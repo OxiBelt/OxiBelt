@@ -13,6 +13,7 @@ const MaximumInputBytes = 1024 * 1024
 const GeneratedStart = '<!-- BEGIN KUBERNETES GRADUATION GENERATED -->'
 const GeneratedEnd = '<!-- END KUBERNETES GRADUATION GENERATED -->'
 const FullRevision = /^[0-9a-f]{40}$/
+const ValidatedProductVersion = /^v[0-9]+\.[0-9]+\.[0-9]+$/
 const UtcSecond = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/
 
 export const KubernetesGraduationFeatureIds = [
@@ -23,6 +24,11 @@ export const KubernetesGraduationFeatureIds = [
   'gateway-api-tcproute',
   'gateway-api-udproute',
   'gateway-api-backendtlspolicy',
+  'gateway-api-weighted-discovery',
+  'gateway-api-standard-filters-backend-tls',
+  'gateway-api-route-policy',
+  'gateway-controller-multi-target',
+  'gateway-controller-explain',
   'helm-data-plane',
   'helm-gateway-controller'
 ] as const
@@ -128,6 +134,7 @@ export type KubernetesGraduationPolicy = {
   features: Array<{
     id: string
     status: 'experimental' | 'supported'
+    lastValidatedVersion: string
     gateIds: string[]
     blockerIds: string[]
   }>
@@ -138,6 +145,7 @@ export type KubernetesGraduationEvidenceReceipt = {
   policyVersion: number
   policyDefinitionSha256: string
   sourceRevision: string
+  validatedVersion: string
   runId: number
   runAttempt: number
   generatedAt: string
@@ -167,6 +175,7 @@ type CliParameters = {
   policyPath?: string
   schemaPath?: string
   expectedSourceRevision?: string
+  expectedValidatedVersion?: string
 }
 
 type IdRecord = {
@@ -200,6 +209,13 @@ function ResolveWorkspace(WorkspacePath: string): string {
 function ValidateSourceRevision(Value: string, Label: string): string {
   if (!FullRevision.test(Value)) {
     throw new Error(`${Label} must be a full lowercase Git commit`)
+  }
+  return Value
+}
+
+function ValidateProductVersion(Value: string, Label: string): string {
+  if (!ValidatedProductVersion.test(Value)) {
+    throw new Error(`${Label} must be a v-prefixed stable semantic version`)
   }
   return Value
 }
@@ -405,6 +421,7 @@ export function ValidateKubernetesGraduationEvidenceObject(
   SchemaValue: unknown,
   Policy: KubernetesGraduationPolicy,
   ExpectedSourceRevision: string,
+  ExpectedValidatedVersion: string,
   Label = 'Kubernetes graduation evidence'
 ): KubernetesGraduationEvidenceReceipt {
   if (!IsObject(SchemaValue)) {
@@ -418,6 +435,13 @@ export function ValidateKubernetesGraduationEvidenceObject(
   )
   if (Receipt.sourceRevision !== ExpectedRevision) {
     throw new Error(`${Label} does not bind the expected source revision`)
+  }
+  const ExpectedVersion = ValidateProductVersion(
+    ExpectedValidatedVersion,
+    'expected validated product version'
+  )
+  if (Receipt.validatedVersion !== ExpectedVersion) {
+    throw new Error(`${Label} does not bind the expected validated product version`)
   }
   if (
     Receipt.policyVersion !== Policy.policyVersion ||
@@ -449,6 +473,14 @@ export function ValidateKubernetesGraduationEvidenceObject(
     }
   }
   AssertExactSet(`${Label} artifact kinds`, ArtifactKinds, ['oci-image', 'helm-chart'])
+  const ArtifactVersion = ExpectedVersion.slice(1)
+  if (!Receipt.artifactSubjects.some(Subject =>
+    Subject.kind === 'helm-chart' && Subject.reference.endsWith(`-${ArtifactVersion}.tgz`)
+  )) {
+    throw new Error(
+      `${Label} must bind a Helm chart package for validated version ${ExpectedVersion}`
+    )
+  }
 
   const ReportNames = new Set<string>()
   for (const Report of Receipt.reports) {
@@ -491,9 +523,10 @@ function ValidateEvidence(
   Root: string,
   Policy: KubernetesGraduationPolicy,
   ExpectedSourceRevision: string,
+  ExpectedValidatedVersion: string,
   GateId: string,
   ReceiptPaths: string[]
-): void {
+): KubernetesGraduationEvidenceReceipt[] {
   if (ReceiptPaths.length === 0) {
     throw new Error(`passed gate ${GateId} must name at least one evidence receipt`)
   }
@@ -501,24 +534,29 @@ function ValidateEvidence(
     ReadBoundedFile(Root, Policy.evidenceSchema),
     Policy.evidenceSchema
   )
+  const Receipts: KubernetesGraduationEvidenceReceipt[] = []
   for (const ReceiptPath of ReceiptPaths) {
     const Receipt = ValidateKubernetesGraduationEvidenceObject(
       ParseJson(ReadBoundedFile(Root, ReceiptPath), ReceiptPath),
       EvidenceSchema,
       Policy,
       ExpectedSourceRevision,
+      ExpectedValidatedVersion,
       ReceiptPath
     )
     if (!Receipt.gateResults.some(Result => Result.id === GateId && Result.result === 'passed')) {
       throw new Error(`${ReceiptPath} does not contain passed evidence for gate ${GateId}`)
     }
+    Receipts.push(Receipt)
   }
+  return Receipts
 }
 
 function ValidatePolicySemantics(
   Policy: KubernetesGraduationPolicy,
   Root?: string,
-  ExpectedSourceRevision?: string
+  ExpectedSourceRevision?: string,
+  ExpectedValidatedVersion?: string
 ): void {
   AssertExactSet(
     'Kubernetes graduation feature ids',
@@ -569,6 +607,7 @@ function ValidatePolicySemantics(
   AssertUniqueIds('Kubernetes graduation features', Policy.features)
   const FeatureIds = new Set<string>(KubernetesGraduationFeatureIds)
 
+  const EvidenceByGate = new Map<string, KubernetesGraduationEvidenceReceipt[]>()
   for (const Gate of Policy.gates) {
     if (!Gate.mandatory) {
       throw new Error(`graduation gate ${Gate.id} must remain mandatory`)
@@ -583,20 +622,24 @@ function ValidatePolicySemantics(
     }
     if (Gate.status === 'passed') {
       if (Root === undefined) {
-        if (Gate.evidenceReceipts.length === 0) {
-          throw new Error(`passed gate ${Gate.id} must name at least one evidence receipt`)
-        }
+        throw new Error(
+          `passed gate ${Gate.id} requires workspace evidence validation`
+        )
       } else {
         if (ExpectedSourceRevision === undefined) {
           throw new Error(`passed gate ${Gate.id} requires an expected source revision`)
         }
-        ValidateEvidence(
+        if (ExpectedValidatedVersion === undefined) {
+          throw new Error(`passed gate ${Gate.id} requires an expected validated product version`)
+        }
+        EvidenceByGate.set(Gate.id, ValidateEvidence(
           Root,
           Policy,
           ExpectedSourceRevision,
+          ExpectedValidatedVersion,
           Gate.id,
           Gate.evidenceReceipts
-        )
+        ))
       }
     }
   }
@@ -621,15 +664,46 @@ function ValidatePolicySemantics(
       .filter(Gate => Gate.appliesTo.includes(Feature.id))
       .map(Gate => Gate.id)
     AssertExactSet(`feature ${Feature.id} gate ids`, Feature.gateIds, ApplicableGateIds)
-    if (Feature.status === 'supported') {
-      if (Feature.blockerIds.length !== 0) {
-        throw new Error(`supported feature ${Feature.id} must not retain blockers`)
+    const Incomplete = Feature.gateIds.filter(GateId => GateById.get(GateId)?.status !== 'passed')
+    if (Feature.lastValidatedVersion !== 'unvalidated') {
+      if (Incomplete.length !== 0) {
+        throw new Error(
+          `feature ${Feature.id} lastValidatedVersion requires complete mandatory gates: ${Incomplete.join(', ')}`
+        )
       }
-      const Incomplete = Feature.gateIds.filter(GateId => GateById.get(GateId)?.status !== 'passed')
+      if (Root !== undefined) {
+        if (ExpectedValidatedVersion === undefined) {
+          throw new Error(
+            `feature ${Feature.id} lastValidatedVersion requires an expected validated product version`
+          )
+        }
+        if (Feature.lastValidatedVersion !== ExpectedValidatedVersion) {
+          throw new Error(
+            `feature ${Feature.id} lastValidatedVersion does not match the expected validated product version`
+          )
+        }
+      }
+      for (const GateId of Feature.gateIds) {
+        for (const Receipt of EvidenceByGate.get(GateId) ?? []) {
+          if (Receipt.validatedVersion !== Feature.lastValidatedVersion) {
+            throw new Error(
+              `feature ${Feature.id} lastValidatedVersion does not match ${GateId} evidence`
+            )
+          }
+        }
+      }
+    }
+    if (Feature.status === 'supported') {
       if (Incomplete.length !== 0) {
         throw new Error(
           `supported feature ${Feature.id} has incomplete mandatory gates: ${Incomplete.join(', ')}`
         )
+      }
+      if (Feature.lastValidatedVersion === 'unvalidated') {
+        throw new Error(`supported feature ${Feature.id} must name its validated product version`)
+      }
+      if (Feature.blockerIds.length !== 0) {
+        throw new Error(`supported feature ${Feature.id} must not retain blockers`)
       }
     }
   }
@@ -652,11 +726,16 @@ function LoadPolicy(
   Root: string,
   RelativePolicyPath: string,
   RelativeSchemaPath: string,
-  ExpectedSourceRevision?: string
+  ExpectedSourceRevision?: string,
+  ExpectedValidatedVersion?: string
 ): KubernetesGraduationPolicy {
   const PolicyValue = ParseJson(ReadBoundedFile(Root, RelativePolicyPath), RelativePolicyPath)
   const SchemaValue = ParseJson(ReadBoundedFile(Root, RelativeSchemaPath), RelativeSchemaPath)
-  const Policy = ValidateKubernetesGraduationPolicyObject(PolicyValue, SchemaValue)
+  if (!IsObject(SchemaValue)) {
+    throw new Error('Kubernetes graduation schema must be an object')
+  }
+  ValidateSchemaValue(PolicyValue, SchemaValue as JsonSchema, 'policy')
+  const Policy = PolicyValue as KubernetesGraduationPolicy
   const RequestedRevision = ExpectedSourceRevision === undefined
     ? undefined
     : ValidateSourceRevision(ExpectedSourceRevision, 'expected source revision')
@@ -671,7 +750,10 @@ function LoadPolicy(
     }
     EvidenceRevision = RequestedRevision ?? WorkspaceRevision
   }
-  ValidatePolicySemantics(Policy, Root, EvidenceRevision)
+  const RequestedVersion = ExpectedValidatedVersion === undefined
+    ? undefined
+    : ValidateProductVersion(ExpectedValidatedVersion, 'expected validated product version')
+  ValidatePolicySemantics(Policy, Root, EvidenceRevision, RequestedVersion)
   return Policy
 }
 
@@ -703,8 +785,8 @@ export function RenderKubernetesGraduationTables(
     '',
     '### Governed feature states',
     '',
-    '| Feature ID | State | Mandatory gates | Active blockers |',
-    '| --- | --- | ---: | --- |'
+    '| Feature ID | State | Last validated version | Mandatory gates | Active blockers |',
+    '| --- | --- | --- | ---: | --- |'
   )
   const BlockerById = new Map(Policy.blockers.map(Blocker => [Blocker.id, Blocker]))
   for (const Feature of Policy.features) {
@@ -717,7 +799,7 @@ export function RenderKubernetesGraduationTables(
         return MarkdownCode(BlockerId)
       }).join(', ')
     Lines.push(
-      `| ${MarkdownCode(Feature.id)} | ${MarkdownCode(Feature.status)} | ${Feature.gateIds.length} | ${Blockers} |`
+      `| ${MarkdownCode(Feature.id)} | ${MarkdownCode(Feature.status)} | ${MarkdownCode(Feature.lastValidatedVersion)} | ${Feature.gateIds.length} | ${Blockers} |`
     )
   }
 
@@ -777,14 +859,16 @@ export function ValidateKubernetesGraduationWorkspace(
   WorkspacePath: string,
   RelativePolicyPath = PolicyPath,
   RelativeSchemaPath = SchemaPath,
-  ExpectedSourceRevision?: string
+  ExpectedSourceRevision?: string,
+  ExpectedValidatedVersion?: string
 ): KubernetesGraduationPolicy {
   const Root = ResolveWorkspace(WorkspacePath)
   const Policy = LoadPolicy(
     Root,
     RelativePolicyPath,
     RelativeSchemaPath,
-    ExpectedSourceRevision
+    ExpectedSourceRevision,
+    ExpectedValidatedVersion
   )
   AssertGeneratedDocument(
     ReadBoundedFile(Root, SupportDocumentPath),
@@ -831,6 +915,9 @@ function ParseCli(Argv: string[]): ParsedCli {
       case '--expected-source-revision':
         Parameters.expectedSourceRevision = Value
         break
+      case '--expected-version':
+        Parameters.expectedValidatedVersion = Value
+        break
       default:
         throw new Error(`unknown option: ${Option}`)
     }
@@ -848,7 +935,8 @@ function RunCli(): void {
       Root,
       RelativePolicyPath,
       RelativeSchemaPath,
-      Parameters.expectedSourceRevision
+      Parameters.expectedSourceRevision,
+      Parameters.expectedValidatedVersion
     )
     return
   }
@@ -856,7 +944,8 @@ function RunCli(): void {
     Root,
     RelativePolicyPath,
     RelativeSchemaPath,
-    Parameters.expectedSourceRevision
+    Parameters.expectedSourceRevision,
+    Parameters.expectedValidatedVersion
   )
   Process.stdout.write(`${RenderKubernetesGraduationTables(Policy)}\n`)
 }

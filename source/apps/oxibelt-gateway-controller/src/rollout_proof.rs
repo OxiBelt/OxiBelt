@@ -4,7 +4,6 @@ use anyhow::{Context, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::cli::RunArgs;
 use super::rollout::{
   RolloutPhase, RolloutState, RolloutTarget, WorkloadKind, WorkloadPodOwnership,
   evaluate_convergence, pod_is_selected,
@@ -13,9 +12,9 @@ use super::rollout_status::{CommitProof, RolloutStatus};
 use super::watch::KubernetesPoller;
 
 impl KubernetesPoller {
-  pub async fn prove_committed_rollout(
+  pub async fn prove_committed_rollout_for(
     &self,
-    args: &RunArgs,
+    target: &RolloutTarget,
     status: &RolloutStatus,
     source_snapshot_digest: String,
   ) -> anyhow::Result<CommitProof> {
@@ -30,7 +29,6 @@ impl KubernetesPoller {
       .desired_content_digest
       .as_deref()
       .context("committed rollout has no desired content digest")?;
-    let target = RolloutTarget::from_args(args)?;
     let workload = self.get_required_json(&target.workload_path()).await?;
     let state = RolloutState::from_workload(&workload);
     if state.phase != RolloutPhase::Committed
@@ -46,10 +44,10 @@ impl KubernetesPoller {
     } else {
       Vec::new()
     };
-    let ownership = WorkloadPodOwnership::from_workload(&target, &workload, &replica_sets)?;
+    let ownership = WorkloadPodOwnership::from_workload(target, &workload, &replica_sets)?;
     let pods = self.list_pods(&target.namespace).await?;
     let convergence = evaluate_convergence(
-      &target,
+      target,
       &workload,
       &ownership,
       &pods,

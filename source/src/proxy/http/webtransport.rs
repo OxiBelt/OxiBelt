@@ -303,6 +303,7 @@ pub(crate) async fn prepare_webtransport(
       downstream_host: &host,
       downstream_uri: &request_uri,
     },
+    downstream_port,
   ) {
     Ok(Some(response)) => {
       return Err(Box::new(with_route_security_headers(
@@ -633,6 +634,15 @@ pub(crate) async fn prepare_webtransport(
     None,
   );
   apply_header_mutations(&mut headers, &request_waf.request_header_mutations);
+  if resolved
+    .route
+    .actions
+    .rewrite
+    .as_ref()
+    .is_some_and(|rewrite| rewrite.authority.is_some())
+  {
+    headers.remove(http::header::HOST);
+  }
   super::early_data::apply_verified_upstream_header(
     &mut headers,
     super::early_data::is_verified(request),

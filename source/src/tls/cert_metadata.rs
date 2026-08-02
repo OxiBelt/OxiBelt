@@ -16,7 +16,6 @@ pub(crate) struct ParsedCertificateMetadata {
   pub(crate) not_after_unix_seconds: i64,
   pub(crate) subject_common_names: Vec<String>,
   pub(crate) san_dns_names: Vec<String>,
-  #[cfg(feature = "admin-runtime")]
   pub(crate) san_uri_names: Vec<String>,
   pub(crate) san_ip_addresses: Vec<IpAddr>,
 }
@@ -108,7 +107,6 @@ pub(crate) fn parse_certificate_metadata(der: &[u8]) -> anyhow::Result<ParsedCer
     not_after_unix_seconds: unix_seconds(validity.not_after),
     subject_common_names: subject_common_names(&cert),
     san_dns_names: Vec::new(),
-    #[cfg(feature = "admin-runtime")]
     san_uri_names: Vec::new(),
     san_ip_addresses: Vec::new(),
   };
@@ -158,14 +156,11 @@ fn collect_subject_alt_names(
   while !reader.is_empty() {
     let (tag, value) = reader.read_any()?;
     match tag {
-      #[cfg(feature = "admin-runtime")]
       0x86 => {
         if let Ok(uri) = std::str::from_utf8(value) {
           metadata.san_uri_names.push(uri.to_string());
         }
       }
-      #[cfg(not(feature = "admin-runtime"))]
-      0x86 => {}
       0x82 => {
         if let Ok(name) = std::str::from_utf8(value) {
           metadata.san_dns_names.push(name.to_ascii_lowercase());
@@ -370,6 +365,19 @@ mod tests {
     assert_eq!(identity.fingerprint_sha256.len(), 64);
   }
 
+  #[test]
+  fn certificate_metadata_extracts_uri_subject_alt_names_without_admin_runtime() {
+    let temp_dir = common::TempDir::new("certificate-uri-san-metadata");
+    let expected = "spiffe://example.test/ns/edge/sa/backend";
+    let (cert_path, _key_path) = create_self_signed_cert_with_uri_san(temp_dir.path(), expected);
+    let cert = first_pem_certificate(&cert_path);
+
+    let metadata =
+      parse_certificate_metadata(cert.as_ref()).expect("certificate metadata should parse");
+
+    assert_eq!(metadata.san_uri_names, vec![expected]);
+  }
+
   fn first_pem_certificate(path: &Path) -> CertificateDer<'static> {
     let bytes = fs::read(path).expect("certificate should be readable");
     CertificateDer::pem_slice_iter(&bytes)
@@ -422,7 +430,6 @@ IP.2 = 2001:db8::1
     (cert_path, key_path)
   }
 
-  #[cfg(feature = "admin-runtime")]
   fn create_self_signed_cert_with_uri_san(dir: &Path, uri: &str) -> (PathBuf, PathBuf) {
     let key_path = dir.join("client-uri-san.key");
     let cert_path = dir.join("client-uri-san.pem");

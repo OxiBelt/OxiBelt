@@ -44,6 +44,13 @@ server_name = "verify.example.test"
   changed_server_name.tls.server_name = Some("other.example.test".to_string());
   assert!(!logical.matches(&changed_server_name, &inherited_roots));
 
+  let mut changed_subject_alt_names = original.clone();
+  changed_subject_alt_names.tls.subject_alt_names =
+    vec![crate::config::UpstreamTlsSubjectAltName::Dns(
+      "verify.example.test".to_string(),
+    )];
+  assert!(!logical.matches(&changed_subject_alt_names, &inherited_roots));
+
   let mut changed_trust = original.clone();
   changed_trust
     .tls

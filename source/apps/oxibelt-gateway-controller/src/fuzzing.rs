@@ -175,6 +175,15 @@ fn translation_args(endpoint_slice_watch: bool) -> SharedArgs {
     } else {
       BackendResolution::ClusterDns
     },
+    request_mirror_max_body_bytes: 0,
+    external_auth_max_body_bytes: 0,
+    external_auth_allowed_content_types: Vec::new(),
+    external_auth_allowed_request_headers: Vec::new(),
+    external_auth_allowed_identity_headers: Vec::new(),
+    external_auth_allowed_terminal_headers: Vec::new(),
+    external_auth_allow_credentials: false,
+    route_policy_max_request_body_bytes: 10_485_760,
+    route_policy_max_timeout_ms: 30_000,
     dry_run: true,
     health_bind: None,
   }

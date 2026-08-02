@@ -30,6 +30,7 @@ impl ConfigArtifact {
     toml: String,
     mut assets: Vec<ConfigArtifactAsset>,
   ) -> anyhow::Result<Self> {
+    validate_artifact_context(target.artifact_context.as_deref())?;
     let data_key = validate_managed_config_path(managed_path)?;
     validate_generated_toml(&toml)?;
     assets.sort_by(|left, right| left.managed_path.cmp(&right.managed_path));
@@ -99,6 +100,12 @@ impl ConfigArtifact {
       MANAGED_PATH_ANNOTATION.to_string(),
       Value::String(self.managed_path.clone()),
     );
+    if let Some(context) = &target.artifact_context {
+      annotations.insert(
+        TARGET_CONTEXT_ANNOTATION.to_string(),
+        Value::String(context.clone()),
+      );
+    }
     let mut data = Map::new();
     data.insert(self.data_key.clone(), Value::String(self.toml.clone()));
     for asset in &self.assets {
@@ -144,6 +151,7 @@ impl ConfigArtifact {
       && annotation(existing, ARTIFACT_DIGEST_ANNOTATION) == Some(self.artifact_digest.as_str())
       && annotation(existing, CONFIG_DIGEST_ANNOTATION) == Some(self.content_digest.as_str())
       && annotation(existing, MANAGED_PATH_ANNOTATION) == Some(self.managed_path.as_str())
+      && annotation(existing, TARGET_CONTEXT_ANNOTATION) == target.artifact_context.as_deref()
   }
 
   pub fn from_existing(target: &RolloutTarget, existing: &Value) -> anyhow::Result<Self> {
@@ -189,7 +197,19 @@ impl ConfigArtifact {
   }
 }
 
-fn digest_artifact_bundle(
+fn validate_artifact_context(context: Option<&str>) -> anyhow::Result<()> {
+  if context.is_some_and(|context| {
+    context.len() != 64
+      || !context
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+  }) {
+    bail!("rollout target artifact context must be a lowercase SHA-256 digest");
+  }
+  Ok(())
+}
+
+pub(crate) fn digest_artifact_bundle(
   managed_path: &str,
   content: &[u8],
   assets: &[ConfigArtifactAsset],

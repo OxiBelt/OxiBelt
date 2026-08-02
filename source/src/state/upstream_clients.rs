@@ -29,8 +29,9 @@ use crate::tls;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type UpstreamBody = BoxBody<Bytes, BoxError>;
-type HyperConnector = InstrumentedConnector<hyper_rustls::HttpsConnector<HttpConnector>>;
-type H2cConnector = InstrumentedConnector<HttpConnector>;
+type FixedHttpConnector = FixedDestinationConnector<HttpConnector>;
+type HyperConnector = InstrumentedConnector<hyper_rustls::HttpsConnector<FixedHttpConnector>>;
+type H2cConnector = InstrumentedConnector<FixedHttpConnector>;
 type HyperClient = Client<HyperConnector, UpstreamBody>;
 type H2cClient = Client<H2cConnector, UpstreamBody>;
 
@@ -182,6 +183,37 @@ impl<C> InstrumentedConnector<C> {
       circuit_breakers,
       circuit_pool,
     }
+  }
+}
+
+/// Keeps transport selection bound to the configured upstream even when a
+/// route rewrites the HTTP authority carried on the request.
+#[derive(Clone)]
+pub(crate) struct FixedDestinationConnector<C> {
+  inner: C,
+  destination: Uri,
+}
+
+impl<C> FixedDestinationConnector<C> {
+  fn new(inner: C, destination: Uri) -> Self {
+    Self { inner, destination }
+  }
+}
+
+impl<C> Service<Uri> for FixedDestinationConnector<C>
+where
+  C: Service<Uri>,
+{
+  type Response = C::Response;
+  type Error = C::Error;
+  type Future = C::Future;
+
+  fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    self.inner.poll_ready(cx)
+  }
+
+  fn call(&mut self, _requested: Uri) -> Self::Future {
+    self.inner.call(self.destination.clone())
   }
 }
 
@@ -380,11 +412,13 @@ fn build_client_pool(
     Some((outbound_revocation, revocation_policy)),
   )
   .context("failed to build negotiated upstream TLS client")?;
+  let fixed_destination = fixed_destination_uri(upstream)?;
 
   let mut h1_http = HttpConnector::new();
   h1_http.enforce_http(false);
   h1_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
   h1_http.set_nodelay(true);
+  let h1_http = FixedDestinationConnector::new(h1_http, fixed_destination.clone());
   let h1_connector = HttpsConnectorBuilder::new()
     .with_tls_config(h1_tls_config)
     .https_or_http();
@@ -411,6 +445,7 @@ fn build_client_pool(
   negotiated_http.enforce_http(false);
   negotiated_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
   negotiated_http.set_nodelay(true);
+  let negotiated_http = FixedDestinationConnector::new(negotiated_http, fixed_destination.clone());
   let negotiated_connector = HttpsConnectorBuilder::new()
     .with_tls_config(negotiated_tls_config)
     .https_or_http();
@@ -440,6 +475,7 @@ fn build_client_pool(
   let mut h2c_http = HttpConnector::new();
   h2c_http.set_connect_timeout(Some(Duration::from_millis(upstream.connect_timeout_ms)));
   h2c_http.set_nodelay(true);
+  let h2c_http = FixedDestinationConnector::new(h2c_http, fixed_destination);
   let h2c_http = InstrumentedConnector::new(
     h2c_http,
     metrics.clone(),
@@ -463,12 +499,31 @@ fn with_fixed_server_name(
   connector: HttpsConnectorBuilder<hyper_rustls::builderstates::WantsProtocols1>,
   upstream: &UpstreamConfig,
 ) -> anyhow::Result<HttpsConnectorBuilder<hyper_rustls::builderstates::WantsProtocols1>> {
-  let Some(server_name) = upstream.tls.server_name.as_deref() else {
-    return Ok(connector);
-  };
+  let server_name = upstream
+    .tls
+    .server_name
+    .as_deref()
+    .or_else(|| upstream.origin.host_str())
+    .with_context(|| format!("upstream {} origin has no host", upstream.name))?;
   let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
     .with_context(|| format!("invalid TLS server name for upstream {}", upstream.name))?;
   Ok(connector.with_server_name_resolver(FixedServerNameResolver::new(server_name)))
+}
+
+fn fixed_destination_uri(upstream: &UpstreamConfig) -> anyhow::Result<Uri> {
+  let destination = upstream.origin.as_str().parse::<Uri>().with_context(|| {
+    format!(
+      "invalid transport destination for upstream {}",
+      upstream.name
+    )
+  })?;
+  if destination.scheme().is_none() || destination.authority().is_none() {
+    anyhow::bail!(
+      "transport destination for upstream {} must include scheme and authority",
+      upstream.name
+    );
+  }
+  Ok(destination)
 }
 
 fn circuit_pool_for_upstream(
@@ -506,6 +561,7 @@ fn metric_scheme(uri: &Uri) -> &'static str {
 #[cfg(test)]
 mod tests {
   use std::future::{Ready, ready};
+  use std::sync::Mutex;
 
   use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
   use hyper_util::client::legacy::connect::{Connected, Connection};
@@ -564,6 +620,63 @@ mod tests {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
       Poll::Ready(Ok(()))
     }
+  }
+
+  #[derive(Clone)]
+  struct RecordingConnector {
+    destinations: Arc<Mutex<Vec<Uri>>>,
+  }
+
+  impl Service<Uri> for RecordingConnector {
+    type Response = FakeIo;
+    type Error = std::io::Error;
+    type Future = Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+      Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, destination: Uri) -> Self::Future {
+      self
+        .destinations
+        .lock()
+        .expect("recording connector lock")
+        .push(destination);
+      ready(Ok(FakeIo))
+    }
+  }
+
+  #[tokio::test]
+  async fn fixed_destination_ignores_rewritten_request_authority() {
+    let destinations = Arc::new(Mutex::new(Vec::new()));
+    let inner = RecordingConnector {
+      destinations: destinations.clone(),
+    };
+    let mut connector = FixedDestinationConnector::new(
+      inner,
+      "https://transport.internal:9443/"
+        .parse()
+        .expect("transport URI"),
+    );
+
+    connector
+      .call(
+        "https://rewritten.example:8443/request"
+          .parse()
+          .expect("request URI"),
+      )
+      .await
+      .expect("connector should succeed");
+
+    assert_eq!(
+      destinations
+        .lock()
+        .expect("recorded destinations")
+        .as_slice(),
+      &["https://transport.internal:9443/"
+        .parse::<Uri>()
+        .expect("expected URI")]
+    );
   }
 
   #[tokio::test]

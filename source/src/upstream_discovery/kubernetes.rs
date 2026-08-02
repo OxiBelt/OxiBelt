@@ -442,6 +442,8 @@ fn discovered_ip_server(
     state: UpstreamPoolServerState::Ready,
     tls: Default::default(),
     source,
+    discovery_instance_id: None,
+    discovered_weight: None,
   })
 }
 

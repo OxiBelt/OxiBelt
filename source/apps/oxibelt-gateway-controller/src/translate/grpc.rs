@@ -29,7 +29,10 @@ impl TranslationState {
     };
 
     for attachment in attachments {
-      let hosts = intersect_hosts(&route_hosts, attachment.listener.hostname.as_deref());
+      let Some(hosts) = intersect_hosts(&route_hosts, attachment.listener.hostname.as_deref())
+      else {
+        continue;
+      };
       for (rule_index, rule) in rules.iter().enumerate() {
         let matches = rule
           .get("matches")
@@ -99,7 +102,7 @@ fn grpc_match_route(
 ) -> anyhow::Result<(GeneratedRoute, ParsedRouteFilters)> {
   let (path_prefix, path_exact) = grpc_path_match(route_match)?;
   let headers = exact_named_matches(route_match, &["headers"], "header")?;
-  let filters = parse_route_filters(rule, &path_prefix, "GRPCRoute")?;
+  let filters = parse_route_filters(rule, &path_prefix, "", None, "GRPCRoute")?;
   Ok((
     GeneratedRoute {
       source: source.to_string(),
@@ -129,6 +132,10 @@ fn grpc_match_route(
       cors: None,
       request_mirrors: Vec::new(),
       external_auth: None,
+      policy_source: None,
+      waf_request_rule_groups: Vec::new(),
+      max_request_body_bytes: None,
+      upstream_request_timeout_ms: None,
     },
     filters,
   ))

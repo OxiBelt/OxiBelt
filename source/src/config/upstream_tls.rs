@@ -1,6 +1,7 @@
 //! Upstream TLS authentication-name and trust-store configuration.
 //! Exact CA digests bind generated paths to the bytes validated at configuration load.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
@@ -16,6 +17,8 @@ use super::{
 pub struct UpstreamTlsConfig {
   #[serde(default)]
   pub server_name: Option<String>,
+  #[serde(default)]
+  pub subject_alt_names: Vec<UpstreamTlsSubjectAltName>,
   #[serde(default)]
   pub trust: UpstreamTlsTrust,
   #[serde(default)]
@@ -76,6 +79,7 @@ impl UpstreamTlsConfig {
         format!("upstream {upstream_name} tls.server_name is not a valid DNS name or IP address")
       })?;
     }
+    validate_subject_alt_names(upstream_name, &self.subject_alt_names)?;
     match self.trust {
       UpstreamTlsTrust::System if !self.trusted_ca_certs.is_empty() => bail!(
         "upstream {upstream_name} tls.trusted_ca_certs must be empty when tls.trust = \"system\""
@@ -126,6 +130,17 @@ impl UpstreamTlsConfig {
   }
 }
 
+/// An explicit certificate authentication identity for an upstream TLS peer.
+///
+/// When this list is non-empty, `UpstreamTlsConfig::server_name` remains the
+/// TLS SNI but is not an authentication identity unless it also appears here.
+#[derive(Debug, Clone, Deserialize, Eq, Hash, PartialEq)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum UpstreamTlsSubjectAltName {
+  Dns(String),
+  Uri(String),
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamTlsTrust {
@@ -133,6 +148,144 @@ pub enum UpstreamTlsTrust {
   Inherit,
   System,
   Exclusive,
+}
+
+const MAX_UPSTREAM_TLS_SUBJECT_ALT_NAMES: usize = 5;
+const MAX_UPSTREAM_TLS_SUBJECT_ALT_NAME_BYTES: usize = 253;
+
+fn validate_subject_alt_names(
+  upstream_name: &str,
+  subject_alt_names: &[UpstreamTlsSubjectAltName],
+) -> anyhow::Result<()> {
+  if subject_alt_names.len() > MAX_UPSTREAM_TLS_SUBJECT_ALT_NAMES {
+    bail!(
+      "upstream {upstream_name} tls.subject_alt_names supports at most {MAX_UPSTREAM_TLS_SUBJECT_ALT_NAMES} entries"
+    );
+  }
+  let mut unique = HashSet::new();
+  for subject_alt_name in subject_alt_names {
+    match subject_alt_name {
+      UpstreamTlsSubjectAltName::Dns(value) => {
+        validate_dns_subject_alt_name(upstream_name, value)?;
+        if !unique.insert(("dns", value.as_str())) {
+          bail!("upstream {upstream_name} tls.subject_alt_names entries must be unique");
+        }
+      }
+      UpstreamTlsSubjectAltName::Uri(value) => {
+        validate_uri_subject_alt_name(upstream_name, value)?;
+        if !unique.insert(("uri", value.as_str())) {
+          bail!("upstream {upstream_name} tls.subject_alt_names entries must be unique");
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
+fn validate_dns_subject_alt_name(upstream_name: &str, value: &str) -> anyhow::Result<()> {
+  if value.is_empty()
+    || value.len() > MAX_UPSTREAM_TLS_SUBJECT_ALT_NAME_BYTES
+    || !value.is_ascii()
+    || value != value.to_ascii_lowercase()
+    || value.contains('*')
+    || value.parse::<std::net::IpAddr>().is_ok()
+  {
+    bail!(
+      "upstream {upstream_name} tls.subject_alt_names DNS values must be lowercase exact DNS names of at most {MAX_UPSTREAM_TLS_SUBJECT_ALT_NAME_BYTES} bytes without wildcards or IP addresses"
+    );
+  }
+  for label in value.split('.') {
+    if label.is_empty()
+      || label.len() > 63
+      || label.starts_with('-')
+      || label.ends_with('-')
+      || !label
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+      bail!(
+        "upstream {upstream_name} tls.subject_alt_names DNS values must be lowercase exact DNS names of at most {MAX_UPSTREAM_TLS_SUBJECT_ALT_NAME_BYTES} bytes without wildcards or IP addresses"
+      );
+    }
+  }
+  Ok(())
+}
+
+fn validate_uri_subject_alt_name(upstream_name: &str, value: &str) -> anyhow::Result<()> {
+  let absolute_parts = value.split_once(':');
+  if value.is_empty()
+    || value.len() > MAX_UPSTREAM_TLS_SUBJECT_ALT_NAME_BYTES
+    || !value.is_ascii()
+    || value.trim() != value
+    || value.bytes().any(|byte| byte.is_ascii_control())
+    || absolute_parts
+      .is_none_or(|(scheme, remainder)| !valid_uri_scheme(scheme) || remainder.is_empty())
+    || !value.bytes().all(is_rfc3986_uri_byte)
+    || !has_valid_percent_encoding(value)
+    || url::Url::parse(value).is_err()
+  {
+    bail!(
+      "upstream {upstream_name} tls.subject_alt_names URI values must be exact absolute URIs of at most {MAX_UPSTREAM_TLS_SUBJECT_ALT_NAME_BYTES} bytes"
+    );
+  }
+  Ok(())
+}
+
+fn valid_uri_scheme(value: &str) -> bool {
+  let mut bytes = value.bytes();
+  bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+    && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
+fn is_rfc3986_uri_byte(byte: u8) -> bool {
+  byte.is_ascii_alphanumeric()
+    || matches!(
+      byte,
+      b'-'
+        | b'.'
+        | b'_'
+        | b'~'
+        | b':'
+        | b'/'
+        | b'?'
+        | b'#'
+        | b'['
+        | b']'
+        | b'@'
+        | b'!'
+        | b'$'
+        | b'&'
+        | b'\''
+        | b'('
+        | b')'
+        | b'*'
+        | b'+'
+        | b','
+        | b';'
+        | b'='
+        | b'%'
+    )
+}
+
+fn has_valid_percent_encoding(value: &str) -> bool {
+  let mut remaining = value.as_bytes();
+  while let Some((&byte, rest)) = remaining.split_first() {
+    if byte != b'%' {
+      remaining = rest;
+      continue;
+    }
+    let Some((&high, rest)) = rest.split_first() else {
+      return false;
+    };
+    let Some((&low, rest)) = rest.split_first() else {
+      return false;
+    };
+    if !high.is_ascii_hexdigit() || !low.is_ascii_hexdigit() {
+      return false;
+    }
+    remaining = rest;
+  }
+  true
 }
 
 fn validate_ca_digest(upstream_name: &str, path: &Path, expected: &str) -> anyhow::Result<()> {

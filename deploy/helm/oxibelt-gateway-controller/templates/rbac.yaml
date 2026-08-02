@@ -81,6 +81,12 @@ rules:
 - apiGroups: ["gateway.networking.k8s.io"]
   resources: ["gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status", "udproutes/status", "backendtlspolicies/status"]
   verbs: ["patch"]
+- apiGroups: ["gateway.oxibelt.dev"]
+  resources: ["oxibeltroutepolicies", "oxibeltdataplanetargets"]
+  verbs: ["list"]
+- apiGroups: ["gateway.oxibelt.dev"]
+  resources: ["oxibeltroutepolicies/status", "oxibeltdataplanetargets/status"]
+  verbs: ["patch"]
 - apiGroups: [""]
   resources: ["services"]
   verbs: ["list"]
@@ -114,6 +120,12 @@ rules:
 - apiGroups: ["gateway.networking.k8s.io"]
   resources: ["gateways/status", "httproutes/status", "grpcroutes/status", "tlsroutes/status", "tcproutes/status", "udproutes/status", "backendtlspolicies/status"]
   verbs: ["patch"]
+- apiGroups: ["gateway.oxibelt.dev"]
+  resources: ["oxibeltroutepolicies", "oxibeltdataplanetargets"]
+  verbs: ["list"]
+- apiGroups: ["gateway.oxibelt.dev"]
+  resources: ["oxibeltroutepolicies/status", "oxibeltdataplanetargets/status"]
+  verbs: ["patch"]
 - apiGroups: [""]
   resources: ["services"]
   verbs: ["list"]
@@ -136,6 +148,7 @@ subjects:
   namespace: {{ .Release.Namespace }}
 ---
 {{- end }}
+{{- if eq (len .Values.rollout.targets) 0 }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -172,3 +185,47 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "oxibelt-gateway-controller.name" . }}
   namespace: {{ .Release.Namespace }}
+{{- end }}
+{{ range $index, $target := .Values.rollout.targets }}
+{{ $targetNamespace := default $.Release.Namespace $target.workloadRef.namespace }}
+{{ $roleName := printf "%s-rollout-%s" (include "oxibelt-gateway-controller.name" $) $target.name | trunc 63 | trimSuffix "-" }}
+{{ if gt $index 0 }}
+---
+{{ end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $roleName }}
+  namespace: {{ $targetNamespace | quote }}
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "create"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+{{ if eq $target.workloadRef.kind "Deployment" }}
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["list"]
+{{ end }}
+- apiGroups: ["apps"]
+  resources: [{{ ternary "deployments" "daemonsets" (eq $target.workloadRef.kind "Deployment") | quote }}]
+  resourceNames:
+  - {{ $target.workloadRef.name | quote }}
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $roleName }}
+  namespace: {{ $targetNamespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $roleName }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "oxibelt-gateway-controller.name" $ }}
+  namespace: {{ $.Release.Namespace }}
+{{ end }}

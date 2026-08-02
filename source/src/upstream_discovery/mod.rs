@@ -1,7 +1,6 @@
 //! Runtime upstream discovery registry and reconciliation.
 //! Discovery providers update candidate upstreams without bypassing route validation.
 
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use anyhow::{Context, anyhow};
 use crate::config::{
   DiscoveryUpstreamScheme, DnsDiscoveryRecordType, UpstreamDiscoveryProvider,
   UpstreamPoolDiscoveryConfig, UpstreamPoolServerConfig, UpstreamPoolServerSource,
-  UpstreamPoolServerState, upstream_pool_server_id,
+  UpstreamPoolServerState,
 };
 use crate::control_http::ControlHttpClient;
 use crate::state::AppHandle;
@@ -30,15 +29,22 @@ mod runtime_tests;
 async fn apply_discovered_servers(
   state: &AppHandle,
   pool_name: &str,
-  provider: UpstreamDiscoveryProvider,
-  mut servers: Vec<UpstreamPoolServerConfig>,
+  discovery: &UpstreamPoolDiscoveryConfig,
+  servers: Vec<UpstreamPoolServerConfig>,
 ) -> anyhow::Result<()> {
-  let source = discovery_source(provider);
-  if discovered_servers_unchanged(state, pool_name, source, &mut servers)? {
+  let source = discovery_source(discovery.provider);
+  if discovered_servers_unchanged(state, pool_name, discovery, &servers)? {
     return Ok(());
   }
+  let discovery_instance_id = discovery.effective_id().to_string();
   upstream_control::apply_runtime_pool_update(state, |config| {
-    upstream_control::replace_discovered_servers(config, pool_name, source, servers.clone())
+    upstream_control::replace_discovered_servers(
+      config,
+      pool_name,
+      source,
+      &discovery_instance_id,
+      servers.clone(),
+    )
   })
   .await
 }
@@ -57,49 +63,30 @@ fn discovery_source(provider: UpstreamDiscoveryProvider) -> UpstreamPoolServerSo
 fn discovered_servers_unchanged(
   state: &AppHandle,
   pool_name: &str,
-  source: UpstreamPoolServerSource,
-  servers: &mut Vec<UpstreamPoolServerConfig>,
+  discovery: &UpstreamPoolDiscoveryConfig,
+  servers: &[UpstreamPoolServerConfig],
 ) -> anyhow::Result<bool> {
   let snapshot = state.snapshot();
-  let pool = snapshot
+  let existing = snapshot
     .config
     .upstream_pools
     .iter()
     .find(|pool| pool.name == pool_name)
     .ok_or_else(|| anyhow!("unknown upstream pool {pool_name}"))?;
-  let discovery_tls = pool
-    .discovery
+  let mut candidate = snapshot.config.clone();
+  upstream_control::replace_discovered_servers(
+    &mut candidate,
+    pool_name,
+    discovery_source(discovery.provider),
+    discovery.effective_id(),
+    servers.to_vec(),
+  )?;
+  let candidate = candidate
+    .upstream_pools
     .iter()
-    .find(|discovery| discovery_source(discovery.provider) == source)
-    .map(|discovery| discovery.tls.clone())
-    .ok_or_else(|| anyhow!("upstream pool {pool_name} has no matching discovery policy"))?;
-  let previous_states = pool
-    .servers
-    .iter()
-    .enumerate()
-    .filter(|(_, server)| server.source == source)
-    .map(|(index, server)| (upstream_pool_server_id(index, server), server.state))
-    .collect::<HashMap<_, _>>();
-
-  for (index, server) in servers.iter_mut().enumerate() {
-    let server_id = upstream_pool_server_id(index, server);
-    server.id = Some(server_id.clone());
-    server.source = source;
-    server.tls = discovery_tls.clone();
-    if let Some(state) = previous_states.get(&server_id) {
-      server.state = *state;
-    } else if server.state != UpstreamPoolServerState::Ready {
-      server.state = UpstreamPoolServerState::Ready;
-    }
-  }
-
-  let existing = pool
-    .servers
-    .iter()
-    .filter(|server| server.source == source)
-    .cloned()
-    .collect::<Vec<_>>();
-  Ok(existing == *servers)
+    .find(|pool| pool.name == pool_name)
+    .ok_or_else(|| anyhow!("unknown upstream pool {pool_name}"))?;
+  Ok(existing.servers == candidate.servers)
 }
 
 pub(crate) async fn discover_servers(
@@ -236,6 +223,8 @@ fn dns_ip_server(
     state: UpstreamPoolServerState::Ready,
     tls: Default::default(),
     source: UpstreamPoolServerSource::Dns,
+    discovery_instance_id: None,
+    discovered_weight: None,
   })
 }
 

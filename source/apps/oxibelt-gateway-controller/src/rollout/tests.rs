@@ -14,6 +14,7 @@ fn target() -> RolloutTarget {
     volume_name: "gateway-config".to_string(),
     timeout: Duration::from_secs(300),
     config_map_prefix: "oxibelt-gateway-config".to_string(),
+    artifact_context: None,
   }
 }
 
@@ -247,10 +248,12 @@ fn artifact_names_and_ownership_labels_are_scoped_to_the_target_kind() {
 
 #[test]
 fn artifact_rejects_unsafe_path_and_unowned_toml_sections() {
-  let target = target();
+  let mut target = target();
   assert!(ConfigArtifact::new(&target, "../gateway.toml", String::new()).is_err());
   assert!(ConfigArtifact::new(&target, "gateway.toml", String::new()).is_err());
   assert!(ConfigArtifact::new(&target, "conf.d/gateway.toml", "[admin]\n".to_string()).is_err());
+  target.artifact_context = Some("not-a-digest".to_string());
+  assert!(ConfigArtifact::new(&target, "conf.d/gateway.toml", "[[routes]]\n".to_string()).is_err());
 }
 
 #[test]

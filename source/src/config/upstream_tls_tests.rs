@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 
 use super::upstream_tls::hex_lower;
-use super::{UpstreamTlsConfig, UpstreamTlsTrust};
+use super::{UpstreamTlsConfig, UpstreamTlsSubjectAltName, UpstreamTlsTrust};
 
 fn ca_file(label: &str, bytes: &[u8]) -> PathBuf {
   let path = std::env::temp_dir().join(format!(
@@ -78,4 +78,66 @@ fn tls_server_name_rejects_ambiguous_whitespace() {
     .validate("test")
     .expect_err("server names must be exact values");
   assert!(error.to_string().contains("non-empty exact value"));
+}
+
+#[test]
+fn subject_alt_names_accept_bounded_exact_dns_and_uri_identities() {
+  let policy = UpstreamTlsConfig {
+    server_name: Some("sni.example.test".to_string()),
+    subject_alt_names: vec![
+      UpstreamTlsSubjectAltName::Dns("identity.example.test".to_string()),
+      UpstreamTlsSubjectAltName::Uri("spiffe://example.test/ns/backend/sa/service".to_string()),
+      UpstreamTlsSubjectAltName::Uri("SPIFFE://Example.TEST/ns/backend/sa/Other".to_string()),
+      UpstreamTlsSubjectAltName::Uri("urn:example:backend#workload".to_string()),
+    ],
+    ..UpstreamTlsConfig::default()
+  };
+
+  policy
+    .validate("test")
+    .expect("bounded exact SAN identities should validate");
+}
+
+#[test]
+fn subject_alt_names_reject_excess_duplicate_or_ambiguous_identities() {
+  let too_many = UpstreamTlsConfig {
+    subject_alt_names: (0..6)
+      .map(|index| UpstreamTlsSubjectAltName::Dns(format!("backend-{index}.example.test")))
+      .collect(),
+    ..UpstreamTlsConfig::default()
+  };
+  let error = too_many
+    .validate("test")
+    .expect_err("more than five SAN identities must fail closed");
+  assert!(error.to_string().contains("at most 5 entries"));
+
+  for invalid in [
+    UpstreamTlsSubjectAltName::Dns("*.example.test".to_string()),
+    UpstreamTlsSubjectAltName::Dns("UPPER.example.test".to_string()),
+    UpstreamTlsSubjectAltName::Dns("127.0.0.1".to_string()),
+    UpstreamTlsSubjectAltName::Uri("relative/path".to_string()),
+    UpstreamTlsSubjectAltName::Uri("https://example.test/a b".to_string()),
+    UpstreamTlsSubjectAltName::Uri("https:\\example.test\\backend".to_string()),
+    UpstreamTlsSubjectAltName::Uri("https://example.test/%zz".to_string()),
+  ] {
+    let policy = UpstreamTlsConfig {
+      subject_alt_names: vec![invalid],
+      ..UpstreamTlsConfig::default()
+    };
+    policy
+      .validate("test")
+      .expect_err("ambiguous SAN identity must fail closed");
+  }
+
+  let duplicate = UpstreamTlsConfig {
+    subject_alt_names: vec![
+      UpstreamTlsSubjectAltName::Dns("backend.example.test".to_string()),
+      UpstreamTlsSubjectAltName::Dns("backend.example.test".to_string()),
+    ],
+    ..UpstreamTlsConfig::default()
+  };
+  let error = duplicate
+    .validate("test")
+    .expect_err("duplicate SAN identities must fail closed");
+  assert!(error.to_string().contains("must be unique"));
 }

@@ -206,11 +206,11 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     NativeConfigSecretClass::CredentialBearingUrl,
   ),
   secret(
-    "upstream_pools[].discovery.token_env",
+    "upstream_pools[].discovery[].token_env",
     NativeConfigSecretClass::EnvironmentReference,
   ),
   secret(
-    "upstream_pools[].discovery.token_file",
+    "upstream_pools[].discovery[].token_file",
     NativeConfigSecretClass::FileReference,
   ),
   secret(
@@ -526,11 +526,17 @@ fn object_schema(shape_path: &str, metadata_path: &str) -> Value {
       )
     })
     .collect::<Map<_, _>>();
-  json!({
+  let mut schema = json!({
     "type": "object",
     "additionalProperties": false,
     "properties": properties,
-  })
+  });
+  if is_subject_alt_names_path(shape_path)
+    && let Some(object) = schema.as_object_mut()
+  {
+    object.insert("required".to_string(), json!(["type", "value"]));
+  }
+  schema
 }
 
 #[cfg(feature = "config-tooling")]
@@ -586,6 +592,16 @@ fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
   }
   if let Some(path_kind) = path_kind(shape_path) {
     object.insert("x-oxibelt-path-kind".to_string(), json!(path_kind));
+  }
+  if is_subject_alt_names_path(shape_path) {
+    object.insert("maxItems".to_string(), json!(5));
+  }
+  if shape_path == "upstream_pools.discovery" {
+    object.insert("maxItems".to_string(), json!(64));
+  }
+  if is_subject_alt_name_value_path(shape_path) {
+    object.insert("minLength".to_string(), json!(1));
+    object.insert("maxLength".to_string(), json!(253));
   }
   schema
 }
@@ -644,6 +660,10 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     "quic.upstream.resolution.cooldown_base_ms" | "quic.upstream.resolution.cooldown_max_ms" => {
       (1, 300_000)
     }
+    "upstream_pools.discovery.weight_multiplier" => (1, u64::from(u32::MAX)),
+    "routes.actions.request_mirrors.max_body_bytes" => {
+      (0, super::MAX_REQUEST_MIRROR_BODY_BYTES as u64)
+    }
     _ => return None,
   };
   Some(range)
@@ -679,8 +699,12 @@ fn is_array_path(path: &str) -> bool {
     "turn_upstream_pools",
     "turn_upstream_pools.servers",
     "upstream_pools",
+    "upstream_pools.discovery",
+    "upstream_pools.discovery.tls.subject_alt_names",
     "upstream_pools.servers",
+    "upstream_pools.servers.tls.subject_alt_names",
     "upstreams",
+    "upstreams.tls.subject_alt_names",
     "webrtc_turn_listeners",
     "webrtc_turn_listeners.auth.static_credentials",
     "webrtc_turn_listeners.relay_families",
@@ -743,7 +767,11 @@ fn integer_path(path: &str) -> bool {
 
 #[cfg(feature = "config-tooling")]
 fn string_array_path(path: &str) -> bool {
-  if path == "runtime.hardening.filesystem_manifest.expected_writable_paths" {
+  if matches!(
+    path,
+    "external_auth.allowed_content_types"
+      | "runtime.hardening.filesystem_manifest.expected_writable_paths"
+  ) {
     return true;
   }
   path.rsplit('.').next().is_some_and(|name| {
@@ -757,7 +785,34 @@ fn string_array_path(path: &str) -> bool {
 
 #[cfg(feature = "config-tooling")]
 fn string_path(path: &str) -> bool {
-  path == "runtime.hardening.filesystem_manifest.expected_digest"
+  matches!(
+    path,
+    "runtime.hardening.filesystem_manifest.expected_digest"
+      | "upstream_pools.discovery.id"
+      | "upstream_pools.discovery.tls.subject_alt_names.value"
+      | "upstream_pools.servers.tls.subject_alt_names.value"
+      | "upstreams.tls.subject_alt_names.value"
+  )
+}
+
+#[cfg(feature = "config-tooling")]
+fn is_subject_alt_names_path(path: &str) -> bool {
+  matches!(
+    path,
+    "upstream_pools.discovery.tls.subject_alt_names"
+      | "upstream_pools.servers.tls.subject_alt_names"
+      | "upstreams.tls.subject_alt_names"
+  )
+}
+
+#[cfg(feature = "config-tooling")]
+fn is_subject_alt_name_value_path(path: &str) -> bool {
+  matches!(
+    path,
+    "upstream_pools.discovery.tls.subject_alt_names.value"
+      | "upstream_pools.servers.tls.subject_alt_names.value"
+      | "upstreams.tls.subject_alt_names.value"
+  )
 }
 
 #[cfg(feature = "config-tooling")]
@@ -821,6 +876,15 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
     ("tls.resumption.mode", vec!["off", "stateful", "stateless"]),
     ("tls.ssl_early_data", vec!["off", "safe_methods", "on"]),
     (
+      "upstream_pools.discovery.tls.subject_alt_names.type",
+      vec!["dns", "uri"],
+    ),
+    (
+      "upstream_pools.servers.tls.subject_alt_names.type",
+      vec!["dns", "uri"],
+    ),
+    ("upstreams.tls.subject_alt_names.type", vec!["dns", "uri"]),
+    (
       "upstream_pools.algorithm",
       vec![
         "power_of_two_choices",
@@ -855,6 +919,7 @@ fn default_value(path: &str) -> Option<Value> {
     "shared_state.failure_policies.udp_flows" => json!("reject_new_only"),
     "shared_state.udp_flow_identity_key_env" => json!("OXIBELT_UDP_FLOW_IDENTITY_KEY"),
     "stream_listeners.udp_flow_state" => json!("local"),
+    "upstream_pools.discovery.weight_multiplier" => json!(1),
     "quic.upstream.resolution.address_family_stagger_ms" => json!(250),
     "quic.upstream.resolution.cooldown_base_ms" => json!(1_000),
     "quic.upstream.resolution.cooldown_max_ms" => json!(30_000),

@@ -43,6 +43,7 @@ mod resumption;
 mod server_policy;
 mod upstream_client;
 mod upstream_policy;
+mod upstream_san;
 pub(crate) use cert_metadata::{
   ParsedCertificateMetadata, client_certificate_metadata, parse_certificate_metadata,
 };

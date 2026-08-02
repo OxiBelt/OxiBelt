@@ -1,0 +1,239 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: oxibeltdataplanetargets.gateway.oxibelt.dev
+spec:
+  group: gateway.oxibelt.dev
+  scope: Namespaced
+  names:
+    plural: oxibeltdataplanetargets
+    singular: oxibeltdataplanetarget
+    kind: OxiBeltDataPlaneTarget
+    shortNames:
+    - obtarget
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    additionalPrinterColumns:
+    - name: GatewayClass
+      type: string
+      jsonPath: .spec.gatewayClassName
+    - name: Workload
+      type: string
+      jsonPath: .spec.workloadRef.name
+    - name: State
+      type: string
+      jsonPath: .status.state
+    - name: Artifact
+      type: string
+      jsonPath: .status.artifactDigest
+    subresources:
+      status: {}
+    schema:
+      openAPIV3Schema:
+        type: object
+        additionalProperties: false
+        required:
+        - apiVersion
+        - kind
+        - metadata
+        - spec
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            additionalProperties: false
+            required:
+            - gatewayClassName
+            - assignment
+            - workloadRef
+            - capabilities
+            - policyVersion
+            - rollout
+            properties:
+              gatewayClassName:
+                type: string
+                minLength: 1
+                maxLength: 253
+                pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+              assignment:
+                type: object
+                additionalProperties: false
+                required:
+                - mode
+                - allowedNamespaces
+                properties:
+                  mode:
+                    type: string
+                    enum:
+                    - Replicated
+                  allowedNamespaces:
+                    type: array
+                    minItems: 1
+                    maxItems: 64
+                    uniqueItems: true
+                    items:
+                      type: string
+                      minLength: 1
+                      maxLength: 63
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+              workloadRef:
+                type: object
+                additionalProperties: false
+                required:
+                - group
+                - kind
+                - namespace
+                - name
+                - containerName
+                - volumeName
+                properties:
+                  group:
+                    type: string
+                    enum:
+                    - apps
+                  kind:
+                    type: string
+                    enum:
+                    - Deployment
+                    - DaemonSet
+                  namespace:
+                    type: string
+                    minLength: 1
+                    maxLength: 63
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                  name:
+                    type: string
+                    minLength: 1
+                    maxLength: 63
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                  containerName:
+                    type: string
+                    minLength: 1
+                    maxLength: 63
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                  volumeName:
+                    type: string
+                    minLength: 1
+                    maxLength: 63
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+              capabilities:
+                type: array
+                minItems: 1
+                maxItems: 32
+                uniqueItems: true
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 63
+                  pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+              policyVersion:
+                type: string
+                enum:
+                - v1alpha1
+              rollout:
+                type: object
+                additionalProperties: false
+                required:
+                - timeoutSeconds
+                - configMapPrefix
+                - concurrency
+                - failurePolicy
+                properties:
+                  timeoutSeconds:
+                    type: integer
+                    format: int64
+                    minimum: 1
+                    maximum: 3600
+                  configMapPrefix:
+                    type: string
+                    minLength: 1
+                    maxLength: 63
+                    pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+                  concurrency:
+                    type: integer
+                    format: int32
+                    enum:
+                    - 1
+                  failurePolicy:
+                    type: string
+                    enum:
+                    - Rollback
+          status:
+            type: object
+            additionalProperties: false
+            properties:
+              observedGeneration:
+                type: integer
+                format: int64
+              state:
+                type: string
+                enum:
+                - Pending
+                - Rendering
+                - Validating
+                - Applying
+                - Active
+                - Degraded
+                - RollingBack
+                - Blocked
+              sourceSnapshotDigest:
+                type: string
+                pattern: '^sha256:[a-f0-9]{64}$'
+              artifactDigest:
+                type: string
+                pattern: '^sha256:[a-f0-9]{64}$'
+              activeRevision:
+                type: string
+                minLength: 1
+                maxLength: 253
+              rollbackRevision:
+                type: string
+                minLength: 1
+                maxLength: 253
+              conditions:
+                type: array
+                maxItems: 8
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys:
+                - type
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                  - type
+                  - status
+                  - reason
+                  - message
+                  - observedGeneration
+                  - lastTransitionTime
+                  properties:
+                    type:
+                      type: string
+                      minLength: 1
+                      maxLength: 63
+                    status:
+                      type: string
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                    reason:
+                      type: string
+                      minLength: 1
+                      maxLength: 63
+                    message:
+                      type: string
+                      maxLength: 1024
+                    observedGeneration:
+                      type: integer
+                      format: int64
+                    lastTransitionTime:
+                      type: string
+                      format: date-time

@@ -17,6 +17,10 @@ pub(super) struct GeneratedRoute {
   pub(super) cors: Option<CorsAction>,
   pub(super) request_mirrors: Vec<RequestMirrorAction>,
   pub(super) external_auth: Option<String>,
+  pub(super) policy_source: Option<String>,
+  pub(super) waf_request_rule_groups: Vec<String>,
+  pub(super) max_request_body_bytes: Option<u64>,
+  pub(super) upstream_request_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +41,8 @@ pub(super) struct GeneratedServer {
 
 #[derive(Debug, Clone)]
 pub(super) struct GeneratedKubernetesDiscovery {
+  pub(super) id: String,
+  pub(super) weight_multiplier: u32,
   pub(super) endpoint: String,
   pub(super) namespace: String,
   pub(super) service: String,
@@ -48,9 +54,16 @@ pub(super) struct GeneratedKubernetesDiscovery {
 #[derive(Debug, Clone)]
 pub(super) struct GeneratedBackendTls {
   pub(super) server_name: String,
+  pub(super) subject_alt_names: Vec<GeneratedBackendTlsSubjectAltName>,
   pub(super) trust: String,
   pub(super) trusted_ca_certs: Vec<String>,
   pub(super) trusted_ca_sha256: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum GeneratedBackendTlsSubjectAltName {
+  Dns(String),
+  Uri(String),
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +117,8 @@ pub(super) struct GeneratedExternalAuth {
   pub(super) forward_headers: Vec<String>,
   pub(super) identity_headers: Vec<String>,
   pub(super) terminal_response_headers: Vec<String>,
+  pub(super) max_request_body_bytes: usize,
+  pub(super) allowed_content_types: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +129,7 @@ pub(super) struct NamedExactMatch {
 
 #[derive(Debug, Clone)]
 pub(super) struct RewriteAction {
+  pub(super) authority: Option<String>,
   pub(super) path: Option<String>,
   pub(super) query: Option<String>,
 }
@@ -121,7 +137,10 @@ pub(super) struct RewriteAction {
 #[derive(Debug, Clone)]
 pub(super) struct RedirectAction {
   pub(super) status: u16,
-  pub(super) location_template: String,
+  pub(super) scheme: Option<String>,
+  pub(super) hostname: Option<String>,
+  pub(super) port: Option<u16>,
+  pub(super) path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

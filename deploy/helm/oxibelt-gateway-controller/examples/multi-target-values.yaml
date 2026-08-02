@@ -1,0 +1,34 @@
+# Operator-owned static replicated targets for one OxiBelt GatewayClass. Route
+# authors can attach only through normal Gateway parentRefs; they cannot select
+# these workload identities or provide rollout endpoints or credentials.
+rollout:
+  targets:
+  - name: west
+    gatewayClassName: oxibelt
+    allowedNamespaces:
+    - tenant-a
+    workloadRef:
+      namespace: data-plane-west
+      kind: Deployment
+      name: oxibelt
+      containerName: oxibelt
+      volumeName: gateway-config
+    capabilities:
+    - gateway-api
+    - http3
+    timeoutSeconds: 300
+    configMapPrefix: oxibelt-west-config
+  - name: east
+    gatewayClassName: oxibelt
+    allowedNamespaces:
+    - tenant-b
+    workloadRef:
+      namespace: data-plane-east
+      kind: Deployment
+      name: oxibelt
+      containerName: oxibelt
+      volumeName: gateway-config
+    capabilities:
+    - gateway-api
+    timeoutSeconds: 300
+    configMapPrefix: oxibelt-east-config

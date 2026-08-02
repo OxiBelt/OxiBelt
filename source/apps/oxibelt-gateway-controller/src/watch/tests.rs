@@ -33,6 +33,84 @@ fn watch_namespace_must_be_a_kubernetes_dns_label() {
 }
 
 #[test]
+fn source_snapshot_digest_binds_semantics_and_ignores_status_or_map_order() {
+  let first = KubernetesObject::from_value(json!({
+    "apiVersion": "gateway.networking.k8s.io/v1",
+    "kind": "HTTPRoute",
+    "metadata": {
+      "name": "app",
+      "namespace": "default",
+      "labels": {"tier": "edge"},
+      "annotations": {"example.test/policy": "strict"}
+    },
+    "spec": {"rules": [{"matches": [{"method": "GET"}]}]},
+    "status": {"parents": [{"controllerName": "other.example/controller"}]}
+  }))
+  .expect("first object")
+  .pop()
+  .expect("first item");
+  let reordered = KubernetesObject::from_value(serde_json::from_str(
+    r#"{
+      "kind":"HTTPRoute",
+      "apiVersion":"gateway.networking.k8s.io/v1",
+      "metadata":{"annotations":{"example.test/policy":"strict"},"labels":{"tier":"edge"},"namespace":"default","name":"app"},
+      "status":{"parents":[]},
+      "spec":{"rules":[{"matches":[{"method":"GET"}]}]}
+    }"#,
+  ).expect("ordered JSON"))
+  .expect("reordered object")
+  .pop()
+  .expect("reordered item");
+  assert_eq!(
+    source_snapshot_digest(std::slice::from_ref(&first)),
+    source_snapshot_digest(std::slice::from_ref(&reordered)),
+    "map insertion order and status written by other controllers are not desired-state identity"
+  );
+
+  let mut changed = reordered;
+  changed.spec["rules"][0]["matches"][0]["method"] = json!("POST");
+  assert_ne!(
+    source_snapshot_digest(std::slice::from_ref(&first)),
+    source_snapshot_digest(std::slice::from_ref(&changed)),
+    "offline objects without resourceVersion still bind their semantic spec"
+  );
+
+  let mut metadata_only = first.clone();
+  metadata_only.metadata.uid = Some("new-uid".to_string());
+  metadata_only.metadata.generation = Some(99);
+  metadata_only.metadata.resource_version = Some("12345".to_string());
+  assert_eq!(
+    source_snapshot_digest(std::slice::from_ref(&first)),
+    source_snapshot_digest(std::slice::from_ref(&metadata_only)),
+    "API bookkeeping must not create a new semantic rollout artifact"
+  );
+
+  let secret = |value: &str| {
+    KubernetesObject::from_value(json!({
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {"name": "backend-ca", "namespace": "default"},
+      "data": {"ca.crt": value}
+    }))
+    .expect("secret object")
+    .pop()
+    .expect("secret item")
+  };
+  let first_secret = secret("YQ==");
+  let second_secret = secret("Yg==");
+  assert_ne!(
+    source_snapshot_digest(std::slice::from_ref(&first_secret)),
+    source_snapshot_digest(std::slice::from_ref(&second_secret)),
+    "internal rollout identity must bind Secret data used by translation"
+  );
+  assert_eq!(
+    redacted_source_snapshot_digest(std::slice::from_ref(&first_secret)),
+    redacted_source_snapshot_digest(std::slice::from_ref(&second_secret)),
+    "shareable explain identity must not expose a Secret equality oracle"
+  );
+}
+
+#[test]
 fn parse_list_accepts_typed_kubernetes_list_envelopes() {
   let gateway_classes = parse_list(Bytes::from_static(
     br#"{
@@ -585,6 +663,15 @@ fn shared_args() -> SharedArgs {
     udp_batch: super::super::cli::UdpBatchMode::Auto,
     udp_batch_size: 16,
     backend_resolution: super::super::cli::BackendResolution::ClusterDns,
+    request_mirror_max_body_bytes: 0,
+    external_auth_max_body_bytes: 0,
+    external_auth_allowed_content_types: Vec::new(),
+    external_auth_allowed_request_headers: Vec::new(),
+    external_auth_allowed_identity_headers: Vec::new(),
+    external_auth_allowed_terminal_headers: Vec::new(),
+    external_auth_allow_credentials: false,
+    route_policy_max_request_body_bytes: 10_485_760,
+    route_policy_max_timeout_ms: 30_000,
     dry_run: false,
     health_bind: None,
   }

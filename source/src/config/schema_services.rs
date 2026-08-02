@@ -281,6 +281,19 @@ pub enum UpstreamDiscoveryProvider {
   Nomad,
 }
 
+impl UpstreamDiscoveryProvider {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Dns => "dns",
+      Self::File => "file",
+      Self::Kubernetes => "kubernetes",
+      Self::Consul => "consul",
+      Self::Etcd => "etcd",
+      Self::Nomad => "nomad",
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DnsDiscoveryRecordType {
@@ -359,6 +372,10 @@ pub struct UpstreamPoolServerConfig {
   pub tls: UpstreamTlsConfig,
   #[serde(skip)]
   pub source: UpstreamPoolServerSource,
+  #[serde(skip)]
+  pub discovery_instance_id: Option<String>,
+  #[serde(skip)]
+  pub discovered_weight: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]

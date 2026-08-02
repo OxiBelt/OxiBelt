@@ -1,0 +1,161 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: oxibeltroutepolicies.gateway.oxibelt.dev
+  annotations:
+    oxibelt.dev/capability: gateway-api-route-policy-v1alpha1
+spec:
+  group: gateway.oxibelt.dev
+  scope: Namespaced
+  names:
+    plural: oxibeltroutepolicies
+    singular: oxibeltroutepolicy
+    kind: OxiBeltRoutePolicy
+    shortNames:
+    - obrp
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Accepted
+      type: string
+      jsonPath: .status.conditions[?(@.type=="Accepted")].status
+    - name: Target
+      type: string
+      jsonPath: .spec.targetRef.name
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+    schema:
+      openAPIV3Schema:
+        type: object
+        additionalProperties: false
+        required:
+        - apiVersion
+        - kind
+        - metadata
+        - spec
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            additionalProperties: false
+            required:
+            - targetRef
+            properties:
+              targetRef:
+                type: object
+                additionalProperties: false
+                required:
+                - group
+                - kind
+                - name
+                properties:
+                  group:
+                    type: string
+                    enum:
+                    - gateway.networking.k8s.io
+                  kind:
+                    type: string
+                    enum:
+                    - HTTPRoute
+                    - GRPCRoute
+                  name:
+                    type: string
+                    minLength: 1
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+              waf:
+                type: object
+                additionalProperties: false
+                properties:
+                  requestRuleGroups:
+                    type: array
+                    minItems: 1
+                    maxItems: 16
+                    uniqueItems: true
+                    items:
+                      type: string
+                      minLength: 1
+                      maxLength: 32
+                      pattern: ^[A-Za-z0-9-]+$
+              limits:
+                type: object
+                additionalProperties: false
+                properties:
+                  maxRequestBodyBytes:
+                    type: integer
+                    format: int64
+                    minimum: 1
+                    maximum: 104857600
+              timeouts:
+                type: object
+                additionalProperties: false
+                properties:
+                  upstreamRequestMilliseconds:
+                    type: integer
+                    format: int64
+                    minimum: 1
+                    maximum: 300000
+            x-kubernetes-validations:
+            - rule: has(self.waf) || has(self.limits) || has(self.timeouts)
+              message: at least one bounded route policy field is required
+          status:
+            type: object
+            additionalProperties: false
+            properties:
+              observedGeneration:
+                type: integer
+                format: int64
+                minimum: 0
+              artifactDigest:
+                type: string
+                pattern: ^sha256:[0-9a-f]{64}$
+              conditions:
+                type: array
+                maxItems: 8
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys:
+                - type
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                  - type
+                  - status
+                  - reason
+                  - message
+                  - lastTransitionTime
+                  properties:
+                    type:
+                      type: string
+                      maxLength: 64
+                    status:
+                      type: string
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                    observedGeneration:
+                      type: integer
+                      format: int64
+                      minimum: 0
+                    reason:
+                      type: string
+                      minLength: 1
+                      maxLength: 64
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                    message:
+                      type: string
+                      maxLength: 1024
+                    lastTransitionTime:
+                      type: string
+                      format: date-time

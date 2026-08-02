@@ -74,6 +74,25 @@ spec:
         - "--udp-batch={{ .Values.l4.udp.batch }}"
         - "--udp-batch-size={{ include "oxibelt-gateway-controller.decimalInteger" (dict "name" "l4.udp.batchSize" "value" .Values.l4.udp.batchSize) }}"
         - "--backend-resolution={{ .Values.backendResolution }}"
+        - "--request-mirror-max-body-bytes={{ include "oxibelt-gateway-controller.decimalInteger" (dict "name" "filters.requestMirror.maxBodyBytes" "value" .Values.filters.requestMirror.maxBodyBytes) }}"
+        - "--external-auth-max-body-bytes={{ include "oxibelt-gateway-controller.decimalInteger" (dict "name" "filters.externalAuth.maxBodyBytes" "value" .Values.filters.externalAuth.maxBodyBytes) }}"
+        {{- range $contentType := .Values.filters.externalAuth.allowedContentTypes }}
+        - "--external-auth-allowed-content-type={{ $contentType }}"
+        {{- end }}
+        {{- range $header := .Values.filters.externalAuth.allowedRequestHeaders }}
+        - "--external-auth-allowed-request-header={{ $header }}"
+        {{- end }}
+        {{- range $header := .Values.filters.externalAuth.allowedIdentityHeaders }}
+        - "--external-auth-allowed-identity-header={{ $header }}"
+        {{- end }}
+        {{- range $header := .Values.filters.externalAuth.allowedTerminalHeaders }}
+        - "--external-auth-allowed-terminal-header={{ $header }}"
+        {{- end }}
+        {{- if .Values.filters.externalAuth.allowCredentials }}
+        - "--external-auth-allow-credentials"
+        {{- end }}
+        - "--route-policy-max-request-body-bytes={{ include "oxibelt-gateway-controller.decimalInteger" (dict "name" "routePolicy.maxRequestBodyBytes" "value" .Values.routePolicy.maxRequestBodyBytes) }}"
+        - "--route-policy-max-timeout-ms={{ include "oxibelt-gateway-controller.decimalInteger" (dict "name" "routePolicy.maxTimeoutMs" "value" .Values.routePolicy.maxTimeoutMs) }}"
         - "--compatibility-mode={{ .Values.compatibility.mode }}"
         {{- if eq .Values.compatibility.mode "rolling_upgrade" }}
         - "--compatibility-previous-version={{ .Values.compatibility.previousVersion }}"

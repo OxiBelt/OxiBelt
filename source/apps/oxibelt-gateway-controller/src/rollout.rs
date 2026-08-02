@@ -15,6 +15,7 @@ pub use super::rollout_patch::build_workload_patch;
 mod artifact;
 #[path = "rollout/pod_ownership.rs"]
 mod pod_ownership;
+pub(crate) use artifact::digest_artifact_bundle;
 pub use artifact::{ConfigArtifact, ConfigArtifactAsset};
 pub(crate) use pod_ownership::{WorkloadPodOwnership, pod_is_selected};
 
@@ -22,6 +23,7 @@ pub const IMMUTABLE_ROLLOUT_ANNOTATION: &str = "oxibelt.dev/immutable-config-rol
 pub const CONFIG_REVISION_ANNOTATION: &str = "oxibelt.dev/config-revision";
 pub const CONFIG_DIGEST_ANNOTATION: &str = "oxibelt.dev/config-digest";
 pub const ARTIFACT_DIGEST_ANNOTATION: &str = "oxibelt.dev/gateway-config-artifact-digest";
+pub const TARGET_CONTEXT_ANNOTATION: &str = "oxibelt.dev/gateway-target-context";
 pub const MANAGED_PATH_ANNOTATION: &str = "oxibelt.dev/gateway-config-managed-path";
 pub const ROLLOUT_PHASE_ANNOTATION: &str = "oxibelt.dev/gateway-config-phase";
 pub const DESIRED_REVISION_ANNOTATION: &str = "oxibelt.dev/gateway-config-desired";
@@ -49,7 +51,7 @@ const GENERATED_CONFIG_KEYS: &[&str] = &[
   "upstream_pools",
 ];
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub enum WorkloadKind {
   Deployment,
   DaemonSet,
@@ -91,6 +93,7 @@ pub struct RolloutTarget {
   pub volume_name: String,
   pub timeout: Duration,
   pub config_map_prefix: String,
+  pub artifact_context: Option<String>,
 }
 
 impl RolloutTarget {
@@ -114,6 +117,7 @@ impl RolloutTarget {
       volume_name: args.rollout_volume_name.clone(),
       timeout: Duration::from_secs(args.rollout_timeout_seconds),
       config_map_prefix: args.rollout_config_map_prefix.clone(),
+      artifact_context: None,
     })
   }
 

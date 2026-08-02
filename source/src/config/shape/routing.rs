@@ -26,6 +26,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "ech",
       "resumption",
       "server_name",
+      "subject_alt_names",
       "trust",
       "trusted_ca_certs",
       "trusted_ca_sha256",
@@ -37,6 +38,9 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "upstreams.tls.resumption"
     | "upstream_pools.servers.tls.resumption"
     | "upstream_pools.discovery.tls.resumption" => &["mode", "session_cache_size", "tls12"][..],
+    "upstreams.tls.subject_alt_names"
+    | "upstream_pools.servers.tls.subject_alt_names"
+    | "upstream_pools.discovery.tls.subject_alt_names" => &["type", "value"][..],
     "upstreams.tls.upstream_revocation" => outbound_revocation::OUTBOUND_REVOCATION_CONFIG_KEYS,
     "upstreams.tls.upstream_revocation.ocsp" => outbound_revocation::OUTBOUND_OCSP_CONFIG_KEYS,
     "upstreams.tls.upstream_revocation.crlite" => crlite::CRLITE_CONFIG_KEYS,
@@ -59,6 +63,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "endpoint",
       "file",
       "filter",
+      "id",
       "key_prefix",
       "kubernetes_resource",
       "min_ttl_ms",
@@ -77,6 +82,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "update_debounce_ms",
       "watch",
       "watch_timeout_seconds",
+      "weight_multiplier",
     ][..],
     "upstream_pools.sticky_cookie" => &[
       "cookie_name",
@@ -198,7 +204,14 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "expose_headers",
       "max_age_seconds",
     ][..],
-    "routes.actions.redirect" => &["location_template", "status"][..],
+    "routes.actions.redirect" => &[
+      "hostname",
+      "location_template",
+      "path",
+      "port",
+      "scheme",
+      "status",
+    ][..],
     "routes.actions.request_headers" => &["add", "remove", "set"][..],
     "routes.actions.request_headers.add" => &["name", "value"][..],
     "routes.actions.request_headers.set" => &["name", "value"][..],
@@ -206,7 +219,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "routes.actions.response_headers" => &["add", "remove", "set"][..],
     "routes.actions.response_headers.add" => &["name", "value"][..],
     "routes.actions.response_headers.set" => &["name", "value"][..],
-    "routes.actions.rewrite" => &["path", "query"][..],
+    "routes.actions.rewrite" => &["authority", "path", "query"][..],
     "routes.static_files" => &[
       "cache_control",
       "cache_control_by_extension",

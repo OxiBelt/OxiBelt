@@ -10,7 +10,7 @@ use rustls::pki_types::EchConfigListBytes;
 
 use crate::config::{
   CryptoConfig, OutboundTlsRevocationConfig, QuicConfig, UpstreamEchConfig, UpstreamEchMode,
-  UpstreamTlsResumptionConfig, UpstreamTlsTrust,
+  UpstreamTlsResumptionConfig, UpstreamTlsSubjectAltName, UpstreamTlsTrust,
 };
 
 use super::certificate_io::read_existing_file;
@@ -80,6 +80,7 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
     crypto,
     extra_root_certificates,
     UpstreamTlsTrust::Inherit,
+    &[],
     ech,
     resumption,
     state,
@@ -93,6 +94,7 @@ pub(super) fn build_upstream_client_config_with_trust(
   crypto: &CryptoConfig,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
+  subject_alt_names: &[UpstreamTlsSubjectAltName],
   ech: &UpstreamEchConfig,
   resumption: &UpstreamTlsResumptionConfig,
   state: Option<&TlsResumptionState>,
@@ -105,6 +107,7 @@ pub(super) fn build_upstream_client_config_with_trust(
     upstream_name,
     extra_root_certificates,
     trust,
+    subject_alt_names,
     ech,
     resumption,
   )?;
@@ -119,6 +122,7 @@ pub(super) fn build_upstream_client_config_with_trust(
         crypto,
         extra_root_certificates,
         trust,
+        subject_alt_names,
         ech,
         resumption,
         false,
@@ -130,6 +134,7 @@ pub(super) fn build_upstream_client_config_with_trust(
     crypto,
     extra_root_certificates,
     trust,
+    subject_alt_names,
     ech,
     resumption,
     false,
@@ -137,10 +142,12 @@ pub(super) fn build_upstream_client_config_with_trust(
   )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_uncached_upstream_client_config(
   crypto: &CryptoConfig,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
+  subject_alt_names: &[UpstreamTlsSubjectAltName],
   ech: &UpstreamEchConfig,
   resumption: &UpstreamTlsResumptionConfig,
   quic_only: bool,
@@ -168,13 +175,20 @@ fn build_uncached_upstream_client_config(
       .context("failed to configure upstream TLS versions")?,
   };
 
-  let mut client_config = if let Some((runtime, policy)) = revocation {
+  let mut client_config = if !subject_alt_names.is_empty() || revocation.is_some() {
     let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
       .build()
       .context("failed to build upstream WebPKI verifier")?;
+    let verifier =
+      super::upstream_san::explicit_subject_alt_name_verifier(verifier, subject_alt_names)?;
+    let verifier = if let Some((runtime, policy)) = revocation {
+      runtime.verifier(verifier, policy)
+    } else {
+      verifier
+    };
     builder
       .dangerous()
-      .with_custom_certificate_verifier(runtime.verifier(verifier, policy))
+      .with_custom_certificate_verifier(verifier)
       .with_no_client_auth()
   } else {
     builder.with_root_certificates(roots).with_no_client_auth()
@@ -287,6 +301,7 @@ pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revoc
     crypto,
     extra_root_certificates,
     UpstreamTlsTrust::Inherit,
+    &[],
     ech,
     quic,
     resumption,
@@ -301,6 +316,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
   crypto: &CryptoConfig,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
+  subject_alt_names: &[UpstreamTlsSubjectAltName],
   ech: &UpstreamEchConfig,
   quic: &QuicConfig,
   resumption: &UpstreamTlsResumptionConfig,
@@ -314,6 +330,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
     upstream_name,
     extra_root_certificates,
     trust,
+    subject_alt_names,
     ech,
     resumption,
   )?;
@@ -328,6 +345,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
         crypto,
         extra_root_certificates,
         trust,
+        subject_alt_names,
         ech,
         resumption,
         true,
@@ -339,6 +357,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
       crypto,
       extra_root_certificates,
       trust,
+      subject_alt_names,
       ech,
       resumption,
       true,
@@ -417,7 +436,7 @@ mod tests {
     Config, ListenerConfig, OcspConfig, ProxyProtocolConfig, Tls12CipherSuite,
     Tls12NegotiationConfig, Tls13CipherSuite, Tls13NegotiationConfig, TlsClientAuthConfig,
     TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig, TlsVersion, UpstreamEchConfig,
-    UpstreamTlsResumptionConfig,
+    UpstreamTlsConfig, UpstreamTlsResumptionConfig, UpstreamTlsSubjectAltName,
   };
   use crate::metrics::Metrics;
   use rustls::HandshakeKind;
@@ -479,6 +498,187 @@ mod tests {
       ),
       "revocation-aware upstream client must force a fresh certificate verification"
     );
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn explicit_subject_alt_names_separate_sni_from_certificate_identity() {
+    let temp_dir = common::TempDir::new("upstream-explicit-san");
+    let certificate_dns_name = "certificate.example.test";
+    let certificate_uri = "spiffe://example.test/ns/backend/sa/service";
+    let sni_name = "sni.example.test";
+    let (ca_cert_path, ca_key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "upstream-explicit-san-ca");
+    let (server_cert_path, server_key_path) = create_subject_alt_name_server_cert(
+      temp_dir.path(),
+      certificate_dns_name,
+      certificate_uri,
+      &ca_cert_path,
+      &ca_key_path,
+    );
+    let chain_path = write_certificate_chain(temp_dir.path(), &server_cert_path, &ca_cert_path);
+    let server_tls = test_tls_config(chain_path, server_key_path);
+    let client = |subject_alt_names: Vec<UpstreamTlsSubjectAltName>, roots: &[PathBuf]| {
+      let policy = UpstreamTlsConfig {
+        subject_alt_names,
+        ..UpstreamTlsConfig::default()
+      };
+      build_upstream_client_config_with_trust(
+        &CryptoConfig::default(),
+        roots,
+        UpstreamTlsTrust::Inherit,
+        &policy.subject_alt_names,
+        &policy.ech,
+        &policy.resumption,
+        None,
+        "explicit-san-test",
+        None,
+      )
+      .expect("upstream TLS client should build")
+    };
+
+    assert!(
+      run_one_handshake(
+        &server_tls,
+        client(
+          vec![UpstreamTlsSubjectAltName::Dns(
+            certificate_dns_name.to_string()
+          )],
+          std::slice::from_ref(&ca_cert_path),
+        ),
+        sni_name,
+      )
+      .await,
+      "an explicit DNS SAN should authenticate independently of SNI"
+    );
+    assert!(
+      run_one_handshake(
+        &server_tls,
+        client(
+          vec![UpstreamTlsSubjectAltName::Uri(certificate_uri.to_string())],
+          std::slice::from_ref(&ca_cert_path),
+        ),
+        sni_name,
+      )
+      .await,
+      "an exact URI SAN should authenticate after chain validation"
+    );
+    assert!(
+      !run_one_handshake(
+        &server_tls,
+        client(
+          vec![UpstreamTlsSubjectAltName::Uri(
+            "spiffe://example.test/ns/backend/sa/other".to_string()
+          )],
+          std::slice::from_ref(&ca_cert_path),
+        ),
+        certificate_dns_name,
+      )
+      .await,
+      "a matching SNI must not authenticate when an explicit SAN list mismatches"
+    );
+    assert!(
+      !run_one_handshake(
+        &server_tls,
+        client(
+          vec![UpstreamTlsSubjectAltName::Uri(
+            "spiffe://EXAMPLE.test/ns/backend/sa/service".to_string()
+          )],
+          std::slice::from_ref(&ca_cert_path),
+        ),
+        certificate_dns_name,
+      )
+      .await,
+      "URI SAN authentication must preserve exact case instead of normalizing identities"
+    );
+
+    let wildcard_dir = temp_dir.path().join("wildcard");
+    fs::create_dir(&wildcard_dir).expect("wildcard certificate directory should be created");
+    let (wildcard_cert_path, wildcard_key_path) = create_subject_alt_name_server_cert(
+      &wildcard_dir,
+      "*.example.test",
+      certificate_uri,
+      &ca_cert_path,
+      &ca_key_path,
+    );
+    let wildcard_chain_path =
+      write_certificate_chain(&wildcard_dir, &wildcard_cert_path, &ca_cert_path);
+    let wildcard_server_tls = test_tls_config(wildcard_chain_path, wildcard_key_path);
+    assert!(
+      !run_one_handshake(
+        &wildcard_server_tls,
+        client(
+          vec![UpstreamTlsSubjectAltName::Dns(
+            "backend.example.test".to_string()
+          )],
+          std::slice::from_ref(&ca_cert_path),
+        ),
+        "backend.example.test",
+      )
+      .await,
+      "a certificate wildcard must not satisfy an explicitly configured exact DNS SAN"
+    );
+
+    let (untrusted_ca_path, _untrusted_ca_key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "upstream-explicit-san-untrusted-ca");
+    assert!(
+      !run_one_handshake(
+        &server_tls,
+        client(
+          vec![UpstreamTlsSubjectAltName::Uri(certificate_uri.to_string())],
+          std::slice::from_ref(&untrusted_ca_path),
+        ),
+        sni_name,
+      )
+      .await,
+      "a matching URI SAN must not bypass certificate-chain validation"
+    );
+  }
+
+  async fn run_one_handshake(
+    server_tls: &TlsConfig,
+    client_config: ClientConfig,
+    server_name: &str,
+  ) -> bool {
+    let server_config = crate::tls::build_server_config(server_tls, &test_listeners())
+      .expect("server TLS config should build");
+    let listener = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("test TLS listener should bind");
+    let addr = listener
+      .local_addr()
+      .expect("listener address should exist");
+    let acceptor = TlsAcceptor::from(server_config);
+    let server = tokio::spawn(async move {
+      let (stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
+      acceptor
+        .accept(stream)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    });
+
+    let stream = TcpStream::connect(addr)
+      .await
+      .expect("client should connect");
+    let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+      .expect("test server name should be valid");
+    let client_result = tokio::time::timeout(
+      Duration::from_secs(5),
+      TlsConnector::from(Arc::new(client_config)).connect(server_name, stream),
+    )
+    .await
+    .expect("client TLS handshake should not time out");
+    let succeeded = client_result.is_ok();
+    drop(client_result);
+
+    let server_result = tokio::time::timeout(Duration::from_secs(5), server)
+      .await
+      .expect("server TLS handshake should not time out")
+      .expect("server task should finish");
+    if succeeded {
+      server_result.expect("server TLS handshake should complete when the client accepted it");
+    }
+    succeeded
   }
 
   async fn run_two_handshakes(
@@ -652,6 +852,67 @@ request_timeout_ms = 1
       &config_path,
       format!(
         "[req]\ndistinguished_name = req_distinguished_name\nreq_extensions = req_ext\nprompt = no\n\n[req_distinguished_name]\nCN = {common_name}\n\n[req_ext]\nsubjectAltName = @alt_names\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\nextendedKeyUsage = serverAuth\nauthorityInfoAccess = OCSP;URI:http://127.0.0.1:9/ocsp\n\n[alt_names]\nDNS.1 = {common_name}\n"
+      ),
+    )
+    .unwrap_or_else(|error| panic!("failed to write {}: {error}", config_path.display()));
+
+    run_command(
+      "openssl",
+      &[
+        OsStr::new("req"),
+        OsStr::new("-newkey"),
+        OsStr::new("rsa:2048"),
+        OsStr::new("-sha256"),
+        OsStr::new("-nodes"),
+        OsStr::new("-config"),
+        config_path.as_os_str(),
+        OsStr::new("-keyout"),
+        key_path.as_os_str(),
+        OsStr::new("-out"),
+        csr_path.as_os_str(),
+      ],
+    );
+    run_command(
+      "openssl",
+      &[
+        OsStr::new("x509"),
+        OsStr::new("-req"),
+        OsStr::new("-in"),
+        csr_path.as_os_str(),
+        OsStr::new("-CA"),
+        ca_cert_path.as_os_str(),
+        OsStr::new("-CAkey"),
+        ca_key_path.as_os_str(),
+        OsStr::new("-CAcreateserial"),
+        OsStr::new("-days"),
+        OsStr::new("1"),
+        OsStr::new("-sha256"),
+        OsStr::new("-extfile"),
+        config_path.as_os_str(),
+        OsStr::new("-extensions"),
+        OsStr::new("req_ext"),
+        OsStr::new("-out"),
+        cert_path.as_os_str(),
+      ],
+    );
+    (cert_path, key_path)
+  }
+
+  fn create_subject_alt_name_server_cert(
+    dir: &Path,
+    dns_name: &str,
+    uri: &str,
+    ca_cert_path: &Path,
+    ca_key_path: &Path,
+  ) -> (PathBuf, PathBuf) {
+    let key_path = dir.join("explicit-san-server.key");
+    let cert_path = dir.join("explicit-san-server.pem");
+    let csr_path = dir.join("explicit-san-server.csr");
+    let config_path = dir.join("explicit-san-server.cnf");
+    fs::write(
+      &config_path,
+      format!(
+        "[req]\ndistinguished_name = req_distinguished_name\nreq_extensions = req_ext\nprompt = no\n\n[req_distinguished_name]\nCN = {dns_name}\n\n[req_ext]\nsubjectAltName = @alt_names\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature\nextendedKeyUsage = serverAuth\n\n[alt_names]\nDNS.1 = {dns_name}\nURI.1 = {uri}\n"
       ),
     )
     .unwrap_or_else(|error| panic!("failed to write {}: {error}", config_path.display()));

@@ -179,6 +179,12 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     forwarded_header_cache,
     forwarded_request_header_values: None,
     preserve_host: upstream.preserve_host,
+    authority_override: resolved
+      .route
+      .actions
+      .rewrite
+      .as_ref()
+      .and_then(|rewrite| rewrite.authority.as_deref()),
     upstream_version,
     waf_mutations: &request_waf.request_header_mutations,
     route_mutations: &route_request_mutations,
@@ -219,7 +225,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   request_mirror::spawn_request_mirrors(
     state.clone(),
     resolved.route,
-    &outbound,
+    &mut outbound,
     &request_uri,
     client_addr,
     host,

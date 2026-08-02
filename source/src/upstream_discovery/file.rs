@@ -61,6 +61,8 @@ pub(super) async fn discover_file_servers(
         state: server.state,
         tls: Default::default(),
         source: UpstreamPoolServerSource::File,
+        discovery_instance_id: None,
+        discovered_weight: None,
       })
     })
     .collect::<anyhow::Result<Vec<_>>>()?;

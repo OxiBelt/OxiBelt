@@ -331,6 +331,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "trust_route_name",
     ][..],
     "external_auth" => &[
+      "allowed_content_types",
       "claim_headers",
       "client_id_env",
       "client_secret_env",
@@ -339,6 +340,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "forward_headers",
       "identity_headers",
       "max_response_body_bytes",
+      "max_request_body_bytes",
       "name",
       "provider",
       "required_claims",

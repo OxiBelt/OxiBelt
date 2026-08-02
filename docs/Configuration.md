@@ -3754,6 +3754,13 @@ header = "remote-user"
 
 Before forwarding upstream, OxiBelt strips configured `identity_headers` from the client request and injects identity headers only from the trusted auth response/token claims. Routes with `external_auth` use the general proxy path so fast paths cannot bypass the check. `timeout_ms` is a wall-clock deadline for the full auth exchange, including request send, response headers, and response body collection. `max_response_body_bytes` caps the auth response body size but is not a time limit. `fail_policy = "closed"` returns `503` on auth-service errors; `open` allows the request and records an auth error metric.
 
+External-auth header lists never delegate message framing or routing identity.
+`forward_headers` and `identity_headers` reject framing, hop-by-hop, `Host`,
+`Forwarded`, and trusted forwarding headers; `terminal_response_headers`
+rejects framing and hop-by-hop headers. OxiBelt derives request and response
+framing from the actual body even if an invalid runtime object bypasses normal
+configuration admission.
+
 ```toml
 [[upstream_pools]]
 name = "app-pool"
@@ -3815,6 +3822,8 @@ min_ttl_ms = 1000
 
 [[upstream_pools.discovery]]
 provider = "kubernetes"
+id = "app-primary"
+weight_multiplier = 20
 endpoint = "https://kubernetes.default.svc"
 namespace = "default"
 service = "app"
@@ -3920,7 +3929,34 @@ Pool server `state` controls new request selection. `ready` accepts traffic. `dr
 
 `[upstream_pools.circuit_breaker]` is a sparse override of `[circuit_breakers.pool_defaults]`. Use it for a dependency-wide active-request, pending-queue, physical-connection, or stream cap; it does not reinterpret `[[upstream_pools.servers]].max_conns`, which remains the existing selected-server request cap. Pool circuit failures are aggregate attempt outcomes and complement, rather than replace, per-server passive health and outlier ejection.
 
-Dynamic discovery applies to `upstream_pools` only. `provider = "file"` reads a JSON document from a path under the config directory, for example `source/config/discovery/app-pool.json` when running from the repository layout. `provider = "nomad"` polls `GET /v1/service/:service_name`; when `watch = true`, OxiBelt uses Nomad blocking-query `index` and `wait` parameters derived from successful `X-Nomad-Index` responses and `watch_timeout_seconds`. Nomad `token_env` is read from the environment and sent only as `X-Nomad-Token`; bearer-style configuration is intentionally not exposed in OxiBelt TOML. Nomad responses are treated as untrusted input: entries need non-empty service IDs, matching service names, valid addresses and ports, and generated `http`/`https` origins. Invalid discovery responses or rejected runtime updates keep the previous active pool state. The file discovery document shape is:
+Dynamic discovery applies to `upstream_pools` only. Every discovery block may
+set a stable `id` and positive `weight_multiplier` (default `1`). IDs must be
+unique within the pool. Repeating a provider requires an explicit ID for every
+instance; a legacy single instance may omit it and retains its provider-derived
+identity. Runtime reconciliation replaces only servers owned by the matching
+provider and instance ID. Across instances, OxiBelt treats each multiplier as
+the instance's aggregate traffic share, divides that share among the instance's
+ready endpoint weights, and then produces one deterministic bounded `u32`
+weight vector using checked arithmetic and GCD reduction. An update is rejected
+without replacing the active pool if normalization would lose a positive share
+or collapse distinct shares. Admission permits at most 64 discovery instances
+per pool and 256 across one configuration, before the supervisor can create any
+polling or watch worker. Runtime server IDs are deterministic opaque identities
+scoped to the provider and discovery instance; provider-local endpoint IDs are
+validated as input but cannot collide with a sibling cohort.
+
+`provider = "file"` reads a JSON document from a path under the config
+directory, for example `source/config/discovery/app-pool.json` when running
+from the repository layout. `provider = "nomad"` polls
+`GET /v1/service/:service_name`; when `watch = true`, OxiBelt uses Nomad
+blocking-query `index` and `wait` parameters derived from successful
+`X-Nomad-Index` responses and `watch_timeout_seconds`. Nomad `token_env` is read
+from the environment and sent only as `X-Nomad-Token`; bearer-style
+configuration is intentionally not exposed in OxiBelt TOML. Nomad responses
+are treated as untrusted input: entries need non-empty service IDs, matching
+service names, valid addresses and ports, and generated `http`/`https` origins.
+Invalid discovery responses or rejected runtime updates keep the previous
+active pool state. The file discovery document shape is:
 
 ```json
 {
@@ -4133,7 +4169,7 @@ Route header modifiers are validated with the same framing safety boundary as WA
 
 `actions.cors` handles valid preflight requests immediately after route matching and before route IPM, redirects, external auth, WAF, static files, cache, or upstream selection. Successful preflight responses return `204` with CORS response headers and no backend data. Credentialed CORS must not use wildcard origins. Non-preflight responses receive CORS response headers only when the request carries an allowed `Origin`.
 
-`actions.request_mirrors` selects the configured `upstream_pool` independently from the primary upstream and sends a bodyless best-effort mirror for `GET` and `HEAD` requests after outbound request construction. Mirror failures, unavailable pools, unsupported HTTP/3/proxy-protocol egress targets, and sampled-out requests never affect the primary response; they update `oxibelt_request_mirror_success_total`, `oxibelt_request_mirror_errors_total`, or `oxibelt_request_mirror_skips_total`.
+`actions.request_mirrors` selects the configured `upstream_pool` independently from the primary upstream and sends a bodyless best-effort mirror for `GET` and `HEAD` requests after outbound request construction. Bodyful mirrors may set `max_body_bytes` up to 16 MiB; the runtime reserves that configured capture size from a fail-fast 64-MiB process-wide mirror budget before reading any body frames and holds the reservation until every dispatched clone drops. Budget exhaustion skips the mirror without changing the primary request. Mirror failures, unavailable pools, unsupported HTTP/3/proxy-protocol egress targets, and sampled-out requests never affect the primary response; they update `oxibelt_request_mirror_success_total`, `oxibelt_request_mirror_errors_total`, or `oxibelt_request_mirror_skips_total`.
 
 Extended route matching keeps existing `hosts` and `path_prefix` behavior by default. `match.path.prefix` is an alias for the effective route prefix; when `path_prefix` is also set to a non-root value, both prefixes must be identical. `match.path.exact` and `match.path.regex` add extra path constraints without changing the prefix used for upstream rewrite or static-file stripping.
 

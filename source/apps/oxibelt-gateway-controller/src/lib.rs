@@ -16,6 +16,7 @@ mod rollout_patch;
 mod rollout_proof;
 mod rollout_status;
 mod status;
+mod target_topology;
 mod translate;
 mod watch;
 
@@ -27,6 +28,7 @@ use cli::{Cli, Command};
 /// Runs the Gateway Controller command-line application.
 pub async fn run() -> anyhow::Result<()> {
   let cli = Cli::parse();
+  cli.shared.validate()?;
   tracing_subscriber::fmt()
     .with_env_filter(
       tracing_subscriber::EnvFilter::try_from_default_env()
@@ -35,6 +37,17 @@ pub async fn run() -> anyhow::Result<()> {
     .init();
 
   match &cli.command {
+    Command::Explain(args) => {
+      let objects = render::load_objects(&args.input)?;
+      let rendered = translate::translate_objects(&objects, &cli.shared)?;
+      let explanation = rendered
+        .explanation
+        .select(args.gateway.as_deref(), args.route.as_deref())?;
+      let output = match args.format {
+        cli::ExplainFormat::Json => serde_json::to_string_pretty(&explanation)?,
+      };
+      render::write_rendered(&args.output, &format!("{output}\n"))?;
+    }
     Command::Render(args) => {
       let objects = render::load_objects(&args.input)?;
       let rendered = translate::translate_objects(&objects, &cli.shared)?;

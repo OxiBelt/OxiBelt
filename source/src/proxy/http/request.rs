@@ -30,6 +30,7 @@ pub(crate) struct RebuildRequestOptions<'a> {
   pub(crate) forwarded_header_cache: Option<&'a ForwardedHeaderCache>,
   pub(crate) forwarded_request_header_values: Option<&'a ForwardedRequestHeaderValues>,
   pub(crate) preserve_host: bool,
+  pub(crate) authority_override: Option<&'a str>,
   pub(crate) upstream_version: HttpVersion,
   pub(crate) waf_mutations: &'a [HeaderMutation],
   pub(crate) route_mutations: &'a [HeaderMutation],
@@ -81,6 +82,13 @@ pub(crate) fn rebuild_request_parts(
 
   apply_header_mutations(&mut parts.headers, options.waf_mutations);
   apply_header_mutations(&mut parts.headers, options.route_mutations);
+  if let Some(authority) = options.authority_override {
+    if options.upstream_version == HttpVersion::H1 {
+      set_effective_host_header(&mut parts.headers, authority);
+    } else {
+      parts.headers.remove(HOST);
+    }
+  }
   let accept_encoding_decision = if request_has_sensitive_credentials(&parts.headers) {
     UpstreamAcceptEncodingDecision::Strip
   } else {
@@ -212,6 +220,7 @@ mod tests {
       forwarded_header_cache: None,
       forwarded_request_header_values: None,
       preserve_host,
+      authority_override: None,
       upstream_version: HttpVersion::H1,
       waf_mutations: &[],
       route_mutations: &[],
@@ -268,6 +277,46 @@ mod tests {
 
     assert_eq!(rebuilt.headers()[HOST], "absolute.example");
     assert_eq!(rebuilt.headers()["x-forwarded-host"], "absolute.example");
+  }
+
+  #[test]
+  fn authority_override_is_protocol_exact_and_preserves_forwarded_identity() {
+    let compression = CompressionConfig::default();
+    let waf_mutations = [HeaderMutation::Set {
+      name: HOST,
+      value: http::HeaderValue::from_static("waf-override.example"),
+    }];
+
+    for version in [HttpVersion::H1, HttpVersion::H2, HttpVersion::H3] {
+      let request = Request::builder()
+        .uri("/app?q=1")
+        .header(HOST, "downstream.example")
+        .body(empty_proxy_body())
+        .expect("request should build");
+      let mut options = rebuild_options(
+        "https://tenant.example:8443/app?q=1".parse().unwrap(),
+        &compression,
+        "downstream.example",
+        true,
+      );
+      options.authority_override = Some("tenant.example:8443");
+      options.upstream_version = version;
+      options.waf_mutations = &waf_mutations;
+
+      let rebuilt = rebuild_request(request, options);
+
+      assert_eq!(
+        rebuilt.uri().authority().map(http::uri::Authority::as_str),
+        Some("tenant.example:8443")
+      );
+      assert_eq!(rebuilt.headers()["x-forwarded-host"], "downstream.example");
+      assert_eq!(rebuilt.headers()["x-forwarded-port"], "443");
+      if version == HttpVersion::H1 {
+        assert_eq!(rebuilt.headers()[HOST], "tenant.example:8443");
+      } else {
+        assert!(!rebuilt.headers().contains_key(HOST));
+      }
+    }
   }
 
   #[test]

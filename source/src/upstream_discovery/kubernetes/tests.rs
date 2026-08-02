@@ -4,6 +4,8 @@ use crate::config::UpstreamDiscoveryProvider;
 fn endpoint_slice_discovery() -> UpstreamPoolDiscoveryConfig {
   UpstreamPoolDiscoveryConfig {
     provider: UpstreamDiscoveryProvider::Kubernetes,
+    id: None,
+    weight_multiplier: 1,
     name: None,
     endpoint: Some("https://kubernetes.default.svc".parse().expect("valid URL")),
     namespace: Some("default".to_string()),

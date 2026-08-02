@@ -9,6 +9,8 @@ use super::model::{Diagnostic, KubernetesObject, ObjectKey, object_ref as model_
 
 #[path = "translate/backend_tls.rs"]
 mod backend_tls;
+#[path = "translate/explain.rs"]
+mod explain;
 #[path = "translate/filters.rs"]
 mod filters;
 #[path = "translate/generated.rs"]
@@ -21,6 +23,8 @@ mod http;
 mod l4;
 #[path = "translate/render.rs"]
 mod render;
+#[path = "translate/route_policy.rs"]
+mod route_policy;
 
 use generated::*;
 
@@ -38,6 +42,8 @@ pub struct RenderedConfig {
   pub toml: String,
   pub assets: Vec<RenderedAsset>,
   pub diagnostics: Vec<Diagnostic>,
+  pub requires_exact_data_plane: bool,
+  pub explanation: explain::TranslationExplanation,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -94,6 +100,14 @@ struct TranslationState {
   gateway_classes: HashSet<String>,
   gateways: HashMap<ObjectKey, GatewayInfo>,
   reference_grants: Vec<ReferenceGrantInfo>,
+  route_policies: BTreeMap<ObjectKey, route_policy::RoutePolicy>,
+  request_mirror_max_body_bytes: usize,
+  external_auth_max_body_bytes: usize,
+  external_auth_allowed_content_types: HashSet<String>,
+  external_auth_allowed_request_headers: HashSet<String>,
+  external_auth_allowed_identity_headers: HashSet<String>,
+  external_auth_allowed_terminal_headers: HashSet<String>,
+  external_auth_allow_credentials: bool,
   pools: BTreeMap<String, GeneratedPool>,
   external_auth: BTreeMap<String, GeneratedExternalAuth>,
   routes: Vec<GeneratedRoute>,
@@ -119,12 +133,30 @@ pub fn translate_objects(
   objects: &[KubernetesObject],
   args: &SharedArgs,
 ) -> anyhow::Result<RenderedConfig> {
+  let canonical_objects = super::rollout::canonicalize_objects(objects);
+  let objects = canonical_objects.as_slice();
   let mut state = TranslationState {
     backend_resolution: args.backend_resolution,
     namespace_labels: gateway_policy::namespace_labels(objects),
+    request_mirror_max_body_bytes: args.request_mirror_max_body_bytes,
+    external_auth_max_body_bytes: args.external_auth_max_body_bytes,
+    external_auth_allowed_content_types: normalized_policy_values(
+      &args.external_auth_allowed_content_types,
+    ),
+    external_auth_allowed_request_headers: normalized_policy_values(
+      &args.external_auth_allowed_request_headers,
+    ),
+    external_auth_allowed_identity_headers: normalized_policy_values(
+      &args.external_auth_allowed_identity_headers,
+    ),
+    external_auth_allowed_terminal_headers: normalized_policy_values(
+      &args.external_auth_allowed_terminal_headers,
+    ),
+    external_auth_allow_credentials: args.external_auth_allow_credentials,
     ..Default::default()
   };
   state.index_supporting_objects(objects, args)?;
+  state.route_policies = route_policy::index_route_policies(objects, args, &mut state.diagnostics);
   state.index_backend_tls(objects);
   state.translate_l4_routes(objects, args);
   for object in objects {
@@ -144,11 +176,25 @@ pub fn translate_objects(
       state.restore_generated(checkpoint);
     }
   }
+  let requires_exact_data_plane = state.pools.values().any(|pool| pool.discoveries.len() > 1);
+  let toml = render::render_toml(&state, args);
+  let assets = state.assets.values().cloned().collect::<Vec<_>>();
+  let explanation = explain::build_explanation(objects, &state, args, &toml, &assets)?;
   Ok(RenderedConfig {
-    toml: render::render_toml(&state, args),
-    assets: state.assets.into_values().collect(),
+    toml,
+    assets,
     diagnostics: state.diagnostics,
+    requires_exact_data_plane,
+    explanation,
   })
+}
+
+fn normalized_policy_values(values: &[String]) -> HashSet<String> {
+  values
+    .iter()
+    .map(|value| value.trim().to_ascii_lowercase())
+    .filter(|value| !value.is_empty())
+    .collect()
 }
 
 impl TranslationState {
@@ -240,7 +286,10 @@ impl TranslationState {
         ));
         continue;
       }
-      let hosts = intersect_hosts(&route_hosts, attachment.listener.hostname.as_deref());
+      let Some(hosts) = intersect_hosts(&route_hosts, attachment.listener.hostname.as_deref())
+      else {
+        continue;
+      };
       for (rule_index, rule) in rules.iter().enumerate() {
         let source = format!(
           "TLSRoute/{}/{} rule {} via Gateway/{}/{}",
@@ -579,21 +628,31 @@ fn service_target_port(port: &Value) -> Option<ServiceTargetPort> {
   target.as_str().map(|_| ServiceTargetPort::Name)
 }
 
-fn intersect_hosts(route_hosts: &[String], listener_hostname: Option<&str>) -> Vec<String> {
+fn intersect_hosts(route_hosts: &[String], listener_hostname: Option<&str>) -> Option<Vec<String>> {
   let Some(listener) = listener_hostname else {
-    return route_hosts.to_vec();
+    return Some(route_hosts.to_vec());
   };
   if route_hosts.is_empty() {
-    return vec![listener.to_string()];
+    return Some(vec![listener.to_string()]);
   }
-  route_hosts
+  let mut intersections = route_hosts
     .iter()
-    .filter(|host| host_intersects(host, listener))
-    .cloned()
-    .collect()
+    .filter_map(|route| {
+      if host_matches(route, listener) {
+        Some(listener.to_string())
+      } else if host_matches(listener, route) {
+        Some(route.clone())
+      } else {
+        None
+      }
+    })
+    .collect::<Vec<_>>();
+  intersections.sort();
+  intersections.dedup();
+  (!intersections.is_empty()).then_some(intersections)
 }
 
-fn host_intersects(route_host: &str, listener_host: &str) -> bool {
+pub(crate) fn host_intersects(route_host: &str, listener_host: &str) -> bool {
   host_matches(route_host, listener_host) || host_matches(listener_host, route_host)
 }
 

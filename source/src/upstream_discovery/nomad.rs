@@ -155,6 +155,8 @@ fn nomad_service_entry_to_server(
     state: UpstreamPoolServerState::Ready,
     tls: Default::default(),
     source: UpstreamPoolServerSource::Nomad,
+    discovery_instance_id: None,
+    discovered_weight: None,
   })
 }
 
@@ -220,6 +222,8 @@ mod tests {
   fn discovery() -> UpstreamPoolDiscoveryConfig {
     UpstreamPoolDiscoveryConfig {
       provider: crate::config::UpstreamDiscoveryProvider::Nomad,
+      id: None,
+      weight_multiplier: 1,
       name: None,
       endpoint: Some("http://nomad.service:4646".parse().unwrap()),
       namespace: Some("default".to_string()),

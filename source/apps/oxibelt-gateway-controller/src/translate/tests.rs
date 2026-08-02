@@ -41,6 +41,21 @@ fn args() -> SharedArgs {
     udp_batch: crate::cli::UdpBatchMode::Auto,
     udp_batch_size: 16,
     backend_resolution: crate::cli::BackendResolution::ClusterDns,
+    request_mirror_max_body_bytes: 0,
+    external_auth_max_body_bytes: 4_096,
+    external_auth_allowed_content_types: vec!["application/json".to_string()],
+    external_auth_allowed_request_headers: vec!["authorization".to_string()],
+    external_auth_allowed_identity_headers: vec![
+      "www-authenticate".to_string(),
+      "x-auth-user".to_string(),
+    ],
+    external_auth_allowed_terminal_headers: vec![
+      "www-authenticate".to_string(),
+      "x-auth-user".to_string(),
+    ],
+    external_auth_allow_credentials: true,
+    route_policy_max_request_body_bytes: 10_485_760,
+    route_policy_max_timeout_ms: 30_000,
     dry_run: false,
     health_bind: None,
   }
@@ -92,6 +107,31 @@ fn http_route_generates_weighted_pool_and_route() {
   assert!(rendered.toml.contains("hosts = [\"api.example.com\"]"));
   assert!(rendered.toml.contains("path_prefix = \"/api\""));
   assert!(rendered.toml.contains("methods = [\"GET\"]"));
+}
+
+#[test]
+fn route_hostnames_are_narrowed_to_listener_ownership_and_disjoint_routes_are_omitted() {
+  let wildcard_route = HTTP_FIXTURE.replace("  - api.example.com", "  - '*.example.com'");
+  let rendered = translate_objects(&objects(&wildcard_route), &args()).expect("translate");
+  assert!(rendered.toml.contains("hosts = [\"api.example.com\"]"));
+  assert!(!rendered.toml.contains("hosts = [\"*.example.com\"]"));
+
+  let disjoint_redirect = HTTP_FIXTURE
+    .replace("hostname: api.example.com", "hostname: owned.example.com")
+    .replace(
+      "  - matches:\n",
+      "  - filters:\n    - type: RequestRedirect\n      requestRedirect:\n        hostname: login.example.test\n    matches:\n",
+    )
+    .replace(
+      "    backendRefs:\n    - name: app\n      port: 8080\n      weight: 80\n    - name: canary\n      port: 8080\n      weight: 20\n",
+      "",
+    );
+  let rendered = translate_objects(&objects(&disjoint_redirect), &args()).expect("translate");
+  assert!(
+    !rendered.toml.contains("[[routes]]"),
+    "a route outside listener hostname ownership must not become a wildcard redirect"
+  );
+  assert!(!rendered.toml.contains("login.example.test"));
 }
 
 #[test]
@@ -200,7 +240,7 @@ fn http_route_filters_generate_native_actions() {
   assert!(
     rendered
       .toml
-      .contains("endpoint = \"http://auth.default.svc.cluster.local:9000\"")
+      .contains("endpoint = \"http://auth.default.svc.cluster.local:9000/verify\"")
   );
   assert!(
     rendered
@@ -210,7 +250,7 @@ fn http_route_filters_generate_native_actions() {
   assert!(
     rendered
       .toml
-      .contains("identity_headers = [\"x-auth-user\"]")
+      .contains("identity_headers = [\"x-auth-user\", \"www-authenticate\"]")
   );
   assert!(
     rendered
@@ -236,6 +276,73 @@ fn http_route_filters_generate_native_actions() {
       .toml
       .contains("external_auth = \"gwapi-http-default-app-0-0-ext-auth\"")
   );
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn http_route_rewrite_and_redirect_render_exact_authority_and_location_fields() {
+  let rewrite = HTTP_FIXTURE.replace(
+    "  - matches:\n",
+    "  - filters:\n    - type: URLRewrite\n      urlRewrite:\n        hostname: upstream.example.test\n        path:\n          type: ReplacePrefixMatch\n          replacePrefixMatch: /edge\n    matches:\n",
+  );
+  let rendered = translate_objects(&objects(&rewrite), &args()).expect("translate");
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("authority = \"upstream.example.test\"")
+  );
+  assert!(rendered.toml.contains("path = \"/edge{path_suffix}\""));
+  generated_toml_validates(&rendered.toml);
+
+  let redirect = HTTP_FIXTURE
+    .replace(
+      "  - matches:\n",
+      "  - filters:\n    - type: RequestRedirect\n      requestRedirect:\n        scheme: https\n        hostname: login.example.test\n        port: 8443\n        statusCode: 308\n        path:\n          type: ReplaceFullPath\n          replaceFullPath: /moved\n    matches:\n",
+    )
+    .replace(
+      "    backendRefs:\n    - name: app\n      port: 8080\n      weight: 80\n    - name: canary\n      port: 8080\n      weight: 20\n",
+      "",
+    );
+  let rendered = translate_objects(&objects(&redirect), &args()).expect("translate");
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(rendered.toml.contains("status = 308"));
+  assert!(rendered.toml.contains("scheme = \"https\""));
+  assert!(rendered.toml.contains("hostname = \"login.example.test\""));
+  assert!(rendered.toml.contains("port = 8443"));
+  assert!(rendered.toml.contains("path = \"/moved\""));
+  assert!(!rendered.toml.contains("location_template"));
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn request_redirect_without_scheme_or_port_binds_the_gateway_listener_port() {
+  let redirect = HTTP_FIXTURE
+    .replace(
+      "  - matches:\n",
+      "  - filters:\n    - type: RequestRedirect\n      requestRedirect:\n        hostname: login.example.test\n    matches:\n",
+    )
+    .replace(
+      "    backendRefs:\n    - name: app\n      port: 8080\n      weight: 80\n    - name: canary\n      port: 8080\n      weight: 20\n",
+      "",
+    );
+  let rendered = translate_objects(&objects(&redirect), &args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(rendered.toml.contains("hostname = \"login.example.test\""));
+  assert!(rendered.toml.contains("port = 443"));
   generated_toml_validates(&rendered.toml);
 }
 
@@ -279,6 +386,29 @@ fn gateway_external_auth_rejects_identity_header_modifier_conflicts() {
 }
 
 #[test]
+fn gateway_external_auth_rejects_framing_headers_even_when_operator_listed() {
+  let raw = HTTP_FILTER_FIXTURE.replace(
+    "          - x-auth-user\n          - www-authenticate",
+    "          - content-length",
+  );
+  let mut args = args();
+  args
+    .external_auth_allowed_identity_headers
+    .push("content-length".to_string());
+  args
+    .external_auth_allowed_terminal_headers
+    .push("content-length".to_string());
+  let rendered = translate_objects(&objects(&raw), &args).expect("translate");
+
+  assert!(
+    has_error_containing(&rendered, "contains forbidden header content-length"),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(!rendered.toml.contains("[[routes]]"));
+}
+
+#[test]
 fn grpc_route_generates_service_method_route_and_shared_filters() {
   let rendered = translate_objects(&objects(GRPC_FIXTURE), &args()).expect("translate");
 
@@ -307,6 +437,32 @@ fn grpc_route_generates_service_method_route_and_shared_filters() {
 }
 
 #[test]
+fn grpc_route_generates_weighted_multi_service_endpoint_slice_discoveries() {
+  let raw = GRPC_FIXTURE.replace(
+    "    - name: echo\n      namespace: default\n      port: 50051",
+    "    - name: echo\n      namespace: default\n      port: 50051\n      weight: 75\n    - name: mirror\n      namespace: default\n      port: 50052\n      weight: 25",
+  );
+  let rendered = translate_objects(&objects(&raw), &endpoint_slice_args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert_eq!(
+    rendered
+      .toml
+      .matches("[[upstream_pools.discovery]]")
+      .count(),
+    3,
+    "the primary two-Service pool and one mirror pool must each retain discovery ownership"
+  );
+  assert!(rendered.toml.contains("weight_multiplier = 75"));
+  assert!(rendered.toml.contains("weight_multiplier = 25"));
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
 fn grpc_external_auth_protocol_is_blocking_diagnostic() {
   let rendered =
     translate_objects(&objects(UNSUPPORTED_GRPC_EXTERNAL_AUTH), &args()).expect("translate");
@@ -321,6 +477,63 @@ fn grpc_external_auth_protocol_is_blocking_diagnostic() {
     "{:?}",
     rendered.diagnostics
   );
+  assert!(!rendered.toml.contains("[[routes]]"));
+}
+
+#[test]
+fn oxibelt_route_policy_applies_bounded_waf_body_and_timeout_controls() {
+  let route = HTTP_FIXTURE.replace(
+    "  - matches:\n",
+    "  - filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: app-security\n    matches:\n",
+  );
+  let raw = format!(
+    "{route}\n---\napiVersion: gateway.oxibelt.dev/v1alpha1\nkind: OxiBeltRoutePolicy\nmetadata:\n  name: app-security\n  namespace: default\nspec:\n  targetRef:\n    group: gateway.networking.k8s.io\n    kind: HTTPRoute\n    name: app\n  waf:\n    requestRuleGroups: [edge-baseline]\n  limits:\n    maxRequestBodyBytes: 1048576\n  timeouts:\n    upstreamRequestMilliseconds: 2500\n"
+  );
+
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("# Policy: OxiBeltRoutePolicy/default/app-security")
+  );
+  assert!(rendered.toml.contains("max_request_body_bytes = 1048576"));
+  assert!(rendered.toml.contains("upstream_request_timeout_ms = 2500"));
+  assert!(rendered.toml.contains("groups = [\"edge-baseline\"]"));
+  generated_toml_validates_with_waf_group(&rendered.toml, "edge-baseline");
+}
+
+#[test]
+fn oxibelt_route_policy_is_fail_closed_for_caps_targets_and_missing_objects() {
+  let route = HTTP_FIXTURE.replace(
+    "  - matches:\n",
+    "  - filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: app-security\n    matches:\n",
+  );
+  let policy = "\n---\napiVersion: gateway.oxibelt.dev/v1alpha1\nkind: OxiBeltRoutePolicy\nmetadata:\n  name: app-security\n  namespace: default\nspec:\n  targetRef:\n    group: gateway.networking.k8s.io\n    kind: HTTPRoute\n    name: app\n  limits:\n    maxRequestBodyBytes: 10485761\n";
+  let mut capped_args = args();
+  capped_args.route_policy_max_request_body_bytes = 10_485_760;
+  let rendered =
+    translate_objects(&objects(&format!("{route}{policy}")), &capped_args).expect("translate");
+  assert!(has_error_containing(&rendered, "exceeds the operator cap"));
+  assert!(!rendered.toml.contains("[[routes]]"));
+
+  let wrong_target = format!(
+    "{route}{}",
+    policy
+      .replace("name: app\n  limits", "name: other\n  limits")
+      .replace("10485761", "1024")
+  );
+  let rendered = translate_objects(&objects(&wrong_target), &args()).expect("translate");
+  assert!(has_error_containing(&rendered, "targetRef does not select"));
+  assert!(!rendered.toml.contains("[[routes]]"));
+
+  let rendered = translate_objects(&objects(&route), &args()).expect("translate");
+  assert!(has_error_containing(&rendered, "was not found"));
   assert!(!rendered.toml.contains("[[routes]]"));
 }
 
@@ -361,6 +574,58 @@ fn endpoint_slice_backend_resolution_generates_discovery_pool() {
   );
   assert!(!rendered.toml.contains("[[upstream_pools.servers]]"));
   generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn endpoint_slice_backend_resolution_generates_weighted_multi_service_discoveries() {
+  let rendered =
+    translate_objects(&objects(HTTP_FIXTURE), &endpoint_slice_args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert_eq!(
+    rendered
+      .toml
+      .matches("[[upstream_pools.discovery]]")
+      .count(),
+    2
+  );
+  assert!(rendered.toml.contains("service = \"app\""));
+  assert!(rendered.toml.contains("service = \"canary\""));
+  assert!(rendered.toml.contains("weight_multiplier = 80"));
+  assert!(rendered.toml.contains("weight_multiplier = 20"));
+  assert!(
+    rendered
+      .toml
+      .contains("id = \"gwapi-http-default-app-0-0-backend-0-default-app\"")
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("id = \"gwapi-http-default-app-0-0-backend-1-default-canary\"")
+  );
+  assert!(!rendered.toml.contains("[[upstream_pools.servers]]"));
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn backend_weight_is_parsed_strictly_instead_of_defaulting_invalid_values() {
+  let raw = HTTP_FIXTURE.replace("weight: 80", "weight: invalid");
+  let rendered = translate_objects(&objects(&raw), &endpoint_slice_args()).expect("translate");
+
+  assert!(
+    has_error_containing(
+      &rendered,
+      "backendRefs[0].weight must be an unsigned integer"
+    ),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert!(!rendered.toml.contains("[[routes]]"));
+  assert!(!rendered.toml.contains("[[upstream_pools.discovery]]"));
 }
 
 #[test]
@@ -496,6 +761,62 @@ fn equivalent_kubernetes_input_order_keeps_the_generated_content_digest_stable()
 }
 
 #[test]
+fn explain_evidence_is_deterministic_bounded_and_redacts_secret_objects() {
+  let mut snapshot = objects(HTTP_FIXTURE);
+  snapshot.extend(objects(
+    r#"
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: controller-token, namespace: default, uid: secret-uid}
+data: {token: dG9wLXNlY3JldA==}
+"#,
+  ));
+  let mut reordered = snapshot.clone();
+  reordered.reverse();
+
+  let first = translate_objects(&snapshot, &endpoint_slice_args()).expect("translate");
+  let second = translate_objects(&reordered, &endpoint_slice_args()).expect("translate");
+  let first_json = serde_json::to_value(&first.explanation).expect("serialize explain");
+  let second_json = serde_json::to_value(&second.explanation).expect("serialize explain");
+
+  assert_eq!(first_json, second_json);
+  assert_eq!(
+    first_json["schemaVersion"],
+    "gateway.oxibelt.dev/explain-v1alpha1"
+  );
+  assert_eq!(first_json["experimental"], true);
+  assert_eq!(first_json["validation"]["valid"], true);
+  assert_eq!(first_json["validation"]["requiresExactDataPlane"], true);
+  assert!(
+    first_json["artifactDigest"]
+      .as_str()
+      .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
+  );
+  let encoded = serde_json::to_string(&first_json).expect("encode explain");
+  assert!(!encoded.contains("controller-token"));
+  assert!(!encoded.contains("dG9wLXNlY3JldA"));
+  assert!(encoded.contains("normalizedWeight"));
+
+  let selected = first
+    .explanation
+    .clone()
+    .select(Some("default/edge"), Some("default/app"))
+    .expect("select explain evidence");
+  let selected = serde_json::to_value(selected).expect("serialize selected explain");
+  assert!(
+    selected["sources"]
+      .as_array()
+      .is_some_and(|items| !items.is_empty())
+  );
+  assert!(
+    selected["fragments"]
+      .as_array()
+      .is_some_and(|items| !items.is_empty())
+  );
+}
+
+#[test]
 fn backend_tls_policy_system_roots_sets_fixed_sni_and_https() {
   let raw = format!(
     "{}\n---\n{}",
@@ -565,6 +886,89 @@ spec:
 }
 
 #[test]
+fn backend_tls_policy_merges_multiple_ca_refs_and_enforces_exact_sans() {
+  let raw = format!(
+    "{}\n---\n{}",
+    HTTP_FIXTURE,
+    r#"apiVersion: v1
+kind: ConfigMap
+metadata: {name: app-ca-primary, namespace: default}
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    cHJpbWFyeQ==
+    -----END CERTIFICATE-----
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: app-ca-rotation, namespace: default}
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    cm90YXRpb24=
+    -----END CERTIFICATE-----
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata: {name: app-tls, namespace: default}
+spec:
+  targetRefs: [{group: "", kind: Service, name: app}]
+  validation:
+    hostname: backend.example.test
+    caCertificateRefs:
+    - {group: "", kind: ConfigMap, name: app-ca-rotation}
+    - {group: "", kind: ConfigMap, name: app-ca-primary}
+    subjectAltNames:
+    - {type: URI, uri: "spiffe://cluster.example.test/ns/default/sa/app"}
+    - {type: Hostname, hostname: "identity.example.test"}
+"#
+  );
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert_eq!(rendered.assets.len(), 2);
+  assert!(rendered.toml.contains(
+    "subject_alt_names = [{ type = \"uri\", value = \"spiffe://cluster.example.test/ns/default/sa/app\" }, { type = \"dns\", value = \"identity.example.test\" }]"
+  ));
+  let mut paths = rendered
+    .assets
+    .iter()
+    .map(|asset| asset.managed_path.as_str())
+    .collect::<Vec<_>>();
+  paths.sort();
+  assert!(
+    rendered.toml.find(paths[0]).expect("first path")
+      < rendered.toml.find(paths[1]).expect("second path")
+  );
+}
+
+#[test]
+fn backend_tls_policy_rejects_ambiguous_or_unsupported_sans() {
+  let raw = format!(
+    "{}\n---\n{}",
+    HTTP_FIXTURE,
+    r#"apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata: {name: app-tls, namespace: default}
+spec:
+  targetRefs: [{group: "", kind: Service, name: app}]
+  validation:
+    hostname: backend.example.test
+    wellKnownCACertificates: System
+    subjectAltNames:
+    - {type: Hostname, hostname: "*.example.test"}
+"#
+  );
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate");
+  assert!(has_error_containing(&rendered, "without wildcards"));
+  assert!(!rendered.toml.contains("[[routes]]"));
+}
+
+#[test]
 fn conflicting_backend_tls_policies_fail_closed_without_shipping_unused_ca() {
   let raw = format!(
     "{}\n---\n{}",
@@ -615,13 +1019,30 @@ fn generated_toml_validates(rendered_toml: &str) {
   let (cert_path, key_path) =
     common::create_self_signed_cert(temp_dir.path(), "gateway-api-generated-config");
   let raw = format!(
-    "{}\n{}",
+    "{}\n[runtime.hardening.seccomp]\nexpectation = \"required\"\n{}",
     common::minimal_config_toml(&cert_path, &key_path),
     rendered_toml
   );
 
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("generated config should validate");
+}
+
+fn generated_toml_validates_with_waf_group(rendered_toml: &str, group: &str) {
+  let temp_dir = common::TempDir::new("gateway-api-generated-policy-config");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "gateway-api-generated-policy-config");
+  let raw = format!(
+    "{}\n[runtime.hardening.seccomp]\nexpectation = \"required\"\n[[waf.rule_groups]]\nname = {:?}\nphase = \"request\"\nwhen = \"true\"\n[[waf.rule_groups.actions]]\ntype = \"set_tag\"\nkey = \"gateway-route-policy\"\nvalue = \"applied\"\n{}",
+    common::minimal_config_toml(&cert_path, &key_path),
+    group,
+    rendered_toml
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("generated policy config should validate");
 }
 
 fn generated_toml_parses(rendered_toml: &str) {

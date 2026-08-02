@@ -32,8 +32,10 @@ The controller watches:
 - `TCPRoute`
 - `UDPRoute`
 - `BackendTLSPolicy`
+- `OxiBeltRoutePolicy.gateway.oxibelt.dev/v1alpha1`
 - `ReferenceGrant`
 - `Service`
+- operator-owned `OxiBeltDataPlaneTarget.gateway.oxibelt.dev/v1alpha1`
 - referenced `ConfigMap` objects containing public CA bundles
 
 Only `GatewayClass.spec.controllerName = "oxibelt.dev/gateway-controller"` is
@@ -51,14 +53,24 @@ Weighted `backendRefs` become OxiBelt upstream-pool server weights. The
 controller reads `oxibelt.dev/upstream-scheme = "http" | "https"` from a
 `Service`; the default is `http`.
 
-Set `--backend-resolution=endpoint_slice_watch` to generate a Kubernetes
-EndpointSlice discovery block for route rules that reference exactly one
-nonzero Service backend. Weighted multi-backend rules remain static-DNS-only in
-this mode and are rejected with a blocking diagnostic rather than silently
-dropping weights. For direct EndpointSlice routing, generated discovery uses a
-named Service port as `port_name`, otherwise it uses numeric `targetPort` when
-available, falling back to the Service port only when `targetPort` is omitted.
-Generated discovery uses the in-pod service-account token file:
+Set `--backend-resolution=endpoint_slice_watch` to generate one Kubernetes
+EndpointSlice discovery instance per nonzero Service backend. HTTPRoute and
+GRPCRoute rules may therefore combine multiple dynamically discovered Services
+without one Service's refresh replacing another Service's endpoints. Each
+instance has a deterministic ID and carries the Gateway `backendRef.weight` as
+its aggregate weight multiplier. Zero-weight backends are omitted; an absent
+weight is `1`; malformed or out-of-range weights block translation. This new
+multi-Service artifact shape requires `--compatibility-mode=exact` and is
+blocked during a previous-minor rolling-upgrade window.
+
+Within each discovery instance, ready endpoint weights are normalized so that
+the instance's endpoints share its aggregate Gateway weight. The controller and
+data plane use checked arithmetic, deterministic ordering, GCD reduction, and
+bounded scaling; they reject a vector whose positive shares cannot be retained
+in the core `u32` weight range. EndpointSlice generation uses a named Service
+port as `port_name`, otherwise it uses numeric `targetPort` when available,
+falling back to the Service port only when `targetPort` is omitted. Generated
+discovery uses the in-pod service-account token file:
 
 ```toml
 token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -90,24 +102,36 @@ to a newer route.
 
 ## BackendTLSPolicy Mapping
 
-The stable-core subset applies to generated HTTPRoute and GRPCRoute Service
+The implemented subset applies to generated HTTPRoute and GRPCRoute Service
 backends. It supports exactly one same-namespace Service `targetRef`, required
-`validation.hostname`, and one of:
+lowercase precise `validation.hostname`, and one of:
 
 - `wellKnownCACertificates: System`; or
-- one core ConfigMap `caCertificateRefs` entry whose `ca.crt` key is a valid,
-  bounded PEM CA bundle.
+- one to eight core ConfigMap `caCertificateRefs` entries whose `ca.crt` keys
+  form a valid PEM CA set of at most 256 KiB in aggregate.
 
 The policy hostname is used for both SNI and certificate authentication while
 OxiBelt still connects to the Service address. Exclusive ConfigMap trust does
 not inherit the system or operator global trust roots. The controller fetches
 only exact referenced ConfigMaps, copies only the public `ca.crt` bytes into
 the immutable generated artifact, and binds their UID, resource version, and
-content digest into rollout proof.
+content digest into rollout proof. Multiple references are checked for
+duplicates and merged by content-addressed path, so reference or watch order
+cannot alter the trust bundle or artifact digest.
 
-Multiple targets, target `sectionName`, multiple CA references,
-`subjectAltNames`, `options`, cross-namespace CA refs, Secret refs, mTLS client
-identity, and certificate/SPKI pins are unsupported. They receive explicit
+`validation.subjectAltNames` accepts one to five exact Gateway API v1.6.1
+`Hostname` or `URI` entries. Hostnames must be lowercase DNS names without
+wildcards or IP literals; URIs must be exact absolute ASCII URIs. The configured
+`hostname` remains TLS SNI. When an explicit SAN list is present, it is not an
+authentication identity unless it is also listed. OxiBelt first performs the
+ordinary WebPKI chain, time, purpose, and CA verification and then requires at
+least one configured DNS or URI SAN to match the leaf certificate. The SAN set
+is also part of TCP/QUIC client and resumption identity, preventing reuse across
+different authentication policies.
+
+Multiple targets, target `sectionName`, `options`, cross-namespace CA refs,
+Secret refs, mTLS client identity, and certificate/SPKI pins are unsupported.
+They receive explicit
 policy status and never fall back to plaintext or broader TLS trust. Gateway
 API v1 does not define a portable client-identity or pin field, and a
 `ReferenceGrant` cannot make an otherwise invalid cross-namespace policy CA
@@ -156,26 +180,79 @@ Unsupported matches fail the route translation for the affected rule:
 
 Supported filters:
 
-- `URLRewrite` path rewrite when it maps to OxiBelt `actions.rewrite.path`
-- `RequestRedirect` path-only redirect when it maps to origin-relative
-  `actions.redirect.location_template`
+- `URLRewrite` exact hostname/authority and `ReplacePrefixMatch` or
+  `ReplaceFullPath` path rewrite, mapped to `actions.rewrite`
+- `RequestRedirect` scheme, hostname, port, status code, and path fields,
+  mapped to structured `actions.redirect`; an omitted scheme and port retains
+  the selected listener port
 - `RequestHeaderModifier` and `ResponseHeaderModifier`, mapped to
   `routes.actions.request_headers` and `routes.actions.response_headers`
-- `RequestMirror`, mapped to a generated mirror `upstream_pool`
+- `RequestMirror`, mapped to a generated mirror `upstream_pool`; the operator
+  chooses a global `--request-mirror-max-body-bytes` cap of at most 16 MiB,
+  with `0` preserving bodyless behavior. The data plane also reserves each
+  capture against a fail-fast 64-MiB process-wide budget until all mirror body
+  clones are dropped; exhaustion skips only the mirror
 - `CORS`, mapped to `routes.actions.cors`
-- `ExternalAuth` with `protocol: HTTP`, mapped to generated
+- `ExternalAuth` with `protocol: HTTP`, exact HTTP path/header allowlists, and
+  bounded `forwardBody.maxSize`, mapped to generated
   `[[external_auth]] provider = "gateway_ext_auth_http"`
+- same-namespace `ExtensionRef` to
+  `OxiBeltRoutePolicy.gateway.oxibelt.dev/v1alpha1`
 
-Unsupported filters include extension refs, hostname rewrite, port rewrite,
-scheme rewrite, gRPC ext-authz, and `ExternalAuth.forwardBody.maxSize > 0`.
+`RequestRedirect` cannot be combined with a backend or any other filter;
+unsupported combinations block the affected rule. gRPC ext-authz remains
+unsupported because the native runtime does not expose an exact gRPC auth
+contract.
 `RequestHeaderModifier` follows OxiBelt route request-header hardening: route
 authors cannot mutate OxiBelt-managed proxy identity or authority headers such
 as `Host`, `Forwarded`, `X-Forwarded-*`, `X-Real-IP`, or `CF-Connecting-IP`,
 and cannot mutate the same rule's `ExternalAuth.headersToBackend` identity
 headers. The controller reports these as blocking diagnostics and omits the
 affected generated route.
-Gateway HTTP external auth uses explicit header allowlists; omitted allowlists
-render as empty arrays instead of inheriting OxiBelt's non-Gateway defaults.
+Gateway HTTP external auth uses explicit operator ceilings for forwarded,
+identity, terminal-response, and credential headers. Route allowlists must be
+subsets. Forwarded and identity lists cannot include `Host`, trusted
+forwarding identity, framing, or hop-by-hop headers; terminal-response lists
+cannot include framing or hop-by-hop headers. Body forwarding requires both a route `forwardBody.maxSize` no larger
+than 65,535 bytes and the operator's byte/content-type allowlists. Unsupported
+media types fail locally with `415`; oversized bodies fail with `413`; the auth
+decision occurs before the protected upstream receives the replayed body.
+
+Bodyful mirroring is best-effort and never changes or waits indefinitely on the
+primary response. OxiBelt tees at most the operator cap while the primary body
+continues streaming; oversize, failed, cancelled, or non-replayable copies are
+not dispatched. Set the cap to `0` for namespaces or installations where
+sensitive bodies must never be mirrored. Status and logs contain no body bytes.
+
+## OxiBeltRoutePolicy v1alpha1
+
+The namespaced `OxiBeltRoutePolicy.gateway.oxibelt.dev/v1alpha1` CRD is an
+operator-installed alpha API. A route rule attaches it through a same-namespace
+Gateway `ExtensionRef`; `spec.targetRef` must select that HTTPRoute or
+GRPCRoute. The initial bounded fields are:
+
+- up to 16 named WAF/OxiRule request groups;
+- `limits.maxRequestBodyBytes`, capped by the operator and 100 MiB schema
+  maximum; and
+- `timeouts.upstreamRequestMilliseconds`, capped by the operator and 300-second
+  schema maximum.
+
+The policy cannot contain raw TOML, listener/Admin fields, filesystem paths,
+trust roots, arbitrary headers, Secrets, credentials, or another route's
+settings. Unknown fields, a missing or mismatched target, more than one policy
+filter on a rule, and over-cap values reject the affected rule transactionally.
+Operator caps are the upper authority; the route policy may only choose a
+bounded value at or below them. Standard route filters remain independently
+validated and cannot weaken those caps.
+
+Policy status publishes `Accepted`, `ResolvedRefs`, `Conflicted`, and
+`Programmed` conditions plus the lowercase immutable artifact-bundle digest
+only after rollout proof and only when the target route and policy fragment
+exist in the translated artifact. The status and explain views include effective group/body/timeout values
+but never rule contents, request bodies, credentials, or generated TOML. Apply
+the CRD from
+`deploy/kubernetes/oxibelt-gateway-controller/crds/oxibeltroutepolicies.gateway.oxibelt.dev.yaml`
+before installing or upgrading the chart.
 
 ## GRPCRoute Mapping
 
@@ -197,14 +274,15 @@ not applicable to `GRPCRoute`.
 | --- | --- | --- |
 | `HTTPRoute` host/path/method/exact header/exact query matches | Supported | Regex and wildcard method matches are rejected. |
 | `HTTPRoute` weighted Service backendRefs | Supported | Cross-namespace refs require `ReferenceGrant`. |
-| `HTTPRoute` `URLRewrite` and `RequestRedirect` | Partial | Path-only bounded mappings; host/scheme/port rewrites are rejected. |
-| `HTTPRoute` header modifiers, CORS, `RequestMirror` | Partial | Mapped to native route actions; mirrors are best-effort and bodyless in v1. |
-| `HTTPRoute`/`GRPCRoute` HTTP `ExternalAuth` | Partial | HTTP subset only, explicit header allowlists, no body forwarding. |
+| `HTTPRoute` `URLRewrite` and `RequestRedirect` | Experimental/partial | Exact hostname/path rewrite and structured scheme/hostname/port/path/status redirect; incompatible combinations are rejected. |
+| `HTTPRoute` header modifiers, CORS, `RequestMirror` | Experimental/partial | Mapped to native route actions; mirror bodies are opt-in, bounded, and best-effort. |
+| `HTTPRoute`/`GRPCRoute` HTTP `ExternalAuth` | Experimental/partial | HTTP only, explicit operator/route header and media-type allowlists, bounded body forwarding. |
+| `HTTPRoute`/`GRPCRoute` OxiBelt `ExtensionRef` | Experimental | Same-namespace v1alpha1 WAF group, body-limit, and timeout subset only. |
 | `GRPCRoute` service/method/header matches | Partial | Exact service+method and service-only matches only. |
 | `TLSRoute` passthrough | Partial | Requires `tls.mode = Passthrough`; emits `sni_forward` rules. |
 | `TCPRoute` | Experimental | One rule, weighted core Service backends, deterministic listener winner, and explicit operator-owned port exposure. |
 | `UDPRoute` | Experimental | Same bounded Service mapping plus required Redis-compatible or PostgreSQL logical flow affinity, fenced ownership, admission, and datagram limits. Disabled unless the controller is explicitly set to `shared_required`. |
-| `BackendTLSPolicy` | Experimental/partial | Stable-core hostname plus System or one ConfigMap `ca.crt`; extensions, Secrets, mTLS, pins, and SAN overrides are rejected. |
+| `BackendTLSPolicy` | Experimental/partial | Exact hostname/SNI, System or up to eight bounded ConfigMap CAs, and up to five enforced DNS/URI SANs; Secrets, mTLS, pins, and options are rejected. |
 
 Cross-namespace `Service` references require a `ReferenceGrant` in the target
 namespace. Without the grant, the controller emits a blocking diagnostic and
@@ -245,9 +323,51 @@ resources owned by its configured `--controller-name`.
 - `BackendTLSPolicy`: replaces only this controller's matching ancestor entry
   and reports accepted, conflicted, invalid, unresolved, and unsupported
   policy states without removing status owned by other controllers.
+- `OxiBeltRoutePolicy`: reports accepted, resolved-reference, conflict, rollout,
+  and proven artifact identity without publishing policy or body contents.
+- `OxiBeltDataPlaneTarget`: reports assignment, source snapshot, artifact,
+  apply, active, degraded, and rollback state independently for each target.
+  Translation can succeed while one target remains unprogrammed.
 
 `--dry-run` skips immutable artifact/workload mutations and Kubernetes status
 mutations.
+
+## Explain and Offline Evidence
+
+The offline explain command accepts one manifest file or a symlink-free
+directory and emits bounded JSON without contacting Kubernetes or mutating a
+target:
+
+```bash
+oxibelt-gateway-controller explain \
+  --input ./gateway-snapshot \
+  --gateway default/edge \
+  --route default/app \
+  --format json
+```
+
+Every directory entry is checked independently for symlinks and file type.
+Input is limited to 1,024 manifest files, a bounded post-open read of 16 MiB per
+file, and 10,000 objects.
+The controller canonicalizes object and JSON-map ordering before translation.
+The explain document contains its alpha schema version, source snapshot digest,
+path-bound artifact and content digests, source UID/resourceVersion/generation,
+typed diagnostics, generated fragment identities, normalized backend weights,
+effective route-policy values, operator-owned target assignments, validation
+state, and the explicit `experimental-unqualified` marker. Blocking diagnostics
+are evidence output rather than a reason to hide the explanation.
+
+Secret objects, values, and value-derived digest material are excluded.
+ConfigMap CA contents, generated TOML,
+bearer tokens, credentials, private keys, request bodies, and rollout endpoints
+are not present. An offline result has no active rollout receipt; live
+`Programmed` status remains the authority for a committed generation. The
+shareable source digest includes canonical desired spec, labels, annotations,
+and public ConfigMap data digest while excluding API bookkeeping and status
+written by other controllers. The internal rollout digest additionally binds
+Secret data required by translation without publishing that digest in explain
+output. Equivalent desired snapshots therefore keep the same semantic artifact
+regardless of list/watch arrival order or status/resourceVersion churn.
 
 ## High Availability and Fencing
 
@@ -276,6 +396,52 @@ the controller recovered. Do not grant namespace-wide Lease creation merely
 to automate this recovery.
 
 ## Immutable Rollout Model
+
+### Static replicated data-plane targets
+
+The first multi-target topology is an operator-owned, static replicated set for
+one OxiBelt-managed `GatewayClass`. Configure up to 32 entries under Helm
+`rollout.targets`; the chart creates a versioned
+`OxiBeltDataPlaneTarget.gateway.oxibelt.dev/v1alpha1` resource and an exact-name
+workload Role for each entry only after the operator installs the CRD from
+`deploy/kubernetes/oxibelt-gateway-controller/crds/`. The Helm chart does not
+own the CRD lifecycle. See
+`deploy/helm/oxibelt-gateway-controller/examples/multi-target-values.yaml` for a
+two-target example. When the array is empty, the legacy `rollout.target` CLI
+and Helm configuration remains authoritative.
+
+Each target restricts assignment to an explicit list of Gateway namespaces,
+names one Deployment or DaemonSet, and declares a sorted bounded capability
+set. Route authors attach through ordinary Gateway parent references; the
+target schema has no route-authored target ID, raw Admin URL, credential, or
+Secret field. The controller rejects unknown fields, duplicate workloads,
+unowned GatewayClasses, more than one class in the v1alpha1 static set, more
+than 32 targets, a managed Gateway with no allowed target assignment, and any
+per-target concurrency other than one.
+
+Target reconciliation is deterministic and sequential, giving v1alpha1 a
+global concurrency bound of one. The generated artifact identity binds the
+target resource identity, GatewayClass, policy version, sorted capabilities,
+target rollout policy, and target-specific source snapshot digest. A full
+target-context SHA-256 annotation is revalidated whenever an immutable artifact
+is reused or loaded for rollback, so a capability or assignment-policy change
+cannot adopt the prior context's ConfigMap. Workload annotations and immutable
+ConfigMaps remain the durable per-target state, so restart recovery and
+rollback can never substitute another target's committed revision. A failed
+target becomes `Blocked` or `Degraded` without cancelling or patching another
+target; each target snapshot retains only selected Gateways/routes and their
+reference-reachable Services, ReferenceGrants, BackendTLSPolicies, and CA
+ConfigMaps. Before status publication the controller re-reads the target set
+and independently re-proves every successful target, then recomputes the
+aggregate. Gateway and route `Programmed=True` requires that final active proof
+for every target in the static replicated set.
+
+The target status is bounded and contains digests, revision names, conditions,
+and state only. It contains no generated TOML, request data, Admin endpoint,
+token, or Secret material. The per-target Roles grant no Secret access and can
+patch only the exact named workload. This initial mode is static replicated
+placement, not dynamic load-aware sharding, active/standby failover, or
+consistent-hash rebalancing.
 
 The base OxiBelt config must include the controller-owned path, usually with a
 glob, and set `runtime.hot_reload.mode = "off"`:

@@ -24,16 +24,56 @@ pub(crate) async fn run_dynamic_upstream_discovery(
     }
 
     let snapshot = state.snapshot();
-    let mut desired = HashSet::new();
+    let desired = snapshot
+      .config
+      .upstream_pools
+      .iter()
+      .flat_map(|pool| {
+        pool.discovery.iter().map(|discovery| DiscoveryWorkerKey {
+          pool_name: pool.name.clone(),
+          provider: discovery.provider,
+          discovery_instance_id: discovery.effective_id().to_string(),
+        })
+      })
+      .collect::<HashSet<_>>();
+    let stale_keys = workers
+      .keys()
+      .filter(|key| !desired.contains(*key))
+      .cloned()
+      .collect::<Vec<_>>();
+    for key in stale_keys {
+      if let Some(worker) = workers.remove(&key) {
+        worker.stop();
+      }
+      let source = super::discovery_source(key.provider);
+      let discovery_instance_id = key.discovery_instance_id.clone();
+      if let Err(error) = crate::upstream_control::apply_runtime_pool_update(&state, |config| {
+        crate::upstream_control::remove_discovered_servers(
+          config,
+          &key.pool_name,
+          source,
+          &discovery_instance_id,
+        )
+      })
+      .await
+      {
+        tracing::warn!(
+          error = %error,
+          pool = %key.pool_name,
+          provider = ?key.provider,
+          "stale upstream discovery cohort removal failed"
+        );
+      }
+    }
 
     for pool in &snapshot.config.upstream_pools {
-      for (index, discovery) in pool.discovery.iter().cloned().enumerate() {
+      for discovery in pool.discovery.iter().cloned() {
         let key = DiscoveryWorkerKey {
           pool_name: pool.name.clone(),
-          index,
+          provider: discovery.provider,
+          discovery_instance_id: discovery.effective_id().to_string(),
         };
         let fingerprint = discovery_fingerprint(&discovery);
-        desired.insert(key.clone());
         let should_spawn = workers
           .get(&key)
           .is_none_or(|worker| worker.fingerprint != fingerprint || worker.task.is_finished());
@@ -50,15 +90,6 @@ pub(crate) async fn run_dynamic_upstream_discovery(
       }
     }
 
-    workers.retain(|key, worker| {
-      if desired.contains(key) {
-        true
-      } else {
-        worker.stop();
-        false
-      }
-    });
-
     tokio::select! {
       _ = shutdown.changed() => {}
       _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -73,7 +104,8 @@ pub(crate) async fn run_dynamic_upstream_discovery(
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct DiscoveryWorkerKey {
   pool_name: String,
-  index: usize,
+  provider: UpstreamDiscoveryProvider,
+  discovery_instance_id: String,
 }
 
 struct DiscoveryWorker {
@@ -162,7 +194,7 @@ async fn run_polling_discovery_worker(
     let delay = match result {
       Ok((servers, delay)) => {
         if let Err(error) =
-          super::apply_discovered_servers(&state, &pool_name, discovery.provider, servers).await
+          super::apply_discovered_servers(&state, &pool_name, &discovery, servers).await
         {
           tracing::warn!(
             error = %error,

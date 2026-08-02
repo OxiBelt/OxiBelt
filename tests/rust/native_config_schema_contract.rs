@@ -110,6 +110,80 @@ fn example_configuration_matches_the_structural_schema() {
 }
 
 #[test]
+fn discovery_instance_schema_is_typed_and_bounded() {
+  let schema = generate_native_config_schema().expect("native schema should generate");
+  let schema: serde_json::Value =
+    serde_json::from_str(&schema).expect("generated schema should be JSON");
+  let id = schema_node_for_metadata_path(&schema, "upstream_pools[].discovery[].id");
+  assert_eq!(id["type"], "string");
+  let discoveries = schema_node_for_metadata_path(&schema, "upstream_pools[].discovery");
+  assert_eq!(discoveries["type"], "array");
+  assert_eq!(discoveries["maxItems"], 64);
+  let multiplier =
+    schema_node_for_metadata_path(&schema, "upstream_pools[].discovery[].weight_multiplier");
+  assert_eq!(multiplier["type"], "integer");
+  assert_eq!(multiplier["minimum"], 1);
+  assert_eq!(multiplier["maximum"], u64::from(u32::MAX));
+  assert_eq!(multiplier["default"], 1);
+}
+
+#[test]
+fn request_mirror_body_schema_publishes_the_runtime_admission_unit() {
+  let schema = generate_native_config_schema().expect("native schema should generate");
+  let schema: serde_json::Value =
+    serde_json::from_str(&schema).expect("generated schema should be JSON");
+  let max_body =
+    schema_node_for_metadata_path(&schema, "routes[].actions.request_mirrors[].max_body_bytes");
+  assert_eq!(max_body["type"], "integer");
+  assert_eq!(max_body["minimum"], 0);
+  assert_eq!(max_body["maximum"], 16_777_216);
+}
+
+#[test]
+fn upstream_tls_subject_alt_names_schema_is_typed_and_bounded() {
+  let schema = generate_native_config_schema().expect("native schema should generate");
+  let schema: serde_json::Value =
+    serde_json::from_str(&schema).expect("generated schema should be JSON");
+  for path in [
+    "upstreams[].tls.subject_alt_names",
+    "upstream_pools[].servers[].tls.subject_alt_names",
+    "upstream_pools[].discovery[].tls.subject_alt_names",
+  ] {
+    let subject_alt_names = schema_node_for_metadata_path(&schema, path);
+    assert_eq!(
+      subject_alt_names["type"], "array",
+      "unexpected type at {path}"
+    );
+    assert_eq!(
+      subject_alt_names["maxItems"], 5,
+      "unexpected bound at {path}"
+    );
+    assert_eq!(
+      subject_alt_names["items"]["additionalProperties"], false,
+      "unexpected item shape at {path}"
+    );
+    assert_eq!(
+      subject_alt_names["items"]["required"],
+      serde_json::json!(["type", "value"]),
+      "unexpected required fields at {path}"
+    );
+    assert_eq!(
+      subject_alt_names["items"]["properties"]["type"]["enum"],
+      serde_json::json!(["dns", "uri"]),
+      "unexpected SAN types at {path}"
+    );
+    assert_eq!(
+      subject_alt_names["items"]["properties"]["value"]["minLength"], 1,
+      "unexpected minimum length at {path}"
+    );
+    assert_eq!(
+      subject_alt_names["items"]["properties"]["value"]["maxLength"], 253,
+      "unexpected maximum length at {path}"
+    );
+  }
+}
+
+#[test]
 fn secret_reference_metadata_covers_runtime_credential_boundaries() {
   for (path, expected) in [
     (
@@ -215,8 +289,8 @@ fn generated_schema_preserves_metadata_through_array_items() {
     "upstream_pools[].servers[].origin",
     "stream_upstream_pools[].servers[].origin",
     "turn_upstream_pools[].servers[].origin",
-    "upstream_pools[].discovery.token_env",
-    "upstream_pools[].discovery.token_file",
+    "upstream_pools[].discovery[].token_env",
+    "upstream_pools[].discovery[].token_file",
     "upstream_pools[].sticky_cookie.secret_env",
   ] {
     let node = schema_node_for_metadata_path(&schema, path);

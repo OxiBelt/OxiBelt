@@ -118,7 +118,7 @@ where
   B::Error: Into<super::body::BoxError> + Send + Sync + Unpin + 'static,
 {
   let InitialContext {
-    mut request,
+    request,
     state,
     resolved,
     host,
@@ -364,8 +364,13 @@ where
       &dynamic_challenge_response_mutations,
     ));
   }
-  match route_actions::resolved_redirect_response(&resolved, downstream_scheme, host, &request_uri)
-  {
+  match route_actions::resolved_redirect_response(
+    &resolved,
+    downstream_scheme,
+    host,
+    downstream_port,
+    &request_uri,
+  ) {
     Ok(Some(response)) => {
       return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
         response,
@@ -387,18 +392,21 @@ where
       ));
     }
   }
+  let mut request = request.map(|body| body.map_err(Into::into).boxed());
   if resolved.execution_plan.features.external_auth
     && let Some(provider) = resolved.route.external_auth.as_deref()
   {
     match state
       .external_auth
-      .authorize(
+      .authorize_http(
         provider,
         &mut request,
         client_addr.ip(),
         host,
         downstream_scheme,
         &resolved.route.name,
+        usize::try_from(max_request_body_bytes).unwrap_or(usize::MAX),
+        client_body_timeout,
       )
       .await
     {

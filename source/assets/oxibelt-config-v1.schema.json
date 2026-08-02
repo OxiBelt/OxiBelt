@@ -8515,6 +8515,17 @@
       "items": {
         "additionalProperties": false,
         "properties": {
+          "allowed_content_types": {
+            "description": "OxiBelt native field `external_auth[].allowed_content_types`. Production Rust validation is authoritative.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
           "claim_headers": {
             "additionalProperties": false,
             "description": "OxiBelt native field `external_auth[].claim_headers`. Production Rust validation is authoritative.",
@@ -8737,6 +8748,15 @@
               }
             ],
             "description": "OxiBelt native field `external_auth[].identity_headers`. Production Rust validation is authoritative.",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_request_body_bytes": {
+            "description": "OxiBelt native field `external_auth[].max_request_body_bytes`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
             "x-oxibelt-reference-activation": "none",
@@ -16250,6 +16270,33 @@
                 "additionalProperties": false,
                 "description": "OxiBelt native field `routes[].actions.redirect`. Production Rust validation is authoritative.",
                 "properties": {
+                  "hostname": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "array"
+                      },
+                      {
+                        "type": "object"
+                      }
+                    ],
+                    "description": "OxiBelt native field `routes[].actions.redirect.hostname`. Production Rust validation is authoritative.",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
                   "location_template": {
                     "anyOf": [
                       {
@@ -16272,6 +16319,87 @@
                       }
                     ],
                     "description": "OxiBelt native field `routes[].actions.redirect.location_template`. Production Rust validation is authoritative.",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "path": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "array"
+                      },
+                      {
+                        "type": "object"
+                      }
+                    ],
+                    "description": "OxiBelt native field `routes[].actions.redirect.path`. Production Rust validation is authoritative.",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "port": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "array"
+                      },
+                      {
+                        "type": "object"
+                      }
+                    ],
+                    "description": "OxiBelt native field `routes[].actions.redirect.port`. Production Rust validation is authoritative.",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "scheme": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "array"
+                      },
+                      {
+                        "type": "object"
+                      }
+                    ],
+                    "description": "OxiBelt native field `routes[].actions.redirect.scheme`. Production Rust validation is authoritative.",
                     "x-oxibelt-config-activation": "full_reload",
                     "x-oxibelt-introduced-epoch": 1,
                     "x-oxibelt-reference-activation": "none",
@@ -16486,6 +16614,7 @@
                   "properties": {
                     "max_body_bytes": {
                       "description": "OxiBelt native field `routes[].actions.request_mirrors[].max_body_bytes`. Production Rust validation is authoritative.",
+                      "maximum": 16777216,
                       "minimum": 0,
                       "type": "integer",
                       "x-oxibelt-config-activation": "full_reload",
@@ -16728,6 +16857,33 @@
                 "additionalProperties": false,
                 "description": "OxiBelt native field `routes[].actions.rewrite`. Production Rust validation is authoritative.",
                 "properties": {
+                  "authority": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "array"
+                      },
+                      {
+                        "type": "object"
+                      }
+                    ],
+                    "description": "OxiBelt native field `routes[].actions.rewrite.authority`. Production Rust validation is authoritative.",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
                   "path": {
                     "anyOf": [
                       {
@@ -25534,776 +25690,840 @@
             "x-oxibelt-secret-class": "none"
           },
           "discovery": {
-            "additionalProperties": false,
             "description": "OxiBelt native field `upstream_pools[].discovery`. Production Rust validation is authoritative.",
-            "properties": {
-              "datacenter": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.datacenter`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "endpoint": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.endpoint`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "file": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.file`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "filter": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.filter`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "key_prefix": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.key_prefix`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "kubernetes_resource": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.kubernetes_resource`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "min_ttl_ms": {
-                "description": "OxiBelt native field `upstream_pools[].discovery.min_ttl_ms`. Production Rust validation is authoritative.",
-                "minimum": 0,
-                "type": "integer",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "name": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.name`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "namespace": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.namespace`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "port": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.port`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "port_name": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.port_name`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "provider": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.provider`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "record_type": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.record_type`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "refresh_interval_ms": {
-                "description": "OxiBelt native field `upstream_pools[].discovery.refresh_interval_ms`. Production Rust validation is authoritative.",
-                "minimum": 0,
-                "type": "integer",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "scheme": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.scheme`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "service": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.service`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "tls": {
-                "additionalProperties": false,
-                "description": "OxiBelt native field `upstream_pools[].discovery.tls`. Production Rust validation is authoritative.",
-                "properties": {
-                  "ech": {
-                    "additionalProperties": false,
-                    "description": "OxiBelt native field `upstream_pools[].discovery.tls.ech`. Production Rust validation is authoritative.",
-                    "properties": {
-                      "config_list_file": {
-                        "anyOf": [
-                          {
-                            "type": "string"
-                          },
-                          {
-                            "type": "integer"
-                          },
-                          {
-                            "type": "number"
-                          },
-                          {
-                            "type": "boolean"
-                          },
-                          {
-                            "type": "array"
-                          },
-                          {
-                            "type": "object"
-                          }
-                        ],
-                        "description": "OxiBelt native field `upstream_pools[].discovery.tls.ech.config_list_file`. Production Rust validation is authoritative.",
-                        "x-oxibelt-config-activation": "full_reload",
-                        "x-oxibelt-introduced-epoch": 1,
-                        "x-oxibelt-reference-activation": "none",
-                        "x-oxibelt-secret-class": "none"
-                      },
-                      "mode": {
-                        "anyOf": [
-                          {
-                            "type": "string"
-                          },
-                          {
-                            "type": "integer"
-                          },
-                          {
-                            "type": "number"
-                          },
-                          {
-                            "type": "boolean"
-                          },
-                          {
-                            "type": "array"
-                          },
-                          {
-                            "type": "object"
-                          }
-                        ],
-                        "description": "OxiBelt native field `upstream_pools[].discovery.tls.ech.mode`. Production Rust validation is authoritative.",
-                        "x-oxibelt-config-activation": "full_reload",
-                        "x-oxibelt-introduced-epoch": 1,
-                        "x-oxibelt-reference-activation": "none",
-                        "x-oxibelt-secret-class": "none"
-                      }
-                    },
-                    "type": "object",
-                    "x-oxibelt-config-activation": "full_reload",
-                    "x-oxibelt-introduced-epoch": 1,
-                    "x-oxibelt-reference-activation": "none",
-                    "x-oxibelt-secret-class": "none"
-                  },
-                  "resumption": {
-                    "additionalProperties": false,
-                    "description": "OxiBelt native field `upstream_pools[].discovery.tls.resumption`. Production Rust validation is authoritative.",
-                    "properties": {
-                      "mode": {
-                        "anyOf": [
-                          {
-                            "type": "string"
-                          },
-                          {
-                            "type": "integer"
-                          },
-                          {
-                            "type": "number"
-                          },
-                          {
-                            "type": "boolean"
-                          },
-                          {
-                            "type": "array"
-                          },
-                          {
-                            "type": "object"
-                          }
-                        ],
-                        "description": "OxiBelt native field `upstream_pools[].discovery.tls.resumption.mode`. Production Rust validation is authoritative.",
-                        "x-oxibelt-config-activation": "full_reload",
-                        "x-oxibelt-introduced-epoch": 1,
-                        "x-oxibelt-reference-activation": "none",
-                        "x-oxibelt-secret-class": "none"
-                      },
-                      "session_cache_size": {
-                        "description": "OxiBelt native field `upstream_pools[].discovery.tls.resumption.session_cache_size`. Production Rust validation is authoritative.",
-                        "minimum": 0,
-                        "type": "integer",
-                        "x-oxibelt-config-activation": "full_reload",
-                        "x-oxibelt-introduced-epoch": 1,
-                        "x-oxibelt-reference-activation": "none",
-                        "x-oxibelt-secret-class": "none"
-                      },
-                      "tls12": {
-                        "anyOf": [
-                          {
-                            "type": "string"
-                          },
-                          {
-                            "type": "integer"
-                          },
-                          {
-                            "type": "number"
-                          },
-                          {
-                            "type": "boolean"
-                          },
-                          {
-                            "type": "array"
-                          },
-                          {
-                            "type": "object"
-                          }
-                        ],
-                        "description": "OxiBelt native field `upstream_pools[].discovery.tls.resumption.tls12`. Production Rust validation is authoritative.",
-                        "x-oxibelt-config-activation": "full_reload",
-                        "x-oxibelt-introduced-epoch": 1,
-                        "x-oxibelt-reference-activation": "none",
-                        "x-oxibelt-secret-class": "none"
-                      }
-                    },
-                    "type": "object",
-                    "x-oxibelt-config-activation": "full_reload",
-                    "x-oxibelt-introduced-epoch": 1,
-                    "x-oxibelt-reference-activation": "none",
-                    "x-oxibelt-secret-class": "none"
-                  },
-                  "server_name": {
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "type": "integer"
-                      },
-                      {
-                        "type": "number"
-                      },
-                      {
-                        "type": "boolean"
-                      },
-                      {
-                        "type": "array"
-                      },
-                      {
-                        "type": "object"
-                      }
-                    ],
-                    "description": "OxiBelt native field `upstream_pools[].discovery.tls.server_name`. Production Rust validation is authoritative.",
-                    "x-oxibelt-config-activation": "full_reload",
-                    "x-oxibelt-introduced-epoch": 1,
-                    "x-oxibelt-reference-activation": "none",
-                    "x-oxibelt-secret-class": "none"
-                  },
-                  "trust": {
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "type": "integer"
-                      },
-                      {
-                        "type": "number"
-                      },
-                      {
-                        "type": "boolean"
-                      },
-                      {
-                        "type": "array"
-                      },
-                      {
-                        "type": "object"
-                      }
-                    ],
-                    "description": "OxiBelt native field `upstream_pools[].discovery.tls.trust`. Production Rust validation is authoritative.",
-                    "x-oxibelt-config-activation": "full_reload",
-                    "x-oxibelt-introduced-epoch": 1,
-                    "x-oxibelt-reference-activation": "none",
-                    "x-oxibelt-secret-class": "none"
-                  },
-                  "trusted_ca_certs": {
-                    "description": "OxiBelt native field `upstream_pools[].discovery.tls.trusted_ca_certs`. Production Rust validation is authoritative.",
-                    "items": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "datacenter": {
+                  "anyOf": [
+                    {
                       "type": "string"
                     },
-                    "type": "array",
-                    "x-oxibelt-config-activation": "full_reload",
-                    "x-oxibelt-introduced-epoch": 1,
-                    "x-oxibelt-path-kind": "cert_relative",
-                    "x-oxibelt-reference-activation": "none",
-                    "x-oxibelt-secret-class": "none"
-                  },
-                  "trusted_ca_sha256": {
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "type": "integer"
-                      },
-                      {
-                        "type": "number"
-                      },
-                      {
-                        "type": "boolean"
-                      },
-                      {
-                        "type": "array"
-                      },
-                      {
-                        "type": "object"
-                      }
-                    ],
-                    "description": "OxiBelt native field `upstream_pools[].discovery.tls.trusted_ca_sha256`. Production Rust validation is authoritative.",
-                    "x-oxibelt-config-activation": "full_reload",
-                    "x-oxibelt-introduced-epoch": 1,
-                    "x-oxibelt-reference-activation": "none",
-                    "x-oxibelt-secret-class": "none"
-                  },
-                  "upstream_revocation": {
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "type": "integer"
-                      },
-                      {
-                        "type": "number"
-                      },
-                      {
-                        "type": "boolean"
-                      },
-                      {
-                        "type": "array"
-                      },
-                      {
-                        "type": "object"
-                      }
-                    ],
-                    "description": "OxiBelt native field `upstream_pools[].discovery.tls.upstream_revocation`. Production Rust validation is authoritative.",
-                    "x-oxibelt-config-activation": "full_reload",
-                    "x-oxibelt-introduced-epoch": 1,
-                    "x-oxibelt-reference-activation": "none",
-                    "x-oxibelt-secret-class": "none"
-                  }
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].datacenter`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
                 },
-                "type": "object",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
+                "endpoint": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].endpoint`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "file": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].file`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "filter": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].filter`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "id": {
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].id`. Production Rust validation is authoritative.",
+                  "type": "string",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "key_prefix": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].key_prefix`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "kubernetes_resource": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].kubernetes_resource`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "min_ttl_ms": {
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].min_ttl_ms`. Production Rust validation is authoritative.",
+                  "minimum": 0,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "name": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].name`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "namespace": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].namespace`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "port": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].port`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "port_name": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].port_name`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "provider": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].provider`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "record_type": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].record_type`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "refresh_interval_ms": {
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].refresh_interval_ms`. Production Rust validation is authoritative.",
+                  "minimum": 0,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "scheme": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].scheme`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "service": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].service`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "tls": {
+                  "additionalProperties": false,
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].tls`. Production Rust validation is authoritative.",
+                  "properties": {
+                    "ech": {
+                      "additionalProperties": false,
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.ech`. Production Rust validation is authoritative.",
+                      "properties": {
+                        "config_list_file": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "array"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ],
+                          "description": "OxiBelt native field `upstream_pools[].discovery[].tls.ech.config_list_file`. Production Rust validation is authoritative.",
+                          "x-oxibelt-config-activation": "full_reload",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        },
+                        "mode": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "array"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ],
+                          "description": "OxiBelt native field `upstream_pools[].discovery[].tls.ech.mode`. Production Rust validation is authoritative.",
+                          "x-oxibelt-config-activation": "full_reload",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        }
+                      },
+                      "type": "object",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
+                    "resumption": {
+                      "additionalProperties": false,
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.resumption`. Production Rust validation is authoritative.",
+                      "properties": {
+                        "mode": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "array"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ],
+                          "description": "OxiBelt native field `upstream_pools[].discovery[].tls.resumption.mode`. Production Rust validation is authoritative.",
+                          "x-oxibelt-config-activation": "full_reload",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        },
+                        "session_cache_size": {
+                          "description": "OxiBelt native field `upstream_pools[].discovery[].tls.resumption.session_cache_size`. Production Rust validation is authoritative.",
+                          "minimum": 0,
+                          "type": "integer",
+                          "x-oxibelt-config-activation": "full_reload",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        },
+                        "tls12": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "boolean"
+                            },
+                            {
+                              "type": "array"
+                            },
+                            {
+                              "type": "object"
+                            }
+                          ],
+                          "description": "OxiBelt native field `upstream_pools[].discovery[].tls.resumption.tls12`. Production Rust validation is authoritative.",
+                          "x-oxibelt-config-activation": "full_reload",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        }
+                      },
+                      "type": "object",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
+                    "server_name": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ],
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.server_name`. Production Rust validation is authoritative.",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
+                    "subject_alt_names": {
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.subject_alt_names`. Production Rust validation is authoritative.",
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "description": "OxiBelt native field `upstream_pools[].discovery[].tls.subject_alt_names[].type`. Production Rust validation is authoritative.",
+                            "enum": [
+                              "dns",
+                              "uri"
+                            ],
+                            "type": "string",
+                            "x-oxibelt-config-activation": "full_reload",
+                            "x-oxibelt-introduced-epoch": 1,
+                            "x-oxibelt-reference-activation": "none",
+                            "x-oxibelt-secret-class": "none"
+                          },
+                          "value": {
+                            "description": "OxiBelt native field `upstream_pools[].discovery[].tls.subject_alt_names[].value`. Production Rust validation is authoritative.",
+                            "maxLength": 253,
+                            "minLength": 1,
+                            "type": "string",
+                            "x-oxibelt-config-activation": "full_reload",
+                            "x-oxibelt-introduced-epoch": 1,
+                            "x-oxibelt-reference-activation": "none",
+                            "x-oxibelt-secret-class": "none"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 5,
+                      "type": "array",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
+                    "trust": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ],
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.trust`. Production Rust validation is authoritative.",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
+                    "trusted_ca_certs": {
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.trusted_ca_certs`. Production Rust validation is authoritative.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-path-kind": "cert_relative",
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
+                    "trusted_ca_sha256": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ],
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.trusted_ca_sha256`. Production Rust validation is authoritative.",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
+                    "upstream_revocation": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ],
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.upstream_revocation`. Production Rust validation is authoritative.",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    }
+                  },
+                  "type": "object",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "token_env": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].token_env`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "full_reload",
+                  "x-oxibelt-secret-class": "environment_reference"
+                },
+                "token_file": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].token_file`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "full_reload",
+                  "x-oxibelt-secret-class": "file_reference"
+                },
+                "update_debounce_ms": {
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].update_debounce_ms`. Production Rust validation is authoritative.",
+                  "minimum": 0,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "watch": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].watch`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "watch_timeout_seconds": {
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].watch_timeout_seconds`. Production Rust validation is authoritative.",
+                  "minimum": 0,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "weight_multiplier": {
+                  "default": 1,
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].weight_multiplier`. Production Rust validation is authoritative.",
+                  "maximum": 4294967295,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                }
               },
-              "token_env": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.token_env`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "full_reload",
-                "x-oxibelt-secret-class": "environment_reference"
-              },
-              "token_file": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.token_file`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "full_reload",
-                "x-oxibelt-secret-class": "file_reference"
-              },
-              "update_debounce_ms": {
-                "description": "OxiBelt native field `upstream_pools[].discovery.update_debounce_ms`. Production Rust validation is authoritative.",
-                "minimum": 0,
-                "type": "integer",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "watch": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "array"
-                  },
-                  {
-                    "type": "object"
-                  }
-                ],
-                "description": "OxiBelt native field `upstream_pools[].discovery.watch`. Production Rust validation is authoritative.",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              },
-              "watch_timeout_seconds": {
-                "description": "OxiBelt native field `upstream_pools[].discovery.watch_timeout_seconds`. Production Rust validation is authoritative.",
-                "minimum": 0,
-                "type": "integer",
-                "x-oxibelt-config-activation": "full_reload",
-                "x-oxibelt-introduced-epoch": 1,
-                "x-oxibelt-reference-activation": "none",
-                "x-oxibelt-secret-class": "none"
-              }
+              "type": "object"
             },
-            "type": "object",
+            "maxItems": 64,
+            "type": "array",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
             "x-oxibelt-reference-activation": "none",
@@ -27807,6 +28027,47 @@
                       "x-oxibelt-reference-activation": "none",
                       "x-oxibelt-secret-class": "none"
                     },
+                    "subject_alt_names": {
+                      "description": "OxiBelt native field `upstream_pools[].servers[].tls.subject_alt_names`. Production Rust validation is authoritative.",
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "description": "OxiBelt native field `upstream_pools[].servers[].tls.subject_alt_names[].type`. Production Rust validation is authoritative.",
+                            "enum": [
+                              "dns",
+                              "uri"
+                            ],
+                            "type": "string",
+                            "x-oxibelt-config-activation": "full_reload",
+                            "x-oxibelt-introduced-epoch": 1,
+                            "x-oxibelt-reference-activation": "none",
+                            "x-oxibelt-secret-class": "none"
+                          },
+                          "value": {
+                            "description": "OxiBelt native field `upstream_pools[].servers[].tls.subject_alt_names[].value`. Production Rust validation is authoritative.",
+                            "maxLength": 253,
+                            "minLength": 1,
+                            "type": "string",
+                            "x-oxibelt-config-activation": "full_reload",
+                            "x-oxibelt-introduced-epoch": 1,
+                            "x-oxibelt-reference-activation": "none",
+                            "x-oxibelt-secret-class": "none"
+                          }
+                        },
+                        "required": [
+                          "type",
+                          "value"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 5,
+                      "type": "array",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
                     "trust": {
                       "anyOf": [
                         {
@@ -28602,6 +28863,47 @@
                   }
                 ],
                 "description": "OxiBelt native field `upstreams[].tls.server_name`. Production Rust validation is authoritative.",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "subject_alt_names": {
+                "description": "OxiBelt native field `upstreams[].tls.subject_alt_names`. Production Rust validation is authoritative.",
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "description": "OxiBelt native field `upstreams[].tls.subject_alt_names[].type`. Production Rust validation is authoritative.",
+                      "enum": [
+                        "dns",
+                        "uri"
+                      ],
+                      "type": "string",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
+                    "value": {
+                      "description": "OxiBelt native field `upstreams[].tls.subject_alt_names[].value`. Production Rust validation is authoritative.",
+                      "maxLength": 253,
+                      "minLength": 1,
+                      "type": "string",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 5,
+                "type": "array",
                 "x-oxibelt-config-activation": "full_reload",
                 "x-oxibelt-introduced-epoch": 1,
                 "x-oxibelt-reference-activation": "none",

@@ -592,6 +592,48 @@ This post-beta.2 compatibility change requires a later governed beta and
 fresh exact-revision evidence; it is not part of beta.2's immutable release
 record.
 
+Post-beta.2 development also adds stable discovery-instance identity and
+aggregate weight composition to HTTP upstream pools. Existing pools with one
+instance of each discovery provider remain valid: an omitted `id` derives the
+legacy provider identity and an omitted `weight_multiplier` remains `1`.
+Configure explicit unique IDs when one pool contains the same provider more
+than once. Generated weighted multi-Service EndpointSlice pools require an
+exact-version controller/data-plane pairing and are blocked while
+`compatibility.mode = "rolling_upgrade"`, because a previous-minor data plane
+cannot parse or preserve the new ownership fields. Roll back by returning the
+route to one nonzero discovered Service, or by selecting `cluster_dns` before
+entering rolling-upgrade mode; never remove identity fields from an already
+active multi-instance pool in place. The data plane now scopes its internal
+server IDs to provider-plus-instance ownership, so dashboards or Admin clients
+must treat discovered server IDs as opaque and should key operator meaning from
+the discovery instance. Configuration admission is capped at 64 instances per
+pool and 256 total; split configurations above those limits before upgrade.
+
+Post-beta.2 development also adds an optional static replicated data-plane
+target set for the Gateway controller. An empty Helm `rollout.targets` array
+preserves the existing single `rollout.target` behavior. Enabling the new mode
+creates operator-owned
+`OxiBeltDataPlaneTarget.gateway.oxibelt.dev/v1alpha1` resources and changes
+artifact identity so it additionally binds target identity, GatewayClass,
+policy version, capability set, rollout policy, and the target-specific source
+snapshot. A target policy or capability change also changes the persisted
+target-context digest; automatic rollback refuses an artifact from the earlier
+context. Restore the earlier typed target policy before requesting that prior
+artifact explicitly. Treat
+this as a controller rollout boundary: apply the operator-owned CRD from
+`deploy/kubernetes/oxibelt-gateway-controller/crds/` before the Helm upgrade,
+let the chart install exact-name target RBAC, validate every target workload's immutable-rollout opt-in and
+effective version, then add all replicated targets for the one managed
+GatewayClass. `Programmed=True` is withheld until every assigned target has an
+independent active proof, including a final proof pass after the controller
+re-reads the complete source and target policy. Target snapshots include only
+their selected Gateways/routes and reference-reachable Services, grants, TLS
+policies, and CA ConfigMaps; unrelated namespaces can no longer block or churn
+another target's artifact. To roll back the topology, retain every target's last
+committed immutable ConfigMap, remove the typed target resources, restore the
+legacy target values, and wait for that target's own proof; never copy a
+revision from one target workload to another.
+
 Neither the immutable `0.7.0` tag nor `0.7.1-beta.1` is a deployable upgrade
 target. Both failed exact-revision release-contract validation before draft
 creation and have no GitHub Release or official artifact. Use

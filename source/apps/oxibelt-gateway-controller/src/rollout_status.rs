@@ -56,6 +56,14 @@ pub struct RolloutStatus {
   pub desired_content_digest: Option<String>,
   pub reason: Option<String>,
   pub proof: Option<CommitProof>,
+  pub target_summary: Option<TargetRolloutSummary>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TargetRolloutSummary {
+  pub assigned: usize,
+  pub active: usize,
+  pub failed: usize,
 }
 
 impl RolloutStatus {
@@ -66,6 +74,7 @@ impl RolloutStatus {
       desired_content_digest: None,
       reason: Some(reason.into()),
       proof: None,
+      target_summary: None,
     }
   }
 
@@ -76,11 +85,37 @@ impl RolloutStatus {
       desired_content_digest: None,
       reason: Some(reason.into()),
       proof: None,
+      target_summary: None,
     }
   }
 
   pub fn is_committed(&self) -> bool {
-    self.phase.is_committed() && self.proof.is_some()
+    self.target_summary.as_ref().map_or_else(
+      || self.phase.is_committed() && self.proof.is_some(),
+      |summary| summary.assigned > 0 && summary.active == summary.assigned && summary.failed == 0,
+    )
+  }
+
+  pub fn from_targets(assigned: usize, active: usize, failed: usize) -> Self {
+    let phase = if failed > 0 {
+      RolloutPhase::Failed
+    } else if assigned > 0 && active == assigned {
+      RolloutPhase::Committed
+    } else {
+      RolloutPhase::Generated
+    };
+    Self {
+      phase,
+      desired_revision: None,
+      desired_content_digest: None,
+      reason: (failed > 0).then(|| "TargetRolloutFailed".to_string()),
+      proof: None,
+      target_summary: Some(TargetRolloutSummary {
+        assigned,
+        active,
+        failed,
+      }),
+    }
   }
 
   pub fn programmed(&self, accepted: bool) -> ProgrammedCondition {
@@ -92,6 +127,16 @@ impl RolloutStatus {
       };
     }
     if self.is_committed() {
+      if let Some(summary) = &self.target_summary {
+        return ProgrammedCondition {
+          programmed: true,
+          reason: "Programmed",
+          message: format!(
+            "All {} operator-assigned data-plane targets independently prove their immutable artifacts active",
+            summary.assigned
+          ),
+        };
+      }
       return ProgrammedCondition {
         programmed: true,
         reason: "Programmed",
@@ -143,6 +188,7 @@ impl From<&RolloutState> for RolloutStatus {
       desired_content_digest: state.desired_content_digest.clone(),
       reason: state.failure.clone(),
       proof: None,
+      target_summary: None,
     }
   }
 }
@@ -168,6 +214,7 @@ mod tests {
       desired_content_digest: Some("digest".to_string()),
       reason: None,
       proof: Some(CommitProof::test()),
+      target_summary: None,
     };
     assert!(committed.programmed(true).programmed);
   }
@@ -180,9 +227,27 @@ mod tests {
       desired_content_digest: Some("digest".to_string()),
       reason: Some("ConvergenceLost".to_string()),
       proof: None,
+      target_summary: None,
     };
     let condition = lost.programmed(true);
     assert!(!condition.programmed);
     assert_eq!(condition.reason, "ConvergenceLost");
+  }
+
+  #[test]
+  fn multi_target_status_requires_every_independent_target() {
+    assert!(
+      !RolloutStatus::from_targets(2, 1, 0)
+        .programmed(true)
+        .programmed
+    );
+    assert!(
+      !RolloutStatus::from_targets(2, 1, 1)
+        .programmed(true)
+        .programmed
+    );
+    let condition = RolloutStatus::from_targets(2, 2, 0).programmed(true);
+    assert!(condition.programmed);
+    assert!(condition.message.contains("All 2"));
   }
 }

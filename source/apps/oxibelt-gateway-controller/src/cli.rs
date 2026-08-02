@@ -1,10 +1,12 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+use anyhow::bail;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 pub const DEFAULT_CONTROLLER_NAME: &str = "oxibelt.dev/gateway-controller";
 pub const DEFAULT_MANAGED_CONFIG_PATH: &str = "conf.d/gateway-api.generated.toml";
+pub const MAX_REQUEST_MIRROR_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt-gateway-controller")]
@@ -56,10 +58,139 @@ pub struct SharedArgs {
   pub udp_batch_size: usize,
   #[arg(long, global = true, value_enum, default_value = "cluster_dns")]
   pub backend_resolution: BackendResolution,
+  #[arg(long, global = true, default_value_t = 0)]
+  pub request_mirror_max_body_bytes: usize,
+  #[arg(long, global = true, default_value_t = 0)]
+  pub external_auth_max_body_bytes: usize,
+  #[arg(long = "external-auth-allowed-content-type", global = true)]
+  pub external_auth_allowed_content_types: Vec<String>,
+  #[arg(long = "external-auth-allowed-request-header", global = true)]
+  pub external_auth_allowed_request_headers: Vec<String>,
+  #[arg(long = "external-auth-allowed-identity-header", global = true)]
+  pub external_auth_allowed_identity_headers: Vec<String>,
+  #[arg(long = "external-auth-allowed-terminal-header", global = true)]
+  pub external_auth_allowed_terminal_headers: Vec<String>,
+  #[arg(long, global = true, default_value_t = false)]
+  pub external_auth_allow_credentials: bool,
+  #[arg(long, global = true, default_value_t = 10_485_760)]
+  pub route_policy_max_request_body_bytes: u64,
+  #[arg(long, global = true, default_value_t = 30_000)]
+  pub route_policy_max_timeout_ms: u64,
   #[arg(long, global = true)]
   pub dry_run: bool,
   #[arg(long, global = true)]
   pub health_bind: Option<SocketAddr>,
+}
+
+impl SharedArgs {
+  pub fn validate(&self) -> anyhow::Result<()> {
+    if self.request_mirror_max_body_bytes > MAX_REQUEST_MIRROR_BODY_BYTES {
+      bail!(
+        "request-mirror-max-body-bytes must not exceed {}",
+        MAX_REQUEST_MIRROR_BODY_BYTES
+      );
+    }
+    if self.external_auth_max_body_bytes > usize::from(u16::MAX) {
+      bail!("external-auth-max-body-bytes must not exceed 65535");
+    }
+    if self.external_auth_max_body_bytes > 0 && self.external_auth_allowed_content_types.is_empty()
+    {
+      bail!(
+        "external-auth-max-body-bytes > 0 requires at least one --external-auth-allowed-content-type"
+      );
+    }
+    validate_content_types(&self.external_auth_allowed_content_types)?;
+    validate_header_allowlist(
+      "external-auth-allowed-request-header",
+      &self.external_auth_allowed_request_headers,
+      ExternalAuthHeaderScope::ProtectedRequest,
+    )?;
+    validate_header_allowlist(
+      "external-auth-allowed-identity-header",
+      &self.external_auth_allowed_identity_headers,
+      ExternalAuthHeaderScope::ProtectedRequest,
+    )?;
+    validate_header_allowlist(
+      "external-auth-allowed-terminal-header",
+      &self.external_auth_allowed_terminal_headers,
+      ExternalAuthHeaderScope::TerminalResponse,
+    )?;
+    if self.route_policy_max_request_body_bytes == 0
+      || self.route_policy_max_request_body_bytes > 104_857_600
+    {
+      bail!("route-policy-max-request-body-bytes must be between 1 and 104857600");
+    }
+    if self.route_policy_max_timeout_ms == 0 || self.route_policy_max_timeout_ms > 300_000 {
+      bail!("route-policy-max-timeout-ms must be between 1 and 300000");
+    }
+    Ok(())
+  }
+}
+
+fn validate_content_types(values: &[String]) -> anyhow::Result<()> {
+  let mut unique = std::collections::HashSet::new();
+  for value in values {
+    let normalized = value.trim().to_ascii_lowercase();
+    let Some((kind, subtype)) = normalized.split_once('/') else {
+      bail!("external-auth-allowed-content-type must use a type/subtype media type");
+    };
+    let valid_token = |token: &str| {
+      !token.is_empty()
+        && token.bytes().all(|byte| {
+          byte.is_ascii_alphanumeric()
+            || matches!(
+              byte,
+              b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+            )
+        })
+    };
+    if normalized != value.as_str()
+      || !valid_token(kind)
+      || !valid_token(subtype)
+      || kind == "*"
+      || subtype == "*"
+    {
+      bail!(
+        "external-auth-allowed-content-type values must be lowercase exact media types without parameters or wildcards"
+      );
+    }
+    if !unique.insert(normalized) {
+      bail!("external-auth-allowed-content-type contains a duplicate value");
+    }
+  }
+  Ok(())
+}
+
+fn validate_header_allowlist(
+  label: &str,
+  values: &[String],
+  scope: ExternalAuthHeaderScope,
+) -> anyhow::Result<()> {
+  let mut unique = std::collections::HashSet::new();
+  for value in values {
+    let normalized = oxibelt_control_protocol::normalize_route_action_header_name(value)?;
+    let forbidden = match scope {
+      ExternalAuthHeaderScope::ProtectedRequest => {
+        oxibelt_control_protocol::is_reserved_route_request_header(&normalized)
+      }
+      ExternalAuthHeaderScope::TerminalResponse => {
+        oxibelt_control_protocol::is_forbidden_route_action_header(&normalized)
+      }
+    };
+    if forbidden {
+      bail!("{label} contains forbidden header {normalized}");
+    }
+    if !unique.insert(normalized) {
+      bail!("{label} contains a duplicate header");
+    }
+  }
+  Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ExternalAuthHeaderScope {
+  ProtectedRequest,
+  TerminalResponse,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
@@ -134,8 +265,30 @@ impl CompatibilityMode {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+  Explain(ExplainArgs),
   Run(Box<RunArgs>),
   Render(RenderArgs),
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum ExplainFormat {
+  #[default]
+  Json,
+}
+
+#[derive(Debug, Args)]
+pub struct ExplainArgs {
+  #[arg(long)]
+  pub input: PathBuf,
+  #[arg(long)]
+  pub gateway: Option<String>,
+  #[arg(long)]
+  pub route: Option<String>,
+  #[arg(long, value_enum, default_value = "json")]
+  pub format: ExplainFormat,
+  #[arg(long, default_value = "-")]
+  pub output: String,
 }
 
 #[derive(Debug, Args)]
@@ -258,5 +411,70 @@ mod tests {
     ])
     .expect_err("controller CLI must reject process-local UDP flow activation");
     assert_eq!(invalid.kind(), clap::error::ErrorKind::InvalidValue);
+  }
+
+  #[test]
+  fn explain_command_accepts_bounded_source_selectors_and_json_format() {
+    let cli = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "explain",
+      "--input=objects.yaml",
+      "--gateway=default/edge",
+      "--route=default/app",
+      "--format=json",
+    ])
+    .expect("explain CLI should parse");
+    let Command::Explain(args) = cli.command else {
+      panic!("expected explain command");
+    };
+    assert_eq!(args.gateway.as_deref(), Some("default/edge"));
+    assert_eq!(args.route.as_deref(), Some("default/app"));
+  }
+
+  #[test]
+  fn request_mirror_body_cap_cannot_exceed_the_runtime_admission_unit() {
+    let cli = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "--request-mirror-max-body-bytes=16777217",
+      "render",
+      "--input=objects.yaml",
+    ])
+    .expect("CLI shape should parse before semantic validation");
+    let error = cli
+      .shared
+      .validate()
+      .expect_err("oversized mirror capture must fail");
+    assert!(error.to_string().contains("must not exceed 16777216"));
+  }
+
+  #[test]
+  fn external_auth_operator_allowlists_reject_reserved_and_framing_headers() {
+    for (option, header) in [
+      ("--external-auth-allowed-request-header", "host"),
+      ("--external-auth-allowed-identity-header", "content-length"),
+      (
+        "--external-auth-allowed-terminal-header",
+        "transfer-encoding",
+      ),
+    ] {
+      let cli = Cli::try_parse_from([
+        "oxibelt-gateway-controller",
+        option,
+        header,
+        "render",
+        "--input=objects.yaml",
+      ])
+      .expect("CLI shape should parse before semantic validation");
+      let error = cli
+        .shared
+        .validate()
+        .expect_err("external auth must not receive message-framing authority");
+      assert!(
+        error
+          .to_string()
+          .contains(&format!("contains forbidden header {header}")),
+        "unexpected error for {option}: {error}"
+      );
+    }
   }
 }

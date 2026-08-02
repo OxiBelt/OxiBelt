@@ -39,6 +39,24 @@ statusAddresses: []
 backendResolution: cluster_dns
 dryRun: false
 
+# Operator-owned admission bounds for route-authored Gateway filters. A zero
+# body limit retains bodyless mirroring/auth compatibility. ExternalAuth stays
+# blocked until credential forwarding is explicitly admitted.
+filters:
+  requestMirror:
+    maxBodyBytes: 0
+  externalAuth:
+    maxBodyBytes: 0
+    allowedContentTypes: []
+    allowedRequestHeaders: []
+    allowedIdentityHeaders: []
+    allowedTerminalHeaders: []
+    allowCredentials: false
+
+routePolicy:
+  maxRequestBodyBytes: 10485760
+  maxTimeoutMs: 30000
+
 # Normal reconciliation requires the selected data-plane workload to carry
 # `oxibelt.dev/effective-version` equal to the controller build version.
 # `rolling_upgrade` is a temporary, bounded exception for one explicitly named
@@ -74,6 +92,24 @@ serviceAccount:
     expirationSeconds: 3600
 
 rollout:
+  # Optional operator-owned static replicated target set. When non-empty, the
+  # controller ignores the legacy target below and reconciles these resources
+  # sequentially with a global concurrency bound of one. Target entries contain
+  # workload identity only; Admin URLs and credential references are not part
+  # of the v1alpha1 contract.
+  targets: []
+  # - name: west
+  #   gatewayClassName: oxibelt
+  #   allowedNamespaces: [default]
+  #   workloadRef:
+  #     namespace: default
+  #     kind: Deployment
+  #     name: oxibelt-west
+  #     containerName: oxibelt
+  #     volumeName: gateway-config
+  #   capabilities: [gateway-api]
+  #   timeoutSeconds: 300
+  #   configMapPrefix: oxibelt-west-config
   target:
     # Empty means the controller release namespace.
     namespace: ""

@@ -594,6 +594,7 @@ mod tests {
       volume_name: "gateway-config".to_string(),
       timeout: Duration::from_secs(300),
       config_map_prefix: "oxibelt-gateway-config".to_string(),
+      artifact_context: None,
     }
   }
 

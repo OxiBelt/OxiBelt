@@ -27,6 +27,13 @@ pub struct ExternalAuthConfig {
   pub terminal_response_headers: Vec<String>,
   #[serde(default = "default_external_auth_max_response_body_bytes")]
   pub max_response_body_bytes: usize,
+  /// Maximum downstream request body forwarded to a Gateway API HTTP auth service.
+  /// Zero preserves the bodyless external-auth behavior.
+  #[serde(default)]
+  pub max_request_body_bytes: usize,
+  /// Exact, parameter-free media types permitted for Gateway API auth body forwarding.
+  #[serde(default)]
+  pub allowed_content_types: Vec<String>,
   #[serde(default)]
   pub client_id_env: Option<String>,
   #[serde(default)]
@@ -95,20 +102,35 @@ impl Config {
           auth.name
         );
       }
+      if auth.provider != ExternalAuthProvider::GatewayExtAuthHttp
+        && (auth.max_request_body_bytes != 0 || !auth.allowed_content_types.is_empty())
+      {
+        bail!(
+          "external_auth {} request body forwarding is only supported by gateway_ext_auth_http",
+          auth.name
+        );
+      }
+      validate_content_types(
+        &format!("external_auth {} allowed_content_types", auth.name),
+        &auth.allowed_content_types,
+      )?;
       validate_header_names(
         &format!("external_auth {} forward_headers", auth.name),
         &auth.forward_headers,
         true,
+        ExternalAuthHeaderScope::ProtectedRequest,
       )?;
       validate_header_names(
         &format!("external_auth {} identity_headers", auth.name),
         &auth.identity_headers,
         true,
+        ExternalAuthHeaderScope::ProtectedRequest,
       )?;
       validate_header_names(
         &format!("external_auth {} terminal_response_headers", auth.name),
         &auth.terminal_response_headers,
         true,
+        ExternalAuthHeaderScope::TerminalResponse,
       )?;
       validate_optional_non_empty(
         &format!("external_auth {} client_id_env", auth.name),
@@ -156,6 +178,7 @@ impl Config {
           &format!("external_auth {} claim_headers.header", auth.name),
           std::slice::from_ref(&mapping.header),
           false,
+          ExternalAuthHeaderScope::ProtectedRequest,
         )?;
         let normalized = http::HeaderName::from_bytes(mapping.header.as_bytes())
           .with_context(|| format!("invalid external_auth claim header {}", mapping.header))?
@@ -178,6 +201,7 @@ fn validate_header_names(
   field_name: &str,
   headers: &[String],
   allow_empty: bool,
+  scope: ExternalAuthHeaderScope,
 ) -> anyhow::Result<()> {
   if headers.is_empty() && !allow_empty {
     bail!("{field_name} must include at least one header");
@@ -190,11 +214,28 @@ fn validate_header_names(
     let name = http::HeaderName::from_bytes(header.as_bytes())
       .with_context(|| format!("{field_name} contains invalid header name {header}"))?;
     let normalized = name.as_str().to_ascii_lowercase();
+    let forbidden = match scope {
+      ExternalAuthHeaderScope::ProtectedRequest => {
+        oxibelt_control_protocol::is_reserved_route_request_header(&normalized)
+      }
+      ExternalAuthHeaderScope::TerminalResponse => {
+        oxibelt_control_protocol::is_forbidden_route_action_header(&normalized)
+      }
+    };
+    if forbidden {
+      bail!("{field_name} contains forbidden header {normalized}");
+    }
     if !names.insert(normalized.clone()) {
       bail!("{field_name} contains duplicate header {normalized}");
     }
   }
   Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ExternalAuthHeaderScope {
+  ProtectedRequest,
+  TerminalResponse,
 }
 
 fn validate_string_list(field_name: &str, values: &[String]) -> anyhow::Result<()> {
@@ -206,6 +247,40 @@ fn validate_string_list(field_name: &str, values: &[String]) -> anyhow::Result<(
     }
   }
   Ok(())
+}
+
+fn validate_content_types(field_name: &str, values: &[String]) -> anyhow::Result<()> {
+  let mut normalized = HashSet::new();
+  for value in values {
+    if value.trim() != value || value.is_empty() || value.contains(';') {
+      bail!("{field_name} contains invalid media type {value}");
+    }
+    let Some((type_name, subtype)) = value.split_once('/') else {
+      bail!("{field_name} contains invalid media type {value}");
+    };
+    if type_name.is_empty()
+      || subtype.is_empty()
+      || type_name == "*"
+      || subtype == "*"
+      || !type_name.bytes().all(is_media_type_token_byte)
+      || !subtype.bytes().all(is_media_type_token_byte)
+    {
+      bail!("{field_name} contains invalid media type {value}");
+    }
+    let value = value.to_ascii_lowercase();
+    if !normalized.insert(value.clone()) {
+      bail!("{field_name} contains duplicate media type {value}");
+    }
+  }
+  Ok(())
+}
+
+fn is_media_type_token_byte(byte: u8) -> bool {
+  byte.is_ascii_alphanumeric()
+    || matches!(
+      byte,
+      b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+    )
 }
 
 fn default_external_auth_timeout_ms() -> u64 {

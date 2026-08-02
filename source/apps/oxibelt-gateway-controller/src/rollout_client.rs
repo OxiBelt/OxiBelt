@@ -7,7 +7,7 @@ use oxibelt_control_http::{full_body, uri_from_url};
 use serde_json::Value;
 use tracing::{info, warn};
 
-use super::cli::{RunArgs, SharedArgs};
+use super::cli::SharedArgs;
 use super::compatibility::CompatibilityPolicy;
 use super::rollout::{
   CONFIG_DIGEST_ANNOTATION, CONFIG_REVISION_ANNOTATION, ConfigArtifact, HOLDER_IDENTITY_ANNOTATION,
@@ -29,29 +29,27 @@ use super::watch::{KUBERNETES_MAX_BODY_BYTES, KubernetesPoller};
 const ROLLOUT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl KubernetesPoller {
-  pub async fn preflight_target_compatibility(
+  pub async fn preflight_target_compatibility_for(
     &self,
-    args: &RunArgs,
+    target: &RolloutTarget,
     compatibility: &CompatibilityPolicy,
   ) -> anyhow::Result<()> {
-    let target = RolloutTarget::from_args(args)?;
     let workload = self.get_required_json(&target.workload_path()).await?;
     compatibility
       .validate_target_workload(&workload)
       .context("target workload compatibility preflight failed")
   }
 
-  pub async fn reconcile_immutable_rollout(
+  pub async fn reconcile_immutable_rollout_for(
     &self,
     shared: &SharedArgs,
-    args: &RunArgs,
+    target: &RolloutTarget,
     compatibility: &CompatibilityPolicy,
     generated_toml: &str,
     generated_assets: &[super::translate::RenderedAsset],
   ) -> anyhow::Result<RolloutStatus> {
-    let target = RolloutTarget::from_args(args)?;
     let candidate = ConfigArtifact::new_with_assets(
-      &target,
+      target,
       &shared.managed_config_path,
       generated_toml.to_string(),
       generated_assets
@@ -69,17 +67,17 @@ impl KubernetesPoller {
       .context("target workload compatibility preflight failed")?;
     validate_rollout_opt_in(&workload)?;
     self
-      .preflight_base_config(&target, &workload, &candidate.managed_path)
+      .preflight_base_config(target, &workload, &candidate.managed_path)
       .await?;
-    self.ensure_config_map(&target, &candidate).await?;
+    self.ensure_config_map(target, &candidate).await?;
     let state = RolloutState::from_workload(&workload);
 
     if state.desired_revision.is_some() {
       let permit = self.authorize_write().await?;
       if !workload_term_matches(&workload, permit.term()) {
-        let desired = self.load_desired_artifact(&target, &state).await?;
+        let desired = self.load_desired_artifact(target, &state).await?;
         self
-          .apply_state(&target, &workload, &desired, &state)
+          .apply_state(target, &workload, &desired, &state)
           .await?;
         info!(
           lease_uid = %permit.term().lease_uid,
@@ -93,11 +91,11 @@ impl KubernetesPoller {
     if state.phase == RolloutPhase::RolledBack
       && state.failed_revision.as_deref() == Some(candidate.name.as_str())
     {
-      let rollback = self.load_desired_artifact(&target, &state).await?;
+      let rollback = self.load_desired_artifact(target, &state).await?;
       let mut failed = state;
       failed.phase = RolloutPhase::Failed;
       self
-        .apply_state(&target, &workload, &rollback, &failed)
+        .apply_state(target, &workload, &rollback, &failed)
         .await?;
       return Ok(RolloutStatus::from(&failed));
     }
@@ -108,14 +106,14 @@ impl KubernetesPoller {
 
     if state.desired_revision.as_deref() == Some(candidate.name.as_str()) {
       return self
-        .reconcile_active_revision(&target, &workload, state, candidate, false)
+        .reconcile_active_revision(target, &workload, state, candidate, false)
         .await;
     }
 
     if state.phase == RolloutPhase::RollbackRequested {
-      let rollback = self.load_desired_artifact(&target, &state).await?;
+      let rollback = self.load_desired_artifact(target, &state).await?;
       return self
-        .reconcile_active_revision(&target, &workload, state, rollback, true)
+        .reconcile_active_revision(target, &workload, state, rollback, true)
         .await;
     }
 
@@ -125,13 +123,13 @@ impl KubernetesPoller {
       && state.desired_revision != state.committed_revision
     {
       return self
-        .request_rollback(&target, &workload, state, "SupersededByNewRevision")
+        .request_rollback(target, &workload, state, "SupersededByNewRevision")
         .await;
     }
 
     let next = RolloutState::new_attempt(&candidate, &state, now_unix_seconds());
     self
-      .apply_state(&target, &workload, &candidate, &next)
+      .apply_state(target, &workload, &candidate, &next)
       .await?;
     info!(
       revision = %candidate.name,
@@ -527,6 +525,7 @@ fn convergence_lost_status(state: &RolloutState) -> RolloutStatus {
     desired_content_digest: state.desired_content_digest.clone(),
     reason: Some("ConvergenceLost".to_string()),
     proof: None,
+    target_summary: None,
   }
 }
 
@@ -611,6 +610,7 @@ mod tests {
       volume_name: "gateway-config".to_string(),
       timeout: Duration::from_secs(300),
       config_map_prefix: "oxibelt-gateway-config".to_string(),
+      artifact_context: None,
     };
     let workload = json!({
       "metadata": { "uid": "target-deployment-uid" },

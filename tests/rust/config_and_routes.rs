@@ -8990,10 +8990,150 @@ min_ttl_ms = 1000
   config.validate().expect("config should validate");
   let pool = &config.upstream_pools[0];
   assert_eq!(pool.discovery[0].provider, UpstreamDiscoveryProvider::File);
+  assert_eq!(pool.discovery[0].id, None);
+  assert_eq!(pool.discovery[0].weight_multiplier, 1);
   assert_eq!(pool.discovery[1].provider, UpstreamDiscoveryProvider::Dns);
   assert_eq!(
     pool.discovery[1].record_type,
     DnsDiscoveryRecordType::AAndAaaa
+  );
+}
+
+#[test]
+fn upstream_pool_discovery_instances_are_strict_and_unambiguous() {
+  let temp_dir = common::TempDir::new("pool-discovery-instances");
+  let config_dir = temp_dir.path().join("config");
+  let cert_dir = temp_dir.path().join("cert");
+  std::fs::create_dir_all(&config_dir).expect("config directory should be created");
+  std::fs::create_dir_all(&cert_dir).expect("certificate directory should be created");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "pool-discovery-instances");
+  std::fs::copy(cert_path, cert_dir.join("fullchain.pem"))
+    .expect("certificate should be installed");
+  std::fs::copy(key_path, cert_dir.join("privkey.pem")).expect("key should be installed");
+  std::fs::write(config_dir.join("alpha.json"), r#"{"servers":[]}"#)
+    .expect("alpha discovery fixture should be written");
+  std::fs::write(config_dir.join("beta.json"), r#"{"servers":[]}"#)
+    .expect("beta discovery fixture should be written");
+  let raw = format!(
+    r#"
+{}
+
+[[upstream_pools]]
+name = "dynamic-pool"
+
+[[upstream_pools.discovery]]
+provider = "file"
+id = "alpha"
+weight_multiplier = 20
+file = "alpha.json"
+
+[[upstream_pools.discovery]]
+provider = "file"
+id = "beta"
+weight_multiplier = 80
+file = "beta.json"
+"#,
+    common::minimal_config_toml_with_paths("fullchain.pem", "privkey.pem")
+  );
+  let config_path = config_dir.join("oxibelt.toml");
+  std::fs::write(&config_path, &raw).expect("configuration should be written");
+  let valid_config = Config::load(&config_path).expect("strict configuration should load");
+  valid_config
+    .validate()
+    .expect("discovery instances should validate");
+  let discoveries = &valid_config.upstream_pools[0].discovery;
+  assert_eq!(discoveries[0].id.as_deref(), Some("alpha"));
+  assert_eq!(discoveries[0].weight_multiplier, 20);
+  assert_eq!(discoveries[1].id.as_deref(), Some("beta"));
+  assert_eq!(discoveries[1].weight_multiplier, 80);
+
+  let missing_ids = raw
+    .replace("id = \"alpha\"\n", "")
+    .replace("id = \"beta\"\n", "");
+  let config: Config = toml::from_str(&missing_ids).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("duplicate providers without ids must be rejected");
+  assert!(
+    error.to_string().contains("require explicit ids"),
+    "unexpected error: {error}"
+  );
+
+  let duplicate_id = raw.replace("id = \"beta\"", "id = \"alpha\"");
+  let config: Config = toml::from_str(&duplicate_id).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("duplicate discovery ids must be rejected");
+  assert!(
+    error.to_string().contains("duplicate discovery id alpha"),
+    "unexpected error: {error}"
+  );
+
+  let invalid_id = raw.replace("id = \"alpha\"", "id = \"alpha/beta\"");
+  let config: Config = toml::from_str(&invalid_id).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("invalid discovery ids must be rejected");
+  assert!(
+    error.to_string().contains("upstream discovery id"),
+    "unexpected error: {error}"
+  );
+
+  let zero_multiplier = raw.replace("weight_multiplier = 20", "weight_multiplier = 0");
+  let config: Config = toml::from_str(&zero_multiplier).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("zero discovery weights must be rejected");
+  assert!(
+    error
+      .to_string()
+      .contains("weight_multiplier must be greater than 0"),
+    "unexpected error: {error}"
+  );
+
+  let mut over_pool_limit = valid_config.clone();
+  let template = over_pool_limit.upstream_pools[0].discovery[0].clone();
+  over_pool_limit.upstream_pools[0].discovery = (0..65)
+    .map(|index| {
+      let mut discovery = template.clone();
+      discovery.id = Some(format!("instance-{index}"));
+      discovery
+    })
+    .collect();
+  let error = over_pool_limit
+    .validate()
+    .expect_err("per-pool discovery worker admission must be bounded");
+  assert!(
+    error.to_string().contains("maximum is 64"),
+    "unexpected error: {error}"
+  );
+
+  let mut over_global_limit = valid_config;
+  let pool_template = {
+    let pool = &mut over_global_limit.upstream_pools[0];
+    pool.discovery = (0..64)
+      .map(|index| {
+        let mut discovery = template.clone();
+        discovery.id = Some(format!("instance-{index}"));
+        discovery
+      })
+      .collect();
+    pool.clone()
+  };
+  over_global_limit.upstream_pools = (0..5)
+    .map(|index| {
+      let mut pool = pool_template.clone();
+      pool.name = format!("dynamic-pool-{index}");
+      pool
+    })
+    .collect();
+  let error = over_global_limit
+    .validate()
+    .expect_err("global discovery worker admission must be bounded");
+  assert!(
+    error.to_string().contains("maximum is 256"),
+    "unexpected error: {error}"
   );
 }
 
@@ -11916,6 +12056,10 @@ origin = "https://app-a.default.svc.cluster.local:8443"
 
 [upstream_pools.servers.tls]
 server_name = "backend.example.test"
+subject_alt_names = [
+  {{ type = "dns", value = "backend.example.test" }},
+  {{ type = "uri", value = "spiffe://example.test/ns/backend/sa/service" }},
+]
 trust = "exclusive"
 trusted_ca_certs = ["{cert_file}"]
 trusted_ca_sha256 = ["{digest}"]
@@ -11928,12 +12072,44 @@ trusted_ca_sha256 = ["{digest}"]
   let config = Config::load(&config_path).expect("policy-bound pool config should load");
   let tls = &config.upstream_pools[0].servers[0].tls;
   assert_eq!(tls.server_name.as_deref(), Some("backend.example.test"));
+  assert_eq!(
+    tls.subject_alt_names,
+    vec![
+      oxibelt::config::UpstreamTlsSubjectAltName::Dns("backend.example.test".to_string()),
+      oxibelt::config::UpstreamTlsSubjectAltName::Uri(
+        "spiffe://example.test/ns/backend/sa/service".to_string(),
+      ),
+    ]
+  );
   assert_eq!(tls.trust, oxibelt::config::UpstreamTlsTrust::Exclusive);
   assert_eq!(
     tls.trusted_ca_certs,
     vec![cert_path.canonicalize().unwrap()]
   );
   assert_eq!(tls.trusted_ca_sha256, vec![digest]);
+}
+
+#[test]
+fn config_load_rejects_unknown_upstream_subject_alt_name_fields() {
+  let temp_dir = common::TempDir::new("strict-upstream-san-unknown");
+  let config_path = write_loadable_config(&temp_dir, "strict-upstream-san-unknown", |raw| {
+    raw.replace(
+      "[[routes]]",
+      r#"[upstreams.tls]
+subject_alt_names = [{ type = "dns", value = "backend.example.test", unexpected = true }]
+
+[[routes]]"#,
+    )
+  });
+
+  let error = Config::load(&config_path).expect_err("unknown SAN item field should fail");
+
+  assert!(
+    error
+      .to_string()
+      .contains("upstreams.tls.subject_alt_names.unexpected"),
+    "unexpected error: {error:#}"
+  );
 }
 
 #[test]
@@ -14575,6 +14751,7 @@ fn route_actions_parse_valid_rewrite_and_redirect_blocks() {
 regex = "^/items/([0-9]+)$"
 
 [routes.actions.rewrite]
+authority = "tenant.example.test:8443"
 path = "/edge{path_suffix}"
 query = "id={capture:1}&debug={query:debug}""#,
   );
@@ -14587,6 +14764,10 @@ query = "id={capture:1}&debug={query:debug}""#,
     .rewrite
     .as_ref()
     .expect("rewrite action should parse");
+  assert_eq!(
+    rewrite.authority.as_deref(),
+    Some("tenant.example.test:8443")
+  );
   assert_eq!(rewrite.path.as_deref(), Some("/edge{path_suffix}"));
   assert_eq!(
     rewrite.query.as_deref(),
@@ -14613,6 +14794,33 @@ location_template = "/new{path_suffix}?{query}""#,
     redirect.location_template.as_deref(),
     Some("/new{path_suffix}?{query}")
   );
+
+  let structured_redirect_raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "upstream = \"app\"",
+    r#"[routes.actions.redirect]
+scheme = "https"
+hostname = "redirect.example.test"
+port = 8443
+path = "/new{path_suffix}""#,
+  );
+  let structured_redirect_config: Config =
+    toml::from_str(&structured_redirect_raw).expect("config should parse");
+  structured_redirect_config
+    .validate()
+    .expect("structured redirect should validate");
+  let structured = structured_redirect_config.routes[0]
+    .actions
+    .redirect
+    .as_ref()
+    .expect("structured redirect should parse");
+  assert_eq!(structured.status, None);
+  assert_eq!(structured.scheme.as_deref(), Some("https"));
+  assert_eq!(
+    structured.hostname.as_deref(),
+    Some("redirect.example.test")
+  );
+  assert_eq!(structured.port, Some(8443));
+  assert_eq!(structured.path.as_deref(), Some("/new{path_suffix}"));
 }
 
 #[test]
@@ -14638,6 +14846,8 @@ endpoint = "http://127.0.0.1:19090"
 forward_headers = ["authorization"]
 identity_headers = ["x-auth-user"]
 terminal_response_headers = ["www-authenticate"]
+max_request_body_bytes = 1024
+allowed_content_types = ["application/json", "application/x-www-form-urlencoded"]
 
 [[routes.actions.request_headers.set]]
 name = "x-route"
@@ -14672,6 +14882,11 @@ max_body_bytes = 0"#,
   config.validate().expect("route actions should validate");
   let route = &config.routes[0];
   assert_eq!(route.external_auth.as_deref(), Some("gw-auth"));
+  assert_eq!(config.external_auth[0].max_request_body_bytes, 1024);
+  assert_eq!(
+    config.external_auth[0].allowed_content_types,
+    vec!["application/json", "application/x-www-form-urlencoded"]
+  );
   assert_eq!(route.actions.request_headers.set[0].name, "x-route");
   assert_eq!(route.actions.response_headers.remove, vec!["server"]);
   assert_eq!(
@@ -14684,6 +14899,86 @@ max_body_bytes = 0"#,
     vec!["GET", "POST"]
   );
   assert_eq!(route.actions.request_mirrors[0].upstream_pool, "edge-pool");
+
+  let oversized_mirror = raw.replace("max_body_bytes = 0", "max_body_bytes = 16777217");
+  let config: Config = toml::from_str(&oversized_mirror).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("mirror capture above the process admission unit must fail");
+  assert!(
+    error.to_string().contains("must not exceed 16777216"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn external_auth_request_body_policy_is_gateway_only_and_uses_exact_media_types() {
+  let temp_dir = common::TempDir::new("gateway-auth-body-policy-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "gateway-auth-body-policy-invalid");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let non_gateway = format!(
+    "{base}\n[[external_auth]]\nname = \"auth\"\nprovider = \"authelia\"\nendpoint = \"http://127.0.0.1:19090\"\nmax_request_body_bytes = 16\nallowed_content_types = [\"application/json\"]\n"
+  );
+  let config: Config = toml::from_str(&non_gateway).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("non-Gateway auth body forwarding must fail");
+  assert!(
+    error
+      .to_string()
+      .contains("request body forwarding is only supported by gateway_ext_auth_http")
+  );
+
+  let wildcard = format!(
+    "{base}\n[[external_auth]]\nname = \"auth\"\nprovider = \"gateway_ext_auth_http\"\nendpoint = \"http://127.0.0.1:19090\"\nmax_request_body_bytes = 16\nallowed_content_types = [\"application/*\"]\n"
+  );
+  let config: Config = toml::from_str(&wildcard).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("wildcard body media type must fail");
+  assert!(
+    error
+      .to_string()
+      .contains("contains invalid media type application/*")
+  );
+}
+
+#[test]
+fn external_auth_rejects_reserved_and_framing_header_authority() {
+  let temp_dir = common::TempDir::new("external-auth-reserved-headers");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "external-auth-reserved-headers");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for (field, header) in [
+    ("forward_headers", "host"),
+    ("identity_headers", "content-length"),
+    ("terminal_response_headers", "transfer-encoding"),
+  ] {
+    let raw = base.replace(
+      "upstream = \"app\"",
+      &format!(
+        r#"upstream = "app"
+
+[[external_auth]]
+name = "edge-auth"
+endpoint = "http://127.0.0.1:19090"
+{field} = ["{header}"]"#,
+      ),
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("external auth must not receive message-framing authority");
+    assert!(
+      error
+        .to_string()
+        .contains(&format!("contains forbidden header {header}")),
+      "unexpected error for {field}: {error}"
+    );
+  }
 }
 
 #[test]
@@ -14735,7 +15030,7 @@ sample_percent = 10"#,
 
 [routes.actions.rewrite]"#,
       ),
-      "actions.rewrite must set path or query",
+      "actions.rewrite must set authority, path, or query",
     ),
     (
       base.replace(
@@ -14850,6 +15145,50 @@ path = "/edge{capture:2}""#,
 path = "/edge{unknown}""#,
       ),
       "unsupported template token",
+    ),
+    (
+      base.replace(
+        "upstream = \"app\"",
+        r#"upstream = "app"
+
+[routes.actions.rewrite]
+authority = "user@backend.example""#,
+      ),
+      "actions.rewrite.authority",
+    ),
+    (
+      base.replace(
+        "upstream = \"app\"",
+        r#"[routes.actions.redirect]
+status = 302
+location_template = "/legacy"
+scheme = "https""#,
+      ),
+      "location_template cannot be combined with structured redirect fields",
+    ),
+    (
+      base.replace(
+        "upstream = \"app\"",
+        r#"[routes.actions.redirect]
+scheme = "ftp""#,
+      ),
+      "actions.redirect.scheme must be http or https",
+    ),
+    (
+      base.replace(
+        "upstream = \"app\"",
+        r#"[routes.actions.redirect]
+hostname = "*.example.test""#,
+      ),
+      "actions.redirect.hostname must be a valid precise DNS hostname",
+    ),
+    (
+      base.replace(
+        "upstream = \"app\"",
+        r#"[routes.actions.redirect]
+port = 0"#,
+      ),
+      "actions.redirect.port must be between 1 and 65535",
     ),
   ] {
     let config: Config = toml::from_str(&raw).expect("config should parse");

@@ -117,43 +117,48 @@ controls but does not by itself satisfy the `pod-security-restricted`,
 
 ### Governed feature states
 
-| Feature ID | State | Mandatory gates | Active blockers |
-| --- | --- | ---: | --- |
-| `gateway-controller` | `experimental` | 16 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
-| `gateway-api-httproute` | `experimental` | 8 | `native-riscv64-cluster-runner` |
-| `gateway-api-grpcroute` | `experimental` | 8 | `native-riscv64-cluster-runner` |
-| `gateway-api-tlsroute` | `experimental` | 8 | `native-riscv64-cluster-runner` |
-| `gateway-api-tcproute` | `experimental` | 8 | `native-riscv64-cluster-runner` |
-| `gateway-api-udproute` | `experimental` | 8 | `native-riscv64-cluster-runner` |
-| `gateway-api-backendtlspolicy` | `experimental` | 9 | `native-riscv64-cluster-runner` |
-| `helm-data-plane` | `experimental` | 15 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
-| `helm-gateway-controller` | `experimental` | 16 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
+| Feature ID | State | Last validated version | Mandatory gates | Active blockers |
+| --- | --- | --- | ---: | --- |
+| `gateway-controller` | `experimental` | `unvalidated` | 16 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
+| `gateway-api-httproute` | `experimental` | `unvalidated` | 8 | `native-riscv64-cluster-runner` |
+| `gateway-api-grpcroute` | `experimental` | `unvalidated` | 8 | `native-riscv64-cluster-runner` |
+| `gateway-api-tlsroute` | `experimental` | `unvalidated` | 8 | `native-riscv64-cluster-runner` |
+| `gateway-api-tcproute` | `experimental` | `unvalidated` | 8 | `native-riscv64-cluster-runner` |
+| `gateway-api-udproute` | `experimental` | `unvalidated` | 8 | `native-riscv64-cluster-runner` |
+| `gateway-api-backendtlspolicy` | `experimental` | `unvalidated` | 9 | `native-riscv64-cluster-runner` |
+| `gateway-api-weighted-discovery` | `experimental` | `unvalidated` | 10 | `native-riscv64-cluster-runner` |
+| `gateway-api-standard-filters-backend-tls` | `experimental` | `unvalidated` | 10 | `native-riscv64-cluster-runner` |
+| `gateway-api-route-policy` | `experimental` | `unvalidated` | 8 | `native-riscv64-cluster-runner` |
+| `gateway-controller-multi-target` | `experimental` | `unvalidated` | 16 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
+| `gateway-controller-explain` | `experimental` | `unvalidated` | 8 | `native-riscv64-cluster-runner` |
+| `helm-data-plane` | `experimental` | `unvalidated` | 15 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
+| `helm-gateway-controller` | `experimental` | `unvalidated` | 16 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
 
 ### Mandatory graduation gates
 
 | Gate ID | Earliest cadence | State | Applies to |
 | --- | --- | --- | --- |
-| `policy-contract` | `pull_request` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `helm-data-plane`, `helm-gateway-controller` |
-| `unsupported-combination-diagnostics` | `pull_request` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `helm-data-plane`, `helm-gateway-controller` |
-| `clean-lifecycle` | `release_candidate` | `unmet` | `gateway-controller`, `helm-data-plane`, `helm-gateway-controller` |
-| `leader-election-failover` | `nightly` | `unmet` | `gateway-controller`, `helm-gateway-controller` |
-| `api-outage-recovery` | `nightly` | `unmet` | `gateway-controller`, `helm-gateway-controller` |
-| `watch-reconnect-compaction` | `pull_request` | `unmet` | `gateway-controller` |
-| `stale-object-convergence` | `nightly` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy` |
-| `partial-rollout-recovery` | `pull_request` | `unmet` | `gateway-controller`, `helm-data-plane`, `helm-gateway-controller` |
-| `network-partition` | `nightly` | `unmet` | `gateway-controller`, `helm-data-plane`, `helm-gateway-controller` |
-| `configmap-propagation` | `nightly` | `unmet` | `gateway-controller`, `gateway-api-backendtlspolicy`, `helm-data-plane`, `helm-gateway-controller` |
+| `policy-contract` | `pull_request` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
+| `unsupported-combination-diagnostics` | `pull_request` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
+| `clean-lifecycle` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-data-plane`, `helm-gateway-controller` |
+| `leader-election-failover` | `nightly` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-gateway-controller` |
+| `api-outage-recovery` | `nightly` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-gateway-controller` |
+| `watch-reconnect-compaction` | `pull_request` | `unmet` | `gateway-controller`, `gateway-api-weighted-discovery`, `gateway-api-route-policy`, `gateway-controller-multi-target` |
+| `stale-object-convergence` | `nightly` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain` |
+| `partial-rollout-recovery` | `pull_request` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
+| `network-partition` | `nightly` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-data-plane`, `helm-gateway-controller` |
+| `configmap-propagation` | `nightly` | `unmet` | `gateway-controller`, `gateway-api-backendtlspolicy`, `gateway-api-standard-filters-backend-tls`, `gateway-controller-multi-target`, `helm-data-plane`, `helm-gateway-controller` |
 | `secret-rotation` | `nightly` | `unmet` | `helm-data-plane` |
-| `multi-node` | `nightly` | `unmet` | `gateway-controller`, `helm-data-plane`, `helm-gateway-controller` |
+| `multi-node` | `nightly` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-data-plane`, `helm-gateway-controller` |
 | `pod-security-restricted` | `pull_request` | `unmet` | `helm-data-plane`, `helm-gateway-controller` |
 | `network-policy-cnis` | `nightly` | `unmet` | `helm-data-plane`, `helm-gateway-controller` |
-| `previous-minor-interop` | `release_candidate` | `unmet` | `gateway-controller`, `helm-data-plane`, `helm-gateway-controller` |
-| `long-duration-soak` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `helm-data-plane`, `helm-gateway-controller` |
-| `native-amd64` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `helm-data-plane`, `helm-gateway-controller` |
-| `native-arm64` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `helm-data-plane`, `helm-gateway-controller` |
-| `native-riscv64` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `helm-data-plane`, `helm-gateway-controller` |
-| `gateway-conformance-http` | `release_candidate` | `unmet` | `gateway-api-httproute`, `gateway-api-backendtlspolicy` |
-| `gateway-conformance-grpc` | `release_candidate` | `unmet` | `gateway-api-grpcroute` |
+| `previous-minor-interop` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-data-plane`, `helm-gateway-controller` |
+| `long-duration-soak` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
+| `native-amd64` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
+| `native-arm64` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
+| `native-riscv64` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
+| `gateway-conformance-http` | `release_candidate` | `unmet` | `gateway-api-httproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls` |
+| `gateway-conformance-grpc` | `release_candidate` | `unmet` | `gateway-api-grpcroute`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls` |
 | `gateway-conformance-tls` | `release_candidate` | `unmet` | `gateway-api-tlsroute` |
 | `gateway-conformance-tcp` | `release_candidate` | `unmet` | `gateway-api-tcproute` |
 | `gateway-conformance-udp` | `release_candidate` | `unmet` | `gateway-api-udproute` |
@@ -174,7 +179,16 @@ freshness, and agreement with `docs/FeatureStatus.md`. A feature cannot move to
 A passed gate must reference a bounded JSON evidence receipt under
 `evidence/kubernetes-graduation/`. The receipt binds the policy-definition
 SHA-256, policy version, exact 40-character source revision, GitHub run,
-attempt and job IDs, generation time, and passed gate IDs. Release validation
+attempt and job IDs, generation time, exact validated product version, and
+passed gate IDs. A feature's `lastValidatedVersion` can name a version only
+after all of that feature's mandatory gates pass, and every referenced receipt
+must name that same version. Workspace validation of any passed gate also
+requires the caller to supply the independently derived release identity with
+`--expected-version vMAJOR.MINOR.PATCH`; the receipt, feature row, and at least
+one versioned Helm chart package must all match it. The ordinary pull-request
+check intentionally supplies only `--expected-source-revision`, so a
+registry-only promotion fails closed until a release/promotion workflow
+provides the trusted version input. Release validation
 must read back the exact run through an authenticated GitHub API call and
 reject missing, failed, cancelled, skipped, duplicate, stale, or mismatched
 evidence. Evidence must bind immutable image/chart digests and hashes of

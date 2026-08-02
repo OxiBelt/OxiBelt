@@ -436,7 +436,7 @@
     },
     "features": {
       "type": "array",
-      "minItems": 9,
+      "minItems": 14,
       "uniqueItems": true,
       "items": {
         "type": "object",
@@ -444,6 +444,7 @@
         "required": [
           "id",
           "status",
+          "lastValidatedVersion",
           "gateIds",
           "blockerIds"
         ],
@@ -458,6 +459,10 @@
               "experimental",
               "supported"
             ]
+          },
+          "lastValidatedVersion": {
+            "type": "string",
+            "pattern": "^(unvalidated|v[0-9]+\\.[0-9]+\\.[0-9]+)$"
           },
           "gateIds": {
             "type": "array",

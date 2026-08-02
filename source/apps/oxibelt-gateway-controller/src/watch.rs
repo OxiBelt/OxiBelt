@@ -17,10 +17,11 @@ use super::cli::{RunArgs, SharedArgs};
 use super::compatibility::CompatibilityPolicy;
 use super::health::ControllerHealth;
 use super::leader_election::{Leadership, WritePermit, validate_write_permit};
-use super::model::KubernetesObject;
+use super::model::{DiagnosticSeverity, KubernetesObject};
 use super::rollout;
 use super::rollout_status::RolloutStatus;
 use super::status;
+use super::target_topology::{TargetOutcome, TargetSet, objects_for_target};
 use super::translate;
 
 const DEFAULT_SERVICE_ACCOUNT_TOKEN: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
@@ -129,6 +130,19 @@ impl KubernetesPoller {
     objects.extend(
       self
         .list_namespaced("/apis/gateway.networking.k8s.io/v1", "backendtlspolicies")
+        .await?,
+    );
+    objects.extend(
+      self
+        .list_namespaced("/apis/gateway.oxibelt.dev/v1alpha1", "oxibeltroutepolicies")
+        .await?,
+    );
+    objects.extend(
+      self
+        .list_namespaced(
+          "/apis/gateway.oxibelt.dev/v1alpha1",
+          "oxibeltdataplanetargets",
+        )
         .await?,
     );
     objects.extend(
@@ -432,14 +446,37 @@ async fn reconcile_once(
   args: &RunArgs,
   compatibility: &CompatibilityPolicy,
 ) -> anyhow::Result<RolloutStatus> {
-  kubernetes
-    .preflight_target_compatibility(args, compatibility)
-    .await?;
   let objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
+  let target_set = TargetSet::from_objects(&objects, args, &shared.controller_name)?;
   let rendered = translate::translate_objects(&objects, shared)?;
+  compatibility.validate_generated_capabilities(rendered.requires_exact_data_plane)?;
   status::print_diagnostics(&rendered.diagnostics);
+  let mut target_outcomes = Vec::new();
   let rollout_status = if shared.dry_run {
     info!("dry-run enabled; immutable ConfigMap rollout was not applied");
+    if let TargetSet::StaticReplicated(targets) = &target_set {
+      target_outcomes = targets
+        .iter()
+        .map(|target| {
+          let target_objects =
+            objects_for_target(&objects, target, shared.status_service.as_deref());
+          let translation_succeeded = translate::translate_objects(&target_objects, shared)
+            .is_ok_and(|rendered| {
+              !rendered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+            });
+          TargetOutcome {
+            target: target.clone(),
+            source_snapshot_digest: source_snapshot_digest(&target_objects),
+            translation_succeeded,
+            rollout: Some(RolloutStatus::pending("DryRun")),
+            failure_reason: None,
+          }
+        })
+        .collect();
+    }
     RolloutStatus::pending("DryRun")
   } else {
     apply_status_patches(
@@ -450,33 +487,45 @@ async fn reconcile_once(
       &RolloutStatus::pending("RolloutInProgress"),
     )
     .await?;
-    match kubernetes
-      .reconcile_immutable_rollout(
-        shared,
-        args,
-        compatibility,
-        &rendered.toml,
-        &rendered.assets,
-      )
-      .await
-    {
-      Ok(status) => status,
-      Err(error) => {
-        let rollout_status = RolloutStatus::failed("RolloutFailed");
-        let failed_objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
-        apply_status_patches(
-          kubernetes,
-          &failed_objects,
-          shared,
-          &rendered.diagnostics,
-          &rollout_status,
-        )
-        .await?;
-        return Err(error);
+    match &target_set {
+      TargetSet::Legacy(target) => {
+        kubernetes
+          .preflight_target_compatibility_for(target, compatibility)
+          .await?;
+        match kubernetes
+          .reconcile_immutable_rollout_for(
+            shared,
+            target,
+            compatibility,
+            &rendered.toml,
+            &rendered.assets,
+          )
+          .await
+        {
+          Ok(status) => status,
+          Err(error) => {
+            let rollout_status = RolloutStatus::failed("RolloutFailed");
+            let failed_objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
+            apply_status_patches(
+              kubernetes,
+              &failed_objects,
+              shared,
+              &rendered.diagnostics,
+              &rollout_status,
+            )
+            .await?;
+            return Err(error);
+          }
+        }
+      }
+      TargetSet::StaticReplicated(targets) => {
+        target_outcomes =
+          reconcile_static_targets(kubernetes, shared, compatibility, &objects, targets).await;
+        summarize_target_outcomes(targets.len(), &target_outcomes)
       }
     }
   };
-  let (status_objects, status_diagnostics, source_snapshot_digest) = if shared.dry_run {
+  let (status_objects, status_diagnostics, status_source_snapshot_digest) = if shared.dry_run {
     (
       objects.clone(),
       rendered.diagnostics.clone(),
@@ -490,16 +539,97 @@ async fn reconcile_once(
     {
       bail!("Gateway API resources changed before status commit; refusing stale Programmed=True");
     }
+    if matches!(target_set, TargetSet::StaticReplicated(_))
+      && TargetSet::from_objects(&fresh_objects, args, &shared.controller_name)? != target_set
+    {
+      bail!(
+        "data-plane target policy changed before status commit; refusing stale Programmed=True"
+      );
+    }
     let digest = source_snapshot_digest(&fresh_objects);
     (fresh_objects, fresh_rendered.diagnostics, digest)
   };
   let mut rollout_status = rollout_status;
-  if rollout_status.phase.is_committed() && !shared.dry_run {
+  if rollout_status.phase.is_committed()
+    && !shared.dry_run
+    && let TargetSet::Legacy(target) = &target_set
+  {
     rollout_status.proof = Some(
       kubernetes
-        .prove_committed_rollout(args, &rollout_status, source_snapshot_digest)
+        .prove_committed_rollout_for(target, &rollout_status, status_source_snapshot_digest)
         .await?,
     );
+  }
+  if !shared.dry_run
+    && let TargetSet::StaticReplicated(targets) = &target_set
+  {
+    for outcome in &mut target_outcomes {
+      if outcome.failure_reason.is_some()
+        || !outcome
+          .rollout
+          .as_ref()
+          .is_some_and(RolloutStatus::is_committed)
+      {
+        continue;
+      }
+      let fresh_target_objects = rollout::canonicalize_objects(&objects_for_target(
+        &status_objects,
+        &outcome.target,
+        shared.status_service.as_deref(),
+      ));
+      let fresh_digest = source_snapshot_digest(&fresh_target_objects);
+      if fresh_digest != outcome.source_snapshot_digest {
+        outcome.failure_reason = Some("TargetSourceChanged");
+        if let Some(rollout) = &mut outcome.rollout {
+          rollout.proof = None;
+        }
+        continue;
+      }
+      let proof = kubernetes
+        .prove_committed_rollout_for(
+          &outcome.target.rollout,
+          outcome.rollout.as_ref().expect("committed rollout checked"),
+          fresh_digest,
+        )
+        .await;
+      match proof {
+        Ok(proof) => {
+          outcome
+            .rollout
+            .as_mut()
+            .expect("committed rollout checked")
+            .proof = Some(proof);
+        }
+        Err(error) => {
+          warn!(
+            target = %outcome.target.identity(),
+            error = %error,
+            "operator-owned data-plane target lost its final committed proof"
+          );
+          outcome.failure_reason = Some("TargetProofFailed");
+          outcome
+            .rollout
+            .as_mut()
+            .expect("committed rollout checked")
+            .proof = None;
+        }
+      }
+    }
+    rollout_status = summarize_target_outcomes(targets.len(), &target_outcomes);
+  }
+  if !target_outcomes.is_empty() {
+    let patches = target_outcomes
+      .iter()
+      .map(TargetOutcome::status_patch)
+      .collect::<Vec<_>>();
+    if shared.dry_run {
+      info!(
+        patches = patches.len(),
+        "dry-run enabled; data-plane target status patches were not applied"
+      );
+    } else {
+      kubernetes.apply_status_patches(&patches).await?;
+    }
   }
   apply_status_patches(
     kubernetes,
@@ -510,6 +640,120 @@ async fn reconcile_once(
   )
   .await?;
   Ok(rollout_status)
+}
+
+fn summarize_target_outcomes(assigned: usize, outcomes: &[TargetOutcome]) -> RolloutStatus {
+  let active = outcomes
+    .iter()
+    .filter(|outcome| {
+      outcome
+        .rollout
+        .as_ref()
+        .is_some_and(RolloutStatus::is_committed)
+        && outcome.failure_reason.is_none()
+    })
+    .count();
+  let failed = outcomes
+    .iter()
+    .filter(|outcome| outcome.failure_reason.is_some())
+    .count();
+  RolloutStatus::from_targets(assigned, active, failed)
+}
+
+async fn reconcile_static_targets(
+  kubernetes: &KubernetesPoller,
+  shared: &SharedArgs,
+  compatibility: &CompatibilityPolicy,
+  objects: &[KubernetesObject],
+  targets: &[super::target_topology::PlannedTarget],
+) -> Vec<TargetOutcome> {
+  let mut outcomes = Vec::with_capacity(targets.len());
+  // v1alpha1 intentionally reconciles targets sequentially. This is a global
+  // concurrency bound of one and prevents one target failure from cancelling
+  // or mutating any other target's durable workload-annotation state.
+  for target in targets {
+    let target_objects = rollout::canonicalize_objects(&objects_for_target(
+      objects,
+      target,
+      shared.status_service.as_deref(),
+    ));
+    let snapshot_digest = source_snapshot_digest(&target_objects);
+    let rendered = match translate::translate_objects(&target_objects, shared) {
+      Ok(rendered)
+        if !rendered
+          .diagnostics
+          .iter()
+          .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error) =>
+      {
+        rendered
+      }
+      Ok(_) | Err(_) => {
+        outcomes.push(TargetOutcome {
+          target: target.clone(),
+          source_snapshot_digest: snapshot_digest,
+          translation_succeeded: false,
+          rollout: None,
+          failure_reason: Some("TranslationFailed"),
+        });
+        continue;
+      }
+    };
+    let attempted = async {
+      compatibility.validate_generated_capabilities(rendered.requires_exact_data_plane)?;
+      kubernetes
+        .preflight_target_compatibility_for(&target.rollout, compatibility)
+        .await?;
+      let bound_toml = target.bound_toml(&snapshot_digest, &rendered.toml);
+      let mut rollout_status = kubernetes
+        .reconcile_immutable_rollout_for(
+          shared,
+          &target.rollout,
+          compatibility,
+          &bound_toml,
+          &rendered.assets,
+        )
+        .await?;
+      if rollout_status.phase.is_committed() {
+        rollout_status.proof = Some(
+          kubernetes
+            .prove_committed_rollout_for(&target.rollout, &rollout_status, snapshot_digest.clone())
+            .await?,
+        );
+      }
+      anyhow::Ok(rollout_status)
+    }
+    .await;
+    match attempted {
+      Ok(rollout_status) => outcomes.push(TargetOutcome {
+        target: target.clone(),
+        source_snapshot_digest: snapshot_digest,
+        translation_succeeded: true,
+        rollout: Some(rollout_status),
+        failure_reason: None,
+      }),
+      Err(error) => {
+        warn!(
+          target = %target.identity(),
+          error = %error,
+          "operator-owned data-plane target reconciliation failed independently"
+        );
+        let persisted_rollout = kubernetes
+          .get_required_json(&target.rollout.workload_path())
+          .await
+          .ok()
+          .map(|workload| rollout::RolloutState::from_workload(&workload))
+          .map(|state| RolloutStatus::from(&state));
+        outcomes.push(TargetOutcome {
+          target: target.clone(),
+          source_snapshot_digest: snapshot_digest,
+          translation_succeeded: true,
+          rollout: persisted_rollout,
+          failure_reason: Some("TargetRolloutFailed"),
+        });
+      }
+    }
+  }
+  outcomes
 }
 
 async fn apply_status_patches(
@@ -531,32 +775,86 @@ async fn apply_status_patches(
   Ok(())
 }
 
-fn source_snapshot_digest(objects: &[KubernetesObject]) -> String {
+pub(crate) fn source_snapshot_digest(objects: &[KubernetesObject]) -> String {
+  source_snapshot_digest_with_secret_data(objects, true)
+}
+
+pub(crate) fn redacted_source_snapshot_digest(objects: &[KubernetesObject]) -> String {
+  source_snapshot_digest_with_secret_data(objects, false)
+}
+
+fn source_snapshot_digest_with_secret_data(
+  objects: &[KubernetesObject],
+  include_secret_data: bool,
+) -> String {
   let mut proof = objects
     .iter()
     .map(|object| {
+      let spec_digest = digest_canonical_json(&object.spec);
+      let metadata_digest = digest_canonical_json(&json!({
+        "annotations": &object.metadata.annotations,
+        "labels": &object.metadata.labels,
+      }));
       let data_digest = if object.data.is_empty() {
         String::new()
+      } else if object.kind == "Secret" && !include_secret_data {
+        "redacted".to_string()
       } else {
-        let encoded = serde_json::to_vec(&object.data).unwrap_or_default();
-        let digest = Sha256::digest(encoded);
-        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+        digest_canonical_json(&serde_json::to_value(&object.data).unwrap_or(Value::Null))
       };
       format!(
-        "{}/{}/{}/{}/{}/{}/{}/{}",
+        "{}/{}/{}/{}/{}/{}/{}",
         object.api_version,
         object.kind,
         object.namespace(),
         object.name(),
-        object.metadata.uid.as_deref().unwrap_or(""),
-        object.metadata.generation.unwrap_or_default(),
-        object.metadata.resource_version.as_deref().unwrap_or(""),
+        metadata_digest,
+        spec_digest,
         data_digest,
       )
     })
     .collect::<Vec<_>>();
   proof.sort();
   let digest = Sha256::digest(proof.join("\n").as_bytes());
+  digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn digest_canonical_json(value: &Value) -> String {
+  fn append(value: &Value, output: &mut String) {
+    match value {
+      Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+        output.push_str(&value.to_string());
+      }
+      Value::Array(values) => {
+        output.push('[');
+        for (index, value) in values.iter().enumerate() {
+          if index > 0 {
+            output.push(',');
+          }
+          append(value, output);
+        }
+        output.push(']');
+      }
+      Value::Object(values) => {
+        output.push('{');
+        let mut entries = values.iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(right.0));
+        for (index, (key, value)) in entries.into_iter().enumerate() {
+          if index > 0 {
+            output.push(',');
+          }
+          output.push_str(&Value::String(key.clone()).to_string());
+          output.push(':');
+          append(value, output);
+        }
+        output.push('}');
+      }
+    }
+  }
+
+  let mut canonical = String::new();
+  append(value, &mut canonical);
+  let digest = Sha256::digest(canonical.as_bytes());
   digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

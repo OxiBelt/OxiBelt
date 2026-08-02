@@ -31,6 +31,14 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
     out.push_str("terminal_response_headers = ");
     out.push_str(&toml_string_array(&auth.terminal_response_headers));
     out.push('\n');
+    if auth.max_request_body_bytes > 0 {
+      out.push_str("max_request_body_bytes = ");
+      out.push_str(&auth.max_request_body_bytes.to_string());
+      out.push('\n');
+      out.push_str("allowed_content_types = ");
+      out.push_str(&toml_string_array(&auth.allowed_content_types));
+      out.push('\n');
+    }
     out.push('\n');
   }
 
@@ -57,9 +65,18 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
         render_backend_tls(&mut out, "upstream_pools.servers.tls", tls);
       }
     }
+    let requires_discovery_identity = pool.discoveries.len() > 1;
     for discovery in &pool.discoveries {
       out.push_str("\n[[upstream_pools.discovery]]\n");
       out.push_str("provider = \"kubernetes\"\n");
+      if requires_discovery_identity {
+        out.push_str("id = ");
+        out.push_str(&toml_string(&discovery.id));
+        out.push('\n');
+        out.push_str("weight_multiplier = ");
+        out.push_str(&discovery.weight_multiplier.to_string());
+        out.push('\n');
+      }
       out.push_str("endpoint = ");
       out.push_str(&toml_string(&discovery.endpoint));
       out.push('\n');
@@ -175,6 +192,11 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
     out.push_str("# Source: ");
     out.push_str(&route.source);
     out.push('\n');
+    if let Some(policy_source) = &route.policy_source {
+      out.push_str("# Policy: ");
+      out.push_str(policy_source);
+      out.push('\n');
+    }
     out.push_str("[[routes]]\n");
     out.push_str("name = ");
     out.push_str(&toml_string(&route.name));
@@ -230,6 +252,11 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
     }
     if let Some(rewrite) = &route.rewrite {
       out.push_str("\n[routes.actions.rewrite]\n");
+      if let Some(authority) = &rewrite.authority {
+        out.push_str("authority = ");
+        out.push_str(&toml_string(authority));
+        out.push('\n');
+      }
       if let Some(path) = &rewrite.path {
         out.push_str("path = ");
         out.push_str(&toml_string(path));
@@ -246,9 +273,26 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       out.push_str("status = ");
       out.push_str(&redirect.status.to_string());
       out.push('\n');
-      out.push_str("location_template = ");
-      out.push_str(&toml_string(&redirect.location_template));
-      out.push('\n');
+      if let Some(scheme) = &redirect.scheme {
+        out.push_str("scheme = ");
+        out.push_str(&toml_string(scheme));
+        out.push('\n');
+      }
+      if let Some(hostname) = &redirect.hostname {
+        out.push_str("hostname = ");
+        out.push_str(&toml_string(hostname));
+        out.push('\n');
+      }
+      if let Some(port) = redirect.port {
+        out.push_str("port = ");
+        out.push_str(&port.to_string());
+        out.push('\n');
+      }
+      if let Some(path) = &redirect.path {
+        out.push_str("path = ");
+        out.push_str(&toml_string(path));
+        out.push('\n');
+      }
     }
     render_header_modifier(&mut out, "request_headers", &route.request_headers);
     render_header_modifier(&mut out, "response_headers", &route.response_headers);
@@ -291,6 +335,29 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       }
       out.push_str("max_body_bytes = ");
       out.push_str(&mirror.max_body_bytes.to_string());
+      out.push('\n');
+    }
+    if let Some(max_request_body_bytes) = route.max_request_body_bytes {
+      out.push_str("\n[routes.limits]\n");
+      out.push_str("max_request_body_bytes = ");
+      out.push_str(&max_request_body_bytes.to_string());
+      out.push('\n');
+    }
+    if let Some(upstream_request_timeout_ms) = route.upstream_request_timeout_ms {
+      out.push_str("\n[routes.timeouts]\n");
+      out.push_str("upstream_request_timeout_ms = ");
+      out.push_str(&upstream_request_timeout_ms.to_string());
+      out.push('\n');
+    }
+    if !route.waf_request_rule_groups.is_empty() {
+      out.push_str("\n[[routes.waf.rules]]\n");
+      out.push_str("name = ");
+      out.push_str(&toml_string(&format!("{}-route-policy", route.name)));
+      out.push('\n');
+      out.push_str("phase = \"request\"\n");
+      out.push_str("priority = 0\n");
+      out.push_str("groups = ");
+      out.push_str(&toml_string_array(&route.waf_request_rule_groups));
       out.push('\n');
     }
     out.push('\n');
@@ -338,6 +405,27 @@ fn render_backend_tls(out: &mut String, table: &str, tls: &super::GeneratedBacke
   out.push_str(table);
   out.push_str("]\nserver_name = ");
   out.push_str(&toml_string(&tls.server_name));
+  if !tls.subject_alt_names.is_empty() {
+    out.push_str("\nsubject_alt_names = [");
+    for (index, subject_alt_name) in tls.subject_alt_names.iter().enumerate() {
+      if index > 0 {
+        out.push_str(", ");
+      }
+      match subject_alt_name {
+        super::GeneratedBackendTlsSubjectAltName::Dns(value) => {
+          out.push_str("{ type = \"dns\", value = ");
+          out.push_str(&toml_string(value));
+          out.push_str(" }");
+        }
+        super::GeneratedBackendTlsSubjectAltName::Uri(value) => {
+          out.push_str("{ type = \"uri\", value = ");
+          out.push_str(&toml_string(value));
+          out.push_str(" }");
+        }
+      }
+    }
+    out.push(']');
+  }
   out.push_str("\ntrust = ");
   out.push_str(&toml_string(&tls.trust));
   out.push('\n');

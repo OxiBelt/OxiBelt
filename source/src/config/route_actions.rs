@@ -2,8 +2,10 @@
 //! Rewrite and redirect templates are validated before the HTTP data path renders them.
 
 use std::collections::HashSet;
+use std::str::FromStr;
 
 use anyhow::{Context, bail};
+use http::uri::Authority;
 use http::{HeaderValue, Method};
 use serde::Deserialize;
 
@@ -12,6 +14,8 @@ use super::route_header_policy::{
   is_forbidden_route_action_header, is_reserved_route_request_header,
   normalize_route_action_header_name,
 };
+
+pub const MAX_REQUEST_MIRROR_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteActionsConfig {
@@ -43,6 +47,8 @@ impl RouteActionsConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteRewriteActionConfig {
   #[serde(default)]
+  pub authority: Option<String>,
+  #[serde(default)]
   pub path: Option<String>,
   #[serde(default)]
   pub query: Option<String>,
@@ -54,6 +60,14 @@ pub struct RouteRedirectActionConfig {
   pub status: Option<u16>,
   #[serde(default)]
   pub location_template: Option<String>,
+  #[serde(default)]
+  pub scheme: Option<String>,
+  #[serde(default)]
+  pub hostname: Option<String>,
+  #[serde(default)]
+  pub port: Option<u16>,
+  #[serde(default)]
+  pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -110,8 +124,8 @@ pub(crate) fn validate_route_actions_config(route: &RouteConfig) -> anyhow::Resu
   }
 
   if let Some(rewrite) = &route.actions.rewrite {
-    if rewrite.path.is_none() && rewrite.query.is_none() {
-      bail!("route {route_name} actions.rewrite must set path or query");
+    if rewrite.authority.is_none() && rewrite.path.is_none() && rewrite.query.is_none() {
+      bail!("route {route_name} actions.rewrite must set authority, path, or query");
     }
     if route.replace_prefix_with.is_some() {
       bail!("route {route_name} cannot set replace_prefix_with when actions.rewrite is configured");
@@ -119,27 +133,55 @@ pub(crate) fn validate_route_actions_config(route: &RouteConfig) -> anyhow::Resu
     if let Some(path) = &rewrite.path {
       validate_route_action_path_template(route, "actions.rewrite.path", path)?;
     }
+    if let Some(authority) = rewrite.authority.as_deref() {
+      validate_route_rewrite_authority(route_name, authority)?;
+    }
     if let Some(query) = &rewrite.query {
       validate_route_action_query_template(route, "actions.rewrite.query", query)?;
     }
   }
 
   if let Some(redirect) = &route.actions.redirect {
-    match redirect.status {
-      Some(301 | 302 | 303 | 307 | 308) => {}
-      Some(status) => bail!(
+    let structured = redirect.scheme.is_some()
+      || redirect.hostname.is_some()
+      || redirect.port.is_some()
+      || redirect.path.is_some()
+      || redirect.location_template.is_none();
+    match (redirect.status, structured) {
+      (Some(301 | 302 | 303 | 307 | 308), _) => {}
+      (Some(status), _) => bail!(
         "route {route_name} actions.redirect.status {status} must be one of 301, 302, 303, 307, or 308"
       ),
-      None => bail!("route {route_name} actions.redirect.status is required"),
+      (None, false) => bail!("route {route_name} actions.redirect.status is required"),
+      (None, true) => {}
     }
-    let Some(location_template) = redirect.location_template.as_deref() else {
-      bail!("route {route_name} actions.redirect.location_template is required");
-    };
-    validate_route_action_redirect_template(
-      route,
-      "actions.redirect.location_template",
-      location_template,
-    )?;
+    if let Some(location_template) = redirect.location_template.as_deref() {
+      if structured {
+        bail!(
+          "route {route_name} actions.redirect.location_template cannot be combined with structured redirect fields"
+        );
+      }
+      validate_route_action_redirect_template(
+        route,
+        "actions.redirect.location_template",
+        location_template,
+      )?;
+    } else {
+      if let Some(scheme) = redirect.scheme.as_deref()
+        && !matches!(scheme, "http" | "https")
+      {
+        bail!("route {route_name} actions.redirect.scheme must be http or https");
+      }
+      if let Some(hostname) = redirect.hostname.as_deref() {
+        validate_precise_hostname(route_name, "actions.redirect.hostname", hostname)?;
+      }
+      if redirect.port == Some(0) {
+        bail!("route {route_name} actions.redirect.port must be between 1 and 65535");
+      }
+      if let Some(path) = redirect.path.as_deref() {
+        validate_route_action_path_template(route, "actions.redirect.path", path)?;
+      }
+    }
   }
 
   validate_header_modifier(
@@ -159,6 +201,49 @@ pub(crate) fn validate_route_actions_config(route: &RouteConfig) -> anyhow::Resu
   }
   validate_request_mirrors(route_name, &route.actions.request_mirrors)?;
 
+  Ok(())
+}
+
+fn validate_route_rewrite_authority(route_name: &str, authority: &str) -> anyhow::Result<()> {
+  if authority.trim() != authority || authority.is_empty() {
+    bail!("route {route_name} actions.rewrite.authority must be a non-empty exact authority");
+  }
+  let parsed = Authority::from_str(authority).with_context(|| {
+    format!("route {route_name} actions.rewrite.authority is not a valid HTTP authority")
+  })?;
+  if parsed.host().is_empty() || authority.contains('@') {
+    bail!("route {route_name} actions.rewrite.authority must not contain user information");
+  }
+  HeaderValue::from_str(authority).with_context(|| {
+    format!("route {route_name} actions.rewrite.authority is not a valid Host header value")
+  })?;
+  Ok(())
+}
+
+fn validate_precise_hostname(
+  route_name: &str,
+  field_name: &str,
+  hostname: &str,
+) -> anyhow::Result<()> {
+  if hostname.trim() != hostname
+    || hostname.is_empty()
+    || hostname.len() > 253
+    || hostname.ends_with('.')
+    || hostname.contains('*')
+  {
+    bail!("route {route_name} {field_name} must be a valid precise DNS hostname");
+  }
+  if hostname.split('.').any(|label| {
+    label.is_empty()
+      || label.len() > 63
+      || label.starts_with('-')
+      || label.ends_with('-')
+      || !label
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+  }) {
+    bail!("route {route_name} {field_name} must be a valid precise DNS hostname");
+  }
   Ok(())
 }
 
@@ -520,6 +605,11 @@ fn validate_request_mirrors(
     {
       bail!(
         "route {route_name} actions.request_mirrors.sample_percent must be greater than 0 and at most 100"
+      );
+    }
+    if mirror.max_body_bytes > MAX_REQUEST_MIRROR_BODY_BYTES {
+      bail!(
+        "route {route_name} actions.request_mirrors.max_body_bytes must not exceed {MAX_REQUEST_MIRROR_BODY_BYTES}"
       );
     }
     if !pools.insert(mirror.upstream_pool.as_str()) {

@@ -4,9 +4,14 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::super::model::{Diagnostic, KubernetesObject, ObjectKey, object_ref};
-use super::{BackendTlsDecision, GeneratedBackendTls, RenderedAsset, TranslationState, string_at};
+use super::{
+  BackendTlsDecision, GeneratedBackendTls, GeneratedBackendTlsSubjectAltName, RenderedAsset,
+  TranslationState, string_at,
+};
 
 const MAX_CA_PEM_BYTES: usize = 256 * 1024;
+const MAX_CA_REFS: usize = 8;
+const MAX_SUBJECT_ALT_NAMES: usize = 5;
 
 struct ParsedPolicy {
   object: KubernetesObject,
@@ -188,13 +193,6 @@ impl TranslationState {
       );
       valid = false;
     }
-    if validation.get("subjectAltNames").is_some() {
-      self.policy_error(
-        policy,
-        "validation.subjectAltNames is outside the supported stable core",
-      );
-      valid = false;
-    }
     if validation.get("options").is_some() {
       self.policy_error(
         policy,
@@ -217,6 +215,14 @@ impl TranslationState {
       );
       valid = false;
     }
+    let subject_alt_names = match parse_subject_alt_names(validation) {
+      Ok(subject_alt_names) => subject_alt_names,
+      Err(message) => {
+        self.policy_error(policy, &message);
+        valid = false;
+        Vec::new()
+      }
+    };
 
     let ca_refs = validation
       .get("caCertificateRefs")
@@ -227,6 +233,7 @@ impl TranslationState {
     let tls = match (system, ca_refs.as_slice()) {
       (Some("System"), []) => Some(GeneratedBackendTls {
         server_name: hostname.to_ascii_lowercase(),
+        subject_alt_names: subject_alt_names.clone(),
         trust: "system".to_string(),
         trusted_ca_certs: Vec::new(),
         trusted_ca_sha256: Vec::new(),
@@ -238,11 +245,16 @@ impl TranslationState {
         );
         None
       }
-      (None, [ca_ref]) => self.policy_config_map_tls(policy, hostname, ca_ref, config_maps),
-      (None, _) => {
+      (None, ca_refs) if !ca_refs.is_empty() && ca_refs.len() <= MAX_CA_REFS => {
+        self.policy_config_map_tls(policy, hostname, &subject_alt_names, ca_refs, config_maps)
+      }
+      (None, ca_refs) => {
         self.policy_error(
           policy,
-          "validation requires System roots or exactly one ConfigMap caCertificateRef",
+          &format!(
+            "validation requires System roots or 1..={MAX_CA_REFS} ConfigMap caCertificateRefs; found {}",
+            ca_refs.len()
+          ),
         );
         None
       }
@@ -261,77 +273,109 @@ impl TranslationState {
     &mut self,
     policy: &KubernetesObject,
     hostname: &str,
-    ca_ref: &Value,
+    subject_alt_names: &[GeneratedBackendTlsSubjectAltName],
+    ca_refs: &[Value],
     config_maps: &BTreeMap<ObjectKey, &KubernetesObject>,
   ) -> Option<GeneratedBackendTls> {
-    if unsupported_field(ca_ref, &["group", "kind", "name"]).is_some() {
-      self.policy_error(
-        policy,
-        "caCertificateRef contains fields outside the supported stable core",
-      );
-      return None;
+    let mut seen_refs = std::collections::HashSet::new();
+    let mut aggregate_bytes = 0_usize;
+    let mut bundles = BTreeMap::<String, String>::new();
+    for (index, ca_ref) in ca_refs.iter().enumerate() {
+      if unsupported_field(ca_ref, &["group", "kind", "name"]).is_some() {
+        self.policy_error(
+          policy,
+          &format!("caCertificateRefs[{index}] contains fields outside the supported stable core"),
+        );
+        return None;
+      }
+      let group = string_at(ca_ref, &["group"]).unwrap_or("");
+      let kind = string_at(ca_ref, &["kind"]).unwrap_or("ConfigMap");
+      let Some(name) = string_at(ca_ref, &["name"]) else {
+        self.policy_error(
+          policy,
+          &format!("caCertificateRefs[{index}].name is required"),
+        );
+        return None;
+      };
+      if !group.is_empty() || kind != "ConfigMap" {
+        self.policy_error(
+          policy,
+          &format!("caCertificateRefs[{index}] must select a core same-namespace ConfigMap"),
+        );
+        return None;
+      }
+      if !seen_refs.insert(name) {
+        self.policy_error(policy, "caCertificateRefs must not repeat a ConfigMap");
+        return None;
+      }
+      let key = ObjectKey {
+        namespace: policy.namespace().to_string(),
+        name: name.to_string(),
+      };
+      let Some(config_map) = config_maps.get(&key) else {
+        self.policy_error(
+          policy,
+          &format!(
+            "referenced ConfigMap {}/{} was not found",
+            key.namespace, key.name
+          ),
+        );
+        return None;
+      };
+      let Some(pem) = config_map.data.get("ca.crt") else {
+        self.policy_error(
+          policy,
+          &format!(
+            "referenced ConfigMap {}/{} must contain data[\"ca.crt\"]",
+            key.namespace, key.name
+          ),
+        );
+        return None;
+      };
+      aggregate_bytes = match aggregate_bytes.checked_add(pem.len()) {
+        Some(total) if total <= MAX_CA_PEM_BYTES => total,
+        _ => {
+          self.policy_error(
+            policy,
+            &format!("aggregate ConfigMap ca.crt bytes must be 1..={MAX_CA_PEM_BYTES}"),
+          );
+          return None;
+        }
+      };
+      if pem.is_empty()
+        || pem.contains('\0')
+        || !pem.contains("-----BEGIN CERTIFICATE-----")
+        || !pem.contains("-----END CERTIFICATE-----")
+      {
+        self.policy_error(
+          policy,
+          &format!(
+            "ConfigMap {}/{} ca.crt is not a PEM certificate bundle",
+            key.namespace, key.name
+          ),
+        );
+        return None;
+      }
+      let digest = hex_digest(&Sha256::digest(pem.as_bytes()));
+      let managed_path = format!("gateway-api-ca/{digest}.pem");
+      let data_key = format!("gateway-api-ca-{digest}.pem");
+      self
+        .assets
+        .entry(managed_path.clone())
+        .or_insert_with(|| RenderedAsset {
+          data_key,
+          managed_path: managed_path.clone(),
+          content: pem.clone(),
+        });
+      bundles.insert(managed_path, digest);
     }
-    let group = string_at(ca_ref, &["group"]).unwrap_or("");
-    let kind = string_at(ca_ref, &["kind"]).unwrap_or("ConfigMap");
-    let Some(name) = string_at(ca_ref, &["name"]) else {
-      self.policy_error(policy, "caCertificateRef.name is required");
-      return None;
-    };
-    if !group.is_empty() || kind != "ConfigMap" {
-      self.policy_error(
-        policy,
-        "stable core only supports a core ConfigMap caCertificateRef",
-      );
-      return None;
-    }
-    let key = ObjectKey {
-      namespace: policy.namespace().to_string(),
-      name: name.to_string(),
-    };
-    let Some(config_map) = config_maps.get(&key) else {
-      self.policy_error(
-        policy,
-        &format!(
-          "referenced ConfigMap {}/{} was not found",
-          key.namespace, key.name
-        ),
-      );
-      return None;
-    };
-    let Some(pem) = config_map.data.get("ca.crt") else {
-      self.policy_error(policy, "referenced ConfigMap must contain data[\"ca.crt\"]");
-      return None;
-    };
-    if pem.is_empty() || pem.len() > MAX_CA_PEM_BYTES {
-      self.policy_error(
-        policy,
-        &format!("ConfigMap ca.crt must be 1..={MAX_CA_PEM_BYTES} bytes"),
-      );
-      return None;
-    }
-    if pem.contains('\0')
-      || !pem.contains("-----BEGIN CERTIFICATE-----")
-      || !pem.contains("-----END CERTIFICATE-----")
-    {
-      self.policy_error(policy, "ConfigMap ca.crt is not a PEM certificate bundle");
-      return None;
-    }
-    let digest = hex_digest(&Sha256::digest(pem.as_bytes()));
-    let managed_path = format!("gateway-api-ca/{digest}.pem");
-    let data_key = format!("gateway-api-ca-{digest}.pem");
-    self
-      .assets
-      .entry(managed_path.clone())
-      .or_insert_with(|| RenderedAsset {
-        data_key,
-        managed_path: managed_path.clone(),
-        content: pem.clone(),
-      });
+    let (trusted_ca_certs, trusted_ca_sha256) = bundles.into_iter().unzip();
     Some(GeneratedBackendTls {
       server_name: hostname.to_ascii_lowercase(),
+      subject_alt_names: subject_alt_names.to_vec(),
       trust: "exclusive".to_string(),
-      trusted_ca_certs: vec![managed_path],
-      trusted_ca_sha256: vec![digest],
+      trusted_ca_certs,
+      trusted_ca_sha256,
     })
   }
 
@@ -353,7 +397,9 @@ fn policy_precedence(policy: &KubernetesObject) -> (&str, &str, &str) {
 fn valid_precise_hostname(hostname: &str) -> bool {
   !hostname.is_empty()
     && hostname.len() <= 253
+    && hostname == hostname.to_ascii_lowercase()
     && !hostname.ends_with('.')
+    && hostname.parse::<std::net::IpAddr>().is_err()
     && hostname.split('.').all(|label| {
       !label.is_empty()
         && label.len() <= 63
@@ -369,6 +415,87 @@ fn valid_precise_hostname(hostname: &str) -> bool {
           .last()
           .is_some_and(u8::is_ascii_alphanumeric)
     })
+}
+
+fn parse_subject_alt_names(
+  validation: &Value,
+) -> Result<Vec<GeneratedBackendTlsSubjectAltName>, String> {
+  let Some(values) = validation.get("subjectAltNames") else {
+    return Ok(Vec::new());
+  };
+  let values = values
+    .as_array()
+    .ok_or_else(|| "validation.subjectAltNames must be an array".to_string())?;
+  if values.is_empty() || values.len() > MAX_SUBJECT_ALT_NAMES {
+    return Err(format!(
+      "validation.subjectAltNames must contain 1..={MAX_SUBJECT_ALT_NAMES} entries"
+    ));
+  }
+  let mut seen = std::collections::HashSet::new();
+  let mut parsed = Vec::with_capacity(values.len());
+  for (index, value) in values.iter().enumerate() {
+    if let Some(field) = unsupported_field(value, &["type", "hostname", "uri"]) {
+      return Err(format!(
+        "validation.subjectAltNames[{index}].{field} is unsupported"
+      ));
+    }
+    let kind = string_at(value, &["type"])
+      .ok_or_else(|| format!("validation.subjectAltNames[{index}].type is required"))?;
+    let subject_alt_name = match kind {
+      "Hostname" => {
+        if value.get("uri").is_some() {
+          return Err(format!(
+            "validation.subjectAltNames[{index}] type Hostname cannot set uri"
+          ));
+        }
+        let hostname = string_at(value, &["hostname"])
+          .ok_or_else(|| format!("validation.subjectAltNames[{index}].hostname is required"))?;
+        if !valid_precise_hostname(hostname) || hostname.contains('*') {
+          return Err(format!(
+            "validation.subjectAltNames[{index}].hostname must be a lowercase exact DNS hostname without wildcards or IP addresses"
+          ));
+        }
+        GeneratedBackendTlsSubjectAltName::Dns(hostname.to_string())
+      }
+      "URI" => {
+        if value.get("hostname").is_some() {
+          return Err(format!(
+            "validation.subjectAltNames[{index}] type URI cannot set hostname"
+          ));
+        }
+        let uri = string_at(value, &["uri"])
+          .ok_or_else(|| format!("validation.subjectAltNames[{index}].uri is required"))?;
+        let parsed_uri = url::Url::parse(uri).map_err(|_| {
+          format!("validation.subjectAltNames[{index}].uri must be an exact absolute URI")
+        })?;
+        if uri.is_empty()
+          || uri.len() > 253
+          || !uri.is_ascii()
+          || uri.trim() != uri
+          || parsed_uri.scheme().is_empty()
+        {
+          return Err(format!(
+            "validation.subjectAltNames[{index}].uri must be an exact absolute URI of at most 253 bytes"
+          ));
+        }
+        GeneratedBackendTlsSubjectAltName::Uri(uri.to_string())
+      }
+      other => {
+        return Err(format!(
+          "validation.subjectAltNames[{index}].type {other} is unsupported"
+        ));
+      }
+    };
+    let uniqueness_key = match &subject_alt_name {
+      GeneratedBackendTlsSubjectAltName::Dns(value) => format!("dns:{value}"),
+      GeneratedBackendTlsSubjectAltName::Uri(value) => format!("uri:{value}"),
+    };
+    if !seen.insert(uniqueness_key) {
+      return Err("validation.subjectAltNames entries must be unique".to_string());
+    }
+    parsed.push(subject_alt_name);
+  }
+  Ok(parsed)
 }
 
 fn hex_digest(digest: &[u8]) -> String {

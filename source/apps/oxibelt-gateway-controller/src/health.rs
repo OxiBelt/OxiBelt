@@ -241,6 +241,7 @@ mod tests {
       desired_content_digest: Some("digest".to_string()),
       reason: None,
       proof: Some(crate::rollout_status::CommitProof::test()),
+      target_summary: None,
     });
     assert!(health.ready());
     assert!(health.reconcile_ready());

@@ -119,7 +119,15 @@ upstream_pool = "app-pool"
       .expect("pool should exist")
       .servers
       .iter()
-      .any(|server| server.id == "file-alt" && server.source == "file")
+      .any(|server| {
+        server.id
+          == upstream_control::scoped_discovered_server_id(
+            UpstreamPoolServerSource::File,
+            "file",
+            "file-alt",
+          )
+          && server.source == "file"
+      })
     {
       found = true;
       break;
@@ -235,16 +243,14 @@ upstream_pool = "app-pool"
     state: UpstreamPoolServerState::Ready,
     tls: Default::default(),
     source: UpstreamPoolServerSource::File,
+    discovery_instance_id: None,
+    discovered_weight: None,
   }];
+  let discovery = state.snapshot().config.upstream_pools[0].discovery[0].clone();
 
-  apply_discovered_servers(
-    &state,
-    "app-pool",
-    UpstreamDiscoveryProvider::File,
-    servers.clone(),
-  )
-  .await
-  .expect("first discovery update should apply");
+  apply_discovered_servers(&state, "app-pool", &discovery, servers.clone())
+    .await
+    .expect("first discovery update should apply");
   let snapshot_after_apply = state.snapshot();
   let discovered = snapshot_after_apply.config.upstream_pools[0]
     .servers
@@ -260,7 +266,7 @@ upstream_pool = "app-pool"
     crate::config::UpstreamTlsTrust::System
   );
 
-  apply_discovered_servers(&state, "app-pool", UpstreamDiscoveryProvider::File, servers)
+  apply_discovered_servers(&state, "app-pool", &discovery, servers)
     .await
     .expect("second discovery update should be accepted as a no-op");
   let snapshot_after_noop = state.snapshot();
@@ -268,5 +274,249 @@ upstream_pool = "app-pool"
   assert!(
     std::sync::Arc::ptr_eq(&snapshot_after_apply, &snapshot_after_noop),
     "identical discovered servers should not replace the app snapshot"
+  );
+}
+
+fn file_discovered_server(id: &str, weight: u32) -> UpstreamPoolServerConfig {
+  UpstreamPoolServerConfig {
+    id: Some(id.to_string()),
+    origin: format!("http://{id}.example/")
+      .parse()
+      .expect("test origin should be valid"),
+    weight,
+    max_conns: 0,
+    backup: false,
+    state: UpstreamPoolServerState::Ready,
+    tls: Default::default(),
+    source: UpstreamPoolServerSource::File,
+    discovery_instance_id: None,
+    discovered_weight: None,
+  }
+}
+
+async fn discovery_instance_test_state(
+  first_multiplier: u32,
+  second_multiplier: u32,
+) -> (
+  AppHandle,
+  UpstreamPoolDiscoveryConfig,
+  UpstreamPoolDiscoveryConfig,
+) {
+  let temp_dir = common::TempDir::new("discovery-instance-runtime");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "discovery-instance-runtime");
+  let raw = format!(
+    r#"
+{}
+
+[[upstream_pools]]
+name = "weighted-pool"
+algorithm = "power_of_two_choices"
+
+[[upstream_pools.discovery]]
+provider = "file"
+id = "alpha"
+weight_multiplier = {first_multiplier}
+file = "alpha.json"
+
+[[upstream_pools.discovery]]
+provider = "file"
+id = "beta"
+weight_multiplier = {second_multiplier}
+file = "beta.json"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let first = config.upstream_pools[0].discovery[0].clone();
+  let second = config.upstream_pools[0].discovery[1].clone();
+  let state = AppHandle::new(
+    AppSnapshot::new(config)
+      .await
+      .expect("snapshot should initialize"),
+  );
+  (state, first, second)
+}
+
+#[tokio::test]
+async fn discovery_instances_preserve_aggregate_weight_and_reconcile_independently() {
+  let (state, alpha, beta) = discovery_instance_test_state(20, 80).await;
+  apply_discovered_servers(
+    &state,
+    "weighted-pool",
+    &alpha,
+    vec![
+      file_discovered_server("alpha-a", 1),
+      file_discovered_server("alpha-b", 3),
+    ],
+  )
+  .await
+  .expect("first discovery cohort should apply");
+  apply_discovered_servers(
+    &state,
+    "weighted-pool",
+    &beta,
+    vec![file_discovered_server("beta-a", 5)],
+  )
+  .await
+  .expect("second discovery cohort should apply");
+
+  let snapshot = state.snapshot();
+  let servers = &snapshot.config.upstream_pools[0].servers;
+  let alpha_weight = servers
+    .iter()
+    .filter(|server| server.discovery_instance_id.as_deref() == Some("alpha"))
+    .map(|server| u64::from(server.weight))
+    .sum::<u64>();
+  let beta_weight = servers
+    .iter()
+    .filter(|server| server.discovery_instance_id.as_deref() == Some("beta"))
+    .map(|server| u64::from(server.weight))
+    .sum::<u64>();
+  assert_eq!(alpha_weight, 400);
+  assert_eq!(beta_weight, 1_600);
+  assert_eq!(beta_weight, alpha_weight * 4);
+  assert_eq!(
+    servers
+      .iter()
+      .map(|server| server.id.as_deref().unwrap_or_default())
+      .collect::<Vec<_>>(),
+    [
+      upstream_control::scoped_discovered_server_id(
+        UpstreamPoolServerSource::File,
+        "alpha",
+        "alpha-a"
+      ),
+      upstream_control::scoped_discovered_server_id(
+        UpstreamPoolServerSource::File,
+        "alpha",
+        "alpha-b"
+      ),
+      upstream_control::scoped_discovered_server_id(
+        UpstreamPoolServerSource::File,
+        "beta",
+        "beta-a"
+      ),
+    ]
+  );
+
+  apply_discovered_servers(
+    &state,
+    "weighted-pool",
+    &alpha,
+    vec![file_discovered_server("alpha-a", 7)],
+  )
+  .await
+  .expect("one cohort refresh should apply");
+  let snapshot = state.snapshot();
+  let servers = &snapshot.config.upstream_pools[0].servers;
+  let alpha_weight = servers
+    .iter()
+    .filter(|server| server.discovery_instance_id.as_deref() == Some("alpha"))
+    .map(|server| u64::from(server.weight))
+    .sum::<u64>();
+  let beta_weight = servers
+    .iter()
+    .filter(|server| server.discovery_instance_id.as_deref() == Some("beta"))
+    .map(|server| u64::from(server.weight))
+    .sum::<u64>();
+  assert_eq!(beta_weight, alpha_weight * 4);
+  assert!(servers.iter().any(|server| {
+    server.id.as_deref()
+      == Some(
+        upstream_control::scoped_discovered_server_id(
+          UpstreamPoolServerSource::File,
+          "beta",
+          "beta-a",
+        )
+        .as_str(),
+      )
+  }));
+
+  apply_discovered_servers(&state, "weighted-pool", &alpha, Vec::new())
+    .await
+    .expect("empty refresh should remove only its owning cohort");
+  let snapshot = state.snapshot();
+  let servers = &snapshot.config.upstream_pools[0].servers;
+  assert_eq!(servers.len(), 1);
+  assert_eq!(
+    servers[0].id.as_deref(),
+    Some(
+      upstream_control::scoped_discovered_server_id(
+        UpstreamPoolServerSource::File,
+        "beta",
+        "beta-a"
+      )
+      .as_str()
+    )
+  );
+  assert_eq!(servers[0].discovery_instance_id.as_deref(), Some("beta"));
+}
+
+#[tokio::test]
+async fn discovery_instances_scope_colliding_provider_server_ids() {
+  let (state, alpha, beta) = discovery_instance_test_state(50, 50).await;
+  apply_discovered_servers(
+    &state,
+    "weighted-pool",
+    &alpha,
+    vec![file_discovered_server("shared", 1)],
+  )
+  .await
+  .expect("first discovery cohort should apply");
+  apply_discovered_servers(
+    &state,
+    "weighted-pool",
+    &beta,
+    vec![file_discovered_server("shared", 1)],
+  )
+  .await
+  .expect("a sibling cohort with the same provider-local ID should apply");
+
+  let snapshot = state.snapshot();
+  let servers = &snapshot.config.upstream_pools[0].servers;
+  assert_eq!(servers.len(), 2);
+  assert_ne!(servers[0].id, servers[1].id);
+  assert_eq!(
+    servers
+      .iter()
+      .map(|server| server.discovery_instance_id.as_deref().unwrap_or_default())
+      .collect::<Vec<_>>(),
+    ["alpha", "beta"]
+  );
+}
+
+#[tokio::test]
+async fn unrepresentable_discovery_weight_update_is_atomic() {
+  let (state, alpha, beta) = discovery_instance_test_state(1, u32::MAX).await;
+  apply_discovered_servers(
+    &state,
+    "weighted-pool",
+    &alpha,
+    vec![
+      file_discovered_server("alpha-small", 1),
+      file_discovered_server("alpha-large", u32::MAX - 1),
+    ],
+  )
+  .await
+  .expect("representable first cohort should apply");
+  let before = state.snapshot();
+
+  let error = apply_discovered_servers(
+    &state,
+    "weighted-pool",
+    &beta,
+    vec![file_discovered_server("beta-large", u32::MAX - 1)],
+  )
+  .await
+  .expect_err("a positive share rounded to zero must be rejected");
+  assert!(
+    error.to_string().contains("lose a positive backend share"),
+    "unexpected error: {error:#}"
+  );
+  assert!(
+    std::sync::Arc::ptr_eq(&before, &state.snapshot()),
+    "rejected normalization must leave the previous snapshot active"
   );
 }

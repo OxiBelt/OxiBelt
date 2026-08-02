@@ -9,6 +9,7 @@
     "policyVersion",
     "policyDefinitionSha256",
     "sourceRevision",
+    "validatedVersion",
     "runId",
     "runAttempt",
     "generatedAt",
@@ -33,6 +34,10 @@
     "sourceRevision": {
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
+    },
+    "validatedVersion": {
+      "type": "string",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
     },
     "runId": {
       "type": "integer",

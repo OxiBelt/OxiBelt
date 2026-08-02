@@ -1,7 +1,7 @@
 {
   "$schema": "./kubernetes-feature-graduation.schema.json",
   "schemaVersion": 1,
-  "policyVersion": 1,
+  "policyVersion": 2,
   "lifecycleAuthority": "docs/FeatureStatus.md",
   "evidenceSchema": "devops/config/kubernetes-feature-graduation-evidence.schema.json",
   "supportContract": {
@@ -140,6 +140,11 @@
         "gateway-api-tcproute",
         "gateway-api-udproute",
         "gateway-api-backendtlspolicy",
+        "gateway-api-weighted-discovery",
+        "gateway-api-standard-filters-backend-tls",
+        "gateway-api-route-policy",
+        "gateway-controller-multi-target",
+        "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -159,6 +164,11 @@
         "gateway-api-tcproute",
         "gateway-api-udproute",
         "gateway-api-backendtlspolicy",
+        "gateway-api-weighted-discovery",
+        "gateway-api-standard-filters-backend-tls",
+        "gateway-api-route-policy",
+        "gateway-controller-multi-target",
+        "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -172,6 +182,7 @@
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
+        "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -185,6 +196,7 @@
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
+        "gateway-controller-multi-target",
         "helm-gateway-controller"
       ],
       "evidenceReceipts": []
@@ -197,6 +209,7 @@
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
+        "gateway-controller-multi-target",
         "helm-gateway-controller"
       ],
       "evidenceReceipts": []
@@ -208,7 +221,10 @@
       "status": "unmet",
       "mandatory": true,
       "appliesTo": [
-        "gateway-controller"
+        "gateway-controller",
+        "gateway-api-weighted-discovery",
+        "gateway-api-route-policy",
+        "gateway-controller-multi-target"
       ],
       "evidenceReceipts": []
     },
@@ -225,7 +241,12 @@
         "gateway-api-tlsroute",
         "gateway-api-tcproute",
         "gateway-api-udproute",
-        "gateway-api-backendtlspolicy"
+        "gateway-api-backendtlspolicy",
+        "gateway-api-weighted-discovery",
+        "gateway-api-standard-filters-backend-tls",
+        "gateway-api-route-policy",
+        "gateway-controller-multi-target",
+        "gateway-controller-explain"
       ],
       "evidenceReceipts": []
     },
@@ -237,6 +258,8 @@
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
+        "gateway-controller-multi-target",
+        "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -250,6 +273,7 @@
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
+        "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -264,6 +288,8 @@
       "appliesTo": [
         "gateway-controller",
         "gateway-api-backendtlspolicy",
+        "gateway-api-standard-filters-backend-tls",
+        "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -288,6 +314,7 @@
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
+        "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -325,6 +352,7 @@
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
+        "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -344,6 +372,11 @@
         "gateway-api-tcproute",
         "gateway-api-udproute",
         "gateway-api-backendtlspolicy",
+        "gateway-api-weighted-discovery",
+        "gateway-api-standard-filters-backend-tls",
+        "gateway-api-route-policy",
+        "gateway-controller-multi-target",
+        "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -363,6 +396,11 @@
         "gateway-api-tcproute",
         "gateway-api-udproute",
         "gateway-api-backendtlspolicy",
+        "gateway-api-weighted-discovery",
+        "gateway-api-standard-filters-backend-tls",
+        "gateway-api-route-policy",
+        "gateway-controller-multi-target",
+        "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -382,6 +420,11 @@
         "gateway-api-tcproute",
         "gateway-api-udproute",
         "gateway-api-backendtlspolicy",
+        "gateway-api-weighted-discovery",
+        "gateway-api-standard-filters-backend-tls",
+        "gateway-api-route-policy",
+        "gateway-controller-multi-target",
+        "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -401,6 +444,11 @@
         "gateway-api-tcproute",
         "gateway-api-udproute",
         "gateway-api-backendtlspolicy",
+        "gateway-api-weighted-discovery",
+        "gateway-api-standard-filters-backend-tls",
+        "gateway-api-route-policy",
+        "gateway-controller-multi-target",
+        "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -414,7 +462,9 @@
       "mandatory": true,
       "appliesTo": [
         "gateway-api-httproute",
-        "gateway-api-backendtlspolicy"
+        "gateway-api-backendtlspolicy",
+        "gateway-api-weighted-discovery",
+        "gateway-api-standard-filters-backend-tls"
       ],
       "evidenceReceipts": []
     },
@@ -425,7 +475,9 @@
       "status": "unmet",
       "mandatory": true,
       "appliesTo": [
-        "gateway-api-grpcroute"
+        "gateway-api-grpcroute",
+        "gateway-api-weighted-discovery",
+        "gateway-api-standard-filters-backend-tls"
       ],
       "evidenceReceipts": []
     },
@@ -467,6 +519,7 @@
     {
       "id": "gateway-controller",
       "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
       "gateIds": [
         "policy-contract",
         "unsupported-combination-diagnostics",
@@ -493,6 +546,7 @@
     {
       "id": "gateway-api-httproute",
       "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
       "gateIds": [
         "policy-contract",
         "unsupported-combination-diagnostics",
@@ -510,6 +564,7 @@
     {
       "id": "gateway-api-grpcroute",
       "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
       "gateIds": [
         "policy-contract",
         "unsupported-combination-diagnostics",
@@ -527,6 +582,7 @@
     {
       "id": "gateway-api-tlsroute",
       "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
       "gateIds": [
         "policy-contract",
         "unsupported-combination-diagnostics",
@@ -544,6 +600,7 @@
     {
       "id": "gateway-api-tcproute",
       "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
       "gateIds": [
         "policy-contract",
         "unsupported-combination-diagnostics",
@@ -561,6 +618,7 @@
     {
       "id": "gateway-api-udproute",
       "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
       "gateIds": [
         "policy-contract",
         "unsupported-combination-diagnostics",
@@ -578,6 +636,7 @@
     {
       "id": "gateway-api-backendtlspolicy",
       "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
       "gateIds": [
         "policy-contract",
         "unsupported-combination-diagnostics",
@@ -594,8 +653,112 @@
       ]
     },
     {
+      "id": "gateway-api-weighted-discovery",
+      "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
+      "gateIds": [
+        "policy-contract",
+        "unsupported-combination-diagnostics",
+        "watch-reconnect-compaction",
+        "stale-object-convergence",
+        "long-duration-soak",
+        "native-amd64",
+        "native-arm64",
+        "native-riscv64",
+        "gateway-conformance-http",
+        "gateway-conformance-grpc"
+      ],
+      "blockerIds": [
+        "native-riscv64-cluster-runner"
+      ]
+    },
+    {
+      "id": "gateway-api-standard-filters-backend-tls",
+      "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
+      "gateIds": [
+        "policy-contract",
+        "unsupported-combination-diagnostics",
+        "stale-object-convergence",
+        "configmap-propagation",
+        "long-duration-soak",
+        "native-amd64",
+        "native-arm64",
+        "native-riscv64",
+        "gateway-conformance-http",
+        "gateway-conformance-grpc"
+      ],
+      "blockerIds": [
+        "native-riscv64-cluster-runner"
+      ]
+    },
+    {
+      "id": "gateway-api-route-policy",
+      "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
+      "gateIds": [
+        "policy-contract",
+        "unsupported-combination-diagnostics",
+        "watch-reconnect-compaction",
+        "stale-object-convergence",
+        "long-duration-soak",
+        "native-amd64",
+        "native-arm64",
+        "native-riscv64"
+      ],
+      "blockerIds": [
+        "native-riscv64-cluster-runner"
+      ]
+    },
+    {
+      "id": "gateway-controller-multi-target",
+      "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
+      "gateIds": [
+        "policy-contract",
+        "unsupported-combination-diagnostics",
+        "clean-lifecycle",
+        "leader-election-failover",
+        "api-outage-recovery",
+        "watch-reconnect-compaction",
+        "stale-object-convergence",
+        "partial-rollout-recovery",
+        "network-partition",
+        "configmap-propagation",
+        "multi-node",
+        "previous-minor-interop",
+        "long-duration-soak",
+        "native-amd64",
+        "native-arm64",
+        "native-riscv64"
+      ],
+      "blockerIds": [
+        "previous-stable-role-topology",
+        "native-riscv64-cluster-runner"
+      ]
+    },
+    {
+      "id": "gateway-controller-explain",
+      "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
+      "gateIds": [
+        "policy-contract",
+        "unsupported-combination-diagnostics",
+        "stale-object-convergence",
+        "partial-rollout-recovery",
+        "long-duration-soak",
+        "native-amd64",
+        "native-arm64",
+        "native-riscv64"
+      ],
+      "blockerIds": [
+        "native-riscv64-cluster-runner"
+      ]
+    },
+    {
       "id": "helm-data-plane",
       "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
       "gateIds": [
         "policy-contract",
         "unsupported-combination-diagnostics",
@@ -621,6 +784,7 @@
     {
       "id": "helm-gateway-controller",
       "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
       "gateIds": [
         "policy-contract",
         "unsupported-combination-diagnostics",

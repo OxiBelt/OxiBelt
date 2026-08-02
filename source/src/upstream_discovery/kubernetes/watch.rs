@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
-use crate::config::{UpstreamDiscoveryProvider, UpstreamPoolDiscoveryConfig};
+use crate::config::UpstreamPoolDiscoveryConfig;
 use crate::control_http::{ControlHttpClient, empty_body, uri_from_url};
 use crate::state::AppHandle;
 
@@ -390,13 +390,8 @@ async fn apply_endpoint_slice_cache(
   discovery: &UpstreamPoolDiscoveryConfig,
   cache: &super::EndpointSliceCache,
 ) -> anyhow::Result<()> {
-  super::super::apply_discovered_servers(
-    state,
-    pool_name,
-    UpstreamDiscoveryProvider::Kubernetes,
-    cache.servers(discovery)?,
-  )
-  .await
+  super::super::apply_discovered_servers(state, pool_name, discovery, cache.servers(discovery)?)
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -445,6 +440,8 @@ mod tests {
   fn endpoint_slice_discovery() -> UpstreamPoolDiscoveryConfig {
     UpstreamPoolDiscoveryConfig {
       provider: UpstreamDiscoveryProvider::Kubernetes,
+      id: None,
+      weight_multiplier: 1,
       name: None,
       endpoint: Some("https://kubernetes.default.svc".parse().expect("valid URL")),
       namespace: Some("default".to_string()),

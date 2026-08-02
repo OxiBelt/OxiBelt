@@ -46,6 +46,26 @@ pub(super) fn route_has_matching_listener(
     if parent_port.is_some() && parent_port != listener.port {
       return false;
     }
+    let hostname_matches = listener
+      .hostname
+      .as_deref()
+      .is_none_or(|listener_hostname| {
+        route
+          .spec
+          .get("hostnames")
+          .and_then(Value::as_array)
+          .is_none_or(|hostnames| {
+            hostnames.is_empty()
+              || hostnames.iter().any(|hostname| {
+                hostname.as_str().is_some_and(|route_hostname| {
+                  super::super::translate::host_intersects(route_hostname, listener_hostname)
+                })
+              })
+          })
+      });
+    if !hostname_matches {
+      return false;
+    }
     (match route.kind.as_str() {
       "GRPCRoute" | "HTTPRoute" => matches!(listener.protocol.as_str(), "HTTP" | "HTTPS"),
       "TLSRoute" => {

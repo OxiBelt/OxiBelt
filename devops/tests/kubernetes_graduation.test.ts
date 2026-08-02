@@ -126,6 +126,7 @@ test('requires exact source, immutable image, chart, report, and log bindings in
     policyVersion: Loaded.policyVersion,
     policyDefinitionSha256: KubernetesGraduationPolicyDefinitionSha256(Loaded),
     sourceRevision: ExpectedSourceRevision,
+    validatedVersion: 'v0.7.0',
     runId: 123,
     runAttempt: 2,
     generatedAt: '2026-07-24T12:00:00Z',
@@ -167,7 +168,8 @@ test('requires exact source, immutable image, chart, report, and log bindings in
     Receipt,
     EvidenceSchema,
     Loaded,
-    ExpectedSourceRevision
+    ExpectedSourceRevision,
+    'v0.7.0'
   )
 
   const StaleRevision = structuredClone(Receipt)
@@ -177,7 +179,8 @@ test('requires exact source, immutable image, chart, report, and log bindings in
       StaleRevision,
       EvidenceSchema,
       Loaded,
-      ExpectedSourceRevision
+      ExpectedSourceRevision,
+      'v0.7.0'
     ),
     /does not bind the expected source revision/
   )
@@ -187,7 +190,8 @@ test('requires exact source, immutable image, chart, report, and log bindings in
       Receipt,
       EvidenceSchema,
       Loaded,
-      'ABC123'
+      'ABC123',
+      'v0.7.0'
     ),
     /expected source revision must be a full lowercase Git commit/
   )
@@ -199,7 +203,8 @@ test('requires exact source, immutable image, chart, report, and log bindings in
       MissingArtifacts,
       EvidenceSchema,
       Loaded,
-      ExpectedSourceRevision
+      ExpectedSourceRevision,
+      'v0.7.0'
     ),
     /artifactSubjects must contain at least 2 items/
   )
@@ -212,7 +217,8 @@ test('requires exact source, immutable image, chart, report, and log bindings in
       MutableImage,
       EvidenceSchema,
       Loaded,
-      ExpectedSourceRevision
+      ExpectedSourceRevision,
+      'v0.7.0'
     ),
     /reference must end with its immutable digest/
   )
@@ -229,8 +235,75 @@ test('requires exact source, immutable image, chart, report, and log bindings in
       MissingLog,
       EvidenceSchema,
       Loaded,
-      ExpectedSourceRevision
+      ExpectedSourceRevision,
+      'v0.7.0'
     ),
     /one log hash for every exact job id/
+  )
+
+  const ArbitraryVersion = structuredClone(Receipt)
+  ArbitraryVersion.validatedVersion = 'v999.999.999'
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      ArbitraryVersion,
+      EvidenceSchema,
+      Loaded,
+      ExpectedSourceRevision,
+      'v0.7.0'
+    ),
+    /does not bind the expected validated product version/
+  )
+
+  const MismatchedChartVersion = structuredClone(Receipt)
+  MismatchedChartVersion.artifactSubjects[1].reference =
+    'oxibelt-gateway-controller-9.9.9.tgz'
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      MismatchedChartVersion,
+      EvidenceSchema,
+      Loaded,
+      ExpectedSourceRevision,
+      'v0.7.0'
+    ),
+    /must bind a Helm chart package for validated version v0.7.0/
+  )
+})
+
+test('rejects a validated product version without complete qualification gates', () => {
+  const Schema = ReadJson('devops/config/kubernetes-feature-graduation.schema.json')
+  const Unproven = Policy()
+  const Feature = Unproven.features.find(Candidate => Candidate.id === 'gateway-controller')
+  Assert.notEqual(Feature, undefined)
+  if (Feature === undefined) {
+    return
+  }
+  Feature.lastValidatedVersion = 'v999.999.999'
+  Assert.throws(
+    () => ValidateKubernetesGraduationPolicyObject(Unproven, Schema),
+    /lastValidatedVersion requires complete mandatory gates/
+  )
+})
+
+test('requires workspace evidence validation before an object can claim passed gates', () => {
+  const Schema = ReadJson('devops/config/kubernetes-feature-graduation.schema.json')
+  const Untrusted = Policy()
+  const Feature = Untrusted.features.find(Candidate => Candidate.id === 'gateway-controller')
+  Assert.notEqual(Feature, undefined)
+  if (Feature === undefined) {
+    return
+  }
+  for (const Gate of Untrusted.gates) {
+    if (Gate.appliesTo.includes(Feature.id)) {
+      Gate.status = 'passed'
+      Gate.evidenceReceipts = ['evidence/kubernetes-graduation/missing.json']
+    }
+  }
+  Feature.status = 'supported'
+  Feature.lastValidatedVersion = 'v999.999.999'
+  Feature.blockerIds = []
+
+  Assert.throws(
+    () => ValidateKubernetesGraduationPolicyObject(Untrusted, Schema),
+    /requires workspace evidence validation/
   )
 })

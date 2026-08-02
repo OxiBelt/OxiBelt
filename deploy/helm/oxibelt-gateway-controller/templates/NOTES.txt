@@ -9,3 +9,12 @@ successful render or install is not a support claim. Check `/supportz` and run
 Steady state requires `compatibility.mode=exact`. Use `rolling_upgrade` only
 for the documented controller-first adjacent-minor procedure and restore
 `exact` before its bounded deadline.
+
+{{- if gt (len .Values.rollout.targets) 0 }}
+
+MULTI-TARGET CRD PREINSTALL REQUIRED: this chart renders operator-owned
+OxiBeltDataPlaneTarget resources but does not install or upgrade their CRD.
+Before installing these values, apply the matching manifest from
+deploy/kubernetes/oxibelt-gateway-controller/crds/ and review its lifecycle
+under the Kubernetes support policy.
+{{- end }}

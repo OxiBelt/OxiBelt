@@ -9,6 +9,7 @@ use anyhow::Context;
 use base64::Engine;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
+use http_body_util::BodyExt;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use tracing::warn;
@@ -20,6 +21,7 @@ use crate::config::{
 };
 use crate::control_http::{ControlHttpClient, empty_body, full_body, uri_from_url};
 use crate::metrics::Metrics;
+use crate::proxy::http::body::{ProxyBody, materialized_known_small_body};
 
 #[derive(Clone)]
 pub struct ExternalAuthRuntime {
@@ -148,12 +150,232 @@ impl ExternalAuthRuntime {
       route_name,
     };
     let result = match provider.config.provider {
-      ExternalAuthProvider::Authelia => inner.check_forward_auth(provider, context).await,
-      ExternalAuthProvider::GatewayExtAuthHttp => inner.check_forward_auth(provider, context).await,
+      ExternalAuthProvider::Authelia => inner.check_forward_auth(provider, context, None).await,
+      ExternalAuthProvider::GatewayExtAuthHttp => {
+        inner.check_forward_auth(provider, context, None).await
+      }
       ExternalAuthProvider::OAuth2 => inner.check_oauth2(provider, context).await,
       ExternalAuthProvider::Oidc => inner.check_oidc(provider, context).await,
     };
     finish_auth_check(request, provider, inner.metrics.as_ref(), result)
+  }
+
+  /// Authorize an HTTP request, forwarding a bounded, replayable body only for
+  /// the Gateway API HTTP external-auth provider.
+  #[allow(clippy::too_many_arguments)]
+  pub async fn authorize_http(
+    &self,
+    provider_name: &str,
+    request: &mut Request<ProxyBody>,
+    client_ip: std::net::IpAddr,
+    host: &str,
+    downstream_scheme: &str,
+    route_name: &str,
+    request_body_limit: usize,
+    request_body_timeout: Duration,
+  ) -> ExternalAuthOutcome {
+    let Some(inner) = &self.inner else {
+      return ExternalAuthOutcome::Allowed;
+    };
+    let Some(provider) = inner.providers.get(provider_name) else {
+      warn!(
+        provider = provider_name,
+        "route references missing external auth provider"
+      );
+      inner.metrics.record_external_auth_error();
+      return fail_closed(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "external auth provider is not configured",
+      );
+    };
+
+    strip_identity_headers(request.headers_mut(), &provider.identity_headers);
+    let forwarded_body = if provider.config.provider == ExternalAuthProvider::GatewayExtAuthHttp
+      && provider.config.max_request_body_bytes > 0
+    {
+      match capture_gateway_request_body(
+        request,
+        provider,
+        request_body_limit,
+        request_body_timeout,
+      )
+      .await
+      {
+        Ok(body) => Some(body),
+        Err(terminal) => {
+          inner.metrics.record_external_auth_denied();
+          return ExternalAuthOutcome::Denied(terminal);
+        }
+      }
+    } else {
+      None
+    };
+    let context = ExternalAuthRequestContext {
+      method: request.method(),
+      uri: request.uri(),
+      headers: request.headers(),
+      client_ip,
+      host,
+      downstream_scheme,
+      route_name,
+    };
+    let result = match provider.config.provider {
+      ExternalAuthProvider::Authelia => inner.check_forward_auth(provider, context, None).await,
+      ExternalAuthProvider::GatewayExtAuthHttp => {
+        inner
+          .check_forward_auth(provider, context, forwarded_body)
+          .await
+      }
+      ExternalAuthProvider::OAuth2 => inner.check_oauth2(provider, context).await,
+      ExternalAuthProvider::Oidc => inner.check_oidc(provider, context).await,
+    };
+    finish_auth_check(request, provider, inner.metrics.as_ref(), result)
+  }
+}
+
+async fn capture_gateway_request_body(
+  request: &mut Request<ProxyBody>,
+  provider: &ExternalAuthProviderRuntime,
+  request_body_limit: usize,
+  request_body_timeout: Duration,
+) -> Result<Bytes, ExternalAuthTerminal> {
+  let limit = provider
+    .config
+    .max_request_body_bytes
+    .min(request_body_limit);
+  if request
+    .headers()
+    .get(http::header::CONTENT_LENGTH)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.parse::<usize>().ok())
+    .is_some_and(|length| length > limit)
+  {
+    return Err(external_auth_request_rejection(
+      StatusCode::PAYLOAD_TOO_LARGE,
+      "external auth request body exceeds configured limit",
+    ));
+  }
+
+  let original_body = std::mem::replace(
+    request.body_mut(),
+    materialized_known_small_body(Bytes::new(), None),
+  );
+  let collected = tokio::time::timeout(
+    request_body_timeout,
+    collect_bounded_request_body(original_body, limit),
+  )
+  .await
+  .map_err(|_| {
+    external_auth_request_rejection(
+      StatusCode::REQUEST_TIMEOUT,
+      "external auth request body timed out",
+    )
+  })?
+  .map_err(|error| match error {
+    ExternalAuthRequestBodyError::TooLarge => external_auth_request_rejection(
+      StatusCode::PAYLOAD_TOO_LARGE,
+      "external auth request body exceeds configured limit",
+    ),
+    ExternalAuthRequestBodyError::Body(error) => {
+      warn!(error = %error, "failed to read external auth request body");
+      external_auth_request_rejection(
+        StatusCode::BAD_REQUEST,
+        "failed to read external auth request body",
+      )
+    }
+  })?;
+  let (body, trailers) = collected;
+  *request.body_mut() = materialized_known_small_body(body.clone(), trailers);
+
+  if !body.is_empty() && !gateway_content_type_allowed(request.headers(), provider) {
+    return Err(external_auth_request_rejection(
+      StatusCode::UNSUPPORTED_MEDIA_TYPE,
+      "external auth request body content type is not allowed",
+    ));
+  }
+  Ok(body)
+}
+
+enum ExternalAuthRequestBodyError {
+  TooLarge,
+  Body(crate::proxy::http::body::BoxError),
+}
+
+async fn collect_bounded_request_body(
+  mut body: ProxyBody,
+  limit: usize,
+) -> Result<(Bytes, Option<HeaderMap>), ExternalAuthRequestBodyError> {
+  let mut bytes = bytes::BytesMut::new();
+  let mut trailers = None;
+  while let Some(frame) = body.frame().await {
+    let frame = frame.map_err(ExternalAuthRequestBodyError::Body)?;
+    match frame.into_data() {
+      Ok(data) => {
+        let Some(total) = bytes.len().checked_add(data.len()) else {
+          return Err(ExternalAuthRequestBodyError::TooLarge);
+        };
+        if total > limit {
+          return Err(ExternalAuthRequestBodyError::TooLarge);
+        }
+        bytes.extend_from_slice(&data);
+      }
+      Err(frame) => {
+        if let Ok(frame_trailers) = frame.into_trailers() {
+          trailers = Some(frame_trailers);
+        }
+      }
+    }
+  }
+  Ok((bytes.freeze(), trailers))
+}
+
+fn gateway_content_type_allowed(
+  headers: &HeaderMap,
+  provider: &ExternalAuthProviderRuntime,
+) -> bool {
+  let Some(content_type) = headers
+    .get(http::header::CONTENT_TYPE)
+    .and_then(|value| value.to_str().ok())
+    .map(|value| {
+      value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_ascii_lowercase()
+    })
+  else {
+    return false;
+  };
+  provider
+    .config
+    .allowed_content_types
+    .iter()
+    .any(|allowed| allowed.eq_ignore_ascii_case(&content_type))
+}
+
+fn gateway_auth_uri(endpoint: &url::Url, request_uri: &http::Uri) -> anyhow::Result<http::Uri> {
+  let mut target = endpoint.clone();
+  let prefix = endpoint.path().trim_end_matches('/');
+  let original_path = request_uri.path();
+  let path = if prefix.is_empty() {
+    original_path.to_string()
+  } else if original_path == "/" {
+    format!("{prefix}/")
+  } else {
+    format!("{prefix}/{}", original_path.trim_start_matches('/'))
+  };
+  target.set_path(&path);
+  target.set_query(request_uri.query());
+  target.set_fragment(None);
+  uri_from_url(&target)
+}
+
+fn external_auth_request_rejection(status: StatusCode, message: &str) -> ExternalAuthTerminal {
+  ExternalAuthTerminal {
+    status,
+    headers: HeaderMap::new(),
+    body: Bytes::copy_from_slice(message.as_bytes()),
   }
 }
 
@@ -162,16 +384,41 @@ impl ExternalAuthInner {
     &self,
     provider: &ExternalAuthProviderRuntime,
     context: ExternalAuthRequestContext<'_>,
+    forwarded_body: Option<Bytes>,
   ) -> anyhow::Result<AuthCheck> {
+    let is_gateway = provider.config.provider == ExternalAuthProvider::GatewayExtAuthHttp;
+    let request_uri = if is_gateway {
+      gateway_auth_uri(&provider.config.endpoint, context.uri)?
+    } else {
+      uri_from_url(&provider.config.endpoint)?
+    };
     let mut builder = Request::builder()
-      .method(Method::GET)
-      .uri(uri_from_url(&provider.config.endpoint)?);
+      .method(if is_gateway {
+        context.method.clone()
+      } else {
+        Method::GET
+      })
+      .uri(request_uri);
     let headers = builder
       .headers_mut()
       .ok_or_else(|| anyhow::anyhow!("external auth request builder rejected headers"))?;
     add_forward_auth_headers(headers, provider, &context);
+    if is_gateway {
+      headers.remove(http::header::CONTENT_LENGTH);
+      headers.remove(http::header::TRANSFER_ENCODING);
+      if let Some(body) = forwarded_body.as_ref() {
+        if let Some(content_type) = context.headers.get(http::header::CONTENT_TYPE) {
+          headers.insert(http::header::CONTENT_TYPE, content_type.clone());
+        }
+        headers.insert(
+          http::header::CONTENT_LENGTH,
+          HeaderValue::from_str(&body.len().to_string())
+            .context("failed to encode external auth request body length")?,
+        );
+      }
+    }
     let request = builder
-      .body(empty_body())
+      .body(forwarded_body.map_or_else(empty_body, full_body))
       .context("failed to build external auth request")?;
     let response = self
       .client
@@ -367,6 +614,9 @@ fn add_forward_auth_headers(
   context: &ExternalAuthRequestContext<'_>,
 ) {
   for name in &provider.forward_headers {
+    if oxibelt_control_protocol::is_reserved_route_request_header(name.as_str()) {
+      continue;
+    }
     if let Some(value) = context.headers.get(name) {
       headers.insert(name.clone(), value.clone());
     }
@@ -410,6 +660,9 @@ fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
 
 fn strip_identity_headers(headers: &mut HeaderMap, names: &[HeaderName]) {
   for name in names {
+    if oxibelt_control_protocol::is_reserved_route_request_header(name.as_str()) {
+      continue;
+    }
     headers.remove(name);
   }
 }
@@ -420,6 +673,9 @@ fn apply_identity_headers(
   identity: HashMap<String, String>,
 ) {
   for name in &provider.identity_headers {
+    if oxibelt_control_protocol::is_reserved_route_request_header(name.as_str()) {
+      continue;
+    }
     if let Some(value) = identity.get(name.as_str())
       && let Ok(value) = HeaderValue::from_str(value)
     {
@@ -453,6 +709,7 @@ fn filter_terminal_response(
   for (name, value) in headers {
     if let Some(name) = name
       && provider.terminal_response_headers.contains(&name)
+      && !oxibelt_control_protocol::is_forbidden_route_action_header(name.as_str())
     {
       filtered.append(name, value);
     }

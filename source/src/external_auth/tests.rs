@@ -37,6 +37,8 @@ fn provider_with_kind_and_fail_policy(
         .map(|header| header.to_string())
         .collect(),
       max_response_body_bytes: 4_096,
+      max_request_body_bytes: 0,
+      allowed_content_types: Vec::new(),
       client_id_env: None,
       client_secret_env: None,
       required_scopes: Vec::new(),
@@ -118,6 +120,204 @@ fn forward_auth_headers_project_origin_absolute_and_authority_targets() {
     assert_eq!(headers["x-forwarded-for"], "192.0.2.10");
     assert_eq!(headers["x-forwarded-route"], "vault-admin");
   }
+}
+
+#[test]
+fn gateway_auth_endpoint_path_prefixes_original_path_and_query() {
+  let endpoint = "https://auth.example.test/ext-auth/"
+    .parse()
+    .expect("valid auth endpoint");
+  let original = "/orders/42?expand=items"
+    .parse()
+    .expect("valid original URI");
+
+  let target = gateway_auth_uri(&endpoint, &original).expect("gateway auth URI should build");
+
+  assert_eq!(
+    target,
+    "https://auth.example.test/ext-auth/orders/42?expand=items"
+  );
+}
+
+#[tokio::test]
+async fn gateway_request_body_capture_replays_body_and_enforces_policy() {
+  let mut provider = provider_with_kind_and_fail_policy(
+    ExternalAuthProvider::GatewayExtAuthHttp,
+    ExternalAuthFailPolicy::Closed,
+    &[],
+    &[],
+  );
+  provider.config.max_request_body_bytes = 4;
+  provider.config.allowed_content_types = vec!["application/json".to_string()];
+  let mut request = Request::builder()
+    .header(
+      http::header::CONTENT_TYPE,
+      "application/json; charset=utf-8",
+    )
+    .header(http::header::CONTENT_LENGTH, "4")
+    .body(materialized_known_small_body(
+      Bytes::from_static(b"body"),
+      None,
+    ))
+    .expect("request should build");
+
+  let captured = match capture_gateway_request_body(
+    &mut request,
+    &provider,
+    16,
+    std::time::Duration::from_secs(1),
+  )
+  .await
+  {
+    Ok(captured) => captured,
+    Err(terminal) => panic!(
+      "allowed request body should be captured, got status {}",
+      terminal.status
+    ),
+  };
+
+  assert_eq!(captured, Bytes::from_static(b"body"));
+  let replayed = request
+    .into_body()
+    .collect()
+    .await
+    .expect("primary body should replay")
+    .to_bytes();
+  assert_eq!(replayed, Bytes::from_static(b"body"));
+
+  let mut oversized = Request::builder()
+    .header(http::header::CONTENT_TYPE, "application/json")
+    .header(http::header::CONTENT_LENGTH, "5")
+    .body(materialized_known_small_body(
+      Bytes::from_static(b"12345"),
+      None,
+    ))
+    .expect("request should build");
+  let terminal = capture_gateway_request_body(
+    &mut oversized,
+    &provider,
+    16,
+    std::time::Duration::from_secs(1),
+  )
+  .await
+  .expect_err("oversized request body must fail closed");
+  assert_eq!(terminal.status, StatusCode::PAYLOAD_TOO_LARGE);
+
+  let mut disallowed = Request::builder()
+    .header(http::header::CONTENT_TYPE, "text/plain")
+    .body(materialized_known_small_body(
+      Bytes::from_static(b"body"),
+      None,
+    ))
+    .expect("request should build");
+  let terminal = capture_gateway_request_body(
+    &mut disallowed,
+    &provider,
+    16,
+    std::time::Duration::from_secs(1),
+  )
+  .await
+  .expect_err("disallowed request body content type must fail closed");
+  assert_eq!(terminal.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+async fn gateway_forward_auth_dispatches_original_method_prefixed_path_and_body() {
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("capture listener should bind");
+  let address = listener.local_addr().expect("listener address");
+  let (capture_sender, capture_receiver) = tokio::sync::oneshot::channel();
+  tokio::spawn(async move {
+    let (mut stream, _) = listener.accept().await.expect("auth request should arrive");
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 1024];
+    loop {
+      let read = stream.read(&mut buffer).await.expect("request should read");
+      if read == 0 {
+        break;
+      }
+      request.extend_from_slice(&buffer[..read]);
+      let Some(headers_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+        continue;
+      };
+      let headers_end = headers_end + 4;
+      let headers = String::from_utf8_lossy(&request[..headers_end]);
+      let content_length = headers
+        .lines()
+        .find_map(|line| {
+          let (name, value) = line.split_once(':')?;
+          name
+            .eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+        })
+        .unwrap_or(0);
+      if request.len() >= headers_end + content_length {
+        break;
+      }
+    }
+    let _ = capture_sender.send(request);
+    stream
+      .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+      .await
+      .expect("auth response should write");
+  });
+
+  let mut provider = provider_with_kind_and_fail_policy(
+    ExternalAuthProvider::GatewayExtAuthHttp,
+    ExternalAuthFailPolicy::Closed,
+    &[],
+    &[],
+  );
+  provider.config.endpoint = format!("http://{address}/authz/")
+    .parse()
+    .expect("valid local endpoint");
+  let method = Method::POST;
+  let uri = http::Uri::from_static("/orders/42?expand=items");
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    http::header::CONTENT_TYPE,
+    HeaderValue::from_static("application/json"),
+  );
+  let context = ExternalAuthRequestContext {
+    method: &method,
+    uri: &uri,
+    headers: &headers,
+    client_ip: "192.0.2.10".parse().expect("valid client IP"),
+    host: "shop.example.test",
+    downstream_scheme: "https",
+    route_name: "orders",
+  };
+  let inner = ExternalAuthInner {
+    providers: HashMap::new(),
+    client: ControlHttpClient::new(&[]).expect("control client should build"),
+    metrics: Arc::new(Metrics::default()),
+  };
+
+  let result = inner
+    .check_forward_auth(&provider, context, Some(Bytes::from_static(b"{}")))
+    .await
+    .expect("gateway auth request should succeed");
+  assert!(matches!(result, AuthCheck::Allowed(_)));
+  let captured = capture_receiver
+    .await
+    .expect("captured auth request should be delivered");
+  let captured = String::from_utf8(captured).expect("captured request should be UTF-8");
+  assert!(captured.starts_with("POST /authz/orders/42?expand=items HTTP/1.1\r\n"));
+  assert!(
+    captured
+      .to_ascii_lowercase()
+      .contains("content-type: application/json\r\n")
+  );
+  assert!(
+    captured
+      .to_ascii_lowercase()
+      .contains("content-length: 2\r\n")
+  );
+  assert!(captured.ends_with("\r\n\r\n{}"));
 }
 
 #[test]
@@ -249,6 +449,36 @@ fn denied_forward_auth_response_preserves_unauthorized_status_and_allowlisted_he
     "sid=1"
   );
   assert!(terminal.headers.get("x-internal-error").is_none());
+}
+
+#[test]
+fn invalid_runtime_header_lists_cannot_mutate_message_framing() {
+  let provider = provider_with_headers(&["content-length"], &["content-length"]);
+  let mut request = Request::builder()
+    .header(http::header::CONTENT_LENGTH, "4")
+    .body(())
+    .expect("request builds");
+
+  strip_identity_headers(request.headers_mut(), &provider.identity_headers);
+  apply_identity_headers(
+    request.headers_mut(),
+    &provider,
+    HashMap::from([("content-length".to_string(), "999".to_string())]),
+  );
+  assert_eq!(request.headers()[http::header::CONTENT_LENGTH], "4");
+
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    http::header::CONTENT_LENGTH,
+    HeaderValue::from_static("999"),
+  );
+  let terminal = filter_terminal_response(
+    StatusCode::UNAUTHORIZED,
+    headers,
+    Bytes::from_static(b"denied"),
+    &provider,
+  );
+  assert!(terminal.headers.get(http::header::CONTENT_LENGTH).is_none());
 }
 
 #[test]

@@ -413,6 +413,15 @@ pub(super) async fn handle_upgrade_request(
     None,
   );
   apply_header_mutations(&mut parts.headers, &request_waf.request_header_mutations);
+  if let Some(authority) = resolved
+    .route
+    .actions
+    .rewrite
+    .as_ref()
+    .and_then(|rewrite| rewrite.authority.as_deref())
+  {
+    set_effective_host_header(&mut parts.headers, authority);
+  }
   early_data::apply_verified_upstream_header(&mut parts.headers, verified_early_data);
   state
     .telemetry

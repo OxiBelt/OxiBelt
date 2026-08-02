@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{
   TlsClientAuthConfig, TlsCryptoProvider, TlsServerResumptionConfig, TlsServerResumptionMode,
   UpstreamEchConfig, UpstreamTls12ResumptionMode, UpstreamTlsResumptionConfig,
-  UpstreamTlsResumptionMode, UpstreamTlsTrust,
+  UpstreamTlsResumptionMode, UpstreamTlsSubjectAltName, UpstreamTlsTrust,
 };
 
 use super::certificate_io::{load_certs, read_existing_file};
@@ -78,6 +78,7 @@ pub(super) struct TlsClientConfigKey {
   tls_provider: TlsCryptoProvider,
   upstream_name: String,
   roots_identity: String,
+  subject_alt_names_identity: String,
   ech_identity: String,
   mode: UpstreamTlsResumptionMode,
   session_cache_size: usize,
@@ -432,12 +433,14 @@ pub(super) fn upstream_client_resumption(config: &UpstreamTlsResumptionConfig) -
   Resumption::in_memory_sessions(config.session_cache_size).tls12_resumption(tls12)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn upstream_client_config_key(
   scope: &'static str,
   tls_provider: TlsCryptoProvider,
   upstream_name: &str,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
+  subject_alt_names: &[UpstreamTlsSubjectAltName],
   ech: &UpstreamEchConfig,
   resumption: &UpstreamTlsResumptionConfig,
 ) -> anyhow::Result<TlsClientConfigKey> {
@@ -446,11 +449,32 @@ pub(super) fn upstream_client_config_key(
     tls_provider,
     upstream_name: upstream_name.to_string(),
     roots_identity: upstream_roots_identity(extra_root_certificates, trust)?,
+    subject_alt_names_identity: upstream_subject_alt_names_identity(subject_alt_names),
     ech_identity: upstream_ech_identity(ech)?,
     mode: resumption.mode,
     session_cache_size: resumption.session_cache_size,
     tls12: resumption.tls12,
   })
+}
+
+fn upstream_subject_alt_names_identity(subject_alt_names: &[UpstreamTlsSubjectAltName]) -> String {
+  let mut identities = subject_alt_names
+    .iter()
+    .map(|identity| match identity {
+      UpstreamTlsSubjectAltName::Dns(value) => (b'd', value.as_str()),
+      UpstreamTlsSubjectAltName::Uri(value) => (b'u', value.as_str()),
+    })
+    .collect::<Vec<_>>();
+  identities.sort_unstable();
+
+  let mut context = Sha256::new();
+  context.update(b"subject-alt-names");
+  for (kind, value) in identities {
+    context.update([kind]);
+    context.update((value.len() as u64).to_be_bytes());
+    context.update(value.as_bytes());
+  }
+  hex_encode(&context.finalize())
 }
 
 pub(in crate::tls) fn certificate_identity(certs: &[CertificateDer<'static>]) -> String {
@@ -513,8 +537,13 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-  use super::{TlsClientAuthConfig, TtlServerSessionCache, client_auth_identity};
-  use crate::config::TlsClientAuthMode;
+  use super::{
+    TlsClientAuthConfig, TtlServerSessionCache, client_auth_identity, upstream_client_config_key,
+  };
+  use crate::config::{
+    TlsClientAuthMode, TlsCryptoProvider, UpstreamEchConfig, UpstreamTlsResumptionConfig,
+    UpstreamTlsSubjectAltName, UpstreamTlsTrust,
+  };
   use rustls::server::StoresServerSessions;
   use std::sync::Arc;
   use std::time::Duration;
@@ -535,6 +564,35 @@ mod tests {
       client_auth_identity(&shallow).expect("identity should hash"),
       client_auth_identity(&deep).expect("identity should hash")
     );
+  }
+
+  #[test]
+  fn upstream_client_identity_includes_canonical_subject_alt_names() {
+    let first = vec![
+      UpstreamTlsSubjectAltName::Dns("backend.example.test".to_string()),
+      UpstreamTlsSubjectAltName::Uri("spiffe://example.test/backend".to_string()),
+    ];
+    let reordered = vec![first[1].clone(), first[0].clone()];
+    let changed = vec![UpstreamTlsSubjectAltName::Dns(
+      "other.example.test".to_string(),
+    )];
+    let key = |subject_alt_names: &[UpstreamTlsSubjectAltName]| {
+      upstream_client_config_key(
+        "tcp",
+        TlsCryptoProvider::default(),
+        "backend",
+        &[],
+        UpstreamTlsTrust::Inherit,
+        subject_alt_names,
+        &UpstreamEchConfig::default(),
+        &UpstreamTlsResumptionConfig::default(),
+      )
+      .expect("client identity should hash")
+    };
+
+    assert_eq!(key(&first), key(&reordered));
+    assert_ne!(key(&first), key(&changed));
+    assert_ne!(key(&first), key(&[]));
   }
 
   #[test]

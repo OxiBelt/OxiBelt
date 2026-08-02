@@ -1467,6 +1467,8 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 #
 #[[upstream_pools.discovery]]
 # provider = "kubernetes"
+# id = "app-primary"
+# weight_multiplier = 20
 # endpoint = "https://kubernetes.default.svc"
 # namespace = "default"
 # service = "app"

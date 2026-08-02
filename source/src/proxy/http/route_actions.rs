@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, bail};
 use http::header::LOCATION;
-use http::uri::PathAndQuery;
+use http::uri::{Authority, PathAndQuery, Scheme};
 use http::{HeaderValue, Response, StatusCode, Uri};
 
 use crate::config::RouteConfig;
@@ -96,48 +96,63 @@ pub(super) fn build_upstream_uri(
   };
   let path_and_query = PathAndQuery::from_str(path_and_query.as_str())
     .map_err(|error| anyhow::anyhow!("failed to build route action URI: {error}"))?;
-  build_uri(origin, path_and_query)
+  let uri = build_uri(origin, path_and_query)?;
+  match rewrite.authority.as_deref() {
+    Some(authority) => replace_uri_authority(uri, authority),
+    None => Ok(uri),
+  }
 }
 
 pub(super) fn resolved_redirect_response(
   resolved: &ResolvedRoute<'_>,
   downstream_scheme: &str,
   downstream_host: &str,
+  downstream_port: u16,
   downstream_uri: &Uri,
 ) -> anyhow::Result<Option<Response<ProxyBody>>> {
   redirect_response(
     resolved.route,
     resolved_context(resolved, downstream_scheme, downstream_host, downstream_uri),
+    downstream_port,
   )
 }
 
 pub(super) fn redirect_response(
   route: &RouteConfig,
   context: RouteActionRenderContext<'_>,
+  downstream_port: u16,
 ) -> anyhow::Result<Option<Response<ProxyBody>>> {
   let Some(redirect) = route.actions.redirect.as_ref() else {
     return Ok(None);
   };
-  let status = redirect
-    .status
-    .ok_or_else(|| anyhow::anyhow!("actions.redirect.status is missing after validation"))?;
+  let structured = redirect.location_template.is_none();
+  let status = match (redirect.status, structured) {
+    (Some(status), _) => status,
+    (None, true) => 302,
+    (None, false) => {
+      bail!("actions.redirect.status is missing after validation");
+    }
+  };
   let status = StatusCode::from_u16(status)
     .map_err(|error| anyhow::anyhow!("actions.redirect.status is invalid: {error}"))?;
-  let template = redirect.location_template.as_deref().ok_or_else(|| {
-    anyhow::anyhow!("actions.redirect.location_template is missing after validation")
-  })?;
-  let location = render_template(template, context).with_context(|| {
-    format!(
-      "route {} actions.redirect.location_template failed to render",
-      route.name
-    )
-  })?;
-  validate_redirect_location(&location).with_context(|| {
-    format!(
-      "route {} actions.redirect.location_template rendered an unsafe location",
-      route.name
-    )
-  })?;
+  let location = match redirect.location_template.as_deref() {
+    Some(template) => {
+      let location = render_template(template, context).with_context(|| {
+        format!(
+          "route {} actions.redirect.location_template failed to render",
+          route.name
+        )
+      })?;
+      validate_legacy_redirect_location(&location).with_context(|| {
+        format!(
+          "route {} actions.redirect.location_template rendered an unsafe location",
+          route.name
+        )
+      })?;
+      location
+    }
+    None => structured_redirect_location(route, context, downstream_port)?,
+  };
 
   let mut response = text_response(status, "");
   let location = HeaderValue::from_str(&location).map_err(|error| {
@@ -145,6 +160,94 @@ pub(super) fn redirect_response(
   })?;
   response.headers_mut().insert(LOCATION, location);
   Ok(Some(response))
+}
+
+fn replace_uri_authority(uri: Uri, authority: &str) -> anyhow::Result<Uri> {
+  let authority = Authority::from_str(authority)
+    .map_err(|error| anyhow::anyhow!("failed to parse route rewrite authority: {error}"))?;
+  let mut parts = uri.into_parts();
+  parts.authority = Some(authority);
+  Uri::from_parts(parts)
+    .map_err(|error| anyhow::anyhow!("failed to build authority-rewritten URI: {error}"))
+}
+
+fn structured_redirect_location(
+  route: &RouteConfig,
+  context: RouteActionRenderContext<'_>,
+  downstream_port: u16,
+) -> anyhow::Result<String> {
+  let redirect = route
+    .actions
+    .redirect
+    .as_ref()
+    .ok_or_else(|| anyhow::anyhow!("structured redirect is missing after validation"))?;
+  let scheme_text = redirect
+    .scheme
+    .as_deref()
+    .unwrap_or(context.downstream_scheme);
+  if !matches!(scheme_text, "http" | "https") {
+    bail!("structured redirect requires an http or https request scheme");
+  }
+  let scheme = Scheme::from_str(scheme_text)
+    .map_err(|error| anyhow::anyhow!("failed to parse redirect scheme: {error}"))?;
+  let port = redirect.port.unwrap_or(match redirect.scheme.as_deref() {
+    Some("http") => 80,
+    Some("https") => 443,
+    _ => downstream_port,
+  });
+  if port == 0 {
+    bail!("structured redirect port must be between 1 and 65535");
+  }
+  let hostname = redirect
+    .hostname
+    .as_deref()
+    .unwrap_or(context.downstream_host);
+  let authority = redirect_authority(hostname, scheme_text, port)?;
+
+  let path = match redirect.path.as_deref() {
+    Some(template) => render_template(template, context).with_context(|| {
+      format!(
+        "route {} actions.redirect.path failed to render",
+        route.name
+      )
+    })?,
+    None => context.downstream_uri.path().to_string(),
+  };
+  validate_rendered_path(&path).with_context(|| {
+    format!(
+      "route {} actions.redirect.path rendered an unsafe path",
+      route.name
+    )
+  })?;
+  let path_and_query = match context.downstream_uri.query() {
+    Some(query) => format!("{path}?{query}"),
+    None => path,
+  };
+  let path_and_query = PathAndQuery::from_str(&path_and_query)
+    .map_err(|error| anyhow::anyhow!("failed to build redirect path and query: {error}"))?;
+  let mut parts = http::uri::Parts::default();
+  parts.scheme = Some(scheme);
+  parts.authority = Some(authority);
+  parts.path_and_query = Some(path_and_query);
+  Uri::from_parts(parts)
+    .map(|uri| uri.to_string())
+    .map_err(|error| anyhow::anyhow!("failed to build structured redirect URI: {error}"))
+}
+
+fn redirect_authority(hostname: &str, scheme: &str, port: u16) -> anyhow::Result<Authority> {
+  let hostname = if hostname.contains(':') && !hostname.starts_with('[') {
+    format!("[{hostname}]")
+  } else {
+    hostname.to_string()
+  };
+  let omit_port = matches!((scheme, port), ("http", 80) | ("https", 443));
+  let authority = if omit_port {
+    hostname
+  } else {
+    format!("{hostname}:{port}")
+  };
+  Authority::from_str(&authority)
+    .map_err(|error| anyhow::anyhow!("failed to build redirect authority: {error}"))
 }
 
 fn resolved_context<'a>(
@@ -300,7 +403,7 @@ fn validate_rendered_query(query: &str) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn validate_redirect_location(location: &str) -> anyhow::Result<()> {
+fn validate_legacy_redirect_location(location: &str) -> anyhow::Result<()> {
   if !location.starts_with('/') || location.starts_with("//") {
     bail!("rendered redirect location must start with one '/'");
   }
@@ -331,6 +434,7 @@ mod tests {
       replace_prefix_with: None,
       actions: RouteActionsConfig {
         rewrite: Some(RouteRewriteActionConfig {
+          authority: None,
           path: path.map(str::to_string),
           query: query.map(str::to_string),
         }),
@@ -456,6 +560,28 @@ mod tests {
   }
 
   #[test]
+  fn rewrite_replaces_authority_without_changing_upstream_scheme_or_path() {
+    let origin =
+      UpstreamUriParts::from_url(&url::Url::parse("https://transport.internal/base").unwrap())
+        .unwrap();
+    let mut route = route_with_rewrite(Some("/edge{path_suffix}"), None);
+    route
+      .actions
+      .rewrite
+      .as_mut()
+      .expect("rewrite exists")
+      .authority = Some("tenant.example.test:8443".to_string());
+    let uri = Uri::from_static("/api/orders?id=42");
+
+    let rewritten = build_upstream_uri(&origin, &route, context(&route, &[], &uri)).unwrap();
+
+    assert_eq!(
+      rewritten.to_string(),
+      "https://tenant.example.test:8443/base/edge/orders?id=42"
+    );
+  }
+
+  #[test]
   fn rewrite_fails_closed_on_unsafe_rendered_path() {
     let origin = UpstreamUriParts::from_url(&url::Url::parse("http://upstream").unwrap()).unwrap();
     let route = route_with_rewrite(Some("//edge"), None);
@@ -472,12 +598,13 @@ mod tests {
       redirect: Some(RouteRedirectActionConfig {
         status: Some(308),
         location_template: Some("/new{path_suffix}?{query}".to_string()),
+        ..Default::default()
       }),
       ..Default::default()
     };
     let uri = Uri::from_static("/api/orders?id=42");
 
-    let response = redirect_response(&route, context(&route, &[], &uri))
+    let response = redirect_response(&route, context(&route, &[], &uri), 443)
       .unwrap()
       .unwrap();
 
@@ -493,11 +620,63 @@ mod tests {
       redirect: Some(RouteRedirectActionConfig {
         status: Some(302),
         location_template: Some("/{path}".to_string()),
+        ..Default::default()
       }),
       ..Default::default()
     };
     let uri = Uri::from_static("/api/orders");
 
-    assert!(redirect_response(&route, context(&route, &[], &uri)).is_err());
+    assert!(redirect_response(&route, context(&route, &[], &uri), 443).is_err());
+  }
+
+  #[test]
+  fn structured_redirect_applies_gateway_port_defaults_and_preserves_query() {
+    let uri = Uri::from_static("/api/orders?id=42");
+    let cases = [
+      (
+        RouteRedirectActionConfig {
+          scheme: Some("https".to_string()),
+          hostname: Some("redirect.example.test".to_string()),
+          path: Some("/new{path_suffix}".to_string()),
+          ..Default::default()
+        },
+        8080,
+        "https://redirect.example.test/new/orders?id=42",
+      ),
+      (
+        RouteRedirectActionConfig {
+          path: Some("/new{path_suffix}".to_string()),
+          ..Default::default()
+        },
+        8443,
+        "https://example.test:8443/new/orders?id=42",
+      ),
+      (
+        RouteRedirectActionConfig {
+          scheme: Some("http".to_string()),
+          hostname: Some("redirect.example.test".to_string()),
+          port: Some(8080),
+          ..Default::default()
+        },
+        443,
+        "http://redirect.example.test:8080/api/orders?id=42",
+      ),
+    ];
+
+    for (redirect, downstream_port, expected) in cases {
+      let mut route = route_with_rewrite(None, None);
+      route.actions = RouteActionsConfig {
+        rewrite: None,
+        redirect: Some(redirect),
+        ..Default::default()
+      };
+
+      let response = redirect_response(&route, context(&route, &[], &uri), downstream_port)
+        .unwrap()
+        .unwrap();
+
+      assert_eq!(response.status(), StatusCode::FOUND);
+      assert_eq!(response.headers()[LOCATION], expected);
+    }
   }
 }

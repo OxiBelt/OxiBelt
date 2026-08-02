@@ -359,12 +359,15 @@ spec:
         backendRef:
           name: auth
           port: 9000
-        headersToExtAuth:
-        - authorization
-        headersToBackend:
-        - x-auth-user
-        headersToDownstreamOnDeny:
-        - www-authenticate
+        http:
+          path: /verify
+          allowedHeaders:
+          - authorization
+          allowedResponseHeaders:
+          - x-auth-user
+          - www-authenticate
+        forwardBody:
+          maxSize: 4096
     backendRefs:
     - name: app
       port: 8080

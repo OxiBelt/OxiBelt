@@ -19,6 +19,15 @@ fn args() -> SharedArgs {
     udp_batch: crate::cli::UdpBatchMode::Auto,
     udp_batch_size: 16,
     backend_resolution: crate::cli::BackendResolution::ClusterDns,
+    request_mirror_max_body_bytes: 0,
+    external_auth_max_body_bytes: 0,
+    external_auth_allowed_content_types: Vec::new(),
+    external_auth_allowed_request_headers: Vec::new(),
+    external_auth_allowed_identity_headers: Vec::new(),
+    external_auth_allowed_terminal_headers: Vec::new(),
+    external_auth_allow_credentials: false,
+    route_policy_max_request_body_bytes: 10_485_760,
+    route_policy_max_timeout_ms: 30_000,
     dry_run: false,
     health_bind: None,
   }
@@ -40,6 +49,7 @@ fn committed_rollout() -> RolloutStatus {
     desired_content_digest: Some("digest".to_string()),
     reason: None,
     proof: Some(crate::rollout_status::CommitProof::test()),
+    target_summary: None,
   }
 }
 
@@ -405,6 +415,60 @@ spec:
 }
 
 #[test]
+fn route_status_rejects_disjoint_route_and_listener_hostnames() {
+  let objects = vec![
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: oxibelt}
+spec: {controllerName: oxibelt.dev/gateway-controller}
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: edge, namespace: default}
+spec:
+  gatewayClassName: oxibelt
+  listeners:
+  - {name: http, protocol: HTTP, port: 80, hostname: owned.example.com}
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: redirect, namespace: default}
+spec:
+  parentRefs: [{name: edge, sectionName: http}]
+  hostnames: [outside.example.com]
+  rules: []
+"#,
+    ),
+  ];
+  let patches = build_status_patches(&objects, &args(), &[], &committed_rollout());
+  let gateway = patches
+    .iter()
+    .find(|patch| patch.resource == "gateways")
+    .expect("gateway patch");
+  assert_eq!(gateway.status["listeners"][0]["attachedRoutes"], 0);
+  let route = patches
+    .iter()
+    .find(|patch| patch.resource == "httproutes")
+    .expect("route patch");
+  assert_eq!(
+    route.status["parents"][0]["conditions"][0]["reason"],
+    "NoMatchingListener"
+  );
+  assert_eq!(
+    route.status["parents"][0]["conditions"][0]["status"],
+    CONDITION_FALSE
+  );
+}
+
+#[test]
 fn route_status_marks_reference_grant_name_mismatch_as_unresolved() {
   let objects = vec![
     object(
@@ -462,5 +526,130 @@ spec:
   assert_eq!(
     route.status["parents"][0]["conditions"][1]["status"],
     CONDITION_FALSE
+  );
+}
+
+#[test]
+fn route_policy_status_reports_resolution_caps_and_proven_artifact() {
+  let gateway_class = object(
+    r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: oxibelt}
+spec: {controllerName: oxibelt.dev/gateway-controller}
+"#,
+  );
+  let gateway = object(
+    r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: edge, namespace: default}
+spec:
+  gatewayClassName: oxibelt
+  listeners: [{name: http, protocol: HTTP, port: 80}]
+"#,
+  );
+  let route = object(
+    r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: app, namespace: default}
+spec:
+  parentRefs: [{name: edge, sectionName: http}]
+  rules:
+  - filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: gateway.oxibelt.dev
+        kind: OxiBeltRoutePolicy
+        name: app-security
+"#,
+  );
+  let policy = object(
+    r#"
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltRoutePolicy
+metadata: {name: app-security, namespace: default, generation: 3, resourceVersion: "9"}
+spec:
+  targetRef: {group: gateway.networking.k8s.io, kind: HTTPRoute, name: app}
+  limits: {maxRequestBodyBytes: 1024}
+"#,
+  );
+  let mut rollout = committed_rollout();
+  rollout.proof.as_mut().expect("proof").revision =
+    "oxibelt-config-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+  let objects = vec![gateway_class, gateway, route, policy];
+  let patches = build_status_patches(&objects, &args(), &[], &rollout);
+  let policy = patches
+    .iter()
+    .find(|patch| patch.resource == "oxibeltroutepolicies")
+    .expect("route policy status patch");
+
+  assert_eq!(policy.api_prefix, "/apis/gateway.oxibelt.dev/v1alpha1");
+  assert_eq!(policy.resource_version.as_deref(), Some("9"));
+  assert_eq!(policy.status["conditions"][0]["status"], CONDITION_TRUE);
+  assert_eq!(policy.status["conditions"][1]["status"], CONDITION_TRUE);
+  assert_eq!(policy.status["conditions"][2]["status"], CONDITION_FALSE);
+  assert_eq!(policy.status["conditions"][3]["status"], CONDITION_TRUE);
+  assert_eq!(
+    policy.status["artifactDigest"],
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  );
+
+  let diagnostics = vec![Diagnostic::error(
+    "OxiBeltRoutePolicy/default/app-security",
+    "invalid OxiBeltRoutePolicy: spec.limits.maxRequestBodyBytes exceeds the operator cap of 1024",
+  )];
+  let patches = build_status_patches(&objects, &args(), &diagnostics, &rollout);
+  let rejected = patches
+    .iter()
+    .find(|patch| patch.resource == "oxibeltroutepolicies")
+    .expect("rejected route policy status patch");
+  assert_eq!(rejected.status["conditions"][0]["status"], CONDITION_FALSE);
+  assert_eq!(
+    rejected.status["conditions"][0]["reason"],
+    "ExceedsOperatorLimit"
+  );
+  assert_eq!(rejected.status["conditions"][3]["status"], CONDITION_FALSE);
+}
+
+#[test]
+fn route_policy_status_does_not_program_an_omitted_target_route() {
+  let route = object(
+    r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: app, namespace: default}
+spec:
+  rules:
+  - filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: gateway.oxibelt.dev
+        kind: OxiBeltRoutePolicy
+        name: app-security
+"#,
+  );
+  let policy = object(
+    r#"
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltRoutePolicy
+metadata: {name: app-security, namespace: default}
+spec:
+  targetRef: {group: gateway.networking.k8s.io, kind: HTTPRoute, name: app}
+  waf: {requestRuleGroups: [baseline]}
+"#,
+  );
+  let patches = build_status_patches(&[route, policy], &args(), &[], &committed_rollout());
+  let policy = patches
+    .iter()
+    .find(|patch| patch.resource == "oxibeltroutepolicies")
+    .expect("route policy status patch");
+  assert_eq!(policy.status["conditions"][0]["status"], CONDITION_TRUE);
+  assert_eq!(policy.status["conditions"][1]["status"], CONDITION_TRUE);
+  assert_eq!(policy.status["conditions"][3]["status"], CONDITION_FALSE);
+  assert_eq!(
+    policy.status["conditions"][3]["reason"],
+    "TranslationOmitted"
   );
 }

@@ -6,7 +6,7 @@ use super::{
   GeneratedServer, NamedExactMatch, ObjectKey, TranslationState, backend_port,
   backend_ref_is_service, backend_service_port, endpoint_slice_discovery_port,
   filters::ParsedRouteFilters, filters::parse_route_filters, intersect_hosts, sanitize_name,
-  string_at, u32_at,
+  string_at,
 };
 use crate::cli::BackendResolution;
 use crate::model::{KubernetesObject, object_ref as model_object_ref};
@@ -33,7 +33,10 @@ impl TranslationState {
     };
 
     for attachment in attachments {
-      let hosts = intersect_hosts(&route_hosts, attachment.listener.hostname.as_deref());
+      let Some(hosts) = intersect_hosts(&route_hosts, attachment.listener.hostname.as_deref())
+      else {
+        continue;
+      };
       for (rule_index, rule) in rules.iter().enumerate() {
         let matches = rule
           .get("matches")
@@ -52,21 +55,20 @@ impl TranslationState {
             attachment.gateway.name,
           );
           let object_label = model_object_ref(route);
-          let Ok((mut generated, filters)) = http_match_route(
-            route,
-            rule,
-            route_match,
-            &hosts,
+          let context = HttpMatchContext {
             rule_index,
             match_index,
-            &source,
-          )
-          .inspect_err(|error| {
-            self.diagnostics.push(crate::model::Diagnostic::error(
-              object_label.clone(),
-              error.to_string(),
-            ));
-          }) else {
+            source: &source,
+            listener_port: attachment.listener.port,
+          };
+          let Ok((mut generated, filters)) =
+            http_match_route(route, rule, route_match, &hosts, context).inspect_err(|error| {
+              self.diagnostics.push(crate::model::Diagnostic::error(
+                object_label.clone(),
+                error.to_string(),
+              ));
+            })
+          else {
             continue;
           };
 
@@ -74,18 +76,33 @@ impl TranslationState {
           {
             continue;
           }
-          if let Some(pool) = self.backend_pool(
+          if generated.redirect.is_some()
+            && rule
+              .get("backendRefs")
+              .and_then(Value::as_array)
+              .is_some_and(|backends| !backends.is_empty())
+          {
+            self.diagnostics.push(crate::model::Diagnostic::error(
+              model_object_ref(route),
+              "RequestRedirect rules cannot also configure backendRefs",
+            ));
+            continue;
+          }
+          if generated.redirect.is_some() {
+            self.routes.push(generated);
+            continue;
+          }
+          let Some(pool) = self.backend_pool(
             route,
             "HTTPRoute",
             rule.get("backendRefs").and_then(Value::as_array),
             &generated.name,
             &source,
-          ) {
-            generated.upstream_pool = Some(pool.name.clone());
-            self.pools.insert(pool.name.clone(), pool);
-          } else if generated.redirect.is_none() {
+          ) else {
             continue;
-          }
+          };
+          generated.upstream_pool = Some(pool.name.clone());
+          self.pools.insert(pool.name.clone(), pool);
           self.routes.push(generated);
         }
       }
@@ -107,11 +124,22 @@ impl TranslationState {
       ));
       return None;
     };
-    let nonzero_backends = backend_refs
-      .iter()
-      .enumerate()
-      .filter(|(_, backend)| u32_at(backend, &["weight"]).unwrap_or(1) > 0)
-      .collect::<Vec<_>>();
+    let mut nonzero_backends = Vec::new();
+    for (index, backend) in backend_refs.iter().enumerate() {
+      let weight = match gateway_backend_weight(backend) {
+        Ok(weight) => weight,
+        Err(message) => {
+          self.diagnostics.push(crate::model::Diagnostic::error(
+            model_object_ref(route),
+            format!("rule.backendRefs[{index}].weight {message}"),
+          ));
+          return None;
+        }
+      };
+      if weight > 0 {
+        nonzero_backends.push((index, backend, weight));
+      }
+    }
     if nonzero_backends.is_empty() {
       self.diagnostics.push(crate::model::Diagnostic::error(
         model_object_ref(route),
@@ -120,27 +148,23 @@ impl TranslationState {
       return None;
     }
     if self.backend_resolution == BackendResolution::EndpointSliceWatch {
-      if nonzero_backends.len() != 1 {
-        self.diagnostics.push(crate::model::Diagnostic::error(
-          model_object_ref(route),
-          "EndpointSlice backend resolution requires exactly one nonzero Service backendRef per rule",
-        ));
-        return None;
+      let mut discoveries = Vec::with_capacity(nonzero_backends.len());
+      for (index, backend, weight) in nonzero_backends {
+        let discovery =
+          self.backend_discovery(route, from_kind, backend, index, weight, route_name)?;
+        discoveries.push(discovery);
       }
-      let (index, backend) = nonzero_backends[0];
-      let discovery = self.backend_discovery(route, from_kind, backend, index)?;
       let name = sanitize_name(&format!("{route_name}-pool"));
       return Some(GeneratedPool {
         source: source.to_string(),
         name,
         servers: Vec::new(),
-        discoveries: vec![discovery],
+        discoveries,
       });
     }
 
     let mut servers = Vec::new();
-    for (index, backend) in nonzero_backends {
-      let weight = u32_at(backend, &["weight"]).unwrap_or(1);
+    for (index, backend, weight) in nonzero_backends {
       let Some(server) = self.backend_server(route, from_kind, backend, index, weight) else {
         continue;
       };
@@ -229,7 +253,9 @@ impl TranslationState {
     route: &KubernetesObject,
     from_kind: &str,
     backend: &Value,
-    _index: usize,
+    index: usize,
+    weight: u32,
+    route_name: &str,
   ) -> Option<GeneratedKubernetesDiscovery> {
     if !backend_ref_is_service(backend) {
       self.diagnostics.push(crate::model::Diagnostic::error(
@@ -279,6 +305,8 @@ impl TranslationState {
     };
     let tls = self.backend_tls_for_service(route, &key).ok()?;
     Some(GeneratedKubernetesDiscovery {
+      id: sanitize_name(&format!("{route_name}-backend-{index}-{namespace}-{name}")),
+      weight_multiplier: weight,
       endpoint: "https://kubernetes.default.svc".to_string(),
       namespace: service.namespace.clone(),
       service: service.name.clone(),
@@ -300,6 +328,16 @@ impl TranslationState {
     filters: ParsedRouteFilters,
     source: &str,
   ) -> bool {
+    if let Some(policy_ref) = filters.route_policy.as_ref()
+      && let Err(error) =
+        super::route_policy::apply_route_policy(&self.route_policies, policy_ref, route, generated)
+    {
+      self.diagnostics.push(crate::model::Diagnostic::error(
+        model_object_ref(route),
+        error.to_string(),
+      ));
+      return false;
+    }
     generated.request_headers = filters.request_headers;
     generated.response_headers = filters.response_headers;
     generated.cors = filters.cors;
@@ -314,13 +352,34 @@ impl TranslationState {
         return false;
       };
       let mut action = mirror.action;
+      action.max_body_bytes = self.request_mirror_max_body_bytes;
       action.upstream_pool = pool.name.clone();
       generated.request_mirrors.push(action);
       self.pools.insert(pool.name.clone(), pool);
     }
     if let Some(auth) = filters.external_auth {
+      let auth = match self.authorized_external_auth(auth) {
+        Ok(auth) => auth,
+        Err(error) => {
+          self.diagnostics.push(crate::model::Diagnostic::error(
+            model_object_ref(route),
+            error.to_string(),
+          ));
+          return false;
+        }
+      };
       let Some(server) = self.backend_server(route, from_kind, &auth.backend_ref, 0, 1) else {
         return false;
+      };
+      let endpoint = match external_auth_endpoint(&server.origin, auth.path_prefix.as_deref()) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+          self.diagnostics.push(crate::model::Diagnostic::error(
+            model_object_ref(route),
+            error.to_string(),
+          ));
+          return false;
+        }
       };
       let name = sanitize_name(&format!("{}-ext-auth", generated.name));
       self.external_auth.insert(
@@ -328,16 +387,158 @@ impl TranslationState {
         GeneratedExternalAuth {
           source: source.to_string(),
           name: name.clone(),
-          endpoint: server.origin,
+          endpoint,
           forward_headers: auth.forward_headers,
           identity_headers: auth.identity_headers,
           terminal_response_headers: auth.terminal_response_headers,
+          max_request_body_bytes: auth.max_request_body_bytes,
+          allowed_content_types: if auth.max_request_body_bytes > 0 {
+            let mut content_types = self
+              .external_auth_allowed_content_types
+              .iter()
+              .cloned()
+              .collect::<Vec<_>>();
+            content_types.sort();
+            content_types
+          } else {
+            Vec::new()
+          },
         },
       );
       generated.external_auth = Some(name);
     }
     true
   }
+
+  fn authorized_external_auth(
+    &self,
+    mut auth: super::filters::ParsedExternalAuth,
+  ) -> anyhow::Result<super::filters::ParsedExternalAuth> {
+    if !self.external_auth_allow_credentials {
+      bail!("Gateway ExternalAuth requires the operator to set --external-auth-allow-credentials");
+    }
+    if auth.max_request_body_bytes > self.external_auth_max_body_bytes {
+      bail!(
+        "Gateway ExternalAuth forwardBody.maxSize {} exceeds the operator cap of {}",
+        auth.max_request_body_bytes,
+        self.external_auth_max_body_bytes
+      );
+    }
+    if auth.max_request_body_bytes > 0 && self.external_auth_allowed_content_types.is_empty() {
+      bail!(
+        "Gateway ExternalAuth body forwarding requires an explicit operator content-type allowlist"
+      );
+    }
+    validate_header_subset(
+      "Gateway ExternalAuth http.allowedHeaders",
+      &auth.forward_headers,
+      &self.external_auth_allowed_request_headers,
+      ExternalAuthHeaderScope::ProtectedRequest,
+    )?;
+    if auth.identity_headers.is_empty() {
+      bail!("Gateway ExternalAuth http.allowedResponseHeaders must name an explicit safe subset");
+    }
+    validate_header_subset(
+      "Gateway ExternalAuth http.allowedResponseHeaders for the protected backend",
+      &auth.identity_headers,
+      &self.external_auth_allowed_identity_headers,
+      ExternalAuthHeaderScope::ProtectedRequest,
+    )?;
+    validate_header_subset(
+      "Gateway ExternalAuth http.allowedResponseHeaders for terminal responses",
+      &auth.terminal_response_headers,
+      &self.external_auth_allowed_terminal_headers,
+      ExternalAuthHeaderScope::TerminalResponse,
+    )?;
+    if !auth
+      .forward_headers
+      .iter()
+      .any(|header| header.eq_ignore_ascii_case("authorization"))
+    {
+      auth.forward_headers.push("authorization".to_string());
+    }
+    auth
+      .forward_headers
+      .sort_by_key(|header| header.to_ascii_lowercase());
+    auth
+      .forward_headers
+      .dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    Ok(auth)
+  }
+}
+
+fn validate_header_subset(
+  field: &str,
+  values: &[String],
+  allowed: &std::collections::HashSet<String>,
+  scope: ExternalAuthHeaderScope,
+) -> anyhow::Result<()> {
+  for value in values {
+    let normalized = oxibelt_control_protocol::normalize_route_action_header_name(value)
+      .with_context(|| format!("{field} contains invalid header {value}"))?;
+    let forbidden = match scope {
+      ExternalAuthHeaderScope::ProtectedRequest => {
+        oxibelt_control_protocol::is_reserved_route_request_header(&normalized)
+      }
+      ExternalAuthHeaderScope::TerminalResponse => {
+        oxibelt_control_protocol::is_forbidden_route_action_header(&normalized)
+      }
+    };
+    if forbidden {
+      bail!("{field} contains forbidden header {normalized}");
+    }
+    if !allowed.contains(&normalized) {
+      bail!("{field} header {normalized} is not admitted by operator policy");
+    }
+  }
+  Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ExternalAuthHeaderScope {
+  ProtectedRequest,
+  TerminalResponse,
+}
+
+fn external_auth_endpoint(origin: &str, path_prefix: Option<&str>) -> anyhow::Result<String> {
+  let mut endpoint = url::Url::parse(origin).context("external auth Service origin is invalid")?;
+  if let Some(path_prefix) = path_prefix {
+    if !path_prefix.starts_with('/')
+      || path_prefix.starts_with("//")
+      || path_prefix.contains('?')
+      || path_prefix.contains('#')
+    {
+      bail!(
+        "Gateway ExternalAuth http.path must start with one '/' and contain no query or fragment"
+      );
+    }
+    endpoint.set_path(path_prefix);
+  }
+  Ok(endpoint.to_string())
+}
+
+const MAX_GATEWAY_BACKEND_WEIGHT: u32 = 1_000_000;
+
+fn gateway_backend_weight(backend: &Value) -> Result<u32, &'static str> {
+  let Some(value) = backend.get("weight") else {
+    return Ok(1);
+  };
+  let Some(raw) = value.as_u64() else {
+    return Err("must be an unsigned integer");
+  };
+  let weight = u32::try_from(raw).map_err(|_| "does not fit the supported integer range")?;
+  if weight > MAX_GATEWAY_BACKEND_WEIGHT {
+    return Err("must not exceed the Gateway API maximum of 1000000");
+  }
+  Ok(weight)
+}
+
+#[derive(Clone, Copy)]
+struct HttpMatchContext<'a> {
+  rule_index: usize,
+  match_index: usize,
+  source: &'a str,
+  listener_port: u16,
 }
 
 fn http_match_route(
@@ -345,9 +546,7 @@ fn http_match_route(
   rule: &Value,
   route_match: &Value,
   hosts: &[String],
-  rule_index: usize,
-  match_index: usize,
-  source: &str,
+  context: HttpMatchContext<'_>,
 ) -> anyhow::Result<(GeneratedRoute, ParsedRouteFilters)> {
   let path = route_match.get("path");
   let path_type = path
@@ -376,16 +575,22 @@ fn http_match_route(
   }
   let headers = exact_named_matches(route_match, &["headers"], "header")?;
   let queries = exact_named_matches(route_match, &["queryParams"], "query")?;
-  let filters = parse_route_filters(rule, &path_prefix, "HTTPRoute")?;
+  let filters = parse_route_filters(
+    rule,
+    &path_prefix,
+    path_type,
+    Some(context.listener_port),
+    "HTTPRoute",
+  )?;
   Ok((
     GeneratedRoute {
-      source: source.to_string(),
+      source: context.source.to_string(),
       name: sanitize_name(&format!(
         "gwapi-http-{}-{}-{}-{}",
         route.namespace(),
         route.name(),
-        rule_index,
-        match_index
+        context.rule_index,
+        context.match_index
       )),
       hosts: if hosts.is_empty() {
         vec!["*".to_string()]
@@ -397,7 +602,7 @@ fn http_match_route(
       methods,
       headers,
       queries,
-      priority: 10_000 - (rule_index as i32 * 100) - match_index as i32,
+      priority: 10_000 - (context.rule_index as i32 * 100) - context.match_index as i32,
       upstream_pool: None,
       rewrite: None,
       redirect: None,
@@ -406,6 +611,10 @@ fn http_match_route(
       cors: None,
       request_mirrors: Vec::new(),
       external_auth: None,
+      policy_source: None,
+      waf_request_rule_groups: Vec::new(),
+      max_request_body_bytes: None,
+      upstream_request_timeout_ms: None,
     },
     filters,
   ))

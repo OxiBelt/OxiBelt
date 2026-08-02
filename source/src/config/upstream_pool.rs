@@ -13,6 +13,9 @@ use super::{
   UpstreamTlsConfig, validate_optional_non_empty,
 };
 
+pub(super) const MAX_DISCOVERY_INSTANCES_PER_POOL: usize = 64;
+pub(super) const MAX_DISCOVERY_INSTANCES_TOTAL: usize = 256;
+
 mod health_check;
 pub(in crate::config) use health_check::validate_pool_health_check;
 pub use health_check::*;
@@ -51,9 +54,17 @@ pub(super) fn default_discovery_update_debounce_ms() -> u64 {
   250
 }
 
+pub(super) fn default_discovery_weight_multiplier() -> u32 {
+  1
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct UpstreamPoolDiscoveryConfig {
   pub provider: UpstreamDiscoveryProvider,
+  #[serde(default)]
+  pub id: Option<String>,
+  #[serde(default = "default_discovery_weight_multiplier")]
+  pub weight_multiplier: u32,
   #[serde(default)]
   pub name: Option<String>,
   #[serde(default)]
@@ -96,6 +107,12 @@ pub struct UpstreamPoolDiscoveryConfig {
   pub min_ttl_ms: u64,
   #[serde(default)]
   pub tls: UpstreamTlsConfig,
+}
+
+impl UpstreamPoolDiscoveryConfig {
+  pub fn effective_id(&self) -> &str {
+    self.id.as_deref().unwrap_or_else(|| self.provider.as_str())
+  }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -261,13 +278,50 @@ pub(super) fn validate_pool_policy(pool: &UpstreamPoolConfig) -> anyhow::Result<
 }
 
 pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Result<()> {
-  let mut providers = HashSet::new();
+  if pool.discovery.len() > MAX_DISCOVERY_INSTANCES_PER_POOL {
+    bail!(
+      "upstream pool {} has {} discovery instances; maximum is {MAX_DISCOVERY_INSTANCES_PER_POOL}",
+      pool.name,
+      pool.discovery.len()
+    );
+  }
+  let provider_counts =
+    pool
+      .discovery
+      .iter()
+      .fold(std::collections::HashMap::new(), |mut counts, discovery| {
+        *counts.entry(discovery.provider).or_insert(0_usize) += 1;
+        counts
+      });
+  let mut identities = HashSet::new();
   for discovery in &pool.discovery {
-    if !providers.insert(discovery.provider) {
+    if let Some(id) = discovery.id.as_deref() {
+      super::validate_runtime_identifier("upstream discovery id", id)?;
+    }
+    if provider_counts
+      .get(&discovery.provider)
+      .copied()
+      .unwrap_or_default()
+      > 1
+      && discovery.id.is_none()
+    {
       bail!(
-        "upstream pool {} must not configure duplicate {:?} discovery providers",
+        "upstream pool {} duplicate {:?} discovery providers require explicit ids",
         pool.name,
         discovery.provider
+      );
+    }
+    if !identities.insert(discovery.effective_id()) {
+      bail!(
+        "upstream pool {} has duplicate discovery id {}",
+        pool.name,
+        discovery.effective_id()
+      );
+    }
+    if discovery.weight_multiplier == 0 {
+      bail!(
+        "upstream pool {} discovery weight_multiplier must be greater than 0",
+        pool.name
       );
     }
     if discovery.refresh_interval_ms == 0 || discovery.min_ttl_ms == 0 {

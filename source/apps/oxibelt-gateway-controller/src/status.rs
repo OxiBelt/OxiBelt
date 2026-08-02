@@ -7,7 +7,8 @@ use super::cli::SharedArgs;
 use super::gateway_policy::{self, ListenerPolicy, RoutePolicyDecision};
 use super::kubernetes_time::rfc3339_now;
 use super::model::{
-  Diagnostic, DiagnosticSeverity, KubernetesObject, ObjectKey, object_ref as model_object_ref,
+  Diagnostic, DiagnosticCode, DiagnosticSeverity, KubernetesObject, ObjectKey,
+  object_ref as model_object_ref,
 };
 use super::rollout_status::RolloutStatus;
 use super::translate::UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC;
@@ -19,6 +20,8 @@ const CONDITION_FALSE: &str = "False";
 mod attachment;
 #[path = "status/backend_tls.rs"]
 mod backend_tls;
+#[path = "status/route_policy.rs"]
+mod route_policy;
 #[cfg(test)]
 #[path = "status/tests.rs"]
 mod tests;
@@ -109,11 +112,70 @@ pub fn build_status_patches(
         &diagnostics_by_object,
         &now,
       )),
+      "OxiBeltRoutePolicy" => patches.push(route_policy::patch(
+        object,
+        objects,
+        &diagnostics_by_object,
+        rollout_status,
+        route_policy_target_was_translated(
+          object,
+          objects,
+          &gateways,
+          &namespace_labels,
+          &diagnostics_by_object,
+        ),
+        &now,
+      )),
       _ => {}
     }
   }
 
   patches
+}
+
+fn route_policy_target_was_translated(
+  policy: &KubernetesObject,
+  objects: &[KubernetesObject],
+  gateways: &HashMap<ObjectKey, GatewaySummary>,
+  namespace_labels: &HashMap<String, BTreeMap<String, String>>,
+  diagnostics: &HashMap<String, Vec<&Diagnostic>>,
+) -> bool {
+  let Some(kind) = string_at(&policy.spec, &["targetRef", "kind"]) else {
+    return false;
+  };
+  let Some(name) = string_at(&policy.spec, &["targetRef", "name"]) else {
+    return false;
+  };
+  let Some(route) = objects.iter().find(|object| {
+    object.kind == kind && object.namespace() == policy.namespace() && object.name() == name
+  }) else {
+    return false;
+  };
+  if diagnostics
+    .get(&model_object_ref(route))
+    .into_iter()
+    .flatten()
+    .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+  {
+    return false;
+  }
+  parent_refs(route).iter().any(|parent| {
+    if !parent_ref_is_gateway(parent) {
+      return false;
+    }
+    let namespace = string_at(parent, &["namespace"]).unwrap_or(route.namespace());
+    let Some(name) = string_at(parent, &["name"]) else {
+      return false;
+    };
+    gateways
+      .get(&ObjectKey {
+        namespace: namespace.to_string(),
+        name: name.to_string(),
+      })
+      .is_some_and(|gateway| {
+        attachment::route_has_matching_listener(route, parent, gateway, namespace_labels)
+      })
+  })
 }
 
 fn gateway_class_patch(object: &KubernetesObject, now: &str) -> StatusPatch {
@@ -388,7 +450,7 @@ fn route_parent_status(
     attachment::route_has_matching_listener(object, parent, gateway, namespace_labels);
   let has_reference_error = object_errors.iter().any(|diagnostic| {
     matches!(diagnostic.severity, DiagnosticSeverity::Error)
-      && is_reference_error(&diagnostic.message)
+      && diagnostic.code == DiagnosticCode::RefNotPermitted
   });
   let not_programmed_by_precedence = object_errors.iter().any(|diagnostic| {
     diagnostic
@@ -403,7 +465,7 @@ fn route_parent_status(
   let resolved_refs = !has_reference_error;
   let has_nonreference_error = object_errors.iter().any(|diagnostic| {
     matches!(diagnostic.severity, DiagnosticSeverity::Error)
-      && !is_reference_error(&diagnostic.message)
+      && diagnostic.code != DiagnosticCode::RefNotPermitted
   });
   let accepted = listener_matches && !has_nonreference_error;
   let programmed =
@@ -472,39 +534,16 @@ fn route_parent_status(
 }
 
 fn route_error_reason(errors: &[&Diagnostic]) -> &'static str {
-  if errors.iter().any(|diagnostic| {
-    diagnostic.message.contains("ReferenceGrant")
-      || diagnostic.message.contains("was not found")
-      || diagnostic.message.contains("does not expose")
-  }) {
-    return "RefNotPermitted";
-  }
-  if errors
+  errors
     .iter()
-    .any(|diagnostic| diagnostic.message.contains("filter"))
-  {
-    return "IncompatibleFilters";
-  }
-  if errors
-    .iter()
-    .any(|diagnostic| diagnostic.message.contains("unsupported"))
-  {
-    return "UnsupportedValue";
-  }
-  "InvalidRoute"
-}
-
-fn is_reference_error(message: &str) -> bool {
-  message.contains("ReferenceGrant")
-    || message.contains("backend Service")
-    || message.contains("backendRef")
-    || message.contains("status Service")
+    .find(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+    .map_or("InvalidRoute", |diagnostic| diagnostic.code.as_str())
 }
 
 fn resolved_refs_reason(errors: &[&Diagnostic]) -> &'static str {
   if errors
     .iter()
-    .any(|diagnostic| diagnostic.message.contains("ReferenceGrant"))
+    .any(|diagnostic| diagnostic.code == DiagnosticCode::RefNotPermitted)
   {
     "RefNotPermitted"
   } else if errors

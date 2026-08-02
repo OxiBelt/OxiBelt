@@ -229,6 +229,8 @@ async fn admin_add_pool_server(
       state: body.state,
       tls: Default::default(),
       source: UpstreamPoolServerSource::Admin,
+      discovery_instance_id: None,
+      discovered_weight: None,
     };
     if server.weight == 0 {
       bail!("upstream pool server weight must be greater than 0");

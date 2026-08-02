@@ -77,6 +77,18 @@ impl CompatibilityPolicy {
     self.validate_target_workload_at(workload, unix_seconds_now()?)
   }
 
+  pub fn validate_generated_capabilities(
+    &self,
+    requires_exact_data_plane: bool,
+  ) -> anyhow::Result<()> {
+    if requires_exact_data_plane && self.mode != CompatibilityMode::Exact {
+      bail!(
+        "weighted multi-Service EndpointSlice discovery requires compatibility mode `exact`; the permitted previous-minor data plane cannot parse discovery instance identity"
+      );
+    }
+    Ok(())
+  }
+
   fn validate_target_workload_at(
     &self,
     workload: &Value,
@@ -293,6 +305,22 @@ mod tests {
         .validate_target_workload_at(&workload(None), 0)
         .is_err()
     );
+  }
+
+  #[test]
+  fn weighted_multi_service_discovery_requires_exact_mode() {
+    let exact =
+      CompatibilityPolicy::from_args_at(&args(CompatibilityMode::Exact), "0.7.0", 0).unwrap();
+    assert!(exact.validate_generated_capabilities(true).is_ok());
+    assert!(exact.validate_generated_capabilities(false).is_ok());
+
+    let now = parse_rfc3339_utc("2026-07-24T00:00:00Z").unwrap();
+    let mut rolling_args = args(CompatibilityMode::RollingUpgrade);
+    rolling_args.compatibility_previous_version = Some("0.6.5".to_string());
+    rolling_args.compatibility_deadline = Some("2026-07-25T00:00:00Z".to_string());
+    let rolling = CompatibilityPolicy::from_args_at(&rolling_args, "0.7.0", now).unwrap();
+    assert!(rolling.validate_generated_capabilities(false).is_ok());
+    assert!(rolling.validate_generated_capabilities(true).is_err());
   }
 
   #[test]

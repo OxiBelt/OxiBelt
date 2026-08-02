@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
@@ -134,34 +134,90 @@ pub struct ObjectKey {
   pub name: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DiagnosticSeverity {
   Warning,
   Error,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+pub enum DiagnosticCode {
+  Conflicted,
+  ExceedsOperatorLimit,
+  IncompatibleFilters,
+  InvalidResource,
+  NotProgrammed,
+  RefNotPermitted,
+  RequiresExactDataPlane,
+  UnsupportedValue,
+}
+
+impl DiagnosticCode {
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Conflicted => "Conflicted",
+      Self::ExceedsOperatorLimit => "ExceedsOperatorLimit",
+      Self::IncompatibleFilters => "IncompatibleFilters",
+      Self::InvalidResource => "InvalidResource",
+      Self::NotProgrammed => "NotProgrammed",
+      Self::RefNotPermitted => "RefNotPermitted",
+      Self::RequiresExactDataPlane => "RequiresExactDataPlane",
+      Self::UnsupportedValue => "UnsupportedValue",
+    }
+  }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Diagnostic {
   pub severity: DiagnosticSeverity,
+  pub code: DiagnosticCode,
   pub object: String,
   pub message: String,
 }
 
 impl Diagnostic {
   pub fn warning(object: impl Into<String>, message: impl Into<String>) -> Self {
+    let message = message.into();
     Self {
       severity: DiagnosticSeverity::Warning,
+      code: diagnostic_code(&message),
       object: object.into(),
-      message: message.into(),
+      message,
     }
   }
 
   pub fn error(object: impl Into<String>, message: impl Into<String>) -> Self {
+    let message = message.into();
     Self {
       severity: DiagnosticSeverity::Error,
+      code: diagnostic_code(&message),
       object: object.into(),
-      message: message.into(),
+      message,
     }
+  }
+}
+
+fn diagnostic_code(message: &str) -> DiagnosticCode {
+  if message.contains("ReferenceGrant")
+    || message.contains("was not found")
+    || message.contains("does not expose")
+  {
+    DiagnosticCode::RefNotPermitted
+  } else if message.contains("operator cap") {
+    DiagnosticCode::ExceedsOperatorLimit
+  } else if message.contains("filter") || message.contains("cannot be combined") {
+    DiagnosticCode::IncompatibleFilters
+  } else if message.contains("Conflicted") || message.contains("conflict") {
+    DiagnosticCode::Conflicted
+  } else if message.contains("requires compatibility mode `exact`") {
+    DiagnosticCode::RequiresExactDataPlane
+  } else if message.contains("unsupported") || message.contains("outside the supported") {
+    DiagnosticCode::UnsupportedValue
+  } else if message.contains("not Programmed") {
+    DiagnosticCode::NotProgrammed
+  } else {
+    DiagnosticCode::InvalidResource
   }
 }
 

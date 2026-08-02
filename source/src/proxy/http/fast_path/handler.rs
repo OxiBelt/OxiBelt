@@ -425,6 +425,12 @@ impl PlainProxyFastPath {
             forwarded_header_cache,
             forwarded_request_header_values: Some(&forwarded_request_header_values),
             preserve_host,
+            authority_override: resolved
+              .route
+              .actions
+              .rewrite
+              .as_ref()
+              .and_then(|rewrite| rewrite.authority.as_deref()),
             upstream_version,
             waf_mutations: &request_waf.request_header_mutations,
             route_mutations: &[],

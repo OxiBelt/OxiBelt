@@ -1,0 +1,35 @@
+{{- $root := . -}}
+{{- $targetResourceNamespace := default .Release.Namespace .Values.watchNamespace -}}
+{{- range $index, $target := .Values.rollout.targets }}
+{{- if gt $index 0 }}
+---
+{{- end }}
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltDataPlaneTarget
+metadata:
+  name: {{ required "rollout.targets[].name is required" $target.name | quote }}
+  namespace: {{ $targetResourceNamespace | quote }}
+  labels:
+{{ include "oxibelt-gateway-controller.labels" $root | indent 4 }}
+spec:
+  gatewayClassName: {{ required "rollout.targets[].gatewayClassName is required" $target.gatewayClassName | quote }}
+  assignment:
+    mode: Replicated
+    allowedNamespaces:
+{{ toYaml $target.allowedNamespaces | indent 6 }}
+  workloadRef:
+    group: apps
+    kind: {{ required "rollout.targets[].workloadRef.kind is required" $target.workloadRef.kind | quote }}
+    namespace: {{ default $root.Release.Namespace $target.workloadRef.namespace | quote }}
+    name: {{ required "rollout.targets[].workloadRef.name is required" $target.workloadRef.name | quote }}
+    containerName: {{ required "rollout.targets[].workloadRef.containerName is required" $target.workloadRef.containerName | quote }}
+    volumeName: {{ required "rollout.targets[].workloadRef.volumeName is required" $target.workloadRef.volumeName | quote }}
+  capabilities:
+{{ toYaml $target.capabilities | indent 4 }}
+  policyVersion: v1alpha1
+  rollout:
+    timeoutSeconds: {{ include "oxibelt-gateway-controller.decimalInteger" (dict "name" "rollout.targets[].timeoutSeconds" "value" $target.timeoutSeconds) }}
+    configMapPrefix: {{ required "rollout.targets[].configMapPrefix is required" $target.configMapPrefix | quote }}
+    concurrency: 1
+    failurePolicy: Rollback
+{{- end }}

@@ -876,6 +876,7 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(values["l4"]["udp"]["batchSize"], 16);
   assert_eq!(values["rollout"]["target"]["kind"], "deployment");
   assert_eq!(values["rollout"]["target"]["name"], "oxibelt");
+  assert_eq!(values["rollout"]["targets"].as_array().unwrap().len(), 0);
   assert_eq!(values["rollout"]["volumeName"], "gateway-config");
   assert_eq!(values["rollout"]["timeoutSeconds"], 300);
   assert!(values["rollout"].get("retainedRevisions").is_none());
@@ -910,8 +911,21 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
     "endpoint_slice_watch"
   );
   assert_eq!(
+    schema["properties"]["filters"]["properties"]["requestMirror"]["properties"]["maxBodyBytes"]["maximum"],
+    16_777_216
+  );
+  assert_eq!(
     schema["properties"]["rollout"]["properties"]["target"]["properties"]["kind"]["enum"][1],
     "daemonset"
+  );
+  assert_eq!(
+    schema["properties"]["rollout"]["properties"]["targets"]["maxItems"],
+    32
+  );
+  assert_eq!(
+    schema["properties"]["rollout"]["properties"]["targets"]["items"]["properties"]["allowedNamespaces"]
+      ["maxItems"],
+    64
   );
   assert_eq!(
     schema["properties"]["managedConfigPath"]["pattern"],
@@ -1049,6 +1063,8 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(rbac.contains("backendtlspolicies"));
   assert!(rbac.contains("udproutes/status"));
   assert!(rbac.contains("backendtlspolicies/status"));
+  assert!(rbac.contains("oxibeltdataplanetargets"));
+  assert!(rbac.contains("oxibeltdataplanetargets/status"));
   assert!(rbac.contains("watchAllNamespaces"));
   assert!(rbac.contains("-cluster"));
   assert!(rbac.contains("-watch"));
@@ -1073,6 +1089,8 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(!rbac.contains("verbs: [\"get\", \"list\", \"watch\"]"));
   assert!(!rbac.contains("verbs: [\"get\", \"patch\", \"update\"]"));
   assert!(!rbac.contains("secrets"));
+  assert!(rbac.contains("range $index, $target := .Values.rollout.targets"));
+  assert!(rbac.contains("resourceNames:\n  - {{ $target.workloadRef.name | quote }}"));
   assert_eq!(
     rbac
       .matches("resources: [\"configmaps\"]\n  verbs: [\"get\"]")
@@ -1102,4 +1120,59 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(pdb.contains("apiVersion: policy/v1"));
   assert!(pdb.contains("kind: PodDisruptionBudget"));
   assert!(pdb.contains("minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}"));
+
+  let target_template =
+    read_repo("deploy/helm/oxibelt-gateway-controller/templates/dataplane-targets.yaml");
+  for needle in [
+    "kind: OxiBeltDataPlaneTarget",
+    "mode: Replicated",
+    "policyVersion: v1alpha1",
+    "concurrency: 1",
+    "failurePolicy: Rollback",
+  ] {
+    assert!(target_template.contains(needle));
+  }
+  assert!(!target_template.to_ascii_lowercase().contains("secret"));
+  assert!(!target_template.contains("adminEndpoint"));
+
+  let target_crd = read_yaml(
+    "deploy/kubernetes/oxibelt-gateway-controller/crds/oxibeltdataplanetargets.gateway.oxibelt.dev.yaml",
+  );
+  assert_eq!(target_crd["spec"]["scope"], "Namespaced");
+  assert_eq!(target_crd["spec"]["versions"][0]["name"], "v1alpha1");
+  assert_eq!(
+    target_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["additionalProperties"],
+    false
+  );
+  assert_eq!(
+    target_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+      ["rollout"]["properties"]["concurrency"]["enum"][0],
+    1
+  );
+
+  let route_policy_crd = read_yaml(
+    "deploy/kubernetes/oxibelt-gateway-controller/crds/oxibeltroutepolicies.gateway.oxibelt.dev.yaml",
+  );
+  assert_eq!(route_policy_crd["spec"]["scope"], "Namespaced");
+  assert_eq!(route_policy_crd["spec"]["versions"][0]["name"], "v1alpha1");
+  assert!(
+    route_policy_crd["spec"]["versions"][0]["subresources"]["status"]
+      .as_object()
+      .is_some()
+  );
+  let route_policy_spec =
+    &route_policy_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
+  assert_eq!(route_policy_spec["additionalProperties"], false);
+  assert_eq!(
+    route_policy_spec["properties"]["waf"]["properties"]["requestRuleGroups"]["maxItems"],
+    16
+  );
+  assert_eq!(
+    route_policy_spec["properties"]["limits"]["properties"]["maxRequestBodyBytes"]["maximum"],
+    104_857_600
+  );
+  assert_eq!(
+    route_policy_spec["properties"]["timeouts"]["properties"]["upstreamRequestMilliseconds"]["maximum"],
+    300_000
+  );
 }

@@ -123,6 +123,22 @@ impl Config {
       }
     }
 
+    let discovery_instance_total =
+      self
+        .upstream_pools
+        .iter()
+        .try_fold(0_usize, |total, pool| {
+          total.checked_add(pool.discovery.len()).ok_or_else(|| {
+            anyhow::anyhow!("upstream discovery instance count cannot be represented safely")
+          })
+        })?;
+    if discovery_instance_total > upstream_pool::MAX_DISCOVERY_INSTANCES_TOTAL {
+      bail!(
+        "configuration has {discovery_instance_total} upstream discovery instances; maximum is {}",
+        upstream_pool::MAX_DISCOVERY_INSTANCES_TOTAL
+      );
+    }
+
     let mut pool_names = HashSet::new();
     for pool in &self.upstream_pools {
       if pool.name.trim().is_empty() {
