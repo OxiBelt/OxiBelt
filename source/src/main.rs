@@ -197,8 +197,9 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
 
   if env!("CARGO_PKG_NAME") == "oxibelt-dataplane-strict" {
     effective_config.validate_for_artifact(oxibelt::config::RuntimeArtifact::StrictDataPlane)?;
+  } else {
+    effective_config.validate()?;
   }
-  effective_config.validate()?;
 
   if cli.dump_effective_config {
     let value = Config::load_effective_toml_redacted(config_path)

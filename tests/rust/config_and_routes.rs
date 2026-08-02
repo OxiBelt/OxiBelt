@@ -117,6 +117,50 @@ fn strict_data_plane_reports_every_customized_admin_capability() {
 }
 
 #[test]
+fn standalone_artifact_runs_common_validation_without_strict_seccomp() {
+  let temp_dir = common::TempDir::new("standalone-artifact-validation");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "standalone-artifact-validation");
+  let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("minimal config should parse");
+
+  config
+    .validate_for_artifact(RuntimeArtifact::Standalone)
+    .expect("standalone artifact should accept the default seccomp expectation");
+
+  let mut invalid = config;
+  invalid.listeners.http1 = false;
+  invalid.listeners.http2 = false;
+  let error = invalid
+    .validate_for_artifact(RuntimeArtifact::Standalone)
+    .expect_err("standalone artifact must still apply common semantic validation");
+  assert!(
+    error
+      .to_string()
+      .contains("at least one downstream HTTP version")
+  );
+}
+
+#[cfg(not(feature = "admin-runtime"))]
+#[test]
+fn feature_derived_validation_remains_strict_without_admin_runtime() {
+  let temp_dir = common::TempDir::new("feature-derived-strict-validation");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "feature-derived-strict-validation");
+  let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("minimal config should parse");
+
+  let error = config
+    .validate()
+    .expect_err("no-Admin builds must retain strict artifact validation");
+  assert!(
+    error
+      .to_string()
+      .contains("runtime.hardening.seccomp.expectation")
+  );
+}
+
+#[test]
 fn edge_secure_medium_profile_expands_and_validates_the_v1_baseline() {
   let temp_dir = common::TempDir::new("edge-secure-medium");
   let (cert_path, key_path) =

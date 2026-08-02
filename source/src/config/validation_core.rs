@@ -4,9 +4,15 @@ use super::*;
 
 impl Config {
   pub fn validate(&self) -> anyhow::Result<()> {
+    #[cfg(feature = "admin-runtime")]
+    let artifact = RuntimeArtifact::Standalone;
     #[cfg(not(feature = "admin-runtime"))]
-    self.validate_for_artifact(RuntimeArtifact::StrictDataPlane)?;
+    let artifact = RuntimeArtifact::StrictDataPlane;
 
+    self.validate_for_artifact(artifact)
+  }
+
+  fn validate_common(&self) -> anyhow::Result<()> {
     if !self.listeners.http1
       && !self.listeners.http2
       && !self.listeners.http3
@@ -431,8 +437,13 @@ impl Config {
     Ok(())
   }
 
-  /// Rejects configuration that requests capabilities absent from a role-specific artifact.
+  /// Validates common semantics and rejects capabilities absent from the selected artifact.
   pub fn validate_for_artifact(&self, artifact: RuntimeArtifact) -> anyhow::Result<()> {
+    self.validate_artifact_constraints(artifact)?;
+    self.validate_common()
+  }
+
+  fn validate_artifact_constraints(&self, artifact: RuntimeArtifact) -> anyhow::Result<()> {
     if artifact == RuntimeArtifact::Standalone {
       return Ok(());
     }

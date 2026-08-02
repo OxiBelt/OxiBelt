@@ -3,7 +3,7 @@
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::{
   Arc,
@@ -14,7 +14,7 @@ use anyhow::Context;
 use clap::Parser;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use oxibelt::config::{Config, HotReloadMode, RuntimeOverrides};
+use oxibelt::config::{Config, HotReloadMode, RuntimeArtifact, RuntimeOverrides};
 use oxibelt::netport_switcher::{NetportBroker, SOCKET_ENV};
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -57,12 +57,7 @@ async fn run() -> anyhow::Result<i32> {
     hot_reload_mode: cli.hot_reload_mode,
     hot_reload_poll_interval_ms: cli.hot_reload_poll_interval_ms,
   };
-  let mut config = Config::load(&cli.config)
-    .with_context(|| format!("failed to load {}", cli.config.display()))?;
-  for warning in config.apply_runtime_overrides(&overrides) {
-    eprintln!("{warning}");
-  }
-  config.validate()?;
+  let config = load_and_validate_config(&cli.config, &overrides)?;
 
   let broker = Arc::new(NetportBroker::from_config(&config)?);
   let listener = broker.bind_control_listener()?;
@@ -85,6 +80,21 @@ async fn run() -> anyhow::Result<i32> {
     .join()
     .map_err(|_| anyhow::anyhow!("netport switcher broker thread panicked"))??;
   exit_code
+}
+
+fn load_and_validate_config(
+  config_path: &Path,
+  overrides: &RuntimeOverrides,
+) -> anyhow::Result<Config> {
+  let mut config = Config::load(config_path)
+    .with_context(|| format!("failed to load {}", config_path.display()))?;
+  for warning in config.apply_runtime_overrides(overrides) {
+    eprintln!("{warning}");
+  }
+  // This wrapper validates the standalone child it will spawn. The broker still
+  // independently constrains the privileged listener inventory.
+  config.validate_for_artifact(RuntimeArtifact::Standalone)?;
+  Ok(config)
 }
 
 fn spawn_child(
@@ -221,8 +231,40 @@ fn parse_hot_reload_mode(value: &str) -> Result<HotReloadMode, String> {
 
 #[cfg(test)]
 mod tests {
-  use super::Cli;
+  use std::fs;
+  use std::path::{Path, PathBuf};
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  use super::{Cli, load_and_validate_config};
   use clap::Parser;
+  use oxibelt::config::{RuntimeOverrides, RuntimeSeccompExpectation};
+
+  struct TestDir(PathBuf);
+
+  impl TestDir {
+    fn new(label: &str) -> Self {
+      let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("test clock should follow the Unix epoch")
+        .as_nanos();
+      let path = std::env::temp_dir().join(format!(
+        "oxibelt-netport-switcher-{label}-{}-{nonce}",
+        std::process::id()
+      ));
+      fs::create_dir_all(&path).expect("test directory should be created");
+      Self(path)
+    }
+
+    fn path(&self) -> &Path {
+      &self.0
+    }
+  }
+
+  impl Drop for TestDir {
+    fn drop(&mut self) {
+      let _ = fs::remove_dir_all(&self.0);
+    }
+  }
 
   #[test]
   fn version_flag_reports_canonical_build_identity() {
@@ -233,6 +275,84 @@ mod tests {
       error
         .to_string()
         .contains(oxibelt_build_identity::MACHINE_IDENTITY_MARKER)
+    );
+  }
+
+  #[test]
+  fn standalone_child_validation_accepts_default_seccomp_without_binding() {
+    let test_dir = TestDir::new("standalone-validation");
+    let config_dir = test_dir.path().join("config");
+    let cert_dir = test_dir.path().join("cert");
+    fs::create_dir_all(&config_dir).expect("test config directory should be created");
+    fs::create_dir_all(&cert_dir).expect("test certificate directory should be created");
+    fs::write(cert_dir.join("fullchain.pem"), b"unused test certificate")
+      .expect("test certificate should be written");
+    fs::write(cert_dir.join("privkey.pem"), b"unused test key")
+      .expect("test private key should be written");
+    let config_path = config_dir.join("oxibelt.toml");
+    fs::write(
+      &config_path,
+      r#"
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+
+[runtime.netport_switcher]
+enabled = true
+socket_dir = "/run/oxibelt-netport-switcher"
+main_uid = 10001
+main_gid = 10001
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "127.0.0.1:443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[compression]
+enabled = true
+gzip = true
+deflate = true
+zstd = true
+
+[[upstreams]]
+name = "app"
+origin = "http://app.internal.example"
+max_http_version = "h1"
+
+[[routes]]
+name = "app-root"
+hosts = ["example.com"]
+path_prefix = "/"
+upstream = "app"
+"#,
+    )
+    .expect("test configuration should be written");
+
+    let config = load_and_validate_config(&config_path, &RuntimeOverrides::default())
+      .expect("standalone child configuration should validate");
+    assert!(config.runtime.netport_switcher.enabled);
+    assert_eq!(
+      config.runtime.hardening.seccomp.expectation,
+      RuntimeSeccompExpectation::Off
     );
   }
 }
