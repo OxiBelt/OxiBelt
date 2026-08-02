@@ -413,6 +413,15 @@ config:
     enabled = true
     max_http_version = "h2"
 
+    [[routes]]
+    name = "strict-hardening-live"
+    hosts = ["oxibelt-hardening.test"]
+    path_prefix = "/__oxibelt-strict-hardening"
+
+    [routes.actions.redirect]
+    status = 308
+    location_template = "/"
+
     [compression]
     enabled = false
 

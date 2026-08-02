@@ -554,6 +554,31 @@ fn helm_strict_hardening_live_script_text() -> String {
     .expect("Helm strict hardening live script should be readable")
 }
 
+fn helm_strict_hardening_live_inline_config() -> String {
+  let script = helm_strict_hardening_live_script_text();
+  let inline = script
+    .split_once("config:\n  inline: |\n")
+    .expect("Helm strict hardening live script should define inline config")
+    .1
+    .split_once("\nEOF\n")
+    .expect("Helm strict hardening inline config should end at its heredoc marker")
+    .0;
+
+  inline
+    .lines()
+    .map(|line| {
+      if line.is_empty() {
+        ""
+      } else {
+        line
+          .strip_prefix("    ")
+          .expect("Helm strict hardening inline config should use four-space YAML indentation")
+      }
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
 fn kubernetes_pod_lifecycle_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-pod-lifecycle.sh"))
     .expect("Kubernetes Pod lifecycle script should be readable")
@@ -2819,6 +2844,7 @@ fn kubernetes_strict_hardening_ci_is_provider_neutral_and_invocation_isolated() 
     "io.x-k8s.kind.cluster",
     "kind delete cluster --name \"${cluster_name}\"",
     "minikube delete --profile \"${cluster_name}\"",
+    "runtimeHardening:\n  seccomp:\n    expectation: required",
     "seccompProfile:\n    type: RuntimeDefault",
     "mode = \"manifest\"",
     "\"filesystem_manifest_digest_withheld\":true",
@@ -2850,6 +2876,46 @@ fn kubernetes_strict_hardening_ci_is_provider_neutral_and_invocation_isolated() 
       "strict hardening live harness must not contain {forbidden}"
     );
   }
+}
+
+#[test]
+fn kubernetes_strict_hardening_live_config_is_semantically_valid() {
+  let inline = helm_strict_hardening_live_inline_config();
+  let config: oxibelt::config::Config =
+    toml::from_str(&inline).expect("strict hardening live config should parse as TOML");
+
+  config
+    .validate()
+    .expect("strict hardening live config should satisfy production semantic validation");
+
+  let mut missing_serving_target = config.clone();
+  missing_serving_target.routes.clear();
+  let error = missing_serving_target
+    .validate()
+    .expect_err("strict hardening live config should require a serving target");
+  assert!(
+    error.to_string().contains(
+      "at least one route, SNI forwarding rule/default target, stream listener, or WebRTC TURN listener must be configured"
+    ),
+    "strict hardening live config should retain the production serving-target invariant"
+  );
+
+  assert!(
+    config.upstreams.is_empty(),
+    "strict hardening live config should not require upstream network access"
+  );
+  let route = config
+    .routes
+    .iter()
+    .find(|route| route.name == "strict-hardening-live")
+    .expect("strict hardening live config should define its self-contained route");
+  assert!(
+    route.upstream.is_none()
+      && route.upstream_pool.is_none()
+      && route.static_root.is_none()
+      && route.actions.redirect.is_some(),
+    "strict hardening live route should remain a redirect-only serving target"
+  );
 }
 
 #[test]
