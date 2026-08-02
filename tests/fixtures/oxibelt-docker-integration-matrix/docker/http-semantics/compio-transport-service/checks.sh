@@ -582,11 +582,11 @@ run_case_checks() {
     1
   compio_transport_require_exact_metric_sample \
     "${metrics_after}" \
-    'oxibelt_runtime_worker_allocation{pool="tokio_executor",owner="tokio"}' \
+    'oxibelt_runtime_worker_allocation{pool="tokio_executor",owner="tokio",applicability="applied"}' \
     1
   compio_transport_require_exact_metric_sample \
     "${metrics_after}" \
-    'oxibelt_runtime_worker_allocation{pool="compio_direct_h1",owner="compio"}' \
+    'oxibelt_runtime_worker_allocation{pool="compio_direct_h1",owner="compio",applicability="applied"}' \
     1
 
   stats_after="$(compio_transport_control_stats)"

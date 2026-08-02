@@ -178,11 +178,13 @@ The public metrics surface exports:
 
 - `oxibelt_runtime_topology_info{requested_preset,resolved_preset,outcome,reason}`;
 - `oxibelt_runtime_subsystem_owner{subsystem,owner}`;
-- `oxibelt_runtime_worker_allocation{pool,owner}`;
+- `oxibelt_runtime_worker_allocation{pool,owner,applicability}`;
 - `oxibelt_runtime_compatibility_boundary{boundary}`.
 
 These labels come from bounded preset, outcome, reason, subsystem, owner,
-pool, and boundary vocabularies. Worker counts are gauge values, not label
+pool, applicability, and boundary vocabularies. Worker `applicability` is
+`applied` or `inapplicable`, indicating whether the corresponding worker
+setting controls the reported pool. Worker counts are gauge values, not label
 values. Logs, metrics, and support surfaces omit raw capability errors,
 hostnames, paths, routes, peers, request data, and secrets.
 

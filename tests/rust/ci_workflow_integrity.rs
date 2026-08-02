@@ -4374,8 +4374,8 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
     "requested_preset=\"compio\",resolved_preset=\"hybrid_compio\",outcome=\"exact\",reason=\"legacy_alias\"",
     "subsystem=\"general_http\",owner=\"tokio\"",
     "subsystem=\"direct_h1_transport\",owner=\"compio\"",
-    "pool=\"tokio_executor\",owner=\"tokio\"",
-    "pool=\"compio_direct_h1\",owner=\"compio\"",
+    "oxibelt_runtime_worker_allocation{pool=\"tokio_executor\",owner=\"tokio\",applicability=\"applied\"}",
+    "oxibelt_runtime_worker_allocation{pool=\"compio_direct_h1\",owner=\"compio\",applicability=\"applied\"}",
     "oxibelt_http_compio_direct_h1_queue_occupancy",
     "retired_protocol",
     "retired_eof",
@@ -4386,6 +4386,15 @@ fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() 
     assert!(
       checks.contains(expected),
       "the Compio transport fixture should preserve {expected}"
+    );
+  }
+  for stale in [
+    "oxibelt_runtime_worker_allocation{pool=\"tokio_executor\",owner=\"tokio\"}",
+    "oxibelt_runtime_worker_allocation{pool=\"compio_direct_h1\",owner=\"compio\"}",
+  ] {
+    assert!(
+      !checks.contains(stale),
+      "the Compio transport fixture must not preserve stale worker-allocation sample {stale}"
     );
   }
   for forbidden in [

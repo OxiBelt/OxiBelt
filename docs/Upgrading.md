@@ -486,11 +486,14 @@ The deprecated async run wrappers now use the caller's current runtime,
 caller-managed process globals, and no implicit signals or Landlock. They
 return a structured migration error when configuration requires process
 ownership. Embedded runtime/topology and executor-worker settings are reported
-as inapplicable rather than silently resized or falsely claimed. New callers
-must retain `ServerHandle` and await consuming `shutdown(deadline)` or `wait()`
-before dropping their runtime when joined cleanup is required; dropping the
-handle requests cancellation but does not prove a join. Sequential replacement
-should wait for joined terminal completion and must retain compatible immutable
+as inapplicable rather than silently resized or falsely claimed. Prometheus
+consumers that exactly match `oxibelt_runtime_worker_allocation` must accept its
+bounded `applicability` label (`applied` or `inapplicable`) and update selectors
+or parsers that assumed only `pool` and `owner`. New callers must retain
+`ServerHandle` and await consuming `shutdown(deadline)` or `wait()` before
+dropping their runtime when joined cleanup is required; dropping the handle
+requests cancellation but does not prove a join. Sequential replacement should
+wait for joined terminal completion and must retain compatible immutable
 process-global choices; concurrent instances are not guaranteed. This changes
 the Rust library compatibility surface but does not change TOML syntax, native
 schema epoch, Admin wire schemas, or persisted state. Roll back by returning to
