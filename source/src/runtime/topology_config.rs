@@ -85,9 +85,11 @@ pub fn capabilities_for_active(topology: &RuntimeTopologySnapshot) -> RuntimeTop
 pub fn external_topology(config: &Config) -> RuntimeTopologySnapshot {
   let mut workers = request_from_config(config).workers;
   workers.tokio_executor_workers = 0;
-  workers.tcp_accept_workers = 0;
-  workers.quic_socket_workers = 0;
   workers.compio_direct_h1_workers = 0;
+  workers.tokio_blocking_worker_limit = None;
+  if !config.listeners.http3 {
+    workers.quic_socket_workers = 0;
+  }
   RuntimeTopologySnapshot::external_with_workers(workers)
 }
 
@@ -144,8 +146,40 @@ private_key = "privkey.pem"
 
     assert_eq!(topology.resolved_preset, RuntimeResolvedPreset::External);
     assert_eq!(topology.workers.tokio_executor_workers, 0);
-    assert_eq!(topology.workers.tcp_accept_workers, 0);
+    assert_eq!(
+      topology.workers.tcp_accept_workers,
+      default_config().runtime.accept.workers
+    );
     assert_eq!(topology.workers.quic_socket_workers, 0);
     assert_eq!(topology.workers.compio_direct_h1_workers, 0);
+    assert_eq!(
+      topology.worker_applicability.tokio_executor_workers,
+      super::super::topology::RuntimeWorkerApplicability::Inapplicable
+    );
+    assert_eq!(
+      topology.worker_applicability.tcp_accept_workers,
+      super::super::topology::RuntimeWorkerApplicability::Applied
+    );
+  }
+
+  #[test]
+  fn external_topology_retains_oxibelt_accept_and_quic_fan_out() {
+    let mut config = default_config();
+    config.listeners.http3 = true;
+    config.runtime.accept.workers = 3;
+    config.quic.socket.workers = 2;
+
+    let topology = external_topology(&config);
+
+    assert_eq!(topology.workers.tcp_accept_workers, 3);
+    assert_eq!(topology.workers.quic_socket_workers, 2);
+    assert_eq!(
+      topology.worker_applicability.quic_socket_workers,
+      super::super::topology::RuntimeWorkerApplicability::Applied
+    );
+    assert_eq!(
+      topology.worker_applicability.compio_direct_h1_workers,
+      super::super::topology::RuntimeWorkerApplicability::Inapplicable
+    );
   }
 }

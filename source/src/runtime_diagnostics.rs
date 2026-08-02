@@ -191,6 +191,7 @@ pub(crate) fn handle_runtime_check_command(
   Ok(())
 }
 
+#[allow(deprecated)]
 fn run_runtime_check(config_path: &Path) -> RuntimeCheckReport {
   let mut report = RuntimeCheckReport::new();
   let mut config = match report.stage("config_load", true, || {

@@ -47,6 +47,7 @@ fn feature_matrix_uses_known_lifecycle_statuses_and_required_ids() {
     ("downstream-http-protocols", "supported"),
     ("upstream-http-protocols", "supported"),
     ("compio-direct-h1-io", "experimental"),
+    ("owned-embedded-runtime-api", "experimental"),
     ("route-matchers", "supported"),
     ("route-actions", "supported"),
     ("upstream-pool-algorithms", "supported"),
@@ -115,6 +116,71 @@ fn compio_direct_h1_status_preserves_experimental_no_duplicate_boundary() {
       description.contains(expected),
       "compio-direct-h1-io lifecycle notes should preserve {expected:?}"
     );
+  }
+}
+
+#[test]
+fn owned_and_embedded_runtime_api_is_documented_as_an_explicit_ownership_boundary() {
+  let readme = read_repo_file("README.md");
+  let embedding = read_repo_file("docs/Embedding.md");
+  let configuration = read_repo_file("docs/Configuration.md");
+  let upgrading = read_repo_file("docs/Upgrading.md");
+
+  assert!(
+    readme.contains("[Rust embedding guide](docs/Embedding.md)"),
+    "README.md should publish the Rust embedding guide"
+  );
+  for expected in [
+    "OxiBelt::builder",
+    "RuntimePolicy::FromConfig",
+    "RuntimePolicy::CurrentRuntime",
+    "ProcessPolicy::Standalone",
+    "ProcessPolicy::Embedded",
+    "ProcessGlobalHooks::CallerManaged",
+    "ProcessGlobalHooks::VerifyOnly",
+    "ProcessGlobalHooks::ApplySelected",
+    "ServerHandle",
+    "readiness",
+    "runtime_topology",
+    "bound_listeners",
+    "shutdown",
+    "cancel",
+    "wait",
+    "Drop cannot await",
+    "Concurrent instances are not a compatibility guarantee",
+  ] {
+    assert!(
+      embedding.contains(expected),
+      "docs/Embedding.md should preserve {expected:?}"
+    );
+  }
+  for status in [
+    "Applied",
+    "AlreadyMatching",
+    "Verified",
+    "CallerManaged",
+    "Inapplicable",
+    "Unverifiable",
+    "Rejected",
+    "Conflict",
+  ] {
+    assert!(
+      embedding.contains(status),
+      "docs/Embedding.md should preserve process-global status {status:?}"
+    );
+  }
+  for document in [&configuration, &upgrading] {
+    for expected in [
+      "RuntimePolicy::CurrentRuntime",
+      "ProcessPolicy::Embedded",
+      "ProcessGlobalHooks::CallerManaged",
+      "Landlock",
+    ] {
+      assert!(
+        document.contains(expected),
+        "configuration and upgrade docs should preserve {expected:?}"
+      );
+    }
   }
 }
 

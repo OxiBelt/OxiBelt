@@ -1,7 +1,7 @@
 //! Small crypto primitive adapters used by OxiBelt-owned protocol code.
 //! These helpers keep fixed algorithms and constant-time tag checks explicit.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 use aes_gcm::Aes256Gcm as RustCryptoAes256Gcm;
 use aes_gcm::aead::{AeadInOut, KeyInit as AeadKeyInit};
@@ -23,43 +23,87 @@ pub(crate) const SHA1_LEN: usize = 20;
 pub(crate) const SHA256_LEN: usize = 32;
 pub(crate) const SHA256_HEX_LEN: usize = SHA256_LEN * 2;
 
-const PROVIDER_RUSTCRYPTO: u8 = 0;
-const PROVIDER_AWS_LC_RS: u8 = 1;
+const PROVIDER_RUSTCRYPTO: u16 = 0;
+const PROVIDER_AWS_LC_RS: u16 = 1;
+const SHA2_SHIFT: u32 = 0;
+const HKDF_SHIFT: u32 = 1;
+const HMAC_SHA256_SHIFT: u32 = 2;
+const AES_GCM_SHIFT: u32 = 3;
+const CHACHA20POLY1305_SHIFT: u32 = 4;
+const PROVIDER_MASK: u16 = (1 << 5) - 1;
+const CLAIMED: u16 = 1 << 15;
 
-static SHA2_PROVIDER: AtomicU8 = AtomicU8::new(PROVIDER_RUSTCRYPTO);
-static HKDF_PROVIDER: AtomicU8 = AtomicU8::new(PROVIDER_RUSTCRYPTO);
-static HMAC_SHA256_PROVIDER: AtomicU8 = AtomicU8::new(PROVIDER_RUSTCRYPTO);
-static AES_GCM_PROVIDER: AtomicU8 = AtomicU8::new(PROVIDER_RUSTCRYPTO);
-static CHACHA20POLY1305_PROVIDER: AtomicU8 = AtomicU8::new(PROVIDER_RUSTCRYPTO);
+// A single atomic keeps provider selection coherent across every primitive. Its
+// high bit records an explicit process claim; the all-zero initial value is the
+// historical RustCrypto default and remains observable to verify-only callers.
+static RUNTIME_PROVIDERS: AtomicU16 = AtomicU16::new(0);
 
 type HmacSha1 = Hmac<Sha1>;
 type HmacSha256 = Hmac<Sha256>;
 
-pub(crate) fn configure_runtime(config: &CryptoConfig) {
-  SHA2_PROVIDER.store(encode_provider(config.sha2_provider()), Ordering::Relaxed);
-  HKDF_PROVIDER.store(encode_provider(config.hkdf_provider()), Ordering::Relaxed);
-  HMAC_SHA256_PROVIDER.store(
-    encode_provider(config.hmac_sha256_provider()),
-    Ordering::Relaxed,
-  );
-  AES_GCM_PROVIDER.store(
-    encode_provider(config.aes_gcm_provider()),
-    Ordering::Relaxed,
-  );
-  CHACHA20POLY1305_PROVIDER.store(
-    encode_provider(config.chacha20poly1305_provider()),
-    Ordering::Relaxed,
-  );
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum CryptoPrimitiveClaim {
+  Applied,
+  AlreadyMatching,
 }
 
-fn encode_provider(provider: CryptoPrimitiveProvider) -> u8 {
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct CryptoPrimitiveConflict;
+
+pub(crate) fn configure_runtime(
+  config: &CryptoConfig,
+) -> Result<CryptoPrimitiveClaim, CryptoPrimitiveConflict> {
+  claim_runtime(&RUNTIME_PROVIDERS, encode_config(config))
+}
+
+fn claim_runtime(
+  providers: &AtomicU16,
+  requested: u16,
+) -> Result<CryptoPrimitiveClaim, CryptoPrimitiveConflict> {
+  loop {
+    let active = providers.load(Ordering::Acquire);
+    if active & CLAIMED != 0 {
+      return if active & PROVIDER_MASK == requested {
+        Ok(CryptoPrimitiveClaim::AlreadyMatching)
+      } else {
+        Err(CryptoPrimitiveConflict)
+      };
+    }
+    if providers
+      .compare_exchange(
+        active,
+        CLAIMED | requested,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      )
+      .is_ok()
+    {
+      return Ok(CryptoPrimitiveClaim::Applied);
+    }
+  }
+}
+
+pub(crate) fn runtime_matches(config: &CryptoConfig) -> bool {
+  RUNTIME_PROVIDERS.load(Ordering::Acquire) & PROVIDER_MASK == encode_config(config)
+}
+
+fn encode_config(config: &CryptoConfig) -> u16 {
+  (encode_provider(config.sha2_provider()) << SHA2_SHIFT)
+    | (encode_provider(config.hkdf_provider()) << HKDF_SHIFT)
+    | (encode_provider(config.hmac_sha256_provider()) << HMAC_SHA256_SHIFT)
+    | (encode_provider(config.aes_gcm_provider()) << AES_GCM_SHIFT)
+    | (encode_provider(config.chacha20poly1305_provider()) << CHACHA20POLY1305_SHIFT)
+}
+
+fn encode_provider(provider: CryptoPrimitiveProvider) -> u16 {
   match provider {
     CryptoPrimitiveProvider::RustCrypto => PROVIDER_RUSTCRYPTO,
     CryptoPrimitiveProvider::AwsLcRs => PROVIDER_AWS_LC_RS,
   }
 }
 
-fn decode_provider(value: u8) -> CryptoPrimitiveProvider {
+fn active_provider(shift: u32) -> CryptoPrimitiveProvider {
+  let value = (RUNTIME_PROVIDERS.load(Ordering::Acquire) >> shift) & 1;
   match value {
     PROVIDER_AWS_LC_RS => CryptoPrimitiveProvider::AwsLcRs,
     _ => CryptoPrimitiveProvider::RustCrypto,
@@ -79,7 +123,7 @@ pub(crate) fn sha1(bytes: &[u8]) -> [u8; SHA1_LEN] {
 }
 
 pub(crate) fn sha256(bytes: &[u8]) -> [u8; SHA256_LEN] {
-  match decode_provider(SHA2_PROVIDER.load(Ordering::Relaxed)) {
+  match active_provider(SHA2_SHIFT) {
     CryptoPrimitiveProvider::RustCrypto => rustcrypto_sha256(bytes),
     CryptoPrimitiveProvider::AwsLcRs => {
       let digest = aws_digest::digest(&aws_digest::SHA256, bytes);
@@ -114,7 +158,7 @@ pub(crate) fn verify_hmac_sha1(key: &[u8], value: &[u8], tag: &[u8]) -> bool {
 }
 
 pub(crate) fn hmac_sha256(key: &[u8], value: &[u8]) -> [u8; SHA256_LEN] {
-  match decode_provider(HMAC_SHA256_PROVIDER.load(Ordering::Relaxed)) {
+  match active_provider(HMAC_SHA256_SHIFT) {
     CryptoPrimitiveProvider::RustCrypto => rustcrypto_hmac_sha256(key, value),
     CryptoPrimitiveProvider::AwsLcRs => {
       let key = aws_hmac::Key::new(aws_hmac::HMAC_SHA256, key);
@@ -127,9 +171,7 @@ pub(crate) fn hmac_sha256(key: &[u8], value: &[u8]) -> [u8; SHA256_LEN] {
 }
 
 pub(crate) fn verify_hmac_sha256(key: &[u8], value: &[u8], tag: &[u8]) -> bool {
-  if decode_provider(HMAC_SHA256_PROVIDER.load(Ordering::Relaxed))
-    == CryptoPrimitiveProvider::AwsLcRs
-  {
+  if active_provider(HMAC_SHA256_SHIFT) == CryptoPrimitiveProvider::AwsLcRs {
     let key = aws_hmac::Key::new(aws_hmac::HMAC_SHA256, key);
     return aws_hmac::verify(&key, value, tag).is_ok();
   }
@@ -142,7 +184,7 @@ pub(crate) fn hkdf_sha256(
   info: &[u8],
   out: &mut [u8],
 ) -> anyhow::Result<()> {
-  match decode_provider(HKDF_PROVIDER.load(Ordering::Relaxed)) {
+  match active_provider(HKDF_SHIFT) {
     CryptoPrimitiveProvider::RustCrypto => {
       hkdf::Hkdf::<Sha256>::new(Some(salt), secret)
         .expand(info, out)
@@ -167,7 +209,7 @@ pub(crate) enum Aes256GcmKey {
 
 impl Aes256GcmKey {
   pub(crate) fn new_from_slice(key: &[u8]) -> anyhow::Result<Self> {
-    match decode_provider(AES_GCM_PROVIDER.load(Ordering::Relaxed)) {
+    match active_provider(AES_GCM_SHIFT) {
       CryptoPrimitiveProvider::RustCrypto => Ok(Self::RustCrypto(Box::new(
         RustCryptoAes256Gcm::new_from_slice(key).context("AES-256-GCM requires a 32-byte key")?,
       ))),
@@ -244,7 +286,7 @@ pub(crate) enum ChaCha20Poly1305Key {
 #[allow(dead_code)]
 impl ChaCha20Poly1305Key {
   pub(crate) fn new_from_slice(key: &[u8]) -> anyhow::Result<Self> {
-    match decode_provider(CHACHA20POLY1305_PROVIDER.load(Ordering::Relaxed)) {
+    match active_provider(CHACHA20POLY1305_SHIFT) {
       CryptoPrimitiveProvider::RustCrypto => Ok(Self::RustCrypto(Box::new(
         RustCryptoChaCha20Poly1305::new_from_slice(key)
           .context("ChaCha20-Poly1305 requires a 32-byte key")?,
@@ -373,9 +415,33 @@ mod tests {
     let _guard = PROVIDER_TEST_LOCK
       .lock()
       .expect("provider test lock poisoned");
-    configure_runtime(&config(provider));
+    let previous = RUNTIME_PROVIDERS.swap(encode_config(&config(provider)), Ordering::AcqRel);
     test();
-    configure_runtime(&CryptoConfig::default());
+    RUNTIME_PROVIDERS.store(previous, Ordering::Release);
+  }
+
+  #[test]
+  fn checked_runtime_claim_is_idempotent_and_rejects_reconfiguration() {
+    let providers = AtomicU16::new(0);
+    let rustcrypto = encode_config(&config(CryptoPrimitiveProvider::RustCrypto));
+    let aws_lc = encode_config(&config(CryptoPrimitiveProvider::AwsLcRs));
+
+    assert_eq!(
+      claim_runtime(&providers, rustcrypto),
+      Ok(CryptoPrimitiveClaim::Applied)
+    );
+    assert_eq!(
+      claim_runtime(&providers, rustcrypto),
+      Ok(CryptoPrimitiveClaim::AlreadyMatching)
+    );
+    assert_eq!(
+      claim_runtime(&providers, aws_lc),
+      Err(CryptoPrimitiveConflict)
+    );
+    assert_eq!(
+      providers.load(Ordering::Acquire) & PROVIDER_MASK,
+      rustcrypto
+    );
   }
 
   #[test]

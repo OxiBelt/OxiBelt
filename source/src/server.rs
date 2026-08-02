@@ -119,6 +119,7 @@ mod file_sync_path;
 mod h1_fast_proxy;
 mod http1_framing_guard;
 mod http_io;
+mod lifecycle_api;
 mod listener_sets;
 mod listener_supervisor;
 mod listener_tasks;
@@ -179,16 +180,28 @@ use admin_dispatch::*;
 #[cfg(feature = "admin-runtime")]
 use admin_operations::AdminOperationRuntime;
 #[cfg(feature = "admin-runtime")]
+pub(crate) use admin_runtime::prepare_controlled;
+#[cfg(feature = "admin-runtime")]
 pub use admin_runtime::serve;
 #[cfg(feature = "admin-runtime")]
 use admin_stream_pools::admin_stream_pools_response;
 #[cfg(feature = "admin-runtime")]
 use admin_upstream_pools::admin_upstream_pools_response;
+pub use lifecycle_api::{
+  BoundListener, BoundListenerKind, BoundListenerTransport, ReadinessReason, ReadinessSnapshot,
+  ServerControl, ServerControlClosed, ServerHandle, ServerReadiness, ShutdownOutcome,
+  ShutdownReason, ShutdownResult, WaitReadyError,
+};
+pub(crate) use lifecycle_api::{
+  ControlCommand, PreparedServer, ServerLifecycle, SignalMode, readiness_for_snapshot,
+};
 pub(crate) use listener_supervisor::ListenerSupervisor;
 use listener_supervisor::*;
 use listener_tasks::*;
 use listeners::*;
 use public_dispatch::*;
+#[cfg(not(feature = "admin-runtime"))]
+pub(crate) use strict_runtime::prepare_controlled;
 #[cfg(not(feature = "admin-runtime"))]
 pub use strict_runtime::serve;
 use tls_metadata::*;

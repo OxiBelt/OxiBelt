@@ -68,6 +68,10 @@ pub(crate) use ocsp::OcspStapleRuntime;
 pub(crate) use outbound_revocation::OutboundRevocationRuntime;
 #[cfg(feature = "admin-runtime")]
 pub use outbound_revocation::OutboundRevocationRuntimeStatus;
+pub(crate) use provider::{
+  ConfiguredProviderInstall, ConfiguredProviderInstallError, ConfiguredProviderState,
+  configured_provider_state, ensure_configured_provider,
+};
 pub use redis_client::preload_native_redis_roots;
 pub(crate) use redis_client::{
   RedisTlsClientConfig, RedisTlsIdentity, build_redis_tls_client_config, native_root_access_paths,
@@ -97,15 +101,17 @@ pub(crate) use upstream_policy::{
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {
-  let provider = provider::default_crypto_provider();
-  let _ = provider.install_default();
-  Ok(())
+  install_configured_provider(&CryptoConfig::default())
 }
 
 pub fn install_configured_provider(config: &crate::config::CryptoConfig) -> anyhow::Result<()> {
-  let provider = provider::crypto_provider(config)?;
-  let _ = provider.install_default();
-  Ok(())
+  match ensure_configured_provider(config) {
+    Ok(ConfiguredProviderInstall::Applied | ConfiguredProviderInstall::AlreadyMatching) => Ok(()),
+    Err(ConfiguredProviderInstallError::Conflict) => {
+      bail!("configured rustls crypto provider conflicts with the process default")
+    }
+    Err(ConfiguredProviderInstallError::Unavailable(error)) => Err(error),
+  }
 }
 
 pub(crate) fn default_crypto_provider() -> rustls::crypto::CryptoProvider {

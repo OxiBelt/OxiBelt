@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, ensure};
 use tracing::{error, info};
 
+use super::ops::OpsTasks;
 use super::{AppHandle, ListenerSupervisor};
 use crate::proxy::http::fast_path::direct_h1::CompioDirectH1ShutdownSummary;
 
@@ -70,27 +71,34 @@ pub(super) fn begin_process_predrain(state: &AppHandle, listeners: &mut Listener
   listeners.quiesce();
 }
 
-pub(super) async fn graceful_process_shutdown(
+pub(super) async fn controlled_process_shutdown(
   state: &AppHandle,
   listeners: &mut ListenerSupervisor,
-) -> anyhow::Result<()> {
+  ops: OpsTasks,
+  deadline: std::time::Instant,
+  apply_shutdown_delay: bool,
+) -> anyhow::Result<bool> {
   let snapshot = state.snapshot();
   snapshot.lifecycle.start_shutdown();
   state.begin_compio_direct_h1_drain();
   listeners.quiesce();
-  let shutdown_delay = Duration::from_millis(snapshot.config.runtime.drain.shutdown_delay_ms);
-  if !shutdown_delay.is_zero() {
-    tokio::time::sleep(shutdown_delay).await;
+  if apply_shutdown_delay {
+    let configured = Duration::from_millis(snapshot.config.runtime.drain.shutdown_delay_ms);
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    let delay = configured.min(remaining);
+    if !delay.is_zero() {
+      tokio::time::sleep(delay).await;
+    }
   }
+  let terminal_deadline = tokio::time::Instant::from_std(deadline);
   let required = snapshot
     .compio_direct_h1_service
     .as_ref()
     .is_some_and(|service| service.is_required());
-  let deadline = tokio::time::Instant::now()
-    + Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
-  let ((), summary) = tokio::join!(
-    listeners.shutdown(snapshot.as_ref()),
-    state.shutdown_compio_direct_h1(deadline)
+  let (listener_forced, ops_forced, summary) = tokio::join!(
+    listeners.shutdown_until(terminal_deadline),
+    ops.shutdown(terminal_deadline),
+    state.shutdown_compio_direct_h1(terminal_deadline),
   );
   let shutdown_succeeded = compio_direct_h1_shutdown_succeeded(required, summary);
   log_compio_direct_h1_shutdown_summary(summary, !shutdown_succeeded);
@@ -101,24 +109,7 @@ pub(super) async fn graceful_process_shutdown(
     summary.workers_joined,
     summary.worker_failures
   );
-  Ok(())
-}
-
-pub(super) async fn shutdown_compio_direct_h1_after_error(state: &AppHandle) {
-  let snapshot = state.snapshot();
-  snapshot.lifecycle.start_shutdown();
-  state.begin_compio_direct_h1_drain();
-  let required = snapshot
-    .compio_direct_h1_service
-    .as_ref()
-    .is_some_and(|service| service.is_required());
-  let deadline = tokio::time::Instant::now()
-    + Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
-  let summary = state.shutdown_compio_direct_h1(deadline).await;
-  log_compio_direct_h1_shutdown_summary(
-    summary,
-    !compio_direct_h1_shutdown_succeeded(required, summary),
-  );
+  Ok(listener_forced || ops_forced)
 }
 
 fn compio_direct_h1_shutdown_succeeded(

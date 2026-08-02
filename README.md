@@ -176,6 +176,8 @@ the complete contract and boundaries.
   rollback, and irreversible-step contracts.
 - [Technical specification](docs/Specification.md): proxy behavior, request pipeline, runtime model, security posture, and non-goals.
 - [Configuration reference](docs/Configuration.md): TOML sections, includes, path rules, machine-readable schema, validation, migration, and examples.
+- [Rust embedding guide](docs/Embedding.md): owned and current-runtime APIs,
+  process-global hook policy, readiness, and bounded shutdown.
 - [Operational-profile contract](docs/Configuration.md#operational-profiles):
   `edge-secure-medium` v1 syntax, protected defaults, required inputs, Helm
   companion values, and compatibility rules.

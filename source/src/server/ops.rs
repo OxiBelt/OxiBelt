@@ -20,6 +20,7 @@ use crate::runtime_health::{
 use crate::state::AppHandle;
 
 use super::rollout_identity;
+use super::{BoundListener, BoundListenerKind, BoundListenerTransport};
 
 #[derive(Clone, Copy)]
 pub(super) enum OpsKind {
@@ -30,6 +31,7 @@ pub(super) enum OpsKind {
 pub(super) struct OpsTasks {
   shutdown: Vec<watch::Sender<bool>>,
   tasks: Vec<JoinHandle<()>>,
+  bound_listeners: Vec<BoundListener>,
 }
 
 impl OpsTasks {
@@ -41,6 +43,7 @@ impl OpsTasks {
     let runtime_health = snapshot.runtime_health.clone();
     let mut shutdown = Vec::new();
     let mut tasks = Vec::new();
+    let mut bound_listeners = Vec::new();
     if snapshot.config.metrics.enabled {
       let listener = TcpListener::bind(snapshot.config.metrics.bind)
         .await
@@ -50,6 +53,13 @@ impl OpsTasks {
             snapshot.config.metrics.bind
           )
         })?;
+      bound_listeners.push(BoundListener {
+        kind: BoundListenerKind::Metrics,
+        transport: BoundListenerTransport::Tcp,
+        address: listener
+          .local_addr()
+          .context("failed to inspect bound metrics listener address")?,
+      });
       let (tx, rx) = watch::channel(false);
       shutdown.push(tx);
       let mut initial_listener = Some(listener);
@@ -88,6 +98,13 @@ impl OpsTasks {
             snapshot.config.health.bind
           )
         })?;
+      bound_listeners.push(BoundListener {
+        kind: BoundListenerKind::Health,
+        transport: BoundListenerTransport::Tcp,
+        address: listener
+          .local_addr()
+          .context("failed to inspect bound health listener address")?,
+      });
       let (tx, rx) = watch::channel(false);
       shutdown.push(tx);
       let mut initial_listener = Some(listener);
@@ -188,7 +205,32 @@ impl OpsTasks {
         }
       },
     ));
-    Ok(Self { shutdown, tasks })
+    Ok(Self {
+      shutdown,
+      tasks,
+      bound_listeners,
+    })
+  }
+
+  pub(super) fn bound_listeners(&self) -> impl Iterator<Item = BoundListener> + '_ {
+    self.bound_listeners.iter().copied()
+  }
+
+  /// Stops and joins every Ops/runtime-health task before the supplied terminal deadline.
+  /// Returns true when at least one task required forced cancellation.
+  pub(super) async fn shutdown(mut self, deadline: tokio::time::Instant) -> bool {
+    for tx in &self.shutdown {
+      let _ = tx.send(true);
+    }
+    let mut forced = false;
+    for mut task in self.tasks.drain(..) {
+      if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+        forced = true;
+        task.abort();
+        let _ = task.await;
+      }
+    }
+    forced
   }
 }
 

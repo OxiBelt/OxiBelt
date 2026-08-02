@@ -126,6 +126,15 @@ impl AdminClusterRuntimeTasks {
   }
 }
 
+impl Drop for AdminClusterRuntimeTasks {
+  fn drop(&mut self) {
+    let _ = self.shutdown.send(true);
+    for task in self.tasks.drain(..) {
+      task.abort();
+    }
+  }
+}
+
 fn spawn_worker<F, Fut>(
   health: Arc<RuntimeHealth>,
   generation: u64,

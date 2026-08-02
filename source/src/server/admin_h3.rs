@@ -58,6 +58,13 @@ pub(super) struct BoundAdminHttp3Listener {
 }
 
 impl AdminHttp3ListenerTask {
+  pub(super) fn bound_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+    self
+      .endpoints
+      .iter()
+      .filter_map(|endpoint| endpoint.local_addr().ok())
+  }
+
   pub(super) fn matches(
     &self,
     bind: SocketAddr,
@@ -78,21 +85,25 @@ impl AdminHttp3ListenerTask {
     drop(self.drain());
   }
 
-  pub(super) fn drain(self) -> JoinHandle<()> {
+  pub(super) fn drain(self) -> JoinHandle<bool> {
+    let deadline = tokio::time::Instant::now() + self.graceful_timeout;
+    self.drain_until(deadline)
+  }
+
+  pub(super) fn drain_until(self, deadline: tokio::time::Instant) -> JoinHandle<bool> {
     tokio::spawn(async move {
       let AdminHttp3ListenerTask {
         endpoints,
         shutdown,
         connections,
-        graceful_timeout,
-        tasks,
+        mut tasks,
         ..
       } = self;
       let _ = shutdown.send(true);
       let wait_endpoints = endpoints.clone();
       let wait_connections = connections.clone();
       let wait = async {
-        for task in tasks {
+        for task in &mut tasks {
           let _ = task.await;
         }
         wait_connections.wait_idle().await;
@@ -100,12 +111,21 @@ impl AdminHttp3ListenerTask {
           endpoint.wait_idle().await;
         }
       };
-      if tokio::time::timeout(graceful_timeout, wait).await.is_err() {
+      if tokio::time::timeout_at(deadline, wait).await.is_err() {
         for endpoint in endpoints {
           endpoint.close(0u32.into(), b"admin h3 listener drain timeout");
         }
+        for task in &tasks {
+          task.abort();
+        }
         connections.abort_all();
+        for task in tasks {
+          let _ = task.await;
+        }
+        connections.wait_idle().await;
+        return true;
       }
+      false
     })
   }
 }

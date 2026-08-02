@@ -9,6 +9,7 @@ use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::runtime_health::RuntimeTaskKind;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
+use crate::server::BoundListener;
 use crate::state::{AppHandle, AppSnapshot};
 use crate::tls;
 use anyhow::{Context, bail};
@@ -25,6 +26,8 @@ use tokio_rustls::{LazyConfigAcceptor, TlsConnector};
 use tracing::{info, warn};
 use url::Url;
 
+mod bound_inventory;
+mod task_lifecycle;
 mod udp_task;
 use crate::tls::TlsResumptionState;
 
@@ -35,6 +38,7 @@ use super::protocol::*;
 
 pub struct TurnListenerTask {
   key: TurnListenerKey,
+  bound_listeners: Vec<BoundListener>,
   quiesce: watch::Sender<bool>,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
@@ -121,6 +125,7 @@ impl BoundTurnListener {
     state: AppHandle,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
   ) -> TurnListenerTask {
+    let bound_listeners = bound_inventory::collect(&self);
     let snapshot = state.snapshot();
     let graceful_timeout = Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
     let long_connection_close_delay =
@@ -183,6 +188,7 @@ impl BoundTurnListener {
     tasks.push(spawn_health_task(state, shutdown_rx.clone()));
     TurnListenerTask {
       key,
+      bound_listeners,
       quiesce,
       shutdown,
       connections,
@@ -196,40 +202,6 @@ impl BoundTurnListener {
 pub(crate) struct TurnListenerKey {
   pub(crate) config: WebRtcTurnListenerConfig,
   pub(crate) tcp_options: TcpListenOptions,
-}
-
-impl TurnListenerTask {
-  pub(crate) fn listener_key(&self) -> &TurnListenerKey {
-    &self.key
-  }
-
-  pub(crate) fn quiesce(&self) {
-    let _ = self.quiesce.send(true);
-  }
-
-  pub(crate) fn drain_background(self) {
-    drop(self.drain());
-  }
-
-  pub(crate) fn drain(self) -> JoinHandle<()> {
-    tokio::spawn(async move {
-      let _ = self.quiesce.send(true);
-      let _ = self.shutdown.send(true);
-      let wait_connections = self.connections.clone();
-      let wait = async {
-        for task in self.tasks {
-          let _ = task.await;
-        }
-        wait_connections.wait_idle().await;
-      };
-      if tokio::time::timeout(self.graceful_timeout, wait)
-        .await
-        .is_err()
-      {
-        self.connections.abort_all();
-      }
-    })
-  }
 }
 
 #[allow(clippy::too_many_arguments)]

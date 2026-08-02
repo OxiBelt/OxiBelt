@@ -696,6 +696,28 @@ read_write_paths = []
 
 `unprivileged_mode = true` rejects listener ports `1..1023` unless `[runtime.netport_switcher] enabled = true` is set for data-plane listeners and OxiBelt is started through `/usr/local/bin/oxibelt-netport-switcher`. While the Compio direct-H1 response engine remains experimental, the checked-in example and conservative production recommendation explicitly select `main_runtime = "tokio_hyper"` and `direct_h1_io = "auto"`.
 
+### Library runtime ownership
+
+The Rust library has separate owned and embedded entry points; see
+[Embedding OxiBelt](Embedding.md). `RuntimePolicy::FromConfig` applies
+`runtime.main_runtime`, `runtime.topology_policy`, and the configured Tokio and
+Compio worker ownership in a runtime created and owned by OxiBelt.
+`RuntimePolicy::CurrentRuntime` instead uses the caller's current Tokio
+runtime. In that mode the main-runtime, topology-policy, Tokio-worker, and
+Compio-worker fields remain valid TOML but are reported as `Inapplicable`; the
+library never resizes the caller executor or claims a different executor.
+Accept and QUIC socket workers remain OxiBelt-owned and their configuration is
+still applied.
+
+`ProcessPolicy::Embedded` separately selects
+`ProcessGlobalHooks::CallerManaged`, `VerifyOnly`, or `ApplySelected`. These
+policies control process-global crypto defaults, tracing, signals/reload,
+`close_range`, and hardening rather than changing TOML precedence. Embedded
+Landlock application is rejected because confinement cannot be made truthful
+after a caller-owned runtime has created threads. Select
+`ProcessPolicy::Standalone` and the owned API when configured Landlock or
+OxiBelt-owned process signals are required.
+
 `main_runtime = "hybrid_compio"` is the canonical default. It owns one Compio bootstrap driver around a Tokio compatibility island; TCP accept, general HTTP, HTTP/3 and QUIC, DNS and discovery, timers, background/control work, and Tokio-managed blocking work execute on Tokio. Only an activated Compio direct-H1 worker fleet owns direct-H1 transport work. The legacy value `main_runtime = "compio"` remains behavior-identical, resolves to `hybrid_compio`, and emits `CFG_RUNTIME_MAIN_RUNTIME_COMPATIBILITY_ALIAS`; no removal deadline is assigned. `main_runtime = "tokio_hyper"` runs the same server subsystems directly on Tokio/Hyper. `main_runtime = "auto"` prefers a safe hybrid topology and records a fallback to Tokio/Hyper when Compio is unavailable or unsafe.
 
 `topology_policy = "allow_fallback"` preserves the compatibility fallback behavior. `require_exact` rejects startup or reload when `auto` cannot retain the preferred hybrid topology or an explicitly requested Compio direct-H1 transport would require a compatibility fallback. Capability resolution is deterministic and reports `exact`, `fallback`, `rejected`, or `feature_disabled` together with a fixed reason; it accounts for the OS, architecture, compiled support, Compio driver safety and preflight, required socket/protocol capabilities, hardening, and worker/resource budgets. Raw probe errors are not exposed in logs, metrics, config explain, runtime snapshots, or support bundles.

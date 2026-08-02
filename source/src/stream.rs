@@ -22,6 +22,7 @@ use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
 use crate::proxy_protocol_egress;
 use crate::runtime_health::RuntimeTaskKind;
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
+use crate::server::{BoundListener, BoundListenerKind, BoundListenerTransport};
 use crate::shared_state::SharedState;
 use crate::sni_forward::client_hello::{ClientHelloSni, tls_record_client_hello_sni};
 use crate::state::AppHandle;
@@ -42,6 +43,7 @@ const STREAM_INCOMPLETE_CLIENT_HELLO_RETRY_DELAY: Duration = Duration::from_mill
 
 pub(crate) struct StreamListenerTask {
   pub(crate) generation: StreamListenerGeneration,
+  bound_listeners: Vec<BoundListener>,
   quiesce: watch::Sender<bool>,
   shutdown: watch::Sender<bool>,
   connections: TaskRegistry,
@@ -142,6 +144,10 @@ enum BoundStreamTransport {
 }
 
 impl StreamListenerTask {
+  pub(crate) fn bound_listeners(&self) -> impl Iterator<Item = BoundListener> + '_ {
+    self.bound_listeners.iter().copied()
+  }
+
   #[cfg(test)]
   pub(crate) fn test_identity(&self) -> watch::Receiver<bool> {
     self.quiesce.subscribe()
@@ -155,13 +161,17 @@ impl StreamListenerTask {
     drop(self.drain());
   }
 
-  pub(crate) fn drain(self) -> JoinHandle<()> {
+  pub(crate) fn drain(self) -> JoinHandle<bool> {
+    let deadline = tokio::time::Instant::now() + self.graceful_timeout;
+    self.drain_until(deadline)
+  }
+
+  pub(crate) fn drain_until(self, deadline: tokio::time::Instant) -> JoinHandle<bool> {
     tokio::spawn(async move {
       let StreamListenerTask {
         quiesce,
         shutdown,
         connections,
-        graceful_timeout,
         mut tasks,
         generation,
         ..
@@ -170,14 +180,11 @@ impl StreamListenerTask {
       if generation.config.network == StreamNetwork::Tcp {
         let _ = shutdown.send(true);
       }
-      if tokio::time::timeout(
-        graceful_timeout,
-        wait_for_stream_tasks(&mut tasks, &connections),
-      )
-      .await
-      .is_ok()
+      if tokio::time::timeout_at(deadline, wait_for_stream_tasks(&mut tasks, &connections))
+        .await
+        .is_ok()
       {
-        return;
+        return false;
       }
 
       let _ = shutdown.send(true);
@@ -185,17 +192,22 @@ impl StreamListenerTask {
         connections.abort_all();
       }
       if tokio::time::timeout(
-        Duration::from_secs(1),
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
         wait_for_stream_tasks(&mut tasks, &connections),
       )
       .await
       .is_err()
       {
         connections.abort_all();
-        for task in tasks {
+        for task in &tasks {
           task.abort();
         }
+        for task in tasks {
+          let _ = task.await;
+        }
+        connections.wait_idle().await;
       }
+      true
     })
   }
 }
@@ -250,6 +262,28 @@ impl BoundStreamListener {
     let name = generation.config.name.clone();
     let config = generation.config.clone();
     let transport = self.transport;
+    let bound_listeners = match &transport {
+      BoundStreamTransport::Tcp(listeners) => listeners
+        .iter()
+        .filter_map(|listener| listener.local_addr().ok())
+        .map(|address| BoundListener {
+          kind: BoundListenerKind::Stream,
+          transport: BoundListenerTransport::Tcp,
+          address,
+        })
+        .collect(),
+      BoundStreamTransport::Udp(socket) => socket
+        .local_addr()
+        .ok()
+        .map(|address| {
+          vec![BoundListener {
+            kind: BoundListenerKind::Stream,
+            transport: BoundListenerTransport::Udp,
+            address,
+          }]
+        })
+        .unwrap_or_default(),
+    };
     let task_name = name.clone();
     let accept_error_backoff = self.accept_error_backoff;
     let snapshot = state.snapshot();
@@ -327,6 +361,7 @@ impl BoundStreamListener {
     };
     StreamListenerTask {
       generation,
+      bound_listeners,
       quiesce,
       shutdown,
       connections,

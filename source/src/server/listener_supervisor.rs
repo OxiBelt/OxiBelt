@@ -22,6 +22,7 @@ pub(crate) struct ListenerSupervisor {
 
 pub(super) struct TcpListenerTask {
   pub(super) options: TcpListenOptions,
+  pub(super) bound_addresses: Vec<SocketAddr>,
   pub(super) quiesce: watch::Sender<bool>,
   pub(super) shutdown: watch::Sender<bool>,
   pub(super) connections: TaskRegistry,
@@ -45,6 +46,7 @@ pub(super) enum TcpListenerKind {
 
 pub(super) struct Http3ListenerTask {
   pub(super) bind: SocketAddr,
+  pub(super) bound_addresses: Vec<SocketAddr>,
   pub(super) socket: crate::config::QuicSocketConfig,
   pub(super) transport: crate::config::QuicTransportConfig,
   pub(super) endpoints: Vec<h3_quinn::quinn::Endpoint>,
@@ -66,6 +68,7 @@ pub(super) struct BoundHttp3Listener {
 #[cfg(feature = "admin-runtime")]
 pub(super) struct AdminListenerTask {
   pub(super) bind: SocketAddr,
+  pub(super) bound_address: SocketAddr,
   pub(super) shutdown: watch::Sender<bool>,
   pub(super) drain_timeouts: DrainTimeouts,
   pub(super) task: JoinHandle<()>,
@@ -117,6 +120,12 @@ impl DrainTimeouts {
 }
 
 impl ListenerSupervisor {
+  #[cfg(test)]
+  pub(super) async fn shutdown(&mut self, snapshot: &AppSnapshot) {
+    let deadline = tokio::time::Instant::now() + DrainTimeouts::from_snapshot(snapshot).graceful;
+    let _ = self.shutdown_until(deadline).await;
+  }
+
   #[cfg(feature = "admin-runtime")]
   pub(super) async fn start(
     state: AppHandle,
@@ -423,38 +432,39 @@ impl ListenerSupervisor {
     }
   }
 
-  pub(super) async fn shutdown(&mut self, snapshot: &AppSnapshot) {
+  pub(super) async fn shutdown_until(&mut self, deadline: tokio::time::Instant) -> bool {
     self.quiesce();
-    let drain_timeouts = DrainTimeouts::from_snapshot(snapshot);
     let mut tasks = Vec::new();
     for task in std::mem::take(&mut self.tcp).into_values() {
-      tasks.push(task.drain());
+      tasks.push(task.drain_until(deadline));
     }
     for task in std::mem::take(&mut self.http).into_values() {
-      tasks.push(task.drain());
+      tasks.push(task.drain_until(deadline));
     }
     for task in std::mem::take(&mut self.http3).into_values() {
-      tasks.push(task.drain());
+      tasks.push(task.drain_until(deadline));
     }
     #[cfg(feature = "admin-runtime")]
     if let Some(task) = self.admin.take() {
-      tasks.push(task.drain());
+      tasks.push(task.drain_until(deadline));
     }
     #[cfg(feature = "admin-runtime")]
     if let Some(task) = self.admin_h3.take() {
-      tasks.push(task.drain());
+      tasks.push(task.drain_until(deadline));
     }
     for task in std::mem::take(&mut self.streams).into_values() {
-      tasks.push(task.drain());
+      tasks.push(task.drain_until(deadline));
     }
     for task in std::mem::take(&mut self.turns) {
-      tasks.push(task.drain());
+      tasks.push(task.drain_until(deadline));
     }
     if tasks.is_empty() {
-      tokio::time::sleep(drain_timeouts.graceful.min(Duration::from_millis(1))).await;
-      return;
+      return false;
     }
-    let _ = futures_util::future::join_all(tasks).await;
+    futures_util::future::join_all(tasks)
+      .await
+      .into_iter()
+      .any(|result| !matches!(result, Ok(false)))
   }
 
   pub(super) fn quiesce(&mut self) {
@@ -474,6 +484,72 @@ impl ListenerSupervisor {
     for task in &self.turns {
       task.quiesce();
     }
+  }
+
+  pub(crate) fn bound_listeners(&self) -> Vec<BoundListener> {
+    let mut listeners = Vec::new();
+    for task in self.tcp.values() {
+      listeners.extend(
+        task
+          .bound_addresses
+          .iter()
+          .copied()
+          .map(|address| BoundListener {
+            kind: BoundListenerKind::Https,
+            transport: BoundListenerTransport::Tcp,
+            address,
+          }),
+      );
+    }
+    for task in self.http.values() {
+      listeners.extend(
+        task
+          .bound_addresses
+          .iter()
+          .copied()
+          .map(|address| BoundListener {
+            kind: BoundListenerKind::Http,
+            transport: BoundListenerTransport::Tcp,
+            address,
+          }),
+      );
+    }
+    for task in self.http3.values() {
+      listeners.extend(
+        task
+          .bound_addresses
+          .iter()
+          .copied()
+          .map(|address| BoundListener {
+            kind: BoundListenerKind::Http3,
+            transport: BoundListenerTransport::Quic,
+            address,
+          }),
+      );
+    }
+    #[cfg(feature = "admin-runtime")]
+    if let Some(task) = &self.admin {
+      listeners.push(BoundListener {
+        kind: BoundListenerKind::Admin,
+        transport: BoundListenerTransport::Tcp,
+        address: task.bound_address,
+      });
+    }
+    #[cfg(feature = "admin-runtime")]
+    if let Some(task) = &self.admin_h3 {
+      listeners.extend(task.bound_addresses().map(|address| BoundListener {
+        kind: BoundListenerKind::AdminHttp3,
+        transport: BoundListenerTransport::Quic,
+        address,
+      }));
+    }
+    for task in self.streams.values() {
+      listeners.extend(task.bound_listeners());
+    }
+    for task in &self.turns {
+      listeners.extend(task.bound_listeners());
+    }
+    listeners
   }
 }
 
@@ -497,6 +573,9 @@ impl Drop for ListenerSupervisor {
       task.drain_background();
     }
     for task in std::mem::take(&mut self.streams).into_values() {
+      task.drain_background();
+    }
+    for task in std::mem::take(&mut self.turns) {
       task.drain_background();
     }
   }

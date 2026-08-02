@@ -10,7 +10,10 @@ use super::backend::{
   RuntimeBackendSnapshot, UNAVAILABLE_IO_DRIVER_NAME,
 };
 
-pub const RUNTIME_TOPOLOGY_SCHEMA_VERSION: u32 = 1;
+mod worker_applicability;
+pub use worker_applicability::{RuntimeWorkerApplicabilities, RuntimeWorkerApplicability};
+
+pub const RUNTIME_TOPOLOGY_SCHEMA_VERSION: u32 = 2;
 
 macro_rules! fixed_enum {
   ($name:ident { $($variant:ident => $label:literal),+ $(,)? }) => {
@@ -316,6 +319,7 @@ pub struct RuntimeTopologySnapshot {
   pub subsystems: RuntimeSubsystemOwners,
   pub compatibility_boundaries: RuntimeCompatibilityBoundaries,
   pub workers: RuntimeWorkerAllocations,
+  pub worker_applicability: RuntimeWorkerApplicabilities,
   pub blocking: RuntimeBlockingWorkerStrategy,
   pub direct_h1: RuntimeDirectH1Topology,
 }
@@ -351,6 +355,7 @@ impl RuntimeTopologySnapshot {
         tokio_to_compio_direct_h1: None,
       },
       workers,
+      worker_applicability: RuntimeWorkerApplicabilities::embedded(),
       blocking: RuntimeBlockingWorkerStrategy {
         strategy: RuntimeBlockingStrategy::External,
         tokio_worker_limit: workers.tokio_blocking_worker_limit,
@@ -414,12 +419,19 @@ impl RuntimeTopologySnapshot {
       "# HELP oxibelt_runtime_worker_allocation Resolved worker allocation by fixed pool and executor.\n\
        # TYPE oxibelt_runtime_worker_allocation gauge\n",
     );
-    for (pool, executor, workers) in self.workers.metric_allocations() {
+    for (pool, default_executor, workers) in self.workers.metric_allocations() {
+      let applicability = self.worker_applicability.for_pool(pool);
+      let executor = if self.resolved_preset == RuntimeResolvedPreset::External {
+        RuntimeSubsystemOwner::External
+      } else {
+        default_executor
+      };
       let _ = writeln!(
         output,
-        "oxibelt_runtime_worker_allocation{{pool=\"{}\",owner=\"{}\"}} {workers}",
+        "oxibelt_runtime_worker_allocation{{pool=\"{}\",owner=\"{}\",applicability=\"{}\"}} {workers}",
         pool.as_str(),
         executor.as_str(),
+        applicability.as_str(),
       );
     }
 
@@ -554,6 +566,7 @@ pub fn resolve_runtime_topology(
       }),
     },
     workers,
+    worker_applicability: RuntimeWorkerApplicabilities::applied(),
     blocking: RuntimeBlockingWorkerStrategy {
       strategy: if compio_direct_h1 {
         RuntimeBlockingStrategy::TokioManagedPoolWithDedicatedCompioIoThreads

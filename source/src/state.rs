@@ -316,7 +316,6 @@ impl AppSnapshot {
         observe_runtime_hardening(&config.runtime.hardening, Some(&manifest_projection))
       }
     };
-    crate::crypto::configure_runtime(&config.crypto);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let (upstream_uri_parts, upstream_uri_parts_by_index) = build_upstream_uri_parts(&upstreams)?;
@@ -728,7 +727,6 @@ impl AppSnapshot {
     previous: &AppSnapshot,
   ) -> anyhow::Result<Self> {
     let hardening = previous.admitted_reload_hardening(&config)?;
-    crate::crypto::configure_runtime(&config.crypto);
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
     let route_table = RouteTable::new_with_waf(&config, &previous.waf);

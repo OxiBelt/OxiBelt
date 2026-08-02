@@ -88,6 +88,7 @@ ARG OXIBELT_BUILD_KIND
 
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
+COPY docs/Embedding.md ./docs/Embedding.md
 COPY source ./source
 COPY source/apps/oxibelt-dataplane-strict ./source/apps/oxibelt-dataplane-strict
 COPY source/apps/oxibelt-gateway-controller ./source/apps/oxibelt-gateway-controller

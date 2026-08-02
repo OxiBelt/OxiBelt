@@ -472,6 +472,32 @@ restarting with the prior immutable image. Landlock and seccomp are irreversible
 inside a running process, so rollback always replaces the process rather than
 attempting to weaken its current policy.
 
+Post-beta.2 development also splits the public Rust startup API into explicit
+owned and embedded modes. Existing library callers should migrate from the
+deprecated `run`, `run_with_options`, and `configure_crypto_runtime` functions
+to `OxiBelt::builder`; see [Embedding OxiBelt](Embedding.md). Use
+`RuntimePolicy::FromConfig` with `ProcessPolicy::Standalone` when OxiBelt owns
+runtime construction, signals, and configured hardening. Use
+`RuntimePolicy::CurrentRuntime` with `ProcessPolicy::Embedded` when the caller
+owns Tokio and select `ProcessGlobalHooks::CallerManaged`, `VerifyOnly`, or an
+explicit `ApplySelected` grant.
+
+The deprecated async run wrappers now use the caller's current runtime,
+caller-managed process globals, and no implicit signals or Landlock. They
+return a structured migration error when configuration requires process
+ownership. Embedded runtime/topology and executor-worker settings are reported
+as inapplicable rather than silently resized or falsely claimed. New callers
+must retain `ServerHandle` and await consuming `shutdown(deadline)` or `wait()`
+before dropping their runtime when joined cleanup is required; dropping the
+handle requests cancellation but does not prove a join. Sequential replacement
+should wait for joined terminal completion and must retain compatible immutable
+process-global choices; concurrent instances are not guaranteed. This changes
+the Rust library compatibility surface but does not change TOML syntax, native
+schema epoch, Admin wire schemas, or persisted state. Roll back by returning to
+the prior library version and its startup wrapper; restart the host process
+rather than attempting to reverse an installed process-global hook or Landlock
+policy.
+
 `edge-secure-medium` v2 is an explicit opt-in and never replaces an omitted or
 explicit v1 selector. Before changing `profile_version = 1` to `2` in Helm or
 native TOML:

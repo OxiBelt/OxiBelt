@@ -246,6 +246,25 @@ fn compio_direct_h1_threat_model_preserves_dispatch_and_reuse_boundaries() {
   }
 }
 
+#[test]
+fn embedded_runtime_threat_model_preserves_process_ownership_and_cleanup_boundaries() {
+  let threat_model = read_repo_file("docs/ThreatModel.md");
+  for expected in [
+    "Embedding host application",
+    "Caller-Owned Tokio Runtime and Process Globals",
+    "owned-embedded-runtime-api",
+    "never resizes the caller runtime",
+    "conflicts fail before listener publication",
+    "dropping it requests cancellation but cannot prove an async join",
+    "concurrent instances may conflict and are not guaranteed",
+  ] {
+    assert!(
+      threat_model.contains(expected),
+      "docs/ThreatModel.md should preserve {expected:?}"
+    );
+  }
+}
+
 fn feature_ids_with_status(document: &str, expected_status: &str) -> BTreeSet<String> {
   document
     .lines()

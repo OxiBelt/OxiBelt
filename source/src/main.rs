@@ -189,14 +189,52 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
     hot_reload_mode: cli.hot_reload_mode,
     hot_reload_poll_interval_ms: cli.hot_reload_poll_interval_ms,
   };
-  let mut config = Config::load(config_path)
+  let config = Config::load(config_path)
     .with_context(|| format!("failed to load {}", config_path.display()))?;
-  let override_warnings = config.apply_runtime_overrides(&runtime_overrides);
+  let mut effective_config = config.clone();
+  effective_config.resolve_rollout_identity_from_environment()?;
+  let override_warnings = effective_config.apply_runtime_overrides(&runtime_overrides);
 
   if env!("CARGO_PKG_NAME") == "oxibelt-dataplane-strict" {
-    config.validate_for_artifact(oxibelt::config::RuntimeArtifact::StrictDataPlane)?;
+    effective_config.validate_for_artifact(oxibelt::config::RuntimeArtifact::StrictDataPlane)?;
+  }
+  effective_config.validate()?;
+
+  if cli.dump_effective_config {
+    let value = Config::load_effective_toml_redacted(config_path)
+      .with_context(|| format!("failed to load effective {}", config_path.display()))?;
+    println!("{}", toml::to_string_pretty(&value)?);
+    return Ok(());
+  }
+  if cli.check {
+    return run_configuration_check(effective_config, override_warnings);
   }
 
+  let worker_threads = effective_config.runtime.workers.tokio;
+  let request = request_from_config(&effective_config);
+  let compio_preflight = preflight_compio_for_startup(request.requested_preset, worker_threads);
+  let mut capabilities = available_capabilities(compio_preflight.driver);
+  if let Some(reason) = compio_preflight.failure_reason {
+    capabilities.compio_main = RuntimeCapability::Unavailable(reason);
+  }
+  let result = oxibelt::OxiBelt::builder(config)
+    .run_options(oxibelt::RunOptions {
+      config_path: Some(config_path.clone()),
+      runtime_overrides,
+    })
+    .runtime_policy(oxibelt::RuntimePolicy::FromConfig)
+    .process_policy(oxibelt::ProcessPolicy::Standalone)
+    .runtime_capabilities(capabilities)
+    .build_owned()?
+    .run()?;
+  if result.outcome == oxibelt::server::ShutdownOutcome::Failed {
+    bail!("server lifecycle failed");
+  }
+  Ok(())
+}
+
+#[allow(deprecated)]
+fn run_configuration_check(config: Config, override_warnings: Vec<String>) -> anyhow::Result<()> {
   oxibelt::runtime::init_startup_logging(&config.logging)?;
   for warning in override_warnings {
     tracing::warn!("{warning}");
@@ -209,43 +247,21 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
       "legacy runtime.hardening.seccomp.mode maps to runtime.hardening.seccomp.expectation"
     );
   }
-  config.validate()?;
   oxibelt::configure_crypto_runtime(&config);
   oxibelt::tls::install_configured_provider(&config.crypto)?;
   oxibelt::tls::preload_native_redis_roots(&config)
     .context("failed to preload native Redis trust roots before runtime confinement")?;
-
-  if cli.dump_effective_config {
-    let value = Config::load_effective_toml_redacted(config_path)
-      .with_context(|| format!("failed to load effective {}", config_path.display()))?;
-    println!("{}", toml::to_string_pretty(&value)?);
-    return Ok(());
-  }
   let filesystem_manifest =
     oxibelt::filesystem_access::FilesystemAccessManifest::from_config(&config)
       .context("failed to generate filesystem-access manifest")?;
-  let manifest_projection = filesystem_manifest.landlock_projection();
-  let hardening = if cli.check {
-    oxibelt::hardening::observe_runtime_hardening(
-      &config.runtime.hardening,
-      Some(&manifest_projection),
-    )
-  } else {
-    oxibelt::netport_switcher::ensure_required_runtime_socket(&config)?;
-    oxibelt::hardening::apply_runtime_hardening_with_manifest_and_policy(
-      &config.runtime.hardening,
-      Some(&manifest_projection),
-      oxibelt::hardening::RequiredHardeningFailurePolicy::for_operational_profile(
-        config.operational_profile.as_ref(),
-      ),
-    )?
-  };
+  let projection = filesystem_manifest.landlock_projection();
+  let hardening =
+    oxibelt::hardening::observe_runtime_hardening(&config.runtime.hardening, Some(&projection));
   tracing::info!(
     hardening = %serde_json::to_string(&hardening)?,
     "resolved runtime hardening contract"
   );
   let telemetry = oxibelt::runtime::init_telemetry(&config)?;
-
   config.log_worker_resolution();
   let worker_threads = config.runtime.workers.tokio;
   let request = request_from_config(&config);
@@ -283,42 +299,14 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
     }
     Err(error) => return Err(error.context("resolved main runtime failed to build")),
   };
-  let runtime_backend = topology.legacy_backend_snapshot();
-  oxibelt::runtime::backend::set_runtime_backend_snapshot(runtime_backend);
-  tracing::info!(
-    requested_preset = topology.requested_preset.as_str(),
-    resolved_preset = topology.resolved_preset.as_str(),
-    topology_policy = topology.policy.as_str(),
-    outcome = topology.outcome.as_str(),
-    reason = topology.reason.as_str(),
-    compatibility_island_count = topology.compatibility_boundaries.compatibility_island_count,
-    tokio_executor_workers = topology.workers.tokio_executor_workers,
-    compio_direct_h1_workers = topology.workers.compio_direct_h1_workers,
-    direct_h1_backend = topology.direct_h1.resolved.as_str(),
-    "resolved async runtime topology"
-  );
-  let check = cli.check;
+  oxibelt::runtime::backend::set_runtime_backend_snapshot(topology.legacy_backend_snapshot());
   runtime.block_on(async move {
-    let state = startup_stage_async(
+    startup_stage_async(
       "app_snapshot_new_with_telemetry",
       build_app_handle(config, telemetry, topology, hardening),
     )
-    .await?;
-    if check {
-      return Ok(());
-    }
-    startup_stage_async("server_serve", async {
-      oxibelt::server::serve(
-        state,
-        Some(config_path.clone()),
-        RuntimeOverrides {
-          hot_reload_mode: runtime_overrides.hot_reload_mode,
-          hot_reload_poll_interval_ms: runtime_overrides.hot_reload_poll_interval_ms,
-        },
-      )
-      .await
-    })
     .await
+    .map(|_| ())
   })
 }
 
@@ -611,6 +599,7 @@ fn handle_oxirule_command(
   }
 }
 
+#[allow(deprecated)]
 fn load_command_config(config_path: Option<&PathBuf>) -> anyhow::Result<Config> {
   let config_path = config_path.ok_or_else(|| anyhow::anyhow!("--config is required"))?;
   let config = Config::load(config_path)

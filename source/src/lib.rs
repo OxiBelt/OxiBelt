@@ -25,6 +25,7 @@ pub mod admin_client;
 pub(crate) mod admin_list;
 #[cfg(feature = "admin-runtime")]
 pub mod admin_mutation;
+mod application;
 pub mod cache;
 pub mod circuit_breakers;
 pub mod client_identity;
@@ -51,6 +52,7 @@ pub mod overload;
 pub(crate) mod platform_fs;
 mod pool_health;
 pub mod pools;
+mod process_globals;
 pub mod proxy;
 pub mod proxy_protocol;
 pub mod proxy_protocol_egress;
@@ -81,72 +83,66 @@ pub mod waf;
 #[cfg(feature = "admin-runtime")]
 pub mod webtransport_admin;
 
+pub use application::{
+  ApplicationBuildError, EmbeddedServer, OwnedServer, OxiBelt, OxiBeltBuilder, RunOptions,
+  StartupReport,
+};
+pub use process_globals::{
+  ProcessGlobalError, ProcessGlobalHook, ProcessGlobalHookReport, ProcessGlobalHookStatus,
+  ProcessGlobalHooks, ProcessGlobalReason, ProcessGlobalReport, ProcessGlobalSelection,
+  ProcessPolicy, RuntimePolicy,
+};
+
 #[cfg(test)]
 mod simd_bench;
 
-use anyhow::Context;
-use config::{Config, RuntimeOverrides};
-use state::{AppHandle, AppSnapshot};
-
-/// Runtime options that are not part of the persistent configuration file.
-#[derive(Debug, Clone, Default)]
-pub struct RunOptions {
-  pub config_path: Option<std::path::PathBuf>,
-  pub runtime_overrides: RuntimeOverrides,
-}
+use config::Config;
 
 /// Runs OxiBelt with a validated, in-memory configuration.
+#[deprecated(
+  since = "0.7.1",
+  note = "use OxiBelt::builder with explicit runtime and process policies"
+)]
+#[allow(deprecated)]
 pub async fn run(config: Config) -> anyhow::Result<()> {
   run_with_options(config, RunOptions::default()).await
 }
 
 /// Runs OxiBelt with explicit runtime metadata for reload and admin surfaces.
-pub async fn run_with_options(mut config: Config, options: RunOptions) -> anyhow::Result<()> {
-  config.resolve_rollout_identity_from_environment()?;
-  runtime::init_startup_logging(&config.logging)?;
-  if let Some(mode) = config.runtime.hardening.seccomp.legacy_mode() {
-    tracing::warn!(
-      code = "CFG_RUNTIME_SECCOMP_MODE_COMPATIBILITY_ALIAS",
-      legacy_mode = ?mode,
-      expectation = config.runtime.hardening.seccomp.expectation.as_str(),
-      "legacy runtime.hardening.seccomp.mode maps to runtime.hardening.seccomp.expectation"
-    );
-  }
-  config.validate()?;
+#[deprecated(
+  since = "0.7.1",
+  note = "use OxiBelt::builder with explicit runtime and process policies"
+)]
+pub async fn run_with_options(config: Config, options: RunOptions) -> anyhow::Result<()> {
   if config.runtime.hardening.landlock.mode != config::RuntimeLandlockMode::Off {
     anyhow::bail!(
-      "embedded_runtime_landlock_ownership_unproven: run_with_options cannot install thread-scoped Landlock for a caller-owned runtime; use the standalone binary or set runtime.hardening.landlock.mode = \"off\""
+      "embedded_runtime_landlock_ownership_unproven: deprecated run wrappers cannot install configured Landlock; migrate to the explicit owned-runtime API"
     );
   }
-  configure_crypto_runtime(&config);
-  netport_switcher::ensure_required_runtime_socket(&config)?;
-  let filesystem_manifest = filesystem_access::FilesystemAccessManifest::from_config(&config)
-    .context("failed to generate filesystem-access manifest")?;
-  let manifest_projection = filesystem_manifest.landlock_projection();
-  let hardening = hardening::apply_runtime_hardening_with_manifest_and_policy(
-    &config.runtime.hardening,
-    Some(&manifest_projection),
-    hardening::RequiredHardeningFailurePolicy::for_operational_profile(
-      config.operational_profile.as_ref(),
-    ),
-  )?;
-  tracing::info!(
-    hardening = %serde_json::to_string(&hardening)?,
-    "resolved runtime hardening contract"
-  );
-  let telemetry = runtime::init_telemetry(&config)?;
-  config.log_worker_resolution();
-  tls::install_configured_provider(&config.crypto)?;
-
-  let state = AppHandle::new(
-    AppSnapshot::new_with_telemetry_and_hardening(config, telemetry, hardening)
-      .await
-      .context("failed to initialize application state")?,
-  );
-  server::serve(state, options.config_path, options.runtime_overrides).await
+  let handle = OxiBelt::builder(config)
+    .run_options(options)
+    .runtime_policy(RuntimePolicy::CurrentRuntime)
+    .process_policy(ProcessPolicy::Embedded(ProcessGlobalHooks::CallerManaged))
+    .build_embedded()?
+    .start()
+    .await?;
+  let result = handle.wait().await?;
+  if result.outcome == server::ShutdownOutcome::Failed {
+    anyhow::bail!("server lifecycle failed");
+  }
+  Ok(())
 }
 
 /// Applies the process-wide crypto primitive provider choices from a loaded config.
+#[deprecated(
+  since = "0.7.1",
+  note = "select crypto ownership through OxiBelt::builder and ProcessGlobalHooks"
+)]
 pub fn configure_crypto_runtime(config: &Config) {
-  crypto::configure_runtime(&config.crypto);
+  if crypto::configure_runtime(&config.crypto).is_err() {
+    tracing::error!(
+      code = "PROCESS_GLOBAL_CRYPTO_CONFLICT",
+      "configured crypto primitives conflict with the active process claim"
+    );
+  }
 }

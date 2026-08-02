@@ -1,20 +1,23 @@
 //! Runtime orchestration for the strict data-plane artifact.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::config::{RuntimeArtifact, RuntimeOverrides};
 use crate::reload::{ReloadManager, ReloadTrigger};
 use crate::state::AppHandle;
 
-use super::ListenerSupervisor;
 use super::ops::OpsTasks;
 use super::process_signals::{
-  ProcessSignal, ProcessSignals, begin_process_predrain, graceful_process_shutdown,
-  shutdown_compio_direct_h1_after_error,
+  ProcessSignal, ProcessSignals, begin_process_predrain, controlled_process_shutdown,
+};
+use super::{
+  ControlCommand, ListenerSupervisor, PreparedServer, ReadinessReason, ReadinessSnapshot,
+  ServerHandle, ServerLifecycle, ServerReadiness, ShutdownOutcome, ShutdownReason, ShutdownResult,
+  SignalMode, readiness_for_snapshot,
 };
 
 pub async fn serve(
@@ -22,103 +25,281 @@ pub async fn serve(
   config_path: Option<PathBuf>,
   runtime_overrides: RuntimeOverrides,
 ) -> anyhow::Result<()> {
-  let result = serve_inner(state.clone(), config_path, runtime_overrides).await;
-  if result.is_err() {
-    shutdown_compio_direct_h1_after_error(&state).await;
+  let result = start_controlled(state, config_path, runtime_overrides, SignalMode::Process)
+    .await?
+    .wait()
+    .await?;
+  if result.outcome == ShutdownOutcome::Failed {
+    anyhow::bail!("server lifecycle failed");
   }
-  result
+  Ok(())
 }
 
-async fn serve_inner(
+pub(crate) async fn start_controlled(
   state: AppHandle,
   config_path: Option<PathBuf>,
   runtime_overrides: RuntimeOverrides,
-) -> anyhow::Result<()> {
+  signal_mode: SignalMode,
+) -> anyhow::Result<ServerHandle> {
+  Ok(
+    prepare_controlled(state, config_path, runtime_overrides, signal_mode)
+      .await?
+      .spawn(),
+  )
+}
+
+pub(crate) async fn prepare_controlled(
+  state: AppHandle,
+  config_path: Option<PathBuf>,
+  runtime_overrides: RuntimeOverrides,
+  signal_mode: SignalMode,
+) -> anyhow::Result<PreparedServer> {
   state
     .snapshot()
     .config
     .validate_for_artifact(RuntimeArtifact::StrictDataPlane)?;
-  let (error_tx, mut error_rx) = mpsc::unbounded_channel();
+  let process_signals = match signal_mode {
+    SignalMode::Process => Some(ProcessSignals::new()?),
+    SignalMode::CallerManaged => None,
+  };
+  let reload = prepare_reload(&state, config_path, runtime_overrides)?;
+  let (error_tx, error_rx) = mpsc::unbounded_channel();
   let mut listeners = ListenerSupervisor::start(state.clone(), error_tx.clone()).await?;
-  let mut process_signals = ProcessSignals::new()?;
-  let _ops = OpsTasks::start(state.clone(), error_tx.clone()).await?;
-  let reload = if state.snapshot().config.runtime.hot_reload.mode.enabled() {
-    match config_path {
-      Some(config_path) => Some(ReloadManager::new(
-        config_path,
-        runtime_overrides,
-        state.snapshot().as_ref(),
-      )?),
-      None => {
-        warn!("hot reload is enabled but no configuration path is available; reload disabled");
-        None
+  let ops = match OpsTasks::start(state.clone(), error_tx.clone()).await {
+    Ok(ops) => ops,
+    Err(error) => {
+      let snapshot = state.snapshot();
+      let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(snapshot.config.runtime.drain.graceful_timeout_ms);
+      let _ = listeners.shutdown_until(deadline).await;
+      return Err(error);
+    }
+  };
+  let mut bound = listeners.bound_listeners();
+  bound.extend(ops.bound_listeners());
+  let topology = state.snapshot().runtime_topology.clone();
+  let (handle, lifecycle) = ServerLifecycle::new(topology, bound);
+  lifecycle.publish(readiness_for_snapshot(&state.snapshot()));
+  drop(error_tx);
+  Ok(PreparedServer::new(
+    handle,
+    drive_server(
+      state,
+      listeners,
+      ops,
+      error_rx,
+      reload,
+      process_signals,
+      lifecycle,
+    ),
+  ))
+}
+
+fn prepare_reload(
+  state: &AppHandle,
+  config_path: Option<PathBuf>,
+  runtime_overrides: RuntimeOverrides,
+) -> anyhow::Result<Option<ReloadManager>> {
+  if !state.snapshot().config.runtime.hot_reload.mode.enabled() {
+    return Ok(None);
+  }
+  match config_path {
+    Some(config_path) => Ok(Some(ReloadManager::new(
+      config_path,
+      runtime_overrides,
+      state.snapshot().as_ref(),
+    )?)),
+    None => {
+      warn!("hot reload is enabled but no configuration path is available; reload disabled");
+      Ok(None)
+    }
+  }
+}
+
+async fn drive_server(
+  state: AppHandle,
+  mut listeners: ListenerSupervisor,
+  ops: OpsTasks,
+  mut error_rx: mpsc::UnboundedReceiver<anyhow::Error>,
+  mut reload: Option<ReloadManager>,
+  mut process_signals: Option<ProcessSignals>,
+  mut lifecycle: ServerLifecycle,
+) {
+  #[cfg(unix)]
+  let mut hup = if process_signals.is_some() && reload.is_some() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+      Ok(signal) => Some(signal),
+      Err(error) => {
+        error!(%error, "failed to install SIGHUP listener");
+        lifecycle.publish_final(failed_result());
+        return;
       }
     }
   } else {
     None
   };
-  drop(error_tx);
-  if let Some(reload) = reload {
-    serve_with_reload(
-      state,
-      &mut listeners,
-      &mut error_rx,
-      reload,
-      &mut process_signals,
-    )
-    .await
-  } else {
-    serve_until_shutdown(state, &mut listeners, &mut error_rx, &mut process_signals).await
+  #[cfg(not(unix))]
+  let mut hup: Option<()> = None;
+  let poll_interval = reload
+    .as_ref()
+    .map_or(Duration::from_secs(86_400), ReloadManager::poll_interval);
+  let mut reload_tick = tokio::time::interval(poll_interval);
+  reload_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+  let mut readiness_tick = tokio::time::interval(Duration::from_millis(100));
+  readiness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+  let stop = loop {
+    tokio::select! {
+      command = lifecycle.command_rx.recv() => match command {
+        Some(ControlCommand::PreDrain) => {
+          begin_process_predrain(&state, &mut listeners);
+          lifecycle.publish(ReadinessSnapshot {
+            state: ServerReadiness::Draining,
+            reason: ReadinessReason::PreDrainRequested,
+          });
+        }
+        Some(ControlCommand::Reload) => {
+          if let Some(manager) = &mut reload
+            && !state.snapshot().lifecycle.is_shutdown_draining()
+          {
+            manager.reload_if_changed(ReloadTrigger::Signal, &state, &mut listeners).await;
+          }
+        }
+        Some(ControlCommand::Graceful { deadline }) => {
+          break StopRequest::Graceful {
+            deadline,
+            reason: ShutdownReason::CallerRequested,
+            apply_delay: true,
+          };
+        }
+        None => break StopRequest::Immediate,
+      },
+      _ = lifecycle.cancellation.cancelled() => break StopRequest::Immediate,
+      result = recv_process_signal(&mut process_signals) => match result {
+        Ok(ProcessSignal::PreDrain) => {
+          begin_process_predrain(&state, &mut listeners);
+          lifecycle.publish(ReadinessSnapshot {
+            state: ServerReadiness::Draining,
+            reason: ReadinessReason::PreDrainRequested,
+          });
+        }
+        Ok(ProcessSignal::Shutdown) => {
+          let timeout = Duration::from_millis(
+            state.snapshot().config.runtime.drain.graceful_timeout_ms,
+          );
+          break StopRequest::Graceful {
+            deadline: Instant::now() + timeout,
+            reason: ShutdownReason::ProcessSignal,
+            apply_delay: true,
+          };
+        }
+        Err(error) => break StopRequest::Failed(error),
+      },
+      Some(error) = error_rx.recv() => break StopRequest::Failed(error),
+      _ = readiness_tick.tick() => {
+        lifecycle.publish(readiness_for_snapshot(&state.snapshot()));
+      }
+      _ = reload_tick.tick(), if reload.is_some() && !state.snapshot().lifecycle.is_shutdown_draining() => {
+        if let Some(manager) = &mut reload {
+          manager.reload_if_changed(ReloadTrigger::Poll, &state, &mut listeners).await;
+        }
+      }
+      _ = recv_hup(&mut hup), if hup.is_some() && !state.snapshot().lifecycle.is_shutdown_draining() => {
+        if let Some(manager) = &mut reload {
+          manager.reload_if_changed(ReloadTrigger::Signal, &state, &mut listeners).await;
+        }
+      }
+    }
+  };
+
+  let (deadline, reason, apply_delay, requested_outcome) = match stop {
+    StopRequest::Graceful {
+      deadline,
+      reason,
+      apply_delay,
+    } => (deadline, reason, apply_delay, ShutdownOutcome::Graceful),
+    StopRequest::Immediate => (
+      Instant::now(),
+      ShutdownReason::ImmediateCancellation,
+      false,
+      ShutdownOutcome::Cancelled,
+    ),
+    StopRequest::Failed(error) => {
+      error!(%error, "server lifecycle driver failed");
+      (
+        Instant::now(),
+        ShutdownReason::RuntimeFailure,
+        false,
+        ShutdownOutcome::Failed,
+      )
+    }
+  };
+  lifecycle.publish(ReadinessSnapshot {
+    state: ServerReadiness::Draining,
+    reason: ReadinessReason::ShutdownRequested,
+  });
+  let result =
+    match controlled_process_shutdown(&state, &mut listeners, ops, deadline, apply_delay).await {
+      Ok(forced) => ShutdownResult {
+        outcome: if requested_outcome == ShutdownOutcome::Graceful && forced {
+          ShutdownOutcome::Forced
+        } else {
+          requested_outcome
+        },
+        reason: if requested_outcome == ShutdownOutcome::Graceful && forced {
+          ShutdownReason::DeadlineExpired
+        } else {
+          reason
+        },
+      },
+      Err(error) => {
+        error!(%error, "server lifecycle cleanup failed");
+        failed_result()
+      }
+    };
+  drop(listeners);
+  drop(reload);
+  drop(state);
+  lifecycle.publish_final(result);
+}
+
+enum StopRequest {
+  Graceful {
+    deadline: Instant,
+    reason: ShutdownReason,
+    apply_delay: bool,
+  },
+  Immediate,
+  Failed(anyhow::Error),
+}
+
+const fn failed_result() -> ShutdownResult {
+  ShutdownResult {
+    outcome: ShutdownOutcome::Failed,
+    reason: ShutdownReason::RuntimeFailure,
   }
 }
 
-async fn serve_until_shutdown(
-  state: AppHandle,
-  listeners: &mut ListenerSupervisor,
-  error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
-  process_signals: &mut ProcessSignals,
-) -> anyhow::Result<()> {
-  loop {
-    tokio::select! {
-      result = process_signals.recv() => {
-        match result? {
-          ProcessSignal::PreDrain => begin_process_predrain(&state, listeners),
-          ProcessSignal::Shutdown => return graceful_process_shutdown(&state, listeners).await,
-        }
-      }
-      Some(error) = error_rx.recv() => return Err(error),
-    }
+async fn recv_process_signal(
+  signals: &mut Option<ProcessSignals>,
+) -> anyhow::Result<ProcessSignal> {
+  match signals {
+    Some(signals) => signals.recv().await,
+    None => std::future::pending().await,
   }
 }
 
-async fn serve_with_reload(
-  state: AppHandle,
-  listeners: &mut ListenerSupervisor,
-  error_rx: &mut mpsc::UnboundedReceiver<anyhow::Error>,
-  mut reload: ReloadManager,
-  process_signals: &mut ProcessSignals,
-) -> anyhow::Result<()> {
-  #[cfg(unix)]
-  let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-    .context("failed to install SIGHUP listener")?;
-
-  loop {
-    let poll_sleep = tokio::time::sleep(reload.poll_interval());
-    tokio::pin!(poll_sleep);
-    tokio::select! {
-      result = process_signals.recv() => {
-        match result? {
-          ProcessSignal::PreDrain => begin_process_predrain(&state, listeners),
-          ProcessSignal::Shutdown => return graceful_process_shutdown(&state, listeners).await,
-        }
-      }
-      Some(error) = error_rx.recv() => return Err(error),
-      _ = &mut poll_sleep, if !state.snapshot().lifecycle.is_shutdown_draining() => {
-        reload.reload_if_changed(ReloadTrigger::Poll, &state, listeners).await;
-      }
-      _ = hup.recv(), if !state.snapshot().lifecycle.is_shutdown_draining() => {
-        reload.reload_if_changed(ReloadTrigger::Signal, &state, listeners).await;
-      }
+#[cfg(unix)]
+async fn recv_hup(signal: &mut Option<tokio::signal::unix::Signal>) {
+  match signal {
+    Some(signal) => {
+      signal.recv().await;
     }
+    None => std::future::pending().await,
   }
+}
+
+#[cfg(not(unix))]
+async fn recv_hup(_signal: &mut Option<()>) {
+  std::future::pending().await
 }

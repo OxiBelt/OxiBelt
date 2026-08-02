@@ -53,6 +53,37 @@ fn legacy_compio_resolves_to_observable_hybrid_topology() {
   assert!(metrics.contains(
     "requested_preset=\"compio\",resolved_preset=\"hybrid_compio\",outcome=\"exact\",reason=\"legacy_alias\""
   ));
+  assert!(metrics.contains("pool=\"tokio_executor\",owner=\"tokio\",applicability=\"applied\""));
+}
+
+#[test]
+fn external_topology_marks_executor_settings_inapplicable() {
+  let topology = RuntimeTopologySnapshot::external_with_workers(RuntimeWorkerAllocations {
+    tokio_executor_workers: 0,
+    tcp_accept_workers: 3,
+    quic_socket_workers: 2,
+    compio_direct_h1_workers: 0,
+    tokio_blocking_worker_limit: None,
+  });
+
+  assert_eq!(topology.schema_version, 2);
+  assert_eq!(
+    topology.worker_applicability.tokio_executor_workers,
+    RuntimeWorkerApplicability::Inapplicable
+  );
+  assert_eq!(
+    topology.worker_applicability.tcp_accept_workers,
+    RuntimeWorkerApplicability::Applied
+  );
+  assert_eq!(topology.workers.tcp_accept_workers, 3);
+  assert_eq!(topology.workers.quic_socket_workers, 2);
+
+  let mut metrics = String::new();
+  topology.append_prometheus(&mut metrics);
+  assert!(
+    metrics.contains("pool=\"tokio_executor\",owner=\"external\",applicability=\"inapplicable\"")
+  );
+  assert!(metrics.contains("pool=\"tcp_accept\",owner=\"external\",applicability=\"applied\"} 3"));
 }
 
 fn auto_request(policy: RuntimeTopologyPolicy) -> RuntimeTopologyRequest {

@@ -11,31 +11,41 @@ impl TcpListenerTask {
     drop(self.drain());
   }
 
-  pub(super) fn drain(self) -> JoinHandle<()> {
+  pub(super) fn drain(self) -> JoinHandle<bool> {
+    let deadline = tokio::time::Instant::now() + self.drain_timeouts.graceful;
+    self.drain_until(deadline)
+  }
+
+  pub(super) fn drain_until(self, deadline: tokio::time::Instant) -> JoinHandle<bool> {
     tokio::spawn(async move {
       let TcpListenerTask {
         quiesce,
         shutdown,
         connections,
-        drain_timeouts,
-        tasks,
+        mut tasks,
         ..
       } = self;
       let _ = quiesce.send(true);
       let _ = shutdown.send(true);
       let wait_connections = connections.clone();
       let wait = async {
-        for task in tasks {
+        for task in &mut tasks {
           let _ = task.await;
         }
         wait_connections.wait_idle().await;
       };
-      if tokio::time::timeout(drain_timeouts.graceful, wait)
-        .await
-        .is_err()
-      {
+      if tokio::time::timeout_at(deadline, wait).await.is_err() {
+        for task in &tasks {
+          task.abort();
+        }
         connections.abort_all();
+        for task in tasks {
+          let _ = task.await;
+        }
+        connections.wait_idle().await;
+        return true;
       }
+      false
     })
   }
 }
@@ -47,6 +57,20 @@ impl BoundTcpListener {
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
     drain_timeouts: DrainTimeouts,
   ) -> TcpListenerTask {
+    let mut bound_addresses = self
+      .listeners
+      .iter()
+      .filter_map(|listener| match listener.local_addr() {
+        Ok(address) => Some(address),
+        Err(error) => {
+          warn!(%error, configured_bind = %self.bind, "failed to inspect bound TCP listener address");
+          None
+        }
+      })
+      .collect::<Vec<_>>();
+    if bound_addresses.is_empty() {
+      bound_addresses.push(self.bind);
+    }
     let (quiesce, quiesce_rx) = watch::channel(false);
     let (shutdown, shutdown_rx) = watch::channel(false);
     let options = self.options;
@@ -87,6 +111,7 @@ impl BoundTcpListener {
       .collect();
     TcpListenerTask {
       options,
+      bound_addresses,
       quiesce,
       shutdown,
       connections,
@@ -105,15 +130,19 @@ impl Http3ListenerTask {
     drop(self.drain());
   }
 
-  pub(super) fn drain(self) -> JoinHandle<()> {
+  pub(super) fn drain(self) -> JoinHandle<bool> {
+    let deadline = tokio::time::Instant::now() + self.drain_timeouts.graceful;
+    self.drain_until(deadline)
+  }
+
+  pub(super) fn drain_until(self, deadline: tokio::time::Instant) -> JoinHandle<bool> {
     tokio::spawn(async move {
       let Http3ListenerTask {
         endpoints,
         quiesce,
         shutdown,
         connections,
-        drain_timeouts,
-        tasks,
+        mut tasks,
         ..
       } = self;
       let _ = quiesce.send(true);
@@ -121,7 +150,7 @@ impl Http3ListenerTask {
       let wait_endpoints = endpoints.clone();
       let wait_connections = connections.clone();
       let wait = async {
-        for task in tasks {
+        for task in &mut tasks {
           let _ = task.await;
         }
         wait_connections.wait_idle().await;
@@ -129,15 +158,21 @@ impl Http3ListenerTask {
           endpoint.wait_idle().await;
         }
       };
-      if tokio::time::timeout(drain_timeouts.graceful, wait)
-        .await
-        .is_err()
-      {
+      if tokio::time::timeout_at(deadline, wait).await.is_err() {
         for endpoint in endpoints {
           endpoint.close(0u32.into(), b"listener drain timeout");
         }
+        for task in &tasks {
+          task.abort();
+        }
         connections.abort_all();
+        for task in tasks {
+          let _ = task.await;
+        }
+        connections.wait_idle().await;
+        return true;
       }
+      false
     })
   }
 }
@@ -149,6 +184,20 @@ impl BoundHttp3Listener {
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
     drain_timeouts: DrainTimeouts,
   ) -> Http3ListenerTask {
+    let mut bound_addresses = self
+      .endpoints
+      .iter()
+      .filter_map(|endpoint| match endpoint.local_addr() {
+        Ok(address) => Some(address),
+        Err(error) => {
+          warn!(%error, configured_bind = %self.bind, "failed to inspect bound HTTP/3 listener address");
+          None
+        }
+      })
+      .collect::<Vec<_>>();
+    if bound_addresses.is_empty() {
+      bound_addresses.push(self.bind);
+    }
     let (quiesce, quiesce_rx) = watch::channel(false);
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
@@ -196,6 +245,7 @@ impl BoundHttp3Listener {
     );
     Http3ListenerTask {
       bind,
+      bound_addresses,
       socket,
       transport,
       endpoints: self.endpoints,
@@ -214,19 +264,23 @@ impl AdminListenerTask {
     drop(self.drain());
   }
 
-  pub(super) fn drain(self) -> JoinHandle<()> {
+  pub(super) fn drain(self) -> JoinHandle<bool> {
+    let deadline = tokio::time::Instant::now() + self.drain_timeouts.graceful;
+    self.drain_until(deadline)
+  }
+
+  pub(super) fn drain_until(self, deadline: tokio::time::Instant) -> JoinHandle<bool> {
     tokio::spawn(async move {
       let AdminListenerTask {
-        shutdown,
-        drain_timeouts,
-        mut task,
-        ..
+        shutdown, mut task, ..
       } = self;
       let _ = shutdown.send(true);
       tokio::select! {
-        _ = &mut task => {}
-        _ = tokio::time::sleep(drain_timeouts.graceful) => {
+        _ = &mut task => false,
+        _ = tokio::time::sleep_until(deadline) => {
           task.abort();
+          let _ = task.await;
+          true
         }
       }
     })
@@ -243,6 +297,13 @@ impl BoundAdminListener {
     admin_operations: AdminOperationRuntime,
     drain_timeouts: DrainTimeouts,
   ) -> AdminListenerTask {
+    let bound_address = match self.listener.local_addr() {
+      Ok(address) => address,
+      Err(error) => {
+        warn!(%error, configured_bind = %self.bind, "failed to inspect bound Admin listener address");
+        self.bind
+      }
+    };
     let (shutdown, shutdown_rx) = watch::channel(false);
     let bind = self.bind;
     let task = tokio::spawn(async move {
@@ -261,6 +322,7 @@ impl BoundAdminListener {
     });
     AdminListenerTask {
       bind,
+      bound_address,
       shutdown,
       drain_timeouts,
       task,

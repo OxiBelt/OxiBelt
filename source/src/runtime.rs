@@ -1,5 +1,7 @@
 //! Runtime initialization for async execution, tracing, and telemetry resources.
 
+use std::sync::{Mutex, OnceLock};
+
 use anyhow::Context;
 use tracing_subscriber::EnvFilter;
 
@@ -50,9 +52,47 @@ pub fn init_observability(config: &Config) -> anyhow::Result<ObservabilityGuard>
 }
 
 fn init_logging(config: &crate::config::LoggingConfig) -> anyhow::Result<()> {
+  match install_startup_logging(config) {
+    Ok(TracingInstall::Applied | TracingInstall::AlreadyMatching) => Ok(()),
+    Err(TracingInstallError::InvalidFilter(error)) => Err(error),
+    Err(TracingInstallError::AlreadyInitialized) => {
+      anyhow::bail!("a process-global tracing subscriber is already initialized")
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum TracingInstall {
+  Applied,
+  AlreadyMatching,
+}
+
+#[derive(Debug)]
+pub(crate) enum TracingInstallError {
+  InvalidFilter(anyhow::Error),
+  AlreadyInitialized,
+}
+
+pub(crate) fn install_startup_logging(
+  config: &crate::config::LoggingConfig,
+) -> Result<TracingInstall, TracingInstallError> {
+  static INSTALL_LOCK: Mutex<()> = Mutex::new(());
+  static INSTALLED_FILTER: OnceLock<String> = OnceLock::new();
+
   let env_filter = EnvFilter::try_from_default_env()
     .or_else(|_| EnvFilter::try_new(config.level.clone()))
-    .context("failed to configure log filter")?;
+    .context("failed to configure log filter")
+    .map_err(TracingInstallError::InvalidFilter)?;
+  let filter_fingerprint = env_filter.to_string();
+  let _install_guard = INSTALL_LOCK
+    .lock()
+    .map_err(|_| TracingInstallError::AlreadyInitialized)?;
+  if let Some(outcome) = classify_installed_filter(
+    INSTALLED_FILTER.get().map(String::as_str),
+    &filter_fingerprint,
+  ) {
+    return outcome;
+  }
 
   tracing_subscriber::fmt()
     .with_env_filter(env_filter)
@@ -60,7 +100,41 @@ fn init_logging(config: &crate::config::LoggingConfig) -> anyhow::Result<()> {
     .with_target(false)
     .compact()
     .try_init()
-    .ok();
+    .map_err(|_| TracingInstallError::AlreadyInitialized)?;
+  if INSTALLED_FILTER.set(filter_fingerprint).is_err() {
+    return Err(TracingInstallError::AlreadyInitialized);
+  }
+  Ok(TracingInstall::Applied)
+}
 
-  Ok(())
+fn classify_installed_filter(
+  installed: Option<&str>,
+  requested: &str,
+) -> Option<Result<TracingInstall, TracingInstallError>> {
+  installed.map(|installed| {
+    if installed == requested {
+      Ok(TracingInstall::AlreadyMatching)
+    } else {
+      Err(TracingInstallError::AlreadyInitialized)
+    }
+  })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn initialized_tracing_filter_is_idempotent_or_a_structured_conflict() {
+    let installed = "oxibelt=info".to_string();
+    assert!(matches!(
+      classify_installed_filter(Some(&installed), "oxibelt=info"),
+      Some(Ok(TracingInstall::AlreadyMatching))
+    ));
+    assert!(matches!(
+      classify_installed_filter(Some(&installed), "oxibelt=debug"),
+      Some(Err(TracingInstallError::AlreadyInitialized))
+    ));
+    assert!(classify_installed_filter(None, "oxibelt=info").is_none());
+  }
 }
