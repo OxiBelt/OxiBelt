@@ -660,6 +660,51 @@ fn direct_h2_diagnostic_row(
   row
 }
 
+fn direct_h2_contention_row(
+  label: &str,
+  rps: f64,
+  p99_ms: f64,
+  direct_h2_hits: u64,
+  direct_h2_misses: u64,
+) -> Value {
+  let mut row =
+    direct_h2_diagnostic_row(label, "h2", rps, p99_ms, direct_h2_hits, direct_h2_misses);
+  row["errors"] = json!(0);
+  row["fast_path"]["pool"]["direct_h2"] = json!({
+      "hit": direct_h2_hits,
+      "miss": direct_h2_misses,
+      "miss_saturated": direct_h2_misses,
+      "connect_leader": 1,
+      "connect_coalesced": 63,
+      "capacity_wait": 4,
+      "capacity_ready": 3,
+      "capacity_timeout": 1,
+      "capacity_full": 2,
+      "drain_started": 1,
+      "drain_completed": 1,
+      "graceful_close": 1,
+      "cooldown_entered": 1,
+      "cooldown_expired": 1,
+      "stale_generation": 1
+  });
+  row["fast_path"]["stage_timing"] = json!({
+      "plain_proxy": {
+          "h2": {
+              "direct_h2_pool_take": {
+                  "ok": {"count": 4, "total_ns": 440, "avg_ns": 110.0}
+              },
+              "direct_h2_connect": {
+                  "ok": {"count": 1, "total_ns": 220, "avg_ns": 220.0}
+              },
+              "direct_h2_capacity_wait": {
+                  "ok": {"count": 3, "total_ns": 990, "avg_ns": 330.0}
+              }
+          }
+      }
+  });
+  row
+}
+
 fn runtime_direct_h1_row(
   label: &str,
   protocol: &str,
@@ -1299,6 +1344,21 @@ fn find_direct_h2_promotion_evidence<'a>(
     })
 }
 
+fn find_direct_h2_contention_evidence<'a>(
+  report: &'a Value,
+  upstream_variant: &str,
+  concurrency: u64,
+) -> &'a Value {
+  report["direct_h2_contention_evidence"]
+    .as_array()
+    .expect("direct-H2 contention evidence should be an array")
+    .iter()
+    .find(|row| row["upstream_variant"] == upstream_variant && row["concurrency"] == concurrency)
+    .unwrap_or_else(|| {
+      panic!("missing direct-H2 contention evidence for {upstream_variant}/c{concurrency}")
+    })
+}
+
 fn find_runtime_direct_h1_comparison<'a>(report: &'a Value, workload: &str) -> &'a Value {
   report["runtime_direct_h1_comparisons"]
     .as_array()
@@ -1530,7 +1590,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
   let report = run_aggregate(&input_dir, &output_dir);
 
-  assert_eq!(report["schema_version"], 31);
+  assert_eq!(report["schema_version"], 32);
   assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
   let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -1990,6 +2050,83 @@ fn direct_h2_diagnostics_record_promotion_evidence_without_blocking_gates() {
 }
 
 #[test]
+fn direct_h2_contention_evidence_compares_matched_controls_without_blocking_gates() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+
+  let mut control = load_row(
+    "oxibelt-direct-h2-contention-control-c64",
+    "h2",
+    1000.0,
+    1.0,
+    10.0,
+  );
+  control["errors"] = json!(0);
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-smoke-direct-h2-contention-shard-1/run-1"),
+    vec![
+      control,
+      direct_h2_contention_row("oxibelt-direct-h2-contention-h2c-c64", 1100.0, 8.0, 995, 5),
+    ],
+  );
+
+  let report = run_aggregate(&input_dir, &output_dir);
+  let evidence = find_direct_h2_contention_evidence(&report, "h2c", 64);
+  assert_eq!(
+    evidence["control_scenario"],
+    "direct-h2-contention-control-c64"
+  );
+  assert_eq!(
+    evidence["diagnostic_scenario"],
+    "direct-h2-contention-h2c-c64"
+  );
+  assert_eq!(evidence["status"], "observed");
+  assert_close(
+    evidence["rps_ratio_vs_control"]
+      .as_f64()
+      .expect("contention RPS ratio should exist"),
+    1.1,
+  );
+  assert_close(
+    evidence["p99_ratio_vs_control"]
+      .as_f64()
+      .expect("contention p99 ratio should exist"),
+    0.8,
+  );
+  assert_eq!(evidence["direct_h2_pool_connect_leader"], 1);
+  assert_eq!(evidence["direct_h2_pool_miss_saturated"], 5);
+  assert_eq!(evidence["direct_h2_pool_connect_coalesced"], 63);
+  assert_eq!(evidence["direct_h2_pool_capacity_wait"], 4);
+  assert_eq!(evidence["direct_h2_pool_capacity_ready"], 3);
+  assert_eq!(evidence["direct_h2_pool_capacity_timeout"], 1);
+  assert_eq!(evidence["direct_h2_pool_capacity_full"], 2);
+  assert_eq!(evidence["direct_h2_pool_drain_started"], 1);
+  assert_eq!(evidence["direct_h2_pool_drain_completed"], 1);
+  assert_eq!(evidence["direct_h2_pool_graceful_close"], 1);
+  assert_eq!(evidence["direct_h2_pool_cooldown_entered"], 1);
+  assert_eq!(evidence["direct_h2_pool_cooldown_expired"], 1);
+  assert_eq!(evidence["direct_h2_pool_stale_generation"], 1);
+  assert_eq!(evidence["direct_h2_pool_take_median_avg_ns"], 110.0);
+  assert_eq!(evidence["direct_h2_connect_median_avg_ns"], 220.0);
+  assert_eq!(evidence["direct_h2_capacity_wait_median_avg_ns"], 330.0);
+  assert!(
+    !report["regression_gates"]["violations"]
+      .as_array()
+      .expect("violations should be an array")
+      .iter()
+      .any(|violation| violation["gate"] == "direct_h2_contention"),
+    "direct-H2 contention evidence must remain advisory"
+  );
+
+  let markdown = fs::read_to_string(output_dir.join("performance-comparison.md"))
+    .expect("markdown report should be readable");
+  assert!(markdown.contains("## Direct-H2 contention evidence"));
+  assert!(markdown.contains("| `x86-64-v3` | `h2c` | `64`"));
+  assert!(markdown.contains("`1` / `63`"));
+}
+
+#[test]
 fn runtime_direct_h1_pairs_gate_cpu_request_latency_and_backend_with_three_samples() {
   let temp_dir = TempDir::new();
   let input_dir = temp_dir.path().join("input");
@@ -2028,7 +2165,7 @@ fn runtime_direct_h1_pairs_gate_cpu_request_latency_and_backend_with_three_sampl
   );
 
   let report = run_aggregate(&input_dir, &output_dir);
-  assert_eq!(report["schema_version"], 31);
+  assert_eq!(report["schema_version"], 32);
   for (workload, _, expected_backend) in workloads {
     let comparison = find_runtime_direct_h1_comparison(&report, workload);
     assert_eq!(comparison["expected_experiment_backend"], expected_backend);
@@ -2184,7 +2321,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
     ],
   );
 
-  assert_eq!(report["schema_version"], 31);
+  assert_eq!(report["schema_version"], 32);
   assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
   assert_eq!(report["sample_quality"]["ok_iterations"], 16);
   assert_eq!(report["sample_quality"]["failed_iterations"], 0);

@@ -33,7 +33,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 31;
+const COMPARISON_SCHEMA_VERSION: u32 = 32;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -64,7 +64,7 @@ const SERVING_TYPES: [&str; 8] = [
   "runtime-direct-h1",
   "metrics-mode",
 ];
-const RECOGNIZED_SERVING_TYPES: [&str; 9] = [
+const RECOGNIZED_SERVING_TYPES: [&str; 10] = [
   "reverse-proxy",
   "static-files",
   "oxibelt-features",
@@ -72,6 +72,7 @@ const RECOGNIZED_SERVING_TYPES: [&str; 9] = [
   "accept-multipliers",
   "remote-signer",
   "pool-concurrency",
+  "direct-h2-contention",
   "runtime-direct-h1",
   "metrics-mode",
 ];
@@ -734,6 +735,44 @@ struct DirectH2PromotionEvidence {
 }
 
 #[derive(Clone, Serialize)]
+struct DirectH2ContentionEvidence {
+  amd64_target_cpu: String,
+  upstream_variant: String,
+  concurrency: u64,
+  control_scenario: String,
+  diagnostic_scenario: String,
+  control_sample_count: usize,
+  diagnostic_sample_count: usize,
+  control_median_rps: Option<f64>,
+  diagnostic_median_rps: Option<f64>,
+  rps_ratio_vs_control: Option<f64>,
+  control_median_p99_ms: Option<f64>,
+  diagnostic_median_p99_ms: Option<f64>,
+  p99_ratio_vs_control: Option<f64>,
+  direct_h2_min_hit_rate: Option<f64>,
+  direct_h2_pool_hit: u64,
+  direct_h2_pool_miss: u64,
+  direct_h2_pool_miss_saturated: u64,
+  direct_h2_pool_connect_leader: u64,
+  direct_h2_pool_connect_coalesced: u64,
+  direct_h2_pool_capacity_wait: u64,
+  direct_h2_pool_capacity_ready: u64,
+  direct_h2_pool_capacity_timeout: u64,
+  direct_h2_pool_capacity_full: u64,
+  direct_h2_pool_drain_started: u64,
+  direct_h2_pool_drain_completed: u64,
+  direct_h2_pool_graceful_close: u64,
+  direct_h2_pool_cooldown_entered: u64,
+  direct_h2_pool_cooldown_expired: u64,
+  direct_h2_pool_stale_generation: u64,
+  direct_h2_pool_take_median_avg_ns: Option<f64>,
+  direct_h2_connect_median_avg_ns: Option<f64>,
+  direct_h2_capacity_wait_median_avg_ns: Option<f64>,
+  status: String,
+  reason: String,
+}
+
+#[derive(Clone, Serialize)]
 struct RuntimeDirectH1Comparison {
   amd64_target_cpu: String,
   workload: String,
@@ -1193,6 +1232,7 @@ struct Report {
   remote_signer_comparisons: Vec<RemoteSignerComparison>,
   pool_concurrency_experiments: Vec<PoolConcurrencyExperiment>,
   direct_h2_promotion_evidence: Vec<DirectH2PromotionEvidence>,
+  direct_h2_contention_evidence: Vec<DirectH2ContentionEvidence>,
   runtime_direct_h1_comparisons: Vec<RuntimeDirectH1Comparison>,
   amd64_isa_comparisons: Vec<Amd64IsaComparison>,
   probe_h2load_comparisons: Vec<ProbeH2loadComparison>,
@@ -2133,6 +2173,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     expected_shards,
     regression_gate_thresholds.h1_fast_path_min_hit_rate,
   );
+  let direct_h2_contention_evidence = build_direct_h2_contention_evidence(&aggregate_map);
   let runtime_direct_h1_comparisons =
     build_runtime_direct_h1_comparisons(&aggregate_map, &primary_target_cpu);
   let probe_h2load_comparisons =
@@ -2210,6 +2251,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     remote_signer_comparisons,
     pool_concurrency_experiments,
     direct_h2_promotion_evidence,
+    direct_h2_contention_evidence,
     runtime_direct_h1_comparisons,
     amd64_isa_comparisons,
     probe_h2load_comparisons,
@@ -5096,6 +5138,236 @@ fn direct_h2_promotion_status(
       ),
     )
   }
+}
+
+fn build_direct_h2_contention_evidence(
+  aggregates: &AggregateMap,
+) -> Vec<DirectH2ContentionEvidence> {
+  let mut controls: BTreeMap<(String, u64), &AggregateStats> = BTreeMap::new();
+  for ((target, comparator, scenario), aggregate) in aggregates {
+    if *comparator != Comparator::Oxibelt {
+      continue;
+    }
+    let Some((variant, concurrency)) = direct_h2_contention_scenario_parts(scenario) else {
+      continue;
+    };
+    if variant == "control" {
+      controls.insert((target.clone(), concurrency), aggregate);
+    }
+  }
+
+  let mut rows = Vec::new();
+  for ((target, comparator, scenario), diagnostic) in aggregates {
+    if *comparator != Comparator::Oxibelt {
+      continue;
+    }
+    let Some((upstream_variant, concurrency)) = direct_h2_contention_scenario_parts(scenario)
+    else {
+      continue;
+    };
+    if upstream_variant == "control" {
+      continue;
+    }
+    let control_scenario = format!("direct-h2-contention-control-c{concurrency}");
+    let control = controls.get(&(target.clone(), concurrency)).copied();
+    let transport = direct_h2_transport_stats(diagnostic, "h2");
+    let direct_h2_min_hit_rate = transport.and_then(|stats| stats.min_hit_rate);
+    let rps_ratio_vs_control =
+      control.and_then(|control| ratio(diagnostic.median_rps, control.median_rps));
+    let p99_ratio_vs_control =
+      control.and_then(|control| ratio(diagnostic.median_p99_ms, control.median_p99_ms));
+    let direct_h2_pool_miss_saturated =
+      direct_h2_pool_event_count(Some(diagnostic), "miss_saturated");
+    let direct_h2_pool_capacity_wait =
+      direct_h2_pool_event_count(Some(diagnostic), "capacity_wait");
+    let direct_h2_pool_capacity_full =
+      direct_h2_pool_event_count(Some(diagnostic), "capacity_full");
+    let (status, reason) = direct_h2_contention_status(
+      control,
+      diagnostic,
+      transport,
+      rps_ratio_vs_control,
+      p99_ratio_vs_control,
+      direct_h2_pool_miss_saturated,
+      direct_h2_pool_capacity_wait,
+      direct_h2_pool_capacity_full,
+    );
+
+    rows.push(DirectH2ContentionEvidence {
+      amd64_target_cpu: target.clone(),
+      upstream_variant: upstream_variant.to_owned(),
+      concurrency,
+      control_scenario,
+      diagnostic_scenario: scenario.clone(),
+      control_sample_count: control.map_or(0, |row| row.sample_count),
+      diagnostic_sample_count: diagnostic.sample_count,
+      control_median_rps: control.and_then(|row| row.median_rps),
+      diagnostic_median_rps: diagnostic.median_rps,
+      rps_ratio_vs_control,
+      control_median_p99_ms: control.and_then(|row| row.median_p99_ms),
+      diagnostic_median_p99_ms: diagnostic.median_p99_ms,
+      p99_ratio_vs_control,
+      direct_h2_min_hit_rate,
+      direct_h2_pool_hit: direct_h2_pool_event_count(Some(diagnostic), "hit"),
+      direct_h2_pool_miss: direct_h2_pool_event_count(Some(diagnostic), "miss"),
+      direct_h2_pool_miss_saturated,
+      direct_h2_pool_connect_leader: direct_h2_pool_event_count(Some(diagnostic), "connect_leader"),
+      direct_h2_pool_connect_coalesced: direct_h2_pool_event_count(
+        Some(diagnostic),
+        "connect_coalesced",
+      ),
+      direct_h2_pool_capacity_wait,
+      direct_h2_pool_capacity_ready: direct_h2_pool_event_count(Some(diagnostic), "capacity_ready"),
+      direct_h2_pool_capacity_timeout: direct_h2_pool_event_count(
+        Some(diagnostic),
+        "capacity_timeout",
+      ),
+      direct_h2_pool_capacity_full,
+      direct_h2_pool_drain_started: direct_h2_pool_event_count(Some(diagnostic), "drain_started"),
+      direct_h2_pool_drain_completed: direct_h2_pool_event_count(
+        Some(diagnostic),
+        "drain_completed",
+      ),
+      direct_h2_pool_graceful_close: direct_h2_pool_event_count(Some(diagnostic), "graceful_close"),
+      direct_h2_pool_cooldown_entered: direct_h2_pool_event_count(
+        Some(diagnostic),
+        "cooldown_entered",
+      ),
+      direct_h2_pool_cooldown_expired: direct_h2_pool_event_count(
+        Some(diagnostic),
+        "cooldown_expired",
+      ),
+      direct_h2_pool_stale_generation: direct_h2_pool_event_count(
+        Some(diagnostic),
+        "stale_generation",
+      ),
+      direct_h2_pool_take_median_avg_ns: stage_median_avg_ns(
+        diagnostic,
+        "plain_proxy",
+        "h2",
+        "direct_h2_pool_take",
+      ),
+      direct_h2_connect_median_avg_ns: stage_median_avg_ns(
+        diagnostic,
+        "plain_proxy",
+        "h2",
+        "direct_h2_connect",
+      ),
+      direct_h2_capacity_wait_median_avg_ns: stage_median_avg_ns(
+        diagnostic,
+        "plain_proxy",
+        "h2",
+        "direct_h2_capacity_wait",
+      ),
+      status,
+      reason,
+    });
+  }
+
+  rows.sort_by(|left, right| {
+    (
+      &left.amd64_target_cpu,
+      left.concurrency,
+      &left.upstream_variant,
+    )
+      .cmp(&(
+        &right.amd64_target_cpu,
+        right.concurrency,
+        &right.upstream_variant,
+      ))
+  });
+  rows
+}
+
+fn direct_h2_contention_scenario_parts(scenario: &str) -> Option<(&str, u64)> {
+  let rest = scenario.strip_prefix("direct-h2-contention-")?;
+  let (variant, concurrency) = rest.rsplit_once("-c")?;
+  if !matches!(variant, "control" | "h2c" | "h2") {
+    return None;
+  }
+  Some((variant, concurrency.parse().ok()?))
+}
+
+fn direct_h2_contention_status(
+  control: Option<&AggregateStats>,
+  diagnostic: &AggregateStats,
+  transport: Option<&FastPathAggregateStats>,
+  rps_ratio_vs_control: Option<f64>,
+  p99_ratio_vs_control: Option<f64>,
+  direct_h2_pool_miss_saturated: u64,
+  direct_h2_pool_capacity_wait: u64,
+  direct_h2_pool_capacity_full: u64,
+) -> (String, String) {
+  let Some(control) = control else {
+    return (
+      "missing_evidence".to_owned(),
+      "matching general-client contention control row is missing; evidence remains advisory"
+        .to_owned(),
+    );
+  };
+  if control.sample_count == 0
+    || diagnostic.sample_count == 0
+    || control.skipped_count > 0
+    || diagnostic.skipped_count > 0
+  {
+    return (
+      "missing_evidence".to_owned(),
+      "control or direct-H2 contention row has no complete sample; evidence remains advisory"
+        .to_owned(),
+    );
+  }
+  if control.total_errors > 0 || diagnostic.total_errors > 0 {
+    return (
+      "request_errors".to_owned(),
+      "control or direct-H2 contention row recorded request errors; evidence remains advisory"
+        .to_owned(),
+    );
+  }
+  if transport.is_none_or(|stats| stats.attempts == 0) {
+    return (
+      "missing_transport_evidence".to_owned(),
+      "direct-H2 contention row recorded no direct-H2 transport attempts; evidence remains advisory"
+        .to_owned(),
+    );
+  }
+  if transport.and_then(|stats| stats.min_hit_rate).is_none() {
+    return (
+      "missing_transport_evidence".to_owned(),
+      "direct-H2 contention row has no pool hit-rate evidence; evidence remains advisory"
+        .to_owned(),
+    );
+  }
+  if rps_ratio_vs_control.is_none() || p99_ratio_vs_control.is_none() {
+    return (
+      "missing_ratio_evidence".to_owned(),
+      "matched contention rows do not yield both RPS and p99 ratios; evidence remains advisory"
+        .to_owned(),
+    );
+  }
+  if direct_h2_pool_miss_saturated == 0
+    && direct_h2_pool_capacity_wait == 0
+    && direct_h2_pool_capacity_full == 0
+  {
+    return (
+      "no_contention".to_owned(),
+      "direct-H2 row recorded no saturated miss, capacity wait, or capacity-full event; evidence remains advisory"
+        .to_owned(),
+    );
+  }
+  (
+    "observed".to_owned(),
+    "matched small-pool control and direct-H2 contention evidence includes observed saturation; ratios and pool diagnostics are advisory"
+      .to_owned(),
+  )
+}
+
+fn direct_h2_pool_event_count(aggregate: Option<&AggregateStats>, event: &str) -> u64 {
+  aggregate
+    .and_then(|aggregate| aggregate.fast_path.as_ref())
+    .and_then(|fast_path| fast_path.direct_h2_pool.as_ref())
+    .and_then(|events| events.values.get(event))
+    .copied()
+    .unwrap_or(0)
 }
 
 fn direct_h2_transport_stats<'a>(
@@ -8363,6 +8635,7 @@ fn render_markdown(report: &Report) -> String {
   write_amd64_isa_table(&mut markdown, &report.amd64_isa_comparisons);
   write_pool_concurrency_experiment_table(&mut markdown, &report.pool_concurrency_experiments);
   write_direct_h2_promotion_evidence_table(&mut markdown, &report.direct_h2_promotion_evidence);
+  write_direct_h2_contention_evidence_table(&mut markdown, &report.direct_h2_contention_evidence);
   write_runtime_direct_h1_comparison_table(&mut markdown, &report.runtime_direct_h1_comparisons);
   write_direct_h1_pool_diagnostics_table(&mut markdown, report);
   write_direct_h2_pool_diagnostics_table(&mut markdown, report);
@@ -8580,6 +8853,68 @@ fn write_direct_h2_promotion_evidence_table(
       row.direct_h2_pool_reconnect,
       row.status,
       markdown_escape_cell(&row.reason)
+    )
+    .unwrap();
+  }
+  writeln!(markdown).unwrap();
+}
+
+fn write_direct_h2_contention_evidence_table(
+  markdown: &mut String,
+  rows: &[DirectH2ContentionEvidence],
+) {
+  writeln!(markdown, "\n## Direct-H2 contention evidence\n").unwrap();
+  if rows.is_empty() {
+    writeln!(
+      markdown,
+      "No direct-H2 small-pool contention evidence rows were found.\n"
+    )
+    .unwrap();
+    return;
+  }
+
+  writeln!(
+    markdown,
+    "| Target | Upstream | Concurrency | Samples control / diagnostic | RPS / control | p99 / control | Direct-H2 hit rate | Pool hit / miss / saturated miss | Connect leader / coalesced | Capacity wait / ready / timeout / full | Drain started / completed | Graceful close | Cooldown entered / expired | Stale generation | Pool take / connect / capacity wait avg | Status | Reason |"
+  )
+  .unwrap();
+  writeln!(
+    markdown,
+    "| --- | --- | ---: | --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- | ---: | --- | --- | --- |"
+  )
+  .unwrap();
+  for row in rows {
+    writeln!(
+      markdown,
+      "| `{}` | `{}` | `{}` | `{}` / `{}` | {} | {} | {} | `{}` / `{}` / `{}` | `{}` / `{}` | `{}` / `{}` / `{}` / `{}` | `{}` / `{}` | `{}` | `{}` / `{}` | `{}` | {} / {} / {} | `{}` | {} |",
+      row.amd64_target_cpu,
+      row.upstream_variant,
+      row.concurrency,
+      row.control_sample_count,
+      row.diagnostic_sample_count,
+      format_ratio_value(row.rps_ratio_vs_control),
+      format_ratio_value(row.p99_ratio_vs_control),
+      format_ratio_value(row.direct_h2_min_hit_rate),
+      row.direct_h2_pool_hit,
+      row.direct_h2_pool_miss,
+      row.direct_h2_pool_miss_saturated,
+      row.direct_h2_pool_connect_leader,
+      row.direct_h2_pool_connect_coalesced,
+      row.direct_h2_pool_capacity_wait,
+      row.direct_h2_pool_capacity_ready,
+      row.direct_h2_pool_capacity_timeout,
+      row.direct_h2_pool_capacity_full,
+      row.direct_h2_pool_drain_started,
+      row.direct_h2_pool_drain_completed,
+      row.direct_h2_pool_graceful_close,
+      row.direct_h2_pool_cooldown_entered,
+      row.direct_h2_pool_cooldown_expired,
+      row.direct_h2_pool_stale_generation,
+      format_optional_ns(row.direct_h2_pool_take_median_avg_ns),
+      format_optional_ns(row.direct_h2_connect_median_avg_ns),
+      format_optional_ns(row.direct_h2_capacity_wait_median_avg_ns),
+      row.status,
+      markdown_escape_cell(&row.reason),
     )
     .unwrap();
   }

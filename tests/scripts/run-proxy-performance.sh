@@ -4,7 +4,7 @@ umask 077
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -128,7 +128,7 @@ case "${profile}" in
 esac
 
 case "${serving_type}" in
-  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run) ;;
+  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run) ;;
   *)
     usage
     exit 2
@@ -182,6 +182,17 @@ keysigner_image="${OXIBELT_KEYSIGNER_DOCKER_IMAGE:-${oxibelt_image}}"
 nginx_image="${OXIBELT_NGINX_IMAGE:-nginx:mainline-alpine}"
 caddy_image="${OXIBELT_CADDY_IMAGE:-caddy:2-alpine}"
 openresty_image="${OXIBELT_OPENRESTY_IMAGE:-openresty/openresty:1.31.1.1-2-alpine}"
+source_sha="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+source_dirty=false
+if [[ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null || true)" ]]; then
+  source_dirty=true
+fi
+source_architecture="$(uname -m)"
+if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
+  oxibelt_build_mode="prebuilt-container"
+else
+  oxibelt_build_mode="release-container"
+fi
 nginx_h3_mode_override="${OXIBELT_NGINX_H3_MODE:-auto}"
 remove_perf_probe_image=0
 remove_external_benchmark_image=0
@@ -1461,9 +1472,65 @@ start_perf_upstreams() {
   docker start "${h2_container}" >/dev/null
 }
 
+image_identity_json() {
+  local reference="$1"
+  local inspected
+  if inspected="$(docker image inspect "${reference}" 2>/dev/null)"; then
+    jq -c --arg reference "${reference}" \
+      '.[0] | {
+        reference: $reference,
+        image_id: .Id,
+        repo_digests: (.RepoDigests // []),
+        created: .Created,
+        os: .Os,
+        architecture: .Architecture,
+        version_label: (.Config.Labels["org.opencontainers.image.version"] // null),
+        revision_label: (.Config.Labels["org.opencontainers.image.revision"] // null)
+      }' <<<"${inspected}"
+  else
+    jq -cn --arg reference "${reference}" '{reference: $reference, unavailable: true}'
+  fi
+}
+
 append_result() {
   local json="$1"
-  json="$(jq -c --arg target "${amd64_target_cpu}" '. + {amd64_target_cpu: $target}' <<<"${json}")"
+  local perf_probe_identity oxibelt_identity nginx_identity caddy_identity openresty_identity
+  perf_probe_identity="$(image_identity_json "${perf_probe_image}")"
+  oxibelt_identity="$(image_identity_json "${oxibelt_image}")"
+  nginx_identity="$(image_identity_json "${nginx_image}")"
+  caddy_identity="$(image_identity_json "${caddy_image}")"
+  openresty_identity="$(image_identity_json "${openresty_image}")"
+  json="$(jq -c \
+    --arg target "${amd64_target_cpu}" \
+    --arg source_sha "${source_sha}" \
+    --argjson source_dirty "${source_dirty}" \
+    --arg source_architecture "${source_architecture}" \
+    --arg profile "${profile}" \
+    --arg serving_type "${serving_type}" \
+    --arg oxibelt_build_mode "${oxibelt_build_mode}" \
+    --argjson perf_probe_image "${perf_probe_identity}" \
+    --argjson oxibelt_image "${oxibelt_identity}" \
+    --argjson nginx_image "${nginx_identity}" \
+    --argjson caddy_image "${caddy_identity}" \
+    --argjson openresty_image "${openresty_identity}" \
+    '. + {
+      amd64_target_cpu: $target,
+      benchmark_identity: {
+        source_sha: $source_sha,
+        source_dirty: $source_dirty,
+        source_architecture: $source_architecture,
+        profile: $profile,
+        serving_type: $serving_type,
+        oxibelt_build_mode: $oxibelt_build_mode,
+        images: {
+          perf_probe: $perf_probe_image,
+          oxibelt: $oxibelt_image,
+          nginx: $nginx_image,
+          caddy: $caddy_image,
+          openresty: $openresty_image
+        }
+      }
+    }' <<<"${json}")"
   printf '%s\n' "${json}" >>"${results_jsonl}"
   local label type protocol skipped requests rps p95 p99 errors fast_path_hit_rate direct_h1_hit_rate direct_h2_hit_rate direct_h1_pool_events static_sources result_text fast_path_protocol
   label="$(jq -r '.label // "unknown"' <<<"${json}")"
@@ -1579,7 +1646,7 @@ direct_h2_diagnostic_load_label() {
     return 1
   fi
   case "${label}:${protocol}" in
-    oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3) return 0 ;;
+    oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3|oxibelt-direct-h2-contention-*:h2) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -3016,6 +3083,7 @@ plain_proxy_fast_path_gate_protocol() {
     oxibelt-h2-upstream-h2:h2) printf 'h2' ;;
     oxibelt-h3-upstream-h2c:h3) printf 'h3' ;;
     oxibelt-h3-upstream-h2:h3) printf 'h3' ;;
+    oxibelt-direct-h2-contention-h2c-c*:h2|oxibelt-direct-h2-contention-h2-c*:h2) printf 'h2' ;;
   esac
 }
 
@@ -3028,7 +3096,7 @@ direct_transport_gate_transport() {
   fi
   case "${label}:${protocol}" in
     oxibelt-h1-keepalive:h1|oxibelt-h2:h2|oxibelt-h3:h3|oxibelt-post-1k-json-h2:h2|oxibelt-post-16k-json-h2:h2|oxibelt-upload-1m-post-h2:h2|oxibelt-upload-1m-put-h2:h2|oxibelt-stream-1m-h2:h2|oxibelt-stream-10m-h2:h2|oxibelt-chunked-post-16k-h1:h1|oxibelt-h2-multiplexed-bodyful:h2|oxibelt-post-1k-json-h3:h3|oxibelt-post-16k-json-h3:h3|oxibelt-h3-multiplexed-bodyful:h3|oxibelt-h3-concurrent-bodyful:h3|oxibelt-runtime-direct-h1-*-h1:h1|oxibelt-runtime-direct-h1-*-h2:h2|oxibelt-runtime-direct-h1-*-h3:h3|oxibelt-metrics-basic-h2:h2|oxibelt-metrics-basic-h3:h3|oxibelt-metrics-detailed-h2:h2|oxibelt-metrics-detailed-h3:h3|oxibelt-h2-multiplexed:h2|oxibelt-h3-inline-fast-path-experiment:h3|oxibelt-pool*-conc*-h2:h2|oxibelt-pool*-conc*-h3:h3) printf 'direct_h1' ;;
-    oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3) printf 'direct_h2' ;;
+    oxibelt-h2-upstream-h2c:h2|oxibelt-h2-upstream-h2:h2|oxibelt-h3-upstream-h2c:h3|oxibelt-h3-upstream-h2:h3|oxibelt-direct-h2-contention-h2c-c*:h2|oxibelt-direct-h2-contention-h2-c*:h2) printf 'direct_h2' ;;
   esac
 }
 
@@ -4278,6 +4346,36 @@ run_pool_concurrency_group() {
   run_pool_concurrency_experiments_group
 }
 
+run_direct_h2_contention_group() {
+  if ! has_comparator oxibelt; then
+    return
+  fi
+
+  local preset
+  local -a contention_presets=(64 256)
+
+  start_oxibelt baseline-direct-h2-contention-control oxibelt --detailed-hot-path-diagnostics
+  for preset in "${contention_presets[@]}"; do
+    run_load "oxibelt-direct-h2-contention-control-c${preset}" h2 oxibelt \
+      "/perf/direct-h2-contention?body=ok" "${duration_seconds}" "${preset}" \
+      --h2-streams-per-connection 16
+  done
+
+  start_oxibelt baseline-direct-h2-contention-h2c oxibelt --detailed-hot-path-diagnostics
+  for preset in "${contention_presets[@]}"; do
+    run_load "oxibelt-direct-h2-contention-h2c-c${preset}" h2 oxibelt \
+      "/perf/direct-h2-contention?body=ok" "${duration_seconds}" "${preset}" \
+      --h2-streams-per-connection 16
+  done
+
+  start_oxibelt baseline-direct-h2-contention-h2 oxibelt --detailed-hot-path-diagnostics
+  for preset in "${contention_presets[@]}"; do
+    run_load "oxibelt-direct-h2-contention-h2-c${preset}" h2 oxibelt \
+      "/perf/direct-h2-contention?body=ok" "${duration_seconds}" "${preset}" \
+      --h2-streams-per-connection 16
+  done
+}
+
 wait_for_compio_direct_h1_idle() {
   local attempt metrics=""
   for attempt in $(seq 1 "${runtime_direct_h1_cleanup_wait_seconds}"); do
@@ -4593,6 +4691,10 @@ cat >"${summary_md}" <<EOF
 - Pool experiment caps: \`${pool_experiment_caps}\`
 - Pool experiment concurrency presets: \`${pool_experiment_concurrency_presets}\`
 - Docker command: \`${docker_command}\`
+- Source SHA: \`${source_sha}\`
+- Source dirty: \`${source_dirty}\`
+- Source architecture: \`${source_architecture}\`
+- OxiBelt build mode: \`${oxibelt_build_mode}\`
 - OxiBelt AMD64 target CPU: \`${amd64_target_cpu}\`
 - Perf probe image: \`${perf_probe_image}\`
 - External benchmarks: \`${external_benchmarks}\`
@@ -4658,6 +4760,9 @@ case "${serving_type}" in
     ;;
   pool-concurrency)
     run_pool_concurrency_group
+    ;;
+  direct-h2-contention)
+    run_direct_h2_contention_group
     ;;
   runtime-direct-h1)
     run_runtime_direct_h1_group

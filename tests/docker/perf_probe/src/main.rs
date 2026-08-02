@@ -1079,6 +1079,8 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
         "h2_streams_per_connection": args.h2_streams_per_connection,
         "h3_streams_per_connection": args.h3_streams_per_connection,
         "tcp_nodelay": args.tcp_nodelay,
+        "authority": args.authority,
+        "path": args.path,
         "method": args.method.as_str(),
         "request_body_bytes": args.request_body.len(),
         "chunked_request_body": args.chunked_request_body,

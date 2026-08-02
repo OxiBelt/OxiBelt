@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use oxibelt::config::{CapacitySetting, Config, MetricsDetail};
+use oxibelt::config::{CapacitySetting, Config, HttpVersion, MetricsDetail};
 use oxibelt::routes::{RouteTable, WafExecutionPlan};
 use oxibelt::waf::WafEngine;
 
@@ -1064,7 +1064,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
   );
   assert!(
         script.contains(
-            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run"
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run"
         ),
         "usage should document every supported serving type"
     );
@@ -1077,6 +1077,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
     "accept-multipliers",
     "remote-signer",
     "pool-concurrency",
+    "direct-h2-contention",
     "runtime-direct-h1",
     "metrics-mode",
     "oxibelt-aggressive-long-run",
@@ -1636,6 +1637,55 @@ fn pool_concurrency_serving_type_runs_controlled_diagnostic_matrix() {
       "pool/concurrency experiment should contain {expected:?}"
     );
   }
+}
+
+#[test]
+fn direct_h2_contention_serving_type_runs_advisory_matched_multiplexed_rows() {
+  let script = performance_script_text();
+  let group_function = extract_bash_function(&script, "run_direct_h2_contention_group");
+  let plain_proxy_gate = extract_bash_function(&script, "plain_proxy_fast_path_gate_protocol");
+  let direct_transport_gate = extract_bash_function(&script, "direct_transport_gate_transport");
+
+  for expected in [
+    "direct-h2-contention)",
+    "oxibelt-direct-h2-contention-*:h2",
+    "oxibelt-direct-h2-contention-h2c-c*:h2",
+    "oxibelt-direct-h2-contention-h2-c*:h2",
+  ] {
+    assert!(
+      script.contains(expected),
+      "direct-H2 contention serving type should contain {expected:?}"
+    );
+  }
+
+  assert!(
+    !plain_proxy_gate.contains("oxibelt-direct-h2-contention-control-c*"),
+    "the general-client control must not claim a plain-proxy fast-path hit"
+  );
+  assert!(
+    !direct_transport_gate.contains("oxibelt-direct-h2-contention-control-c*"),
+    "the general-client control must not claim a direct-transport hit"
+  );
+
+  for expected in [
+    "local -a contention_presets=(64 256)",
+    "start_oxibelt baseline-direct-h2-contention-control oxibelt --detailed-hot-path-diagnostics",
+    "start_oxibelt baseline-direct-h2-contention-h2c oxibelt --detailed-hot-path-diagnostics",
+    "start_oxibelt baseline-direct-h2-contention-h2 oxibelt --detailed-hot-path-diagnostics",
+    "--h2-streams-per-connection 16",
+  ] {
+    assert!(
+      group_function.contains(expected),
+      "direct-H2 contention group should contain {expected:?}"
+    );
+  }
+  assert_eq!(
+    group_function
+      .matches("/perf/direct-h2-contention?body=ok")
+      .count(),
+    3,
+    "control, H2C, and TLS-H2 rows should use the same workload"
+  );
 }
 
 #[test]
@@ -2300,6 +2350,99 @@ fn oxibelt_direct_h2_performance_fixtures_enable_fast_path_metrics() {
       config.metrics.detail,
       MetricsDetail::Basic,
       "{scenario} should avoid detailed metrics on the measured fast path"
+    );
+  }
+}
+
+#[test]
+fn direct_h2_contention_fixtures_have_only_documented_control_differences() {
+  let scenarios = [
+    ("baseline-direct-h2-contention-control", None),
+    (
+      "baseline-direct-h2-contention-h2c",
+      Some((HttpVersion::H2, "http://perf-upstream-h2c:18082/")),
+    ),
+    (
+      "baseline-direct-h2-contention-h2",
+      Some((HttpVersion::H2, "https://perf-upstream-h2:18444/")),
+    ),
+  ];
+
+  let mut normalized = Vec::new();
+  for (scenario, direct_upstream) in scenarios {
+    let path = oxibelt_performance_fixture_root()
+      .join(scenario)
+      .join("config/oxibelt.toml");
+    let config_text = fs::read_to_string(&path)
+      .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let config: Config = toml::from_str(&config_text)
+      .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+
+    assert!(config.metrics.enabled, "{scenario} should expose metrics");
+    assert_eq!(
+      config.metrics.detail,
+      MetricsDetail::Detailed,
+      "{scenario} should expose detailed fixed-label contention diagnostics"
+    );
+    assert_eq!(
+      config.proxy.http2.max_concurrent_streams, 1024,
+      "{scenario} must not lower the global HTTP/2 stream limit to manufacture contention"
+    );
+
+    if let Some((expected_version, expected_origin)) = direct_upstream {
+      assert!(config.upstream_pools.is_empty());
+      let upstream = config
+        .upstreams
+        .first()
+        .unwrap_or_else(|| panic!("{scenario} should define its direct-H2 upstream"));
+      assert_eq!(upstream.pool_max_idle_per_host, 1);
+      assert_eq!(upstream.max_http_version, expected_version);
+      assert_eq!(upstream.origin.as_str(), expected_origin);
+    } else {
+      assert!(config.upstreams.is_empty());
+      let pool = config
+        .upstream_pools
+        .first()
+        .expect("control should define its general-client upstream pool");
+      assert_eq!(pool.name, "perf-control");
+      assert_eq!(pool.keepalive.max_idle, 256);
+      assert_eq!(pool.servers.len(), 1);
+      assert_eq!(
+        pool.servers[0].origin.as_str(),
+        "https://perf-upstream-h2:18444/"
+      );
+      assert!(config.routes.iter().any(|route| {
+        route.name == "proxy-route" && route.upstream_pool.as_deref() == Some("perf-control")
+      }));
+      assert!(
+        config
+          .routes
+          .iter()
+          .all(|route| route.upstream.as_deref() != Some("perf-upstream")),
+        "control must not retain the direct fixture's now-undefined upstream route"
+      );
+    }
+
+    let mut normalized_value: toml::Value = toml::from_str(&config_text)
+      .unwrap_or_else(|error| panic!("failed to parse raw {}: {error}", path.display()));
+    let root = normalized_value
+      .as_table_mut()
+      .expect("fixture root should be a TOML table");
+    root.remove("upstreams");
+    root.remove("upstream_pools");
+    if let Some(toml::Value::Array(routes)) = root.get_mut("routes") {
+      routes.retain(|route| route.get("static_root").is_some());
+    }
+    normalized.push((scenario, normalized_value));
+  }
+
+  let (_, expected) = normalized
+    .first()
+    .expect("contention fixtures should produce normalized configurations");
+  for (scenario, config) in normalized.iter().skip(1) {
+    assert_eq!(
+      config, expected,
+      "{scenario} should differ only by the documented direct-versus-general upstream selection"
     );
   }
 }
@@ -3573,6 +3716,32 @@ fn perf_probe_reports_every_request_inside_the_process_cpu_window() {
       && source.contains("\"warmup_requests\": warmup_requests")
       && source.contains("\"total_requests_including_warmup\": total_requests_including_warmup"),
     "perf-probe should expose exact warmup and measured request counts so process CPU/request does not divide a warmup-inclusive CPU window by measured requests alone"
+  );
+}
+
+#[test]
+fn performance_rows_record_exact_workload_source_build_and_image_identity() {
+  let script = performance_script_text();
+  let source = perf_probe_source_text();
+
+  assert!(
+    source.contains("\"authority\": args.authority")
+      && source.contains("\"path\": args.path")
+      && source.contains("\"method\": args.method.as_str()")
+      && source.contains("\"request_body_bytes\": args.request_body.len()"),
+    "load rows should preserve the exact authority, path, method, and request body size"
+  );
+  assert!(
+    script.contains("benchmark_identity:")
+      && script.contains("source_sha: $source_sha")
+      && script.contains("source_dirty: $source_dirty")
+      && script.contains("source_architecture: $source_architecture")
+      && script.contains("oxibelt_build_mode: $oxibelt_build_mode")
+      && script.contains("image_id: .Id")
+      && script.contains("repo_digests: (.RepoDigests // [])")
+      && script.contains("version_label:")
+      && script.contains("revision_label:"),
+    "each result row should carry source, build, architecture, and immutable image identity"
   );
 }
 
