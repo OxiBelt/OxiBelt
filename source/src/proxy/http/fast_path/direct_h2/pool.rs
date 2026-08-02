@@ -1373,6 +1373,7 @@ impl DirectH2Pool {
   }
 
   #[cfg(test)]
+  #[allow(clippy::too_many_arguments)]
   pub(super) fn for_test(
     slot_count: usize,
     target_streams_per_slot: usize,

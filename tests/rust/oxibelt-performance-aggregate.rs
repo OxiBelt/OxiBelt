@@ -5288,6 +5288,7 @@ fn direct_h2_contention_scenario_parts(scenario: &str) -> Option<(&str, u64)> {
   Some((variant, concurrency.parse().ok()?))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn direct_h2_contention_status(
   control: Option<&AggregateStats>,
   diagnostic: &AggregateStats,
