@@ -461,6 +461,8 @@ fn validate_membership_config(rollout: &AdminMutationRolloutConfig) -> anyhow::R
     .map(String::as_str)
     .collect::<BTreeSet<_>>();
   let mut bootstrap = BTreeSet::new();
+  let mut readiness_keys = BTreeSet::new();
+  let mut catchup_keys = BTreeSet::new();
   for member in &membership.bootstrap_members {
     validate_runtime_identifier(
       "admin.mutations.rollout.membership.bootstrap_members.id",
@@ -476,10 +478,19 @@ fn validate_membership_config(rollout: &AdminMutationRolloutConfig) -> anyhow::R
       "admin.mutations.rollout.membership.bootstrap_members.readiness_ed25519_public_key",
       &member.readiness_ed25519_public_key,
     )?;
+    if !readiness_keys.insert(member.readiness_ed25519_public_key.as_str()) {
+      bail!("staged Admin membership readiness public keys must be unique");
+    }
     validate_base64_public_key(
       "admin.mutations.rollout.membership.bootstrap_members.catchup_x25519_public_key",
       &member.catchup_x25519_public_key,
     )?;
+    if !catchup_keys.insert(member.catchup_x25519_public_key.as_str()) {
+      bail!("staged Admin membership catch-up public keys must be unique");
+    }
+  }
+  if !readiness_keys.is_disjoint(&catchup_keys) {
+    bail!("staged Admin membership readiness and catch-up public keys must be distinct");
   }
   if bootstrap != configured {
     bail!(

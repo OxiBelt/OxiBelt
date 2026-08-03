@@ -162,7 +162,7 @@ impl RuntimeSharedPublisher {
       }
       SharedEffectCheckpoint::Membership(checkpoint) => {
         restore_membership_mutation_tx(
-          &mut **transaction.transaction(),
+          transaction.transaction(),
           self.runtime.store()?.namespace(),
           &checkpoint,
         )
@@ -327,7 +327,7 @@ enum AppliedEffect {
   },
   Membership {
     checkpoint: crate::admin_mutation::MembershipMutationCheckpoint,
-    transition: crate::admin_mutation::MembershipTransition,
+    transition: Box<crate::admin_mutation::MembershipTransition>,
   },
 }
 
@@ -384,6 +384,9 @@ impl AppliedEffect {
   }
 }
 
+// The shared transaction boundary intentionally carries each authenticated
+// mutation authority explicitly into the single effect dispatcher.
+#[allow(clippy::too_many_arguments)]
 async fn apply_effect(
   transaction: &mut crate::admin_mutation::FencedCoordinatorTransaction<'_>,
   runtime: &AdminMutationRuntime,
@@ -411,7 +414,7 @@ async fn apply_effect(
       .collect::<Vec<_>>();
     let namespace = transaction.store().namespace().to_string();
     let (transition, checkpoint) = apply_membership_proposal_tx(
-      &mut **transaction.transaction(),
+      transaction.transaction(),
       &namespace,
       &fence.exact_membership.cluster_id,
       request_id,
@@ -423,7 +426,7 @@ async fn apply_effect(
     .await?;
     return Ok(AppliedEffect::Membership {
       checkpoint,
-      transition,
+      transition: Box::new(transition),
     });
   }
   if let Some((transition_id, request)) = operation.membership_activation() {
@@ -439,7 +442,7 @@ async fn apply_effect(
       .collect::<Vec<_>>();
     let namespace = transaction.store().namespace().to_string();
     let (transition, checkpoint) = authorize_membership_activation_tx(
-      &mut **transaction.transaction(),
+      transaction.transaction(),
       &namespace,
       &fence.exact_membership.cluster_id,
       request_id,
@@ -450,7 +453,7 @@ async fn apply_effect(
     .await?;
     return Ok(AppliedEffect::Membership {
       checkpoint,
-      transition,
+      transition: Box::new(transition),
     });
   }
   if let Some((transition_id, request)) = operation.membership_cancellation() {
@@ -460,7 +463,7 @@ async fn apply_effect(
     );
     let namespace = transaction.store().namespace().to_string();
     let (transition, checkpoint) = cancel_membership_transition_tx(
-      &mut **transaction.transaction(),
+      transaction.transaction(),
       &namespace,
       &fence.exact_membership.cluster_id,
       request_id,
@@ -469,7 +472,7 @@ async fn apply_effect(
     .await?;
     return Ok(AppliedEffect::Membership {
       checkpoint,
-      transition,
+      transition: Box::new(transition),
     });
   }
   if let Some(mutation) = operation.ipm_mutation()? {

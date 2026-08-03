@@ -135,7 +135,7 @@ pub(crate) struct PreviousEvidence {
 pub(crate) enum RecoveryOutcome {
   CandidateApplied(ExecutionEvidence),
   PreviousRestored(ExecutionEvidence),
-  SharedStaged(SharedStagedOperation),
+  SharedStaged(Box<SharedStagedOperation>),
   Indeterminate(String),
 }
 
@@ -396,7 +396,7 @@ impl AdminClusterExecutor {
     if operation.kind == OperationKind::SharedStaged {
       return operation.shared.clone().map_or_else(
         || RecoveryOutcome::Indeterminate("shared operation was not decoded".to_string()),
-        RecoveryOutcome::SharedStaged,
+        |operation| RecoveryOutcome::SharedStaged(Box::new(operation)),
       );
     }
     if operation.kind == OperationKind::FileSync {
