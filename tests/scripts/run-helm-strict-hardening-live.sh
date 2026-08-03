@@ -500,6 +500,7 @@ do
   fi
 done
 
+: >"${work_dir}/port-forward.log"
 kube -n "${namespace}" port-forward deployment/oxibelt :9091 \
   --address 127.0.0.1 >"${work_dir}/port-forward.log" 2>&1 &
 port_forward_pid="$!"

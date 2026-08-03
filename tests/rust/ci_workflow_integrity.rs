@@ -2898,6 +2898,24 @@ fn kubernetes_strict_hardening_ci_is_provider_neutral_and_invocation_isolated() 
       "strict hardening live harness must not contain {forbidden}"
     );
   }
+
+  let port_forward_log_creation = script
+    .find(": >\"${work_dir}/port-forward.log\"")
+    .expect("strict hardening harness should create the port-forward log before startup");
+  let port_forward_start = script
+    .find("kube -n \"${namespace}\" port-forward deployment/oxibelt :9091")
+    .expect("strict hardening harness should start the health port-forward");
+  let port_forward_log_read = script
+    .find("local_port=\"$(sed -nE")
+    .expect("strict hardening harness should parse the health port-forward log");
+  assert!(
+    port_forward_log_creation < port_forward_start,
+    "the port-forward log must exist before the background process starts"
+  );
+  assert!(
+    port_forward_start < port_forward_log_read,
+    "the port-forward log must be read only after the background process starts"
+  );
 }
 
 #[test]
