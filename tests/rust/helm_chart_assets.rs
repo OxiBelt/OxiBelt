@@ -21,6 +21,36 @@ fn read_yaml(path: &str) -> Value {
     .unwrap_or_else(|error| panic!("{path} should parse as YAML: {error}"))
 }
 
+fn assert_crd_schema_is_structural(value: &Value, path: &str) {
+  match value {
+    Value::Object(object) => {
+      assert_ne!(
+        object.get("additionalProperties"),
+        Some(&Value::Bool(false)),
+        "{path} must not use forbidden additionalProperties: false"
+      );
+      assert!(
+        !(object.contains_key("properties") && object.contains_key("additionalProperties")),
+        "{path} must not combine properties with additionalProperties"
+      );
+      assert_ne!(
+        object.get("uniqueItems"),
+        Some(&Value::Bool(true)),
+        "{path} must not use Kubernetes-forbidden uniqueItems: true"
+      );
+      for (key, child) in object {
+        assert_crd_schema_is_structural(child, &format!("{path}.{key}"));
+      }
+    }
+    Value::Array(array) => {
+      for (index, child) in array.iter().enumerate() {
+        assert_crd_schema_is_structural(child, &format!("{path}[{index}]"));
+      }
+    }
+    _ => {}
+  }
+}
+
 #[test]
 fn data_plane_chart_metadata_and_values_are_valid() {
   let chart = read_yaml("deploy/helm/oxibelt/Chart.yaml");
@@ -1196,13 +1226,22 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   );
   assert_eq!(target_crd["spec"]["scope"], "Namespaced");
   assert_eq!(target_crd["spec"]["versions"][0]["name"], "v1alpha1");
+  assert_crd_schema_is_structural(
+    &target_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"],
+    "OxiBeltDataPlaneTarget.openAPIV3Schema",
+  );
+  let target_spec =
+    &target_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
   assert_eq!(
-    target_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["additionalProperties"],
-    false
+    target_spec["properties"]["assignment"]["properties"]["allowedNamespaces"]["x-kubernetes-list-type"],
+    "set"
   );
   assert_eq!(
-    target_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
-      ["rollout"]["properties"]["concurrency"]["enum"][0],
+    target_spec["properties"]["capabilities"]["x-kubernetes-list-type"],
+    "set"
+  );
+  assert_eq!(
+    target_spec["properties"]["rollout"]["properties"]["concurrency"]["enum"][0],
     1
   );
 
@@ -1211,6 +1250,10 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   );
   assert_eq!(route_policy_crd["spec"]["scope"], "Namespaced");
   assert_eq!(route_policy_crd["spec"]["versions"][0]["name"], "v1alpha1");
+  assert_crd_schema_is_structural(
+    &route_policy_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"],
+    "OxiBeltRoutePolicy.openAPIV3Schema",
+  );
   assert!(
     route_policy_crd["spec"]["versions"][0]["subresources"]["status"]
       .as_object()
@@ -1218,10 +1261,17 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   );
   let route_policy_spec =
     &route_policy_crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
-  assert_eq!(route_policy_spec["additionalProperties"], false);
+  let request_rule_groups =
+    &route_policy_spec["properties"]["waf"]["properties"]["requestRuleGroups"];
+  assert_eq!(request_rule_groups["maxItems"], 16);
+  assert_eq!(request_rule_groups["x-kubernetes-list-type"], "atomic");
   assert_eq!(
-    route_policy_spec["properties"]["waf"]["properties"]["requestRuleGroups"]["maxItems"],
-    16
+    request_rule_groups["x-kubernetes-validations"][0]["rule"],
+    "self.all(group, self.filter(candidate, candidate == group).size() == 1)"
+  );
+  assert_eq!(
+    request_rule_groups["x-kubernetes-validations"][0]["message"],
+    "request rule groups must be unique"
   );
   assert_eq!(
     route_policy_spec["properties"]["limits"]["properties"]["maxRequestBodyBytes"]["maximum"],
