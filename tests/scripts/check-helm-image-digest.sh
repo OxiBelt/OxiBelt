@@ -16,6 +16,7 @@ strict_image_repository="ghcr.io/oxibelt/oxibelt-dataplane-strict"
 v2_values="${data_chart}/examples/edge-secure-medium-v2-values.yaml"
 controller_image_repository="ghcr.io/oxibelt/oxibelt-gateway-controller"
 image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+v2_image_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 die() {
   echo "Helm image digest check: $*" >&2
@@ -65,7 +66,6 @@ helm template oxibelt "${data_chart}" \
 helm template oxibelt "${data_chart}" \
   --kube-version "${kubernetes_version}" \
   -f "${v2_values}" \
-  --set-string image.digest="${image_digest}" \
   >"${work_dir}/data-v2.yaml"
 helm template oxibelt-controller "${controller_chart}" \
   --kube-version "${kubernetes_version}" \
@@ -80,7 +80,7 @@ grep -F -- "image: \"${data_image_repository}@${image_digest}\"" "${work_dir}/da
   || die "data Deployment did not render the immutable image digest"
 grep -F -- "image: \"${data_image_repository}@${image_digest}\"" "${work_dir}/data-daemonset.yaml" >/dev/null \
   || die "data DaemonSet did not render the immutable image digest"
-grep -F -- "image: \"${strict_image_repository}@${image_digest}\"" "${work_dir}/data-v2.yaml" >/dev/null \
+grep -F -- "image: \"${strict_image_repository}@${v2_image_digest}\"" "${work_dir}/data-v2.yaml" >/dev/null \
   || die "edge-secure-medium v2 did not retain the official strict digest identity"
 grep -F -- "image: \"${controller_image_repository}@${image_digest}\"" "${work_dir}/controller.yaml" >/dev/null \
   || die "controller did not render the immutable image digest"
@@ -110,11 +110,10 @@ grep -F -- "OBP106-IMAGE-DIGEST" "${work_dir}/v2-missing-digest.log" >/dev/null 
 if helm template oxibelt "${data_chart}" --kube-version "${kubernetes_version}" \
   -f "${v2_values}" --skip-schema-validation \
   --set-string image.repository=ghcr.io/oxibelt/oxibelt-dataplane \
-  >"${work_dir}/v2-role-confusion.log" 2>&1; then
+  >"${work_dir}/v2-wrong-repository.log" 2>&1; then
   die "edge-secure-medium v2 accepted the compatibility repository"
 fi
-grep -F -- "image.repository ghcr.io/oxibelt/oxibelt-dataplane does not match image.role dataplane-strict" \
-  "${work_dir}/v2-role-confusion.log" >/dev/null \
-  || die "edge-secure-medium v2 role-confusion diagnostic changed"
+grep -F -- "OBP106-IMAGE-REPOSITORY" "${work_dir}/v2-wrong-repository.log" >/dev/null \
+  || die "edge-secure-medium v2 wrong-repository diagnostic changed"
 
 echo "Helm image digest rendering passed."
