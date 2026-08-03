@@ -94,7 +94,8 @@ impl AdminMutationRuntime {
         maximum_clock_skew_seconds: self.inner.maximum_clock_skew_seconds,
       },
     )?;
-    if verified.envelope.unsigned.target != self.inner.target {
+    let authority = self.membership_authority();
+    if verified.envelope.unsigned.target != authority.target {
       return Ok(MutationAdmission::Conflict(MutationConflict::Target));
     }
     let unsigned = &verified.envelope.unsigned;
@@ -165,9 +166,9 @@ impl AdminMutationRuntime {
       .context("failed to load cluster mutation logical revision")?
       .context("cluster mutation baseline is not initialized")?;
     if !(logical.committed_revision == unsigned.expected_previous_revision
-      && logical.cluster_id.as_deref() == Some(self.inner.target.cluster_id.as_str())
+      && logical.cluster_id.as_deref() == Some(authority.target.cluster_id.as_str())
       && logical.membership_revision.as_deref()
-        == Some(self.inner.target.membership_revision.as_str()))
+        == Some(authority.target.membership_revision.as_str()))
     {
       return Err(
         anyhow::anyhow!("cluster mutation baseline does not match the active runtime").into(),
@@ -176,8 +177,8 @@ impl AdminMutationRuntime {
     let exact = prove_exact_resource_membership(
       store,
       &self.inner.cluster_id,
-      &self.inner.target.membership_revision,
-      &self.inner.members,
+      &authority.target.membership_revision,
+      &authority.members,
       oxibelt_build_identity::SHORT_VERSION,
       "admin-mutation-rollout-v1",
       self.artifact_key_fingerprint()?,

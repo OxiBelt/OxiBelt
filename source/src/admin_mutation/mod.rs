@@ -4,6 +4,9 @@ mod cluster_command;
 mod envelope;
 mod error;
 mod ledger;
+mod membership;
+mod membership_crypto;
+mod membership_store;
 #[cfg(test)]
 mod postgres_test_support;
 mod response;
@@ -26,6 +29,15 @@ pub use error::{MutationProtocolError, MutationProtocolErrorKind};
 #[cfg(test)]
 pub(crate) use ledger::{ClaimOutcome, MutationClaim};
 pub(crate) use ledger::{MutationRecord, MutationState};
+pub(crate) use membership::{
+  MembershipActivationRequest, MembershipCancelRequest, MembershipMember,
+  MembershipReadinessReceipt, MembershipTransitionRequest,
+};
+pub(crate) use membership_store::{
+  MembershipMutationCheckpoint, MembershipTransition, apply_membership_proposal_tx,
+  authorize_membership_activation_tx, cancel_membership_transition_tx,
+  restore_membership_mutation_tx,
+};
 pub use response::{
   IDEMPOTENT_REPLAY_HEADER, MUTATION_REQUEST_ID_HEADER, MUTATION_REVISION_HEADER,
   MutationResponseMetadata, attach_mutation_response_headers,

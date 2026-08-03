@@ -557,6 +557,146 @@
         }
       }
     },
+    "/admin/v1/membership": {
+      "get": {
+        "tags": ["membership"],
+        "operationId": "getMembershipStatus",
+        "summary": "Fetch the authenticated active membership epoch, required members, learner progress, fencing, and pending transition.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonObject" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/admin/v1/membership/transitions": {
+      "post": {
+        "tags": ["membership"],
+        "operationId": "proposeMembershipTransition",
+        "summary": "Propose one serialized learner, maintenance, removal, rejoin, or initialization epoch under the current all-member boundary.",
+        "parameters": [
+          { "$ref": "#/components/parameters/IfMatch" },
+          { "$ref": "#/components/parameters/MutationEnvelope" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MembershipTransitionRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/MutationResult" },
+          "202": { "$ref": "#/components/responses/MutationResult" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "428": { "$ref": "#/components/responses/PreconditionRequired" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/admin/v1/membership/transitions/{transition_id}/catchup": {
+      "get": {
+        "tags": ["membership"],
+        "operationId": "getMembershipCatchup",
+        "summary": "Fetch bounded learner-scoped encrypted catch-up chunks.",
+        "parameters": [
+          { "$ref": "#/components/parameters/MembershipTransitionId" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonObject" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/admin/v1/membership/transitions/{transition_id}/readiness": {
+      "post": {
+        "tags": ["membership"],
+        "operationId": "submitMembershipReadiness",
+        "summary": "Submit a learner-signed catch-up, build, capability, and clock readiness receipt without granting voting authority.",
+        "parameters": [
+          { "$ref": "#/components/parameters/MembershipTransitionId" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MembershipReadinessReceipt" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/JsonObject" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/admin/v1/membership/transitions/{transition_id}/activate": {
+      "post": {
+        "tags": ["membership"],
+        "operationId": "activateMembershipTransition",
+        "summary": "Authorize activation separately under the old all-member boundary; committed authorization is finalized durably before the new epoch is used.",
+        "parameters": [
+          { "$ref": "#/components/parameters/MembershipTransitionId" },
+          { "$ref": "#/components/parameters/IfMatch" },
+          { "$ref": "#/components/parameters/MutationEnvelope" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MembershipActivationRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/MutationResult" },
+          "202": { "$ref": "#/components/responses/MutationResult" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "428": { "$ref": "#/components/responses/PreconditionRequired" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/admin/v1/membership/transitions/{transition_id}/cancel": {
+      "post": {
+        "tags": ["membership"],
+        "operationId": "cancelMembershipTransition",
+        "summary": "Cancel a non-terminal membership transition under the current all-member boundary.",
+        "parameters": [
+          { "$ref": "#/components/parameters/MembershipTransitionId" },
+          { "$ref": "#/components/parameters/IfMatch" },
+          { "$ref": "#/components/parameters/MutationEnvelope" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MembershipCancelRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "$ref": "#/components/responses/MutationResult" },
+          "202": { "$ref": "#/components/responses/MutationResult" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "428": { "$ref": "#/components/responses/PreconditionRequired" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
     "/admin/v1/config/status": {
       "get": {
         "tags": [
@@ -4579,6 +4719,16 @@
           "format": "uuid"
         }
       },
+      "MembershipTransitionId": {
+        "name": "transition_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
       "ActivationId": {
         "name": "id",
         "in": "path",
@@ -6220,6 +6370,99 @@
       }
     },
     "schemas": {
+      "MembershipMember": {
+        "type": "object",
+        "required": [
+          "id",
+          "readiness_ed25519_public_key",
+          "catchup_x25519_public_key"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 253 },
+          "readiness_ed25519_public_key": {
+            "type": "string",
+            "description": "Canonical base64 encoding of exactly 32 Ed25519 public-key bytes."
+          },
+          "catchup_x25519_public_key": {
+            "type": "string",
+            "description": "Canonical base64 encoding of exactly 32 X25519 public-key bytes."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MembershipTransitionRequest": {
+        "type": "object",
+        "required": ["version", "kind", "expected_active_epoch", "member"],
+        "properties": {
+          "version": { "type": "integer", "const": 1 },
+          "kind": {
+            "type": "string",
+            "enum": ["initialize", "join", "maintenance", "remove", "rejoin"]
+          },
+          "expected_active_epoch": {
+            "type": ["string", "null"],
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "member": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/MembershipMember" },
+              { "type": "null" }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "MembershipReadinessReceipt": {
+        "type": "object",
+        "required": [
+          "version",
+          "transition_id",
+          "target_epoch",
+          "member_id",
+          "catchup_cursor",
+          "catchup_digest",
+          "build_version",
+          "capability_version",
+          "issued_at_unix_seconds",
+          "signature"
+        ],
+        "properties": {
+          "version": { "type": "integer", "const": 1 },
+          "transition_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "target_epoch": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+          "member_id": { "type": "string", "minLength": 1, "maxLength": 253 },
+          "catchup_cursor": { "type": "integer", "minimum": 1, "maximum": 4096 },
+          "catchup_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+          "build_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "capability_version": { "type": "string", "const": "admin-mutation-rollout-v1" },
+          "issued_at_unix_seconds": { "type": "integer" },
+          "signature": {
+            "type": "string",
+            "description": "Canonical base64 encoding of the 64-byte Ed25519 signature over the readiness transcript."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MembershipActivationRequest": {
+        "type": "object",
+        "required": ["version", "transition_id", "expected_target_epoch"],
+        "properties": {
+          "version": { "type": "integer", "const": 1 },
+          "transition_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "expected_target_epoch": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "MembershipCancelRequest": {
+        "type": "object",
+        "required": ["version", "transition_id", "expected_target_epoch"],
+        "properties": {
+          "version": { "type": "integer", "const": 1 },
+          "transition_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "expected_target_epoch": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+        },
+        "additionalProperties": false
+      },
       "AdminAuditListResponse": {
         "type": "object",
         "required": [

@@ -147,6 +147,18 @@ fn signs_only_the_p1_13_protected_mutation_set() {
     &Method::POST,
     "/admin/v1/break-glass/activations/abc/revoke"
   ));
+  assert!(is_protected_mutation(
+    &Method::POST,
+    "/admin/v1/membership/transitions"
+  ));
+  assert!(is_protected_mutation(
+    &Method::POST,
+    "/admin/v1/membership/transitions/join-1/activate"
+  ));
+  assert!(!is_protected_mutation(
+    &Method::POST,
+    "/admin/v1/membership/transitions/join-1/readiness"
+  ));
   assert!(!is_protected_mutation(
     &Method::POST,
     "/admin/v1/ipm/simulate/self"

@@ -398,8 +398,128 @@ pub(super) fn statements() -> &'static [&'static str] {
     "CREATE INDEX IF NOT EXISTS oxibelt_admin_break_glass_active_idx
        ON oxibelt_admin_break_glass_activations
          (namespace, principal, expires_at) WHERE revoked_at IS NULL",
+    "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_heads (
+       namespace text NOT NULL,
+       cluster_id text NOT NULL,
+       active_epoch_digest text NULL,
+       active_epoch_sequence bigint NULL,
+       state_version bigint NOT NULL DEFAULT 0,
+       updated_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY(namespace, cluster_id),
+       CHECK ((active_epoch_digest IS NULL) = (active_epoch_sequence IS NULL)),
+       CHECK (active_epoch_digest IS NULL OR active_epoch_digest ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (active_epoch_sequence IS NULL OR active_epoch_sequence >= 0),
+       CHECK (state_version >= 0)
+     )",
+    "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_epochs (
+       namespace text NOT NULL,
+       cluster_id text NOT NULL,
+       epoch_digest text NOT NULL,
+       epoch_sequence bigint NOT NULL,
+       predecessor_digest text NULL,
+       document jsonb NOT NULL,
+       authorized_request_id text NOT NULL,
+       state text NOT NULL,
+       created_at timestamptz NOT NULL DEFAULT now(),
+       activated_at timestamptz NULL,
+       PRIMARY KEY(namespace, cluster_id, epoch_digest),
+       UNIQUE(namespace, cluster_id, epoch_sequence),
+       CHECK (epoch_digest ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (predecessor_digest IS NULL OR predecessor_digest ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK ((epoch_sequence = 0) = (predecessor_digest IS NULL)),
+       CHECK (state IN ('staged','active','superseded','indeterminate')),
+       CHECK ((state IN ('active','superseded')) = (activated_at IS NOT NULL))
+     )",
+    "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_epoch_members (
+       namespace text NOT NULL,
+       cluster_id text NOT NULL,
+       epoch_digest text NOT NULL,
+       instance_id text NOT NULL,
+       readiness_ed25519_public_key text NOT NULL,
+       catchup_x25519_public_key text NOT NULL,
+       created_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY(namespace, cluster_id, epoch_digest, instance_id),
+       FOREIGN KEY(namespace, cluster_id, epoch_digest)
+         REFERENCES oxibelt_admin_membership_epochs(namespace, cluster_id, epoch_digest)
+         ON DELETE CASCADE
+     )",
+    "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_transitions (
+       namespace text NOT NULL,
+       cluster_id text NOT NULL,
+       transition_id text NOT NULL,
+       kind text NOT NULL,
+       state text NOT NULL,
+       state_version bigint NOT NULL DEFAULT 0,
+       source_epoch_digest text NULL,
+       target_epoch_digest text NOT NULL,
+       member_id text NULL,
+       proposal_request_id text NOT NULL,
+       activation_request_id text NULL,
+       blocking_reason text NULL,
+       catchup_cursor bigint NOT NULL DEFAULT 0,
+       catchup_digest text NULL,
+       receipt_count integer NOT NULL DEFAULT 0,
+       fence_cutoff bigint NULL,
+       created_at timestamptz NOT NULL DEFAULT now(),
+       updated_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY(namespace, cluster_id, transition_id),
+       UNIQUE(namespace, proposal_request_id),
+       UNIQUE(namespace, activation_request_id),
+       CHECK (kind IN ('initialize','join','maintenance','remove','rejoin')),
+       CHECK (state IN ('proposed','learner','catching_up','ready',
+         'activation_authorized','fencing','active','cancelled','indeterminate')),
+       CHECK (state_version >= 0 AND catchup_cursor >= 0),
+       CHECK (receipt_count BETWEEN 0 AND 4096),
+       CHECK (source_epoch_digest IS NULL OR source_epoch_digest ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (target_epoch_digest ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (catchup_digest IS NULL OR catchup_digest ~ '^sha256:[0-9a-f]{64}$')
+     )",
+    "CREATE UNIQUE INDEX IF NOT EXISTS oxibelt_admin_membership_pending_idx
+       ON oxibelt_admin_membership_transitions(namespace, cluster_id)
+       WHERE state NOT IN ('active','cancelled','indeterminate')",
+    "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_receipts (
+       namespace text NOT NULL,
+       cluster_id text NOT NULL,
+       transition_id text NOT NULL,
+       ordinal integer NOT NULL,
+       receipt_kind text NOT NULL,
+       instance_id text NULL,
+       payload_digest text NOT NULL,
+       payload jsonb NOT NULL,
+       created_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY(namespace, cluster_id, transition_id, ordinal),
+       FOREIGN KEY(namespace, cluster_id, transition_id)
+         REFERENCES oxibelt_admin_membership_transitions(namespace, cluster_id, transition_id)
+         ON DELETE CASCADE,
+       CHECK (ordinal BETWEEN 0 AND 4095),
+       CHECK (payload_digest ~ '^sha256:[0-9a-f]{64}$')
+     )",
+    "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_catchup_chunks (
+       namespace text NOT NULL,
+       cluster_id text NOT NULL,
+       transition_id text NOT NULL,
+       chunk_index integer NOT NULL,
+       algorithm text NOT NULL,
+       ephemeral_public_key bytea NOT NULL,
+       nonce bytea NOT NULL,
+       ciphertext bytea NOT NULL,
+       ciphertext_digest text NOT NULL,
+       plaintext_len integer NOT NULL,
+       created_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY(namespace, cluster_id, transition_id, chunk_index),
+       FOREIGN KEY(namespace, cluster_id, transition_id)
+         REFERENCES oxibelt_admin_membership_transitions(namespace, cluster_id, transition_id)
+         ON DELETE CASCADE,
+       CHECK (chunk_index BETWEEN 0 AND 4095),
+       CHECK (algorithm = 'x25519-hkdf-sha256-aes-256-gcm-v1'),
+       CHECK (octet_length(ephemeral_public_key) = 32),
+       CHECK (octet_length(nonce) = 12),
+       CHECK (plaintext_len BETWEEN 0 AND 16793638),
+       CHECK (octet_length(ciphertext) = plaintext_len + 16),
+       CHECK (ciphertext_digest ~ '^sha256:[0-9a-f]{64}$')
+     )",
     "INSERT INTO oxibelt_admin_schema_migrations(component, version)
-       VALUES ('admin_mutation', 3) ON CONFLICT DO NOTHING",
+       VALUES ('admin_mutation', 4) ON CONFLICT DO NOTHING",
   ]
 }
 
@@ -458,6 +578,11 @@ mod tests {
       "oxibelt_admin_shared_publications",
       "oxibelt_admin_mutations_admission_tuple_check",
       "VALIDATE CONSTRAINT oxibelt_admin_mutations_coordinator_tuple_check",
+      "oxibelt_admin_membership_heads",
+      "oxibelt_admin_membership_epochs",
+      "oxibelt_admin_membership_transitions",
+      "oxibelt_admin_membership_receipts",
+      "oxibelt_admin_membership_catchup_chunks",
     ] {
       assert!(
         schema.contains(invariant),

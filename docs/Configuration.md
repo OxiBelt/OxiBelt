@@ -2632,6 +2632,16 @@ stale_after_seconds = 15
 phase_timeout_seconds = 300
 rollback_timeout_seconds = 300
 canary_observation_seconds = 30
+
+[admin.mutations.rollout.membership]
+mode = "fixed" # fixed | staged
+# readiness_private_key_file_env = "OXIBELT_ADMIN_MEMBERSHIP_READINESS_KEY_FILE"
+# catchup_private_key_file_env = "OXIBELT_ADMIN_MEMBERSHIP_CATCHUP_KEY_FILE"
+
+# [[admin.mutations.rollout.membership.bootstrap_members]]
+# id = "edge-a"
+# readiness_ed25519_public_key = "<canonical-base64-32-bytes>"
+# catchup_x25519_public_key = "<different-canonical-base64-32-bytes>"
 ```
 
 Signer IDs are unique and bind one signature suite and one IPM principal.
@@ -2648,7 +2658,7 @@ external secret channel and keep it stable across restarts. The key and
 plaintext artifacts must not be placed in TOML, PostgreSQL, audit events,
 mutation receipts, support bundles, or logs.
 
-`admin_cluster` is the supported fixed-member rollout mode. It requires all of
+`admin_cluster` uses fixed membership by default. It requires all of
 the following:
 
 - `[admin.mutations] mode = "required"` and the existing same-PostgreSQL
@@ -2657,7 +2667,8 @@ the following:
   `[runtime.hot_reload] mode = "off"`;
 - a non-empty cluster ID and 2 through 1,024 unique member IDs;
 - `instance_id_env` naming a valid environment variable whose value is one
-  configured member;
+  configured member in fixed mode (staged mode also permits a non-participating
+  learner identity);
 - `artifact_key_env` containing exactly 32 base64-encoded bytes;
 - heartbeat interval `1..=60` seconds, stale interval at least twice heartbeat
   and at most 300 seconds, canary observation `1..=600` seconds, phase timeout
@@ -2668,11 +2679,27 @@ Member order is not significant. OxiBelt derives the signed membership target
 from the cluster ID and canonical sorted member set. All members must use the
 same membership, compatible build/capability version, and artifact key. A
 missing, extra, stale, duplicate, incompatible, or differently keyed member
-keeps durable write authority unavailable. Membership changes are an offline
+keeps durable write authority unavailable. In `fixed` mode, membership changes are an offline
 operation: stop protected writes, allow old leases and nonterminal rollouts to
 finish or expire, deploy the exact new set, and wait for every member to report
 the same baseline revision/digest before admitting work. Do not reuse a cluster
 ID to overlap old and new live memberships.
+
+`membership.mode = "staged"` is experimental and replaces offline changes with
+authenticated durable epochs; it does not replace the all-active-member
+authorization rule. `bootstrap_members` must contain exactly the IDs in
+`rollout.members`, with one distinct Ed25519 readiness key and X25519 catch-up
+key per member. The two private-key environment names identify external
+file-path channels for member-local key custody; private material must remain
+outside TOML, PostgreSQL, receipts, diagnostics, and logs. A learner whose
+local instance ID is outside the current set remains unable to heartbeat,
+coordinate, validate, acknowledge, or make the rollout ready until a committed
+activation installs an epoch containing it. Catch-up data is bounded and
+recipient encrypted. Promotion requires a separate signed readiness receipt
+and a new protected activation mutation authorized by every old active member.
+Maintenance/removal records a fence cutoff and removed processes release their
+old fence before the runtime accepts the new epoch. Emergency recovery from a
+lost active member is deliberately not exposed as an ordinary transition.
 
 The PostgreSQL state machine uses database-time leases and monotonic fencing
 epochs. It durably claims the signed request and encrypted command, validates

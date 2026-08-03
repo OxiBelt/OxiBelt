@@ -11,10 +11,12 @@ use zeroize::Zeroizing;
 
 use crate::admin_mutation::{
   AdminMutationRuntime, CoordinatorFence, MemberFence, SharedPublicationClaim,
-  SharedPublicationOutcome, SharedPublicationState, begin_coordinator_transaction,
-  capture_break_glass_checkpoint_tx, claim_shared_publication, consume_shared_winner_response,
-  create_break_glass_activation_tx, finish_shared_publication, load_shared_publication,
-  publish_checkpoint_in_coordinator_transaction, restore_break_glass_checkpoint_tx,
+  SharedPublicationOutcome, SharedPublicationState, apply_membership_proposal_tx,
+  authorize_membership_activation_tx, begin_coordinator_transaction,
+  cancel_membership_transition_tx, capture_break_glass_checkpoint_tx, claim_shared_publication,
+  consume_shared_winner_response, create_break_glass_activation_tx, finish_shared_publication,
+  load_shared_publication, publish_checkpoint_in_coordinator_transaction,
+  restore_break_glass_checkpoint_tx, restore_membership_mutation_tx,
   revoke_break_glass_activation_tx,
 };
 use crate::ipm::{IpmActor, IpmMutationCheckpoint, IpmRuntime, IpmTransactionalMutationResult};
@@ -57,6 +59,8 @@ impl RuntimeSharedPublisher {
     let ipm = self.state.snapshot().ipm.clone();
     let effect = apply_effect(
       &mut transaction,
+      &self.runtime,
+      fence,
       &ipm,
       actor,
       operation,
@@ -156,6 +160,14 @@ impl RuntimeSharedPublisher {
         )
         .await?;
       }
+      SharedEffectCheckpoint::Membership(checkpoint) => {
+        restore_membership_mutation_tx(
+          &mut **transaction.transaction(),
+          self.runtime.store()?.namespace(),
+          &checkpoint,
+        )
+        .await?;
+      }
     }
     let safe = restored_response();
     finish_shared_publication(
@@ -189,7 +201,8 @@ impl RuntimeSharedPublisher {
         && record.content_digest == operation.candidate_digest,
       "shared operation does not match its durable mutation"
     );
-    let canary = deterministic_canary(&record.request_id, self.runtime.configured_members())?;
+    let members = self.runtime.configured_members();
+    let canary = deterministic_canary(&record.request_id, &members)?;
     let owner = fence
       .exact_membership
       .members
@@ -312,6 +325,10 @@ enum AppliedEffect {
     checkpoint: crate::admin_mutation::BreakGlassMutationCheckpoint,
     safe_response: serde_json::Value,
   },
+  Membership {
+    checkpoint: crate::admin_mutation::MembershipMutationCheckpoint,
+    transition: crate::admin_mutation::MembershipTransition,
+  },
 }
 
 impl AppliedEffect {
@@ -319,6 +336,7 @@ impl AppliedEffect {
     match self {
       Self::Ipm(result) => SharedEffectCheckpoint::Ipm(result.checkpoint.clone()),
       Self::BreakGlass { checkpoint, .. } => SharedEffectCheckpoint::BreakGlass(checkpoint.clone()),
+      Self::Membership { checkpoint, .. } => SharedEffectCheckpoint::Membership(checkpoint.clone()),
     }
   }
 
@@ -331,6 +349,7 @@ impl AppliedEffect {
         "token_recoverable": false,
       }),
       Self::BreakGlass { safe_response, .. } => safe_response.clone(),
+      Self::Membership { transition, .. } => json!({"ok":true,"transition":transition}),
     }
   }
 
@@ -338,6 +357,7 @@ impl AppliedEffect {
     match self {
       Self::Ipm(result) => result.one_time_token.as_ref().map(|value| value.as_str()),
       Self::BreakGlass { .. } => None,
+      Self::Membership { .. } => None,
     }
   }
 
@@ -366,12 +386,92 @@ impl AppliedEffect {
 
 async fn apply_effect(
   transaction: &mut crate::admin_mutation::FencedCoordinatorTransaction<'_>,
+  runtime: &AdminMutationRuntime,
+  fence: &CoordinatorFence,
   ipm: &IpmRuntime,
   actor: &IpmActor,
   operation: &SharedStagedOperation,
   request_id: &str,
   maximum_break_glass_ttl: u64,
 ) -> anyhow::Result<AppliedEffect> {
+  if let Some(request) = operation.membership_proposal() {
+    let expected_revision = request
+      .expected_active_epoch
+      .as_deref()
+      .unwrap_or("membership-uninitialized");
+    ensure!(
+      operation.operational_precondition_revision == expected_revision,
+      "membership request precondition conflicts with the signed If-Match value"
+    );
+    let approving_members = fence
+      .exact_membership
+      .members
+      .iter()
+      .map(|member| member.instance_id.clone())
+      .collect::<Vec<_>>();
+    let namespace = transaction.store().namespace().to_string();
+    let (transition, checkpoint) = apply_membership_proposal_tx(
+      &mut **transaction.transaction(),
+      &namespace,
+      &fence.exact_membership.cluster_id,
+      request_id,
+      request_id,
+      request,
+      runtime.membership_bootstrap_members(),
+      &approving_members,
+    )
+    .await?;
+    return Ok(AppliedEffect::Membership {
+      checkpoint,
+      transition,
+    });
+  }
+  if let Some((transition_id, request)) = operation.membership_activation() {
+    ensure!(
+      transition_id == request.transition_id,
+      "membership activation identity changed"
+    );
+    let approving_members = fence
+      .exact_membership
+      .members
+      .iter()
+      .map(|member| member.instance_id.clone())
+      .collect::<Vec<_>>();
+    let namespace = transaction.store().namespace().to_string();
+    let (transition, checkpoint) = authorize_membership_activation_tx(
+      &mut **transaction.transaction(),
+      &namespace,
+      &fence.exact_membership.cluster_id,
+      request_id,
+      request,
+      fence.coordinator_epoch,
+      &approving_members,
+    )
+    .await?;
+    return Ok(AppliedEffect::Membership {
+      checkpoint,
+      transition,
+    });
+  }
+  if let Some((transition_id, request)) = operation.membership_cancellation() {
+    ensure!(
+      transition_id == request.transition_id,
+      "membership cancellation identity changed"
+    );
+    let namespace = transaction.store().namespace().to_string();
+    let (transition, checkpoint) = cancel_membership_transition_tx(
+      &mut **transaction.transaction(),
+      &namespace,
+      &fence.exact_membership.cluster_id,
+      request_id,
+      request,
+    )
+    .await?;
+    return Ok(AppliedEffect::Membership {
+      checkpoint,
+      transition,
+    });
+  }
   if let Some(mutation) = operation.ipm_mutation()? {
     return Ok(AppliedEffect::Ipm(Box::new(
       ipm
@@ -459,6 +559,7 @@ async fn apply_effect(
 enum SharedEffectCheckpoint {
   Ipm(IpmMutationCheckpoint),
   BreakGlass(crate::admin_mutation::BreakGlassMutationCheckpoint),
+  Membership(crate::admin_mutation::MembershipMutationCheckpoint),
 }
 
 #[derive(Serialize)]
@@ -480,6 +581,9 @@ impl SharedEffectCheckpoint {
     let (kind, payload) = match self {
       Self::Ipm(checkpoint) => ("ipm", checkpoint.encode_plaintext()?),
       Self::BreakGlass(checkpoint) => ("break_glass", checkpoint.encode_plaintext()?),
+      Self::Membership(checkpoint) => {
+        ("membership", Zeroizing::new(checkpoint.encode_plaintext()?))
+      }
     };
     Ok(Zeroizing::new(serde_json::to_vec(&SharedCheckpointWire {
       format: "oxibelt-shared-effect-checkpoint-v1",
@@ -501,6 +605,9 @@ impl SharedEffectCheckpoint {
       )?)),
       "break_glass" => Ok(Self::BreakGlass(
         crate::admin_mutation::BreakGlassMutationCheckpoint::decode_plaintext(&payload)?,
+      )),
+      "membership" => Ok(Self::Membership(
+        crate::admin_mutation::MembershipMutationCheckpoint::decode_plaintext(&payload)?,
       )),
       _ => bail!("unsupported shared checkpoint kind"),
     }

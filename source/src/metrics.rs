@@ -9,6 +9,7 @@ use crate::config::{MetricsConfig, MetricsDetail};
 use crate::tls::TlsServerSessionStorageStats;
 
 mod admin_audit;
+mod admin_membership;
 mod auth;
 mod backend_failure;
 pub(crate) mod compio_direct_h1;
@@ -63,6 +64,7 @@ pub struct Metrics {
   request_mirror_errors_total: AtomicU64,
   request_mirror_skips_total: AtomicU64,
   admin_audit: admin_audit::AdminAuditMetrics,
+  admin_membership: admin_membership::AdminMembershipMetrics,
   #[cfg(feature = "admin-runtime")]
   secret_activation: secret_activation::SecretActivationMetrics,
   mitigation_queued_total: AtomicU64,
@@ -652,6 +654,7 @@ impl Metrics {
     );
     auth::append_auth_and_mirror_metrics(&mut output, self);
     self.append_admin_audit_prometheus(&mut output);
+    self.append_admin_membership_prometheus(&mut output);
     #[cfg(feature = "admin-runtime")]
     self.append_secret_activation_prometheus(&mut output);
     append_metric(

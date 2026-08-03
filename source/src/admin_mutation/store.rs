@@ -280,7 +280,7 @@ pub(crate) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
   sqlx::query(statements[0]).execute(&mut *tx).await?;
   let applied: bool = sqlx::query_scalar(
     "SELECT EXISTS(SELECT 1 FROM oxibelt_admin_schema_migrations
-      WHERE component='admin_mutation' AND version=3)",
+      WHERE component='admin_mutation' AND version=4)",
   )
   .fetch_one(&mut *tx)
   .await?;

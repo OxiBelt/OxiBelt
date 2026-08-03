@@ -85,6 +85,7 @@ pub(crate) async fn plan_command(
     }
     Command::Cache(command) => plan_cache(command),
     Command::Ipm(command) => crate::ipm_plan::plan_ipm(client, command).await,
+    Command::Membership(command) => plan_membership(command),
     Command::Auth(command) => match &command.command {
       AuthSubcommand::Check(args) => crate::ipm_plan::plan_auth_check(args),
     },
@@ -97,6 +98,73 @@ pub(crate) async fn plan_command(
       ),
     },
   }
+}
+
+fn plan_membership(command: &MembershipCommand) -> anyhow::Result<RequestPlan> {
+  match &command.command {
+    MembershipSubcommand::Status => get(
+      "/admin/v1/membership",
+      "membership:GetStatus",
+      "membership/current",
+    ),
+    MembershipSubcommand::Propose(args) => with_etag(
+      post_json(
+        "/admin/v1/membership/transitions",
+        read_json_file(&args.file)?,
+        "membership:Propose",
+        "membership/current",
+      )?,
+      args.etag.clone(),
+    ),
+    MembershipSubcommand::Activate(args) => with_etag(
+      post_json(
+        &format!(
+          "/admin/v1/membership/transitions/{}/activate",
+          path_component(&args.transition_id)?
+        ),
+        read_json_file(&args.file)?,
+        "membership:Activate",
+        &format!("membership/transition/{}", args.transition_id),
+      )?,
+      args.etag.clone(),
+    ),
+    MembershipSubcommand::Cancel(args) => with_etag(
+      post_json(
+        &format!(
+          "/admin/v1/membership/transitions/{}/cancel",
+          path_component(&args.transition_id)?
+        ),
+        read_json_file(&args.file)?,
+        "membership:Cancel",
+        &format!("membership/transition/{}", args.transition_id),
+      )?,
+      args.etag.clone(),
+    ),
+    MembershipSubcommand::Catchup(args) => get(
+      &format!(
+        "/admin/v1/membership/transitions/{}/catchup",
+        path_component(&args.transition_id)?
+      ),
+      "membership:GetCatchUp",
+      &format!("membership/transition/{}", args.transition_id),
+    ),
+    MembershipSubcommand::Readiness(args) => post_json(
+      &format!(
+        "/admin/v1/membership/transitions/{}/readiness",
+        path_component(&args.transition_id)?
+      ),
+      read_json_file(&args.file)?,
+      "membership:SubmitReadiness",
+      &format!("membership/transition/{}", args.transition_id),
+    ),
+  }
+}
+
+fn path_component(value: &str) -> anyhow::Result<String> {
+  if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+    bail!("path identifier is invalid");
+  }
+  Ok(url::form_urlencoded::byte_serialize(value.as_bytes()).collect())
 }
 
 fn admin_audit_endpoint(args: &AdminAuditArgs) -> String {

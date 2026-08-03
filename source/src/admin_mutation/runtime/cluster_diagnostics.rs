@@ -16,9 +16,11 @@ impl AdminMutationRuntime {
   /// Returns a bounded diagnostic view. Guarded terminal transitions remain
   /// the convergence authority; this snapshot never authorizes a mutation.
   pub(crate) async fn cluster_diagnostics(&self) -> anyhow::Result<Value> {
+    let authority = self.membership_authority();
     if self.inner.rollout_mode != AdminMutationRolloutMode::AdminCluster {
       return Ok(json!({
-        "membership_revision": self.inner.target.membership_revision,
+        "membership_revision": authority.target.membership_revision,
+        "membership": self.membership_status().await?,
         "authority": { "ready": true, "blocking_reason": null },
         "active_rollouts": [],
         "logical_revisions": {},
@@ -39,7 +41,7 @@ impl AdminMutationRuntime {
       }
     }
     let expected_key = self.artifact_key_fingerprint()?;
-    let mut instance_ids = self.inner.members.clone();
+    let mut instance_ids = authority.members.clone();
     instance_ids.extend(live.iter().map(|value| value.instance_id.clone()));
     instance_ids.sort();
     instance_ids.dedup();
@@ -48,7 +50,7 @@ impl AdminMutationRuntime {
       .map(|instance_id| {
         let heartbeat = live.iter().find(|value| &value.instance_id == instance_id);
         let compatible = heartbeat.is_some_and(|value| {
-          value.membership_revision == self.inner.target.membership_revision
+          value.membership_revision == authority.target.membership_revision
             && value.build_version == oxibelt_build_identity::SHORT_VERSION
             && value.capability_version == CAPABILITY_VERSION
             && value.artifact_key_fingerprint == expected_key
@@ -91,7 +93,7 @@ impl AdminMutationRuntime {
         });
         json!({
           "instance_id": instance_id,
-          "configured": self.inner.members.contains(instance_id),
+          "configured": authority.members.contains(instance_id),
           "live": heartbeat.is_some(),
           "ready": ready,
           "compatible": compatible,
@@ -126,7 +128,8 @@ impl AdminMutationRuntime {
       );
     }
     Ok(json!({
-      "membership_revision": self.inner.target.membership_revision,
+      "membership_revision": authority.target.membership_revision,
+      "membership": self.membership_status().await?,
       "authority": {
         "ready": authority_ready && blocking_reason.is_none(),
         "blocking_reason": blocking_reason,

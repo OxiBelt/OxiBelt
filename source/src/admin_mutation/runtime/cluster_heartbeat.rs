@@ -6,6 +6,7 @@ use anyhow::Context;
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::{MissedTickBehavior, interval};
 
 use crate::config::Config;
 use crate::crypto::random_fill;
@@ -44,6 +45,73 @@ impl Drop for ClusterHeartbeatTask {
 }
 
 impl AdminMutationRuntime {
+  async fn refresh_staged_membership_authority(
+    &self,
+    controller: &crate::admin_mutation::rollout::AdminClusterRolloutController,
+  ) -> anyhow::Result<()> {
+    if !self.staged_membership() {
+      return Ok(());
+    }
+    let store = self.store()?;
+    let _ = super::super::membership_store::finalize_committed_membership_activation(
+      store,
+      &self.inner.cluster_id,
+    )
+    .await?;
+    let Some(active) = super::super::membership_store::load_active_membership_authority(
+      store,
+      &self.inner.cluster_id,
+    )
+    .await?
+    else {
+      return Ok(());
+    };
+    let current = self.membership_authority();
+    if current.target.membership_revision == active.epoch_digest
+      && current.members == active.members
+    {
+      return Ok(());
+    }
+    controller
+      .activate_membership(active.epoch_digest.clone(), active.members.clone())
+      .await?;
+    *self
+      .inner
+      .membership_authority
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = super::MembershipAuthority {
+      target: crate::admin_mutation::MutationTarget {
+        cluster_id: self.inner.cluster_id.clone(),
+        membership_revision: active.epoch_digest,
+      },
+      members: active.members,
+    };
+    Ok(())
+  }
+
+  async fn heartbeat_with_membership_until_shutdown(
+    &self,
+    controller: crate::admin_mutation::rollout::AdminClusterRolloutController,
+    mut shutdown: watch::Receiver<bool>,
+  ) -> anyhow::Result<()> {
+    let mut ticker = interval(controller.heartbeat_interval());
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+      tokio::select! {
+        biased;
+        changed = shutdown.changed() => {
+          if changed.is_err() || *shutdown.borrow() {
+            return Ok(());
+          }
+        }
+        _ = ticker.tick() => {
+          self.refresh_staged_membership_authority(&controller).await?;
+          controller.heartbeat_and_refresh_readiness().await?;
+        }
+      }
+    }
+  }
+
   pub(crate) fn observed_resource_digest(resource: &str, revision: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"OXIBELT-ADMIN-CLUSTER-OBSERVED-RESOURCE-V1\0");
@@ -112,6 +180,7 @@ impl AdminMutationRuntime {
     for byte in random {
       let _ = write!(boot_id, "{byte:02x}");
     }
+    let authority = self.membership_authority();
     if self.store()?.load_revision("config").await?.is_none() {
       self
         .store()?
@@ -119,11 +188,24 @@ impl AdminMutationRuntime {
           "config",
           &applied_revision,
           &applied_digest,
-          Some(&self.inner.target.cluster_id),
-          Some(&self.inner.target.membership_revision),
+          Some(&authority.target.cluster_id),
+          Some(&authority.target.membership_revision),
         )
         .await
         .context("failed to initialize Admin cluster configuration baseline")?;
+    }
+    if self.staged_membership() && self.store()?.load_revision("membership").await?.is_none() {
+      self
+        .store()?
+        .initialize_revision(
+          "membership",
+          "membership-uninitialized",
+          &super::digest_parts(["membership-uninitialized"]),
+          Some(&authority.target.cluster_id),
+          Some(&authority.target.membership_revision),
+        )
+        .await
+        .context("failed to initialize Admin membership logical baseline")?;
     }
     self.initialize_cluster_controller(config, boot_id, applied_revision, applied_digest)?;
     let controller = self
@@ -132,6 +214,7 @@ impl AdminMutationRuntime {
     controller.heartbeat_once().await?;
     let (shutdown, shutdown_rx) = watch::channel(false);
     let task_controller = controller.clone();
+    let task_runtime = self.clone();
     Ok(Some(ClusterHeartbeatTask {
       runtime: self.clone(),
       shutdown,
@@ -144,7 +227,12 @@ impl AdminMutationRuntime {
         fatal_tx,
         move |shutdown| {
           let controller = task_controller.clone();
-          async move { controller.heartbeat_until_shutdown(shutdown).await }
+          let runtime = task_runtime.clone();
+          async move {
+            runtime
+              .heartbeat_with_membership_until_shutdown(controller, shutdown)
+              .await
+          }
         },
       )),
     }))

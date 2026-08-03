@@ -79,6 +79,23 @@ fn prometheus_output_includes_admin_audit_metrics() {
 }
 
 #[test]
+fn prometheus_output_includes_identity_free_admin_membership_metrics() {
+  let metrics = Metrics::new();
+  metrics.set_admin_membership_status(3, 1, Some("catching_up"));
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+
+  assert!(body.contains("oxibelt_admin_membership_active_members 3"));
+  assert!(body.contains("oxibelt_admin_membership_fenced_members 1"));
+  assert!(body.contains("oxibelt_admin_membership_pending_transition{state=\"catching_up\"} 1"));
+  assert!(!body.contains("member_id"));
+}
+
+#[test]
 fn prometheus_output_includes_plain_proxy_fast_path_decisions() {
   let metrics = Metrics::new();
   metrics.record_plain_proxy_fast_path_decision("h1", "hit", "eligible");

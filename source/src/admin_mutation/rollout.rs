@@ -6,17 +6,19 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, ensure};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use tokio::sync::{RwLock, watch};
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::sync::RwLock;
 
 use super::ledger::{MutationRecord, MutationState, validate_identifier};
-use super::rollout_store::{self, HeartbeatUpdate, MemberFence, RolloutTarget, TargetState};
+use super::rollout_store::{
+  self, HeartbeatUpdate, MemberFence, ResourceHeadUpdate, RolloutTarget, TargetState,
+};
 use super::store::MutationStore;
 
 #[path = "rollout_state.rs"]
@@ -36,6 +38,7 @@ pub(crate) struct RolloutSettings {
   pub(crate) membership_revision: String,
   pub(crate) members: Vec<String>,
   pub(crate) instance_id: String,
+  pub(crate) allow_learner: bool,
   pub(crate) boot_id: String,
   pub(crate) build_version: String,
   pub(crate) artifact_key_fingerprint: String,
@@ -67,7 +70,7 @@ impl RolloutSettings {
     );
     let members = normalized_members(&self.members)?;
     ensure!(
-      members.binary_search(&self.instance_id).is_ok(),
+      self.allow_learner || members.binary_search(&self.instance_id).is_ok(),
       "local instance is not in the fixed Admin cluster membership"
     );
     ensure!(
@@ -128,9 +131,17 @@ impl LocalRolloutStatus {
 pub(crate) struct AdminClusterRolloutController {
   store: MutationStore,
   settings: Arc<RolloutSettings>,
+  membership: Arc<StdRwLock<ControllerMembership>>,
   local_status: Arc<RwLock<LocalRolloutStatus>>,
   member_fence: Arc<RwLock<Option<MemberFence>>>,
   ready: Arc<AtomicBool>,
+  participating: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct ControllerMembership {
+  revision: String,
+  members: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,12 +170,22 @@ impl AdminClusterRolloutController {
     settings.members = normalized_members(&settings.members)?;
     settings.validate()?;
     initial_status.validate()?;
+    let participating = settings
+      .members
+      .binary_search(&settings.instance_id)
+      .is_ok();
+    let membership = ControllerMembership {
+      revision: settings.membership_revision.clone(),
+      members: settings.members.clone(),
+    };
     Ok(Self {
       store,
       settings: Arc::new(settings),
+      membership: Arc::new(StdRwLock::new(membership)),
       local_status: Arc::new(RwLock::new(initial_status)),
       member_fence: Arc::new(RwLock::new(None)),
       ready: Arc::new(AtomicBool::new(false)),
+      participating: Arc::new(AtomicBool::new(participating)),
     })
   }
 
@@ -184,8 +205,69 @@ impl AdminClusterRolloutController {
     &self.settings.cluster_id
   }
 
-  pub(crate) fn membership_revision(&self) -> &str {
-    &self.settings.membership_revision
+  pub(crate) fn membership_revision(&self) -> String {
+    self.membership().revision
+  }
+
+  fn membership(&self) -> ControllerMembership {
+    self
+      .membership
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
+  }
+
+  pub(crate) async fn activate_membership(
+    &self,
+    revision: String,
+    members: Vec<String>,
+  ) -> anyhow::Result<bool> {
+    validate_identifier("membership_revision", &revision, 256)?;
+    let members = normalized_members(&members)?;
+    let participating = members.binary_search(&self.settings.instance_id).is_ok();
+    if let Some(fence) = self.member_fence.write().await.take() {
+      ensure!(
+        rollout_store::release_member_fence(&self.store, &fence).await?,
+        "Admin cluster membership activation could not release the previous member fence"
+      );
+    }
+    *self
+      .membership
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) =
+      ControllerMembership { revision, members };
+    self.participating.store(participating, Ordering::Release);
+    self.ready.store(false, Ordering::Release);
+    if participating {
+      self.heartbeat_once().await?;
+      let fence = self.member_fence().await?;
+      let local = self.local_status.read().await.clone();
+      for resource in ["config", "ipm", "break-glass", "membership"] {
+        let Some(logical) = self.store.load_revision(resource).await? else {
+          continue;
+        };
+        if resource == "config" {
+          ensure!(
+            local.applied_revision == logical.committed_revision
+              && local.applied_digest == logical.content_digest,
+            "promoted learner local configuration differs from the durable logical head"
+          );
+        }
+        rollout_store::publish_resource_head(
+          &self.store,
+          &fence,
+          &ResourceHeadUpdate {
+            resource: resource.to_string(),
+            assigned_revision: None,
+            applied_revision: logical.committed_revision,
+            applied_digest: logical.content_digest,
+            ready: local.ready,
+          },
+        )
+        .await?;
+      }
+    }
+    Ok(participating)
   }
 
   pub(crate) async fn member_fence(&self) -> anyhow::Result<MemberFence> {
@@ -201,6 +283,17 @@ impl AdminClusterRolloutController {
     seconds_i32(self.settings.stale_after, "coordinator lease")
   }
 
+  pub(crate) fn heartbeat_interval(&self) -> Duration {
+    self.settings.heartbeat_interval
+  }
+
+  pub(crate) async fn heartbeat_and_refresh_readiness(&self) -> anyhow::Result<()> {
+    self.heartbeat_once().await?;
+    let durable_ready = self.durable_readiness().await.unwrap_or(false);
+    self.ready.store(durable_ready, Ordering::Release);
+    Ok(())
+  }
+
   pub(crate) async fn update_local_status(&self, status: LocalRolloutStatus) -> anyhow::Result<()> {
     status.validate()?;
     *self.local_status.write().await = status;
@@ -209,7 +302,7 @@ impl AdminClusterRolloutController {
 
   pub(crate) async fn release(&self) -> anyhow::Result<()> {
     self.ready.store(false, Ordering::Release);
-    let fence = self.member_fence.read().await.clone();
+    let fence = self.member_fence.write().await.take();
     if let Some(fence) = fence {
       ensure!(
         rollout_store::release_member_fence(&self.store, &fence).await?,
@@ -219,36 +312,14 @@ impl AdminClusterRolloutController {
     Ok(())
   }
 
-  pub(crate) async fn heartbeat_until_shutdown(
-    &self,
-    mut shutdown: watch::Receiver<bool>,
-  ) -> anyhow::Result<()> {
-    let mut ticker = interval(self.settings.heartbeat_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-      tokio::select! {
-        biased;
-        changed = shutdown.changed() => {
-          if changed.is_err() || *shutdown.borrow() {
-            self.ready.store(false, Ordering::Release);
-            return Ok(());
-          }
-        }
-        _ = ticker.tick() => {
-          if let Err(error) = self.heartbeat_once().await {
-            self.ready.store(false, Ordering::Release);
-            return Err(error);
-          }
-          let durable_ready = self.durable_readiness().await.unwrap_or(false);
-          self.ready.store(durable_ready, Ordering::Release);
-        }
-      }
-    }
-  }
-
   pub(crate) async fn heartbeat_once(&self) -> anyhow::Result<()> {
+    if !self.participating.load(Ordering::Acquire) {
+      self.ready.store(false, Ordering::Release);
+      return Ok(());
+    }
     let status = self.local_status.read().await.clone();
     status.validate()?;
+    let membership = self.membership();
     let fence = rollout_store::heartbeat_fenced(
       &self.store,
       &HeartbeatUpdate {
@@ -258,7 +329,7 @@ impl AdminClusterRolloutController {
         build_version: self.settings.build_version.clone(),
         capability_version: CAPABILITY_VERSION.to_string(),
         artifact_key_fingerprint: self.settings.artifact_key_fingerprint.clone(),
-        membership_revision: self.settings.membership_revision.clone(),
+        membership_revision: membership.revision,
         assigned_revision: status.assigned_revision,
         applied_revision: status.applied_revision,
         applied_digest: status.applied_digest,
@@ -311,6 +382,7 @@ impl AdminClusterRolloutController {
     targets: &[RolloutTarget],
   ) -> anyhow::Result<RolloutDirective> {
     let clock = self.phase_clock(&record.request_id, record.state).await?;
+    let membership = self.membership();
     Ok(classify(
       record,
       targets,
@@ -318,17 +390,21 @@ impl AdminClusterRolloutController {
       clock.phase_timed_out,
       clock.rollback_timed_out,
       clock.observation_complete,
-      &self.settings.members,
+      &membership.members,
     ))
   }
 
   async fn durable_readiness(&self) -> anyhow::Result<bool> {
+    if !self.participating.load(Ordering::Acquire) {
+      return Ok(false);
+    }
+    let membership = self.membership();
     for resource in ["config", "ipm", "break-glass"] {
       rollout_store::prove_exact_resource_membership(
         &self.store,
         &self.settings.cluster_id,
-        &self.settings.membership_revision,
-        &self.settings.members,
+        &membership.revision,
+        &membership.members,
         &self.settings.build_version,
         CAPABILITY_VERSION,
         &self.settings.artifact_key_fingerprint,

@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use base64::Engine as _;
 use serde::Deserialize;
 
 use super::{
@@ -25,6 +26,52 @@ const MAX_STALE_AFTER_SECONDS: u64 = 300;
 const MAX_CANARY_OBSERVATION_SECONDS: u64 = 600;
 const MAX_PHASE_TIMEOUT_SECONDS: u64 = 3_600;
 const MAX_ROLLBACK_TIMEOUT_SECONDS: u64 = 3_600;
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminMembershipMode {
+  #[default]
+  Fixed,
+  Staged,
+}
+
+impl AdminMembershipMode {
+  pub const fn is_staged(self) -> bool {
+    matches!(self, Self::Staged)
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AdminMembershipBootstrapMember {
+  pub id: String,
+  pub readiness_ed25519_public_key: String,
+  pub catchup_x25519_public_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AdminMembershipConfig {
+  #[serde(default)]
+  pub mode: AdminMembershipMode,
+  #[serde(default)]
+  pub bootstrap_members: Vec<AdminMembershipBootstrapMember>,
+  #[serde(default = "default_membership_readiness_key_env")]
+  pub readiness_private_key_file_env: String,
+  #[serde(default = "default_membership_catchup_key_env")]
+  pub catchup_private_key_file_env: String,
+}
+
+impl Default for AdminMembershipConfig {
+  fn default() -> Self {
+    Self {
+      mode: AdminMembershipMode::Fixed,
+      bootstrap_members: Vec::new(),
+      readiness_private_key_file_env: default_membership_readiness_key_env(),
+      catchup_private_key_file_env: default_membership_catchup_key_env(),
+    }
+  }
+}
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -107,6 +154,8 @@ pub struct AdminMutationRolloutConfig {
   pub rollback_timeout_seconds: u64,
   #[serde(default = "default_canary_observation_seconds")]
   pub canary_observation_seconds: u64,
+  #[serde(default)]
+  pub membership: AdminMembershipConfig,
 }
 
 impl Default for AdminMutationRolloutConfig {
@@ -121,6 +170,7 @@ impl Default for AdminMutationRolloutConfig {
       phase_timeout_seconds: default_phase_timeout_seconds(),
       rollback_timeout_seconds: default_rollback_timeout_seconds(),
       canary_observation_seconds: default_canary_observation_seconds(),
+      membership: AdminMembershipConfig::default(),
     }
   }
 }
@@ -292,6 +342,10 @@ impl Config {
     }
     if mutations.rollout.mode.is_cluster() {
       self.validate_admin_cluster_rollout()?;
+    } else if mutations.rollout.membership.mode.is_staged()
+      || !mutations.rollout.membership.bootstrap_members.is_empty()
+    {
+      bail!("staged Admin membership requires admin.mutations.rollout.mode = \"admin_cluster\"");
     }
     Ok(())
   }
@@ -337,8 +391,12 @@ impl Config {
       )
     })?;
     validate_runtime_identifier("Admin cluster instance ID", &instance_id)?;
-    if instance_id.len() > 253 || !members.contains(instance_id.as_str()) {
-      bail!("Admin cluster instance ID must be one of admin.mutations.rollout.members");
+    if instance_id.len() > 253
+      || (!rollout.membership.mode.is_staged() && !members.contains(instance_id.as_str()))
+    {
+      bail!(
+        "Admin cluster instance ID must be one of admin.mutations.rollout.members unless staged membership learner mode is enabled"
+      );
     }
     validate_environment_name(
       "admin.mutations.artifact_key_env",
@@ -377,8 +435,79 @@ impl Config {
         "admin.mutations.rollout.rollback_timeout_seconds must be between 1 and {MAX_ROLLBACK_TIMEOUT_SECONDS}"
       );
     }
+    validate_membership_config(rollout)?;
     Ok(())
   }
+}
+
+fn validate_membership_config(rollout: &AdminMutationRolloutConfig) -> anyhow::Result<()> {
+  let membership = &rollout.membership;
+  if !membership.mode.is_staged() {
+    if !membership.bootstrap_members.is_empty() {
+      bail!(
+        "admin.mutations.rollout.membership.bootstrap_members requires membership.mode = \"staged\""
+      );
+    }
+    return Ok(());
+  }
+  if membership.bootstrap_members.len() != rollout.members.len() {
+    bail!(
+      "staged Admin membership bootstrap_members must exactly cover admin.mutations.rollout.members"
+    );
+  }
+  let configured = rollout
+    .members
+    .iter()
+    .map(String::as_str)
+    .collect::<BTreeSet<_>>();
+  let mut bootstrap = BTreeSet::new();
+  for member in &membership.bootstrap_members {
+    validate_runtime_identifier(
+      "admin.mutations.rollout.membership.bootstrap_members.id",
+      &member.id,
+    )?;
+    if !bootstrap.insert(member.id.as_str()) {
+      bail!(
+        "duplicate staged Admin membership bootstrap member {}",
+        member.id
+      );
+    }
+    validate_base64_public_key(
+      "admin.mutations.rollout.membership.bootstrap_members.readiness_ed25519_public_key",
+      &member.readiness_ed25519_public_key,
+    )?;
+    validate_base64_public_key(
+      "admin.mutations.rollout.membership.bootstrap_members.catchup_x25519_public_key",
+      &member.catchup_x25519_public_key,
+    )?;
+  }
+  if bootstrap != configured {
+    bail!(
+      "staged Admin membership bootstrap member IDs must exactly match admin.mutations.rollout.members"
+    );
+  }
+  validate_environment_name(
+    "admin.mutations.rollout.membership.readiness_private_key_file_env",
+    &membership.readiness_private_key_file_env,
+  )?;
+  validate_environment_name(
+    "admin.mutations.rollout.membership.catchup_private_key_file_env",
+    &membership.catchup_private_key_file_env,
+  )?;
+  if membership.readiness_private_key_file_env == membership.catchup_private_key_file_env {
+    bail!("Admin membership readiness and catch-up keys must use distinct environment variables");
+  }
+  Ok(())
+}
+
+fn validate_base64_public_key(field: &str, value: &str) -> anyhow::Result<()> {
+  let decoded = base64::engine::general_purpose::STANDARD
+    .decode(value)
+    .with_context(|| format!("{field} must be canonical base64"))?;
+  if decoded.len() != 32 || base64::engine::general_purpose::STANDARD.encode(decoded) != value {
+    bail!("{field} must encode exactly 32 bytes using canonical base64");
+  }
+  Ok(())
 }
 
 fn validate_environment_name(field: &str, value: &str) -> anyhow::Result<()> {
@@ -452,6 +581,14 @@ fn default_instance_id_env() -> String {
   "OXIBELT_INSTANCE_ID".to_string()
 }
 
+fn default_membership_readiness_key_env() -> String {
+  "OXIBELT_ADMIN_MEMBERSHIP_READINESS_KEY_FILE".to_string()
+}
+
+fn default_membership_catchup_key_env() -> String {
+  "OXIBELT_ADMIN_MEMBERSHIP_CATCHUP_KEY_FILE".to_string()
+}
+
 fn default_artifact_key_env() -> String {
   "OXIBELT_ADMIN_MUTATION_ARTIFACT_KEY".to_string()
 }
@@ -507,5 +644,38 @@ mod tests {
         "accepted {invalid:?}"
       );
     }
+  }
+
+  #[test]
+  fn staged_membership_requires_exact_bootstrap_identity_and_distinct_keys() {
+    let key = |byte: u8| base64::engine::general_purpose::STANDARD.encode([byte; 32]);
+    let mut rollout = AdminMutationRolloutConfig {
+      mode: AdminMutationRolloutMode::AdminCluster,
+      cluster_id: "cluster-a".to_string(),
+      members: vec!["edge-a".to_string(), "edge-b".to_string()],
+      membership: AdminMembershipConfig {
+        mode: AdminMembershipMode::Staged,
+        bootstrap_members: vec![
+          AdminMembershipBootstrapMember {
+            id: "edge-a".to_string(),
+            readiness_ed25519_public_key: key(1),
+            catchup_x25519_public_key: key(2),
+          },
+          AdminMembershipBootstrapMember {
+            id: "edge-b".to_string(),
+            readiness_ed25519_public_key: key(3),
+            catchup_x25519_public_key: key(4),
+          },
+        ],
+        ..AdminMembershipConfig::default()
+      },
+      ..AdminMutationRolloutConfig::default()
+    };
+    validate_membership_config(&rollout).expect("valid staged membership");
+    rollout.membership.bootstrap_members[1].id = "edge-c".to_string();
+    assert!(validate_membership_config(&rollout).is_err());
+    rollout.membership.bootstrap_members[1].id = "edge-b".to_string();
+    rollout.membership.bootstrap_members[1].catchup_x25519_public_key = key(3);
+    assert!(validate_membership_config(&rollout).is_err());
   }
 }

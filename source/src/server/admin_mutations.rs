@@ -9,9 +9,9 @@ use tracing::warn;
 
 use crate::admin_audit::AdminAuditHandle;
 use crate::admin_mutation::{
-  AdminMutationRuntime, ClusterCommandAuthorization, MutationAdmission, MutationAdmissionError,
-  MutationConflict, MutationRecord, MutationResponseMetadata, MutationState,
-  attach_mutation_response_headers,
+  AdminMutationRuntime, ClusterCommandAuthorization, MembershipReadinessReceipt, MutationAdmission,
+  MutationAdmissionError, MutationConflict, MutationRecord, MutationResponseMetadata,
+  MutationState, attach_mutation_response_headers,
 };
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
@@ -42,7 +42,15 @@ pub(super) fn handles(
   path: &str,
   headers: &HeaderMap,
 ) -> bool {
-  if is_receipt_read(method, path) || is_instance_read(method, path) {
+  if path.starts_with("/admin/v1/membership/") && *method == Method::POST {
+    return runtime.enabled() && runtime.cluster_mode() && runtime.staged_membership();
+  }
+  if is_receipt_read(method, path)
+    || is_instance_read(method, path)
+    || is_membership_read(method, path)
+    || is_membership_catchup_read(method, path)
+    || is_membership_readiness(method, path)
+  {
     return true;
   }
   if *method == Method::GET && admin_mutation_resources::handles(method, path) {
@@ -69,6 +77,15 @@ pub(super) async fn response(
   }
   if is_instance_read(method, path) {
     return instances_response(&runtime, authorization).await;
+  }
+  if is_membership_read(method, path) {
+    return membership_response(&runtime, authorization, &snapshot.metrics).await;
+  }
+  if is_membership_catchup_read(method, path) {
+    return membership_catchup_response(&runtime, authorization, path).await;
+  }
+  if is_membership_readiness(method, path) {
+    return membership_readiness_response(request, &runtime, authorization, path).await;
   }
   if *method == Method::GET && admin_mutation_resources::handles(method, path) {
     return admin_mutation_resources::response(
@@ -103,7 +120,20 @@ pub(super) async fn response(
       Err(response) => return response,
     };
   let (action, resource) = mutation_scope(method, path);
-  let active_revision = current_revision(&state, &admin_control, path).await;
+  let active_revision = if path.starts_with("/admin/v1/membership/") {
+    match runtime.membership_precondition_revision().await {
+      Ok(value) => value,
+      Err(error) => {
+        warn!(error = %error, "failed to load membership precondition");
+        return text_response(
+          StatusCode::SERVICE_UNAVAILABLE,
+          "membership authority unavailable",
+        );
+      }
+    }
+  } else {
+    current_revision(&state, &admin_control, path).await
+  };
   let admission = if runtime.cluster_mode() {
     let checks = match authorization_checks(method, path, &bytes, &authorization.actor.principal) {
       Ok(checks) => checks,
@@ -335,6 +365,7 @@ fn is_protected_write(method: &Method, path: &str) -> bool {
   path.starts_with("/admin/v1/ipm/")
     && matches!(*method, Method::POST | Method::PATCH | Method::DELETE)
     && path != "/admin/v1/ipm/simulate"
+    || (path.starts_with("/admin/v1/membership/") && *method == Method::POST)
 }
 
 #[allow(clippy::result_large_err)]
@@ -385,6 +416,25 @@ fn is_instance_read(method: &Method, path: &str) -> bool {
   *method == Method::GET && path == "/admin/v1/config/instances"
 }
 
+fn is_membership_read(method: &Method, path: &str) -> bool {
+  *method == Method::GET && path == "/admin/v1/membership"
+}
+
+fn is_membership_catchup_read(method: &Method, path: &str) -> bool {
+  *method == Method::GET && membership_transition_suffix(path, "/catchup").is_some()
+}
+
+fn is_membership_readiness(method: &Method, path: &str) -> bool {
+  *method == Method::POST && membership_transition_suffix(path, "/readiness").is_some()
+}
+
+fn membership_transition_suffix<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
+  path
+    .strip_prefix("/admin/v1/membership/transitions/")?
+    .strip_suffix(suffix)
+    .filter(|id| !id.is_empty() && !id.contains('/'))
+}
+
 async fn current_revision(
   state: &AppHandle,
   admin_control: &AdminControlHandle,
@@ -405,7 +455,14 @@ async fn current_revision(
 }
 
 fn mutation_scope(method: &Method, path: &str) -> (&'static str, &'static str) {
-  if path.starts_with("/admin/v1/ipm/") {
+  if path.starts_with("/admin/v1/membership/") {
+    match (method, path) {
+      (&Method::POST, "/admin/v1/membership/transitions") => ("membership.propose", "membership"),
+      (&Method::POST, path) if path.ends_with("/activate") => ("membership.activate", "membership"),
+      (&Method::POST, path) if path.ends_with("/cancel") => ("membership.cancel", "membership"),
+      _ => ("membership.mutate", "membership"),
+    }
+  } else if path.starts_with("/admin/v1/ipm/") {
     ("ipm.write", "ipm")
   } else if path.starts_with("/admin/v1/break-glass/") {
     match (method, path) {
@@ -693,6 +750,97 @@ async fn instances_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "mutation store unavailable",
       )
+    }
+  }
+}
+
+async fn membership_response(
+  runtime: &AdminMutationRuntime,
+  authorization: &AdminAuthorization<'_>,
+  metrics: &crate::metrics::Metrics,
+) -> Response<ProxyBody> {
+  if !authorization.is_allowed("membership:GetStatus", "membership/current") {
+    return text_response(StatusCode::FORBIDDEN, "forbidden");
+  }
+  match runtime.membership_status().await {
+    Ok(status) => {
+      metrics.set_admin_membership_status(
+        status["required_members"]
+          .as_array()
+          .map_or(0, |members| members.len() as u64),
+        status["fenced_members"]
+          .as_array()
+          .map_or(0, |members| members.len() as u64),
+        status["pending_transition"]["state"].as_str(),
+      );
+      json_response(StatusCode::OK, &status)
+    }
+    Err(error) => {
+      warn!(error = %error, "failed to load Admin membership state");
+      text_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "membership authority unavailable",
+      )
+    }
+  }
+}
+
+async fn membership_catchup_response(
+  runtime: &AdminMutationRuntime,
+  authorization: &AdminAuthorization<'_>,
+  path: &str,
+) -> Response<ProxyBody> {
+  let Some(transition_id) = membership_transition_suffix(path, "/catchup") else {
+    return text_response(StatusCode::NOT_FOUND, "not found");
+  };
+  let resource = format!("membership/transition/{transition_id}");
+  if !authorization.is_allowed("membership:GetCatchUp", &resource) {
+    return text_response(StatusCode::FORBIDDEN, "forbidden");
+  }
+  match runtime.membership_catchup(transition_id).await {
+    Ok(value) => json_response(StatusCode::OK, &value),
+    Err(error) => {
+      warn!(error = %error, "failed to load membership catch-up chunks");
+      text_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "membership catch-up unavailable",
+      )
+    }
+  }
+}
+
+async fn membership_readiness_response(
+  request: hyper::Request<Incoming>,
+  runtime: &AdminMutationRuntime,
+  authorization: &AdminAuthorization<'_>,
+  path: &str,
+) -> Response<ProxyBody> {
+  let Some(transition_id) = membership_transition_suffix(path, "/readiness") else {
+    return text_response(StatusCode::NOT_FOUND, "not found");
+  };
+  let resource = format!("membership/transition/{transition_id}");
+  if !authorization.is_allowed("membership:SubmitReadiness", &resource) {
+    return text_response(StatusCode::FORBIDDEN, "forbidden");
+  }
+  let (_, bytes) = match collect_admin_request_bytes(request, 64 * 1024).await {
+    Ok(value) => value,
+    Err(response) => return response,
+  };
+  let receipt: MembershipReadinessReceipt = match serde_json::from_slice(&bytes) {
+    Ok(value) => value,
+    Err(_) => return text_response(StatusCode::BAD_REQUEST, "invalid readiness receipt"),
+  };
+  if receipt.transition_id != transition_id {
+    return text_response(
+      StatusCode::BAD_REQUEST,
+      "readiness receipt transition does not match path",
+    );
+  }
+  match runtime.submit_membership_readiness(&receipt).await {
+    Ok(value) => json_response(StatusCode::OK, &value),
+    Err(error) => {
+      warn!(error = %error, "membership readiness receipt was rejected");
+      text_response(StatusCode::CONFLICT, "membership readiness rejected")
     }
   }
 }

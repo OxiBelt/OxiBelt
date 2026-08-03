@@ -473,6 +473,7 @@ fn execution_model(method: &Method, path_and_query: &str) -> anyhow::Result<Clus
     && matches!(*method, Method::POST | Method::PATCH | Method::DELETE)
     && path != "/admin/v1/ipm/simulate")
     || (path.starts_with("/admin/v1/break-glass/") && method == Method::POST)
+    || (path.starts_with("/admin/v1/membership/") && method == Method::POST)
   {
     return Ok(ClusterExecutionModel::SharedStaged);
   }

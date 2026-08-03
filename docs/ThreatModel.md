@@ -255,11 +255,16 @@ strongest available policy.
   writes, local process signals, externally managed Kubernetes changes, and
   direct changes by a compromised PostgreSQL authority do not inherit this
   guarantee.
-- Fixed-member `admin_cluster` is not a Byzantine consensus system and does not
-  remain writable through member loss. It trusts PostgreSQL, every configured
-  host, the shared artifact key, and the configured signer/IPM authorities.
-  Loss or incompatibility of one required member intentionally denies protected
-  writes; membership changes require a quiesced offline rollout.
+- `admin_cluster` is not a Byzantine consensus system and does not remain
+  writable through active-member loss. It trusts PostgreSQL, every active host,
+  the shared artifact key, and the configured signer/IPM authorities. Fixed
+  membership remains the default. Experimental staged membership serializes
+  authenticated epochs through the existing all-current-member mutation
+  boundary; learner catch-up is recipient encrypted and promotion requires a
+  distinct learner-signed readiness receipt plus a committed activation. Loss
+  or incompatibility of one required active member intentionally denies
+  protected writes. Emergency boundary reconstitution remains an explicit
+  out-of-band disaster-recovery action and is not majority quorum.
 - Best-effort audit/export does not guarantee durable, queryable, ordered, or
   acknowledged audit-of-record delivery.
 - OxiBelt does not issue or renew certificates, rotate external secrets,

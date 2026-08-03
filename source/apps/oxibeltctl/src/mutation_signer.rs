@@ -500,6 +500,9 @@ pub(crate) fn is_protected_mutation(method: &Method, endpoint: &str) -> bool {
     || is_path_or_child(path, "/admin/v1/ipm/policies")
     || is_path_or_child(path, "/admin/v1/ipm/bindings")
     || (path.starts_with("/admin/v1/break-glass/activations/") && path.ends_with("/revoke"))
+    || path == "/admin/v1/membership/transitions"
+    || (path.starts_with("/admin/v1/membership/transitions/")
+      && (path.ends_with("/activate") || path.ends_with("/cancel")))
 }
 
 fn is_path_or_child(path: &str, base: &str) -> bool {

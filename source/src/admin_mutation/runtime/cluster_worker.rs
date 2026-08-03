@@ -54,14 +54,15 @@ impl AdminMutationRuntime {
     revision: &str,
     digest: &str,
   ) -> anyhow::Result<()> {
+    let authority = self.membership_authority();
     self
       .store()?
       .initialize_revision(
         resource,
         revision,
         digest,
-        Some(&self.inner.target.cluster_id),
-        Some(&self.inner.target.membership_revision),
+        Some(&authority.target.cluster_id),
+        Some(&authority.target.membership_revision),
       )
       .await
   }
@@ -122,11 +123,12 @@ impl AdminMutationRuntime {
       .load_revision(&record.resource)
       .await?
       .context("cluster resource logical head is unavailable")?;
+    let authority = self.membership_authority();
     let mut exact = prove_exact_live_membership(
       self.store()?,
       &self.inner.cluster_id,
-      &self.inner.target.membership_revision,
-      &self.inner.members,
+      &authority.target.membership_revision,
+      &authority.members,
       oxibelt_build_identity::SHORT_VERSION,
       "admin-mutation-rollout-v1",
       self.artifact_key_fingerprint()?,

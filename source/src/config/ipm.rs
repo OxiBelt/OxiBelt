@@ -504,6 +504,7 @@ fn validate_ipm_service(field: &str, service: &str) -> anyhow::Result<()> {
       | "lifecycle"
       | "diagnostics"
       | "runtime"
+      | "membership"
       | "route"
       | "stream"
       | "turn"
@@ -560,6 +561,14 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "ReloadDownstreamTls",
       "ReadUpstreamTls",
       "RefreshUpstreamTls",
+    ],
+    "membership" => &[
+      "GetStatus",
+      "GetCatchUp",
+      "SubmitReadiness",
+      "Propose",
+      "Activate",
+      "Cancel",
     ],
     "cache" => &[
       "ExplainKey",

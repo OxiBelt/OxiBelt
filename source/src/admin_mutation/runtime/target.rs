@@ -86,7 +86,7 @@ pub(super) fn ensure_cluster_member(
   );
   ensure!(
     runtime
-      .inner
+      .membership_authority()
       .members
       .binary_search(&instance_id.to_string())
       .is_ok(),

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 
 use crate::admin_audit::{AdminAuditHandle, AdminAuditRuntime};
 use crate::config::{
-  AdminMutationMode, AdminMutationRolloutMode, AdminMutationSignatureSuite, Config,
+  AdminMembershipMode, AdminMutationMode, AdminMutationRolloutMode, AdminMutationSignatureSuite,
+  Config,
 };
 
 use super::artifact::{ArtifactBinding, MutationArtifactCipher, MutationArtifactPlaintext};
@@ -26,7 +27,8 @@ use super::store::{
   init_postgres, load_active_break_glass_for_principal, revoke_break_glass_activation_tx,
 };
 use super::{
-  MUTATION_HEADER, MutationProtocolError, MutationProtocolErrorKind, SignerBinding, SignerRegistry,
+  MUTATION_HEADER, MembershipMember, MembershipReadinessReceipt, MutationProtocolError,
+  MutationProtocolErrorKind, SignerBinding, SignerRegistry,
 };
 pub(crate) use cluster_heartbeat::ClusterHeartbeatTask;
 pub(crate) use target::configured_target;
@@ -49,15 +51,22 @@ struct RuntimeInner {
   maximum_validity_seconds: u64,
   maximum_clock_skew_seconds: u64,
   retention_seconds: i64,
-  target: MutationTarget,
   rollout_mode: AdminMutationRolloutMode,
+  membership_mode: AdminMembershipMode,
   cluster_id: String,
-  members: Vec<String>,
+  membership_authority: RwLock<MembershipAuthority>,
+  membership_bootstrap_members: Vec<MembershipMember>,
   artifact_cipher: Option<MutationArtifactCipher>,
   cluster_controller: OnceLock<AdminClusterRolloutController>,
   cluster_worker_state: AtomicU8,
   winner_responses: Mutex<HashMap<String, Option<zeroize::Zeroizing<Vec<u8>>>>>,
   winner_response_wait: Duration,
+}
+
+#[derive(Clone)]
+struct MembershipAuthority {
+  target: MutationTarget,
+  members: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -123,6 +132,17 @@ impl AdminMutationRuntime {
     let target = configured_target(config);
     let mut members = mutation_config.rollout.members.clone();
     members.sort();
+    let membership_bootstrap_members = mutation_config
+      .rollout
+      .membership
+      .bootstrap_members
+      .iter()
+      .map(|member| MembershipMember {
+        id: member.id.clone(),
+        readiness_ed25519_public_key: member.readiness_ed25519_public_key.clone(),
+        catchup_x25519_public_key: member.catchup_x25519_public_key.clone(),
+      })
+      .collect();
     let artifact_cipher = if mutation_config.rollout.mode.is_cluster() {
       Some(MutationArtifactCipher::from_environment(
         &mutation_config.artifact_key_env,
@@ -147,10 +167,11 @@ impl AdminMutationRuntime {
         maximum_clock_skew_seconds: mutation_config.max_clock_skew_seconds,
         retention_seconds: i64::try_from(mutation_config.retention_seconds)
           .context("Admin mutation retention exceeds the supported range")?,
-        target,
         rollout_mode: mutation_config.rollout.mode,
+        membership_mode: mutation_config.rollout.membership.mode,
         cluster_id: mutation_config.rollout.cluster_id.clone(),
-        members,
+        membership_authority: RwLock::new(MembershipAuthority { target, members }),
+        membership_bootstrap_members,
         artifact_cipher,
         cluster_controller: OnceLock::new(),
         cluster_worker_state: AtomicU8::new(0),
@@ -170,13 +191,17 @@ impl AdminMutationRuntime {
         maximum_validity_seconds: 1,
         maximum_clock_skew_seconds: 0,
         retention_seconds: 1,
-        target: MutationTarget {
-          cluster_id: "single".to_string(),
-          membership_revision: digest_parts(["single"]),
-        },
         rollout_mode: AdminMutationRolloutMode::SingleInstance,
+        membership_mode: AdminMembershipMode::Fixed,
         cluster_id: String::new(),
-        members: Vec::new(),
+        membership_authority: RwLock::new(MembershipAuthority {
+          target: MutationTarget {
+            cluster_id: "single".to_string(),
+            membership_revision: digest_parts(["single"]),
+          },
+          members: Vec::new(),
+        }),
+        membership_bootstrap_members: Vec::new(),
         artifact_cipher: None,
         cluster_controller: OnceLock::new(),
         cluster_worker_state: AtomicU8::new(0),
@@ -253,7 +278,8 @@ impl AdminMutationRuntime {
         maximum_clock_skew_seconds: self.inner.maximum_clock_skew_seconds,
       },
     )?;
-    if verified.envelope.unsigned.target != self.inner.target {
+    let authority = self.membership_authority();
+    if verified.envelope.unsigned.target != authority.target {
       return Ok(MutationAdmission::Conflict(MutationConflict::Target));
     }
 
@@ -323,8 +349,8 @@ impl AdminMutationRuntime {
           resource,
           current_revision,
           EMPTY_DIGEST,
-          Some(&self.inner.target.cluster_id),
-          Some(&self.inner.target.membership_revision),
+          Some(&authority.target.cluster_id),
+          Some(&authority.target.membership_revision),
         )
         .await
         .context("failed to initialize Admin mutation logical revision")?;
@@ -346,12 +372,91 @@ impl AdminMutationRuntime {
     }
   }
 
-  pub(crate) fn configured_members(&self) -> &[String] {
-    &self.inner.members
+  pub(crate) fn configured_members(&self) -> Vec<String> {
+    self.membership_authority().members
+  }
+
+  fn membership_authority(&self) -> MembershipAuthority {
+    self
+      .inner
+      .membership_authority
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
   }
 
   pub(crate) fn cluster_mode(&self) -> bool {
     self.inner.rollout_mode == AdminMutationRolloutMode::AdminCluster
+  }
+
+  pub(crate) fn staged_membership(&self) -> bool {
+    self.inner.membership_mode.is_staged()
+  }
+
+  pub(crate) fn membership_bootstrap_members(&self) -> &[MembershipMember] {
+    &self.inner.membership_bootstrap_members
+  }
+
+  pub(crate) async fn membership_precondition_revision(&self) -> anyhow::Result<String> {
+    if !self.staged_membership() {
+      return Ok(self.membership_authority().target.membership_revision);
+    }
+    Ok(
+      self
+        .store()?
+        .load_revision("membership")
+        .await?
+        .map(|revision| revision.committed_revision)
+        .unwrap_or_else(|| "membership-uninitialized".to_string()),
+    )
+  }
+
+  pub(crate) async fn membership_status(&self) -> anyhow::Result<Value> {
+    if !self.staged_membership() {
+      return Ok(json!({
+        "mode": "fixed",
+        "active_epoch": null,
+        "pending_transition": null,
+        "required_members": self.configured_members(),
+      }));
+    }
+    let status =
+      super::membership_store::load_membership_status(self.store()?, &self.inner.cluster_id)
+        .await?;
+    serde_json::to_value(status).context("failed to encode membership status")
+  }
+
+  pub(crate) async fn membership_catchup(&self, transition_id: &str) -> anyhow::Result<Value> {
+    ensure!(self.staged_membership(), "staged membership is not enabled");
+    let chunks = super::membership_store::load_membership_catchup(
+      self.store()?,
+      &self.inner.cluster_id,
+      transition_id,
+    )
+    .await?;
+    Ok(json!({
+      "transition_id": transition_id,
+      "chunk_count": chunks.len(),
+      "chunks": chunks,
+    }))
+  }
+
+  pub(crate) async fn submit_membership_readiness(
+    &self,
+    receipt: &MembershipReadinessReceipt,
+  ) -> anyhow::Result<Value> {
+    ensure!(self.staged_membership(), "staged membership is not enabled");
+    let now = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .context("system clock precedes the Unix epoch")?;
+    let transition = super::membership_store::submit_membership_readiness(
+      self.store()?,
+      &self.inner.cluster_id,
+      receipt,
+      i64::try_from(now.as_secs()).context("system clock exceeds supported range")?,
+    )
+    .await?;
+    Ok(json!({"ok":true,"transition":transition}))
   }
 
   #[allow(dead_code)]
@@ -371,13 +476,15 @@ impl AdminMutationRuntime {
       .instance_id()
       .context("Admin cluster rollout identity is missing its instance ID")?
       .to_string();
+    let authority = self.membership_authority();
     let controller = AdminClusterRolloutController::new(
       self.store()?.clone(),
       RolloutSettings {
         cluster_id: self.inner.cluster_id.clone(),
-        membership_revision: self.inner.target.membership_revision.clone(),
-        members: self.inner.members.clone(),
+        membership_revision: authority.target.membership_revision.clone(),
+        members: authority.members.clone(),
         instance_id,
+        allow_learner: self.staged_membership(),
         boot_id,
         build_version: oxibelt_build_identity::SHORT_VERSION.to_string(),
         artifact_key_fingerprint: self.artifact_key_fingerprint()?.to_string(),
@@ -395,8 +502,8 @@ impl AdminMutationRuntime {
       },
     )?;
     ensure!(
-      controller.cluster_id() == self.inner.target.cluster_id
-        && controller.membership_revision() == self.inner.target.membership_revision,
+      controller.cluster_id() == authority.target.cluster_id
+        && controller.membership_revision() == authority.target.membership_revision,
       "Admin cluster controller target does not match the mutation runtime"
     );
     self
@@ -483,10 +590,11 @@ impl AdminMutationRuntime {
 
   #[allow(dead_code)]
   fn artifact_binding(&self, record: &MutationRecord) -> anyhow::Result<ArtifactBinding> {
+    let authority = self.membership_authority();
     ensure!(
-      record.cluster_id.as_deref() == Some(self.inner.target.cluster_id.as_str())
+      record.cluster_id.as_deref() == Some(authority.target.cluster_id.as_str())
         && record.membership_revision.as_deref()
-          == Some(self.inner.target.membership_revision.as_str()),
+          == Some(authority.target.membership_revision.as_str()),
       "mutation artifact target does not match this runtime"
     );
     ArtifactBinding::from_record(self.store()?.namespace(), record)
@@ -526,7 +634,7 @@ impl AdminMutationRuntime {
     Ok(json!({
       "enabled": self.enabled(),
       "required": self.required(),
-      "target": self.inner.target,
+      "target": self.membership_authority().target,
       "logical_revisions": revisions,
     }))
   }

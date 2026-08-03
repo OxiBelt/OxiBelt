@@ -14,6 +14,8 @@ mod config_compat_cli;
 mod doctor_cli;
 #[path = "ipm_cli.rs"]
 mod ipm_cli;
+#[path = "membership_cli.rs"]
+mod membership_cli;
 #[path = "mutation_cli.rs"]
 mod mutation_cli;
 #[path = "rulepack_cli.rs"]
@@ -23,6 +25,7 @@ pub(crate) use auth_cli::*;
 pub(crate) use config_compat_cli::*;
 pub(crate) use doctor_cli::*;
 pub(crate) use ipm_cli::*;
+pub(crate) use membership_cli::*;
 pub(crate) use mutation_cli::*;
 pub(crate) use rulepack_cli::*;
 
@@ -95,6 +98,7 @@ pub(crate) enum Command {
   Mitigate(MitigateArgs),
   Cache(CacheCommand),
   Ipm(IpmCommand),
+  Membership(MembershipCommand),
   Auth(AuthCommand),
   Files(FilesCommand),
 }

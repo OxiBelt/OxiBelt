@@ -256,7 +256,7 @@ const fn default_admin_audit_spool_max_event_bytes() -> usize {
   64 * 1024
 }
 
-pub const ADMIN_AUDIT_PROTECTED_MUTATION_ACTIONS: [&str; 9] = [
+pub const ADMIN_AUDIT_PROTECTED_MUTATION_ACTIONS: [&str; 12] = [
   "config.load",
   "config.rollback",
   "config.files_sync",
@@ -266,9 +266,12 @@ pub const ADMIN_AUDIT_PROTECTED_MUTATION_ACTIONS: [&str; 9] = [
   "ipm.write",
   "break_glass.activate",
   "break_glass.revoke",
+  "membership.propose",
+  "membership.activate",
+  "membership.cancel",
 ];
 
-pub const ADMIN_AUDIT_DURABILITY_ACTIONS: [&str; 20] = [
+pub const ADMIN_AUDIT_DURABILITY_ACTIONS: [&str; 23] = [
   "config.load",
   "config.rollback",
   "config.files_sync",
@@ -279,6 +282,9 @@ pub const ADMIN_AUDIT_DURABILITY_ACTIONS: [&str; 20] = [
   "ipm.write",
   "break_glass.activate",
   "break_glass.revoke",
+  "membership.propose",
+  "membership.activate",
+  "membership.cancel",
   "operations.write",
   "operations.lifecycle",
   "cache.warm",

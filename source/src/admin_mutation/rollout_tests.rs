@@ -368,6 +368,7 @@ async fn controller_identity_getters_expose_the_validated_local_boot() {
       membership_revision: "sha256:members".to_string(),
       members: vec!["edge-b".to_string(), "edge-a".to_string()],
       instance_id: "edge-a".to_string(),
+      allow_learner: false,
       boot_id: "boot-a".to_string(),
       build_version: "test".to_string(),
       artifact_key_fingerprint: "sha256:test-key".to_string(),

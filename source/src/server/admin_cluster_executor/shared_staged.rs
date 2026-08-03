@@ -14,7 +14,10 @@ use http::Method;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-use crate::admin_mutation::{ClusterAuthorizationCheck, ClusterMutationCommand, CoordinatorFence};
+use crate::admin_mutation::{
+  ClusterAuthorizationCheck, ClusterMutationCommand, CoordinatorFence, MembershipActivationRequest,
+  MembershipCancelRequest, MembershipTransitionRequest,
+};
 use crate::ipm::{
   IpmActor, IpmAdminMutation, IpmBindingCreate, IpmCredentialCreate, IpmCredentialPatch,
   IpmCredentialRevoke, IpmCredentialRotate, IpmPolicyCreate, IpmPolicyPatch, IpmPrincipalCreate,
@@ -91,6 +94,9 @@ impl SharedStagedOperation {
       SharedMutationKind::BreakGlassActivate | SharedMutationKind::BreakGlassRevoke(_) => {
         return Ok(None);
       }
+      SharedMutationKind::MembershipPropose(_)
+      | SharedMutationKind::MembershipActivate(_, _)
+      | SharedMutationKind::MembershipCancel(_, _) => return Ok(None),
     };
     Ok(Some(mutation))
   }
@@ -108,6 +114,27 @@ impl SharedStagedOperation {
       }
       _ => None,
     })
+  }
+
+  pub(crate) fn membership_proposal(&self) -> Option<&MembershipTransitionRequest> {
+    match &self.kind {
+      SharedMutationKind::MembershipPropose(request) => Some(request),
+      _ => None,
+    }
+  }
+
+  pub(crate) fn membership_activation(&self) -> Option<(&str, &MembershipActivationRequest)> {
+    match &self.kind {
+      SharedMutationKind::MembershipActivate(id, request) => Some((id, request)),
+      _ => None,
+    }
+  }
+
+  pub(crate) fn membership_cancellation(&self) -> Option<(&str, &MembershipCancelRequest)> {
+    match &self.kind {
+      SharedMutationKind::MembershipCancel(id, request) => Some((id, request)),
+      _ => None,
+    }
   }
 
   pub(crate) fn token_producing(&self) -> bool {
@@ -141,6 +168,9 @@ pub(crate) enum SharedMutationKind {
   BindingDelete(String),
   BreakGlassActivate,
   BreakGlassRevoke(String),
+  MembershipPropose(MembershipTransitionRequest),
+  MembershipActivate(String, MembershipActivationRequest),
+  MembershipCancel(String, MembershipCancelRequest),
 }
 
 pub(crate) struct SharedPublishResult {
@@ -280,6 +310,17 @@ pub(crate) fn decode_shared_operation(
         )],
       )
     }
+    (&Method::POST, "/admin/v1/membership/transitions") => {
+      let value: MembershipTransitionRequest = decode(body)?;
+      value.validate()?;
+      (
+        SharedMutationKind::MembershipPropose(value),
+        vec![check(
+          "membership:Propose",
+          "membership/current".to_string(),
+        )],
+      )
+    }
     _ => decode_item_operation(method, path, body)?,
   };
   checks.sort();
@@ -292,6 +333,46 @@ fn decode_item_operation(
   path: &str,
   body: &[u8],
 ) -> anyhow::Result<(SharedMutationKind, Vec<ClusterAuthorizationCheck>)> {
+  if let Some(rest) = path.strip_prefix("/admin/v1/membership/transitions/") {
+    let (id, suffix) = rest.split_once('/').unwrap_or((rest, ""));
+    ensure!(
+      !id.is_empty() && !id.contains('/'),
+      "invalid membership transition path"
+    );
+    return match (method.as_str(), suffix) {
+      ("POST", "activate") => {
+        let request: MembershipActivationRequest = decode(body)?;
+        request.validate()?;
+        ensure!(
+          request.transition_id == id,
+          "membership activation path does not match body"
+        );
+        Ok((
+          SharedMutationKind::MembershipActivate(id.to_string(), request),
+          vec![check(
+            "membership:Activate",
+            format!("membership/transition/{}", admin_resource::component(id)),
+          )],
+        ))
+      }
+      ("POST", "cancel") => {
+        let request: MembershipCancelRequest = decode(body)?;
+        request.validate()?;
+        ensure!(
+          request.transition_id == id,
+          "membership cancellation path does not match body"
+        );
+        Ok((
+          SharedMutationKind::MembershipCancel(id.to_string(), request),
+          vec![check(
+            "membership:Cancel",
+            format!("membership/transition/{}", admin_resource::component(id)),
+          )],
+        ))
+      }
+      _ => bail!("unsupported membership transition mutation"),
+    };
+  }
   if let Some(id) = one_segment(path, "/admin/v1/ipm/principals/") {
     return match method.as_str() {
       "PATCH" => {

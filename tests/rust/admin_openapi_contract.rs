@@ -816,6 +816,15 @@ fn high_risk_mutations_declare_signed_replay_contract() {
     ("delete", "/admin/v1/ipm/bindings/{id}"),
     ("post", "/admin/v1/break-glass/activations"),
     ("post", "/admin/v1/break-glass/activations/{id}/revoke"),
+    ("post", "/admin/v1/membership/transitions"),
+    (
+      "post",
+      "/admin/v1/membership/transitions/{transition_id}/activate",
+    ),
+    (
+      "post",
+      "/admin/v1/membership/transitions/{transition_id}/cancel",
+    ),
   ] {
     let names = operation_parameter_names(&spec, path, method);
     assert!(
@@ -1429,6 +1438,24 @@ fn expected_operations() -> BTreeSet<(String, String)> {
     ("get", "/admin/v1/version"),
     ("get", "/admin/v1/audit"),
     ("get", "/admin/v1/mutations/{request_id}"),
+    ("get", "/admin/v1/membership"),
+    ("post", "/admin/v1/membership/transitions"),
+    (
+      "get",
+      "/admin/v1/membership/transitions/{transition_id}/catchup",
+    ),
+    (
+      "post",
+      "/admin/v1/membership/transitions/{transition_id}/readiness",
+    ),
+    (
+      "post",
+      "/admin/v1/membership/transitions/{transition_id}/activate",
+    ),
+    (
+      "post",
+      "/admin/v1/membership/transitions/{transition_id}/cancel",
+    ),
     ("get", "/admin/v1/operations"),
     ("post", "/admin/v1/operations"),
     ("get", "/admin/v1/operations/{id}"),

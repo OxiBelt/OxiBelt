@@ -617,11 +617,20 @@ revision. Read-only status, effective-config, validation, and diff endpoints
 remain available to operators.
 
 `[admin.mutations.rollout] mode = "admin_cluster"` enables the PostgreSQL-backed
-fixed-member rollout authority. It requires mutation mode `required`, matching
+Admin-cluster rollout authority. It requires mutation mode `required`, matching
 process rollout mode, disabled hot reload, two through 1,024 unique configured
-members, a local instance ID in that set, and one shared 32-byte artifact key.
-The configured membership is an all-member policy boundary; there is no
+members, and one shared 32-byte artifact key. The configured membership remains
+the compatibility default and is an all-member policy boundary; there is no
 majority-quorum mode.
+
+`[admin.mutations.rollout.membership] mode = "staged"` opts into authenticated
+membership epochs. `bootstrap_members` must exactly cover the initial configured
+member IDs and supplies distinct canonical-base64 Ed25519 readiness and X25519
+catch-up public keys. A local instance outside the active set starts as a
+non-participating learner: it cannot heartbeat as an active member, validate or
+acknowledge protected writes, acquire coordinator authority, or make the Admin
+rollout ready. Merely adding that instance to local configuration never changes
+the protected-write boundary.
 
 The winning request is durably claimed with its exact encrypted command and
 target set. Every configured member validates the candidate, the deterministic
@@ -659,6 +668,30 @@ revision, durable authority state, a safe blocking reason, active rollout
 summary, and bounded per-instance configured/live/ready/compatible evidence.
 It is an operational diagnostic view; the mutation's guarded terminal
 transaction, not this read response, is the convergence authority.
+
+`GET /admin/v1/membership` is the protected diagnostic view for the active
+epoch document, exact required members, recent bounded transitions, learner
+cursor/digest and blocking reason, and fenced maintenance/removal identities.
+`POST /admin/v1/membership/transitions` proposes exactly one serialized
+`initialize`, `join`, `maintenance`, `remove`, or `rejoin` transition. It is a
+normal signed protected mutation authorized and acknowledged by every member of
+the current boundary. Join and rejoin create an encrypted bounded catch-up
+manifest at `GET .../{transition_id}/catchup`; its X25519/HKDF-SHA256/
+AES-256-GCM binding includes the cluster, transition, learner, source epoch,
+target epoch, and chunk index.
+
+The learner submits `POST .../{transition_id}/readiness` with an Ed25519-signed
+receipt binding the verified catch-up cursor/digest, exact build and capability,
+target epoch, identity, and clock. This evidence changes only learner state; it
+does not grant voting authority. A separate all-current-member protected
+`POST .../{transition_id}/activate` authorizes promotion or fencing. The new
+epoch becomes runtime authority only after that activation mutation is durably
+`committed`; heartbeat reconciliation then releases the old member fence,
+installs the new exact member set, and keeps removed members self-fenced.
+`POST .../{transition_id}/cancel` can cancel only a non-terminal transition.
+An unavailable active member is never silently omitted. Emergency boundary
+reconstitution remains an out-of-band disaster-recovery procedure, not this
+ordinary transition API.
 
 ## Protected Mutations
 
