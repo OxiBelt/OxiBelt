@@ -6576,6 +6576,9 @@ fn admin_mutations_accept_selective_audit_only_when_all_protected_actions_are_co
     "ipm.write",
     "break_glass.activate",
     "break_glass.revoke",
+    "membership.propose",
+    "membership.activate",
+    "membership.cancel",
   ]"#;
   let raw = format!(
     r#"

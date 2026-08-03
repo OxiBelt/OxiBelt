@@ -135,6 +135,15 @@ pub(super) fn mutation_durability_scope(
     }
     (&Method::POST, "/admin/v1/keys/rotate") => Some(("config.key_rotate", "config")),
     (&Method::POST, "/admin/v1/files/sync") => Some(("config.files_sync", "config")),
+    (&Method::POST, "/admin/v1/membership/transitions") => {
+      Some(("membership.propose", "membership"))
+    }
+    (&Method::POST, path) if membership_transition_suffix(path, "/activate").is_some() => {
+      Some(("membership.activate", "membership"))
+    }
+    (&Method::POST, path) if membership_transition_suffix(path, "/cancel").is_some() => {
+      Some(("membership.cancel", "membership"))
+    }
     (&Method::POST, "/admin/v1/cache/warm") => Some(("cache.warm", "cache")),
     (&Method::POST, "/admin/v1/cache/purge") => Some(("cache.purge", "cache")),
     (&Method::POST, "/admin/v1/waf/person-proof/clearances/revoke") => {
@@ -183,6 +192,13 @@ pub(super) fn mutation_durability_scope(
   None
 }
 
+fn membership_transition_suffix<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
+  path
+    .strip_prefix("/admin/v1/membership/transitions/")?
+    .strip_suffix(suffix)
+    .filter(|id| !id.is_empty() && !id.contains('/'))
+}
+
 #[cfg(test)]
 mod tests {
   use std::collections::HashSet;
@@ -228,6 +244,21 @@ mod tests {
         Method::POST,
         "/admin/v1/break-glass/activations/id/revoke",
         "break_glass.revoke",
+      ),
+      (
+        Method::POST,
+        "/admin/v1/membership/transitions",
+        "membership.propose",
+      ),
+      (
+        Method::POST,
+        "/admin/v1/membership/transitions/join-1/activate",
+        "membership.activate",
+      ),
+      (
+        Method::POST,
+        "/admin/v1/membership/transitions/join-1/cancel",
+        "membership.cancel",
       ),
       (Method::POST, "/admin/v1/operations", "operations.write"),
       (
@@ -282,17 +313,30 @@ mod tests {
         Some(("cache.purge", "cache"))
       );
     }
-    for path in [
-      "/admin/v1/config/validate",
-      "/admin/v1/config/diff",
-      "/admin/v1/ipm/simulate",
-      "/admin/v1/diagnostics/preflight",
-      "/admin/v1/waf/oxirule/check",
+    for (method, path) in [
+      (Method::POST, "/admin/v1/config/validate"),
+      (Method::POST, "/admin/v1/config/diff"),
+      (Method::POST, "/admin/v1/ipm/simulate"),
+      (Method::POST, "/admin/v1/diagnostics/preflight"),
+      (Method::POST, "/admin/v1/waf/oxirule/check"),
+      (
+        Method::POST,
+        "/admin/v1/membership/transitions/join-1/readiness",
+      ),
+      (
+        Method::GET,
+        "/admin/v1/membership/transitions/join-1/catchup",
+      ),
+      (Method::GET, "/admin/v1/membership/transitions"),
+      (
+        Method::POST,
+        "/admin/v1/membership/transitions/join-1/nested/activate",
+      ),
     ] {
       assert_eq!(
-        mutation_durability_scope(&Method::POST, path),
+        mutation_durability_scope(&method, path),
         None,
-        "{path}"
+        "{method} {path}"
       );
     }
   }
