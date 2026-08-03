@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "ea1e3abf83a00d8fb2fa59af655635e3554ca272aeb05f05e10f8030b2ecb1ab",
+      "lockfileSha256": "5040ffbaebee4071800c2fcc4e1a86e21c4f6fe655017e07c557230548f14aca",
       "exemptionInventorySha256": "40d9bc34e0647219920215d20a455622783a778729adfdba0104f91801fe5bc7",
       "exemptedPackageVersions": 421
     },
@@ -189,7 +189,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:ea1e3abf83a00d8fb2fa59af655635e3554ca272aeb05f05e10f8030b2ecb1ab",
+      "subject": "Cargo.lock@sha256:5040ffbaebee4071800c2fcc4e1a86e21c4f6fe655017e07c557230548f14aca",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -201,7 +201,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:ea1e3abf83a00d8fb2fa59af655635e3554ca272aeb05f05e10f8030b2ecb1ab",
+      "subject": "Cargo.lock@sha256:5040ffbaebee4071800c2fcc4e1a86e21c4f6fe655017e07c557230548f14aca",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
