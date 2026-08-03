@@ -70,3 +70,44 @@ sections before making or reviewing changes:
 If this file and `CONTRIBUTING.md` diverge on workflow, security, testing,
 documentation, or Conventional Commits requirements, follow `CONTRIBUTING.md`
 and update this pointer file only when agent-specific orientation changes.
+
+## Agent Commit Message Guidance
+
+Commit messages must contain portable, repository-relevant context. Do not
+include session-specific command aliases, absolute host paths, or local-only
+environment data and artifacts. For example, do not record the availability or
+use of `docker-rootful` or cite files under `.agents/temp`; describe the
+portable result instead, such as whether performance benchmarks were run.
+
+When additional context is useful, prefer stable sources that readers can
+access publicly, such as tracked repository files, public GitHub projects,
+issues, pull requests, commits, published security advisories, and official
+documentation. If no suitable public source exists, explain the necessary
+context inline without citing inaccessible local material. Sanitize the
+description and do not expose secrets, personal data, or undisclosed
+vulnerability details.
+
+## Codex Security Advisory Guidance
+
+Follow the [Security Policy](SECURITY.md) for every validated, high-confidence,
+report-worthy finding from Codex Security Cloud or a local Codex Security scan.
+Use one GitHub repository Security Advisory per finding and keep the disclosure
+state fail-closed:
+
+- If a supported fix or actionable mitigation is not yet available, submit
+  only a private vulnerability report to the repository advisory inbox and
+  keep it in `triage` or `draft`. Do not substitute a public issue, discussion,
+  pull request, or revealing commit message.
+- Once the supported fix or actionable mitigation is verified and disclosure
+  is permitted by the Security Policy, publish the repository Security
+  Advisory.
+- Preview the exact advisory payload and obtain explicit approval for each
+  submission or publication. Before writing, verify the canonical repository,
+  immutable source revision and finding locations, duplicate status,
+  authenticated identity, permissions, and intended visibility. Read the
+  advisory back before reporting success.
+- Do not request a CVE identification number unless the user explicitly asks
+  for one.
+- If the available credentials or tooling cannot preserve the required private
+  or published state, stop and report the blocker without changing disclosure
+  channels.
