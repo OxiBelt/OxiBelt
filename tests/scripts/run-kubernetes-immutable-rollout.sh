@@ -1582,6 +1582,10 @@ curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
   "${gateway_api_url}"
 printf '%s  %s\n' "${gateway_api_sha256}" "${gateway_api_manifest}" | sha256sum --check --status
 kube apply --server-side --force-conflicts -f "${gateway_api_manifest}" >/dev/null
+kube apply --server-side --force-conflicts \
+  -f "${repo_root}/deploy/kubernetes/oxibelt-gateway-controller/crds/oxibeltroutepolicies.gateway.oxibelt.dev.yaml" \
+  -f "${repo_root}/deploy/kubernetes/oxibelt-gateway-controller/crds/oxibeltdataplanetargets.gateway.oxibelt.dev.yaml" \
+  >/dev/null
 
 kube wait --for=condition=Established --timeout=120s \
   crd/gatewayclasses.gateway.networking.k8s.io \
@@ -1592,7 +1596,9 @@ kube wait --for=condition=Established --timeout=120s \
   crd/referencegrants.gateway.networking.k8s.io \
   crd/tcproutes.gateway.networking.k8s.io \
   crd/udproutes.gateway.networking.k8s.io \
-  crd/backendtlspolicies.gateway.networking.k8s.io
+  crd/backendtlspolicies.gateway.networking.k8s.io \
+  crd/oxibeltroutepolicies.gateway.oxibelt.dev \
+  crd/oxibeltdataplanetargets.gateway.oxibelt.dev
 
 kube create namespace "${namespace}" >/dev/null
 kube create namespace "${outside_namespace}" >/dev/null

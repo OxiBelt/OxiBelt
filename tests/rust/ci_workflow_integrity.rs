@@ -2764,15 +2764,37 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     );
   }
   for expected in [
+    "deploy/kubernetes/oxibelt-gateway-controller/crds/oxibeltroutepolicies.gateway.oxibelt.dev.yaml",
+    "deploy/kubernetes/oxibelt-gateway-controller/crds/oxibeltdataplanetargets.gateway.oxibelt.dev.yaml",
     "crd/tcproutes.gateway.networking.k8s.io",
     "crd/udproutes.gateway.networking.k8s.io",
     "crd/backendtlspolicies.gateway.networking.k8s.io",
+    "crd/oxibeltroutepolicies.gateway.oxibelt.dev",
+    "crd/oxibeltdataplanetargets.gateway.oxibelt.dev",
   ] {
     assert!(
       script.contains(expected),
-      "the Kubernetes rollout must wait for the Gateway API v1 Phase 6 CRD {expected}"
+      "the Kubernetes rollout must install and wait for the required Gateway API CRD contract {expected}"
     );
   }
+  let standard_crd_apply = script
+    .find("kube apply --server-side --force-conflicts -f \"${gateway_api_manifest}\"")
+    .expect("the Kubernetes rollout must install the pinned standard Gateway API CRDs");
+  let oxibelt_crd_apply = script
+    .find("deploy/kubernetes/oxibelt-gateway-controller/crds/oxibeltroutepolicies.gateway.oxibelt.dev.yaml")
+    .expect("the Kubernetes rollout must install the OxiBelt Gateway API CRDs");
+  let established_wait = script
+    .find("kube wait --for=condition=Established --timeout=120s")
+    .expect("the Kubernetes rollout must wait for its Gateway API CRDs to become established");
+  let namespace_create = script
+    .find("kube create namespace \"${namespace}\"")
+    .expect("the Kubernetes rollout must create its isolated namespace");
+  assert!(
+    standard_crd_apply < oxibelt_crd_apply
+      && oxibelt_crd_apply < established_wait
+      && established_wait < namespace_create,
+    "the Kubernetes rollout must establish the standard and OxiBelt Gateway API CRDs before installing namespaced workloads"
+  );
   assert!(
     !script.contains("v1alpha2") && !script.contains("kube patch crd"),
     "the Kubernetes rollout must use served Gateway API v1 resources without mutating CRD versions"
