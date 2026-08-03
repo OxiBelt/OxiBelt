@@ -2197,7 +2197,8 @@ modes are:
   `config.files_sync`, `config.downstream_tls_reload`,
   `config.upstream_tls_refresh`, `config.key_rotate`,
   `config.secret_reference_update`, `ipm.write`, `break_glass.activate`,
-  `break_glass.revoke`, `operations.write`, `operations.lifecycle`,
+  `break_glass.revoke`, `membership.propose`, `membership.activate`,
+  `membership.cancel`, `operations.write`, `operations.lifecycle`,
   `cache.warm`, `cache.purge`,
   `person_proof.revoke`, `lifecycle.drain`, `lifecycle.undrain`,
   `dynamic_policy.write`, `upstream_pool.write`, and `stream_pool.write`.
@@ -2557,6 +2558,9 @@ required_actions = [
   "ipm.write",
   "break_glass.activate",
   "break_glass.revoke",
+  "membership.propose",
+  "membership.activate",
+  "membership.cancel",
 ]
 
 [admin.audit.spool]
@@ -2594,7 +2598,7 @@ changes. `mode` is `off`, `optional`, or `required`. `optional` validates and
 records supplied envelopes while preserving compatibility for callers that do
 not send one; `required` rejects a protected request without
 `X-OxiBelt-Mutation`. Both active modes require `backend` to name a PostgreSQL
-shared-state backend and require durable Admin audit coverage for all nine
+shared-state backend and require durable Admin audit coverage for all twelve
 protected action IDs with the durable store on that same backend. `required`
 also requires `[admin.audit.anchor].enabled = true` and external authority
 evidence before reporting protected-mutation success. A local fsynced audit

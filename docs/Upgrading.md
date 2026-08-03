@@ -634,6 +634,31 @@ committed immutable ConfigMap, remove the typed target resources, restore the
 legacy target values, and wait for that target's own proof; never copy a
 revision from one target workload to another.
 
+Post-beta.2 development also aligns the opt-in staged Admin-cluster membership
+writes with the Admin audit durability boundary. The exact proposal endpoint,
+`POST /admin/v1/membership/transitions`, uses `membership.propose`; exact
+one-segment `POST /admin/v1/membership/transitions/{transition_id}/activate`
+and `/cancel` requests use `membership.activate` and `membership.cancel`.
+Learner readiness, catch-up and status reads, wrong methods, and malformed
+nested paths remain outside those action identities. When one of these actions
+requires durable audit acknowledgement, an acknowledgement failure rejects the
+request before the membership effect is published.
+
+Deployments with active `[admin.mutations]` and
+`admin.audit.mode = "durable_required_for_actions"` must add all three
+`membership.*` identifiers to `admin.audit.required_actions`, for twelve
+protected action IDs in total.
+`durable_required` already covers them without an action list. Earlier binaries
+reject the new identifiers, while this version rejects the former nine-action
+selective list when Admin mutations are active. Either stop protected writes
+and replace the binary and configuration together, or first switch to
+`durable_required` and remove `required_actions`, validate that bridge with the
+old binary, upgrade every member, and only then restore selective mode with all
+twelve identifiers. Use the same `durable_required` bridge before rolling back
+to an earlier binary; never bridge through `best_effort`. Fixed membership
+remains the default, and this audit-classification correction changes no Admin
+wire shape, native configuration schema epoch, or persisted-state format.
+
 Neither the immutable `0.7.0` tag nor `0.7.1-beta.1` is a deployable upgrade
 target. Both failed exact-revision release-contract validation before draft
 creation and have no GitHub Release or official artifact. Use
