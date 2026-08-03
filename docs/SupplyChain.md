@@ -25,8 +25,10 @@ binary inventory, SBOM, and build environment independently checkable; it is
 still a workflow assertion until a separate rebuild verifies it. The
 publication-time vulnerability gate described below applies repository policy
 to the release scan, but operators must still enforce approval, current
-vulnerability intelligence, freshness, rollback, and deployment-admission
-policy separately.
+vulnerability intelligence, freshness, rollback, and deployment approval.
+OxiBelt's experimental admission-bundle flow supplies exact-evidence and
+freshness enforcement for the documented Kubernetes path; it does not replace
+those operator decisions.
 
 ## Official image repositories
 
@@ -150,11 +152,11 @@ run the compatibility `oxibelt` executable.
 
 `edge-secure-medium` v2 is intentionally stricter than the general chart: it
 admits only `ghcr.io/oxibelt/oxibelt-dataplane-strict` at an immutable digest
-and records that exact tuple in its Secret-free profile report. This is digest
-selection, not attestation admission. The report's `supplyChainBundle` remains
-unset until the separately designed `OB-P2-04` contract can bind and verify an
-exact trusted bundle. Do not populate a lookalike value, infer success from an
-OCI referrer, or treat a ConfigMap checksum as provenance evidence.
+and requires the experimental signed admission bundle described below. The
+Secret-free profile report records the exact image reference, bundle payload
+digest, signing-key ID, and that admission is required. The ConfigMap is only
+transport for an independently signed bundle; its Kubernetes checksum is not
+provenance evidence.
 
 ## Verify GitHub attestations
 
@@ -241,6 +243,117 @@ valid records as well as historical records. Verification must examine all
 results and select an exact match. A trusted timestamp proves when a particular
 bundle was witnessed; it is not a release-freshness or anti-rollback policy.
 
+## Generate a deployment admission bundle
+
+`oxibeltctl supply-chain admission-bundle` verifies a canonical
+multi-architecture index, not a mutable tag. By default it calls `gh
+attestation verify` separately for SLSA provenance, CycloneDX, and the OxiBelt
+index rebuild recipe with the exact repository, digest, source ref, full
+source revision, hosted-runner requirement, workflow identity, and predicate
+type. There is no local-evidence bypass: all three attestation classes must
+pass the GitHub CLI's cryptographic verification during bundle generation.
+
+The index recipe must contain the canonical `amd64`, `arm64`, and `riscv64`
+children. Supply the ID of one successful automatic
+`.github/workflows/verify-release-rebuild.yml` run. The command fetches its
+three exact role/architecture artifacts through the GitHub API, verifies each
+artifact archive against GitHub's immutable SHA-256 digest, safely extracts
+one bounded receipt, and checks the receipt's repository, release ref, source
+revision, role, architecture, workflow path, and run ID. `exact` and
+`normalized_equivalent` are accepted; a manual, failed, stale, expired,
+missing, duplicate, mismatched, or unbound receipt fails closed.
+
+```sh
+umask 077
+head -c 32 /dev/urandom > admission-bundle.ed25519
+
+oxibeltctl supply-chain admission-bundle \
+  --repository ghcr.io/oxibelt/oxibelt-dataplane-strict \
+  --role dataplane-strict \
+  --digest sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST \
+  --source-ref refs/tags/15.2.0 \
+  --source-revision FULL_40_CHARACTER_GIT_COMMIT \
+  --release-channel stable \
+  --independent-rebuild-run-id SUCCESSFUL_AUTOMATIC_WORKFLOW_RUN_ID \
+  --independent-rebuild-workflow-sha APPROVED_FULL_40_CHARACTER_VERIFIER_COMMIT \
+  --revocations deploy/supply-chain/revocations.example.json \
+  --signing-key-file admission-bundle.ed25519 \
+  --public-key-output admission-bundle.ed25519.pub \
+  --key-id deployment-admission-2026 \
+  --output bundle.json
+```
+
+The signing key is a raw 32-byte Ed25519 seed in an owner-only regular file.
+`--public-key-output` derives its raw 32-byte public key; distribute only that
+file to the admission component. The command prints `payloadDigest`; this is
+the identity placed in Helm values and on admitted Pods. Bundle payload
+serialization and Ed25519 signing are
+deterministic for identical evidence, policy inputs, and the explicitly
+modeled verification time.
+
+The verifier applies these hard bounds:
+
+- 100 results and 16 MiB for each GitHub verification response;
+- 1 MiB for workflow metadata, 4 MiB for at most 100 artifact records, 2 MiB
+  for each ZIP archive, and 1 MiB for each of exactly three rebuild receipts;
+- a 60-second deadline and 64 KiB diagnostic limit for every GitHub CLI call;
+- 1,024 entries and 1 MiB for the revocation policy;
+- 256 KiB for the final bundle and each admission request;
+- evidence freshness of at most one year, bundle lifetime of at most 30 days,
+  and at most five minutes of future clock skew.
+
+The bundle schema is
+`deploy/supply-chain/admission-bundle.schema.json`; revocations use
+`deploy/supply-chain/revocations.schema.json`. Unknown fields, mutable refs,
+role/repository confusion, conflicting duplicate predicates, unparseable
+trusted timestamps, stale evidence, malformed CycloneDX properties, incomplete
+rebuild coverage, and an effective revocation all fail closed.
+
+## Kubernetes validating admission
+
+Set `supplyChainAdmission.enabled=true` and provide the exact generated bundle,
+payload digest, public key, revocation policy, TLS Secret, CA bundle, and a
+digest-pinned official tools image. Also configure one to sixteen exact
+`webhook.apiServerSourceCidrs` observed for the cluster's API-server webhook
+connections; do not substitute the whole Pod or node CIDR. `edge-secure-medium`
+v2 requires this configuration and rejects a bundle whose embedded repository,
+role, image digest, payload digest, decision, or key ID differs from Helm
+values.
+
+The chart runs `oxibeltctl supply-chain admission-server` with no ambient
+ServiceAccount token, no GitHub credential, no egress, a read-only root
+filesystem, fixed CPU/memory limits, and a maximum of 128 concurrent TLS
+connections. The `ValidatingWebhookConfiguration` uses `failurePolicy: Fail`,
+matches only this release's OxiBelt Pods, and requires the exact bundle
+annotation, role annotation, and digest-pinned `oxibelt` container image. The
+server rechecks signature, expiry, revocation, and payload shape for every
+request. Missing, unreachable, malformed, expired, mismatched, or revoked
+evidence therefore blocks Pod creation and update; existing running Pods are
+not terminated.
+
+Admission resources and their immutable ConfigMap are content-addressed by the
+bundle payload digest. On rotation, generate a new bundle rather than editing
+one in place, install it with the new image identity, and wait for the new
+admission Deployment and Service endpoints before judging the data-plane
+rollout. Kubernetes controllers retry temporarily denied Pod creation. A
+webhook outage intentionally blocks rollout, so operate at least two replicas,
+retain the prior still-authorized bundle for rollback, monitor readiness, and
+test certificate renewal before expiry.
+
+Key rotation requires a new key ID, public key, bundle, and content-addressed
+admission Deployment. Revocation-policy changes also require a new bundle
+because the payload signs the canonical policy hash. To withdraw the currently
+deployed digest, publish the revocation and replacement bundle together; the
+old webhook then becomes unready/fail-closed until a non-revoked bundle is
+installed. Rollback is permitted only to an older digest that has fresh exact
+evidence, accepted rebuild receipts, and no effective revocation.
+
+This component authenticates the signed decision produced by the bundle
+operator. Compromise of the bundle signing key, admission TLS key, Helm release
+authority, webhook tools image, Kubernetes API/admission chain, or node remains
+a deployment trust-boundary compromise. Keep the signing key outside the
+cluster and do not place GitHub credentials in data-plane or admission Pods.
+
 ## Independent rebuild verification
 
 `.github/workflows/verify-release-rebuild.yml` is a separate read-only
@@ -251,6 +364,10 @@ a fresh tree, starts an isolated rootless Docker daemon, verifies the
 provenance, SBOM, and rebuild-recipe records through GitHub's API, resolves the
 canonical GHCR digest, and rebuilds without downloading artifacts from the
 producer workflow.
+
+Manual dispatch remains a diagnostic facility and is never accepted as
+release-admission evidence. Admission bundles accept only a successful
+automatic `workflow_run` for a stable or beta release.
 
 GitHub-hosted verification requests Docker's `cgroupfs` driver so the rootless
 daemon does not require an interactively authorized systemd scope. Docker
@@ -269,6 +386,12 @@ The verifier writes a machine-readable receipt with one of four outcomes:
 - `mismatch` is a verification failure; and
 - `unverifiable` means evidence was missing, malformed, unsafe to compare, or
   outside the comparator's resource bounds, and also fails the job.
+
+Successful receipts also carry the exact source repository, tag ref, full
+revision, image role, architecture, verifier workflow path, run ID, and run
+attempt. These fields make a downloaded artifact reviewable and prevent a
+receipt from another successful run or release from being substituted during
+admission-bundle generation.
 
 Normalization preserves filesystem content and types, modes, ownership,
 links, extended attributes and capabilities, OCI configuration, executable
@@ -528,15 +651,15 @@ newer digest is attested, that every role or platform has equivalent evidence,
 that the release completed promotion, or that the evidence satisfies current
 policy.
 
-OxiBelt does not ship a Sigstore Policy Controller policy or another
-OxiBelt-managed Kubernetes admission rule for the GitHub API bundles. A policy
-that searches GHCR referrers, requires a Cosign signature, or verifies with
-`--bundle-from-oci` will not find the current API-only records. Do not switch a
-validating webhook to `failurePolicy: Ignore`, broaden an allowlist to
-`ghcr.io/oxibelt/*`, or remove a fail-closed policy merely to make deployment
-proceed. Any replacement admission policy is an operator-owned security-boundary
-change and must be separately approved, staged, tested for every role, and
-given a rollback plan.
+The OxiBelt admission-bundle verifier consumes the GitHub API verification
+model above; it does not search OCI referrers or require Cosign sibling
+artifacts. A policy that searches GHCR referrers, requires a Cosign signature,
+or verifies with `--bundle-from-oci` will not find the current API-only
+records. Do not switch the validating webhook to `failurePolicy: Ignore`,
+broaden an allowlist to `ghcr.io/oxibelt/*`, or remove a fail-closed policy
+merely to make deployment proceed. Any replacement admission policy is an
+operator-owned security-boundary change and must be separately approved,
+staged, tested for every role, and given a rollback plan.
 
 ## Release and rollback records
 

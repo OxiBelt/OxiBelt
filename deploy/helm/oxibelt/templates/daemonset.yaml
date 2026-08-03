@@ -61,6 +61,10 @@ spec:
         checksum/oxibelt-profile-report: {{ include "oxibelt.profileReportDigest" . | quote }}
         oxibelt.dev/profile-report: {{ include "oxibelt.profileReportName" . | quote }}
         {{- end }}
+        {{- if .Values.supplyChainAdmission.enabled }}
+        oxibelt.dev/supply-chain-bundle-digest: {{ .Values.supplyChainAdmission.bundle.payloadDigest | quote }}
+        oxibelt.dev/image-role: {{ .Values.image.role | quote }}
+        {{- end }}
         {{- if eq .Values.configRollout.mode "kubernetes_immutable" }}
         oxibelt.dev/immutable-config-rollout: "true"
         oxibelt.dev/config-rollout-target-kind: "DaemonSet"

@@ -112,7 +112,12 @@ for expected in \
   '"schemaVersion": 1' \
   '"filesystemManifestExpectationPresent": true' \
   '"filesystemManifestDigestWithheld": true' \
-  '"supplyChainBundle": null' \
+  '"admissionRequired": true' \
+  '"payloadDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"' \
+  'oxibelt.dev/supply-chain-bundle-digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222"' \
+  'failurePolicy: Fail' \
+  'automountServiceAccountToken: false' \
+  'cidr: "192.0.2.1/32"' \
   '"unmetRequirements": []'; do
   assert_contains "${work_dir}/deployment.yaml" "${expected}"
 done
@@ -189,6 +194,18 @@ render hardening_changed \
 
 expect_failure_contains missing_digest 'OBP106-IMAGE-DIGEST' \
   --set-string image.digest=
+expect_failure_contains admission_disabled 'OBP204-ADMISSION-REQUIRED' \
+  --set supplyChainAdmission.enabled=false
+expect_failure_contains bundle_identity_mismatch 'OBP204-BUNDLE-IDENTITY' \
+  --set-string supplyChainAdmission.bundle.payloadDigest=sha256:5555555555555555555555555555555555555555555555555555555555555555
+expect_failure_contains bundle_artifact_mismatch 'OBP204-BUNDLE-ARTIFACT' \
+  --set-string image.digest=sha256:5555555555555555555555555555555555555555555555555555555555555555
+expect_failure_contains webhook_unpinned 'OBP204-WEBHOOK-DIGEST' \
+  --set-string supplyChainAdmission.webhook.image.digest=
+expect_failure_contains invalid_webhook_tls_secret 'OBP204-WEBHOOK-TLS' \
+  --set-string supplyChainAdmission.webhook.tlsSecretName=bad_name
+expect_failure_contains missing_webhook_sources 'OBP204-WEBHOOK-SOURCES' \
+  --set-json supplyChainAdmission.webhook.apiServerSourceCidrs=[]
 expect_failure_contains non_strict_role 'OBP106-IMAGE-ROLE' \
   --set-string image.role=dataplane \
   --set-string image.repository=ghcr.io/oxibelt/oxibelt-dataplane

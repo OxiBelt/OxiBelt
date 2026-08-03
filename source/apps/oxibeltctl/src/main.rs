@@ -85,6 +85,12 @@ mod rulepack_render;
 mod rulepack_url;
 #[path = "rulepack_values.rs"]
 mod rulepack_values;
+#[path = "supply_chain.rs"]
+mod supply_chain;
+#[path = "supply_chain_admission.rs"]
+mod supply_chain_admission;
+#[path = "supply_chain_bundle.rs"]
+mod supply_chain_bundle;
 #[cfg(test)]
 #[path = "test_support.rs"]
 mod test_support;
@@ -142,6 +148,9 @@ async fn run() -> anyhow::Result<i32> {
   }
   if config_compat::run_local_if_requested(&cli.command)? {
     return Ok(0);
+  }
+  if let Some(code) = supply_chain::run_if_requested(&cli.command).await? {
+    return Ok(code);
   }
   let client = build_client(&cli.admin)?;
   if let Some(prepared) = prepared_config_plan {

@@ -12,6 +12,41 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
+# Digest-bound admission is opt-in for unprofiled installs and mandatory for
+# edge-secure-medium v2. Generate `bundle.inline` with `oxibeltctl supply-chain
+# admission-bundle`; the admission Pod needs no GitHub or registry credential.
+supplyChainAdmission:
+  enabled: false
+  bundle:
+    # SHA-256 identity printed by the bundle generator. It is also signed as
+    # `signature.payloadSha256` and placed on admitted OxiBelt Pods.
+    payloadDigest: ""
+    inline: ""
+    keyId: ""
+    # Raw 32-byte Ed25519 public key encoded as standard padded base64.
+    publicKeyBase64: ""
+    # A bounded schema-v1 revocation policy. Changing it requires a new bundle
+    # because the bundle signs its exact canonical SHA-256 digest.
+    revocations: |-
+      {"schemaVersion":1,"revocations":[]}
+  webhook:
+    # Exact tools-image digest containing `oxibeltctl supply-chain
+    # admission-server`. The webhook is a separately pinned bootstrap
+    # component and is not covered by the data-plane bundle.
+    image:
+      repository: ghcr.io/oxibelt/oxibelt-tools
+      digest: ""
+      pullPolicy: IfNotPresent
+    replicas: 2
+    tlsSecretName: ""
+    # Exact source CIDRs observed for Kubernetes API-server webhook calls.
+    # edge-secure-medium v2 requires 1-16 entries; determine these from the
+    # cluster network rather than admitting the full Pod or node CIDR.
+    apiServerSourceCidrs: []
+    # PEM CA certificate bytes encoded as base64 for ValidatingWebhookConfiguration.
+    caBundle: ""
+    timeoutSeconds: 5
+
 # Empty uses Chart.appVersion. Development and release-equivalent image
 # qualification must set the immutable image's effective SemVer explicitly.
 effectiveVersion: ""

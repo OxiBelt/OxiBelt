@@ -86,6 +86,7 @@ pub(crate) async fn plan_command(
     Command::Cache(command) => plan_cache(command),
     Command::Ipm(command) => crate::ipm_plan::plan_ipm(client, command).await,
     Command::Membership(command) => plan_membership(command),
+    Command::SupplyChain(_) => bail!("supply-chain commands are local-only"),
     Command::Auth(command) => match &command.command {
       AuthSubcommand::Check(args) => crate::ipm_plan::plan_auth_check(args),
     },

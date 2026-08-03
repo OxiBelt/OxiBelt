@@ -38,7 +38,7 @@ http-body-util = "0.1.4"
 jsonschema = { workspace = true, optional = true }
 futures-util = "0.3.33"
 fastwebsockets = { version = "0.10.0", features = ["unstable-split"] }
-flate2 = "1.1.9"
+flate2.workspace = true
 h3 = "0.0.8"
 h3-datagram = "0.0.2"
 h3-quinn = { version = "0.0.10", default-features = false, features = ["datagram"] }

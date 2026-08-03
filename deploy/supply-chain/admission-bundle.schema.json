@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oxibelt.dev/schemas/supply-chain/admission-bundle-v1.json",
+  "title": "OxiBelt supply-chain admission bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["payload", "signature"],
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
+    "timestamp": { "type": "integer", "minimum": 0 },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "predicateType", "objectSha256", "predicateSha256", "trustedTimestamp"],
+      "properties": {
+        "kind": { "enum": ["provenance", "sbom", "rebuild"] },
+        "predicateType": {
+          "enum": [
+            "https://slsa.dev/provenance/v1",
+            "https://cyclonedx.org/bom",
+            "https://oxibelt.dev/attestations/rebuild/v1"
+          ]
+        },
+        "objectSha256": { "$ref": "#/$defs/digest" },
+        "predicateSha256": { "$ref": "#/$defs/digest" },
+        "trustedTimestamp": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "rebuildReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactArch", "publishedDigest", "outcome", "archiveSha256", "objectSha256"],
+      "properties": {
+        "artifactArch": { "enum": ["amd64", "arm64", "riscv64"] },
+        "publishedDigest": { "$ref": "#/$defs/digest" },
+        "outcome": { "enum": ["exact", "normalized_equivalent"] },
+        "archiveSha256": { "$ref": "#/$defs/digest" },
+        "objectSha256": { "$ref": "#/$defs/digest" }
+      }
+    }
+  },
+  "properties": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "policy", "artifact", "evidence", "independentRebuild", "decision"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "releaseChannel", "maxEvidenceAgeSeconds", "revocationsSha256", "bundleSigningKeyId"],
+          "properties": {
+            "version": { "const": "oxibelt-admission-v1" },
+            "releaseChannel": { "enum": ["stable", "beta"] },
+            "maxEvidenceAgeSeconds": { "type": "integer", "minimum": 1, "maximum": 31536000 },
+            "revocationsSha256": { "$ref": "#/$defs/digest" },
+            "bundleSigningKeyId": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "digest", "imageReference", "role", "sourceRepository", "sourceRef", "sourceRevision", "signerWorkflow"],
+          "properties": {
+            "repository": { "type": "string", "pattern": "^ghcr[.]io/oxibelt/oxibelt(?:-dataplane|-dataplane-strict|-gateway-controller|-tools|-keysigner)?$" },
+            "digest": { "$ref": "#/$defs/digest" },
+            "imageReference": { "type": "string", "maxLength": 256 },
+            "role": { "enum": ["standalone", "dataplane", "dataplane-strict", "controller", "tools", "keysigner"] },
+            "sourceRepository": { "const": "OxiBelt/OxiBelt" },
+            "sourceRef": { "type": "string", "pattern": "^refs/tags/[0-9]+[.][0-9]+[.][0-9]+(?:-beta[.][0-9]+)?$" },
+            "sourceRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "signerWorkflow": { "type": "string", "maxLength": 512 }
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/evidence" }
+        },
+        "independentRebuild": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requiredArchitectures", "workflowRunId", "workflowPath", "workflowSha", "completedAt", "receipts"],
+          "properties": {
+            "requiredArchitectures": {
+              "const": ["amd64", "arm64", "riscv64"]
+            },
+            "workflowRunId": { "type": "integer", "minimum": 1 },
+            "workflowPath": { "const": ".github/workflows/verify-release-rebuild.yml" },
+            "workflowSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "completedAt": { "$ref": "#/$defs/timestamp" },
+            "receipts": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": { "$ref": "#/$defs/rebuildReceipt" }
+            }
+          }
+        },
+        "decision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reasons", "verifiedAt", "expiresAt"],
+          "properties": {
+            "status": { "const": "pass" },
+            "reasons": { "const": ["exact_evidence_verified"] },
+            "verifiedAt": { "$ref": "#/$defs/timestamp" },
+            "expiresAt": { "$ref": "#/$defs/timestamp" }
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "keyId", "payloadSha256", "valueHex"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "keyId": { "$ref": "#/$defs/identifier" },
+        "payloadSha256": { "$ref": "#/$defs/digest" },
+        "valueHex": { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+      }
+    }
+  }
+}

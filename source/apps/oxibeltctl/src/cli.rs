@@ -20,6 +20,8 @@ mod membership_cli;
 mod mutation_cli;
 #[path = "rulepack_cli.rs"]
 mod rulepack_cli;
+#[path = "supply_chain_cli.rs"]
+mod supply_chain_cli;
 pub(crate) use audit_cli::*;
 pub(crate) use auth_cli::*;
 pub(crate) use config_compat_cli::*;
@@ -28,6 +30,7 @@ pub(crate) use ipm_cli::*;
 pub(crate) use membership_cli::*;
 pub(crate) use mutation_cli::*;
 pub(crate) use rulepack_cli::*;
+pub(crate) use supply_chain_cli::*;
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibeltctl")]
@@ -99,6 +102,8 @@ pub(crate) enum Command {
   Cache(CacheCommand),
   Ipm(IpmCommand),
   Membership(MembershipCommand),
+  #[command(name = "supply-chain")]
+  SupplyChain(SupplyChainCommand),
   Auth(AuthCommand),
   Files(FilesCommand),
 }

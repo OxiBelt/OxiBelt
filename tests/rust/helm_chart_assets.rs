@@ -32,6 +32,16 @@ fn data_plane_chart_metadata_and_values_are_valid() {
 
   let values = read_yaml("deploy/helm/oxibelt/values.yaml");
   assert_eq!(values["image"]["digest"], "");
+  assert_eq!(values["supplyChainAdmission"]["enabled"], false);
+  assert_eq!(
+    values["supplyChainAdmission"]["webhook"]["image"]["repository"],
+    "ghcr.io/oxibelt/oxibelt-tools"
+  );
+  assert!(
+    values["supplyChainAdmission"]["webhook"]["apiServerSourceCidrs"]
+      .as_array()
+      .is_some_and(Vec::is_empty)
+  );
   assert_eq!(values["replicaCount"], 2);
   assert_eq!(values["workload"]["kind"], "Deployment");
   assert_eq!(values["workload"]["deployment"]["maxUnavailable"], 0);
@@ -150,6 +160,15 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(
     schema["properties"]["image"]["properties"]["digest"]["pattern"],
     "^$|^sha256:[0-9a-f]{64}$"
+  );
+  assert_eq!(
+    schema["properties"]["supplyChainAdmission"]["properties"]["bundle"]["properties"]["inline"]["maxLength"],
+    262144
+  );
+  assert_eq!(
+    schema["properties"]["supplyChainAdmission"]["properties"]["webhook"]["properties"]["timeoutSeconds"]
+      ["maximum"],
+    10
   );
   assert_eq!(
     schema["properties"]["workload"]["properties"]["kind"]["enum"][0],
@@ -450,6 +469,14 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     true
   );
   assert_eq!(
+    edge_secure_medium_v2_example["supplyChainAdmission"]["enabled"],
+    true
+  );
+  assert_eq!(
+    edge_secure_medium_v2_example["supplyChainAdmission"]["webhook"]["image"]["repository"],
+    "ghcr.io/oxibelt/oxibelt-tools"
+  );
+  assert_eq!(
     edge_secure_medium_v2_example["kubernetesDiscovery"]["serviceAccountToken"]["enabled"],
     false
   );
@@ -541,6 +568,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "templates/rbac.yaml",
     "templates/configmap.yaml",
     "templates/profile-report.yaml",
+    "templates/supply-chain-admission.yaml",
     "templates/deployment.yaml",
     "templates/daemonset.yaml",
     "templates/service.yaml",
@@ -555,6 +583,34 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     assert!(
       repo_root().join("deploy/helm/oxibelt").join(file).exists(),
       "data-plane chart should include {file}"
+    );
+  }
+
+  let admission = read_repo("deploy/helm/oxibelt/templates/supply-chain-admission.yaml");
+  for needle in [
+    "kind: ValidatingWebhookConfiguration",
+    "failurePolicy: Fail",
+    "automountServiceAccountToken: false",
+    "readOnlyRootFilesystem: true",
+    "resources:",
+    "egress: []",
+    "oxibeltctl",
+    "admission-server",
+  ] {
+    assert!(
+      admission.contains(needle),
+      "supply-chain admission template should contain {needle}"
+    );
+  }
+  for forbidden in [
+    "failurePolicy: Ignore",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "image: latest",
+  ] {
+    assert!(
+      !admission.contains(forbidden),
+      "supply-chain admission template must not contain {forbidden}"
     );
   }
 

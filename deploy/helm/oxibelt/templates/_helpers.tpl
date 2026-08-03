@@ -2,6 +2,22 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- define "oxibelt.supplyChainAdmissionName" -}}
+{{- printf "%s-admission" (include "oxibelt.name" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "oxibelt.supplyChainAdmissionClusterName" -}}
+{{- printf "%s-%s-admission" .Release.Namespace .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "oxibelt.supplyChainAdmissionRevision" -}}
+{{- trimPrefix "sha256:" .Values.supplyChainAdmission.bundle.payloadDigest | trunc 12 -}}
+{{- end -}}
+
+{{- define "oxibelt.supplyChainAdmissionResourceName" -}}
+{{- printf "%s-%s" (include "oxibelt.supplyChainAdmissionName" . | trunc 50 | trimSuffix "-") (include "oxibelt.supplyChainAdmissionRevision" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "oxibelt.validateImageRole" -}}
 {{- $role := .Values.image.role -}}
 {{- if not (has $role (list "dataplane" "dataplane-strict" "standalone")) -}}

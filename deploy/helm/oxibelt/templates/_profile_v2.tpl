@@ -3,6 +3,83 @@
 {{- if and (eq .Values.operationalProfile.name "edge-secure-medium") (eq (int .Values.operationalProfile.version) 2) -}}true{{- else -}}false{{- end -}}
 {{- end -}}
 
+{{- define "oxibelt.validateSupplyChainAdmission" -}}
+{{- if .Values.supplyChainAdmission.enabled -}}
+{{- if eq (include "oxibelt.isOperationalProfileV2" .) "true" -}}
+{{- if ne .Values.image.role "dataplane-strict" -}}
+{{- fail "OBP106-IMAGE-ROLE: operationalProfile edge-secure-medium v2 requires image.role=dataplane-strict" -}}
+{{- end -}}
+{{- if and .Values.image.repository (ne .Values.image.repository "ghcr.io/oxibelt/oxibelt-dataplane-strict") -}}
+{{- fail "OBP106-IMAGE-REPOSITORY: operationalProfile edge-secure-medium v2 requires the official strict data-plane repository" -}}
+{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) -}}
+{{- fail "OBP106-IMAGE-DIGEST: operationalProfile edge-secure-medium v2 requires image.digest to be a lower-case sha256 digest" -}}
+{{- end -}}
+{{- end -}}
+{{- $admission := .Values.supplyChainAdmission -}}
+{{- $bundle := $admission.bundle -}}
+{{- $webhook := $admission.webhook -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $bundle.payloadDigest) -}}
+{{- fail "OBP204-BUNDLE-DIGEST: supplyChainAdmission.bundle.payloadDigest must be a lower-case sha256 digest" -}}
+{{- end -}}
+{{- if or (not $bundle.inline) (gt (len $bundle.inline) 262144) -}}
+{{- fail "OBP204-BUNDLE-SIZE: supplyChainAdmission.bundle.inline must contain at most 262144 bytes" -}}
+{{- end -}}
+{{- if or (not $bundle.keyId) (gt (len $bundle.keyId) 128) (not (regexMatch "^[A-Za-z0-9._-]+$" $bundle.keyId)) -}}
+{{- fail "OBP204-BUNDLE-KEY: supplyChainAdmission.bundle.keyId is invalid" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9+/]{43}=$" $bundle.publicKeyBase64) -}}
+{{- fail "OBP204-PUBLIC-KEY: supplyChainAdmission.bundle.publicKeyBase64 must encode one raw 32-byte Ed25519 key" -}}
+{{- end -}}
+{{- if or (not $bundle.revocations) (gt (len $bundle.revocations) 1048576) -}}
+{{- fail "OBP204-REVOCATIONS-SIZE: supplyChainAdmission.bundle.revocations must contain at most 1048576 bytes" -}}
+{{- end -}}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $webhook.image.digest) -}}
+{{- fail "OBP204-WEBHOOK-DIGEST: supplyChainAdmission webhook image requires a lower-case sha256 digest" -}}
+{{- end -}}
+{{- if ne $webhook.image.repository "ghcr.io/oxibelt/oxibelt-tools" -}}
+{{- fail "OBP204-WEBHOOK-IMAGE: supplyChainAdmission webhook requires the official tools repository" -}}
+{{- end -}}
+{{- if or (lt (int $webhook.replicas) 2) (gt (int $webhook.replicas) 9) -}}
+{{- fail "OBP204-WEBHOOK-REPLICAS: supplyChainAdmission webhook replicas must be between 2 and 9" -}}
+{{- end -}}
+{{- if or (not $webhook.tlsSecretName) (gt (len $webhook.tlsSecretName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $webhook.tlsSecretName)) -}}
+{{- fail "OBP204-WEBHOOK-TLS: supplyChainAdmission webhook requires a DNS-subdomain tlsSecretName" -}}
+{{- end -}}
+{{- if or (lt (len $webhook.apiServerSourceCidrs) 1) (gt (len $webhook.apiServerSourceCidrs) 16) -}}
+{{- fail "OBP204-WEBHOOK-SOURCES: supplyChainAdmission webhook requires 1 to 16 exact API-server source CIDRs" -}}
+{{- end -}}
+{{- range $cidr := $webhook.apiServerSourceCidrs -}}
+{{- if not (or (regexMatch "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/([0-9]|[12][0-9]|3[0-2])$" $cidr) (regexMatch "^[0-9A-Fa-f:]+/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$" $cidr)) -}}
+{{- fail "OBP204-WEBHOOK-SOURCES: supplyChainAdmission webhook API-server source CIDRs are invalid" -}}
+{{- end -}}
+{{- end -}}
+{{- if or (not $webhook.caBundle) (gt (len $webhook.caBundle) 262144) -}}
+{{- fail "OBP204-WEBHOOK-CA: supplyChainAdmission webhook requires a bounded caBundle" -}}
+{{- end -}}
+{{- if or (lt (int $webhook.timeoutSeconds) 1) (gt (int $webhook.timeoutSeconds) 10) -}}
+{{- fail "OBP204-WEBHOOK-TIMEOUT: supplyChainAdmission webhook timeoutSeconds must be between 1 and 10" -}}
+{{- end -}}
+{{- $parsed := fromJson $bundle.inline -}}
+{{- if hasKey $parsed "Error" -}}
+{{- fail "OBP204-BUNDLE-JSON: supplyChainAdmission.bundle.inline must be valid JSON" -}}
+{{- end -}}
+{{- if ne (dig "signature" "payloadSha256" "" $parsed) $bundle.payloadDigest -}}
+{{- fail "OBP204-BUNDLE-IDENTITY: configured bundle digest does not match signature.payloadSha256" -}}
+{{- end -}}
+{{- if or (ne (dig "signature" "keyId" "" $parsed) $bundle.keyId) (ne (dig "payload" "policy" "bundleSigningKeyId" "" $parsed) $bundle.keyId) -}}
+{{- fail "OBP204-BUNDLE-KEY-ID: configured key id does not match the bundle" -}}
+{{- end -}}
+{{- if ne (dig "payload" "decision" "status" "" $parsed) "pass" -}}
+{{- fail "OBP204-BUNDLE-DECISION: supply-chain bundle decision must pass" -}}
+{{- end -}}
+{{- $repository := .Values.image.repository | default "ghcr.io/oxibelt/oxibelt-dataplane-strict" -}}
+{{- if or (ne (dig "payload" "artifact" "repository" "" $parsed) $repository) (ne (dig "payload" "artifact" "digest" "" $parsed) .Values.image.digest) (ne (dig "payload" "artifact" "role" "" $parsed) .Values.image.role) (ne (dig "payload" "artifact" "imageReference" "" $parsed) (printf "%s@%s" $repository .Values.image.digest)) -}}
+{{- fail "OBP204-BUNDLE-ARTIFACT: supply-chain bundle does not match the exact Helm image repository, role, and digest" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "oxibelt.validateOperationalProfileV2" -}}
 {{- if eq (include "oxibelt.isOperationalProfileV2" .) "true" -}}
 {{- $officialRepository := "ghcr.io/oxibelt/oxibelt-dataplane-strict" -}}
@@ -15,9 +92,14 @@
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest) -}}
 {{- fail "OBP106-IMAGE-DIGEST: operationalProfile edge-secure-medium v2 requires image.digest to be a lower-case sha256 digest" -}}
 {{- end -}}
+{{- if not .Values.supplyChainAdmission.enabled -}}
+{{- fail "OBP204-ADMISSION-REQUIRED: operationalProfile edge-secure-medium v2 requires supplyChainAdmission.enabled=true" -}}
+{{- end -}}
+{{- include "oxibelt.validateSupplyChainAdmission" . -}}
 {{- if not .Values.networkPolicy.enabled -}}
 {{- fail "OBP106-NETWORK-POLICY: operationalProfile edge-secure-medium v2 requires networkPolicy.enabled=true" -}}
 {{- end -}}
+
 {{- $hasPublicListener := or .Values.service.ports.http.enabled .Values.service.ports.https.enabled .Values.service.ports.http3.enabled (gt (len (.Values.service.additionalPorts | default (list))) 0) -}}
 {{- if and $hasPublicListener (not .Values.networkPolicy.ingress.public.allowAll) (eq (len .Values.networkPolicy.ingress.public.from) 0) -}}
 {{- fail "OBP106-PUBLIC-INGRESS: operationalProfile edge-secure-medium v2 requires explicit public ingress peers or ingress.public.allowAll=true for enabled public listeners" -}}
@@ -250,7 +332,7 @@
       "writableMounts" $mounts
       "availability" (dict "workloadKind" .Values.workload.kind "podDisruptionBudget" .Values.podDisruptionBudget "podDistribution" .Values.podDistribution)
       "artifactIdentities" (dict "configDigest" (include "oxibelt.configDigest" .) "oxiruleDigest" (include "oxibelt.oxiruleConfigMapDigest" .) "secretReferencesDigest" (include "oxibelt.secretReferencesDigest" .) "tlsReferences" (dict "publicSecretName" .Values.tls.secretName "quicHostKeySecretName" .Values.quic.hostKeySecretName) "hardeningProfileDigest" (include "oxibelt.hardeningProfileDigest" .) "filesystemManifestExpectationPresent" true "filesystemManifestDigestWithheld" true)
-      "supplyChainBundle" nil
+      "supplyChainBundle" (dict "payloadDigest" .Values.supplyChainAdmission.bundle.payloadDigest "keyId" .Values.supplyChainAdmission.bundle.keyId "imageReference" (printf "%s@%s" $repository .Values.image.digest) "admissionRequired" true)
       "unmetRequirements" (list) -}}
 {{- $report | toPrettyJson -}}
 {{- end -}}

@@ -239,6 +239,60 @@
         "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
       }
     },
+    "supplyChainAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "bundle", "webhook"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "bundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["payloadDigest", "inline", "keyId", "publicKeyBase64", "revocations"],
+          "properties": {
+            "payloadDigest": { "type": "string", "pattern": "^$|^sha256:[0-9a-f]{64}$" },
+            "inline": { "type": "string", "maxLength": 262144 },
+            "keyId": { "type": "string", "maxLength": 128, "pattern": "^$|^[A-Za-z0-9._-]+$" },
+            "publicKeyBase64": { "type": "string", "pattern": "^$|^[A-Za-z0-9+/]{43}=$" },
+            "revocations": { "type": "string", "minLength": 1, "maxLength": 1048576 }
+          }
+        },
+        "webhook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image", "replicas", "tlsSecretName", "apiServerSourceCidrs", "caBundle", "timeoutSeconds"],
+          "properties": {
+            "image": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["repository", "digest", "pullPolicy"],
+              "properties": {
+                "repository": { "const": "ghcr.io/oxibelt/oxibelt-tools" },
+                "digest": { "type": "string", "pattern": "^$|^sha256:[0-9a-f]{64}$" },
+                "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+              }
+            },
+            "replicas": { "type": "integer", "minimum": 2, "maximum": 9 },
+            "tlsSecretName": { "type": "string", "maxLength": 253, "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" },
+            "apiServerSourceCidrs": {
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "maxLength": 49,
+                "oneOf": [
+                  { "pattern": "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/([0-9]|[12][0-9]|3[0-2])$" },
+                  { "pattern": "^[0-9A-Fa-f:]+/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$" }
+                ]
+              }
+            },
+            "caBundle": { "type": "string", "maxLength": 262144 },
+            "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 10 }
+          }
+        }
+      }
+    },
     "effectiveVersion": {
       "type": "string",
       "pattern": "^$|^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
@@ -852,7 +906,7 @@
         }
       },
       "then": {
-        "required": ["image", "networkPolicy", "runtimeHardening", "writableVolumes"],
+        "required": ["image", "networkPolicy", "runtimeHardening", "supplyChainAdmission", "writableVolumes"],
         "properties": {
           "image": {
             "required": ["role", "repository", "digest"],
@@ -865,6 +919,10 @@
             }
           },
           "networkPolicy": {
+            "required": ["enabled"],
+            "properties": { "enabled": { "const": true } }
+          },
+          "supplyChainAdmission": {
             "required": ["enabled"],
             "properties": { "enabled": { "const": true } }
           },

@@ -90,8 +90,8 @@ The bounded networking contract is IPv4 single stack with the portable
 NetworkPolicy behavior tested on both Calico and Cilium. It does not claim that
 every CNI or a dual-stack/IPv6 cluster is qualified. Both charts must install
 and operate in a namespace enforcing the `restricted` Pod Security Standard.
-Operators still own cluster admission, CNI configuration, external DNS,
-load-balancing, storage, and certificate issuance.
+Operators still own the cluster admission chain, CNI configuration, external
+DNS, load-balancing, storage, webhook availability, and certificate issuance.
 
 The `edge-secure-medium` v2 deployment envelope targets this same Kubernetes
 1.34–1.36 and Helm 3.21.3/4.2.3 range. CI verifies its exact digest-pinned
@@ -100,7 +100,10 @@ labels, while the shared strict-data-plane harness supplies live
 RuntimeDefault/Landlock evidence. The live harness does not yet install the
 complete v2 values contract. A rendered profile report records intended
 controls but does not by itself satisfy the `pod-security-restricted`,
-`network-policy-cnis`, native-architecture, or supply-chain gates.
+`network-policy-cnis`, native-architecture, or live supply-chain-admission
+gates. V2 now requires a signed exact-digest bundle and `failurePolicy: Fail`
+webhook; static rendering does not prove that the TLS endpoint was reachable or
+that a real API server admitted and rejected the expected Pods.
 
 <!-- BEGIN KUBERNETES GRADUATION GENERATED -->
 

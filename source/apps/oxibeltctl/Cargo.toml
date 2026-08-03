@@ -17,8 +17,14 @@ anyhow.workspace = true
 aws-lc-rs.workspace = true
 bytes.workspace = true
 clap.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
 getrandom.workspace = true
 http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["server"] }
+hyper-util = { workspace = true, features = ["server"] }
+jiff.workspace = true
 libc.workspace = true
 oxibelt = { workspace = true, features = ["admin-runtime", "config-tooling"] }
 oxibelt-build-identity.workspace = true
@@ -31,6 +37,7 @@ sha2.workspace = true
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }
 tempfile.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 url.workspace = true

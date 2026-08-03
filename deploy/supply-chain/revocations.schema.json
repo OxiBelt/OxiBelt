@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oxibelt.dev/schemas/supply-chain/revocations-v1.json",
+  "title": "OxiBelt deployment artifact revocations v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "revocations"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "revocations": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository", "digest", "effectiveAt", "reason"],
+        "properties": {
+          "repository": {
+            "enum": [
+              "ghcr.io/oxibelt/oxibelt",
+              "ghcr.io/oxibelt/oxibelt-dataplane",
+              "ghcr.io/oxibelt/oxibelt-dataplane-strict",
+              "ghcr.io/oxibelt/oxibelt-gateway-controller",
+              "ghcr.io/oxibelt/oxibelt-tools",
+              "ghcr.io/oxibelt/oxibelt-keysigner"
+            ]
+          },
+          "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "effectiveAt": { "type": "integer", "minimum": 0 },
+          "reason": { "enum": ["compromised", "withdrawn", "policy_violation"] }
+        }
+      }
+    }
+  }
+}

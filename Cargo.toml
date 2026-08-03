@@ -38,11 +38,14 @@ anyhow = "1.0.104"
 aws-lc-rs = { version = "1.17.3", default-features = false }
 bytes = "1.12.1"
 clap = { version = "4.6.5", features = ["derive"] }
+crc32fast = "1.5.0"
+flate2 = "1.1.9"
 glob = "0.3.4"
 getrandom = "0.4.3"
 http = "1.5.0"
 http-body-util = "0.1.4"
 jsonschema = { version = "0.49.2", default-features = false }
+jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 hyper = { version = "1.11.0", features = ["client", "http1", "http2"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
@@ -68,6 +71,7 @@ sha2 = "0.11.0"
 strsim = "0.11.1"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
 toml = "1.1.4"
 toml_edit = "0.25.13"
 tracing = "0.1.44"

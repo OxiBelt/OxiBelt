@@ -305,3 +305,31 @@ python3 "${rebuilt_root}/tests/scripts/compare-release-image-artifacts.py" \
   --rebuilt-contract "${rebuilt_contract}" \
   --rebuilt-sbom "${rebuilt_sbom}" \
   --output "${output}"
+
+if [[ ! "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] ||
+   [[ ! "${GITHUB_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "independent rebuild receipts require exact GitHub workflow run identity" >&2
+  exit 1
+fi
+bound_receipt="${temporary}/bound-rebuild-receipt.json"
+jq -S \
+  --arg repository "OxiBelt/OxiBelt" \
+  --arg ref "${release_ref}" \
+  --arg revision "${revision}" \
+  --arg role "${role}" \
+  --arg artifact_arch "${artifact_arch}" \
+  --arg workflow_path ".github/workflows/verify-release-rebuild.yml" \
+  --argjson run_id "${GITHUB_RUN_ID}" \
+  --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
+    . + {
+      source: {repository: $repository, ref: $ref, revision: $revision},
+      build: {role: $role, artifactArch: $artifact_arch},
+      workflow: {
+        repository: $repository,
+        path: $workflow_path,
+        runId: $run_id,
+        runAttempt: $run_attempt
+      }
+    }
+  ' "${output}" >"${bound_receipt}"
+mv "${bound_receipt}" "${output}"
