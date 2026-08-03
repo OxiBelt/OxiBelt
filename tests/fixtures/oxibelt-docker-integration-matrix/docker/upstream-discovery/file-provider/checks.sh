@@ -1,10 +1,10 @@
 
 run_case_checks() {
-  local response state seen_alt seen_primary attempt
+  local response="" state="" seen_alt seen_primary attempt
   seen_alt=0
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
     state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
-    if ! jq -e '.body | fromjson | ([.servers[] | select(.id == "file-alt" and .source == "file" and .healthy == true)] | length) == 1' <<<"${state}" >/dev/null; then
+    if ! jq -e '.body | fromjson | ([.servers[] | select(.source == "file" and .origin == "http://mock-alt:18081/alt" and .healthy == true)] | length) == 1' <<<"${state}" >/dev/null; then
       sleep 0.5
       continue
     fi
@@ -27,10 +27,11 @@ run_case_checks() {
 }
 JSON
   docker cp "${case_dir}/config/discovery/app-pool.json" "${proxy_container}:/etc/oxibelt/config/discovery/app-pool.json"
+  response=""
   seen_primary=0
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
     state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/app-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
-    if ! jq -e '.body | fromjson | ([.servers[] | select(.id == "file-alt" and .source == "file")] | length) == 0' <<<"${state}" >/dev/null; then
+    if ! jq -e '.body | fromjson | ([.servers[] | select(.source == "file" and .origin == "http://mock-alt:18081/alt")] | length) == 0' <<<"${state}" >/dev/null; then
       sleep 0.5
       continue
     fi
