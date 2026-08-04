@@ -407,7 +407,7 @@ jobs:
           - name: stable
             toolchain: stable
           - name: asan
-            toolchain: nightly-2026-08-01
+            toolchain: nightly-2026-08-04
         fuzz_target:
           - turn_protocol
           - tls_client_hello
@@ -538,7 +538,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         if: matrix.target == 'riscv64gc-unknown-linux-musl'
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Cargo check for RISC-V musl target
@@ -713,7 +713,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -773,7 +773,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
@@ -850,7 +850,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build comparator Docker image artifact
@@ -890,7 +890,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build performance probe Docker image artifact
@@ -928,7 +928,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build external benchmark Docker image artifact
@@ -976,7 +976,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1022,7 +1022,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1095,7 +1095,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
@@ -1199,7 +1199,7 @@ jobs:
             --expected-build-kind "git_development" \
             --expected-created "$(jq -r '.created' "${contract}")" \
             --rust-builder-image "rust:1.97.1-trixie@sha256:1bcff4befb740599103a2c7cb51058e14479b2e35e3a34a3f0dc4ede09927488" \
-            --node-builder-image "node:24-alpine3.24@sha256:f70403e87646dc51b45295f4b8b70cdad0b63d2297c4c9899119b03f7af7a6b3" \
+            --node-builder-image "node:24-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43" \
             --runtime-image "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b" \
             --repo-root "${GITHUB_WORKSPACE}"
 
@@ -1225,7 +1225,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.72.0
+          version: v0.73.0
           scan-type: image
           image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}
           format: json
@@ -1279,7 +1279,7 @@ jobs:
       - name: Generate local Trivy dependency snapshot
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.72.0
+          version: v0.73.0
           scan-type: image
           image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}
           format: github
@@ -1511,7 +1511,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
-          version: v0.36.0
+          version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker integration helper image artifact

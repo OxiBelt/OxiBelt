@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-08-01",
+  "reviewedOn": "2026-08-04",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "5040ffbaebee4071800c2fcc4e1a86e21c4f6fe655017e07c557230548f14aca",
+      "lockfileSha256": "8d6b820441f6a207ceb84bfdee7fbd6d9b3d6898225844b36ef01b9f558045d0",
       "exemptionInventorySha256": "40d9bc34e0647219920215d20a455622783a778729adfdba0104f91801fe5bc7",
       "exemptedPackageVersions": 421
     },
@@ -112,7 +112,7 @@
       {
         "category": "parsing-serialization",
         "packages": {
-          "jsonschema": ["0.49.2"],
+          "jsonschema": ["0.49.4"],
           "serde": ["1.0.229"],
           "serde-saphyr": ["0.0.29"],
           "serde_json": ["1.0.151"],
@@ -189,24 +189,24 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:5040ffbaebee4071800c2fcc4e1a86e21c4f6fe655017e07c557230548f14aca",
+      "subject": "Cargo.lock@sha256:8d6b820441f6a207ceb84bfdee7fbd6d9b3d6898225844b36ef01b9f558045d0",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-01",
+      "reviewedOn": "2026-08-04",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:5040ffbaebee4071800c2fcc4e1a86e21c4f6fe655017e07c557230548f14aca",
+      "subject": "Cargo.lock@sha256:8d6b820441f6a207ceb84bfdee7fbd6d9b3d6898225844b36ef01b9f558045d0",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-01",
+      "reviewedOn": "2026-08-04",
       "expiresOn": "2026-10-19"
     },
     {
@@ -256,15 +256,15 @@
       "expiresOn": "2026-10-19"
     },
     {
-      "id": "rust-license-clubcard-crlite-0.6.1",
+      "id": "rust-license-clubcard-crlite-0.6.2",
       "ecosystem": "rust",
       "control": "license",
-      "subject": "clubcard-crlite@0.6.1:MPL-2.0",
+      "subject": "clubcard-crlite@0.6.2:MPL-2.0",
       "rationale": "OxiBelt's CRLite integration directly relies on this exact MPL-licensed implementation.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-01",
+      "reviewedOn": "2026-08-04",
       "expiresOn": "2026-10-19"
     },
     {

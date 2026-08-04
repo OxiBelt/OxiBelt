@@ -753,6 +753,16 @@ fencing, readiness, or activation; heartbeat scheduling or metrics; or the
 upgrade and rollback sequence above. Existing clusters require no migration or
 additional coordinated rollout for this cleanup.
 
+The subsequent dependency-maintenance refresh updates patch-level Rust crates,
+pnpm development tooling, CodeQL and image-build/scan tooling, the sustained
+fuzz nightly, and the immutable Node 24 Alpine builder-stage digest. The final
+runtime Alpine base, published image roles, executable inventories, users,
+ports, native configuration and Admin wire shapes, schema epoch, and persisted
+state formats are unchanged. No configuration or state migration is required;
+roll out and roll back through the normal exact-revision, immutable-image-digest
+procedure, and keep each rebuild bound to the target revision's complete
+lockfiles and pinned builder inputs rather than mixing inputs across revisions.
+
 Existing signed v1 and v2 supply-chain bundle wire shapes remain readable.
 Admission now stops accepting either schema when the earliest signed
 provenance, SBOM, rebuild-recipe, or independent-rebuild timestamp exceeds

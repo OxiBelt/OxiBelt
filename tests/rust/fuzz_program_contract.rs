@@ -668,7 +668,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "timeout-minutes: 45",
       "name: Fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})",
       "max-parallel: 16",
-      "fuzz_profile:\n          - name: stable\n            toolchain: stable\n          - name: asan\n            toolchain: nightly-2026-08-01",
+      "fuzz_profile:\n          - name: stable\n            toolchain: stable\n          - name: asan\n            toolchain: nightly-2026-08-04",
       "rustup toolchain install \"${{ matrix.fuzz_profile.toolchain }}\" --profile minimal",
       "cargo-fuzz --version 0.13.2",
       "OXIBELT_FUZZ_PROFILE: ${{ matrix.fuzz_profile.name }}",
@@ -702,7 +702,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "permissions:\n      contents: read",
       "max-parallel: 4",
       "timeout-minutes: 120",
-      "nightly-2026-08-01",
+      "nightly-2026-08-04",
       "cargo-fuzz --version 0.13.2",
       "tests/scripts/run-fuzz-target.sh campaign",
       "LSAN_OPTIONS: detect_leaks=1",
@@ -742,7 +742,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     &[
       "set -Eeuo pipefail",
       "umask 077",
-      "readonly FUZZ_ASAN_NIGHTLY=\"nightly-2026-08-01\"",
+      "readonly FUZZ_ASAN_NIGHTLY=\"nightly-2026-08-04\"",
       "readonly fuzz_profile=\"${OXIBELT_FUZZ_PROFILE:-asan}\"",
       "stable fuzz profile only supports smoke mode",
       "OXIBELT_FUZZ_PROFILE must be one of: asan, stable",
@@ -960,7 +960,7 @@ impl CminHarness {
       r#"#!/usr/bin/env bash
 set -Eeuo pipefail
 [[ "$#" -ge 7 ]]
-[[ "$1" == "+nightly-2026-08-01" ]]
+[[ "$1" == "+nightly-2026-08-04" ]]
 [[ "$2" == "fuzz" ]]
 [[ "$3" == "cmin" ]]
 [[ "$6" == "native_config" ]]
@@ -1205,7 +1205,7 @@ fn fuzzing_documentation_covers_the_operational_lifecycle() {
       "## Coverage evidence",
       "## Crash triage and regressions",
       "moving `stable`",
-      "`nightly-2026-08-01`",
+      "`nightly-2026-08-04`",
       "OXIBELT_FUZZ_PROFILE=stable",
       "Stable smoke runs use `--sanitizer none`",
       "stable lane supplements rather than replaces",

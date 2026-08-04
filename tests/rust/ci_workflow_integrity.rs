@@ -5442,7 +5442,7 @@ fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
     "tests/scripts/validate-strict-dataplane-image.py",
     "if: matrix.role.name == 'dataplane-strict'",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
-    "version: v0.72.0",
+    "version: v0.73.0",
     "scan-type: image",
     "image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}",
     "format: json",
@@ -6077,7 +6077,7 @@ fn dependency_snapshot_helper_normalizes_package_free_reports() {
     "version": 0,
     "detector": {
       "name": "trivy",
-      "version": "0.72.0",
+      "version": "0.73.0",
       "url": "https://github.com/aquasecurity/trivy"
     },
     "scanned": "2026-07-21T03:56:06Z"
