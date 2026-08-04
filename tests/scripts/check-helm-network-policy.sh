@@ -265,10 +265,28 @@ expect_failure_contains v2_unreviewed_world_cidr \
   --skip-schema-validation \
   --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
 
+expect_failure_contains v2_unreviewed_leading_zero_ipv4_world_cidr \
+  "OBP106-UNRESTRICTED-CIDR" \
+  -f "${v2_values}" \
+  --skip-schema-validation \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","to":[{"ipBlock":{"cidr":"0.0.0.1/00"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
+
+expect_failure_contains v2_unreviewed_leading_zero_ipv6_world_cidr \
+  "OBP106-UNRESTRICTED-CIDR" \
+  -f "${v2_values}" \
+  --skip-schema-validation \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","to":[{"ipBlock":{"cidr":"2001:db8::1/00"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
+
 render v2_reviewed_world_cidr \
   -f "${v2_values}" \
   --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","unrestrictedCidrs":{"enabled":true,"justification":"reviewed public TLS origin"},"to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
 assert_contains "${work_dir}/v2_reviewed_world_cidr.yaml" "cidr: 0.0.0.0/0"
 assert_contains "${work_dir}/v2_reviewed_world_cidr.yaml" '"justification": "reviewed public TLS origin"'
+
+render v2_reviewed_leading_zero_world_cidr \
+  -f "${v2_values}" \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","unrestrictedCidrs":{"enabled":true,"justification":"reviewed public TLS origin"},"to":[{"ipBlock":{"cidr":"0.0.0.0/00"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
+assert_contains "${work_dir}/v2_reviewed_leading_zero_world_cidr.yaml" "cidr: 0.0.0.0/00"
+assert_contains "${work_dir}/v2_reviewed_leading_zero_world_cidr.yaml" '"justification": "reviewed public TLS origin"'
 
 echo "Helm NetworkPolicy check passed"

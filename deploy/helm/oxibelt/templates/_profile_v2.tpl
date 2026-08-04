@@ -234,7 +234,7 @@
 {{- end -}}
 {{- $world := false -}}
 {{- range $peer := $destination.to -}}
-{{- if and (hasKey $peer "ipBlock") (regexMatch "/0$" $peer.ipBlock.cidr) -}}{{- $world = true -}}{{- end -}}
+{{- if and (hasKey $peer "ipBlock") (regexMatch "/0+$" $peer.ipBlock.cidr) -}}{{- $world = true -}}{{- end -}}
 {{- end -}}
 {{- if and $world (not ($escape.enabled | default false)) -}}
 {{- fail (printf "OBP106-UNRESTRICTED-CIDR: destination %s contains a world CIDR without unrestrictedCidrs.enabled=true" $destination.name) -}}

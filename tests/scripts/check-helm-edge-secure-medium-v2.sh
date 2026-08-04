@@ -195,6 +195,11 @@ render unrestricted_reviewed \
 assert_contains "${work_dir}/unrestricted_reviewed.yaml" 'cidr: 0.0.0.0/0'
 assert_contains "${work_dir}/unrestricted_reviewed.yaml" '"justification": "reviewed public TLS origin"'
 
+render unrestricted_leading_zero_reviewed \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"public-upstream","category":"upstream","unrestrictedCidrs":{"enabled":true,"justification":"reviewed public TLS origin"},"to":[{"ipBlock":{"cidr":"0.0.0.0/00"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
+assert_contains "${work_dir}/unrestricted_leading_zero_reviewed.yaml" 'cidr: 0.0.0.0/00'
+assert_contains "${work_dir}/unrestricted_leading_zero_reviewed.yaml" '"justification": "reviewed public TLS origin"'
+
 render dependency_classes \
   --set-json 'networkPolicy.egress.destinations=[{"name":"upstream","category":"upstream","to":[{"ipBlock":{"cidr":"192.0.2.1/32"}}],"ports":[{"port":443,"protocol":"TCP"}]},{"name":"shared-state","category":"shared-state","to":[{"ipBlock":{"cidr":"192.0.2.2/32"}}],"ports":[{"port":6379,"protocol":"TCP"}]},{"name":"telemetry","category":"telemetry","to":[{"ipBlock":{"cidr":"192.0.2.3/32"}}],"ports":[{"port":4317,"protocol":"TCP"}]},{"name":"revocation","category":"revocation","to":[{"ipBlock":{"cidr":"192.0.2.4/32"}}],"ports":[{"port":80,"protocol":"TCP"}]},{"name":"external","category":"external-dependency","to":[{"ipBlock":{"cidr":"192.0.2.5/32"}}],"ports":[{"port":9443,"protocol":"TCP"}]}]'
 for category in upstream shared-state telemetry revocation external-dependency; do
@@ -272,6 +277,10 @@ expect_failure_contains world_cidr 'OBP106-UNRESTRICTED-CIDR' \
   --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
 expect_failure_contains noncanonical_world_cidr 'OBP106-UNRESTRICTED-CIDR' \
   --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","to":[{"ipBlock":{"cidr":"0.0.0.1/0"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
+expect_failure_contains leading_zero_ipv4_world_cidr 'OBP106-UNRESTRICTED-CIDR' \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","to":[{"ipBlock":{"cidr":"0.0.0.1/00"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
+expect_failure_contains leading_zero_ipv6_world_cidr 'OBP106-UNRESTRICTED-CIDR' \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","to":[{"ipBlock":{"cidr":"2001:db8::1/00"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
 expect_failure_contains world_without_reason 'OBP106-UNRESTRICTED-CIDR-JUSTIFICATION' \
   --set-json 'networkPolicy.egress.destinations=[{"name":"world","category":"upstream","unrestrictedCidrs":{"enabled":true,"justification":""},"to":[{"ipBlock":{"cidr":"::/0"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
 expect_failure_contains control_plane 'OBP106-CONTROL-PLANE' \
