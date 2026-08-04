@@ -253,6 +253,14 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
   restart("runtime.worker_multipliers.runtime"),
   restart("runtime.worker_multipliers.tokio"),
   full_reload("runtime.worker_multipliers.compio_direct_h1"),
+  secret_restart(
+    "runtime.hardening.filesystem_manifest.expected_digest",
+    NativeConfigSecretClass::Literal,
+  ),
+  secret_restart(
+    "runtime.hardening.filesystem_manifest.expected_writable_paths",
+    NativeConfigSecretClass::Literal,
+  ),
   restart("runtime.hardening"),
   restart("runtime.hardening.*"),
   restart("runtime.hot_reload"),
@@ -326,6 +334,21 @@ const fn secret_reload(
     secret_class,
     config_activation: NativeConfigActivation::FullReload,
     reference_activation,
+  }
+}
+
+const fn secret_restart(
+  path: &'static str,
+  secret_class: NativeConfigSecretClass,
+) -> NativeConfigFieldMetadata {
+  NativeConfigFieldMetadata {
+    path,
+    introduced_epoch: 1,
+    deprecated_epoch: None,
+    replacement: None,
+    secret_class,
+    config_activation: NativeConfigActivation::RestartRequired,
+    reference_activation: NativeConfigActivation::None,
   }
 }
 

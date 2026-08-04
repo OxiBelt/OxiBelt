@@ -8,6 +8,24 @@ pub(super) fn redact_effective_toml(value: &mut toml::Value) {
   redact_toml_path(value, &["database", "mitigation", "connection_url"]);
   redact_toml_path(
     value,
+    &[
+      "runtime",
+      "hardening",
+      "filesystem_manifest",
+      "expected_digest",
+    ],
+  );
+  redact_toml_path(
+    value,
+    &[
+      "runtime",
+      "hardening",
+      "filesystem_manifest",
+      "expected_writable_paths",
+    ],
+  );
+  redact_toml_path(
+    value,
     &["logging", "access_log", "database", "connection_url"],
   );
   if let Some(backends) = value

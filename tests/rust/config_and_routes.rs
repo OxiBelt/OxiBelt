@@ -7536,6 +7536,37 @@ connection_url = "redis://:secret@redis.example:6379/0"
 }
 
 #[test]
+fn effective_config_dump_redacts_filesystem_manifest_expectations() {
+  let temp_dir = common::TempDir::new("filesystem-manifest-redacted");
+  let expected_digest = format!("sha256:{}", "b".repeat(64));
+  let expected_writable_path = "/var/lib/oxibelt/tenant-alpha/uploads";
+  let config_path = write_loadable_config(&temp_dir, "filesystem-manifest-redacted", |raw| {
+    format!(
+      r#"{raw}
+[runtime.hardening.filesystem_manifest]
+expected_digest = "{expected_digest}"
+expected_writable_paths = ["{expected_writable_path}"]
+"#
+    )
+  });
+
+  let value = Config::load_effective_toml_redacted(&config_path).unwrap();
+  let filesystem_manifest = &value["runtime"]["hardening"]["filesystem_manifest"];
+  assert_eq!(
+    filesystem_manifest["expected_digest"].as_str(),
+    Some("<redacted>")
+  );
+  assert_eq!(
+    filesystem_manifest["expected_writable_paths"].as_str(),
+    Some("<redacted>")
+  );
+
+  let redacted = toml::to_string_pretty(&value).expect("redacted TOML should serialize");
+  assert!(!redacted.contains(&expected_digest));
+  assert!(!redacted.contains(expected_writable_path));
+}
+
+#[test]
 fn effective_config_dump_redacts_upstream_origin_sensitive_url_parts() {
   let temp_dir = common::TempDir::new("upstream-origin-redacted");
   let config_path = write_loadable_config(&temp_dir, "upstream-origin-redacted", |raw| {

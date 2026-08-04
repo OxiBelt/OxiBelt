@@ -20076,7 +20076,7 @@
                   "x-oxibelt-config-activation": "restart_required",
                   "x-oxibelt-introduced-epoch": 1,
                   "x-oxibelt-reference-activation": "none",
-                  "x-oxibelt-secret-class": "none"
+                  "x-oxibelt-secret-class": "literal"
                 },
                 "expected_writable_paths": {
                   "description": "OxiBelt native field `runtime.hardening.filesystem_manifest.expected_writable_paths`. Production Rust validation is authoritative.",
@@ -20087,7 +20087,7 @@
                   "x-oxibelt-config-activation": "restart_required",
                   "x-oxibelt-introduced-epoch": 1,
                   "x-oxibelt-reference-activation": "none",
-                  "x-oxibelt-secret-class": "none"
+                  "x-oxibelt-secret-class": "literal"
                 }
               },
               "type": "object",

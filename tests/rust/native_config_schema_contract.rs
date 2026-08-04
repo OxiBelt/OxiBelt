@@ -184,7 +184,7 @@ fn upstream_tls_subject_alt_names_schema_is_typed_and_bounded() {
 }
 
 #[test]
-fn secret_reference_metadata_covers_runtime_credential_boundaries() {
+fn sensitive_metadata_covers_runtime_confidentiality_boundaries() {
   for (path, expected) in [
     (
       "admin.mutations.artifact_key_env",
@@ -204,6 +204,14 @@ fn secret_reference_metadata_covers_runtime_credential_boundaries() {
     ),
     (
       "ipm.credentials[0].break_glass_access_token_hash",
+      NativeConfigSecretClass::Literal,
+    ),
+    (
+      "runtime.hardening.filesystem_manifest.expected_digest",
+      NativeConfigSecretClass::Literal,
+    ),
+    (
+      "runtime.hardening.filesystem_manifest.expected_writable_paths",
       NativeConfigSecretClass::Literal,
     ),
     (
@@ -241,6 +249,22 @@ fn secret_reference_metadata_covers_runtime_credential_boundaries() {
     native_config_field_metadata("admin.mutations.artifact_key_env").reference_activation,
     NativeConfigActivation::RestartRequired
   );
+  for path in [
+    "runtime.hardening.filesystem_manifest.expected_digest",
+    "runtime.hardening.filesystem_manifest.expected_writable_paths",
+  ] {
+    let metadata = native_config_field_metadata(path);
+    assert_eq!(
+      metadata.config_activation,
+      NativeConfigActivation::RestartRequired,
+      "{path} must retain restart-required activation"
+    );
+    assert_eq!(
+      metadata.reference_activation,
+      NativeConfigActivation::None,
+      "{path} must not gain reference activation"
+    );
+  }
 }
 
 #[test]
@@ -278,6 +302,8 @@ fn generated_schema_preserves_metadata_through_array_items() {
     "external_auth[].client_secret_env",
     "ipm.credentials[].bearer_token_env",
     "ipm.credentials[].break_glass_access_token_hash",
+    "runtime.hardening.filesystem_manifest.expected_digest",
+    "runtime.hardening.filesystem_manifest.expected_writable_paths",
     "webrtc_turn_listeners[].auth.rest_shared_secret",
     "webrtc_turn_listeners[].auth.rest_shared_secret_env",
     "webrtc_turn_listeners[].auth.static_credentials[].password",
@@ -395,7 +421,7 @@ fn validation_reports_unknown_fields_with_a_stable_suggestion() {
 }
 
 #[test]
-fn explain_tracks_include_origin_and_never_returns_private_key_material() {
+fn explain_tracks_include_origin_and_never_returns_sensitive_material() {
   let temp_dir = common::TempDir::new("native-config-explain");
   let config_dir = temp_dir.path().join("config");
   let cert_dir = temp_dir.path().join("cert");
@@ -411,7 +437,16 @@ fn explain_tracks_include_origin_and_never_returns_private_key_material() {
     key.file_name().unwrap().to_str().unwrap(),
   )
   .replacen("[logging]\nlevel = \"info\"\n\n", "", 1);
-  let raw = format!("include = [\"logging.toml\"]\n{base}");
+  let expected_digest = format!("sha256:{}", "b".repeat(64));
+  let expected_writable_path = "/var/lib/oxibelt/tenant-alpha/uploads";
+  let raw = format!(
+    r#"include = ["logging.toml"]
+{base}
+[runtime.hardening.filesystem_manifest]
+expected_digest = "{expected_digest}"
+expected_writable_paths = ["{expected_writable_path}"]
+"#
+  );
   fs::write(&entry, raw).expect("entry fixture should be writable");
 
   Config::load(&entry).unwrap_or_else(|error| panic!("fixture load failed: {error:#}"));
@@ -442,4 +477,22 @@ fn explain_tracks_include_origin_and_never_returns_private_key_material() {
       .unwrap()
       .contains(&key.display().to_string())
   );
+
+  for field_path in [
+    "runtime.hardening.filesystem_manifest.expected_digest",
+    "runtime.hardening.filesystem_manifest.expected_writable_paths",
+  ] {
+    let report = explain_native_config(&entry, field_path)
+      .unwrap_or_else(|error| panic!("{field_path} should be explainable: {error:#}"));
+    assert!(report.redacted, "{field_path}");
+    assert!(report.effective_value.is_none(), "{field_path}");
+    assert_eq!(
+      report.constraints.secret_class,
+      NativeConfigSecretClass::Literal,
+      "{field_path}"
+    );
+    let encoded = serde_json::to_string(&report).expect("explain report should serialize");
+    assert!(!encoded.contains(&expected_digest), "{field_path}");
+    assert!(!encoded.contains(expected_writable_path), "{field_path}");
+  }
 }

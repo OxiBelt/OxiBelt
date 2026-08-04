@@ -178,6 +178,58 @@ fn secret_equality_is_visible_without_secret_values() {
 }
 
 #[test]
+fn filesystem_manifest_expectations_are_secret_restart_changes() {
+  let current_digest = format!("sha256:{}", "a".repeat(64));
+  let candidate_digest = format!("sha256:{}", "b".repeat(64));
+  let digest_change = plan(
+    &format!("[runtime.hardening.filesystem_manifest]\nexpected_digest = '{current_digest}'\n"),
+    &format!("[runtime.hardening.filesystem_manifest]\nexpected_digest = '{candidate_digest}'\n"),
+  );
+  assert_secret_restart_change(
+    &digest_change,
+    "runtime.hardening.filesystem_manifest.expected_digest",
+    &[&current_digest, &candidate_digest],
+  );
+
+  let current_path = "/var/lib/oxibelt/tenant-alpha/uploads";
+  let candidate_path = "/var/lib/oxibelt/tenant-beta/uploads";
+  let writable_paths_change = plan(
+    &format!(
+      "[runtime.hardening.filesystem_manifest]\nexpected_writable_paths = ['{current_path}']\n"
+    ),
+    &format!(
+      "[runtime.hardening.filesystem_manifest]\nexpected_writable_paths = ['{candidate_path}']\n"
+    ),
+  );
+  assert_secret_restart_change(
+    &writable_paths_change,
+    "runtime.hardening.filesystem_manifest.expected_writable_paths",
+    &[current_path, candidate_path],
+  );
+}
+
+fn assert_secret_restart_change(
+  report: &super::ConfigActivationReport,
+  expected_path: &str,
+  forbidden_values: &[&str],
+) {
+  assert_eq!(report.changes.len(), 1);
+  let change = &report.changes[0];
+  assert_eq!(change.path, expected_path);
+  assert!(change.secret);
+  assert_eq!(change.native_activation, NativeActivation::RestartRequired);
+  assert_eq!(
+    change.resolved_operation,
+    ResolvedActivationOperation::ProcessRestart
+  );
+  assert_eq!(change.metadata_provenance, MetadataProvenance::Explicit);
+  let json = serde_json::to_string(report).expect("report should serialize");
+  for value in forbidden_values {
+    assert!(!json.contains(value), "plan leaked {value}");
+  }
+}
+
+#[test]
 fn fallback_metadata_is_explicitly_conservative() {
   let report = plan("custom = 1\n", "custom = 2\n");
   assert_eq!(
