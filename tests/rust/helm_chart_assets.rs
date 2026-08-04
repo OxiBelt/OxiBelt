@@ -693,6 +693,16 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
       "supply-chain admission template should contain {needle}"
     );
   }
+  let quoted_revision_label = "oxibelt.dev/supply-chain-bundle: {{ $revision | quote }}";
+  assert_eq!(
+    admission.matches(quoted_revision_label).count(),
+    5,
+    "supply-chain admission revisions must remain quoted at every label and selector site"
+  );
+  assert!(
+    !admission.contains("oxibelt.dev/supply-chain-bundle: {{ $revision }}"),
+    "supply-chain admission revisions must not be emitted as implicit YAML scalars"
+  );
   let exact_rules = r#"  rules:
   - apiGroups:
     - ""

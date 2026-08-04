@@ -144,6 +144,19 @@ assert_contains "${work_dir}/webhook-image-rotated.yaml" \
 assert_contains "${work_dir}/webhook-image-rotated.yaml" \
   'oxibelt.dev/supply-chain-bundle-digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222"'
 
+render numeric-admission-revision \
+  --set-string supplyChainAdmission.webhook.image.digest=sha256:000000000000000000000000000000000000000000000000000000000000001b
+numeric_admission_revision="$(annotation_value "${work_dir}/numeric-admission-revision.yaml" 'oxibelt.dev/supply-chain-bundle')"
+[[ "${numeric_admission_revision}" == "493786832259" ]] \
+  || die "numeric admission endpoint revision changed unexpectedly: ${numeric_admission_revision}"
+[[ "${numeric_admission_revision}" =~ ^[0-9]+$ ]] \
+  || die "numeric admission endpoint revision fixture is not all decimal digits"
+numeric_revision_label='oxibelt.dev/supply-chain-bundle: "493786832259"'
+[[ "$(grep -Fc -- "${numeric_revision_label}" "${work_dir}/numeric-admission-revision.yaml")" -eq 5 ]] \
+  || die "numeric admission endpoint revision was not quoted at all five label and selector sites"
+assert_not_contains "${work_dir}/numeric-admission-revision.yaml" \
+  'oxibelt.dev/supply-chain-bundle: 493786832259'
+
 sed \
   -e 's/"schemaVersion":2/"schemaVersion":1/' \
   -e 's/oxibelt-admission-v2/oxibelt-admission-v1/' \

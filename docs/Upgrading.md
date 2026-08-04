@@ -161,6 +161,12 @@ server image therefore creates a new Deployment/selector epoch and excludes
 old permissive endpoints from the Service instead of mixing old and new
 binaries. A short interval with no ready endpoint is intentionally fail-closed.
 
+The chart serializes every `oxibelt.dev/supply-chain-bundle` revision label and
+selector as a YAML string, including when the derived twelve-character epoch
+contains only decimal digits. This corrects manifest typing without changing
+the epoch derivation, chart values, or fail-closed endpoint selection; no
+values migration is required.
+
 Existing Pods continue running across the change. Pod recreation, ordinary
 updates, and ephemeral-container updates fail closed when an executable is not
 present in the active signed policy. Keep the previous valid bundle and fixed
