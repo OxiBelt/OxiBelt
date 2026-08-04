@@ -680,6 +680,32 @@ committed immutable ConfigMap, remove the typed target resources, restore the
 legacy target values, and wait for that target's own proof; never copy a
 revision from one target workload to another.
 
+Post-beta.2 development also corrects Gateway HTTP `ExternalAuth` request-header
+projection for `HTTPRoute` and `GRPCRoute`. Generated `forward_headers` now
+contains only the route-authored `externalAuth.http.allowedHeaders` values that
+the operator admits. Omitting the route list produces `forward_headers = []`
+even when the operator allowlist contains `authorization`; operator admission
+alone no longer forwards a downstream bearer credential.
+
+Before upgrading, audit routes whose authorization service depends on that
+formerly implicit header. Forwarding `Authorization` now requires all three
+explicit opt-ins: `authorization` in the route's
+`externalAuth.http.allowedHeaders`,
+`--external-auth-allowed-request-header=authorization` (or `authorization` in
+Helm `filters.externalAuth.allowedRequestHeaders`), and
+`--external-auth-allow-credentials` (or Helm
+`filters.externalAuth.allowCredentials = true`). A route that requests a
+header outside the operator allowlist remains blocked with a diagnostic. This
+correction changes no Gateway API or native configuration schema and requires
+no persisted-state migration.
+
+Rolling back to an earlier controller can resume implicit `Authorization`
+forwarding when a route omits it. Roll back only after confirming every
+selected authorization Service may receive that credential, or first stop the
+affected `ExternalAuth` routes from carrying downstream bearer credentials.
+Do not treat omission from `externalAuth.http.allowedHeaders` as a credential
+deny boundary while an older controller is active.
+
 Post-beta.2 development also aligns the opt-in staged Admin-cluster membership
 writes with the Admin audit durability boundary. The exact proposal endpoint,
 `POST /admin/v1/membership/transitions`, uses `membership.propose`; exact
