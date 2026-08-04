@@ -737,7 +737,7 @@ fn build_landlock_path_rules(
     syscalls::landlock_read_access_fs(maximum_access)
   };
   let read_write_access = if mode == RuntimeLandlockMode::Manifest {
-    manifest_operator_access(MAX_SUPPORTED_LANDLOCK_ABI)
+    manifest_path_grant_access(MAX_SUPPORTED_LANDLOCK_ABI)
   } else {
     syscalls::landlock_read_write_access_fs(maximum_access)
   };
@@ -784,15 +784,15 @@ fn install_landlock(
   let kernel_abi = u32::try_from(raw_abi).context("Landlock returned an invalid ABI version")?;
   let effective_abi = kernel_abi.min(MAX_SUPPORTED_LANDLOCK_ABI);
   let path_rules = build_landlock_path_rules(mode, manifest_rules, read_paths, read_write_paths)?;
-  let (requested_access, effective_access, unsupported_access) =
-    resolve_landlock_access(mode, kernel_abi)?;
-  let ruleset = syscalls::create_landlock_ruleset(effective_access)
+  let (requested_handled_access, effective_handled_access, unsupported_handled_access) =
+    resolve_landlock_handled_access(mode, kernel_abi)?;
+  let ruleset = syscalls::create_landlock_ruleset(effective_handled_access)
     .context("landlock_create_ruleset failed")?;
   let policy_digest = landlock_policy_digest(
     mode,
     manifest_digest.as_deref(),
     &path_rules,
-    requested_access,
+    requested_handled_access,
   );
 
   let root = open_landlock_root()?;
@@ -803,7 +803,7 @@ fn install_landlock(
     let metadata = file
       .metadata()
       .with_context(|| format!("failed to inspect Landlock path {}", path.display()))?;
-    let allowed_access = access & effective_access;
+    let allowed_access = access & effective_handled_access;
     syscalls::add_landlock_path_rule(ruleset.as_fd(), file.as_fd(), allowed_access)
       .with_context(|| format!("failed to add Landlock path {}", path.display()))?;
     use std::os::unix::fs::MetadataExt;
@@ -836,9 +836,9 @@ fn install_landlock(
       requested_abi: Some(MAX_SUPPORTED_LANDLOCK_ABI),
       kernel_abi: Some(kernel_abi),
       effective_abi: Some(effective_abi),
-      requested_rights: landlock_rights(requested_access),
-      effective_rights: landlock_rights(effective_access),
-      unsupported_rights: landlock_rights(unsupported_access),
+      requested_rights: landlock_rights(requested_handled_access),
+      effective_rights: landlock_rights(effective_handled_access),
+      unsupported_rights: landlock_rights(unsupported_handled_access),
       rule_count: u32::try_from(rule_count).unwrap_or(u32::MAX),
       effective_rules,
       effective_rules_truncated,
@@ -848,32 +848,34 @@ fn install_landlock(
       policy_digest_withheld: true,
       installed_authority: Some(installed_authority),
     },
-    (unsupported_access != 0).then_some(RuntimeHardeningReason::LandlockRightsDowngraded),
+    (unsupported_handled_access != 0).then_some(RuntimeHardeningReason::LandlockRightsDowngraded),
   ))
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_landlock_access(
+fn resolve_landlock_handled_access(
   mode: RuntimeLandlockMode,
   kernel_abi: u32,
 ) -> anyhow::Result<(u64, u64, u64)> {
   let effective_abi = kernel_abi.min(MAX_SUPPORTED_LANDLOCK_ABI);
-  let requested_access = if mode == RuntimeLandlockMode::Manifest {
-    // Manifest mode intentionally has a stable ABI-3 security baseline. Per-path
-    // rules remain least-authority grants within this handled-rights set.
-    manifest_operator_access(MAX_SUPPORTED_LANDLOCK_ABI)
-  } else {
-    syscalls::landlock_handled_access_fs(i64::from(MAX_SUPPORTED_LANDLOCK_ABI))
-  };
-  let kernel_supported_access = syscalls::landlock_handled_access_fs(i64::from(effective_abi));
-  let effective_access = requested_access & kernel_supported_access;
-  let unsupported_access = requested_access & !effective_access;
-  if mode == RuntimeLandlockMode::Manifest && unsupported_access != 0 {
+  // The handled set defines what Landlock can deny. Per-path rules separately
+  // grant the least authority required within this full ABI-3 boundary.
+  let requested_handled_access =
+    syscalls::landlock_handled_access_fs(i64::from(MAX_SUPPORTED_LANDLOCK_ABI));
+  let kernel_supported_handled_access =
+    syscalls::landlock_handled_access_fs(i64::from(effective_abi));
+  let effective_handled_access = requested_handled_access & kernel_supported_handled_access;
+  let unsupported_handled_access = requested_handled_access & !effective_handled_access;
+  if mode == RuntimeLandlockMode::Manifest && unsupported_handled_access != 0 {
     bail!(
       "manifest_landlock_abi_insufficient: Landlock kernel ABI {kernel_abi} cannot enforce the required ABI {MAX_SUPPORTED_LANDLOCK_ABI} handled-rights baseline"
     );
   }
-  Ok((requested_access, effective_access, unsupported_access))
+  Ok((
+    requested_handled_access,
+    effective_handled_access,
+    unsupported_handled_access,
+  ))
 }
 
 #[cfg(target_os = "linux")]
@@ -930,7 +932,7 @@ fn landlock_policy_digest(
   mode: RuntimeLandlockMode,
   manifest_digest: Option<&str>,
   path_rules: &BTreeMap<PathBuf, u64>,
-  requested_access: u64,
+  requested_handled_access: u64,
 ) -> String {
   use std::os::unix::ffi::OsStrExt;
 
@@ -939,7 +941,7 @@ fn landlock_policy_digest(
   hasher.update(format!("{mode:?}\0").as_bytes());
   hasher.update(manifest_digest.unwrap_or("").as_bytes());
   hasher.update([0]);
-  hasher.update(requested_access.to_be_bytes());
+  hasher.update(requested_handled_access.to_be_bytes());
   for (path, access) in path_rules {
     hasher.update(path.as_os_str().as_bytes());
     hasher.update([0]);
@@ -956,7 +958,7 @@ fn landlock_policy_digest(
 }
 
 #[cfg(target_os = "linux")]
-fn manifest_operator_access(abi: u32) -> u64 {
+fn manifest_path_grant_access(abi: u32) -> u64 {
   let supported = syscalls::landlock_handled_access_fs(i64::from(abi));
   supported
     & (syscalls::LANDLOCK_ACCESS_FS_WRITE_FILE
@@ -1485,19 +1487,45 @@ mod tests {
 
   #[cfg(target_os = "linux")]
   #[test]
-  fn manifest_landlock_rights_exclude_execution_and_special_file_creation() {
-    let requested = manifest_operator_access(3);
-    assert_eq!(requested & syscalls::LANDLOCK_ACCESS_FS_EXECUTE, 0);
-    assert_eq!(requested & syscalls::LANDLOCK_ACCESS_FS_MAKE_CHAR, 0);
-    assert_eq!(requested & syscalls::LANDLOCK_ACCESS_FS_MAKE_BLOCK, 0);
-    assert_eq!(requested & syscalls::LANDLOCK_ACCESS_FS_MAKE_FIFO, 0);
-    assert_eq!(requested & syscalls::LANDLOCK_ACCESS_FS_MAKE_SYM, 0);
-    assert_ne!(requested & syscalls::LANDLOCK_ACCESS_FS_MAKE_REG, 0);
-    assert_ne!(requested & syscalls::LANDLOCK_ACCESS_FS_MAKE_SOCK, 0);
-    assert_ne!(requested & syscalls::LANDLOCK_ACCESS_FS_REFER, 0);
-    assert_ne!(requested & syscalls::LANDLOCK_ACCESS_FS_TRUNCATE, 0);
+  fn abi_three_handled_rights_cover_every_supported_filesystem_operation() {
+    let handled = syscalls::landlock_handled_access_fs(3);
+    assert_eq!(
+      landlock_rights(handled),
+      vec![
+        LandlockFilesystemRight::Execute,
+        LandlockFilesystemRight::WriteFile,
+        LandlockFilesystemRight::ReadFile,
+        LandlockFilesystemRight::ReadDir,
+        LandlockFilesystemRight::RemoveDir,
+        LandlockFilesystemRight::RemoveFile,
+        LandlockFilesystemRight::MakeChar,
+        LandlockFilesystemRight::MakeDir,
+        LandlockFilesystemRight::MakeReg,
+        LandlockFilesystemRight::MakeSock,
+        LandlockFilesystemRight::MakeFifo,
+        LandlockFilesystemRight::MakeBlock,
+        LandlockFilesystemRight::MakeSym,
+        LandlockFilesystemRight::Refer,
+        LandlockFilesystemRight::Truncate,
+      ]
+    );
+  }
 
-    let abi_one = manifest_operator_access(1);
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn manifest_path_grants_exclude_execution_and_special_file_creation() {
+    let granted = manifest_path_grant_access(3);
+    assert_eq!(granted & syscalls::LANDLOCK_ACCESS_FS_EXECUTE, 0);
+    assert_eq!(granted & syscalls::LANDLOCK_ACCESS_FS_MAKE_CHAR, 0);
+    assert_eq!(granted & syscalls::LANDLOCK_ACCESS_FS_MAKE_BLOCK, 0);
+    assert_eq!(granted & syscalls::LANDLOCK_ACCESS_FS_MAKE_FIFO, 0);
+    assert_eq!(granted & syscalls::LANDLOCK_ACCESS_FS_MAKE_SYM, 0);
+    assert_ne!(granted & syscalls::LANDLOCK_ACCESS_FS_MAKE_REG, 0);
+    assert_ne!(granted & syscalls::LANDLOCK_ACCESS_FS_MAKE_SOCK, 0);
+    assert_ne!(granted & syscalls::LANDLOCK_ACCESS_FS_REFER, 0);
+    assert_ne!(granted & syscalls::LANDLOCK_ACCESS_FS_TRUNCATE, 0);
+
+    let abi_one = manifest_path_grant_access(1);
     assert_eq!(abi_one & syscalls::LANDLOCK_ACCESS_FS_REFER, 0);
     assert_eq!(abi_one & syscalls::LANDLOCK_ACCESS_FS_TRUNCATE, 0);
   }
@@ -1506,7 +1534,7 @@ mod tests {
   #[test]
   fn manifest_mode_requires_the_stable_abi_three_baseline() {
     for abi in [1, 2] {
-      let error = resolve_landlock_access(RuntimeLandlockMode::Manifest, abi)
+      let error = resolve_landlock_handled_access(RuntimeLandlockMode::Manifest, abi)
         .expect_err("older ABIs must not silently weaken manifest mode");
       assert!(
         error
@@ -1515,11 +1543,11 @@ mod tests {
       );
     }
     let (requested, effective, unsupported) =
-      resolve_landlock_access(RuntimeLandlockMode::Manifest, 3).expect("ABI 3 baseline");
+      resolve_landlock_handled_access(RuntimeLandlockMode::Manifest, 3).expect("ABI 3 baseline");
     assert_eq!(requested, effective);
     assert_eq!(unsupported, 0);
 
-    let (_, _, unsupported) = resolve_landlock_access(RuntimeLandlockMode::Enforce, 1)
+    let (_, _, unsupported) = resolve_landlock_handled_access(RuntimeLandlockMode::Enforce, 1)
       .expect("manual mode retains its downgrade contract");
     assert_ne!(unsupported, 0);
   }
