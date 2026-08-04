@@ -413,6 +413,7 @@ async fn apply_effect(
       .map(|member| member.instance_id.clone())
       .collect::<Vec<_>>();
     let namespace = transaction.store().namespace().to_string();
+    let artifact_ciphers = runtime.artifact_ciphers();
     let (transition, checkpoint) = apply_membership_proposal_tx(
       transaction.transaction(),
       &namespace,
@@ -422,6 +423,8 @@ async fn apply_effect(
       request,
       runtime.membership_bootstrap_members(),
       &approving_members,
+      &fence.exact_membership.membership_revision,
+      &artifact_ciphers,
     )
     .await?;
     return Ok(AppliedEffect::Membership {

@@ -25,6 +25,77 @@ fn disabled_runtime_exposes_no_cluster_artifact_capability() {
 }
 
 #[test]
+fn durable_membership_state_rejects_rollout_downgrades_and_cluster_rebinding() {
+  validate_durable_membership_configuration(
+    false,
+    AdminMutationRolloutMode::SingleInstance,
+    AdminMembershipMode::Fixed,
+    "",
+    &[],
+  )
+  .expect("disabled no-state configuration remains compatible");
+  let durable = vec!["cluster-a".to_string()];
+  assert!(
+    validate_durable_membership_configuration(
+      false,
+      AdminMutationRolloutMode::AdminCluster,
+      AdminMembershipMode::Staged,
+      "cluster-a",
+      &durable,
+    )
+    .is_err()
+  );
+  assert!(
+    validate_durable_membership_configuration(
+      true,
+      AdminMutationRolloutMode::AdminCluster,
+      AdminMembershipMode::Fixed,
+      "cluster-a",
+      &durable,
+    )
+    .is_err()
+  );
+  assert!(
+    validate_durable_membership_configuration(
+      true,
+      AdminMutationRolloutMode::SingleInstance,
+      AdminMembershipMode::Fixed,
+      "",
+      &durable,
+    )
+    .is_err()
+  );
+  assert!(
+    validate_durable_membership_configuration(
+      true,
+      AdminMutationRolloutMode::AdminCluster,
+      AdminMembershipMode::Staged,
+      "cluster-b",
+      &durable,
+    )
+    .is_err()
+  );
+  validate_durable_membership_configuration(
+    true,
+    AdminMutationRolloutMode::AdminCluster,
+    AdminMembershipMode::Staged,
+    "cluster-a",
+    &durable,
+  )
+  .expect("exact staged cluster identity");
+  assert!(
+    validate_durable_membership_configuration(
+      true,
+      AdminMutationRolloutMode::AdminCluster,
+      AdminMembershipMode::Staged,
+      "cluster-a",
+      &["cluster-a".to_string(), "cluster-b".to_string()],
+    )
+    .is_err()
+  );
+}
+
+#[test]
 fn winner_response_guard_removes_cancelled_request_slot() {
   let runtime = AdminMutationRuntime::disabled("default");
   let guard = runtime.register_shared_winner_response("request-cancelled");
@@ -145,9 +216,13 @@ async fn committed_replay_test_body() {
       membership_authority: RwLock::new(MembershipAuthority {
         target: target.clone(),
         members: Vec::new(),
+        artifact_key_fingerprint: EMPTY_DIGEST.to_string(),
       }),
       membership_bootstrap_members: Vec::new(),
-      artifact_cipher: None,
+      local_instance_id: None,
+      membership_private_keys: None,
+      artifact_ciphers: RwLock::new(MembershipArtifactCiphers::new()),
+      local_membership_heads: RwLock::new(HashMap::new()),
       cluster_controller: OnceLock::new(),
       cluster_worker_state: AtomicU8::new(0),
       winner_responses: Mutex::new(HashMap::new()),

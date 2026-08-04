@@ -2673,7 +2673,9 @@ the following:
 - `instance_id_env` naming a valid environment variable whose value is one
   configured member in fixed mode (staged mode also permits a non-participating
   learner identity);
-- `artifact_key_env` containing exactly 32 base64-encoded bytes;
+- in fixed mode, `artifact_key_env` containing exactly 32 base64-encoded
+  bytes; staged bootstrap and retained version-`1` epochs also require this
+  legacy key until their encrypted artifacts no longer need to be opened;
 - heartbeat interval `1..=60` seconds, stale interval at least twice heartbeat
   and at most 300 seconds, canary observation `1..=600` seconds, phase timeout
   greater than observation and at most 3,600 seconds, and rollback timeout
@@ -2692,18 +2694,134 @@ ID to overlap old and new live memberships.
 `membership.mode = "staged"` is experimental and replaces offline changes with
 authenticated durable epochs; it does not replace the all-active-member
 authorization rule. `bootstrap_members` must contain exactly the IDs in
-`rollout.members`, with one distinct Ed25519 readiness key and X25519 catch-up
-key per member. The two private-key environment names identify external
-file-path channels for member-local key custody; private material must remain
-outside TOML, PostgreSQL, receipts, diagnostics, and logs. A learner whose
-local instance ID is outside the current set remains unable to heartbeat,
-coordinate, validate, acknowledge, or make the rollout ready until a committed
-activation installs an epoch containing it. Catch-up data is bounded and
-recipient encrypted. Promotion requires a separate signed readiness receipt
-and a new protected activation mutation authorized by every old active member.
-Maintenance/removal records a fence cutoff and removed processes release their
-old fence before the runtime accepts the new epoch. Emergency recovery from a
-lost active member is deliberately not exposed as an ordinary transition.
+`rollout.members`, with one distinct canonical-base64 32-byte Ed25519 readiness
+public key and X25519 catch-up public key per member. Public keys are unique
+within their purpose and the readiness and catch-up sets must be disjoint.
+`instance_id_env` may identify a process outside the active epoch so that a new
+instance can start as a learner, but that process remains unable to heartbeat
+as active, coordinate, validate, acknowledge, serve privileged mutation
+decisions, or make the rollout ready.
+
+`readiness_private_key_file_env` and `catchup_private_key_file_env` name two
+different environment variables. Each environment variable contains an
+absolute member-local file path, not private-key bytes. At startup OxiBelt opens
+each path once for reading; on Unix it uses no-follow and close-on-exec flags,
+inspects the opened descriptor, and rejects a symlink, non-regular file, empty
+file, oversized file, or permissions that grant any group or other access.
+Use an owner-only mode such as `0400` or `0600`. The readiness file is bounded
+to 4,096 bytes and contains an Ed25519 PKCS#8 private key either as raw DER or
+canonical standard-base64 text. The catch-up file is bounded to 256 bytes and
+contains exactly 32 raw X25519 private-key bytes or their canonical
+standard-base64 text. OxiBelt derives both public keys and, when the local
+identity is a bootstrap member, requires exact matches with that member's
+configured public keys. Keep the private files and their environment-variable
+values out of TOML, PostgreSQL, receipts, diagnostics, support bundles, and
+logs; mount them read-only from an external secret channel.
+
+A fresh staged cluster initially uses the configured legacy shared
+`artifact_key_env` key for the fixed bootstrap boundary. Active and retained
+version-`1` membership epochs also require that same key to reopen their
+encrypted command or rollback artifacts after restart. Keep the legacy secret
+available while any required version-`1` history remains; do not rotate it as
+part of an ordinary membership transition. Every new proposal creates a
+version-`2` epoch with a fresh random 32-byte per-epoch artifact key, `K_next`,
+binds its SHA-256 fingerprint into the epoch digest, and wraps it independently
+to every target member through that member's X25519 key. PostgreSQL stores only
+the authenticated wraps and fingerprint. Each target member must unwrap the
+same `K_next` binding and submit an Ed25519-signed key proof before activation.
+After the cluster is active on version `2`, protected artifacts use the
+epoch-specific key; the shared legacy environment key is not a substitute for
+a missing version-`2` wrap.
+
+Persisted epoch documents and readiness receipts with version `1` remain
+readable and verifiable under their original digest and signature domains. A
+readiness receipt must have the same version as its target epoch. Version `1`
+does not carry source-epoch, epoch-key fingerprint, checkpoint, journal-tail,
+or verified-position evidence and remains on the legacy manual readiness path.
+Version `1` requires capability `admin-mutation-rollout-v1`; version `2`
+requires all of the additional evidence fields and capability
+`admin-membership-epoch-v2`. Both require the exact running build. OxiBelt
+never rewrites old evidence or silently treats a version-`1` receipt as version
+`2`.
+
+Operate staged transitions in this order:
+
+1. Submit an all-current-member protected `initialize`, `join`, `maintenance`,
+   `remove`, or `rejoin` proposal with the exact active-epoch precondition.
+2. For `join` or `rejoin`, provision the learner's configuration, IPM, and
+   break-glass heads out of band. The learner opens the recipient-encrypted
+   bounded checkpoint, reverifies its journal and retained commands, and
+   requires all locally provisioned heads to match exactly.
+3. Wait for every target member's exact `K_next` key proof and, for a learner,
+   its distinct signed readiness receipt. Neither kind of evidence makes the
+   member active.
+4. Submit a separate protected activation mutation. Every old active member
+   must authorize and acknowledge it; every version-`2` target member must have
+   proved its exact epoch key.
+5. Treat the target epoch as authoritative only after the activation mutation
+   commits and the membership-finalizer transaction invalidates old
+   heartbeats, advances the membership-head `fence_cutoff`, and appends the
+   fence and activation receipts atomically.
+
+`maintenance` and `remove` both propose an epoch without the exact named active
+member. That member is not silently ignored: the complete old boundary must be
+healthy enough to authorize the change, and the removed process releases its
+old fence and remains unable to heartbeat under the new epoch. Return it only
+through `rejoin`, with current trust material, new catch-up, key proof,
+readiness, and a separate activation. This is intentionally different from
+majority quorum.
+
+Only one unresolved membership transition is permitted. A transition can be
+cancelled through its protected cancellation mutation only before activation
+authorization.
+Proposal, activation-authorization, and cancellation rollback append
+compensating receipts instead of erasing prior evidence. On restart OxiBelt
+loads the durable epoch and key wraps and finalizes only a committed activation;
+it never infers success from partial local files. A mutation whose activation
+outcome is `indeterminate` makes the transition and staged epoch indeterminate
+without activating the target. Its retained `membership` logical-resource
+reservation blocks later membership transitions until an operator reconciles
+and repairs the durable evidence. Unrelated protected resources may continue
+only under the unchanged exact active epoch and its complete all-member proof.
+
+The retained epoch/key history is bounded at 64 epochs per cluster. A proposal
+that would exceed the bound is rejected before creating another epoch, with an
+instruction to archive unreferenced terminal evidence. This release does not
+provide an ordinary Admin endpoint that deletes or archives membership
+authority. Do not delete PostgreSQL rows ad hoc to bypass the bound; keep staged
+mode enabled and use an explicitly reviewed supported retirement/archive
+procedure before proposing another epoch. Similarly, once any durable staged
+head, epoch, or transition exists in the selected Admin-mutation PostgreSQL
+backend and `shared_state.namespace`, startup requires
+Admin mutations to remain enabled, `rollout.mode = "admin_cluster"`,
+`membership.mode = "staged"`, and the same configured `cluster_id`. Disabling
+Admin mutations, changing rollout mode to `single_instance`, changing
+membership mode back to `fixed`, or changing the cluster ID fails startup
+closed. Restore the exact staged authority settings or finish an explicit
+supported retirement procedure; local TOML cannot disable, downgrade, or
+rename a durable staged boundary.
+
+Changing `shared_state.namespace` or selecting another Admin-mutation/audit
+PostgreSQL backend points the process at a different authority domain. It does
+not prove that the old staged cluster was retired and is never an ordinary
+`initialize`, `join`, `maintenance`, `remove`, or `rejoin` transition. Treat
+namespace or backend replacement as an explicit out-of-band authority migration
+or disaster-recovery operation: fence the old domain, preserve and reconcile
+its terminal evidence, and establish the replacement according to a separately
+reviewed recovery procedure. Do not use a fresh namespace or backend merely to
+bypass the durable downgrade check.
+
+Membership metrics contain counts and a fixed transition-state label only:
+`oxibelt_admin_membership_active_members`,
+`oxibelt_admin_membership_fenced_members`, and
+`oxibelt_admin_membership_pending_transition{state="..."}`. They never label a
+series with a member ID, transition ID, epoch digest, cluster ID, or blocking
+reason. Exact identities, learner cursor/digests, fenced members, and safe
+blocking reasons are available only through access-controlled membership and
+instance diagnostics. Emergency reconstitution after permanent loss of a
+required old member is a separate disaster-recovery decision with explicit
+security tradeoffs; neither ordinary membership transitions nor the normal
+break-glass credential silently weaken the all-member boundary.
 
 The PostgreSQL state machine uses database-time leases and monotonic fencing
 epochs. It durably claims the signed request and encrypted command, validates
@@ -2711,7 +2829,8 @@ on every member, applies to a deterministic canary, observes it, expands to all
 remaining members, and commits only after every exact member ACKs the same
 revision and digest. NACK, timeout, readiness loss, or mismatch rolls back every
 member that may have applied. An outcome that cannot prove convergence or
-restoration is `indeterminate` and blocks later protected writes.
+restoration is `indeterminate` and blocks later protected writes to that
+logical resource.
 
 The ordinary winning HTTP request waits up to 30 seconds for terminal
 convergence and never returns its normal successful response early. If work is
@@ -3095,6 +3214,12 @@ Admin config and downstream TLS endpoints:
 - `POST /admin/v1/files/sync`
 - `POST /admin/v1/keys/rotate`
 - `GET /admin/v1/mutations/{request_id}`
+- `GET /admin/v1/membership`
+- `POST /admin/v1/membership/transitions`
+- `GET /admin/v1/membership/transitions/{transition_id}/catchup`
+- `POST /admin/v1/membership/transitions/{transition_id}/readiness`
+- `POST /admin/v1/membership/transitions/{transition_id}/activate`
+- `POST /admin/v1/membership/transitions/{transition_id}/cancel`
 - `GET /admin/v1/tls/downstream`
 - `POST /admin/v1/tls/downstream/reload`
 - `GET /admin/v1/tls/upstream`
@@ -3135,7 +3260,37 @@ heartbeat records. In `admin_cluster` mode it also reports the canonical
 membership revision, durable authority/readiness, a safe blocking reason, the
 active rollout summary, and per-instance configured/live/ready/compatible
 status. This bounded read view is diagnostic; terminal mutation commit is the
-authoritative convergence proof. `POST /admin/v1/keys/rotate` verifies and
+authoritative convergence proof.
+
+`GET /admin/v1/membership` requires `membership:GetStatus` on
+`membership/current` and returns the staged membership `head`, `active_epoch`,
+sorted `required_members`, one `pending_transition`, up to 32
+`recent_transitions`, and `fenced_members`. Transition diagnostics include the
+kind/state, monotonic state version, source and target epoch digests, affected
+member, request IDs, bounded catch-up and verification evidence, key-proof and
+receipt counts, fence cutoff, timestamps, and a safe blocking reason.
+
+`POST /admin/v1/membership/transitions` requires `membership:Propose`, a strong
+`If-Match`, and a signed mutation envelope. Its strict body has `version = 1`,
+`kind`, `expected_active_epoch`, and `member`; `initialize` uses null epoch and
+member values, join/rejoin supply a new member, and maintenance/remove supply
+the exact active member including both public keys. The mutation request ID is
+the transition ID. `GET .../{transition_id}/catchup` requires
+`membership:GetCatchUp` and returns only bounded encrypted chunks. `POST
+.../{transition_id}/readiness` requires `membership:SubmitReadiness`; the strict
+signed receipt binds `version`, path-matching `transition_id`, target epoch,
+member, catch-up cursor/digest, build, capability, issue time, and signature,
+plus the version-`2` source epoch, artifact-key fingerprint, checkpoint digest,
+journal-tail digest, and verified position. `POST .../activate` and `POST
+.../cancel` require `membership:Activate` or `membership:Cancel`, strong
+`If-Match`, and a signed mutation envelope; each strict body contains
+`version = 1`, the path-matching transition ID, and
+`expected_target_epoch`. Cancellation is accepted only before activation
+authorization; an authorized activation must finish or enter explicit
+indeterminate recovery. See `docs/AdminAPI.md` for response fields and the
+complete lifecycle contract.
+
+`POST /admin/v1/keys/rotate` verifies and
 reloads only the configured default or SNI downstream TLS key path. `POST
 /admin/v1/config/secret-references/update` validates the allowlisted reference
 shape, preflights the complete runtime candidate, and atomically activates it.
@@ -3149,11 +3304,13 @@ or required mutation metadata; and `503` for an unavailable provider, entropy
 source, mutation store, audit authority, or cluster rollout dependency.
 
 An Admin-cluster activation plan always selects an all-member coordinated
-rollout for an ordinary config change. Membership, mutation, audit, storage,
-or protected-write boundary changes use the fixed
-`admin_cluster_membership_epoch` reason and require out-of-band coordination;
-the selected cluster rollout includes a coordinated process restart, and an
-active cluster cannot authorize replacement of its own trust boundary.
+rollout for an ordinary config change. A configuration candidate that changes
+membership bootstrap trust, mutation, audit, storage, or protected-write
+settings uses `admin_cluster_membership_epoch` and requires out-of-band
+coordination; the selected cluster rollout includes a coordinated process
+restart, and an active cluster cannot replace those configured trust roots
+through config load. Changes to the active staged member set use the separate
+membership-transition API and leave those trust-root settings unchanged.
 Planning reports the exact bounded target count, canonical membership
 revision, and signed/durable artifact, all-member acknowledgement, protected
 write, and rollback prerequisites. It returns member IDs only when the caller

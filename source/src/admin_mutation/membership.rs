@@ -6,15 +6,17 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use anyhow::{bail, ensure};
+use anyhow::{Context, bail, ensure};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::ledger::validate_identifier;
 
-pub(crate) const MEMBERSHIP_DOCUMENT_VERSION: u32 = 1;
+pub(crate) const MEMBERSHIP_DOCUMENT_VERSION: u32 = 2;
+pub(crate) const LEGACY_MEMBERSHIP_DOCUMENT_VERSION: u32 = 1;
 pub(crate) const MAX_MEMBERSHIP_MEMBERS: usize = 1_024;
+pub(crate) const MEMBERSHIP_CAPABILITY_VERSION: &str = "admin-membership-epoch-v2";
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,11 +52,14 @@ pub(crate) struct MembershipEpoch {
   pub(crate) cluster_id: String,
   pub(crate) sequence: u64,
   pub(crate) predecessor: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) artifact_key_fingerprint: Option<String>,
   pub(crate) members: Vec<MembershipMember>,
   pub(crate) authorized_by_request_id: String,
 }
 
 impl MembershipEpoch {
+  #[cfg(test)]
   pub(crate) fn new(
     cluster_id: String,
     sequence: u64,
@@ -63,10 +68,32 @@ impl MembershipEpoch {
     authorized_by_request_id: String,
   ) -> anyhow::Result<Self> {
     let value = Self {
+      version: LEGACY_MEMBERSHIP_DOCUMENT_VERSION,
+      cluster_id,
+      sequence,
+      predecessor,
+      artifact_key_fingerprint: None,
+      members,
+      authorized_by_request_id,
+    };
+    value.validate()?;
+    Ok(value)
+  }
+
+  pub(crate) fn new_v2(
+    cluster_id: String,
+    sequence: u64,
+    predecessor: Option<String>,
+    artifact_key_fingerprint: String,
+    members: Vec<MembershipMember>,
+    authorized_by_request_id: String,
+  ) -> anyhow::Result<Self> {
+    let value = Self {
       version: MEMBERSHIP_DOCUMENT_VERSION,
       cluster_id,
       sequence,
       predecessor,
+      artifact_key_fingerprint: Some(artifact_key_fingerprint),
       members,
       authorized_by_request_id,
     };
@@ -76,9 +103,26 @@ impl MembershipEpoch {
 
   pub(crate) fn validate(&self) -> anyhow::Result<()> {
     ensure!(
-      self.version == MEMBERSHIP_DOCUMENT_VERSION,
+      matches!(
+        self.version,
+        LEGACY_MEMBERSHIP_DOCUMENT_VERSION | MEMBERSHIP_DOCUMENT_VERSION
+      ),
       "unsupported membership epoch version"
     );
+    match self.version {
+      LEGACY_MEMBERSHIP_DOCUMENT_VERSION => ensure!(
+        self.artifact_key_fingerprint.is_none(),
+        "legacy membership epoch cannot name an epoch artifact key"
+      ),
+      MEMBERSHIP_DOCUMENT_VERSION => ensure!(
+        self
+          .artifact_key_fingerprint
+          .as_deref()
+          .is_some_and(is_sha256_digest),
+        "membership epoch v2 requires a canonical artifact-key fingerprint"
+      ),
+      _ => bail!("unsupported membership epoch version"),
+    }
     validate_identifier("membership cluster ID", &self.cluster_id, 253)?;
     validate_identifier(
       "membership authorization request ID",
@@ -101,6 +145,8 @@ impl MembershipEpoch {
       );
     }
     let mut ids = BTreeSet::new();
+    let mut readiness_keys = BTreeSet::new();
+    let mut catchup_keys = BTreeSet::new();
     for member in &self.members {
       member.validate()?;
       ensure!(
@@ -108,7 +154,19 @@ impl MembershipEpoch {
         "membership epoch contains duplicate member {}",
         member.id
       );
+      ensure!(
+        readiness_keys.insert(member.readiness_ed25519_public_key.as_str()),
+        "membership epoch contains a duplicate readiness public key"
+      );
+      ensure!(
+        catchup_keys.insert(member.catchup_x25519_public_key.as_str()),
+        "membership epoch contains a duplicate catch-up public key"
+      );
     }
+    ensure!(
+      readiness_keys.is_disjoint(&catchup_keys),
+      "membership epoch readiness and catch-up public keys must be globally distinct"
+    );
     Ok(())
   }
 
@@ -121,11 +179,24 @@ impl MembershipEpoch {
   pub(crate) fn digest(&self) -> anyhow::Result<String> {
     self.validate()?;
     let mut hasher = Sha256::new();
-    hasher.update(b"OXIBELT-ADMIN-MEMBERSHIP-EPOCH-V1\0");
+    hasher.update(if self.version == LEGACY_MEMBERSHIP_DOCUMENT_VERSION {
+      b"OXIBELT-ADMIN-MEMBERSHIP-EPOCH-V1\0".as_slice()
+    } else {
+      b"OXIBELT-ADMIN-MEMBERSHIP-EPOCH-V2\0".as_slice()
+    });
     hash_field(&mut hasher, &self.version.to_string());
     hash_field(&mut hasher, &self.cluster_id);
     hash_field(&mut hasher, &self.sequence.to_string());
     hash_field(&mut hasher, self.predecessor.as_deref().unwrap_or(""));
+    if self.version == MEMBERSHIP_DOCUMENT_VERSION {
+      hash_field(
+        &mut hasher,
+        self
+          .artifact_key_fingerprint
+          .as_deref()
+          .context("validated membership epoch v2 key fingerprint is missing")?,
+      );
+    }
     hash_field(&mut hasher, &self.authorized_by_request_id);
     for member in self.canonical_members() {
       hash_field(&mut hasher, &member.id);
@@ -235,6 +306,16 @@ pub(crate) struct MembershipReadinessReceipt {
   pub(crate) member_id: String,
   pub(crate) catchup_cursor: u32,
   pub(crate) catchup_digest: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) source_epoch: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) artifact_key_fingerprint: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) checkpoint_digest: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) journal_tail_digest: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) verified_position: Option<u64>,
   pub(crate) build_version: String,
   pub(crate) capability_version: String,
   pub(crate) issued_at_unix_seconds: i64,
@@ -244,7 +325,7 @@ pub(crate) struct MembershipReadinessReceipt {
 impl MembershipReadinessReceipt {
   pub(crate) fn validate(&self) -> anyhow::Result<()> {
     ensure!(
-      self.version == 1,
+      matches!(self.version, 1 | 2),
       "unsupported membership readiness receipt version"
     );
     validate_identifier("membership transition ID", &self.transition_id, 256)?;
@@ -271,13 +352,53 @@ impl MembershipReadinessReceipt {
       self.catchup_cursor > 0,
       "readiness catch-up cursor must be positive"
     );
+    if self.version == 1 {
+      ensure!(
+        self.source_epoch.is_none()
+          && self.artifact_key_fingerprint.is_none()
+          && self.checkpoint_digest.is_none()
+          && self.journal_tail_digest.is_none()
+          && self.verified_position.is_none(),
+        "legacy readiness receipt cannot contain v2 verification evidence"
+      );
+    } else {
+      for (name, digest) in [
+        ("readiness source epoch", self.source_epoch.as_deref()),
+        (
+          "readiness artifact-key fingerprint",
+          self.artifact_key_fingerprint.as_deref(),
+        ),
+        (
+          "readiness checkpoint digest",
+          self.checkpoint_digest.as_deref(),
+        ),
+        (
+          "readiness journal-tail digest",
+          self.journal_tail_digest.as_deref(),
+        ),
+      ] {
+        ensure!(digest.is_some_and(is_sha256_digest), "{name} is invalid");
+      }
+      ensure!(
+        self.verified_position.is_some(),
+        "readiness verified position is missing"
+      );
+      ensure!(
+        self.capability_version == MEMBERSHIP_CAPABILITY_VERSION,
+        "membership learner capability is incompatible"
+      );
+    }
     validate_base64_len("membership readiness signature", &self.signature, 64)
   }
 
   pub(crate) fn transcript(&self, cluster_id: &str) -> anyhow::Result<Vec<u8>> {
     self.validate()?;
     validate_identifier("membership cluster ID", cluster_id, 253)?;
-    let mut transcript = b"OXIBELT-ADMIN-MEMBERSHIP-READINESS-V1\0".to_vec();
+    let mut transcript = if self.version == 1 {
+      b"OXIBELT-ADMIN-MEMBERSHIP-READINESS-V1\0".to_vec()
+    } else {
+      b"OXIBELT-ADMIN-MEMBERSHIP-READINESS-V2\0".to_vec()
+    };
     for field in [
       cluster_id,
       self.transition_id.as_str(),
@@ -291,6 +412,98 @@ impl MembershipReadinessReceipt {
       transcript.extend_from_slice(field.as_bytes());
     }
     transcript.extend_from_slice(&self.catchup_cursor.to_be_bytes());
+    if self.version == 2 {
+      let source_epoch = self
+        .source_epoch
+        .as_deref()
+        .context("validated readiness source epoch is missing")?;
+      let artifact_key_fingerprint = self
+        .artifact_key_fingerprint
+        .as_deref()
+        .context("validated readiness artifact-key fingerprint is missing")?;
+      let checkpoint_digest = self
+        .checkpoint_digest
+        .as_deref()
+        .context("validated readiness checkpoint digest is missing")?;
+      let journal_tail_digest = self
+        .journal_tail_digest
+        .as_deref()
+        .context("validated readiness journal-tail digest is missing")?;
+      for field in [
+        source_epoch,
+        artifact_key_fingerprint,
+        checkpoint_digest,
+        journal_tail_digest,
+      ] {
+        transcript.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        transcript.extend_from_slice(field.as_bytes());
+      }
+      transcript.extend_from_slice(
+        &self
+          .verified_position
+          .context("validated readiness verified position is missing")?
+          .to_be_bytes(),
+      );
+    }
+    transcript.extend_from_slice(&self.issued_at_unix_seconds.to_be_bytes());
+    Ok(transcript)
+  }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MembershipKeyProof {
+  pub(crate) version: u32,
+  pub(crate) transition_id: String,
+  pub(crate) target_epoch: String,
+  pub(crate) member_id: String,
+  pub(crate) artifact_key_fingerprint: String,
+  pub(crate) build_version: String,
+  pub(crate) capability_version: String,
+  pub(crate) issued_at_unix_seconds: i64,
+  pub(crate) signature: String,
+}
+
+impl MembershipKeyProof {
+  pub(crate) fn validate(&self) -> anyhow::Result<()> {
+    ensure!(
+      self.version == 2,
+      "unsupported membership key-proof version"
+    );
+    validate_identifier("membership transition ID", &self.transition_id, 256)?;
+    validate_identifier("membership key-proof member ID", &self.member_id, 253)?;
+    validate_identifier(
+      "membership key-proof build version",
+      &self.build_version,
+      256,
+    )?;
+    ensure!(
+      self.capability_version == MEMBERSHIP_CAPABILITY_VERSION,
+      "membership key-proof capability is incompatible"
+    );
+    ensure!(
+      is_sha256_digest(&self.target_epoch) && is_sha256_digest(&self.artifact_key_fingerprint),
+      "membership key-proof target or key fingerprint is invalid"
+    );
+    validate_base64_len("membership key-proof signature", &self.signature, 64)
+  }
+
+  pub(crate) fn transcript(&self, cluster_id: &str) -> anyhow::Result<Vec<u8>> {
+    self.validate()?;
+    validate_identifier("membership cluster ID", cluster_id, 253)?;
+    let mut transcript = b"OXIBELT-ADMIN-MEMBERSHIP-KEY-PROOF-V2\0".to_vec();
+    for field in [
+      cluster_id,
+      self.transition_id.as_str(),
+      self.target_epoch.as_str(),
+      self.member_id.as_str(),
+      self.artifact_key_fingerprint.as_str(),
+      self.build_version.as_str(),
+      self.capability_version.as_str(),
+    ] {
+      transcript.extend_from_slice(&(field.len() as u64).to_be_bytes());
+      transcript.extend_from_slice(field.as_bytes());
+    }
     transcript.extend_from_slice(&self.issued_at_unix_seconds.to_be_bytes());
     Ok(transcript)
   }
@@ -438,7 +651,7 @@ mod tests {
       id: id.to_string(),
       readiness_ed25519_public_key: base64::engine::general_purpose::STANDARD.encode([key; 32]),
       catchup_x25519_public_key: base64::engine::general_purpose::STANDARD
-        .encode([key.wrapping_add(1); 32]),
+        .encode([key.wrapping_add(100); 32]),
     }
   }
 
@@ -484,6 +697,52 @@ mod tests {
     assert!(
       MembershipTransitionState::Ready
         .may_transition_to(MembershipTransitionState::ActivationAuthorized)
+    );
+  }
+
+  #[test]
+  fn epoch_rejects_cross_member_and_cross_purpose_key_reuse() {
+    let mut members = vec![member("a", 1), member("b", 2)];
+    members[1].readiness_ed25519_public_key = members[0].readiness_ed25519_public_key.clone();
+    assert!(
+      MembershipEpoch::new("primary".into(), 0, None, members, "initialize-1".into()).is_err()
+    );
+
+    let mut members = vec![member("a", 1), member("b", 2)];
+    members[1].catchup_x25519_public_key = members[0].readiness_ed25519_public_key.clone();
+    assert!(
+      MembershipEpoch::new("primary".into(), 0, None, members, "initialize-1".into()).is_err()
+    );
+  }
+
+  #[test]
+  fn v1_digest_remains_stable_while_v2_binds_the_artifact_key() {
+    let legacy = MembershipEpoch::new(
+      "primary".into(),
+      0,
+      None,
+      vec![member("a", 1), member("b", 2)],
+      "initialize-1".into(),
+    )
+    .expect("legacy epoch");
+    let v2 = MembershipEpoch::new_v2(
+      "primary".into(),
+      0,
+      None,
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+      legacy.members.clone(),
+      "initialize-1".into(),
+    )
+    .expect("v2 epoch");
+    assert_eq!(legacy.version, 1);
+    assert_eq!(v2.version, 2);
+    assert_eq!(
+      legacy.digest().expect("legacy digest"),
+      "sha256:d1a297ecdfdeff456d9713d82eacc5c8da0ca727515306556e02df436986bf94"
+    );
+    assert_ne!(
+      legacy.digest().expect("legacy digest"),
+      v2.digest().expect("v2 digest")
     );
   }
 }

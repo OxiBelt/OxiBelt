@@ -13,7 +13,7 @@ use crate::admin_mutation::rollout_store::{
 };
 use crate::admin_mutation::store::LogicalRevision;
 
-use super::AdminMutationRuntime;
+use super::{AdminMutationRuntime, LocalMembershipHead};
 
 impl AdminMutationRuntime {
   pub(crate) async fn cluster_set_worker_ready(
@@ -25,11 +25,16 @@ impl AdminMutationRuntime {
     controller
       .update_local_status(LocalRolloutStatus {
         assigned_revision: None,
-        applied_revision,
-        applied_digest,
+        applied_revision: applied_revision.clone(),
+        applied_digest: applied_digest.clone(),
         ready: true,
       })
       .await?;
+    self.update_local_membership_head(LocalMembershipHead {
+      resource: "config".to_string(),
+      revision: applied_revision.clone(),
+      digest: applied_digest.clone(),
+    });
     controller.heartbeat_once().await
   }
 
@@ -38,7 +43,13 @@ impl AdminMutationRuntime {
     update: ResourceHeadUpdate,
   ) -> anyhow::Result<()> {
     let member = self.cluster_controller_ref()?.member_fence().await?;
-    publish_resource_head(self.store()?, &member, &update).await
+    publish_resource_head(self.store()?, &member, &update).await?;
+    self.update_local_membership_head(LocalMembershipHead {
+      resource: update.resource,
+      revision: update.applied_revision,
+      digest: update.applied_digest,
+    });
+    Ok(())
   }
 
   pub(crate) async fn cluster_logical_revision(
@@ -124,6 +135,7 @@ impl AdminMutationRuntime {
       .await?
       .context("cluster resource logical head is unavailable")?;
     let authority = self.membership_authority();
+    let artifact_key_fingerprint = self.artifact_key_fingerprint();
     let mut exact = prove_exact_live_membership(
       self.store()?,
       &self.inner.cluster_id,
@@ -131,7 +143,7 @@ impl AdminMutationRuntime {
       &authority.members,
       oxibelt_build_identity::SHORT_VERSION,
       "admin-mutation-rollout-v1",
-      self.artifact_key_fingerprint()?,
+      &artifact_key_fingerprint,
     )
     .await?;
     exact.resource = record.resource.clone();
@@ -160,18 +172,14 @@ impl AdminMutationRuntime {
     resource: &str,
   ) -> anyhow::Result<Option<(String, ClusterMutationCommand)>> {
     let member = self.cluster_controller_ref()?.member_fence().await?;
-    let cipher = self.artifact_cipher()?;
-    let Some(stored) = fetch_committed_artifact(
-      self.store()?,
-      &member,
-      resource,
-      cipher.maximum_plaintext_bytes(),
-    )
-    .await?
+    let maximum_plaintext_bytes = crate::admin_mutation::store::MAX_STORED_ARTIFACT_BYTES;
+    let Some((encryption_membership_revision, stored)) =
+      fetch_committed_artifact(self.store()?, &member, resource, maximum_plaintext_bytes).await?
     else {
       return Ok(None);
     };
     let binding = stored.binding.clone();
+    let cipher = self.artifact_cipher_for_membership(&encryption_membership_revision)?;
     let request_id = binding.request_id.clone();
     let plaintext = cipher.open(&binding, stored)?;
     let command = ClusterMutationCommand::from_plaintext(&plaintext, &binding)?;

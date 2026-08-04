@@ -34,9 +34,9 @@ pub(crate) use membership::{
   MembershipReadinessReceipt, MembershipTransitionRequest,
 };
 pub(crate) use membership_store::{
-  MembershipMutationCheckpoint, MembershipTransition, apply_membership_proposal_tx,
-  authorize_membership_activation_tx, cancel_membership_transition_tx,
-  restore_membership_mutation_tx,
+  MembershipArtifactCiphers, MembershipMutationCheckpoint, MembershipTransition,
+  apply_membership_proposal_tx, authorize_membership_activation_tx,
+  cancel_membership_transition_tx, restore_membership_mutation_tx,
 };
 pub use response::{
   IDEMPOTENT_REPLAY_HEADER, MUTATION_REQUEST_ID_HEADER, MUTATION_REVISION_HEADER,
@@ -54,8 +54,8 @@ pub(crate) use rollout_store::{
   publish_checkpoint_in_coordinator_transaction,
 };
 pub(crate) use runtime::{
-  AdminMutationRuntime, ClusterHeartbeatTask, MutationAdmission, MutationAdmissionError,
-  MutationConflict, configured_target,
+  AdminMutationRuntime, ClusterHeartbeatTask, LocalMembershipHead, MutationAdmission,
+  MutationAdmissionError, MutationConflict, configured_target,
 };
 pub(crate) use store::{
   BreakGlassMutationCheckpoint, capture_break_glass_checkpoint_tx,

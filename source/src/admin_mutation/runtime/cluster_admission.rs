@@ -174,6 +174,7 @@ impl AdminMutationRuntime {
         anyhow::anyhow!("cluster mutation baseline does not match the active runtime").into(),
       );
     }
+    let artifact_key_fingerprint = self.artifact_key_fingerprint();
     let exact = prove_exact_resource_membership(
       store,
       &self.inner.cluster_id,
@@ -181,7 +182,7 @@ impl AdminMutationRuntime {
       &authority.members,
       oxibelt_build_identity::SHORT_VERSION,
       "admin-mutation-rollout-v1",
-      self.artifact_key_fingerprint()?,
+      &artifact_key_fingerprint,
       resource,
     )
     .await?;

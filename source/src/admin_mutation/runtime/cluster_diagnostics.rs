@@ -40,7 +40,7 @@ impl AdminMutationRuntime {
         heads.insert((head.instance_id.clone(), resource.to_string()), head);
       }
     }
-    let expected_key = self.artifact_key_fingerprint()?;
+    let expected_key = self.artifact_key_fingerprint();
     let mut instance_ids = authority.members.clone();
     instance_ids.extend(live.iter().map(|value| value.instance_id.clone()));
     instance_ids.sort();

@@ -144,9 +144,8 @@ impl AdminMutationRuntime {
       prior_revision: prior_revision.to_string(),
       prior_digest: prior_digest.to_string(),
     };
-    let sealed = self
-      .artifact_cipher()?
-      .seal_checkpoint(&binding, plaintext)?;
+    let cipher = self.artifact_cipher_for_membership(&binding.artifact.membership_revision)?;
+    let sealed = cipher.seal_checkpoint(&binding, plaintext)?;
     Ok(SealedCheckpoint {
       assignment_epoch,
       candidate_revision: record.new_revision.clone(),
@@ -175,7 +174,8 @@ impl AdminMutationRuntime {
       prior_revision: stored.prior_revision.clone(),
       prior_digest: stored.prior_digest.clone(),
     };
-    let plaintext = self.artifact_cipher()?.open_checkpoint(
+    let cipher = self.artifact_cipher_for_membership(&binding.artifact.membership_revision)?;
+    let plaintext = cipher.open_checkpoint(
       &binding,
       stored.nonce,
       stored.ciphertext,
@@ -210,9 +210,8 @@ impl AdminMutationRuntime {
       prior_revision: prior_revision.to_string(),
       prior_digest: prior_digest.to_string(),
     };
-    let sealed = self
-      .artifact_cipher()?
-      .seal_checkpoint(&binding, plaintext)?;
+    let cipher = self.artifact_cipher_for_membership(&binding.artifact.membership_revision)?;
+    let sealed = cipher.seal_checkpoint(&binding, plaintext)?;
     publish_checkpoint(
       self.store()?,
       &member,
@@ -248,7 +247,8 @@ impl AdminMutationRuntime {
       prior_revision: stored.prior_revision.clone(),
       prior_digest: stored.prior_digest.clone(),
     };
-    let plaintext = self.artifact_cipher()?.open_checkpoint(
+    let cipher = self.artifact_cipher_for_membership(&binding.artifact.membership_revision)?;
+    let plaintext = cipher.open_checkpoint(
       &binding,
       stored.nonce,
       stored.ciphertext,

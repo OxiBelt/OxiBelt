@@ -402,10 +402,12 @@ impl Config {
       "admin.mutations.artifact_key_env",
       &mutations.artifact_key_env,
     )?;
-    validate_base64_32_byte_env(
-      "admin.mutations.artifact_key_env",
-      &mutations.artifact_key_env,
-    )?;
+    if !rollout.membership.mode.is_staged() {
+      validate_base64_32_byte_env(
+        "admin.mutations.artifact_key_env",
+        &mutations.artifact_key_env,
+      )?;
+    }
     if !(1..=MAX_HEARTBEAT_INTERVAL_SECONDS).contains(&rollout.heartbeat_interval_seconds) {
       bail!(
         "admin.mutations.rollout.heartbeat_interval_seconds must be between 1 and {MAX_HEARTBEAT_INTERVAL_SECONDS}"

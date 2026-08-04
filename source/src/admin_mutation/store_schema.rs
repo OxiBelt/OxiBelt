@@ -417,19 +417,54 @@ pub(super) fn statements() -> &'static [&'static str] {
        epoch_digest text NOT NULL,
        epoch_sequence bigint NOT NULL,
        predecessor_digest text NULL,
+       artifact_key_fingerprint text NULL,
+       checkpoint_digest text NULL,
        document jsonb NOT NULL,
        authorized_request_id text NOT NULL,
        state text NOT NULL,
        created_at timestamptz NOT NULL DEFAULT now(),
        activated_at timestamptz NULL,
        PRIMARY KEY(namespace, cluster_id, epoch_digest),
-       UNIQUE(namespace, cluster_id, epoch_sequence),
        CHECK (epoch_digest ~ '^sha256:[0-9a-f]{64}$'),
        CHECK (predecessor_digest IS NULL OR predecessor_digest ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (artifact_key_fingerprint IS NULL OR artifact_key_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (checkpoint_digest IS NULL OR checkpoint_digest ~ '^sha256:[0-9a-f]{64}$'),
        CHECK ((epoch_sequence = 0) = (predecessor_digest IS NULL)),
-       CHECK (state IN ('staged','active','superseded','indeterminate')),
+       CHECK (state IN ('staged','active','superseded','cancelled','indeterminate')),
        CHECK ((state IN ('active','superseded')) = (activated_at IS NOT NULL))
      )",
+    "DO $membership_epoch_sequence$
+     DECLARE epoch_sequence_constraint text;
+     BEGIN
+       SELECT constraint_row.conname INTO epoch_sequence_constraint
+         FROM pg_constraint constraint_row
+        WHERE constraint_row.conrelid=to_regclass('oxibelt_admin_membership_epochs')
+          AND constraint_row.contype='u'
+          AND (SELECT array_agg(attribute.attname::text ORDER BY key_column.ordinality)
+                 FROM unnest(constraint_row.conkey) WITH ORDINALITY
+                      AS key_column(attnum, ordinality)
+                 JOIN pg_attribute attribute
+                   ON attribute.attrelid=constraint_row.conrelid
+                  AND attribute.attnum=key_column.attnum)
+              = ARRAY['namespace','cluster_id','epoch_sequence'];
+       IF epoch_sequence_constraint IS NOT NULL THEN
+         EXECUTE format(
+           'ALTER TABLE oxibelt_admin_membership_epochs DROP CONSTRAINT %I',
+           epoch_sequence_constraint
+         );
+       END IF;
+     END
+     $membership_epoch_sequence$",
+    "CREATE UNIQUE INDEX IF NOT EXISTS oxibelt_admin_membership_live_sequence_idx
+       ON oxibelt_admin_membership_epochs(namespace,cluster_id,epoch_sequence)
+       WHERE state IN ('staged','active','superseded')",
+    "ALTER TABLE oxibelt_admin_membership_epochs
+       DROP CONSTRAINT IF EXISTS oxibelt_admin_membership_epochs_state_check",
+    "ALTER TABLE oxibelt_admin_membership_epochs
+       ADD CONSTRAINT oxibelt_admin_membership_epochs_state_check
+       CHECK (state IN ('staged','active','superseded','cancelled','indeterminate')) NOT VALID",
+    "ALTER TABLE oxibelt_admin_membership_epochs
+       VALIDATE CONSTRAINT oxibelt_admin_membership_epochs_state_check",
     "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_epoch_members (
        namespace text NOT NULL,
        cluster_id text NOT NULL,
@@ -440,8 +475,56 @@ pub(super) fn statements() -> &'static [&'static str] {
        created_at timestamptz NOT NULL DEFAULT now(),
        PRIMARY KEY(namespace, cluster_id, epoch_digest, instance_id),
        FOREIGN KEY(namespace, cluster_id, epoch_digest)
-         REFERENCES oxibelt_admin_membership_epochs(namespace, cluster_id, epoch_digest)
+       REFERENCES oxibelt_admin_membership_epochs(namespace, cluster_id, epoch_digest)
          ON DELETE CASCADE
+     )",
+    "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_epoch_key_wraps (
+       namespace text NOT NULL,
+       cluster_id text NOT NULL,
+       epoch_digest text NOT NULL,
+       transition_id text NOT NULL,
+       instance_id text NOT NULL,
+       artifact_key_fingerprint text NOT NULL,
+       algorithm text NOT NULL,
+       ephemeral_public_key bytea NOT NULL,
+       nonce bytea NOT NULL,
+       ciphertext bytea NOT NULL,
+       ciphertext_digest text NOT NULL,
+       created_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY(namespace, cluster_id, epoch_digest, instance_id),
+       FOREIGN KEY(namespace, cluster_id, epoch_digest, instance_id)
+         REFERENCES oxibelt_admin_membership_epoch_members(
+           namespace, cluster_id, epoch_digest, instance_id) ON DELETE CASCADE,
+       CHECK (artifact_key_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (algorithm = 'x25519-hkdf-sha256-aes-256-gcm-key-wrap-v1'),
+       CHECK (octet_length(ephemeral_public_key) = 32),
+       CHECK (octet_length(nonce) = 12),
+       CHECK (octet_length(ciphertext) = 48),
+       CHECK (ciphertext_digest ~ '^sha256:[0-9a-f]{64}$')
+     )",
+    "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_epoch_artifacts (
+       namespace text NOT NULL,
+       cluster_id text NOT NULL,
+       epoch_digest text NOT NULL,
+       resource text NOT NULL,
+       request_id text NOT NULL,
+       algorithm text NOT NULL,
+       nonce bytea NOT NULL,
+       ciphertext bytea NOT NULL,
+       ciphertext_digest text NOT NULL,
+       plaintext_len integer NOT NULL,
+       created_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY(namespace, cluster_id, epoch_digest, resource),
+       FOREIGN KEY(namespace, cluster_id, epoch_digest)
+         REFERENCES oxibelt_admin_membership_epochs(namespace, cluster_id, epoch_digest)
+         ON DELETE CASCADE,
+       FOREIGN KEY(namespace, request_id)
+         REFERENCES oxibelt_admin_mutations(namespace, request_id) ON DELETE RESTRICT,
+       CHECK (algorithm = 'aes-256-gcm-v1'),
+       CHECK (octet_length(nonce) = 12),
+       CHECK (plaintext_len BETWEEN 0 AND 16793638),
+       CHECK (octet_length(ciphertext) = plaintext_len + 16),
+       CHECK (ciphertext_digest ~ '^sha256:[0-9a-f]{64}$')
      )",
     "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_transitions (
        namespace text NOT NULL,
@@ -458,6 +541,12 @@ pub(super) fn statements() -> &'static [&'static str] {
        blocking_reason text NULL,
        catchup_cursor bigint NOT NULL DEFAULT 0,
        catchup_digest text NULL,
+       checkpoint_digest text NULL,
+       journal_tail_digest text NULL,
+       verified_position bigint NULL,
+       capability_result text NOT NULL DEFAULT 'not_required',
+       key_proof_count integer NOT NULL DEFAULT 0,
+       key_proof_required integer NOT NULL DEFAULT 0,
        receipt_count integer NOT NULL DEFAULT 0,
        fence_cutoff bigint NULL,
        created_at timestamptz NOT NULL DEFAULT now(),
@@ -469,11 +558,57 @@ pub(super) fn statements() -> &'static [&'static str] {
        CHECK (state IN ('proposed','learner','catching_up','ready',
          'activation_authorized','fencing','active','cancelled','indeterminate')),
        CHECK (state_version >= 0 AND catchup_cursor >= 0),
+       CHECK (verified_position IS NULL OR verified_position >= 0),
+       CHECK (capability_result IN ('not_required','pending','compatible','incompatible')),
+       CHECK (key_proof_count BETWEEN 0 AND 1024),
+       CHECK (key_proof_required BETWEEN 0 AND 1024),
+       CHECK (key_proof_count <= key_proof_required),
        CHECK (receipt_count BETWEEN 0 AND 4096),
        CHECK (source_epoch_digest IS NULL OR source_epoch_digest ~ '^sha256:[0-9a-f]{64}$'),
        CHECK (target_epoch_digest ~ '^sha256:[0-9a-f]{64}$'),
-       CHECK (catchup_digest IS NULL OR catchup_digest ~ '^sha256:[0-9a-f]{64}$')
+       CHECK (catchup_digest IS NULL OR catchup_digest ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (checkpoint_digest IS NULL OR checkpoint_digest ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (journal_tail_digest IS NULL OR journal_tail_digest ~ '^sha256:[0-9a-f]{64}$')
      )",
+    "ALTER TABLE oxibelt_admin_membership_epochs
+       ADD COLUMN IF NOT EXISTS artifact_key_fingerprint text NULL",
+    "ALTER TABLE oxibelt_admin_membership_epochs
+       ADD COLUMN IF NOT EXISTS checkpoint_digest text NULL",
+    "ALTER TABLE oxibelt_admin_membership_transitions
+       ADD COLUMN IF NOT EXISTS checkpoint_digest text NULL",
+    "ALTER TABLE oxibelt_admin_membership_transitions
+       ADD COLUMN IF NOT EXISTS journal_tail_digest text NULL",
+    "ALTER TABLE oxibelt_admin_membership_transitions
+       ADD COLUMN IF NOT EXISTS verified_position bigint NULL",
+    "ALTER TABLE oxibelt_admin_membership_transitions
+       ADD COLUMN IF NOT EXISTS capability_result text NOT NULL DEFAULT 'not_required'",
+    "ALTER TABLE oxibelt_admin_membership_transitions
+       ADD COLUMN IF NOT EXISTS key_proof_count integer NOT NULL DEFAULT 0",
+    "ALTER TABLE oxibelt_admin_membership_transitions
+       ADD COLUMN IF NOT EXISTS key_proof_required integer NOT NULL DEFAULT 0",
+    "ALTER TABLE oxibelt_admin_membership_epochs
+       DROP CONSTRAINT IF EXISTS oxibelt_admin_membership_epochs_v2_digest_check",
+    "ALTER TABLE oxibelt_admin_membership_epochs
+       ADD CONSTRAINT oxibelt_admin_membership_epochs_v2_digest_check CHECK (
+         (artifact_key_fingerprint IS NULL OR artifact_key_fingerprint ~ '^sha256:[0-9a-f]{64}$')
+         AND (checkpoint_digest IS NULL OR checkpoint_digest ~ '^sha256:[0-9a-f]{64}$')
+       ) NOT VALID",
+    "ALTER TABLE oxibelt_admin_membership_epochs
+       VALIDATE CONSTRAINT oxibelt_admin_membership_epochs_v2_digest_check",
+    "ALTER TABLE oxibelt_admin_membership_transitions
+       DROP CONSTRAINT IF EXISTS oxibelt_admin_membership_transitions_v2_evidence_check",
+    "ALTER TABLE oxibelt_admin_membership_transitions
+       ADD CONSTRAINT oxibelt_admin_membership_transitions_v2_evidence_check CHECK (
+         (checkpoint_digest IS NULL OR checkpoint_digest ~ '^sha256:[0-9a-f]{64}$')
+         AND (journal_tail_digest IS NULL OR journal_tail_digest ~ '^sha256:[0-9a-f]{64}$')
+         AND (verified_position IS NULL OR verified_position >= 0)
+         AND capability_result IN ('not_required','pending','compatible','incompatible')
+         AND key_proof_count BETWEEN 0 AND 1024
+         AND key_proof_required BETWEEN 0 AND 1024
+         AND key_proof_count <= key_proof_required
+       ) NOT VALID",
+    "ALTER TABLE oxibelt_admin_membership_transitions
+       VALIDATE CONSTRAINT oxibelt_admin_membership_transitions_v2_evidence_check",
     "CREATE UNIQUE INDEX IF NOT EXISTS oxibelt_admin_membership_pending_idx
        ON oxibelt_admin_membership_transitions(namespace, cluster_id)
        WHERE state NOT IN ('active','cancelled','indeterminate')",
@@ -492,6 +627,27 @@ pub(super) fn statements() -> &'static [&'static str] {
          REFERENCES oxibelt_admin_membership_transitions(namespace, cluster_id, transition_id)
          ON DELETE CASCADE,
        CHECK (ordinal BETWEEN 0 AND 4095),
+       CHECK (payload_digest ~ '^sha256:[0-9a-f]{64}$')
+     )",
+    "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_key_proofs (
+       namespace text NOT NULL,
+       cluster_id text NOT NULL,
+       transition_id text NOT NULL,
+       instance_id text NOT NULL,
+       target_epoch_digest text NOT NULL,
+       artifact_key_fingerprint text NOT NULL,
+       payload_digest text NOT NULL,
+       payload jsonb NOT NULL,
+       created_at timestamptz NOT NULL DEFAULT now(),
+       PRIMARY KEY(namespace, cluster_id, transition_id, instance_id),
+       FOREIGN KEY(namespace, cluster_id, transition_id)
+         REFERENCES oxibelt_admin_membership_transitions(namespace, cluster_id, transition_id)
+         ON DELETE CASCADE,
+       FOREIGN KEY(namespace, cluster_id, target_epoch_digest, instance_id)
+         REFERENCES oxibelt_admin_membership_epoch_members(
+           namespace, cluster_id, epoch_digest, instance_id) ON DELETE CASCADE,
+       CHECK (target_epoch_digest ~ '^sha256:[0-9a-f]{64}$'),
+       CHECK (artifact_key_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
        CHECK (payload_digest ~ '^sha256:[0-9a-f]{64}$')
      )",
     "CREATE TABLE IF NOT EXISTS oxibelt_admin_membership_catchup_chunks (
@@ -514,12 +670,19 @@ pub(super) fn statements() -> &'static [&'static str] {
        CHECK (algorithm = 'x25519-hkdf-sha256-aes-256-gcm-v1'),
        CHECK (octet_length(ephemeral_public_key) = 32),
        CHECK (octet_length(nonce) = 12),
-       CHECK (plaintext_len BETWEEN 0 AND 16793638),
+       CHECK (plaintext_len BETWEEN 1 AND 16793638),
        CHECK (octet_length(ciphertext) = plaintext_len + 16),
        CHECK (ciphertext_digest ~ '^sha256:[0-9a-f]{64}$')
      )",
+    "ALTER TABLE oxibelt_admin_membership_catchup_chunks
+       DROP CONSTRAINT IF EXISTS oxibelt_admin_membership_catchup_nonempty_check",
+    "ALTER TABLE oxibelt_admin_membership_catchup_chunks
+       ADD CONSTRAINT oxibelt_admin_membership_catchup_nonempty_check
+       CHECK (plaintext_len BETWEEN 1 AND 16793638) NOT VALID",
+    "ALTER TABLE oxibelt_admin_membership_catchup_chunks
+       VALIDATE CONSTRAINT oxibelt_admin_membership_catchup_nonempty_check",
     "INSERT INTO oxibelt_admin_schema_migrations(component, version)
-       VALUES ('admin_mutation', 4) ON CONFLICT DO NOTHING",
+       VALUES ('admin_mutation', 5) ON CONFLICT DO NOTHING",
   ]
 }
 

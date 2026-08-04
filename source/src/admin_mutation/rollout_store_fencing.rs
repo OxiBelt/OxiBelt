@@ -84,6 +84,52 @@ pub(crate) async fn heartbeat_fenced(
     "fenced heartbeat requires an admin_cluster mutation store"
   );
   let mut tx = store.pool().begin().await?;
+  // Staged-membership deployments serialize heartbeat authority with the
+  // durable membership head. Fixed-membership deployments have no head row.
+  // Taking this lock before the heartbeat row preserves the same lock order as
+  // admission and membership cutover.
+  let membership_head = sqlx::query(
+    "SELECT head.active_epoch_digest,epoch.artifact_key_fingerprint,
+            CASE WHEN head.active_epoch_digest IS NULL THEN false ELSE EXISTS(
+              SELECT 1 FROM oxibelt_admin_membership_epoch_members member
+               WHERE member.namespace=head.namespace AND member.cluster_id=head.cluster_id
+                 AND member.epoch_digest=head.active_epoch_digest
+                 AND member.instance_id=$3) END AS target_member
+       FROM oxibelt_admin_membership_heads head
+       LEFT JOIN oxibelt_admin_membership_epochs epoch
+         ON epoch.namespace=head.namespace AND epoch.cluster_id=head.cluster_id
+        AND epoch.epoch_digest=head.active_epoch_digest
+      WHERE head.namespace=$1 AND head.cluster_id=$2 FOR SHARE OF head",
+  )
+  .bind(store.namespace())
+  .bind(&update.cluster_id)
+  .bind(&update.instance_id)
+  .fetch_optional(&mut *tx)
+  .await?;
+  let staged_active_epoch = membership_head
+    .as_ref()
+    .map(|row| row.try_get::<Option<String>, _>("active_epoch_digest"))
+    .transpose()?
+    .flatten();
+  if let Some(active_epoch) = staged_active_epoch.as_deref() {
+    ensure!(
+      update.membership_revision == active_epoch,
+      "member heartbeat targets a superseded membership epoch"
+    );
+    let head = membership_head
+      .as_ref()
+      .context("staged membership head disappeared")?;
+    ensure!(
+      head.try_get::<bool, _>("target_member")?,
+      "member heartbeat identity is outside the active membership epoch"
+    );
+    if let Some(fingerprint) = head.try_get::<Option<String>, _>("artifact_key_fingerprint")? {
+      ensure!(
+        update.artifact_key_fingerprint == fingerprint,
+        "member heartbeat artifact key differs from the active membership epoch"
+      );
+    }
+  }
   let current = sqlx::query(
     "SELECT boot_id, instance_epoch, build_version, capability_version,
             artifact_key_fingerprint, membership_revision,
@@ -100,16 +146,24 @@ pub(crate) async fn heartbeat_fenced(
   let instance_epoch = if let Some(row) = current.as_ref() {
     let current_boot: String = row.try_get("boot_id")?;
     if current_boot == update.boot_id {
-      ensure!(
-        row.try_get::<String, _>("build_version")? == update.build_version
-          && row.try_get::<String, _>("capability_version")? == update.capability_version
-          && row
-            .try_get::<Option<String>, _>("artifact_key_fingerprint")?
-            .as_deref()
-            == Some(update.artifact_key_fingerprint.as_str())
-          && row.try_get::<String, _>("membership_revision")? == update.membership_revision,
-        "member boot identity changed while its session was active"
-      );
+      let same_build = row.try_get::<String, _>("build_version")? == update.build_version;
+      let same_capability =
+        row.try_get::<String, _>("capability_version")? == update.capability_version;
+      let same_key = row
+        .try_get::<Option<String>, _>("artifact_key_fingerprint")?
+        .as_deref()
+        == Some(update.artifact_key_fingerprint.as_str());
+      let same_membership =
+        row.try_get::<String, _>("membership_revision")? == update.membership_revision;
+      if !(same_build && same_capability && same_key && same_membership) {
+        ensure!(
+          !row.try_get::<bool, _>("live")?
+            && same_build
+            && same_capability
+            && staged_active_epoch.as_deref() == Some(update.membership_revision.as_str()),
+          "member boot identity changed outside an exact membership cutover"
+        );
+      }
       row.try_get("instance_epoch")?
     } else {
       ensure!(

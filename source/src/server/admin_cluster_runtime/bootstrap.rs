@@ -1,7 +1,7 @@
 use anyhow::Context;
 use tokio::sync::mpsc;
 
-use crate::admin_mutation::{AdminMutationRuntime, ClusterHeartbeatTask};
+use crate::admin_mutation::{AdminMutationRuntime, ClusterHeartbeatTask, LocalMembershipHead};
 use crate::state::AppHandle;
 
 use super::{AdminClusterRuntimeTasks, AdminControlHandle, ObservedResourceHead};
@@ -65,6 +65,15 @@ impl PreparedAdminClusterRuntime {
         &snapshot.config,
         config_revision,
         config_digest,
+        observed
+          .iter()
+          .map(|head| LocalMembershipHead {
+            resource: head.resource.to_string(),
+            revision: head.revision.clone(),
+            digest: head.digest.clone(),
+          })
+          .collect(),
+        snapshot.metrics.clone(),
         snapshot.runtime_health.clone(),
         snapshot.runtime_generation,
         fatal_tx,

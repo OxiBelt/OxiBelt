@@ -270,7 +270,7 @@ pub(crate) struct StoredArtifact {
   pub(super) plaintext_len: usize,
 }
 
-pub(super) struct MutationArtifactCipher {
+pub(crate) struct MutationArtifactCipher {
   key: Aes256GcmKey,
   key_fingerprint: String,
   maximum_plaintext_bytes: usize,
@@ -474,7 +474,7 @@ impl MutationArtifactCipher {
   }
 }
 
-fn artifact_key_fingerprint(key: &[u8]) -> String {
+pub(crate) fn artifact_key_fingerprint(key: &[u8]) -> String {
   let mut hasher = Sha256::new();
   hasher.update(b"OXIBELT-ADMIN-MUTATION-ARTIFACT-KEY-V1\0");
   hasher.update(key);

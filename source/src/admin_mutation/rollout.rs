@@ -142,6 +142,7 @@ pub(crate) struct AdminClusterRolloutController {
 struct ControllerMembership {
   revision: String,
   members: Vec<String>,
+  artifact_key_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +178,7 @@ impl AdminClusterRolloutController {
     let membership = ControllerMembership {
       revision: settings.membership_revision.clone(),
       members: settings.members.clone(),
+      artifact_key_fingerprint: settings.artifact_key_fingerprint.clone(),
     };
     Ok(Self {
       store,
@@ -221,8 +223,14 @@ impl AdminClusterRolloutController {
     &self,
     revision: String,
     members: Vec<String>,
+    artifact_key_fingerprint: String,
   ) -> anyhow::Result<bool> {
+    self.ready.store(false, Ordering::Release);
     validate_identifier("membership_revision", &revision, 256)?;
+    ensure!(
+      super::artifact::is_sha256_digest(&artifact_key_fingerprint),
+      "membership artifact-key fingerprint is invalid"
+    );
     let members = normalized_members(&members)?;
     let participating = members.binary_search(&self.settings.instance_id).is_ok();
     if let Some(fence) = self.member_fence.write().await.take() {
@@ -234,10 +242,12 @@ impl AdminClusterRolloutController {
     *self
       .membership
       .write()
-      .unwrap_or_else(std::sync::PoisonError::into_inner) =
-      ControllerMembership { revision, members };
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = ControllerMembership {
+      revision,
+      members,
+      artifact_key_fingerprint,
+    };
     self.participating.store(participating, Ordering::Release);
-    self.ready.store(false, Ordering::Release);
     if participating {
       self.heartbeat_once().await?;
       let fence = self.member_fence().await?;
@@ -300,6 +310,14 @@ impl AdminClusterRolloutController {
     Ok(())
   }
 
+  pub(crate) async fn local_status(&self) -> LocalRolloutStatus {
+    self.local_status.read().await.clone()
+  }
+
+  pub(crate) fn participating(&self) -> bool {
+    self.participating.load(Ordering::Acquire)
+  }
+
   pub(crate) async fn release(&self) -> anyhow::Result<()> {
     self.ready.store(false, Ordering::Release);
     let fence = self.member_fence.write().await.take();
@@ -328,7 +346,7 @@ impl AdminClusterRolloutController {
         boot_id: self.settings.boot_id.clone(),
         build_version: self.settings.build_version.clone(),
         capability_version: CAPABILITY_VERSION.to_string(),
-        artifact_key_fingerprint: self.settings.artifact_key_fingerprint.clone(),
+        artifact_key_fingerprint: membership.artifact_key_fingerprint,
         membership_revision: membership.revision,
         assigned_revision: status.assigned_revision,
         applied_revision: status.applied_revision,
@@ -407,7 +425,7 @@ impl AdminClusterRolloutController {
         &membership.members,
         &self.settings.build_version,
         CAPABILITY_VERSION,
-        &self.settings.artifact_key_fingerprint,
+        &membership.artifact_key_fingerprint,
         resource,
       )
       .await?;

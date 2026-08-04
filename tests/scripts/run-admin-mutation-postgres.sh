@@ -14,6 +14,7 @@ container_name="oxibelt-admin-mutation-postgres-${run_token}"
 test_label="dev.oxibelt.test=admin-mutation-postgres-${run_token}"
 postgres_password="$(od -An -N 32 -tx1 /dev/urandom)"
 postgres_password="${postgres_password//[[:space:]]/}"
+container_created=0
 if [[ ! "${postgres_password}" =~ ^[[:xdigit:]]{64}$ ]]; then
   echo "Failed to generate an ephemeral PostgreSQL test password" >&2
   exit 1
@@ -26,7 +27,9 @@ if [[ "${REMOTE_CONTAINERS:-}" == "true" ]]; then
 fi
 
 cleanup() {
-  docker rm --force --volumes "${container_name}" >/dev/null 2>&1 || true
+  if ((container_created == 1)); then
+    docker rm --force --volumes "${container_name}" >/dev/null 2>&1 || true
+  fi
 }
 
 postgres_logs() {
@@ -45,6 +48,7 @@ docker run --detach \
   --env "POSTGRES_PASSWORD=${postgres_password}" \
   --env POSTGRES_DB=oxibelt \
   "${postgres_image}" >/dev/null
+container_created=1
 
 ready=0
 for _attempt in $(seq 1 60); do

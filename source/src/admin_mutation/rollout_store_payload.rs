@@ -1,6 +1,6 @@
 //! Atomic cluster admission and encrypted rollback checkpoints.
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail, ensure};
 use sqlx::{Postgres, Row, Transaction};
 
 use super::fencing::{ExactMembership, MemberFence, lock_exact_membership, require_live_member};
@@ -73,6 +73,7 @@ pub(crate) async fn cluster_admit_tx(
     store.rollout_mode() == StoreRolloutMode::AdminCluster,
     "cluster admission requires cluster store"
   );
+  lock_membership_claim_barrier(tx, store, claim, exact).await?;
   lock_exact_membership(tx, store, exact, false).await?;
   lock_resource_baseline(tx, store, exact).await?;
   ensure!(
@@ -174,6 +175,119 @@ pub(crate) async fn cluster_admit_tx(
       plaintext_len: sealed.plaintext_len,
     }),
   })
+}
+
+/// Serializes every staged-membership claim with membership proposals and
+/// cutovers.  The membership head is deliberately locked before the mutation
+/// claim is inserted: an ordinary claim that wins the lock is visible as a
+/// non-terminal mutation to a following proposal, while a proposal that wins
+/// the lock blocks following ordinary claims until its durable transition is
+/// present.  This closes the gap between a one-time proposal snapshot and the
+/// mutation ledger.
+async fn lock_membership_claim_barrier(
+  tx: &mut Transaction<'_, Postgres>,
+  store: &MutationStore,
+  claim: &MutationClaim,
+  exact: &ExactMembership,
+) -> anyhow::Result<()> {
+  let head = sqlx::query(
+    "SELECT active_epoch_digest
+       FROM oxibelt_admin_membership_heads
+      WHERE namespace=$1 AND cluster_id=$2
+      FOR UPDATE",
+  )
+  .bind(store.namespace())
+  .bind(&exact.cluster_id)
+  .fetch_optional(&mut **tx)
+  .await?;
+  // Fixed-membership deployments do not have a staged-membership head and
+  // retain their existing per-resource admission behavior.
+  let Some(head) = head else {
+    return Ok(());
+  };
+  let active_epoch: Option<String> = head.try_get("active_epoch_digest")?;
+  if let Some(active_epoch) = active_epoch.as_deref() {
+    ensure!(
+      active_epoch == exact.membership_revision,
+      "staged membership changed before cluster admission"
+    );
+  }
+
+  let pending: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+    "SELECT transition_id,state,proposal_request_id,activation_request_id
+       FROM oxibelt_admin_membership_transitions
+      WHERE namespace=$1 AND cluster_id=$2
+        AND state NOT IN ('active','cancelled','indeterminate')",
+  )
+  .bind(store.namespace())
+  .bind(&exact.cluster_id)
+  .fetch_optional(&mut **tx)
+  .await?;
+  let competing: Option<(String, String)> = sqlx::query_as(
+    "SELECT request_id,action
+       FROM oxibelt_admin_mutations
+      WHERE namespace=$1 AND rollout_mode='admin_cluster' AND cluster_id=$2
+        AND request_id<>$3
+        AND state NOT IN ('committed','failed','rolled_back','rollback_failed','indeterminate')
+      ORDER BY created_at,request_id
+      LIMIT 1",
+  )
+  .bind(store.namespace())
+  .bind(&exact.cluster_id)
+  .bind(&claim.request_id)
+  .fetch_optional(&mut **tx)
+  .await?;
+
+  match claim.action.as_str() {
+    "membership.propose" => {
+      ensure!(
+        claim.resource == "membership",
+        "membership proposal uses an invalid protected resource"
+      );
+      if let Some((transition_id, state, proposal_request_id, _)) = pending
+        && proposal_request_id != claim.request_id
+      {
+        bail!("membership proposal is blocked by transition {transition_id} in state {state}");
+      }
+      if let Some((request_id, action)) = competing {
+        bail!("membership proposal is blocked by protected mutation {request_id} ({action})");
+      }
+    }
+    "membership.activate" | "membership.cancel" => {
+      ensure!(
+        claim.resource == "membership",
+        "membership transition action uses an invalid protected resource"
+      );
+      let Some((transition_id, state, _, activation_request_id)) = pending else {
+        bail!("membership transition is not pending");
+      };
+      if activation_request_id
+        .as_deref()
+        .is_some_and(|request_id| request_id != claim.request_id)
+      {
+        bail!("membership action is blocked by transition {transition_id} in state {state}");
+      }
+      if let Some((request_id, action)) = competing {
+        bail!("membership transition is blocked by protected mutation {request_id} ({action})");
+      }
+    }
+    _ => {
+      if let Some((transition_id, state, _, _)) = pending {
+        bail!(
+          "protected mutation is blocked by membership transition {transition_id} in state {state}"
+        );
+      }
+      if let Some((request_id, action)) = competing.filter(|(_, action)| {
+        matches!(
+          action.as_str(),
+          "membership.propose" | "membership.activate" | "membership.cancel"
+        )
+      }) {
+        bail!("protected mutation is blocked by membership mutation {request_id} ({action})");
+      }
+    }
+  }
+  Ok(())
 }
 
 pub(crate) async fn publish_checkpoint(
@@ -333,7 +447,7 @@ pub(crate) async fn fetch_committed_artifact(
   member: &MemberFence,
   resource: &str,
   maximum_plaintext_bytes: usize,
-) -> anyhow::Result<Option<StoredArtifact>> {
+) -> anyhow::Result<Option<(String, StoredArtifact)>> {
   validate_identifier("resource", resource, 256)?;
   ensure!(
     maximum_plaintext_bytes <= MAX_STORED_ARTIFACT_BYTES,
@@ -341,6 +455,66 @@ pub(crate) async fn fetch_committed_artifact(
   );
   let mut tx = store.pool().begin().await?;
   require_live_member(&mut tx, store, member).await?;
+  let replica = sqlx::query(
+    "SELECT mutation.request_id,mutation.fingerprint,mutation.principal,mutation.signer_id,
+            mutation.action,mutation.resource,mutation.cluster_id,mutation.membership_revision,
+            mutation.new_revision,mutation.expected_previous_revision,mutation.content_digest,
+            replica.algorithm,replica.nonce,replica.ciphertext,replica.ciphertext_digest,
+            replica.plaintext_len
+       FROM oxibelt_admin_mutation_revisions revision
+       JOIN oxibelt_admin_mutations mutation ON mutation.namespace=revision.namespace
+        AND mutation.resource=revision.resource AND mutation.new_revision=revision.committed_revision
+        AND mutation.content_digest=revision.content_digest AND mutation.state='committed'
+       JOIN oxibelt_admin_membership_epoch_artifacts replica
+         ON replica.namespace=revision.namespace AND replica.cluster_id=revision.cluster_id
+        AND replica.epoch_digest=revision.membership_revision
+        AND replica.resource=revision.resource AND replica.request_id=mutation.request_id
+      WHERE revision.namespace=$1 AND revision.resource=$2 AND revision.cluster_id=$3
+        AND revision.membership_revision=$4 AND replica.plaintext_len<=$5",
+  )
+  .bind(store.namespace())
+  .bind(resource)
+  .bind(&member.cluster_id)
+  .bind(&member.membership_revision)
+  .bind(i32::try_from(maximum_plaintext_bytes)?)
+  .fetch_optional(&mut *tx)
+  .await?;
+  if let Some(row) = replica {
+    ensure!(
+      row.try_get::<String, _>("algorithm")? == ARTIFACT_ALGORITHM,
+      "committed epoch artifact replica algorithm is incompatible"
+    );
+    let binding = ArtifactBinding {
+      namespace: store.namespace().to_string(),
+      request_id: row.try_get("request_id")?,
+      fingerprint: row.try_get("fingerprint")?,
+      principal: row.try_get("principal")?,
+      signer_id: row.try_get("signer_id")?,
+      action: row.try_get("action")?,
+      resource: row.try_get("resource")?,
+      cluster_id: row.try_get("cluster_id")?,
+      membership_revision: row.try_get("membership_revision")?,
+      new_revision: row.try_get("new_revision")?,
+      expected_previous_revision: row.try_get("expected_previous_revision")?,
+      content_digest: row.try_get("content_digest")?,
+    };
+    binding.validate()?;
+    let stored = StoredArtifact {
+      binding,
+      nonce: row.try_get("nonce")?,
+      ciphertext: row.try_get("ciphertext")?,
+      ciphertext_digest: row.try_get("ciphertext_digest")?,
+      plaintext_len: usize::try_from(row.try_get::<i32, _>("plaintext_len")?)?,
+    };
+    ensure!(
+      stored.nonce.len() == ARTIFACT_NONCE_BYTES
+        && stored.ciphertext.len() == stored.plaintext_len + ARTIFACT_TAG_BYTES
+        && sha256_digest(&stored.ciphertext) == stored.ciphertext_digest,
+      "committed epoch artifact replica is corrupt"
+    );
+    tx.commit().await?;
+    return Ok(Some((member.membership_revision.clone(), stored)));
+  }
   let row = sqlx::query(
     "SELECT mutation.request_id,mutation.fingerprint,mutation.principal,mutation.signer_id,
             mutation.action,mutation.resource,mutation.cluster_id,mutation.membership_revision,
@@ -398,7 +572,8 @@ pub(crate) async fn fetch_committed_artifact(
     "committed mutation artifact is corrupt"
   );
   tx.commit().await?;
-  Ok(Some(stored))
+  let encryption_membership_revision = stored.binding.membership_revision.clone();
+  Ok(Some((encryption_membership_revision, stored)))
 }
 
 fn validate_checkpoint(value: &SealedCheckpoint) -> anyhow::Result<()> {

@@ -1,9 +1,12 @@
 //! Opt-in PostgreSQL integration checks for durable mutation atomicity.
 
+use std::str::FromStr as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::{Method, StatusCode};
 use serde_json::json;
+use sqlx::AssertSqlSafe;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::ledger::{ClaimOutcome, MutationClaim, MutationState, TerminalMutation};
 use super::store::{
@@ -15,6 +18,102 @@ use crate::admin_audit::{AdminAuditHandle, AdminAuditRuntime};
 #[tokio::test]
 async fn postgres_claim_is_atomic_and_terminal_replay_is_retained() {
   Box::pin(postgres_atomicity_test_body()).await;
+}
+
+#[tokio::test]
+async fn postgres_v4_schema_upgrades_to_v5_and_remains_idempotent() {
+  let Some(base_pool) = super::postgres_test_support::connect("mutation v4 to v5 migration").await
+  else {
+    return;
+  };
+  let url =
+    std::env::var("OXIBELT_TEST_MUTATION_POSTGRES_URL").expect("PostgreSQL test URL disappeared");
+  let schema = format!(
+    "oxibelt_membership_migration_{}_{}",
+    std::process::id(),
+    SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("test clock")
+      .as_nanos()
+  );
+  sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+    .execute(&base_pool)
+    .await
+    .expect("create isolated migration schema");
+  let options = PgConnectOptions::from_str(&url)
+    .expect("PostgreSQL test URL")
+    .options([("search_path", schema.as_str())]);
+  let pool = PgPoolOptions::new()
+    .max_connections(2)
+    .connect_with(options)
+    .await
+    .expect("connect isolated migration schema");
+
+  init_postgres(&pool).await.expect("seed current schema");
+  for statement in [
+    "DROP TABLE oxibelt_admin_membership_key_proofs",
+    "DROP TABLE oxibelt_admin_membership_epoch_artifacts",
+    "DROP TABLE oxibelt_admin_membership_epoch_key_wraps",
+    "ALTER TABLE oxibelt_admin_membership_epochs DROP COLUMN artifact_key_fingerprint CASCADE",
+    "ALTER TABLE oxibelt_admin_membership_epochs DROP COLUMN checkpoint_digest CASCADE",
+    "ALTER TABLE oxibelt_admin_membership_transitions DROP COLUMN checkpoint_digest CASCADE",
+    "ALTER TABLE oxibelt_admin_membership_transitions DROP COLUMN journal_tail_digest CASCADE",
+    "ALTER TABLE oxibelt_admin_membership_transitions DROP COLUMN verified_position CASCADE",
+    "ALTER TABLE oxibelt_admin_membership_transitions DROP COLUMN capability_result CASCADE",
+    "ALTER TABLE oxibelt_admin_membership_transitions DROP COLUMN key_proof_count CASCADE",
+    "ALTER TABLE oxibelt_admin_membership_transitions DROP COLUMN key_proof_required CASCADE",
+    "DELETE FROM oxibelt_admin_schema_migrations WHERE component='admin_mutation' AND version=5",
+    "INSERT INTO oxibelt_admin_schema_migrations(component,version)
+       VALUES('admin_mutation',4) ON CONFLICT DO NOTHING",
+  ] {
+    sqlx::query(statement)
+      .execute(&pool)
+      .await
+      .expect("prepare v4 schema shape");
+  }
+
+  init_postgres(&pool).await.expect("upgrade v4 schema to v5");
+  init_postgres(&pool)
+    .await
+    .expect("repeat v5 initialization");
+  let versions: Vec<i32> = sqlx::query_scalar(
+    "SELECT version FROM oxibelt_admin_schema_migrations
+      WHERE component='admin_mutation' AND version IN (4,5) ORDER BY version",
+  )
+  .fetch_all(&pool)
+  .await
+  .expect("load migration versions");
+  assert_eq!(versions, vec![4, 5]);
+  let v5_columns: i64 = sqlx::query_scalar(
+    "SELECT count(*) FROM information_schema.columns
+      WHERE table_schema=current_schema()
+        AND ((table_name='oxibelt_admin_membership_epochs'
+              AND column_name IN ('artifact_key_fingerprint','checkpoint_digest'))
+          OR (table_name='oxibelt_admin_membership_transitions'
+              AND column_name IN ('checkpoint_digest','journal_tail_digest','verified_position',
+                                  'capability_result','key_proof_count','key_proof_required')))",
+  )
+  .fetch_one(&pool)
+  .await
+  .expect("load v5 columns");
+  assert_eq!(v5_columns, 8);
+  let v5_tables: i64 = sqlx::query_scalar(
+    "SELECT count(*) FROM information_schema.tables
+      WHERE table_schema=current_schema()
+        AND table_name IN ('oxibelt_admin_membership_key_proofs',
+                           'oxibelt_admin_membership_epoch_key_wraps',
+                           'oxibelt_admin_membership_epoch_artifacts')",
+  )
+  .fetch_one(&pool)
+  .await
+  .expect("load v5 tables");
+  assert_eq!(v5_tables, 3);
+
+  pool.close().await;
+  sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+    .execute(&base_pool)
+    .await
+    .expect("drop isolated migration schema");
 }
 
 async fn postgres_atomicity_test_body() {

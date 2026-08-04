@@ -10,11 +10,12 @@ use tokio::time::{MissedTickBehavior, interval};
 
 use crate::config::Config;
 use crate::crypto::random_fill;
+use crate::metrics::Metrics;
 use crate::runtime_health::{
   RuntimeHealth, RuntimeTaskKind, RuntimeTaskPolicy, spawn_supervised_task,
 };
 
-use super::AdminMutationRuntime;
+use super::{AdminMutationRuntime, LocalMembershipHead};
 
 pub(crate) struct ClusterHeartbeatTask {
   runtime: AdminMutationRuntime,
@@ -53,6 +54,7 @@ impl AdminMutationRuntime {
       return Ok(());
     }
     let store = self.store()?;
+    self.reconcile_local_staged_membership(controller).await?;
     let _ = super::super::membership_store::finalize_committed_membership_activation(
       store,
       &self.inner.cluster_id,
@@ -67,14 +69,91 @@ impl AdminMutationRuntime {
       return Ok(());
     };
     let current = self.membership_authority();
+    let artifact_key_fingerprint = if active.epoch_version == 1 {
+      self
+        .artifact_cipher_for_membership(&active.epoch_digest)?
+        .key_fingerprint()
+        .to_string()
+    } else {
+      active
+        .artifact_key_fingerprint
+        .clone()
+        .context("active membership epoch v2 is missing its artifact-key fingerprint")?
+    };
     if current.target.membership_revision == active.epoch_digest
       && current.members == active.members
+      && current.artifact_key_fingerprint == artifact_key_fingerprint
     {
       return Ok(());
     }
-    controller
-      .activate_membership(active.epoch_digest.clone(), active.members.clone())
+    let local_member = self
+      .inner
+      .local_instance_id
+      .as_deref()
+      .context("staged membership local instance ID is missing")?;
+    if active.epoch_version == crate::admin_mutation::membership::MEMBERSHIP_DOCUMENT_VERSION
+      && active
+        .members
+        .binary_search_by(|member| member.as_str().cmp(local_member))
+        .is_ok()
+    {
+      let private = self
+        .inner
+        .membership_private_keys
+        .as_ref()
+        .context("staged membership private keys are missing")?;
+      super::membership_reconciliation::validate_local_epoch_identity(
+        &active.epoch,
+        local_member,
+        &private.readiness_pkcs8,
+        private.catchup_x25519.as_ref(),
+      )
+      .context("active membership epoch local identity is invalid")?;
+    }
+    if active
+      .members
+      .binary_search_by(|member| member.as_str().cmp(local_member))
+      .is_ok()
+      && self
+        .artifact_cipher_for_membership(&active.epoch_digest)
+        .is_err()
+    {
+      let private = self
+        .inner
+        .membership_private_keys
+        .as_ref()
+        .context("staged membership private keys are missing")?;
+      let cipher = super::super::membership_store::load_epoch_artifact_cipher_for_member(
+        store,
+        &self.inner.cluster_id,
+        &active.epoch_digest,
+        local_member,
+        private.catchup_x25519.as_ref(),
+        crate::admin_mutation::store::MAX_STORED_ARTIFACT_BYTES,
+      )
       .await?;
+      self
+        .inner
+        .artifact_ciphers
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(active.epoch_digest.clone(), cipher);
+    }
+    controller
+      .activate_membership(
+        active.epoch_digest.clone(),
+        active.members.clone(),
+        artifact_key_fingerprint.clone(),
+      )
+      .await?;
+    if active.epoch_version == crate::admin_mutation::membership::MEMBERSHIP_DOCUMENT_VERSION {
+      self
+        .inner
+        .artifact_ciphers
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|revision, _| revision == &active.epoch_digest);
+    }
     *self
       .inner
       .membership_authority
@@ -85,13 +164,37 @@ impl AdminMutationRuntime {
         membership_revision: active.epoch_digest,
       },
       members: active.members,
+      artifact_key_fingerprint,
     };
+    Ok(())
+  }
+
+  async fn update_membership_metrics(&self, metrics: &Metrics) -> anyhow::Result<()> {
+    if !self.staged_membership() {
+      metrics.set_admin_membership_status(self.configured_members().len() as u64, 0, None);
+      return Ok(());
+    }
+    let status = super::super::membership_store::load_membership_status(
+      self.store()?,
+      &self.inner.cluster_id,
+      &self.inner.membership_bootstrap_members,
+    )
+    .await?;
+    metrics.set_admin_membership_status(
+      status.required_members.len() as u64,
+      status.fenced_members.len() as u64,
+      status
+        .pending_transition
+        .as_ref()
+        .map(|transition| transition.state.as_str()),
+    );
     Ok(())
   }
 
   async fn heartbeat_with_membership_until_shutdown(
     &self,
     controller: crate::admin_mutation::rollout::AdminClusterRolloutController,
+    metrics: std::sync::Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
   ) -> anyhow::Result<()> {
     let mut ticker = interval(controller.heartbeat_interval());
@@ -107,6 +210,7 @@ impl AdminMutationRuntime {
         _ = ticker.tick() => {
           self.refresh_staged_membership_authority(&controller).await?;
           controller.heartbeat_and_refresh_readiness().await?;
+          self.update_membership_metrics(&metrics).await?;
         }
       }
     }
@@ -166,6 +270,8 @@ impl AdminMutationRuntime {
     config: &Config,
     applied_revision: String,
     applied_digest: String,
+    local_heads: Vec<LocalMembershipHead>,
+    metrics: std::sync::Arc<Metrics>,
     health: std::sync::Arc<RuntimeHealth>,
     generation: u64,
     fatal_tx: mpsc::UnboundedSender<anyhow::Error>,
@@ -173,6 +279,7 @@ impl AdminMutationRuntime {
     if !self.cluster_mode() {
       return Ok(None);
     }
+    self.install_local_membership_heads(local_heads)?;
     let mut random = [0_u8; 16];
     random_fill(&mut random).context("failed to generate Admin cluster boot identity")?;
     let mut boot_id = String::with_capacity(37);
@@ -211,10 +318,15 @@ impl AdminMutationRuntime {
     let controller = self
       .installed_cluster_controller()
       .context("Admin cluster controller failed to initialize")?;
+    self
+      .refresh_staged_membership_authority(&controller)
+      .await?;
     controller.heartbeat_once().await?;
+    self.update_membership_metrics(&metrics).await?;
     let (shutdown, shutdown_rx) = watch::channel(false);
     let task_controller = controller.clone();
     let task_runtime = self.clone();
+    let task_metrics = metrics.clone();
     Ok(Some(ClusterHeartbeatTask {
       runtime: self.clone(),
       shutdown,
@@ -228,9 +340,10 @@ impl AdminMutationRuntime {
         move |shutdown| {
           let controller = task_controller.clone();
           let runtime = task_runtime.clone();
+          let metrics = task_metrics.clone();
           async move {
             runtime
-              .heartbeat_with_membership_until_shutdown(controller, shutdown)
+              .heartbeat_with_membership_until_shutdown(controller, metrics, shutdown)
               .await
           }
         },

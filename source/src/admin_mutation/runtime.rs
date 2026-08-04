@@ -1,14 +1,22 @@
 //! Runtime trust configuration and durable admission for protected Admin writes.
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Read as _;
+use std::path::Path;
+use std::str::FromStr as _;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
+use aws_lc_rs::agreement::{PrivateKey, X25519};
+use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
+use base64::Engine as _;
 use http::{HeaderMap, Method, StatusCode, Uri};
 use serde_json::{Value, json};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+use zeroize::Zeroizing;
 
 use crate::admin_audit::{AdminAuditHandle, AdminAuditRuntime};
 use crate::config::{
@@ -27,8 +35,8 @@ use super::store::{
   init_postgres, load_active_break_glass_for_principal, revoke_break_glass_activation_tx,
 };
 use super::{
-  MUTATION_HEADER, MembershipMember, MembershipReadinessReceipt, MutationProtocolError,
-  MutationProtocolErrorKind, SignerBinding, SignerRegistry,
+  MUTATION_HEADER, MembershipArtifactCiphers, MembershipMember, MembershipReadinessReceipt,
+  MutationProtocolError, MutationProtocolErrorKind, SignerBinding, SignerRegistry,
 };
 pub(crate) use cluster_heartbeat::ClusterHeartbeatTask;
 pub(crate) use target::configured_target;
@@ -56,7 +64,10 @@ struct RuntimeInner {
   cluster_id: String,
   membership_authority: RwLock<MembershipAuthority>,
   membership_bootstrap_members: Vec<MembershipMember>,
-  artifact_cipher: Option<MutationArtifactCipher>,
+  local_instance_id: Option<String>,
+  membership_private_keys: Option<MembershipPrivateKeys>,
+  artifact_ciphers: RwLock<MembershipArtifactCiphers>,
+  local_membership_heads: RwLock<HashMap<String, LocalMembershipHead>>,
   cluster_controller: OnceLock<AdminClusterRolloutController>,
   cluster_worker_state: AtomicU8,
   winner_responses: Mutex<HashMap<String, Option<zeroize::Zeroizing<Vec<u8>>>>>,
@@ -67,6 +78,12 @@ struct RuntimeInner {
 struct MembershipAuthority {
   target: MutationTarget,
   members: Vec<String>,
+  artifact_key_fingerprint: String,
+}
+
+struct MembershipPrivateKeys {
+  readiness_pkcs8: Zeroizing<Vec<u8>>,
+  catchup_x25519: Zeroizing<[u8; 32]>,
 }
 
 #[derive(Debug)]
@@ -84,6 +101,13 @@ pub(crate) struct MutationExecution {
   pub(crate) request_id: String,
   pub(crate) new_revision: String,
   winner_response: Option<cluster_checkpoint::SharedWinnerResponseGuard>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct LocalMembershipHead {
+  pub(crate) resource: String,
+  pub(crate) revision: String,
+  pub(crate) digest: String,
 }
 
 impl MutationExecution {
@@ -109,6 +133,15 @@ impl AdminMutationRuntime {
   pub(crate) async fn new(config: &Config, audit: &AdminAuditRuntime) -> anyhow::Result<Self> {
     let mutation_config = &config.admin.mutations;
     if !mutation_config.mode.enabled() {
+      let durable_membership_cluster_ids =
+        load_disabled_durable_membership_cluster_ids(config).await?;
+      validate_durable_membership_configuration(
+        false,
+        mutation_config.rollout.mode,
+        mutation_config.rollout.membership.mode,
+        &mutation_config.rollout.cluster_id,
+        &durable_membership_cluster_ids,
+      )?;
       return Ok(Self::disabled(&config.ipm.namespace));
     }
 
@@ -129,10 +162,19 @@ impl AdminMutationRuntime {
     } else {
       MutationStore::new(pool, config.shared_state.namespace.clone())?
     };
-    let target = configured_target(config);
+    let durable_membership_cluster_ids =
+      super::membership_store::durable_membership_cluster_ids(&store).await?;
+    validate_durable_membership_configuration(
+      true,
+      mutation_config.rollout.mode,
+      mutation_config.rollout.membership.mode,
+      &mutation_config.rollout.cluster_id,
+      &durable_membership_cluster_ids,
+    )?;
+    let mut target = configured_target(config);
     let mut members = mutation_config.rollout.members.clone();
     members.sort();
-    let membership_bootstrap_members = mutation_config
+    let membership_bootstrap_members: Vec<MembershipMember> = mutation_config
       .rollout
       .membership
       .bootstrap_members
@@ -143,14 +185,151 @@ impl AdminMutationRuntime {
         catchup_x25519_public_key: member.catchup_x25519_public_key.clone(),
       })
       .collect();
-    let artifact_cipher = if mutation_config.rollout.mode.is_cluster() {
-      Some(MutationArtifactCipher::from_environment(
-        &mutation_config.artifact_key_env,
-        MAX_STORED_ARTIFACT_BYTES,
+    let local_instance_id = if mutation_config.rollout.mode.is_cluster() {
+      Some(
+        config
+          .rollout
+          .instance_id()
+          .context("Admin cluster rollout identity is missing its instance ID")?
+          .to_string(),
+      )
+    } else {
+      None
+    };
+    let membership_private_keys = if mutation_config.rollout.membership.mode.is_staged() {
+      Some(load_membership_private_keys(
+        &mutation_config
+          .rollout
+          .membership
+          .readiness_private_key_file_env,
+        &mutation_config
+          .rollout
+          .membership
+          .catchup_private_key_file_env,
+        local_instance_id
+          .as_deref()
+          .context("staged membership requires a local instance ID")?,
+        &membership_bootstrap_members,
       )?)
     } else {
       None
     };
+    let mut artifact_ciphers = MembershipArtifactCiphers::new();
+    let legacy_cipher = if mutation_config.rollout.mode.is_cluster()
+      && (!mutation_config.rollout.membership.mode.is_staged()
+        || std::env::var_os(&mutation_config.artifact_key_env).is_some())
+    {
+      Some(Arc::new(MutationArtifactCipher::from_environment(
+        &mutation_config.artifact_key_env,
+        MAX_STORED_ARTIFACT_BYTES,
+      )?))
+    } else {
+      None
+    };
+    if let Some(cipher) = legacy_cipher.as_ref() {
+      artifact_ciphers.insert(target.membership_revision.clone(), cipher.clone());
+    }
+    let mut artifact_key_fingerprint = legacy_cipher.as_ref().map_or_else(
+      || EMPTY_DIGEST.to_string(),
+      |cipher| cipher.key_fingerprint().to_string(),
+    );
+    if mutation_config.rollout.membership.mode.is_staged() {
+      super::membership_store::ensure_membership_head(&store, &mutation_config.rollout.cluster_id)
+        .await?;
+      let _ = super::membership_store::finalize_committed_membership_activation(
+        &store,
+        &mutation_config.rollout.cluster_id,
+      )
+      .await?;
+      if let Some(legacy_cipher) = legacy_cipher.as_ref() {
+        let local_member = local_instance_id
+          .as_deref()
+          .context("staged membership requires a local instance ID")?;
+        for epoch_digest in super::membership_store::load_member_legacy_epoch_digests(
+          &store,
+          &mutation_config.rollout.cluster_id,
+          local_member,
+        )
+        .await?
+        {
+          artifact_ciphers.insert(epoch_digest, legacy_cipher.clone());
+        }
+      }
+      if let Some(active) = super::membership_store::load_active_membership_authority(
+        &store,
+        &mutation_config.rollout.cluster_id,
+      )
+      .await?
+      {
+        target.membership_revision = active.epoch_digest.clone();
+        members = active.members.clone();
+        if active.epoch_version == 1 {
+          let local_member = local_instance_id
+            .as_deref()
+            .context("staged membership requires a local instance ID")?;
+          if members
+            .binary_search_by(|member| member.as_str().cmp(local_member))
+            .is_ok()
+          {
+            let cipher = legacy_cipher.as_ref().context(
+              "active legacy membership requires the shared artifact key until a v2 transition",
+            )?;
+            artifact_ciphers.insert(active.epoch_digest, cipher.clone());
+            artifact_key_fingerprint = cipher.key_fingerprint().to_string();
+          }
+        } else {
+          artifact_key_fingerprint = active
+            .artifact_key_fingerprint
+            .clone()
+            .context("active membership epoch v2 is missing its artifact-key fingerprint")?;
+          let local_member = local_instance_id
+            .as_deref()
+            .context("staged membership requires a local instance ID")?;
+          if members
+            .binary_search_by(|member| member.as_str().cmp(local_member))
+            .is_ok()
+          {
+            let private = membership_private_keys
+              .as_ref()
+              .context("staged membership private keys are missing")?;
+            membership_reconciliation::validate_local_epoch_identity(
+              &active.epoch,
+              local_member,
+              &private.readiness_pkcs8,
+              private.catchup_x25519.as_ref(),
+            )
+            .context("active membership epoch local identity is invalid")?;
+            let cipher = super::membership_store::load_epoch_artifact_cipher_for_member(
+              &store,
+              &mutation_config.rollout.cluster_id,
+              &active.epoch_digest,
+              local_member,
+              private.catchup_x25519.as_ref(),
+              MAX_STORED_ARTIFACT_BYTES,
+            )
+            .await?;
+            artifact_ciphers.clear();
+            artifact_ciphers.insert(active.epoch_digest.clone(), cipher);
+            ensure!(
+              artifact_ciphers.contains_key(&target.membership_revision),
+              "active membership epoch artifact key is unavailable to this member"
+            );
+          }
+        }
+      } else if {
+        let local_member = local_instance_id
+          .as_deref()
+          .context("staged membership requires a local instance ID")?;
+        members
+          .binary_search_by(|member| member.as_str().cmp(local_member))
+          .is_ok()
+      } {
+        ensure!(
+          legacy_cipher.is_some(),
+          "staged membership bootstrap members require the legacy artifact key until v2 initialization"
+        );
+      }
+    }
     let winner_response_wait = cluster_checkpoint::winner_response_wait(
       mutation_config.rollout.phase_timeout_seconds,
       mutation_config.rollout.rollback_timeout_seconds,
@@ -170,9 +349,16 @@ impl AdminMutationRuntime {
         rollout_mode: mutation_config.rollout.mode,
         membership_mode: mutation_config.rollout.membership.mode,
         cluster_id: mutation_config.rollout.cluster_id.clone(),
-        membership_authority: RwLock::new(MembershipAuthority { target, members }),
+        membership_authority: RwLock::new(MembershipAuthority {
+          target,
+          members,
+          artifact_key_fingerprint,
+        }),
         membership_bootstrap_members,
-        artifact_cipher,
+        local_instance_id,
+        membership_private_keys,
+        artifact_ciphers: RwLock::new(artifact_ciphers),
+        local_membership_heads: RwLock::new(HashMap::new()),
         cluster_controller: OnceLock::new(),
         cluster_worker_state: AtomicU8::new(0),
         winner_responses: Mutex::new(HashMap::new()),
@@ -200,9 +386,13 @@ impl AdminMutationRuntime {
             membership_revision: digest_parts(["single"]),
           },
           members: Vec::new(),
+          artifact_key_fingerprint: EMPTY_DIGEST.to_string(),
         }),
         membership_bootstrap_members: Vec::new(),
-        artifact_cipher: None,
+        local_instance_id: None,
+        membership_private_keys: None,
+        artifact_ciphers: RwLock::new(MembershipArtifactCiphers::new()),
+        local_membership_heads: RwLock::new(HashMap::new()),
         cluster_controller: OnceLock::new(),
         cluster_worker_state: AtomicU8::new(0),
         winner_responses: Mutex::new(HashMap::new()),
@@ -397,6 +587,46 @@ impl AdminMutationRuntime {
     &self.inner.membership_bootstrap_members
   }
 
+  fn install_local_membership_heads(&self, heads: Vec<LocalMembershipHead>) -> anyhow::Result<()> {
+    let mut installed = HashMap::with_capacity(heads.len());
+    for head in heads {
+      super::ledger::validate_identifier("local membership resource", &head.resource, 256)?;
+      super::ledger::validate_identifier("local membership revision", &head.revision, 256)?;
+      ensure!(
+        super::artifact::is_sha256_digest(&head.digest),
+        "local membership resource digest is invalid"
+      );
+      ensure!(
+        installed.insert(head.resource.clone(), head).is_none(),
+        "duplicate local membership resource head"
+      );
+    }
+    *self
+      .inner
+      .local_membership_heads
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = installed;
+    Ok(())
+  }
+
+  fn update_local_membership_head(&self, head: LocalMembershipHead) {
+    self
+      .inner
+      .local_membership_heads
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(head.resource.clone(), head);
+  }
+
+  fn local_membership_heads(&self) -> HashMap<String, LocalMembershipHead> {
+    self
+      .inner
+      .local_membership_heads
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
+  }
+
   pub(crate) async fn membership_precondition_revision(&self) -> anyhow::Result<String> {
     if !self.staged_membership() {
       return Ok(self.membership_authority().target.membership_revision);
@@ -420,9 +650,12 @@ impl AdminMutationRuntime {
         "required_members": self.configured_members(),
       }));
     }
-    let status =
-      super::membership_store::load_membership_status(self.store()?, &self.inner.cluster_id)
-        .await?;
+    let status = super::membership_store::load_membership_status(
+      self.store()?,
+      &self.inner.cluster_id,
+      &self.inner.membership_bootstrap_members,
+    )
+    .await?;
     serde_json::to_value(status).context("failed to encode membership status")
   }
 
@@ -446,14 +679,10 @@ impl AdminMutationRuntime {
     receipt: &MembershipReadinessReceipt,
   ) -> anyhow::Result<Value> {
     ensure!(self.staged_membership(), "staged membership is not enabled");
-    let now = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .context("system clock precedes the Unix epoch")?;
     let transition = super::membership_store::submit_membership_readiness(
       self.store()?,
       &self.inner.cluster_id,
       receipt,
-      i64::try_from(now.as_secs()).context("system clock exceeds supported range")?,
     )
     .await?;
     Ok(json!({"ok":true,"transition":transition}))
@@ -487,7 +716,7 @@ impl AdminMutationRuntime {
         allow_learner: self.staged_membership(),
         boot_id,
         build_version: oxibelt_build_identity::SHORT_VERSION.to_string(),
-        artifact_key_fingerprint: self.artifact_key_fingerprint()?.to_string(),
+        artifact_key_fingerprint: authority.artifact_key_fingerprint.clone(),
         heartbeat_interval: Duration::from_secs(rollout.heartbeat_interval_seconds),
         stale_after: Duration::from_secs(rollout.stale_after_seconds),
         phase_timeout: Duration::from_secs(rollout.phase_timeout_seconds),
@@ -559,7 +788,12 @@ impl AdminMutationRuntime {
     let controller = self.cluster_controller_ref()?;
     ensure_cluster_member(self, controller.instance_id())?;
     let binding = self.artifact_binding(record)?;
-    let cipher = self.artifact_cipher()?;
+    let cipher = self.artifact_cipher_for_membership(
+      record
+        .membership_revision
+        .as_deref()
+        .context("cluster mutation is missing its membership revision")?,
+    )?;
     let stored = artifact_store::fetch_for_member(
       self.store()?,
       controller.instance_id(),
@@ -590,27 +824,46 @@ impl AdminMutationRuntime {
 
   #[allow(dead_code)]
   fn artifact_binding(&self, record: &MutationRecord) -> anyhow::Result<ArtifactBinding> {
-    let authority = self.membership_authority();
     ensure!(
-      record.cluster_id.as_deref() == Some(authority.target.cluster_id.as_str())
-        && record.membership_revision.as_deref()
-          == Some(authority.target.membership_revision.as_str()),
-      "mutation artifact target does not match this runtime"
+      record.cluster_id.as_deref() == Some(self.inner.cluster_id.as_str()),
+      "mutation artifact cluster does not match this runtime"
     );
     ArtifactBinding::from_record(self.store()?.namespace(), record)
   }
 
   #[allow(dead_code)]
-  fn artifact_cipher(&self) -> anyhow::Result<&MutationArtifactCipher> {
-    self
-      .inner
-      .artifact_cipher
-      .as_ref()
-      .context("encrypted mutation artifacts require admin_cluster rollout mode")
+  pub(crate) fn artifact_cipher(&self) -> anyhow::Result<Arc<MutationArtifactCipher>> {
+    let authority = self.membership_authority();
+    self.artifact_cipher_for_membership(&authority.target.membership_revision)
   }
 
-  pub(crate) fn artifact_key_fingerprint(&self) -> anyhow::Result<&str> {
-    Ok(self.artifact_cipher()?.key_fingerprint())
+  pub(crate) fn artifact_cipher_for_membership(
+    &self,
+    membership_revision: &str,
+  ) -> anyhow::Result<Arc<MutationArtifactCipher>> {
+    self
+      .inner
+      .artifact_ciphers
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(membership_revision)
+      .cloned()
+      .with_context(|| {
+        format!("artifact key for membership revision {membership_revision} is unavailable")
+      })
+  }
+
+  pub(crate) fn artifact_ciphers(&self) -> MembershipArtifactCiphers {
+    self
+      .inner
+      .artifact_ciphers
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
+  }
+
+  pub(crate) fn artifact_key_fingerprint(&self) -> String {
+    self.membership_authority().artifact_key_fingerprint
   }
 
   #[allow(dead_code)]
@@ -703,6 +956,80 @@ impl AdminMutationRuntime {
   }
 }
 
+fn validate_durable_membership_configuration(
+  mutations_enabled: bool,
+  rollout_mode: AdminMutationRolloutMode,
+  membership_mode: AdminMembershipMode,
+  configured_cluster_id: &str,
+  durable_cluster_ids: &[String],
+) -> anyhow::Result<()> {
+  if durable_cluster_ids.is_empty() {
+    return Ok(());
+  }
+  ensure!(
+    mutations_enabled,
+    "durable staged membership state prevents disabling Admin mutations"
+  );
+  ensure!(
+    rollout_mode.is_cluster() && membership_mode.is_staged(),
+    "durable staged-membership state requires admin_cluster rollout with staged membership; restore the durable cluster configuration or complete an explicit supported retirement procedure"
+  );
+  ensure!(
+    durable_cluster_ids.len() == 1 && durable_cluster_ids[0] == configured_cluster_id,
+    "configured Admin membership cluster ID does not exactly match the durable staged-membership cluster"
+  );
+  Ok(())
+}
+
+async fn load_disabled_durable_membership_cluster_ids(
+  config: &Config,
+) -> anyhow::Result<Vec<String>> {
+  let Some(backend_name) = config.admin.mutations.backend.as_deref() else {
+    return Ok(Vec::new());
+  };
+  let Some(backend) = config
+    .shared_state
+    .backends
+    .iter()
+    .find(|backend| backend.name == backend_name)
+  else {
+    return Ok(Vec::new());
+  };
+  if backend.kind != crate::config::SharedStateBackendKind::Postgres {
+    return Ok(Vec::new());
+  }
+  let connection_url =
+    backend.connection_url_with_prefix(&format!("shared_state.backends.{}", backend.name))?;
+  let mut options = PgConnectOptions::from_str(&connection_url)?
+    .application_name("oxibelt-admin-membership-downgrade-guard")
+    .ssl_mode(match backend.tls.mode {
+      crate::config::DatabaseTlsMode::Off => PgSslMode::Disable,
+      crate::config::DatabaseTlsMode::VerifyFull => PgSslMode::VerifyFull,
+    });
+  if let Some(ca_cert) = &backend.tls.ca_cert {
+    options = options.ssl_root_cert(ca_cert);
+  }
+  if let (Some(client_cert), Some(client_key)) = (&backend.tls.client_cert, &backend.tls.client_key)
+  {
+    options = options
+      .ssl_client_cert(client_cert)
+      .ssl_client_key(client_key);
+  }
+  let pool = PgPoolOptions::new()
+    .max_connections(1)
+    .acquire_timeout(Duration::from_millis(backend.connect_timeout_ms))
+    .connect_with(options)
+    .await
+    .context("failed to query the disabled Admin mutation membership authority")?;
+  let result = super::membership_store::durable_membership_cluster_ids_if_present(
+    &pool,
+    &config.shared_state.namespace,
+  )
+  .await;
+  pool.close().await;
+  result
+}
+
 fn claim_outcome_admission(
   outcome: ClaimOutcome,
   audit: &AdminAuditHandle,
@@ -792,6 +1119,135 @@ impl MutationConflict {
   }
 }
 
+fn load_membership_private_keys(
+  readiness_environment: &str,
+  catchup_environment: &str,
+  instance_id: &str,
+  bootstrap_members: &[MembershipMember],
+) -> anyhow::Result<MembershipPrivateKeys> {
+  let readiness_path = std::env::var(readiness_environment).with_context(|| {
+    format!("failed to read membership readiness key path from {readiness_environment}")
+  })?;
+  let catchup_path = std::env::var(catchup_environment).with_context(|| {
+    format!("failed to read membership catch-up key path from {catchup_environment}")
+  })?;
+  ensure!(
+    readiness_path != catchup_path,
+    "membership readiness and catch-up private keys must use different files"
+  );
+  let readiness_file = read_bounded_membership_private_key(
+    Path::new(&readiness_path),
+    "membership readiness private key",
+    4_096,
+  )?;
+  let readiness_pkcs8 =
+    decode_optional_base64_private_key(readiness_file, "membership readiness private key")?;
+  let readiness_pair = Ed25519KeyPair::from_pkcs8(&readiness_pkcs8)
+    .map_err(|_| anyhow::anyhow!("membership readiness private key is not Ed25519 PKCS#8"))?;
+  let catchup_file = read_bounded_membership_private_key(
+    Path::new(&catchup_path),
+    "membership catch-up private key",
+    256,
+  )?;
+  let catchup =
+    decode_optional_base64_private_key(catchup_file, "membership catch-up private key")?;
+  let catchup_x25519: [u8; 32] = catchup
+    .as_slice()
+    .try_into()
+    .map_err(|_| anyhow::anyhow!("membership catch-up private key must contain 32 bytes"))?;
+  let catchup_private = PrivateKey::from_private_key(&X25519, &catchup_x25519)
+    .map_err(|_| anyhow::anyhow!("membership catch-up X25519 private key is invalid"))?;
+  let catchup_public = catchup_private
+    .compute_public_key()
+    .map_err(|_| anyhow::anyhow!("failed to derive membership catch-up public key"))?;
+  if let Some(member) = bootstrap_members
+    .iter()
+    .find(|member| member.id == instance_id)
+  {
+    ensure!(
+      base64::engine::general_purpose::STANDARD.encode(readiness_pair.public_key().as_ref())
+        == member.readiness_ed25519_public_key,
+      "membership readiness private key does not match the bootstrap member identity"
+    );
+    ensure!(
+      base64::engine::general_purpose::STANDARD.encode(catchup_public.as_ref())
+        == member.catchup_x25519_public_key,
+      "membership catch-up private key does not match the bootstrap member identity"
+    );
+  }
+  Ok(MembershipPrivateKeys {
+    readiness_pkcs8,
+    catchup_x25519: Zeroizing::new(catchup_x25519),
+  })
+}
+
+fn read_bounded_membership_private_key(
+  path: &Path,
+  label: &str,
+  maximum_bytes: u64,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+  ensure!(path.is_absolute(), "{label} path must be absolute");
+  let mut options = OpenOptions::new();
+  options.read(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+  }
+  let file = options
+    .open(path)
+    .with_context(|| format!("failed to open {label} file"))?;
+  let metadata = file
+    .metadata()
+    .with_context(|| format!("failed to inspect {label} file"))?;
+  ensure!(
+    metadata.file_type().is_file(),
+    "{label} must be a regular file"
+  );
+  ensure!(
+    (1..=maximum_bytes).contains(&metadata.len()),
+    "{label} file size is outside its bound"
+  );
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    ensure!(
+      metadata.permissions().mode() & 0o077 == 0,
+      "{label} permissions must not grant group or other access"
+    );
+  }
+  let mut value = Zeroizing::new(Vec::with_capacity(
+    usize::try_from(metadata.len()).context("membership private-key size exceeds usize")?,
+  ));
+  file
+    .take(maximum_bytes.saturating_add(1))
+    .read_to_end(&mut value)
+    .with_context(|| format!("failed to read {label}"))?;
+  ensure!(
+    !value.is_empty() && value.len() as u64 <= maximum_bytes,
+    "{label} changed outside its size bound while being read"
+  );
+  Ok(value)
+}
+
+fn decode_optional_base64_private_key(
+  value: Zeroizing<Vec<u8>>,
+  label: &str,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+  let Ok(text) = std::str::from_utf8(&value) else {
+    return Ok(value);
+  };
+  let trimmed = text.trim();
+  let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(trimmed) else {
+    return Ok(value);
+  };
+  if base64::engine::general_purpose::STANDARD.encode(&decoded) != trimmed {
+    bail!("{label} base64 encoding is not canonical");
+  }
+  ensure!(!decoded.is_empty(), "{label} must not be empty");
+  Ok(Zeroizing::new(decoded))
+}
+
 fn load_signer(config: &crate::config::AdminMutationSignerConfig) -> anyhow::Result<SignerBinding> {
   let ed25519 = fs::read(&config.ed25519_public_key_file).with_context(|| {
     format!(
@@ -838,6 +1294,8 @@ mod cluster_diagnostics;
 mod cluster_heartbeat;
 #[path = "runtime/cluster_worker.rs"]
 mod cluster_worker;
+#[path = "runtime/membership_reconciliation.rs"]
+mod membership_reconciliation;
 #[path = "runtime/target.rs"]
 mod target;
 #[path = "runtime/terminal.rs"]
