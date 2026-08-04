@@ -339,6 +339,46 @@ test('classifies the Kubernetes graduation registry as a feature lifecycle surfa
   }
 })
 
+test('classifies supply-chain schemas as schema epoch surfaces', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(
+      Root,
+      'deploy/supply-chain/admission-bundle.schema.json',
+      '{"schemaVersion":1}\n'
+    )
+    const Base = Commit(Root, 'baseline')
+    WriteFile(
+      Root,
+      'deploy/supply-chain/admission-bundle.schema.json',
+      '{"schemaVersion":2}\n'
+    )
+    const ChangedHead = Commit(Root, 'change supply-chain schema')
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Root,
+        changeBase: Base,
+        changeHead: ChangedHead
+      }),
+      /compatibility surfaces changed \(Schema epochs\)/
+    )
+
+    Fs.rmSync(Path.join(Root, 'deploy/supply-chain/admission-bundle.schema.json'))
+    const DeletedHead = Commit(Root, 'delete supply-chain schema')
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Root,
+        changeBase: Base,
+        changeHead: DeletedHead
+      }),
+      /compatibility surfaces changed \(Schema epochs\)/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
 test('builds exact stable release notes and a digest-bound receipt', () => {
   const Root = CreateContractWorkspace()
   try {

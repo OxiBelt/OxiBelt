@@ -156,7 +156,8 @@ const CompatibilitySurfaceSections: CompatibilitySurface[] = [
     patterns: [
       /^source\/src\/config\/schema\.rs$/,
       /^source\/apps\/oxibeltctl\/src\/config_(?:migrate|schema)\.rs$/,
-      /^source\/assets\/oxibelt-config-v\d+\.schema\.json$/
+      /^source\/assets\/oxibelt-config-v\d+\.schema\.json$/,
+      /^deploy\/supply-chain\/[^/]+\.schema\.json$/
     ]
   },
   {
