@@ -37,7 +37,7 @@ export type PredicateIdentity = {
 }
 
 type CliParameters = {
-  mode: 'platform' | 'index' | 'extract'
+  mode: 'platform' | 'index' | 'extract' | 'digest'
   values: Map<string, string[]>
 }
 const Digest = /^sha256:[0-9a-f]{64}$/
@@ -104,7 +104,7 @@ function CanonicalText(Value: unknown): string {
   return JSON.stringify(Canonical(Value))
 }
 
-function Sha256(Value: unknown): string {
+export function RebuildPredicateSha256(Value: unknown): string {
   return `sha256:${Crypto.createHash('sha256').update(CanonicalText(Value), 'utf8').digest('hex')}`
 }
 
@@ -262,10 +262,10 @@ export function BuildPlatformRebuildRecipe(Options: PlatformRecipeOptions): Json
     },
     output: {
       artifactContract: Contract,
-      artifactContractSha256: Sha256(Contract),
+      artifactContractSha256: RebuildPredicateSha256(Contract),
       binaryInventory: Inventory,
-      binaryInventorySha256: Sha256(Inventory),
-      sbomSha256: Sha256(Sbom)
+      binaryInventorySha256: RebuildPredicateSha256(Inventory),
+      sbomSha256: RebuildPredicateSha256(Sbom)
     },
     comparison: { schemaVersion: 1, exactFirst: true, normalizedFields: NormalizedFields }
   }
@@ -293,7 +293,11 @@ export function BuildIndexRebuildRecipe(Options: IndexRecipeOptions): JsonRecord
     }
     const Subject = RecordValue(Recipe.subject, `platform ${Arch} subject`)
     Exact(Subject.digest, Child.digest, `platform ${Arch} subject digest`)
-    return { artifactArch: Arch, digest: DigestValue(Child.digest, `platform ${Arch} digest`), recipeSha256: Sha256(Recipe) }
+    return {
+      artifactArch: Arch,
+      digest: DigestValue(Child.digest, `platform ${Arch} digest`),
+      recipeSha256: RebuildPredicateSha256(Recipe)
+    }
   })
   const Sbom = ValidateSbom(Options.indexSbom, IndexDigest)
   const Recipe: JsonRecord = {
@@ -308,9 +312,9 @@ export function BuildIndexRebuildRecipe(Options: IndexRecipeOptions): JsonRecord
     },
     output: {
       indexMetadata: Metadata,
-      indexMetadataSha256: Sha256(Metadata),
+      indexMetadataSha256: RebuildPredicateSha256(Metadata),
       children: BoundChildren,
-      sbomSha256: Sha256(Sbom)
+      sbomSha256: RebuildPredicateSha256(Sbom)
     }
   }
   AssertSize(Recipe)
@@ -381,8 +385,8 @@ function ReadJson(Path: string): unknown {
 
 function ParseCli(Argv: string[]): CliParameters {
   const Mode = Argv[2]
-  if (Mode !== 'platform' && Mode !== 'index' && Mode !== 'extract') {
-    throw new Error('first argument must be platform, index, or extract')
+  if (Mode !== 'platform' && Mode !== 'index' && Mode !== 'extract' && Mode !== 'digest') {
+    throw new Error('first argument must be platform, index, extract, or digest')
   }
   const Values = new Map<string, string[]>()
   for (let Index = 3; Index < Argv.length; Index += 2) {
@@ -418,6 +422,10 @@ function WriteOutput(Path: string, Value: unknown): void {
 
 function RunCli(): void {
   const Parameters = ParseCli(Process.argv)
+  if (Parameters.mode === 'digest') {
+    Process.stdout.write(`${RebuildPredicateSha256(ReadJson(CliValue(Parameters, '--input')))}\n`)
+    return
+  }
   const Output = CliValue(Parameters, '--output')
   if (Parameters.mode === 'platform') {
     WriteOutput(Output, BuildPlatformRebuildRecipe({

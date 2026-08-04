@@ -34,6 +34,7 @@
       "properties": {
         "artifactArch": { "enum": ["amd64", "arm64", "riscv64"] },
         "publishedDigest": { "$ref": "#/$defs/digest" },
+        "platformRecipeSha256": { "$ref": "#/$defs/digest" },
         "outcome": { "enum": ["exact", "normalized_equivalent"] },
         "archiveSha256": { "$ref": "#/$defs/digest" },
         "objectSha256": { "$ref": "#/$defs/digest" }
@@ -120,6 +121,7 @@
           "properties": {
             "requiredArchitectures": { "const": ["amd64", "arm64", "riscv64"] },
             "workflowRunId": { "type": "integer", "minimum": 1 },
+            "workflowRunAttempt": { "type": "integer", "minimum": 1 },
             "workflowPath": { "const": ".github/workflows/verify-release-rebuild.yml" },
             "workflowSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
             "completedAt": { "$ref": "#/$defs/timestamp" },
@@ -129,7 +131,25 @@
               "maxItems": 3,
               "items": { "$ref": "#/$defs/rebuildReceipt" }
             }
-          }
+          },
+          "oneOf": [
+            {
+              "not": { "required": ["workflowRunAttempt"] },
+              "properties": {
+                "receipts": {
+                  "items": { "not": { "required": ["platformRecipeSha256"] } }
+                }
+              }
+            },
+            {
+              "required": ["workflowRunAttempt"],
+              "properties": {
+                "receipts": {
+                  "items": { "required": ["platformRecipeSha256"] }
+                }
+              }
+            }
+          ]
         },
         "workloadPolicy": { "$ref": "#/$defs/workloadPolicy" },
         "decision": {

@@ -43,7 +43,13 @@ if [[ -z "${platform}" || -z "${artifact_arch}" || -z "${output_dir}" || "$#" -g
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd -- "${script_dir}/../.." && pwd)"
+tool_root="$(cd -- "${script_dir}/../.." && pwd)"
+source_root="${OXIBELT_DOCKER_IMAGE_SOURCE_ROOT:-${tool_root}}"
+if [[ ! -d "${source_root}" ]]; then
+  echo "Docker image source root is not an existing directory" >&2
+  exit 2
+fi
+repo_root="$(cd -- "${source_root}" && pwd -P)"
 artifact_prefix=""
 case "${role}" in
   standalone)
@@ -262,7 +268,7 @@ docker buildx build \
 
 mv -- "${build_metadata_tmp}" "${build_metadata}"
 
-python3 "${repo_root}/tests/scripts/validate-ci-image-artifact.py" create \
+python3 "${tool_root}/tests/scripts/validate-ci-image-artifact.py" create \
   --image-tar "${image_tar}" \
   --build-metadata "${build_metadata}" \
   --contract "${artifact_contract}" \

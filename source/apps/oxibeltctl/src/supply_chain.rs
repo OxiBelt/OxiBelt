@@ -183,20 +183,22 @@ async fn run_gh_attestation(
   serde_json::from_slice(&stdout).context("gh attestation verification returned invalid JSON")
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct GitHubRepository {
   full_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct GitHubWorkflowRun {
   id: u64,
   name: String,
   path: String,
   event: String,
+  head_branch: String,
   status: String,
   conclusion: Option<String>,
   head_sha: String,
+  run_attempt: u64,
   updated_at: String,
   repository: GitHubRepository,
 }
@@ -300,7 +302,13 @@ async fn load_independent_rebuild(
       "downloaded independent rebuild artifact archive digest does not match GitHub metadata"
     );
     let receipt = extract_receipt(&archive, &expected_name)?;
-    validate_receipt_identity(&receipt, args, args.independent_rebuild_run_id, arch)?;
+    validate_receipt_identity(
+      &receipt,
+      args,
+      args.independent_rebuild_run_id,
+      run.run_attempt,
+      arch,
+    )?;
     receipts.push(IndependentRebuildVerificationReceipt {
       artifact_arch: arch.to_string(),
       archive_sha256: archive_sha256.to_string(),
@@ -308,13 +316,37 @@ async fn load_independent_rebuild(
     });
   }
 
+  let final_run: GitHubWorkflowRun = serde_json::from_slice(
+    &run_gh_api(
+      &run_endpoint,
+      MAX_GH_RUN_BYTES,
+      "final independent rebuild workflow run",
+    )
+    .await?,
+  )
+  .context("GitHub returned an invalid final independent rebuild workflow run")?;
+  validate_workflow_run(&final_run, args, verification_time)?;
+  validate_stable_workflow_run(&run, &final_run)?;
+
   Ok(IndependentRebuildVerificationInput {
     workflow_run_id: run.id,
+    workflow_run_attempt: run.run_attempt,
     workflow_path: run.path,
     workflow_sha: run.head_sha,
     completed_at: parse_timestamp(&run.updated_at, "workflow run completion")?,
     receipts,
   })
+}
+
+fn validate_stable_workflow_run(
+  initial: &GitHubWorkflowRun,
+  final_run: &GitHubWorkflowRun,
+) -> anyhow::Result<()> {
+  ensure!(
+    initial == final_run,
+    "independent rebuild workflow run changed while its artifacts were verified"
+  );
+  Ok(())
 }
 
 fn validate_workflow_run(
@@ -337,6 +369,14 @@ fn validate_workflow_run(
   ensure!(
     run.event == "workflow_run",
     "manual independent rebuild runs cannot satisfy release admission"
+  );
+  ensure!(
+    run.head_branch == "main",
+    "independent rebuild workflow run is not from the canonical branch"
+  );
+  ensure!(
+    run.run_attempt > 0,
+    "independent rebuild workflow run attempt must be positive"
   );
   ensure!(
     run.status == "completed" && run.conclusion.as_deref() == Some("success"),
@@ -545,6 +585,7 @@ fn validate_receipt_identity(
   receipt: &Value,
   args: &SupplyChainAdmissionBundleArgs,
   run_id: u64,
+  run_attempt: u64,
   arch: &str,
 ) -> anyhow::Result<()> {
   ensure!(
@@ -562,7 +603,12 @@ fn validate_receipt_identity(
       && exact("/build/artifactArch", arch)
       && exact("/workflow/repository", SOURCE_REPOSITORY)
       && exact("/workflow/path", REBUILD_WORKFLOW_PATH)
-      && receipt.pointer("/workflow/runId").and_then(Value::as_u64) == Some(run_id),
+      && exact("/workflow/sha", &args.independent_rebuild_workflow_sha,)
+      && receipt.pointer("/workflow/runId").and_then(Value::as_u64) == Some(run_id)
+      && receipt
+        .pointer("/workflow/runAttempt")
+        .and_then(Value::as_u64)
+        == Some(run_attempt),
     "independent rebuild receipt identity does not match the requested release"
   );
   Ok(())

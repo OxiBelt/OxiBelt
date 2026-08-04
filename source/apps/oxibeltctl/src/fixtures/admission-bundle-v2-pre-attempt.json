@@ -1,0 +1,94 @@
+{
+  "payload": {
+    "schemaVersion": 2,
+    "policy": {
+      "version": "oxibelt-admission-v2",
+      "releaseChannel": "stable",
+      "maxEvidenceAgeSeconds": 3600,
+      "revocationsSha256": "sha256:168d8f59e9b3e23590e21788671a61bf8bace750d221fd56d965561c61765069",
+      "bundleSigningKeyId": "deployment-admission-2026"
+    },
+    "artifact": {
+      "repository": "ghcr.io/oxibelt/oxibelt-dataplane-strict",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "imageReference": "ghcr.io/oxibelt/oxibelt-dataplane-strict@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "role": "dataplane-strict",
+      "sourceRepository": "OxiBelt/OxiBelt",
+      "sourceRef": "refs/tags/1.2.3",
+      "sourceRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "signerWorkflow": "https://github.com/OxiBelt/OxiBelt/.github/workflows/release.yml@refs/tags/1.2.3"
+    },
+    "evidence": [
+      {
+        "kind": "provenance",
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "objectSha256": "sha256:8feef41153a9501eb1fd056f6b84ccbb2b5f5d0fa205f3c60e47c73e7eec99f4",
+        "predicateSha256": "sha256:7a552dbca0d4d2ff5d5802851d788d807e227bba65e447e4971fd9fabc333222",
+        "trustedTimestamp": 1785542400
+      },
+      {
+        "kind": "sbom",
+        "predicateType": "https://cyclonedx.org/bom",
+        "objectSha256": "sha256:f6b90c9634f83f7634a044eefdb210e06513ecb829325251ba254b6dbe78781d",
+        "predicateSha256": "sha256:617b9cde27a88bd33a1cde361f0c062c81f2fb1fbd6f591fb05da3ec034e00e9",
+        "trustedTimestamp": 1785542400
+      },
+      {
+        "kind": "rebuild",
+        "predicateType": "https://oxibelt.dev/attestations/rebuild/v1",
+        "objectSha256": "sha256:34e8585320c167041ff2e910f576e5dc5221c992db003c110a245240b8b5541f",
+        "predicateSha256": "sha256:30567381542ed28f4f694b9eb695d9b6f0a4a6b767242c8b1e40d9c61228921a",
+        "trustedTimestamp": 1785542400
+      }
+    ],
+    "independentRebuild": {
+      "requiredArchitectures": ["amd64", "arm64", "riscv64"],
+      "workflowRunId": 42,
+      "workflowPath": ".github/workflows/verify-release-rebuild.yml",
+      "workflowSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "completedAt": 1785542400,
+      "receipts": [
+        {
+          "artifactArch": "amd64",
+          "publishedDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "outcome": "exact",
+          "archiveSha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "objectSha256": "sha256:0d412e1724766dd4a7a3044fd11a173bea6ba53f0eb00331f6bf35755beec79b"
+        },
+        {
+          "artifactArch": "arm64",
+          "publishedDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "outcome": "exact",
+          "archiveSha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "objectSha256": "sha256:26832b471248536cc8e031fa640b068538de56bf27e3717821a99440c6755a8b"
+        },
+        {
+          "artifactArch": "riscv64",
+          "publishedDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "outcome": "exact",
+          "archiveSha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+          "objectSha256": "sha256:fe97a5d60ebfa35c5a751a5334bccbc41191bb4bab296515c6f23ab83faaaa7e"
+        }
+      ]
+    },
+    "workloadPolicy": {
+      "schemaVersion": 1,
+      "auxiliaryContainers": []
+    },
+    "decision": {
+      "status": "pass",
+      "reasons": [
+        "exact_primary_evidence_verified",
+        "signed_workload_policy_verified"
+      ],
+      "verifiedAt": 1785542460,
+      "expiresAt": 1785544260
+    }
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "keyId": "deployment-admission-2026",
+    "payloadSha256": "sha256:13ecc36f2b66c075dd39264d1481872b488326f1e31c0aa986b2ca0c002db53e",
+    "valueHex": "8bb2de4d4e8b22f00ea5b153cd04af71f087590d400c656377913129f91c82876a03f2f312f3f78ab378123907f6173b63b32099600a2c16fc987b196f584104"
+  }
+}

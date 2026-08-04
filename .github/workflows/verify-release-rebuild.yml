@@ -53,12 +53,22 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       release_ref: ${{ steps.plan.outputs.release_ref }}
       revision: ${{ steps.plan.outputs.revision }}
+      verifier_sha: ${{ steps.plan.outputs.verifier_sha }}
 
     steps:
-      - name: Checkout independent release source
+      - name: Checkout approved verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: verifier
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout independent release source as build inputs
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.event.workflow_run.head_sha }}
+          path: release
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -71,20 +81,30 @@ jobs:
 
       - name: Install release-planning dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: verifier
 
       - name: Resolve tag and generate release plan
         id: plan
+        working-directory: verifier
         env:
           EVENT_NAME: ${{ github.event_name }}
           MANUAL_ARCH: ${{ inputs.artifact_arch }}
           MANUAL_ROLE: ${{ inputs.image_role }}
           MANUAL_TAG: ${{ inputs.release_tag }}
+          APPROVED_VERIFIER_SHA: ${{ github.sha }}
           WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
 
-          revision="$(git rev-parse HEAD)"
+          verifier_sha="$(git rev-parse HEAD)"
+          if [[ ! "${verifier_sha}" =~ ^[0-9a-f]{40}$ ]] ||
+             [[ "${verifier_sha}" != "${APPROVED_VERIFIER_SHA}" ]]; then
+            echo "verifier checkout does not match the approved workflow revision" >&2
+            exit 1
+          fi
+
+          revision="$(git -C ../release rev-parse HEAD)"
           if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "checkout did not resolve to a full Git commit" >&2
             exit 1
@@ -96,7 +116,7 @@ jobs:
             release_tag="${WORKFLOW_RUN_HEAD_BRANCH}"
             if [[ ! "${release_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
               mapfile -t matching_tags < <(
-                git tag --points-at "${revision}" |
+                git -C ../release tag --points-at "${revision}" |
                   grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$' || true
               )
               if [[ "${#matching_tags[@]}" -ne 1 ]]; then
@@ -112,7 +132,7 @@ jobs:
           fi
 
           release_ref="refs/tags/${release_tag}"
-          tag_revision="$(git rev-parse "${release_ref}^{commit}")"
+          tag_revision="$(git -C ../release rev-parse "${release_ref}^{commit}")"
           if [[ "${tag_revision}" != "${revision}" ]]; then
             echo "${release_ref} resolves to ${tag_revision}, not checked-out ${revision}" >&2
             exit 1
@@ -139,7 +159,17 @@ jobs:
           OXIBELT_RELEASE_IS_PRERELEASE="${release_prerelease}" \
           OXIBELT_IMAGE_PLAN_OUTPUT="${plan}" \
           GITHUB_EVENT_NAME="${release_event}" \
-            pnpm run versioning:release
+            node --import tsx devops/sources/versioning.ts \
+              --workspace-path ../release \
+              --manifest-path Cargo.toml \
+              --package-name oxibelt \
+              --lockfile-path Cargo.lock \
+              --ref "${release_ref}" \
+              --revision "${revision}" \
+              --event-name "${release_event}" \
+              --release-prerelease "${release_prerelease}" \
+              --image-plan-output "${plan}" \
+              --release-publish
 
           selection='.'
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -175,6 +205,7 @@ jobs:
             echo "matrix=${matrix}"
             echo "release_ref=${release_ref}"
             echo "revision=${revision}"
+            echo "verifier_sha=${verifier_sha}"
           } >>"${GITHUB_OUTPUT}"
 
   verify:
@@ -187,12 +218,25 @@ jobs:
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
 
     steps:
-      - name: Checkout verifier at the immutable release revision
+      - name: Checkout approved verifier at its immutable revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
         with:
-          ref: ${{ needs.resolve.outputs.revision }}
+          ref: ${{ needs.resolve.outputs.verifier_sha }}
+          path: verifier
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Assert approved verifier revision
+        env:
+          APPROVED_VERIFIER_SHA: ${{ needs.resolve.outputs.verifier_sha }}
+        run: |
+          set -euo pipefail
+          verifier_sha="$(git -C verifier rev-parse HEAD)"
+          if [[ ! "${verifier_sha}" =~ ^[0-9a-f]{40}$ ]] ||
+             [[ "${verifier_sha}" != "${APPROVED_VERIFIER_SHA}" ]]; then
+            echo "verifier checkout does not match the approved workflow revision" >&2
+            exit 1
+          fi
 
       - name: Start isolated rootless Docker
         uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
@@ -223,6 +267,7 @@ jobs:
 
       - name: Pre-pull pinned BuildKit
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
+        working-directory: verifier
 
       - name: Setup pinned Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
@@ -244,6 +289,7 @@ jobs:
 
       - name: Install verifier dependencies without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: verifier
 
       - name: Resolve immutable published digest
         id: subject
@@ -262,6 +308,7 @@ jobs:
           echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
 
       - name: Rebuild from fresh source and compare
+        working-directory: verifier
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE: ${{ matrix.image }}
@@ -269,6 +316,7 @@ jobs:
           PUBLISHED_DIGEST: ${{ steps.subject.outputs.digest }}
           RELEASE_REF: ${{ needs.resolve.outputs.release_ref }}
           RELEASE_REVISION: ${{ needs.resolve.outputs.revision }}
+          VERIFIER_SHA: ${{ needs.resolve.outputs.verifier_sha }}
           ROLE: ${{ matrix.role }}
           ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
         run: |
@@ -278,6 +326,7 @@ jobs:
             --digest "${PUBLISHED_DIGEST}" \
             --revision "${RELEASE_REVISION}" \
             --release-ref "${RELEASE_REF}" \
+            --verifier-sha "${VERIFIER_SHA}" \
             --role "${ROLE}" \
             --artifact-arch "${ARTIFACT_ARCH}" \
             --output "${OUTPUT}"

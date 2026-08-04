@@ -231,7 +231,7 @@ class ComparatorTest(unittest.TestCase):
         )
         return result, json.loads(output.read_text(encoding="utf-8"))
 
-    def test_exact_manifest_digest_is_byte_for_byte_reproducible(self) -> None:
+    def test_exact_manifest_and_archive_digests_are_byte_for_byte_reproducible(self) -> None:
         published = self.artifact("published", [("app/oxibelt", b"binary", 0o755)])
         rebuilt = self.artifact("rebuilt", [("app/oxibelt", b"binary", 0o755)])
         rebuilt_contract = json.loads(rebuilt[1].read_text(encoding="utf-8"))
@@ -244,6 +244,26 @@ class ComparatorTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(receipt["outcome"], "exact")
+
+    def test_same_manifest_with_different_archive_is_only_normalized(self) -> None:
+        entries = [("app/oxibelt", b"binary", 0o755), ("etc/config", b"value", 0o640)]
+        published = self.artifact("published", entries, layer_mtime=1)
+        rebuilt = self.artifact("rebuilt", list(reversed(entries)), layer_mtime=2)
+        published_contract = json.loads(published[1].read_text(encoding="utf-8"))
+        rebuilt_contract = json.loads(rebuilt[1].read_text(encoding="utf-8"))
+        self.assertNotEqual(
+            published_contract["image_tar_sha256"],
+            rebuilt_contract["image_tar_sha256"],
+        )
+        rebuilt_contract["image_digest"] = published_contract["image_digest"]
+        write_json(rebuilt[1], rebuilt_contract)
+        write_json(rebuilt[2], sbom(published_contract["image_digest"]))
+
+        result, receipt = self.compare(published, rebuilt)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(receipt["outcome"], "normalized_equivalent")
+        self.assertEqual(receipt["differences"], [])
 
     def test_timestamp_and_archive_order_drift_is_normalized(self) -> None:
         entries = [("app/oxibelt", b"binary", 0o755), ("etc/config", b"value", 0o640)]

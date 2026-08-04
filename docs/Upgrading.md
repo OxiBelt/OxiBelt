@@ -744,6 +744,20 @@ the fail-closed rejection. These audit and route-classification corrections
 change no Admin wire shape, native configuration schema epoch, or persisted-state
 format.
 
+Existing signed v1 and v2 supply-chain bundle wire shapes remain readable.
+Admission now stops accepting either schema when the earliest signed
+provenance, SBOM, rebuild-recipe, or independent-rebuild timestamp exceeds
+`maxEvidenceAgeSeconds`, even if `expiresAt` is later. New generation rejects
+such a later expiry and requires canonical rebuild metadata plus
+attempt-bound, stable GitHub run evidence. Fresh independent-rebuild receipts
+also bind the approved verifier commit and exact platform-recipe hash and must
+satisfy the complete fixed comparison contract. `exact` now requires both the
+OCI manifest and image archive SHA-256 to match; a matching manifest in a
+different archive is only normalized-equivalent. Regenerate bundles from fresh
+evidence before rollout. The v2 extension fields remain backward readable only
+when all are absent; new bundles carry a positive run attempt and all three
+platform-recipe hashes, and partial forms are invalid.
+
 Neither the immutable `0.7.0` tag nor `0.7.1-beta.1` is a deployable upgrade
 target. Both failed exact-revision release-contract validation before draft
 creation and have no GitHub Release or official artifact. Use

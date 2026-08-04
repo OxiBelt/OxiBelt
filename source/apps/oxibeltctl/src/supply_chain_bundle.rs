@@ -58,6 +58,7 @@ pub(crate) struct BundleVerificationInput {
 #[derive(Debug)]
 pub(crate) struct IndependentRebuildVerificationInput {
   pub(crate) workflow_run_id: u64,
+  pub(crate) workflow_run_attempt: u64,
   pub(crate) workflow_path: String,
   pub(crate) workflow_sha: String,
   pub(crate) completed_at: u64,
@@ -137,6 +138,8 @@ pub(crate) struct AdmissionEvidenceClaim {
 pub(crate) struct IndependentRebuildClaim {
   pub(crate) required_architectures: Vec<String>,
   pub(crate) workflow_run_id: u64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) workflow_run_attempt: Option<u64>,
   pub(crate) workflow_path: String,
   pub(crate) workflow_sha: String,
   pub(crate) completed_at: u64,
@@ -148,6 +151,8 @@ pub(crate) struct IndependentRebuildClaim {
 pub(crate) struct IndependentRebuildReceiptClaim {
   pub(crate) artifact_arch: String,
   pub(crate) published_digest: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) platform_recipe_sha256: Option<String>,
   pub(crate) outcome: String,
   pub(crate) archive_sha256: String,
   pub(crate) object_sha256: String,
@@ -194,10 +199,124 @@ struct ExactAttestation {
   predicate: Value,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RebuildChild {
   artifact_arch: String,
   digest: String,
+  recipe_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RebuildReceiptEvidence {
+  schema_version: u32,
+  published: RebuildReceiptImage,
+  rebuilt: RebuildReceiptImage,
+  normalization: RebuildReceiptNormalization,
+  differences: Vec<String>,
+  outcome: String,
+  guarantee: String,
+  source: RebuildReceiptSource,
+  build: RebuildReceiptBuild,
+  workflow: RebuildReceiptWorkflow,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RebuildReceiptImage {
+  image_digest: String,
+  image_tar_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RebuildReceiptNormalization {
+  schema_version: u32,
+  ignored: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RebuildReceiptSource {
+  repository: String,
+  #[serde(rename = "ref")]
+  source_ref: String,
+  revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RebuildReceiptBuild {
+  role: String,
+  artifact_arch: String,
+  recipe_sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RebuildReceiptWorkflow {
+  repository: String,
+  path: String,
+  sha: String,
+  run_id: u64,
+  run_attempt: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IndexRebuildPredicate {
+  schema_version: u32,
+  predicate_type: String,
+  kind: String,
+  subject: IndexRebuildSubject,
+  source: IndexRebuildSource,
+  output: IndexRebuildOutput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexRebuildSubject {
+  name: String,
+  digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexRebuildSource {
+  repository: String,
+  #[serde(rename = "ref")]
+  source_ref: String,
+  revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IndexRebuildOutput {
+  index_metadata: IndexMetadata,
+  index_metadata_sha256: String,
+  children: Vec<RebuildChild>,
+  sbom_sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IndexMetadata {
+  schema_version: u32,
+  role: String,
+  image: String,
+  digest: String,
+  children: Vec<IndexMetadataChild>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IndexMetadataChild {
+  artifact_arch: String,
+  digest: String,
+  os: String,
+  architecture: String,
+  variant: Value,
 }
 
 pub(crate) fn now_unix_seconds() -> anyhow::Result<u64> {
@@ -277,14 +396,34 @@ pub(crate) fn verify_and_sign_bundle(
     &input,
     &signer_workflow,
   )?;
-  let children = validate_rebuild(&rebuild.predicate, &input)?;
+  let children = validate_rebuild(&rebuild.predicate, &input, &sbom.claim.predicate_sha256)?;
   validate_independent_rebuild_run(&evidence.independent_rebuild, &input)?;
-  let receipts = validate_rebuild_receipts(&evidence.independent_rebuild.receipts, &children)?;
+  let receipts = validate_rebuild_receipts(
+    &evidence.independent_rebuild.receipts,
+    &children,
+    &evidence.independent_rebuild,
+    &input,
+  )?;
 
   let expires_at = input
     .verification_time
     .checked_add(input.expires_after_seconds)
     .context("bundle expiry overflows Unix time")?;
+  let evidence_horizon = [
+    provenance.claim.trusted_timestamp,
+    sbom.claim.trusted_timestamp,
+    rebuild.claim.trusted_timestamp,
+    evidence.independent_rebuild.completed_at,
+  ]
+  .into_iter()
+  .min()
+  .expect("four evidence timestamps")
+  .checked_add(input.max_evidence_age_seconds)
+  .context("evidence freshness horizon overflows Unix time")?;
+  ensure!(
+    expires_at <= evidence_horizon,
+    "bundle expiry exceeds the verified evidence freshness horizon"
+  );
   let payload = AdmissionBundlePayload {
     schema_version: 2,
     policy: AdmissionPolicyClaim {
@@ -312,6 +451,7 @@ pub(crate) fn verify_and_sign_bundle(
         "riscv64".to_string(),
       ],
       workflow_run_id: evidence.independent_rebuild.workflow_run_id,
+      workflow_run_attempt: Some(evidence.independent_rebuild.workflow_run_attempt),
       workflow_path: evidence.independent_rebuild.workflow_path,
       workflow_sha: evidence.independent_rebuild.workflow_sha,
       completed_at: evidence.independent_rebuild.completed_at,
@@ -379,7 +519,7 @@ fn exact_attestation(
         input.verification_time.saturating_sub(timestamp) <= input.max_evidence_age_seconds,
         "verified attestation evidence is stale"
       );
-      matches.push((result, predicate, timestamp));
+      matches.push((result, predicate, timestamp, sha256_value(result)?));
     }
   }
   ensure!(
@@ -388,19 +528,19 @@ fn exact_attestation(
   );
   let predicate_hashes = matches
     .iter()
-    .map(|(_, predicate, _)| sha256_value(predicate))
+    .map(|(_, predicate, _, _)| sha256_value(predicate))
     .collect::<anyhow::Result<BTreeSet<_>>>()?;
   ensure!(
     predicate_hashes.len() == 1,
     "verified {kind} attestations contain conflicting predicates"
   );
-  matches.sort_by_key(|(_, _, timestamp)| *timestamp);
-  let (result, predicate, timestamp) = matches.pop().expect("nonempty exact matches");
+  matches.sort_by(|left, right| (left.2, left.3.as_str()).cmp(&(right.2, right.3.as_str())));
+  let (_, predicate, timestamp, object_sha256) = matches.pop().expect("nonempty exact matches");
   Ok(ExactAttestation {
     claim: AdmissionEvidenceClaim {
       kind: kind.to_string(),
       predicate_type: predicate_type.to_string(),
-      object_sha256: sha256_value(result)?,
+      object_sha256,
       predicate_sha256: predicate_hashes
         .into_iter()
         .next()
@@ -592,64 +732,77 @@ fn validate_sbom(predicate: &Value, input: &BundleVerificationInput) -> anyhow::
 fn validate_rebuild(
   predicate: &Value,
   input: &BundleVerificationInput,
+  sbom_predicate_sha256: &str,
 ) -> anyhow::Result<Vec<RebuildChild>> {
+  let predicate: IndexRebuildPredicate = serde_json::from_value(predicate.clone())
+    .context("rebuild predicate has an invalid or non-canonical shape")?;
   ensure!(
-    predicate.get("schemaVersion").and_then(Value::as_u64) == Some(1)
-      && predicate.get("predicateType").and_then(Value::as_str) == Some(REBUILD_PREDICATE)
-      && predicate.get("kind").and_then(Value::as_str) == Some("index"),
+    predicate.schema_version == 1
+      && predicate.predicate_type == REBUILD_PREDICATE
+      && predicate.kind == "index",
     "rebuild predicate is not an index recipe v1"
   );
   ensure!(
-    predicate.pointer("/subject/name").and_then(Value::as_str) == Some(input.repository.as_str())
-      && predicate.pointer("/subject/digest").and_then(Value::as_str)
-        == Some(input.digest.as_str())
-      && predicate
-        .pointer("/source/repository")
-        .and_then(Value::as_str)
-        == Some(SOURCE_REPOSITORY_URL)
-      && predicate.pointer("/source/ref").and_then(Value::as_str)
-        == Some(input.source_ref.as_str())
-      && predicate
-        .pointer("/source/revision")
-        .and_then(Value::as_str)
-        == Some(input.source_revision.as_str()),
+    predicate.subject.name == input.repository
+      && predicate.subject.digest == input.digest
+      && predicate.source.repository == SOURCE_REPOSITORY_URL
+      && predicate.source.source_ref == input.source_ref
+      && predicate.source.revision == input.source_revision,
     "rebuild predicate identity does not match the requested artifact"
   );
-  let values = predicate
-    .pointer("/output/children")
-    .and_then(Value::as_array)
-    .context("index rebuild predicate is missing platform children")?;
   ensure!(
-    values.len() == 3,
+    predicate.output.index_metadata.schema_version == 2
+      && predicate.output.index_metadata.role == input.role.as_str()
+      && predicate.output.index_metadata.image == input.repository
+      && predicate.output.index_metadata.digest == input.digest,
+    "index rebuild metadata identity does not match the requested artifact"
+  );
+  ensure!(
+    predicate.output.index_metadata.children.len() == 3 && predicate.output.children.len() == 3,
     "index rebuild predicate must contain three platform children"
+  );
+  validate_digest(
+    &predicate.output.index_metadata_sha256,
+    "index metadata digest",
+  )?;
+  ensure!(
+    sha256_value(&serde_json::to_value(&predicate.output.index_metadata)?)?
+      == predicate.output.index_metadata_sha256,
+    "index rebuild metadata digest does not match its canonical contents"
+  );
+  validate_digest(&predicate.output.sbom_sha256, "index SBOM predicate digest")?;
+  ensure!(
+    predicate.output.sbom_sha256 == sbom_predicate_sha256,
+    "index rebuild SBOM digest does not match the selected SBOM predicate"
   );
   let mut children = Vec::with_capacity(3);
   let mut child_digests = BTreeSet::new();
   for (index, expected_arch) in ["amd64", "arm64", "riscv64"].iter().enumerate() {
-    let child = &values[index];
+    let metadata_child = &predicate.output.index_metadata.children[index];
+    let child = &predicate.output.children[index];
     ensure!(
-      child.get("artifactArch").and_then(Value::as_str) == Some(*expected_arch),
+      metadata_child.artifact_arch == *expected_arch
+        && metadata_child.os == "linux"
+        && metadata_child.architecture == *expected_arch
+        && metadata_child.variant.is_null()
+        && child.artifact_arch == *expected_arch,
       "index rebuild children are incomplete or out of canonical order"
     );
-    let digest = child
-      .get("digest")
-      .and_then(Value::as_str)
-      .context("index rebuild child is missing a digest")?;
-    validate_digest(digest, "index child digest")?;
+    validate_digest(&metadata_child.digest, "index metadata child digest")?;
+    validate_digest(&child.digest, "index child digest")?;
     ensure!(
-      child_digests.insert(digest),
+      metadata_child.digest == child.digest,
+      "index rebuild child digest does not match index metadata"
+    );
+    ensure!(
+      child_digests.insert(child.digest.as_str()),
       "index rebuild predicate contains a duplicate child digest"
     );
-    validate_digest(
-      child
-        .get("recipeSha256")
-        .and_then(Value::as_str)
-        .context("index rebuild child is missing its recipe digest")?,
-      "platform recipe digest",
-    )?;
+    validate_digest(&child.recipe_sha256, "platform recipe digest")?;
     children.push(RebuildChild {
       artifact_arch: (*expected_arch).to_string(),
-      digest: digest.to_string(),
+      digest: child.digest.clone(),
+      recipe_sha256: child.recipe_sha256.clone(),
     });
   }
   Ok(children)
@@ -662,6 +815,10 @@ fn validate_independent_rebuild_run(
   ensure!(
     independent_rebuild.workflow_run_id > 0,
     "independent rebuild workflow run id must be positive"
+  );
+  ensure!(
+    independent_rebuild.workflow_run_attempt > 0,
+    "independent rebuild workflow run attempt must be positive"
   );
   ensure!(
     independent_rebuild.workflow_path == ".github/workflows/verify-release-rebuild.yml",
@@ -688,23 +845,99 @@ fn validate_independent_rebuild_run(
 fn validate_rebuild_receipts(
   values: &[IndependentRebuildVerificationReceipt],
   children: &[RebuildChild],
+  independent_rebuild: &IndependentRebuildVerificationInput,
+  input: &BundleVerificationInput,
 ) -> anyhow::Result<Vec<IndependentRebuildReceiptClaim>> {
   ensure!(
     values.len() == children.len(),
     "exactly three independent rebuild receipts are required"
   );
+  let parsed = values
+    .iter()
+    .map(|evidence| {
+      let receipt: RebuildReceiptEvidence = serde_json::from_value(evidence.receipt.clone())
+        .context("independent rebuild receipt has an invalid or non-canonical shape")?;
+      ensure!(
+        receipt.schema_version == 1,
+        "independent rebuild receipt schema must be 1"
+      );
+      ensure!(
+        evidence.artifact_arch == receipt.build.artifact_arch,
+        "independent rebuild artifact and receipt architectures disagree"
+      );
+      ensure!(
+        receipt.source.repository == SOURCE_REPOSITORY
+          && receipt.source.source_ref == input.source_ref
+          && receipt.source.revision == input.source_revision
+          && receipt.build.role == input.role.as_str()
+          && receipt.workflow.repository == SOURCE_REPOSITORY
+          && receipt.workflow.path == ".github/workflows/verify-release-rebuild.yml"
+          && receipt.workflow.sha == independent_rebuild.workflow_sha
+          && receipt.workflow.run_id == independent_rebuild.workflow_run_id
+          && receipt.workflow.run_attempt == independent_rebuild.workflow_run_attempt,
+        "independent rebuild receipt identity does not match the verified release and workflow"
+      );
+      validate_digest(
+        &receipt.published.image_digest,
+        "published rebuild receipt image digest",
+      )?;
+      validate_digest(
+        &receipt.published.image_tar_sha256,
+        "published rebuild receipt image archive digest",
+      )?;
+      validate_digest(
+        &receipt.rebuilt.image_digest,
+        "rebuilt receipt image digest",
+      )?;
+      validate_digest(
+        &receipt.rebuilt.image_tar_sha256,
+        "rebuilt receipt image archive digest",
+      )?;
+      validate_digest(&receipt.build.recipe_sha256, "platform recipe digest")?;
+      ensure!(
+        receipt.normalization.schema_version == 1
+          && receipt.normalization.ignored
+            == [
+              "outer-archive-order",
+              "layer-compression",
+              "filesystem-mtime",
+              "oci-created-and-history-timestamps",
+            ],
+        "independent rebuild receipt normalization policy is invalid"
+      );
+      ensure!(
+        receipt.differences.is_empty(),
+        "accepted independent rebuild receipt contains security-relevant differences"
+      );
+      match receipt.outcome.as_str() {
+        "exact" => ensure!(
+          receipt.rebuilt.image_digest == receipt.published.image_digest
+            && receipt.rebuilt.image_tar_sha256 == receipt.published.image_tar_sha256
+            && receipt.guarantee
+              == "published and rebuilt OCI manifest and image archive digests match exactly",
+          "exact independent rebuild receipt is internally inconsistent"
+        ),
+        "normalized_equivalent" => ensure!(
+          (receipt.rebuilt.image_digest != receipt.published.image_digest
+            || receipt.rebuilt.image_tar_sha256 != receipt.published.image_tar_sha256)
+            && receipt.guarantee
+              == "security-relevant content matches after the documented normalization; this is not byte-for-byte reproducibility",
+          "normalized-equivalent independent rebuild receipt is internally inconsistent"
+        ),
+        _ => bail!("independent rebuild receipt does not prove an accepted rebuild"),
+      }
+      Ok((evidence, receipt))
+    })
+    .collect::<anyhow::Result<Vec<_>>>()?;
   let mut claims = Vec::with_capacity(3);
   let mut seen = BTreeSet::new();
   for child in children {
-    let matching = values
+    let matching = parsed
       .iter()
-      .filter(|value| {
-        value.artifact_arch == child.artifact_arch
-          && value
-            .receipt
-            .pointer("/published/imageDigest")
-            .and_then(Value::as_str)
-            == Some(child.digest.as_str())
+      .filter(|(evidence, receipt)| {
+        evidence.artifact_arch == child.artifact_arch
+          && receipt.published.image_digest == child.digest
+          && receipt.build.recipe_sha256 == child.recipe_sha256
       })
       .collect::<Vec<_>>();
     ensure!(
@@ -712,24 +945,12 @@ fn validate_rebuild_receipts(
       "independent rebuild receipts are missing or duplicated for {}",
       child.artifact_arch
     );
-    let evidence = matching[0];
+    let (evidence, receipt) = matching[0];
     validate_digest(
       &evidence.archive_sha256,
       "independent rebuild artifact archive digest",
     )?;
     let value = &evidence.receipt;
-    ensure!(
-      value.get("schemaVersion").and_then(Value::as_u64) == Some(1),
-      "independent rebuild receipt schema must be 1"
-    );
-    let outcome = value
-      .get("outcome")
-      .and_then(Value::as_str)
-      .context("independent rebuild receipt is missing its outcome")?;
-    ensure!(
-      matches!(outcome, "exact" | "normalized_equivalent"),
-      "independent rebuild receipt does not prove an accepted rebuild"
-    );
     let hash = sha256_value(value)?;
     ensure!(
       seen.insert(hash.clone()),
@@ -738,7 +959,8 @@ fn validate_rebuild_receipts(
     claims.push(IndependentRebuildReceiptClaim {
       artifact_arch: child.artifact_arch.clone(),
       published_digest: child.digest.clone(),
-      outcome: outcome.to_string(),
+      platform_recipe_sha256: Some(child.recipe_sha256.clone()),
+      outcome: receipt.outcome.clone(),
       archive_sha256: evidence.archive_sha256.clone(),
       object_sha256: hash,
     });
@@ -863,6 +1085,10 @@ pub(crate) fn verify_bundle(
     "admission bundle is expired"
   );
   ensure!(
+    now <= evidence_freshness_horizon(&bundle.payload)?,
+    "admission bundle evidence is stale"
+  );
+  ensure!(
     bundle.payload.decision.verified_at <= now.saturating_add(CLOCK_SKEW_SECONDS),
     "admission bundle verification time is unacceptably in the future"
   );
@@ -887,8 +1113,53 @@ pub(crate) fn verify_bundle(
   Ok(())
 }
 
+fn evidence_freshness_horizon(payload: &AdmissionBundlePayload) -> anyhow::Result<u64> {
+  let oldest = payload
+    .evidence
+    .iter()
+    .map(|claim| claim.trusted_timestamp)
+    .chain(std::iter::once(payload.independent_rebuild.completed_at))
+    .min()
+    .context("admission bundle has no evidence timestamps")?;
+  oldest
+    .checked_add(payload.policy.max_evidence_age_seconds)
+    .context("admission bundle evidence freshness horizon overflows Unix time")
+}
+
 fn validate_bundle_payload(payload: &AdmissionBundlePayload) -> anyhow::Result<()> {
   let contract = bundle_contract(payload)?;
+  match payload.schema_version {
+    1 => ensure!(
+      payload.independent_rebuild.workflow_run_attempt.is_none()
+        && payload
+          .independent_rebuild
+          .receipts
+          .iter()
+          .all(|receipt| receipt.platform_recipe_sha256.is_none()),
+      "legacy admission bundles cannot contain workflow-attempt or platform-recipe extensions"
+    ),
+    2 => {
+      ensure!(
+        payload
+          .independent_rebuild
+          .workflow_run_attempt
+          .is_none_or(|attempt| attempt > 0),
+        "admission bundle workflow run attempt must be positive when present"
+      );
+      let recipe_hash_count = payload
+        .independent_rebuild
+        .receipts
+        .iter()
+        .filter(|receipt| receipt.platform_recipe_sha256.is_some())
+        .count();
+      ensure!(
+        matches!(recipe_hash_count, 0 | 3)
+          && payload.independent_rebuild.workflow_run_attempt.is_some() == (recipe_hash_count == 3),
+        "admission bundle platform recipe linkage is incomplete"
+      );
+    }
+    _ => unreachable!("bundle_contract rejected an unknown schema"),
+  }
   if let Some(workload_policy) = &payload.workload_policy {
     validate_workload_policy(workload_policy)?;
   }
@@ -1016,6 +1287,9 @@ fn validate_bundle_payload(payload: &AdmissionBundlePayload) -> anyhow::Result<(
       "bundle independent rebuild receipt is invalid"
     );
     validate_digest(&receipt.published_digest, "rebuilt platform digest")?;
+    if let Some(recipe_sha256) = &receipt.platform_recipe_sha256 {
+      validate_digest(recipe_sha256, "platform recipe digest")?;
+    }
     validate_digest(
       &receipt.archive_sha256,
       "independent rebuild artifact archive digest",
@@ -1171,6 +1445,7 @@ fn signed_test_bundle(
         "riscv64".to_string(),
       ],
       workflow_run_id: 42,
+      workflow_run_attempt: (schema_version == 2).then_some(1),
       workflow_path: ".github/workflows/verify-release-rebuild.yml".to_string(),
       workflow_sha: "d".repeat(40),
       completed_at: now,
@@ -1179,6 +1454,7 @@ fn signed_test_bundle(
         .map(|arch| IndependentRebuildReceiptClaim {
           artifact_arch: arch.to_string(),
           published_digest: receipt_digest.clone(),
+          platform_recipe_sha256: (schema_version == 2).then(|| receipt_digest.clone()),
           outcome: "exact".to_string(),
           archive_sha256: receipt_digest.clone(),
           object_sha256: receipt_digest.clone(),

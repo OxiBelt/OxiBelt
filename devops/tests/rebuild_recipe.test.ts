@@ -5,6 +5,7 @@ import {
   BuildIndexRebuildRecipe,
   BuildPlatformRebuildRecipe,
   ExtractVerifiedPredicate,
+  RebuildPredicateSha256,
   RebuildPredicateType
 } from '../sources/rebuild_recipe.js'
 
@@ -169,7 +170,10 @@ test('index recipe binds ordered platform subjects and recipe hashes', () => {
   Assert.equal(Result.kind, 'index')
   const Children = (Result.output as { children: Array<Record<string, unknown>> }).children
   Assert.deepEqual(Children.map(Item => Item.artifactArch), ['amd64', 'arm64', 'riscv64'])
-  Assert.equal(Children.every(Item => /^sha256:[0-9a-f]{64}$/.test(String(Item.recipeSha256))), true)
+  Assert.deepEqual(
+    Children.map(Item => Item.recipeSha256),
+    PlatformRecipes.map(RebuildPredicateSha256)
+  )
 })
 
 test('predicate extraction requires one exact GitHub identity and rejects conflicts', () => {

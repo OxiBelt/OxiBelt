@@ -253,15 +253,36 @@ source revision, hosted-runner requirement, workflow identity, and predicate
 type. There is no local-evidence bypass: all three attestation classes must
 pass the GitHub CLI's cryptographic verification during bundle generation.
 
-The index recipe must contain the canonical `amd64`, `arm64`, and `riscv64`
-children. Supply the ID of one successful automatic
+The index recipe must contain the exact producer contract: schema-v2 index
+metadata for the requested role, repository, and digest; canonical Linux
+`amd64`, `arm64`, and `riscv64` descriptor children; the canonical metadata
+hash; the same ordered children and platform-recipe hashes; and the hash of
+the selected CycloneDX predicate. Unknown or malformed fields fail closed.
+Supply the ID of one successful automatic
 `.github/workflows/verify-release-rebuild.yml` run. The command fetches its
 three exact role/architecture artifacts through the GitHub API, verifies each
 artifact archive against GitHub's immutable SHA-256 digest, safely extracts
 one bounded receipt, and checks the receipt's repository, release ref, source
-revision, role, architecture, workflow path, and run ID. `exact` and
-`normalized_equivalent` are accepted; a manual, failed, stale, expired,
-missing, duplicate, mismatched, or unbound receipt fails closed.
+revision, role, architecture, exact platform-recipe hash, workflow path, run
+ID, positive run attempt, and approved verifier commit. The fixed receipt shape
+also binds both image and archive digests, the exact normalization allowlist,
+an empty security-relevant difference set, and an outcome-specific guarantee.
+`exact` requires both bound digests to match; any accepted digest inequality
+must be `normalized_equivalent` and satisfy the fixed normalization comparison.
+Unknown, partial, or
+internally inconsistent receipts fail closed. Newly generated signed v2 bundles
+expose run ID, run attempt, and each platform-recipe hash so a reviewer can
+identify the exact GitHub execution and recipe whose bounded receipt hash was
+accepted. Earlier unexpired v2 bundles without these explicit extension fields
+remain readable; their signed receipt object hashes remain unchanged. The v2
+schema accepts these extensions only as an all-absent legacy set or as a
+complete positive run attempt plus all three platform-recipe hashes; partial
+forms fail closed.
+The workflow must be the approved revision on `main`; after all downloads, the
+command rereads the run and requires its complete trusted identity and state to
+be unchanged. `exact` and `normalized_equivalent` are accepted; a manual,
+failed, stale, expired, missing, duplicate, mismatched, rerun, or unbound
+receipt fails closed.
 
 New bundles use schema v2. An optional bounded workload-policy file lets the
 deployment signer approve third-party auxiliary images without claiming that
@@ -332,7 +353,11 @@ The verifier applies these hard bounds:
   one executable slot for the required primary container;
 - 256 KiB for the final bundle and each admission request;
 - evidence freshness of at most one year, bundle lifetime of at most 30 days,
-  and at most five minutes of future clock skew.
+  and at most five minutes of future clock skew. Generation rejects a requested
+  expiry after the earliest provenance, SBOM, rebuild-recipe, or independent-
+  rebuild timestamp plus the configured evidence age. Admission independently
+  recomputes that horizon, so a longer nominal expiry in an older signed bundle
+  cannot keep stale evidence deployable.
 
 The legacy v1 bundle schema remains
 `deploy/supply-chain/admission-bundle.schema.json`. New bundles use
@@ -341,7 +366,10 @@ input uses `deploy/supply-chain/admission-workload-policy-v1.schema.json`.
 Revocations use `deploy/supply-chain/revocations.schema.json`. Unknown fields, mutable refs,
 role/repository confusion, conflicting duplicate predicates, unparseable
 trusted timestamps, stale evidence, malformed CycloneDX properties, incomplete
-rebuild coverage, and an effective revocation all fail closed.
+rebuild coverage, workflow-attempt drift, and an effective revocation all fail
+closed. Equivalent duplicate attestations are selected deterministically by
+trusted timestamp and canonical object digest, independent of GitHub response
+order.
 
 ## Kubernetes validating admission
 
@@ -434,17 +462,22 @@ namespace remain required, while the ephemeral runner, job timeout, and
 
 The verifier writes a machine-readable receipt with one of four outcomes:
 
-- `exact` means the rebuilt archive digest and bound evidence match exactly;
+- `exact` means both the rebuilt OCI manifest digest and complete image archive
+  SHA-256 match the published values exactly;
 - `normalized_equivalent` means the semantic image contract matches after
   ignoring only documented archive ordering, compression, filesystem mtime,
-  and OCI created/history timestamp fields;
+  and OCI created/history timestamp fields. This includes a matching manifest
+  packaged into a different archive; archive inequality can never be `exact`;
 - `mismatch` is a verification failure; and
 - `unverifiable` means evidence was missing, malformed, unsafe to compare, or
   outside the comparator's resource bounds, and also fails the job.
 
 Successful receipts also carry the exact source repository, tag ref, full
-revision, image role, architecture, verifier workflow path, run ID, and run
-attempt. These fields make a downloaded artifact reviewable and prevent a
+revision, image role, architecture, verifier workflow path and approved commit,
+run ID, and run attempt. The verifier workflow commit is checked out separately
+from the release source tree; all planning, comparison, and receipt-binding code
+runs from that approved verifier tree while the release tree is only a build
+input. These fields make a downloaded artifact reviewable and prevent a
 receipt from another successful run or release from being substituted during
 admission-bundle generation.
 

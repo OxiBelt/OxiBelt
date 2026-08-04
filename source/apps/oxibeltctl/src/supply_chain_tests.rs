@@ -40,9 +40,11 @@ fn workflow_and_receipt_identity_are_exact() {
     name: REBUILD_WORKFLOW_NAME.to_string(),
     path: REBUILD_WORKFLOW_PATH.to_string(),
     event: "workflow_run".to_string(),
+    head_branch: "main".to_string(),
     status: "completed".to_string(),
     conclusion: Some("success".to_string()),
     head_sha: "c".repeat(40),
+    run_attempt: 2,
     updated_at: "2026-08-01T00:00:00Z".to_string(),
     repository: GitHubRepository {
       full_name: SOURCE_REPOSITORY.to_string(),
@@ -54,20 +56,42 @@ fn workflow_and_receipt_identity_are_exact() {
     "schemaVersion": 1,
     "source": {"repository": SOURCE_REPOSITORY, "ref": args.source_ref, "revision": REVISION},
     "build": {"role": "dataplane-strict", "artifactArch": "amd64"},
-    "workflow": {"repository": SOURCE_REPOSITORY, "path": REBUILD_WORKFLOW_PATH, "runId": 42}
+    "workflow": {
+      "repository": SOURCE_REPOSITORY,
+      "path": REBUILD_WORKFLOW_PATH,
+      "sha": args.independent_rebuild_workflow_sha,
+      "runId": 42,
+      "runAttempt": 2
+    }
   });
-  validate_receipt_identity(&receipt, &args, 42, "amd64").expect("valid receipt");
+  validate_receipt_identity(&receipt, &args, 42, 2, "amd64").expect("valid receipt");
 
-  let mut manual = run;
+  let mut manual = run.clone();
   manual.event = "workflow_dispatch".to_string();
   assert!(validate_workflow_run(&manual, &args, now).is_err());
   let mut wrong_workflow_revision = manual;
   wrong_workflow_revision.event = "workflow_run".to_string();
   wrong_workflow_revision.head_sha = "d".repeat(40);
   assert!(validate_workflow_run(&wrong_workflow_revision, &args, now).is_err());
+  let mut wrong_branch = run.clone();
+  wrong_branch.head_branch = "release-candidate".to_string();
+  assert!(validate_workflow_run(&wrong_branch, &args, now).is_err());
+  let mut invalid_attempt = run.clone();
+  invalid_attempt.run_attempt = 0;
+  assert!(validate_workflow_run(&invalid_attempt, &args, now).is_err());
+  let mut changed = run.clone();
+  changed.updated_at = "2026-08-01T00:00:01Z".to_string();
+  assert!(validate_stable_workflow_run(&run, &run).is_ok());
+  assert!(validate_stable_workflow_run(&run, &changed).is_err());
   let mut wrong = receipt;
   wrong["workflow"]["runId"] = json!(43);
-  assert!(validate_receipt_identity(&wrong, &args, 42, "amd64").is_err());
+  assert!(validate_receipt_identity(&wrong, &args, 42, 2, "amd64").is_err());
+  wrong["workflow"]["runId"] = json!(42);
+  wrong["workflow"]["runAttempt"] = json!(3);
+  assert!(validate_receipt_identity(&wrong, &args, 42, 2, "amd64").is_err());
+  wrong["workflow"]["runAttempt"] = json!(2);
+  wrong["workflow"]["sha"] = json!("d".repeat(40));
+  assert!(validate_receipt_identity(&wrong, &args, 42, 2, "amd64").is_err());
 }
 
 #[test]

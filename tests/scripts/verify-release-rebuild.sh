@@ -6,6 +6,7 @@ usage() {
 usage: verify-release-rebuild.sh \
   --image <ghcr.io/oxibelt/repository> --digest <sha256:...> \
   --revision <40-hex> --release-ref <refs/tags/X.Y.Z...> \
+  --verifier-sha <40-hex> \
   --role <role> --artifact-arch <arch> --output <receipt.json>
 
 Requires authenticated `gh`, rootless `docker`, Buildx, Trivy, Node, pnpm,
@@ -17,6 +18,7 @@ image=""
 digest=""
 revision=""
 release_ref=""
+verifier_sha=""
 role=""
 artifact_arch=""
 output=""
@@ -27,6 +29,7 @@ while [[ "$#" -gt 0 ]]; do
     --digest) digest="${2:-}"; shift 2 ;;
     --revision) revision="${2:-}"; shift 2 ;;
     --release-ref) release_ref="${2:-}"; shift 2 ;;
+    --verifier-sha) verifier_sha="${2:-}"; shift 2 ;;
     --role) role="${2:-}"; shift 2 ;;
     --artifact-arch) artifact_arch="${2:-}"; shift 2 ;;
     --output) output="${2:-}"; shift 2 ;;
@@ -36,6 +39,7 @@ done
 
 if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] ||
    [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]] ||
+   [[ ! "${verifier_sha}" =~ ^[0-9a-f]{40}$ ]] ||
    [[ ! "${release_ref}" =~ ^refs/tags/[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+|-build\.[0-9a-f]{8})?$ ]] ||
    [[ -z "${output}" ]]; then
   usage
@@ -74,6 +78,11 @@ done
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
+checked_out_verifier_sha="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)"
+if [[ "${checked_out_verifier_sha}" != "${verifier_sha}" ]]; then
+  echo "verifier script does not come from the approved workflow revision" >&2
+  exit 1
+fi
 temporary="$(mktemp -d "${TMPDIR:-/tmp}/oxibelt-rebuild-verify.XXXXXX")"
 published_ref="${image}@${digest}"
 published_tar="${temporary}/published.tar"
@@ -156,6 +165,14 @@ extract_predicate "${temporary}/recipe-attestations.json" \
   https://oxibelt.dev/attestations/rebuild/v1 "${temporary}/recipe.json"
 extract_predicate "${temporary}/sbom-attestations.json" \
   https://cyclonedx.org/bom "${published_sbom}"
+recipe_sha256="$(
+  node --import tsx "${repo_root}/devops/sources/rebuild_recipe.ts" digest \
+    --input "${temporary}/recipe.json"
+)"
+if [[ ! "${recipe_sha256}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "platform rebuild recipe digest is invalid" >&2
+  exit 1
+fi
 
 jq -e \
   --arg image "${image}" --arg digest "${digest}" --arg revision "${revision}" \
@@ -195,7 +212,6 @@ if [[ "$(git -C "${rebuilt_root}" rev-parse HEAD)" != "${revision}" ]]; then
   exit 1
 fi
 
-pnpm --dir "${rebuilt_root}" install --frozen-lockfile --ignore-scripts
 if [[ "${release_version}" == *-build.* ]]; then
   release_event="push"
   release_prerelease="false"
@@ -207,7 +223,7 @@ else
   release_prerelease="false"
 fi
 
-node --import tsx "${rebuilt_root}/devops/sources/versioning.ts" \
+node --import tsx "${repo_root}/devops/sources/versioning.ts" \
   --workspace-path "${rebuilt_root}" \
   --manifest-path Cargo.toml \
   --package-name oxibelt \
@@ -229,7 +245,8 @@ OXIBELT_DOCKER_IMAGE_BUILD_KIND="official_release" \
 OXIBELT_DOCKER_IMAGE_SOURCE="${source_url}" \
 OXIBELT_DOCKER_IMAGE_SOURCE_TREE="$(jq -r '.source_tree' "${published_contract}")" \
 OXIBELT_DOCKER_IMAGE_VERSION="${release_version}" \
-  "${rebuilt_root}/tests/scripts/build-docker-image-artifact.sh" \
+OXIBELT_DOCKER_IMAGE_SOURCE_ROOT="${rebuilt_root}" \
+  "${repo_root}/tests/scripts/build-docker-image-artifact.sh" \
     "${platform}" "${artifact_arch}" "${rebuilt_output}" "${role}"
 
 rebuilt_tar="${rebuilt_output}/${artifact_prefix}-alpine-musl-${artifact_arch}.tar"
@@ -258,7 +275,7 @@ esac
 if [[ -n "${target_cpu}" ]]; then
   selector_output="$(
     GITHUB_OUTPUT='' bash \
-      "${rebuilt_root}/tests/scripts/select-amd64-docker-image-artifact.sh" \
+      "${repo_root}/tests/scripts/select-amd64-docker-image-artifact.sh" \
       "${target_cpu}" \
       --allow-unsupported
   )"
@@ -286,7 +303,7 @@ fi
 
 trivy image --input "${rebuilt_tar}" --format cyclonedx \
   --output "${temporary}/rebuilt-raw.cdx.json"
-node --import tsx "${rebuilt_root}/devops/sources/release_sbom.ts" platform \
+node --import tsx "${repo_root}/devops/sources/release_sbom.ts" platform \
   --image-plan "${rebuilt_plan}" \
   --trivy-sbom "${temporary}/rebuilt-raw.cdx.json" \
   --binary-inventory "${temporary}/rebuilt-binaries.json" \
@@ -296,7 +313,7 @@ node --import tsx "${rebuilt_root}/devops/sources/release_sbom.ts" platform \
   --build-metadata "${rebuilt_metadata}" \
   --output "${rebuilt_sbom}"
 
-python3 "${rebuilt_root}/tests/scripts/compare-release-image-artifacts.py" \
+python3 "${repo_root}/tests/scripts/compare-release-image-artifacts.py" \
   --published-image-tar "${published_tar}" \
   --published-contract "${published_contract}" \
   --published-sbom "${published_sbom}" \
@@ -318,15 +335,22 @@ jq -S \
   --arg revision "${revision}" \
   --arg role "${role}" \
   --arg artifact_arch "${artifact_arch}" \
+  --arg recipe_sha256 "${recipe_sha256}" \
   --arg workflow_path ".github/workflows/verify-release-rebuild.yml" \
+  --arg workflow_sha "${verifier_sha}" \
   --argjson run_id "${GITHUB_RUN_ID}" \
   --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
     . + {
       source: {repository: $repository, ref: $ref, revision: $revision},
-      build: {role: $role, artifactArch: $artifact_arch},
+      build: {
+        role: $role,
+        artifactArch: $artifact_arch,
+        recipeSha256: $recipe_sha256
+      },
       workflow: {
         repository: $repository,
         path: $workflow_path,
+        sha: $workflow_sha,
         runId: $run_id,
         runAttempt: $run_attempt
       }

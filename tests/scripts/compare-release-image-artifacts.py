@@ -400,7 +400,10 @@ def compare(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         return receipt, 1
     published_sbom = normalized_sbom(read_json(args.published_sbom, "published SBOM"))
     rebuilt_sbom = normalized_sbom(read_json(args.rebuilt_sbom, "rebuilt SBOM"))
-    if published["image_digest"] == rebuilt["image_digest"]:
+    if (
+        published["image_digest"] == rebuilt["image_digest"]
+        and published["image_tar_sha256"] == rebuilt["image_tar_sha256"]
+    ):
         if published_sbom != rebuilt_sbom:
             receipt.update(
                 outcome="mismatch",
@@ -410,7 +413,7 @@ def compare(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             return receipt, 1
         receipt.update(
             outcome="exact",
-            guarantee="published and rebuilt OCI manifest digests match exactly",
+            guarantee="published and rebuilt OCI manifest and image archive digests match exactly",
         )
         return receipt, 0
 
