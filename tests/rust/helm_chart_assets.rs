@@ -502,6 +502,65 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     edge_secure_medium_v2_example["supplyChainAdmission"]["enabled"],
     true
   );
+  let admission_bundle: Value = serde_json::from_str(
+    edge_secure_medium_v2_example["supplyChainAdmission"]["bundle"]["inline"]
+      .as_str()
+      .expect("v2 admission bundle inline JSON"),
+  )
+  .expect("v2 admission bundle should parse");
+  assert_eq!(admission_bundle["payload"]["schemaVersion"], 2);
+  assert_eq!(
+    admission_bundle["payload"]["policy"]["version"],
+    "oxibelt-admission-v2"
+  );
+  assert_eq!(
+    admission_bundle["payload"]["workloadPolicy"]["schemaVersion"],
+    1
+  );
+  assert_eq!(
+    admission_bundle["payload"]["workloadPolicy"]["auxiliaryContainers"]
+      .as_array()
+      .expect("auxiliary container approvals")
+      .len(),
+    0
+  );
+  let admission_bundle_v1_schema: Value = serde_json::from_str(&read_repo(
+    "deploy/supply-chain/admission-bundle.schema.json",
+  ))
+  .expect("v1 admission bundle schema");
+  assert_eq!(
+    admission_bundle_v1_schema["properties"]["payload"]["properties"]["schemaVersion"]["const"],
+    1
+  );
+  assert_eq!(
+    admission_bundle_v1_schema["properties"]["payload"]["properties"]["policy"]["properties"]["version"]
+      ["const"],
+    "oxibelt-admission-v1"
+  );
+  let admission_bundle_v2_schema: Value = serde_json::from_str(&read_repo(
+    "deploy/supply-chain/admission-bundle-v2.schema.json",
+  ))
+  .expect("v2 admission bundle schema");
+  assert_eq!(
+    admission_bundle_v2_schema["properties"]["payload"]["properties"]["schemaVersion"]["const"],
+    2
+  );
+  assert_eq!(
+    admission_bundle_v2_schema["$defs"]["workloadPolicy"]["properties"]["auxiliaryContainers"]["maxItems"],
+    63
+  );
+  let workload_policy_schema: Value = serde_json::from_str(&read_repo(
+    "deploy/supply-chain/admission-workload-policy-v1.schema.json",
+  ))
+  .expect("workload policy schema");
+  assert_eq!(
+    workload_policy_schema["properties"]["schemaVersion"]["const"],
+    1
+  );
+  assert_eq!(
+    workload_policy_schema["properties"]["auxiliaryContainers"]["maxItems"],
+    63
+  );
   assert_eq!(
     edge_secure_medium_v2_example["supplyChainAdmission"]["webhook"]["image"]["repository"],
     "ghcr.io/oxibelt/oxibelt-tools"
@@ -620,6 +679,8 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   for needle in [
     "kind: ValidatingWebhookConfiguration",
     "failurePolicy: Fail",
+    "matchPolicy: Exact",
+    "sideEffects: None",
     "automountServiceAccountToken: false",
     "readOnlyRootFilesystem: true",
     "resources:",
@@ -632,11 +693,38 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
       "supply-chain admission template should contain {needle}"
     );
   }
+  let exact_rules = r#"  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - pods
+    scope: Namespaced
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    operations:
+    - UPDATE
+    resources:
+    - pods/ephemeralcontainers
+    scope: Namespaced
+"#;
+  assert!(
+    admission.contains(exact_rules),
+    "supply-chain admission should keep exact Pod and ephemeral-container rules"
+  );
   for forbidden in [
     "failurePolicy: Ignore",
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "image: latest",
+    "pods/*",
+    "*/*",
   ] {
     assert!(
       !admission.contains(forbidden),
@@ -806,6 +894,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   for needle in [
     "oxibelt.image",
     "image.digest must be an empty string or a lower-case sha256 digest",
+    ".Values.supplyChainAdmission.webhook.image.digest",
     "oxibelt.generatedConfigDigest",
     "oxibelt-helm-config-v1",
     "sha256sum",

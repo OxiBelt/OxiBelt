@@ -13,8 +13,9 @@ image:
   pullPolicy: IfNotPresent
 
 # Digest-bound admission is opt-in for unprofiled installs and mandatory for
-# edge-secure-medium v2. Generate `bundle.inline` with `oxibeltctl supply-chain
-# admission-bundle`; the admission Pod needs no GitHub or registry credential.
+# edge-secure-medium v2. Generate signed v2 `bundle.inline` with `oxibeltctl
+# supply-chain admission-bundle`; approve auxiliary images only through its
+# `--workload-policy` input. The admission Pod needs no registry credential.
 supplyChainAdmission:
   enabled: false
   bundle:

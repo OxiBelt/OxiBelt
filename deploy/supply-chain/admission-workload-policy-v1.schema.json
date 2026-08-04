@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oxibelt.dev/schemas/supply-chain/admission-workload-policy-v1.json",
+  "title": "OxiBelt supply-chain admission workload policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "auxiliaryContainers"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "auxiliaryContainers": {
+      "type": "array",
+      "maxItems": 63,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class", "name", "imageReference"],
+        "properties": {
+          "class": { "enum": ["regular", "init", "native-sidecar", "ephemeral"] },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$",
+            "not": { "const": "oxibelt" }
+          },
+          "imageReference": {
+            "type": "string",
+            "maxLength": 256,
+            "pattern": "^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

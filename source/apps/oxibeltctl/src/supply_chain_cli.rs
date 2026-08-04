@@ -91,6 +91,9 @@ pub(crate) struct SupplyChainAdmissionBundleArgs {
   pub(crate) independent_rebuild_workflow_sha: String,
   #[arg(long = "revocations", value_name = "FILE")]
   pub(crate) revocations: Option<PathBuf>,
+  /// Strict auxiliary-container approvals to include in the signed v2 bundle.
+  #[arg(long = "workload-policy", value_name = "FILE")]
+  pub(crate) workload_policy: Option<PathBuf>,
   /// Verification time as Unix seconds; defaults to the current clock.
   #[arg(long = "verification-time")]
   pub(crate) verification_time: Option<u64>,

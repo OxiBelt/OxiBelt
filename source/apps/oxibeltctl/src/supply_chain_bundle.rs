@@ -16,6 +16,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use crate::cli::{SupplyChainReleaseChannel, SupplyChainRole};
+use crate::supply_chain_workload_policy::{AdmissionWorkloadPolicy, validate_workload_policy};
 
 pub(crate) const MAX_ATTESTATION_BYTES: u64 = 16 * 1024 * 1024;
 pub(crate) const MAX_BUNDLE_BYTES: u64 = 256 * 1024;
@@ -29,8 +30,15 @@ const SOURCE_REPOSITORY_URL: &str = "https://github.com/OxiBelt/OxiBelt";
 const PROVENANCE_PREDICATE: &str = "https://slsa.dev/provenance/v1";
 const SBOM_PREDICATE: &str = "https://cyclonedx.org/bom";
 const REBUILD_PREDICATE: &str = "https://oxibelt.dev/attestations/rebuild/v1";
-const POLICY_VERSION: &str = "oxibelt-admission-v1";
-const SIGNATURE_DOMAIN: &[u8] = b"OXIBELT-SUPPLY-CHAIN-ADMISSION-BUNDLE-V1\0";
+const POLICY_VERSION_V1: &str = "oxibelt-admission-v1";
+const POLICY_VERSION_V2: &str = "oxibelt-admission-v2";
+const SIGNATURE_DOMAIN_V1: &[u8] = b"OXIBELT-SUPPLY-CHAIN-ADMISSION-BUNDLE-V1\0";
+const SIGNATURE_DOMAIN_V2: &[u8] = b"OXIBELT-SUPPLY-CHAIN-ADMISSION-BUNDLE-V2\0";
+const DECISION_REASONS_V1: [&str; 1] = ["exact_evidence_verified"];
+const DECISION_REASONS_V2: [&str; 2] = [
+  "exact_primary_evidence_verified",
+  "signed_workload_policy_verified",
+];
 
 #[derive(Debug)]
 pub(crate) struct BundleVerificationInput {
@@ -44,6 +52,7 @@ pub(crate) struct BundleVerificationInput {
   pub(crate) max_evidence_age_seconds: u64,
   pub(crate) expires_after_seconds: u64,
   pub(crate) key_id: String,
+  pub(crate) workload_policy: AdmissionWorkloadPolicy,
 }
 
 #[derive(Debug)]
@@ -85,6 +94,8 @@ pub(crate) struct AdmissionBundlePayload {
   pub(crate) artifact: AdmissionArtifactClaim,
   pub(crate) evidence: Vec<AdmissionEvidenceClaim>,
   pub(crate) independent_rebuild: IndependentRebuildClaim,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) workload_policy: Option<AdmissionWorkloadPolicy>,
   pub(crate) decision: AdmissionDecision,
 }
 
@@ -275,9 +286,9 @@ pub(crate) fn verify_and_sign_bundle(
     .checked_add(input.expires_after_seconds)
     .context("bundle expiry overflows Unix time")?;
   let payload = AdmissionBundlePayload {
-    schema_version: 1,
+    schema_version: 2,
     policy: AdmissionPolicyClaim {
-      version: POLICY_VERSION.to_string(),
+      version: POLICY_VERSION_V2.to_string(),
       release_channel: input.release_channel.as_str().to_string(),
       max_evidence_age_seconds: input.max_evidence_age_seconds,
       revocations_sha256: revocations_sha256.to_string(),
@@ -306,9 +317,10 @@ pub(crate) fn verify_and_sign_bundle(
       completed_at: evidence.independent_rebuild.completed_at,
       receipts,
     },
+    workload_policy: Some(input.workload_policy.clone()),
     decision: AdmissionDecision {
       status: "pass".to_string(),
-      reasons: vec!["exact_evidence_verified".to_string()],
+      reasons: DECISION_REASONS_V2.map(str::to_string).to_vec(),
       verified_at: input.verification_time,
       expires_at,
     },
@@ -336,6 +348,7 @@ fn validate_input(input: &BundleVerificationInput) -> anyhow::Result<()> {
     (1..=2_592_000).contains(&input.expires_after_seconds),
     "bundle lifetime must be between one second and 30 days"
   );
+  validate_workload_policy(&input.workload_policy)?;
   Ok(())
 }
 
@@ -744,10 +757,12 @@ fn sign_payload(
   );
   let key = Ed25519KeyPair::from_seed_unchecked(signing_key)
     .map_err(|_| anyhow::anyhow!("bundle signing key is invalid"))?;
+  validate_bundle_payload(&payload)?;
   let payload_bytes = serde_json::to_vec(&payload)?;
   let payload_sha256 = sha256_bytes(&payload_bytes);
-  let mut signed = Vec::with_capacity(SIGNATURE_DOMAIN.len() + payload_bytes.len());
-  signed.extend_from_slice(SIGNATURE_DOMAIN);
+  let contract = bundle_contract(&payload)?;
+  let mut signed = Vec::with_capacity(contract.signature_domain.len() + payload_bytes.len());
+  signed.extend_from_slice(contract.signature_domain);
   signed.extend_from_slice(&payload_bytes);
   let signature = key.sign(&signed);
   Ok(AdmissionBundleEnvelope {
@@ -759,6 +774,29 @@ fn sign_payload(
       value_hex: encode_hex(signature.as_ref()),
     },
   })
+}
+
+struct BundleContract {
+  signature_domain: &'static [u8],
+  decision_reasons: &'static [&'static str],
+}
+
+fn bundle_contract(payload: &AdmissionBundlePayload) -> anyhow::Result<BundleContract> {
+  match (
+    payload.schema_version,
+    payload.policy.version.as_str(),
+    payload.workload_policy.as_ref(),
+  ) {
+    (1, POLICY_VERSION_V1, None) => Ok(BundleContract {
+      signature_domain: SIGNATURE_DOMAIN_V1,
+      decision_reasons: &DECISION_REASONS_V1,
+    }),
+    (2, POLICY_VERSION_V2, Some(_)) => Ok(BundleContract {
+      signature_domain: SIGNATURE_DOMAIN_V2,
+      decision_reasons: &DECISION_REASONS_V2,
+    }),
+    _ => bail!("unsupported or inconsistent admission bundle contract"),
+  }
 }
 
 pub(crate) fn derive_public_key(signing_key: &[u8]) -> anyhow::Result<Vec<u8>> {
@@ -779,14 +817,7 @@ pub(crate) fn verify_bundle(
   now: u64,
 ) -> anyhow::Result<()> {
   validate_bundle_payload(&bundle.payload)?;
-  ensure!(
-    bundle.payload.schema_version == 1,
-    "unsupported admission bundle schema"
-  );
-  ensure!(
-    bundle.payload.policy.version == POLICY_VERSION,
-    "unsupported admission policy version"
-  );
+  let contract = bundle_contract(&bundle.payload)?;
   ensure!(
     bundle.payload.policy.bundle_signing_key_id == expected_key_id
       && bundle.signature.key_id == expected_key_id,
@@ -810,15 +841,21 @@ pub(crate) fn verify_bundle(
     64,
     "admission bundle signature",
   )?;
-  let mut signed = Vec::with_capacity(SIGNATURE_DOMAIN.len() + payload_bytes.len());
-  signed.extend_from_slice(SIGNATURE_DOMAIN);
+  let mut signed = Vec::with_capacity(contract.signature_domain.len() + payload_bytes.len());
+  signed.extend_from_slice(contract.signature_domain);
   signed.extend_from_slice(&payload_bytes);
   UnparsedPublicKey::new(&ED25519, public_key)
     .verify(&signed, &signature)
     .map_err(|_| anyhow::anyhow!("admission bundle signature is invalid"))?;
   ensure!(
     bundle.payload.decision.status == "pass"
-      && bundle.payload.decision.reasons == ["exact_evidence_verified"],
+      && bundle
+        .payload
+        .decision
+        .reasons
+        .iter()
+        .map(String::as_str)
+        .eq(contract.decision_reasons.iter().copied()),
     "admission bundle does not contain a passing decision"
   );
   ensure!(
@@ -851,14 +888,10 @@ pub(crate) fn verify_bundle(
 }
 
 fn validate_bundle_payload(payload: &AdmissionBundlePayload) -> anyhow::Result<()> {
-  ensure!(
-    payload.schema_version == 1,
-    "unsupported admission bundle schema"
-  );
-  ensure!(
-    payload.policy.version == POLICY_VERSION,
-    "unsupported admission policy version"
-  );
+  let contract = bundle_contract(payload)?;
+  if let Some(workload_policy) = &payload.workload_policy {
+    validate_workload_policy(workload_policy)?;
+  }
   validate_identifier(
     &payload.policy.bundle_signing_key_id,
     128,
@@ -990,7 +1023,13 @@ fn validate_bundle_payload(payload: &AdmissionBundlePayload) -> anyhow::Result<(
     validate_digest(&receipt.object_sha256, "rebuild receipt digest")?;
   }
   ensure!(
-    payload.decision.status == "pass" && payload.decision.reasons == ["exact_evidence_verified"],
+    payload.decision.status == "pass"
+      && payload
+        .decision
+        .reasons
+        .iter()
+        .map(String::as_str)
+        .eq(contract.decision_reasons.iter().copied()),
     "admission bundle does not contain a passing decision"
   );
   ensure!(
@@ -1051,16 +1090,45 @@ pub(crate) fn bundle_payload_digest(bundle: &AdmissionBundleEnvelope) -> &str {
 pub(crate) fn signed_bundle_for_admission_test(
   now: u64,
 ) -> (AdmissionBundleEnvelope, Vec<u8>, RevocationSet) {
+  signed_test_bundle(now, Some(AdmissionWorkloadPolicy::default()))
+}
+
+#[cfg(test)]
+pub(crate) fn signed_v1_bundle_for_admission_test(
+  now: u64,
+) -> (AdmissionBundleEnvelope, Vec<u8>, RevocationSet) {
+  signed_test_bundle(now, None)
+}
+
+#[cfg(test)]
+pub(crate) fn signed_bundle_for_admission_test_with_policy(
+  now: u64,
+  workload_policy: AdmissionWorkloadPolicy,
+) -> (AdmissionBundleEnvelope, Vec<u8>, RevocationSet) {
+  validate_workload_policy(&workload_policy).expect("canonical test workload policy");
+  signed_test_bundle(now, Some(workload_policy))
+}
+
+#[cfg(test)]
+fn signed_test_bundle(
+  now: u64,
+  workload_policy: Option<AdmissionWorkloadPolicy>,
+) -> (AdmissionBundleEnvelope, Vec<u8>, RevocationSet) {
   let key = [9_u8; 32];
   let pair = Ed25519KeyPair::from_seed_unchecked(&key).expect("test key");
   let digest = format!("sha256:{}", "a".repeat(64));
   let evidence_digest = format!("sha256:{}", "b".repeat(64));
   let receipt_digest = format!("sha256:{}", "c".repeat(64));
   let source_ref = "refs/tags/1.2.3".to_string();
+  let (schema_version, policy_version, decision_reasons) = if workload_policy.is_some() {
+    (2, POLICY_VERSION_V2, DECISION_REASONS_V2.as_slice())
+  } else {
+    (1, POLICY_VERSION_V1, DECISION_REASONS_V1.as_slice())
+  };
   let payload = AdmissionBundlePayload {
-    schema_version: 1,
+    schema_version,
     policy: AdmissionPolicyClaim {
-      version: POLICY_VERSION.to_string(),
+      version: policy_version.to_string(),
       release_channel: "stable".to_string(),
       max_evidence_age_seconds: 3600,
       revocations_sha256: sha256_value(&serde_json::json!({
@@ -1117,9 +1185,10 @@ pub(crate) fn signed_bundle_for_admission_test(
         })
         .collect(),
     },
+    workload_policy,
     decision: AdmissionDecision {
       status: "pass".to_string(),
-      reasons: vec!["exact_evidence_verified".to_string()],
+      reasons: decision_reasons.iter().map(ToString::to_string).collect(),
       verified_at: now,
       expires_at: now + 1800,
     },

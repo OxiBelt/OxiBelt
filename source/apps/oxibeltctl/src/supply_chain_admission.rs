@@ -1,5 +1,6 @@
 //! Bounded, credential-free Kubernetes admission webhook for signed bundles.
 
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +25,9 @@ use crate::cli::SupplyChainAdmissionServerArgs;
 use crate::supply_chain_bundle::{
   AdmissionBundleEnvelope, RevocationSet, bundle_payload_digest, load_bundle, load_public_key,
   load_revocations, now_unix_seconds, verify_bundle,
+};
+use crate::supply_chain_workload_policy::{
+  ContainerClass, validate_container_name, validate_image_reference,
 };
 
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
@@ -53,6 +57,8 @@ struct AdmissionReviewRequest {
 struct AdmissionRequest {
   uid: String,
   operation: String,
+  #[serde(default)]
+  sub_resource: String,
   kind: GroupVersionKind,
   resource: GroupVersionResource,
   object: Value,
@@ -222,7 +228,7 @@ async fn admission_response(
   let (allowed, message) = match decision {
     Ok(()) => (
       true,
-      "exact signed supply-chain bundle matches the admitted image",
+      "exact signed supply-chain bundle matches the admitted workload images",
     ),
     Err(reason) => (false, reason),
   };
@@ -255,7 +261,11 @@ fn validate_request(
   if current_bundle(state).is_err() {
     return Err("bundle_invalid_or_expired");
   }
-  if !matches!(request.operation.as_str(), "CREATE" | "UPDATE")
+  let supported_operation = matches!(
+    (request.operation.as_str(), request.sub_resource.as_str()),
+    ("CREATE" | "UPDATE", "") | ("UPDATE", "ephemeralcontainers")
+  );
+  if !supported_operation
     || !request.kind.group.is_empty()
     || request.kind.version != "v1"
     || request.kind.kind != "Pod"
@@ -280,27 +290,137 @@ fn validate_request(
   {
     return Err("image_role_mismatch");
   }
-  let Some(containers) = request
-    .object
-    .pointer("/spec/containers")
-    .and_then(Value::as_array)
-  else {
-    return Err("containers_missing");
-  };
-  if containers.len() > 64 {
-    return Err("container_limit_exceeded");
-  }
-  let oxibelt = containers
-    .iter()
-    .filter(|container| container.get("name").and_then(Value::as_str) == Some("oxibelt"))
-    .collect::<Vec<_>>();
-  if oxibelt.len() != 1
-    || oxibelt[0].get("image").and_then(Value::as_str)
-      != Some(state.bundle.payload.artifact.image_reference.as_str())
+  let executables = collect_executable_containers(&request.object)?;
+  if request.operation == "CREATE"
+    && executables
+      .iter()
+      .any(|container| container.class == ContainerClass::Ephemeral)
   {
+    return Err("invalid_executable_container_set");
+  }
+  let oxibelt = executables
+    .iter()
+    .filter(|container| container.class == ContainerClass::Regular && container.name == "oxibelt")
+    .collect::<Vec<_>>();
+  if oxibelt.len() != 1 || oxibelt[0].image != state.bundle.payload.artifact.image_reference {
     return Err("image_digest_mismatch");
   }
+  let mut names = BTreeSet::new();
+  for executable in &executables {
+    if !names.insert(executable.name) {
+      return Err("invalid_executable_container_set");
+    }
+  }
+  let approvals = state
+    .bundle
+    .payload
+    .workload_policy
+    .as_ref()
+    .map_or(&[][..], |policy| policy.auxiliary_containers.as_slice());
+  for executable in executables
+    .iter()
+    .filter(|container| container.name != "oxibelt")
+  {
+    if validate_image_reference(executable.image).is_err()
+      || !approvals.iter().any(|approval| {
+        approval.class == executable.class
+          && approval.name == executable.name
+          && approval.image_reference == executable.image
+      })
+    {
+      return Err("unapproved_executable_container");
+    }
+  }
   Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ExecutableContainer<'a> {
+  class: ContainerClass,
+  name: &'a str,
+  image: &'a str,
+}
+
+fn collect_executable_containers(
+  object: &Value,
+) -> Result<Vec<ExecutableContainer<'_>>, &'static str> {
+  let Some(spec) = object.get("spec").and_then(Value::as_object) else {
+    return Err("containers_missing");
+  };
+  let Some(containers) = spec.get("containers").and_then(Value::as_array) else {
+    return Err("containers_missing");
+  };
+  let init_containers = optional_container_array(spec.get("initContainers"))?;
+  let ephemeral_containers = optional_container_array(spec.get("ephemeralContainers"))?;
+  let total = containers
+    .len()
+    .saturating_add(init_containers.len())
+    .saturating_add(ephemeral_containers.len());
+  if total > 64 {
+    return Err("container_limit_exceeded");
+  }
+  let mut executables = Vec::with_capacity(total);
+  append_executables(&mut executables, containers, ContainerClass::Regular)?;
+  append_init_executables(&mut executables, init_containers)?;
+  append_executables(
+    &mut executables,
+    ephemeral_containers,
+    ContainerClass::Ephemeral,
+  )?;
+  Ok(executables)
+}
+
+fn optional_container_array(value: Option<&Value>) -> Result<&[Value], &'static str> {
+  match value {
+    None | Some(Value::Null) => Ok(&[]),
+    Some(Value::Array(containers)) => Ok(containers),
+    Some(_) => Err("invalid_executable_container_set"),
+  }
+}
+
+fn append_executables<'a>(
+  output: &mut Vec<ExecutableContainer<'a>>,
+  containers: &'a [Value],
+  class: ContainerClass,
+) -> Result<(), &'static str> {
+  for container in containers {
+    output.push(parse_executable(container, class)?);
+  }
+  Ok(())
+}
+
+fn append_init_executables<'a>(
+  output: &mut Vec<ExecutableContainer<'a>>,
+  containers: &'a [Value],
+) -> Result<(), &'static str> {
+  for container in containers {
+    let class = match container.get("restartPolicy") {
+      None | Some(Value::Null) => ContainerClass::Init,
+      Some(Value::String(value)) if value == "Always" => ContainerClass::NativeSidecar,
+      Some(_) => return Err("invalid_executable_container_set"),
+    };
+    output.push(parse_executable(container, class)?);
+  }
+  Ok(())
+}
+
+fn parse_executable(
+  value: &Value,
+  class: ContainerClass,
+) -> Result<ExecutableContainer<'_>, &'static str> {
+  let Some(container) = value.as_object() else {
+    return Err("invalid_executable_container_set");
+  };
+  let Some(name) = container.get("name").and_then(Value::as_str) else {
+    return Err("invalid_executable_container_set");
+  };
+  let Some(image) = container.get("image").and_then(Value::as_str) else {
+    return Err("invalid_executable_container_set");
+  };
+  if validate_container_name(name).is_err() {
+    return Err("invalid_executable_container_set");
+  }
+  Ok(ExecutableContainer { class, name, image })
 }
 
 fn current_bundle(state: &AdmissionState) -> anyhow::Result<()> {
@@ -393,6 +513,9 @@ mod tests {
   use serde_json::json;
 
   use super::*;
+  use crate::supply_chain_workload_policy::{
+    AdmissionWorkloadPolicy, ContainerApproval, canonicalize_workload_policy,
+  };
 
   fn state() -> AdmissionState {
     let now = now_unix_seconds().expect("clock");
@@ -406,10 +529,55 @@ mod tests {
     }
   }
 
+  fn state_with_approvals(approvals: Vec<ContainerApproval>) -> AdmissionState {
+    let now = now_unix_seconds().expect("clock");
+    let policy = canonicalize_workload_policy(AdmissionWorkloadPolicy {
+      schema_version: 1,
+      auxiliary_containers: approvals,
+    })
+    .expect("test workload policy");
+    let (bundle, public_key, revocations) =
+      crate::supply_chain_bundle::signed_bundle_for_admission_test_with_policy(now, policy);
+    AdmissionState {
+      bundle,
+      public_key,
+      key_id: "test-key".to_string(),
+      revocations,
+    }
+  }
+
+  fn v1_state() -> AdmissionState {
+    let now = now_unix_seconds().expect("clock");
+    let (bundle, public_key, revocations) =
+      crate::supply_chain_bundle::signed_v1_bundle_for_admission_test(now);
+    AdmissionState {
+      bundle,
+      public_key,
+      key_id: "test-key".to_string(),
+      revocations,
+    }
+  }
+
+  fn approved_image(name: &str, digest: char) -> String {
+    format!(
+      "ghcr.io/example/{name}@sha256:{}",
+      digest.to_string().repeat(64)
+    )
+  }
+
+  fn approval(class: ContainerClass, name: &str, digest: char) -> ContainerApproval {
+    ContainerApproval {
+      class,
+      name: name.to_string(),
+      image_reference: approved_image(name, digest),
+    }
+  }
+
   fn request(state: &AdmissionState) -> AdmissionRequest {
     AdmissionRequest {
       uid: "request-1".to_string(),
       operation: "CREATE".to_string(),
+      sub_resource: String::new(),
       kind: GroupVersionKind {
         group: String::new(),
         version: "v1".to_string(),
@@ -466,5 +634,281 @@ mod tests {
     for (request, expected) in cases {
       assert_eq!(validate_request(&request, &state), Err(expected));
     }
+  }
+
+  #[test]
+  fn v1_is_primary_only_and_v2_admits_each_exact_auxiliary_class() {
+    let legacy = v1_state();
+    validate_request(&request(&legacy), &legacy).expect("v1 primary");
+    let mut legacy_sidecar = request(&legacy);
+    legacy_sidecar.object["spec"]["containers"]
+      .as_array_mut()
+      .expect("containers")
+      .push(json!({"name": "mesh-proxy", "image": approved_image("mesh-proxy", 'a')}));
+    assert_eq!(
+      validate_request(&legacy_sidecar, &legacy),
+      Err("unapproved_executable_container")
+    );
+
+    let state = state_with_approvals(vec![
+      approval(ContainerClass::Regular, "mesh-proxy", 'a'),
+      approval(ContainerClass::Init, "setup", 'b'),
+      approval(ContainerClass::NativeSidecar, "log-shipper", 'c'),
+      approval(ContainerClass::Ephemeral, "debugger", 'd'),
+    ]);
+    let mut create = request(&state);
+    create.object["spec"]["containers"]
+      .as_array_mut()
+      .expect("containers")
+      .push(json!({"name": "mesh-proxy", "image": approved_image("mesh-proxy", 'a')}));
+    create.object["spec"]["initContainers"] = json!([
+      {"name": "setup", "image": approved_image("setup", 'b')},
+      {"name": "log-shipper", "image": approved_image("log-shipper", 'c'), "restartPolicy": "Always"}
+    ]);
+    create.object["spec"]["ephemeralContainers"] = json!([]);
+    validate_request(&create, &state).expect("approved create shape");
+
+    create.object["spec"]["containers"]
+      .as_array_mut()
+      .expect("containers")
+      .swap(0, 1);
+    create.object["spec"]["initContainers"]
+      .as_array_mut()
+      .expect("init containers")
+      .swap(0, 1);
+    validate_request(&create, &state).expect("actual array order is irrelevant");
+
+    let mut update = create;
+    update.operation = "UPDATE".to_string();
+    update.object["spec"]["ephemeralContainers"] = json!([{
+      "name": "debugger",
+      "image": approved_image("debugger", 'd')
+    }]);
+    validate_request(&update, &state).expect("ordinary update final shape");
+    update.sub_resource = "ephemeralcontainers".to_string();
+    validate_request(&update, &state).expect("ephemeral subresource final shape");
+
+    update.operation = "CREATE".to_string();
+    update.sub_resource.clear();
+    assert_eq!(
+      validate_request(&update, &state),
+      Err("invalid_executable_container_set")
+    );
+  }
+
+  #[test]
+  fn unlisted_digest_drift_and_class_confusion_fail_closed() {
+    let state = state_with_approvals(vec![
+      approval(ContainerClass::Regular, "mesh-proxy", 'a'),
+      approval(ContainerClass::Init, "setup", 'b'),
+      approval(ContainerClass::NativeSidecar, "log-shipper", 'c'),
+      approval(ContainerClass::Ephemeral, "debugger", 'd'),
+    ]);
+    let mut cases = Vec::new();
+
+    let mut unlisted = request(&state);
+    unlisted.object["spec"]["containers"]
+      .as_array_mut()
+      .expect("containers")
+      .push(json!({"name": "unlisted", "image": approved_image("unlisted", 'a')}));
+    cases.push(unlisted);
+
+    let mut drifted = request(&state);
+    drifted.object["spec"]["containers"]
+      .as_array_mut()
+      .expect("containers")
+      .push(json!({"name": "mesh-proxy", "image": approved_image("mesh-proxy", 'f')}));
+    cases.push(drifted);
+
+    let mut tagged = request(&state);
+    tagged.object["spec"]["containers"]
+      .as_array_mut()
+      .expect("containers")
+      .push(json!({"name": "mesh-proxy", "image": "ghcr.io/example/mesh-proxy:latest"}));
+    cases.push(tagged);
+
+    let mut promoted_init = request(&state);
+    promoted_init.object["spec"]["initContainers"] = json!([{
+      "name": "setup",
+      "image": approved_image("setup", 'b'),
+      "restartPolicy": "Always"
+    }]);
+    cases.push(promoted_init);
+
+    let mut demoted_sidecar = request(&state);
+    demoted_sidecar.object["spec"]["initContainers"] = json!([{
+      "name": "log-shipper",
+      "image": approved_image("log-shipper", 'c')
+    }]);
+    cases.push(demoted_sidecar);
+
+    let mut wrong_field = request(&state);
+    wrong_field.object["spec"]["initContainers"] = json!([{
+      "name": "mesh-proxy",
+      "image": approved_image("mesh-proxy", 'a')
+    }]);
+    cases.push(wrong_field);
+
+    let mut ephemeral_drift = request(&state);
+    ephemeral_drift.operation = "UPDATE".to_string();
+    ephemeral_drift.sub_resource = "ephemeralcontainers".to_string();
+    ephemeral_drift.object["spec"]["ephemeralContainers"] = json!([{
+      "name": "debugger",
+      "image": approved_image("debugger", 'f')
+    }]);
+    cases.push(ephemeral_drift);
+
+    for request in cases {
+      assert_eq!(
+        validate_request(&request, &state),
+        Err("unapproved_executable_container")
+      );
+    }
+  }
+
+  #[test]
+  fn malformed_duplicate_and_mixed_container_limits_fail_closed() {
+    let state = state_with_approvals(vec![
+      approval(ContainerClass::Regular, "mesh-proxy", 'a'),
+      approval(ContainerClass::Init, "setup", 'b'),
+    ]);
+    let mut malformed = Vec::new();
+
+    let mut wrong_array = request(&state);
+    wrong_array.object["spec"]["initContainers"] = json!({});
+    malformed.push(wrong_array);
+
+    let mut non_object = request(&state);
+    non_object.object["spec"]["initContainers"] = json!(["setup"]);
+    malformed.push(non_object);
+
+    let mut missing_name = request(&state);
+    missing_name.object["spec"]["initContainers"] =
+      json!([{"image": approved_image("setup", 'b')}]);
+    malformed.push(missing_name);
+
+    let mut missing_image = request(&state);
+    missing_image.object["spec"]["initContainers"] = json!([{"name": "setup"}]);
+    malformed.push(missing_image);
+
+    let mut bad_restart = request(&state);
+    bad_restart.object["spec"]["initContainers"] = json!([{
+      "name": "setup",
+      "image": approved_image("setup", 'b'),
+      "restartPolicy": "Never"
+    }]);
+    malformed.push(bad_restart);
+
+    let mut duplicate = request(&state);
+    duplicate.object["spec"]["containers"]
+      .as_array_mut()
+      .expect("containers")
+      .push(json!({"name": "mesh-proxy", "image": approved_image("mesh-proxy", 'a')}));
+    duplicate.object["spec"]["initContainers"] = json!([{
+      "name": "mesh-proxy",
+      "image": approved_image("mesh-proxy", 'a')
+    }]);
+    malformed.push(duplicate);
+
+    for request in malformed {
+      assert_eq!(
+        validate_request(&request, &state),
+        Err("invalid_executable_container_set")
+      );
+    }
+
+    let approvals = (0..63)
+      .map(|index| approval(ContainerClass::Regular, &format!("aux-{index}"), 'a'))
+      .collect::<Vec<_>>();
+    let bounded = state_with_approvals(approvals);
+    let mut sixty_four = request(&bounded);
+    sixty_four.object["spec"]["containers"]
+      .as_array_mut()
+      .expect("containers")
+      .extend((0..63).map(|index| {
+        let name = format!("aux-{index}");
+        json!({"name": name, "image": approved_image(&name, 'a')})
+      }));
+    validate_request(&sixty_four, &bounded).expect("64 total executable containers");
+    sixty_four.object["spec"]["ephemeralContainers"] =
+      json!([{"name": "overflow", "image": approved_image("overflow", 'a')}]);
+    sixty_four.operation = "UPDATE".to_string();
+    assert_eq!(
+      validate_request(&sixty_four, &bounded),
+      Err("container_limit_exceeded")
+    );
+  }
+
+  #[test]
+  fn operation_subresource_and_deserialization_routes_are_exact() {
+    let state = state();
+    let create = request(&state);
+    validate_request(&create, &state).expect("root create");
+    let mut update = request(&state);
+    update.operation = "UPDATE".to_string();
+    validate_request(&update, &state).expect("root update");
+    update.sub_resource = "ephemeralcontainers".to_string();
+    validate_request(&update, &state).expect("ephemeral update");
+
+    let mut unsupported = Vec::new();
+    let mut ephemeral_create = request(&state);
+    ephemeral_create.sub_resource = "ephemeralcontainers".to_string();
+    unsupported.push(ephemeral_create);
+    for subresource in ["status", "resize"] {
+      let mut value = request(&state);
+      value.operation = "UPDATE".to_string();
+      value.sub_resource = subresource.to_string();
+      unsupported.push(value);
+    }
+    let mut delete = request(&state);
+    delete.operation = "DELETE".to_string();
+    unsupported.push(delete);
+    let mut wrong_kind = request(&state);
+    wrong_kind.kind.kind = "Service".to_string();
+    unsupported.push(wrong_kind);
+    let mut wrong_resource = request(&state);
+    wrong_resource.resource.resource = "deployments".to_string();
+    unsupported.push(wrong_resource);
+    let mut wrong_version = request(&state);
+    wrong_version.resource.version = "v2".to_string();
+    unsupported.push(wrong_version);
+
+    for request in unsupported {
+      assert_eq!(
+        validate_request(&request, &state),
+        Err("unsupported_admission_resource")
+      );
+    }
+
+    let omitted: AdmissionReviewRequest = serde_json::from_value(json!({
+      "apiVersion": "admission.k8s.io/v1",
+      "kind": "AdmissionReview",
+      "request": {
+        "uid": "omitted-subresource",
+        "operation": "UPDATE",
+        "kind": {"group": "", "version": "v1", "kind": "Pod"},
+        "resource": {"group": "", "version": "v1", "resource": "pods"},
+        "object": update.object,
+        "oldObject": {"spec": {"containers": [{"name": "unlisted", "image": "invalid"}]}}
+      }
+    }))
+    .expect("omitted subresource");
+    assert!(omitted.request.sub_resource.is_empty());
+    validate_request(&omitted.request, &state).expect("final object only");
+
+    let present: AdmissionReviewRequest = serde_json::from_value(json!({
+      "apiVersion": "admission.k8s.io/v1",
+      "kind": "AdmissionReview",
+      "request": {
+        "uid": "ephemeral-subresource",
+        "operation": "UPDATE",
+        "subResource": "ephemeralcontainers",
+        "kind": {"group": "", "version": "v1", "kind": "Pod"},
+        "resource": {"group": "", "version": "v1", "resource": "pods"},
+        "object": request(&state).object
+      }
+    }))
+    .expect("present subresource");
+    assert_eq!(present.request.sub_resource, "ephemeralcontainers");
   }
 }

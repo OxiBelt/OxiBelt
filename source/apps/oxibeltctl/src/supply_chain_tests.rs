@@ -20,6 +20,7 @@ fn args() -> SupplyChainAdmissionBundleArgs {
     independent_rebuild_run_id: 42,
     independent_rebuild_workflow_sha: "c".repeat(40),
     revocations: None,
+    workload_policy: None,
     verification_time: None,
     max_evidence_age_seconds: 3600,
     expires_after_seconds: 1800,

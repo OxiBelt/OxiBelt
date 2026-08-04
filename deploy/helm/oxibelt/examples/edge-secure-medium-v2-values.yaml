@@ -11,8 +11,9 @@ image:
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 
 # Replace this documentation-only placeholder with the exact output and
-# payload digest from `oxibeltctl supply-chain admission-bundle`. The webhook
-# will reject this placeholder because its Ed25519 signature is not valid.
+# payload digest from `oxibeltctl supply-chain admission-bundle`. Add only
+# signer-approved auxiliary images through `--workload-policy`. The webhook
+# will reject this structurally incomplete placeholder and its invalid signature.
 supplyChainAdmission:
   enabled: true
   bundle:
@@ -22,7 +23,7 @@ supplyChainAdmission:
     revocations: |-
       {"schemaVersion":1,"revocations":[]}
     inline: |-
-      {"payload":{"schemaVersion":1,"policy":{"version":"oxibelt-admission-v1","releaseChannel":"stable","maxEvidenceAgeSeconds":604800,"revocationsSha256":"sha256:4444444444444444444444444444444444444444444444444444444444444444","bundleSigningKeyId":"deployment-admission-example"},"artifact":{"repository":"ghcr.io/oxibelt/oxibelt-dataplane-strict","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","imageReference":"ghcr.io/oxibelt/oxibelt-dataplane-strict@sha256:0000000000000000000000000000000000000000000000000000000000000000","role":"dataplane-strict","sourceRepository":"OxiBelt/OxiBelt","sourceRef":"refs/tags/0.0.0","sourceRevision":"0000000000000000000000000000000000000000","signerWorkflow":"https://github.com/OxiBelt/OxiBelt/.github/workflows/release.yml@refs/tags/0.0.0"},"evidence":[],"independentRebuild":{"requiredArchitectures":[],"workflowRunId":1,"workflowPath":".github/workflows/verify-release-rebuild.yml","workflowSha":"0000000000000000000000000000000000000000","completedAt":0,"receipts":[]},"decision":{"status":"pass","reasons":["exact_evidence_verified"],"verifiedAt":0,"expiresAt":1}},"signature":{"algorithm":"ed25519","keyId":"deployment-admission-example","payloadSha256":"sha256:2222222222222222222222222222222222222222222222222222222222222222","valueHex":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}
+      {"payload":{"schemaVersion":2,"policy":{"version":"oxibelt-admission-v2","releaseChannel":"stable","maxEvidenceAgeSeconds":604800,"revocationsSha256":"sha256:4444444444444444444444444444444444444444444444444444444444444444","bundleSigningKeyId":"deployment-admission-example"},"artifact":{"repository":"ghcr.io/oxibelt/oxibelt-dataplane-strict","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","imageReference":"ghcr.io/oxibelt/oxibelt-dataplane-strict@sha256:0000000000000000000000000000000000000000000000000000000000000000","role":"dataplane-strict","sourceRepository":"OxiBelt/OxiBelt","sourceRef":"refs/tags/0.0.0","sourceRevision":"0000000000000000000000000000000000000000","signerWorkflow":"https://github.com/OxiBelt/OxiBelt/.github/workflows/release.yml@refs/tags/0.0.0"},"evidence":[],"independentRebuild":{"requiredArchitectures":[],"workflowRunId":1,"workflowPath":".github/workflows/verify-release-rebuild.yml","workflowSha":"0000000000000000000000000000000000000000","completedAt":0,"receipts":[]},"workloadPolicy":{"schemaVersion":1,"auxiliaryContainers":[]},"decision":{"status":"pass","reasons":["exact_primary_evidence_verified","signed_workload_policy_verified"],"verifiedAt":0,"expiresAt":1}},"signature":{"algorithm":"ed25519","keyId":"deployment-admission-example","payloadSha256":"sha256:2222222222222222222222222222222222222222222222222222222222222222","valueHex":"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}}
   webhook:
     image:
       repository: ghcr.io/oxibelt/oxibelt-tools

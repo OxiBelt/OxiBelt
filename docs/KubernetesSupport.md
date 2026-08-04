@@ -104,6 +104,15 @@ controls but does not by itself satisfy the `pod-security-restricted`,
 gates. V2 now requires a signed exact-digest bundle and `failurePolicy: Fail`
 webhook; static rendering does not prove that the TLS endpoint was reachable or
 that a real API server admitted and rejected the expected Pods.
+The static contract now renders separate exact rules for ordinary Pod
+CREATE/UPDATE and `pods/ephemeralcontainers` UPDATE, and deterministic Rust
+coverage exercises approved and rejected regular, init, native-sidecar, and
+ephemeral images. Graduation still requires a live API-server/webhook matrix
+that proves the endpoint accepts every exact signed class/name/digest identity,
+rejects unlisted or drifted identities, routes the ephemeral subresource, and
+does not intercept `pods/status` or unrelated subresources. Server-side render
+or dry-run evidence alone does not establish webhook TLS reachability or
+runtime enforcement.
 
 <!-- BEGIN KUBERNETES GRADUATION GENERATED -->
 

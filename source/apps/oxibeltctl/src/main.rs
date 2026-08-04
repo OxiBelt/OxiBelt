@@ -91,6 +91,8 @@ mod supply_chain;
 mod supply_chain_admission;
 #[path = "supply_chain_bundle.rs"]
 mod supply_chain_bundle;
+#[path = "supply_chain_workload_policy.rs"]
+mod supply_chain_workload_policy;
 #[cfg(test)]
 #[path = "test_support.rs"]
 mod test_support;

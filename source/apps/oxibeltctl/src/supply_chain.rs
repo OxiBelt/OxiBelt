@@ -19,6 +19,7 @@ use crate::supply_chain_bundle::{
   IndependentRebuildVerificationReceipt, MAX_ATTESTATION_BYTES, MAX_REBUILD_RECEIPT_BYTES,
   derive_public_key, load_revocations, load_secret_key, now_unix_seconds, verify_and_sign_bundle,
 };
+use crate::supply_chain_workload_policy::load_workload_policy;
 
 const GH_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_GH_STDERR_BYTES: u64 = 64 * 1024;
@@ -58,6 +59,7 @@ async fn generate_bundle(args: &SupplyChainAdmissionBundleArgs) -> anyhow::Resul
   {
     bail!("refusing to overwrite existing admission public key without --force");
   }
+  let workload_policy = load_workload_policy(args.workload_policy.as_deref())?;
   let verification_time = args.verification_time.map_or_else(now_unix_seconds, Ok)?;
   let (provenance, sbom, rebuild) = (
     run_gh_attestation(args, "https://slsa.dev/provenance/v1").await?,
@@ -80,6 +82,7 @@ async fn generate_bundle(args: &SupplyChainAdmissionBundleArgs) -> anyhow::Resul
       max_evidence_age_seconds: args.max_evidence_age_seconds,
       expires_after_seconds: args.expires_after_seconds,
       key_id: args.key_id.clone(),
+      workload_policy,
     },
     BundleEvidenceInput {
       provenance,

@@ -224,6 +224,15 @@ webhooks:
     resources:
     - pods
     scope: Namespaced
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    operations:
+    - UPDATE
+    resources:
+    - pods/ephemeralcontainers
+    scope: Namespaced
   sideEffects: None
   timeoutSeconds: {{ int .Values.supplyChainAdmission.webhook.timeoutSeconds }}
 {{- end -}}

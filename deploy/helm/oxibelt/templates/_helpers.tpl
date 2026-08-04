@@ -11,7 +11,7 @@
 {{- end -}}
 
 {{- define "oxibelt.supplyChainAdmissionRevision" -}}
-{{- trimPrefix "sha256:" .Values.supplyChainAdmission.bundle.payloadDigest | trunc 12 -}}
+{{- printf "bundle=%s\nwebhook=%s@%s" .Values.supplyChainAdmission.bundle.payloadDigest .Values.supplyChainAdmission.webhook.image.repository .Values.supplyChainAdmission.webhook.image.digest | sha256sum | trunc 12 -}}
 {{- end -}}
 
 {{- define "oxibelt.supplyChainAdmissionResourceName" -}}

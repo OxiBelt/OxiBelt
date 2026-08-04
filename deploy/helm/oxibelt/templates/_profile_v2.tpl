@@ -64,6 +64,16 @@
 {{- if hasKey $parsed "Error" -}}
 {{- fail "OBP204-BUNDLE-JSON: supplyChainAdmission.bundle.inline must be valid JSON" -}}
 {{- end -}}
+{{- $payload := get $parsed "payload" | default (dict) -}}
+{{- $workloadPolicy := dig "payload" "workloadPolicy" (dict) $parsed -}}
+{{- $auxiliaryContainers := get $workloadPolicy "auxiliaryContainers" -}}
+{{- $schemaVersion := int (dig "schemaVersion" 0 $payload) -}}
+{{- $policyVersion := dig "policy" "version" "" $payload -}}
+{{- $isV1 := and (eq $schemaVersion 1) (eq $policyVersion "oxibelt-admission-v1") (not (hasKey $payload "workloadPolicy")) -}}
+{{- $isV2 := and (eq $schemaVersion 2) (eq $policyVersion "oxibelt-admission-v2") (eq (int (dig "schemaVersion" 0 $workloadPolicy)) 1) (hasKey $workloadPolicy "auxiliaryContainers") (kindIs "slice" $auxiliaryContainers) (le (len $auxiliaryContainers) 63) -}}
+{{- if not (or $isV1 $isV2) -}}
+{{- fail "OBP204-BUNDLE-VERSION: supply-chain bundle schema, policy, and workload policy are inconsistent" -}}
+{{- end -}}
 {{- if ne (dig "signature" "payloadSha256" "" $parsed) $bundle.payloadDigest -}}
 {{- fail "OBP204-BUNDLE-IDENTITY: configured bundle digest does not match signature.payloadSha256" -}}
 {{- end -}}

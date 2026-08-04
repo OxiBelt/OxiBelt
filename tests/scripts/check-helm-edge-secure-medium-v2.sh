@@ -114,8 +114,14 @@ for expected in \
   '"filesystemManifestDigestWithheld": true' \
   '"admissionRequired": true' \
   '"payloadDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"' \
+  '"schemaVersion":2' \
+  '"version":"oxibelt-admission-v2"' \
+  '"workloadPolicy":{"schemaVersion":1,"auxiliaryContainers":[]}' \
   'oxibelt.dev/supply-chain-bundle-digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222"' \
   'failurePolicy: Fail' \
+  'matchPolicy: Exact' \
+  'sideEffects: None' \
+  '    - pods/ephemeralcontainers' \
   'automountServiceAccountToken: false' \
   'cidr: "192.0.2.1/32"' \
   '"unmetRequirements": []'; do
@@ -123,7 +129,31 @@ for expected in \
 done
 assert_not_contains "${work_dir}/deployment.yaml" 'serviceAccountToken:'
 assert_not_contains "${work_dir}/deployment.yaml" 'hostPath:'
+assert_not_contains "${work_dir}/deployment.yaml" '    - pods/*'
+assert_not_contains "${work_dir}/deployment.yaml" '    - */*'
 assert_contains "${work_dir}/deployment.yaml" 'default-deny'
+
+render webhook-image-rotated \
+  --set-string supplyChainAdmission.webhook.image.digest=sha256:4444444444444444444444444444444444444444444444444444444444444444
+baseline_admission_revision="$(annotation_value "${work_dir}/deployment.yaml" 'oxibelt.dev/supply-chain-bundle')"
+rotated_admission_revision="$(annotation_value "${work_dir}/webhook-image-rotated.yaml" 'oxibelt.dev/supply-chain-bundle')"
+[[ "${baseline_admission_revision}" != "${rotated_admission_revision}" ]] \
+  || die "webhook image rotation did not change the admission endpoint revision"
+assert_contains "${work_dir}/webhook-image-rotated.yaml" \
+  'image: "ghcr.io/oxibelt/oxibelt-tools@sha256:4444444444444444444444444444444444444444444444444444444444444444"'
+assert_contains "${work_dir}/webhook-image-rotated.yaml" \
+  'oxibelt.dev/supply-chain-bundle-digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222"'
+
+sed \
+  -e 's/"schemaVersion":2/"schemaVersion":1/' \
+  -e 's/oxibelt-admission-v2/oxibelt-admission-v1/' \
+  -e 's/,"workloadPolicy":{"schemaVersion":1,"auxiliaryContainers":\[\]}//' \
+  -e 's/"exact_primary_evidence_verified","signed_workload_policy_verified"/"exact_evidence_verified"/' \
+  "${profile_values}" >"${work_dir}/legacy-v1-values.yaml"
+helm template oxibelt "${chart_dir}" --kube-version "${kubernetes_version}" \
+  -f "${work_dir}/legacy-v1-values.yaml" >"${work_dir}/legacy-v1.yaml"
+assert_contains "${work_dir}/legacy-v1.yaml" 'kind: ValidatingWebhookConfiguration'
+assert_contains "${work_dir}/legacy-v1.yaml" '    - pods/ephemeralcontainers'
 
 render daemonset --set-string workload.kind=DaemonSet
 assert_contains "${work_dir}/daemonset.yaml" 'kind: DaemonSet'
@@ -200,6 +230,10 @@ expect_failure_contains bundle_identity_mismatch 'OBP204-BUNDLE-IDENTITY' \
   --set-string supplyChainAdmission.bundle.payloadDigest=sha256:5555555555555555555555555555555555555555555555555555555555555555
 expect_failure_contains bundle_artifact_mismatch 'OBP204-BUNDLE-ARTIFACT' \
   --set-string image.digest=sha256:5555555555555555555555555555555555555555555555555555555555555555
+expect_failure_contains mixed_bundle_version 'OBP204-BUNDLE-VERSION' \
+  --set-json 'supplyChainAdmission.bundle.inline="{\"payload\":{\"schemaVersion\":2,\"policy\":{\"version\":\"oxibelt-admission-v1\"},\"workloadPolicy\":{\"schemaVersion\":1,\"auxiliaryContainers\":[]}}}"'
+expect_failure_contains missing_workload_policy 'OBP204-BUNDLE-VERSION' \
+  --set-json 'supplyChainAdmission.bundle.inline="{\"payload\":{\"schemaVersion\":2,\"policy\":{\"version\":\"oxibelt-admission-v2\"}}}"'
 expect_failure_contains webhook_unpinned 'OBP204-WEBHOOK-DIGEST' \
   --set-string supplyChainAdmission.webhook.image.digest=
 expect_failure_contains invalid_webhook_tls_secret 'OBP204-WEBHOOK-TLS' \

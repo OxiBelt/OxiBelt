@@ -263,6 +263,32 @@ revision, role, architecture, workflow path, and run ID. `exact` and
 `normalized_equivalent` are accepted; a manual, failed, stale, expired,
 missing, duplicate, mismatched, or unbound receipt fails closed.
 
+New bundles use schema v2. An optional bounded workload-policy file lets the
+deployment signer approve third-party auxiliary images without claiming that
+they received OxiBelt provenance, SBOM, or independent-rebuild verification:
+
+```json
+{
+  "schemaVersion": 1,
+  "auxiliaryContainers": [
+    {
+      "class": "native-sidecar",
+      "name": "mesh-proxy",
+      "imageReference": "ghcr.io/example/mesh-proxy@sha256:FULL_64_CHARACTER_LOWERCASE_DIGEST"
+    }
+  ]
+}
+```
+
+The fixed classes are `regular`, `init`, `native-sidecar`, and `ephemeral`.
+Native sidecars are entries in `spec.initContainers` with
+`restartPolicy: Always`; ordinary init containers omit that field. Names are
+globally unique lowercase Kubernetes DNS labels, `oxibelt` is reserved for the
+primary regular container, and image references must be a fully qualified,
+tagless `repository@sha256:<64 lowercase hex>` identity. Entries are optional
+permissions: the admitted Pod may contain any subset, but every executable
+that is present must match one exact signed class, name, and image.
+
 ```sh
 umask 077
 head -c 32 /dev/urandom > admission-bundle.ed25519
@@ -277,6 +303,7 @@ oxibeltctl supply-chain admission-bundle \
   --independent-rebuild-run-id SUCCESSFUL_AUTOMATIC_WORKFLOW_RUN_ID \
   --independent-rebuild-workflow-sha APPROVED_FULL_40_CHARACTER_VERIFIER_COMMIT \
   --revocations deploy/supply-chain/revocations.example.json \
+  --workload-policy deployment-workload-policy.json \
   --signing-key-file admission-bundle.ed25519 \
   --public-key-output admission-bundle.ed25519.pub \
   --key-id deployment-admission-2026 \
@@ -289,7 +316,10 @@ file to the admission component. The command prints `payloadDigest`; this is
 the identity placed in Helm values and on admitted Pods. Bundle payload
 serialization and Ed25519 signing are
 deterministic for identical evidence, policy inputs, and the explicitly
-modeled verification time.
+modeled verification time. `--workload-policy` is optional; omitting it emits a
+v2 primary-only bundle with an empty auxiliary list. Entries are sorted by a
+fixed class/name/image order before signing, and noncanonical signed policy
+claims fail verification.
 
 The verifier applies these hard bounds:
 
@@ -298,13 +328,17 @@ The verifier applies these hard bounds:
   for each ZIP archive, and 1 MiB for each of exactly three rebuild receipts;
 - a 60-second deadline and 64 KiB diagnostic limit for every GitHub CLI call;
 - 1,024 entries and 1 MiB for the revocation policy;
+- 64 KiB and at most 63 entries for the auxiliary workload policy, leaving
+  one executable slot for the required primary container;
 - 256 KiB for the final bundle and each admission request;
 - evidence freshness of at most one year, bundle lifetime of at most 30 days,
   and at most five minutes of future clock skew.
 
-The bundle schema is
-`deploy/supply-chain/admission-bundle.schema.json`; revocations use
-`deploy/supply-chain/revocations.schema.json`. Unknown fields, mutable refs,
+The legacy v1 bundle schema remains
+`deploy/supply-chain/admission-bundle.schema.json`. New bundles use
+`deploy/supply-chain/admission-bundle-v2.schema.json`, and workload-policy
+input uses `deploy/supply-chain/admission-workload-policy-v1.schema.json`.
+Revocations use `deploy/supply-chain/revocations.schema.json`. Unknown fields, mutable refs,
 role/repository confusion, conflicting duplicate predicates, unparseable
 trusted timestamps, stale evidence, malformed CycloneDX properties, incomplete
 rebuild coverage, and an effective revocation all fail closed.
@@ -325,20 +359,41 @@ ServiceAccount token, no GitHub credential, no egress, a read-only root
 filesystem, fixed CPU/memory limits, and a maximum of 128 concurrent TLS
 connections. The `ValidatingWebhookConfiguration` uses `failurePolicy: Fail`,
 matches only this release's OxiBelt Pods, and requires the exact bundle
-annotation, role annotation, and digest-pinned `oxibelt` container image. The
-server rechecks signature, expiry, revocation, and payload shape for every
-request. Missing, unreachable, malformed, expired, mismatched, or revoked
-evidence therefore blocks Pod creation and update; existing running Pods are
-not terminated.
+annotation, role annotation, and digest-pinned `oxibelt` container image. A
+second exact `UPDATE` rule covers `pods/ephemeralcontainers`; the chart never
+uses `pods/*`. The server validates the final `spec.containers`,
+`spec.initContainers`, and `spec.ephemeralContainers` shape as one globally
+unique set of at most 64 executables. The primary is always required, and every
+other regular, init, native-sidecar, or ephemeral image must match a signed v2
+approval. A valid v1 bundle is accepted only as a primary-only policy, so
+upgrading the server closes the legacy bypass without first rotating the
+bundle. Missing, unreachable, malformed, expired, mismatched, unapproved, or
+revoked evidence therefore blocks creation or update; existing running Pods
+are not terminated.
 
-Admission resources and their immutable ConfigMap are content-addressed by the
-bundle payload digest. On rotation, generate a new bundle rather than editing
-one in place, install it with the new image identity, and wait for the new
-admission Deployment and Service endpoints before judging the data-plane
-rollout. Kubernetes controllers retry temporarily denied Pod creation. A
-webhook outage intentionally blocks rollout, so operate at least two replicas,
-retain the prior still-authorized bundle for rollback, monitor readiness, and
-test certificate renewal before expiry.
+The immutable ConfigMap is content-addressed by the bundle payload digest. The
+admission Deployment and Service endpoint revision binds both that digest and
+the exact webhook image repository/digest, so an image rotation cannot mix old
+and new admission binaries behind one Service. On rotation, generate a new
+bundle rather than editing one in place, install it with the new image identity,
+and wait for the new admission endpoints before judging the data-plane rollout.
+The Service may temporarily have no endpoints and fail closed during cutover;
+Kubernetes controllers retry temporarily denied Pod creation. Operate at least
+two replicas, retain the prior still-authorized bundle for rollback, monitor
+readiness, and test certificate renewal before expiry.
+
+Validating admission observes the final object after mutating admission. For a
+workload that retains this release's chart selector labels, an injector
+therefore succeeds only when its final container name, semantic class, and
+exact digest are already signer-approved; name, class, or digest drift denies
+the Pod. Kubernetes `objectSelector` labels are scoping, not an authorization
+boundary: a mutating admission component that can remove those labels is a
+trusted cluster-admission authority. The auxiliary policy intentionally does
+not authenticate commands, arguments, environment, mounts, capabilities, or
+security context. Pod Security and other admission controls remain
+authoritative for those properties. Remove a compromised auxiliary approval by
+rotating the bounded, expiring bundle; the schema-v1 revocation list remains
+scoped to the primary OxiBelt artifact.
 
 Key rotation requires a new key ID, public key, bundle, and content-addressed
 admission Deployment. Revocation-policy changes also require a new bundle
@@ -657,7 +712,9 @@ artifacts. A policy that searches GHCR referrers, requires a Cosign signature,
 or verifies with `--bundle-from-oci` will not find the current API-only
 records. Do not switch the validating webhook to `failurePolicy: Ignore`,
 broaden an allowlist to `ghcr.io/oxibelt/*`, or remove a fail-closed policy
-merely to make deployment proceed. Any replacement admission policy is an
+merely to make deployment proceed. Bundle v2 permits only signer-approved
+exact class/name/digest entries; it does not permit repository prefixes or
+wildcards. Any replacement admission policy is an
 operator-owned security-boundary change and must be separately approved,
 staged, tested for every role, and given a rollback plan.
 

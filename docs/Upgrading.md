@@ -137,6 +137,39 @@ the stable tag.
    configuration revision, and a representative request before completing the
    rollout. Run any additional commands in the target release entry.
 
+### Supply-chain admission bundle v2
+
+Admission bundle schema v2 adds a signed, bounded auxiliary-container policy.
+New `oxibeltctl supply-chain admission-bundle` generation emits v2, including
+an empty policy when `--workload-policy` is omitted. Older tools binaries reject
+v2. The fixed admission server accepts a still-valid v1 bundle only as a strict
+primary-`oxibelt` policy; every additional regular, init, native-sidecar, or
+ephemeral container is denied.
+
+For a primary-only deployment, upgrade the digest-pinned tools image while
+retaining the current v1 bundle, wait for the new admission Deployment and
+Service endpoints, and then rotate to a generated v2 bundle. For a deployment
+that needs auxiliary images, generate and review the v2 policy first, then
+roll out the v2-capable tools image, content-addressed bundle, Pod template,
+and chart rules together. An old admission binary must never receive a v2
+bundle. Confirm the rendered webhook contains exact `pods` CREATE/UPDATE and
+`pods/ephemeralcontainers` UPDATE rules, not `pods/*`.
+
+The chart derives the admission endpoint revision from both the bundle payload
+digest and the exact tools-image repository/digest. Changing only the fixed
+server image therefore creates a new Deployment/selector epoch and excludes
+old permissive endpoints from the Service instead of mixing old and new
+binaries. A short interval with no ready endpoint is intentionally fail-closed.
+
+Existing Pods continue running across the change. Pod recreation, ordinary
+updates, and ephemeral-container updates fail closed when an executable is not
+present in the active signed policy. Keep the previous valid bundle and fixed
+tools-image digest until the new endpoints and data-plane rollout are healthy.
+Supported rollback restores a previous valid v1 or v2 bundle under a fixed
+server; remove auxiliary containers before restoring v1. Downgrading to a
+server that permits unverified executables is not a supported security
+rollback.
+
 ### Kubernetes controller and data-plane upgrade
 
 The Kubernetes integration remains `experimental`; its objective compatibility

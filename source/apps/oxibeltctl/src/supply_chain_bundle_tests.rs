@@ -2,6 +2,7 @@ use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use serde_json::{Value, json};
 
 use super::*;
+use crate::supply_chain_workload_policy::{ContainerApproval, ContainerClass};
 
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const REVISION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -30,6 +31,7 @@ fn input() -> BundleVerificationInput {
     max_evidence_age_seconds: 3600,
     expires_after_seconds: 1800,
     key_id: "deployment-admission-2026".to_string(),
+    workload_policy: AdmissionWorkloadPolicy::default(),
   }
 }
 
@@ -185,6 +187,16 @@ fn exact_evidence_produces_a_deterministic_verifiable_bundle() {
   );
   assert_eq!(first.payload.artifact.digest, DIGEST);
   assert_eq!(first.payload.artifact.role, "dataplane-strict");
+  assert_eq!(first.payload.schema_version, 2);
+  assert_eq!(first.payload.policy.version, POLICY_VERSION_V2);
+  assert_eq!(
+    first
+      .payload
+      .workload_policy
+      .as_ref()
+      .expect("v2 workload policy"),
+    &AdmissionWorkloadPolicy::default()
+  );
   assert_eq!(first.payload.independent_rebuild.receipts.len(), 3);
   verify_bundle(
     &first,
@@ -194,6 +206,91 @@ fn exact_evidence_produces_a_deterministic_verifiable_bundle() {
     input().verification_time,
   )
   .expect("signature");
+}
+
+#[test]
+fn legacy_v1_payload_bytes_and_signature_domain_remain_compatible() {
+  let (bundle, public_key, revocations) = valid_bundle();
+  let mut payload = bundle.payload;
+  payload.schema_version = 1;
+  payload.policy.version = POLICY_VERSION_V1.to_string();
+  payload.workload_policy = None;
+  payload.decision.reasons = DECISION_REASONS_V1.map(str::to_string).to_vec();
+  let legacy =
+    sign_payload(payload, "deployment-admission-2026", &[7_u8; 32]).expect("legacy v1 fixture");
+
+  assert_eq!(
+    legacy.signature.payload_sha256,
+    "sha256:437041389849e6cf5e74b3a480770de3ebbd436740aa4a5fd1220899f78184b2"
+  );
+  assert!(
+    serde_json::to_value(&legacy.payload)
+      .expect("payload")
+      .get("workloadPolicy")
+      .is_none()
+  );
+  verify_bundle(
+    &legacy,
+    &public_key,
+    "deployment-admission-2026",
+    &revocations,
+    input().verification_time,
+  )
+  .expect("legacy signature");
+}
+
+#[test]
+fn mixed_bundle_contracts_and_workload_tampering_fail_closed() {
+  let (bundle, public_key, revocations) = valid_bundle();
+  let mut mixed = bundle.clone();
+  mixed.payload.schema_version = 1;
+  assert!(
+    verify_bundle(
+      &mixed,
+      &public_key,
+      "deployment-admission-2026",
+      &revocations,
+      input().verification_time,
+    )
+    .expect_err("mixed schema and policy")
+    .to_string()
+    .contains("inconsistent")
+  );
+
+  let mut missing = bundle.clone();
+  missing.payload.workload_policy = None;
+  assert!(
+    verify_bundle(
+      &missing,
+      &public_key,
+      "deployment-admission-2026",
+      &revocations,
+      input().verification_time,
+    )
+    .is_err()
+  );
+
+  let mut tampered = bundle;
+  tampered
+    .payload
+    .workload_policy
+    .as_mut()
+    .expect("workload policy")
+    .auxiliary_containers
+    .push(ContainerApproval {
+      class: ContainerClass::Regular,
+      name: "mesh-proxy".to_string(),
+      image_reference: format!("ghcr.io/example/mesh-proxy@sha256:{}", "e".repeat(64)),
+    });
+  let error = verify_bundle(
+    &tampered,
+    &public_key,
+    "deployment-admission-2026",
+    &revocations,
+    input().verification_time,
+  )
+  .expect_err("tampered workload policy");
+  assert!(error.to_string().contains("payload digest mismatch"));
 }
 
 #[test]
