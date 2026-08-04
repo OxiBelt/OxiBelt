@@ -462,13 +462,6 @@ impl TranslationState {
       &self.external_auth_allowed_terminal_headers,
       ExternalAuthHeaderScope::TerminalResponse,
     )?;
-    if !auth
-      .forward_headers
-      .iter()
-      .any(|header| header.eq_ignore_ascii_case("authorization"))
-    {
-      auth.forward_headers.push("authorization".to_string());
-    }
     auth
       .forward_headers
       .sort_by_key(|header| header.to_ascii_lowercase());

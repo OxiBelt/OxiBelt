@@ -123,6 +123,39 @@ fn forward_auth_headers_project_origin_absolute_and_authority_targets() {
 }
 
 #[test]
+fn gateway_forward_auth_projects_only_explicit_request_headers() {
+  let mut provider = provider_with_kind_and_fail_policy(
+    ExternalAuthProvider::GatewayExtAuthHttp,
+    ExternalAuthFailPolicy::Closed,
+    &[],
+    &[],
+  );
+  let mut request_headers = HeaderMap::new();
+  request_headers.insert(
+    http::header::AUTHORIZATION,
+    HeaderValue::from_static("Bearer downstream-token"),
+  );
+  request_headers.insert("x-explicit", HeaderValue::from_static("tenant-a"));
+
+  let omitted = projected_forward_auth_headers(&provider, &request_headers, "/admin");
+  assert!(omitted.get(http::header::AUTHORIZATION).is_none());
+  assert!(omitted.get("x-explicit").is_none());
+
+  provider.forward_headers = vec![HeaderName::from_static("x-explicit")];
+  let unrelated = projected_forward_auth_headers(&provider, &request_headers, "/admin");
+  assert!(unrelated.get(http::header::AUTHORIZATION).is_none());
+  assert_eq!(unrelated.get("x-explicit").unwrap(), "tenant-a");
+
+  provider.forward_headers = vec![http::header::AUTHORIZATION];
+  let authorized = projected_forward_auth_headers(&provider, &request_headers, "/admin");
+  assert_eq!(
+    authorized.get(http::header::AUTHORIZATION).unwrap(),
+    "Bearer downstream-token"
+  );
+  assert!(authorized.get("x-explicit").is_none());
+}
+
+#[test]
 fn gateway_auth_endpoint_path_prefixes_original_path_and_query() {
   let endpoint = "https://auth.example.test/ext-auth/"
     .parse()
