@@ -13,6 +13,8 @@ mod common {
   ));
 }
 
+#[path = "tests/backend_diagnostics.rs"]
+mod backend_diagnostic_tests;
 #[path = "fixtures.rs"]
 mod fixtures;
 #[path = "tests/l4.rs"]

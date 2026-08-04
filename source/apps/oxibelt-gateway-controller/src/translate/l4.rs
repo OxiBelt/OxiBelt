@@ -199,6 +199,7 @@ impl TranslationState {
       ));
       return None;
     };
+    let diagnostics_before_backend_resolution = self.diagnostics.len();
     let mut servers = Vec::new();
     for (index, backend) in backends.iter().enumerate() {
       if let Some(field) = unsupported_field(
@@ -283,6 +284,9 @@ impl TranslationState {
         ),
         weight,
       });
+    }
+    if self.diagnostics.len() != diagnostics_before_backend_resolution {
+      return None;
     }
     if servers.is_empty() {
       self.diagnostics.push(Diagnostic::error(

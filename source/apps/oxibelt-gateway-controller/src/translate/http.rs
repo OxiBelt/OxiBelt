@@ -147,11 +147,21 @@ impl TranslationState {
       ));
       return None;
     }
+    let diagnostics_before_backend_resolution = self.diagnostics.len();
     if self.backend_resolution == BackendResolution::EndpointSliceWatch {
       let mut discoveries = Vec::with_capacity(nonzero_backends.len());
       for (index, backend, weight) in nonzero_backends {
-        let discovery =
-          self.backend_discovery(route, from_kind, backend, index, weight, route_name)?;
+        let Some(discovery) =
+          self.backend_discovery(route, from_kind, backend, index, weight, route_name)
+        else {
+          if self.diagnostics.len() == diagnostics_before_backend_resolution {
+            self.diagnostics.push(crate::model::Diagnostic::error(
+              model_object_ref(route),
+              "rule.backendRefs has no usable nonzero Service backend",
+            ));
+          }
+          return None;
+        };
         discoveries.push(discovery);
       }
       let name = sanitize_name(&format!("{route_name}-pool"));
@@ -171,10 +181,12 @@ impl TranslationState {
       servers.push(server);
     }
     if servers.is_empty() {
-      self.diagnostics.push(crate::model::Diagnostic::error(
-        model_object_ref(route),
-        "rule.backendRefs has no usable nonzero Service backend",
-      ));
+      if self.diagnostics.len() == diagnostics_before_backend_resolution {
+        self.diagnostics.push(crate::model::Diagnostic::error(
+          model_object_ref(route),
+          "rule.backendRefs has no usable nonzero Service backend",
+        ));
+      }
       return None;
     }
     let name = sanitize_name(&format!("{route_name}-pool"));

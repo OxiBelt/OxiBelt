@@ -208,6 +208,13 @@ rollback inside the declared window, restore the prior data plane before the
 prior controller, then return to `exact`. Never downgrade or delete
 operator-owned Gateway API CRDs as an implicit Helm rollback.
 
+For an otherwise attachable `HTTPRoute`, `GRPCRoute`, `TCPRoute`, or
+`UDPRoute`, a cross-namespace Service `backendRef` without an authorizing
+`ReferenceGrant` reports `Accepted=True`, `ResolvedRefs=False` with reason
+`RefNotPermitted`, and `Programmed=False`. The route still contributes no
+listener or upstream, so this status correction does not weaken the
+fail-closed data-plane result and requires no manifest migration.
+
 ### Durable UDP flow-state transition
 
 Native UDP stream listeners retain `udp_flow_state = "local"` by default.
