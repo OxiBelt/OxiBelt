@@ -744,6 +744,15 @@ the fail-closed rejection. These audit and route-classification corrections
 change no Admin wire shape, native configuration schema epoch, or persisted-state
 format.
 
+The Rust `1.97.1` lint-compatibility cleanup applied after the staged-membership
+v2 implementation changes only internal sealed-result and heartbeat-bootstrap
+plumbing. It does not change Admin HTTP or mutation wire shapes, native
+configuration syntax, defaults, or schema epoch; stored membership or epoch
+state; key derivation, encryption, or zeroization; membership admission,
+fencing, readiness, or activation; heartbeat scheduling or metrics; or the
+upgrade and rollback sequence above. Existing clusters require no migration or
+additional coordinated rollout for this cleanup.
+
 Existing signed v1 and v2 supply-chain bundle wire shapes remain readable.
 Admission now stops accepting either schema when the earliest signed
 provenance, SBOM, rebuild-recipe, or independent-rebuild timestamp exceeds

@@ -38,7 +38,7 @@ use super::{
   MUTATION_HEADER, MembershipArtifactCiphers, MembershipMember, MembershipReadinessReceipt,
   MutationProtocolError, MutationProtocolErrorKind, SignerBinding, SignerRegistry,
 };
-pub(crate) use cluster_heartbeat::ClusterHeartbeatTask;
+pub(crate) use cluster_heartbeat::{ClusterHeartbeatBootstrap, ClusterHeartbeatTask};
 pub(crate) use target::configured_target;
 use target::{digest_parts, ensure_cluster_member};
 
@@ -316,18 +316,19 @@ impl AdminMutationRuntime {
             );
           }
         }
-      } else if {
+      } else {
         let local_member = local_instance_id
           .as_deref()
           .context("staged membership requires a local instance ID")?;
-        members
+        let local_is_bootstrap_member = members
           .binary_search_by(|member| member.as_str().cmp(local_member))
-          .is_ok()
-      } {
-        ensure!(
-          legacy_cipher.is_some(),
-          "staged membership bootstrap members require the legacy artifact key until v2 initialization"
-        );
+          .is_ok();
+        if local_is_bootstrap_member {
+          ensure!(
+            legacy_cipher.is_some(),
+            "staged membership bootstrap members require the legacy artifact key until v2 initialization"
+          );
+        }
       }
     }
     let winner_response_wait = cluster_checkpoint::winner_response_wait(

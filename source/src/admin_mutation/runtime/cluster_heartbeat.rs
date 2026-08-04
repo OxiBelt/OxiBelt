@@ -17,6 +17,12 @@ use crate::runtime_health::{
 
 use super::{AdminMutationRuntime, LocalMembershipHead};
 
+pub(crate) struct ClusterHeartbeatBootstrap {
+  pub(crate) applied_revision: String,
+  pub(crate) applied_digest: String,
+  pub(crate) local_heads: Vec<LocalMembershipHead>,
+}
+
 pub(crate) struct ClusterHeartbeatTask {
   runtime: AdminMutationRuntime,
   shutdown: watch::Sender<bool>,
@@ -268,9 +274,7 @@ impl AdminMutationRuntime {
   pub(crate) async fn start_cluster_heartbeat(
     &self,
     config: &Config,
-    applied_revision: String,
-    applied_digest: String,
-    local_heads: Vec<LocalMembershipHead>,
+    bootstrap: ClusterHeartbeatBootstrap,
     metrics: std::sync::Arc<Metrics>,
     health: std::sync::Arc<RuntimeHealth>,
     generation: u64,
@@ -279,6 +283,11 @@ impl AdminMutationRuntime {
     if !self.cluster_mode() {
       return Ok(None);
     }
+    let ClusterHeartbeatBootstrap {
+      applied_revision,
+      applied_digest,
+      local_heads,
+    } = bootstrap;
     self.install_local_membership_heads(local_heads)?;
     let mut random = [0_u8; 16];
     random_fill(&mut random).context("failed to generate Admin cluster boot identity")?;

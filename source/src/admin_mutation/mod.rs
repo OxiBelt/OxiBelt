@@ -54,8 +54,8 @@ pub(crate) use rollout_store::{
   publish_checkpoint_in_coordinator_transaction,
 };
 pub(crate) use runtime::{
-  AdminMutationRuntime, ClusterHeartbeatTask, LocalMembershipHead, MutationAdmission,
-  MutationAdmissionError, MutationConflict, configured_target,
+  AdminMutationRuntime, ClusterHeartbeatBootstrap, ClusterHeartbeatTask, LocalMembershipHead,
+  MutationAdmission, MutationAdmissionError, MutationConflict, configured_target,
 };
 pub(crate) use store::{
   BreakGlassMutationCheckpoint, capture_break_glass_checkpoint_tx,

@@ -66,6 +66,12 @@ pub(crate) struct StoredEpochKeyWrap {
   pub(crate) ciphertext_digest: String,
 }
 
+struct SealedX25519 {
+  ephemeral_public_key: [u8; 32],
+  nonce: [u8; 12],
+  ciphertext: Zeroizing<Vec<u8>>,
+}
+
 pub(crate) fn seal_catchup_chunk(
   binding: &CatchupBinding<'_>,
   recipient_public_key_base64: &str,
@@ -165,7 +171,11 @@ pub(crate) fn wrap_epoch_artifact_key(
     "membership epoch artifact key must contain exactly 32 bytes"
   );
   let aad = binding.additional_data()?;
-  let (ephemeral_public_key, nonce, ciphertext) = seal_x25519(
+  let SealedX25519 {
+    ephemeral_public_key,
+    nonce,
+    ciphertext,
+  } = seal_x25519(
     recipient_public_key_base64,
     Zeroizing::new(artifact_key.to_vec()),
     &aad,
@@ -217,7 +227,7 @@ fn seal_x25519(
   aad: &[u8],
   domain: &[u8],
   label: &str,
-) -> anyhow::Result<([u8; 32], [u8; 12], Zeroizing<Vec<u8>>)> {
+) -> anyhow::Result<SealedX25519> {
   let recipient_public_key = base64::engine::general_purpose::STANDARD
     .decode(recipient_public_key_base64)
     .with_context(|| format!("{label} recipient X25519 public key is not base64"))?;
@@ -257,7 +267,11 @@ fn seal_x25519(
   cipher
     .seal_in_place_append_tag(nonce, aad, &mut ciphertext)
     .map_err(|()| anyhow::anyhow!("failed to encrypt {label}"))?;
-  Ok((ephemeral_public_key, nonce, ciphertext))
+  Ok(SealedX25519 {
+    ephemeral_public_key,
+    nonce,
+    ciphertext,
+  })
 }
 
 fn open_x25519(
