@@ -43,6 +43,111 @@ fn secret_reference_activation_derives_exact_cluster_authorization() {
 }
 
 #[test]
+fn membership_mutations_derive_exact_shared_staged_authorization() {
+  let epoch = format!("sha256:{}", "a".repeat(64));
+  let cases = [
+    (
+      "/admin/v1/membership/transitions",
+      r#"{"version":1,"kind":"initialize","expected_active_epoch":null,"member":null}"#.to_string(),
+      "membership:Propose",
+      "membership/current".to_string(),
+    ),
+    (
+      "/admin/v1/membership/transitions/join-1/activate",
+      format!(r#"{{"version":1,"transition_id":"join-1","expected_target_epoch":"{epoch}"}}"#),
+      "membership:Activate",
+      "membership/transition/join-1".to_string(),
+    ),
+    (
+      "/admin/v1/membership/transitions/join-1/cancel",
+      format!(r#"{{"version":1,"transition_id":"join-1","expected_target_epoch":"{epoch}"}}"#),
+      "membership:Cancel",
+      "membership/transition/join-1".to_string(),
+    ),
+  ];
+
+  for (path, body, action, resource) in cases {
+    let (kind, checks, apply) = derive_operation(
+      &Method::POST,
+      path,
+      body.as_bytes(),
+      "membership-controller",
+    )
+    .expect("membership mutation should be rollout eligible");
+    assert_eq!(kind, OperationKind::SharedStaged, "{path}");
+    assert_eq!(apply, None, "{path}");
+    assert_eq!(
+      checks,
+      vec![ClusterAuthorizationCheck {
+        action: action.to_string(),
+        resource,
+      }],
+      "{path}"
+    );
+  }
+}
+
+#[test]
+fn membership_derivation_keeps_non_mutations_and_malformed_routes_fail_closed() {
+  let epoch = format!("sha256:{}", "a".repeat(64));
+  let proposal = r#"{"version":1,"kind":"initialize","expected_active_epoch":null,"member":null}"#;
+  let matching =
+    format!(r#"{{"version":1,"transition_id":"join-1","expected_target_epoch":"{epoch}"}}"#);
+  let mismatched =
+    format!(r#"{{"version":1,"transition_id":"join-2","expected_target_epoch":"{epoch}"}}"#);
+  let cases = [
+    (Method::GET, "/admin/v1/membership", b"".as_slice()),
+    (
+      Method::GET,
+      "/admin/v1/membership/transitions",
+      proposal.as_bytes(),
+    ),
+    (
+      Method::POST,
+      "/admin/v1/membership/transitions/join-1/readiness",
+      b"{}".as_slice(),
+    ),
+    (
+      Method::GET,
+      "/admin/v1/membership/transitions/join-1/catchup",
+      b"".as_slice(),
+    ),
+    (
+      Method::POST,
+      "/admin/v1/membership/transitions//activate",
+      matching.as_bytes(),
+    ),
+    (
+      Method::POST,
+      "/admin/v1/membership/transitions/join-1/nested/activate",
+      matching.as_bytes(),
+    ),
+    (
+      Method::POST,
+      "/admin/v1/membership/unknown",
+      b"{}".as_slice(),
+    ),
+    (
+      Method::POST,
+      "/admin/v1/membership/transitions/join-1/activate",
+      mismatched.as_bytes(),
+    ),
+    (
+      Method::POST,
+      "/admin/v1/membership/transitions/join-1/cancel",
+      mismatched.as_bytes(),
+    ),
+  ];
+
+  for (method, path, body) in cases {
+    assert!(
+      derive_operation(&method, path, body, "membership-controller").is_err(),
+      "unexpectedly admitted {method} {path}"
+    );
+  }
+}
+
+#[test]
 fn secret_reference_apply_evidence_must_match_durable_validation() {
   let operation = ValidatedOperation {
     kind: OperationKind::SecretReference,

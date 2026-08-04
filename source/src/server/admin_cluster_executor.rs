@@ -590,7 +590,11 @@ fn derive_operation(
       secret_reference::authorization_checks(body, &mut checks)?;
       (OperationKind::SecretReference, None)
     }
-    value if value.starts_with("/admin/v1/ipm/") || value.starts_with("/admin/v1/break-glass/") => {
+    value
+      if value.starts_with("/admin/v1/ipm/")
+        || value.starts_with("/admin/v1/break-glass/")
+        || value.starts_with("/admin/v1/membership/") =>
+    {
       let (_, derived) = decode_shared_operation(method, value, body, principal)?;
       checks = derived;
       (OperationKind::SharedStaged, None)

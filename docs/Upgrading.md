@@ -728,8 +728,21 @@ and replace the binary and configuration together, or first switch to
 old binary, upgrade every member, and only then restore selective mode with all
 twelve identifiers. Use the same `durable_required` bridge before rolling back
 to an earlier binary; never bridge through `best_effort`. Fixed membership
-remains the default, and this audit-classification correction changes no Admin
-wire shape, native configuration schema epoch, or persisted-state format.
+remains the default.
+
+The initial post-beta.2 staged-membership implementation advertised the three
+protected transition writes above but rejected them during cluster operation
+reconstruction before admission. Corrected binaries route the exact proposal,
+one-segment activation, and one-segment cancellation `POST` requests through
+shared-staged validation; readiness, catch-up and status reads, wrong methods,
+arbitrary membership paths, mismatched transition IDs, and malformed nested
+paths remain rejected. Keep protected membership writes quiesced until every
+active Admin-cluster member runs a corrected binary because an older member
+cannot validate or acknowledge the command. Complete or cancel any pending
+transition before rolling a member back; restoring an affected binary restores
+the fail-closed rejection. These audit and route-classification corrections
+change no Admin wire shape, native configuration schema epoch, or persisted-state
+format.
 
 Neither the immutable `0.7.0` tag nor `0.7.1-beta.1` is a deployable upgrade
 target. Both failed exact-revision release-contract validation before draft
