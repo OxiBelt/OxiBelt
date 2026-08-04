@@ -1,0 +1,1245 @@
+#!/usr/bin/env bash
+# Exercise the complete edge-secure-medium v2 Helm deployment and its
+# credential-free, digest-bound validating admission path. Local runs use an
+# isolated rootless Minikube profile by default; CI selects the Kind adapter.
+set -euo pipefail
+
+umask 077
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/../.." && pwd)"
+chart_dir="${repo_root}/deploy/helm/oxibelt"
+profile_values="${chart_dir}/examples/edge-secure-medium-v2-values.yaml"
+artifact_validator="${repo_root}/tests/scripts/validate-ci-image-artifact.py"
+artifact_builder="${repo_root}/tests/scripts/build-docker-image-artifact.sh"
+temp_root="${TMPDIR:-/tmp}"
+provider="${OXIBELT_KUBERNETES_PROVIDER:-minikube}"
+timeout_seconds="${OXIBELT_ADMISSION_TIMEOUT_SECONDS:-600}"
+kind_node_image="${OXIBELT_ADMISSION_KIND_NODE_IMAGE:-kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256}"
+minikube_kubernetes_version="${OXIBELT_ADMISSION_MINIKUBE_KUBERNETES_VERSION:-v1.34.10}"
+strict_artifact_dir="${OXIBELT_ADMISSION_STRICT_ARTIFACT_DIR:-}"
+tools_artifact_dir="${OXIBELT_ADMISSION_TOOLS_ARTIFACT_DIR:-}"
+fixture_a_input="${OXIBELT_ADMISSION_FIXTURE_A_DIR:-}"
+fixture_b_input="${OXIBELT_ADMISSION_FIXTURE_B_DIR:-}"
+receipt_output="${OXIBELT_ADMISSION_RECEIPT_OUTPUT:-}"
+
+rust_builder_image="rust:1.97.1-trixie@sha256:1bcff4befb740599103a2c7cb51058e14479b2e35e3a34a3f0dc4ede09927488"
+node_builder_image="node:24-alpine3.24@sha256:f70403e87646dc51b45295f4b8b70cdad0b63d2297c4c9899119b03f7af7a6b3"
+runtime_image="alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+
+work_dir=""
+run_id=""
+cluster_name=""
+namespace=""
+release_name=""
+kube_context=""
+cluster_attempted=0
+cluster_created=0
+port_forward_pid=""
+rotation_probe_pid=""
+bundle_switch_probe_pid=""
+tools_extract_container=""
+tools_extract_container_created=0
+strict_source_image="oxibelt-dataplane-strict:alpine-musl-amd64"
+tools_source_image="oxibelt-tools:alpine-musl-amd64"
+strict_source_previous_id=""
+tools_source_previous_id=""
+strict_loaded_id=""
+tools_loaded_id=""
+strict_source_touched=0
+tools_source_touched=0
+artifact_source_dirty=""
+artifact_build_kind=""
+strict_unique_image=""
+tools_unique_image=""
+strict_unique_image_created=0
+tools_unique_image_created=0
+image_lock_dir="/tmp/oxibelt-admission-image-lock-${EUID}"
+strict_digest=""
+tools_digest=""
+source_revision=""
+source_tree=""
+api_server_source_cidrs=""
+filesystem_manifest_digest=""
+fixture_a=""
+fixture_b=""
+public_ca_a=""
+public_ca_b=""
+admission_tls_secret_a=""
+admission_tls_secret_b=""
+
+usage() {
+  echo "usage: $0 [--provider kind|minikube]" >&2
+}
+
+die() {
+  echo "Kubernetes supply-chain admission check: $*" >&2
+  exit 1
+}
+
+require_command() {
+  local command="$1"
+  command -v "${command}" >/dev/null 2>&1 \
+    || die "required command is unavailable: ${command}"
+}
+
+kube() {
+  kubectl --context "${kube_context}" "$@"
+}
+
+wait_for() {
+  local description="$1"
+  shift
+  local deadline=$((SECONDS + timeout_seconds))
+  until "$@"; do
+    if ((SECONDS >= deadline)); then
+      die "timed out waiting for ${description}"
+    fi
+    sleep 1
+  done
+}
+
+stop_port_forward() {
+  if [[ -n "${port_forward_pid}" && "${port_forward_pid}" =~ ^[1-9][0-9]*$ ]]; then
+    kill "${port_forward_pid}" >/dev/null 2>&1 || true
+    wait "${port_forward_pid}" >/dev/null 2>&1 || true
+  fi
+  port_forward_pid=""
+}
+
+stop_rotation_probe() {
+  if [[ -n "${rotation_probe_pid}" && "${rotation_probe_pid}" =~ ^[1-9][0-9]*$ ]]; then
+    rm -f -- "${work_dir}/rotation-probe.running"
+    wait "${rotation_probe_pid}" >/dev/null 2>&1 || true
+  fi
+  rotation_probe_pid=""
+}
+
+stop_bundle_switch_probe() {
+  if [[ -n "${bundle_switch_probe_pid}" && "${bundle_switch_probe_pid}" =~ ^[1-9][0-9]*$ ]]; then
+    rm -f -- "${work_dir}/bundle-switch-probe.running"
+    wait "${bundle_switch_probe_pid}" >/dev/null 2>&1 || true
+  fi
+  bundle_switch_probe_pid=""
+}
+
+kind_cluster_is_owned() {
+  local node owner
+  local -a nodes=()
+  mapfile -t nodes < <(kind get nodes --name "${cluster_name}" 2>/dev/null)
+  ((${#nodes[@]} == 3)) || return 1
+  for node in "${nodes[@]}"; do
+    case "${node}" in
+      "${cluster_name}"-control-plane|"${cluster_name}"-worker|"${cluster_name}"-worker2)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    owner="$(docker container inspect \
+      --format '{{ index .Config.Labels "io.x-k8s.kind.cluster" }}' \
+      "${node}" 2>/dev/null)" || return 1
+    [[ "${owner}" == "${cluster_name}" ]] || return 1
+  done
+}
+
+kind_cluster_cleanup_is_safe() {
+  local node owner
+  local -a nodes=()
+  [[ "${cluster_name}" =~ ^oxibelt-admission-kind-[a-f0-9]{16}$ ]] || return 1
+  kind get clusters 2>/dev/null | grep -Fqx "${cluster_name}" || return 1
+  mapfile -t nodes < <(kind get nodes --name "${cluster_name}" 2>/dev/null)
+  ((${#nodes[@]} > 0)) || return 1
+  for node in "${nodes[@]}"; do
+    case "${node}" in
+      "${cluster_name}"-control-plane|"${cluster_name}"-worker|"${cluster_name}"-worker2)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    owner="$(docker container inspect \
+      --format '{{ index .Config.Labels "io.x-k8s.kind.cluster" }}' \
+      "${node}" 2>/dev/null)" || return 1
+    [[ "${owner}" == "${cluster_name}" ]] || return 1
+  done
+}
+
+diagnose() {
+  set +e
+  [[ -n "${kube_context}" ]] || return 0
+  echo "Supply-chain admission diagnostics for ${provider}/${cluster_name}/${namespace}:" >&2
+  kube get nodes -o wide >&2
+  kube -n "${namespace}" get deployments,replicasets,pods,services,endpoints,networkpolicies,pdb \
+    -o wide --ignore-not-found >&2
+  kube get validatingwebhookconfigurations \
+    -l "app.kubernetes.io/instance=${release_name}" --ignore-not-found >&2
+  kube -n "${namespace}" get events --sort-by=.metadata.creationTimestamp >&2
+  kube -n "${namespace}" logs -l "app.kubernetes.io/name=oxibelt-admission" \
+    --all-containers=true --prefix --tail=200 >&2
+  kube -n "${namespace}" logs -l "app.kubernetes.io/name=oxibelt-admission" \
+    --all-containers=true --prefix --previous --tail=200 >&2
+}
+
+restore_source_image() {
+  local image="$1"
+  local previous_id="$2"
+  local expected_id="$3"
+  local current_id
+  current_id="$(docker image inspect --format '{{.Id}}' "${image}" 2>/dev/null || true)"
+  if [[ -z "${expected_id}" || "${current_id}" != "${expected_id}" ]]; then
+    echo "refusing to restore Docker image tag without exact ownership: ${image}" >&2
+    return 1
+  fi
+  if [[ -n "${previous_id}" ]]; then
+    docker image tag "${previous_id}" "${image}" >/dev/null
+  else
+    docker image rm --no-prune "${image}" >/dev/null
+  fi
+}
+
+cleanup() {
+  local status="$?"
+  set +e
+  stop_bundle_switch_probe
+  stop_rotation_probe
+  stop_port_forward
+
+  if ((status != 0)); then
+    diagnose
+  fi
+  if ((tools_extract_container_created == 1)) && [[ -n "${tools_extract_container}" ]]; then
+    docker container rm --force "${tools_extract_container}" >/dev/null 2>&1 || true
+  fi
+  if ((cluster_attempted == 1)); then
+    case "${provider}" in
+      kind)
+        if kind_cluster_cleanup_is_safe; then
+          kind delete cluster --name "${cluster_name}" >/dev/null 2>&1 || true
+        elif ((cluster_created == 1)) \
+          || kind get clusters 2>/dev/null | grep -Fqx "${cluster_name}"; then
+          echo "refusing to delete Kind cluster without exact ownership proof: ${cluster_name}" >&2
+        fi
+        ;;
+      minikube)
+        case "${cluster_name}" in
+          oxibelt-admission-minikube-[a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9][a-f0-9])
+            minikube delete --profile "${cluster_name}" >/dev/null 2>&1 || true
+            ;;
+          *)
+            echo "refusing to delete unexpected Minikube profile: ${cluster_name}" >&2
+            ;;
+        esac
+        ;;
+    esac
+  fi
+
+  if ((strict_unique_image_created == 1)) && [[ -n "${strict_unique_image}" ]]; then
+    docker image rm --no-prune "${strict_unique_image}" >/dev/null 2>&1 || true
+  fi
+  if ((tools_unique_image_created == 1)) && [[ -n "${tools_unique_image}" ]]; then
+    docker image rm --no-prune "${tools_unique_image}" >/dev/null 2>&1 || true
+  fi
+  if ((strict_source_touched == 1)); then
+    restore_source_image \
+      "${strict_source_image}" "${strict_source_previous_id}" "${strict_loaded_id}" || true
+    if [[ -n "${strict_loaded_id}" && "${strict_loaded_id}" != "${strict_source_previous_id}" ]]; then
+      docker image rm --no-prune "${strict_loaded_id}" >/dev/null 2>&1 || true
+    fi
+  fi
+  if ((tools_source_touched == 1)); then
+    restore_source_image \
+      "${tools_source_image}" "${tools_source_previous_id}" "${tools_loaded_id}" || true
+    if [[ -n "${tools_loaded_id}" && "${tools_loaded_id}" != "${tools_source_previous_id}" ]]; then
+      docker image rm --no-prune "${tools_loaded_id}" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  case "${work_dir}" in
+    "${temp_root%/}"/oxibelt-kubernetes-admission.*)
+      rm -rf -- "${work_dir}"
+      ;;
+    "")
+      ;;
+    *)
+      echo "refusing to remove unexpected admission work directory: ${work_dir}" >&2
+      ;;
+  esac
+  exit "${status}"
+}
+trap cleanup EXIT
+
+while (($# > 0)); do
+  case "$1" in
+    --provider)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      provider="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+case "${provider}" in
+  kind|minikube)
+    ;;
+  *)
+    die "provider must be kind or minikube"
+    ;;
+esac
+if [[ ! "${timeout_seconds}" =~ ^[1-9][0-9]{1,3}$ ]] \
+  || ((timeout_seconds < 120 || timeout_seconds > 3600)); then
+  die "OXIBELT_ADMISSION_TIMEOUT_SECONDS must be between 120 and 3600"
+fi
+case "${kind_node_image}" in
+  kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256|\
+  kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95|\
+  kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5)
+    ;;
+  *)
+    die "unapproved Kind node image: ${kind_node_image}"
+    ;;
+esac
+[[ "${minikube_kubernetes_version}" =~ ^v1\.(34|35|36)\.[0-9]+$ ]] \
+  || die "Minikube Kubernetes version must be within the supported 1.34-1.36 range"
+
+for command in awk base64 cargo cat cp curl cut date dirname docker flock git grep head helm jq kubectl mktemp openssl python3 sed sha256sum stat tr uname; do
+  require_command "${command}"
+done
+case "${provider}" in
+  kind) require_command kind ;;
+  minikube) require_command minikube ;;
+esac
+[[ -f "${profile_values}" && -f "${artifact_validator}" && -x "${artifact_builder}" ]] \
+  || die "required chart or artifact helpers are unavailable"
+[[ "$(uname -m)" == "x86_64" ]] \
+  || die "the current live harness consumes native AMD64 artifacts and requires an x86_64 host"
+
+docker version --format '{{.Server.Version}}' >/dev/null
+if [[ "${provider}" == "minikube" ]]; then
+  docker info --format '{{json .SecurityOptions}}' | grep -Fq 'name=rootless' \
+    || die "Minikube admission qualification requires the host rootless Docker service"
+fi
+
+source_revision="$(git -C "${repo_root}" rev-parse HEAD)"
+source_tree="$(git -C "${repo_root}" rev-parse 'HEAD^{tree}')"
+[[ "${source_revision}" =~ ^[0-9a-f]{40}$ && "${source_tree}" =~ ^[0-9a-f]{40}$ ]] \
+  || die "current Git revision and source tree must be full lowercase hashes"
+
+work_dir="$(mktemp -d "${temp_root%/}/oxibelt-kubernetes-admission.XXXXXX")"
+run_id="$(printf '%s' "${provider}:${BASHPID}:${RANDOM}:$(date +%s%N)" | sha256sum)"
+run_id="${run_id:0:16}"
+[[ "${run_id}" =~ ^[a-f0-9]{16}$ ]] || die "could not derive a bounded run ID"
+cluster_name="oxibelt-admission-${provider}-${run_id}"
+namespace="oxibelt-admission-${run_id}"
+release_name="obp204-${run_id}"
+export KUBECONFIG="${work_dir}/kubeconfig"
+
+if [[ -z "${strict_artifact_dir}" || -z "${tools_artifact_dir}" ]]; then
+  [[ -z "${strict_artifact_dir}" && -z "${tools_artifact_dir}" ]] \
+    || die "strict and tools artifact directories must be supplied together"
+  mkdir -p "${work_dir}/strict-artifact" "${work_dir}/tools-artifact"
+  "${artifact_builder}" linux/amd64 amd64 "${work_dir}/strict-artifact" dataplane-strict
+  "${artifact_builder}" linux/amd64 amd64 "${work_dir}/tools-artifact" tools
+  strict_artifact_dir="${work_dir}/strict-artifact"
+  tools_artifact_dir="${work_dir}/tools-artifact"
+else
+  [[ "${strict_artifact_dir}" == /* && "${tools_artifact_dir}" == /* \
+    && ! -L "${strict_artifact_dir}" && ! -L "${tools_artifact_dir}" ]] \
+    || die "artifact directories must be absolute non-symlink paths"
+fi
+
+validate_artifact() {
+  local role="$1"
+  local prefix="$2"
+  local directory="$3"
+  local archive="${directory%/}/${prefix}-alpine-musl-amd64.tar"
+  local metadata="${directory%/}/${prefix}-alpine-musl-amd64-build-metadata.json"
+  local contract="${directory%/}/${prefix}-alpine-musl-amd64-artifact-contract.json"
+  local expected_version expected_ref expected_source_ref expected_dirty expected_kind expected_created
+
+  [[ -f "${archive}" && -f "${metadata}" && -f "${contract}" ]] \
+    || die "${role} image artifact is incomplete under ${directory}"
+  jq -e \
+    --arg role "${role}" \
+    --arg revision "${source_revision}" \
+    --arg tree "${source_tree}" '
+      .schema == 3
+        and .role == $role
+        and .artifact_arch == "amd64"
+        and .platform == "linux/amd64"
+        and .revision == $revision
+        and .source_tree == $tree
+        and .source == "https://github.com/OxiBelt/OxiBelt"
+        and (.source_dirty == "clean" or .source_dirty == "dirty")
+        and (.build_kind == "git_development" or .build_kind == "tagged_development")
+        and (.image_digest | test("^sha256:[0-9a-f]{64}$"))
+        and .descriptor_digest == .image_digest
+    ' "${contract}" >/dev/null \
+    || die "${role} artifact contract does not match this source revision and role"
+  expected_version="$(jq -r '.version' "${contract}")"
+  expected_ref="$(jq -r '.ref_name' "${contract}")"
+  expected_source_ref="$(jq -r '.source_ref' "${contract}")"
+  expected_dirty="$(jq -r '.source_dirty' "${contract}")"
+  if [[ -z "${artifact_source_dirty}" ]]; then
+    artifact_source_dirty="${expected_dirty}"
+  elif [[ "${artifact_source_dirty}" != "${expected_dirty}" ]]; then
+    die "strict and tools artifact contracts disagree on source dirty state"
+  fi
+  expected_kind="$(jq -r '.build_kind' "${contract}")"
+  if [[ -z "${artifact_build_kind}" ]]; then
+    artifact_build_kind="${expected_kind}"
+  elif [[ "${artifact_build_kind}" != "${expected_kind}" ]]; then
+    die "strict and tools artifact contracts disagree on build kind"
+  fi
+  expected_created="$(jq -r '.created' "${contract}")"
+  python3 "${artifact_validator}" validate \
+    --image-tar "${archive}" \
+    --build-metadata "${metadata}" \
+    --contract "${contract}" \
+    --role "${role}" \
+    --artifact-arch amd64 \
+    --expected-revision "${source_revision}" \
+    --expected-source https://github.com/OxiBelt/OxiBelt \
+    --expected-source-tree "${source_tree}" \
+    --expected-version "${expected_version}" \
+    --expected-ref-name "${expected_ref}" \
+    --expected-source-ref "${expected_source_ref}" \
+    --expected-source-dirty "${expected_dirty}" \
+    --expected-build-kind "${expected_kind}" \
+    --expected-created "${expected_created}" \
+    --rust-builder-image "${rust_builder_image}" \
+    --node-builder-image "${node_builder_image}" \
+    --runtime-image "${runtime_image}" \
+    --repo-root "${repo_root}"
+}
+
+validate_artifact dataplane-strict oxibelt-dataplane-strict "${strict_artifact_dir}"
+validate_artifact tools oxibelt-tools "${tools_artifact_dir}"
+strict_digest="$(jq -r '.image_digest' \
+  "${strict_artifact_dir%/}/oxibelt-dataplane-strict-alpine-musl-amd64-artifact-contract.json")"
+tools_digest="$(jq -r '.image_digest' \
+  "${tools_artifact_dir%/}/oxibelt-tools-alpine-musl-amd64-artifact-contract.json")"
+[[ "${strict_digest}" =~ ^sha256:[0-9a-f]{64}$ && "${tools_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+  || die "validated artifact contracts did not expose exact image digests"
+
+if ! mkdir -m 0700 "${image_lock_dir}" 2>/dev/null; then
+  [[ -d "${image_lock_dir}" && ! -L "${image_lock_dir}" ]] \
+    || die "admission image lock directory is not a real directory"
+fi
+[[ "$(stat -c '%u:%a' "${image_lock_dir}")" == "${EUID}:700" ]] \
+  || die "admission image lock directory must be owned by the current user with mode 0700"
+exec 9>"${image_lock_dir}/image-tags.lock"
+flock --wait "${timeout_seconds}" 9 \
+  || die "timed out waiting for exclusive admission image-tag ownership"
+strict_source_previous_id="$(docker image inspect --format '{{.Id}}' "${strict_source_image}" 2>/dev/null || true)"
+tools_source_previous_id="$(docker image inspect --format '{{.Id}}' "${tools_source_image}" 2>/dev/null || true)"
+strict_source_touched=1
+docker load --input "${strict_artifact_dir%/}/oxibelt-dataplane-strict-alpine-musl-amd64.tar" >/dev/null
+strict_loaded_id="$(docker image inspect --format '{{.Id}}' "${strict_source_image}")"
+tools_source_touched=1
+docker load --input "${tools_artifact_dir%/}/oxibelt-tools-alpine-musl-amd64.tar" >/dev/null
+tools_loaded_id="$(docker image inspect --format '{{.Id}}' "${tools_source_image}")"
+strict_unique_image="ghcr.io/oxibelt/oxibelt-dataplane-strict:obp204-${run_id}"
+tools_unique_image="ghcr.io/oxibelt/oxibelt-tools:obp204-${run_id}"
+for image in "${strict_unique_image}" "${tools_unique_image}"; do
+  if docker image inspect "${image}" >/dev/null 2>&1; then
+    die "refusing to overwrite unique local image tag: ${image}"
+  fi
+done
+docker image tag "${strict_source_image}" "${strict_unique_image}"
+strict_unique_image_created=1
+docker image tag "${tools_source_image}" "${tools_unique_image}"
+tools_unique_image_created=1
+restore_source_image \
+  "${strict_source_image}" "${strict_source_previous_id}" "${strict_loaded_id}" \
+  || die "strict source image tag changed concurrently"
+strict_source_touched=0
+restore_source_image \
+  "${tools_source_image}" "${tools_source_previous_id}" "${tools_loaded_id}" \
+  || die "tools source image tag changed concurrently"
+tools_source_touched=0
+flock --unlock 9
+
+case "${provider}" in
+  kind)
+    if kind get clusters | grep -Fqx "${cluster_name}"; then
+      die "refusing to reuse existing Kind cluster ${cluster_name}"
+    fi
+    cat >"${work_dir}/kind.yaml" <<'KIND'
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+- role: worker
+- role: worker
+KIND
+    cluster_attempted=1
+    kind create cluster --name "${cluster_name}" --image "${kind_node_image}" \
+      --config "${work_dir}/kind.yaml" --wait "${timeout_seconds}s"
+    cluster_created=1
+    kube_context="kind-${cluster_name}"
+    kind_cluster_is_owned || die "Kind cluster ownership or topology did not match this run"
+    kind load docker-image --name "${cluster_name}" "${strict_unique_image}" "${tools_unique_image}"
+    ;;
+  minikube)
+    minikube_root_compatibility=()
+    if [[ "${EUID}" -eq 0 ]]; then
+      minikube_root_compatibility=(--force)
+    fi
+    export MINIKUBE_HOME="${work_dir}/minikube-home"
+    mkdir -p "${MINIKUBE_HOME}"
+    if minikube profile list -o json 2>/dev/null \
+      | jq -e --arg profile "${cluster_name}" 'any((.valid // [])[]?; .Name == $profile)' >/dev/null; then
+      die "refusing to reuse existing Minikube profile ${cluster_name}"
+    fi
+    cluster_attempted=1
+    minikube start --profile "${cluster_name}" --driver=docker --container-runtime=containerd \
+      --nodes=3 --kubernetes-version="${minikube_kubernetes_version}" \
+      --wait=all --wait-timeout="${timeout_seconds}s" \
+      "${minikube_root_compatibility[@]}"
+    cluster_created=1
+    kube_context="${cluster_name}"
+    minikube image load --profile "${cluster_name}" "${strict_unique_image}"
+    minikube image load --profile "${cluster_name}" "${tools_unique_image}"
+    ;;
+esac
+
+kube wait --for=condition=Ready node --all --timeout="${timeout_seconds}s"
+kube get nodes -o json \
+  | jq -e '.items | length == 3
+      and all(.[]; any(.status.conditions[]?;
+        .type == "Ready" and .status == "True"))' >/dev/null \
+  || die "live admission qualification requires exactly three Ready Kubernetes nodes"
+
+verify_node_images() {
+  local node image_json
+  case "${provider}" in
+    kind)
+      while IFS= read -r node; do
+        image_json="$(docker exec "${node}" crictl images -o json)"
+        jq -e \
+          --arg strict_tag "${strict_unique_image}" \
+          --arg strict_digest "ghcr.io/oxibelt/oxibelt-dataplane-strict@${strict_digest}" \
+          --arg tools_tag "${tools_unique_image}" \
+          --arg tools_digest "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '
+            any(.images[]?; (.repoTags // []) | index($strict_tag))
+              and any(.images[]?; (.repoDigests // []) | index($strict_digest))
+              and any(.images[]?; (.repoTags // []) | index($tools_tag))
+              and any(.images[]?; (.repoDigests // []) | index($tools_digest))
+          ' >/dev/null <<<"${image_json}" \
+          || die "Kind node ${node} did not retain exact official image digests"
+      done < <(kind get nodes --name "${cluster_name}")
+      ;;
+    minikube)
+      while IFS= read -r node; do
+        image_json="$(minikube ssh --profile "${cluster_name}" --node "${node}" -- \
+          sudo crictl images -o json)"
+        jq -e \
+          --arg strict_digest "ghcr.io/oxibelt/oxibelt-dataplane-strict@${strict_digest}" \
+          --arg tools_digest "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '
+            any(.images[]?; (.repoDigests // []) | index($strict_digest))
+              and any(.images[]?; (.repoDigests // []) | index($tools_digest))
+          ' >/dev/null <<<"${image_json}" \
+          || die "Minikube node ${node} did not retain exact official image digests"
+      done < <(kube get nodes -o json | jq -r '.items[].metadata.name')
+      ;;
+  esac
+}
+verify_node_images
+
+kube create namespace "${namespace}" >/dev/null
+kube label namespace "${namespace}" \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/warn=restricted >/dev/null
+
+api_server_source_cidrs="$(kube get nodes -l node-role.kubernetes.io/control-plane -o json \
+  | jq -c '[.items[].status.addresses[] | select(.type == "InternalIP") | .address
+    | if contains(":") then . + "/128" else . + "/32" end] | unique')"
+jq -e 'length >= 1 and length <= 16 and all(.[]; test("/32$|/128$"))' \
+  >/dev/null <<<"${api_server_source_cidrs}" \
+  || die "could not derive exact API-server host prefixes"
+
+generate_ca_and_server() {
+  local suffix="$1"
+  local service_dns="oxibelt-admission.${namespace}.svc"
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+    -subj "/CN=obp204-admission-ca-${suffix}" \
+    -keyout "${work_dir}/admission-ca-${suffix}.key" \
+    -out "${work_dir}/admission-ca-${suffix}.crt" >/dev/null 2>&1
+  openssl req -new -newkey rsa:2048 -sha256 -nodes \
+    -subj "/CN=${service_dns}" \
+    -keyout "${work_dir}/admission-${suffix}.key" \
+    -out "${work_dir}/admission-${suffix}.csr" >/dev/null 2>&1
+  cat >"${work_dir}/admission-${suffix}.ext" <<EOF
+subjectAltName=DNS:${service_dns},DNS:${service_dns}.cluster.local
+extendedKeyUsage=serverAuth
+keyUsage=digitalSignature,keyEncipherment
+EOF
+  openssl x509 -req -sha256 -days 1 \
+    -in "${work_dir}/admission-${suffix}.csr" \
+    -CA "${work_dir}/admission-ca-${suffix}.crt" \
+    -CAkey "${work_dir}/admission-ca-${suffix}.key" \
+    -CAcreateserial -extfile "${work_dir}/admission-${suffix}.ext" \
+    -out "${work_dir}/admission-${suffix}.crt" >/dev/null 2>&1
+}
+generate_ca_and_server a
+generate_ca_and_server b
+public_ca_a="$(openssl base64 -A -in "${work_dir}/admission-ca-a.crt")"
+public_ca_b="$(openssl base64 -A -in "${work_dir}/admission-ca-b.crt")"
+[[ -n "${public_ca_a}" && -n "${public_ca_b}" ]] || die "admission CA encoding failed"
+admission_tls_secret_a="oxibelt-admission-tls-a-${run_id}"
+admission_tls_secret_b="oxibelt-admission-tls-b-${run_id}"
+kube -n "${namespace}" create secret tls "${admission_tls_secret_a}" \
+  --cert "${work_dir}/admission-a.crt" --key "${work_dir}/admission-a.key" >/dev/null
+kube -n "${namespace}" create secret tls "${admission_tls_secret_b}" \
+  --cert "${work_dir}/admission-b.crt" --key "${work_dir}/admission-b.key" >/dev/null
+
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+  -subj '/CN=edge.example.test' -addext 'subjectAltName=DNS:edge.example.test' \
+  -keyout "${work_dir}/public-tls.key" -out "${work_dir}/public-tls.crt" >/dev/null 2>&1
+openssl rand -base64 64 >"${work_dir}/quic-host-key.b64"
+kube -n "${namespace}" create secret tls oxibelt-public-tls-v1 \
+  --cert "${work_dir}/public-tls.crt" --key "${work_dir}/public-tls.key" >/dev/null
+kube -n "${namespace}" create secret generic oxibelt-quic-host-key-v1 \
+  --from-file="quic-host-key.b64=${work_dir}/quic-host-key.b64" >/dev/null
+
+jq -n --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '{
+  schemaVersion: 1,
+  auxiliaryContainers: [
+    {class: "regular", name: "obp204-regular", imageReference: $tools},
+    {class: "init", name: "obp204-init", imageReference: $tools},
+    {class: "native-sidecar", name: "obp204-native-sidecar", imageReference: $tools},
+    {class: "ephemeral", name: "obp204-ephemeral", imageReference: $tools}
+  ]
+}' >"${work_dir}/workload-policy.json"
+
+validate_fixture() {
+  local directory="$1"
+  local expected_key="$2"
+  local metadata_payload_digest
+  [[ "${expected_key}" =~ ^obp204-live-test-[A-Za-z0-9._-]+$ ]] \
+    || die "test fixture key ID must remain visibly test-only"
+  for file in bundle.json public-key.b64 revocations.json metadata.json; do
+    [[ -f "${directory%/}/${file}" && ! -L "${directory%/}/${file}" ]] \
+      || die "test admission fixture is missing regular file ${file}"
+  done
+  [[ "$(stat -c '%s' "${directory%/}/bundle.json")" -gt 0 \
+    && "$(stat -c '%s' "${directory%/}/bundle.json")" -le 262144 ]] \
+    || die "test admission bundle exceeds its 256 KiB input bound"
+  [[ "$(stat -c '%s' "${directory%/}/revocations.json")" -gt 0 \
+    && "$(stat -c '%s' "${directory%/}/revocations.json")" -le 262144 ]] \
+    || die "test admission revocation set exceeds its 256 KiB input bound"
+  [[ "$(stat -c '%s' "${directory%/}/metadata.json")" -gt 0 \
+    && "$(stat -c '%s' "${directory%/}/metadata.json")" -le 16384 ]] \
+    || die "test admission metadata exceeds its 16 KiB input bound"
+  [[ "$(stat -c '%s' "${directory%/}/public-key.b64")" -eq 45 ]] \
+    || die "test fixture public key must be exactly one bounded encoded key line"
+  grep -Eq '^[A-Za-z0-9+/]{43}=$' "${directory%/}/public-key.b64" \
+    || die "test fixture public key is not one raw Ed25519 key"
+  jq -e --arg key "${expected_key}" \
+    --arg primary "ghcr.io/oxibelt/oxibelt-dataplane-strict@${strict_digest}" \
+    --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '
+      .syntheticTestFixture == true
+        and .keyId == $key
+        and (.payloadDigest | test("^sha256:[0-9a-f]{64}$"))
+        and .primaryImageReference == $primary
+        and .toolsImageReference == $tools
+        and (.verifiedAt | type == "number")
+        and (.expiresAt | type == "number")
+        and .expiresAt > .verifiedAt
+        and (.expiresAt - .verifiedAt) <= 1800
+    ' "${directory%/}/metadata.json" >/dev/null \
+    || die "test admission fixture metadata is invalid"
+  metadata_payload_digest="$(jq -r '.payloadDigest' "${directory%/}/metadata.json")"
+  [[ "${metadata_payload_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+    || die "test fixture metadata payload digest is invalid"
+  jq -e --arg digest "${strict_digest}" --arg key "${expected_key}" \
+    --arg payload_digest "${metadata_payload_digest}" '
+      .payload.artifact.repository == "ghcr.io/oxibelt/oxibelt-dataplane-strict"
+        and .payload.artifact.role == "dataplane-strict"
+        and .payload.artifact.digest == $digest
+        and .signature.keyId == $key
+        and .signature.payloadSha256 == $payload_digest
+  ' "${directory%/}/bundle.json" >/dev/null \
+    || die "test admission bundle identity does not match its metadata"
+  jq -e '.schemaVersion == 1 and .revocations == []' \
+    "${directory%/}/revocations.json" >/dev/null \
+    || die "test admission revocation set must be empty"
+}
+
+emit_fixture() {
+  local directory="$1"
+  local key_id="$2"
+  mkdir -m 0700 "${directory}"
+  OXIBELT_TEST_ADMISSION_OUTPUT_DIR="${directory}" \
+  OXIBELT_TEST_ADMISSION_PRIMARY_DIGEST="${strict_digest}" \
+  OXIBELT_TEST_ADMISSION_TOOLS_DIGEST="${tools_digest}" \
+  OXIBELT_TEST_ADMISSION_SOURCE_REVISION="${source_revision}" \
+  OXIBELT_TEST_ADMISSION_VERIFICATION_TIME="$(date +%s)" \
+  OXIBELT_TEST_ADMISSION_KEY_ID="${key_id}" \
+  OXIBELT_TEST_ADMISSION_WORKLOAD_POLICY="${work_dir}/workload-policy.json" \
+    cargo test --locked -p oxibeltctl --bin oxibeltctl \
+      supply_chain_bundle::tests::emit_live_kubernetes_admission_fixture \
+      -- --ignored --exact --nocapture
+}
+
+if [[ -n "${fixture_a_input}" || -n "${fixture_b_input}" ]]; then
+  [[ -n "${fixture_a_input}" && -n "${fixture_b_input}" ]] \
+    || die "fixture A and B directories must be supplied together"
+  [[ "${fixture_a_input}" == /* && "${fixture_b_input}" == /* \
+    && ! -L "${fixture_a_input}" && ! -L "${fixture_b_input}" ]] \
+    || die "fixture input directories must be absolute non-symlink paths"
+  fixture_a="${fixture_a_input}"
+  fixture_b="${fixture_b_input}"
+else
+  fixture_a="${work_dir}/fixture-a"
+  fixture_b="${work_dir}/fixture-b"
+  emit_fixture "${fixture_a}" "obp204-live-test-a-${run_id}"
+  emit_fixture "${fixture_b}" "obp204-live-test-b-${run_id}"
+fi
+fixture_key_a="$(jq -r '.keyId' "${fixture_a%/}/metadata.json")"
+fixture_key_b="$(jq -r '.keyId' "${fixture_b%/}/metadata.json")"
+validate_fixture "${fixture_a}" "${fixture_key_a}"
+validate_fixture "${fixture_b}" "${fixture_key_b}"
+bundle_digest_a="$(jq -r '.payloadDigest' "${fixture_a%/}/metadata.json")"
+bundle_digest_b="$(jq -r '.payloadDigest' "${fixture_b%/}/metadata.json")"
+[[ "${bundle_digest_a}" != "${bundle_digest_b}" ]] \
+  || die "fixture rotation did not change the signed bundle identity"
+
+configure_helm_args() {
+  local fixture_dir="$1"
+  local admission_secret="$2"
+  local ca_bundle="$3"
+  local manifest_digest="$4"
+  local payload_digest key_id public_key
+  payload_digest="$(jq -r '.payloadDigest' "${fixture_dir%/}/metadata.json")"
+  key_id="$(jq -r '.keyId' "${fixture_dir%/}/metadata.json")"
+  public_key="$(tr -d '\n' <"${fixture_dir%/}/public-key.b64")"
+  helm_args=(
+    -f "${profile_values}"
+    --set-string "image.digest=${strict_digest}"
+    --set-string image.pullPolicy=Never
+    --set-string "supplyChainAdmission.bundle.payloadDigest=${payload_digest}"
+    --set-file "supplyChainAdmission.bundle.inline=${fixture_dir%/}/bundle.json"
+    --set-string "supplyChainAdmission.bundle.keyId=${key_id}"
+    --set-string "supplyChainAdmission.bundle.publicKeyBase64=${public_key}"
+    --set-file "supplyChainAdmission.bundle.revocations=${fixture_dir%/}/revocations.json"
+    --set-string "supplyChainAdmission.webhook.image.digest=${tools_digest}"
+    --set-string supplyChainAdmission.webhook.image.pullPolicy=Never
+    --set-string "supplyChainAdmission.webhook.tlsSecretName=${admission_secret}"
+    --set-json "supplyChainAdmission.webhook.apiServerSourceCidrs=${api_server_source_cidrs}"
+    --set-string "supplyChainAdmission.webhook.caBundle=${ca_bundle}"
+    --set-string "runtimeHardening.filesystemManifest.expectedDigest=${manifest_digest}"
+  )
+}
+
+placeholder_manifest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+configure_helm_args "${fixture_a}" "${admission_tls_secret_a}" "${public_ca_a}" "${placeholder_manifest}"
+helm template "${release_name}" "${chart_dir}" --namespace "${namespace}" \
+  --kube-version "$(kube version -o json | jq -r '.serverVersion.gitVersion' | sed 's/^v//')" \
+  "${helm_args[@]}" --show-only templates/configmap.yaml >"${work_dir}/configmap.yaml"
+awk '
+  /^  oxibelt[.]toml: \|-$/ { in_config = 1; next }
+  in_config && /^    / { sub(/^    /, ""); print; next }
+  in_config { exit }
+' "${work_dir}/configmap.yaml" >"${work_dir}/oxibelt.toml"
+[[ -s "${work_dir}/oxibelt.toml" ]] || die "could not extract rendered native configuration"
+chmod 0644 "${work_dir}/oxibelt.toml"
+mkdir -m 0755 "${work_dir}/container-config"
+mkdir -m 0755 "${work_dir}/container-config/conf.d"
+cp -- "${work_dir}/oxibelt.toml" "${work_dir}/container-config/oxibelt.toml"
+tools_extract_container="oxibelt-admission-tools-${run_id}"
+docker create --name "${tools_extract_container}" \
+  --network none \
+  --read-only \
+  --user 10001:10001 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --pids-limit 128 \
+  --entrypoint /usr/local/bin/oxibeltctl \
+  "${tools_unique_image}" \
+  config filesystem-access --file /tmp/obp204-config/oxibelt.toml \
+  --format json --show-paths >/dev/null
+tools_extract_container_created=1
+docker cp "${work_dir}/container-config" \
+  "${tools_extract_container}:/tmp/obp204-config"
+docker start --attach "${tools_extract_container}" >"${work_dir}/filesystem-manifest.json"
+[[ "$(docker container inspect --format '{{.State.ExitCode}}' "${tools_extract_container}")" == 0 ]] \
+  || die "exact tools image could not derive the filesystem manifest"
+docker container rm "${tools_extract_container}" >/dev/null
+tools_extract_container_created=0
+tools_extract_container=""
+filesystem_manifest_digest="$(jq -r '.manifest.manifest_digest' \
+  "${work_dir}/filesystem-manifest.json")"
+[[ "${filesystem_manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+  || die "exact tools image did not derive a filesystem manifest digest"
+
+configure_helm_args "${fixture_a}" "${admission_tls_secret_a}" "${public_ca_a}" \
+  "${filesystem_manifest_digest}"
+helm upgrade --install "${release_name}" "${chart_dir}" \
+  --kube-context "${kube_context}" --namespace "${namespace}" \
+  "${helm_args[@]}" --atomic --wait --timeout "${timeout_seconds}s"
+
+revision_for() {
+  local digest="$1"
+  printf 'bundle=%s\nwebhook=%s@%s' "${digest}" \
+    ghcr.io/oxibelt/oxibelt-tools "${tools_digest}" | sha256sum | cut -c1-12
+}
+revision_a="$(revision_for "${bundle_digest_a}")"
+revision_b="$(revision_for "${bundle_digest_b}")"
+[[ "${revision_a}" =~ ^[a-f0-9]{12}$ && "${revision_b}" =~ ^[a-f0-9]{12}$ \
+  && "${revision_a}" != "${revision_b}" ]] \
+  || die "could not derive distinct admission endpoint revisions"
+
+kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_a}" \
+  --timeout="${timeout_seconds}s"
+kube -n "${namespace}" rollout status deployment/oxibelt --timeout="${timeout_seconds}s"
+kube -n "${namespace}" get deployment "oxibelt-admission-${revision_a}" -o json \
+  | jq -e '.spec.replicas >= 2 and .status.readyReplicas == .spec.replicas
+    and .spec.template.spec.automountServiceAccountToken == false
+    and .spec.template.spec.containers[0].image
+      == "ghcr.io/oxibelt/oxibelt-tools@'"${tools_digest}"'"
+    and .spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true' \
+    >/dev/null || die "admission deployment did not retain its hardened exact-image contract"
+kube -n "${namespace}" get deployment oxibelt -o json \
+  | jq -e --arg digest "${bundle_digest_a}" --arg image "${strict_digest}" '
+      .status.readyReplicas == 3
+        and .spec.template.metadata.annotations["oxibelt.dev/supply-chain-bundle-digest"] == $digest
+        and .spec.template.metadata.annotations["oxibelt.dev/image-role"] == "dataplane-strict"
+        and .spec.template.spec.containers[0].image
+          == ("ghcr.io/oxibelt/oxibelt-dataplane-strict@" + $image)
+    ' >/dev/null || die "complete v2 data plane did not become ready with exact admission identity"
+mapfile -t webhook_names < <(kube get validatingwebhookconfigurations \
+  -l "app.kubernetes.io/name=oxibelt-admission,app.kubernetes.io/instance=${release_name}" \
+  -o json | jq -r '.items[].metadata.name')
+((${#webhook_names[@]} == 1)) \
+  || die "expected exactly one labeled admission webhook configuration"
+webhook_name="${webhook_names[0]}"
+kube get validatingwebhookconfiguration "${webhook_name}" -o json \
+  | jq -e '(.webhooks | length) == 1
+    and .webhooks[0].failurePolicy == "Fail"
+    and .webhooks[0].matchPolicy == "Exact"
+    and .webhooks[0].sideEffects == "None"' >/dev/null \
+  || die "live validating webhook is not fail closed and exact"
+
+"${script_dir}/check-helm-edge-secure-medium-v2.sh"
+
+port_forward_log="${work_dir}/admission-port-forward.log"
+kube -n "${namespace}" port-forward service/oxibelt-admission :443 \
+  >"${port_forward_log}" 2>&1 &
+port_forward_pid="$!"
+wait_for "admission port-forward listener" grep -Eq \
+  'Forwarding from (127[.]0[.]0[.]1|\[::1\]):[0-9]+ -> 8443' "${port_forward_log}"
+local_admission_port="$(sed -nE \
+  's/^Forwarding from (127[.]0[.]0[.]1|\[::1\]):([0-9]+) -> 8443$/\2/p' \
+  "${port_forward_log}" | head -n 1)"
+[[ "${local_admission_port}" =~ ^[1-9][0-9]{3,4}$ ]] \
+  || die "could not resolve the admission port-forward listener"
+ready_url="https://oxibelt-admission.${namespace}.svc:${local_admission_port}/readyz"
+wait_for "admission HTTPS readiness" curl --silent --show-error --fail \
+  --cacert "${work_dir}/admission-ca-a.crt" \
+  --resolve "oxibelt-admission.${namespace}.svc:${local_admission_port}:127.0.0.1" "${ready_url}"
+stop_port_forward
+
+base_pod() {
+  local name="$1"
+  local output="$2"
+  kube -n "${namespace}" get deployment oxibelt -o json \
+    | jq --arg name "${name}" '{
+        apiVersion: "v1",
+        kind: "Pod",
+        metadata: {
+          name: $name,
+          labels: .spec.template.metadata.labels,
+          annotations: .spec.template.metadata.annotations
+        },
+        spec: .spec.template.spec
+      }' >"${output}"
+}
+
+expect_admitted() {
+  local file="$1"
+  kube -n "${namespace}" create --dry-run=server -f "${file}" -o name >/dev/null
+}
+
+expect_denied() {
+  local name="$1"
+  local file="$2"
+  if kube -n "${namespace}" create --dry-run=server -f "${file}" \
+    >"${work_dir}/${name}.log" 2>&1; then
+    die "${name} unexpectedly passed live admission"
+  fi
+  grep -Fq 'SupplyChainAdmissionDenied' "${work_dir}/${name}.log" \
+    || die "${name} did not return the fixed admission denial reason"
+}
+
+base_pod obp204-exact "${work_dir}/pod-exact.json"
+expect_admitted "${work_dir}/pod-exact.json"
+jq --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '
+  def secure($name): {
+    name: $name,
+    image: $tools,
+    imagePullPolicy: "Never",
+    command: ["/usr/local/bin/oxibeltctl"],
+    args: ["--help"],
+    securityContext: {
+      allowPrivilegeEscalation: false,
+      readOnlyRootFilesystem: true,
+      capabilities: {drop: ["ALL"]}
+    }
+  };
+  .metadata.name = "obp204-all-classes"
+  | .spec.containers += [secure("obp204-regular")]
+  | .spec.initContainers = ((.spec.initContainers // [])
+      + [secure("obp204-init"), (secure("obp204-native-sidecar") + {restartPolicy: "Always"})])
+' "${work_dir}/pod-exact.json" >"${work_dir}/pod-all-classes.json"
+expect_admitted "${work_dir}/pod-all-classes.json"
+
+jq 'del(.metadata.annotations["oxibelt.dev/supply-chain-bundle-digest"])
+  | .metadata.name = "obp204-missing-bundle"' \
+  "${work_dir}/pod-exact.json" >"${work_dir}/pod-missing-bundle.json"
+expect_denied missing-bundle "${work_dir}/pod-missing-bundle.json"
+jq '.metadata.annotations["oxibelt.dev/supply-chain-bundle-digest"] = "sha256:'"$(printf 'f%.0s' {1..64})"'"
+  | .metadata.name = "obp204-wrong-bundle"' \
+  "${work_dir}/pod-exact.json" >"${work_dir}/pod-wrong-bundle.json"
+expect_denied wrong-bundle "${work_dir}/pod-wrong-bundle.json"
+jq '.metadata.annotations["oxibelt.dev/image-role"] = "dataplane"
+  | .metadata.name = "obp204-wrong-role"' \
+  "${work_dir}/pod-exact.json" >"${work_dir}/pod-wrong-role.json"
+expect_denied wrong-role "${work_dir}/pod-wrong-role.json"
+jq '(.spec.containers[] | select(.name == "oxibelt").image) =
+      "ghcr.io/oxibelt/oxibelt-dataplane-strict@sha256:'"$(printf 'e%.0s' {1..64})"'"
+  | .metadata.name = "obp204-wrong-primary"' \
+  "${work_dir}/pod-exact.json" >"${work_dir}/pod-wrong-primary.json"
+expect_denied wrong-primary "${work_dir}/pod-wrong-primary.json"
+jq --arg image "ghcr.io/oxibelt/oxibelt-dataplane-strict:stable@${strict_digest}" '
+  (.spec.containers[] | select(.name == "oxibelt").image) = $image
+  | .metadata.name = "obp204-tagged-primary"' \
+  "${work_dir}/pod-exact.json" >"${work_dir}/pod-tagged-primary.json"
+expect_denied tagged-primary "${work_dir}/pod-tagged-primary.json"
+jq --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '
+  .metadata.name = "obp204-unlisted-aux"
+  | .spec.containers += [{
+      name: "unlisted", image: $tools, imagePullPolicy: "Never",
+      securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+        capabilities: {drop: ["ALL"]}}
+    }]' "${work_dir}/pod-exact.json" >"${work_dir}/pod-unlisted-aux.json"
+expect_denied unlisted-aux "${work_dir}/pod-unlisted-aux.json"
+jq '.metadata.name = "obp204-aux-digest-drift"
+  | .spec.containers += [{
+      name: "obp204-regular",
+      image: "ghcr.io/oxibelt/oxibelt-tools@sha256:'"$(printf 'd%.0s' {1..64})"'",
+      imagePullPolicy: "Never",
+      securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+        capabilities: {drop: ["ALL"]}}
+    }]' "${work_dir}/pod-exact.json" >"${work_dir}/pod-aux-digest-drift.json"
+expect_denied aux-digest-drift "${work_dir}/pod-aux-digest-drift.json"
+jq --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '
+  .metadata.name = "obp204-class-confusion"
+  | .spec.initContainers = ((.spec.initContainers // []) + [{
+      name: "obp204-regular", image: $tools, imagePullPolicy: "Never",
+      securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+        capabilities: {drop: ["ALL"]}}
+    }])' "${work_dir}/pod-exact.json" >"${work_dir}/pod-class-confusion.json"
+expect_denied class-confusion "${work_dir}/pod-class-confusion.json"
+
+base_pod obp204-ephemeral-base "${work_dir}/pod-ephemeral-base.json"
+kube -n "${namespace}" create -f "${work_dir}/pod-ephemeral-base.json" >/dev/null
+kube -n "${namespace}" wait pod/obp204-ephemeral-base --for=condition=Ready \
+  --timeout="${timeout_seconds}s"
+jq -n --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '{spec:{ephemeralContainers:[{
+  name:"obp204-ephemeral", image:$tools, imagePullPolicy:"Never",
+  command:["/usr/local/bin/oxibeltctl"], args:["--help"],
+  securityContext:{allowPrivilegeEscalation:false, readOnlyRootFilesystem:true,
+    capabilities:{drop:["ALL"]}}
+}]}}' >"${work_dir}/ephemeral-approved.json"
+kube -n "${namespace}" patch pod obp204-ephemeral-base --subresource=ephemeralcontainers \
+  --type merge --patch-file "${work_dir}/ephemeral-approved.json" >/dev/null
+jq -n --arg approved "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '{spec:{ephemeralContainers:[
+  {name:"obp204-ephemeral", image:$approved, imagePullPolicy:"Never",
+    securityContext:{allowPrivilegeEscalation:false, readOnlyRootFilesystem:true,
+      capabilities:{drop:["ALL"]}}},
+  {name:"obp204-unlisted-ephemeral", image:$approved, imagePullPolicy:"Never",
+    securityContext:{allowPrivilegeEscalation:false, readOnlyRootFilesystem:true,
+      capabilities:{drop:["ALL"]}}}
+]}}' >"${work_dir}/ephemeral-denied.json"
+if kube -n "${namespace}" patch pod obp204-ephemeral-base --subresource=ephemeralcontainers \
+  --type merge --patch-file "${work_dir}/ephemeral-denied.json" \
+  >"${work_dir}/ephemeral-denied.log" 2>&1; then
+  die "unlisted ephemeral container unexpectedly passed live admission"
+fi
+grep -Fq 'SupplyChainAdmissionDenied' "${work_dir}/ephemeral-denied.log" \
+  || die "ephemeral denial did not return the fixed admission reason"
+
+base_pod obp204-ephemeral-deny-base "${work_dir}/pod-ephemeral-deny-base.json"
+kube -n "${namespace}" create -f "${work_dir}/pod-ephemeral-deny-base.json" >/dev/null
+kube -n "${namespace}" wait pod/obp204-ephemeral-deny-base --for=condition=Ready \
+  --timeout="${timeout_seconds}s"
+expect_ephemeral_patch_denied() {
+  local name="$1"
+  local patch_file="$2"
+  if kube -n "${namespace}" patch pod obp204-ephemeral-deny-base \
+    --subresource=ephemeralcontainers --type merge --patch-file "${patch_file}" \
+    >"${work_dir}/${name}.log" 2>&1; then
+    die "${name} unexpectedly passed ephemeral-container admission"
+  fi
+  grep -Fq 'SupplyChainAdmissionDenied' "${work_dir}/${name}.log" \
+    || die "${name} did not return the fixed admission denial reason"
+}
+jq -n '{spec:{ephemeralContainers:[{
+  name:"obp204-ephemeral",
+  image:"ghcr.io/oxibelt/oxibelt-tools@sha256:'"$(printf 'c%.0s' {1..64})"'",
+  imagePullPolicy:"Never",
+  securityContext:{allowPrivilegeEscalation:false, readOnlyRootFilesystem:true,
+    capabilities:{drop:["ALL"]}}
+}]}}' >"${work_dir}/ephemeral-wrong-digest.json"
+expect_ephemeral_patch_denied ephemeral-wrong-digest \
+  "${work_dir}/ephemeral-wrong-digest.json"
+jq -n --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '{spec:{ephemeralContainers:[{
+  name:"obp204-regular", image:$tools, imagePullPolicy:"Never",
+  securityContext:{allowPrivilegeEscalation:false, readOnlyRootFilesystem:true,
+    capabilities:{drop:["ALL"]}}
+}]}}' >"${work_dir}/ephemeral-wrong-class.json"
+expect_ephemeral_patch_denied ephemeral-wrong-class \
+  "${work_dir}/ephemeral-wrong-class.json"
+
+wrong_ca="$(openssl base64 -A -in "${work_dir}/public-tls.crt")"
+kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
+  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${wrong_ca}\"}]" >/dev/null
+transport_denied() {
+  ! kube -n "${namespace}" create --dry-run=server -f "${work_dir}/pod-exact.json" \
+    >"${work_dir}/transport-denied.log" 2>&1 \
+    && grep -Eq 'failed calling webhook|certificate|x509|no endpoints available' \
+      "${work_dir}/transport-denied.log"
+}
+wait_for "fail-closed admission TLS rejection" transport_denied
+kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
+  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${public_ca_a}\"}]" >/dev/null
+wait_for "admission recovery after CA restore" expect_admitted "${work_dir}/pod-exact.json"
+
+kube -n "${namespace}" scale "deployment/oxibelt-admission-${revision_a}" --replicas=0 >/dev/null
+endpoints_empty() {
+  kube -n "${namespace}" get endpoints oxibelt-admission -o json \
+    | jq -e '(.subsets // []) | length == 0' >/dev/null
+}
+wait_for "empty admission endpoints" endpoints_empty
+wait_for "fail-closed admission endpoint outage" transport_denied
+kube -n "${namespace}" create configmap "obp204-unrelated-${run_id}" \
+  --from-literal=result=not-intercepted >/dev/null
+data_pod="$(kube -n "${namespace}" get pods \
+  -l "app.kubernetes.io/name=oxibelt,app.kubernetes.io/instance=${release_name}" \
+  -o json | jq -r '.items[0].metadata.name')"
+[[ -n "${data_pod}" && "${data_pod}" != null ]] || die "could not select a data-plane Pod"
+kube -n "${namespace}" patch pod "${data_pod}" --subresource=status --type merge \
+  -p '{"status":{"message":"obp204-status-subresource-not-intercepted"}}' >/dev/null
+kube -n "${namespace}" scale "deployment/oxibelt-admission-${revision_a}" --replicas=2 >/dev/null
+kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_a}" \
+  --timeout="${timeout_seconds}s"
+wait_for "admission recovery after endpoint outage" expect_admitted "${work_dir}/pod-exact.json"
+
+render_admission() {
+  local fixture_dir="$1"
+  local tls_secret="$2"
+  local ca_bundle="$3"
+  local output="$4"
+  configure_helm_args "${fixture_dir}" "${tls_secret}" "${ca_bundle}" \
+    "${filesystem_manifest_digest}"
+  helm template "${release_name}" "${chart_dir}" --namespace "${namespace}" \
+    "${helm_args[@]}" \
+    --show-only templates/serviceaccount.yaml \
+    --show-only templates/supply-chain-admission.yaml >"${output}"
+}
+
+select_admission_documents() {
+  local input="$1"
+  local output="$2"
+  local selection="$3"
+  awk -v selection="${selection}" '
+    function emit_document() {
+      if (document == "") return
+      is_switch = (kind == "Service" || kind == "ValidatingWebhookConfiguration")
+      if ((selection == "switch" && is_switch) || (selection == "stage" && !is_switch)) {
+        printf "%s", document
+      }
+      document = ""
+      kind = ""
+    }
+    $0 == "---" {
+      emit_document()
+      document = "---\n"
+      next
+    }
+    {
+      document = document $0 "\n"
+      if ($1 == "kind:") kind = $2
+    }
+    END { emit_document() }
+  ' "${input}" >"${output}"
+  [[ -s "${output}" ]] || die "admission ${selection} manifest is empty"
+}
+
+service_targets_revision() {
+  local expected_revision="$1"
+  local service_json endpoints_json pod_name pod_revision
+  service_json="$(kube -n "${namespace}" get service oxibelt-admission -o json)" || return 1
+  jq -e --arg revision "${expected_revision}" \
+    '.spec.selector["oxibelt.dev/supply-chain-bundle"] == $revision' \
+    >/dev/null <<<"${service_json}" || return 1
+  endpoints_json="$(kube -n "${namespace}" get endpoints oxibelt-admission -o json)" || return 1
+  [[ "$(jq '[.subsets[]?.addresses[]?] | length' <<<"${endpoints_json}")" -ge 2 ]] \
+    || return 1
+  while IFS= read -r pod_name; do
+    [[ -n "${pod_name}" ]] || return 1
+    pod_revision="$(kube -n "${namespace}" get pod "${pod_name}" \
+      -o jsonpath='{.metadata.labels.oxibelt\.dev/supply-chain-bundle}' 2>/dev/null)" \
+      || return 1
+    [[ "${pod_revision}" == "${expected_revision}" ]] || return 1
+  done < <(jq -r '.subsets[]?.addresses[]?.targetRef.name' <<<"${endpoints_json}")
+}
+
+ca_overlap="$(cat "${work_dir}/admission-ca-a.crt" "${work_dir}/admission-ca-b.crt" \
+  | openssl base64 -A)"
+kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
+  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${ca_overlap}\"}]" >/dev/null
+touch "${work_dir}/rotation-probe.running"
+: >"${work_dir}/rotation-probe.failures"
+(
+  while [[ -f "${work_dir}/rotation-probe.running" ]]; do
+    if ! kube -n "${namespace}" create --dry-run=server -f "${work_dir}/pod-exact.json" \
+      >/dev/null 2>>"${work_dir}/rotation-probe.failures"; then
+      printf 'probe failed\n' >>"${work_dir}/rotation-probe.failures"
+    fi
+    sleep 1
+  done
+) &
+rotation_probe_pid="$!"
+render_admission "${fixture_a}" "${admission_tls_secret_b}" "${ca_overlap}" \
+  "${work_dir}/admission-tls-b.yaml"
+kube apply -f "${work_dir}/admission-tls-b.yaml" >/dev/null
+kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_a}" \
+  --timeout="${timeout_seconds}s"
+kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
+  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${public_ca_b}\"}]" >/dev/null
+wait_for "admission after old CA removal" expect_admitted "${work_dir}/pod-exact.json"
+stop_rotation_probe
+[[ ! -s "${work_dir}/rotation-probe.failures" ]] \
+  || die "admission requests failed during overlapped TLS rotation"
+
+render_admission "${fixture_b}" "${admission_tls_secret_b}" "${public_ca_b}" \
+  "${work_dir}/admission-bundle-b.yaml"
+select_admission_documents "${work_dir}/admission-bundle-b.yaml" \
+  "${work_dir}/admission-bundle-b-stage.yaml" stage
+select_admission_documents "${work_dir}/admission-bundle-b.yaml" \
+  "${work_dir}/admission-bundle-b-switch.yaml" switch
+kube apply -f "${work_dir}/admission-bundle-b-stage.yaml" >/dev/null
+kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_b}" \
+  --timeout="${timeout_seconds}s"
+expect_admitted "${work_dir}/pod-exact.json"
+jq --arg digest "${bundle_digest_b}" '
+  .metadata.name = "obp204-bundle-b"
+  | .metadata.annotations["oxibelt.dev/supply-chain-bundle-digest"] = $digest
+' "${work_dir}/pod-exact.json" >"${work_dir}/pod-bundle-b.json"
+touch "${work_dir}/bundle-switch-probe.running"
+: >"${work_dir}/bundle-switch-probe.failures"
+(
+  while [[ -f "${work_dir}/bundle-switch-probe.running" ]]; do
+    if ! kube -n "${namespace}" create --dry-run=server -f "${work_dir}/pod-exact.json" \
+      >/dev/null 2>&1 \
+      && ! kube -n "${namespace}" create --dry-run=server -f "${work_dir}/pod-bundle-b.json" \
+        >/dev/null 2>&1; then
+      printf 'neither authorized bundle reached an admission endpoint\n' \
+        >>"${work_dir}/bundle-switch-probe.failures"
+    fi
+    sleep 1
+  done
+) &
+bundle_switch_probe_pid="$!"
+kube apply -f "${work_dir}/admission-bundle-b-switch.yaml" >/dev/null
+wait_for "bundle B admission endpoints" service_targets_revision "${revision_b}"
+rm -f -- "${work_dir}/bundle-switch-probe.running"
+wait "${bundle_switch_probe_pid}" >/dev/null 2>&1 || true
+bundle_switch_probe_pid=""
+[[ ! -s "${work_dir}/bundle-switch-probe.failures" ]] \
+  || die "admission became unavailable while switching to staged bundle B"
+expect_admitted "${work_dir}/pod-bundle-b.json"
+expect_denied old-bundle-after-rotation "${work_dir}/pod-exact.json"
+
+render_admission "${fixture_a}" "${admission_tls_secret_b}" "${public_ca_b}" \
+  "${work_dir}/admission-bundle-a-rollback.yaml"
+select_admission_documents "${work_dir}/admission-bundle-a-rollback.yaml" \
+  "${work_dir}/admission-bundle-a-rollback-switch.yaml" switch
+kube apply -f "${work_dir}/admission-bundle-a-rollback-switch.yaml" >/dev/null
+wait_for "bundle A rollback endpoints" service_targets_revision "${revision_a}"
+wait_for "still-authorized bundle A rollback" expect_admitted "${work_dir}/pod-exact.json"
+expect_denied bundle-b-after-rollback "${work_dir}/pod-bundle-b.json"
+
+if [[ -n "${receipt_output}" ]]; then
+  [[ "${receipt_output}" == /* ]] || die "receipt output must be an absolute path"
+  [[ ! -e "${receipt_output}" && -d "$(dirname -- "${receipt_output}")" ]] \
+    || die "receipt output must be a new file in an existing directory"
+  receipt_tmp="${work_dir}/receipt.json"
+  jq -n \
+    --arg revision "${source_revision}" \
+    --arg provider "${provider}" \
+    --arg kubernetes "$(kube version -o json | jq -r '.serverVersion.gitVersion')" \
+    --arg helm "$(helm version --short)" \
+    --arg strict "${strict_digest}" \
+    --arg tools "${tools_digest}" \
+    --arg source_dirty "${artifact_source_dirty}" \
+    --arg build_kind "${artifact_build_kind}" \
+    --arg bundle_a "${bundle_digest_a}" \
+    --arg bundle_b "${bundle_digest_b}" '{
+      schemaVersion: 1,
+      result: "pass",
+      sourceRevision: $revision,
+      provider: $provider,
+      kubernetesVersion: $kubernetes,
+      helmVersion: $helm,
+      strictImageDigest: $strict,
+      toolsImageDigest: $tools,
+      sourceDirty: $source_dirty,
+      buildKind: $build_kind,
+      promotionEligible: ($source_dirty == "clean"),
+      bundleDigests: [$bundle_a, $bundle_b],
+      evidenceScope: {
+        fullV2Install: true,
+        liveTlsWebhook: true,
+        podClasses: ["regular", "init", "native-sidecar", "ephemeral"],
+        failureClosedOutage: true,
+        noninterceptedResources: ["configmaps", "pods/status"],
+        bundleRotationRollback: true,
+        tlsOverlapRotation: true,
+        networkPolicyEnforcement: false,
+        nativeArchitectureQualification: false
+      }
+    }' >"${receipt_tmp}"
+  python3 - "${receipt_tmp}" "${receipt_output}" <<'PY'
+import os
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2])
+descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    with source.open("rb") as input_stream, os.fdopen(descriptor, "wb") as output_stream:
+        descriptor = -1
+        output_stream.write(input_stream.read())
+        output_stream.flush()
+        os.fsync(output_stream.fileno())
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+PY
+fi
+
+echo "Kubernetes supply-chain admission check passed (${provider})"

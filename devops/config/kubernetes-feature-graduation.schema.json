@@ -436,7 +436,7 @@
     },
     "features": {
       "type": "array",
-      "minItems": 14,
+      "minItems": 15,
       "uniqueItems": true,
       "items": {
         "type": "object",

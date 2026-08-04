@@ -1,7 +1,7 @@
 {
   "$schema": "./kubernetes-feature-graduation.schema.json",
   "schemaVersion": 1,
-  "policyVersion": 2,
+  "policyVersion": 3,
   "lifecycleAuthority": "docs/FeatureStatus.md",
   "evidenceSchema": "devops/config/kubernetes-feature-graduation-evidence.schema.json",
   "supportContract": {
@@ -145,6 +145,7 @@
         "gateway-api-route-policy",
         "gateway-controller-multi-target",
         "gateway-controller-explain",
+        "supply-chain-admission-bundle",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -169,6 +170,7 @@
         "gateway-api-route-policy",
         "gateway-controller-multi-target",
         "gateway-controller-explain",
+        "supply-chain-admission-bundle",
         "helm-data-plane",
         "helm-gateway-controller"
       ],
@@ -329,6 +331,18 @@
       "appliesTo": [
         "helm-data-plane",
         "helm-gateway-controller"
+      ],
+      "evidenceReceipts": []
+    },
+    {
+      "id": "live-supply-chain-admission",
+      "objective": "The complete edge-secure-medium v2 chart runs on exactly three Ready nodes with build-validated exact images and renders webhook ingress restricted to exact API-server host prefixes while the live TLS webhook admits every authorized executable class, rejects mismatched identities, fails closed on TLS and endpoint outages without intercepting unrelated resources, and rotates TLS and signed bundles with overlap and rollback.",
+      "cadence": "pull_request",
+      "status": "unmet",
+      "mandatory": true,
+      "appliesTo": [
+        "supply-chain-admission-bundle",
+        "helm-data-plane"
       ],
       "evidenceReceipts": []
     },
@@ -756,6 +770,17 @@
       ]
     },
     {
+      "id": "supply-chain-admission-bundle",
+      "status": "experimental",
+      "lastValidatedVersion": "unvalidated",
+      "gateIds": [
+        "policy-contract",
+        "unsupported-combination-diagnostics",
+        "live-supply-chain-admission"
+      ],
+      "blockerIds": []
+    },
+    {
       "id": "helm-data-plane",
       "status": "experimental",
       "lastValidatedVersion": "unvalidated",
@@ -769,6 +794,7 @@
         "secret-rotation",
         "multi-node",
         "pod-security-restricted",
+        "live-supply-chain-admission",
         "network-policy-cnis",
         "previous-minor-interop",
         "long-duration-soak",

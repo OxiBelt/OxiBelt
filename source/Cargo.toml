@@ -102,6 +102,7 @@ aws-lc-rs = { version = "1.17.3", default-features = false, features = ["bindgen
 [dev-dependencies]
 clubcard = { version = "0.3.4", features = ["builder"] }
 criterion = { version = "0.8.2", default-features = false }
+jsonschema.workspace = true
 loom = "0.7.2"
 pretty_assertions = "1.4.1"
 proc-macro2 = "1.0.107"

@@ -55,6 +55,15 @@ expect_failure_contains() {
     || die "${name} did not report ${expected}"
 }
 
+expect_schema_failure() {
+  local name="$1"
+  shift
+  if helm template oxibelt "${chart_dir}" --kube-version "${kubernetes_version}" \
+    -f "${profile_values}" "$@" >"${work_dir}/${name}.log" 2>&1; then
+    die "${name} unexpectedly passed chart schema validation"
+  fi
+}
+
 assert_contains() {
   local file="$1"
   local expected="$2"
@@ -258,6 +267,25 @@ expect_failure_contains invalid_webhook_tls_secret 'OBP204-WEBHOOK-TLS' \
   --set-string supplyChainAdmission.webhook.tlsSecretName=bad_name
 expect_failure_contains missing_webhook_sources 'OBP204-WEBHOOK-SOURCES' \
   --set-json supplyChainAdmission.webhook.apiServerSourceCidrs=[]
+render exact_ipv6_webhook_source \
+  --set-json 'supplyChainAdmission.webhook.apiServerSourceCidrs=["2001:db8::1/128"]'
+for source_case in \
+  'broad_ipv4_source=["192.0.2.0/24"]' \
+  'world_ipv4_source=["0.0.0.0/0"]' \
+  'padded_ipv4_source=["192.0.2.1/032"]' \
+  'noncanonical_ipv4_source=["192.000.2.1/32"]' \
+  'broad_ipv6_source=["2001:db8::/64"]' \
+  'world_ipv6_source=["::/0"]' \
+  'malformed_ipv6_source=["::::/128"]' \
+  'short_uncompressed_ipv6_source=["2001:db8/128"]'; do
+  source_name="${source_case%%=*}"
+  source_value="${source_case#*=}"
+  expect_schema_failure "${source_name}_schema" \
+    --set-json "supplyChainAdmission.webhook.apiServerSourceCidrs=${source_value}"
+  expect_failure_contains "${source_name}_template" \
+    'OBP204-WEBHOOK-SOURCES' \
+    --set-json "supplyChainAdmission.webhook.apiServerSourceCidrs=${source_value}"
+done
 expect_failure_contains non_strict_role 'OBP106-IMAGE-ROLE' \
   --set-string image.role=dataplane \
   --set-string image.repository=ghcr.io/oxibelt/oxibelt-dataplane

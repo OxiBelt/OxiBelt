@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn repo_root() -> PathBuf {
   PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -49,6 +49,87 @@ fn assert_crd_schema_is_structural(value: &Value, path: &str) {
     }
     _ => {}
   }
+}
+
+#[test]
+fn admission_bundle_v2_schema_rejects_partial_rebuild_identity_extensions() {
+  let schema: Value = serde_json::from_str(&read_repo(
+    "deploy/supply-chain/admission-bundle-v2.schema.json",
+  ))
+  .expect("v2 admission bundle schema");
+  let mut independent_schema =
+    schema["properties"]["payload"]["properties"]["independentRebuild"].clone();
+  let independent_object = independent_schema
+    .as_object_mut()
+    .expect("independent rebuild schema object");
+  independent_object.insert("$schema".to_string(), schema["$schema"].clone());
+  independent_object.insert("$defs".to_string(), schema["$defs"].clone());
+  let validator =
+    jsonschema::validator_for(&independent_schema).expect("independent rebuild schema compiles");
+
+  let digest = |character: char| format!("sha256:{}", character.to_string().repeat(64));
+  let receipt = |arch: &str, character: char| {
+    json!({
+      "artifactArch": arch,
+      "publishedDigest": digest(character),
+      "outcome": "exact",
+      "archiveSha256": digest('d'),
+      "objectSha256": digest('e')
+    })
+  };
+  let legacy = json!({
+    "requiredArchitectures": ["amd64", "arm64", "riscv64"],
+    "workflowRunId": 42,
+    "workflowPath": ".github/workflows/verify-release-rebuild.yml",
+    "workflowSha": "a".repeat(40),
+    "completedAt": 1,
+    "receipts": [receipt("amd64", '1'), receipt("arm64", '2'), receipt("riscv64", '3')]
+  });
+  assert!(
+    validator.is_valid(&legacy),
+    "legacy all-absent extensions remain valid"
+  );
+
+  let mut complete = legacy.clone();
+  complete["workflowRunAttempt"] = json!(2);
+  for (index, character) in ['4', '5', '6'].into_iter().enumerate() {
+    complete["receipts"][index]["platformRecipeSha256"] = json!(digest(character));
+  }
+  assert!(
+    validator.is_valid(&complete),
+    "complete extensions should validate"
+  );
+
+  let mut attempt_only = legacy.clone();
+  attempt_only["workflowRunAttempt"] = json!(1);
+  assert!(
+    !validator.is_valid(&attempt_only),
+    "attempt-only extension must fail"
+  );
+
+  let mut recipe_only = legacy.clone();
+  recipe_only["receipts"][0]["platformRecipeSha256"] = json!(digest('4'));
+  assert!(
+    !validator.is_valid(&recipe_only),
+    "recipe-only extension must fail"
+  );
+
+  let mut partial = complete.clone();
+  partial["receipts"][2]
+    .as_object_mut()
+    .expect("receipt object")
+    .remove("platformRecipeSha256");
+  assert!(
+    !validator.is_valid(&partial),
+    "partial recipe extensions must fail"
+  );
+
+  let mut zero_attempt = complete;
+  zero_attempt["workflowRunAttempt"] = json!(0);
+  assert!(
+    !validator.is_valid(&zero_attempt),
+    "zero workflow attempt must fail"
+  );
 }
 
 #[test]
@@ -200,6 +281,21 @@ fn data_plane_chart_metadata_and_values_are_valid() {
       ["maximum"],
     10
   );
+  let webhook_source_patterns = schema["properties"]["supplyChainAdmission"]["properties"]
+    ["webhook"]["properties"]["apiServerSourceCidrs"]["items"]["oneOf"]
+    .as_array()
+    .expect("webhook source CIDRs should have exact host-prefix alternatives");
+  assert_eq!(webhook_source_patterns.len(), 2);
+  assert!(webhook_source_patterns.iter().any(|entry| {
+    entry["pattern"]
+      .as_str()
+      .is_some_and(|pattern| pattern.ends_with("/32$"))
+  }));
+  assert!(webhook_source_patterns.iter().any(|entry| {
+    entry["pattern"]
+      .as_str()
+      .is_some_and(|pattern| pattern.ends_with("/128$"))
+  }));
   assert_eq!(
     schema["properties"]["workload"]["properties"]["kind"]["enum"][0],
     "Deployment"

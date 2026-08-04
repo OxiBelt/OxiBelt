@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-const FEATURE_IDS: [&str; 14] = [
+const FEATURE_IDS: [&str; 15] = [
   "gateway-controller",
   "gateway-api-httproute",
   "gateway-api-grpcroute",
@@ -17,11 +17,12 @@ const FEATURE_IDS: [&str; 14] = [
   "gateway-api-route-policy",
   "gateway-controller-multi-target",
   "gateway-controller-explain",
+  "supply-chain-admission-bundle",
   "helm-data-plane",
   "helm-gateway-controller",
 ];
 
-const REQUIRED_GATES: [&str; 24] = [
+const REQUIRED_GATES: [&str; 25] = [
   "policy-contract",
   "unsupported-combination-diagnostics",
   "clean-lifecycle",
@@ -35,6 +36,7 @@ const REQUIRED_GATES: [&str; 24] = [
   "secret-rotation",
   "multi-node",
   "pod-security-restricted",
+  "live-supply-chain-admission",
   "network-policy-cnis",
   "previous-minor-interop",
   "long-duration-soak",
@@ -93,7 +95,7 @@ fn feature_statuses() -> BTreeMap<String, String> {
 fn graduation_registry_covers_the_complete_support_contract() {
   let policy = policy();
   assert_eq!(policy["schemaVersion"], 1);
-  assert_eq!(policy["policyVersion"], 2);
+  assert_eq!(policy["policyVersion"], 3);
   assert_eq!(policy["lifecycleAuthority"], "docs/FeatureStatus.md");
   assert_eq!(
     policy["supportContract"]["kubernetes"]["range"],

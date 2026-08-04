@@ -107,6 +107,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "admin-audit-anchor-postgres",
   "kubernetes-immutable-rollout",
   "kubernetes-strict-hardening",
+  "kubernetes-supply-chain-admission",
   "kubernetes-pod-lifecycle",
   "kubernetes-network-policy",
   "kubernetes-current-compatibility",
@@ -202,6 +203,11 @@ fn release_rebuild_verification_workflow_text() -> String {
 fn release_rebuild_verification_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/verify-release-rebuild.sh"))
     .expect("independent release rebuild script should be readable")
+}
+
+fn docker_image_artifact_builder_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/build-docker-image-artifact.sh"))
+    .expect("Docker image artifact builder script should be readable")
 }
 
 fn dependabot_config_text() -> String {
@@ -552,6 +558,11 @@ fn kubernetes_immutable_rollout_script_text() -> String {
 fn helm_strict_hardening_live_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-helm-strict-hardening-live.sh"))
     .expect("Helm strict hardening live script should be readable")
+}
+
+fn kubernetes_supply_chain_admission_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-supply-chain-admission.sh"))
+    .expect("Kubernetes supply-chain admission script should be readable")
 }
 
 fn helm_strict_hardening_live_inline_config() -> String {
@@ -1865,6 +1876,8 @@ fn admin_mutation_postgres_ci_is_mandatory_bounded_and_rootless() {
     "timeout --signal=TERM 35m",
     "cargo test --all-features --locked -p oxibelt --lib",
     "'admin_mutation::' -- --test-threads=1",
+    "container_created=1",
+    "if ((container_created == 1)); then",
     "docker rm --force --volumes \"${container_name}\"",
     "trap cleanup EXIT",
     "trap 'exit 130' INT",
@@ -2916,6 +2929,99 @@ fn kubernetes_strict_hardening_ci_is_provider_neutral_and_invocation_isolated() 
     port_forward_start < port_forward_log_read,
     "the port-forward log must be read only after the background process starts"
   );
+}
+
+#[test]
+fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("kubernetes-supply-chain-admission")
+    .expect("workflow should define the Kubernetes supply-chain admission job");
+  let job_text = workflow_job_text(&workflow, "kubernetes-supply-chain-admission");
+  let script = kubernetes_supply_chain_admission_script_text();
+
+  assert_eq!(
+    job.needs,
+    vec!["docker-alpine-musl-role-image-amd64".to_owned()],
+    "supply-chain admission CI should consume build-validated role artifacts"
+  );
+  for expected in [
+    "name: Kubernetes supply-chain admission",
+    "actions: read",
+    "contents: read",
+    "rustup toolchain install 1.97.1 --profile minimal",
+    "version: v3.21.3",
+    "version: v0.32.0",
+    "kubectl_version: v1.34.10",
+    "name: oxibelt-dataplane-strict-alpine-musl-amd64-image",
+    "name: oxibelt-tools-alpine-musl-amd64-image",
+    "OXIBELT_ADMISSION_STRICT_ARTIFACT_DIR:",
+    "OXIBELT_ADMISSION_TOOLS_ARTIFACT_DIR:",
+    "kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256",
+    "tests/scripts/check-helm-edge-secure-medium-v2.sh",
+    "tests/scripts/run-kubernetes-supply-chain-admission.sh --provider kind",
+    "name: kubernetes-supply-chain-admission-evidence",
+    "if-no-files-found: error",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "supply-chain admission CI job should include {expected}"
+    );
+  }
+
+  for expected in [
+    "usage: $0 [--provider kind|minikube]",
+    "Minikube admission qualification requires the host rootless Docker service",
+    "--nodes=3",
+    "live admission qualification requires exactly three Ready Kubernetes nodes",
+    "if contains(\":\") then . + \"/128\" else . + \"/32\" end",
+    "supply_chain_bundle::tests::emit_live_kubernetes_admission_fixture",
+    "test admission bundle exceeds its 256 KiB input bound",
+    "test fixture public key must be exactly one bounded encoded key line",
+    "image_lock_dir=\"/tmp/oxibelt-admission-image-lock-${EUID}\"",
+    "admission image lock directory must be owned by the current user with mode 0700",
+    "refusing to restore Docker image tag without exact ownership",
+    "strict_unique_image_created=1",
+    "tools_extract_container_created=1",
+    "--network none",
+    "--read-only",
+    "--cap-drop ALL",
+    "--security-opt no-new-privileges",
+    "app.kubernetes.io/name=oxibelt-admission,app.kubernetes.io/instance=${release_name}",
+    "(.webhooks | length) == 1",
+    ".webhooks[0].failurePolicy == \"Fail\"",
+    ".webhooks[0].matchPolicy == \"Exact\"",
+    "no endpoints available",
+    "pods/status",
+    "bundleRotationRollback: true",
+    "tlsOverlapRotation: true",
+    "os.O_WRONLY | os.O_CREAT | os.O_EXCL",
+  ] {
+    assert!(
+      script.contains(expected),
+      "supply-chain admission harness should include {expected}"
+    );
+  }
+
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "docker container prune",
+    "kind delete clusters --all",
+    "minikube delete --all",
+    "kubectl delete --all",
+    "kubectl get secret",
+    "kubectl describe secret",
+    "failurePolicy: Ignore",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+  ] {
+    assert!(
+      !script.contains(forbidden) && !job_text.contains(forbidden),
+      "supply-chain admission integration must not contain {forbidden}"
+    );
+  }
 }
 
 #[test]
@@ -5829,7 +5935,7 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
     serde_json::from_str(&summary_text).expect("success summary should be JSON");
   assert_eq!(summary["schema"], 1);
   assert_eq!(summary["overall"], "success");
-  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(35));
+  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(36));
   assert_eq!(summary["unexpected"], serde_json::json!([]));
   assert!(!summary_text.contains("synthetic-secret-output"));
   assert!(
@@ -7427,6 +7533,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
 fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() {
   let workflow = release_rebuild_verification_workflow_text();
   let script = release_rebuild_verification_script_text();
+  let builder = docker_image_artifact_builder_script_text();
   let parsed: serde_json::Value =
     serde_saphyr::from_str(&workflow).expect("independent rebuild workflow should parse as YAML");
   let jobs = parsed["jobs"]
@@ -7462,7 +7569,15 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "github.event.workflow_run.conclusion == 'success'",
     "github.event.workflow_run.event == 'release'",
     "successful release run must resolve to exactly one stable or beta tag",
-    "pnpm run versioning:release",
+    "ref: ${{ github.sha }}",
+    "path: verifier",
+    "path: release",
+    "verifier_sha: ${{ steps.plan.outputs.verifier_sha }}",
+    "ref: ${{ needs.resolve.outputs.verifier_sha }}",
+    "verifier checkout does not match the approved workflow revision",
+    "working-directory: verifier",
+    "node --import tsx devops/sources/versioning.ts",
+    "--workspace-path ../release",
     "expected_count=30",
     "persist-credentials: false",
     "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
@@ -7479,9 +7594,11 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0",
     "aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1",
     "pnpm install --frozen-lockfile --ignore-scripts",
+    "tests/scripts/retry-docker-pull.sh",
     "tests/scripts/verify-release-rebuild.sh",
     "--release-ref \"${RELEASE_REF}\"",
     "--revision \"${RELEASE_REVISION}\"",
+    "--verifier-sha \"${VERIFIER_SHA}\"",
     "Upload independent rebuild receipt",
   ] {
     assert!(
@@ -7519,7 +7636,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "x86_64:amd64v2) target_cpu=\"x86-64-v2\"",
     "x86_64:amd64) target_cpu=\"x86-64-v3\"",
     "x86_64:amd64v4) target_cpu=\"x86-64-v4\"",
-    "\"${rebuilt_root}/tests/scripts/select-amd64-docker-image-artifact.sh\"",
+    "\"${repo_root}/tests/scripts/select-amd64-docker-image-artifact.sh\"",
     "GITHUB_OUTPUT='' bash",
     "--allow-unsupported",
     "AMD64 selector returned invalid supported status",
@@ -7532,6 +7649,9 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
   for forbidden in [
     "--manifest-path \"${rebuilt_root}/Cargo.toml\"",
     "--lockfile-path \"${rebuilt_root}/Cargo.lock\"",
+    "${rebuilt_root}/devops/sources/",
+    "${rebuilt_root}/tests/scripts/",
+    "pnpm --dir \"${rebuilt_root}\"",
   ] {
     assert!(
       !script.contains(forbidden),
@@ -7555,6 +7675,35 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     selector_position < native_gate_position && native_gate_position < version_execution_position,
     "independent rebuild must query CPU support and gate native --version execution in order"
   );
+
+  for expected in [
+    "--verifier-sha <40-hex>",
+    "git -C \"${repo_root}\" rev-parse HEAD",
+    "verifier script does not come from the approved workflow revision",
+    "node --import tsx \"${repo_root}/devops/sources/versioning.ts\"",
+    "\"${repo_root}/tests/scripts/build-docker-image-artifact.sh\"",
+    "node --import tsx \"${repo_root}/devops/sources/release_sbom.ts\"",
+    "python3 \"${repo_root}/tests/scripts/compare-release-image-artifacts.py\"",
+    "OXIBELT_DOCKER_IMAGE_SOURCE_ROOT=\"${rebuilt_root}\"",
+    "--arg workflow_sha \"${verifier_sha}\"",
+    "sha: $workflow_sha",
+  ] {
+    assert!(
+      script.contains(expected),
+      "independent rebuild must bind and execute trusted verifier code: {expected}"
+    );
+  }
+  for expected in [
+    "tool_root=\"$(cd -- \"${script_dir}/../..\" && pwd)\"",
+    "source_root=\"${OXIBELT_DOCKER_IMAGE_SOURCE_ROOT:-${tool_root}}\"",
+    "python3 \"${tool_root}/tests/scripts/validate-ci-image-artifact.py\" create",
+    "--repo-root \"${repo_root}\"",
+  ] {
+    assert!(
+      builder.contains(expected),
+      "independent rebuild builder must separate trusted tools from release inputs: {expected}"
+    );
+  }
 }
 
 #[test]

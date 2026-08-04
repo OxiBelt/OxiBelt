@@ -50,8 +50,8 @@
 {{- fail "OBP204-WEBHOOK-SOURCES: supplyChainAdmission webhook requires 1 to 16 exact API-server source CIDRs" -}}
 {{- end -}}
 {{- range $cidr := $webhook.apiServerSourceCidrs -}}
-{{- if not (or (regexMatch "^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/([0-9]|[12][0-9]|3[0-2])$" $cidr) (regexMatch "^[0-9A-Fa-f:]+/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$" $cidr)) -}}
-{{- fail "OBP204-WEBHOOK-SOURCES: supplyChainAdmission webhook API-server source CIDRs are invalid" -}}
+{{- if not (or (regexMatch "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$" $cidr) (regexMatch "^((([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4})|(([0-9A-Fa-f]{1,4}:){1,7}:)|(([0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4})|(([0-9A-Fa-f]{1,4}:){1,5}(:[0-9A-Fa-f]{1,4}){1,2})|(([0-9A-Fa-f]{1,4}:){1,4}(:[0-9A-Fa-f]{1,4}){1,3})|(([0-9A-Fa-f]{1,4}:){1,3}(:[0-9A-Fa-f]{1,4}){1,4})|(([0-9A-Fa-f]{1,4}:){1,2}(:[0-9A-Fa-f]{1,4}){1,5})|([0-9A-Fa-f]{1,4}:((:[0-9A-Fa-f]{1,4}){1,6}))|(:((:[0-9A-Fa-f]{1,4}){1,7}|:)))/128$" $cidr)) -}}
+{{- fail "OBP204-WEBHOOK-SOURCES: supplyChainAdmission webhook API-server sources must be exact IPv4 /32 or IPv6 /128 host prefixes" -}}
 {{- end -}}
 {{- end -}}
 {{- if or (not $webhook.caBundle) (gt (len $webhook.caBundle) 262144) -}}

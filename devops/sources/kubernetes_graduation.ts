@@ -29,6 +29,7 @@ export const KubernetesGraduationFeatureIds = [
   'gateway-api-route-policy',
   'gateway-controller-multi-target',
   'gateway-controller-explain',
+  'supply-chain-admission-bundle',
   'helm-data-plane',
   'helm-gateway-controller'
 ] as const

@@ -97,22 +97,25 @@ The `edge-secure-medium` v2 deployment envelope targets this same Kubernetes
 1.34–1.36 and Helm 3.21.3/4.2.3 range. CI verifies its exact digest-pinned
 strict-image render and server-side dry-run under restricted Pod Security
 labels, while the shared strict-data-plane harness supplies live
-RuntimeDefault/Landlock evidence. The live harness does not yet install the
-complete v2 values contract. A rendered profile report records intended
-controls but does not by itself satisfy the `pod-security-restricted`,
-`network-policy-cnis`, native-architecture, or live supply-chain-admission
-gates. V2 now requires a signed exact-digest bundle and `failurePolicy: Fail`
-webhook; static rendering does not prove that the TLS endpoint was reachable or
-that a real API server admitted and rejected the expected Pods.
-The static contract now renders separate exact rules for ordinary Pod
-CREATE/UPDATE and `pods/ephemeralcontainers` UPDATE, and deterministic Rust
-coverage exercises approved and rejected regular, init, native-sidecar, and
-ephemeral images. Graduation still requires a live API-server/webhook matrix
-that proves the endpoint accepts every exact signed class/name/digest identity,
-rejects unlisted or drifted identities, routes the ephemeral subresource, and
-does not intercept `pods/status` or unrelated subresources. Server-side render
-or dry-run evidence alone does not establish webhook TLS reachability or
-runtime enforcement.
+RuntimeDefault/Landlock evidence. The dedicated supply-chain admission harness
+installs the complete v2 values contract on exactly three Ready nodes. It
+renders webhook ingress from exact `/32` IPv4 or `/128` IPv6 API-server source
+prefixes and uses short-lived webhook TLS plus the build-validated strict
+data-plane and tools image artifacts. Local runs default to an isolated
+rootless Minikube profile; the mandatory CI floor runs on the immutable
+Kubernetes 1.34 Kind image.
+
+The live matrix admits every exact signed regular, init, native-sidecar, and
+ephemeral class/name/digest identity; rejects missing, unlisted, replayed, or
+drifted identities; proves bad-CA and unavailable-endpoint failures remain
+closed; and verifies that unrelated ConfigMaps and `pods/status` are not
+intercepted. It also exercises overlapping webhook-CA rotation and staged
+signed-bundle rotation with rollback. A successful run can emit a bounded
+exact-revision receipt, but the registry deliberately leaves the
+`live-supply-chain-admission` gate unmet until qualifying immutable receipts
+are reviewed and recorded. That receipt does not claim NetworkPolicy CNI
+enforcement or native-architecture qualification, and rendering or API-server
+dry-run alone still does not establish live admission.
 
 <!-- BEGIN KUBERNETES GRADUATION GENERATED -->
 
@@ -143,15 +146,16 @@ runtime enforcement.
 | `gateway-api-route-policy` | `experimental` | `unvalidated` | 8 | `native-riscv64-cluster-runner` |
 | `gateway-controller-multi-target` | `experimental` | `unvalidated` | 16 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
 | `gateway-controller-explain` | `experimental` | `unvalidated` | 8 | `native-riscv64-cluster-runner` |
-| `helm-data-plane` | `experimental` | `unvalidated` | 15 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
+| `supply-chain-admission-bundle` | `experimental` | `unvalidated` | 3 | None |
+| `helm-data-plane` | `experimental` | `unvalidated` | 16 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
 | `helm-gateway-controller` | `experimental` | `unvalidated` | 16 | `previous-stable-role-topology`, `native-riscv64-cluster-runner` |
 
 ### Mandatory graduation gates
 
 | Gate ID | Earliest cadence | State | Applies to |
 | --- | --- | --- | --- |
-| `policy-contract` | `pull_request` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
-| `unsupported-combination-diagnostics` | `pull_request` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
+| `policy-contract` | `pull_request` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `supply-chain-admission-bundle`, `helm-data-plane`, `helm-gateway-controller` |
+| `unsupported-combination-diagnostics` | `pull_request` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `supply-chain-admission-bundle`, `helm-data-plane`, `helm-gateway-controller` |
 | `clean-lifecycle` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-data-plane`, `helm-gateway-controller` |
 | `leader-election-failover` | `nightly` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-gateway-controller` |
 | `api-outage-recovery` | `nightly` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-gateway-controller` |
@@ -163,6 +167,7 @@ runtime enforcement.
 | `secret-rotation` | `nightly` | `unmet` | `helm-data-plane` |
 | `multi-node` | `nightly` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-data-plane`, `helm-gateway-controller` |
 | `pod-security-restricted` | `pull_request` | `unmet` | `helm-data-plane`, `helm-gateway-controller` |
+| `live-supply-chain-admission` | `pull_request` | `unmet` | `supply-chain-admission-bundle`, `helm-data-plane` |
 | `network-policy-cnis` | `nightly` | `unmet` | `helm-data-plane`, `helm-gateway-controller` |
 | `previous-minor-interop` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-controller-multi-target`, `helm-data-plane`, `helm-gateway-controller` |
 | `long-duration-soak` | `release_candidate` | `unmet` | `gateway-controller`, `gateway-api-httproute`, `gateway-api-grpcroute`, `gateway-api-tlsroute`, `gateway-api-tcproute`, `gateway-api-udproute`, `gateway-api-backendtlspolicy`, `gateway-api-weighted-discovery`, `gateway-api-standard-filters-backend-tls`, `gateway-api-route-policy`, `gateway-controller-multi-target`, `gateway-controller-explain`, `helm-data-plane`, `helm-gateway-controller` |
