@@ -144,11 +144,11 @@ mod tests {
 
   fn manifest_view(show_paths: bool) -> FilesystemAccessManifestView {
     FilesystemAccessManifestView {
-      schema_version: 2,
+      schema_version: 3,
       manifest_digest: show_paths.then(|| format!("sha256:{}", "a".repeat(64))),
       manifest_digest_withheld: !show_paths,
       paths_redacted: !show_paths,
-      normalization: "descriptor_relative_v2",
+      normalization: "canonical_enforcement_with_verified_kubernetes_atomic_writer_digest_identity_v3",
       entries: Vec::new(),
     }
   }

@@ -506,6 +506,19 @@ The redacted default omits `manifest_digest` and sets
 stable comparison digest. Check reports add `total_findings` and
 `findings_truncated` so bounded output cannot be mistaken for a complete list.
 
+Post-beta.2 filesystem-access manifest/check JSON advances from schema version
+`2` to `3`. Version 3 gives a fully verified Kubernetes AtomicWriter projection
+the logical configured path as its digest identity while retaining the
+canonical resolved target for checks and Landlock rules. This prevents a normal
+ConfigMap or Secret timestamp-directory rotation from changing the digest, but
+does not normalize incomplete, ambiguous, escaping, or lookalike symlink
+layouts. Version 2 and version 3 digests are deliberately not interchangeable:
+regenerate every `runtime.hardening.filesystem_manifest.expected_digest` and
+Helm `runtimeHardening.filesystemManifest.expectedDigest` with the v3
+`oxibeltctl config filesystem-access CONFIG --show-paths` output before rolling
+out the v3 runtime and configuration together. Roll back the image and its
+retained v2 expected digest as one immutable revision.
+
 Support-bundle format advances from `2` to `3`, config-explain from `2` to `3`,
 and runtime-check/hardening JSON advances to schema version `2` for bounded
 effective-rule summaries and explicit digest-withholding metadata. The installed

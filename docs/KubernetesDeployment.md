@@ -485,8 +485,16 @@ review evidence for chart intent, not a runtime or admission attestation.
 Before installing v2, generate the resolved filesystem-access manifest in a
 trusted local environment and set
 `runtimeHardening.filesystemManifest.expectedDigest` to the path-disclosing
-SHA-256 value. Namespace admission should enforce, audit, and warn on the
-restricted Pod Security Standard:
+SHA-256 value. Manifest schema v3 recognizes ConfigMap and Secret projected
+files only after verifying the complete Kubernetes AtomicWriter symlink
+topology. It uses the stable logical mount path for digest identity across
+timestamp-directory rotations while retaining the resolved backing file for
+checks and Landlock installation. Incomplete, ambiguous, escaping, or lookalike
+layouts are not treated as projected volumes and fail an unchanged expected
+digest closed. Regenerate every schema-v2 expected digest with a schema-v3
+`oxibeltctl` against the final logical mount paths before upgrading the runtime;
+do not copy a v2 digest forward. Namespace admission should enforce, audit, and
+warn on the restricted Pod Security Standard:
 
 ```sh
 kubectl label namespace oxibelt \

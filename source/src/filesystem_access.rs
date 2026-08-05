@@ -23,7 +23,11 @@ use crate::hardening::{
   ReadOnlyRootfsCompatibility,
 };
 
-pub const FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION: u32 = 2;
+mod atomic_writer;
+
+pub const FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION: u32 = 3;
+const FILESYSTEM_ACCESS_MANIFEST_NORMALIZATION: &str =
+  "canonical_enforcement_with_verified_kubernetes_atomic_writer_digest_identity_v3";
 const MAX_MANIFEST_ENTRIES: usize = 8_192;
 const MAX_FILESYSTEM_ACCESS_FINDINGS: usize = 256;
 const MAX_PATH_BYTES: usize = 4_096;
@@ -108,6 +112,12 @@ pub enum FilesystemPathScope {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FilesystemAccessEntry {
   path: PathBuf,
+  /// Stable path identity used only for manifest ordering and digesting.
+  ///
+  /// Enforcement, checks, containment, and operator-visible paths always use
+  /// `path`, which remains the canonical path resolved for the current
+  /// filesystem generation.
+  digest_identity_path: PathBuf,
   access: Vec<FilesystemAccessMode>,
   purpose: FilesystemAccessPurpose,
   source_config_path: Option<String>,
@@ -345,7 +355,7 @@ impl FilesystemAccessManifest {
       manifest_digest: show_paths.then(|| self.digest.clone()),
       manifest_digest_withheld: !show_paths,
       paths_redacted: !show_paths,
-      normalization: "canonicalize_existing_components_preserve_proc_self_and_rotation_parent_v2",
+      normalization: FILESYSTEM_ACCESS_MANIFEST_NORMALIZATION,
       entries,
     }
   }
@@ -659,9 +669,17 @@ impl ManifestBuilder {
       let source = source_config_path.as_deref().unwrap_or("unknown source");
       bail!("filesystem manifest path for {source} must not be empty");
     }
+    let logical_path = lexical_absolute_path(path, &self.cwd).ok();
     let path = normalize_path(path, &self.cwd)?;
+    let digest_identity_path = logical_path
+      .as_deref()
+      .and_then(|logical| atomic_writer::digest_identity_path(logical, &path))
+      .unwrap_or_else(|| path.clone());
     if path.as_os_str().as_bytes().len() > MAX_PATH_BYTES {
       bail!("filesystem manifest path exceeds {MAX_PATH_BYTES} bytes");
+    }
+    if digest_identity_path.as_os_str().as_bytes().len() > MAX_PATH_BYTES {
+      bail!("filesystem manifest digest identity path exceeds {MAX_PATH_BYTES} bytes");
     }
     if source_config_path.as_deref().is_some_and(str::is_empty) {
       bail!("filesystem manifest source_config_path must not be empty");
@@ -680,6 +698,7 @@ impl ManifestBuilder {
     }
     self.entries.push(FilesystemAccessEntry {
       path,
+      digest_identity_path,
       access,
       purpose,
       source_config_path,
@@ -1441,7 +1460,7 @@ fn landlock_rights_for_entry(entry: &FilesystemAccessEntry) -> BTreeSet<Landlock
 
 fn entry_order(left: &FilesystemAccessEntry, right: &FilesystemAccessEntry) -> std::cmp::Ordering {
   (
-    left.path.as_os_str().as_bytes(),
+    left.digest_identity_path.as_os_str().as_bytes(),
     &left.access,
     left.purpose,
     left.source_config_path.as_deref(),
@@ -1449,9 +1468,10 @@ fn entry_order(left: &FilesystemAccessEntry, right: &FilesystemAccessEntry) -> s
     left.scope,
     left.requires_parent_write,
     left.optional,
+    left.path.as_os_str().as_bytes(),
   )
     .cmp(&(
-      right.path.as_os_str().as_bytes(),
+      right.digest_identity_path.as_os_str().as_bytes(),
       &right.access,
       right.purpose,
       right.source_config_path.as_deref(),
@@ -1459,6 +1479,7 @@ fn entry_order(left: &FilesystemAccessEntry, right: &FilesystemAccessEntry) -> s
       right.scope,
       right.requires_parent_write,
       right.optional,
+      right.path.as_os_str().as_bytes(),
     ))
 }
 
@@ -1554,13 +1575,16 @@ fn lexical_absolute_path(path: &Path, cwd: &Path) -> anyhow::Result<PathBuf> {
 
 fn manifest_digest(entries: &[FilesystemAccessEntry]) -> String {
   let mut hasher = Sha256::new();
-  digest_part(&mut hasher, b"oxibelt-filesystem-access-manifest-v2");
+  digest_part(&mut hasher, b"oxibelt-filesystem-access-manifest-v3");
   digest_part(
     &mut hasher,
     &FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION.to_be_bytes(),
   );
   for entry in entries {
-    digest_part(&mut hasher, entry.path.as_os_str().as_bytes());
+    digest_part(
+      &mut hasher,
+      entry.digest_identity_path.as_os_str().as_bytes(),
+    );
     for mode in &entry.access {
       digest_part(&mut hasher, format!("{mode:?}").as_bytes());
     }
@@ -1903,6 +1927,7 @@ mod tests {
   fn entry(path: &Path, access: &[FilesystemAccessMode]) -> FilesystemAccessEntry {
     FilesystemAccessEntry {
       path: path.to_path_buf(),
+      digest_identity_path: path.to_path_buf(),
       access: access.to_vec(),
       purpose: FilesystemAccessPurpose::RuntimeData,
       source_config_path: Some("test.path".to_string()),
@@ -2231,6 +2256,52 @@ location_template = "/fixture"
   }
 
   #[test]
+  fn ordinary_symlinks_keep_canonical_enforcement_and_digest_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let actual = temp.path().join("actual.pem");
+    let visible = temp.path().join("visible.pem");
+    fs::write(&actual, b"fixture").expect("write target");
+    symlink("actual.pem", &visible).expect("create ordinary symlink");
+    let mut builder = ManifestBuilder {
+      entries: Vec::new(),
+      precise_read_paths: BTreeSet::new(),
+      cwd: temp.path().to_path_buf(),
+    };
+    builder
+      .add_read_file(
+        &visible,
+        FilesystemAccessPurpose::TlsCertificate,
+        "tls.cert_chain",
+        false,
+      )
+      .expect("add ordinary symlink");
+    let manifest = builder.finish().expect("finish manifest");
+    let entry = manifest.entries.first().expect("manifest entry");
+
+    assert_eq!(entry.path, actual);
+    assert_eq!(entry.digest_identity_path, actual);
+  }
+
+  #[test]
+  fn manifest_view_reports_v3_atomic_writer_normalization() {
+    let entries = vec![entry(
+      Path::new("/etc/oxibelt/config/oxibelt.toml"),
+      &[FilesystemAccessMode::ReadFile],
+    )];
+    let manifest = FilesystemAccessManifest {
+      schema_version: FILESYSTEM_ACCESS_MANIFEST_SCHEMA_VERSION,
+      digest: manifest_digest(&entries),
+      entries,
+    };
+
+    assert_eq!(manifest.schema_version(), 3);
+    assert_eq!(
+      manifest.view(false).normalization,
+      "canonical_enforcement_with_verified_kubernetes_atomic_writer_digest_identity_v3"
+    );
+  }
+
+  #[test]
   fn relative_rotation_path_uses_the_normalized_parent() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut builder = ManifestBuilder {
@@ -2255,19 +2326,25 @@ location_template = "/fixture"
   }
 
   #[test]
-  fn kubernetes_secret_symlink_rotation_stays_within_the_logical_parent() {
+  fn kubernetes_atomic_writer_rotations_keep_digest_identity_but_change_enforcement_targets() {
     let temp = tempfile::tempdir().expect("tempdir");
     let secret = temp.path().join("secret");
-    let first = secret.join("..2026_01");
-    let second = secret.join("..2026_02");
+    let first_name = "..2026_08_05_12_34_56.1234567890";
+    let second_name = "..2026_08_05_12_35_56.1234567890";
+    let first = secret.join(first_name);
+    let second = secret.join(second_name);
     fs::create_dir_all(&first).expect("create first secret version");
     fs::create_dir_all(&second).expect("create second secret version");
     fs::write(first.join("tls.crt"), b"first").expect("write first certificate");
     fs::write(second.join("tls.crt"), b"second").expect("write second certificate");
-    symlink("..2026_01", secret.join("..data")).expect("create data link");
-    symlink("..data/tls.crt", secret.join("tls.crt")).expect("create certificate link");
+    symlink(first_name, secret.join("..data")).expect("create data link");
+    symlink("..data/tls.crt", secret.join("tls.crt")).expect("create visible link");
+    let logical_certificate = secret.join("tls.crt");
 
     let build = || {
+      let loaded_certificate = logical_certificate
+        .canonicalize()
+        .expect("resolve selected projected certificate");
       let mut builder = ManifestBuilder {
         entries: Vec::new(),
         precise_read_paths: BTreeSet::new(),
@@ -2275,7 +2352,7 @@ location_template = "/fixture"
       };
       builder
         .add_read_file(
-          &secret.join("tls.crt"),
+          &loaded_certificate,
           FilesystemAccessPurpose::TlsCertificate,
           "tls.cert_chain",
           true,
@@ -2284,27 +2361,176 @@ location_template = "/fixture"
       builder.finish().expect("finish rotation manifest")
     };
     let installed = build();
+    let installed_exact_path = installed
+      .entries
+      .iter()
+      .find(|entry| entry.scope == FilesystemPathScope::Exact)
+      .expect("installed exact file entry")
+      .path
+      .clone();
+    assert_eq!(installed_exact_path, first.join("tls.crt"));
     assert!(
       installed
         .entries
         .iter()
-        .any(|entry| { entry.path == secret && entry.scope == FilesystemPathScope::Descendants })
+        .any(|entry| entry.path == first && entry.scope == FilesystemPathScope::Descendants)
     );
 
-    symlink("..2026_02", secret.join("..data.next")).expect("create replacement data link");
+    symlink(second_name, secret.join("..data.next")).expect("create replacement data link");
     fs::rename(secret.join("..data.next"), secret.join("..data"))
       .expect("rotate data link atomically");
     let rotated = build();
-    assert!(rotated.access_is_subset_of(&installed));
+    let rotated_exact_path = rotated
+      .entries
+      .iter()
+      .find(|entry| entry.scope == FilesystemPathScope::Exact)
+      .expect("rotated exact file entry")
+      .path
+      .clone();
+    assert_eq!(rotated_exact_path, second.join("tls.crt"));
+    assert_ne!(installed_exact_path, rotated_exact_path);
+    assert_eq!(installed.digest(), rotated.digest());
+    assert_eq!(
+      installed
+        .entries
+        .iter()
+        .find(|entry| entry.scope == FilesystemPathScope::Exact)
+        .expect("installed exact entry")
+        .digest_identity_path,
+      logical_certificate
+    );
+    assert_eq!(
+      installed
+        .entries
+        .iter()
+        .find(|entry| entry.scope == FilesystemPathScope::Descendants)
+        .expect("installed rotation parent")
+        .digest_identity_path,
+      secret
+    );
+    assert!(
+      !rotated.access_is_subset_of(&installed),
+      "canonical enforcement must still detect the newly selected generation"
+    );
+    assert_ne!(
+      installed.landlock_projection().read_paths,
+      rotated.landlock_projection().read_paths,
+      "Landlock must retain the canonical target selected for each generation"
+    );
+  }
 
-    let outside = temp.path().join("outside");
-    fs::create_dir(&outside).expect("create outside directory");
-    fs::write(outside.join("tls.crt"), b"outside").expect("write outside certificate");
-    symlink("../outside", secret.join("..data.next")).expect("create escaping data link");
-    fs::rename(secret.join("..data.next"), secret.join("..data"))
-      .expect("replace data link with escape");
-    let escaped = build();
-    assert!(!escaped.access_is_subset_of(&installed));
+  #[test]
+  fn loaded_config_tls_and_quic_projection_digest_survives_atomic_writer_rotation() {
+    let (temp, _) = resolved_config_fixture();
+    let config_root = temp.path().join("config");
+    let cert_root = temp.path().join("cert");
+    let config_entry = config_root.join("oxibelt.toml");
+    let mut config_contents = fs::read_to_string(&config_entry).expect("read fixture config");
+    config_contents.push_str(
+      r#"
+[quic]
+host_key_file = "quic-host-key.b64"
+"#,
+    );
+    fs::remove_file(&config_entry).expect("remove unprojected config");
+    fs::remove_file(cert_root.join("fullchain.pem")).expect("remove unprojected certificate");
+    fs::remove_file(cert_root.join("privkey.pem")).expect("remove unprojected private key");
+
+    let first_name = "..2026_08_05_12_34_56.1234567890";
+    let second_name = "..2026_08_05_12_35_56.1234567890";
+    for generation in [first_name, second_name] {
+      let config_generation = config_root.join(generation);
+      let cert_generation = cert_root.join(generation);
+      fs::create_dir(&config_generation).expect("create config generation");
+      fs::create_dir(&cert_generation).expect("create certificate generation");
+      fs::write(config_generation.join("oxibelt.toml"), &config_contents)
+        .expect("write projected config");
+      fs::write(cert_generation.join("fullchain.pem"), b"test certificate")
+        .expect("write projected certificate");
+      fs::write(cert_generation.join("privkey.pem"), b"test private key")
+        .expect("write projected private key");
+      fs::write(
+        cert_generation.join("quic-host-key.b64"),
+        b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      )
+      .expect("write projected QUIC host key");
+    }
+    symlink(first_name, config_root.join("..data")).expect("create config data link");
+    symlink("..data/oxibelt.toml", &config_entry).expect("create visible config link");
+    symlink(first_name, cert_root.join("..data")).expect("create certificate data link");
+    for file in ["fullchain.pem", "privkey.pem", "quic-host-key.b64"] {
+      symlink(Path::new("..data").join(file), cert_root.join(file))
+        .expect("create visible certificate link");
+    }
+
+    let build = || {
+      let config = Config::load(&config_entry).expect("load projected config");
+      assert!(
+        config
+          .source_paths
+          .config_files
+          .iter()
+          .any(|path| path.starts_with(&config_root) && path != &config_entry),
+        "the loader must expose a canonicalized config source path"
+      );
+      assert_ne!(config.tls.cert_chain, cert_root.join("fullchain.pem"));
+      let logical_host_key = cert_root.join("quic-host-key.b64");
+      assert_ne!(
+        config.quic.host_key_file.as_deref(),
+        Some(logical_host_key.as_path())
+      );
+      FilesystemAccessManifest::from_config(&config).expect("build projected manifest")
+    };
+    let installed = build();
+    let exact_paths = |manifest: &FilesystemAccessManifest| {
+      [
+        "config.entrypoint",
+        "tls.cert_chain",
+        "tls.private_key",
+        "quic.host_key_file",
+      ]
+      .into_iter()
+      .map(|source| {
+        manifest
+          .entries
+          .iter()
+          .find(|entry| {
+            entry.scope == FilesystemPathScope::Exact
+              && entry.source_config_path.as_deref() == Some(source)
+          })
+          .unwrap_or_else(|| panic!("missing exact entry for {source}"))
+          .path
+          .clone()
+      })
+      .collect::<Vec<_>>()
+    };
+    let installed_paths = exact_paths(&installed);
+    assert!(installed_paths[0].starts_with(config_root.join(first_name)));
+    assert!(
+      installed_paths[1..]
+        .iter()
+        .all(|path| path.starts_with(cert_root.join(first_name)))
+    );
+
+    symlink(second_name, config_root.join("..data.next"))
+      .expect("create replacement config data link");
+    fs::rename(config_root.join("..data.next"), config_root.join("..data"))
+      .expect("rotate config data link");
+    symlink(second_name, cert_root.join("..data.next"))
+      .expect("create replacement certificate data link");
+    fs::rename(cert_root.join("..data.next"), cert_root.join("..data"))
+      .expect("rotate certificate data link");
+
+    let rotated = build();
+    let rotated_paths = exact_paths(&rotated);
+    assert_eq!(installed.digest(), rotated.digest());
+    assert_ne!(installed_paths, rotated_paths);
+    assert!(rotated_paths[0].starts_with(config_root.join(second_name)));
+    assert!(
+      rotated_paths[1..]
+        .iter()
+        .all(|path| path.starts_with(cert_root.join(second_name)))
+    );
   }
 
   #[test]
@@ -2372,6 +2598,7 @@ location_template = "/fixture"
   fn broader_descendant_access_covers_exact_candidate() {
     let installed = FilesystemAccessEntry {
       path: PathBuf::from("/var/lib/oxibelt"),
+      digest_identity_path: PathBuf::from("/var/lib/oxibelt"),
       access: vec![FilesystemAccessMode::ReadFile],
       purpose: FilesystemAccessPurpose::RuntimeData,
       source_config_path: None,
@@ -2486,6 +2713,7 @@ location_template = "/fixture"
     let entries = vec![
       FilesystemAccessEntry {
         path: cache_path.clone(),
+        digest_identity_path: cache_path.clone(),
         access: vec![
           FilesystemAccessMode::ReadFile,
           FilesystemAccessMode::ReadDirectory,
@@ -2502,6 +2730,7 @@ location_template = "/fixture"
       },
       FilesystemAccessEntry {
         path: socket_path.clone(),
+        digest_identity_path: socket_path.clone(),
         access: vec![
           FilesystemAccessMode::ReadDirectory,
           FilesystemAccessMode::BindUnixSocket,
@@ -2581,7 +2810,8 @@ location_template = "/fixture"
     let temp = tempfile::tempdir().expect("tempdir");
     let missing = temp.path().join("audit");
     let entries = vec![FilesystemAccessEntry {
-      path: missing,
+      path: missing.clone(),
+      digest_identity_path: missing,
       access: vec![FilesystemAccessMode::CreateFile],
       purpose: FilesystemAccessPurpose::AuditSpool,
       source_config_path: Some("admin.audit.spool.directory".to_string()),
@@ -2612,6 +2842,7 @@ location_template = "/fixture"
     let temp = tempfile::tempdir().expect("tempdir");
     let entries = vec![FilesystemAccessEntry {
       path: temp.path().to_path_buf(),
+      digest_identity_path: temp.path().to_path_buf(),
       access: vec![FilesystemAccessMode::WriteFile],
       purpose: FilesystemAccessPurpose::RuntimeState,
       source_config_path: Some("runtime.state".to_string()),

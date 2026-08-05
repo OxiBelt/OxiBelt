@@ -237,7 +237,7 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
     ["properties"]["filesystem_access"];
   assert_eq!(
     filesystem_access["properties"]["schema_version"]["const"],
-    2
+    3
   );
   assert_eq!(
     filesystem_access["properties"]["manifest_digest_withheld"]["const"],
