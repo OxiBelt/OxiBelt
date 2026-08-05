@@ -3025,6 +3025,92 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
 }
 
 #[test]
+fn kubernetes_supply_chain_admission_registers_exact_node_image_digests() {
+  let script = kubernetes_supply_chain_admission_script_text();
+
+  for expected in [
+    "strict_config_digest=\"$(jq -r '.config_digest'",
+    "tools_config_digest=\"$(jq -r '.config_digest'",
+    "strict_official_image=\"ghcr.io/oxibelt/oxibelt-dataplane-strict@${strict_digest}\"",
+    "tools_official_image=\"ghcr.io/oxibelt/oxibelt-tools@${tools_digest}\"",
+    "docker exec \"${node}\" \"$@\"",
+    "minikube ssh --profile \"${cluster_name}\" --node \"${node}\" -- sudo \"$@\"",
+    "ctr -n k8s.io images list \"name==${reference}\"",
+    "crictl inspecti \"${reference}\"",
+    ".status.id == $config_digest",
+    "(.status.repoTags // []) | index($required_tag)",
+    "(.status.repoDigests // []) | index($required_digest)",
+    "refusing to replace pre-existing official image reference",
+    "ctr -n k8s.io images tag --local",
+    "require_node_image_target \"${node}\" \"${official_image}\" \"${manifest_digest}\"",
+    "require_node_cri_identity \"${node}\" \"${official_image}\"",
+  ] {
+    assert!(
+      script.contains(expected),
+      "supply-chain admission image registration should include {expected}"
+    );
+  }
+
+  let registration = script
+    .split_once("register_node_image_alias() {")
+    .expect("admission harness should define exact node image registration")
+    .1
+    .split_once("\n}\n\nverify_node_images() {")
+    .expect("node image registration should precede all-node verification")
+    .0;
+  for forbidden in [
+    "--force",
+    "crictl pull",
+    "ctr -n k8s.io images pull",
+    "import-",
+  ] {
+    assert!(
+      !registration.contains(forbidden),
+      "exact node image registration must not contain {forbidden}"
+    );
+  }
+
+  let kind_load = script
+    .find("kind load docker-image")
+    .expect("admission harness should load Kind images");
+  let minikube_load = script
+    .find("minikube image load")
+    .expect("admission harness should load Minikube images");
+  let node_readiness = script
+    .find("kube wait --for=condition=Ready node --all")
+    .expect("admission harness should wait for all nodes");
+  let image_registration = script
+    .find("\nverify_node_images\n")
+    .expect("admission harness should register and verify exact node images");
+  let namespace_creation = script
+    .find("kube create namespace")
+    .expect("admission harness should create its namespace");
+  let helm_install = script
+    .find("helm upgrade --install")
+    .expect("admission harness should install its Helm release");
+  assert!(
+    kind_load < node_readiness
+      && minikube_load < node_readiness
+      && node_readiness < image_registration
+      && image_registration < namespace_creation
+      && namespace_creation < helm_install,
+    "exact image registration must follow provider loads and precede all Kubernetes resources"
+  );
+
+  for expected in [
+    "--set-string \"image.digest=${strict_digest}\"",
+    "--set-string image.pullPolicy=Never",
+    "--set-string \"supplyChainAdmission.webhook.image.digest=${tools_digest}\"",
+    "--set-string supplyChainAdmission.webhook.image.pullPolicy=Never",
+  ] {
+    assert!(
+      script.contains(expected),
+      "digest-qualified admission workloads should preserve {expected}"
+    );
+  }
+}
+
+#[test]
 fn kubernetes_strict_hardening_live_config_is_semantically_valid() {
   let inline = helm_strict_hardening_live_inline_config();
   let config: oxibelt::config::Config =

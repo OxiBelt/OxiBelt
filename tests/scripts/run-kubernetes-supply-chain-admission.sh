@@ -57,6 +57,10 @@ tools_unique_image_created=0
 image_lock_dir="/tmp/oxibelt-admission-image-lock-${EUID}"
 strict_digest=""
 tools_digest=""
+strict_config_digest=""
+tools_config_digest=""
+strict_official_image=""
+tools_official_image=""
 source_revision=""
 source_tree=""
 api_server_source_cidrs=""
@@ -427,8 +431,17 @@ strict_digest="$(jq -r '.image_digest' \
   "${strict_artifact_dir%/}/oxibelt-dataplane-strict-alpine-musl-amd64-artifact-contract.json")"
 tools_digest="$(jq -r '.image_digest' \
   "${tools_artifact_dir%/}/oxibelt-tools-alpine-musl-amd64-artifact-contract.json")"
-[[ "${strict_digest}" =~ ^sha256:[0-9a-f]{64}$ && "${tools_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] \
-  || die "validated artifact contracts did not expose exact image digests"
+strict_config_digest="$(jq -r '.config_digest' \
+  "${strict_artifact_dir%/}/oxibelt-dataplane-strict-alpine-musl-amd64-artifact-contract.json")"
+tools_config_digest="$(jq -r '.config_digest' \
+  "${tools_artifact_dir%/}/oxibelt-tools-alpine-musl-amd64-artifact-contract.json")"
+[[ "${strict_digest}" =~ ^sha256:[0-9a-f]{64}$ \
+  && "${tools_digest}" =~ ^sha256:[0-9a-f]{64}$ \
+  && "${strict_config_digest}" =~ ^sha256:[0-9a-f]{64}$ \
+  && "${tools_config_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] \
+  || die "validated artifact contracts did not expose exact manifest and config digests"
+strict_official_image="ghcr.io/oxibelt/oxibelt-dataplane-strict@${strict_digest}"
+tools_official_image="ghcr.io/oxibelt/oxibelt-tools@${tools_digest}"
 
 if ! mkdir -m 0700 "${image_lock_dir}" 2>/dev/null; then
   [[ -d "${image_lock_dir}" && ! -L "${image_lock_dir}" ]] \
@@ -519,39 +532,108 @@ kube get nodes -o json \
         .type == "Ready" and .status == "True"))' >/dev/null \
   || die "live admission qualification requires exactly three Ready Kubernetes nodes"
 
-verify_node_images() {
-  local node image_json
+node_image_command() {
+  local node="$1"
+  shift
   case "${provider}" in
     kind)
-      while IFS= read -r node; do
-        image_json="$(docker exec "${node}" crictl images -o json)"
-        jq -e \
-          --arg strict_tag "${strict_unique_image}" \
-          --arg strict_digest "ghcr.io/oxibelt/oxibelt-dataplane-strict@${strict_digest}" \
-          --arg tools_tag "${tools_unique_image}" \
-          --arg tools_digest "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '
-            any(.images[]?; (.repoTags // []) | index($strict_tag))
-              and any(.images[]?; (.repoDigests // []) | index($strict_digest))
-              and any(.images[]?; (.repoTags // []) | index($tools_tag))
-              and any(.images[]?; (.repoDigests // []) | index($tools_digest))
-          ' >/dev/null <<<"${image_json}" \
-          || die "Kind node ${node} did not retain exact official image digests"
-      done < <(kind get nodes --name "${cluster_name}")
+      docker exec "${node}" "$@"
       ;;
     minikube)
-      while IFS= read -r node; do
-        image_json="$(minikube ssh --profile "${cluster_name}" --node "${node}" -- \
-          sudo crictl images -o json)"
-        jq -e \
-          --arg strict_digest "ghcr.io/oxibelt/oxibelt-dataplane-strict@${strict_digest}" \
-          --arg tools_digest "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '
-            any(.images[]?; (.repoDigests // []) | index($strict_digest))
-              and any(.images[]?; (.repoDigests // []) | index($tools_digest))
-          ' >/dev/null <<<"${image_json}" \
-          || die "Minikube node ${node} did not retain exact official image digests"
-      done < <(kube get nodes -o json | jq -r '.items[].metadata.name')
+      minikube ssh --profile "${cluster_name}" --node "${node}" -- sudo "$@"
       ;;
   esac
+}
+
+node_image_names() {
+  case "${provider}" in
+    kind) kind get nodes --name "${cluster_name}" ;;
+    minikube) kube get nodes -o json | jq -r '.items[].metadata.name' ;;
+  esac
+}
+
+require_node_image_target() {
+  local node="$1"
+  local reference="$2"
+  local expected_digest="$3"
+  local image_list
+  image_list="$(node_image_command "${node}" \
+    ctr -n k8s.io images list "name==${reference}")" \
+    || die "could not inspect containerd image ${reference} on node ${node}"
+  awk -v expected_reference="${reference}" -v expected_digest="${expected_digest}" '
+    NR == 1 { next }
+    NF {
+      rows += 1
+      if ($1 == expected_reference && $3 == expected_digest) matches += 1
+    }
+    END { exit !(rows == 1 && matches == 1) }
+  ' <<<"${image_list}" \
+    || die "containerd image ${reference} on node ${node} did not target ${expected_digest}"
+}
+
+require_node_cri_identity() {
+  local node="$1"
+  local reference="$2"
+  local expected_config_digest="$3"
+  local required_tag="$4"
+  local required_digest="$5"
+  local image_json
+  image_json="$(node_image_command "${node}" crictl inspecti "${reference}")" \
+    || die "CRI could not inspect image ${reference} on node ${node}"
+  jq -e \
+    --arg config_digest "${expected_config_digest}" \
+    --arg required_tag "${required_tag}" \
+    --arg required_digest "${required_digest}" '
+      .status.id == $config_digest
+        and (((.status.repoTags // []) | index($required_tag)) != null)
+        and (($required_digest == "")
+          or (((.status.repoDigests // []) | index($required_digest)) != null))
+    ' >/dev/null <<<"${image_json}" \
+    || die "CRI image ${reference} on node ${node} did not retain its exact identity"
+}
+
+register_node_image_alias() {
+  local node="$1"
+  local unique_image="$2"
+  local official_image="$3"
+  local manifest_digest="$4"
+  local config_digest="$5"
+  local official_matches
+
+  require_node_image_target "${node}" "${unique_image}" "${manifest_digest}"
+  require_node_cri_identity "${node}" "${unique_image}" \
+    "${config_digest}" "${unique_image}" ""
+
+  official_matches="$(node_image_command "${node}" \
+    ctr -n k8s.io images list --quiet "name==${official_image}")" \
+    || die "could not check official image reference ${official_image} on node ${node}"
+  [[ -z "${official_matches}" ]] \
+    || die "refusing to replace pre-existing official image reference ${official_image} on node ${node}"
+  if node_image_command "${node}" crictl inspecti "${official_image}" >/dev/null 2>&1; then
+    die "CRI unexpectedly resolved official image reference ${official_image} on node ${node}"
+  fi
+
+  node_image_command "${node}" ctr -n k8s.io images tag --local \
+    "${unique_image}" "${official_image}" >/dev/null \
+    || die "could not register official image reference ${official_image} on node ${node}"
+  require_node_image_target "${node}" "${official_image}" "${manifest_digest}"
+  require_node_cri_identity "${node}" "${official_image}" \
+    "${config_digest}" "${unique_image}" "${official_image}"
+}
+
+verify_node_images() {
+  local node node_list
+  node_list="$(node_image_names)" \
+    || die "could not enumerate ${provider} nodes for image verification"
+  [[ -n "${node_list}" ]] || die "image verification did not find any ${provider} nodes"
+  while IFS= read -r node; do
+    register_node_image_alias "${node}" \
+      "${strict_unique_image}" "${strict_official_image}" \
+      "${strict_digest}" "${strict_config_digest}"
+    register_node_image_alias "${node}" \
+      "${tools_unique_image}" "${tools_official_image}" \
+      "${tools_digest}" "${tools_config_digest}"
+  done <<<"${node_list}"
 }
 verify_node_images
 
