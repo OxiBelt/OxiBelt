@@ -763,6 +763,20 @@ roll out and roll back through the normal exact-revision, immutable-image-digest
 procedure, and keep each rebuild bound to the target revision's complete
 lockfiles and pinned builder inputs rather than mixing inputs across revisions.
 
+A later staged-membership correction lets an instance outside an active legacy
+version-`1` epoch remain online as a non-participating learner when the legacy
+shared artifact key is not provisioned. The learner still cannot send an
+active-member heartbeat, acquire coordinator or fencing authority, validate or
+acknowledge protected writes, serve privileged mutation decisions, or make a
+rollout ready. Active version-`1` members still require the shared key, and
+version-`2` fingerprint, key-wrap, readiness, and activation behavior is
+unchanged. The correction changes no Admin wire shape, native configuration,
+schema epoch, persisted state, or cryptographic format and requires no migration
+or coordinated active-member rollout. Before rolling a keyless learner back to
+an affected binary while a version-`1` epoch remains active, stop that learner or
+provision the legacy key through the protected external secret channel; the
+older binary can otherwise fail heartbeat initialization.
+
 Existing signed v1 and v2 supply-chain bundle wire shapes remain readable.
 Admission now stops accepting either schema when the earliest signed
 provenance, SBOM, rebuild-recipe, or independent-rebuild timestamp exceeds

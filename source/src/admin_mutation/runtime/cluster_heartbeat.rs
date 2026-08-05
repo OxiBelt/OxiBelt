@@ -75,11 +75,24 @@ impl AdminMutationRuntime {
       return Ok(());
     };
     let current = self.membership_authority();
+    let local_member = self
+      .inner
+      .local_instance_id
+      .as_deref()
+      .context("staged membership local instance ID is missing")?;
+    let local_is_active_member = active
+      .members
+      .binary_search_by(|member| member.as_str().cmp(local_member))
+      .is_ok();
     let artifact_key_fingerprint = if active.epoch_version == 1 {
-      self
-        .artifact_cipher_for_membership(&active.epoch_digest)?
-        .key_fingerprint()
-        .to_string()
+      if local_is_active_member {
+        self
+          .artifact_cipher_for_membership(&active.epoch_digest)?
+          .key_fingerprint()
+          .to_string()
+      } else {
+        current.artifact_key_fingerprint.clone()
+      }
     } else {
       active
         .artifact_key_fingerprint
@@ -92,16 +105,8 @@ impl AdminMutationRuntime {
     {
       return Ok(());
     }
-    let local_member = self
-      .inner
-      .local_instance_id
-      .as_deref()
-      .context("staged membership local instance ID is missing")?;
     if active.epoch_version == crate::admin_mutation::membership::MEMBERSHIP_DOCUMENT_VERSION
-      && active
-        .members
-        .binary_search_by(|member| member.as_str().cmp(local_member))
-        .is_ok()
+      && local_is_active_member
     {
       let private = self
         .inner
@@ -116,10 +121,7 @@ impl AdminMutationRuntime {
       )
       .context("active membership epoch local identity is invalid")?;
     }
-    if active
-      .members
-      .binary_search_by(|member| member.as_str().cmp(local_member))
-      .is_ok()
+    if local_is_active_member
       && self
         .artifact_cipher_for_membership(&active.epoch_digest)
         .is_err()
@@ -360,3 +362,7 @@ impl AdminMutationRuntime {
     }))
   }
 }
+
+#[cfg(test)]
+#[path = "cluster_heartbeat_tests.rs"]
+mod tests;
