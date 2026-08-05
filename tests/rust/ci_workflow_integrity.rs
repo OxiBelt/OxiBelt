@@ -2983,11 +2983,51 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
     "admission image lock directory must be owned by the current user with mode 0700",
     "refusing to restore Docker image tag without exact ownership",
     "strict_unique_image_created=1",
+    "tools_seed_container_created=1",
     "tools_extract_container_created=1",
+    "tools_config_volume_created=1",
+    "tools_cert_volume_created=1",
+    "oxibelt.test.run=${run_id}",
+    "oxibelt.test.resource=seed",
+    "oxibelt.test.resource=extract",
+    "oxibelt.test.resource=config",
+    "oxibelt.test.resource=cert",
+    "refusing to reuse existing tools input volume",
+    "refusing to reuse existing tools input container",
+    "refusing to remove tools container without exact ownership",
+    "refusing to remove tools volume without exact ownership",
+    "tar --format=posix --numeric-owner --owner=0 --group=10001",
+    "-C \"${work_dir}/container-input/config\" -cf - .",
+    "-C \"${work_dir}/container-input/cert\" -cf - .",
+    "| docker cp - \"${tools_seed_container}:/etc/oxibelt/config\"",
+    "| docker cp - \"${tools_seed_container}:/etc/oxibelt/cert\"",
+    "mkdir -m 0755 \"${work_dir}/container-input/config\"",
+    "mkdir -m 0755 \"${work_dir}/container-input/config/conf.d\"",
+    "mkdir -m 0750 \"${work_dir}/container-input/cert\"",
+    "container-input/config/conf.d",
+    "container-input/cert/tls.crt",
+    "container-input/cert/tls.key",
+    "container-input/cert/quic-host-key.b64",
+    "chmod 0644 \"${work_dir}/container-input/config/oxibelt.toml\"",
+    "chmod 0440",
+    "type=volume,src=${tools_config_volume},dst=/etc/oxibelt/config,volume-nocopy",
+    "type=volume,src=${tools_cert_volume},dst=/etc/oxibelt/cert,volume-nocopy",
+    "type=volume,src=${tools_config_volume},dst=/etc/oxibelt/config,readonly,volume-nocopy",
+    "type=volume,src=${tools_cert_volume},dst=/etc/oxibelt/cert,readonly,volume-nocopy",
     "--network none",
     "--read-only",
+    "--user 10001:10001",
     "--cap-drop ALL",
     "--security-opt no-new-privileges",
+    "config filesystem-access /etc/oxibelt/config/oxibelt.toml",
+    ".manifest.schema_version as $schema",
+    "select($schema == 3)",
+    ".manifest.normalization as $normalization",
+    "canonical_enforcement_with_verified_kubernetes_atomic_writer_digest_identity_v3",
+    ".source_config_path == \"config.entrypoint\"",
+    ".source_config_path == \"tls.cert_chain\"",
+    ".source_config_path == \"tls.private_key\"",
+    ".source_config_path == \"quic.host_key_file\"",
     "app.kubernetes.io/name=oxibelt-admission,app.kubernetes.io/instance=${release_name}",
     "(.webhooks | length) == 1",
     ".webhooks[0].failurePolicy == \"Fail\"",
@@ -3004,15 +3044,66 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
     );
   }
 
+  assert_eq!(
+    script
+      .matches("tar --format=posix --numeric-owner --owner=0 --group=10001")
+      .count(),
+    2,
+    "configuration and certificate volumes must each be seeded by an ownership-stable tar stream"
+  );
+  let staging_start = script
+    .find("mkdir -m 0755 \"${work_dir}/container-input\"")
+    .expect("tools input staging should remain explicit");
+  let volumes_start = script
+    .find("tools_config_volume=\"oxibelt-admission-tools-config-${run_id}\"")
+    .expect("tools volume creation should remain explicit");
+  let staging_block = &script[staging_start..volumes_start];
+  for expected in [
+    "chmod 0644 \"${work_dir}/container-input/config/oxibelt.toml\"",
+    "chmod 0440",
+    "\"${work_dir}/container-input/cert/tls.crt\"",
+    "\"${work_dir}/container-input/cert/tls.key\"",
+    "\"${work_dir}/container-input/cert/quic-host-key.b64\"",
+  ] {
+    assert!(
+      staging_block.contains(expected),
+      "tools input staging should retain security-relevant mode contract {expected}"
+    );
+  }
+  let seed_start = script
+    .find("tools_seed_container=\"$(docker create")
+    .expect("tools staging container creation should remain explicit");
+  let extract_start = script
+    .find("tools_extract_container=\"$(docker create")
+    .expect("tools extraction container creation should remain explicit");
+  let seed_block = &script[seed_start..extract_start];
+  for expected in [
+    "--network none",
+    "--read-only",
+    "--user 10001:10001",
+    "--cap-drop ALL",
+    "--security-opt no-new-privileges",
+    "--pids-limit 128",
+  ] {
+    assert!(
+      seed_block.contains(expected),
+      "never-started tools staging container should retain {expected}"
+    );
+  }
+
   for forbidden in [
     "docker-rootful",
     "docker system prune",
     "docker container prune",
+    "docker volume prune",
     "kind delete clusters --all",
     "minikube delete --all",
     "kubectl delete --all",
     "kubectl get secret",
     "kubectl describe secret",
+    "type=bind",
+    "filesystem-access --file",
+    "/tmp/obp204-config",
     "failurePolicy: Ignore",
     "GITHUB_TOKEN",
     "GH_TOKEN",

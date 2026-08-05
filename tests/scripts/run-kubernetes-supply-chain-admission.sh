@@ -39,7 +39,15 @@ port_forward_pid=""
 rotation_probe_pid=""
 bundle_switch_probe_pid=""
 tools_extract_container=""
+tools_extract_container_name=""
 tools_extract_container_created=0
+tools_seed_container=""
+tools_seed_container_name=""
+tools_seed_container_created=0
+tools_config_volume=""
+tools_config_volume_created=0
+tools_cert_volume=""
+tools_cert_volume_created=0
 strict_source_image="oxibelt-dataplane-strict:alpine-musl-amd64"
 tools_source_image="oxibelt-tools:alpine-musl-amd64"
 strict_source_previous_id=""
@@ -202,8 +210,67 @@ restore_source_image() {
   fi
 }
 
+tools_container_is_owned() {
+  local container_id="$1"
+  local expected_name="$2"
+  local expected_resource="$3"
+  local actual_id actual_name actual_run actual_resource
+  [[ "${container_id}" =~ ^[0-9a-f]{64}$ \
+    && "${expected_name}" == "oxibelt-admission-tools-${expected_resource}-${run_id}" ]] \
+    || return 1
+  actual_id="$(docker container inspect --format '{{.Id}}' "${container_id}" 2>/dev/null)" \
+    || return 1
+  actual_name="$(docker container inspect --format '{{.Name}}' "${container_id}" 2>/dev/null)" \
+    || return 1
+  actual_run="$(docker container inspect \
+    --format '{{ index .Config.Labels "oxibelt.test.run" }}' \
+    "${container_id}" 2>/dev/null)" || return 1
+  actual_resource="$(docker container inspect \
+    --format '{{ index .Config.Labels "oxibelt.test.resource" }}' \
+    "${container_id}" 2>/dev/null)" || return 1
+  [[ "${actual_id}" == "${container_id}" \
+    && "${actual_name}" == "/${expected_name}" \
+    && "${actual_run}" == "${run_id}" \
+    && "${actual_resource}" == "${expected_resource}" ]]
+}
+
+remove_owned_tools_container() {
+  local container_id="$1"
+  local expected_name="$2"
+  local expected_resource="$3"
+  local force="${4:-0}"
+  tools_container_is_owned "${container_id}" "${expected_name}" "${expected_resource}" \
+    || { echo "refusing to remove tools container without exact ownership: ${expected_name}" >&2; return 1; }
+  if [[ "${force}" == 1 ]]; then
+    docker container rm --force "${container_id}" >/dev/null
+  else
+    docker container rm "${container_id}" >/dev/null
+  fi
+}
+
+tools_volume_is_owned() {
+  local volume="$1"
+  local expected_resource="$2"
+  local actual_run actual_resource
+  [[ "${volume}" == "oxibelt-admission-tools-${expected_resource}-${run_id}" ]] || return 1
+  actual_run="$(docker volume inspect \
+    --format '{{ index .Labels "oxibelt.test.run" }}' "${volume}" 2>/dev/null)" || return 1
+  actual_resource="$(docker volume inspect \
+    --format '{{ index .Labels "oxibelt.test.resource" }}' "${volume}" 2>/dev/null)" || return 1
+  [[ "${actual_run}" == "${run_id}" && "${actual_resource}" == "${expected_resource}" ]]
+}
+
+remove_owned_tools_volume() {
+  local volume="$1"
+  local expected_resource="$2"
+  tools_volume_is_owned "${volume}" "${expected_resource}" \
+    || { echo "refusing to remove tools volume without exact ownership: ${volume}" >&2; return 1; }
+  docker volume rm "${volume}" >/dev/null
+}
+
 cleanup() {
   local status="$?"
+  local cleanup_failed=0
   set +e
   stop_bundle_switch_probe
   stop_rotation_probe
@@ -213,7 +280,42 @@ cleanup() {
     diagnose
   fi
   if ((tools_extract_container_created == 1)) && [[ -n "${tools_extract_container}" ]]; then
-    docker container rm --force "${tools_extract_container}" >/dev/null 2>&1 || true
+    if remove_owned_tools_container "${tools_extract_container}" \
+      "${tools_extract_container_name}" extract 1 >/dev/null 2>&1; then
+      tools_extract_container_created=0
+      tools_extract_container=""
+    else
+      echo "could not clean up the owned tools extraction container" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if ((tools_seed_container_created == 1)) && [[ -n "${tools_seed_container}" ]]; then
+    if remove_owned_tools_container "${tools_seed_container}" \
+      "${tools_seed_container_name}" seed 1 >/dev/null 2>&1; then
+      tools_seed_container_created=0
+      tools_seed_container=""
+    else
+      echo "could not clean up the owned tools staging container" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if ((tools_config_volume_created == 1)) && [[ -n "${tools_config_volume}" ]]; then
+    if remove_owned_tools_volume "${tools_config_volume}" config >/dev/null 2>&1; then
+      tools_config_volume_created=0
+      tools_config_volume=""
+    else
+      echo "could not clean up the owned tools configuration volume" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if ((tools_cert_volume_created == 1)) && [[ -n "${tools_cert_volume}" ]]; then
+    if remove_owned_tools_volume "${tools_cert_volume}" cert >/dev/null 2>&1; then
+      tools_cert_volume_created=0
+      tools_cert_volume=""
+    else
+      echo "could not clean up the owned tools certificate volume" >&2
+      cleanup_failed=1
+    fi
   fi
   if ((cluster_attempted == 1)); then
     case "${provider}" in
@@ -269,6 +371,9 @@ cleanup() {
       echo "refusing to remove unexpected admission work directory: ${work_dir}" >&2
       ;;
   esac
+  if ((cleanup_failed == 1 && status == 0)); then
+    status=1
+  fi
   exit "${status}"
 }
 trap cleanup EXIT
@@ -314,7 +419,7 @@ esac
 [[ "${minikube_kubernetes_version}" =~ ^v1\.(34|35|36)\.[0-9]+$ ]] \
   || die "Minikube Kubernetes version must be within the supported 1.34-1.36 range"
 
-for command in awk base64 cargo cat cp curl cut date dirname docker flock git grep head helm jq kubectl mktemp openssl python3 sed sha256sum stat tr uname; do
+for command in awk base64 cargo cat cp curl cut date dirname docker flock git grep head helm jq kubectl mktemp openssl python3 sed sha256sum stat tar tr uname; do
   require_command "${command}"
 done
 case "${provider}" in
@@ -836,32 +941,167 @@ awk '
 ' "${work_dir}/configmap.yaml" >"${work_dir}/oxibelt.toml"
 [[ -s "${work_dir}/oxibelt.toml" ]] || die "could not extract rendered native configuration"
 chmod 0644 "${work_dir}/oxibelt.toml"
-mkdir -m 0755 "${work_dir}/container-config"
-mkdir -m 0755 "${work_dir}/container-config/conf.d"
-cp -- "${work_dir}/oxibelt.toml" "${work_dir}/container-config/oxibelt.toml"
-tools_extract_container="oxibelt-admission-tools-${run_id}"
-docker create --name "${tools_extract_container}" \
+mkdir -m 0755 "${work_dir}/container-input"
+mkdir -m 0755 "${work_dir}/container-input/config"
+mkdir -m 0755 "${work_dir}/container-input/config/conf.d"
+mkdir -m 0750 "${work_dir}/container-input/cert"
+cp -- "${work_dir}/oxibelt.toml" "${work_dir}/container-input/config/oxibelt.toml"
+cp -- "${work_dir}/public-tls.crt" "${work_dir}/container-input/cert/tls.crt"
+cp -- "${work_dir}/public-tls.key" "${work_dir}/container-input/cert/tls.key"
+cp -- "${work_dir}/quic-host-key.b64" \
+  "${work_dir}/container-input/cert/quic-host-key.b64"
+chmod 0644 "${work_dir}/container-input/config/oxibelt.toml"
+chmod 0440 \
+  "${work_dir}/container-input/cert/tls.crt" \
+  "${work_dir}/container-input/cert/tls.key" \
+  "${work_dir}/container-input/cert/quic-host-key.b64"
+
+tools_config_volume="oxibelt-admission-tools-config-${run_id}"
+tools_cert_volume="oxibelt-admission-tools-cert-${run_id}"
+tools_seed_container_name="oxibelt-admission-tools-seed-${run_id}"
+tools_extract_container_name="oxibelt-admission-tools-extract-${run_id}"
+for volume in "${tools_config_volume}" "${tools_cert_volume}"; do
+  if docker volume inspect "${volume}" >/dev/null 2>&1; then
+    die "refusing to reuse existing tools input volume: ${volume}"
+  fi
+done
+for container_name in "${tools_seed_container_name}" "${tools_extract_container_name}"; do
+  if docker container inspect "${container_name}" >/dev/null 2>&1; then
+    die "refusing to reuse existing tools input container: ${container_name}"
+  fi
+done
+created_volume="$(docker volume create \
+  --label "oxibelt.test.run=${run_id}" \
+  --label oxibelt.test.resource=config \
+  "${tools_config_volume}")"
+tools_config_volume_created=1
+[[ "${created_volume}" == "${tools_config_volume}" ]] \
+  || die "Docker did not create the exact tools configuration volume"
+tools_volume_is_owned "${tools_config_volume}" config \
+  || die "tools configuration volume did not retain exact ownership labels"
+created_volume="$(docker volume create \
+  --label "oxibelt.test.run=${run_id}" \
+  --label oxibelt.test.resource=cert \
+  "${tools_cert_volume}")"
+tools_cert_volume_created=1
+[[ "${created_volume}" == "${tools_cert_volume}" ]] \
+  || die "Docker did not create the exact tools certificate volume"
+tools_volume_is_owned "${tools_cert_volume}" cert \
+  || die "tools certificate volume did not retain exact ownership labels"
+
+tools_seed_container="$(docker create --name "${tools_seed_container_name}" \
+  --label "oxibelt.test.run=${run_id}" \
+  --label oxibelt.test.resource=seed \
   --network none \
   --read-only \
   --user 10001:10001 \
   --cap-drop ALL \
   --security-opt no-new-privileges \
   --pids-limit 128 \
+  --mount "type=volume,src=${tools_config_volume},dst=/etc/oxibelt/config,volume-nocopy" \
+  --mount "type=volume,src=${tools_cert_volume},dst=/etc/oxibelt/cert,volume-nocopy" \
+  --entrypoint /usr/local/bin/oxibeltctl \
+  "${tools_unique_image}" --help)"
+tools_seed_container_created=1
+[[ "${tools_seed_container}" =~ ^[0-9a-f]{64}$ ]] \
+  || die "Docker did not return an immutable tools staging container ID"
+tools_container_is_owned \
+  "${tools_seed_container}" "${tools_seed_container_name}" seed \
+  || die "tools staging container did not retain exact ownership"
+tar --format=posix --numeric-owner --owner=0 --group=10001 \
+  -C "${work_dir}/container-input/config" -cf - . \
+  | docker cp - "${tools_seed_container}:/etc/oxibelt/config"
+tar --format=posix --numeric-owner --owner=0 --group=10001 \
+  -C "${work_dir}/container-input/cert" -cf - . \
+  | docker cp - "${tools_seed_container}:/etc/oxibelt/cert"
+
+tools_extract_container="$(docker create --name "${tools_extract_container_name}" \
+  --label "oxibelt.test.run=${run_id}" \
+  --label oxibelt.test.resource=extract \
+  --network none \
+  --read-only \
+  --user 10001:10001 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --pids-limit 128 \
+  --mount "type=volume,src=${tools_config_volume},dst=/etc/oxibelt/config,readonly,volume-nocopy" \
+  --mount "type=volume,src=${tools_cert_volume},dst=/etc/oxibelt/cert,readonly,volume-nocopy" \
   --entrypoint /usr/local/bin/oxibeltctl \
   "${tools_unique_image}" \
-  config filesystem-access --file /tmp/obp204-config/oxibelt.toml \
-  --format json --show-paths >/dev/null
+  config filesystem-access /etc/oxibelt/config/oxibelt.toml \
+  --format json --show-paths)"
 tools_extract_container_created=1
-docker cp "${work_dir}/container-config" \
-  "${tools_extract_container}:/tmp/obp204-config"
-docker start --attach "${tools_extract_container}" >"${work_dir}/filesystem-manifest.json"
+[[ "${tools_extract_container}" =~ ^[0-9a-f]{64}$ ]] \
+  || die "Docker did not return an immutable tools extraction container ID"
+tools_container_is_owned \
+  "${tools_extract_container}" "${tools_extract_container_name}" extract \
+  || die "tools extraction container did not retain exact ownership"
+docker container inspect "${tools_extract_container}" \
+  | jq -e \
+    --arg config_volume "${tools_config_volume}" \
+    --arg cert_volume "${tools_cert_volume}" '
+      length == 1
+        and .[0].HostConfig.ReadonlyRootfs == true
+        and .[0].HostConfig.NetworkMode == "none"
+        and .[0].Config.User == "10001:10001"
+        and ([.[0].Mounts[] | select(
+          .Name == $config_volume
+            and .Destination == "/etc/oxibelt/config"
+            and .RW == false)] | length) == 1
+        and ([.[0].Mounts[] | select(
+          .Name == $cert_volume
+            and .Destination == "/etc/oxibelt/cert"
+            and .RW == false)] | length) == 1
+    ' >/dev/null || die "tools extraction container did not retain its hardened mounts"
+if ! docker start --attach "${tools_extract_container}" \
+  >"${work_dir}/filesystem-manifest.json"; then
+  extract_exit_code="$(docker container inspect \
+    --format '{{.State.ExitCode}}' "${tools_extract_container}" 2>/dev/null || true)"
+  die "exact tools image could not derive the filesystem manifest (exit ${extract_exit_code:-unknown})"
+fi
 [[ "$(docker container inspect --format '{{.State.ExitCode}}' "${tools_extract_container}")" == 0 ]] \
   || die "exact tools image could not derive the filesystem manifest"
-docker container rm "${tools_extract_container}" >/dev/null
+filesystem_manifest_digest="$(jq -er '
+  .manifest.schema_version as $schema
+  | .manifest.normalization as $normalization
+  | .manifest.manifest_digest as $digest
+  | select($schema == 3)
+  | select($normalization
+      == "canonical_enforcement_with_verified_kubernetes_atomic_writer_digest_identity_v3")
+  | select($digest | test("^sha256:[0-9a-f]{64}$"))
+  | select(any(.manifest.entries[];
+      .source_config_path == "config.entrypoint"
+        and .path == "/etc/oxibelt/config/oxibelt.toml"))
+  | select(any(.manifest.entries[];
+      .source_config_path == "tls.cert_chain"
+        and .path == "/etc/oxibelt/cert/tls.crt"))
+  | select(any(.manifest.entries[];
+      .source_config_path == "tls.private_key"
+        and .path == "/etc/oxibelt/cert/tls.key"))
+  | select(any(.manifest.entries[];
+      .source_config_path == "quic.host_key_file"
+        and .path == "/etc/oxibelt/cert/quic-host-key.b64"))
+  | $digest
+' "${work_dir}/filesystem-manifest.json")" \
+  || die "exact tools image did not derive the required schema-v3 logical manifest entries"
+remove_owned_tools_container \
+  "${tools_extract_container}" "${tools_extract_container_name}" extract \
+  || die "could not remove the owned tools extraction container"
 tools_extract_container_created=0
 tools_extract_container=""
-filesystem_manifest_digest="$(jq -r '.manifest.manifest_digest' \
-  "${work_dir}/filesystem-manifest.json")"
+remove_owned_tools_container \
+  "${tools_seed_container}" "${tools_seed_container_name}" seed \
+  || die "could not remove the owned tools staging container"
+tools_seed_container_created=0
+tools_seed_container=""
+remove_owned_tools_volume "${tools_config_volume}" config \
+  || die "could not remove the owned tools configuration volume"
+tools_config_volume_created=0
+tools_config_volume=""
+remove_owned_tools_volume "${tools_cert_volume}" cert \
+  || die "could not remove the owned tools certificate volume"
+tools_cert_volume_created=0
+tools_cert_volume=""
 [[ "${filesystem_manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]] \
   || die "exact tools image did not derive a filesystem manifest digest"
 
