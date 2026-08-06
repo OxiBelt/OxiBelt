@@ -3182,6 +3182,60 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
 }
 
 #[test]
+fn kubernetes_supply_chain_admission_ephemeral_probe_is_append_only() {
+  let script = kubernetes_supply_chain_admission_script_text();
+  let ephemeral_probe = script
+    .split_once("base_pod obp204-ephemeral-base")
+    .expect("supply-chain admission harness should define the approved ephemeral probe")
+    .1
+    .split_once("base_pod obp204-ephemeral-deny-base")
+    .expect("approved ephemeral probe should precede the independent denial probes")
+    .0;
+
+  let approved_patch = ephemeral_probe
+    .find("--type merge --patch-file \"${work_dir}/ephemeral-approved.json\"")
+    .expect("the approved ephemeral container should be installed before denial testing");
+  let denied_fixture = ephemeral_probe
+    .find("path:\"/spec/ephemeralContainers/-\"")
+    .expect("the denied fixture should append one ephemeral container");
+  let denied_patch = ephemeral_probe
+    .find("--type json --patch-file \"${work_dir}/ephemeral-denied.json\"")
+    .expect("the denied ephemeral container should use JSON Patch");
+  assert!(
+    approved_patch < denied_fixture && denied_fixture < denied_patch,
+    "the denial probe must append to the already-approved ephemeral container list"
+  );
+
+  let denied_block = &ephemeral_probe[denied_fixture..];
+  for expected in [
+    "path:\"/spec/ephemeralContainers/-\"",
+    "SupplyChainAdmissionDenied",
+    "unapproved_executable_container",
+  ] {
+    assert!(
+      denied_block.contains(expected),
+      "the append-only ephemeral denial probe should include {expected}"
+    );
+  }
+  assert_eq!(
+    ephemeral_probe.matches("op:\"add\"").count(),
+    1,
+    "the denial fixture should contain exactly one JSON Patch add operation"
+  );
+  assert_eq!(
+    ephemeral_probe
+      .matches("path:\"/spec/ephemeralContainers/-\"")
+      .count(),
+    1,
+    "the denial fixture should append exactly one ephemeral container"
+  );
+  assert!(
+    !denied_block.contains("--type merge"),
+    "the denial probe must not replace the immutable ephemeral container list"
+  );
+}
+
+#[test]
 fn kubernetes_supply_chain_admission_route_is_semantically_valid_and_self_contained() {
   let route_inline = kubernetes_supply_chain_admission_route_config();
   let route_value: toml::Value =

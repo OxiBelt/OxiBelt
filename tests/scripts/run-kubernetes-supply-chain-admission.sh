@@ -1389,21 +1389,21 @@ jq -n --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '{spec:{epheme
 }]}}' >"${work_dir}/ephemeral-approved.json"
 kube -n "${namespace}" patch pod obp204-ephemeral-base --subresource=ephemeralcontainers \
   --type merge --patch-file "${work_dir}/ephemeral-approved.json" >/dev/null
-jq -n --arg approved "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '{spec:{ephemeralContainers:[
-  {name:"obp204-ephemeral", image:$approved, imagePullPolicy:"Never",
-    securityContext:{allowPrivilegeEscalation:false, readOnlyRootFilesystem:true,
-      capabilities:{drop:["ALL"]}}},
-  {name:"obp204-unlisted-ephemeral", image:$approved, imagePullPolicy:"Never",
+jq -n --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '[{
+  op:"add", path:"/spec/ephemeralContainers/-",
+  value:{name:"obp204-unlisted-ephemeral", image:$tools, imagePullPolicy:"Never",
     securityContext:{allowPrivilegeEscalation:false, readOnlyRootFilesystem:true,
       capabilities:{drop:["ALL"]}}}
-]}}' >"${work_dir}/ephemeral-denied.json"
+}]' >"${work_dir}/ephemeral-denied.json"
 if kube -n "${namespace}" patch pod obp204-ephemeral-base --subresource=ephemeralcontainers \
-  --type merge --patch-file "${work_dir}/ephemeral-denied.json" \
+  --type json --patch-file "${work_dir}/ephemeral-denied.json" \
   >"${work_dir}/ephemeral-denied.log" 2>&1; then
   die "unlisted ephemeral container unexpectedly passed live admission"
 fi
 grep -Fq 'SupplyChainAdmissionDenied' "${work_dir}/ephemeral-denied.log" \
   || die "ephemeral denial did not return the fixed admission reason"
+grep -Fq 'unapproved_executable_container' "${work_dir}/ephemeral-denied.log" \
+  || die "ephemeral denial did not return the unapproved executable reason"
 
 base_pod obp204-ephemeral-deny-base "${work_dir}/pod-ephemeral-deny-base.json"
 kube -n "${namespace}" create -f "${work_dir}/pod-ephemeral-deny-base.json" >/dev/null
