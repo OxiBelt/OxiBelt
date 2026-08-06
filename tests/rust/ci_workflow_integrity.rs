@@ -3182,6 +3182,130 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
 }
 
 #[test]
+fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
+  let script = kubernetes_supply_chain_admission_script_text();
+  let rotation = script
+    .split_once("ca_overlap=\"$(cat")
+    .expect("supply-chain admission harness should define overlapping CA rotation")
+    .1
+    .split_once("\nif [[ -n \"${receipt_output}\"")
+    .expect("admission rotation should finish before receipt generation")
+    .0;
+
+  for expected in [
+    "kube -n \"${namespace}\" apply -f \"${work_dir}/admission-tls-b.yaml\"",
+    "kube -n \"${namespace}\" apply -f \"${work_dir}/admission-bundle-b-stage.yaml\"",
+    "kube -n \"${namespace}\" apply -f \"${work_dir}/admission-bundle-b-switch.yaml\"",
+    "kube -n \"${namespace}\" apply -f \"${work_dir}/admission-bundle-a-rollback-switch.yaml\"",
+  ] {
+    assert!(
+      rotation.contains(expected),
+      "admission rotation should explicitly namespace {expected}"
+    );
+  }
+  assert_eq!(
+    rotation
+      .matches("kube -n \"${namespace}\" apply -f \"${work_dir}/admission")
+      .count(),
+    4,
+    "every rendered admission manifest should be applied to the test namespace"
+  );
+  assert!(
+    !rotation.contains("\nkube apply -f \"${work_dir}/admission"),
+    "rendered admission manifests must never use the context default namespace"
+  );
+  assert!(
+    !rotation.contains("rollout restart"),
+    "TLS rotation should be driven by the namespaced Secret reference update"
+  );
+
+  let convergence = script
+    .split_once("service_targets_revision_and_tls_secret() {")
+    .expect("supply-chain admission harness should verify endpoint TLS identity")
+    .1
+    .split_once("\n}\n\nwebhook_trusts_exact_ca_bundle()")
+    .expect("endpoint TLS verification should precede webhook CA verification")
+    .0;
+  for expected in [
+    ".metadata.generation == .status.observedGeneration",
+    ".status.updatedReplicas == $replicas",
+    ".status.readyReplicas == $replicas",
+    ".status.availableReplicas == $replicas",
+    "([.subsets[]?.addresses[]?] | length) == $replicas",
+    "| unique | length) == $replicas",
+    ".type == \"Ready\" and .status == \"True\"",
+    ".secret.secretName == $secret",
+  ] {
+    assert!(
+      convergence.contains(expected),
+      "endpoint convergence should require {expected}"
+    );
+  }
+  assert_eq!(
+    rotation
+      .matches("service_targets_revision_and_tls_secret")
+      .count(),
+    3,
+    "TLS rotation, bundle switch, and rollback should all prove endpoint TLS identity"
+  );
+
+  let overlap_patch = rotation
+    .find("\\\"value\\\":\\\"${ca_overlap}\\\"")
+    .expect("TLS rotation should install overlapping CA trust");
+  let overlap_readback = rotation
+    .find("webhook_trusts_exact_ca_bundle \"${ca_overlap}\"")
+    .expect("overlapping CA trust should be read back");
+  let probe_start = rotation
+    .find("touch \"${work_dir}/rotation-probe.running\"")
+    .expect("TLS rotation should start its continuous admission probe");
+  let tls_apply = rotation
+    .find("kube -n \"${namespace}\" apply -f \"${work_dir}/admission-tls-b.yaml\"")
+    .expect("TLS Secret B manifest should be applied to the test namespace");
+  let deployment_readback = rotation
+    .find("deployment_targets_tls_secret \"${revision_a}\" \"${admission_tls_secret_b}\"")
+    .expect("TLS rotation should read back the Deployment Secret reference");
+  let rollout = rotation
+    .find("rollout status \"deployment/oxibelt-admission-${revision_a}\"")
+    .expect("TLS rotation should wait for the Secret B rollout");
+  let endpoint_convergence = rotation
+    .find("service_targets_revision_and_tls_secret \"${revision_a}\" \"${admission_tls_secret_b}\"")
+    .expect("TLS rotation should prove every endpoint uses Secret B");
+  let overlap_admission = rotation
+    .find("wait_for \"admission with overlapping CA trust\"")
+    .expect("TLS rotation should prove admission before removing CA A");
+  let ca_b_patch = rotation
+    .find("\\\"value\\\":\\\"${public_ca_b}\\\"")
+    .expect("TLS rotation should contract trust to CA B");
+  let ca_b_readback = rotation
+    .find("webhook_trusts_exact_ca_bundle \"${public_ca_b}\"")
+    .expect("CA B-only trust should be read back");
+  let recovery = rotation
+    .find("wait_for \"admission after old CA removal\"")
+    .expect("admission should recover after CA A removal");
+  let probe_stop = rotation
+    .find("stop_rotation_probe")
+    .expect("TLS rotation should stop its continuous probe");
+  let probe_check = rotation
+    .find("[[ ! -s \"${work_dir}/rotation-probe.failures\" ]]")
+    .expect("TLS rotation should reject any continuous-probe failure");
+  assert!(
+    overlap_patch < overlap_readback
+      && overlap_readback < probe_start
+      && probe_start < tls_apply
+      && tls_apply < deployment_readback
+      && deployment_readback < rollout
+      && rollout < endpoint_convergence
+      && endpoint_convergence < overlap_admission
+      && overlap_admission < ca_b_patch
+      && ca_b_patch < ca_b_readback
+      && ca_b_readback < recovery
+      && recovery < probe_stop
+      && probe_stop < probe_check,
+    "TLS rotation must prove Secret B convergence before removing CA A"
+  );
+}
+
+#[test]
 fn kubernetes_supply_chain_admission_ephemeral_probe_is_append_only() {
   let script = kubernetes_supply_chain_admission_script_text();
   let ephemeral_probe = script

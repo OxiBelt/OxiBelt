@@ -1512,29 +1512,78 @@ select_admission_documents() {
   [[ -s "${output}" ]] || die "admission ${selection} manifest is empty"
 }
 
-service_targets_revision() {
+deployment_targets_tls_secret() {
   local expected_revision="$1"
-  local service_json endpoints_json pod_name pod_revision
+  local expected_tls_secret="$2"
+  local deployment_json
+  deployment_json="$(kube -n "${namespace}" get deployment \
+    "oxibelt-admission-${expected_revision}" -o json)" || return 1
+  jq -e --arg secret "${expected_tls_secret}" '
+    ([.spec.template.spec.volumes[]?
+      | select(.name == "tls" and .secret.secretName == $secret)] | length) == 1
+  ' >/dev/null <<<"${deployment_json}"
+}
+
+service_targets_revision_and_tls_secret() {
+  local expected_revision="$1"
+  local expected_tls_secret="$2"
+  local service_json deployment_json endpoints_json desired_replicas pod_name pod_json
   service_json="$(kube -n "${namespace}" get service oxibelt-admission -o json)" || return 1
   jq -e --arg revision "${expected_revision}" \
     '.spec.selector["oxibelt.dev/supply-chain-bundle"] == $revision' \
     >/dev/null <<<"${service_json}" || return 1
+  deployment_json="$(kube -n "${namespace}" get deployment \
+    "oxibelt-admission-${expected_revision}" -o json)" || return 1
+  desired_replicas="$(jq -r '.spec.replicas // 0' <<<"${deployment_json}")"
+  [[ "${desired_replicas}" =~ ^[1-9][0-9]*$ ]] || return 1
+  jq -e --arg revision "${expected_revision}" \
+    --arg secret "${expected_tls_secret}" \
+    --argjson replicas "${desired_replicas}" '
+      .metadata.generation == .status.observedGeneration
+        and .status.updatedReplicas == $replicas
+        and .status.readyReplicas == $replicas
+        and .status.availableReplicas == $replicas
+        and .spec.template.metadata.labels["oxibelt.dev/supply-chain-bundle"] == $revision
+        and ([.spec.template.spec.volumes[]?
+          | select(.name == "tls" and .secret.secretName == $secret)] | length) == 1
+    ' >/dev/null <<<"${deployment_json}" || return 1
   endpoints_json="$(kube -n "${namespace}" get endpoints oxibelt-admission -o json)" || return 1
-  [[ "$(jq '[.subsets[]?.addresses[]?] | length' <<<"${endpoints_json}")" -ge 2 ]] \
-    || return 1
+  jq -e --argjson replicas "${desired_replicas}" '
+    ([.subsets[]?.addresses[]?] | length) == $replicas
+      and ([.subsets[]?.addresses[]?.targetRef
+        | select(.kind == "Pod"
+          and (.name | type) == "string"
+          and (.name | length) > 0)
+        | .name] | unique | length) == $replicas
+  ' >/dev/null <<<"${endpoints_json}" || return 1
   while IFS= read -r pod_name; do
     [[ -n "${pod_name}" ]] || return 1
-    pod_revision="$(kube -n "${namespace}" get pod "${pod_name}" \
-      -o jsonpath='{.metadata.labels.oxibelt\.dev/supply-chain-bundle}' 2>/dev/null)" \
-      || return 1
-    [[ "${pod_revision}" == "${expected_revision}" ]] || return 1
+    pod_json="$(kube -n "${namespace}" get pod "${pod_name}" -o json)" || return 1
+    jq -e --arg revision "${expected_revision}" --arg secret "${expected_tls_secret}" '
+      .metadata.labels["oxibelt.dev/supply-chain-bundle"] == $revision
+        and any(.status.conditions[]?; .type == "Ready" and .status == "True")
+        and ([.spec.volumes[]?
+          | select(.name == "tls" and .secret.secretName == $secret)] | length) == 1
+    ' >/dev/null <<<"${pod_json}" || return 1
   done < <(jq -r '.subsets[]?.addresses[]?.targetRef.name' <<<"${endpoints_json}")
+}
+
+webhook_trusts_exact_ca_bundle() {
+  local expected_ca_bundle="$1"
+  kube get validatingwebhookconfiguration "${webhook_name}" -o json \
+    | jq -e --arg ca_bundle "${expected_ca_bundle}" '
+        (.webhooks | length) == 1
+          and .webhooks[0].failurePolicy == "Fail"
+          and .webhooks[0].clientConfig.caBundle == $ca_bundle
+      ' >/dev/null
 }
 
 ca_overlap="$(cat "${work_dir}/admission-ca-a.crt" "${work_dir}/admission-ca-b.crt" \
   | openssl base64 -A)"
 kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
   -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${ca_overlap}\"}]" >/dev/null
+webhook_trusts_exact_ca_bundle "${ca_overlap}" \
+  || die "admission webhook did not retain the overlapping CA bundle"
 touch "${work_dir}/rotation-probe.running"
 : >"${work_dir}/rotation-probe.failures"
 (
@@ -1549,11 +1598,19 @@ touch "${work_dir}/rotation-probe.running"
 rotation_probe_pid="$!"
 render_admission "${fixture_a}" "${admission_tls_secret_b}" "${ca_overlap}" \
   "${work_dir}/admission-tls-b.yaml"
-kube apply -f "${work_dir}/admission-tls-b.yaml" >/dev/null
+kube -n "${namespace}" apply -f "${work_dir}/admission-tls-b.yaml" >/dev/null
+deployment_targets_tls_secret "${revision_a}" "${admission_tls_secret_b}" \
+  || die "admission deployment did not target TLS Secret B"
 kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_a}" \
   --timeout="${timeout_seconds}s"
+wait_for "TLS Secret B admission endpoints" \
+  service_targets_revision_and_tls_secret "${revision_a}" "${admission_tls_secret_b}"
+wait_for "admission with overlapping CA trust" \
+  expect_admitted "${work_dir}/pod-exact.json"
 kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
   -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${public_ca_b}\"}]" >/dev/null
+webhook_trusts_exact_ca_bundle "${public_ca_b}" \
+  || die "admission webhook did not retain CA B after rotation"
 wait_for "admission after old CA removal" expect_admitted "${work_dir}/pod-exact.json"
 stop_rotation_probe
 [[ ! -s "${work_dir}/rotation-probe.failures" ]] \
@@ -1565,7 +1622,7 @@ select_admission_documents "${work_dir}/admission-bundle-b.yaml" \
   "${work_dir}/admission-bundle-b-stage.yaml" stage
 select_admission_documents "${work_dir}/admission-bundle-b.yaml" \
   "${work_dir}/admission-bundle-b-switch.yaml" switch
-kube apply -f "${work_dir}/admission-bundle-b-stage.yaml" >/dev/null
+kube -n "${namespace}" apply -f "${work_dir}/admission-bundle-b-stage.yaml" >/dev/null
 kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_b}" \
   --timeout="${timeout_seconds}s"
 expect_admitted "${work_dir}/pod-exact.json"
@@ -1588,8 +1645,9 @@ touch "${work_dir}/bundle-switch-probe.running"
   done
 ) &
 bundle_switch_probe_pid="$!"
-kube apply -f "${work_dir}/admission-bundle-b-switch.yaml" >/dev/null
-wait_for "bundle B admission endpoints" service_targets_revision "${revision_b}"
+kube -n "${namespace}" apply -f "${work_dir}/admission-bundle-b-switch.yaml" >/dev/null
+wait_for "bundle B admission endpoints" \
+  service_targets_revision_and_tls_secret "${revision_b}" "${admission_tls_secret_b}"
 rm -f -- "${work_dir}/bundle-switch-probe.running"
 wait "${bundle_switch_probe_pid}" >/dev/null 2>&1 || true
 bundle_switch_probe_pid=""
@@ -1602,8 +1660,9 @@ render_admission "${fixture_a}" "${admission_tls_secret_b}" "${public_ca_b}" \
   "${work_dir}/admission-bundle-a-rollback.yaml"
 select_admission_documents "${work_dir}/admission-bundle-a-rollback.yaml" \
   "${work_dir}/admission-bundle-a-rollback-switch.yaml" switch
-kube apply -f "${work_dir}/admission-bundle-a-rollback-switch.yaml" >/dev/null
-wait_for "bundle A rollback endpoints" service_targets_revision "${revision_a}"
+kube -n "${namespace}" apply -f "${work_dir}/admission-bundle-a-rollback-switch.yaml" >/dev/null
+wait_for "bundle A rollback endpoints" \
+  service_targets_revision_and_tls_secret "${revision_a}" "${admission_tls_secret_b}"
 wait_for "still-authorized bundle A rollback" expect_admitted "${work_dir}/pod-exact.json"
 expect_denied bundle-b-after-rollback "${work_dir}/pod-bundle-b.json"
 
