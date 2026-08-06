@@ -1011,6 +1011,7 @@ configure_helm_args() {
   public_key="$(tr -d '\n' <"${fixture_dir%/}/public-key.b64")"
   helm_args=(
     -f "${profile_values}"
+    --set-string service.type=ClusterIP
     --set-file "config.inline=${admission_config_inline}"
     --set-string "image.digest=${strict_digest}"
     --set-string image.pullPolicy=Never
@@ -1209,6 +1210,9 @@ configure_helm_args "${fixture_a}" "${admission_tls_secret_a}" "${public_ca_a}" 
 helm upgrade --install "${release_name}" "${chart_dir}" \
   --kube-context "${kube_context}" --namespace "${namespace}" \
   "${helm_args[@]}" --atomic --wait --timeout "${timeout_seconds}s"
+kube -n "${namespace}" get service oxibelt -o json \
+  | jq -e '.spec.type == "ClusterIP"' >/dev/null \
+  || die "data-plane Service did not remain cluster-local"
 
 revision_for() {
   local digest="$1"

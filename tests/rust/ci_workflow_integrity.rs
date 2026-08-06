@@ -2989,7 +2989,10 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
     "$0 == \"\"",
     "derived chart config.inline exceeds its 256 KiB bound",
     "chart config.inline already defines a route; refusing to append the test target",
+    "--set-string service.type=ClusterIP",
     "--set-file \"config.inline=${admission_config_inline}\"",
+    "\"${helm_args[@]}\" --atomic --wait --timeout \"${timeout_seconds}s\"",
+    "data-plane Service did not remain cluster-local",
     "Minikube admission qualification requires the host rootless Docker service",
     "--nodes=3",
     "live admission qualification requires exactly three Ready Kubernetes nodes",
@@ -3061,6 +3064,38 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
       "supply-chain admission harness should include {expected}"
     );
   }
+
+  let configure_helm_args = script
+    .split_once("configure_helm_args() {")
+    .expect("supply-chain admission harness should define shared Helm arguments")
+    .1
+    .split_once("\n}\n\nplaceholder_manifest=")
+    .expect("shared Helm arguments should precede placeholder rendering")
+    .0;
+  assert_eq!(
+    script
+      .matches("--set-string service.type=ClusterIP")
+      .count(),
+    1,
+    "the admission harness should override the data-plane Service type exactly once"
+  );
+  assert!(
+    configure_helm_args.contains("--set-string service.type=ClusterIP"),
+    "the cluster-local Service override must be shared by rendering, installation, and rotation"
+  );
+  let helm_install = script
+    .find("helm upgrade --install \"${release_name}\"")
+    .expect("supply-chain admission harness should install its Helm release");
+  let service_contract = script
+    .find("kube -n \"${namespace}\" get service oxibelt -o json")
+    .expect("supply-chain admission harness should verify its data-plane Service type");
+  let admission_rollout = script
+    .find("kube -n \"${namespace}\" rollout status \"deployment/oxibelt-admission-${revision_a}\"")
+    .expect("supply-chain admission harness should wait for its admission deployment");
+  assert!(
+    helm_install < service_contract && service_contract < admission_rollout,
+    "the installed Service type must be verified before admission qualification"
+  );
 
   assert_eq!(
     script
