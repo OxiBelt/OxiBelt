@@ -565,6 +565,18 @@ fn kubernetes_supply_chain_admission_script_text() -> String {
     .expect("Kubernetes supply-chain admission script should be readable")
 }
 
+fn kubernetes_supply_chain_admission_route_config() -> String {
+  let script = kubernetes_supply_chain_admission_script_text();
+  script
+    .split_once("<<'ADMISSION_ROUTE'\n")
+    .expect("supply-chain admission script should define its test route")
+    .1
+    .split_once("\nADMISSION_ROUTE\n")
+    .expect("supply-chain admission test route should end at its heredoc marker")
+    .0
+    .to_owned()
+}
+
 fn helm_strict_hardening_live_inline_config() -> String {
   let script = helm_strict_hardening_live_script_text();
   let inline = script
@@ -2972,6 +2984,12 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
 
   for expected in [
     "usage: $0 [--provider kind|minikube]",
+    "chart_values=\"${chart_dir}/values.yaml\"",
+    "derive_admission_config_inline",
+    "$0 == \"\"",
+    "derived chart config.inline exceeds its 256 KiB bound",
+    "chart config.inline already defines a route; refusing to append the test target",
+    "--set-file \"config.inline=${admission_config_inline}\"",
     "Minikube admission qualification requires the host rootless Docker service",
     "--nodes=3",
     "live admission qualification requires exactly three Ready Kubernetes nodes",
@@ -3051,6 +3069,19 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
     2,
     "configuration and certificate volumes must each be seeded by an ownership-stable tar stream"
   );
+  let work_dir_creation = script
+    .find("work_dir=\"$(mktemp -d")
+    .expect("supply-chain admission harness should create a private work directory");
+  let config_derivation = script
+    .find("derive_admission_config_inline \"${admission_config_inline}\"")
+    .expect("supply-chain admission harness should derive its live configuration");
+  let artifact_build = script
+    .find("\"${artifact_builder}\" linux/amd64 amd64")
+    .expect("supply-chain admission harness should build missing image artifacts");
+  assert!(
+    work_dir_creation < config_derivation && config_derivation < artifact_build,
+    "the bounded test configuration must be derived before artifact or cluster work"
+  );
   let staging_start = script
     .find("mkdir -m 0755 \"${work_dir}/container-input\"")
     .expect("tools input staging should remain explicit");
@@ -3113,6 +3144,81 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
       "supply-chain admission integration must not contain {forbidden}"
     );
   }
+}
+
+#[test]
+fn kubernetes_supply_chain_admission_route_is_semantically_valid_and_self_contained() {
+  let route_inline = kubernetes_supply_chain_admission_route_config();
+  let route_value: toml::Value =
+    toml::from_str(&route_inline).expect("supply-chain admission test route should parse as TOML");
+  let routes = route_value["routes"]
+    .as_array()
+    .expect("supply-chain admission test config should contain routes");
+  assert_eq!(
+    routes.len(),
+    1,
+    "supply-chain admission test config should contain exactly one route"
+  );
+  let route = routes[0]
+    .as_table()
+    .expect("supply-chain admission test route should be a TOML table");
+  assert_eq!(
+    route.get("name").and_then(toml::Value::as_str),
+    Some("supply-chain-admission-live")
+  );
+  let hosts = route
+    .get("hosts")
+    .and_then(toml::Value::as_array)
+    .expect("supply-chain admission test route should define hosts");
+  assert_eq!(hosts.len(), 1);
+  assert_eq!(hosts[0].as_str(), Some("edge.example.test"));
+  assert_eq!(
+    route.get("path_prefix").and_then(toml::Value::as_str),
+    Some("/__oxibelt-supply-chain-admission")
+  );
+  for forbidden in ["upstream", "upstream_pool", "static_root"] {
+    assert!(
+      !route.contains_key(forbidden),
+      "supply-chain admission test route must not define {forbidden}"
+    );
+  }
+  let redirect = route["actions"]["redirect"]
+    .as_table()
+    .expect("supply-chain admission test route should define a redirect action");
+  assert_eq!(
+    redirect.get("status").and_then(toml::Value::as_integer),
+    Some(308)
+  );
+  assert_eq!(
+    redirect
+      .get("location_template")
+      .and_then(toml::Value::as_str),
+    Some("/")
+  );
+
+  let mut semantic_value: toml::Value = toml::from_str(&helm_strict_hardening_live_inline_config())
+    .expect("strict hardening live config should parse as TOML");
+  semantic_value["routes"] = route_value["routes"].clone();
+  semantic_value["tls"]["server_names"] =
+    toml::Value::Array(vec![toml::Value::String("edge.example.test".to_owned())]);
+  let config: oxibelt::config::Config = semantic_value
+    .try_into()
+    .expect("supply-chain admission test route should parse in a complete configuration");
+  config
+    .validate()
+    .expect("supply-chain admission test route should satisfy production semantic validation");
+
+  let mut missing_serving_target = config.clone();
+  missing_serving_target.routes.clear();
+  let error = missing_serving_target
+    .validate()
+    .expect_err("supply-chain admission test config should require its redirect route");
+  assert!(
+    error.to_string().contains(
+      "at least one route, SNI forwarding rule/default target, stream listener, or WebRTC TURN listener must be configured"
+    ),
+    "supply-chain admission test config should retain the production serving-target invariant"
+  );
 }
 
 #[test]

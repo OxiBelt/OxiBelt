@@ -9,6 +9,7 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 chart_dir="${repo_root}/deploy/helm/oxibelt"
+chart_values="${chart_dir}/values.yaml"
 profile_values="${chart_dir}/examples/edge-secure-medium-v2-values.yaml"
 artifact_validator="${repo_root}/tests/scripts/validate-ci-image-artifact.py"
 artifact_builder="${repo_root}/tests/scripts/build-docker-image-artifact.sh"
@@ -28,6 +29,7 @@ node_builder_image="node:24-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6
 runtime_image="alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 
 work_dir=""
+admission_config_inline=""
 run_id=""
 cluster_name=""
 namespace=""
@@ -93,6 +95,99 @@ require_command() {
   local command="$1"
   command -v "${command}" >/dev/null 2>&1 \
     || die "required command is unavailable: ${command}"
+}
+
+derive_admission_config_inline() {
+  local output="$1"
+  local config_inline_bytes required
+
+  awk '
+    BEGIN {
+      config_blocks = 0
+      inline_blocks = 0
+      content_lines = 0
+      in_config = 0
+      in_inline = 0
+    }
+    $0 == "config:" {
+      config_blocks += 1
+      in_config = 1
+      next
+    }
+    in_config && $0 == "  inline: |" {
+      inline_blocks += 1
+      in_inline = 1
+      next
+    }
+    in_inline && /^    / {
+      print substr($0, 5)
+      content_lines += 1
+      next
+    }
+    in_inline && $0 == "" {
+      print ""
+      content_lines += 1
+      next
+    }
+    in_inline {
+      in_inline = 0
+      in_config = 0
+    }
+    in_config && /^[^[:space:]]/ {
+      in_config = 0
+    }
+    END {
+      if (config_blocks != 1 || inline_blocks != 1 || content_lines == 0) {
+        exit 1
+      }
+    }
+  ' "${chart_values}" >"${output}" \
+    || die "could not extract exactly one chart config.inline block"
+
+  [[ -f "${output}" && -s "${output}" && ! -L "${output}" ]] \
+    || die "derived chart config.inline must be a nonempty regular file"
+  config_inline_bytes="$(stat -c '%s' -- "${output}")" \
+    || die "could not measure derived chart config.inline"
+  if [[ ! "${config_inline_bytes}" =~ ^[1-9][0-9]*$ ]] \
+    || ((config_inline_bytes > 262144)); then
+    die "derived chart config.inline exceeds its 256 KiB bound"
+  fi
+
+  for required in \
+    'include = ["conf.d/*.toml"]' \
+    '[config]' \
+    '[runtime.accept]' \
+    '[quic]' \
+    '[listeners]' \
+    '[tls]' \
+    '[health]' \
+    '[metrics]' \
+    '[circuit_breakers]'; do
+    grep -Fqx "${required}" "${output}" \
+      || die "derived chart config.inline is missing required baseline ${required}"
+  done
+  if grep -Fq '[[routes]]' "${output}"; then
+    die "chart config.inline already defines a route; refusing to append the test target"
+  fi
+
+  cat >>"${output}" <<'ADMISSION_ROUTE'
+
+[[routes]]
+name = "supply-chain-admission-live"
+hosts = ["edge.example.test"]
+path_prefix = "/__oxibelt-supply-chain-admission"
+
+[routes.actions.redirect]
+status = 308
+location_template = "/"
+ADMISSION_ROUTE
+  chmod 0600 "${output}"
+
+  [[ "$(grep -Fxc '[[routes]]' "${output}")" == "1" ]] \
+    || die "derived chart config.inline must contain exactly one test route"
+  if grep -Eq '^[[:space:]]*(upstream|upstream_pool|static_root)[[:space:]]*=' "${output}"; then
+    die "derived chart config.inline must not introduce an external serving target"
+  fi
 }
 
 kube() {
@@ -426,7 +521,8 @@ case "${provider}" in
   kind) require_command kind ;;
   minikube) require_command minikube ;;
 esac
-[[ -f "${profile_values}" && -f "${artifact_validator}" && -x "${artifact_builder}" ]] \
+[[ -f "${chart_values}" && ! -L "${chart_values}" \
+  && -f "${profile_values}" && -f "${artifact_validator}" && -x "${artifact_builder}" ]] \
   || die "required chart or artifact helpers are unavailable"
 [[ "$(uname -m)" == "x86_64" ]] \
   || die "the current live harness consumes native AMD64 artifacts and requires an x86_64 host"
@@ -443,6 +539,8 @@ source_tree="$(git -C "${repo_root}" rev-parse 'HEAD^{tree}')"
   || die "current Git revision and source tree must be full lowercase hashes"
 
 work_dir="$(mktemp -d "${temp_root%/}/oxibelt-kubernetes-admission.XXXXXX")"
+admission_config_inline="${work_dir}/config.inline"
+derive_admission_config_inline "${admission_config_inline}"
 run_id="$(printf '%s' "${provider}:${BASHPID}:${RANDOM}:$(date +%s%N)" | sha256sum)"
 run_id="${run_id:0:16}"
 [[ "${run_id}" =~ ^[a-f0-9]{16}$ ]] || die "could not derive a bounded run ID"
@@ -913,6 +1011,7 @@ configure_helm_args() {
   public_key="$(tr -d '\n' <"${fixture_dir%/}/public-key.b64")"
   helm_args=(
     -f "${profile_values}"
+    --set-file "config.inline=${admission_config_inline}"
     --set-string "image.digest=${strict_digest}"
     --set-string image.pullPolicy=Never
     --set-string "supplyChainAdmission.bundle.payloadDigest=${payload_digest}"
