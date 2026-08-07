@@ -294,6 +294,16 @@ and every generation continues to count against the same listener-wide
 admission bounds. This correction does not change Redis-compatible or
 PostgreSQL record formats and requires no state migration or additional drain.
 
+Post-beta.2 shared-state initialization serializes its PostgreSQL schema work
+with one transaction-scoped advisory lock. All base shared-state and durable
+UDP table and index DDL runs in that same transaction, so
+concurrent initializers wait instead of racing PostgreSQL catalog object
+creation. A lock, DDL, or commit failure leaves the transaction uncommitted and
+keeps backend initialization fail closed. This correction does not change
+configuration, table or index layouts, stored records, or public APIs, and it
+requires no state migration, additional drain, or database restoration solely
+for this change.
+
 For rollback to a version without durable UDP support, first disable generated
 UDP and drain new-version owners, then restore the prior data-plane
 configuration and image before the prior controller. Keep the previous key and
