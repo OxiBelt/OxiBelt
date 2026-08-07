@@ -113,6 +113,11 @@ pub(super) async fn connect_postgres_pool(
 }
 
 pub(super) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
+  let mut tx = pool.begin().await?;
+  sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('oxibelt-shared-state-schema', 0))")
+    .execute(&mut *tx)
+    .await
+    .context("failed to acquire shared-state PostgreSQL schema initialization lock")?;
   sqlx::query(
     "CREATE TABLE IF NOT EXISTS oxibelt_shared_state (
        key text PRIMARY KEY,
@@ -120,7 +125,7 @@ pub(super) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
        expires_at_ms bigint NULL
      )",
   )
-  .execute(pool)
+  .execute(&mut *tx)
   .await?;
   sqlx::query(
     "CREATE TABLE IF NOT EXISTS oxibelt_shared_counters (
@@ -129,7 +134,7 @@ pub(super) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
        expires_at_ms bigint NULL
      )",
   )
-  .execute(pool)
+  .execute(&mut *tx)
   .await?;
   sqlx::query(
     "CREATE TABLE IF NOT EXISTS oxibelt_shared_idempotency (
@@ -139,20 +144,20 @@ pub(super) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
        expires_at_ms bigint NOT NULL
      )",
   )
-  .execute(pool)
+  .execute(&mut *tx)
   .await?;
   sqlx::query(
     "CREATE INDEX IF NOT EXISTS oxibelt_shared_idempotency_expires
      ON oxibelt_shared_idempotency (expires_at_ms)",
   )
-  .execute(pool)
+  .execute(&mut *tx)
   .await?;
   sqlx::query(
     "CREATE TABLE IF NOT EXISTS oxibelt_shared_rate_limit_locks (
        limit_name text PRIMARY KEY
      )",
   )
-  .execute(pool)
+  .execute(&mut *tx)
   .await?;
   sqlx::query(
     "CREATE TABLE IF NOT EXISTS oxibelt_shared_rate_buckets (
@@ -162,14 +167,15 @@ pub(super) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
        PRIMARY KEY (limit_name, bucket_key)
      )",
   )
-  .execute(pool)
+  .execute(&mut *tx)
   .await?;
   sqlx::query(
     "CREATE INDEX IF NOT EXISTS oxibelt_shared_rate_buckets_expires
      ON oxibelt_shared_rate_buckets (limit_name, expires_at_ms)",
   )
-  .execute(pool)
+  .execute(&mut *tx)
   .await?;
-  udp_flows::init_postgres_udp_flows(pool).await?;
+  udp_flows::init_postgres_udp_flows(&mut tx).await?;
+  tx.commit().await?;
   Ok(())
 }

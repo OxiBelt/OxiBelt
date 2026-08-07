@@ -20,6 +20,82 @@ fn assert_absent(path: &str, source: &str, forbidden: &str) {
   );
 }
 
+fn function_source<'a>(path: &str, source: &'a str, signature: &str) -> &'a str {
+  let (_, function) = source
+    .split_once(signature)
+    .unwrap_or_else(|| panic!("{path} should contain {signature}"));
+  let (function, _) = function
+    .split_once("\n}\n")
+    .unwrap_or_else(|| panic!("{path} should terminate {signature}"));
+  function
+}
+
+#[test]
+fn postgres_schema_initialization_is_transactionally_serialized() {
+  let backend_path = "source/src/shared_state/backend_postgres.rs";
+  let backend = read_repo_file(backend_path);
+  let backend_init = function_source(
+    backend_path,
+    &backend,
+    "pub(super) async fn init_postgres(pool: &Pool<Postgres>)",
+  );
+  let begin = backend_init
+    .find("let mut tx = pool.begin().await?;")
+    .expect("shared-state PostgreSQL schema initialization should begin a transaction");
+  let lock = backend_init
+    .find("pg_advisory_xact_lock(hashtextextended('oxibelt-shared-state-schema', 0))")
+    .expect("shared-state PostgreSQL schema initialization should acquire its stable lock");
+  let first_ddl = backend_init
+    .find("CREATE TABLE IF NOT EXISTS oxibelt_shared_state")
+    .expect("shared-state PostgreSQL schema initialization should create the base table");
+  let udp = backend_init
+    .find("udp_flows::init_postgres_udp_flows(&mut tx).await?;")
+    .expect("UDP schema initialization should share the schema transaction");
+  let commit = backend_init
+    .find("tx.commit().await?;")
+    .expect("shared-state PostgreSQL schema initialization should commit its transaction");
+  assert!(
+    begin < lock && lock < first_ddl && first_ddl < udp && udp < commit,
+    "shared-state PostgreSQL schema initialization must lock before DDL and commit after UDP DDL"
+  );
+  assert!(
+    !backend_init.contains(".execute(pool)"),
+    "{backend_path} must not execute schema statements outside the locked transaction"
+  );
+  for (offset, _) in backend_init.match_indices(".execute(") {
+    assert!(
+      backend_init[offset..].starts_with(".execute(&mut *tx)"),
+      "{backend_path} must execute every schema statement through the locked transaction"
+    );
+  }
+
+  let udp_path = "source/src/shared_state/udp_flows/postgres.rs";
+  let udp_source = read_repo_file(udp_path);
+  let udp_init = function_source(
+    udp_path,
+    &udp_source,
+    "pub(in crate::shared_state) async fn init_postgres_udp_flows(",
+  );
+  assert!(
+    udp_init.contains("tx: &mut Transaction<'_, Postgres>"),
+    "{udp_path} should receive the enclosing schema transaction"
+  );
+  assert!(
+    !udp_init.contains("pool: &Pool<Postgres>"),
+    "{udp_path} must receive the enclosing schema transaction instead of a pool"
+  );
+  assert!(
+    !udp_init.contains(".execute(pool)"),
+    "{udp_path} must not execute schema statements outside the enclosing transaction"
+  );
+  for (offset, _) in udp_init.match_indices(".execute(") {
+    assert!(
+      udp_init[offset..].starts_with(".execute(&mut **tx)"),
+      "{udp_path} must execute every schema statement through the enclosing transaction"
+    );
+  }
+}
+
 #[test]
 fn shared_state_backend_implementation_has_no_blocking_bridge() {
   let files = [

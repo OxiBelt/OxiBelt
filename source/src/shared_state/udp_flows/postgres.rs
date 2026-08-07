@@ -5,12 +5,12 @@
 //! debit commit or roll back together.
 
 use sqlx::postgres::PgRow;
-use sqlx::{Pool, Postgres, Row, Transaction};
+use sqlx::{Postgres, Row, Transaction};
 
 use super::*;
 
 pub(in crate::shared_state) async fn init_postgres_udp_flows(
-  pool: &Pool<Postgres>,
+  tx: &mut Transaction<'_, Postgres>,
 ) -> anyhow::Result<()> {
   sqlx::query(
     "CREATE TABLE IF NOT EXISTS oxibelt_udp_flow_scopes (
@@ -43,7 +43,7 @@ pub(in crate::shared_state) async fn init_postgres_udp_flows(
        )
      )",
   )
-  .execute(pool)
+  .execute(&mut **tx)
   .await?;
   sqlx::query(
     "CREATE TABLE IF NOT EXISTS oxibelt_udp_flows (
@@ -69,13 +69,13 @@ pub(in crate::shared_state) async fn init_postgres_udp_flows(
          ON DELETE CASCADE
      )",
   )
-  .execute(pool)
+  .execute(&mut **tx)
   .await?;
   sqlx::query(
     "CREATE INDEX IF NOT EXISTS oxibelt_udp_flows_expiry
      ON oxibelt_udp_flows (namespace, scope_digest, idle_expires_at_ms, flow_digest)",
   )
-  .execute(pool)
+  .execute(&mut **tx)
   .await?;
   Ok(())
 }
