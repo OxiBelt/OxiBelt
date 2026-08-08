@@ -484,7 +484,18 @@ admission-bundle generation.
 Normalization preserves filesystem content and types, modes, ownership,
 links, extended attributes and capabilities, OCI configuration, executable
 hashes, and the SBOM graph. A normalized result is evidence of semantic
-equivalence, not a claim of byte-for-byte reproducibility.
+equivalence, not a claim of byte-for-byte reproducibility. CycloneDX ordering
+is normalized only for schema-validated component, dependency, `dependsOn`,
+property, and hash collections from CycloneDX `1.6` or `1.7`; every component
+requires string `type` and `name`, and custom arrays retain their order. Its generated
+serial number and timestamp are ignored. The root image subject hash/property
+are ignored only when each is an exact-shaped, unique binding to that SBOM's
+declared OCI subject; duplicate, malformed, or missing bindings fail closed.
+All other fields remain comparison-significant. A failed comparison emits at
+most eight sorted filesystem path fingerprints and at most eight component or
+dependency fingerprints per collection, with total and truncation counts. The
+receipt never copies image content or archive paths into diagnostics, and
+rejects SBOMs outside its fixed depth, node, and collection-item bounds.
 
 ## Dependency admission
 
