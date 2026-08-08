@@ -629,7 +629,10 @@ fn recv_fd(stream: &UnixStream) -> anyhow::Result<OwnedFd> {
   let mut iov = [IoSliceMut::new(&mut payload)];
   let mut control_bytes = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
   let mut control = RecvAncillaryBuffer::new(&mut control_bytes);
-  let message = recvmsg(stream, &mut iov, &mut control, RecvFlags::empty())?;
+  // Ask the kernel to set FD_CLOEXEC while it installs SCM_RIGHTS descriptors.
+  // Setting it after receipt leaves a window where a concurrent exec can inherit
+  // a privileged data-plane socket.
+  let message = recvmsg(stream, &mut iov, &mut control, RecvFlags::CMSG_CLOEXEC)?;
   if message.bytes == 0 {
     bail!("netport switcher closed before sending socket FD");
   }

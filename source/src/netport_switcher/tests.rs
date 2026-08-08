@@ -1,7 +1,27 @@
 use std::net::TcpStream;
 use std::sync::atomic::AtomicBool;
 
+use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+
 use super::*;
+
+fn assert_received_socket_flags(fd: &OwnedFd) {
+  let descriptor_flags = FdFlag::from_bits_retain(
+    fcntl(fd, FcntlArg::F_GETFD).expect("received descriptor F_GETFD should succeed"),
+  );
+  assert!(
+    descriptor_flags.contains(FdFlag::FD_CLOEXEC),
+    "received SCM_RIGHTS descriptor must close across exec"
+  );
+
+  let status_flags = OFlag::from_bits_retain(
+    fcntl(fd, FcntlArg::F_GETFL).expect("received descriptor F_GETFL should succeed"),
+  );
+  assert!(
+    status_flags.contains(OFlag::O_NONBLOCK),
+    "received broker socket must remain nonblocking"
+  );
+}
 
 #[test]
 fn broker_denies_unlisted_bind() {
@@ -83,6 +103,7 @@ fn fd_passing_returns_usable_tcp_listener() {
   let response: BindResponse = read_frame(&mut client).expect("response should read");
   assert!(matches!(response, BindResponse::Ok));
   let fd = recv_fd(&client).expect("fd should receive");
+  assert_received_socket_flags(&fd);
   let received = StdTcpListener::from(fd);
   received
     .set_nonblocking(false)
@@ -112,6 +133,7 @@ fn fd_passing_returns_usable_udp_socket() {
   let response: BindResponse = read_frame(&mut client).expect("response should read");
   assert!(matches!(response, BindResponse::Ok));
   let fd = recv_fd(&client).expect("fd should receive");
+  assert_received_socket_flags(&fd);
   let received = StdUdpSocket::from(fd);
   received
     .set_nonblocking(false)
