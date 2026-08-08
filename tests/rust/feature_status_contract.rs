@@ -120,6 +120,19 @@ fn compio_direct_h1_status_preserves_experimental_no_duplicate_boundary() {
 }
 
 #[test]
+fn runtime_confinement_status_tracks_the_filesystem_manifest_schema() {
+  let description = feature_status_description("runtime-confinement-contract");
+  assert!(
+    description.contains("schema-v3 filesystem-access manifest"),
+    "runtime-confinement-contract lifecycle notes must name the active manifest schema"
+  );
+  assert!(
+    !description.contains("schema-v2 filesystem-access manifest"),
+    "runtime-confinement-contract lifecycle notes must not retain the superseded schema"
+  );
+}
+
+#[test]
 fn owned_and_embedded_runtime_api_is_documented_as_an_explicit_ownership_boundary() {
   let readme = read_repo_file("README.md");
   let embedding = read_repo_file("docs/Embedding.md");
