@@ -101,6 +101,33 @@ jobs:
           set -euo pipefail
           cp -R "${RUNNER_TEMP}/oxibelt-release-metadata/workspace/." .
 
+      - name: Start isolated rootless Docker
+        uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
+        with:
+          version: v29.7.1
+          rootless: true
+          set-host: true
+          # Hosted runners do not delegate systemd cgroup scopes to rootless Docker.
+          daemon-config: |
+            {
+              "exec-opts": ["native.cgroupdriver=cgroupfs"]
+            }
+
+      - name: Assert rootless Docker boundary
+        run: |
+          set -euo pipefail
+          docker info --format '{{json .SecurityOptions}}' |
+            jq -e '
+              index("name=rootless") != null and
+              index("name=cgroupns") != null and
+              index("name=seccomp,profile=builtin") != null
+            ' >/dev/null
+          cgroup_driver="$(docker info --format '{{.CgroupDriver}}')"
+          if [[ "${cgroup_driver}" != "none" ]]; then
+            echo "rootless release builder must use no host cgroup resource controller, got ${cgroup_driver}" >&2
+            exit 1
+          fi
+
       - name: Pre-pull Docker BuildKit image
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 

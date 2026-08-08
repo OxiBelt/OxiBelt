@@ -8115,6 +8115,16 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   for expected in [
     "Checkout release revision",
     "Validate immutable release checkout",
+    "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
+    "version: v29.7.1",
+    "rootless: true",
+    "daemon-config: |",
+    "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",
+    "index(\"name=rootless\") != null",
+    "index(\"name=cgroupns\") != null",
+    "index(\"name=seccomp,profile=builtin\") != null",
+    "docker info --format '{{.CgroupDriver}}'",
+    "rootless release builder must use no host cgroup resource controller",
     "tests/scripts/build-docker-image-artifact.sh",
     "validate-strict-dataplane-image.py",
     "Upload Docker image artifact",
@@ -8122,6 +8132,28 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   ] {
     assert!(build.contains(expected));
   }
+  let rootless_setup = build
+    .find("      - name: Start isolated rootless Docker")
+    .expect("release image build should start the isolated rootless Docker daemon");
+  let rootless_assertion = build
+    .find("      - name: Assert rootless Docker boundary")
+    .expect("release image build should assert its rootless Docker boundary");
+  let buildkit_prepull = build
+    .find("      - name: Pre-pull Docker BuildKit image")
+    .expect("release image build should pre-pull the pinned BuildKit image");
+  let buildx_setup = build
+    .find("      - name: Setup Docker Buildx")
+    .expect("release image build should configure Buildx");
+  let artifact_build = build
+    .find("      - name: Build Docker image artifact")
+    .expect("release image build should build the image artifact");
+  assert!(
+    rootless_setup < rootless_assertion
+      && rootless_assertion < buildkit_prepull
+      && buildkit_prepull < buildx_setup
+      && buildx_setup < artifact_build,
+    "release image builds must establish and verify the rootless Docker boundary before BuildKit and image construction"
+  );
   assert_eq!(
     build.matches("overwrite: true").count(),
     1,
@@ -8679,8 +8711,8 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "independent rebuild planning should retain its reviewed runner"
   );
   assert_eq!(
-    jobs["verify"]["runs-on"], "ubuntu-24.04",
-    "independent rebuild containers should run on the stable hosted runner"
+    jobs["verify"]["runs-on"], "${{ matrix.runner }}",
+    "independent rebuild containers should use the resolver-derived trusted runner"
   );
 
   for expected in [
@@ -8698,6 +8730,14 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "node --import tsx devops/sources/versioning.ts",
     "--workspace-path ../release",
     "expected_count=30",
+    "def runner:",
+    ".artifactArch == \"arm64\" then \"ubuntu-24.04-arm\"",
+    ".artifactArch == \"amd64v2\" or .artifactArch == \"amd64\"",
+    ".artifactArch == \"amd64v4\" or .artifactArch == \"riscv64\"",
+    "then \"ubuntu-24.04\"",
+    "unsupported image artifact architecture",
+    "runner: runner",
+    "runs-on: ${{ matrix.runner }}",
     "persist-credentials: false",
     "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
     "version: v29.7.1",
@@ -8728,6 +8768,8 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
   for forbidden in [
     "actions/download-artifact",
     "oxibelt-release-metadata",
+    "inputs.runner",
+    "MANUAL_RUNNER",
     "attestations: write",
     "contents: write",
     "id-token: write",

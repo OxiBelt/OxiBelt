@@ -188,10 +188,16 @@ jobs:
                 elif .role == "tools" then "oxibelt-tools"
                 elif .role == "keysigner" then "oxibelt-keysigner"
                 else error("unsupported image role") end;
+              def runner:
+                if .artifactArch == "arm64" then "ubuntu-24.04-arm"
+                elif .artifactArch == "amd64v2" or .artifactArch == "amd64" or
+                     .artifactArch == "amd64v4" or .artifactArch == "riscv64"
+                then "ubuntu-24.04"
+                else error("unsupported image artifact architecture") end;
               {include: [.artifacts[] |
                 if $selection == "." then . else select(.role == $role and .artifactArch == $arch) end |
                 {role, artifact_arch: .artifactArch, image, canonical_tag: .canonicalGhcrTag,
-                 platform, artifact_prefix: prefix}]}
+                 platform, artifact_prefix: prefix, runner: runner}]}
             ' "${plan}")"
           expected_count=30
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -211,7 +217,7 @@ jobs:
   verify:
     name: Rebuild ${{ matrix.role }}/${{ matrix.artifact_arch }} independently
     needs: resolve
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       max-parallel: 3
