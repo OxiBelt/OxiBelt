@@ -6431,13 +6431,38 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
     serde_json::from_str(&summary_text).expect("success summary should be JSON");
   assert_eq!(summary["schema"], 1);
   assert_eq!(summary["overall"], "success");
-  assert_eq!(summary["jobs"].as_array().map(Vec::len), Some(36));
+  assert_eq!(
+    summary["jobs"].as_array().map(Vec::len),
+    Some(REQUIRED_NON_BENCHMARK_JOBS.len())
+  );
   assert_eq!(summary["unexpected"], serde_json::json!([]));
   assert!(!summary_text.contains("synthetic-secret-output"));
   assert!(
     fs::read_to_string(markdown_path)
       .expect("success Markdown should be readable")
       .contains("Non-benchmark validation summary")
+  );
+
+  let mut transitional = needs.clone();
+  transitional.insert(
+    "feature-graduation-exact-verification".to_owned(),
+    serde_json::json!({"result": "success", "outputs": {}}),
+  );
+  let (output, summary_path, _) = run_case(
+    "feature-graduation-transition",
+    &serde_json::Value::Object(transitional),
+  );
+  assert!(
+    output.status.success(),
+    "summary helper should accept the exact transition inventory: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let transitional_summary: serde_json::Value =
+    serde_json::from_slice(&fs::read(&summary_path).expect("transition summary should be written"))
+      .expect("transition summary should be valid JSON");
+  assert_eq!(
+    transitional_summary["jobs"].as_array().map(Vec::len),
+    Some(37)
   );
 
   for result in ["failure", "cancelled", "skipped", "unexpected"] {
