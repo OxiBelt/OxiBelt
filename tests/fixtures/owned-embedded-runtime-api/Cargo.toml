@@ -1,0 +1,15 @@
+[package]
+name = "oxibelt-owned-embedded-runtime-api-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+build = false
+
+# This fixture is deliberately its own workspace, rather than a member of the
+# OxiBelt workspace. It represents a downstream library consumer.
+[workspace]
+
+[dependencies]
+anyhow = "1.0.104"
+oxibelt = { path = "../../../source" }
+tokio = { version = "=1.53.1", features = ["sync"] }
