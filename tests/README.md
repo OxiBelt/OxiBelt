@@ -10,6 +10,7 @@
 - `scripts/compare-release-image-artifacts.py`: reconstructs bounded Docker layers without extracting them and compares independently rebuilt release images while normalizing only documented archive, compression, filesystem-mtime, and OCI timestamp differences. `scripts/test-compare-release-image-artifacts.py` covers exact and normalized matches, content and metadata mismatches, unsafe inputs, and the artifact contract, and runs in source-structure CI.
 - `scripts/prepare-ci-dependency-snapshot.py`: normalizes Trivy's local GitHub dependency snapshot into a bounded, commit-bound artifact and emits a companion role/architecture/hash contract.
 - `scripts/summarize-ci-needs.sh`: emits the machine-readable and Markdown forms of the complete non-benchmark result and fails closed on failed, cancelled, skipped, missing, extra, malformed, or unknown required-job outcomes.
+- `.github/workflows/feature-graduation.yml`: manually qualifies one full live-`main` revision, separates unprivileged native gate production and evidence collection from OIDC attestation, and verifies signed receipts in a read-only job. Until reviewed gate producers are checked in, the native matrix fails explicitly and cannot emit qualification evidence.
 - `scripts/build-docker-integration-helper-images-artifact.sh`: builds the Docker integration helper images once for CI and writes a loadable tar artifact containing the mock upstream, DNS, Kubernetes, PQ probe, protocol probe, PostgreSQL, and Valkey images.
 - `scripts/build-external-benchmark-image-artifact.sh`: builds the reusable h2load/oha/wrk external benchmark image as `oxibelt/external-benchmarks:ci` and writes `oxibelt-external-benchmark-image.tar` for CI.
 - `scripts/select-amd64-docker-image-artifact.sh`: selects the best loadable AMD64 Docker artifact for the current Linux runner from `/proc/cpuinfo`, or validates a required target such as `x86-64-v3` for benchmark jobs.
@@ -43,7 +44,7 @@ The Docker performance flow follows the same constraint. It copies generated TLS
 
 CI builds the six production Alpine musl roles (`standalone`, `dataplane`, `dataplane-strict`, `controller`, `tools`, and `keysigner`) for `amd64v2`, `amd64`, `amd64v4`, `arm64`, and `riscv64`, producing 30 uniquely bound artifacts. Docker integration, remote signer, and browser WebDriver jobs auto-select the newest supported standalone artifact on each AMD64 runner. Docker performance runs each supported `x86-64-v2` and `x86-64-v3` artifact sequentially in the same matrix job so summaries can compare both ISA targets, while aggressive long-run jobs intentionally use `x86-64-v3`; unsupported performance targets upload `unsupported-cpu.json` and are excluded from aggregate calculations, while unsupported aggressive long-run runners fail and should be manually rerun.
 After the image artifacts are built in non-release CI, Trivy scans all 30 role/architecture combinations. Each scan reports vulnerabilities as a Markdown table in `GITHUB_STEP_SUMMARY`, uploads report-only raw JSON, and generates a normalized local dependency snapshot without a write token. Pull requests, including forks, upload those local snapshot artifacts but never submit them externally. A checkout-free canonical-repository job validates the complete 30-snapshot set and submits it to the Dependency Snapshot API only after the non-benchmark summary succeeds on a default-branch push, schedule, or manual run with `submit_dependency_snapshots` enabled.
-Every ordinary pull request exposes the stable `PR non-benchmark summary` check. It depends on all 34 required aggregate jobs and uploads schema-versioned JSON plus Markdown; any failure, cancellation, unexpected skip, or topology mismatch fails the check. The summary helper is loaded from the pull request's immutable base revision instead of the pull request worktree. Required-job inventory changes therefore need a compatibility-first helper that accepts the old and new inventories, followed by the workflow update and a strict-helper cleanup; otherwise the intermediate base-branch run fails closed. Superseded runs are cancelled only within the same pull request. Comparator, performance-probe, external-benchmark, Docker performance, performance summary, and aggressive long-run jobs remain schedule/manual-only and wait for a successful same-run non-benchmark summary.
+Every ordinary pull request exposes the stable `PR non-benchmark summary` check. It depends on all 37 required aggregate jobs and uploads schema-versioned JSON plus Markdown; any failure, cancellation, unexpected skip, or topology mismatch fails the check. The summary helper is loaded from the pull request's immutable base revision instead of the pull request worktree. Required-job inventory changes therefore need a compatibility-first helper that accepts the old and new inventories, followed by the workflow update and a strict-helper cleanup; otherwise the intermediate base-branch run fails closed. Superseded runs are cancelled only within the same pull request. Comparator, performance-probe, external-benchmark, Docker performance, performance summary, and aggressive long-run jobs remain schedule/manual-only and wait for a successful same-run non-benchmark summary.
 Kubernetes/controller and Helm features remain experimental. Their graduation
 registry targets Kubernetes `1.34`–`1.36`, Helm `3.21.3` and `4.2.3`, Gateway
 API `v1.6.1`, Calico/Cilium IPv4 policy, restricted Pod Security, and native
@@ -56,6 +57,7 @@ promotion contract.
 Validate the policy/schema, generated document, and feature lifecycle mapping:
 
 ```sh
+pnpm run feature-graduation:check
 pnpm run kubernetes-graduation:check
 ```
 The tracked, bypass-free release-tag ruleset requires the configured GitHub
@@ -64,7 +66,7 @@ when matching tags are created and blocks later update or deletion. The
 release workflow resolves the strict tag to one full revision, then
 independently uses read-only GitHub metadata to require the newest canonical
 default-branch `Check OxiBelt` push attempt for that exact revision to contain
-exactly one successful 34-job terminal summary with the expected GitHub
+exactly one successful 37-job terminal summary with the expected GitHub
 Actions check identity. Missing, stale, duplicate, failed, or mismatched
 evidence blocks release preparation and publication. Benchmark and
 dependency-snapshot submission jobs remain outside the prerequisite, and

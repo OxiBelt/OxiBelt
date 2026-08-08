@@ -1,0 +1,852 @@
+name: Feature graduation qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Full lowercase main-branch commit to qualify
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: feature-graduation-${{ inputs.source_revision }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-source:
+    name: Resolve exact main source
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    outputs:
+      revision: ${{ steps.resolve.outputs.revision }}
+      expectation_result: ${{ steps.expectations.outputs.result }}
+
+    steps:
+      - name: Checkout exact requested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve and authenticate exact main source
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_SOURCE_REVISION: ${{ inputs.source_revision }}
+          OXIBELT_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          full_revision='^[0-9a-f]{40}$'
+          [[ "${GITHUB_REPOSITORY}" == "OxiBelt/OxiBelt" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${OXIBELT_WORKFLOW_REF}" == "OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml@refs/heads/main" ]]
+          [[ "${OXIBELT_SOURCE_REVISION}" =~ ${full_revision} ]]
+          [[ "${GITHUB_SHA}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "$(git rev-parse --verify HEAD^{commit})" == "${OXIBELT_SOURCE_REVISION}" ]]
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          [[ "$(git rev-parse --verify refs/remotes/origin/main^{commit})" == "${OXIBELT_SOURCE_REVISION}" ]]
+          live_main="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${live_main}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          printf 'revision=%s\n' "${OXIBELT_SOURCE_REVISION}" >>"${GITHUB_OUTPUT}"
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install Node dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Resolve checked-in graduation expectations
+        id: expectations
+        env:
+          OXIBELT_EXPECTATIONS: .qualification-metadata/expectations.json
+        run: |
+          set -euo pipefail
+          install -d -m 700 .qualification-metadata
+          pnpm run feature-graduation:expectations \
+            --workspace-path . \
+            --output "${OXIBELT_EXPECTATIONS}"
+          result="$(jq -er '
+            select(
+              .schemaVersion == 1
+              and .predicateType == "https://oxibelt.dev/attestations/feature-graduation/v1"
+              and (.result == "zero_supported" or .result == "supported")
+            )
+            | .result
+          ' "${OXIBELT_EXPECTATIONS}")"
+          printf 'result=%s\n' "${result}" >>"${GITHUB_OUTPUT}"
+
+  qualify:
+    name: Qualify graduation gates (${{ matrix.platform }})
+    needs:
+      - resolve-source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            artifact_platform: amd64
+            runner: ubuntu-26.04
+          - platform: linux/arm64
+            artifact_platform: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout exact qualified source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ needs.resolve-source.outputs.revision }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Recheck immutable qualification identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_SOURCE_REVISION: ${{ needs.resolve-source.outputs.revision }}
+          OXIBELT_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "OxiBelt/OxiBelt" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${OXIBELT_WORKFLOW_REF}" == "OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml@refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "$(git rev-parse --verify HEAD^{commit})" == "${OXIBELT_SOURCE_REVISION}" ]]
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          [[ "$(git rev-parse --verify refs/remotes/origin/main^{commit})" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" == "${OXIBELT_SOURCE_REVISION}" ]]
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install Node dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Fail closed until reviewed gate producers are checked in
+        env:
+          OXIBELT_EXPECTATION_RESULT: ${{ needs.resolve-source.outputs.expectation_result }}
+          OXIBELT_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          if [[ "${OXIBELT_EXPECTATION_RESULT}" == "zero_supported" ]]; then
+            echo "feature graduation has no supported rows to qualify at this revision" >&2
+            exit 1
+          fi
+          if [[ "${OXIBELT_EXPECTATION_RESULT}" != "supported" ]]; then
+            echo "feature graduation expectations returned an unknown result" >&2
+            exit 1
+          fi
+          echo "no reviewed feature-graduation gate producer is checked in for ${OXIBELT_PLATFORM}" >&2
+          exit 1
+
+      - name: Upload exact platform gate evidence
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: feature-graduation-raw-${{ matrix.artifact_platform }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/feature-graduation-raw
+          if-no-files-found: error
+          retention-days: 7
+
+  collect-evidence:
+    name: Collect exact graduation evidence
+    needs:
+      - resolve-source
+      - qualify
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout exact qualified source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ needs.resolve-source.outputs.revision }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select exact raw gate artifacts
+        id: raw-artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_SOURCE_REVISION: ${{ needs.resolve-source.outputs.revision }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "OxiBelt/OxiBelt" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          artifacts_json="${RUNNER_TEMP}/feature-graduation-raw-artifacts.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" >"${artifacts_json}"
+          jq -e '
+            (.total_count | type) == "number"
+            and .total_count > 0
+            and .total_count <= 100
+            and (.artifacts | type) == "array"
+            and .total_count == (.artifacts | length)
+            and ([.artifacts[].id] | length) == ([.artifacts[].id] | unique | length)
+          ' "${artifacts_json}" >/dev/null
+          for platform in amd64 arm64; do
+            artifact_name="feature-graduation-raw-${platform}-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            jq -e --arg name "${artifact_name}" '
+              ([.artifacts[] | select(.name == $name)] | length) == 1
+              and ([.artifacts[] | select(
+                .name == $name
+                and .expired == false
+                and (.id | type) == "number"
+                and .id > 0
+                and (.digest | type) == "string"
+                and (.digest | test("^sha256:[0-9a-f]{64}$"))
+                and (.size_in_bytes | type) == "number"
+                and .size_in_bytes > 0
+                and .size_in_bytes <= 8388608
+              )] | length) == 1
+            ' "${artifacts_json}" >/dev/null
+            artifact_id="$(jq -er --arg name "${artifact_name}" '.artifacts[] | select(.name == $name) | .id' "${artifacts_json}")"
+            artifact_digest="$(jq -er --arg name "${artifact_name}" '.artifacts[] | select(.name == $name) | .digest' "${artifacts_json}")"
+            printf '%s_id=%s\n' "${platform}" "${artifact_id}" >>"${GITHUB_OUTPUT}"
+            printf '%s_digest=%s\n' "${platform}" "${artifact_digest}" >>"${GITHUB_OUTPUT}"
+          done
+
+      - name: Download AMD64 gate evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          artifact-ids: ${{ steps.raw-artifacts.outputs.amd64_id }}
+          digest-mismatch: error
+          merge-multiple: true
+          path: ${{ runner.temp }}/feature-graduation-raw/amd64
+
+      - name: Download ARM64 gate evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          artifact-ids: ${{ steps.raw-artifacts.outputs.arm64_id }}
+          digest-mismatch: error
+          merge-multiple: true
+          path: ${{ runner.temp }}/feature-graduation-raw/arm64
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install Node dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Collect authenticated run metadata and producer logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_AMD64_ARTIFACT_DIGEST: ${{ steps.raw-artifacts.outputs.amd64_digest }}
+          OXIBELT_AMD64_ARTIFACT_ID: ${{ steps.raw-artifacts.outputs.amd64_id }}
+          OXIBELT_ARM64_ARTIFACT_DIGEST: ${{ steps.raw-artifacts.outputs.arm64_digest }}
+          OXIBELT_ARM64_ARTIFACT_ID: ${{ steps.raw-artifacts.outputs.arm64_id }}
+          OXIBELT_EVIDENCE_ROOT: .qualification-evidence-input
+          OXIBELT_JOBS_METADATA: .qualification-metadata/jobs.json
+          OXIBELT_RAW_ROOT: ${{ runner.temp }}/feature-graduation-raw
+          OXIBELT_RUN_METADATA: .qualification-metadata/run.json
+          OXIBELT_SOURCE_REVISION: ${{ needs.resolve-source.outputs.revision }}
+          OXIBELT_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "OxiBelt/OxiBelt" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${OXIBELT_WORKFLOW_REF}" == "OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml@refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "$(git rev-parse --verify HEAD^{commit})" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" == "${OXIBELT_SOURCE_REVISION}" ]]
+
+          install -d -m 700 .qualification-metadata
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >"${RUNNER_TEMP}/feature-graduation-run-raw.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" >"${RUNNER_TEMP}/feature-graduation-jobs-raw.json"
+          for platform in amd64 arm64; do
+            artifact_id_variable="OXIBELT_${platform^^}_ARTIFACT_ID"
+            artifact_digest_variable="OXIBELT_${platform^^}_ARTIFACT_DIGEST"
+            artifact_id="${!artifact_id_variable}"
+            artifact_digest="${!artifact_digest_variable}"
+            artifact_name="feature-graduation-raw-${platform}-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            raw_artifact="${RUNNER_TEMP}/feature-graduation-${platform}-artifact-raw.json"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}" >"${raw_artifact}"
+            jq -e \
+              --arg digest "${artifact_digest}" \
+              --arg name "${artifact_name}" \
+              --argjson artifact_id "${artifact_id}" \
+              --argjson run_id "${GITHUB_RUN_ID}" '
+              .id == $artifact_id
+              and .name == $name
+              and .expired == false
+              and .digest == $digest
+              and .workflow_run.id == $run_id
+              and .size_in_bytes > 0
+              and .size_in_bytes <= 8388608
+            ' "${raw_artifact}" >/dev/null
+          done
+          jq -e --arg revision "${OXIBELT_SOURCE_REVISION}" --argjson attempt "${GITHUB_RUN_ATTEMPT}" '
+            .event == "workflow_dispatch"
+            and .path == ".github/workflows/feature-graduation.yml"
+            and .head_branch == "main"
+            and .head_sha == $revision
+            and .run_attempt == $attempt
+            and .status == "in_progress"
+            and .conclusion == null
+          ' "${RUNNER_TEMP}/feature-graduation-run-raw.json" >/dev/null
+          jq -e '
+            (.total_count | type) == "number"
+            and .total_count > 0
+            and .total_count <= 100
+            and (.jobs | type) == "array"
+            and .total_count == (.jobs | length)
+            and ([.jobs[].id] | length) == ([.jobs[].id] | unique | length)
+            and ([.jobs[] | select(.name == "Collect exact graduation evidence")] | length) == 1
+            and ([.jobs[] | select(.name == "Resolve exact main source" and .conclusion == "success")] | length) == 1
+            and ([.jobs[] | select(.name | startswith("Qualify graduation gates (")) | .name] | sort) == ([
+              "Qualify graduation gates (linux/amd64)",
+              "Qualify graduation gates (linux/arm64)"
+            ] | sort)
+            and ([.jobs[] | select(.name | startswith("Qualify graduation gates (")) | .conclusion] | all(. == "success"))
+          ' "${RUNNER_TEMP}/feature-graduation-jobs-raw.json" >/dev/null
+          jq -cS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg revision "${OXIBELT_SOURCE_REVISION}" '
+            {
+              schemaVersion: 1,
+              repository: $repository,
+              workflowPath: .path,
+              workflowRef: $revision,
+              runId: .id,
+              runAttempt: .run_attempt,
+              sourceRef: "refs/heads/main",
+              sourceRevision: .head_sha,
+              status: .status,
+              conclusion: .conclusion
+            }
+          ' "${RUNNER_TEMP}/feature-graduation-run-raw.json" >"${OXIBELT_RUN_METADATA}"
+          jq -cS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson run_id "${GITHUB_RUN_ID}" \
+            --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
+            {
+              schemaVersion: 1,
+              repository: $repository,
+              runId: $run_id,
+              runAttempt: $run_attempt,
+              jobs: [.jobs[]
+                | select(.name | startswith("Qualify graduation gates ("))
+                | {id, name, conclusion}
+              ]
+            }
+          ' "${RUNNER_TEMP}/feature-graduation-jobs-raw.json" >"${OXIBELT_JOBS_METADATA}"
+
+          install -d -m 700 \
+            "${OXIBELT_EVIDENCE_ROOT}/receipts/features" \
+            "${OXIBELT_EVIDENCE_ROOT}/receipts/kubernetes" \
+            "${OXIBELT_EVIDENCE_ROOT}/reports" \
+            "${OXIBELT_EVIDENCE_ROOT}/logs"
+          for platform in amd64 arm64; do
+            raw="${OXIBELT_RAW_ROOT}/${platform}"
+            root_entries="$(find "${raw}" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+            [[ "${root_entries}" == $'receipts\nreports' ]]
+            receipt_entries="$(find "${raw}/receipts" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+            [[ "${receipt_entries}" == $'features\nkubernetes' ]]
+            if find "${raw}" \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit | grep -q .; then
+              echo "qualification artifact contains a symlink or special file" >&2
+              exit 1
+            fi
+            [[ "$(find "${raw}" -type f | wc -l)" -le 64 ]]
+            [[ "$(du -sb "${raw}" | cut -f1)" -le 4194304 ]]
+            find "${raw}" -type f -size +1M -print -quit | grep -q . && {
+              echo "qualification artifact contains an oversized file" >&2
+              exit 1
+            }
+          done
+          duplicate_paths="$({
+            for platform in amd64 arm64; do
+              cd "${OXIBELT_RAW_ROOT}/${platform}"
+              find receipts reports -type f -printf '%p\n'
+            done
+          } | LC_ALL=C sort | uniq -d)"
+          [[ -z "${duplicate_paths}" ]]
+          for platform in amd64 arm64; do
+            cp -R --no-preserve=mode,ownership,timestamps \
+              "${OXIBELT_RAW_ROOT}/${platform}/receipts/." \
+              "${OXIBELT_EVIDENCE_ROOT}/receipts/"
+            cp -R --no-preserve=mode,ownership,timestamps \
+              "${OXIBELT_RAW_ROOT}/${platform}/reports/." \
+              "${OXIBELT_EVIDENCE_ROOT}/reports/"
+          done
+
+          mapfile -t producer_job_ids < <(jq -er '
+            [.jobs[] | select(.name | startswith("Qualify graduation gates (")) | .id] | sort | .[]
+          ' "${RUNNER_TEMP}/feature-graduation-jobs-raw.json")
+          [[ "${#producer_job_ids[@]}" -eq 2 ]]
+          for job_id in "${producer_job_ids[@]}"; do
+            [[ "${job_id}" =~ ^[1-9][0-9]*$ ]]
+            gh api -H 'Accept: application/vnd.github+json' \
+              "repos/${GITHUB_REPOSITORY}/actions/jobs/${job_id}/logs" \
+              >"${OXIBELT_EVIDENCE_ROOT}/logs/${job_id}.log"
+            [[ -s "${OXIBELT_EVIDENCE_ROOT}/logs/${job_id}.log" ]]
+            [[ "$(stat -c '%s' "${OXIBELT_EVIDENCE_ROOT}/logs/${job_id}.log")" -le 1048576 ]]
+          done
+
+      - name: Seal exact graduation evidence
+        env:
+          OXIBELT_EVIDENCE_ROOT: .qualification-evidence-input
+          OXIBELT_JOBS_METADATA: .qualification-metadata/jobs.json
+          OXIBELT_RUN_METADATA: .qualification-metadata/run.json
+          OXIBELT_SEALED_ROOT: qualification-evidence
+          OXIBELT_SOURCE_REVISION: ${{ needs.resolve-source.outputs.revision }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "${OXIBELT_SEALED_ROOT}"
+          pnpm run feature-graduation:seal \
+            --workspace-path . \
+            --evidence-dir "${OXIBELT_EVIDENCE_ROOT}" \
+            --run-metadata "${OXIBELT_RUN_METADATA}" \
+            --jobs-metadata "${OXIBELT_JOBS_METADATA}" \
+            --expected-source-revision "${OXIBELT_SOURCE_REVISION}" \
+            --expected-source-ref refs/heads/main \
+            --phase candidate \
+            --subject-output "${OXIBELT_SEALED_ROOT}/feature-graduation-subject.json" \
+            --predicate-output "${OXIBELT_SEALED_ROOT}/feature-graduation-predicate.json"
+          cp -R --no-preserve=mode,ownership,timestamps \
+            "${OXIBELT_EVIDENCE_ROOT}/receipts" \
+            "${OXIBELT_EVIDENCE_ROOT}/reports" \
+            "${OXIBELT_EVIDENCE_ROOT}/logs" \
+            "${OXIBELT_SEALED_ROOT}/"
+
+      - name: Upload sealed graduation evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: feature-graduation-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: qualification-evidence
+          if-no-files-found: error
+          retention-days: 30
+
+  attest-evidence:
+    name: Attest sealed graduation evidence
+    needs:
+      - resolve-source
+      - collect-evidence
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Select exact sealed graduation artifact
+        id: sealed-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_SOURCE_REVISION: ${{ needs.resolve-source.outputs.revision }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "OxiBelt/OxiBelt" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          artifact_name="feature-graduation-evidence-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifacts_json="${RUNNER_TEMP}/feature-graduation-sealed-artifacts.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" >"${artifacts_json}"
+          jq -e --arg name "${artifact_name}" '
+            (.total_count | type) == "number"
+            and .total_count > 0
+            and .total_count <= 100
+            and (.artifacts | type) == "array"
+            and .total_count == (.artifacts | length)
+            and ([.artifacts[].id] | length) == ([.artifacts[].id] | unique | length)
+            and ([.artifacts[] | select(.name == $name)] | length) == 1
+            and ([.artifacts[] | select(
+              .name == $name
+              and .expired == false
+              and (.id | type) == "number"
+              and .id > 0
+              and (.digest | type) == "string"
+              and (.digest | test("^sha256:[0-9a-f]{64}$"))
+              and (.size_in_bytes | type) == "number"
+              and .size_in_bytes > 0
+              and .size_in_bytes <= 16777216
+            )] | length) == 1
+          ' "${artifacts_json}" >/dev/null
+          artifact_id="$(jq -er --arg name "${artifact_name}" '.artifacts[] | select(.name == $name) | .id' "${artifacts_json}")"
+          artifact_digest="$(jq -er --arg name "${artifact_name}" '.artifacts[] | select(.name == $name) | .digest' "${artifacts_json}")"
+          printf 'artifact_id=%s\n' "${artifact_id}" >>"${GITHUB_OUTPUT}"
+          printf 'artifact_digest=%s\n' "${artifact_digest}" >>"${GITHUB_OUTPUT}"
+
+      - name: Download sealed graduation evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          artifact-ids: ${{ steps.sealed-artifact.outputs.artifact_id }}
+          digest-mismatch: error
+          merge-multiple: true
+          path: ${{ runner.temp }}/feature-graduation-evidence
+
+      - name: Validate bounded attestation inputs without executing artifact content
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_ARTIFACT_DIGEST: ${{ steps.sealed-artifact.outputs.artifact_digest }}
+          OXIBELT_ARTIFACT_ID: ${{ steps.sealed-artifact.outputs.artifact_id }}
+          OXIBELT_EVIDENCE_ROOT: ${{ runner.temp }}/feature-graduation-evidence
+          OXIBELT_INPUT_REVISION: ${{ inputs.source_revision }}
+          OXIBELT_SOURCE_REVISION: ${{ needs.resolve-source.outputs.revision }}
+          OXIBELT_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "OxiBelt/OxiBelt" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${OXIBELT_WORKFLOW_REF}" == "OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml@refs/heads/main" ]]
+          [[ "${OXIBELT_INPUT_REVISION}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "${GITHUB_SHA}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" == "${OXIBELT_SOURCE_REVISION}" ]]
+          artifact_name="feature-graduation-evidence-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${OXIBELT_ARTIFACT_ID}" >"${RUNNER_TEMP}/feature-graduation-sealed-artifact-raw.json"
+          jq -e \
+            --arg digest "${OXIBELT_ARTIFACT_DIGEST}" \
+            --arg name "${artifact_name}" \
+            --argjson artifact_id "${OXIBELT_ARTIFACT_ID}" \
+            --argjson run_id "${GITHUB_RUN_ID}" '
+            .id == $artifact_id
+            and .name == $name
+            and .expired == false
+            and .digest == $digest
+            and .workflow_run.id == $run_id
+            and .size_in_bytes > 0
+            and .size_in_bytes <= 16777216
+          ' "${RUNNER_TEMP}/feature-graduation-sealed-artifact-raw.json" >/dev/null
+          root_entries="$(find "${OXIBELT_EVIDENCE_ROOT}" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          [[ "${root_entries}" == $'feature-graduation-predicate.json\nfeature-graduation-subject.json\nlogs\nreceipts\nreports' ]]
+          receipt_entries="$(find "${OXIBELT_EVIDENCE_ROOT}/receipts" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          [[ "${receipt_entries}" == $'features\nkubernetes' ]]
+          if find "${OXIBELT_EVIDENCE_ROOT}" \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit | grep -q .; then
+            echo "sealed evidence contains a symlink or special file" >&2
+            exit 1
+          fi
+          [[ "$(find "${OXIBELT_EVIDENCE_ROOT}" -type f | wc -l)" -le 128 ]]
+          [[ "$(du -sb "${OXIBELT_EVIDENCE_ROOT}" | cut -f1)" -le 8388608 ]]
+          find "${OXIBELT_EVIDENCE_ROOT}" -type f -size +1M -print -quit | grep -q . && {
+            echo "sealed evidence contains an oversized file" >&2
+            exit 1
+          }
+          subject="${OXIBELT_EVIDENCE_ROOT}/feature-graduation-subject.json"
+          predicate="${OXIBELT_EVIDENCE_ROOT}/feature-graduation-predicate.json"
+          predicate_sha256="sha256:$(sha256sum "${predicate}" | cut -d ' ' -f 1)"
+          jq -e \
+            --arg revision "${OXIBELT_SOURCE_REVISION}" \
+            --arg predicate_sha256 "${predicate_sha256}" '
+            .schemaVersion == 1
+            and .subjectName == "feature-graduation-subject.json"
+            and .repository == "OxiBelt/OxiBelt"
+            and .sourceRef == "refs/heads/main"
+            and .sourceRevision == $revision
+            and .phase == "candidate"
+            and .predicateSha256 == $predicate_sha256
+          ' "${subject}" >/dev/null
+          jq -e \
+            --arg revision "${OXIBELT_SOURCE_REVISION}" \
+            --arg workflow_ref "${OXIBELT_WORKFLOW_REF}" \
+            --argjson run_id "${GITHUB_RUN_ID}" \
+            --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
+            .schemaVersion == 1
+            and .predicateType == "https://oxibelt.dev/attestations/feature-graduation/v1"
+            and .repository == "OxiBelt/OxiBelt"
+            and .sourceRef == "refs/heads/main"
+            and .sourceRevision == $revision
+            and .phase == "candidate"
+            and .run.id == $run_id
+            and .run.attempt == $run_attempt
+            and .run.workflowPath == ".github/workflows/feature-graduation.yml"
+            and .run.workflowRef == $revision
+            and .run.status == "in_progress"
+            and .run.conclusion == null
+            and .expectations.result == "supported"
+            and (.inventory.receipts | type == "array" and length > 0)
+            and (.inventory.reports | type == "array" and length > 0)
+            and (.inventory.logs | type == "array" and length > 0)
+            and (all(.inventory.receipts[];
+              (.scope == "features" or .scope == "kubernetes")
+              and (.path | test("^receipts/(features|kubernetes)/[a-z0-9][a-z0-9._-]*\\.json$"))
+              and (.scope as $scope | .path | startswith("receipts/" + $scope + "/"))
+              and (.sha256 | test("^sha256:[0-9a-f]{64}$"))
+            ))
+            and (all(.inventory.reports[];
+              (.name | test("^[A-Za-z0-9][A-Za-z0-9._/-]*$"))
+              and (.name | contains("..") | not)
+              and (.sha256 | test("^sha256:[0-9a-f]{64}$"))
+            ))
+            and (all(.inventory.logs[];
+              (.jobId | type == "number" and . > 0)
+              and (.sha256 | test("^sha256:[0-9a-f]{64}$"))
+            ))
+          ' "${predicate}" >/dev/null
+          while IFS=$'\t' read -r path digest; do
+            [[ "sha256:$(sha256sum "${OXIBELT_EVIDENCE_ROOT}/${path}" | cut -d ' ' -f 1)" == "${digest}" ]]
+          done < <(jq -er '.inventory.receipts[] | [.path, .sha256] | @tsv' "${predicate}")
+          while IFS=$'\t' read -r name digest; do
+            [[ "sha256:$(sha256sum "${OXIBELT_EVIDENCE_ROOT}/reports/${name}" | cut -d ' ' -f 1)" == "${digest}" ]]
+          done < <(jq -er '.inventory.reports[] | [.name, .sha256] | @tsv' "${predicate}")
+          while IFS=$'\t' read -r job_id digest; do
+            [[ "sha256:$(sha256sum "${OXIBELT_EVIDENCE_ROOT}/logs/${job_id}.log" | cut -d ' ' -f 1)" == "${digest}" ]]
+          done < <(jq -er '.inventory.logs[] | [(.jobId | tostring), .sha256] | @tsv' "${predicate}")
+          find "${OXIBELT_EVIDENCE_ROOT}/receipts" -type f -printf '%P\n' \
+            | sed 's#^#receipts/#' | LC_ALL=C sort >"${RUNNER_TEMP}/actual-receipts.txt"
+          jq -er '.inventory.receipts[].path' "${predicate}" \
+            | LC_ALL=C sort >"${RUNNER_TEMP}/expected-receipts.txt"
+          cmp "${RUNNER_TEMP}/actual-receipts.txt" "${RUNNER_TEMP}/expected-receipts.txt"
+          find "${OXIBELT_EVIDENCE_ROOT}/reports" -type f -printf '%P\n' \
+            | LC_ALL=C sort >"${RUNNER_TEMP}/actual-reports.txt"
+          jq -er '.inventory.reports[].name' "${predicate}" \
+            | LC_ALL=C sort >"${RUNNER_TEMP}/expected-reports.txt"
+          cmp "${RUNNER_TEMP}/actual-reports.txt" "${RUNNER_TEMP}/expected-reports.txt"
+          find "${OXIBELT_EVIDENCE_ROOT}/logs" -type f -printf '%f\n' \
+            | LC_ALL=C sort >"${RUNNER_TEMP}/actual-logs.txt"
+          jq -er '.inventory.logs[].jobId | tostring + ".log"' "${predicate}" \
+            | LC_ALL=C sort >"${RUNNER_TEMP}/expected-logs.txt"
+          cmp "${RUNNER_TEMP}/actual-logs.txt" "${RUNNER_TEMP}/expected-logs.txt"
+          printf 'subject=%s\n' "${subject}" >>"${GITHUB_OUTPUT}"
+          printf 'predicate=%s\n' "${predicate}" >>"${GITHUB_OUTPUT}"
+
+      - name: Publish signed graduation evidence
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ steps.subject.outputs.subject }}
+          predicate-type: https://oxibelt.dev/attestations/feature-graduation/v1
+          predicate-path: ${{ steps.subject.outputs.predicate }}
+          push-to-registry: false
+
+  verify-evidence:
+    name: Verify signed graduation evidence
+    needs:
+      - resolve-source
+      - collect-evidence
+      - attest-evidence
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+
+    steps:
+      - name: Checkout exact qualified source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ needs.resolve-source.outputs.revision }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select exact sealed graduation artifact
+        id: sealed-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_SOURCE_REVISION: ${{ needs.resolve-source.outputs.revision }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "OxiBelt/OxiBelt" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          artifact_name="feature-graduation-evidence-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifacts_json="${RUNNER_TEMP}/feature-graduation-sealed-artifacts.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" >"${artifacts_json}"
+          jq -e --arg name "${artifact_name}" '
+            (.total_count | type) == "number"
+            and .total_count > 0
+            and .total_count <= 100
+            and (.artifacts | type) == "array"
+            and .total_count == (.artifacts | length)
+            and ([.artifacts[].id] | length) == ([.artifacts[].id] | unique | length)
+            and ([.artifacts[] | select(.name == $name)] | length) == 1
+            and ([.artifacts[] | select(
+              .name == $name
+              and .expired == false
+              and (.id | type) == "number"
+              and .id > 0
+              and (.digest | type) == "string"
+              and (.digest | test("^sha256:[0-9a-f]{64}$"))
+              and (.size_in_bytes | type) == "number"
+              and .size_in_bytes > 0
+              and .size_in_bytes <= 16777216
+            )] | length) == 1
+          ' "${artifacts_json}" >/dev/null
+          artifact_id="$(jq -er --arg name "${artifact_name}" '.artifacts[] | select(.name == $name) | .id' "${artifacts_json}")"
+          artifact_digest="$(jq -er --arg name "${artifact_name}" '.artifacts[] | select(.name == $name) | .digest' "${artifacts_json}")"
+          printf 'artifact_id=%s\n' "${artifact_id}" >>"${GITHUB_OUTPUT}"
+          printf 'artifact_digest=%s\n' "${artifact_digest}" >>"${GITHUB_OUTPUT}"
+
+      - name: Download sealed graduation evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          artifact-ids: ${{ steps.sealed-artifact.outputs.artifact_id }}
+          digest-mismatch: error
+          merge-multiple: true
+          path: qualification-evidence
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install Node dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Read back and verify signed graduation evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_ARTIFACT_DIGEST: ${{ steps.sealed-artifact.outputs.artifact_digest }}
+          OXIBELT_ARTIFACT_ID: ${{ steps.sealed-artifact.outputs.artifact_id }}
+          OXIBELT_JOBS_METADATA: .qualification-metadata/jobs.json
+          OXIBELT_INPUT_REVISION: ${{ inputs.source_revision }}
+          OXIBELT_RUN_METADATA: .qualification-metadata/run.json
+          OXIBELT_SOURCE_REVISION: ${{ needs.resolve-source.outputs.revision }}
+          OXIBELT_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "OxiBelt/OxiBelt" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${OXIBELT_WORKFLOW_REF}" == "OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml@refs/heads/main" ]]
+          [[ "${OXIBELT_INPUT_REVISION}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "${GITHUB_SHA}" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "$(git rev-parse --verify HEAD^{commit})" == "${OXIBELT_SOURCE_REVISION}" ]]
+          install -d -m 700 .qualification-metadata
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" >"${RUNNER_TEMP}/feature-graduation-run-raw.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100" >"${RUNNER_TEMP}/feature-graduation-jobs-raw.json"
+          artifact_name="feature-graduation-evidence-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${OXIBELT_ARTIFACT_ID}" >"${RUNNER_TEMP}/feature-graduation-sealed-artifact-raw.json"
+          jq -e \
+            --arg digest "${OXIBELT_ARTIFACT_DIGEST}" \
+            --arg name "${artifact_name}" \
+            --argjson artifact_id "${OXIBELT_ARTIFACT_ID}" \
+            --argjson run_id "${GITHUB_RUN_ID}" '
+            .id == $artifact_id
+            and .name == $name
+            and .expired == false
+            and .digest == $digest
+            and .workflow_run.id == $run_id
+            and .size_in_bytes > 0
+            and .size_in_bytes <= 16777216
+          ' "${RUNNER_TEMP}/feature-graduation-sealed-artifact-raw.json" >/dev/null
+          jq -e '
+            (.total_count | type) == "number"
+            and .total_count > 0
+            and .total_count <= 100
+            and (.jobs | type) == "array"
+            and .total_count == (.jobs | length)
+            and ([.jobs[].id] | length) == ([.jobs[].id] | unique | length)
+            and ([.jobs[] | select(.name | startswith("Qualify graduation gates (")) | .name] | sort) == ([
+              "Qualify graduation gates (linux/amd64)",
+              "Qualify graduation gates (linux/arm64)"
+            ] | sort)
+            and ([.jobs[] | select(.name | startswith("Qualify graduation gates (")) | .conclusion] | all(. == "success"))
+          ' "${RUNNER_TEMP}/feature-graduation-jobs-raw.json" >/dev/null
+          jq -cS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg revision "${OXIBELT_SOURCE_REVISION}" '
+            {
+              schemaVersion: 1,
+              repository: $repository,
+              workflowPath: .path,
+              workflowRef: $revision,
+              runId: .id,
+              runAttempt: .run_attempt,
+              sourceRef: "refs/heads/main",
+              sourceRevision: .head_sha,
+              status: .status,
+              conclusion: .conclusion
+            }
+          ' "${RUNNER_TEMP}/feature-graduation-run-raw.json" >"${OXIBELT_RUN_METADATA}"
+          jq -cS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson run_id "${GITHUB_RUN_ID}" \
+            --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
+            {
+              schemaVersion: 1,
+              repository: $repository,
+              runId: $run_id,
+              runAttempt: $run_attempt,
+              jobs: [.jobs[]
+                | select(.name | startswith("Qualify graduation gates ("))
+                | {id, name, conclusion}
+              ]
+            }
+          ' "${RUNNER_TEMP}/feature-graduation-jobs-raw.json" >"${OXIBELT_JOBS_METADATA}"
+          root_entries="$(find qualification-evidence -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          [[ "${root_entries}" == $'feature-graduation-predicate.json\nfeature-graduation-subject.json\nlogs\nreceipts\nreports' ]]
+          receipt_entries="$(find qualification-evidence/receipts -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          [[ "${receipt_entries}" == $'features\nkubernetes' ]]
+          if find qualification-evidence \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit | grep -q .; then
+            echo "sealed evidence contains a symlink or special file" >&2
+            exit 1
+          fi
+          [[ "$(find qualification-evidence -type f | wc -l)" -le 128 ]]
+          [[ "$(du -sb qualification-evidence | cut -f1)" -le 8388608 ]]
+          find qualification-evidence -type f -size +1M -print -quit | grep -q . && {
+            echo "sealed evidence contains an oversized file" >&2
+            exit 1
+          }
+          install -d -m 700 \
+            .qualification-recomputed \
+            .qualification-evidence-readback/receipts \
+            .qualification-evidence-readback/reports \
+            .qualification-evidence-readback/logs
+          cp -R --no-preserve=mode,ownership,timestamps \
+            qualification-evidence/receipts/. .qualification-evidence-readback/receipts/
+          cp -R --no-preserve=mode,ownership,timestamps \
+            qualification-evidence/reports/. .qualification-evidence-readback/reports/
+          cp -R --no-preserve=mode,ownership,timestamps \
+            qualification-evidence/logs/. .qualification-evidence-readback/logs/
+          pnpm run feature-graduation:seal \
+            --workspace-path . \
+            --evidence-dir .qualification-evidence-readback \
+            --run-metadata "${OXIBELT_RUN_METADATA}" \
+            --jobs-metadata "${OXIBELT_JOBS_METADATA}" \
+            --expected-source-revision "${OXIBELT_SOURCE_REVISION}" \
+            --expected-source-ref refs/heads/main \
+            --phase candidate \
+            --subject-output .qualification-recomputed/feature-graduation-subject.json \
+            --predicate-output .qualification-recomputed/feature-graduation-predicate.json
+          cmp qualification-evidence/feature-graduation-subject.json \
+            .qualification-recomputed/feature-graduation-subject.json
+          cmp qualification-evidence/feature-graduation-predicate.json \
+            .qualification-recomputed/feature-graduation-predicate.json
+          gh attestation verify qualification-evidence/feature-graduation-subject.json \
+            --repo OxiBelt/OxiBelt \
+            --signer-workflow OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml \
+            --signer-digest "${OXIBELT_SOURCE_REVISION}" \
+            --source-digest "${OXIBELT_SOURCE_REVISION}" \
+            --source-ref refs/heads/main \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --deny-self-hosted-runners \
+            --predicate-type https://oxibelt.dev/attestations/feature-graduation/v1 \
+            --limit 100 \
+            --format json \
+            >.qualification-metadata/attestations.json
+          pnpm run feature-graduation:attestation-verify \
+            --workspace-path . \
+            --attestations .qualification-metadata/attestations.json \
+            --subject qualification-evidence/feature-graduation-subject.json \
+            --predicate qualification-evidence/feature-graduation-predicate.json \
+            --signer-workflow OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml@refs/heads/main \
+            --source-repository OxiBelt/OxiBelt \
+            --source-ref refs/heads/main \
+            --source-revision "${OXIBELT_SOURCE_REVISION}" \
+            --run-metadata "${OXIBELT_RUN_METADATA}" \
+            --verification-context in_run
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          [[ "$(git rev-parse --verify refs/remotes/origin/main^{commit})" == "${OXIBELT_SOURCE_REVISION}" ]]
+          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" == "${OXIBELT_SOURCE_REVISION}" ]]

@@ -407,6 +407,30 @@ the declared workflow, job, artifact, report, and log identities. The checker
 rejects missing, duplicate, mismatched, or incomplete receipt content. A
 promotion gate additionally requires authenticated workflow and attestation
 readback before treating those declared identities as qualification evidence.
+The manual `Feature graduation qualification` workflow accepts only one full
+lowercase revision on the live `main` ref. It rechecks that revision against
+the checkout, `origin/main`, and the GitHub API before native AMD64 and ARM64
+qualification work. Its evidence collector binds the exact run attempt,
+successful producer jobs, report bytes, and downloaded job logs before an
+isolated OIDC job attests the sealed subject and predicate. The OIDC job does
+not check out or execute repository or artifact code; a separate read-only job
+performs cryptographic and policy readback.
+
+The canonical `Check OxiBelt` workflow always includes
+`Feature graduation exact verification` in the non-benchmark summary. While
+both registries have zero supported rows, that job validates the checked-in
+policies and succeeds without external evidence. On pull requests it also
+compares canonical expectations from the exact trusted base revision without
+executing base code: zero-supported base and head revisions pass, as do
+byte-identical supported expectations. A promotion, demotion, or supported
+policy or expectation change fails until canonical `main` is qualified. Live
+`main` requires exactly one successful manual qualification run for the same
+SHA, exact attempt-qualified artifact, receipt set, predicate, signer workflow,
+and attestation. The current manual matrix fails explicitly because no reviewed
+gate producer is checked in; its topology is not qualification evidence and
+cannot authorize a promotion. General comparative benchmarks remain outside
+this prerequisite; only a future direct-H1 gate receipt may bind that feature's
+dedicated evidence.
 This tooling does not itself promote a feature or change runtime defaults,
 native configuration syntax or schema, Admin API wire behavior, persisted
 state, or rollback behavior. Roll back the tooling by restoring the previous

@@ -90,6 +90,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "rust-advisory-checks",
   "node-dependency-admission",
   "typescript-release-tooling",
+  "feature-graduation-exact-verification",
   "fuzz-smoke",
   "unsafe-validation",
   "check-riscv64-cross",
@@ -147,6 +148,7 @@ const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
   "rust-advisory-checks",
   "node-dependency-admission",
   "typescript-release-tooling",
+  "feature-graduation-exact-verification",
   "fuzz-smoke",
   "unsafe-validation",
   "check-riscv64-cross",
@@ -173,6 +175,11 @@ fn repo_root() -> PathBuf {
 fn workflow_text() -> String {
   fs::read_to_string(repo_root().join(".github/workflows/check-oxibelt.yml"))
     .expect("check-oxibelt workflow should be readable")
+}
+
+fn feature_graduation_workflow_text() -> String {
+  fs::read_to_string(repo_root().join(".github/workflows/feature-graduation.yml"))
+    .expect("feature graduation workflow should be readable")
 }
 
 fn release_workflow_text() -> String {
@@ -1843,6 +1850,594 @@ fn source_structure_failure_does_not_skip_test_or_docker_ci_jobs() {
       "{job_id} would be skipped if source-structure failed"
     );
   }
+}
+
+#[test]
+fn feature_graduation_workflow_is_manual_exact_sha_and_privilege_separated() {
+  let workflow = feature_graduation_workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("feature graduation workflow should parse as YAML");
+  let triggers = parsed["on"]
+    .as_object()
+    .expect("feature graduation workflow should define triggers");
+  assert_eq!(
+    triggers.keys().cloned().collect::<BTreeSet<_>>(),
+    BTreeSet::from(["workflow_dispatch".to_owned()]),
+    "feature graduation must expose only manual dispatch"
+  );
+  assert_eq!(
+    triggers["workflow_dispatch"]["inputs"],
+    serde_json::json!({
+      "source_revision": {
+        "description": "Full lowercase main-branch commit to qualify",
+        "required": true,
+        "type": "string"
+      }
+    }),
+    "manual qualification must accept only one full source revision"
+  );
+  assert_eq!(parsed["permissions"], serde_json::json!({}));
+
+  let jobs = parse_jobs(&workflow);
+  assert_eq!(
+    jobs.keys().cloned().collect::<BTreeSet<_>>(),
+    BTreeSet::from([
+      "attest-evidence".to_owned(),
+      "collect-evidence".to_owned(),
+      "qualify".to_owned(),
+      "resolve-source".to_owned(),
+      "verify-evidence".to_owned(),
+    ])
+  );
+  assert_eq!(jobs["resolve-source"].needs, Vec::<String>::new());
+  assert_eq!(jobs["qualify"].needs, expected_needs(&["resolve-source"]));
+  assert_eq!(
+    jobs["collect-evidence"].needs,
+    expected_needs(&["resolve-source", "qualify"])
+  );
+  assert_eq!(
+    jobs["attest-evidence"].needs,
+    expected_needs(&["resolve-source", "collect-evidence"])
+  );
+  assert_eq!(
+    jobs["verify-evidence"].needs,
+    expected_needs(&["resolve-source", "collect-evidence", "attest-evidence"])
+  );
+
+  assert_eq!(
+    parsed["jobs"]["resolve-source"]["permissions"],
+    serde_json::json!({"contents": "read"})
+  );
+  assert_eq!(
+    parsed["jobs"]["qualify"]["permissions"],
+    serde_json::json!({"actions": "read", "contents": "read"})
+  );
+  assert_eq!(
+    parsed["jobs"]["collect-evidence"]["permissions"],
+    serde_json::json!({"actions": "read", "contents": "read"})
+  );
+  assert_eq!(
+    parsed["jobs"]["attest-evidence"]["permissions"],
+    serde_json::json!({
+      "actions": "read",
+      "attestations": "write",
+      "contents": "read",
+      "id-token": "write"
+    })
+  );
+  assert_eq!(
+    parsed["jobs"]["verify-evidence"]["permissions"],
+    serde_json::json!({
+      "actions": "read",
+      "attestations": "read",
+      "contents": "read"
+    })
+  );
+
+  let action_pin = regex::Regex::new(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
+    .expect("action pin pattern should compile");
+  for step in parsed["jobs"]
+    .as_object()
+    .expect("feature graduation workflow should define jobs")
+    .values()
+    .filter_map(|job| job["steps"].as_array())
+    .flatten()
+  {
+    if let Some(uses) = step["uses"].as_str() {
+      assert!(
+        action_pin.is_match(uses),
+        "feature graduation action must be pinned to a full commit: {uses}"
+      );
+    }
+  }
+
+  let resolve = workflow_job_text(&workflow, "resolve-source");
+  let qualify = workflow_job_text(&workflow, "qualify");
+  let collect = workflow_job_text(&workflow, "collect-evidence");
+  let attest = workflow_job_text(&workflow, "attest-evidence");
+  let verify = workflow_job_text(&workflow, "verify-evidence");
+  for expected in [
+    "[[ \"${GITHUB_REPOSITORY}\" == \"OxiBelt/OxiBelt\" ]]",
+    "full_revision='^[0-9a-f]{40}$'",
+    "[[ \"${GITHUB_EVENT_NAME}\" == \"workflow_dispatch\" ]]",
+    "[[ \"${GITHUB_REF}\" == \"refs/heads/main\" ]]",
+    "github.workflow_ref",
+    "[[ \"${GITHUB_SHA}\" == \"${OXIBELT_SOURCE_REVISION}\" ]]",
+    "refs/remotes/origin/main^{commit}",
+    "git/ref/heads/main",
+    "persist-credentials: false",
+  ] {
+    assert!(
+      resolve.contains(expected),
+      "resolver should retain {expected}"
+    );
+  }
+  assert_eq!(
+    parsed["jobs"]["qualify"]["strategy"]["matrix"]["include"],
+    serde_json::json!([
+      {"platform": "linux/amd64", "artifact_platform": "amd64", "runner": "ubuntu-26.04"},
+      {"platform": "linux/arm64", "artifact_platform": "arm64", "runner": "ubuntu-24.04-arm"}
+    ])
+  );
+  assert!(
+    parsed["jobs"]["qualify"].get("if").is_none(),
+    "supported platform qualification must not have a job-level skip condition"
+  );
+  for expected in [
+    "feature graduation has no supported rows to qualify at this revision",
+    "no reviewed feature-graduation gate producer is checked in",
+    "exit 1",
+    "persist-credentials: false",
+  ] {
+    assert!(
+      qualify.contains(expected),
+      "qualification should retain {expected}"
+    );
+  }
+  for forbidden in ["continue-on-error", "secrets.", "id-token:", "packages:"] {
+    assert!(
+      !qualify.contains(forbidden),
+      "qualification must not contain {forbidden}"
+    );
+  }
+  for expected in [
+    "/artifacts?per_page=100",
+    "/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100",
+    "/actions/artifacts/${artifact_id}",
+    "/actions/jobs/${job_id}/logs",
+    ".total_count <= 100",
+    ".total_count == (.artifacts | length)",
+    "([.artifacts[] | select(.name == $name)] | length) == 1",
+    ".total_count == (.jobs | length)",
+    "([.artifacts[].id] | length) == ([.artifacts[].id] | unique | length)",
+    "([.jobs[].id] | length) == ([.jobs[].id] | unique | length)",
+    "Qualify graduation gates (linux/amd64)",
+    "Qualify graduation gates (linux/arm64)",
+    "artifact-ids: ${{ steps.raw-artifacts.outputs.amd64_id }}",
+    "artifact-ids: ${{ steps.raw-artifacts.outputs.arm64_id }}",
+    "digest-mismatch: error",
+    "merge-multiple: true",
+    ".size_in_bytes <= 8388608",
+    "-le 4194304",
+    "status: .status",
+    "conclusion: .conclusion",
+    "feature-graduation:seal",
+    "--run-metadata",
+    "--jobs-metadata",
+    "receipts/features",
+    "receipts/kubernetes",
+  ] {
+    assert!(
+      collect.contains(expected),
+      "collector should retain {expected}"
+    );
+  }
+  for expected in [
+    "Select exact sealed graduation artifact",
+    "/artifacts?per_page=100",
+    "/actions/artifacts/${OXIBELT_ARTIFACT_ID}",
+    ".total_count == (.artifacts | length)",
+    "([.artifacts[] | select(.name == $name)] | length) == 1",
+    "artifact-ids: ${{ steps.sealed-artifact.outputs.artifact_id }}",
+    "digest-mismatch: error",
+    "merge-multiple: true",
+    ".size_in_bytes <= 16777216",
+    "Validate bounded attestation inputs without executing artifact content",
+    "feature-graduation-predicate.json",
+    "feature-graduation-subject.json",
+    "sha256sum",
+    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d",
+    "subject-path:",
+    "predicate-path:",
+    "push-to-registry: false",
+  ] {
+    assert!(
+      attest.contains(expected),
+      "attestation job should retain {expected}"
+    );
+  }
+  for forbidden in [
+    "actions/checkout@",
+    "pnpm ",
+    "node ",
+    "git ",
+    "docker",
+    "secrets.",
+    "GITHUB_TOKEN",
+    "packages:",
+    "chmod",
+    "eval",
+  ] {
+    assert!(
+      !attest.contains(forbidden),
+      "OIDC-bearing attestation job must not contain {forbidden}"
+    );
+  }
+  for expected in [
+    "Select exact sealed graduation artifact",
+    "/artifacts?per_page=100",
+    "/actions/artifacts/${OXIBELT_ARTIFACT_ID}",
+    ".total_count == (.artifacts | length)",
+    "([.artifacts[] | select(.name == $name)] | length) == 1",
+    ".total_count == (.jobs | length)",
+    "([.jobs[].id] | length) == ([.jobs[].id] | unique | length)",
+    "Qualify graduation gates (linux/amd64)",
+    "Qualify graduation gates (linux/arm64)",
+    "artifact-ids: ${{ steps.sealed-artifact.outputs.artifact_id }}",
+    "digest-mismatch: error",
+    "merge-multiple: true",
+    "gh attestation verify",
+    "--signer-workflow OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml",
+    "--signer-digest \"${OXIBELT_SOURCE_REVISION}\"",
+    "--source-digest \"${OXIBELT_SOURCE_REVISION}\"",
+    "--source-ref refs/heads/main",
+    "--deny-self-hosted-runners",
+    "feature-graduation:attestation-verify",
+    "--signer-workflow OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml@refs/heads/main",
+    "--verification-context in_run",
+    "git/ref/heads/main",
+  ] {
+    assert!(
+      verify.contains(expected),
+      "read-only verifier should retain {expected}"
+    );
+  }
+  assert_eq!(
+    workflow
+      .matches("/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100")
+      .count(),
+    workflow.matches(".total_count == (.jobs | length)").count(),
+    "every first-page jobs API read must prove the entire bounded inventory was returned"
+  );
+  assert_eq!(
+    workflow.matches("/artifacts?per_page=100").count(),
+    workflow
+      .matches(".total_count == (.artifacts | length)")
+      .count(),
+    "every first-page artifacts API read must prove the entire bounded inventory was returned"
+  );
+  for forbidden in [
+    "attestations: write",
+    "id-token: write",
+    "packages:",
+    "secrets.",
+  ] {
+    assert!(
+      !verify.contains(forbidden),
+      "read-only verifier must not contain {forbidden}"
+    );
+  }
+  for forbidden in [
+    "workflow_run:",
+    "workflow_call:",
+    "pull_request:",
+    "pull_request_target:",
+    "push:",
+    "schedule:",
+  ] {
+    assert!(
+      !workflow.contains(forbidden),
+      "manual workflow must not contain {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn canonical_ci_requires_authenticated_exact_feature_graduation_evidence() {
+  let workflow = workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check workflow should parse as YAML");
+  let jobs = parse_jobs(&workflow);
+  let gate = workflow_job_text(&workflow, "feature-graduation-exact-verification");
+  assert_eq!(
+    jobs["feature-graduation-exact-verification"].needs,
+    Vec::<String>::new(),
+    "external graduation verification must remain an independent entry gate"
+  );
+  assert_eq!(
+    parsed["jobs"]["feature-graduation-exact-verification"]["if"],
+    DEPENDABOT_ACTOR_CONDITION
+  );
+  assert_eq!(
+    parsed["jobs"]["feature-graduation-exact-verification"]["permissions"],
+    serde_json::json!({
+      "actions": "read",
+      "attestations": "read",
+      "contents": "read"
+    })
+  );
+  let gate_steps = parsed["jobs"]["feature-graduation-exact-verification"]["steps"]
+    .as_array()
+    .expect("canonical graduation gate should define steps");
+  let step_named = |name: &str| {
+    gate_steps
+      .iter()
+      .find(|step| step["name"].as_str() == Some(name))
+      .unwrap_or_else(|| panic!("canonical graduation gate should define step {name}"))
+  };
+  let policy_step = step_named("Check graduation policy without credentials");
+  let policy_run = policy_step["run"]
+    .as_str()
+    .expect("graduation policy step should be a shell step");
+  assert!(
+    policy_step["env"].get("GH_TOKEN").is_none(),
+    "PR-controlled policy commands must not receive GH_TOKEN"
+  );
+  assert!(
+    !policy_run.contains("gh api") && !policy_run.contains("github.token"),
+    "PR-controlled policy commands must not make authenticated API calls"
+  );
+  assert_eq!(
+    policy_step["env"]["OXIBELT_BASE_REVISION"],
+    "${{ github.event.pull_request.base.sha }}"
+  );
+  assert_eq!(
+    policy_step["env"]["OXIBELT_BASE_REF"],
+    "${{ github.base_ref }}"
+  );
+  for expected in [
+    "pnpm run feature-graduation:check",
+    "pnpm run kubernetes-graduation:check",
+    "pnpm run feature-graduation:expectations",
+    "[[ \"${OXIBELT_BASE_REF}\" == \"main\" ]]",
+    "git cat-file -e \"${OXIBELT_BASE_REVISION}^{commit}\"",
+    "git merge-base --is-ancestor \"${OXIBELT_BASE_REVISION}\" HEAD",
+    "git merge-base --is-ancestor \"${OXIBELT_BASE_REVISION}\" refs/remotes/origin/main",
+    "git worktree add --detach \"${base_worktree}\" \"${OXIBELT_BASE_REVISION}\"",
+    "--workspace-path \"${base_worktree}\"",
+    "--output \"$(pwd)/${OXIBELT_BASE_EXPECTATIONS}\"",
+    "if [[ \"${base_expectation_result}\" != \"${expectation_result}\" ]]",
+    "if [[ \"${expectation_result}\" == \"supported\" ]]",
+    "&& ! cmp -s \"${OXIBELT_BASE_EXPECTATIONS}\" \"${OXIBELT_EXPECTATIONS}\"",
+    "cannot promote or demote graduation support before pushed-main qualification",
+    "cannot change supported graduation expectations or policy before pushed-main qualification",
+    "git worktree remove \"${base_worktree}\"",
+    "rmdir \"${base_worktree_root}\"",
+    "trap cleanup_base_worktree EXIT",
+    "trap - EXIT",
+  ] {
+    assert!(
+      policy_run.contains(expected),
+      "credential-free policy step should retain {expected}"
+    );
+  }
+  assert_eq!(
+    policy_run
+      .matches("pnpm run feature-graduation:expectations")
+      .count(),
+    2,
+    "the checked-out head helper must inspect both head and detached base policies"
+  );
+  assert!(
+    policy_run
+      .find(
+        "if [[ \"${GITHUB_EVENT_NAME}\" != \"pull_request\" && \"${expectation_result}\" == \"zero_supported\" ]]",
+      )
+      .expect("policy should retain a non-PR zero-supported fast path")
+      < policy_run
+        .find("git fetch --no-tags origin")
+        .expect("PR policy should fetch the trusted base ref for every head state"),
+    "only non-PR zero-supported heads should finish before base comparison"
+  );
+  for forbidden in [
+    "cd \"${base_worktree}\"",
+    "node \"${base_worktree}",
+    "pnpm --dir \"${base_worktree}",
+    "source \"${base_worktree}",
+    "eval ",
+    "rm -",
+  ] {
+    assert!(
+      !policy_run.contains(forbidden),
+      "base comparison must not execute base code or use unsafe cleanup: {forbidden}"
+    );
+  }
+  let non_pr_evidence_condition =
+    "github.event_name != 'pull_request' && steps.policy.outputs.requires_evidence == 'true'";
+  for name in [
+    "Select exact manual evidence on canonical main",
+    "Download exact manual graduation evidence",
+    "Verify authenticated receipts and attestation readback",
+  ] {
+    assert_eq!(
+      step_named(name)["if"],
+      non_pr_evidence_condition,
+      "token-bearing evidence step {name} must be unreachable on pull requests"
+    );
+  }
+  for step in gate_steps {
+    let run = step["run"].as_str().unwrap_or_default();
+    let has_explicit_token =
+      step["env"].get("GH_TOKEN").is_some() || step["with"].get("github-token").is_some();
+    if run.contains("gh api") || has_explicit_token {
+      assert_eq!(
+        step["if"], non_pr_evidence_condition,
+        "API and explicitly token-bearing graduation steps must be unreachable on pull requests"
+      );
+    }
+  }
+  for expected in [
+    "pnpm run feature-graduation:check",
+    "pnpm run kubernetes-graduation:check --expected-source-revision \"${GITHUB_SHA}\"",
+    "pnpm run feature-graduation:expectations",
+    ".result == \"zero_supported\"",
+    "printf 'requires_evidence=false",
+    "cannot promote or demote graduation support before pushed-main qualification",
+    "cannot change supported graduation expectations or policy before pushed-main qualification",
+    "git merge-base --is-ancestor \"${OXIBELT_BASE_REVISION}\" HEAD",
+    "git worktree add --detach",
+    "&& ! cmp -s \"${OXIBELT_BASE_EXPECTATIONS}\" \"${OXIBELT_EXPECTATIONS}\"",
+    "[[ \"${GITHUB_REF}\" == \"refs/heads/main\" ]]",
+    "git/ref/heads/main",
+    "event=workflow_dispatch",
+    "status=success",
+    ".total_count == 1",
+    ".workflow_runs[0].status == \"completed\"",
+    ".workflow_runs[0].conclusion == \"success\"",
+    "feature-graduation-evidence-${GITHUB_SHA}-${run_id}-${run_attempt}",
+    ".total_count == (.artifacts | length)",
+    "([.artifacts[] | select(.name == $name)] | length) == 1",
+    ".total_count == (.jobs | length)",
+    "([.artifacts[].id] | length) == ([.artifacts[].id] | unique | length)",
+    "([.jobs[].id] | length) == ([.jobs[].id] | unique | length)",
+    "Qualify graduation gates (linux/amd64)",
+    "Qualify graduation gates (linux/arm64)",
+    ".size_in_bytes <= 16777216",
+    "artifact-ids: ${{ steps.evidence.outputs.artifact_id }}",
+    "digest-mismatch: error",
+    "merge-multiple: true",
+    "run-id: ${{ steps.evidence.outputs.run_id }}",
+    "/actions/artifacts/${OXIBELT_ARTIFACT_ID}",
+    "feature-graduation:verify",
+    "kubernetes-graduation:verify",
+    "gh attestation verify",
+    "feature-graduation:attestation-verify",
+    "--signer-workflow OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml@refs/heads/main",
+    "--verification-context canonical_consumer",
+    "refs/remotes/origin/main^{commit}",
+  ] {
+    assert!(
+      gate.contains(expected),
+      "canonical graduation gate should retain {expected}"
+    );
+  }
+  assert!(
+    gate.find(".result == \"zero_supported\"").unwrap()
+      < gate
+        .find("Select exact manual evidence on canonical main")
+        .unwrap(),
+    "zero-supported policy checks should succeed without requesting external evidence"
+  );
+  assert_eq!(
+    gate.matches("/artifacts?per_page=100").count(),
+    gate
+      .matches(".total_count == (.artifacts | length)")
+      .count(),
+    "canonical first-page artifact reads must prove the complete bounded inventory"
+  );
+  assert_eq!(
+    gate
+      .matches("/attempts/${OXIBELT_RUN_ATTEMPT}/jobs?per_page=100")
+      .count(),
+    gate.matches(".total_count == (.jobs | length)").count(),
+    "canonical first-page job reads must prove the complete bounded inventory"
+  );
+  for forbidden in [
+    "performance_profile",
+    "docker-performance",
+    "attestations: write",
+    "id-token: write",
+    "packages:",
+    "secrets.",
+  ] {
+    assert!(
+      !gate.contains(forbidden),
+      "canonical graduation gate must not contain {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn supported_feature_graduation_prs_require_an_unchanged_base_contract() {
+  fn pr_can_reuse_base_qualification(head: &serde_json::Value, base: &serde_json::Value) -> bool {
+    if head["result"] != base["result"] {
+      return false;
+    }
+    head["result"] == "zero_supported" || (head["result"] == "supported" && head == base)
+  }
+
+  let supported = serde_json::json!({
+    "schemaVersion": 1,
+    "predicateType": "https://oxibelt.dev/attestations/feature-graduation/v1",
+    "result": "supported",
+    "policies": [
+      {
+        "scope": "features",
+        "repository": "OxiBelt/OxiBelt",
+        "targetVersion": "0.7.1",
+        "policyDefinitionSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "scope": "kubernetes",
+        "repository": "OxiBelt/OxiBelt",
+        "targetVersion": "0.7.1",
+        "policyDefinitionSha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "features": [{
+      "scope": "features",
+      "featureId": "config-activation-planner",
+      "qualifiedPlatforms": ["linux/amd64", "linux/arm64"],
+      "gates": [{"id": "planner-differential", "platforms": ["linux/amd64", "linux/arm64"]}]
+    }]
+  });
+  assert!(
+    pr_can_reuse_base_qualification(&supported, &supported),
+    "an unrelated PR must be able to reuse an identical supported base contract"
+  );
+
+  let zero_supported = serde_json::json!({
+    "schemaVersion": 1,
+    "predicateType": "https://oxibelt.dev/attestations/feature-graduation/v1",
+    "result": "zero_supported",
+    "policies": supported["policies"].clone(),
+    "features": []
+  });
+  assert!(
+    pr_can_reuse_base_qualification(&zero_supported, &zero_supported),
+    "a zero-supported PR must be able to reuse a zero-supported base without evidence"
+  );
+  assert!(
+    !pr_can_reuse_base_qualification(&supported, &zero_supported),
+    "the first promotion must wait for pushed-main qualification"
+  );
+  assert!(
+    !pr_can_reuse_base_qualification(&zero_supported, &supported),
+    "a supported-to-zero demotion must wait for pushed-main qualification"
+  );
+
+  let mut promoted = supported.clone();
+  promoted["features"]
+    .as_array_mut()
+    .expect("fixture features should be an array")
+    .push(serde_json::json!({
+      "scope": "features",
+      "featureId": "runtime-confinement-contract",
+      "qualifiedPlatforms": ["linux/amd64", "linux/arm64"],
+      "gates": [{"id": "native-confinement", "platforms": ["linux/amd64", "linux/arm64"]}]
+    }));
+  assert!(
+    !pr_can_reuse_base_qualification(&promoted, &supported),
+    "a newly supported row must invalidate base qualification"
+  );
+
+  let mut policy_drift = supported.clone();
+  policy_drift["policies"][0]["policyDefinitionSha256"] =
+    serde_json::json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+  assert!(
+    !pr_can_reuse_base_qualification(&policy_drift, &supported),
+    "a supported policy-definition change must invalidate base qualification"
+  );
 }
 
 #[test]

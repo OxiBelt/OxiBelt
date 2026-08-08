@@ -368,6 +368,35 @@ test('classifies the non-Kubernetes graduation contract as a feature lifecycle s
   }
 })
 
+test('classifies the exact feature-graduation workflow as a feature lifecycle surface', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(
+      Root,
+      '.github/workflows/feature-graduation.yml',
+      'name: Feature graduation\non:\n  workflow_dispatch:\n'
+    )
+    const Base = Commit(Root, 'baseline')
+    WriteFile(
+      Root,
+      '.github/workflows/feature-graduation.yml',
+      'name: Feature graduation qualification\non:\n  workflow_dispatch:\n'
+    )
+    const Head = Commit(Root, 'change feature graduation workflow')
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Root,
+        changeBase: Base,
+        changeHead: Head
+      }),
+      /compatibility surfaces changed \(Feature lifecycle\)/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
 test('classifies supply-chain schemas as schema epoch surfaces', () => {
   const Root = CreateContractWorkspace()
   try {

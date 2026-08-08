@@ -177,8 +177,9 @@ const CompatibilitySurfaceSections: CompatibilitySurface[] = [
       /^docs\/KubernetesSupport\.md$/,
       /^devops\/config\/feature-graduation(?:-evidence)?(?:\.schema)?\.json$/,
       /^devops\/config\/kubernetes-feature-graduation(?:-evidence)?(?:\.schema)?\.json$/,
-      /^devops\/sources\/feature_graduation\.ts$/,
-      /^devops\/sources\/kubernetes_graduation\.ts$/
+      /^devops\/sources\/feature_graduation(?:_attestation)?\.ts$/,
+      /^devops\/sources\/kubernetes_graduation\.ts$/,
+      /^\.github\/workflows\/feature-graduation\.yml$/
     ]
   },
   {

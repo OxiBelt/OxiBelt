@@ -392,6 +392,384 @@ jobs:
               --change-head "${OXIBELT_CHANGE_HEAD}"
           fi
 
+  feature-graduation-exact-verification:
+    name: Feature graduation exact verification
+    runs-on: ubuntu-26.04
+    if: github.actor != 'dependabot[bot]'
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+
+    steps:
+      - name: Checkout exact validation source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          corepack enable
+          corepack install
+
+      - name: Install Node dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Check graduation policy without credentials
+        id: policy
+        env:
+          OXIBELT_BASE_REF: ${{ github.base_ref }}
+          OXIBELT_BASE_REVISION: ${{ github.event.pull_request.base.sha }}
+          OXIBELT_BASE_EXPECTATIONS: .qualification-metadata/base-expectations.json
+          OXIBELT_EXPECTATIONS: .qualification-metadata/expectations.json
+        run: |
+          set -euo pipefail
+          install -d -m 700 .qualification-metadata
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse --verify HEAD^{commit})" == "${GITHUB_SHA}" ]]
+          pnpm run feature-graduation:check
+          pnpm run kubernetes-graduation:check --expected-source-revision "${GITHUB_SHA}"
+          pnpm run feature-graduation:expectations \
+            --workspace-path . \
+            --output "${OXIBELT_EXPECTATIONS}"
+          expectation_result="$(jq -er '
+            select(
+              .schemaVersion == 1
+              and .predicateType == "https://oxibelt.dev/attestations/feature-graduation/v1"
+              and (.result == "zero_supported" or .result == "supported")
+            )
+            | .result
+          ' "${OXIBELT_EXPECTATIONS}")"
+          if [[ "${GITHUB_EVENT_NAME}" != "pull_request" && "${expectation_result}" == "zero_supported" ]]; then
+            printf 'requires_evidence=false\n' >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            full_revision='^[0-9a-f]{40}$'
+            [[ "${OXIBELT_BASE_REF}" == "main" ]]
+            [[ "${OXIBELT_BASE_REVISION}" =~ ${full_revision} ]]
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+            git cat-file -e "${OXIBELT_BASE_REVISION}^{commit}"
+            git merge-base --is-ancestor "${OXIBELT_BASE_REVISION}" HEAD
+            git merge-base --is-ancestor "${OXIBELT_BASE_REVISION}" refs/remotes/origin/main
+
+            base_worktree_root="$(mktemp -d "${RUNNER_TEMP}/feature-graduation-base.XXXXXX")"
+            base_worktree="${base_worktree_root}/worktree"
+            cleanup_base_worktree() {
+              git worktree remove "${base_worktree}" >/dev/null 2>&1 || true
+              rmdir "${base_worktree}" >/dev/null 2>&1 || true
+              rmdir "${base_worktree_root}" >/dev/null 2>&1 || true
+            }
+            trap cleanup_base_worktree EXIT
+            git worktree add --detach "${base_worktree}" "${OXIBELT_BASE_REVISION}"
+            [[ "$(git -C "${base_worktree}" rev-parse --verify HEAD^{commit})" == "${OXIBELT_BASE_REVISION}" ]]
+            pnpm run feature-graduation:expectations \
+              --workspace-path "${base_worktree}" \
+              --output "$(pwd)/${OXIBELT_BASE_EXPECTATIONS}"
+            base_expectation_result="$(jq -er '
+              select(
+                .schemaVersion == 1
+                and .predicateType == "https://oxibelt.dev/attestations/feature-graduation/v1"
+                and (.result == "zero_supported" or .result == "supported")
+              )
+              | .result
+            ' "${OXIBELT_BASE_EXPECTATIONS}")"
+            if [[ "${base_expectation_result}" != "${expectation_result}" ]]; then
+              echo "a pull request cannot promote or demote graduation support before pushed-main qualification" >&2
+              exit 1
+            fi
+            if [[ "${expectation_result}" == "supported" ]] \
+              && ! cmp -s "${OXIBELT_BASE_EXPECTATIONS}" "${OXIBELT_EXPECTATIONS}"; then
+              echo "a pull request cannot change supported graduation expectations or policy before pushed-main qualification" >&2
+              exit 1
+            fi
+            git worktree remove "${base_worktree}"
+            rmdir "${base_worktree_root}"
+            trap - EXIT
+            printf 'requires_evidence=false\n' >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          [[ "${expectation_result}" == "supported" ]]
+          printf 'requires_evidence=true\n' >>"${GITHUB_OUTPUT}"
+
+      - name: Select exact manual evidence on canonical main
+        id: evidence
+        if: github.event_name != 'pull_request' && steps.policy.outputs.requires_evidence == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "OxiBelt/OxiBelt" ]]
+          [[ "${GITHUB_EVENT_NAME}" != "pull_request" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${OXIBELT_WORKFLOW_REF}" == "OxiBelt/OxiBelt/.github/workflows/check-oxibelt.yml@refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse --verify HEAD^{commit})" == "${GITHUB_SHA}" ]]
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          [[ "$(git rev-parse --verify refs/remotes/origin/main^{commit})" == "${GITHUB_SHA}" ]]
+          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" == "${GITHUB_SHA}" ]]
+
+          workflow_json="${RUNNER_TEMP}/feature-graduation-workflow.json"
+          runs_json="${RUNNER_TEMP}/feature-graduation-runs.json"
+          artifacts_json="${RUNNER_TEMP}/feature-graduation-artifacts.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/feature-graduation.yml" >"${workflow_json}"
+          gh api --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/feature-graduation.yml/runs" \
+            -f event=workflow_dispatch \
+            -f branch=main \
+            -f status=success \
+            -f head_sha="${GITHUB_SHA}" \
+            -f per_page=100 \
+            >"${runs_json}"
+          jq -e --slurpfile workflow "${workflow_json}" --arg revision "${GITHUB_SHA}" '
+            .total_count == 1
+            and (.workflow_runs | length) == 1
+            and .workflow_runs[0].workflow_id == $workflow[0].id
+            and .workflow_runs[0].event == "workflow_dispatch"
+            and .workflow_runs[0].path == ".github/workflows/feature-graduation.yml"
+            and .workflow_runs[0].head_branch == "main"
+            and .workflow_runs[0].head_sha == $revision
+            and .workflow_runs[0].status == "completed"
+            and .workflow_runs[0].conclusion == "success"
+            and (.workflow_runs[0].run_attempt | type == "number" and . > 0)
+          ' "${runs_json}" >/dev/null
+          run_id="$(jq -er '.workflow_runs[0].id' "${runs_json}")"
+          run_attempt="$(jq -er '.workflow_runs[0].run_attempt' "${runs_json}")"
+          artifact_name="feature-graduation-evidence-${GITHUB_SHA}-${run_id}-${run_attempt}"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" >"${artifacts_json}"
+          jq -e --arg name "${artifact_name}" '
+            (.total_count | type) == "number"
+            and .total_count > 0
+            and .total_count <= 100
+            and (.artifacts | type) == "array"
+            and .total_count == (.artifacts | length)
+            and ([.artifacts[].id] | length) == ([.artifacts[].id] | unique | length)
+            and ([.artifacts[] | select(.name == $name)] | length) == 1
+            and ([.artifacts[] | select(
+              .name == $name
+              and .expired == false
+              and (.id | type) == "number"
+              and .id > 0
+              and (.digest | type) == "string"
+              and (.digest | test("^sha256:[0-9a-f]{64}$"))
+              and (.size_in_bytes | type) == "number"
+              and .size_in_bytes > 0
+              and .size_in_bytes <= 16777216
+            )] | length) == 1
+          ' "${artifacts_json}" >/dev/null
+          artifact_id="$(jq -er --arg name "${artifact_name}" '.artifacts[] | select(.name == $name) | .id' "${artifacts_json}")"
+          artifact_digest="$(jq -er --arg name "${artifact_name}" '.artifacts[] | select(.name == $name) | .digest' "${artifacts_json}")"
+          printf 'run_id=%s\n' "${run_id}" >>"${GITHUB_OUTPUT}"
+          printf 'run_attempt=%s\n' "${run_attempt}" >>"${GITHUB_OUTPUT}"
+          printf 'artifact_name=%s\n' "${artifact_name}" >>"${GITHUB_OUTPUT}"
+          printf 'artifact_id=%s\n' "${artifact_id}" >>"${GITHUB_OUTPUT}"
+          printf 'artifact_digest=%s\n' "${artifact_digest}" >>"${GITHUB_OUTPUT}"
+
+      - name: Download exact manual graduation evidence
+        if: github.event_name != 'pull_request' && steps.policy.outputs.requires_evidence == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          artifact-ids: ${{ steps.evidence.outputs.artifact_id }}
+          digest-mismatch: error
+          merge-multiple: true
+          path: qualification-evidence
+          github-token: ${{ github.token }}
+          repository: OxiBelt/OxiBelt
+          run-id: ${{ steps.evidence.outputs.run_id }}
+
+      - name: Verify authenticated receipts and attestation readback
+        if: github.event_name != 'pull_request' && steps.policy.outputs.requires_evidence == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OXIBELT_ARTIFACT_DIGEST: ${{ steps.evidence.outputs.artifact_digest }}
+          OXIBELT_ARTIFACT_ID: ${{ steps.evidence.outputs.artifact_id }}
+          OXIBELT_ARTIFACT_NAME: ${{ steps.evidence.outputs.artifact_name }}
+          OXIBELT_RUN_ATTEMPT: ${{ steps.evidence.outputs.run_attempt }}
+          OXIBELT_RUN_ID: ${{ steps.evidence.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          raw_run="${RUNNER_TEMP}/feature-graduation-run-raw.json"
+          raw_jobs="${RUNNER_TEMP}/feature-graduation-jobs-raw.json"
+          raw_artifact="${RUNNER_TEMP}/feature-graduation-artifact-raw.json"
+          run_metadata=".qualification-metadata/run.json"
+          jobs_metadata=".qualification-metadata/jobs.json"
+          predicate="qualification-evidence/feature-graduation-predicate.json"
+          subject="qualification-evidence/feature-graduation-subject.json"
+          install -d -m 700 .qualification-metadata
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${OXIBELT_RUN_ID}" >"${raw_run}"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${OXIBELT_RUN_ID}/attempts/${OXIBELT_RUN_ATTEMPT}/jobs?per_page=100" >"${raw_jobs}"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${OXIBELT_ARTIFACT_ID}" >"${raw_artifact}"
+          jq -e \
+            --arg digest "${OXIBELT_ARTIFACT_DIGEST}" \
+            --arg name "${OXIBELT_ARTIFACT_NAME}" \
+            --argjson artifact_id "${OXIBELT_ARTIFACT_ID}" \
+            --argjson run_id "${OXIBELT_RUN_ID}" '
+            .id == $artifact_id
+            and .name == $name
+            and .expired == false
+            and .digest == $digest
+            and .workflow_run.id == $run_id
+            and .size_in_bytes > 0
+            and .size_in_bytes <= 16777216
+          ' "${raw_artifact}" >/dev/null
+          jq -e '
+            (.total_count | type) == "number"
+            and .total_count > 0
+            and .total_count <= 100
+            and (.jobs | type) == "array"
+            and .total_count == (.jobs | length)
+            and ([.jobs[].id] | length) == ([.jobs[].id] | unique | length)
+            and ([.jobs[] | select(.name | startswith("Qualify graduation gates (")) | .name] | sort) == ([
+              "Qualify graduation gates (linux/amd64)",
+              "Qualify graduation gates (linux/arm64)"
+            ] | sort)
+            and ([.jobs[] | select(.name | startswith("Qualify graduation gates (")) | .conclusion] | all(. == "success"))
+          ' "${raw_jobs}" >/dev/null
+          jq -cS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg revision "${GITHUB_SHA}" '
+            {
+              schemaVersion: 1,
+              repository: $repository,
+              workflowPath: .path,
+              workflowRef: $revision,
+              runId: .id,
+              runAttempt: .run_attempt,
+              sourceRef: "refs/heads/main",
+              sourceRevision: .head_sha,
+              status: .status,
+              conclusion: .conclusion
+            }
+          ' "${raw_run}" >"${run_metadata}"
+          jq -cS \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --argjson run_id "${OXIBELT_RUN_ID}" \
+            --argjson run_attempt "${OXIBELT_RUN_ATTEMPT}" \
+            --slurpfile predicate "${predicate}" '
+            ($predicate[0].inventory.logs | map(.jobId)) as $producer_ids
+            | {
+                schemaVersion: 1,
+                repository: $repository,
+                runId: $run_id,
+                runAttempt: $run_attempt,
+                jobs: [.jobs[] | select(.id as $id | $producer_ids | index($id)) | {id, name, conclusion}]
+              }
+          ' "${raw_jobs}" >"${jobs_metadata}"
+          jq -e --slurpfile predicate "${predicate}" '
+            ([.jobs[].id] | sort) == ([$predicate[0].inventory.logs[].jobId] | sort)
+            and (all(.jobs[]; .conclusion == "success"))
+          ' "${jobs_metadata}" >/dev/null
+          jq -e --argjson run_id "${OXIBELT_RUN_ID}" --argjson run_attempt "${OXIBELT_RUN_ATTEMPT}" --arg revision "${GITHUB_SHA}" '
+            .schemaVersion == 1
+            and .predicateType == "https://oxibelt.dev/attestations/feature-graduation/v1"
+            and .repository == "OxiBelt/OxiBelt"
+            and .sourceRef == "refs/heads/main"
+            and .sourceRevision == $revision
+            and .phase == "candidate"
+            and .run.id == $run_id
+            and .run.attempt == $run_attempt
+            and .run.workflowPath == ".github/workflows/feature-graduation.yml"
+            and .run.workflowRef == $revision
+            and .run.status == "in_progress"
+            and .run.conclusion == null
+            and .expectations.result == "supported"
+          ' "${predicate}" >/dev/null
+          predicate_sha256="sha256:$(sha256sum "${predicate}" | cut -d ' ' -f 1)"
+          jq -e --arg revision "${GITHUB_SHA}" --arg predicate_sha256 "${predicate_sha256}" '
+            .schemaVersion == 1
+            and .subjectName == "feature-graduation-subject.json"
+            and .repository == "OxiBelt/OxiBelt"
+            and .sourceRef == "refs/heads/main"
+            and .sourceRevision == $revision
+            and .phase == "candidate"
+            and .predicateSha256 == $predicate_sha256
+          ' "${subject}" >/dev/null
+          root_entries="$(find qualification-evidence -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          [[ "${root_entries}" == $'feature-graduation-predicate.json\nfeature-graduation-subject.json\nlogs\nreceipts\nreports' ]]
+          receipt_entries="$(find qualification-evidence/receipts -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)"
+          [[ "${receipt_entries}" == $'features\nkubernetes' ]]
+          if find qualification-evidence \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit | grep -q .; then
+            echo "sealed evidence contains a symlink or special file" >&2
+            exit 1
+          fi
+          [[ "$(find qualification-evidence -type f | wc -l)" -le 128 ]]
+          [[ "$(du -sb qualification-evidence | cut -f1)" -le 8388608 ]]
+          find qualification-evidence -type f -size +1M -print -quit | grep -q . && {
+            echo "sealed evidence contains an oversized file" >&2
+            exit 1
+          }
+          find qualification-evidence/receipts -type f -printf '%P\n' \
+            | sed 's#^#receipts/#' | LC_ALL=C sort >.qualification-metadata/actual-receipts.txt
+          jq -er '.inventory.receipts[].path' "${predicate}" \
+            | LC_ALL=C sort >.qualification-metadata/expected-receipts.txt
+          cmp .qualification-metadata/actual-receipts.txt .qualification-metadata/expected-receipts.txt
+          find qualification-evidence/reports -type f -printf '%P\n' \
+            | LC_ALL=C sort >.qualification-metadata/actual-reports.txt
+          jq -er '.inventory.reports[].name' "${predicate}" \
+            | LC_ALL=C sort >.qualification-metadata/expected-reports.txt
+          cmp .qualification-metadata/actual-reports.txt .qualification-metadata/expected-reports.txt
+          find qualification-evidence/logs -type f -printf '%f\n' \
+            | LC_ALL=C sort >.qualification-metadata/actual-logs.txt
+          jq -er '.inventory.logs[].jobId | tostring + ".log"' "${predicate}" \
+            | LC_ALL=C sort >.qualification-metadata/expected-logs.txt
+          cmp .qualification-metadata/actual-logs.txt .qualification-metadata/expected-logs.txt
+          while IFS=$'\t' read -r path digest; do
+            [[ "${path}" =~ ^receipts/(features|kubernetes)/[a-z0-9][a-z0-9._-]*\.json$ ]]
+            [[ "sha256:$(sha256sum "qualification-evidence/${path}" | cut -d ' ' -f 1)" == "${digest}" ]]
+          done < <(jq -er '.inventory.receipts[] | [.path, .sha256] | @tsv' "${predicate}")
+          while IFS=$'\t' read -r name digest; do
+            [[ "${name}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]
+            [[ "${name}" != *..* ]]
+            [[ "sha256:$(sha256sum "qualification-evidence/reports/${name}" | cut -d ' ' -f 1)" == "${digest}" ]]
+          done < <(jq -er '.inventory.reports[] | [.name, .sha256] | @tsv' "${predicate}")
+          while IFS=$'\t' read -r job_id digest; do
+            [[ "${job_id}" =~ ^[1-9][0-9]*$ ]]
+            [[ "sha256:$(sha256sum "qualification-evidence/logs/${job_id}.log" | cut -d ' ' -f 1)" == "${digest}" ]]
+          done < <(jq -er '.inventory.logs[] | [(.jobId | tostring), .sha256] | @tsv' "${predicate}")
+          if jq -e 'any(.features[]; .scope == "features")' .qualification-metadata/expectations.json >/dev/null; then
+            pnpm run feature-graduation:verify \
+              --expected-source-revision "${GITHUB_SHA}" \
+              --expected-source-ref refs/heads/main \
+              --phase candidate \
+              --evidence-dir qualification-evidence/receipts/features
+          fi
+          if jq -e 'any(.features[]; .scope == "kubernetes")' .qualification-metadata/expectations.json >/dev/null; then
+            pnpm run kubernetes-graduation:verify \
+              --expected-source-revision "${GITHUB_SHA}" \
+              --expected-source-ref refs/heads/main \
+              --phase candidate \
+              --evidence-dir qualification-evidence/receipts/kubernetes
+          fi
+          gh attestation verify "${subject}" \
+            --repo OxiBelt/OxiBelt \
+            --signer-workflow OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml \
+            --signer-digest "${GITHUB_SHA}" \
+            --source-digest "${GITHUB_SHA}" \
+            --source-ref refs/heads/main \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --deny-self-hosted-runners \
+            --predicate-type https://oxibelt.dev/attestations/feature-graduation/v1 \
+            --limit 100 \
+            --format json \
+            >.qualification-metadata/attestations.json
+          pnpm run feature-graduation:attestation-verify \
+            --workspace-path . \
+            --attestations .qualification-metadata/attestations.json \
+            --subject "${subject}" \
+            --predicate "${predicate}" \
+            --signer-workflow OxiBelt/OxiBelt/.github/workflows/feature-graduation.yml@refs/heads/main \
+            --source-repository OxiBelt/OxiBelt \
+            --source-ref refs/heads/main \
+            --source-revision "${GITHUB_SHA}" \
+            --run-metadata "${run_metadata}" \
+            --verification-context canonical_consumer
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          [[ "$(git rev-parse --verify refs/remotes/origin/main^{commit})" == "${GITHUB_SHA}" ]]
+          [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" == "${GITHUB_SHA}" ]]
+
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})
     runs-on: ubuntu-26.04
@@ -2736,6 +3114,7 @@ jobs:
       - rust-advisory-checks
       - node-dependency-admission
       - typescript-release-tooling
+      - feature-graduation-exact-verification
       - fuzz-smoke
       - unsafe-validation
       - check-riscv64-cross
