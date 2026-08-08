@@ -770,9 +770,14 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "-detect_leaks=1",
       "configure_sanitizer_environment 0",
       "configure_sanitizer_environment 1",
-      "cargo_target_dir",
-      "coverage_search_roots",
-      "metadata --no-deps --format-version 1",
+      "coverage_target",
+      "coverage_target_dir",
+      "missing or ambiguous nightly coverage target triple",
+      "--target \"$coverage_target\"",
+      "--target-dir \"$coverage_target_dir\"",
+      "missing instrumented coverage binary for $target",
+      "multiple instrumented coverage binaries for $target",
+      "ambiguous instrumented coverage binary for $target",
       "cmin_staging",
       "cmin_replacement",
       "cmin_backup",
@@ -915,6 +920,263 @@ fn stable_profile_is_smoke_only_and_unknown_profiles_fail_closed() {
     String::from_utf8_lossy(&output.stderr)
       .contains("OXIBELT_FUZZ_PROFILE must be one of: asan, stable"),
     "unknown profile rejection should list the accepted values: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+}
+
+#[cfg(unix)]
+struct CoverageHarness {
+  _temp_dir: tempfile::TempDir,
+  runner_temp: PathBuf,
+  bin_dir: PathBuf,
+  coverage_dir: PathBuf,
+  coverage_backup: Option<PathBuf>,
+  target: String,
+  target_libdir: PathBuf,
+}
+
+#[cfg(unix)]
+impl CoverageHarness {
+  fn new(target: &str) -> Self {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let repo = repo_root();
+    let target_dir = repo.join("target");
+    fs::create_dir_all(&target_dir).expect("Cargo target directory should be creatable");
+    let temp_dir = tempfile::Builder::new()
+      .prefix("oxibelt-fuzz-coverage-contract-")
+      .tempdir_in(target_dir)
+      .expect("coverage contract temp directory should be creatable");
+    let runner_temp = temp_dir.path().join("runner");
+    let corpus = runner_temp.join("oxibelt-fuzz-corpus").join(target);
+    let bin_dir = temp_dir.path().join("bin");
+    let coverage_dir = repo.join("fuzz/coverage").join(target);
+    let coverage_backup_path = temp_dir.path().join("coverage-backup");
+    let coverage_backup = if coverage_dir.exists() {
+      let metadata =
+        fs::symlink_metadata(&coverage_dir).expect("existing coverage output should have metadata");
+      assert!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "existing coverage output must be a real directory"
+      );
+      fs::rename(&coverage_dir, &coverage_backup_path)
+        .expect("existing coverage output should be preserved for the fixture");
+      Some(coverage_backup_path)
+    } else {
+      None
+    };
+    let target_libdir = temp_dir
+      .path()
+      .join("toolchain/lib/rustlib/x86_64-unknown-linux-gnu/lib");
+    let llvm_bin = target_libdir
+      .parent()
+      .expect("target libdir should have a rustlib target parent")
+      .join("bin");
+    fs::create_dir_all(&corpus).expect("coverage corpus should be creatable");
+    fs::create_dir_all(&bin_dir).expect("fake tool directory should be creatable");
+    fs::create_dir_all(&llvm_bin).expect("fake llvm directory should be creatable");
+    fs::write(corpus.join("input"), b"fixture").expect("coverage corpus input should be writable");
+
+    let cargo = bin_dir.join("cargo");
+    fs::write(
+      &cargo,
+      r#"#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "$1" == "+nightly-2026-08-04" ]]
+[[ "$2" == "fuzz" ]]
+[[ "$3" == "coverage" ]]
+shift 3
+coverage_target=""
+coverage_target_dir=""
+while (( $# > 0 )); do
+  case "$1" in
+    --target)
+      coverage_target="$2"
+      shift 2
+      ;;
+    --target-dir)
+      coverage_target_dir="$2"
+      shift 2
+      ;;
+    --)
+      break
+      ;;
+    *) shift ;;
+  esac
+done
+[[ "$coverage_target" == "$FAKE_COVERAGE_TARGET_TRIPLE" ]]
+case "$coverage_target_dir" in
+  "$RUNNER_TEMP/oxibelt-fuzz-coverage-$FAKE_COVERAGE_TARGET."??????) ;;
+  *) exit 66 ;;
+esac
+mkdir -p -- "$FAKE_COVERAGE_DIR"
+printf 'profile' >"$FAKE_COVERAGE_DIR/coverage.profdata"
+case "$FAKE_COVERAGE_MODE" in
+  exact)
+    mkdir -p -- "$coverage_target_dir/$coverage_target/release"
+    printf 'binary' >"$coverage_target_dir/$coverage_target/release/$FAKE_COVERAGE_TARGET"
+    chmod u+x "$coverage_target_dir/$coverage_target/release/$FAKE_COVERAGE_TARGET"
+    ;;
+  ambiguous)
+    mkdir -p -- "$coverage_target_dir/unexpected-target/release"
+    printf 'binary' >"$coverage_target_dir/unexpected-target/release/$FAKE_COVERAGE_TARGET"
+    chmod u+x "$coverage_target_dir/unexpected-target/release/$FAKE_COVERAGE_TARGET"
+    ;;
+  multiple)
+    for triple in "$coverage_target" unexpected-target; do
+      mkdir -p -- "$coverage_target_dir/$triple/release"
+      printf 'binary' >"$coverage_target_dir/$triple/release/$FAKE_COVERAGE_TARGET"
+      chmod u+x "$coverage_target_dir/$triple/release/$FAKE_COVERAGE_TARGET"
+    done
+    ;;
+  missing) ;;
+  *) exit 65 ;;
+esac
+"#,
+    )
+    .expect("fake Cargo should be writable");
+    let rustc = bin_dir.join("rustc");
+    fs::write(
+      &rustc,
+      r#"#!/usr/bin/env bash
+set -Eeuo pipefail
+case " $* " in
+  *" -vV "*) printf 'host: %s\n' "$FAKE_COVERAGE_TARGET_TRIPLE" ;;
+  *" --print target-libdir "*) printf '%s\n' "$FAKE_TARGET_LIBDIR" ;;
+  *) exit 65 ;;
+esac
+"#,
+    )
+    .expect("fake rustc should be writable");
+    let jq = bin_dir.join("jq");
+    fs::write(&jq, "#!/usr/bin/env bash\nexit 0\n").expect("fake jq should be writable");
+    let llvm_cov = llvm_bin.join("llvm-cov");
+    fs::write(
+      &llvm_cov,
+      r#"#!/usr/bin/env bash
+set -Eeuo pipefail
+for argument in "$@"; do
+  case "$argument" in
+    -output-dir=*) mkdir -p -- "${argument#-output-dir=}" ;;
+  esac
+done
+"#,
+    )
+    .expect("fake llvm-cov should be writable");
+    for command in [&cargo, &rustc, &jq, &llvm_cov] {
+      let mut permissions = fs::metadata(command)
+        .expect("fake tool should have metadata")
+        .permissions();
+      permissions.set_mode(0o755);
+      fs::set_permissions(command, permissions).expect("fake tool should be executable");
+    }
+
+    Self {
+      _temp_dir: temp_dir,
+      runner_temp,
+      bin_dir,
+      coverage_dir,
+      coverage_backup,
+      target: target.to_string(),
+      target_libdir,
+    }
+  }
+
+  fn run(&self, mode: &str) -> std::process::Output {
+    let original_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!(
+      "{}:{}",
+      self.bin_dir.display(),
+      original_path.to_string_lossy()
+    );
+    std::process::Command::new("bash")
+      .arg(repo_root().join("tests/scripts/run-fuzz-target.sh"))
+      .args(["coverage", &self.target])
+      .current_dir(repo_root())
+      .env("RUNNER_TEMP", &self.runner_temp)
+      .env("FAKE_COVERAGE_DIR", &self.coverage_dir)
+      .env("FAKE_COVERAGE_MODE", mode)
+      .env("FAKE_COVERAGE_TARGET", &self.target)
+      .env("FAKE_COVERAGE_TARGET_TRIPLE", "x86_64-unknown-linux-gnu")
+      .env("FAKE_TARGET_LIBDIR", &self.target_libdir)
+      .env("PATH", path)
+      .output()
+      .expect("coverage contract runner should execute")
+  }
+}
+
+#[cfg(unix)]
+impl Drop for CoverageHarness {
+  fn drop(&mut self) {
+    if self.coverage_dir.exists() {
+      fs::remove_dir_all(&self.coverage_dir).expect("fixture coverage output should be removable");
+    }
+    if let Some(backup) = &self.coverage_backup {
+      fs::rename(backup, &self.coverage_dir)
+        .expect("preexisting coverage output should be restored");
+    }
+  }
+}
+
+#[cfg(unix)]
+#[test]
+fn coverage_uses_the_exact_target_binary() {
+  let harness = CoverageHarness::new("native_config");
+  let output = harness.run("exact");
+  assert!(
+    output.status.success(),
+    "coverage should use the exact target binary: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn coverage_rejects_a_missing_target_binary() {
+  let harness = CoverageHarness::new("tls_client_hello");
+  let output = harness.run("missing");
+  assert!(
+    !output.status.success(),
+    "missing coverage binary must fail"
+  );
+  assert!(
+    String::from_utf8_lossy(&output.stderr)
+      .contains("missing instrumented coverage binary for tls_client_hello"),
+    "coverage should explain the missing binary: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn coverage_rejects_an_off_triple_target_binary() {
+  let harness = CoverageHarness::new("http_semantics");
+  let output = harness.run("ambiguous");
+  assert!(
+    !output.status.success(),
+    "off-triple coverage binary must fail"
+  );
+  assert!(
+    String::from_utf8_lossy(&output.stderr)
+      .contains("ambiguous instrumented coverage binary for http_semantics"),
+    "coverage should explain the off-triple binary: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn coverage_rejects_multiple_target_binaries() {
+  let harness = CoverageHarness::new("websocket_frame");
+  let output = harness.run("multiple");
+  assert!(
+    !output.status.success(),
+    "multiple coverage binaries must fail"
+  );
+  assert!(
+    String::from_utf8_lossy(&output.stderr)
+      .contains("multiple instrumented coverage binaries for websocket_frame"),
+    "coverage should explain multiple binaries: {}",
     String::from_utf8_lossy(&output.stderr)
   );
 }
@@ -1209,6 +1471,8 @@ fn fuzzing_documentation_covers_the_operational_lifecycle() {
       "OXIBELT_FUZZ_PROFILE=stable",
       "Stable smoke runs use `--sanitizer none`",
       "stable lane supplements rather than replaces",
+      "isolated target directory",
+      "exact",
       "tests/scripts/run-fuzz-target.sh smoke",
       "tests/scripts/run-fuzz-target.sh campaign",
       "tests/fixtures/fuzz-regressions/<target>/",

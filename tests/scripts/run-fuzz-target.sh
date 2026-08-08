@@ -372,7 +372,32 @@ case "$mode" in
   coverage)
     configure_sanitizer_environment 1
     validate_cached_corpus "$persistent_corpus"
-    cargo "+$FUZZ_ASAN_NIGHTLY" fuzz coverage --sanitizer address "$target" "$persistent_corpus" -- \
+    mapfile -t coverage_targets < <(
+      rustc "+$FUZZ_ASAN_NIGHTLY" -vV \
+        | awk '/^host: [a-zA-Z0-9_.-]+$/ { print $2 }'
+    )
+    (( ${#coverage_targets[@]} == 1 )) \
+      || fail "missing or ambiguous nightly coverage target triple"
+    readonly coverage_target="${coverage_targets[0]}"
+
+    coverage_target_dir="$(mktemp -d "$runner_temp/oxibelt-fuzz-coverage-${target}.XXXXXX")"
+    cleanup_coverage_target_dir() {
+      case "$coverage_target_dir" in
+        "$runner_temp/oxibelt-fuzz-coverage-$target."??????)
+          [[ ! -e "$coverage_target_dir" || -d "$coverage_target_dir" && ! -L "$coverage_target_dir" ]] \
+            || fail "refusing to clean an unexpected coverage target directory"
+          rm -rf -- "$coverage_target_dir"
+          ;;
+        *) fail "refusing to clean an unexpected coverage target directory" ;;
+      esac
+    }
+    trap cleanup_coverage_target_dir EXIT
+    readonly coverage_target_dir
+
+    cargo "+$FUZZ_ASAN_NIGHTLY" fuzz coverage --sanitizer address \
+      --target "$coverage_target" \
+      --target-dir "$coverage_target_dir" \
+      "$target" "$persistent_corpus" -- \
       "-max_len=$max_input_bytes" \
       "-timeout=$FUZZ_TIMEOUT_SECONDS" \
       -detect_leaks=1
@@ -380,39 +405,22 @@ case "$mode" in
     readonly profdata="$coverage_dir/coverage.profdata"
     [[ -s "$profdata" && ! -L "$profdata" ]] || fail "cargo-fuzz did not create coverage.profdata"
 
-    command -v jq >/dev/null 2>&1 || fail "jq is required to locate and validate coverage"
-    cargo_target_dir="$(
-      cargo "+$FUZZ_ASAN_NIGHTLY" metadata --no-deps --format-version 1 \
-        | jq -er '.target_directory | select(type == "string" and startswith("/"))'
-    )"
-    readonly cargo_target_dir
-    [[ "$cargo_target_dir" == "$repo_root"/* && -d "$cargo_target_dir" && ! -L "$cargo_target_dir" ]] \
-      || fail "Cargo target directory must be a real directory inside the repository"
-
-    coverage_search_roots=("$cargo_target_dir")
-    for coverage_candidate in "$repo_root/target" "$fuzz_root/target"; do
-      [[ -d "$coverage_candidate" && ! -L "$coverage_candidate" ]] || continue
-      coverage_candidate="$(cd -- "$coverage_candidate" && pwd -P)"
-      [[ "$coverage_candidate" == "$repo_root"/* ]] \
-        || fail "coverage search roots must stay inside the repository"
-      coverage_candidate_seen=0
-      for coverage_search_root in "${coverage_search_roots[@]}"; do
-        if [[ "$coverage_search_root" == "$coverage_candidate" ]]; then
-          coverage_candidate_seen=1
-        fi
-      done
-      if (( coverage_candidate_seen == 0 )); then
-        coverage_search_roots+=("$coverage_candidate")
-      fi
-    done
-    readonly coverage_search_roots
+    command -v jq >/dev/null 2>&1 || fail "jq is required to validate coverage"
     mapfile -d '' coverage_binaries < <(
-      find "${coverage_search_roots[@]}" \
-        -type f -path '*/coverage/*/release/*' -name "$target" -perm -u+x -print0 2>/dev/null \
+      find "$coverage_target_dir" \
+        -type f -path "*/release/$target" -perm -u+x -print0 2>/dev/null \
         | sort -z
     )
-    (( ${#coverage_binaries[@]} == 1 )) || fail "expected exactly one instrumented coverage binary"
+    (( ${#coverage_binaries[@]} > 0 )) \
+      || fail "missing instrumented coverage binary for $target"
+    (( ${#coverage_binaries[@]} == 1 )) \
+      || fail "multiple instrumented coverage binaries for $target"
     readonly coverage_binary="${coverage_binaries[0]}"
+    readonly expected_coverage_binary="$coverage_target_dir/$coverage_target/release/$target"
+    [[ "$coverage_binary" == "$expected_coverage_binary" ]] \
+      || fail "ambiguous instrumented coverage binary for $target"
+    [[ -f "$coverage_binary" && -x "$coverage_binary" && ! -L "$coverage_binary" ]] \
+      || fail "instrumented coverage binary must be a regular executable"
     target_libdir="$(rustc "+$FUZZ_ASAN_NIGHTLY" --print target-libdir)"
     readonly target_libdir
     llvm_bin="$(dirname -- "$target_libdir")/bin"

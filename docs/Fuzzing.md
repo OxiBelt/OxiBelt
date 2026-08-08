@@ -148,6 +148,11 @@ nonzero coverage. The program initially gates landmark reachability rather
 than a repository-wide percentage, which would be unstable as targets and
 generated code evolve.
 
+For every run, the runner supplies `cargo-fuzz` an isolated target directory
+and the pinned nightly host triple. It accepts only that target's exact
+instrumented release binary; missing, off-triple, or multiple matching
+binaries fail closed rather than selecting a stale build artifact.
+
 Generate equivalent evidence locally with the same catalog and corpus bounds:
 
 ```sh
