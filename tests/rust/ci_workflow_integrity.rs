@@ -7038,26 +7038,29 @@ fn non_benchmark_summary_helper_reports_success_and_rejects_incomplete_results()
       .contains("Non-benchmark validation summary")
   );
 
-  let mut transitional = needs.clone();
-  transitional.insert(
-    "feature-graduation-exact-verification".to_owned(),
-    serde_json::json!({"result": "success", "outputs": {}}),
-  );
+  let mut legacy = needs.clone();
+  legacy.remove("feature-graduation-exact-verification");
   let (output, summary_path, _) = run_case(
-    "feature-graduation-transition",
-    &serde_json::Value::Object(transitional),
+    "legacy-without-feature-graduation",
+    &serde_json::Value::Object(legacy),
   );
   assert!(
-    output.status.success(),
-    "summary helper should accept the exact transition inventory: {}",
+    !output.status.success(),
+    "summary helper must reject the retired 36-job inventory: {}",
     String::from_utf8_lossy(&output.stderr)
   );
-  let transitional_summary: serde_json::Value =
-    serde_json::from_slice(&fs::read(&summary_path).expect("transition summary should be written"))
-      .expect("transition summary should be valid JSON");
+  let legacy_summary: serde_json::Value = serde_json::from_slice(
+    &fs::read(&summary_path).expect("legacy summary should still be written"),
+  )
+  .expect("legacy summary should be valid JSON");
+  assert_eq!(legacy_summary["overall"], "failure");
   assert_eq!(
-    transitional_summary["jobs"].as_array().map(Vec::len),
-    Some(37)
+    legacy_summary["missing_jobs"],
+    serde_json::json!(["feature-graduation-exact-verification"])
+  );
+  assert!(
+    !non_benchmark_summary_script_text().contains("transitional_jobs"),
+    "summary helper must not retain the compatibility inventory"
   );
 
   for result in ["failure", "cancelled", "skipped", "unexpected"] {

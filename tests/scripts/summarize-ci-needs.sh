@@ -15,6 +15,7 @@ summary_json="$2"
 summary_markdown="$3"
 
 required_jobs=(
+  feature-graduation-exact-verification
   source-structure
   test
   rust-advisory-checks
@@ -53,13 +54,6 @@ required_jobs=(
   browser-webdriver
 )
 
-# Keep this exact compatibility window until every pull request base revision
-# contains the feature-graduation summary dependency. Arbitrary additional jobs
-# remain rejected; only the old and new inventories are accepted.
-transitional_jobs=(
-  feature-graduation-exact-verification
-)
-
 if [[ ! -f "${needs_json}" ]]; then
   echo "needs JSON does not exist: ${needs_json}" >&2
   exit 2
@@ -74,7 +68,6 @@ cleanup() {
 trap cleanup EXIT
 
 printf '%s\n' "${required_jobs[@]}" | LC_ALL=C sort | jq -Rsc 'split("\n") | map(select(length > 0))' >"${temporary_dir}/expected.json"
-printf '%s\n' "${transitional_jobs[@]}" | LC_ALL=C sort | jq -Rsc 'split("\n") | map(select(length > 0))' >"${temporary_dir}/transitional.json"
 
 if ! jq -e '
   type == "object" and
@@ -85,14 +78,6 @@ if ! jq -e '
 fi
 
 jq -c 'keys | sort' "${needs_json}" >"${temporary_dir}/actual.json"
-jq -n -c \
-  --slurpfile expected "${temporary_dir}/expected.json" \
-  --slurpfile transitional "${temporary_dir}/transitional.json" \
-  --slurpfile actual "${temporary_dir}/actual.json" \
-  'if (($transitional[0] - $actual[0]) | length) == 0
-   then (($expected[0] + $transitional[0]) | sort)
-   else $expected[0]
-   end' >"${temporary_dir}/accepted.json"
 jq -c '
   [
     to_entries[]
@@ -102,11 +87,11 @@ jq -c '
 ' "${needs_json}" >"${temporary_dir}/jobs.json"
 
 jq -n -c \
-  --slurpfile expected "${temporary_dir}/accepted.json" \
+  --slurpfile expected "${temporary_dir}/expected.json" \
   --slurpfile actual "${temporary_dir}/actual.json" \
   '$expected[0] - $actual[0]' >"${temporary_dir}/missing.json"
 jq -n -c \
-  --slurpfile expected "${temporary_dir}/accepted.json" \
+  --slurpfile expected "${temporary_dir}/expected.json" \
   --slurpfile actual "${temporary_dir}/actual.json" \
   '$actual[0] - $expected[0]' >"${temporary_dir}/extra.json"
 jq -c '[.[] | select(.result != "success")]' "${temporary_dir}/jobs.json" >"${temporary_dir}/unexpected.json"
