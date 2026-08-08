@@ -33,12 +33,108 @@ BURST = importlib.util.module_from_spec(BURST_SPEC)
 sys.modules[BURST_SPEC.name] = BURST
 BURST_SPEC.loader.exec_module(BURST)
 
+SERVER_PATH = pathlib.Path(__file__).parents[1] / "docker" / "mock_upstream" / "server.py"
+SERVER_SPEC = importlib.util.spec_from_file_location("mock_upstream_server", SERVER_PATH)
+if SERVER_SPEC is None or SERVER_SPEC.loader is None:
+    raise RuntimeError(f"cannot import {SERVER_PATH}")
+SERVER = importlib.util.module_from_spec(SERVER_SPEC)
+sys.modules[SERVER_SPEC.name] = SERVER
+SERVER_SPEC.loader.exec_module(SERVER)
+
 BAD_REQUEST = (
     b"HTTP/1.1 400 Bad Request\r\n"
     b"Content-Length: 0\r\n"
     b"Connection: close\r\n"
     b"\r\n"
 )
+
+RESPONSE_HEADER_QUERY_FIELDS = (
+    "etag",
+    "last_modified",
+    "early_link",
+    "content_type",
+    "content_encoding",
+    "cache_control_value",
+    "surrogate_control",
+    "surrogate_key",
+    "cache_tag",
+    "expires",
+    "vary",
+)
+INJECTED_HEADER = "X-Mock-Upstream-Injected"
+
+
+class MockUpstreamServerHeaderValidationTests(unittest.TestCase):
+    """Exercise the fixture server's response-header trust boundary."""
+
+    def request(
+        self,
+        target: str,
+    ) -> tuple[int, set[str], bytes]:
+        handler = object.__new__(SERVER.EchoHandler)
+        handler.path = target
+        handler.command = "GET"
+        handler.request_version = "HTTP/1.1"
+        handler.headers = {}
+        handler.rfile = io.BytesIO()
+        handler.send_header = mock.Mock()
+        response: dict[str, object] = {}
+
+        def send_error(status: int, message: str) -> None:
+            response["status"] = status
+            response["body"] = message.encode("utf-8")
+
+        handler.send_error = send_error
+        SERVER.EchoHandler._handle(handler)
+
+        status = response.get("status")
+        body = response.get("body")
+        if not isinstance(status, int) or not isinstance(body, bytes):
+            self.fail(f"handler did not produce an error response: {response!r}")
+        header_names = {
+            call.args[0].lower()
+            for call in handler.send_header.call_args_list
+            if call.args
+        }
+        return status, header_names, body
+
+    def test_percent_decoded_cr_and_lf_are_rejected_for_every_response_header_field(
+        self,
+    ) -> None:
+        for field in RESPONSE_HEADER_QUERY_FIELDS:
+            for encoded_control in ("%0D", "%0A", "%0D%0A"):
+                with self.subTest(field=field, encoded_control=encoded_control):
+                    target = (
+                        f"/?{field}=safe{encoded_control}"
+                        f"{INJECTED_HEADER}%3A%20present"
+                    )
+                    status, header_names, body = self.request(target)
+
+                    self.assertEqual(status, 400)
+                    self.assertNotIn(INJECTED_HEADER.lower(), header_names)
+                    self.assertNotIn(
+                        INJECTED_HEADER.lower().encode("ascii"),
+                        body.lower(),
+                    )
+
+    def test_upgrade_token_validator_rejects_cr_and_lf(self) -> None:
+        for control in ("\r", "\n", "\r\n"):
+            with self.subTest(control=repr(control)):
+                token = f"websocket{control}{INJECTED_HEADER}: present"
+                self.assertIsNone(SERVER.HTTP_TOKEN_RE.fullmatch(token))
+
+                handler = object.__new__(SERVER.EchoHandler)
+                handler.headers = {
+                    "upgrade": token,
+                    "connection": "Upgrade",
+                }
+                handler.send_error = mock.Mock()
+
+                self.assertTrue(handler._handle_upgrade())
+                handler.send_error.assert_called_once_with(
+                    400,
+                    "invalid Upgrade token",
+                )
 
 
 class EarlyResponseSocket:
