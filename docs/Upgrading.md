@@ -183,10 +183,13 @@ and graduation rules are in
 [KubernetesSupport.md](KubernetesSupport.md). For a controlled adjacent-version
 upgrade:
 
-A feature-promotion check must validate every passed-gate evidence receipt
-against the exact checked-out Git revision. CI supplies the trusted
-`GITHUB_SHA`; local checks resolve `HEAD` when no expected revision is supplied.
-Malformed, stale, or mismatched source revisions block the lifecycle change.
+A feature-promotion verification must validate every detached feature receipt
+against an explicitly supplied repository, ref, phase, and full checked-out Git
+revision. The ordinary policy check validates only registry, schema, generated
+documentation, and lifecycle agreement; it does not consume qualification
+receipts. Authenticated CI supplies the trusted revision and rechecks workflow
+and attestation identities. Missing, malformed, stale, or mismatched evidence
+blocks the lifecycle change.
 
 1. Verify that the source and target are explicitly admitted by the exact
    release entry and retain both immutable image digests.
@@ -394,6 +397,28 @@ The additional source change at the failed `0.7.1-beta.1` cut repairs
 same-run vulnerability-evidence selection for a failed-jobs rerun; it does not
 change runtime, configuration, schema, API, rulepack, or persisted-state
 behavior.
+
+Post-`0.7.1-beta.2` development also adds a machine-readable graduation
+policy and detached-evidence verifier for the ten non-Kubernetes features that
+remain experimental in this source revision. The checker binds any future
+promotion to the intended status and stable target version, exact repository,
+ref, and commit, qualified native platforms, the policy-definition digest, and
+the declared workflow, job, artifact, report, and log identities. The checker
+rejects missing, duplicate, mismatched, or incomplete receipt content. A
+promotion gate additionally requires authenticated workflow and attestation
+readback before treating those declared identities as qualification evidence.
+This tooling does not itself promote a feature or change runtime defaults,
+native configuration syntax or schema, Admin API wire behavior, persisted
+state, or rollback behavior. Roll back the tooling by restoring the previous
+source revision; no runtime or data migration is required.
+
+The Kubernetes graduation registry now uses the same detached, feature-scoped
+receipt contract instead of storing mutable pass/fail state and receipt paths
+on shared gate descriptors. All fifteen Kubernetes/controller/Helm rows remain
+`experimental` and `unvalidated` in this revision. The supply-chain admission
+target is bounded to native `linux/amd64` and `linux/arm64`; the other fourteen
+rows retain their existing RISC-V qualification gates and blocker without a new
+RISC-V support claim.
 
 Post-`0.7.1-beta.2` development keeps `compio-direct-h1-io` experimental.
 The checked-in production example now explicitly recommends

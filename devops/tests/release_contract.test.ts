@@ -339,6 +339,35 @@ test('classifies the Kubernetes graduation registry as a feature lifecycle surfa
   }
 })
 
+test('classifies the non-Kubernetes graduation contract as a feature lifecycle surface', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(
+      Root,
+      'devops/config/feature-graduation.json',
+      '{"schemaVersion":1,"policyVersion":1}\n'
+    )
+    const Base = Commit(Root, 'baseline')
+    WriteFile(
+      Root,
+      'devops/config/feature-graduation.json',
+      '{"schemaVersion":1,"policyVersion":2}\n'
+    )
+    const Head = Commit(Root, 'change feature graduation')
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Root,
+        changeBase: Base,
+        changeHead: Head
+      }),
+      /compatibility surfaces changed \(Feature lifecycle\)/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
 test('classifies supply-chain schemas as schema epoch surfaces', () => {
   const Root = CreateContractWorkspace()
   try {

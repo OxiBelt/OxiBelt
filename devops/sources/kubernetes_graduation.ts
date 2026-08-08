@@ -10,11 +10,15 @@ const SchemaPath = 'devops/config/kubernetes-feature-graduation.schema.json'
 const SupportDocumentPath = 'docs/KubernetesSupport.md'
 const FeatureStatusPath = 'docs/FeatureStatus.md'
 const MaximumInputBytes = 1024 * 1024
+const MaximumEvidenceFiles = 64
+const MaximumJsonDepth = 64
+const MaximumJsonNodes = 10000
+const MaximumJsonStringBytes = 64 * 1024
+const MaximumJsonArrayItems = 1024
+const MaximumJsonObjectKeys = 256
 const GeneratedStart = '<!-- BEGIN KUBERNETES GRADUATION GENERATED -->'
 const GeneratedEnd = '<!-- END KUBERNETES GRADUATION GENERATED -->'
 const FullRevision = /^[0-9a-f]{40}$/
-const ValidatedProductVersion = /^v[0-9]+\.[0-9]+\.[0-9]+$/
-const UtcSecond = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/
 
 export const KubernetesGraduationFeatureIds = [
   'gateway-controller',
@@ -34,11 +38,24 @@ export const KubernetesGraduationFeatureIds = [
   'helm-gateway-controller'
 ] as const
 
+export const KubernetesGraduationPhases = ['candidate', 'official_beta'] as const
+
 const RequiredCadences = [
   'pull_request',
   'nightly',
   'release_candidate',
   'stable'
+] as const
+
+const SupplyChainArtifactRequirements = [
+  'image-standalone|oci-image|ghcr.io/oxibelt/oxibelt',
+  'image-dataplane|oci-image|ghcr.io/oxibelt/oxibelt-dataplane',
+  'image-dataplane-strict|oci-image|ghcr.io/oxibelt/oxibelt-dataplane-strict',
+  'image-controller|oci-image|ghcr.io/oxibelt/oxibelt-gateway-controller',
+  'image-tools|oci-image|ghcr.io/oxibelt/oxibelt-tools',
+  'image-keysigner|oci-image|ghcr.io/oxibelt/oxibelt-keysigner',
+  'chart-oxibelt|helm-chart|ghcr.io/oxibelt/charts/oxibelt',
+  'chart-gateway-controller|helm-chart|ghcr.io/oxibelt/charts/oxibelt-gateway-controller'
 ] as const
 
 /* eslint-disable @typescript-eslint/naming-convention -- Parsed policy and JSON Schema keys are stable lower-camel-case wire names. */
@@ -62,10 +79,12 @@ type JsonSchema = {
 
 export type KubernetesGraduationPolicy = {
   $schema: string
-  schemaVersion: 1
+  schemaVersion: 2
   policyVersion: number
   lifecycleAuthority: string
   evidenceSchema: string
+  repository: 'OxiBelt/OxiBelt'
+  targetVersion: '0.7.1'
   supportContract: {
     kubernetes: {
       range: string
@@ -127,64 +146,98 @@ export type KubernetesGraduationPolicy = {
     id: string
     objective: string
     cadence: 'pull_request' | 'nightly' | 'release_candidate'
-    status: 'unmet' | 'passed'
     mandatory: true
     appliesTo: string[]
-    evidenceReceipts: string[]
   }>
   features: Array<{
-    id: string
+    id: (typeof KubernetesGraduationFeatureIds)[number]
     status: 'experimental' | 'supported'
     lastValidatedVersion: string
+    qualifiedPlatforms: Array<'linux/amd64' | 'linux/arm64' | 'linux/riscv64'>
+    requiredArtifacts: Array<{
+      name: string
+      kind: 'oci-image' | 'helm-chart'
+      repository: string
+    }>
     gateIds: string[]
     blockerIds: string[]
   }>
 }
 
 export type KubernetesGraduationEvidenceReceipt = {
-  schemaVersion: 1
+  schemaVersion: 2
   policyVersion: number
   policyDefinitionSha256: string
+  featureId: (typeof KubernetesGraduationFeatureIds)[number]
+  intendedStatus: 'supported'
+  phase: (typeof KubernetesGraduationPhases)[number]
+  targetVersion: string
+  repository: string
+  sourceRef: string
   sourceRevision: string
-  validatedVersion: string
-  runId: number
-  runAttempt: number
   generatedAt: string
-  jobIds: number[]
+  qualifiedPlatforms: Array<'linux/amd64' | 'linux/arm64' | 'linux/riscv64'>
+  workflow: {
+    repository: string
+    path: '.github/workflows/feature-graduation.yml'
+    ref: string
+    runId: number
+    runAttempt: number
+    jobs: Array<{
+      id: number
+      name: string
+      conclusion: 'success'
+    }>
+  }
+  toolVersions: Array<{
+    name: string
+    version: string
+  }>
   artifactSubjects: Array<{
     name: string
     kind: 'oci-image' | 'helm-chart'
     reference: string
     digest: string
   }>
-  reports: Array<{
+  reportHashes: Array<{
     name: string
     sha256: string
   }>
-  logs: Array<{
+  logHashes: Array<{
     jobId: number
     sha256: string
   }>
   gateResults: Array<{
     id: string
-    result: 'passed'
+    platformResults: Array<{
+      platform: 'linux/amd64' | 'linux/arm64' | 'linux/riscv64'
+      jobId: number
+      reportName: string
+      reportSha256: string
+      result: 'pass'
+    }>
   }>
+  result: 'pass'
 }
 
 type CliParameters = {
   workspacePath?: string
-  policyPath?: string
-  schemaPath?: string
   expectedSourceRevision?: string
-  expectedValidatedVersion?: string
+  expectedSourceRef?: string
+  phase?: (typeof KubernetesGraduationPhases)[number]
+  evidenceDirectory?: string
 }
 
 type IdRecord = {
   id: string
 }
 
+type NamedRecord = {
+  name: string
+}
+
 type ParsedCli = {
-  command: 'check' | 'render'
+  command: 'check' | 'render' | 'verify'
   parameters: CliParameters
 }
 /* eslint-enable @typescript-eslint/naming-convention */
@@ -214,9 +267,9 @@ function ValidateSourceRevision(Value: string, Label: string): string {
   return Value
 }
 
-function ValidateProductVersion(Value: string, Label: string): string {
-  if (!ValidatedProductVersion.test(Value)) {
-    throw new Error(`${Label} must be a v-prefixed stable semantic version`)
+function ValidateSourceRef(Value: string, Label: string): string {
+  if (!/^refs\/(heads|tags)\/[A-Za-z0-9._/-]+$/.test(Value)) {
+    throw new Error(`${Label} must be an exact Git branch or tag ref`)
   }
   return Value
 }
@@ -240,27 +293,51 @@ function ResolveWorkspaceRevision(Root: string): string {
 }
 
 function ResolveRepositoryPath(Root: string, RelativePath: string): string {
+  if (Path.isAbsolute(RelativePath)) {
+    throw new Error(`repository input must be a relative path: ${RelativePath}`)
+  }
   const Candidate = Path.resolve(Root, RelativePath)
   if (!IsPathWithin(Root, Candidate)) {
     throw new Error(`repository input escapes the workspace: ${RelativePath}`)
+  }
+  const Relative = Path.relative(Root, Candidate)
+  let Current = Root
+  for (const Component of Relative.split(Path.sep)) {
+    if (Component === '') {
+      continue
+    }
+    Current = Path.join(Current, Component)
+    const Stat = Fs.lstatSync(Current)
+    if (Stat.isSymbolicLink()) {
+      throw new Error(`repository input must not traverse a symlink: ${RelativePath}`)
+    }
+  }
+  const RealCandidate = Fs.realpathSync(Candidate)
+  if (!IsPathWithin(Root, RealCandidate) || RealCandidate !== Candidate) {
+    throw new Error(`repository input resolves outside its checked path: ${RelativePath}`)
   }
   return Candidate
 }
 
 function ReadBoundedFile(Root: string, RelativePath: string): string {
   const Candidate = ResolveRepositoryPath(Root, RelativePath)
-  const Stat = Fs.lstatSync(Candidate)
-  if (!Stat.isFile() || Stat.isSymbolicLink()) {
-    throw new Error(`repository input must be a regular non-symlink file: ${RelativePath}`)
+  const Descriptor = Fs.openSync(Candidate, Fs.constants.O_RDONLY | Fs.constants.O_NOFOLLOW)
+  try {
+    const Stat = Fs.fstatSync(Descriptor)
+    if (!Stat.isFile()) {
+      throw new Error(`repository input must be a regular file: ${RelativePath}`)
+    }
+    if (Stat.size > MaximumInputBytes) {
+      throw new Error(`repository input exceeds ${MaximumInputBytes} bytes: ${RelativePath}`)
+    }
+    const Content = Fs.readFileSync(Descriptor, 'utf8')
+    if (Content.includes('\0')) {
+      throw new Error(`repository input contains a NUL byte: ${RelativePath}`)
+    }
+    return Content
+  } finally {
+    Fs.closeSync(Descriptor)
   }
-  if (Stat.size > MaximumInputBytes) {
-    throw new Error(`repository input exceeds ${MaximumInputBytes} bytes: ${RelativePath}`)
-  }
-  const Content = Fs.readFileSync(Candidate, 'utf8')
-  if (Content.includes('\0')) {
-    throw new Error(`repository input contains a NUL byte: ${RelativePath}`)
-  }
-  return Content
 }
 
 function ParseJson(Content: string, Label: string): unknown {
@@ -282,6 +359,48 @@ function StableValue(Value: unknown): string {
     ).join(',')}}`
   }
   return JSON.stringify(Value)
+}
+
+function ValidateJsonComplexity(
+  Value: unknown,
+  Location: string,
+  Depth = 0,
+  State = { nodes: 0 }
+): void {
+  if (Depth > MaximumJsonDepth) {
+    throw new Error(`${Location} exceeds JSON nesting limit ${MaximumJsonDepth}`)
+  }
+  State.nodes += 1
+  if (State.nodes > MaximumJsonNodes) {
+    throw new Error(`${Location} exceeds JSON node limit ${MaximumJsonNodes}`)
+  }
+  if (typeof Value === 'string') {
+    if (Buffer.byteLength(Value, 'utf8') > MaximumJsonStringBytes) {
+      throw new Error(`${Location} exceeds JSON string limit ${MaximumJsonStringBytes}`)
+    }
+    return
+  }
+  if (Array.isArray(Value)) {
+    if (Value.length > MaximumJsonArrayItems) {
+      throw new Error(`${Location} exceeds JSON array-item limit ${MaximumJsonArrayItems}`)
+    }
+    Value.forEach((Item, Index) =>
+      ValidateJsonComplexity(Item, `${Location}[${Index}]`, Depth + 1, State)
+    )
+    return
+  }
+  if (IsObject(Value)) {
+    const Keys = Object.keys(Value)
+    if (Keys.length > MaximumJsonObjectKeys) {
+      throw new Error(`${Location} exceeds JSON object-key limit ${MaximumJsonObjectKeys}`)
+    }
+    for (const Key of Keys) {
+      if (Buffer.byteLength(Key, 'utf8') > MaximumJsonStringBytes) {
+        throw new Error(`${Location} contains an oversized JSON key`)
+      }
+      ValidateJsonComplexity(Value[Key], `${Location}.${Key}`, Depth + 1, State)
+    }
+  }
 }
 
 function ValuesEqual(Left: unknown, Right: unknown): boolean {
@@ -401,15 +520,11 @@ function AssertUniqueIds(Label: string, Values: IdRecord[]): Set<string> {
 export function KubernetesGraduationPolicyDefinitionSha256(
   Policy: KubernetesGraduationPolicy
 ): string {
-  const Definition = {
-    ...Policy,
-    gates: Policy.gates.map(Gate => ({ ...Gate, evidenceReceipts: [] }))
-  }
-  return Crypto.createHash('sha256').update(StableValue(Definition), 'utf8').digest('hex')
+  return Crypto.createHash('sha256').update(StableValue(Policy), 'utf8').digest('hex')
 }
 
 function IsExactUtcSecond(Value: string): boolean {
-  if (!UtcSecond.test(Value)) {
+  if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/.test(Value)) {
     return false
   }
   const Parsed = new Date(Value)
@@ -417,12 +532,33 @@ function IsExactUtcSecond(Value: string): boolean {
     Parsed.toISOString() === `${Value.slice(0, -1)}.000Z`
 }
 
+function ReadCanonicalReceipt(Root: string, RelativePath: string): unknown {
+  const Content = ReadBoundedFile(Root, RelativePath)
+  const Value = ParseJson(Content, RelativePath)
+  ValidateJsonComplexity(Value, RelativePath)
+  if (Content !== StableValue(Value)) {
+    throw new Error(`${RelativePath} must contain canonical JSON without duplicate keys or whitespace`)
+  }
+  return Value
+}
+
+function ValidateNamedUnique(Label: string, Values: NamedRecord[]): void {
+  const Seen = new Set<string>()
+  for (const Value of Values) {
+    if (Seen.has(Value.name)) {
+      throw new Error(`${Label} repeats name ${Value.name}`)
+    }
+    Seen.add(Value.name)
+  }
+}
+
 export function ValidateKubernetesGraduationEvidenceObject(
   Value: unknown,
   SchemaValue: unknown,
   Policy: KubernetesGraduationPolicy,
   ExpectedSourceRevision: string,
-  ExpectedValidatedVersion: string,
+  ExpectedSourceRef: string,
+  ExpectedPhase: (typeof KubernetesGraduationPhases)[number],
   Label = 'Kubernetes graduation evidence'
 ): KubernetesGraduationEvidenceReceipt {
   if (!IsObject(SchemaValue)) {
@@ -434,15 +570,22 @@ export function ValidateKubernetesGraduationEvidenceObject(
     ExpectedSourceRevision,
     'expected source revision'
   )
-  if (Receipt.sourceRevision !== ExpectedRevision) {
+  const ExpectedRef = ValidateSourceRef(ExpectedSourceRef, 'expected source ref')
+  ValidateKubernetesGraduationPhaseRef(ExpectedPhase, ExpectedRef)
+  if (Receipt.sourceRevision !== ExpectedRevision || Receipt.workflow.ref !== ExpectedRevision) {
     throw new Error(`${Label} does not bind the expected source revision`)
   }
-  const ExpectedVersion = ValidateProductVersion(
-    ExpectedValidatedVersion,
-    'expected validated product version'
-  )
-  if (Receipt.validatedVersion !== ExpectedVersion) {
-    throw new Error(`${Label} does not bind the expected validated product version`)
+  if (Receipt.sourceRef !== ExpectedRef) {
+    throw new Error(`${Label} does not bind the expected source ref`)
+  }
+  if (Receipt.phase !== ExpectedPhase) {
+    throw new Error(`${Label} does not bind the expected qualification phase`)
+  }
+  if (Receipt.targetVersion !== Policy.targetVersion) {
+    throw new Error(`${Label} does not bind target version ${Policy.targetVersion}`)
+  }
+  if (Receipt.repository !== Policy.repository || Receipt.workflow.repository !== Policy.repository) {
+    throw new Error(`${Label} does not bind the policy repository`)
   }
   if (
     Receipt.policyVersion !== Policy.policyVersion ||
@@ -453,112 +596,210 @@ export function ValidateKubernetesGraduationEvidenceObject(
   if (!IsExactUtcSecond(Receipt.generatedAt)) {
     throw new Error(`${Label}.generatedAt must be a real RFC3339 UTC timestamp`)
   }
+  const Feature = Policy.features.find(Candidate => Candidate.id === Receipt.featureId)
+  if (Feature === undefined) {
+    throw new Error(`${Label} references unknown feature ${Receipt.featureId}`)
+  }
+  if (Feature.status !== 'supported' || Feature.lastValidatedVersion !== Policy.targetVersion) {
+    throw new Error(`${Label} may only promote a supported feature at target version ${Policy.targetVersion}`)
+  }
+  AssertExactSet(`${Label} qualified platforms`, Receipt.qualifiedPlatforms, Feature.qualifiedPlatforms)
 
-  const ArtifactNames = new Set<string>()
-  const ArtifactReferences = new Set<string>()
-  const ArtifactKinds = new Set<string>()
-  for (const Subject of Receipt.artifactSubjects) {
-    if (ArtifactNames.has(Subject.name) || ArtifactReferences.has(Subject.reference)) {
-      throw new Error(`${Label} repeats an artifact name or reference`)
+  const JobIds = new Set<number>()
+  const JobNames = new Set<string>()
+  for (const Job of Receipt.workflow.jobs) {
+    if (JobIds.has(Job.id) || JobNames.has(Job.name)) {
+      throw new Error(`${Label} repeats workflow job id or name`)
     }
-    ArtifactNames.add(Subject.name)
+    JobIds.add(Job.id)
+    JobNames.add(Job.name)
+  }
+  ValidateNamedUnique(`${Label} tool versions`, Receipt.toolVersions)
+  ValidateNamedUnique(`${Label} artifact subjects`, Receipt.artifactSubjects)
+  const ArtifactReferences = new Set<string>()
+  for (const Subject of Receipt.artifactSubjects) {
+    if (ArtifactReferences.has(Subject.reference)) {
+      throw new Error(`${Label} repeats artifact reference ${Subject.reference}`)
+    }
     ArtifactReferences.add(Subject.reference)
-    ArtifactKinds.add(Subject.kind)
+    if (!Subject.reference.endsWith(`@${Subject.digest}`)) {
+      throw new Error(`${Label} artifact ${Subject.name} must bind an immutable digest reference`)
+    }
+  }
+  AssertExactSet(
+    `${Label} artifact subject names`,
+    Receipt.artifactSubjects.map(Subject => Subject.name),
+    Feature.requiredArtifacts.map(Requirement => Requirement.name)
+  )
+  for (const Requirement of Feature.requiredArtifacts) {
+    const Subject = Receipt.artifactSubjects.find(Candidate => Candidate.name === Requirement.name)
     if (
-      Subject.kind === 'oci-image' &&
-      !Subject.reference.endsWith(`@${Subject.digest}`)
+      Subject === undefined ||
+      Subject.kind !== Requirement.kind ||
+      Subject.reference !== `${Requirement.repository}@${Subject.digest}`
     ) {
       throw new Error(
-        `${Label} OCI image ${Subject.name} reference must end with its immutable digest`
+        `${Label} artifact ${Requirement.name} must bind exact ${Requirement.kind} repository ${Requirement.repository}`
       )
     }
   }
-  AssertExactSet(`${Label} artifact kinds`, ArtifactKinds, ['oci-image', 'helm-chart'])
-  const ArtifactVersion = ExpectedVersion.slice(1)
-  if (!Receipt.artifactSubjects.some(Subject =>
-    Subject.kind === 'helm-chart' && Subject.reference.endsWith(`-${ArtifactVersion}.tgz`)
-  )) {
-    throw new Error(
-      `${Label} must bind a Helm chart package for validated version ${ExpectedVersion}`
-    )
-  }
-
-  const ReportNames = new Set<string>()
-  for (const Report of Receipt.reports) {
-    if (ReportNames.has(Report.name)) {
-      throw new Error(`${Label} repeats report name ${Report.name}`)
-    }
-    ReportNames.add(Report.name)
-  }
-
+  ValidateNamedUnique(`${Label} report hashes`, Receipt.reportHashes)
   const LogJobIds = new Set<number>()
-  for (const Log of Receipt.logs) {
+  for (const Log of Receipt.logHashes) {
     if (LogJobIds.has(Log.jobId)) {
       throw new Error(`${Label} repeats log hash for job ${Log.jobId}`)
     }
     LogJobIds.add(Log.jobId)
   }
-  const JobIds = new Set(Receipt.jobIds)
-  if (
-    JobIds.size !== Receipt.jobIds.length ||
-    !ValuesEqual([...JobIds].sort((Left, Right) => Left - Right), [...LogJobIds].sort((Left, Right) => Left - Right))
-  ) {
-    throw new Error(`${Label} must bind one log hash for every exact job id`)
+  if (!ValuesEqual(
+    [...JobIds].sort((Left, Right) => Left - Right),
+    [...LogJobIds].sort((Left, Right) => Left - Right)
+  )) {
+    throw new Error(`${Label} must bind one log hash for every exact workflow job`)
   }
-
-  const PolicyGateIds = new Set(Policy.gates.map(Gate => Gate.id))
   const ResultIds = new Set<string>()
   for (const Result of Receipt.gateResults) {
-    if (!PolicyGateIds.has(Result.id)) {
-      throw new Error(`${Label} references unknown gate ${Result.id}`)
-    }
     if (ResultIds.has(Result.id)) {
       throw new Error(`${Label} repeats gate result ${Result.id}`)
     }
     ResultIds.add(Result.id)
+    AssertExactSet(
+      `${Label} gate result ${Result.id} platforms`,
+      Result.platformResults.map(PlatformResult => PlatformResult.platform),
+      Feature.qualifiedPlatforms
+    )
+    const ProducingJobIds = new Set<number>()
+    const PlatformReportNames = new Set<string>()
+    const PlatformReportHashes = new Set<string>()
+    for (const PlatformResult of Result.platformResults) {
+      if (ProducingJobIds.has(PlatformResult.jobId)) {
+        throw new Error(`${Label} gate result ${Result.id} must use a distinct job for every platform`)
+      }
+      ProducingJobIds.add(PlatformResult.jobId)
+      if (
+        PlatformReportNames.has(PlatformResult.reportName) ||
+        PlatformReportHashes.has(PlatformResult.reportSha256)
+      ) {
+        throw new Error(`${Label} gate result ${Result.id} must use a distinct report for every platform`)
+      }
+      PlatformReportNames.add(PlatformResult.reportName)
+      PlatformReportHashes.add(PlatformResult.reportSha256)
+      if (!JobIds.has(PlatformResult.jobId)) {
+        throw new Error(`${Label} gate result ${Result.id} references an unknown producing job`)
+      }
+      if (!Receipt.reportHashes.some(Report =>
+        Report.name === PlatformResult.reportName && Report.sha256 === PlatformResult.reportSha256
+      )) {
+        throw new Error(`${Label} gate result ${Result.id} does not bind its exact report hash`)
+      }
+    }
   }
+  AssertExactSet(`${Label} gate results`, ResultIds, Feature.gateIds)
   return Receipt
 }
 
-function ValidateEvidence(
-  Root: string,
-  Policy: KubernetesGraduationPolicy,
-  ExpectedSourceRevision: string,
-  ExpectedValidatedVersion: string,
-  GateId: string,
-  ReceiptPaths: string[]
-): KubernetesGraduationEvidenceReceipt[] {
-  if (ReceiptPaths.length === 0) {
-    throw new Error(`passed gate ${GateId} must name at least one evidence receipt`)
+export function LoadKubernetesGraduationEvidenceDirectory(
+  WorkspacePath: string,
+  RelativeDirectoryPath: string
+): string[] {
+  const Root = ResolveWorkspace(WorkspacePath)
+  const Directory = ResolveRepositoryPath(Root, RelativeDirectoryPath)
+  const Stat = Fs.lstatSync(Directory)
+  if (!Stat.isDirectory() || Stat.isSymbolicLink()) {
+    throw new Error(`evidence directory must be a non-symlink directory: ${RelativeDirectoryPath}`)
   }
-  const EvidenceSchema = ParseJson(
-    ReadBoundedFile(Root, Policy.evidenceSchema),
-    Policy.evidenceSchema
-  )
-  const Receipts: KubernetesGraduationEvidenceReceipt[] = []
-  for (const ReceiptPath of ReceiptPaths) {
-    const Receipt = ValidateKubernetesGraduationEvidenceObject(
-      ParseJson(ReadBoundedFile(Root, ReceiptPath), ReceiptPath),
-      EvidenceSchema,
-      Policy,
-      ExpectedSourceRevision,
-      ExpectedValidatedVersion,
-      ReceiptPath
-    )
-    if (!Receipt.gateResults.some(Result => Result.id === GateId && Result.result === 'passed')) {
-      throw new Error(`${ReceiptPath} does not contain passed evidence for gate ${GateId}`)
+  const Entries = Fs.readdirSync(Directory, { withFileTypes: true })
+  if (Entries.length === 0 || Entries.length > MaximumEvidenceFiles) {
+    throw new Error(`evidence directory must contain between 1 and ${MaximumEvidenceFiles} receipt files`)
+  }
+  const RelativePaths: string[] = []
+  for (const Entry of Entries) {
+    if (!Entry.isFile() || Entry.isSymbolicLink() || !Entry.name.endsWith('.json')) {
+      throw new Error(`evidence directory contains an unsafe or unsupported entry: ${Entry.name}`)
     }
-    Receipts.push(Receipt)
+    RelativePaths.push(Path.posix.join(
+      RelativeDirectoryPath.replaceAll(Path.sep, '/'),
+      Entry.name
+    ))
   }
+  return RelativePaths.sort()
+}
+
+export function ValidateKubernetesGraduationEvidenceFiles(
+  WorkspacePath: string,
+  ReceiptPaths: string[],
+  ExpectedSourceRevision: string,
+  ExpectedSourceRef: string,
+  ExpectedPhase: (typeof KubernetesGraduationPhases)[number]
+): KubernetesGraduationEvidenceReceipt[] {
+  const Root = ResolveWorkspace(WorkspacePath)
+  if (ReceiptPaths.length === 0 || ReceiptPaths.length > MaximumEvidenceFiles) {
+    throw new Error(`verify requires between 1 and ${MaximumEvidenceFiles} explicit receipt paths`)
+  }
+  const CanonicalPaths = new Set<string>()
+  for (const ReceiptPath of ReceiptPaths) {
+    const CanonicalPath = Path.posix.normalize(ReceiptPath.replaceAll(Path.sep, '/'))
+    if (CanonicalPaths.has(CanonicalPath)) {
+      throw new Error(`verify repeats receipt path ${ReceiptPath}`)
+    }
+    CanonicalPaths.add(CanonicalPath)
+  }
+  const Policy = LoadKubernetesGraduationPolicy(Root)
+  const EvidenceSchema = ParseJson(ReadBoundedFile(Root, Policy.evidenceSchema), Policy.evidenceSchema)
+  const Receipts = ReceiptPaths.map(ReceiptPath => ValidateKubernetesGraduationEvidenceObject(
+    ReadCanonicalReceipt(Root, ReceiptPath),
+    EvidenceSchema,
+    Policy,
+    ExpectedSourceRevision,
+    ExpectedSourceRef,
+    ExpectedPhase,
+    ReceiptPath
+  ))
+  return ValidateKubernetesGraduationEvidenceSet(Policy, Receipts)
+}
+
+export function ValidateKubernetesGraduationEvidenceSet(
+  Policy: KubernetesGraduationPolicy,
+  Receipts: KubernetesGraduationEvidenceReceipt[]
+): KubernetesGraduationEvidenceReceipt[] {
+  const SupportedFeatureIds = Policy.features
+    .filter(Feature => Feature.status === 'supported')
+    .map(Feature => Feature.id)
+  if (SupportedFeatureIds.length === 0) {
+    throw new Error('verify requires at least one supported feature row')
+  }
+  const ReceiptsByFeature = new Map<string, KubernetesGraduationEvidenceReceipt>()
+  for (const Receipt of Receipts) {
+    if (ReceiptsByFeature.has(Receipt.featureId)) {
+      throw new Error(`verify receives duplicate evidence for feature ${Receipt.featureId}`)
+    }
+    const Feature = Policy.features.find(Candidate => Candidate.id === Receipt.featureId)
+    if (Feature?.status !== 'supported' || Feature.lastValidatedVersion !== Policy.targetVersion) {
+      throw new Error(`verify rejects evidence for experimental or unvalidated feature ${Receipt.featureId}`)
+    }
+    ReceiptsByFeature.set(Receipt.featureId, Receipt)
+  }
+  AssertExactSet('verify receipt feature ids', ReceiptsByFeature.keys(), SupportedFeatureIds)
   return Receipts
 }
 
-function ValidatePolicySemantics(
-  Policy: KubernetesGraduationPolicy,
-  Root?: string,
-  ExpectedSourceRevision?: string,
-  ExpectedValidatedVersion?: string
-): void {
+export function ValidateKubernetesGraduationEvidenceDirectory(
+  WorkspacePath: string,
+  RelativeDirectoryPath: string,
+  ExpectedSourceRevision: string,
+  ExpectedSourceRef: string,
+  ExpectedPhase: (typeof KubernetesGraduationPhases)[number]
+): KubernetesGraduationEvidenceReceipt[] {
+  return ValidateKubernetesGraduationEvidenceFiles(
+    WorkspacePath,
+    LoadKubernetesGraduationEvidenceDirectory(WorkspacePath, RelativeDirectoryPath),
+    ExpectedSourceRevision,
+    ExpectedSourceRef,
+    ExpectedPhase
+  )
+}
+
+function ValidatePolicySemantics(Policy: KubernetesGraduationPolicy): void {
   AssertExactSet(
     'Kubernetes graduation feature ids',
     Policy.features.map(Feature => Feature.id),
@@ -608,7 +849,6 @@ function ValidatePolicySemantics(
   AssertUniqueIds('Kubernetes graduation features', Policy.features)
   const FeatureIds = new Set<string>(KubernetesGraduationFeatureIds)
 
-  const EvidenceByGate = new Map<string, KubernetesGraduationEvidenceReceipt[]>()
   for (const Gate of Policy.gates) {
     if (!Gate.mandatory) {
       throw new Error(`graduation gate ${Gate.id} must remain mandatory`)
@@ -616,31 +856,6 @@ function ValidatePolicySemantics(
     for (const FeatureId of Gate.appliesTo) {
       if (!FeatureIds.has(FeatureId)) {
         throw new Error(`graduation gate ${Gate.id} references unknown feature ${FeatureId}`)
-      }
-    }
-    if (Gate.status === 'unmet' && Gate.evidenceReceipts.length !== 0) {
-      throw new Error(`unmet gate ${Gate.id} must not claim evidence receipts`)
-    }
-    if (Gate.status === 'passed') {
-      if (Root === undefined) {
-        throw new Error(
-          `passed gate ${Gate.id} requires workspace evidence validation`
-        )
-      } else {
-        if (ExpectedSourceRevision === undefined) {
-          throw new Error(`passed gate ${Gate.id} requires an expected source revision`)
-        }
-        if (ExpectedValidatedVersion === undefined) {
-          throw new Error(`passed gate ${Gate.id} requires an expected validated product version`)
-        }
-        EvidenceByGate.set(Gate.id, ValidateEvidence(
-          Root,
-          Policy,
-          ExpectedSourceRevision,
-          ExpectedValidatedVersion,
-          Gate.id,
-          Gate.evidenceReceipts
-        ))
       }
     }
   }
@@ -665,43 +880,38 @@ function ValidatePolicySemantics(
       .filter(Gate => Gate.appliesTo.includes(Feature.id))
       .map(Gate => Gate.id)
     AssertExactSet(`feature ${Feature.id} gate ids`, Feature.gateIds, ApplicableGateIds)
-    const Incomplete = Feature.gateIds.filter(GateId => GateById.get(GateId)?.status !== 'passed')
-    if (Feature.lastValidatedVersion !== 'unvalidated') {
-      if (Incomplete.length !== 0) {
-        throw new Error(
-          `feature ${Feature.id} lastValidatedVersion requires complete mandatory gates: ${Incomplete.join(', ')}`
-        )
-      }
-      if (Root !== undefined) {
-        if (ExpectedValidatedVersion === undefined) {
-          throw new Error(
-            `feature ${Feature.id} lastValidatedVersion requires an expected validated product version`
-          )
-        }
-        if (Feature.lastValidatedVersion !== ExpectedValidatedVersion) {
-          throw new Error(
-            `feature ${Feature.id} lastValidatedVersion does not match the expected validated product version`
-          )
-        }
-      }
-      for (const GateId of Feature.gateIds) {
-        for (const Receipt of EvidenceByGate.get(GateId) ?? []) {
-          if (Receipt.validatedVersion !== Feature.lastValidatedVersion) {
-            throw new Error(
-              `feature ${Feature.id} lastValidatedVersion does not match ${GateId} evidence`
-            )
-          }
-        }
-      }
+    AssertExactSet(
+      `feature ${Feature.id} qualified platforms`,
+      Feature.qualifiedPlatforms,
+      Feature.id === 'supply-chain-admission-bundle'
+        ? ['linux/amd64', 'linux/arm64']
+        : ['linux/amd64', 'linux/arm64', 'linux/riscv64']
+    )
+    const RequiresRiscvQualification = Feature.id !== 'supply-chain-admission-bundle'
+    if (
+      Feature.gateIds.includes('native-riscv64') !== RequiresRiscvQualification ||
+      Feature.blockerIds.includes('native-riscv64-cluster-runner') !==
+        (RequiresRiscvQualification && Feature.status === 'experimental')
+    ) {
+      throw new Error(
+        `feature ${Feature.id} has an invalid native RISC-V qualification gate or blocker relationship`
+      )
+    }
+    AssertExactSet(
+      `feature ${Feature.id} required artifacts`,
+      Feature.requiredArtifacts.map(Requirement =>
+        `${Requirement.name}|${Requirement.kind}|${Requirement.repository}`
+      ),
+      Feature.id === 'supply-chain-admission-bundle'
+        ? SupplyChainArtifactRequirements
+        : []
+    )
+    if (Feature.status === 'experimental' && Feature.lastValidatedVersion !== 'unvalidated') {
+      throw new Error(`experimental feature ${Feature.id} must remain unvalidated`)
     }
     if (Feature.status === 'supported') {
-      if (Incomplete.length !== 0) {
-        throw new Error(
-          `supported feature ${Feature.id} has incomplete mandatory gates: ${Incomplete.join(', ')}`
-        )
-      }
-      if (Feature.lastValidatedVersion === 'unvalidated') {
-        throw new Error(`supported feature ${Feature.id} must name its validated product version`)
+      if (Feature.lastValidatedVersion !== Policy.targetVersion) {
+        throw new Error(`supported feature ${Feature.id} must bind target version ${Policy.targetVersion}`)
       }
       if (Feature.blockerIds.length !== 0) {
         throw new Error(`supported feature ${Feature.id} must not retain blockers`)
@@ -723,39 +933,11 @@ export function ValidateKubernetesGraduationPolicyObject(
   return Policy
 }
 
-function LoadPolicy(
-  Root: string,
-  RelativePolicyPath: string,
-  RelativeSchemaPath: string,
-  ExpectedSourceRevision?: string,
-  ExpectedValidatedVersion?: string
-): KubernetesGraduationPolicy {
-  const PolicyValue = ParseJson(ReadBoundedFile(Root, RelativePolicyPath), RelativePolicyPath)
-  const SchemaValue = ParseJson(ReadBoundedFile(Root, RelativeSchemaPath), RelativeSchemaPath)
-  if (!IsObject(SchemaValue)) {
-    throw new Error('Kubernetes graduation schema must be an object')
-  }
-  ValidateSchemaValue(PolicyValue, SchemaValue as JsonSchema, 'policy')
-  const Policy = PolicyValue as KubernetesGraduationPolicy
-  const RequestedRevision = ExpectedSourceRevision === undefined
-    ? undefined
-    : ValidateSourceRevision(ExpectedSourceRevision, 'expected source revision')
-  let EvidenceRevision = RequestedRevision
-  if (
-    RequestedRevision !== undefined ||
-    Policy.gates.some(Gate => Gate.status === 'passed')
-  ) {
-    const WorkspaceRevision = ResolveWorkspaceRevision(Root)
-    if (RequestedRevision !== undefined && RequestedRevision !== WorkspaceRevision) {
-      throw new Error('expected source revision does not match the checked-out Git source revision')
-    }
-    EvidenceRevision = RequestedRevision ?? WorkspaceRevision
-  }
-  const RequestedVersion = ExpectedValidatedVersion === undefined
-    ? undefined
-    : ValidateProductVersion(ExpectedValidatedVersion, 'expected validated product version')
-  ValidatePolicySemantics(Policy, Root, EvidenceRevision, RequestedVersion)
-  return Policy
+export function LoadKubernetesGraduationPolicy(WorkspacePath: string): KubernetesGraduationPolicy {
+  const Root = ResolveWorkspace(WorkspacePath)
+  const PolicyValue = ParseJson(ReadBoundedFile(Root, PolicyPath), PolicyPath)
+  const SchemaValue = ParseJson(ReadBoundedFile(Root, SchemaPath), SchemaPath)
+  return ValidateKubernetesGraduationPolicyObject(PolicyValue, SchemaValue)
 }
 
 function MarkdownCode(Value: string): string {
@@ -786,8 +968,8 @@ export function RenderKubernetesGraduationTables(
     '',
     '### Governed feature states',
     '',
-    '| Feature ID | State | Last validated version | Mandatory gates | Active blockers |',
-    '| --- | --- | --- | ---: | --- |'
+    '| Feature ID | State | Last validated version | Qualification platforms | Required artifacts | Mandatory gates | Active blockers |',
+    '| --- | --- | --- | --- | --- | ---: | --- |'
   )
   const BlockerById = new Map(Policy.blockers.map(Blocker => [Blocker.id, Blocker]))
   for (const Feature of Policy.features) {
@@ -799,8 +981,11 @@ export function RenderKubernetesGraduationTables(
         }
         return MarkdownCode(BlockerId)
       }).join(', ')
+    const RequiredArtifacts = Feature.requiredArtifacts.length === 0
+      ? 'None'
+      : Feature.requiredArtifacts.map(Requirement => MarkdownCode(Requirement.name)).join(', ')
     Lines.push(
-      `| ${MarkdownCode(Feature.id)} | ${MarkdownCode(Feature.status)} | ${MarkdownCode(Feature.lastValidatedVersion)} | ${Feature.gateIds.length} | ${Blockers} |`
+      `| ${MarkdownCode(Feature.id)} | ${MarkdownCode(Feature.status)} | ${MarkdownCode(Feature.lastValidatedVersion)} | ${Feature.qualifiedPlatforms.map(MarkdownCode).join(', ')} | ${RequiredArtifacts} | ${Feature.gateIds.length} | ${Blockers} |`
     )
   }
 
@@ -808,12 +993,12 @@ export function RenderKubernetesGraduationTables(
     '',
     '### Mandatory graduation gates',
     '',
-    '| Gate ID | Earliest cadence | State | Applies to |',
-    '| --- | --- | --- | --- |'
+    '| Gate ID | Earliest cadence | Applies to |',
+    '| --- | --- | --- |'
   )
   for (const Gate of Policy.gates) {
     Lines.push(
-      `| ${MarkdownCode(Gate.id)} | ${MarkdownCode(Gate.cadence)} | ${MarkdownCode(Gate.status)} | ${Gate.appliesTo.map(MarkdownCode).join(', ')} |`
+      `| ${MarkdownCode(Gate.id)} | ${MarkdownCode(Gate.cadence)} | ${Gate.appliesTo.map(MarkdownCode).join(', ')} |`
     )
   }
   Lines.push('', GeneratedEnd)
@@ -858,19 +1043,16 @@ function FeatureStatusRows(Content: string): Map<string, string> {
 
 export function ValidateKubernetesGraduationWorkspace(
   WorkspacePath: string,
-  RelativePolicyPath = PolicyPath,
-  RelativeSchemaPath = SchemaPath,
-  ExpectedSourceRevision?: string,
-  ExpectedValidatedVersion?: string
+  ExpectedSourceRevision?: string
 ): KubernetesGraduationPolicy {
   const Root = ResolveWorkspace(WorkspacePath)
-  const Policy = LoadPolicy(
-    Root,
-    RelativePolicyPath,
-    RelativeSchemaPath,
-    ExpectedSourceRevision,
-    ExpectedValidatedVersion
-  )
+  if (ExpectedSourceRevision !== undefined) {
+    const Revision = ValidateSourceRevision(ExpectedSourceRevision, 'expected source revision')
+    if (ResolveWorkspaceRevision(Root) !== Revision) {
+      throw new Error('expected source revision does not match the checked-out Git source revision')
+    }
+  }
+  const Policy = LoadKubernetesGraduationPolicy(Root)
   AssertGeneratedDocument(
     ReadBoundedFile(Root, SupportDocumentPath),
     RenderKubernetesGraduationTables(Policy)
@@ -889,8 +1071,8 @@ export function ValidateKubernetesGraduationWorkspace(
 
 function ParseCli(Argv: string[]): ParsedCli {
   const Command = Argv[2]
-  if (Command !== 'check' && Command !== 'render') {
-    throw new Error('usage: kubernetes_graduation.ts <check|render> [options]')
+  if (Command !== 'check' && Command !== 'render' && Command !== 'verify') {
+    throw new Error('usage: kubernetes_graduation.ts <check|render|verify> [options]')
   }
   const Parameters: CliParameters = {}
   for (let Index = 3; Index < Argv.length; Index += 1) {
@@ -907,17 +1089,20 @@ function ParseCli(Argv: string[]): ParsedCli {
       case '--workspace-path':
         Parameters.workspacePath = Value
         break
-      case '--policy-path':
-        Parameters.policyPath = Value
-        break
-      case '--schema-path':
-        Parameters.schemaPath = Value
-        break
       case '--expected-source-revision':
         Parameters.expectedSourceRevision = Value
         break
-      case '--expected-version':
-        Parameters.expectedValidatedVersion = Value
+      case '--expected-source-ref':
+        Parameters.expectedSourceRef = Value
+        break
+      case '--phase':
+        if (Value !== 'candidate' && Value !== 'official_beta') {
+          throw new Error(`unsupported qualification phase: ${Value}`)
+        }
+        Parameters.phase = Value
+        break
+      case '--evidence-dir':
+        Parameters.evidenceDirectory = Value
         break
       default:
         throw new Error(`unknown option: ${Option}`)
@@ -926,29 +1111,83 @@ function ParseCli(Argv: string[]): ParsedCli {
   return { command: Command, parameters: Parameters }
 }
 
+export function ResolveKubernetesGraduationGitRefRevision(Root: string, Ref: string): string {
+  const ValidRef = ValidateSourceRef(Ref, 'expected source ref')
+  try {
+    return ValidateSourceRevision(execFileSync(
+      'git',
+      ['-C', Root, 'rev-parse', '--verify', `${ValidRef}^{commit}`],
+      { encoding: 'utf8', maxBuffer: 1024, stdio: ['ignore', 'pipe', 'pipe'] }
+    ).trim(), 'expected source ref revision')
+  } catch {
+    throw new Error(`could not resolve expected source ref ${ValidRef}`)
+  }
+}
+
+export function ValidateKubernetesGraduationPhaseRef(
+  Phase: (typeof KubernetesGraduationPhases)[number],
+  Ref: string
+): void {
+  if (Phase === 'candidate' && Ref !== 'refs/heads/main') {
+    throw new Error('candidate qualification requires source ref refs/heads/main')
+  }
+  if (Phase === 'official_beta' && !/^refs\/tags\/0\.7\.1-beta\.[1-9][0-9]*$/.test(Ref)) {
+    throw new Error('official_beta qualification requires an exact 0.7.1 beta tag ref')
+  }
+}
+
 function RunCli(): void {
   const { command: Command, parameters: Parameters } = ParseCli(Process.argv)
   const Root = ResolveWorkspace(Parameters.workspacePath ?? '.')
-  const RelativePolicyPath = Parameters.policyPath ?? PolicyPath
-  const RelativeSchemaPath = Parameters.schemaPath ?? SchemaPath
   if (Command === 'check') {
-    ValidateKubernetesGraduationWorkspace(
-      Root,
-      RelativePolicyPath,
-      RelativeSchemaPath,
-      Parameters.expectedSourceRevision,
-      Parameters.expectedValidatedVersion
-    )
+    if (
+      Parameters.expectedSourceRef !== undefined ||
+      Parameters.phase !== undefined ||
+      Parameters.evidenceDirectory !== undefined
+    ) {
+      throw new Error('check accepts only --workspace-path and --expected-source-revision')
+    }
+    ValidateKubernetesGraduationWorkspace(Root, Parameters.expectedSourceRevision)
     return
   }
-  const Policy = LoadPolicy(
-    Root,
-    RelativePolicyPath,
-    RelativeSchemaPath,
+  if (Command === 'render') {
+    if (
+      Parameters.expectedSourceRevision !== undefined ||
+      Parameters.expectedSourceRef !== undefined ||
+      Parameters.phase !== undefined ||
+      Parameters.evidenceDirectory !== undefined
+    ) {
+      throw new Error('render accepts only --workspace-path')
+    }
+    Process.stdout.write(`${RenderKubernetesGraduationTables(LoadKubernetesGraduationPolicy(Root))}\n`)
+    return
+  }
+  if (
+    Parameters.expectedSourceRevision === undefined ||
+    Parameters.expectedSourceRef === undefined ||
+    Parameters.phase === undefined ||
+    Parameters.evidenceDirectory === undefined
+  ) {
+    throw new Error('verify requires --expected-source-revision, --expected-source-ref, --phase, and --evidence-dir')
+  }
+  const Revision = ValidateSourceRevision(
     Parameters.expectedSourceRevision,
-    Parameters.expectedValidatedVersion
+    'expected source revision'
   )
-  Process.stdout.write(`${RenderKubernetesGraduationTables(Policy)}\n`)
+  if (ResolveWorkspaceRevision(Root) !== Revision) {
+    throw new Error('expected source revision does not match the checked-out Git source revision')
+  }
+  ValidateKubernetesGraduationPhaseRef(Parameters.phase, Parameters.expectedSourceRef)
+  if (ResolveKubernetesGraduationGitRefRevision(Root, Parameters.expectedSourceRef) !== Revision) {
+    throw new Error('expected source ref does not resolve to the expected checked-out Git source revision')
+  }
+  ValidateKubernetesGraduationEvidenceDirectory(
+    Root,
+    Parameters.evidenceDirectory,
+    Revision,
+    Parameters.expectedSourceRef,
+    Parameters.phase
+  )
 }
 
 const Entrypoint = Process.argv[1]

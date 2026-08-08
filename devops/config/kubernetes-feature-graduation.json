@@ -1,7 +1,7 @@
 {
   "$schema": "./kubernetes-feature-graduation.schema.json",
-  "schemaVersion": 1,
-  "policyVersion": 3,
+  "schemaVersion": 2,
+  "policyVersion": 4,
   "lifecycleAuthority": "docs/FeatureStatus.md",
   "evidenceSchema": "devops/config/kubernetes-feature-graduation-evidence.schema.json",
   "supportContract": {
@@ -130,7 +130,6 @@
       "id": "policy-contract",
       "objective": "The registry, generated support tables, feature lifecycle matrix, release contract, charts, and workflow topology agree.",
       "cadence": "pull_request",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
@@ -148,14 +147,12 @@
         "supply-chain-admission-bundle",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "unsupported-combination-diagnostics",
       "objective": "Helm, controller readiness, support metadata, and operator diagnostics reject or clearly identify every unsupported Kubernetes, Gateway API, architecture, and skew combination.",
       "cadence": "pull_request",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
@@ -173,68 +170,58 @@
         "supply-chain-admission-bundle",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "clean-lifecycle",
       "objective": "Clean install, same-version upgrade, rollback, and uninstall converge while operator-owned Gateway API CRDs and retained immutable rollback objects follow the documented ownership contract.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
         "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "leader-election-failover",
       "objective": "Leader deletion, follower takeover, Lease deletion and recreation, and stale-writer fencing preserve a single active writer with takeover within 45 seconds.",
       "cadence": "nightly",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
         "gateway-controller-multi-target",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "api-outage-recovery",
       "objective": "A bounded Kubernetes API outage and leader-only API partition produce no unproved writes and recover reconciliation within 90 seconds after connectivity returns.",
       "cadence": "nightly",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
         "gateway-controller-multi-target",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "watch-reconnect-compaction",
       "objective": "Watch close, timeout, error events, and HTTP 410 resource-version compaction trigger a fresh list or GET without stale authority.",
       "cadence": "pull_request",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
         "gateway-api-weighted-discovery",
         "gateway-api-route-policy",
         "gateway-controller-multi-target"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "stale-object-convergence",
       "objective": "Accepted, rejected, deleted, and corrected Gateway API objects converge to fresh status and configuration without preserving stale authority.",
       "cadence": "nightly",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
@@ -249,14 +236,12 @@
         "gateway-api-route-policy",
         "gateway-controller-multi-target",
         "gateway-controller-explain"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "partial-rollout-recovery",
       "objective": "A stalled, rejected, or partially Ready candidate never commits and restores the last committed revision before a distinct candidate may proceed.",
       "cadence": "pull_request",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
@@ -264,28 +249,24 @@
         "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "network-partition",
       "objective": "Controller-to-API and multi-node partitions preserve fencing, readiness, and last-committed configuration guarantees and recover within the documented bounds.",
       "cadence": "nightly",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
         "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "configmap-propagation",
       "objective": "Base configuration, generated configuration, and BackendTLSPolicy public-CA ConfigMap changes create and converge the expected immutable revision within 300 seconds.",
       "cadence": "nightly",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
@@ -294,89 +275,75 @@
         "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "secret-rotation",
       "objective": "Versioned TLS and Admin Secret replacement followed by a Helm rollout activates only the intended Secret without claiming unsupported in-place hot reload.",
       "cadence": "nightly",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "helm-data-plane"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "multi-node",
       "objective": "A multi-node cluster preserves topology, disruption, rollout, status, and traffic behavior through one worker loss.",
       "cadence": "nightly",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
         "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "pod-security-restricted",
       "objective": "Both charts install and operate in a namespace enforcing the Kubernetes restricted Pod Security Standard.",
       "cadence": "pull_request",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "live-supply-chain-admission",
       "objective": "The complete edge-secure-medium v2 chart runs on exactly three Ready nodes with build-validated exact images and renders webhook ingress restricted to exact API-server host prefixes while the live TLS webhook admits every authorized executable class, rejects mismatched identities, fails closed on TLS and endpoint outages without intercepting unrelated resources, and rotates TLS and signed bundles with overlap and rollback.",
       "cadence": "pull_request",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "supply-chain-admission-bundle",
         "helm-data-plane"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "network-policy-cnis",
       "objective": "The portable NetworkPolicy contract passes on both Calico and Cilium in IPv4 single-stack clusters without undeclared egress.",
       "cadence": "nightly",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "previous-minor-interop",
       "objective": "Release-candidate and immediately preceding minor released or release-equivalent artifacts pass bounded rolling upgrade and rollback using immutable verified digests.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
         "gateway-controller-multi-target",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "long-duration-soak",
       "objective": "An eight-hour correctness soak repeats route changes, traffic, leader replacement, and API disruptions with no stale writes, digest mismatch, or unrecovered readiness loss.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
@@ -393,14 +360,12 @@
         "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "native-amd64",
       "objective": "The complete release-candidate Kubernetes suite passes on a native linux/amd64 worker using the canonical release CPU floor.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
@@ -417,14 +382,12 @@
         "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "native-arm64",
       "objective": "The complete release-candidate Kubernetes suite passes on a native linux/arm64 worker.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
@@ -441,14 +404,12 @@
         "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "native-riscv64",
       "objective": "The complete release-candidate Kubernetes suite passes on a real native linux/riscv64 worker; emulation and image smoke are not qualifying evidence.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-controller",
@@ -465,68 +426,57 @@
         "gateway-controller-explain",
         "helm-data-plane",
         "helm-gateway-controller"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "gateway-conformance-http",
       "objective": "The pinned upstream Gateway API GATEWAY-HTTP core profile passes without skipped or exempted tests and emits a version-specific conformance report.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-api-httproute",
         "gateway-api-backendtlspolicy",
         "gateway-api-weighted-discovery",
         "gateway-api-standard-filters-backend-tls"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "gateway-conformance-grpc",
       "objective": "The pinned upstream Gateway API GATEWAY-GRPC core profile passes without skipped or exempted tests and emits a version-specific conformance report.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-api-grpcroute",
         "gateway-api-weighted-discovery",
         "gateway-api-standard-filters-backend-tls"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "gateway-conformance-tls",
       "objective": "The pinned upstream Gateway API GATEWAY-TLS core profile passes without skipped or exempted tests and emits a version-specific conformance report.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-api-tlsroute"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "gateway-conformance-tcp",
       "objective": "The pinned upstream Gateway API GATEWAY-TCP core profile passes without skipped or exempted tests and emits a version-specific conformance report.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-api-tcproute"
-      ],
-      "evidenceReceipts": []
+      ]
     },
     {
       "id": "gateway-conformance-udp",
       "objective": "The pinned upstream Gateway API GATEWAY-UDP core profile passes without skipped or exempted tests and emits a version-specific conformance report.",
       "cadence": "release_candidate",
-      "status": "unmet",
       "mandatory": true,
       "appliesTo": [
         "gateway-api-udproute"
-      ],
-      "evidenceReceipts": []
+      ]
     }
   ],
   "features": [
@@ -555,7 +505,13 @@
       "blockerIds": [
         "previous-stable-role-topology",
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-api-httproute",
@@ -573,7 +529,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-api-grpcroute",
@@ -591,7 +553,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-api-tlsroute",
@@ -609,7 +577,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-api-tcproute",
@@ -627,7 +601,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-api-udproute",
@@ -645,7 +625,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-api-backendtlspolicy",
@@ -664,7 +650,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-api-weighted-discovery",
@@ -684,7 +676,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-api-standard-filters-backend-tls",
@@ -704,7 +702,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-api-route-policy",
@@ -722,7 +726,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-controller-multi-target",
@@ -749,7 +759,13 @@
       "blockerIds": [
         "previous-stable-role-topology",
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "gateway-controller-explain",
@@ -767,7 +783,13 @@
       ],
       "blockerIds": [
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "supply-chain-admission-bundle",
@@ -778,7 +800,53 @@
         "unsupported-combination-diagnostics",
         "live-supply-chain-admission"
       ],
-      "blockerIds": []
+      "blockerIds": [],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "requiredArtifacts": [
+        {
+          "name": "image-standalone",
+          "kind": "oci-image",
+          "repository": "ghcr.io/oxibelt/oxibelt"
+        },
+        {
+          "name": "image-dataplane",
+          "kind": "oci-image",
+          "repository": "ghcr.io/oxibelt/oxibelt-dataplane"
+        },
+        {
+          "name": "image-dataplane-strict",
+          "kind": "oci-image",
+          "repository": "ghcr.io/oxibelt/oxibelt-dataplane-strict"
+        },
+        {
+          "name": "image-controller",
+          "kind": "oci-image",
+          "repository": "ghcr.io/oxibelt/oxibelt-gateway-controller"
+        },
+        {
+          "name": "image-tools",
+          "kind": "oci-image",
+          "repository": "ghcr.io/oxibelt/oxibelt-tools"
+        },
+        {
+          "name": "image-keysigner",
+          "kind": "oci-image",
+          "repository": "ghcr.io/oxibelt/oxibelt-keysigner"
+        },
+        {
+          "name": "chart-oxibelt",
+          "kind": "helm-chart",
+          "repository": "ghcr.io/oxibelt/charts/oxibelt"
+        },
+        {
+          "name": "chart-gateway-controller",
+          "kind": "helm-chart",
+          "repository": "ghcr.io/oxibelt/charts/oxibelt-gateway-controller"
+        }
+      ]
     },
     {
       "id": "helm-data-plane",
@@ -805,7 +873,13 @@
       "blockerIds": [
         "previous-stable-role-topology",
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     },
     {
       "id": "helm-gateway-controller",
@@ -832,7 +906,15 @@
       "blockerIds": [
         "previous-stable-role-topology",
         "native-riscv64-cluster-runner"
-      ]
+      ],
+      "qualifiedPlatforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "linux/riscv64"
+      ],
+      "requiredArtifacts": []
     }
-  ]
+  ],
+  "repository": "OxiBelt/OxiBelt",
+  "targetVersion": "0.7.1"
 }

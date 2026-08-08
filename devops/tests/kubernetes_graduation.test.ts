@@ -5,20 +5,39 @@ import * as Path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
-  KubernetesGraduationPolicyDefinitionSha256,
   KubernetesGraduationFeatureIds,
+  KubernetesGraduationPolicyDefinitionSha256,
+  LoadKubernetesGraduationEvidenceDirectory,
   RenderKubernetesGraduationTables,
+  ResolveKubernetesGraduationGitRefRevision,
+  ValidateKubernetesGraduationEvidenceFiles,
   ValidateKubernetesGraduationEvidenceObject,
+  ValidateKubernetesGraduationEvidenceSet,
+  ValidateKubernetesGraduationPhaseRef,
   ValidateKubernetesGraduationPolicyObject,
   ValidateKubernetesGraduationWorkspace,
   type KubernetesGraduationEvidenceReceipt,
   type KubernetesGraduationPolicy
 } from '../sources/kubernetes_graduation.js'
 
+/* eslint-disable @typescript-eslint/naming-convention -- Fixture fields mirror detached receipt JSON. */
 const RepoRoot = Path.resolve(Path.dirname(fileURLToPath(import.meta.url)), '../..')
 
 function ReadJson(RelativePath: string): unknown {
   return JSON.parse(Fs.readFileSync(Path.join(RepoRoot, RelativePath), 'utf8')) as unknown
+}
+
+function CanonicalJson(Value: unknown): string {
+  if (Array.isArray(Value)) {
+    return `[${Value.map(Item => CanonicalJson(Item)).join(',')}]`
+  }
+  if (typeof Value === 'object' && Value !== null) {
+    const ObjectValue = Value as Record<string, unknown>
+    return `{${Object.keys(ObjectValue).sort().map(Key =>
+      `${JSON.stringify(Key)}:${CanonicalJson(ObjectValue[Key])}`
+    ).join(',')}}`
+  }
+  return JSON.stringify(Value)
 }
 
 function Policy(): KubernetesGraduationPolicy {
@@ -29,43 +48,117 @@ function Policy(): KubernetesGraduationPolicy {
 }
 
 function GitHead(): string {
-  return execFileSync(
-    'git',
-    ['-C', RepoRoot, 'rev-parse', '--verify', 'HEAD^{commit}'],
-    {
-      encoding: 'utf8',
-      maxBuffer: 1024,
-      stdio: ['ignore', 'pipe', 'pipe']
-    }
-  ).trim()
+  return execFileSync('git', ['-C', RepoRoot, 'rev-parse', '--verify', 'HEAD^{commit}'], {
+    encoding: 'utf8', maxBuffer: 1024, stdio: ['ignore', 'pipe', 'pipe']
+  }).trim()
 }
 
-test('accepts the repository policy, generated support document, and lifecycle matrix', () => {
-  const Loaded = ValidateKubernetesGraduationWorkspace(RepoRoot)
-  Assert.equal(Loaded.schemaVersion, 1)
+function SupportedPolicy(
+  FeatureIds: Array<(typeof KubernetesGraduationFeatureIds)[number]>
+): KubernetesGraduationPolicy {
+  const Result = Policy()
+  for (const Feature of Result.features) {
+    if (FeatureIds.includes(Feature.id)) {
+      Feature.status = 'supported'
+      Feature.lastValidatedVersion = Result.targetVersion
+      Feature.blockerIds = []
+    }
+  }
+  return ValidateKubernetesGraduationPolicyObject(
+    Result,
+    ReadJson('devops/config/kubernetes-feature-graduation.schema.json')
+  )
+}
+
+function Receipt(
+  PolicyValue: KubernetesGraduationPolicy,
+  FeatureId: (typeof KubernetesGraduationFeatureIds)[number] = 'supply-chain-admission-bundle'
+): KubernetesGraduationEvidenceReceipt {
+  const Feature = PolicyValue.features.find(Candidate => Candidate.id === FeatureId)
+  Assert.notEqual(Feature, undefined)
+  if (Feature === undefined) {
+    throw new Error(`missing fixture feature ${FeatureId}`)
+  }
+  const Revision = GitHead()
+  const Jobs = Feature.qualifiedPlatforms.map((Platform, Index) => ({
+    id: 456 + Index,
+    name: `kubernetes qualification ${Platform}`,
+    conclusion: 'success' as const
+  }))
+  const Reports = Feature.qualifiedPlatforms.map((Platform, Index) => ({
+    name: `kubernetes-qualification-${Platform.slice('linux/'.length)}.json`,
+    sha256: `${Index + 4}`.repeat(64)
+  }))
+  return {
+    schemaVersion: 2,
+    policyVersion: PolicyValue.policyVersion,
+    policyDefinitionSha256: KubernetesGraduationPolicyDefinitionSha256(PolicyValue),
+    featureId: Feature.id,
+    intendedStatus: 'supported',
+    phase: 'candidate',
+    targetVersion: PolicyValue.targetVersion,
+    repository: PolicyValue.repository,
+    sourceRef: 'refs/heads/main',
+    sourceRevision: Revision,
+    generatedAt: '2026-08-08T12:00:00Z',
+    qualifiedPlatforms: Feature.qualifiedPlatforms,
+    workflow: {
+      repository: PolicyValue.repository,
+      path: '.github/workflows/feature-graduation.yml',
+      ref: Revision,
+      runId: 123,
+      runAttempt: 2,
+      jobs: Jobs
+    },
+    toolVersions: [
+      { name: 'kubectl', version: 'v1.34.8' },
+      { name: 'helm', version: '3.21.3' }
+    ],
+    artifactSubjects: Feature.requiredArtifacts.map((Requirement, Index) => {
+      const Digest = `sha256:${((Index + 2) % 10).toString().repeat(64)}`
+      return {
+        name: Requirement.name,
+        kind: Requirement.kind,
+        reference: `${Requirement.repository}@${Digest}`,
+        digest: Digest
+      }
+    }),
+    reportHashes: Reports,
+    logHashes: Jobs.map((Job, Index) => ({ jobId: Job.id, sha256: `${Index + 7}`.repeat(64) })),
+    gateResults: Feature.gateIds.map(id => ({
+      id,
+      platformResults: Feature.qualifiedPlatforms.map((platform, Index) => ({
+        platform,
+        jobId: Jobs[Index].id,
+        reportName: Reports[Index].name,
+        reportSha256: Reports[Index].sha256,
+        result: 'pass' as const
+      }))
+    })),
+    result: 'pass'
+  }
+}
+
+test('accepts the exact experimental registry, support document, and lifecycle matrix', () => {
+  const Loaded = ValidateKubernetesGraduationWorkspace(RepoRoot, GitHead())
+  Assert.equal(Loaded.schemaVersion, 2)
+  Assert.equal(Loaded.policyVersion, 4)
+  Assert.equal(Loaded.targetVersion, '0.7.1')
   Assert.deepEqual(
     Loaded.features.map(Feature => Feature.id).sort(),
     [...KubernetesGraduationFeatureIds].sort()
   )
-  Assert.ok(Loaded.features.every(Feature => Feature.status === 'experimental'))
-})
-
-test('binds an explicit expected revision to the checked-out Git commit', () => {
-  const Revision = GitHead()
-  ValidateKubernetesGraduationWorkspace(RepoRoot, undefined, undefined, Revision)
-  const MismatchedRevision = `${Revision[0] === '0' ? '1' : '0'}${Revision.slice(1)}`
+  Assert.ok(Loaded.features.every(Feature =>
+    Feature.status === 'experimental' && Feature.lastValidatedVersion === 'unvalidated'
+  ))
+  const MismatchedRevision = `${GitHead()[0] === '0' ? '1' : '0'}${GitHead().slice(1)}`
   Assert.throws(
-    () => ValidateKubernetesGraduationWorkspace(
-      RepoRoot,
-      undefined,
-      undefined,
-      MismatchedRevision
-    ),
+    () => ValidateKubernetesGraduationWorkspace(RepoRoot, MismatchedRevision),
     /expected source revision does not match the checked-out Git source revision/
   )
 })
 
-test('rejects schema-unknown fields and incomplete supported promotion', () => {
+test('preserves support inputs and rejects invalid promotion or platform scope', () => {
   const Schema = ReadJson('devops/config/kubernetes-feature-graduation.schema.json')
   const Unknown = Policy()
   Object.assign(Unknown as unknown as Record<string, unknown>, { ignored: true })
@@ -74,236 +167,394 @@ test('rejects schema-unknown fields and incomplete supported promotion', () => {
     /unknown property ignored/
   )
 
-  const Promoted = Policy()
-  const Feature = Promoted.features.find(Candidate => Candidate.id === 'gateway-controller')
-  Assert.notEqual(Feature, undefined)
-  if (Feature === undefined) {
-    return
+  const PromotedWithBlocker = Policy()
+  const Controller = PromotedWithBlocker.features.find(Feature => Feature.id === 'gateway-controller')
+  Assert.notEqual(Controller, undefined)
+  if (Controller !== undefined) {
+    Controller.status = 'supported'
+    Controller.lastValidatedVersion = PromotedWithBlocker.targetVersion
   }
-  Feature.status = 'supported'
-  Feature.blockerIds = []
   Assert.throws(
-    () => ValidateKubernetesGraduationPolicyObject(Promoted, Schema),
-    /incomplete mandatory gates/
+    () => ValidateKubernetesGraduationPolicyObject(PromotedWithBlocker, Schema),
+    /invalid native RISC-V qualification gate or blocker relationship/
+  )
+
+  const WrongVersion = Policy()
+  const Supply = WrongVersion.features.find(Feature => Feature.id === 'supply-chain-admission-bundle')
+  Assert.notEqual(Supply, undefined)
+  if (Supply !== undefined) {
+    Supply.status = 'supported'
+  }
+  Assert.throws(
+    () => ValidateKubernetesGraduationPolicyObject(WrongVersion, Schema),
+    /must bind target version 0.7.1/
+  )
+
+  const RiscvSupply = Policy()
+  const RiscvSupplyFeature = RiscvSupply.features.find(
+    Feature => Feature.id === 'supply-chain-admission-bundle'
+  )
+  Assert.notEqual(RiscvSupplyFeature, undefined)
+  if (RiscvSupplyFeature !== undefined) {
+    RiscvSupplyFeature.qualifiedPlatforms.push('linux/riscv64')
+  }
+  Assert.throws(
+    () => ValidateKubernetesGraduationPolicyObject(RiscvSupply, Schema),
+    /qualified platforms must be exactly/
+  )
+
+  const MissingRiscvBlocker = Policy()
+  const MissingRiscvController = MissingRiscvBlocker.features.find(
+    Feature => Feature.id === 'gateway-controller'
+  )
+  Assert.notEqual(MissingRiscvController, undefined)
+  if (MissingRiscvController !== undefined) {
+    MissingRiscvController.blockerIds = MissingRiscvController.blockerIds.filter(
+      BlockerId => BlockerId !== 'native-riscv64-cluster-runner'
+    )
+  }
+  Assert.throws(
+    () => ValidateKubernetesGraduationPolicyObject(MissingRiscvBlocker, Schema),
+    /invalid native RISC-V qualification gate or blocker relationship/
+  )
+
+  const SupplyRiscvBlocker = Policy()
+  const SupplyWithoutRiscv = SupplyRiscvBlocker.features.find(
+    Feature => Feature.id === 'supply-chain-admission-bundle'
+  )
+  Assert.notEqual(SupplyWithoutRiscv, undefined)
+  if (SupplyWithoutRiscv !== undefined) {
+    SupplyWithoutRiscv.blockerIds.push('native-riscv64-cluster-runner')
+  }
+  Assert.throws(
+    () => ValidateKubernetesGraduationPolicyObject(SupplyRiscvBlocker, Schema),
+    /invalid native RISC-V qualification gate or blocker relationship/
+  )
+
+  const SubstituteArtifact = Policy()
+  const SubstituteSupply = SubstituteArtifact.features.find(
+    Feature => Feature.id === 'supply-chain-admission-bundle'
+  )
+  Assert.notEqual(SubstituteSupply, undefined)
+  if (SubstituteSupply !== undefined) {
+    SubstituteSupply.requiredArtifacts[0].repository = 'ghcr.io/oxibelt/substitute'
+  }
+  Assert.throws(
+    () => ValidateKubernetesGraduationPolicyObject(SubstituteArtifact, Schema),
+    /required artifacts must be exactly/
   )
 })
 
-test('rejects mutable or cross-minor Kubernetes representatives', () => {
-  const Schema = ReadJson('devops/config/kubernetes-feature-graduation.schema.json')
-  const Mutable = Policy()
-  Mutable.supportContract.kubernetes.minors[0].kindNodeImage = 'kindest/node:v1.34.8'
-  Assert.throws(
-    () => ValidateKubernetesGraduationPolicyObject(Mutable, Schema),
-    /does not match required pattern/
-  )
-
-  const CrossMinor = Policy()
-  CrossMinor.supportContract.kubernetes.minors[0].ciVersion = 'v1.35.5'
-  Assert.throws(
-    () => ValidateKubernetesGraduationPolicyObject(CrossMinor, Schema),
-    /representative .* must use the same minor/
-  )
-})
-
-test('renders the Kubernetes support tables deterministically', () => {
-  const Loaded = Policy()
-  const First = RenderKubernetesGraduationTables(Loaded)
-  const Second = RenderKubernetesGraduationTables(structuredClone(Loaded))
+test('renders detached gate descriptors and qualification platforms deterministically', () => {
+  const First = RenderKubernetesGraduationTables(Policy())
+  const Second = RenderKubernetesGraduationTables(structuredClone(Policy()))
   Assert.equal(First, Second)
   Assert.match(First, /Graduation target Kubernetes matrix/)
-  Assert.match(First, /`gateway-controller` \| `experimental`/)
-  Assert.match(First, /`native-riscv64` \| `release_candidate` \| `unmet`/)
+  Assert.match(First, /Qualification platforms/)
+  Assert.match(First, /`supply-chain-admission-bundle` \| `experimental` \| `unvalidated` \| `linux\/amd64`, `linux\/arm64`/)
+  Assert.match(First, /`image-standalone`.*`chart-gateway-controller`/)
+  Assert.match(First, /`native-riscv64` \| `release_candidate` \|/)
+  Assert.doesNotMatch(First, /\| State \| Applies to \|/)
 })
 
-test('requires exact source, immutable image, chart, report, and log bindings in evidence receipts', () => {
-  const Loaded = Policy()
-  const EvidenceSchema = ReadJson(
-    'devops/config/kubernetes-feature-graduation-evidence.schema.json'
+test('binds candidate and official beta phases to exact release refs', () => {
+  ValidateKubernetesGraduationPhaseRef('candidate', 'refs/heads/main')
+  ValidateKubernetesGraduationPhaseRef('official_beta', 'refs/tags/0.7.1-beta.3')
+  Assert.throws(
+    () => ValidateKubernetesGraduationPhaseRef('candidate', 'refs/heads/release'),
+    /requires source ref refs\/heads\/main/
   )
-  const ExpectedSourceRevision = '1'.repeat(40)
-  const Receipt: KubernetesGraduationEvidenceReceipt = {
-    schemaVersion: 1,
-    policyVersion: Loaded.policyVersion,
-    policyDefinitionSha256: KubernetesGraduationPolicyDefinitionSha256(Loaded),
-    sourceRevision: ExpectedSourceRevision,
-    validatedVersion: 'v0.7.0',
-    runId: 123,
-    runAttempt: 2,
-    generatedAt: '2026-07-24T12:00:00Z',
-    jobIds: [456],
-    artifactSubjects: [
-      {
-        name: 'controller',
-        kind: 'oci-image',
-        reference: `ghcr.io/oxibelt/oxibelt-gateway-controller@sha256:${'2'.repeat(64)}`,
-        digest: `sha256:${'2'.repeat(64)}`
-      },
-      {
-        name: 'controller-chart',
-        kind: 'helm-chart',
-        reference: 'oxibelt-gateway-controller-0.7.0.tgz',
-        digest: `sha256:${'3'.repeat(64)}`
-      }
-    ],
-    reports: [
-      {
-        name: 'conformance.json',
-        sha256: '4'.repeat(64)
-      }
-    ],
-    logs: [
-      {
-        jobId: 456,
-        sha256: '5'.repeat(64)
-      }
-    ],
-    gateResults: [
-      {
-        id: 'policy-contract',
-        result: 'passed'
-      }
-    ]
-  }
+  Assert.throws(
+    () => ValidateKubernetesGraduationPhaseRef('official_beta', 'refs/tags/0.7.1'),
+    /requires an exact 0.7.1 beta tag ref/
+  )
+  Assert.throws(
+    () => ResolveKubernetesGraduationGitRefRevision(
+      RepoRoot,
+      'refs/tags/0.7.1-beta.999999-does-not-exist'
+    ),
+    /could not resolve expected source ref/
+  )
+})
+
+test('requires a supported exact feature-scoped receipt with complete provenance', () => {
+  const BaselinePolicy = Policy()
+  const PolicyValue = SupportedPolicy(['supply-chain-admission-bundle'])
+  const Schema = ReadJson('devops/config/kubernetes-feature-graduation-evidence.schema.json')
+  const Evidence = Receipt(PolicyValue)
   ValidateKubernetesGraduationEvidenceObject(
-    Receipt,
-    EvidenceSchema,
-    Loaded,
-    ExpectedSourceRevision,
-    'v0.7.0'
+    Evidence, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
   )
 
-  const StaleRevision = structuredClone(Receipt)
-  StaleRevision.sourceRevision = '6'.repeat(40)
+  const ControllerPolicy = SupportedPolicy(['gateway-controller'])
+  const ControllerEvidence = Receipt(ControllerPolicy, 'gateway-controller')
+  Assert.deepEqual(ControllerEvidence.artifactSubjects, [])
+  ValidateKubernetesGraduationEvidenceObject(
+    ControllerEvidence,
+    Schema,
+    ControllerPolicy,
+    GitHead(),
+    'refs/heads/main',
+    'candidate'
+  )
+  const UnassignedControllerArtifact = structuredClone(ControllerEvidence)
+  UnassignedControllerArtifact.artifactSubjects.push({
+    name: 'unassigned-image',
+    kind: 'oci-image',
+    reference: `ghcr.io/oxibelt/unassigned@sha256:${'9'.repeat(64)}`,
+    digest: `sha256:${'9'.repeat(64)}`
+  })
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceObject(
-      StaleRevision,
-      EvidenceSchema,
-      Loaded,
-      ExpectedSourceRevision,
-      'v0.7.0'
+      UnassignedControllerArtifact,
+      Schema,
+      ControllerPolicy,
+      GitHead(),
+      'refs/heads/main',
+      'candidate'
     ),
-    /does not bind the expected source revision/
+    /artifact subject names must be exactly \[\]/
+  )
+  const OfficialBetaEvidence = structuredClone(Evidence)
+  OfficialBetaEvidence.phase = 'official_beta'
+  OfficialBetaEvidence.sourceRef = 'refs/tags/0.7.1-beta.3'
+  ValidateKubernetesGraduationEvidenceObject(
+    OfficialBetaEvidence,
+    Schema,
+    PolicyValue,
+    GitHead(),
+    'refs/tags/0.7.1-beta.3',
+    'official_beta'
+  )
+  const IncompleteOfficialBetaEvidence = structuredClone(OfficialBetaEvidence)
+  IncompleteOfficialBetaEvidence.artifactSubjects.pop()
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      IncompleteOfficialBetaEvidence,
+      Schema,
+      PolicyValue,
+      GitHead(),
+      'refs/tags/0.7.1-beta.3',
+      'official_beta'
+    ),
+    /artifact subject names must be exactly/
   )
 
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceObject(
-      Receipt,
-      EvidenceSchema,
-      Loaded,
-      'ABC123',
-      'v0.7.0'
+      Evidence, Schema, PolicyValue, GitHead(), 'refs/tags/0.7.1-beta.3', 'candidate'
     ),
-    /expected source revision must be a full lowercase Git commit/
+    /candidate qualification requires source ref refs\/heads\/main/
   )
 
-  const MissingArtifacts = structuredClone(Receipt)
-  MissingArtifacts.artifactSubjects = []
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceObject(
-      MissingArtifacts,
-      EvidenceSchema,
-      Loaded,
-      ExpectedSourceRevision,
-      'v0.7.0'
+      Receipt(BaselinePolicy), Schema, BaselinePolicy, GitHead(), 'refs/heads/main', 'candidate'
     ),
-    /artifactSubjects must contain at least 2 items/
+    /may only promote a supported feature/
   )
 
-  const MutableImage = structuredClone(Receipt)
-  MutableImage.artifactSubjects[0].reference =
-    'ghcr.io/oxibelt/oxibelt-gateway-controller:0.7.0'
+  const MissingGate = structuredClone(Evidence)
+  MissingGate.gateResults.pop()
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceObject(
-      MutableImage,
-      EvidenceSchema,
-      Loaded,
-      ExpectedSourceRevision,
-      'v0.7.0'
+      MissingGate, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
     ),
-    /reference must end with its immutable digest/
+    /gate results must be exactly/
   )
 
-  const MissingLog = structuredClone(Receipt)
-  MissingLog.logs = [
-    {
-      jobId: 789,
-      sha256: '5'.repeat(64)
-    }
-  ]
+  const MutableArtifact = structuredClone(Evidence)
+  MutableArtifact.artifactSubjects[1].reference =
+    'ghcr.io/oxibelt/charts/oxibelt-gateway-controller:0.7.1'
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceObject(
-      MissingLog,
-      EvidenceSchema,
-      Loaded,
-      ExpectedSourceRevision,
-      'v0.7.0'
+      MutableArtifact, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
     ),
-    /one log hash for every exact job id/
+    /must bind an immutable digest reference/
   )
 
-  const ArbitraryVersion = structuredClone(Receipt)
-  ArbitraryVersion.validatedVersion = 'v999.999.999'
+  const MissingChart = structuredClone(Evidence)
+  MissingChart.artifactSubjects.pop()
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceObject(
-      ArbitraryVersion,
-      EvidenceSchema,
-      Loaded,
-      ExpectedSourceRevision,
-      'v0.7.0'
+      MissingChart, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
     ),
-    /does not bind the expected validated product version/
+    /artifact subject names must be exactly/
   )
 
-  const MismatchedChartVersion = structuredClone(Receipt)
-  MismatchedChartVersion.artifactSubjects[1].reference =
-    'oxibelt-gateway-controller-9.9.9.tgz'
+  const SubstituteReceiptArtifact = structuredClone(Evidence)
+  const SubstituteSubject = SubstituteReceiptArtifact.artifactSubjects[0]
+  SubstituteSubject.reference = `ghcr.io/oxibelt/substitute@${SubstituteSubject.digest}`
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceObject(
-      MismatchedChartVersion,
-      EvidenceSchema,
-      Loaded,
-      ExpectedSourceRevision,
-      'v0.7.0'
+      SubstituteReceiptArtifact, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
     ),
-    /must bind a Helm chart package for validated version v0.7.0/
+    /must bind exact oci-image repository ghcr.io\/oxibelt\/oxibelt/
+  )
+
+  const UnknownProducingJob = structuredClone(Evidence)
+  UnknownProducingJob.gateResults[0].platformResults[0].jobId = 789
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      UnknownProducingJob, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
+    ),
+    /references an unknown producing job/
+  )
+
+  const MismatchedReport = structuredClone(Evidence)
+  MismatchedReport.gateResults[0].platformResults[0].reportSha256 = '6'.repeat(64)
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      MismatchedReport, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
+    ),
+    /does not bind its exact report hash/
+  )
+
+  const MissingPlatform = structuredClone(Evidence)
+  MissingPlatform.gateResults[0].platformResults.pop()
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      MissingPlatform, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
+    ),
+    /platforms must be exactly/
+  )
+
+  const ReusedPlatformJob = structuredClone(Evidence)
+  ReusedPlatformJob.gateResults[0].platformResults[1].jobId =
+    ReusedPlatformJob.gateResults[0].platformResults[0].jobId
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      ReusedPlatformJob, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
+    ),
+    /must use a distinct job for every platform/
+  )
+
+  const ReusedPlatformReport = structuredClone(Evidence)
+  ReusedPlatformReport.gateResults[0].platformResults[1].reportName =
+    ReusedPlatformReport.gateResults[0].platformResults[0].reportName
+  ReusedPlatformReport.gateResults[0].platformResults[1].reportSha256 =
+    ReusedPlatformReport.gateResults[0].platformResults[0].reportSha256
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      ReusedPlatformReport, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
+    ),
+    /must use a distinct report for every platform/
+  )
+
+  const InvalidTimestamp = structuredClone(Evidence)
+  InvalidTimestamp.generatedAt = '2026-02-30T12:00:00Z'
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceObject(
+      InvalidTimestamp, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'
+    ),
+    /must be a real RFC3339 UTC timestamp/
   )
 })
 
-test('rejects a validated product version without complete qualification gates', () => {
-  const Schema = ReadJson('devops/config/kubernetes-feature-graduation.schema.json')
-  const Unproven = Policy()
-  const Feature = Unproven.features.find(Candidate => Candidate.id === 'gateway-controller')
-  Assert.notEqual(Feature, undefined)
-  if (Feature === undefined) {
-    return
-  }
-  Feature.lastValidatedVersion = 'v999.999.999'
+test('requires the exact supported receipt set and rejects experimental extras', () => {
+  const BaselinePolicy = Policy()
   Assert.throws(
-    () => ValidateKubernetesGraduationPolicyObject(Unproven, Schema),
-    /lastValidatedVersion requires complete mandatory gates/
+    () => ValidateKubernetesGraduationEvidenceSet(BaselinePolicy, []),
+    /requires at least one supported feature row/
+  )
+  const PolicyValue = SupportedPolicy(['supply-chain-admission-bundle'])
+  const Evidence = Receipt(PolicyValue)
+  ValidateKubernetesGraduationEvidenceSet(PolicyValue, [Evidence])
+
+  const ExperimentalExtra = structuredClone(Evidence)
+  ExperimentalExtra.featureId = 'gateway-controller'
+  Assert.throws(
+    () => ValidateKubernetesGraduationEvidenceSet(PolicyValue, [Evidence, ExperimentalExtra]),
+    /rejects evidence for experimental or unvalidated feature/
   )
 })
 
-test('requires workspace evidence validation before an object can claim passed gates', () => {
-  const Schema = ReadJson('devops/config/kubernetes-feature-graduation.schema.json')
-  const Untrusted = Policy()
-  const Feature = Untrusted.features.find(Candidate => Candidate.id === 'gateway-controller')
-  Assert.notEqual(Feature, undefined)
-  if (Feature === undefined) {
-    return
-  }
-  for (const Gate of Untrusted.gates) {
-    if (Gate.appliesTo.includes(Feature.id)) {
-      Gate.status = 'passed'
-      Gate.evidenceReceipts = ['evidence/kubernetes-graduation/missing.json']
-    }
-  }
-  Feature.status = 'supported'
-  Feature.lastValidatedVersion = 'v999.999.999'
-  Feature.blockerIds = []
+test('loads only canonical regular evidence files below a non-symlink directory', () => {
+  const TemporaryRoot = Fs.mkdtempSync(Path.join(RepoRoot, '.kubernetes-graduation-test-'))
+  const Directory = Path.join(TemporaryRoot, 'receipts')
+  Fs.mkdirSync(Directory)
+  try {
+    const Evidence = Receipt(SupportedPolicy(['supply-chain-admission-bundle']))
+    const ReceiptPath = Path.relative(RepoRoot, Path.join(Directory, 'supply-chain.json'))
+    Fs.writeFileSync(Path.join(Directory, 'supply-chain.json'), CanonicalJson(Evidence))
+    Assert.deepEqual(
+      LoadKubernetesGraduationEvidenceDirectory(RepoRoot, Path.relative(RepoRoot, Directory)),
+      [ReceiptPath.replaceAll(Path.sep, '/')]
+    )
+    Assert.throws(
+      () => ValidateKubernetesGraduationEvidenceFiles(
+        RepoRoot, [ReceiptPath, ReceiptPath], GitHead(), 'refs/heads/main', 'candidate'
+      ),
+      /repeats receipt path/
+    )
 
-  Assert.throws(
-    () => ValidateKubernetesGraduationPolicyObject(Untrusted, Schema),
-    /requires workspace evidence validation/
+    Fs.writeFileSync(Path.join(Directory, 'supply-chain.json'), JSON.stringify(Evidence, null, 2))
+    Assert.throws(
+      () => ValidateKubernetesGraduationEvidenceFiles(
+        RepoRoot, [ReceiptPath], GitHead(), 'refs/heads/main', 'candidate'
+      ),
+      /must contain canonical JSON/
+    )
+
+    Fs.unlinkSync(Path.join(Directory, 'supply-chain.json'))
+    Fs.symlinkSync('/tmp', Path.join(Directory, 'outside'))
+    Assert.throws(
+      () => LoadKubernetesGraduationEvidenceDirectory(RepoRoot, Path.relative(RepoRoot, Directory)),
+      /unsafe or unsupported entry/
+    )
+    Fs.unlinkSync(Path.join(Directory, 'outside'))
+    Fs.symlinkSync('/tmp', Path.join(TemporaryRoot, 'linked-parent'))
+    Assert.throws(
+      () => LoadKubernetesGraduationEvidenceDirectory(
+        RepoRoot,
+        Path.relative(RepoRoot, Path.join(TemporaryRoot, 'linked-parent'))
+      ),
+      /must not traverse a symlink/
+    )
+  } finally {
+    Fs.rmSync(TemporaryRoot, { recursive: true, force: true })
+  }
+})
+
+test('keeps domain-independent receipt fields aligned with non-Kubernetes evidence', () => {
+  type SchemaNode = {
+    const?: unknown
+    required?: string[]
+    properties?: Record<string, SchemaNode>
+    items?: SchemaNode
+  }
+  const KubernetesSchema = ReadJson(
+    'devops/config/kubernetes-feature-graduation-evidence.schema.json'
+  ) as SchemaNode
+  const FeatureSchema = ReadJson(
+    'devops/config/feature-graduation-evidence.schema.json'
+  ) as SchemaNode
+  Assert.deepEqual(
+    [...(KubernetesSchema.required ?? [])].sort(),
+    [...(FeatureSchema.required ?? [])].sort()
+  )
+  Assert.deepEqual(
+    [...(KubernetesSchema.properties?.workflow.required ?? [])].sort(),
+    [...(FeatureSchema.properties?.workflow.required ?? [])].sort()
+  )
+  Assert.deepEqual(
+    [...(KubernetesSchema.properties?.gateResults.items?.required ?? [])].sort(),
+    [...(FeatureSchema.properties?.gateResults.items?.required ?? [])].sort()
+  )
+  Assert.deepEqual(
+    [...(KubernetesSchema.properties?.gateResults.items?.properties?.platformResults.items?.required ?? [])].sort(),
+    [...(FeatureSchema.properties?.gateResults.items?.properties?.platformResults.items?.required ?? [])].sort()
+  )
+  Assert.equal(
+    KubernetesSchema.properties?.workflow.properties?.path.const,
+    FeatureSchema.properties?.workflow.properties?.path.const
+  )
+  Assert.equal(
+    KubernetesSchema.properties?.gateResults.items?.properties?.platformResults.items?.properties?.result.const,
+    FeatureSchema.properties?.gateResults.items?.properties?.platformResults.items?.properties?.result.const
+  )
+  Assert.equal(
+    KubernetesSchema.properties?.result.const,
+    FeatureSchema.properties?.result.const
   )
 })

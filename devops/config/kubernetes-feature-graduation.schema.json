@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://oxibelt.dev/schemas/kubernetes-feature-graduation-v1.json",
+  "$id": "https://oxibelt.dev/schemas/kubernetes-feature-graduation-v2.json",
   "title": "OxiBelt Kubernetes feature graduation policy",
   "type": "object",
   "additionalProperties": false,
@@ -10,6 +10,8 @@
     "policyVersion",
     "lifecycleAuthority",
     "evidenceSchema",
+    "repository",
+    "targetVersion",
     "supportContract",
     "cadences",
     "blockers",
@@ -21,7 +23,7 @@
       "const": "./kubernetes-feature-graduation.schema.json"
     },
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
     "policyVersion": {
       "type": "integer",
@@ -34,6 +36,12 @@
     "evidenceSchema": {
       "type": "string",
       "const": "devops/config/kubernetes-feature-graduation-evidence.schema.json"
+    },
+    "repository": {
+      "const": "OxiBelt/OxiBelt"
+    },
+    "targetVersion": {
+      "const": "0.7.1"
     },
     "supportContract": {
       "type": "object",
@@ -381,10 +389,8 @@
           "id",
           "objective",
           "cadence",
-          "status",
           "mandatory",
-          "appliesTo",
-          "evidenceReceipts"
+          "appliesTo"
         ],
         "properties": {
           "id": {
@@ -403,13 +409,6 @@
               "release_candidate"
             ]
           },
-          "status": {
-            "type": "string",
-            "enum": [
-              "unmet",
-              "passed"
-            ]
-          },
           "mandatory": {
             "type": "boolean",
             "const": true
@@ -421,14 +420,6 @@
             "items": {
               "type": "string",
               "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
-            }
-          },
-          "evidenceReceipts": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {
-              "type": "string",
-              "pattern": "^evidence/kubernetes-graduation/[a-zA-Z0-9._/-]+\\.json$"
             }
           }
         }
@@ -445,6 +436,8 @@
           "id",
           "status",
           "lastValidatedVersion",
+          "qualifiedPlatforms",
+          "requiredArtifacts",
           "gateIds",
           "blockerIds"
         ],
@@ -462,7 +455,48 @@
           },
           "lastValidatedVersion": {
             "type": "string",
-            "pattern": "^(unvalidated|v[0-9]+\\.[0-9]+\\.[0-9]+)$"
+            "pattern": "^(unvalidated|[0-9]+\\.[0-9]+\\.[0-9]+)$"
+          },
+          "qualifiedPlatforms": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "linux/amd64",
+                "linux/arm64",
+                "linux/riscv64"
+              ]
+            }
+          },
+          "requiredArtifacts": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "kind",
+                "repository"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+                },
+                "kind": {
+                  "enum": [
+                    "oci-image",
+                    "helm-chart"
+                  ]
+                },
+                "repository": {
+                  "type": "string",
+                  "pattern": "^ghcr\\.io/oxibelt/[a-z0-9]+(?:[._/-][a-z0-9]+)*$"
+                }
+              }
+            }
           },
           "gateIds": {
             "type": "array",

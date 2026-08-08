@@ -1,0 +1,42 @@
+{
+  "$schema": "./feature-graduation.schema.json",
+  "schemaVersion": 1,
+  "policyVersion": 1,
+  "lifecycleAuthority": "docs/FeatureStatus.md",
+  "evidenceSchema": "devops/config/feature-graduation-evidence.schema.json",
+  "repository": "OxiBelt/OxiBelt",
+  "targetVersion": "0.7.1",
+  "gates": [
+    { "id": "config-schema-api-snapshots", "objective": "Schema-v3 and public API snapshots bind the activation planner contract.", "appliesTo": ["config-activation-planner"] },
+    { "id": "config-planner-executor-differential", "objective": "The planner never selects a weaker operation than execution for every required activation path.", "appliesTo": ["config-activation-planner"] },
+    { "id": "config-planner-failure-race", "objective": "Planner failures and races remain secret-safe and side-effect free.", "appliesTo": ["config-activation-planner"] },
+    { "id": "confinement-schema-v3", "objective": "Feature status and dynamic confinement contracts use schema v3.", "appliesTo": ["runtime-confinement-contract"] },
+    { "id": "confinement-native-platforms", "objective": "Landlock, seccomp, AtomicWriter, and filesystem-race contracts pass natively on each supported platform.", "appliesTo": ["runtime-confinement-contract"] },
+    { "id": "embedded-runtime-api-snapshot", "objective": "Downstream-crate compile and public API snapshots bind the embedded-runtime interface.", "appliesTo": ["owned-embedded-runtime-api"] },
+    { "id": "embedded-runtime-lifecycle", "objective": "Owned and current-runtime lifecycle, reuse, cancellation, and failure contracts pass without claiming concurrent instances.", "appliesTo": ["owned-embedded-runtime-api"] },
+    { "id": "direct-h1-parser-differential", "objective": "Parser, fragmentation, cancellation, drain, slow-origin, and Hyper differential contracts pass.", "appliesTo": ["compio-direct-h1-io"] },
+    { "id": "direct-h1-sustained-fuzz", "objective": "Exact instrumented binaries pass sustained fuzzing with deterministic coverage discovery.", "appliesTo": ["compio-direct-h1-io"] },
+    { "id": "direct-h1-performance-soak", "objective": "Three paired samples and the 30-minute bounded-resource soak meet the direct-H1 promotion limits.", "appliesTo": ["compio-direct-h1-io"] },
+    { "id": "crlite-revocation-matrix", "objective": "Hermetic CRLite filters, cache, rotation, refresh, outage, and policy matrices pass.", "appliesTo": ["crlite"] },
+    { "id": "upstream-revocation-matrix", "objective": "Controlled PKI and revocation matrices pass for every supported upstream protocol and policy.", "appliesTo": ["tls-upstream-revocation"] },
+    { "id": "netport-privilege-protocols", "objective": "Peer credentials, descriptor, UID/GID, signal, protocol, and excluded-listener contracts pass.", "appliesTo": ["root-netport-switcher"] },
+    { "id": "netport-native-confinement", "objective": "Netport seccomp profiles qualify natively on every supported platform.", "appliesTo": ["root-netport-switcher"] },
+    { "id": "asn-managed-source-corpus", "objective": "Managed-source lifecycle, IPv4/IPv6 corpus, cache, and resource-ceiling contracts pass.", "appliesTo": ["client-identity-asn"] },
+    { "id": "sybil-datastore-identities", "objective": "Redis and PostgreSQL lifecycle, concurrency, failover, privacy, and fallback identity contracts pass.", "appliesTo": ["sybil-rate-limit-identities"] },
+    { "id": "sybil-asn-dependency", "objective": "ASN-derived Sybil keys consume qualified ASN evidence without authenticating identity.", "appliesTo": ["sybil-rate-limit-identities"] },
+    { "id": "staged-membership-postgres-faults", "objective": "Rootless multi-node PostgreSQL durable-transition, crash, corruption, partition, recovery, load, and soak contracts pass.", "appliesTo": ["admin-staged-membership"] },
+    { "id": "staged-membership-mixed-version", "objective": "An immutable 0.6.5 member blocks staged activation until every member advertises the candidate capability.", "appliesTo": ["admin-staged-membership"] }
+  ],
+  "features": [
+    { "id": "config-activation-planner", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64", "linux/arm64"], "dependsOn": [], "gateIds": ["config-schema-api-snapshots", "config-planner-executor-differential", "config-planner-failure-race"] },
+    { "id": "runtime-confinement-contract", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64", "linux/arm64"], "dependsOn": [], "gateIds": ["confinement-schema-v3", "confinement-native-platforms"] },
+    { "id": "owned-embedded-runtime-api", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64", "linux/arm64"], "dependsOn": [], "gateIds": ["embedded-runtime-api-snapshot", "embedded-runtime-lifecycle"] },
+    { "id": "compio-direct-h1-io", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64"], "dependsOn": [], "gateIds": ["direct-h1-parser-differential", "direct-h1-sustained-fuzz", "direct-h1-performance-soak"] },
+    { "id": "crlite", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64", "linux/arm64"], "dependsOn": [], "gateIds": ["crlite-revocation-matrix"] },
+    { "id": "tls-upstream-revocation", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64", "linux/arm64"], "dependsOn": [], "gateIds": ["upstream-revocation-matrix"] },
+    { "id": "root-netport-switcher", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64", "linux/arm64"], "dependsOn": [], "gateIds": ["netport-privilege-protocols", "netport-native-confinement"] },
+    { "id": "client-identity-asn", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64", "linux/arm64"], "dependsOn": [], "gateIds": ["asn-managed-source-corpus"] },
+    { "id": "sybil-rate-limit-identities", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64", "linux/arm64"], "dependsOn": ["client-identity-asn"], "gateIds": ["sybil-datastore-identities", "sybil-asn-dependency"] },
+    { "id": "admin-staged-membership", "status": "experimental", "lastValidatedVersion": "unvalidated", "qualifiedPlatforms": ["linux/amd64", "linux/arm64"], "dependsOn": [], "gateIds": ["staged-membership-postgres-faults", "staged-membership-mixed-version"] }
+  ]
+}

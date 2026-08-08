@@ -94,9 +94,11 @@ fn feature_statuses() -> BTreeMap<String, String> {
 #[test]
 fn graduation_registry_covers_the_complete_support_contract() {
   let policy = policy();
-  assert_eq!(policy["schemaVersion"], 1);
-  assert_eq!(policy["policyVersion"], 3);
+  assert_eq!(policy["schemaVersion"], 2);
+  assert_eq!(policy["policyVersion"], 4);
   assert_eq!(policy["lifecycleAuthority"], "docs/FeatureStatus.md");
+  assert_eq!(policy["repository"], "OxiBelt/OxiBelt");
+  assert_eq!(policy["targetVersion"], "0.7.1");
   assert_eq!(
     policy["supportContract"]["kubernetes"]["range"],
     ">=1.34.0-0 <1.37.0-0"
@@ -186,21 +188,23 @@ fn graduation_registry_covers_the_complete_support_contract() {
 }
 
 #[test]
-fn lifecycle_promotion_requires_complete_immutable_evidence() {
+fn lifecycle_policy_uses_detached_feature_scoped_evidence() {
   let policy = policy();
   let status_rows = feature_statuses();
   let gates = policy["gates"]
     .as_array()
     .expect("gates should be an array");
-  let gate_by_id = gates
-    .iter()
-    .map(|gate| {
-      (
-        gate["id"].as_str().expect("gate id should be a string"),
-        gate,
-      )
-    })
-    .collect::<BTreeMap<_, _>>();
+  for gate in gates {
+    assert_eq!(gate["mandatory"], true);
+    assert!(
+      gate.get("status").is_none(),
+      "gate state must be detached from the shared descriptor"
+    );
+    assert!(
+      gate.get("evidenceReceipts").is_none(),
+      "receipt paths must be detached from the shared descriptor"
+    );
+  }
   let features = policy["features"]
     .as_array()
     .expect("features should be an array");
@@ -226,46 +230,96 @@ fn lifecycle_promotion_requires_complete_immutable_evidence() {
       Some(status),
       "policy and docs/FeatureStatus.md must agree for {id}"
     );
-    if status != "supported" {
-      continue;
-    }
-    assert!(
-      feature["blockerIds"]
+    assert_eq!(status, "experimental");
+    assert_eq!(feature["lastValidatedVersion"], "unvalidated");
+    let platforms = strings(&feature["qualifiedPlatforms"]);
+    if id == "supply-chain-admission-bundle" {
+      assert_eq!(platforms, BTreeSet::from(["linux/amd64", "linux/arm64"]));
+      assert!(!strings(&feature["gateIds"]).contains("native-riscv64"));
+      assert!(!strings(&feature["blockerIds"]).contains("native-riscv64-cluster-runner"));
+      let required_artifacts = feature["requiredArtifacts"]
         .as_array()
-        .expect("blocker ids should be an array")
-        .is_empty(),
-      "supported feature {id} must not retain blockers"
-    );
-    for gate_id in strings(&feature["gateIds"]) {
-      let gate = gate_by_id
-        .get(gate_id)
-        .unwrap_or_else(|| panic!("{id} references missing gate {gate_id}"));
+        .expect("required artifacts should be an array")
+        .iter()
+        .map(|artifact| {
+          format!(
+            "{}|{}|{}",
+            artifact["name"]
+              .as_str()
+              .expect("artifact name should be a string"),
+            artifact["kind"]
+              .as_str()
+              .expect("artifact kind should be a string"),
+            artifact["repository"]
+              .as_str()
+              .expect("artifact repository should be a string")
+          )
+        })
+        .collect::<BTreeSet<_>>();
       assert_eq!(
-        gate["status"], "passed",
-        "supported feature {id} requires passed gate {gate_id}"
+        required_artifacts,
+        BTreeSet::from([
+          "chart-gateway-controller|helm-chart|ghcr.io/oxibelt/charts/oxibelt-gateway-controller"
+            .to_string(),
+          "chart-oxibelt|helm-chart|ghcr.io/oxibelt/charts/oxibelt".to_string(),
+          "image-controller|oci-image|ghcr.io/oxibelt/oxibelt-gateway-controller".to_string(),
+          "image-dataplane-strict|oci-image|ghcr.io/oxibelt/oxibelt-dataplane-strict".to_string(),
+          "image-dataplane|oci-image|ghcr.io/oxibelt/oxibelt-dataplane".to_string(),
+          "image-keysigner|oci-image|ghcr.io/oxibelt/oxibelt-keysigner".to_string(),
+          "image-standalone|oci-image|ghcr.io/oxibelt/oxibelt".to_string(),
+          "image-tools|oci-image|ghcr.io/oxibelt/oxibelt-tools".to_string(),
+        ])
       );
-      let receipts = gate["evidenceReceipts"]
-        .as_array()
-        .expect("evidence receipts should be an array");
+    } else {
+      assert_eq!(
+        platforms,
+        BTreeSet::from(["linux/amd64", "linux/arm64", "linux/riscv64"])
+      );
+      assert!(strings(&feature["gateIds"]).contains("native-riscv64"));
+      assert!(strings(&feature["blockerIds"]).contains("native-riscv64-cluster-runner"));
       assert!(
-        !receipts.is_empty(),
-        "supported feature {id} gate {gate_id} requires immutable evidence"
+        feature["requiredArtifacts"]
+          .as_array()
+          .expect("required artifacts should be an array")
+          .is_empty(),
+        "only the supply-chain row should bind the release artifact inventory"
       );
-      for receipt in receipts {
-        let path = receipt
-          .as_str()
-          .expect("evidence receipt path should be a string");
-        assert!(
-          path.starts_with("evidence/kubernetes-graduation/") && path.ends_with(".json"),
-          "evidence receipt must stay in the governed directory: {path}"
-        );
-        assert!(
-          repo_root().join(path).is_file(),
-          "evidence receipt should exist: {path}"
-        );
-      }
     }
   }
+
+  let evidence_schema: Value = serde_json::from_str(&read_repo(
+    "devops/config/kubernetes-feature-graduation-evidence.schema.json",
+  ))
+  .expect("Kubernetes evidence schema should be valid JSON");
+  let required = strings(&evidence_schema["required"]);
+  for field in [
+    "featureId",
+    "phase",
+    "sourceRef",
+    "sourceRevision",
+    "qualifiedPlatforms",
+    "workflow",
+    "reportHashes",
+    "logHashes",
+    "gateResults",
+    "result",
+  ] {
+    assert!(
+      required.contains(field),
+      "receipt schema should require {field}"
+    );
+  }
+  assert_eq!(
+    strings(&evidence_schema["properties"]["gateResults"]["items"]["required"]),
+    BTreeSet::from(["id", "platformResults"])
+  );
+  assert_eq!(
+    strings(
+      &evidence_schema["properties"]["gateResults"]["items"]["properties"]["platformResults"]["items"]
+        ["required"],
+    ),
+    BTreeSet::from(["jobId", "platform", "reportName", "reportSha256", "result",])
+  );
 }
 
 #[test]
@@ -342,4 +396,5 @@ fn charts_workflows_and_harnesses_expose_the_same_experimental_policy() {
   assert!(support_document.contains("<!-- BEGIN KUBERNETES GRADUATION GENERATED -->"));
   assert!(support_document.contains("<!-- END KUBERNETES GRADUATION GENERATED -->"));
   assert!(read_repo("package.json").contains("\"kubernetes-graduation:check\""));
+  assert!(read_repo("package.json").contains("\"kubernetes-graduation:verify\""));
 }
