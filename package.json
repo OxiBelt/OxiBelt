@@ -27,6 +27,8 @@
     "release-contract:verify": "node --import tsx devops/sources/release_contract.ts verify-release",
     "versioning:check": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock",
     "versioning:release": "node --import tsx devops/sources/versioning.ts --workspace-path . --manifest-path Cargo.toml --package-name oxibelt --lockfile-path Cargo.lock --ref \"$OXIBELT_RELEASE_REF\" --revision \"$OXIBELT_RELEASE_REVISION\" --event-name \"$GITHUB_EVENT_NAME\" --release-prerelease \"$OXIBELT_RELEASE_IS_PRERELEASE\" --image-plan-output \"$OXIBELT_IMAGE_PLAN_OUTPUT\" --release-publish",
+    "helm-chart:prepare": "node --import tsx devops/sources/helm_chart_release.ts prepare",
+    "helm-chart:verify": "node --import tsx devops/sources/helm_chart_release.ts verify",
     "person-proof-ui:build": "npm run build --workspace @oxibelt/person-proof-ui"
   },
   "devDependencies": {
