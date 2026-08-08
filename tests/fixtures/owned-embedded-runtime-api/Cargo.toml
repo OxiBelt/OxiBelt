@@ -13,3 +13,12 @@ build = false
 anyhow = "1.0.104"
 oxibelt = { path = "../../../source" }
 tokio = { version = "=1.53.1", features = ["sync"] }
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+missing_safety_doc = "deny"
+multiple_unsafe_ops_per_block = "deny"
+undocumented_unsafe_blocks = "deny"
