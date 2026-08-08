@@ -6,12 +6,14 @@
 
 mod aggregate;
 mod diff;
+#[cfg(any(feature = "config-tooling", test))]
+mod file_adapter;
 mod model;
 mod secret;
 
-#[cfg(feature = "config-tooling")]
-pub use diff::plan_config_files;
 pub use diff::{plan_config_projections, plan_toml_values};
+#[cfg(feature = "config-tooling")]
+pub use file_adapter::plan_config_files;
 pub use model::{
   ACTIVATION_PLAN_SCHEMA_VERSION, ActivationPlan, ActivationPrerequisite,
   ActivationPrerequisiteStatus, ActivationReasonCode, ChangeOperation, ConfigActivationChange,

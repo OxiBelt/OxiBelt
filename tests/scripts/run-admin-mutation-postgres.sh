@@ -97,7 +97,7 @@ export OXIBELT_TEST_MUTATION_POSTGRES_URL="postgres://oxibelt:${postgres_passwor
 cd -- "${repo_root}"
 if ! timeout --signal=TERM 35m \
   cargo test --all-features --locked -p oxibelt --lib \
-  'admin_mutation::' -- --test-threads=1; then
+  'admin_mutation' -- --test-threads=1; then
   postgres_logs
   exit 1
 fi

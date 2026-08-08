@@ -2,7 +2,7 @@
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
-pub(super) async fn connect(test_name: &str) -> Option<PgPool> {
+pub(crate) async fn connect(test_name: &str) -> Option<PgPool> {
   let required = std::env::var("OXIBELT_REQUIRE_MUTATION_POSTGRES_TESTS")
     .ok()
     .is_some_and(|value| value == "1");

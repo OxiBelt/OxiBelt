@@ -1,0 +1,5 @@
+use crate::server::ListenerSupervisor;
+
+fn execute(supervisor: &ListenerSupervisor) {
+  let _ = supervisor;
+}

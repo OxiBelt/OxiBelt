@@ -8,7 +8,7 @@ mod membership;
 mod membership_crypto;
 mod membership_store;
 #[cfg(test)]
-mod postgres_test_support;
+pub(crate) mod postgres_test_support;
 mod response;
 mod rollout;
 mod rollout_store;

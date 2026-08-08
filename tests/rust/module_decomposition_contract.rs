@@ -343,6 +343,39 @@ fn dependency_violations(source: &str, facts: &ModuleFacts) -> Vec<Violation> {
     );
   }
 
+  if source == "activation_plan.rs" || source.starts_with("activation_plan/") {
+    let allowed = if source == "activation_plan/file_adapter.rs" {
+      &["std::fs", "std::path", "crate::config::Config"][..]
+    } else {
+      &[][..]
+    };
+    push_forbidden(
+      &mut violations,
+      "activation-plan policy",
+      source,
+      facts,
+      &[
+        "std::fs",
+        "std::path",
+        "std::net",
+        "std::process",
+        "tokio",
+        "sqlx",
+        "kube",
+        "k8s_openapi",
+        "crate::application",
+        "crate::listener_socket",
+        "crate::reload",
+        "crate::server",
+        "crate::state",
+        "crate::runtime",
+        "crate::admin_mutation",
+        "crate::config::Config",
+      ],
+      allowed,
+    );
+  }
+
   if PURE_WAF_MODULES.contains(&source) {
     push_forbidden(
       &mut violations,
@@ -459,6 +492,7 @@ fn configured_boundary_targets_exist() {
     .chain([
       "config.rs",
       "config",
+      "activation_plan",
       "proxy",
       "remote_signer.rs",
       "remote_signer",
@@ -498,6 +532,72 @@ fn dependency_boundaries_hold_for_all_runtime_sources() {
 }
 
 #[test]
+fn activation_plan_file_io_is_confined_to_the_exact_tooling_adapter() {
+  let adapter_path = Path::new(SOURCE_ROOT).join("activation_plan/file_adapter.rs");
+  let adapter = facts(&adapter_path);
+  assert!(
+    adapter
+      .paths
+      .iter()
+      .any(|path| path_matches(path, "std::fs")),
+    "the positive adapter control must exercise its narrow filesystem allowance"
+  );
+  assert!(
+    adapter
+      .paths
+      .iter()
+      .any(|path| path_matches(path, "std::path")),
+    "the positive adapter control must exercise its narrow path allowance"
+  );
+  assert!(
+    adapter
+      .paths
+      .iter()
+      .any(|path| path_matches(path, "crate::config::Config")),
+    "the positive adapter control must exercise its narrow Config loader allowance"
+  );
+  assert!(
+    dependency_violations("activation_plan/file_adapter.rs", &adapter).is_empty(),
+    "the current file adapter must remain accepted"
+  );
+
+  for source in rust_sources(&Path::new(SOURCE_ROOT).join("activation_plan")) {
+    let relative = relative(&source);
+    if relative == "activation_plan/file_adapter.rs" || is_test_source(&relative) {
+      continue;
+    }
+    let facts = facts(&source);
+    for forbidden in ["std::fs", "std::path", "crate::config::Config"] {
+      assert!(
+        !facts.paths.iter().any(|path| path_matches(path, forbidden)),
+        "activation-plan adapter-only dependency {forbidden} escaped into {relative}"
+      );
+    }
+  }
+
+  for (fixture, forbidden) in [
+    ("activation-plan-diff-to-fs.txt", "std::fs"),
+    ("activation-plan-diff-to-path.txt", "std::path"),
+    (
+      "activation-plan-diff-to-config-loader.txt",
+      "crate::config::Config",
+    ),
+  ] {
+    let path = Path::new(FIXTURE_ROOT).join(fixture);
+    let source = fs::read_to_string(&path)
+      .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let fixture_facts = facts_from_source("activation_plan/diff.rs", &source)
+      .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+    assert!(
+      dependency_violations("activation_plan/diff.rs", &fixture_facts)
+        .iter()
+        .any(|violation| path_matches(&violation.dependency, forbidden)),
+      "fixture {fixture} must exercise adapter-only dependency {forbidden}"
+    );
+  }
+}
+
+#[test]
 fn forbidden_dependency_fixtures_are_rejected() {
   for (fixture, source_path, boundary) in [
     (
@@ -509,6 +609,31 @@ fn forbidden_dependency_fixtures_are_rejected() {
       "proxy-to-admin.txt",
       "proxy/http/injected.rs",
       "protocol/data-plane runtime",
+    ),
+    (
+      "activation-plan-to-server.txt",
+      "activation_plan/injected.rs",
+      "activation-plan policy",
+    ),
+    (
+      "activation-plan-diff-to-fs.txt",
+      "activation_plan/diff.rs",
+      "activation-plan policy",
+    ),
+    (
+      "activation-plan-diff-to-path.txt",
+      "activation_plan/diff.rs",
+      "activation-plan policy",
+    ),
+    (
+      "activation-plan-diff-to-config-loader.txt",
+      "activation_plan/diff.rs",
+      "activation-plan policy",
+    ),
+    (
+      "activation-plan-file-adapter-to-runtime.txt",
+      "activation_plan/file_adapter.rs",
+      "activation-plan policy",
     ),
     (
       "waf-to-config.txt",

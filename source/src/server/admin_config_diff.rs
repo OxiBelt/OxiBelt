@@ -275,7 +275,7 @@ fn resolve_listener_transition(
       if !bind_conflict {
         ResolvedActivationOperation::ListenerTransition
       } else {
-        ResolvedActivationOperation::GracefulDrain
+        ResolvedActivationOperation::ProcessRestart
       },
       if !bind_conflict {
         ActivationReasonCode::ListenerRebindRequired
@@ -1140,7 +1140,7 @@ private_key = "privkey.pem"
   }
 
   #[test]
-  fn resolved_listener_plan_reports_unchanged_add_remove_conflict_and_drain() {
+  fn resolved_listener_plan_reports_unchanged_add_remove_and_restart_only_conflict() {
     let active = test_config();
 
     let mut replaced = active.clone();
@@ -1188,7 +1188,11 @@ private_key = "privkey.pem"
     );
     assert_eq!(
       conflict.activation_plan.connections.websocket,
-      ConnectionEffect::GracefulDrain
+      ConnectionEffect::ProcessRestart
+    );
+    assert_eq!(
+      conflict.activation_plan.selected_operation,
+      ResolvedActivationOperation::ProcessRestart
     );
     assert_eq!(
       conflict

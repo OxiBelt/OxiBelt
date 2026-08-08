@@ -139,6 +139,10 @@ path = "../tests/rust/native_config_schema_contract.rs"
 required-features = ["config-tooling"]
 
 [[test]]
+name = "config_activation_planner_contract"
+path = "../tests/rust/config_activation_planner_contract.rs"
+
+[[test]]
 name = "tls_client_roots"
 path = "../tests/rust/tls_client_roots.rs"
 

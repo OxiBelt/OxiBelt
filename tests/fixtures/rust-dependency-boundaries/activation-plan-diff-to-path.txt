@@ -1,0 +1,5 @@
+use std::path::Path;
+
+fn inspect_candidate_path(path: &Path) -> bool {
+  path.is_file()
+}

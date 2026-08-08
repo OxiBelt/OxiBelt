@@ -2449,6 +2449,9 @@ fn admin_mutation_postgres_ci_is_mandatory_bounded_and_rootless() {
     .expect("workflow should define the Admin mutation PostgreSQL durability job");
   let job_text = workflow_job_text(&workflow, "admin-mutation-postgres");
   let script = admin_mutation_postgres_script_text();
+  let dispatch_tests =
+    fs::read_to_string(repo_root().join("source/src/server/admin_mutations/tests.rs"))
+      .expect("Admin mutation dispatch tests should be readable");
 
   assert_eq!(
     job.needs,
@@ -2482,7 +2485,7 @@ fn admin_mutation_postgres_ci_is_mandatory_bounded_and_rootless() {
     "NetworkSettings.Networks",
     "timeout --signal=TERM 35m",
     "cargo test --all-features --locked -p oxibelt --lib",
-    "'admin_mutation::' -- --test-threads=1",
+    "'admin_mutation' -- --test-threads=1",
     "container_created=1",
     "if ((container_created == 1)); then",
     "docker rm --force --volumes \"${container_name}\"",
@@ -2495,6 +2498,20 @@ fn admin_mutation_postgres_ci_is_mandatory_bounded_and_rootless() {
       "Admin mutation PostgreSQL harness should preserve {expected}"
     );
   }
+  assert!(
+    !script.contains("'admin_mutation::' -- --test-threads=1"),
+    "the narrower module-only filter would skip server Admin mutation dispatch tests"
+  );
+  const CLUSTER_DISPATCH_TEST: &str = "server::admin_mutations::tests::cluster_dispatch_admission_persists_a_routable_durable_receipt";
+  assert!(
+    CLUSTER_DISPATCH_TEST.contains("admin_mutation"),
+    "the exact PostgreSQL test filter must select the durable cluster dispatch test"
+  );
+  assert!(
+    dispatch_tests
+      .contains("async fn cluster_dispatch_admission_persists_a_routable_durable_receipt()"),
+    "the selected durable cluster dispatch test must remain registered"
+  );
   for forbidden in [
     "docker-rootful",
     "docker system prune",

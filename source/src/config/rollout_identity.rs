@@ -200,6 +200,26 @@ impl ConfigRolloutIdentity {
   }
 
   #[cfg(test)]
+  pub(crate) fn validated_immutable_for_planning_test(
+    namespace: &str,
+    kind: &str,
+    name: &str,
+    revision_file: &Path,
+  ) -> Self {
+    let revision_file = std::fs::canonicalize(revision_file)
+      .expect("planning test revision file should canonicalize");
+    let digest = sha256_hex(
+      &std::fs::read(&revision_file).expect("planning test revision file should be readable"),
+    );
+    Self {
+      desired_revision: Some("planning-test".to_string()),
+      digest: Some(digest),
+      revision_file: Some(revision_file),
+      ..Self::immutable_for_planning_test(namespace, kind, name)
+    }
+  }
+
+  #[cfg(test)]
   pub(crate) fn admin_cluster_for_planning_test(instance_id: &str) -> Self {
     Self {
       mode: ConfigRolloutMode::AdminCluster,

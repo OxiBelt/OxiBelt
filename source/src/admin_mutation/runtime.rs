@@ -402,6 +402,162 @@ impl AdminMutationRuntime {
     }
   }
 
+  #[cfg(test)]
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) async fn fixed_cluster_for_dispatch_test(
+    pool: sqlx::PgPool,
+    namespace: String,
+    signers: SignerRegistry,
+    target: MutationTarget,
+    members: Vec<String>,
+    local_instance_id: String,
+    artifact_key: [u8; 32],
+    baseline_revision: String,
+    baseline_digest: String,
+  ) -> anyhow::Result<Self> {
+    ensure!(
+      members.len() >= 2,
+      "cluster test requires at least two members"
+    );
+    let store = MutationStore::new_cluster(pool, namespace.clone())?;
+    let cipher = Arc::new(MutationArtifactCipher::new(
+      &artifact_key,
+      MAX_STORED_ARTIFACT_BYTES,
+    )?);
+    let artifact_key_fingerprint = cipher.key_fingerprint().to_string();
+    let mut artifact_ciphers = MembershipArtifactCiphers::new();
+    artifact_ciphers.insert(target.membership_revision.clone(), cipher);
+    let runtime = Self {
+      inner: Arc::new(RuntimeInner {
+        mode: AdminMutationMode::Required,
+        signers,
+        store: Some(store.clone()),
+        namespace,
+        maximum_validity_seconds: 900,
+        maximum_clock_skew_seconds: 30,
+        retention_seconds: 86_400,
+        rollout_mode: AdminMutationRolloutMode::AdminCluster,
+        membership_mode: AdminMembershipMode::Fixed,
+        cluster_id: target.cluster_id.clone(),
+        membership_authority: RwLock::new(MembershipAuthority {
+          target: target.clone(),
+          members: members.clone(),
+          artifact_key_fingerprint: artifact_key_fingerprint.clone(),
+        }),
+        membership_bootstrap_members: Vec::new(),
+        local_instance_id: Some(local_instance_id.clone()),
+        membership_private_keys: None,
+        artifact_ciphers: RwLock::new(artifact_ciphers),
+        local_membership_heads: RwLock::new(HashMap::new()),
+        cluster_controller: OnceLock::new(),
+        cluster_worker_state: AtomicU8::new(0),
+        winner_responses: Mutex::new(HashMap::new()),
+        winner_response_wait: ORDINARY_TERMINAL_WAIT,
+      }),
+    };
+    for resource in ["config", "ipm", "break-glass"] {
+      store
+        .initialize_revision(
+          resource,
+          &baseline_revision,
+          &baseline_digest,
+          Some(&target.cluster_id),
+          Some(&target.membership_revision),
+        )
+        .await?;
+    }
+    let controller = AdminClusterRolloutController::new(
+      store.clone(),
+      RolloutSettings {
+        cluster_id: target.cluster_id,
+        membership_revision: target.membership_revision,
+        members: members.clone(),
+        instance_id: local_instance_id.clone(),
+        allow_learner: false,
+        boot_id: format!("boot-{local_instance_id}"),
+        build_version: oxibelt_build_identity::SHORT_VERSION.to_string(),
+        artifact_key_fingerprint: artifact_key_fingerprint.clone(),
+        heartbeat_interval: Duration::from_secs(1),
+        stale_after: Duration::from_secs(30),
+        phase_timeout: Duration::from_secs(30),
+        rollback_timeout: Duration::from_secs(30),
+        canary_observation: Duration::from_secs(1),
+      },
+      LocalRolloutStatus {
+        assigned_revision: None,
+        applied_revision: baseline_revision.clone(),
+        applied_digest: baseline_digest.clone(),
+        ready: true,
+      },
+    )?;
+    controller.heartbeat_once().await?;
+    let local_fence = controller.member_fence().await?;
+    for resource in ["config", "ipm", "break-glass"] {
+      super::rollout_store::publish_resource_head(
+        &store,
+        &local_fence,
+        &super::rollout_store::ResourceHeadUpdate {
+          resource: resource.to_string(),
+          assigned_revision: None,
+          applied_revision: baseline_revision.clone(),
+          applied_digest: baseline_digest.clone(),
+          ready: true,
+        },
+      )
+      .await?;
+    }
+    for member in members
+      .iter()
+      .filter(|member| member.as_str() != local_instance_id.as_str())
+    {
+      let fence = super::rollout_store::heartbeat_fenced(
+        &store,
+        &super::rollout_store::HeartbeatUpdate {
+          cluster_id: runtime.inner.cluster_id.clone(),
+          instance_id: member.clone(),
+          boot_id: format!("boot-{member}"),
+          build_version: oxibelt_build_identity::SHORT_VERSION.to_string(),
+          capability_version: "admin-mutation-rollout-v1".to_string(),
+          artifact_key_fingerprint: artifact_key_fingerprint.clone(),
+          membership_revision: runtime.membership_authority().target.membership_revision,
+          assigned_revision: None,
+          applied_revision: baseline_revision.clone(),
+          applied_digest: baseline_digest.clone(),
+          ready: true,
+          lease_seconds: 30,
+        },
+      )
+      .await?;
+      for resource in ["config", "ipm", "break-glass"] {
+        super::rollout_store::publish_resource_head(
+          &store,
+          &fence,
+          &super::rollout_store::ResourceHeadUpdate {
+            resource: resource.to_string(),
+            assigned_revision: None,
+            applied_revision: baseline_revision.clone(),
+            applied_digest: baseline_digest.clone(),
+            ready: true,
+          },
+        )
+        .await?;
+      }
+    }
+    runtime
+      .inner
+      .cluster_controller
+      .set(controller.clone())
+      .map_err(|_| anyhow::anyhow!("cluster test controller was already installed"))?;
+    controller.heartbeat_and_refresh_readiness().await?;
+    runtime.set_cluster_worker_running(true, true);
+    runtime.set_cluster_worker_running(false, true);
+    ensure!(
+      runtime.cluster_rollout_ready(),
+      "cluster test runtime is not ready"
+    );
+    Ok(runtime)
+  }
+
   pub(crate) fn enabled(&self) -> bool {
     self.inner.mode.enabled()
   }

@@ -304,7 +304,7 @@ fn different_config_roots_mark_identical_relative_secret_files_changed() {
     &ConfigComparisonProjection::from_value(&candidate, &key),
     PlanningBasis::OfflineConfig,
   );
-  super::diff::add_relative_file_reference_root_changes(
+  super::file_adapter::add_relative_file_reference_root_changes(
     &mut report,
     &current,
     &candidate,

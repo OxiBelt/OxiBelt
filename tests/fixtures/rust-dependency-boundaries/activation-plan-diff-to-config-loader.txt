@@ -1,0 +1,5 @@
+use crate::config::Config;
+
+fn load_candidate(path: &std::path::Path) {
+  let _ = Config::load(path);
+}

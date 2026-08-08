@@ -1,9 +1,4 @@
 use std::collections::BTreeSet;
-#[cfg(any(feature = "config-tooling", test))]
-use std::path::Path;
-
-#[cfg(feature = "config-tooling")]
-use anyhow::Context as _;
 
 use crate::config::{
   NativeConfigActivation, NativeConfigSecretClass, native_config_field_metadata,
@@ -31,40 +26,6 @@ pub fn plan_toml_values(
   Ok(plan_config_projections(&current, &candidate, basis))
 }
 
-/// Loads two files through the authoritative native configuration loader and
-/// builds an offline activation plan.
-#[cfg(feature = "config-tooling")]
-pub fn plan_config_files(
-  current_path: &Path,
-  candidate_path: &Path,
-) -> anyhow::Result<ConfigActivationReport> {
-  let current = crate::config::Config::load_effective_toml_for_activation(current_path)?;
-  let candidate = crate::config::Config::load_effective_toml_for_activation(candidate_path)?;
-  let current_root = canonical_config_parent(current_path)?;
-  let candidate_root = canonical_config_parent(candidate_path)?;
-  let mut report = plan_toml_values(&current, &candidate, PlanningBasis::OfflineConfig)?;
-  add_relative_file_reference_root_changes(
-    &mut report,
-    &current,
-    &candidate,
-    &current_root,
-    &candidate_root,
-  );
-  Ok(report)
-}
-
-#[cfg(feature = "config-tooling")]
-fn canonical_config_parent(path: &Path) -> anyhow::Result<std::path::PathBuf> {
-  let canonical = std::fs::canonicalize(path)
-    .with_context(|| format!("failed to canonicalize config file {}", path.display()))?;
-  canonical.parent().map(Path::to_path_buf).ok_or_else(|| {
-    anyhow::anyhow!(
-      "config file {} does not have a parent directory",
-      path.display()
-    )
-  })
-}
-
 /// Compares opaque projections created with the same process-local key.
 pub fn plan_config_projections(
   current: &ConfigComparisonProjection,
@@ -85,94 +46,6 @@ pub fn plan_config_projections(
   }
   let activation_plan = aggregate(&collector.changes);
   ConfigActivationReport::new(basis, true, collector.changes, activation_plan)
-}
-
-#[cfg(any(feature = "config-tooling", test))]
-pub(super) fn add_relative_file_reference_root_changes(
-  report: &mut ConfigActivationReport,
-  current: &toml::Value,
-  candidate: &toml::Value,
-  current_root: &Path,
-  candidate_root: &Path,
-) {
-  if current_root == candidate_root || !report.is_success() {
-    return;
-  }
-  let mut root_sensitive_paths = BTreeSet::new();
-  collect_identical_relative_file_references("", current, candidate, &mut root_sensitive_paths);
-  let existing = report
-    .changes
-    .iter()
-    .map(|change| change.path.as_str())
-    .collect::<BTreeSet<_>>();
-  root_sensitive_paths.retain(|path| !existing.contains(path.as_str()));
-  if report
-    .changes
-    .len()
-    .saturating_add(root_sensitive_paths.len())
-    > MAX_ACTIVATION_CHANGES
-  {
-    *report = ConfigActivationReport::new(report.basis, false, Vec::new(), change_limit_exceeded());
-    return;
-  }
-  report.changes.extend(
-    root_sensitive_paths
-      .into_iter()
-      .map(|path| classify_change(&path, ChangeOperation::Change)),
-  );
-  report.changes.sort_by(|left, right| {
-    left
-      .path
-      .cmp(&right.path)
-      .then_with(|| left.op.cmp(&right.op))
-  });
-  report.activation_plan = aggregate(&report.changes);
-}
-
-#[cfg(any(feature = "config-tooling", test))]
-fn collect_identical_relative_file_references(
-  path: &str,
-  current: &toml::Value,
-  candidate: &toml::Value,
-  paths: &mut BTreeSet<String>,
-) {
-  match (current, candidate) {
-    (toml::Value::Table(current), toml::Value::Table(candidate)) => {
-      for name in current
-        .keys()
-        .chain(candidate.keys())
-        .collect::<BTreeSet<_>>()
-      {
-        if let (Some(current), Some(candidate)) = (current.get(name), candidate.get(name)) {
-          collect_identical_relative_file_references(
-            &child_field_path(path, name),
-            current,
-            candidate,
-            paths,
-          );
-        }
-      }
-    }
-    (toml::Value::Array(current), toml::Value::Array(candidate)) => {
-      for (index, (current, candidate)) in current.iter().zip(candidate).enumerate() {
-        collect_identical_relative_file_references(
-          &format!("{path}[{index}]"),
-          current,
-          candidate,
-          paths,
-        );
-      }
-    }
-    (toml::Value::String(current), toml::Value::String(candidate))
-      if current == candidate
-        && std::path::Path::new(current).is_relative()
-        && native_config_field_metadata(path).secret_class
-          == NativeConfigSecretClass::FileReference =>
-    {
-      paths.insert(path.to_string());
-    }
-    _ => {}
-  }
 }
 
 #[derive(Default)]
@@ -282,7 +155,7 @@ fn collect_one_side(
   }
 }
 
-fn classify_change(path: &str, op: ChangeOperation) -> ConfigActivationChange {
+pub(super) fn classify_change(path: &str, op: ChangeOperation) -> ConfigActivationChange {
   let metadata = native_config_field_metadata(path);
   let provenance = if metadata.path == "*" {
     MetadataProvenance::ConservativeDefault
@@ -369,7 +242,7 @@ fn resolve_native_activation(
   }
 }
 
-fn child_field_path(path: &str, name: &str) -> String {
+pub(super) fn child_field_path(path: &str, name: &str) -> String {
   if path.is_empty() {
     name.to_string()
   } else {
