@@ -60,7 +60,7 @@ name, revision, details URL, and GitHub Actions application identity. Failure,
 cancellation, skip, missing or duplicate evidence, a stale older success, or
 any repository, workflow, branch, event, ref, revision, check, or application
 mismatch blocks release metadata, GHCR writes, attestations, manifests,
-verification, and alias promotion. The 34-job terminal summary covers Rust,
+verification, and alias promotion. The 37-job terminal summary covers Rust,
 dependency, TypeScript, fuzzing, sanitizer, cross-build, image, vulnerability,
 database, Kubernetes, integration, signer, and browser validation. Benchmark
 jobs and dependency-snapshot submission remain outside the release
