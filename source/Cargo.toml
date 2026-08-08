@@ -233,3 +233,7 @@ path = "../tests/rust/runtime_confinement_contract.rs"
 [[test]]
 name = "owned_embedded_runtime_api_contract"
 path = "../tests/rust/owned_embedded_runtime_api_contract.rs"
+
+[[test]]
+name = "owned_embedded_runtime_lifecycle"
+path = "../tests/rust/owned_embedded_runtime_lifecycle.rs"
