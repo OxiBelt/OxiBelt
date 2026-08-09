@@ -725,7 +725,7 @@ notes = "Reviewed the complete checksum-matched 0.2.126-to-0.2.127 crate delta. 
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.11.10 -> 0.11.12"
-notes = "Reviewed the complete checksum-matched 0.11.10-to-0.11.12 source delta. SendStream now retains caller-buffer position across cancellation by using the trait's partial-write default, owned zero-copy chunks remain explicit, and client/server builders share and actually attach the selected bounded Quinn transport configuration. The crate has no unsafe code; the separate web-transport-trait 0.3.7 exception remains exact."
+notes = "Reviewed the complete checksum-matched 0.11.10-to-0.11.12 source delta. SendStream now retains caller-buffer position across cancellation by using the trait's partial-write default, owned zero-copy chunks remain explicit, and client/server builders share and actually attach the selected bounded Quinn transport configuration. The crate has no unsafe code; the separate web-transport-trait 0.4.0 exception remains exact."
 
 [[audits.web-transport-quinn]]
 who = "OpenAI Codex"
