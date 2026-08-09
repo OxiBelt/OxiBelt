@@ -1,6 +1,6 @@
 import json
 import os
-import time
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -13,6 +13,7 @@ UPDATED_ENDPOINT_IP = os.environ.get("UPDATED_ENDPOINT_IP", "127.0.0.1")
 INITIAL_PORT = int(os.environ.get("INITIAL_ENDPOINT_PORT", "18080"))
 UPDATED_PORT = int(os.environ.get("UPDATED_ENDPOINT_PORT", "18081"))
 MODIFIED_DELAY_SECONDS = float(os.environ.get("MODIFIED_DELAY_SECONDS", "3.0"))
+ADVANCE_EVENT = threading.Event()
 
 
 def service_entry(entry_id, address, port):
@@ -46,13 +47,14 @@ class NomadHandler(BaseHTTPRequestHandler):
       return
 
     if "index" in query:
-      time.sleep(MODIFIED_DELAY_SECONDS)
-      self._send_json(
-        200,
-        [service_entry("nomad-app-updated", UPDATED_ENDPOINT_IP, UPDATED_PORT)],
-        "2",
-      )
-      return
+      ADVANCE_EVENT.wait(MODIFIED_DELAY_SECONDS)
+      if ADVANCE_EVENT.is_set():
+        self._send_json(
+          200,
+          [service_entry("nomad-app-updated", UPDATED_ENDPOINT_IP, UPDATED_PORT)],
+          "2",
+        )
+        return
 
     self._send_json(
       200,
@@ -60,15 +62,29 @@ class NomadHandler(BaseHTTPRequestHandler):
       "1",
     )
 
+  def do_POST(self):
+    if self.headers.get("x-nomad-token") != EXPECTED_TOKEN:
+      self._send_json(403, {"error": "forbidden"})
+      return
+
+    parsed = urlsplit(self.path)
+    if unquote(parsed.path) != "/__control/advance":
+      self._send_json(404, {"error": "not found"})
+      return
+
+    ADVANCE_EVENT.set()
+    self._send_json(200, {"advanced": True})
+
   def log_message(self, format, *args):
     return
 
-  def _send_json(self, status, payload, index):
+  def _send_json(self, status, payload, index=None):
     encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     self.send_response(status)
     self.send_header("content-type", "application/json")
     self.send_header("content-length", str(len(encoded)))
-    self.send_header("x-nomad-index", index)
+    if index is not None:
+      self.send_header("x-nomad-index", index)
     self.end_headers()
     self.wfile.write(encoded)
 

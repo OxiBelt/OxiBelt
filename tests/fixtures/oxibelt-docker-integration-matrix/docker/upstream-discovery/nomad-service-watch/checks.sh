@@ -1,6 +1,23 @@
 
+nomad_control_request() {
+  local method="$1"
+  local path="$2"
+  docker exec "${http_container}" python /opt/mock_upstream/client.py \
+    --target-host mock-nomad \
+    --scheme http \
+    --port 18091 \
+    --host mock-nomad \
+    --method "${method}" \
+    --path "${path}" \
+    --body "" \
+    --header "X-Nomad-Token: matrix-nomad-token" \
+    --dump-response-json \
+    --expect-status 200 \
+    --timeout 2
+}
+
 run_case_checks() {
-  local response state metrics attempt
+  local response="" state="" metrics="" advance_response="" attempt
   for attempt in 1 2 3 4 5 6 7 8 9 10; do
     state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/nomad-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
     if jq -e '.body | fromjson | ([.servers[] | select(.source == "nomad" and (.origin | contains(":18080/")) and .health_reason == "unknown" and (.effective_weight_percent >= 10) and (.effective_weight_percent <= 100) and (.slow_start_remaining_ms != null))] | length) == 1' <<<"${state}" >/dev/null; then
@@ -16,6 +33,10 @@ run_case_checks() {
     echo "${response}" >&2
     fail_with_diagnostics "Nomad initial service list did not route to the HTTP upstream"
   fi
+
+  advance_response="$(nomad_control_request "POST" "/__control/advance")"
+  assert_response_jq "${advance_response}" '.body | fromjson | .advanced == true'
+  response=""
 
   for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     state="$(plain_client_request_with_headers_on_port 9092 "proxy" "/admin/v1/upstream-pools/nomad-pool" 200 "GET" "" "Authorization: Bearer matrix-admin-token")"
