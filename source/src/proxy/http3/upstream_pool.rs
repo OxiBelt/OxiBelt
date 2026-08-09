@@ -350,7 +350,10 @@ impl UpstreamH3Pool {
     prepared: &crate::proxy::http::PreparedWebTransport,
     global_roots: &[PathBuf],
     metrics: &Arc<Metrics>,
-  ) -> anyhow::Result<(web_transport_quinn::Session, WebTransportConnectionGuard)> {
+  ) -> anyhow::Result<(
+    super::webtransport_bridge::UpstreamWebTransportSession,
+    WebTransportConnectionGuard,
+  )> {
     if !self
       .logical_origin
       .matches(&prepared.upstream, global_roots)
@@ -371,16 +374,16 @@ impl UpstreamH3Pool {
       admission,
     } = admitted;
     let (endpoint, connection) = connected.into_parts()?;
-    let mut request = web_transport_quinn::proto::ConnectRequest::new(prepared.target_url.clone())
-      .with_headers(prepared.headers.clone());
-    if !prepared.protocols.is_empty() {
-      request = request.with_protocols(prepared.protocols.clone());
-    }
     // Only the QUIC/H3 transport candidates race. A single winner sends the
     // WebTransport CONNECT so long-lived sessions are never duplicated.
     let session = tokio::time::timeout_at(
       deadlines.request,
-      web_transport_quinn::Session::connect(connection, request),
+      super::webtransport_bridge::UpstreamWebTransportSession::connect(
+        connection,
+        prepared.target_url.clone(),
+        prepared.headers.clone(),
+        prepared.protocols.clone(),
+      ),
     )
     .await
     .context("upstream WebTransport CONNECT timed out")?

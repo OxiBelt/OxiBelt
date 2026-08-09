@@ -47,6 +47,46 @@ fn first_party_rust_uses_only_the_audited_unsafe_allowlist() {
 }
 
 #[test]
+fn webtransport_receive_stays_behind_the_selected_path_adapter() {
+  let root = repo_root();
+  let adapter = "source/src/proxy/http3/webtransport_bridge/upstream_adapter.rs";
+  let forbidden_crates = ["web_transport_quinn", "web_transport_trait"];
+
+  for relative in rust_source_files(&root) {
+    if !relative.starts_with("source/src/") || relative == adapter {
+      continue;
+    }
+    let source = fs::read_to_string(root.join(&relative))
+      .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"));
+    syn::parse_file(&source).unwrap_or_else(|error| panic!("failed to parse {relative}: {error}"));
+    let tokens = TokenStream::from_str(&source)
+      .unwrap_or_else(|error| panic!("failed to tokenize {relative}: {error}"));
+    for dependency_crate in forbidden_crates {
+      assert!(
+        count_ident(&tokens, dependency_crate) == 0,
+        "{relative} must use the selected-path WebTransport receive adapter instead of dependency crate {dependency_crate}"
+      );
+    }
+  }
+}
+
+#[test]
+fn webtransport_adapter_policy_detects_dependency_aliases() {
+  for source in [
+    "use web_transport_quinn as wt; fn bypass(session: wt::Session) {}",
+    "use web_transport_quinn::{RecvStream as RawRecv};",
+    "extern crate web_transport_trait as wt_trait;",
+  ] {
+    let tokens = TokenStream::from_str(source).expect("bypass sample should tokenize");
+    assert!(
+      count_ident(&tokens, "web_transport_quinn") > 0
+        || count_ident(&tokens, "web_transport_trait") > 0,
+      "dependency aliases must remain visible to the selected-path guard"
+    );
+  }
+}
+
+#[test]
 fn manifests_apply_the_policy_to_every_first_party_workspace() {
   let root = repo_root();
   let root_manifest = root.join("Cargo.toml");

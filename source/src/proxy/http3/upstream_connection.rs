@@ -252,7 +252,10 @@ pub(super) async fn send_h3_request(
 pub(in crate::proxy::http3) async fn connect_upstream_webtransport(
   prepared: &http_proxy::PreparedWebTransport,
   state: &AppSnapshot,
-) -> anyhow::Result<(web_transport_quinn::Session, WebTransportConnectionGuard)> {
+) -> anyhow::Result<(
+  super::webtransport_bridge::UpstreamWebTransportSession,
+  WebTransportConnectionGuard,
+)> {
   let client = state
     .h3_clients
     .for_upstream(&prepared.upstream.name)

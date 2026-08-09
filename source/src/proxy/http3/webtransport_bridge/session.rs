@@ -19,7 +19,10 @@ use tracing::warn;
 
 use super::super::{H3RequestStream, connect_upstream_webtransport, respond_to_h3_request};
 use super::connection::DownstreamWebTransportConnection;
-use super::{DispatcherEvent, DownstreamBidiStream, DownstreamUniRecvStream};
+use super::upstream_adapter::{UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream};
+use super::{
+  DispatcherEvent, DownstreamBidiStream, DownstreamUniRecvStream, UpstreamWebTransportSession,
+};
 use crate::limits::ConnectionLimitContext;
 use crate::proxy::http as http_proxy;
 use crate::proxy::http::response::{is_silent_close_response, text_response};
@@ -258,7 +261,7 @@ fn spawn_upstream_session_tasks(
   session_id: SessionId,
   connect_stream_id: StreamId,
   downstream: Arc<DownstreamWebTransportConnection>,
-  upstream: Arc<web_transport_quinn::Session>,
+  upstream: Arc<UpstreamWebTransportSession>,
   events: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
@@ -330,7 +333,7 @@ pub(super) fn handle_downstream_bidi_stream(
 async fn bridge_downstream_bidi_stream(
   session_id: SessionId,
   stream: DownstreamBidiStream,
-  upstream: Arc<web_transport_quinn::Session>,
+  upstream: Arc<UpstreamWebTransportSession>,
   events: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
@@ -386,7 +389,7 @@ pub(super) fn handle_downstream_uni_stream(
 async fn bridge_downstream_uni_stream(
   session_id: SessionId,
   stream: DownstreamUniRecvStream,
-  upstream: Arc<web_transport_quinn::Session>,
+  upstream: Arc<UpstreamWebTransportSession>,
   events: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
@@ -496,7 +499,7 @@ pub(super) fn handle_downstream_datagram(
 async fn bridge_upstream_bidi(
   session_id: SessionId,
   downstream: Arc<DownstreamWebTransportConnection>,
-  upstream: Arc<web_transport_quinn::Session>,
+  upstream: Arc<UpstreamWebTransportSession>,
   activity: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
@@ -525,7 +528,7 @@ async fn bridge_upstream_bidi(
 async fn bridge_upstream_uni(
   session_id: SessionId,
   downstream: Arc<DownstreamWebTransportConnection>,
-  upstream: Arc<web_transport_quinn::Session>,
+  upstream: Arc<UpstreamWebTransportSession>,
   activity: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
@@ -556,7 +559,7 @@ async fn bridge_upstream_datagrams(
   session_id: SessionId,
   connect_stream_id: StreamId,
   downstream: Arc<DownstreamWebTransportConnection>,
-  upstream: Arc<web_transport_quinn::Session>,
+  upstream: Arc<UpstreamWebTransportSession>,
   activity: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
@@ -671,8 +674,8 @@ fn stop_unknown_uni_stream(mut stream: DownstreamUniRecvStream) {
 async fn copy_bidi_stream<D>(
   session_id: SessionId,
   downstream: D,
-  mut upstream_send: web_transport_quinn::SendStream,
-  mut upstream_recv: web_transport_quinn::RecvStream,
+  mut upstream_send: UpstreamWebTransportSendStream,
+  mut upstream_recv: UpstreamWebTransportRecvStream,
   activity: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
