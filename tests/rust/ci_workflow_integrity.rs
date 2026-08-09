@@ -2793,6 +2793,49 @@ fn test_job_runs_independent_format_checks_in_parallel() {
 }
 
 #[test]
+fn test_job_fetches_locked_cargo_graph_before_build_checks() {
+  let workflow = workflow_text();
+  let test_job = workflow_job_text(&workflow, "test");
+
+  assert_eq!(
+    test_job
+      .matches("name: Fetch locked Cargo dependency graph")
+      .count(),
+    1,
+    "test job should fetch the locked Cargo dependency graph exactly once"
+  );
+  assert_eq!(
+    test_job.matches("run: cargo fetch --locked\n").count(),
+    1,
+    "test job should use the exact locked Cargo fetch command exactly once"
+  );
+
+  let install_rust = test_job
+    .find("name: Install Rust toolchain")
+    .expect("test job should install Rust before fetching dependencies");
+  let fetch_dependencies = test_job
+    .find("name: Fetch locked Cargo dependency graph")
+    .expect("test job should fetch dependencies after installing Rust");
+  let format_parallel = test_job
+    .find("      - parallel:\n")
+    .expect("test job should define a format parallel group");
+  let cargo_clippy = test_job
+    .find("name: Cargo clippy")
+    .expect("test job should run cargo clippy");
+  let cargo_test = test_job
+    .find("name: Cargo test")
+    .expect("test job should run cargo test");
+
+  assert!(
+    install_rust < fetch_dependencies
+      && fetch_dependencies < format_parallel
+      && format_parallel < cargo_clippy
+      && cargo_clippy < cargo_test,
+    "test job should fetch locked dependencies after Rust setup and before format, clippy, and tests"
+  );
+}
+
+#[test]
 fn test_job_runs_bounded_loom_models_on_amd64() {
   let workflow = workflow_text();
   let test_job = workflow_job_text(&workflow, "test");

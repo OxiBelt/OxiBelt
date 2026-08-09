@@ -204,6 +204,9 @@ jobs:
           rustup default ${{ matrix.rust_version }}
           rustup component add rustfmt clippy --toolchain ${{ matrix.rust_version }}
 
+      - name: Fetch locked Cargo dependency graph
+        run: cargo fetch --locked
+
       - parallel:
           - name: Cargo fmt
             run: cargo fmt --check
