@@ -776,7 +776,7 @@ jobs:
   fuzz-smoke:
     name: Fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read

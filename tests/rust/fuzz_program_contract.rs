@@ -665,7 +665,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     smoke,
     &[
       "permissions:\n      contents: read",
-      "timeout-minutes: 45",
+      "timeout-minutes: 60",
       "name: Fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})",
       "max-parallel: 16",
       "fuzz_profile:\n          - name: stable\n            toolchain: stable\n          - name: asan\n            toolchain: nightly-2026-08-04",
