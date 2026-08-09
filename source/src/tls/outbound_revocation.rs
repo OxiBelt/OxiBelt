@@ -296,29 +296,13 @@ impl OutboundRevocationRuntime {
     };
     match result {
       Ok(outcome) => {
-        if outcome.certificate_rejected {
-          if outcome.result == Some("revoked") {
-            self
-              .inner
-              .metrics
-              .record_outbound_revocation_crlite_revoked();
-            bail!("upstream_crlite_revoked_certificate");
-          }
-          if policy.crlite.failure_policy == CrliteFailurePolicy::FailClosed {
-            bail!(
-              "{}",
-              outcome
-                .error_code
-                .unwrap_or("upstream_crlite_certificate_rejected")
-            );
-          }
+        if outcome.certificate_rejected && outcome.result == Some("revoked") {
+          self
+            .inner
+            .metrics
+            .record_outbound_revocation_crlite_revoked();
         }
-        if outcome.error_code.is_some()
-          && policy.crlite.failure_policy == CrliteFailurePolicy::FailClosed
-        {
-          bail!("{}", outcome.error_code.unwrap_or("upstream_crlite_error"));
-        }
-        Ok(())
+        enforce_crlite_outcome(&outcome, policy.crlite.failure_policy)
       }
       Err(error) => {
         let code = crlite::classify_crlite_error(&error);
@@ -500,6 +484,27 @@ impl OutboundRevocationRuntime {
   }
 }
 
+fn enforce_crlite_outcome(
+  outcome: &crlite::CrliteCheckOutcome,
+  failure_policy: CrliteFailurePolicy,
+) -> anyhow::Result<()> {
+  if outcome.certificate_rejected {
+    if outcome.result == Some("revoked") {
+      bail!("upstream_crlite_revoked_certificate");
+    }
+    bail!(
+      "{}",
+      outcome
+        .error_code
+        .unwrap_or("upstream_crlite_certificate_rejected")
+    );
+  }
+  if outcome.error_code.is_some() && failure_policy == CrliteFailurePolicy::FailClosed {
+    bail!("{}", outcome.error_code.unwrap_or("upstream_crlite_error"));
+  }
+  Ok(())
+}
+
 impl fmt::Debug for OutboundRevocationRuntime {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     formatter
@@ -663,3 +668,7 @@ fn collect_managed_crlite_policy(
     policies.push(policy.clone());
   }
 }
+
+#[cfg(test)]
+#[path = "outbound_revocation_tests.rs"]
+mod tests;
