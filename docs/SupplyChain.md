@@ -158,6 +158,30 @@ digest, signing-key ID, and that admission is required. The ConfigMap is only
 transport for an independently signed bundle; its Kubernetes checksum is not
 provenance evidence.
 
+## Verify Helm OCI release evidence
+
+The Helm OCI receipt and deterministic-rebuild helper uses schema v3 and the
+`https://oxibelt.dev/attestations/helm-chart-rebuild/v3` predicate type. Each
+chart receipt embeds the exact registry descriptor, manifest, and config byte
+sequences as canonical padded base64. Validation decodes and rechecks those
+bytes to prove that the descriptor identifies the exact manifest, the manifest
+identifies the exact config, and its single chart-content layer matches the
+recorded package digest and size. Each embedded document remains limited to
+256 KiB, and the canonical receipt or predicate envelope is limited to 4 MiB.
+
+Schema-v2 receipts and `/v2` predicates are not valid release evidence and are
+rejected rather than parsed as a legacy compatibility form. Matching published
+and independently rebuilt archive bytes does not compensate for missing or
+substituted registry evidence.
+
+This helper does not publish or authenticate an attestation by itself, and no
+release workflow currently consumes it. The
+`github-workflow-authentication-required` receipt value is a required policy
+marker, not proof of identity. Before trusting a future signed predicate,
+verify the exact GitHub repository, signer workflow, source ref and revision,
+subject digest, predicate type, and trusted timestamp through the GitHub
+attestation API.
+
 ## Verify GitHub attestations
 
 Use a current GitHub CLI, authenticate it for the OxiBelt repository, and

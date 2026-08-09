@@ -9,6 +9,8 @@ import {
   BuildHelmChartRebuildPredicate,
   HelmChartOciSha256,
   HelmChartRebuildPredicateType,
+  MaximumHelmChartOciEnvelopeBytes,
+  MaximumHelmChartOciJsonBytes,
   ReadCanonicalHelmChartOciJson,
   ValidateHelmChartPublishReceipt,
   ValidateHelmChartRebuildPredicate
@@ -65,20 +67,46 @@ function Fixture() {
   return { Directory, Archives, Artifacts, Plan, Receipt, PlanBytes }
 }
 
+function ForgedManifestReceipt(FixtureValue: ReturnType<typeof Fixture>, Index: number, ReplaceEvidence: boolean) {
+  const Name = ['oxibelt', 'oxibelt-gateway-controller'][Index]
+  const MaliciousArtifact = Artifact(Buffer.from(`malicious ${Name} chart`))
+  const MaliciousDescriptor = JSON.parse(MaliciousArtifact.descriptorBytes.toString('utf8')) as Record<string, unknown>
+  const ForgedReceipt = structuredClone(FixtureValue.Receipt)
+  ForgedReceipt.charts[Index].manifest.digest = MaliciousDescriptor.digest as string
+  ForgedReceipt.charts[Index].manifest.bytes = MaliciousDescriptor.size as number
+  ForgedReceipt.charts[Index].manifest.descriptor = {
+    bytes: MaliciousArtifact.descriptorBytes.length,
+    sha256: HelmChartOciSha256(MaliciousArtifact.descriptorBytes)
+  }
+  if (ReplaceEvidence) {
+    ForgedReceipt.charts[Index].manifest.evidence = {
+      descriptorBase64: MaliciousArtifact.descriptorBytes.toString('base64'),
+      manifestBase64: MaliciousArtifact.manifestBytes.toString('base64'),
+      configBase64: MaliciousArtifact.configBytes.toString('base64')
+    }
+  }
+  return ForgedReceipt
+}
+
 test('builds canonical exact two-chart OCI receipt and predicate', () => {
   const FixtureValue = Fixture()
   try {
     const { Receipt } = FixtureValue
     Assert.equal(Receipt.repository, 'OxiBelt/OxiBelt')
     Assert.equal(Receipt.repositoryProvenance, 'github-workflow-authentication-required')
-    Assert.equal(Receipt.schemaVersion, 2)
+    Assert.equal(Receipt.schemaVersion, 3)
     Assert.equal(Receipt.charts.length, 2)
     Assert.equal(Receipt.charts[0].manifest.layers[0].digest, `sha256:${Receipt.charts[0].package.sha256}`)
     Assert.deepEqual(Receipt.charts[0].manifest.descriptor, { bytes: FixtureValue.Artifacts.oxibelt.descriptorBytes.length, sha256: HelmChartOciSha256(FixtureValue.Artifacts.oxibelt.descriptorBytes) })
     Assert.equal(Receipt.charts[0].manifest.bytes, FixtureValue.Artifacts.oxibelt.manifestBytes.length)
+    Assert.deepEqual(Receipt.charts[0].manifest.evidence, {
+      descriptorBase64: FixtureValue.Artifacts.oxibelt.descriptorBytes.toString('base64'),
+      manifestBase64: FixtureValue.Artifacts.oxibelt.manifestBytes.toString('base64'),
+      configBase64: FixtureValue.Artifacts.oxibelt.configBytes.toString('base64')
+    })
     const Predicate = BuildHelmChartRebuildPredicate({ receipt: Receipt, rebuiltPlanBytes: FixtureValue.PlanBytes, publishedArchives: FixtureValue.Archives, rebuiltArchives: FixtureValue.Archives })
-    Assert.equal(Predicate.schemaVersion, 2)
-    Assert.equal(HelmChartRebuildPredicateType, 'https://oxibelt.dev/attestations/helm-chart-rebuild/v2')
+    Assert.equal(Predicate.schemaVersion, 3)
+    Assert.equal(HelmChartRebuildPredicateType, 'https://oxibelt.dev/attestations/helm-chart-rebuild/v3')
     Assert.equal(Predicate.predicateType, HelmChartRebuildPredicateType)
     Assert.deepEqual((Predicate.comparison as Record<string, unknown>).consumptionHelmVersions, ['v3.21.3', 'v4.2.3'])
     Assert.doesNotThrow(() => ValidateHelmChartPublishReceipt(structuredClone(Receipt)))
@@ -121,6 +149,8 @@ test('bounded canonical file reads reject symlinks, whitespace, and duplicate-ke
     Assert.throws(() => ReadCanonicalHelmChartOciJson(File), /canonical JSON/)
     Fs.writeFileSync(File, '{"a":1,"a":2}\n')
     Assert.throws(() => ReadCanonicalHelmChartOciJson(File), /duplicate JSON key/)
+    Fs.writeFileSync(File, Buffer.alloc(MaximumHelmChartOciEnvelopeBytes + 1, 0x20))
+    Assert.throws(() => ReadCanonicalHelmChartOciJson(File), /byte limit/)
     Fs.unlinkSync(File); Fs.writeFileSync(Path.join(Directory, 'target.json'), '{"a":1}\n'); Fs.symlinkSync('target.json', File)
     Assert.throws(() => ReadCanonicalHelmChartOciJson(File), /symlinks/)
     const ParentAlias = Path.join(Directory, 'parent-alias'); Fs.symlinkSync(Directory, ParentAlias)
@@ -150,6 +180,16 @@ test('rejects substituted plan semantics, unsupported tags, and oversized eviden
     }
     Assert.throws(() => BuildHelmChartPublishReceipt({ planBytes: Buffer.alloc(128 * 1024 + 1), archives: FixtureValue.Archives, artifacts: {} }), /at most/)
     Assert.throws(() => BuildHelmChartPublishReceipt({ planBytes: FixtureValue.PlanBytes, archives: { ...FixtureValue.Archives, oxibelt: Buffer.alloc(16 * 1024 * 1024 + 1) }, artifacts: FixtureValue.Artifacts }), /at most/)
+    for (const Field of ['descriptorBytes', 'manifestBytes', 'configBytes'] as const) {
+      Assert.throws(() => BuildHelmChartPublishReceipt({
+        planBytes: FixtureValue.PlanBytes,
+        archives: FixtureValue.Archives,
+        artifacts: {
+          ...FixtureValue.Artifacts,
+          oxibelt: { ...FixtureValue.Artifacts.oxibelt, [Field]: Buffer.alloc(MaximumHelmChartOciJsonBytes + 1) }
+        }
+      }), /bounded bytes/)
+    }
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
@@ -171,6 +211,74 @@ test('rebuild predicates require exact independently rebuilt plan and package by
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
+test('rejects forged OCI manifest identities that do not contain the recorded package layer', () => {
+  const FixtureValue = Fixture()
+  try {
+    for (const Index of [0, 1]) {
+      const SummaryForgery = ForgedManifestReceipt(FixtureValue, Index, false)
+      Assert.throws(() => ValidateHelmChartPublishReceipt(structuredClone(SummaryForgery)), /raw OCI evidence/)
+      Assert.throws(() => BuildHelmChartRebuildPredicate({
+        receipt: SummaryForgery,
+        rebuiltPlanBytes: FixtureValue.PlanBytes,
+        publishedArchives: FixtureValue.Archives,
+        rebuiltArchives: FixtureValue.Archives
+      }), /raw OCI evidence/)
+      const EvidenceForgery = ForgedManifestReceipt(FixtureValue, Index, true)
+      Assert.throws(() => ValidateHelmChartPublishReceipt(structuredClone(EvidenceForgery)), /does not bind the exact package bytes/)
+      Assert.throws(() => BuildHelmChartRebuildPredicate({
+        receipt: EvidenceForgery,
+        rebuiltPlanBytes: FixtureValue.PlanBytes,
+        publishedArchives: FixtureValue.Archives,
+        rebuiltArchives: FixtureValue.Archives
+      }), /does not bind the exact package bytes/)
+      const Predicate = BuildHelmChartRebuildPredicate({
+        receipt: FixtureValue.Receipt,
+        rebuiltPlanBytes: FixtureValue.PlanBytes,
+        publishedArchives: FixtureValue.Archives,
+        rebuiltArchives: FixtureValue.Archives
+      })
+      const ForgedPredicate = structuredClone(Predicate)
+      ForgedPredicate.receipt = EvidenceForgery
+      Assert.throws(() => ValidateHelmChartRebuildPredicate(ForgedPredicate), /does not bind the exact package bytes/)
+    }
+  } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
+})
+
+test('rejects substituted raw OCI evidence and all v2 receipt or predicate inputs', () => {
+  const FixtureValue = Fixture()
+  try {
+    const NoncanonicalBase64 = structuredClone(FixtureValue.Receipt)
+    NoncanonicalBase64.charts[0].manifest.evidence.descriptorBase64 = 'A==='
+    Assert.throws(() => ValidateHelmChartPublishReceipt(NoncanonicalBase64), /canonical padded base64/)
+
+    const DuplicateDescriptor = structuredClone(FixtureValue.Receipt)
+    DuplicateDescriptor.charts[0].manifest.evidence.descriptorBase64 = Buffer.from('{"a":1,"a":2}', 'utf8').toString('base64')
+    Assert.throws(() => ValidateHelmChartPublishReceipt(DuplicateDescriptor), /duplicate JSON key/)
+
+    const DuplicateManifest = structuredClone(FixtureValue.Receipt)
+    DuplicateManifest.charts[0].manifest.evidence.manifestBase64 = Buffer.from('{"schemaVersion":2,"schemaVersion":2}', 'utf8').toString('base64')
+    Assert.throws(() => ValidateHelmChartPublishReceipt(DuplicateManifest), /duplicate JSON key/)
+
+    const SubstitutedConfig = structuredClone(FixtureValue.Receipt)
+    SubstitutedConfig.charts[0].manifest.evidence.configBase64 = Buffer.from('substituted config', 'utf8').toString('base64')
+    Assert.throws(() => ValidateHelmChartPublishReceipt(SubstitutedConfig), /config does not bind exact raw config bytes/)
+
+    const MissingEvidence = structuredClone(FixtureValue.Receipt) as unknown as Record<string, unknown>
+    const MissingManifest = (MissingEvidence.charts as Array<Record<string, unknown>>)[0].manifest as Record<string, unknown>
+    delete MissingManifest.evidence
+    Assert.throws(() => ValidateHelmChartPublishReceipt(MissingEvidence), /missing, unexpected/)
+
+    const LegacyReceipt = structuredClone(FixtureValue.Receipt) as unknown as Record<string, unknown>
+    LegacyReceipt.schemaVersion = 2
+    Assert.throws(() => ValidateHelmChartPublishReceipt(LegacyReceipt), /identity is invalid/)
+
+    const LegacyPredicate = BuildHelmChartRebuildPredicate({ receipt: FixtureValue.Receipt, rebuiltPlanBytes: FixtureValue.PlanBytes, publishedArchives: FixtureValue.Archives, rebuiltArchives: FixtureValue.Archives })
+    LegacyPredicate.schemaVersion = 2
+    LegacyPredicate.predicateType = 'https://oxibelt.dev/attestations/helm-chart-rebuild/v2'
+    Assert.throws(() => ValidateHelmChartRebuildPredicate(LegacyPredicate), /identity is invalid/)
+  } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
+})
+
 test('CLI accepts only exact option sets and writes newline-canonical predicates', () => {
   const FixtureValue = Fixture()
   try {
@@ -181,6 +289,10 @@ test('CLI accepts only exact option sets and writes newline-canonical predicates
     const PublishedController = Path.join(FixtureValue.Directory, 'published-controller.tgz')
     const RebuiltController = Path.join(FixtureValue.Directory, 'rebuilt-controller.tgz')
     const Output = Path.join(FixtureValue.Directory, 'predicate.json')
+    const ForgedReceiptPath = Path.join(FixtureValue.Directory, 'forged-receipt.json')
+    const ForgedOutput = Path.join(FixtureValue.Directory, 'forged-predicate.json')
+    const LegacyReceiptPath = Path.join(FixtureValue.Directory, 'legacy-receipt.json')
+    const LegacyPredicatePath = Path.join(FixtureValue.Directory, 'legacy-predicate.json')
     const PublishReceipt = Path.join(FixtureValue.Directory, 'publish-receipt.json')
     const OxiBeltDescriptor = Path.join(FixtureValue.Directory, 'oxibelt-descriptor.json')
     const OxiBeltManifest = Path.join(FixtureValue.Directory, 'oxibelt-manifest.json')
@@ -212,6 +324,22 @@ test('CLI accepts only exact option sets and writes newline-canonical predicates
     RunCli(['build-receipt', ...ReceiptArguments])
     Assert.doesNotThrow(() => ValidateHelmChartPublishReceipt(ReadCanonicalHelmChartOciJson(PublishReceipt)))
     RunCli(['validate-receipt', '--input', PublishReceipt])
+    const ForgedReceipt = ForgedManifestReceipt(FixtureValue, 0, true)
+    Fs.writeFileSync(ForgedReceiptPath, `${Canonical(ForgedReceipt)}\n`)
+    Assert.throws(() => RunCli(['validate-receipt', '--input', ForgedReceiptPath]), /does not bind the exact package bytes/)
+    const ForgedCommon = [...Common]
+    ForgedCommon[1] = ForgedReceiptPath
+    ForgedCommon[ForgedCommon.length - 1] = ForgedOutput
+    Assert.throws(() => RunCli(['build-predicate', ...ForgedCommon]), /does not bind the exact package bytes/)
+    const LegacyReceipt = structuredClone(FixtureValue.Receipt) as unknown as Record<string, unknown>
+    LegacyReceipt.schemaVersion = 2
+    Fs.writeFileSync(LegacyReceiptPath, `${Canonical(LegacyReceipt)}\n`)
+    Assert.throws(() => RunCli(['validate-receipt', '--input', LegacyReceiptPath]), /identity is invalid/)
+    const LegacyPredicate = BuildHelmChartRebuildPredicate({ receipt: FixtureValue.Receipt, rebuiltPlanBytes: FixtureValue.PlanBytes, publishedArchives: FixtureValue.Archives, rebuiltArchives: FixtureValue.Archives })
+    LegacyPredicate.schemaVersion = 2
+    LegacyPredicate.predicateType = 'https://oxibelt.dev/attestations/helm-chart-rebuild/v2'
+    Fs.writeFileSync(LegacyPredicatePath, `${Canonical(LegacyPredicate)}\n`)
+    Assert.throws(() => RunCli(['validate-predicate', '--input', LegacyPredicatePath]), /identity is invalid/)
     Assert.throws(() => RunCli(['build-predicate', ...Common, '--unknown', 'value']), /unknown option/)
     Assert.throws(() => RunCli(['validate-receipt', '--input', ReceiptPath, '--input', ReceiptPath]), /exactly once/)
     Assert.throws(() => RunCli(['validate-receipt', '--input']), /non-option value/)

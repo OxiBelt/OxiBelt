@@ -9,16 +9,18 @@ import { ParseReleaseTag } from './docker_image_release.js'
 
 type JsonObject = Record<string, unknown>
 
-export const HelmChartPublishReceiptSchemaVersion = 2
-export const HelmChartRebuildPredicateSchemaVersion = 2
-export const HelmChartRebuildPredicateType = 'https://oxibelt.dev/attestations/helm-chart-rebuild/v2'
+export const HelmChartPublishReceiptSchemaVersion = 3
+export const HelmChartRebuildPredicateSchemaVersion = 3
+export const HelmChartRebuildPredicateType = 'https://oxibelt.dev/attestations/helm-chart-rebuild/v3'
 export const MaximumHelmChartOciJsonBytes = 256 * 1024
+export const MaximumHelmChartOciEnvelopeBytes = 4 * 1024 * 1024
 export const MaximumHelmChartOciPlanBytes = 128 * 1024
 export const MaximumHelmChartOciArchiveBytes = 16 * 1024 * 1024
 
 const FullRevision = /^[0-9a-f]{40}$/
 const Sha256 = /^[0-9a-f]{64}$/
 const Digest = /^sha256:[0-9a-f]{64}$/
+const CanonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
 const Semver = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/
 const Repository = 'OxiBelt/OxiBelt'
 const Provenance = 'github-workflow-authentication-required'
@@ -51,7 +53,7 @@ const Charts = [
 ] as const
 
 export type HelmChartPublishReceipt = {
-  schemaVersion: 2
+  schemaVersion: 3
   kind: 'helm-chart-publish'
   repository: 'OxiBelt/OxiBelt'
   repositoryProvenance: 'github-workflow-authentication-required'
@@ -68,11 +70,25 @@ export type HelmChartPublishReceipt = {
     experimentalStatus: 'experimental'
     defaultImages: Array<{ path: string, from: 'latest', to: string }>
     transformationRecipe: string[]
-    manifest: { descriptor: { bytes: number, sha256: string }, digest: string, mediaType: string, bytes: number, config: Descriptor, layers: [Descriptor] }
+    manifest: HelmChartOciManifestReceipt
   }>
 }
 
 export type Descriptor = { mediaType: string, digest: string, size: number }
+
+export type HelmChartOciManifestReceipt = {
+  descriptor: { bytes: number, sha256: string }
+  digest: string
+  mediaType: string
+  bytes: number
+  config: Descriptor
+  layers: [Descriptor]
+  evidence: {
+    descriptorBase64: string
+    manifestBase64: string
+    configBase64: string
+  }
+}
 
 export type BuildHelmChartPublishReceiptOptions = {
   planBytes: Buffer
@@ -122,6 +138,11 @@ function Canonical(Value: unknown): string {
   if (Array.isArray(Value)) return `[${Value.map(Canonical).join(',')}]`
   if (IsObject(Value)) return `{${Object.keys(Value).sort().map(Key => `${JSON.stringify(Key)}:${Canonical(Value[Key])}`).join(',')}}`
   return JSON.stringify(Value)
+}
+
+function AssertEnvelopeSize(Value: unknown, Label: string): void {
+  const Bytes = Buffer.byteLength(`${Canonical(Value)}\n`, 'utf8')
+  if (Bytes > MaximumHelmChartOciEnvelopeBytes) throw new Error(`${Label} exceeds the ${MaximumHelmChartOciEnvelopeBytes} byte canonical envelope limit`)
 }
 
 function ExactCanonical(Value: unknown, Expected: unknown, Label: string): void {
@@ -189,15 +210,15 @@ function ParseStrictJson(Bytes: Buffer, Label: string, MaximumBytes = MaximumHel
   return Value
 }
 
-function ParseCanonicalJson(Bytes: Buffer, Label: string): unknown {
-  const Value = ParseStrictJson(Bytes, Label)
+function ParseCanonicalJson(Bytes: Buffer, Label: string, MaximumBytes = MaximumHelmChartOciJsonBytes): unknown {
+  const Value = ParseStrictJson(Bytes, Label, MaximumBytes)
   const Text = Bytes.toString('utf8')
   if (`${Canonical(Value)}\n` !== Text) throw new Error(`${Label} must be canonical JSON without duplicate keys or whitespace`)
   return Value
 }
 
 export function ReadCanonicalHelmChartOciJson(FilePath: string): unknown {
-  return ParseCanonicalJson(BoundedRegularFile(FilePath, MaximumHelmChartOciJsonBytes, 'OCI JSON input'), 'OCI JSON input')
+  return ParseCanonicalJson(BoundedRegularFile(FilePath, MaximumHelmChartOciEnvelopeBytes, 'OCI JSON input'), 'OCI JSON input', MaximumHelmChartOciEnvelopeBytes)
 }
 
 function DescriptorValue(Value: unknown, Label: string): Descriptor {
@@ -255,9 +276,19 @@ function BoundedBytes(Value: unknown, MaximumBytes: number, Label: string): Buff
   return Value
 }
 
-function ManifestValue(Artifact: HelmChartOciArtifact | undefined, ExpectedDigest: string, ExpectedSize: number, Label: string): { descriptor: { bytes: number, sha256: string }, digest: string, mediaType: string, bytes: number, config: Descriptor, layers: [Descriptor] } {
+function EvidenceBytes(Value: unknown, Label: string): Buffer {
+  const Encoded = StringValue(Value, Label)
+  const MaximumEncodedBytes = Math.ceil(MaximumHelmChartOciJsonBytes / 3) * 4
+  if (Encoded.length > MaximumEncodedBytes || !CanonicalBase64.test(Encoded)) throw new Error(`${Label} must be canonical padded base64 for bounded raw OCI evidence`)
+  const Bytes = Buffer.from(Encoded, 'base64')
+  if (Bytes.length === 0 || Bytes.length > MaximumHelmChartOciJsonBytes || Bytes.toString('base64') !== Encoded) throw new Error(`${Label} must be canonical padded base64 for bounded raw OCI evidence`)
+  return Bytes
+}
+
+function ManifestValue(Artifact: HelmChartOciArtifact | undefined, ExpectedDigest: string, ExpectedSize: number, Label: string): HelmChartOciManifestReceipt {
   if (Artifact === undefined) throw new Error(`${Label} OCI artifact evidence is missing`)
-  const DescriptorDocument = ObjectValue(ParseStrictJson(BoundedBytes(Artifact.descriptorBytes, MaximumHelmChartOciJsonBytes, `${Label} OCI descriptor`), `${Label} OCI descriptor`), `${Label} OCI descriptor`)
+  const DescriptorBytes = BoundedBytes(Artifact.descriptorBytes, MaximumHelmChartOciJsonBytes, `${Label} OCI descriptor`)
+  const DescriptorDocument = ObjectValue(ParseStrictJson(DescriptorBytes, `${Label} OCI descriptor`), `${Label} OCI descriptor`)
   const DescriptorBinding = DescriptorValue(DescriptorDocument, `${Label} OCI descriptor`)
   if (DescriptorBinding.mediaType !== 'application/vnd.oci.image.manifest.v1+json') throw new Error(`${Label} OCI descriptor media type is invalid`)
   const ManifestBytes = BoundedBytes(Artifact.manifestBytes, MaximumHelmChartOciJsonBytes, `${Label} OCI manifest`)
@@ -274,12 +305,24 @@ function ManifestValue(Artifact: HelmChartOciArtifact | undefined, ExpectedDiges
   if (!Array.isArray(Manifest.layers) || Manifest.layers.length !== 1) throw new Error(`${Label} OCI manifest must contain exactly one chart-content layer`)
   const layer = DescriptorValue(Manifest.layers[0], `${Label} OCI manifest.layers[0]`)
   if (layer.mediaType !== ChartContentMediaType || layer.digest !== `sha256:${ExpectedDigest}` || layer.size !== ExpectedSize) throw new Error(`${Label} OCI chart layer does not bind the exact package bytes`)
-  return { descriptor: { bytes: Artifact.descriptorBytes.length, sha256: HelmChartOciSha256(Artifact.descriptorBytes) }, digest, mediaType, bytes: ManifestBytes.length, config, layers: [layer] }
+  return {
+    descriptor: { bytes: DescriptorBytes.length, sha256: HelmChartOciSha256(DescriptorBytes) },
+    digest,
+    mediaType,
+    bytes: ManifestBytes.length,
+    config,
+    layers: [layer],
+    evidence: {
+      descriptorBase64: DescriptorBytes.toString('base64'),
+      manifestBase64: ManifestBytes.toString('base64'),
+      configBase64: ConfigBytes.toString('base64')
+    }
+  }
 }
 
-function ReceiptManifestValue(Value: unknown, ExpectedDigest: string, ExpectedSize: number, Label: string): { descriptor: { bytes: number, sha256: string }, digest: string, mediaType: string, bytes: number, config: Descriptor, layers: [Descriptor] } {
+function ReceiptManifestValue(Value: unknown, ExpectedDigest: string, ExpectedSize: number, Label: string): HelmChartOciManifestReceipt {
   const Manifest = ObjectValue(Value, `${Label} OCI manifest`)
-  ExactKeys(Manifest, ['descriptor', 'digest', 'mediaType', 'bytes', 'config', 'layers'], `${Label} OCI manifest`)
+  ExactKeys(Manifest, ['descriptor', 'digest', 'mediaType', 'bytes', 'config', 'layers', 'evidence'], `${Label} OCI manifest`)
   const DescriptorReceipt = ObjectValue(Manifest.descriptor, `${Label} OCI manifest.descriptor`)
   ExactKeys(DescriptorReceipt, ['bytes', 'sha256'], `${Label} OCI manifest.descriptor`)
   const DescriptorBytes = NumberValue(DescriptorReceipt.bytes, `${Label} OCI manifest.descriptor.bytes`)
@@ -294,7 +337,17 @@ function ReceiptManifestValue(Value: unknown, ExpectedDigest: string, ExpectedSi
   if (!Array.isArray(Manifest.layers) || Manifest.layers.length !== 1) throw new Error(`${Label} OCI manifest must contain exactly one chart-content layer`)
   const layer = DescriptorValue(Manifest.layers[0], `${Label} OCI manifest.layers[0]`)
   if (layer.mediaType !== ChartContentMediaType || layer.digest !== `sha256:${ExpectedDigest}` || layer.size !== ExpectedSize) throw new Error(`${Label} OCI chart layer does not bind the exact package bytes`)
-  return { descriptor: { bytes: DescriptorBytes, sha256: DescriptorSha256 }, digest, mediaType, bytes: ManifestBytes, config, layers: [layer] }
+  const Evidence = ObjectValue(Manifest.evidence, `${Label} OCI manifest raw OCI evidence`)
+  ExactKeys(Evidence, ['descriptorBase64', 'manifestBase64', 'configBase64'], `${Label} OCI manifest raw OCI evidence`)
+  const Verified = ManifestValue({
+    descriptorBytes: EvidenceBytes(Evidence.descriptorBase64, `${Label} OCI descriptor raw OCI evidence`),
+    manifestBytes: EvidenceBytes(Evidence.manifestBase64, `${Label} OCI manifest raw OCI evidence`),
+    configBytes: EvidenceBytes(Evidence.configBase64, `${Label} OCI config raw OCI evidence`)
+  }, ExpectedDigest, ExpectedSize, Label)
+  const Claimed = { descriptor: { bytes: DescriptorBytes, sha256: DescriptorSha256 }, digest, mediaType, bytes: ManifestBytes, config, layers: [layer] }
+  const VerifiedSummary = { descriptor: Verified.descriptor, digest: Verified.digest, mediaType: Verified.mediaType, bytes: Verified.bytes, config: Verified.config, layers: Verified.layers }
+  if (Canonical(Claimed) !== Canonical(VerifiedSummary)) throw new Error(`${Label} OCI manifest does not match raw OCI evidence`)
+  return Verified
 }
 
 export function BuildHelmChartPublishReceipt(Options: BuildHelmChartPublishReceiptOptions): HelmChartPublishReceipt {
@@ -368,6 +421,7 @@ export function ValidateHelmChartPublishReceipt(Value: unknown): HelmChartPublis
     ExactCanonical(Annotations, ExpectedAnnotations, `Helm chart publish receipt annotations for ${Expected.name}`)
     Result.charts[Index].manifest = Manifest
   }
+  AssertEnvelopeSize(Result, 'Helm chart publish receipt')
   return Result
 }
 
@@ -414,10 +468,13 @@ export function ValidateHelmChartRebuildPredicate(Value: unknown): JsonObject {
   const Comparison = ObjectValue(Predicate.comparison, 'Helm chart rebuild predicate comparison')
   ExactKeys(Comparison, ['schemaVersion', 'exactPackageBytes', 'deterministicPackager', 'consumptionHelmVersions'], 'Helm chart rebuild predicate comparison')
   if (Comparison.schemaVersion !== 1 || Comparison.exactPackageBytes !== true || Comparison.deterministicPackager !== 'v4.2.3' || Canonical(Comparison.consumptionHelmVersions) !== Canonical(['v3.21.3', 'v4.2.3'])) throw new Error('Helm chart rebuild predicate comparison contract is invalid')
+  AssertEnvelopeSize(Predicate, 'Helm chart rebuild predicate')
   return Predicate
 }
 
 function WriteCanonical(FilePath: string, Value: unknown): void {
+  const Content = Buffer.from(`${Canonical(Value)}\n`, 'utf8')
+  if (Content.length > MaximumHelmChartOciEnvelopeBytes) throw new Error(`OCI JSON output exceeds the ${MaximumHelmChartOciEnvelopeBytes} byte canonical envelope limit`)
   if (FilePath === '' || FilePath.includes('\0') || FilePath.split(Path.sep).includes('..')) throw new Error('OCI JSON output path is invalid')
   const ParentBinding = BindInputPath(Path.dirname(FilePath), 'OCI JSON output parent')
   const Target = Path.join(ParentBinding.resolved, Path.basename(FilePath))
@@ -427,7 +484,6 @@ function WriteCanonical(FilePath: string, Value: unknown): void {
   let Descriptor: number | undefined
   try {
     Descriptor = Fs.openSync(Target, Fs.constants.O_WRONLY | Fs.constants.O_CREAT | Fs.constants.O_EXCL | NoFollow, 0o600)
-    const Content = Buffer.from(`${Canonical(Value)}\n`, 'utf8')
     let Offset = 0
     while (Offset < Content.length) Offset += Fs.writeSync(Descriptor, Content, Offset, Content.length - Offset)
     Fs.fsyncSync(Descriptor)
