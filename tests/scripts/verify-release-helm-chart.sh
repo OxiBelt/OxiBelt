@@ -79,7 +79,7 @@ work_directory="$(assert_no_symlink_path "${work_directory}" "work directory")" 
 
 helm_version="$("${helm_bin}" version --short)"
 oras_version="$("${oras_bin}" version)"
-[[ "${oras_version}" =~ (^|[[:space:]])1\.2\.0($|[[:space:]]) ]] || { echo "ORAS must be the approved 1.2.0 acquisition client" >&2; exit 1; }
+[[ "${oras_version}" =~ (^|[[:space:]])1\.3\.3($|[[:space:]]) ]] || { echo "ORAS must be the approved 1.3.3 acquisition client" >&2; exit 1; }
 if [[ "${mode}" == rebuild ]]; then
   [[ "${helm_version}" =~ ^v4\.2\.3(\+[0-9A-Za-z.-]+)?$ ]] || { echo "byte rebuild requires Helm v4.2.3, found ${helm_version}" >&2; exit 1; }
   [[ "${release_ref}" == "refs/tags/${version}" && "${revision}" =~ ^[0-9a-f]{40}$ && -n "${workspace_path}" ]] || { usage; exit 2; }

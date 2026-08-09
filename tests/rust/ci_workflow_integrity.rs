@@ -2046,7 +2046,7 @@ fn feature_graduation_workflow_is_manual_exact_sha_and_privilege_separated() {
     "feature-graduation-predicate.json",
     "feature-graduation-subject.json",
     "sha256sum",
-    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d",
+    "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
     "subject-path:",
     "predicate-path:",
     "push-to-registry: false",
@@ -8176,7 +8176,7 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     "Checkout release revision",
     "Validate immutable release checkout",
     "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
-    "version: v29.7.1",
+    "version: v29.7.2",
     "rootless: true",
     "daemon-config: |",
     "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",
@@ -8417,10 +8417,10 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   );
   assert_eq!(
     workflow
-      .matches("actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1")
+      .matches("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2")
       .count()
       + arch_workflow
-        .matches("actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1")
+        .matches("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2")
         .count(),
     6
   );
@@ -8480,7 +8480,7 @@ fn release_vulnerability_gate_preserves_attestation_and_digest_publication_chain
     "packages: read",
     "Validate immutable platform attestation subject",
     "canonical platform tag ${canonical_tag} resolved to ${resolved_digest}, expected ${DIGEST}",
-    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1",
+    "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2",
     "Publish signed platform provenance",
     "Publish signed platform SBOM",
     "Publish signed platform rebuild recipe",
@@ -8576,7 +8576,7 @@ fn release_vulnerability_gate_preserves_attestation_and_digest_publication_chain
     "packages: read",
     "Validate immutable index attestation subject",
     "[.children[].artifactArch] == [\"amd64\", \"arm64\", \"riscv64\"]",
-    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1",
+    "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2",
     "Publish signed index provenance",
     "Publish signed index SBOM",
     "Publish signed index rebuild recipe",
@@ -8707,7 +8707,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "release plan must contain exactly 30 unique role/architecture artifacts",
     "release plan must contain exactly 12 unique role manifests",
     "{schemaVersion: 2, role: $role, image: $image, digest: $digest, children: $children}",
-    "actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1",
+    "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2",
     "https://oxibelt.dev/attestations/rebuild/v1",
     "rebuild_recipe.mjs",
     "push-to-registry: false",
@@ -8800,7 +8800,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "runs-on: ${{ matrix.runner }}",
     "persist-credentials: false",
     "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
-    "version: v29.7.1",
+    "version: v29.7.2",
     "rootless: true",
     "daemon-config: |",
     "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",
