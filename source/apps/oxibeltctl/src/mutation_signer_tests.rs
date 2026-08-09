@@ -223,14 +223,14 @@ fn parses_complete_mutation_signing_configuration() {
 #[test]
 fn signs_with_both_hybrid_components() {
   use aws_lc_rs::encoding::AsDer;
-  use aws_lc_rs::unstable::signature::{ML_DSA_44_SIGNING, PqdsaKeyPair};
+  use aws_lc_rs::signature::{ML_DSA_44_SIGNING, PqdsaKeyPair};
 
   let ed25519 = Ed25519KeyPair::generate().expect("test Ed25519 key generation");
   let ml_dsa_44 = PqdsaKeyPair::generate(&ML_DSA_44_SIGNING).expect("test ML-DSA key generation");
   let ed25519_file = write_private_key(&ed25519, 0o600);
   let ml_dsa_file = write_key_bytes(
     ml_dsa_44
-      .to_pkcs8()
+      .to_pkcs8v1()
       .expect("serialize test ML-DSA key")
       .as_ref(),
     0o600,

@@ -270,7 +270,7 @@ fn attaches_mutation_response_headers() {
 #[test]
 fn hybrid_signature_requires_both_algorithms() {
   use aws_lc_rs::encoding::AsDer;
-  use aws_lc_rs::unstable::signature::{ML_DSA_44_SIGNING, PqdsaKeyPair};
+  use aws_lc_rs::signature::{ML_DSA_44_SIGNING, PqdsaKeyPair};
 
   let body = b"safe";
   let principal = "controller-a";

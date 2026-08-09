@@ -87,7 +87,7 @@ impl SignerBinding {
         .as_ref()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| invalid("ML-DSA-44 public key is required"))?;
-      ParsedPublicKey::new(&aws_lc_rs::unstable::signature::ML_DSA_44, public_key)
+      ParsedPublicKey::new(&aws_lc_rs::signature::ML_DSA_44, public_key)
         .map_err(|_| invalid("ML-DSA-44 public key is invalid"))?;
     }
     Ok(())
@@ -176,7 +176,7 @@ fn verify_signature(
         .ml_dsa_44_public_key_der
         .as_ref()
         .is_some_and(|public_key| {
-          UnparsedPublicKey::new(&aws_lc_rs::unstable::signature::ML_DSA_44, public_key)
+          UnparsedPublicKey::new(&aws_lc_rs::signature::ML_DSA_44, public_key)
             .verify(transcript, ml_dsa_44)
             .is_ok()
         });

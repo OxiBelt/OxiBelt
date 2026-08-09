@@ -42,7 +42,7 @@ enum SigningKeys {
   #[cfg(feature = "mutation-pqc")]
   Ed25519MlDsa44 {
     ed25519: Ed25519KeyPair,
-    ml_dsa_44: aws_lc_rs::unstable::signature::PqdsaKeyPair,
+    ml_dsa_44: aws_lc_rs::signature::PqdsaKeyPair,
   },
 }
 
@@ -252,7 +252,7 @@ impl SigningKeys {
       )?)),
       #[cfg(feature = "mutation-pqc")]
       Self::Ed25519MlDsa44 { ed25519, ml_dsa_44 } => {
-        use aws_lc_rs::unstable::signature::ML_DSA_44_SIGNING;
+        use aws_lc_rs::signature::ML_DSA_44_SIGNING;
 
         let mut ml_dsa_signature = vec![0_u8; ML_DSA_44_SIGNING.signature_len()];
         let written = ml_dsa_44
@@ -311,8 +311,8 @@ fn load_ed25519_key(path: &Path) -> anyhow::Result<Ed25519KeyPair> {
 }
 
 #[cfg(feature = "mutation-pqc")]
-fn load_ml_dsa_44_key(path: &Path) -> anyhow::Result<aws_lc_rs::unstable::signature::PqdsaKeyPair> {
-  use aws_lc_rs::unstable::signature::{ML_DSA_44_SIGNING, PqdsaKeyPair};
+fn load_ml_dsa_44_key(path: &Path) -> anyhow::Result<aws_lc_rs::signature::PqdsaKeyPair> {
+  use aws_lc_rs::signature::{ML_DSA_44_SIGNING, PqdsaKeyPair};
 
   with_pkcs8_der(path, |der| {
     PqdsaKeyPair::from_pkcs8(&ML_DSA_44_SIGNING, der).map_err(|_| {

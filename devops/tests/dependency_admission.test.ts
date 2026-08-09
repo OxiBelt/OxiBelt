@@ -13,7 +13,7 @@ type Fixture = {
   auditReportPath: string
 }
 
-const PackageManager = 'pnpm@11.20.0+sha512.9a6f330a95b66446ea088faf1521405a8a01f07fde7124cc9958dfed52d4bb436737e65b08f85f37b46fcba375092558ac51262b816844b22f63406ed166bfee'
+const PackageManager = 'pnpm@11.21.0+sha512.521705bce689924eac72f5a3587122f362689ef6571e55ba80076fd637c11132ecffada26fad4ea79c485bfddbfd3d5a2a5b05805a77e893de71ec8a6cca3bb1'
 const Integrity = `sha512-${Buffer.alloc(64, 7).toString('base64')}`
 
 function WriteJson(FilePath: string, Value: unknown): void {
