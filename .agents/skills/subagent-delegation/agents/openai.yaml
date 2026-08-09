@@ -1,0 +1,7 @@
+interface:
+  display_name: "Subagent Delegation"
+  short_description: "Route Codex subagents by cost, ambiguity, and risk"
+  default_prompt: "Apply the subagent delegation policy to this engineering task."
+
+policy:
+  allow_implicit_invocation: true
