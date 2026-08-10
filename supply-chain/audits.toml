@@ -53,7 +53,7 @@ notes = "Reviewed the complete checksum-matched 1.17.1-to-1.17.3 source delta an
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "1.17.3 -> 1.18.0"
-notes = "Reviewed the complete checksum-matched cached 1.17.3-to-1.18.0 delta and its locally available provenance. The facade adds checked out-of-place TLS AEAD sealing, fixes key-wrap short-input rejection, zeroizes key-wrap keys, and stabilizes ML-DSA-facing APIs while retaining deprecated compatibility aliases. OxiBelt's optional mutation-pqc feature now uses the stable signature API and no longer enables aws-lc-rs/unstable. The new AEAD FFI call validates all caller-controlled output lengths before invocation; OxiBelt continues to use only the existing in-place AEAD methods and its ML-DSA-44 signature lengths remain explicitly checked."
+notes = "Reviewed the complete checksum-matched cached 1.17.3-to-1.18.0 delta and its locally available provenance. The facade adds checked out-of-place TLS AEAD sealing, fixes key-wrap short-input rejection, zeroizes key-wrap keys, and stabilizes ML-DSA-facing APIs while retaining deprecated compatibility aliases. OxiBelt's first-party mutation-pqc features use the stable signature API and no longer request aws-lc-rs/unstable; the locked quic-parser 0.1.5 dependency still requests that feature independently for its AWS-LC backend. The new AEAD FFI call validates all caller-controlled output lengths before invocation; OxiBelt continues to use only the existing in-place AEAD methods and its ML-DSA-44 signature lengths remain explicitly checked."
 
 [[audits.aws-lc-sys]]
 who = "OpenAI Codex"

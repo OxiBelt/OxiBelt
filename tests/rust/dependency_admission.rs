@@ -25,6 +25,19 @@ fn toml_document(path: &str) -> toml::Value {
   toml::from_str(&read(path)).unwrap_or_else(|error| panic!("failed to parse {path}: {error}"))
 }
 
+fn string_array<'a>(value: &'a toml::Value, description: &str) -> Vec<&'a str> {
+  value
+    .as_array()
+    .unwrap_or_else(|| panic!("{description} must be an array"))
+    .iter()
+    .map(|entry| {
+      entry
+        .as_str()
+        .unwrap_or_else(|| panic!("{description} entries must be strings"))
+    })
+    .collect()
+}
+
 fn sha256_hex(contents: &[u8]) -> String {
   let digest = Sha256::digest(contents);
   digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -58,6 +71,85 @@ fn compatibility_lines_follow_cargo_zero_major_semantics() {
   assert_eq!(compatibility_line("0.2.3"), "0.2");
   assert_eq!(compatibility_line("0.0.3"), "0.0.3");
   assert_eq!(compatibility_line("0.0.7-alpha.1+metadata"), "0.0.7");
+}
+
+#[test]
+fn aws_lc_stable_signature_evidence_matches_first_party_features() {
+  let core = toml_document("source/Cargo.toml");
+  assert_eq!(
+    string_array(
+      &core["features"]["mutation-pqc"],
+      "source mutation-pqc feature",
+    ),
+    ["admin-runtime"]
+  );
+
+  let quic_parser = &core["dependencies"]["quic-parser"];
+  assert_eq!(quic_parser["version"].as_str(), Some("0.1.5"));
+  assert_eq!(quic_parser["default-features"].as_bool(), Some(false));
+  assert_eq!(
+    string_array(
+      &quic_parser["features"],
+      "source quic-parser dependency features",
+    ),
+    ["aws-lc-rs"]
+  );
+  let cargo_lock = toml_document("Cargo.lock");
+  let locked_quic_parser_versions = cargo_lock["package"]
+    .as_array()
+    .expect("Cargo.lock package list must be an array")
+    .iter()
+    .filter(|package| package["name"].as_str() == Some("quic-parser"))
+    .map(|package| {
+      package["version"]
+        .as_str()
+        .expect("locked quic-parser version must be a string")
+    })
+    .collect::<Vec<_>>();
+  assert_eq!(locked_quic_parser_versions, ["0.1.5"]);
+
+  let cli = toml_document("source/apps/oxibeltctl/Cargo.toml");
+  assert_eq!(
+    string_array(
+      &cli["features"]["mutation-pqc"],
+      "oxibeltctl mutation-pqc feature",
+    ),
+    ["oxibelt/mutation-pqc"]
+  );
+
+  for path in [
+    "source/apps/oxibeltctl/src/mutation_signer.rs",
+    "source/src/admin_mutation/verifier.rs",
+  ] {
+    assert!(
+      !read(path).contains("aws_lc_rs::unstable"),
+      "{path} must use stable AWS-LC signature APIs"
+    );
+  }
+
+  let audits = toml_document("supply-chain/audits.toml");
+  let matching_audits = audits["audits"]["aws-lc-rs"]
+    .as_array()
+    .expect("aws-lc-rs audits must be an array")
+    .iter()
+    .filter(|audit| audit["delta"].as_str() == Some("1.17.3 -> 1.18.0"))
+    .collect::<Vec<_>>();
+  assert_eq!(
+    matching_audits.len(),
+    1,
+    "the AWS-LC 1.18.0 delta needs one unambiguous audit record"
+  );
+  let audit = matching_audits[0];
+  assert_eq!(audit["criteria"].as_str(), Some("safe-to-deploy"));
+  let notes = audit["notes"]
+    .as_str()
+    .expect("the AWS-LC 1.18.0 audit needs review notes");
+  assert!(notes.contains(
+    "first-party mutation-pqc features use the stable signature API and no longer request aws-lc-rs/unstable"
+  ));
+  assert!(
+    notes.contains("locked quic-parser 0.1.5 dependency still requests that feature independently")
+  );
 }
 
 fn parse_date(value: &str) -> i64 {

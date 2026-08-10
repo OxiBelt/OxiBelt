@@ -137,6 +137,21 @@ the stable tag.
    configuration revision, and a representative request before completing the
    rollout. Run any additional commands in the target release entry.
 
+### AWS-LC feature selection for mutation signing
+
+Builds of `oxibeltctl` with `mutation-pqc` use the stable ML-DSA signature APIs
+in `aws-lc-rs` 1.18.0 and no longer request the dependency's `unstable` feature
+directly. This changes dependency feature bookkeeping only: command-line flags,
+accepted PKCS#8 keys, mutation signatures, Admin wire format, and runtime
+verification behavior are unchanged, and no configuration or state migration
+is required.
+
+The locked `quic-parser` 0.1.5 AWS-LC backend still requests
+`aws-lc-rs/unstable` independently, so the full dependency graph continues to
+include `unstable`; the first-party migration is not a graph-wide removal.
+Rolling back to earlier source reintroduces the redundant direct `oxibeltctl`
+request but does not change keys, protocols, or state.
+
 ### Supply-chain admission bundle v2
 
 Admission bundle schema v2 adds a signed, bounded auxiliary-container policy.
