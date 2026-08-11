@@ -348,6 +348,36 @@ When write conflicts are likely, prefer:
 
 ---
 
+## Security Review Scope Policy
+
+Do **not** recommend a monolithic full-repository security review as the default security gate, **including during release preparation**.
+
+Release readiness should normally be established incrementally from a trustworthy security baseline rather than by repeatedly rereading the entire repository. Prefer a layered approach:
+
+1. Start from the most recent trustworthy repository-wide security baseline, if one exists.
+2. Review the release delta from that baseline through the current working tree or release candidate.
+3. Expand review to affected trust boundaries, callers, sibling operations, configuration paths, protocol surfaces, and other semantically coupled code even when those files were not directly modified.
+4. Use cheap exhaustive workers for inventory and coverage, stronger semantic workers for plausible security-relevant paths, and the strongest review only for ambiguous or high-impact candidates.
+5. Record uncovered, deferred, or stale surfaces explicitly rather than compensating with an indiscriminate full-repository rescan.
+
+For a release candidate, **do not equate "release security review" with "full repository review."** A complete release review means that the security-relevant delta and all materially affected surfaces are covered against a sufficiently recent and trustworthy baseline.
+
+A full-repository review may still be justified as an exception when one or more of the following apply:
+
+- No trustworthy repository-wide security baseline exists.
+- The existing baseline is materially stale or predates major security-sensitive development.
+- A large architectural change invalidates assumptions across broad parts of the repository.
+- Trust boundaries, privilege separation, authentication/authorization architecture, unsafe/FFI boundaries, protocol architecture, or persistent security invariants were substantially redesigned.
+- A security incident or newly discovered vulnerability class creates a credible reason to revisit previously unchanged code.
+- Repository or organizational policy explicitly requires a full review.
+- Coverage evidence is missing or unreliable enough that incremental review cannot establish what has actually been reviewed.
+
+Even in these exceptional cases, prefer **partitioned, risk-directed repository coverage** over one monolithic high-end scan. Divide the repository into meaningful security surfaces, use cost-efficient workers for broad evidence collection, and escalate only suspicious or high-risk paths to stronger semantic review.
+
+Do not claim release security readiness merely because the changed files passed review. The release review must also account for non-local security effects and semantically affected unchanged code. Conversely, do not require unchanged, previously well-covered code to be repeatedly re-reviewed without a concrete reason.
+
+---
+
 ## Independent Review
 
 For high-risk changes, the agent that implements a change should preferably not be the only agent that validates it.
