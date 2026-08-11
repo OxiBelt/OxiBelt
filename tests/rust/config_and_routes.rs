@@ -1,6 +1,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 
@@ -77,6 +78,60 @@ fn strict_data_plane_accepts_disabled_default_admin_configuration() {
   config
     .validate_for_artifact(RuntimeArtifact::StrictDataPlane)
     .expect("strict artifact should accept disabled Admin defaults");
+}
+
+#[test]
+fn riscv64_release_smoke_fixture_satisfies_strict_artifact_contract() {
+  let temp_dir = common::TempDir::new("riscv64-release-smoke-strict");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "riscv64-release-smoke-strict");
+  let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    .join("../tests/fixtures/riscv64-release-image-smoke/oxibelt.toml");
+  let fixture = fs::read_to_string(&fixture_path)
+    .unwrap_or_else(|error| panic!("failed to read {}: {error}", fixture_path.display()));
+  let with_test_tls = |raw: &str| {
+    let mut value: toml::Value = toml::from_str(raw).expect("RISC-V smoke fixture should parse");
+    let tls = value
+      .get_mut("tls")
+      .and_then(toml::Value::as_table_mut)
+      .expect("RISC-V smoke fixture should define a TLS table");
+    tls.insert(
+      "cert_chain".to_string(),
+      toml::Value::String(cert_path.display().to_string()),
+    );
+    tls.insert(
+      "private_key".to_string(),
+      toml::Value::String(key_path.display().to_string()),
+    );
+    value
+      .try_into::<Config>()
+      .expect("RISC-V smoke fixture should deserialize")
+  };
+
+  let config = with_test_tls(&fixture);
+  config
+    .validate_for_artifact(RuntimeArtifact::StrictDataPlane)
+    .expect("RISC-V smoke fixture should satisfy the strict artifact contract");
+
+  let strict_admin = with_test_tls(&format!(
+    "{fixture}\n[admin]\nenabled = true\nbind = \"0.0.0.0:9092\"\n"
+  ));
+  let error = strict_admin
+    .validate_for_artifact(RuntimeArtifact::StrictDataPlane)
+    .expect_err("strict smoke Admin fixture should remain rejected");
+  let message = error.to_string();
+  let violations = message
+    .rsplit_once(": ")
+    .map(|(_, violations)| violations)
+    .expect("strict artifact error should list violations");
+  assert!(
+    violations.contains("admin.enabled"),
+    "unexpected error: {message}"
+  );
+  assert!(
+    !violations.contains("runtime.hardening.seccomp.expectation"),
+    "strict smoke fixture should retain required seccomp: {message}"
+  );
 }
 
 #[test]

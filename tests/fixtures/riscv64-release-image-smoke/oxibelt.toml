@@ -15,6 +15,9 @@ reuse_port = false
 backlog = 128
 accept_error_backoff_ms = 10
 
+[runtime.hardening.seccomp]
+expectation = "required"
+
 [listeners]
 https_bind = "0.0.0.0:8443"
 http_bind = "0.0.0.0:8080"
