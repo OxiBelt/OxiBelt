@@ -3839,6 +3839,20 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
 #[test]
 fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
   let script = kubernetes_supply_chain_admission_script_text();
+  for expected in [
+    "semantic admission cache qualification requires exactly one control-plane node",
+    "generate_ca_and_server b \"${rotation_barrier_service}.${namespace}.svc\"",
+    "-checkhost \"oxibelt-admission.${namespace}.svc\"",
+    "-checkhost \"${rotation_barrier_service}.${namespace}.svc\"",
+    ".webhooks[1].timeoutSeconds == .webhooks[0].timeoutSeconds",
+    "SupplyChainAdmissionDenied",
+    "bundle_digest_mismatch",
+  ] {
+    assert!(
+      script.contains(expected),
+      "semantic TLS rotation qualification should require {expected}"
+    );
+  }
   let rotation = script
     .split_once("ca_overlap=\"$(cat")
     .expect("supply-chain admission harness should define overlapping CA rotation")
@@ -3848,7 +3862,7 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
     .0;
 
   for expected in [
-    "kube -n \"${namespace}\" apply -f \"${work_dir}/admission-tls-b.yaml\"",
+    "kube -n \"${namespace}\" apply -f \"${work_dir}/admission-tls-b-stage.yaml\"",
     "kube -n \"${namespace}\" apply -f \"${work_dir}/admission-bundle-b-stage.yaml\"",
     "kube -n \"${namespace}\" apply -f \"${work_dir}/admission-bundle-b-switch.yaml\"",
     "kube -n \"${namespace}\" apply -f \"${work_dir}/admission-bundle-a-rollback-switch.yaml\"",
@@ -3882,6 +3896,8 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
     .expect("endpoint TLS verification should precede webhook CA verification")
     .0;
   for expected in [
+    ".spec.type == \"ClusterIP\"",
+    ".spec.ports[0].targetPort == \"https\"",
     ".metadata.generation == .status.observedGeneration",
     ".status.updatedReplicas == $replicas",
     ".status.readyReplicas == $replicas",
@@ -3900,22 +3916,66 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
     rotation
       .matches("service_targets_revision_and_tls_secret")
       .count(),
-    3,
-    "TLS rotation, bundle switch, and rollback should all prove endpoint TLS identity"
+    4,
+    "the barrier, TLS rotation, bundle switch, and rollback should prove endpoint TLS identity"
   );
 
+  for expected in [
+    ".metadata.labels = {($barrier_label_key): $barrier_label_value}",
+    "{op: \"replace\", path: \"/webhooks/0/clientConfig/caBundle\", value: $ca_overlap}",
+    "{op: \"add\", path: \"/webhooks/-\"",
+    "{op: \"remove\", path: \"/webhooks/1\"}",
+  ] {
+    assert!(
+      rotation.contains(expected),
+      "semantic TLS rotation should retain {expected}"
+    );
+  }
+  assert_eq!(
+    rotation
+      .matches("{op: \"test\", path: \"/metadata/resourceVersion\"")
+      .count(),
+    2,
+    "both webhook transitions should reject concurrent configuration changes"
+  );
+
+  let bundle_b_stage = rotation
+    .find("kube -n \"${namespace}\" apply -f \"${work_dir}/admission-bundle-b-stage.yaml\"")
+    .expect("revision B should be staged without switching canonical traffic");
+  let bundle_b_rollout = rotation
+    .find("rollout status \"deployment/oxibelt-admission-${revision_b}\"")
+    .expect("staged revision B should become Ready");
+  let barrier_service = rotation
+    .find("create -f \"${work_dir}/rotation-barrier-service.json\"")
+    .expect("TLS rotation should create a test-only barrier Service");
+  let barrier_endpoints = rotation
+    .find("wait_for \"rotation barrier TLS Secret B endpoints\"")
+    .expect("the barrier Service should prove exact revision B endpoint identity");
+  let barrier_fixture = rotation
+    .find(".metadata.name = \"obp204-rotation-barrier\"")
+    .expect("TLS rotation should create a uniquely selected sentinel");
   let overlap_patch = rotation
-    .find("\\\"value\\\":\\\"${ca_overlap}\\\"")
-    .expect("TLS rotation should install overlapping CA trust");
+    .find("--patch-file \"${work_dir}/admission-overlap-barrier-patch.json\"")
+    .expect("TLS rotation should atomically install overlap trust and the barrier");
+  let barrier_fixture_block = &rotation[barrier_fixture..overlap_patch];
+  for forbidden in ["app.kubernetes.io/name", "app.kubernetes.io/instance"] {
+    assert!(
+      !barrier_fixture_block.contains(forbidden),
+      "the barrier sentinel must not retain canonical selector label {forbidden}"
+    );
+  }
   let overlap_readback = rotation
-    .find("webhook_trusts_exact_ca_bundle \"${ca_overlap}\"")
-    .expect("overlapping CA trust should be read back");
+    .find("webhook_trusts_overlap_and_barrier \"${ca_overlap}\"")
+    .expect("overlap trust and the barrier should be read back together");
+  let semantic_barrier = rotation
+    .find("wait_for \"semantic CA B trust barrier\" rotation_barrier_denied")
+    .expect("a semantic CA B denial should acknowledge the new webhook snapshot");
   let probe_start = rotation
     .find("touch \"${work_dir}/rotation-probe.running\"")
     .expect("TLS rotation should start its continuous admission probe");
   let tls_apply = rotation
-    .find("kube -n \"${namespace}\" apply -f \"${work_dir}/admission-tls-b.yaml\"")
-    .expect("TLS Secret B manifest should be applied to the test namespace");
+    .find("kube -n \"${namespace}\" apply -f \"${work_dir}/admission-tls-b-stage.yaml\"")
+    .expect("TLS Secret B stage manifest should not replace the live webhook configuration");
   let deployment_readback = rotation
     .find("deployment_targets_tls_secret \"${revision_a}\" \"${admission_tls_secret_b}\"")
     .expect("TLS rotation should read back the Deployment Secret reference");
@@ -3929,14 +3989,20 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
     .find("wait_for \"admission with overlapping CA trust\"")
     .expect("TLS rotation should prove admission before removing CA A");
   let ca_b_patch = rotation
-    .find("\\\"value\\\":\\\"${public_ca_b}\\\"")
-    .expect("TLS rotation should contract trust to CA B");
+    .find("--patch-file \"${work_dir}/admission-ca-b-remove-barrier-patch.json\"")
+    .expect("TLS rotation should atomically contract trust and remove the barrier");
   let ca_b_readback = rotation
     .find("webhook_trusts_exact_ca_bundle \"${public_ca_b}\"")
     .expect("CA B-only trust should be read back");
+  let barrier_removal = rotation
+    .find("wait_for \"rotation barrier webhook removal\"")
+    .expect("the sentinel should acknowledge barrier removal");
   let recovery = rotation
     .find("wait_for \"admission after old CA removal\"")
     .expect("admission should recover after CA A removal");
+  let barrier_service_delete = rotation
+    .find("delete service \"${rotation_barrier_service}\" --wait=true")
+    .expect("the barrier Service should be removed after cache acknowledgement");
   let probe_stop = rotation
     .find("stop_rotation_probe")
     .expect("TLS rotation should stop its continuous probe");
@@ -3944,8 +4010,15 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
     .find("[[ ! -s \"${work_dir}/rotation-probe.failures\" ]]")
     .expect("TLS rotation should reject any continuous-probe failure");
   assert!(
-    overlap_patch < overlap_readback
+    bundle_b_stage < bundle_b_rollout
+      && bundle_b_rollout < barrier_service
+      && barrier_service < barrier_endpoints
+      && barrier_endpoints < barrier_fixture
+      && barrier_fixture < overlap_patch
+      && overlap_patch < overlap_readback
       && overlap_readback < probe_start
+      && overlap_readback < semantic_barrier
+      && semantic_barrier < probe_start
       && probe_start < tls_apply
       && tls_apply < deployment_readback
       && deployment_readback < rollout
@@ -3953,10 +4026,13 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
       && endpoint_convergence < overlap_admission
       && overlap_admission < ca_b_patch
       && ca_b_patch < ca_b_readback
-      && ca_b_readback < recovery
+      && ca_b_readback < barrier_removal
+      && barrier_removal < recovery
+      && recovery < barrier_service_delete
+      && barrier_service_delete < probe_stop
       && recovery < probe_stop
       && probe_stop < probe_check,
-    "TLS rotation must prove Secret B convergence before removing CA A"
+    "TLS rotation must semantically prove CA B trust before switching endpoints"
   );
 }
 

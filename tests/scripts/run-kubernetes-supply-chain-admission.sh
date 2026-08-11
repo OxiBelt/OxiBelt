@@ -81,6 +81,8 @@ public_ca_a=""
 public_ca_b=""
 admission_tls_secret_a=""
 admission_tls_secret_b=""
+rotation_barrier_service=""
+rotation_barrier_label_key="oxibelt.dev/admission-rotation-barrier"
 
 usage() {
   echo "usage: $0 [--provider kind|minikube]" >&2
@@ -547,6 +549,7 @@ run_id="${run_id:0:16}"
 cluster_name="oxibelt-admission-${provider}-${run_id}"
 namespace="oxibelt-admission-${run_id}"
 release_name="obp204-${run_id}"
+rotation_barrier_service="oxibelt-admission-rotation-${run_id}"
 export KUBECONFIG="${work_dir}/kubeconfig"
 
 if [[ -z "${strict_artifact_dir}" || -z "${tools_artifact_dir}" ]]; then
@@ -734,6 +737,11 @@ kube get nodes -o json \
       and all(.[]; any(.status.conditions[]?;
         .type == "Ready" and .status == "True"))' >/dev/null \
   || die "live admission qualification requires exactly three Ready Kubernetes nodes"
+control_plane_nodes="$(kube get nodes -l node-role.kubernetes.io/control-plane -o json)"
+# One semantic sentinel can acknowledge one API-server admission cache. Fail
+# closed instead of generalizing this qualification to an HA control plane.
+jq -e '.items | length == 1' >/dev/null <<<"${control_plane_nodes}" \
+  || die "semantic admission cache qualification requires exactly one control-plane node"
 
 node_image_command() {
   local node="$1"
@@ -846,16 +854,22 @@ kube label namespace "${namespace}" \
   pod-security.kubernetes.io/audit=restricted \
   pod-security.kubernetes.io/warn=restricted >/dev/null
 
-api_server_source_cidrs="$(kube get nodes -l node-role.kubernetes.io/control-plane -o json \
-  | jq -c '[.items[].status.addresses[] | select(.type == "InternalIP") | .address
-    | if contains(":") then . + "/128" else . + "/32" end] | unique')"
+api_server_source_cidrs="$(jq -c \
+  '[.items[].status.addresses[] | select(.type == "InternalIP") | .address
+    | if contains(":") then . + "/128" else . + "/32" end] | unique' \
+  <<<"${control_plane_nodes}")"
 jq -e 'length >= 1 and length <= 16 and all(.[]; test("/32$|/128$"))' \
   >/dev/null <<<"${api_server_source_cidrs}" \
   || die "could not derive exact API-server host prefixes"
 
 generate_ca_and_server() {
   local suffix="$1"
+  local extra_service_dns="${2:-}"
   local service_dns="oxibelt-admission.${namespace}.svc"
+  local subject_alt_names="DNS:${service_dns},DNS:${service_dns}.cluster.local"
+  if [[ -n "${extra_service_dns}" ]]; then
+    subject_alt_names+=",DNS:${extra_service_dns},DNS:${extra_service_dns}.cluster.local"
+  fi
   openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
     -subj "/CN=obp204-admission-ca-${suffix}" \
     -keyout "${work_dir}/admission-ca-${suffix}.key" \
@@ -865,7 +879,7 @@ generate_ca_and_server() {
     -keyout "${work_dir}/admission-${suffix}.key" \
     -out "${work_dir}/admission-${suffix}.csr" >/dev/null 2>&1
   cat >"${work_dir}/admission-${suffix}.ext" <<EOF
-subjectAltName=DNS:${service_dns},DNS:${service_dns}.cluster.local
+subjectAltName=${subject_alt_names}
 extendedKeyUsage=serverAuth
 keyUsage=digitalSignature,keyEncipherment
 EOF
@@ -877,7 +891,13 @@ EOF
     -out "${work_dir}/admission-${suffix}.crt" >/dev/null 2>&1
 }
 generate_ca_and_server a
-generate_ca_and_server b
+generate_ca_and_server b "${rotation_barrier_service}.${namespace}.svc"
+openssl x509 -in "${work_dir}/admission-b.crt" -noout \
+  -checkhost "oxibelt-admission.${namespace}.svc" >/dev/null \
+  || die "admission certificate B did not retain the canonical Service identity"
+openssl x509 -in "${work_dir}/admission-b.crt" -noout \
+  -checkhost "${rotation_barrier_service}.${namespace}.svc" >/dev/null \
+  || die "admission certificate B did not retain the rotation barrier Service identity"
 public_ca_a="$(openssl base64 -A -in "${work_dir}/admission-ca-a.crt")"
 public_ca_b="$(openssl base64 -A -in "${work_dir}/admission-ca-b.crt")"
 [[ -n "${public_ca_a}" && -n "${public_ca_b}" ]] || die "admission CA encoding failed"
@@ -1527,10 +1547,21 @@ deployment_targets_tls_secret() {
 service_targets_revision_and_tls_secret() {
   local expected_revision="$1"
   local expected_tls_secret="$2"
+  local expected_service="${3:-oxibelt-admission}"
   local service_json deployment_json endpoints_json desired_replicas pod_name pod_json
-  service_json="$(kube -n "${namespace}" get service oxibelt-admission -o json)" || return 1
-  jq -e --arg revision "${expected_revision}" \
-    '.spec.selector["oxibelt.dev/supply-chain-bundle"] == $revision' \
+  service_json="$(kube -n "${namespace}" get service "${expected_service}" -o json)" \
+    || return 1
+  jq -e --arg revision "${expected_revision}" --arg release "${release_name}" \
+    '.spec.type == "ClusterIP"
+      and (.spec.ports | length) == 1
+      and .spec.ports[0].name == "https"
+      and .spec.ports[0].port == 443
+      and .spec.ports[0].protocol == "TCP"
+      and .spec.ports[0].targetPort == "https"
+      and (.spec.selector | length) == 3
+      and .spec.selector["app.kubernetes.io/name"] == "oxibelt-admission"
+      and .spec.selector["app.kubernetes.io/instance"] == $release
+      and .spec.selector["oxibelt.dev/supply-chain-bundle"] == $revision' \
     >/dev/null <<<"${service_json}" || return 1
   deployment_json="$(kube -n "${namespace}" get deployment \
     "oxibelt-admission-${expected_revision}" -o json)" || return 1
@@ -1547,7 +1578,8 @@ service_targets_revision_and_tls_secret() {
         and ([.spec.template.spec.volumes[]?
           | select(.name == "tls" and .secret.secretName == $secret)] | length) == 1
     ' >/dev/null <<<"${deployment_json}" || return 1
-  endpoints_json="$(kube -n "${namespace}" get endpoints oxibelt-admission -o json)" || return 1
+  endpoints_json="$(kube -n "${namespace}" get endpoints "${expected_service}" -o json)" \
+    || return 1
   jq -e --argjson replicas "${desired_replicas}" '
     ([.subsets[]?.addresses[]?] | length) == $replicas
       and ([.subsets[]?.addresses[]?.targetRef
@@ -1578,12 +1610,141 @@ webhook_trusts_exact_ca_bundle() {
       ' >/dev/null
 }
 
+webhook_trusts_overlap_and_barrier() {
+  local expected_ca_bundle="$1"
+  local barrier_webhook="$2"
+  kube get validatingwebhookconfiguration "${webhook_name}" -o json \
+    | jq -e \
+      --arg ca_bundle "${expected_ca_bundle}" \
+      --arg ca_b "${public_ca_b}" \
+      --arg barrier_webhook "${barrier_webhook}" \
+      --arg barrier_service "${rotation_barrier_service}" \
+      --arg namespace "${namespace}" \
+      --arg barrier_label_key "${rotation_barrier_label_key}" \
+      --arg barrier_label_value "${run_id}" '
+        (.webhooks | length) == 2
+          and .webhooks[0].failurePolicy == "Fail"
+          and .webhooks[0].clientConfig.caBundle == $ca_bundle
+          and .webhooks[1].name == $barrier_webhook
+          and .webhooks[1].admissionReviewVersions == ["v1"]
+          and .webhooks[1].failurePolicy == "Fail"
+          and .webhooks[1].matchPolicy == "Exact"
+          and .webhooks[1].sideEffects == "None"
+          and .webhooks[1].timeoutSeconds == .webhooks[0].timeoutSeconds
+          and .webhooks[1].clientConfig.caBundle == $ca_b
+          and .webhooks[1].clientConfig.service.name == $barrier_service
+          and .webhooks[1].clientConfig.service.namespace == $namespace
+          and .webhooks[1].clientConfig.service.path == "/validate"
+          and .webhooks[1].clientConfig.service.port == 443
+          and .webhooks[1].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+            == $namespace
+          and .webhooks[1].objectSelector
+            == {matchLabels: {($barrier_label_key): $barrier_label_value}}
+          and .webhooks[1].rules == [{
+            apiGroups: [""],
+            apiVersions: ["v1"],
+            operations: ["CREATE"],
+            resources: ["pods"],
+            scope: "Namespaced"
+          }]
+      ' >/dev/null
+}
+
+rotation_barrier_denied() {
+  if kube -n "${namespace}" create --dry-run=server \
+    -f "${work_dir}/pod-rotation-barrier.json" \
+    >"${work_dir}/rotation-barrier.log" 2>&1; then
+    return 1
+  fi
+  grep -Fq 'SupplyChainAdmissionDenied' "${work_dir}/rotation-barrier.log" \
+    && grep -Fq 'bundle_digest_mismatch' "${work_dir}/rotation-barrier.log"
+}
+
 ca_overlap="$(cat "${work_dir}/admission-ca-a.crt" "${work_dir}/admission-ca-b.crt" \
   | openssl base64 -A)"
+render_admission "${fixture_b}" "${admission_tls_secret_b}" "${public_ca_b}" \
+  "${work_dir}/admission-bundle-b.yaml"
+select_admission_documents "${work_dir}/admission-bundle-b.yaml" \
+  "${work_dir}/admission-bundle-b-stage.yaml" stage
+select_admission_documents "${work_dir}/admission-bundle-b.yaml" \
+  "${work_dir}/admission-bundle-b-switch.yaml" switch
+kube -n "${namespace}" apply -f "${work_dir}/admission-bundle-b-stage.yaml" >/dev/null
+kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_b}" \
+  --timeout="${timeout_seconds}s"
+
+jq -n \
+  --arg name "${rotation_barrier_service}" \
+  --arg namespace "${namespace}" \
+  --arg release "${release_name}" \
+  --arg revision "${revision_b}" '{
+    apiVersion: "v1",
+    kind: "Service",
+    metadata: {
+      name: $name,
+      namespace: $namespace,
+      labels: {
+        "app.kubernetes.io/name": "oxibelt-admission",
+        "app.kubernetes.io/instance": $release,
+        "oxibelt.dev/test-resource": "admission-rotation-barrier"
+      }
+    },
+    spec: {
+      type: "ClusterIP",
+      selector: {
+        "app.kubernetes.io/name": "oxibelt-admission",
+        "app.kubernetes.io/instance": $release,
+        "oxibelt.dev/supply-chain-bundle": $revision
+      },
+      ports: [{name: "https", port: 443, protocol: "TCP", targetPort: "https"}]
+    }
+  }' >"${work_dir}/rotation-barrier-service.json"
+kube -n "${namespace}" create -f "${work_dir}/rotation-barrier-service.json" >/dev/null
+wait_for "rotation barrier TLS Secret B endpoints" \
+  service_targets_revision_and_tls_secret "${revision_b}" "${admission_tls_secret_b}" \
+  "${rotation_barrier_service}"
+
+jq \
+  --arg barrier_label_key "${rotation_barrier_label_key}" \
+  --arg barrier_label_value "${run_id}" \
+  --arg wrong_digest "${bundle_digest_a}" '
+    .metadata.name = "obp204-rotation-barrier"
+      | .metadata.labels = {($barrier_label_key): $barrier_label_value}
+      | .metadata.annotations["oxibelt.dev/supply-chain-bundle-digest"] = $wrong_digest
+  ' "${work_dir}/pod-exact.json" >"${work_dir}/pod-rotation-barrier.json"
+rotation_barrier_webhook="${release_name}.${namespace}.rotation-barrier.supply-chain.oxibelt.dev"
+kube get validatingwebhookconfiguration "${webhook_name}" -o json \
+  | jq -ce \
+    --arg ca_overlap "${ca_overlap}" \
+    --arg ca_b "${public_ca_b}" \
+    --arg barrier_webhook "${rotation_barrier_webhook}" \
+    --arg barrier_service "${rotation_barrier_service}" \
+    --arg barrier_label_key "${rotation_barrier_label_key}" \
+    --arg barrier_label_value "${run_id}" '
+      select((.webhooks | length) == 1 and .webhooks[0].failurePolicy == "Fail")
+        | [
+          {op: "test", path: "/metadata/resourceVersion", value: .metadata.resourceVersion},
+          {op: "test", path: "/webhooks/0/name", value: .webhooks[0].name},
+          {op: "replace", path: "/webhooks/0/clientConfig/caBundle", value: $ca_overlap},
+          {op: "add", path: "/webhooks/-", value: (.webhooks[0]
+            | .name = $barrier_webhook
+            | .clientConfig.caBundle = $ca_b
+            | .clientConfig.service.name = $barrier_service
+            | .objectSelector = {matchLabels: {($barrier_label_key): $barrier_label_value}}
+            | .rules = [{
+                apiGroups: [""],
+                apiVersions: ["v1"],
+                operations: ["CREATE"],
+                resources: ["pods"],
+                scope: "Namespaced"
+              }])}
+        ]
+    ' >"${work_dir}/admission-overlap-barrier-patch.json"
 kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
-  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${ca_overlap}\"}]" >/dev/null
-webhook_trusts_exact_ca_bundle "${ca_overlap}" \
-  || die "admission webhook did not retain the overlapping CA bundle"
+  --patch-file "${work_dir}/admission-overlap-barrier-patch.json" >/dev/null
+webhook_trusts_overlap_and_barrier "${ca_overlap}" "${rotation_barrier_webhook}" \
+  || die "admission webhook did not retain overlap trust and the CA B barrier"
+wait_for "semantic CA B trust barrier" rotation_barrier_denied
+
 touch "${work_dir}/rotation-probe.running"
 : >"${work_dir}/rotation-probe.failures"
 (
@@ -1598,7 +1759,9 @@ touch "${work_dir}/rotation-probe.running"
 rotation_probe_pid="$!"
 render_admission "${fixture_a}" "${admission_tls_secret_b}" "${ca_overlap}" \
   "${work_dir}/admission-tls-b.yaml"
-kube -n "${namespace}" apply -f "${work_dir}/admission-tls-b.yaml" >/dev/null
+select_admission_documents "${work_dir}/admission-tls-b.yaml" \
+  "${work_dir}/admission-tls-b-stage.yaml" stage
+kube -n "${namespace}" apply -f "${work_dir}/admission-tls-b-stage.yaml" >/dev/null
 deployment_targets_tls_secret "${revision_a}" "${admission_tls_secret_b}" \
   || die "admission deployment did not target TLS Secret B"
 kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_a}" \
@@ -1607,22 +1770,30 @@ wait_for "TLS Secret B admission endpoints" \
   service_targets_revision_and_tls_secret "${revision_a}" "${admission_tls_secret_b}"
 wait_for "admission with overlapping CA trust" \
   expect_admitted "${work_dir}/pod-exact.json"
+kube get validatingwebhookconfiguration "${webhook_name}" -o json \
+  | jq -ce \
+    --arg ca_b "${public_ca_b}" \
+    --arg barrier_webhook "${rotation_barrier_webhook}" '
+      select((.webhooks | length) == 2 and .webhooks[1].name == $barrier_webhook)
+        | [
+          {op: "test", path: "/metadata/resourceVersion", value: .metadata.resourceVersion},
+          {op: "test", path: "/webhooks/1/name", value: $barrier_webhook},
+          {op: "replace", path: "/webhooks/0/clientConfig/caBundle", value: $ca_b},
+          {op: "remove", path: "/webhooks/1"}
+        ]
+    ' >"${work_dir}/admission-ca-b-remove-barrier-patch.json"
 kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
-  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${public_ca_b}\"}]" >/dev/null
+  --patch-file "${work_dir}/admission-ca-b-remove-barrier-patch.json" >/dev/null
 webhook_trusts_exact_ca_bundle "${public_ca_b}" \
   || die "admission webhook did not retain CA B after rotation"
+wait_for "rotation barrier webhook removal" \
+  expect_admitted "${work_dir}/pod-rotation-barrier.json"
 wait_for "admission after old CA removal" expect_admitted "${work_dir}/pod-exact.json"
+kube -n "${namespace}" delete service "${rotation_barrier_service}" --wait=true >/dev/null
 stop_rotation_probe
 [[ ! -s "${work_dir}/rotation-probe.failures" ]] \
   || die "admission requests failed during overlapped TLS rotation"
 
-render_admission "${fixture_b}" "${admission_tls_secret_b}" "${public_ca_b}" \
-  "${work_dir}/admission-bundle-b.yaml"
-select_admission_documents "${work_dir}/admission-bundle-b.yaml" \
-  "${work_dir}/admission-bundle-b-stage.yaml" stage
-select_admission_documents "${work_dir}/admission-bundle-b.yaml" \
-  "${work_dir}/admission-bundle-b-switch.yaml" switch
-kube -n "${namespace}" apply -f "${work_dir}/admission-bundle-b-stage.yaml" >/dev/null
 kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_b}" \
   --timeout="${timeout_seconds}s"
 expect_admitted "${work_dir}/pod-exact.json"
