@@ -15,6 +15,176 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.7.1-beta.3] - 2026-08-10
+
+> Immutable unpublished failed cut. The tag workflow rejected this exact
+> revision before draft creation because it had no governed beta entry. No
+> GitHub Release or official `0.7.1-beta.3` artifact was produced. This entry
+> records the cut as attributable history; it does not repair, move, recreate,
+> or republish the signed tag.
+
+- Changes since: `0.7.1-beta.2`
+- Supported upgrade sources: `0.7.1-beta.2`, `0.6.5`
+- Upgrade guide: [Upgrade from 0.6.5 to the 0.7.1 line](docs/Upgrading.md#upgrade-from-065-to-the-071-line)
+
+### Configuration
+
+- Add configuration activation planning and resolved runtime-topology
+  reporting for the bounded Compio direct-H1 engine, persistent direct-H1
+  services, stateful direct-H2 pooling, and adaptive HTTP/3 address selection.
+  Capability and file-root checks remain fail closed when a selected runtime
+  surface is unavailable or unqualified.
+- Add manifest-based filesystem confinement verification, installed-manifest
+  binding across reloads, and explicit strict-artifact seccomp expectations.
+  The `edge-secure-medium` v2 profile renders and validates these hardening
+  inputs as one deployment contract, including redacted manifest diagnostics.
+
+### Schema epochs
+
+- Keep the native OxiBelt configuration at schema epoch `1`; no epoch
+  migration is required between beta.2 and this cut.
+- Add supply-chain admission bundle schema v2 and digest-bound immutable
+  evidence schemas. Version 2 signs a bounded workload-image policy for
+  regular, init, native-sidecar, and ephemeral containers; an older fixed
+  admission server must not receive a v2 bundle.
+
+### Deprecations and removals
+
+- No changes for this release.
+
+### Admin API
+
+- Add staged fixed-member cluster membership with isolated mutation keys,
+  audit classification, shared mutation decoding, and version-2 membership
+  epochs. Keyless version-1 learners remain live while a staged transition is
+  recoverable, and invalid or incomplete epochs fail closed.
+- Preserve the existing Admin audit wire contract while adding membership
+  mutation compatibility and the resolved activation/runtime diagnostics used
+  to review a configuration before it becomes active.
+
+### Feature lifecycle
+
+- Add exact-revision feature-graduation evidence, detached qualification
+  attestations, and complete graduation-summary inventory checks. Evidence is
+  bound to the repository, ref, phase, and full checked-out revision rather
+  than being inferred from a mutable branch.
+- Keep the Kubernetes Gateway Controller, Gateway API translation, and Helm
+  integration `experimental`. Expanded Gateway capabilities and their
+  admission/hardening qualification do not promote those surfaces without all
+  required native architecture and cluster evidence.
+
+### Rulepack compatibility
+
+- No changes for this release.
+
+### Executables and images
+
+- Add explicit owned and embedded OxiBelt runtime APIs and validate their
+  lifecycle and unsafe-code boundaries. Keep `netport-switcher` a standalone
+  artifact and preserve the existing public executable names and role split.
+- Expand Gateway API handling and Helm hardening, produce reproducible Helm
+  archives, and bind Helm OCI descriptors, manifests, configuration, chart
+  layers, and rebuild predicates with the self-verifying schema-v3 evidence
+  contract. Older or internally inconsistent evidence is rejected.
+- Align independent image rebuild inputs, bound mismatch diagnostics, and
+  prefetch the complete locked Cargo graph for offline fixture checks. Every
+  release role and architecture still requires its own exact-revision image,
+  SBOM, provenance, vulnerability, and rebuild evidence.
+
+### Storage and state
+
+- Serialize PostgreSQL shared-state schema initialization with one
+  transaction-scoped advisory lock. Base shared-state and durable UDP table
+  and index creation now commit atomically, so concurrent initializers wait
+  instead of racing catalog objects; stored records and schema layouts do not
+  change.
+- Persist staged Admin membership epochs through the existing durable Admin
+  operation and audit boundaries. Stop new-version membership writers before
+  restoring an older binary that does not understand a staged epoch.
+
+### Upgrade validation
+
+- A beta.2 configuration remains at epoch `1`, but validate the complete
+  configuration and referenced files with the target source build before any
+  recovery exercise:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
+```
+
+- When starting from `0.6.5`, create and inspect the epoch-1 sibling tree with
+  the target `oxibeltctl`, then validate the migrated configuration before
+  activation:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+```
+
+- Do not deploy or promote `0.7.1-beta.3`: the immutable cut has no official
+  image or release asset. A source build may be used only to inspect or recover
+  configuration and state, and has neither beta.3 release identity nor release
+  qualification.
+
+### Rollback and irreversible steps
+
+- Because beta.3 produced no official artifacts, retain the last
+  operator-approved image digests instead of treating the beta.3 tag or a
+  source build as a rollback target. Preserve the prior configuration tree,
+  referenced assets, PostgreSQL backup, admission bundle, audit evidence, and
+  controller rollback state until recovery is complete.
+- Stop staged-membership, Admin, shared-state, and UDP writers before restoring
+  older images and compatible data. Restore the data plane before the Gateway
+  Controller, drain durable UDP owners, and restore epoch-0 configuration and
+  the pre-upgrade database when returning to `0.6.5`; no automatic epoch-1
+  down-migration exists.
+- Externally witnessed audit checkpoints remain append-only. Rollback cannot
+  recreate prior sockets, upstream source ports, NAT or conntrack entries,
+  exact Kubernetes Service endpoints, in-flight datagrams, or application
+  sessions.
+
+### Known issues
+
+- The signed `0.7.1-beta.3` tag is immutable and its tree lacks this governed
+  entry, so its failed draft workflow cannot be repaired. It has no draft,
+  GitHub Release, official asset, manifest, attestation, or image.
+- The same-revision `0.7.1-build.bcfd6140` release-image run failed the first
+  `dataplane-strict` `linux/riscv64` runtime check because the shared smoke
+  fixture omitted the required seccomp expectation. Its global vulnerability
+  evaluator admitted all 30 subjects with zero findings, but that decision
+  cannot override the failed runtime matrix or qualify beta.3.
+- The published `0.7.1-beta.2` prerelease did not complete its independent
+  30-subject rebuild evidence and is not qualified evidence for beta.3 or a
+  stable release.
+- The Kubernetes Gateway Controller and its Gateway API features remain
+  `experimental`; native `linux/riscv64` cluster-runner graduation evidence is
+  still unmet.
+
+### Security
+
+- Bind installed filesystem-confinement manifests to activation and reload,
+  distinguish handled filesystem access from granted paths, stabilize atomic
+  manifest digests, and require the strict data-plane artifact to observe its
+  declared seccomp contract. Missing or mismatched hardening evidence blocks
+  startup or reload.
+- Require signed workload-image policies and digest-bound admission evidence,
+  including exact executable coverage for auxiliary and ephemeral containers.
+  Namespace, serving-target, image-digest, bundle-revision, and webhook-rule
+  mismatches fail closed.
+- Preserve CRLite certificate rejection across TLS decisions, contain
+  WebTransport receive operations, honor Gateway ExternalAuth response-header
+  allowlists, and admit dependency updates only with matching lockfile,
+  Cargo-vet, and supply-chain evidence.
+- A vulnerability `allow` decision is necessary but not sufficient: every
+  role/architecture runtime smoke, immutable manifest, provenance,
+  attestation, and independent rebuild gate must also succeed for the exact
+  release revision.
+
 ## [0.7.1-beta.2] - 2026-07-29
 
 > Recovery candidate for the `0.7.1` line. The immutable

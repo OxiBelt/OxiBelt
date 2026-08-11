@@ -38,8 +38,10 @@ be used as a supported production upgrade source or target.
 | `0.7.0-beta.3` | `0.7.0` | Not qualified | Beta.3 did not complete independent rebuild, and the later beta.4 and stable cuts also failed. None qualifies as a stable source or target. |
 | `0.7.0-beta.4` | `0.7.0` | Unpublished failed cut | Beta.4 did not complete its release-image workflow, and the immutable stable tag was created without its governed entry. Neither cut qualifies as a stable source or target. |
 | `0.6.5` | `0.7.1-beta.1` | Unpublished failed cut | The immutable tag failed exact-revision release-contract validation before draft creation because `CHANGELOG-beta.md` had no governed entry. It has no GitHub Release or official artifacts. |
-| `0.6.5` | `0.7.1-beta.2` | Recovery candidate | Follow [Upgrade from 0.6.5 to the 0.7.1 line](#upgrade-from-065-to-the-071-line). Treat the target as available only after person review and every exact-revision artifact and evidence gate succeeds. |
+| `0.6.5` | `0.7.1-beta.2` | Published, not qualified | The person-reviewed prerelease and release-image workflow completed, but its automatic independent rebuild failed before the complete 30-subject receipt set existed. Preserve it as release history; do not use it as stable qualification evidence. |
 | `0.7.1-beta.1` | `0.7.1-beta.2` | Recovery source only | The later entry admits the immutable beta.1 source revision, but beta.1 has no official image or release asset to promote. |
+| `0.6.5` | `0.7.1-beta.3` | Unpublished failed cut | The immutable tag failed exact-revision release-contract validation before draft creation because `CHANGELOG-beta.md` had no governed beta.3 entry. It has no GitHub Release or official artifacts. |
+| `0.7.1-beta.2` | `0.7.1-beta.3` | Recovery source only | The beta.3 ledger records the adjacent source relationship, but beta.3 has no official artifact and beta.2 did not complete independent rebuild qualification. Neither cut can be promoted. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -76,27 +78,30 @@ stable entry. Preserve both tags and the beta.4 prerelease as failed release
 history; do not attach artifacts, synthesize a stable release, or reinterpret
 their incomplete evidence as qualification for a later cut.
 
-### Recovery from the `0.7.0` and `0.7.1-beta.1` failed cuts
+### Recovery from the `0.7.0` and `0.7.1-beta.1` through `0.7.1-beta.3` failed cuts
 
-The remote `0.7.0` and `0.7.1-beta.1` tags are signed immutable release
-history. Do not move, delete, recreate, or repush either tag, and do not
-prepare a hand-written GitHub Release for either failed cut. Their exact
-revisions cannot acquire the missing governed entries after the fact.
+The remote `0.7.0`, `0.7.1-beta.1`, and `0.7.1-beta.3` tags are signed
+immutable release history. Do not move, delete, recreate, or repush those
+tags, and do not prepare a hand-written GitHub Release for a cut rejected
+before draft creation. Their exact revisions cannot acquire a missing
+governed entry after the fact. Preserve the published `0.7.1-beta.2`
+prerelease as history too; do not attach replacement evidence or reinterpret
+its failed independent rebuild as a qualified release.
 
 Keep `0.6.5` as the immediately preceding stable release because `0.7.0`
-never produced a GitHub Release or deployable official artifact. Preserve the
-failed `0.7.1-beta.1` source revision in the governed beta ledger and advance
-to `0.7.1-beta.2`. The recovery beta requires a fresh exact-revision draft,
-complete 30-subject artifact matrix, vulnerability decision, attestations,
-provenance, and independent-rebuild receipts; no evidence from
-`0.7.0-beta.4` or `0.7.1-beta.1` may be promoted or reused.
+never produced a GitHub Release or deployable official artifact. Preserve all
+three beta source revisions in the governed ledger and advance to a new beta
+revision. The recovery beta requires a fresh exact-revision draft, complete
+30-subject artifact matrix, vulnerability decision, attestations, provenance,
+and independent-rebuild receipts; no evidence from `0.7.0-beta.4`,
+`0.7.1-beta.1`, `0.7.1-beta.2`, or `0.7.1-beta.3` may be promoted or reused.
 
-Start the stable `0.7.1` qualification soak only after `0.7.1-beta.2` is
-person-reviewed and published and every official evidence gate has succeeded.
-Any source, configuration, schema, dependency, workflow, Helm, controller, or
-packaging change during qualification requires a later beta and a restarted
-soak. Record observed beta issues in the eventual stable entry before creating
-the stable tag.
+Start the stable `0.7.1` qualification soak only after the later recovery beta
+is person-reviewed and published and every official evidence gate has
+succeeded. Any source, configuration, schema, dependency, workflow, Helm,
+controller, or packaging change during qualification requires another beta
+and a restarted soak. Record observed beta issues in the eventual stable entry
+before creating the stable tag.
 
 ## General upgrade procedure
 
@@ -878,12 +883,13 @@ evidence before rollout. The v2 extension fields remain backward readable only
 when all are absent; new bundles carry a positive run attempt and all three
 platform-recipe hashes, and partial forms are invalid.
 
-Neither the immutable `0.7.0` tag nor `0.7.1-beta.1` is a deployable upgrade
-target. Both failed exact-revision release-contract validation before draft
-creation and have no GitHub Release or official artifact. Use
-`0.7.1-beta.2` only after its person-reviewed release and its new
-exact-revision artifact, vulnerability, attestation, provenance, and
-independent-rebuild evidence all succeed.
+Neither the immutable `0.7.0`, `0.7.1-beta.1`, nor `0.7.1-beta.3` tag is a
+deployable upgrade target. All three failed exact-revision release-contract
+validation before draft creation and have no GitHub Release or official
+artifact. The published `0.7.1-beta.2` prerelease completed its release-image
+workflow but not its automatic independent rebuild, so it remains a source
+and configuration recovery point rather than qualified stable-release
+evidence.
 
 When upgrading directly from `0.6.5`, follow the complete epoch-0-to-1
 migration, backup, role-selection, HTTP/1 compatibility, fixed-member Admin,
@@ -900,16 +906,18 @@ oxibeltctl config validate \
   --local-only
 ```
 
-A local source build from `0.7.1-beta.1` may be retained only as recovery
-history. Before replacing it with a person-reviewed later release, validate
-the active epoch-1 configuration and referenced files, retain all prior
-digests and backups, and confirm that controller and data-plane roles use the
-same target revision:
+A local source build from `0.7.1-beta.1` or `0.7.1-beta.3`, or a deployment
+that used beta.2 under an operator's prerelease policy, may be retained only as
+recovery history. Before replacing it with a person-reviewed later release,
+validate the active epoch-1 configuration and referenced files, retain all
+prior digests and backups, and confirm that controller and data-plane roles
+use the same target revision:
 
 ```sh
 oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
 ```
 
-Do not reuse the failed beta.1 workflow run, its absent release artifacts, or
-the incomplete beta.4 evidence. The `0.7.1-beta.2` release must produce its
-own complete 30-subject image and evidence set before rollout.
+Do not reuse the failed beta.1 or beta.3 workflow runs, their absent release
+artifacts, the incomplete `0.7.0-beta.4` evidence, or beta.2's incomplete
+independent-rebuild set. A later `0.7.1` recovery beta must produce its own
+complete 30-subject image and evidence set before rollout.
