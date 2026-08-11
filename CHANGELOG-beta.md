@@ -15,6 +15,133 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.7.1-beta.4] - 2026-08-11
+
+> Recovery candidate for the `0.7.1` line. This cut advances from the
+> immutable unpublished `0.7.1-beta.3` tag at a new exact revision. It does
+> not move or repair beta.3 and must rebuild and qualify every official
+> artifact independently.
+
+- Changes since: `0.7.1-beta.3`
+- Supported upgrade sources: `0.7.1-beta.3`, `0.7.1-beta.2`, `0.6.5`
+- Upgrade guide: [Upgrade from 0.6.5 to the 0.7.1 line](docs/Upgrading.md#upgrade-from-065-to-the-071-line)
+
+### Configuration
+
+- No changes for this release.
+
+### Schema epochs
+
+- No changes for this release.
+
+### Deprecations and removals
+
+- No changes for this release.
+
+### Admin API
+
+- No changes for this release.
+
+### Feature lifecycle
+
+- No changes for this release.
+
+### Rulepack compatibility
+
+- No changes for this release.
+
+### Executables and images
+
+- Require the shared RISC-V release-image smoke configuration to declare
+  `runtime.hardening.seccomp.expectation = "required"`, matching the existing
+  `oxibelt-dataplane-strict` artifact contract. A repository regression loads
+  that exact tracked fixture, supplies test TLS material, validates it under
+  the strict artifact role, and confirms that enabling Admin still fails for
+  the Admin capability fields.
+- Rebuild every role and architecture at the exact beta.4 revision. Do not
+  promote a beta.2 image, synthesize a beta.3 asset, or reuse an earlier build,
+  manifest, SBOM, provenance statement, attestation, vulnerability result, or
+  independent-rebuild receipt.
+
+### Storage and state
+
+- No changes for this release.
+
+### Upgrade validation
+
+- Beta.2 and beta.3 configurations remain at native schema epoch `1`. Validate
+  the complete configuration and every referenced file with the beta.4
+  `oxibeltctl` before rollout:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
+```
+
+- When upgrading directly from `0.6.5`, create and inspect the epoch-1 sibling
+  tree, then validate the migrated configuration before activation:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+```
+
+- Deploy beta.4 only after its person-reviewed release, all 30
+  role/architecture runtime checks, vulnerability admission, immutable
+  manifests, SBOMs, attestations, provenance, and independent-rebuild receipts
+  succeed for its exact revision. Begin the stable qualification soak only
+  from that complete evidence set.
+
+### Rollback and irreversible steps
+
+- Retain the last operator-approved image digests, epoch-1 configuration tree,
+  referenced assets, PostgreSQL backup, signed admission bundle, audit
+  evidence, controller rollback ConfigMaps, Gateway API Lease, and shared UDP
+  identity key and backend until the beta.4 rollback decision is complete.
+- Stop new-version Admin and staged-membership writers and new UDP admission
+  before restoring prior images and compatible data. Roll back the data plane
+  before the Gateway Controller, drain durable UDP owners, and restore the
+  epoch-0 configuration and pre-upgrade PostgreSQL backup when returning to
+  `0.6.5`; there is no automatic epoch-1 down-migration.
+- Externally witnessed audit checkpoints remain append-only, and
+  operator-owned Gateway API CRDs must not be deleted as an implicit rollback.
+  Rollback cannot recreate prior sockets, source ports, NAT or conntrack
+  entries, exact Service endpoints, in-flight datagrams, or sessions.
+
+### Known issues
+
+- The immutable `0.7.1-beta.3` tag has no GitHub Release or official artifact
+  and cannot be repaired. A source build from its revision is recovery input,
+  not an image or evidence source for beta.4.
+- The published `0.7.1-beta.2` prerelease did not complete its independent
+  rebuild evidence. Direct beta.2-to-beta.4 configuration recovery is
+  supported, but beta.2 evidence cannot qualify beta.4.
+- No beta.4 release qualification exists until the new signed tag's hosted
+  workflows produce and verify the complete exact-revision evidence set. A
+  local release-contract receipt or source check is not publication or stable
+  readiness.
+- The Kubernetes Gateway Controller and its Gateway API features remain
+  `experimental`; native `linux/riscv64` cluster-runner graduation evidence is
+  still unmet.
+
+### Security
+
+- Keep the strict runtime contract unchanged and fail closed: the repaired
+  fixture supplies the required seccomp expectation instead of weakening the
+  validator, role capabilities, runtime hardening, or vulnerability policy.
+- Require all 30 exact-revision subjects to pass their runtime matrix and the
+  stable/beta vulnerability policy, which blocks every `CRITICAL` finding and
+  every fixable `HIGH` finding. A global vulnerability `allow` cannot rescue a
+  failed role/architecture runtime check.
+- Require fresh digest-bound SBOM, provenance, GitHub attestation, Helm OCI
+  evidence, signed admission evidence, and independent-rebuild receipts for
+  beta.4. Earlier beta or build-tag results must not be copied, promoted, or
+  interpreted as evidence for this revision.
+
 ## [0.7.1-beta.3] - 2026-08-10
 
 > Immutable unpublished failed cut. The tag workflow rejected this exact
