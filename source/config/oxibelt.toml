@@ -12,6 +12,22 @@ level = "info"
 enabled = false
 stdout = true
 
+[sni_forward]
+enabled = false
+client_hello_max_bytes = 65536
+client_hello_parse_methods = ["single_record"]
+idle_timeout_ms = 75000
+quic_max_sessions = 8192
+quic_local_queue_capacity = 1024
+
+[sni_forward.quic_initial_reassembly]
+max_pending_sessions = 64
+max_fragments_per_session = 64
+max_datagrams_per_session = 64
+max_buffered_datagram_bytes_per_session = 131072
+max_total_buffered_bytes = 4194304
+timeout_ms = 10000
+
 [access_log.system]
 enabled = false
 

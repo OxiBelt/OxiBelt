@@ -56,6 +56,7 @@ pub fn exercise_tls_client_hello(data: &[u8]) {
     ],
   );
   let _ = crate::sni_forward::client_hello::raw_client_hello_sni(data);
+  crate::sni_forward::quic::exercise_quic_initial_reassembly_ranges(data);
 }
 
 pub fn exercise_syscall_boundaries(data: &[u8]) {

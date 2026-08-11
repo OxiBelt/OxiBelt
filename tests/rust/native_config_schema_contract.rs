@@ -128,6 +128,41 @@ fn discovery_instance_schema_is_typed_and_bounded() {
 }
 
 #[test]
+fn quic_initial_reassembly_schema_is_defaulted_and_bounded() {
+  let schema = generate_native_config_schema().expect("native schema should generate");
+  let schema: serde_json::Value =
+    serde_json::from_str(&schema).expect("generated schema should be JSON");
+  for (path, default) in [
+    (
+      "sni_forward.quic_initial_reassembly.max_pending_sessions",
+      64,
+    ),
+    (
+      "sni_forward.quic_initial_reassembly.max_fragments_per_session",
+      64,
+    ),
+    (
+      "sni_forward.quic_initial_reassembly.max_datagrams_per_session",
+      64,
+    ),
+    (
+      "sni_forward.quic_initial_reassembly.max_buffered_datagram_bytes_per_session",
+      131072,
+    ),
+    (
+      "sni_forward.quic_initial_reassembly.max_total_buffered_bytes",
+      4194304,
+    ),
+    ("sni_forward.quic_initial_reassembly.timeout_ms", 10000),
+  ] {
+    let field = schema_node_for_metadata_path(&schema, path);
+    assert_eq!(field["type"], "integer", "unexpected type at {path}");
+    assert_eq!(field["minimum"], 1, "unexpected minimum at {path}");
+    assert_eq!(field["default"], default, "unexpected default at {path}");
+  }
+}
+
+#[test]
 fn request_mirror_body_schema_publishes_the_runtime_admission_unit() {
   let schema = generate_native_config_schema().expect("native schema should generate");
   let schema: serde_json::Value =

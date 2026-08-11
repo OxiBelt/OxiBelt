@@ -687,6 +687,12 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     "routes.actions.request_mirrors.max_body_bytes" => {
       (0, super::MAX_REQUEST_MIRROR_BODY_BYTES as u64)
     }
+    "sni_forward.quic_initial_reassembly.max_pending_sessions"
+    | "sni_forward.quic_initial_reassembly.max_fragments_per_session"
+    | "sni_forward.quic_initial_reassembly.max_datagrams_per_session"
+    | "sni_forward.quic_initial_reassembly.max_buffered_datagram_bytes_per_session"
+    | "sni_forward.quic_initial_reassembly.max_total_buffered_bytes"
+    | "sni_forward.quic_initial_reassembly.timeout_ms" => (1, u64::MAX),
     _ => return None,
   };
   Some(range)
@@ -941,6 +947,14 @@ fn default_value(path: &str) -> Option<Value> {
     | "runtime.worker_multipliers.compio_direct_h1" => json!(1.0),
     "shared_state.failure_policies.udp_flows" => json!("reject_new_only"),
     "shared_state.udp_flow_identity_key_env" => json!("OXIBELT_UDP_FLOW_IDENTITY_KEY"),
+    "sni_forward.quic_initial_reassembly.max_pending_sessions" => json!(64),
+    "sni_forward.quic_initial_reassembly.max_fragments_per_session" => json!(64),
+    "sni_forward.quic_initial_reassembly.max_datagrams_per_session" => json!(64),
+    "sni_forward.quic_initial_reassembly.max_buffered_datagram_bytes_per_session" => {
+      json!(131_072)
+    }
+    "sni_forward.quic_initial_reassembly.max_total_buffered_bytes" => json!(4_194_304),
+    "sni_forward.quic_initial_reassembly.timeout_ms" => json!(10_000),
     "stream_listeners.udp_flow_state" => json!("local"),
     "upstream_pools.discovery.weight_multiplier" => json!(1),
     "quic.upstream.resolution.address_family_stagger_ms" => json!(250),

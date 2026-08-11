@@ -31,12 +31,12 @@ leak_policy = "enabled"
 name = "tls_client_hello"
 owner = "TLS and SNI forwarding maintainers"
 max_input_bytes = 4096
-input_contract = "Untrusted bytes interpreted as raw and TLS-record-framed ClientHello messages."
-invariants = ["record reassembly remains bounded", "SNI normalization rejects invalid names", "malformed handshakes never panic"]
+input_contract = "Untrusted bytes interpreted as raw and TLS-record-framed ClientHello messages plus bounded QUIC Initial CRYPTO ranges."
+invariants = ["record and QUIC CRYPTO reassembly remain bounded", "overlap conflicts are rejected without panics", "SNI normalization rejects invalid names", "malformed handshakes never panic"]
 unsupported_states = ["live TLS handshakes", "private keys", "remote signers"]
 seed_dir = "fuzz/seeds/tls_client_hello"
 dictionary = "fuzz/dictionaries/tls.dict"
-coverage_landmarks = ["source/src/sni_forward/client_hello.rs:tls_record_client_hello_sni", "source/src/sni_forward/client_hello.rs:raw_client_hello_sni"]
+coverage_landmarks = ["source/src/sni_forward/client_hello.rs:tls_record_client_hello_sni", "source/src/sni_forward/client_hello.rs:raw_client_hello_sni", "source/src/sni_forward/quic/initial.rs:merge_crypto_segment"]
 regression_path = "tests/fixtures/fuzz-regressions/tls_client_hello"
 leak_policy = "enabled"
 

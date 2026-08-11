@@ -2047,6 +2047,14 @@ idle_timeout_ms = 60000
 quic_max_sessions = 128
 quic_local_queue_capacity = 32
 
+[sni_forward.quic_initial_reassembly]
+max_pending_sessions = 16
+max_fragments_per_session = 24
+max_datagrams_per_session = 32
+max_buffered_datagram_bytes_per_session = 65536
+max_total_buffered_bytes = 131072
+timeout_ms = 5000
+
 [[sni_forward.rules]]
 name = "legacy-tls"
 server_names = ["legacy.example.com", "*.legacy.example.com"]
@@ -2071,6 +2079,42 @@ tcp_proxy_protocol_egress = "v1"
   );
   assert_eq!(config.sni_forward.quic_max_sessions, 128);
   assert_eq!(config.sni_forward.quic_local_queue_capacity, 32);
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_pending_sessions,
+    16
+  );
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_fragments_per_session,
+    24
+  );
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_datagrams_per_session,
+    32
+  );
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_buffered_datagram_bytes_per_session,
+    65536
+  );
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_total_buffered_bytes,
+    131072
+  );
+  assert_eq!(config.sni_forward.quic_initial_reassembly.timeout_ms, 5000);
   assert_eq!(
     config.sni_forward.rules[0].protocols,
     vec![SniForwardProtocol::TcpTls]
@@ -2099,6 +2143,42 @@ default_target = "127.0.0.1:9443"
   );
   assert_eq!(config.sni_forward.quic_max_sessions, 8192);
   assert_eq!(config.sni_forward.quic_local_queue_capacity, 1024);
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_pending_sessions,
+    64
+  );
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_fragments_per_session,
+    64
+  );
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_datagrams_per_session,
+    64
+  );
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_buffered_datagram_bytes_per_session,
+    131072
+  );
+  assert_eq!(
+    config
+      .sni_forward
+      .quic_initial_reassembly
+      .max_total_buffered_bytes,
+    4194304
+  );
+  assert_eq!(config.sni_forward.quic_initial_reassembly.timeout_ms, 10000);
 }
 
 #[test]
@@ -2124,6 +2204,25 @@ enabled = true
 quic_local_queue_capacity = 0
 "#,
       "sni_forward.quic_local_queue_capacity must be greater than 0",
+    ),
+    (
+      r#"
+[sni_forward]
+enabled = true
+[sni_forward.quic_initial_reassembly]
+max_fragments_per_session = 0
+"#,
+      "sni_forward.quic_initial_reassembly.max_fragments_per_session must be greater than 0",
+    ),
+    (
+      r#"
+[sni_forward]
+enabled = true
+[sni_forward.quic_initial_reassembly]
+max_buffered_datagram_bytes_per_session = 131073
+max_total_buffered_bytes = 131072
+"#,
+      "sni_forward.quic_initial_reassembly.max_buffered_datagram_bytes_per_session must not exceed max_total_buffered_bytes",
     ),
   ] {
     let config: Config = toml::from_str(&(base.clone() + suffix)).expect("config should parse");

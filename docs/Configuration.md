@@ -1143,6 +1143,14 @@ quic_max_sessions = 8192
 quic_local_queue_capacity = 1024
 # default_target = "10.0.10.20:443"
 
+[sni_forward.quic_initial_reassembly]
+max_pending_sessions = 64
+max_fragments_per_session = 64
+max_datagrams_per_session = 64
+max_buffered_datagram_bytes_per_session = 131072
+max_total_buffered_bytes = 4194304
+timeout_ms = 10000
+
 [[sni_forward.rules]]
 name = "legacy-tls"
 server_names = ["legacy.example.com", "*.legacy.example.com"]
@@ -1159,11 +1167,15 @@ For TCP TLS, OxiBelt peeks at a bounded ClientHello before `rustls` accepts the 
 
 `client_hello_parse_methods` controls TCP TLS SNI inspection. The default is `["single_record"]`, which parses only a complete ClientHello contained in one TLS handshake record. Add `tls_record_reassembly` to accept a ClientHello split across consecutive TLS handshake records, for example `["single_record", "tls_record_reassembly"]`, when compatibility with DPI-bypass client fragmentation tools is required.
 
-For QUIC, `protocols = ["quic"]` uses the same UDP address as downstream HTTP/3 and therefore requires `listeners.http3 = true`. OxiBelt decrypts QUIC Initial packets, reassembles visible CRYPTO frames, extracts ClientHello SNI, and forwards matched sessions as UDP passthrough while local sessions are queued into Quinn. Forwarded QUIC sessions acquire the same total, per-IP, and named downstream connection leases as local HTTP/3 connections. QUIC forwarding tracks connection IDs and expires idle sessions using the rule or global idle timeout.
+For QUIC, `protocols = ["quic"]` uses the same UDP address as downstream HTTP/3 and therefore requires `listeners.http3 = true`. OxiBelt decrypts QUIC Initial packets, reassembles visible CRYPTO frames across datagrams, extracts ClientHello SNI, and replays contributing datagrams in arrival order: matched sessions go to UDP passthrough and local sessions are queued into Quinn. Forwarded QUIC sessions acquire the same total, per-IP, and named downstream connection leases as local HTTP/3 connections. QUIC forwarding tracks connection IDs and expires idle sessions using the rule or global idle timeout.
 
 `quic_max_sessions` caps SNI-forwarding QUIC pre-classification state across local and forwarded clients; when the cap is exceeded, the oldest tracked client is evicted and forwarded sessions are ended with a `capacity` outcome. `quic_local_queue_capacity` caps queued local QUIC datagrams waiting for Quinn; excess local datagrams are dropped instead of growing memory without bound. Both values must be greater than zero.
 
-Prometheus metrics include aggregate SNI-forward decision, parse-failure, session, active-QUIC-session, TCP-byte, and UDP-byte counters. With `metrics.detail = "detailed"`, bounded labels add protocol, decision, rule, target, and outcome. SNI forwarding emits structured `tracing` log events for session start, end, and failure; those events include the protocol, rule, target, SNI, peer, duration, error, and byte-count fields that are available at that point.
+`[sni_forward.quic_initial_reassembly]` bounds only pending QUIC Initial reconstruction and is shared by all `SO_REUSEPORT` workers for a logical bind. Every value must be positive, and `max_buffered_datagram_bytes_per_session` must not exceed `max_total_buffered_bytes`. Its total budget counts retained raw datagrams plus unique decrypted CRYPTO bytes; `client_hello_max_bytes` remains the bound on ClientHello/CRYPTO data. The effective absolute deadline is `min(timeout_ms, limits.tls_handshake_timeout_ms)` and retransmissions do not extend it. Identical overlap/retransmit data is deduplicated, while conflicting overlap, expiry, capacity admission, and every fragment/datagram/byte limit fail closed. Pending state is separate from established local or forwarded sessions, so incomplete unauthenticated Initials cannot evict an established session.
+
+Prometheus metrics include aggregate SNI-forward decision, parse-failure, session, active-QUIC-session, TCP-byte, UDP-byte, and `oxibelt_sni_forward_quic_initial_reassembly_total{outcome}` counters. The latter has only the fixed outcomes `pending`, `completed`, `expired`, `capacity_rejected`, `limit_rejected`, `overlap_conflict`, `local_replay_queue_full`, and `forward_replay_send_failed`; it never labels peer, connection ID, SNI, or error text. With `metrics.detail = "detailed"`, bounded labels add protocol, decision, rule, target, and outcome.
+
+QUIC Initial inspection diagnostics are sampled per logical listener. DEBUG records a sampled `peer`, `classification_mode`, `stage`, static `reason`, `datagram_bytes`, and `suppressed_since_last`; TRACE adds bounded version/header/decryption/CRYPTO/reassembly lengths and counts. Neither level records raw packets, decrypted content, connection IDs or their hashes, partially parsed SNI, TLS transcript fields, or dependency error strings. These diagnostics follow `[logging].level` and `RUST_LOG`; environment filtering takes precedence when configured, and changing either level requires a process restart.
 
 ## Proxy Sections
 
@@ -4582,7 +4594,7 @@ Configuration validation rejects:
 - Non-Linux runtime when `runtime.linux_only = true`.
 - Invalid main-runtime or topology-policy values, an unsatisfied `require_exact` topology, zero worker counts, non-positive worker multipliers, invalid hot reload mode, zero `poll_interval_ms`, zero accept backlog/backoff values, accept worker counts greater than one without `runtime.accept.reuse_port = true`, or HTTP/3 QUIC socket worker counts greater than one without `quic.socket.reuse_port = true`.
 - Missing all `[[routes]]`, `[sni_forward]` rule/default targets, `[[stream_listeners]]`, and `[[webrtc_turn_listeners]]`; duplicate names; empty route hosts; or unknown route targets.
-- Invalid SNI forwarding targets, duplicate SNI forwarding rule names or server-name patterns, unsupported wildcard placement, zero SNI forwarding timeouts, or QUIC SNI forwarding without downstream HTTP/3.
+- Invalid SNI forwarding targets, duplicate SNI forwarding rule names or server-name patterns, unsupported wildcard placement, zero SNI forwarding timeouts or QUIC Initial reassembly limits, a per-session QUIC Initial buffer cap above its total cap, or QUIC SNI forwarding without downstream HTTP/3.
 - Invalid stream upstream-pool origins, unsupported stream pool algorithms, duplicate stream SNI rule names or server-name patterns, stream listener/SNI rule target conflicts, missing stream listener defaults without SNI rules, UDP stream listeners with PROXY protocol egress, stream listeners that reference a pool without matching `tcp://` or `udp://` servers, or `shared_required` UDP state without its shared backend, identity key, timeout floor, and same-backend connection-limit prerequisites.
 - Routes that set zero or more than one of `upstream`, `upstream_pool`, `static_root`, or `actions.redirect`.
 - Unsafe route paths.

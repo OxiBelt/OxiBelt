@@ -18,7 +18,8 @@ use base64::Engine;
 use bytes::{Buf, Bytes, BytesMut};
 use h3_quinn::quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use h3_quinn::quinn::{
-  ClientConfig as QuinnClientConfig, Endpoint, ServerConfig as QuinnServerConfig,
+  AsyncUdpSocket, ClientConfig as QuinnClientConfig, Endpoint, EndpointConfig, Runtime,
+  ServerConfig as QuinnServerConfig, TokioRuntime, UdpPoller,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
@@ -144,8 +145,11 @@ struct DownstreamArgs {
   headers: HeaderMap,
   ca_cert: String,
   tls_version: Option<DownstreamTlsVersion>,
+  quic_initial_alpn_padding_bytes: usize,
   expect_status: Option<u16>,
 }
+
+const MAX_QUIC_INITIAL_ALPN_PADDING_BYTES: usize = 16 * 1024;
 
 struct HttpGetArgs {
   host: String,
@@ -409,7 +413,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
   eprintln!(
-        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
 }
 
@@ -853,6 +857,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
   let mut headers = HeaderMap::new();
   let mut ca_cert = None;
   let mut tls_version = None;
+  let mut quic_initial_alpn_padding_bytes = 0;
   let mut expect_status = None;
 
   while let Some(flag) = args.next() {
@@ -892,6 +897,18 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
       "--header" => insert_header(&mut headers, &value)?,
       "--ca-cert" => ca_cert = Some(value),
       "--tls-version" => tls_version = Some(DownstreamTlsVersion::parse(&value)?),
+      "--quic-initial-alpn-padding" => {
+        quic_initial_alpn_padding_bytes = value
+          .parse()
+          .context("invalid --quic-initial-alpn-padding value")?;
+        if quic_initial_alpn_padding_bytes == 0
+          || quic_initial_alpn_padding_bytes > MAX_QUIC_INITIAL_ALPN_PADDING_BYTES
+        {
+          bail!(
+            "--quic-initial-alpn-padding must be between 1 and {MAX_QUIC_INITIAL_ALPN_PADDING_BYTES} bytes"
+          );
+        }
+      }
       "--expect-status" => {
         expect_status = Some(value.parse().context("invalid --expect-status value")?);
       }
@@ -914,6 +931,9 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
   {
     bail!("--tls-version tls1.2 is only supported for TCP downstream protocols");
   }
+  if quic_initial_alpn_padding_bytes != 0 && !matches!(protocol, DownstreamProtocol::H3) {
+    bail!("--quic-initial-alpn-padding is only supported for HTTP/3");
+  }
   Ok(DownstreamArgs {
     protocol,
     host: host.ok_or_else(|| anyhow!("--host is required"))?,
@@ -930,6 +950,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     headers,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
     tls_version,
+    quic_initial_alpn_padding_bytes,
     expect_status,
   })
 }
@@ -3123,13 +3144,27 @@ async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
 }
 
 async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
-  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3", args.tls_version)?;
+  let client_config = downstream_client_config_with_quic_initial_alpn_padding(
+    Path::new(&args.ca_cert),
+    b"h3",
+    args.tls_version,
+    args.quic_initial_alpn_padding_bytes,
+  )?;
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
   let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
   let remote_addr = resolve_remote_addr(&args.host, args.port).await?;
-  let endpoint = Endpoint::client(client_bind_addr(remote_addr))
-    .context("failed to create downstream QUIC endpoint")?;
+  let (endpoint, initial_packet_count) = if args.quic_initial_alpn_padding_bytes == 0 {
+    (
+      Endpoint::client(client_bind_addr(remote_addr))
+        .context("failed to create downstream QUIC endpoint")?,
+      None,
+    )
+  } else {
+    let (endpoint, count) = counted_quic_client_endpoint(remote_addr)
+      .context("failed to create counted downstream QUIC endpoint")?;
+    (endpoint, Some(count))
+  };
   let quinn_connection = endpoint
     .connect_with(quic_config, remote_addr, &args.server_name)
     .with_context(|| {
@@ -3194,13 +3229,113 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
   let _ = driver_task.await;
 
   let (parts, _) = response.into_parts();
-  Ok(response_json(
+  let mut output = response_json(
     args.protocol.label(),
     None,
     parts.status,
     &parts.headers,
     &response_body.freeze(),
-  ))
+  );
+  if let Some(initial_packet_count) = initial_packet_count {
+    output["quic_initial_udp_segments"] =
+      serde_json::Value::from(initial_packet_count.load(Ordering::Relaxed));
+  }
+  Ok(output)
+}
+
+#[derive(Debug)]
+struct CountingQuicUdpSocket {
+  inner: Arc<dyn AsyncUdpSocket>,
+  initial_packet_count: Arc<AtomicU64>,
+}
+
+impl AsyncUdpSocket for CountingQuicUdpSocket {
+  fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+    self.inner.clone().create_io_poller()
+  }
+
+  fn try_send(&self, transmit: &h3_quinn::quinn::udp::Transmit) -> io::Result<()> {
+    self.inner.try_send(transmit)?;
+    self.initial_packet_count.fetch_add(
+      quic_initial_packets_in_transmit(transmit),
+      Ordering::Relaxed,
+    );
+    Ok(())
+  }
+
+  fn poll_recv(
+    &self,
+    cx: &mut TaskContext<'_>,
+    bufs: &mut [io::IoSliceMut<'_>],
+    meta: &mut [h3_quinn::quinn::udp::RecvMeta],
+  ) -> Poll<io::Result<usize>> {
+    self.inner.poll_recv(cx, bufs, meta)
+  }
+
+  fn local_addr(&self) -> io::Result<SocketAddr> {
+    self.inner.local_addr()
+  }
+
+  fn max_transmit_segments(&self) -> usize {
+    self.inner.max_transmit_segments()
+  }
+
+  fn max_receive_segments(&self) -> usize {
+    self.inner.max_receive_segments()
+  }
+
+  fn may_fragment(&self) -> bool {
+    self.inner.may_fragment()
+  }
+}
+
+fn counted_quic_client_endpoint(
+  remote_addr: SocketAddr,
+) -> anyhow::Result<(Endpoint, Arc<AtomicU64>)> {
+  let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
+  let socket = std::net::UdpSocket::bind(client_bind_addr(remote_addr))
+    .context("failed to bind counted downstream QUIC socket")?;
+  let socket = runtime
+    .wrap_udp_socket(socket)
+    .context("failed to prepare counted downstream QUIC socket")?;
+  let initial_packet_count = Arc::new(AtomicU64::new(0));
+  let socket: Arc<dyn AsyncUdpSocket> = Arc::new(CountingQuicUdpSocket {
+    inner: socket,
+    initial_packet_count: initial_packet_count.clone(),
+  });
+  let endpoint =
+    Endpoint::new_with_abstract_socket(EndpointConfig::default(), None, socket, runtime)
+      .context("failed to construct counted downstream QUIC endpoint")?;
+  Ok((endpoint, initial_packet_count))
+}
+
+fn quic_initial_packets_in_transmit(transmit: &h3_quinn::quinn::udp::Transmit) -> u64 {
+  let segment_size = transmit.segment_size.unwrap_or(transmit.contents.len());
+  if segment_size == 0 {
+    return 0;
+  }
+  transmit
+    .contents
+    .chunks(segment_size)
+    .filter(|packet| is_quic_initial_packet(packet))
+    .count() as u64
+}
+
+fn is_quic_initial_packet(packet: &[u8]) -> bool {
+  const QUIC_V1: u32 = 0x0000_0001;
+  const QUIC_V2: u32 = 0x6B33_43CF;
+
+  let Some((&first, version)) = packet.first().zip(packet.get(1..5)) else {
+    return false;
+  };
+  if first & 0xC0 != 0xC0 {
+    return false;
+  }
+  match u32::from_be_bytes(version.try_into().expect("fixed QUIC version width")) {
+    QUIC_V1 => first & 0x30 == 0x00,
+    QUIC_V2 => first & 0x30 == 0x10,
+    _ => false,
+  }
 }
 
 fn downstream_h2_body(args: &DownstreamArgs) -> BoxBody<Bytes, Infallible> {
@@ -3277,6 +3412,15 @@ fn downstream_client_config(
   alpn: &[u8],
   tls_version: Option<DownstreamTlsVersion>,
 ) -> anyhow::Result<ClientConfig> {
+  downstream_client_config_with_quic_initial_alpn_padding(path, alpn, tls_version, 0)
+}
+
+fn downstream_client_config_with_quic_initial_alpn_padding(
+  path: &Path,
+  alpn: &[u8],
+  tls_version: Option<DownstreamTlsVersion>,
+  quic_initial_alpn_padding_bytes: usize,
+) -> anyhow::Result<ClientConfig> {
   let builder =
     ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
   let builder = match tls_version {
@@ -3287,8 +3431,31 @@ fn downstream_client_config(
   let mut config = builder
     .with_root_certificates(load_root_store(path)?)
     .with_no_client_auth();
-  config.alpn_protocols = vec![alpn.to_vec()];
+  config.alpn_protocols = quic_initial_alpn_protocols(alpn, quic_initial_alpn_padding_bytes)?;
   Ok(config)
+}
+
+fn quic_initial_alpn_protocols(
+  alpn: &[u8],
+  quic_initial_alpn_padding_bytes: usize,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+  if quic_initial_alpn_padding_bytes > MAX_QUIC_INITIAL_ALPN_PADDING_BYTES {
+    bail!("QUIC Initial ALPN padding exceeds {MAX_QUIC_INITIAL_ALPN_PADDING_BYTES} bytes");
+  }
+
+  let mut protocols = vec![alpn.to_vec()];
+  let mut remaining = quic_initial_alpn_padding_bytes;
+  let mut entry = 0usize;
+  while remaining != 0 {
+    let len = remaining.min(u8::MAX as usize);
+    let mut dummy = format!("oxibelt-probe-padding-{entry:04}-").into_bytes();
+    dummy.resize(len, b'x');
+    dummy.truncate(len);
+    protocols.push(dummy);
+    remaining -= len;
+    entry += 1;
+  }
+  Ok(protocols)
 }
 
 fn downstream_request<B>(
@@ -3661,6 +3828,69 @@ mod tests {
     ] {
       assert_eq!(DpiTlsProfile::parse(name).unwrap().label(), name);
     }
+  }
+
+  #[test]
+  fn quic_initial_alpn_padding_keeps_h3_and_is_bounded() {
+    let protocols = quic_initial_alpn_protocols(b"h3", 512).expect("valid padding");
+    assert_eq!(protocols.first(), Some(&b"h3".to_vec()));
+    assert_eq!(protocols.iter().skip(1).map(Vec::len).sum::<usize>(), 512);
+    assert!(quic_initial_alpn_protocols(b"h3", MAX_QUIC_INITIAL_ALPN_PADDING_BYTES + 1).is_err());
+  }
+
+  #[test]
+  fn quic_initial_counter_accepts_only_known_initial_headers() {
+    let v1_initial = [0xC0, 0, 0, 0, 1];
+    let v1_handshake = [0xE0, 0, 0, 0, 1];
+    let v2_initial = [0xD0, 0x6B, 0x33, 0x43, 0xCF];
+    assert!(is_quic_initial_packet(&v1_initial));
+    assert!(is_quic_initial_packet(&v2_initial));
+    assert!(!is_quic_initial_packet(&v1_handshake));
+    assert!(!is_quic_initial_packet(&[0x40, 0, 0, 0, 1]));
+  }
+
+  #[test]
+  fn quic_initial_counter_counts_gso_segments() {
+    let contents = [0xC0, 0, 0, 0, 1, 0xC0, 0, 0, 0, 1];
+    let transmit = h3_quinn::quinn::udp::Transmit {
+      destination: "127.0.0.1:443".parse().expect("socket address"),
+      ecn: None,
+      contents: &contents,
+      segment_size: Some(5),
+      src_ip: None,
+    };
+    assert_eq!(quic_initial_packets_in_transmit(&transmit), 2);
+  }
+
+  #[test]
+  fn downstream_rejects_quic_initial_padding_for_h2() {
+    let result = parse_downstream_args(
+      [
+        "--protocol",
+        "h2",
+        "--host",
+        "proxy",
+        "--port",
+        "8443",
+        "--server-name",
+        "proxy",
+        "--authority",
+        "proxy",
+        "--path",
+        "/",
+        "--ca-cert",
+        "ca.pem",
+        "--quic-initial-alpn-padding",
+        "4096",
+      ]
+      .into_iter()
+      .map(str::to_owned),
+    );
+    let error = match result {
+      Ok(_) => panic!("H2 must reject QUIC Initial padding"),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("only supported for HTTP/3"));
   }
 
   fn synthetic_client_hello(server_name: &str) -> Vec<u8> {

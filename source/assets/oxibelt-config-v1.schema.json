@@ -22659,6 +22659,83 @@
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
         },
+        "quic_initial_reassembly": {
+          "additionalProperties": false,
+          "description": "OxiBelt native field `sni_forward.quic_initial_reassembly`. Production Rust validation is authoritative.",
+          "properties": {
+            "max_buffered_datagram_bytes_per_session": {
+              "default": 131072,
+              "description": "OxiBelt native field `sni_forward.quic_initial_reassembly.max_buffered_datagram_bytes_per_session`. Production Rust validation is authoritative.",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "max_datagrams_per_session": {
+              "default": 64,
+              "description": "OxiBelt native field `sni_forward.quic_initial_reassembly.max_datagrams_per_session`. Production Rust validation is authoritative.",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "max_fragments_per_session": {
+              "default": 64,
+              "description": "OxiBelt native field `sni_forward.quic_initial_reassembly.max_fragments_per_session`. Production Rust validation is authoritative.",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "max_pending_sessions": {
+              "default": 64,
+              "description": "OxiBelt native field `sni_forward.quic_initial_reassembly.max_pending_sessions`. Production Rust validation is authoritative.",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "max_total_buffered_bytes": {
+              "default": 4194304,
+              "description": "OxiBelt native field `sni_forward.quic_initial_reassembly.max_total_buffered_bytes`. Production Rust validation is authoritative.",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "timeout_ms": {
+              "default": 10000,
+              "description": "OxiBelt native field `sni_forward.quic_initial_reassembly.timeout_ms`. Production Rust validation is authoritative.",
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            }
+          },
+          "type": "object",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
         "quic_local_queue_capacity": {
           "description": "OxiBelt native field `sni_forward.quic_local_queue_capacity`. Production Rust validation is authoritative.",
           "minimum": 0,

@@ -311,6 +311,33 @@ async fn local_datagram_queue_drops_when_capacity_is_full() {
   assert!(receiver.try_recv().is_err());
 }
 
+#[tokio::test]
+async fn local_initial_replay_reserves_the_whole_batch_before_enqueueing() {
+  let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+  let (demux, sockets) = QuicDemuxSocket::new(socket, 1, 1);
+  let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+  let metrics = crate::metrics::Metrics::new();
+  let batch = initial::ReplayBatch::for_test(vec![vec![1], vec![2]]);
+
+  assert!(!demux.queue_local_batch(0, batch, peer, metrics.as_ref()));
+  let mut receiver = sockets[0]
+    .local_rx
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  assert!(
+    receiver.try_recv().is_err(),
+    "a failed batch must enqueue no prefix"
+  );
+  let body = metrics.prometheus(
+    &crate::config::MetricsConfig::default(),
+    Default::default(),
+    Default::default(),
+  );
+  assert!(body.contains(
+    "oxibelt_sni_forward_quic_initial_reassembly_total{outcome=\"local_replay_queue_full\"} 1"
+  ));
+}
+
 fn test_session(target: SocketAddr) -> QuicForwardSession {
   test_session_with_last_seen(target, Instant::now())
 }

@@ -83,6 +83,12 @@ loopback collectors such as local sidecars. Add private collector CAs with
 `access_log.otlp.trusted_ca_certs`.
 Trace OTLP export remains configured separately under `[telemetry.tracing]`.
 
+## QUIC Initial SNI Diagnostics
+
+When QUIC SNI forwarding is enabled, `oxibelt_sni_forward_quic_initial_reassembly_total{outcome}` reports bounded Initial reconstruction lifecycle outcomes: `pending`, `completed`, `expired`, `capacity_rejected`, `limit_rejected`, `overlap_conflict`, `local_replay_queue_full`, and `forward_replay_send_failed`. The metric has no peer, connection-ID, SNI, or error-text labels.
+
+Set `[logging].level = "debug"` for sampled, per-logical-listener Initial inspection summaries, or `"trace"` for the same sample plus bounded protocol and reassembly counters. DEBUG records only `peer`, `classification_mode`, `stage`, a static `reason`, `datagram_bytes`, and `suppressed_since_last`; TRACE adds bounded version/header/decryption/CRYPTO/reassembly lengths and counts. Raw datagrams, decrypted bytes, connection IDs or hashes, SNI, TLS transcript fields, and dependency error strings are never emitted. `RUST_LOG`, when configured, takes precedence over `[logging].level`; changing either filter requires a process restart.
+
 ## Bundle Assets
 
 The bundle is intentionally small:

@@ -106,6 +106,26 @@ packaging change during qualification requires another beta and a restarted
 soak. Record observed beta issues in the eventual stable entry before creating
 the stable tag.
 
+### QUIC Initial reassembly in `0.7.1-beta.4`
+
+`0.7.1-beta.4` retains native configuration schema epoch `1`. Existing
+configuration remains valid because `[sni_forward.quic_initial_reassembly]` is
+an optional, defaulted nested table. Before enabling split-Initial handling,
+add the table deliberately, validate the complete configuration, and roll out
+the target binary through the normal drain/restart procedure:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
+```
+
+The table creates no persisted state or migration. Its bounded pending state is
+in-memory and is discarded at process stop. To roll back to an earlier strict
+unknown-field binary, remove the complete
+`[sni_forward.quic_initial_reassembly]` table first, validate with that binary,
+then drain and restart. Do not roll back while relying on cross-datagram QUIC
+Initial SNI classification: the older binary cannot interpret the nested table
+or reproduce its bounded replay behavior.
+
 ## General upgrade procedure
 
 1. Read the complete entry for the target version and confirm that the

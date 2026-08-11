@@ -14,6 +14,12 @@ use super::{
 const DEFAULT_CLIENT_HELLO_MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_QUIC_MAX_SESSIONS: usize = 8192;
 const DEFAULT_QUIC_LOCAL_QUEUE_CAPACITY: usize = 1024;
+const DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_PENDING_SESSIONS: usize = 64;
+const DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_FRAGMENTS_PER_SESSION: usize = 64;
+const DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_DATAGRAMS_PER_SESSION: usize = 64;
+const DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_BUFFERED_DATAGRAM_BYTES_PER_SESSION: usize = 128 * 1024;
+const DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_TOTAL_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_QUIC_INITIAL_REASSEMBLY_TIMEOUT_MS: u64 = 10_000;
 pub(super) const SNI_FORWARD_CONFIG_KEYS: &[&str] = &[
   "client_hello_max_bytes",
   "client_hello_parse_methods",
@@ -21,8 +27,17 @@ pub(super) const SNI_FORWARD_CONFIG_KEYS: &[&str] = &[
   "enabled",
   "idle_timeout_ms",
   "quic_local_queue_capacity",
+  "quic_initial_reassembly",
   "quic_max_sessions",
   "rules",
+];
+pub(super) const SNI_FORWARD_QUIC_INITIAL_REASSEMBLY_CONFIG_KEYS: &[&str] = &[
+  "max_buffered_datagram_bytes_per_session",
+  "max_datagrams_per_session",
+  "max_fragments_per_session",
+  "max_pending_sessions",
+  "max_total_buffered_bytes",
+  "timeout_ms",
 ];
 pub(super) const SNI_FORWARD_RULE_KEYS: &[&str] = &[
   "connect_timeout_ms",
@@ -71,6 +86,8 @@ pub struct SniForwardConfig {
   #[serde(default = "default_quic_local_queue_capacity")]
   pub quic_local_queue_capacity: usize,
   #[serde(default)]
+  pub quic_initial_reassembly: QuicInitialReassemblyConfig,
+  #[serde(default)]
   pub rules: Vec<SniForwardRuleConfig>,
 }
 
@@ -84,6 +101,7 @@ impl Default for SniForwardConfig {
       idle_timeout_ms: default_client_idle_timeout_ms(),
       quic_max_sessions: default_quic_max_sessions(),
       quic_local_queue_capacity: default_quic_local_queue_capacity(),
+      quic_initial_reassembly: QuicInitialReassemblyConfig::default(),
       rules: Vec::new(),
     }
   }
@@ -141,6 +159,7 @@ impl SniForwardConfig {
     if self.quic_local_queue_capacity == 0 {
       bail!("sni_forward.quic_local_queue_capacity must be greater than 0");
     }
+    self.quic_initial_reassembly.validate()?;
     if let Some(target) = &self.default_target {
       validate_sni_forward_target("sni_forward.default_target", target)?;
     }
@@ -149,6 +168,68 @@ impl SniForwardConfig {
     let mut patterns = HashSet::new();
     for rule in &self.rules {
       rule.validate(&mut names, &mut patterns)?;
+    }
+    Ok(())
+  }
+}
+
+/// Bounded state retained while reconstructing a QUIC Initial ClientHello.
+///
+/// The effective runtime deadline is the smaller of `timeout_ms` and
+/// `limits.tls_handshake_timeout_ms`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct QuicInitialReassemblyConfig {
+  #[serde(default = "default_quic_initial_reassembly_max_pending_sessions")]
+  pub max_pending_sessions: usize,
+  #[serde(default = "default_quic_initial_reassembly_max_fragments_per_session")]
+  pub max_fragments_per_session: usize,
+  #[serde(default = "default_quic_initial_reassembly_max_datagrams_per_session")]
+  pub max_datagrams_per_session: usize,
+  #[serde(default = "default_quic_initial_reassembly_max_buffered_datagram_bytes_per_session")]
+  pub max_buffered_datagram_bytes_per_session: usize,
+  #[serde(default = "default_quic_initial_reassembly_max_total_buffered_bytes")]
+  pub max_total_buffered_bytes: usize,
+  #[serde(default = "default_quic_initial_reassembly_timeout_ms")]
+  pub timeout_ms: u64,
+}
+
+impl Default for QuicInitialReassemblyConfig {
+  fn default() -> Self {
+    Self {
+      max_pending_sessions: default_quic_initial_reassembly_max_pending_sessions(),
+      max_fragments_per_session: default_quic_initial_reassembly_max_fragments_per_session(),
+      max_datagrams_per_session: default_quic_initial_reassembly_max_datagrams_per_session(),
+      max_buffered_datagram_bytes_per_session:
+        default_quic_initial_reassembly_max_buffered_datagram_bytes_per_session(),
+      max_total_buffered_bytes: default_quic_initial_reassembly_max_total_buffered_bytes(),
+      timeout_ms: default_quic_initial_reassembly_timeout_ms(),
+    }
+  }
+}
+
+impl QuicInitialReassemblyConfig {
+  fn validate(&self) -> anyhow::Result<()> {
+    for (field, value) in [
+      ("max_pending_sessions", self.max_pending_sessions),
+      ("max_fragments_per_session", self.max_fragments_per_session),
+      ("max_datagrams_per_session", self.max_datagrams_per_session),
+      (
+        "max_buffered_datagram_bytes_per_session",
+        self.max_buffered_datagram_bytes_per_session,
+      ),
+      ("max_total_buffered_bytes", self.max_total_buffered_bytes),
+    ] {
+      if value == 0 {
+        bail!("sni_forward.quic_initial_reassembly.{field} must be greater than 0");
+      }
+    }
+    if self.timeout_ms == 0 {
+      bail!("sni_forward.quic_initial_reassembly.timeout_ms must be greater than 0");
+    }
+    if self.max_buffered_datagram_bytes_per_session > self.max_total_buffered_bytes {
+      bail!(
+        "sni_forward.quic_initial_reassembly.max_buffered_datagram_bytes_per_session must not exceed max_total_buffered_bytes"
+      );
     }
     Ok(())
   }
@@ -253,6 +334,30 @@ fn default_quic_max_sessions() -> usize {
 
 fn default_quic_local_queue_capacity() -> usize {
   DEFAULT_QUIC_LOCAL_QUEUE_CAPACITY
+}
+
+fn default_quic_initial_reassembly_max_pending_sessions() -> usize {
+  DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_PENDING_SESSIONS
+}
+
+fn default_quic_initial_reassembly_max_fragments_per_session() -> usize {
+  DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_FRAGMENTS_PER_SESSION
+}
+
+fn default_quic_initial_reassembly_max_datagrams_per_session() -> usize {
+  DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_DATAGRAMS_PER_SESSION
+}
+
+fn default_quic_initial_reassembly_max_buffered_datagram_bytes_per_session() -> usize {
+  DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_BUFFERED_DATAGRAM_BYTES_PER_SESSION
+}
+
+fn default_quic_initial_reassembly_max_total_buffered_bytes() -> usize {
+  DEFAULT_QUIC_INITIAL_REASSEMBLY_MAX_TOTAL_BUFFERED_BYTES
+}
+
+fn default_quic_initial_reassembly_timeout_ms() -> u64 {
+  DEFAULT_QUIC_INITIAL_REASSEMBLY_TIMEOUT_MS
 }
 
 fn default_sni_forward_protocols() -> Vec<SniForwardProtocol> {

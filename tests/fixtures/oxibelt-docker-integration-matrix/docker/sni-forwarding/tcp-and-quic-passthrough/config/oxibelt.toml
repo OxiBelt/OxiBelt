@@ -62,6 +62,14 @@ default_target = "mock-https:18443"
 client_hello_max_bytes = 65536
 idle_timeout_ms = 5000
 
+[sni_forward.quic_initial_reassembly]
+max_pending_sessions = 64
+max_fragments_per_session = 64
+max_datagrams_per_session = 64
+max_buffered_datagram_bytes_per_session = 131072
+max_total_buffered_bytes = 4194304
+timeout_ms = 10000
+
 [[sni_forward.rules]]
 name = "tcp-explicit"
 server_names = ["sni-forward.test"]

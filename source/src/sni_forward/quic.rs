@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use crate::metrics::QuicInitialReassemblyOutcome;
 use crate::sni_forward::SniForwardDecision;
 use crate::sni_forward::client_hello::raw_client_hello_sni;
 use crate::sni_forward::connection_limits::acquire_quic_forward_connection_permit;
@@ -22,8 +23,13 @@ use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::resolve_target_addr;
 
 mod forward_record;
+mod initial;
 mod state;
 use forward_record::QuicForwardRecord;
+use initial::{
+  CompletedInitial, IngestResult, InitialDiagnosticTrace, InitialReassemblyLimits, InspectError,
+  ReassemblyReject, ReassemblyResult, SharedInitialReassembly, inspect_initial,
+};
 use state::{DatagramAction, LocalQuicSession, QuicForwardSession, QuicForwardState};
 
 const MAX_UDP_DATAGRAM_BYTES: usize = 65_535;
@@ -51,8 +57,10 @@ pub(crate) fn bind_server_endpoints(
 ) -> anyhow::Result<(Vec<Endpoint>, Vec<BoundQuicForwardSocket>)> {
   let mut endpoints = Vec::with_capacity(snapshot.config.quic.socket.workers);
   let mut demuxes = Vec::with_capacity(snapshot.config.quic.socket.workers);
+  let initial = Arc::new(SharedInitialReassembly::default());
 
-  let (first_endpoints, first_demux) = bind_server_endpoint(bind, &server_config, snapshot)?;
+  let (first_endpoints, first_demux) =
+    bind_server_endpoint(bind, &server_config, snapshot, initial.clone())?;
   let assigned = first_endpoints
     .first()
     .ok_or_else(|| anyhow::anyhow!("downstream QUIC bind created no endpoints"))?
@@ -67,7 +75,8 @@ pub(crate) fn bind_server_endpoints(
 
   let worker_bind = SocketAddr::new(bind.ip(), assigned.port());
   for _ in 1..snapshot.config.quic.socket.workers {
-    let (worker_endpoints, demux) = bind_server_endpoint(worker_bind, &server_config, snapshot)?;
+    let (worker_endpoints, demux) =
+      bind_server_endpoint(worker_bind, &server_config, snapshot, initial.clone())?;
     endpoints.extend(worker_endpoints);
     demuxes.push(demux);
   }
@@ -132,13 +141,15 @@ fn bind_server_endpoint(
   bind: SocketAddr,
   server_config: &crate::tls::DownstreamQuicServerConfig,
   snapshot: &AppSnapshot,
+  initial: Arc<SharedInitialReassembly>,
 ) -> anyhow::Result<(Vec<Endpoint>, BoundQuicForwardSocket)> {
   let socket = crate::quic::bind_udp_socket(bind, &snapshot.config.quic.socket)?;
   let socket = UdpSocket::from_std(socket).context("failed to register QUIC UDP socket")?;
-  let (demux, local_sockets) = QuicDemuxSocket::new(
+  let (demux, local_sockets) = QuicDemuxSocket::new_with_initial(
     socket,
     snapshot.config.sni_forward.quic_local_queue_capacity,
     server_config.configs().len(),
+    initial,
   );
   let runtime = default_runtime().unwrap_or_else(|| Arc::new(TokioRuntime));
   let mut endpoints = Vec::with_capacity(local_sockets.len());
@@ -170,6 +181,7 @@ struct QuicDemuxSocket {
   socket: Arc<UdpSocket>,
   local_txs: Vec<mpsc::Sender<LocalDatagram>>,
   sessions: Mutex<QuicForwardState>,
+  initial: Arc<SharedInitialReassembly>,
 }
 
 struct QuicDemuxEndpointSocket {
@@ -191,10 +203,25 @@ impl fmt::Debug for QuicDemuxEndpointSocket {
 }
 
 impl QuicDemuxSocket {
+  #[cfg(test)]
   fn new(
     socket: UdpSocket,
     local_queue_capacity: usize,
     local_policy_count: usize,
+  ) -> (Arc<Self>, Vec<Arc<QuicDemuxEndpointSocket>>) {
+    Self::new_with_initial(
+      socket,
+      local_queue_capacity,
+      local_policy_count,
+      Arc::new(SharedInitialReassembly::default()),
+    )
+  }
+
+  fn new_with_initial(
+    socket: UdpSocket,
+    local_queue_capacity: usize,
+    local_policy_count: usize,
+    initial: Arc<SharedInitialReassembly>,
   ) -> (Arc<Self>, Vec<Arc<QuicDemuxEndpointSocket>>) {
     let policy_count = local_policy_count.max(1);
     let mut local_txs = Vec::with_capacity(policy_count);
@@ -208,6 +235,7 @@ impl QuicDemuxSocket {
       socket: Arc::new(socket),
       local_txs,
       sessions: Mutex::new(QuicForwardState::default()),
+      initial,
     });
     let endpoint_sockets = local_rxs
       .into_iter()
@@ -229,7 +257,7 @@ impl QuicDemuxSocket {
   ) -> anyhow::Result<()> {
     let bind = self.socket.local_addr()?;
     let mut buffer = vec![0u8; MAX_UDP_DATAGRAM_BYTES];
-    let mut expire = tokio::time::interval(Duration::from_secs(5));
+    let mut expire = tokio::time::interval(Duration::from_secs(1));
     let mut quiescing = *quiesce.borrow();
     info!(bind = %bind, "SNI forwarding QUIC demux started");
     loop {
@@ -254,8 +282,9 @@ impl QuicDemuxSocket {
         received = self.socket.recv_from(&mut buffer) => {
           let (len, peer) = received.context("failed to receive QUIC UDP datagram")?;
           let datagram = &buffer[..len];
-          if let Err(error) = self.handle_datagram(datagram, peer, &state, !quiescing).await {
-            warn!(peer = %peer, error = %error, "failed to classify QUIC datagram for SNI forwarding");
+          if self.handle_datagram(datagram, peer, &state, !quiescing).await.is_err() {
+            // This is a socket/demux failure, not untrusted Initial parser text.
+            warn!(peer = %peer, "failed to classify QUIC datagram for SNI forwarding");
           }
         }
       }
@@ -298,18 +327,106 @@ impl QuicDemuxSocket {
       return Ok(());
     }
 
-    let initial = extract_initial_sni(datagram);
-    let (sni, client_scid) = match initial {
-      Ok(value) => value,
+    let initial = match inspect_initial(datagram, peer) {
+      Ok(initial) => initial,
       Err(error) => {
+        self.record_initial_inspection(
+          snapshot.as_ref(),
+          peer,
+          sni_forward_enabled,
+          error,
+          datagram.len(),
+        );
         snapshot.metrics.record_sni_forward_parse_failure("quic");
         snapshot
           .metrics
           .record_sni_forward_decision("quic", "reject", "parse_failure", "none");
-        warn!(peer = %peer, error = %error, "QUIC Initial SNI inspection failed");
         return Ok(());
       }
     };
+    let trace = InitialDiagnosticTrace {
+      version: Some(initial.version),
+      header_bytes: initial.header_bytes,
+      decrypted_bytes: initial.decrypted_bytes,
+      crypto_frame_bytes: initial.crypto_frame_bytes(),
+      crypto_frames: initial.frames_len(),
+      retained_pending_sessions: 0,
+      retained_crypto_bytes: 0,
+      retained_segments: 0,
+      retained_datagrams: 0,
+      retained_datagram_bytes: 0,
+    };
+    let limits = InitialReassemblyLimits::new(
+      &snapshot.config.sni_forward.quic_initial_reassembly,
+      snapshot.config.sni_forward.client_hello_max_bytes,
+      snapshot.config.limits.tls_handshake_timeout_ms,
+    );
+    let IngestResult { result, expired } = self.initial.ingest(initial, Instant::now(), limits);
+    for _ in 0..expired {
+      snapshot
+        .metrics
+        .record_sni_forward_quic_initial_reassembly(QuicInitialReassemblyOutcome::Expired);
+    }
+    let initial = match result {
+      ReassemblyResult::Pending => {
+        snapshot
+          .metrics
+          .record_sni_forward_quic_initial_reassembly(QuicInitialReassemblyOutcome::Pending);
+        self.record_initial_diagnostic(
+          peer,
+          sni_forward_enabled,
+          "crypto_reassembly",
+          "incomplete_client_hello",
+          datagram.len(),
+          trace,
+        );
+        return Ok(());
+      }
+      ReassemblyResult::Completed(initial) => {
+        snapshot
+          .metrics
+          .record_sni_forward_quic_initial_reassembly(QuicInitialReassemblyOutcome::Completed);
+        initial
+      }
+      ReassemblyResult::Rejected(rejection) => {
+        if let Some(outcome) = rejection.outcome() {
+          snapshot
+            .metrics
+            .record_sni_forward_quic_initial_reassembly(outcome);
+        } else if rejection != ReassemblyReject::Expired {
+          snapshot.metrics.record_sni_forward_parse_failure("quic");
+          snapshot
+            .metrics
+            .record_sni_forward_decision("quic", "reject", "parse_failure", "none");
+        }
+        self.record_initial_diagnostic(
+          peer,
+          sni_forward_enabled,
+          rejection.stage(),
+          rejection.reason(),
+          datagram.len(),
+          trace,
+        );
+        return Ok(());
+      }
+    };
+    self
+      .classify_completed_initial(initial, peer, snapshot.as_ref(), sni_forward_enabled)
+      .await
+  }
+
+  async fn classify_completed_initial(
+    &self,
+    initial: CompletedInitial,
+    peer: SocketAddr,
+    snapshot: &AppSnapshot,
+    sni_forward_enabled: bool,
+  ) -> anyhow::Result<()> {
+    let CompletedInitial {
+      sni,
+      client_scid,
+      batch,
+    } = initial;
     let local_policy_index = snapshot
       .quic_server_config
       .as_ref()
@@ -324,8 +441,10 @@ impl QuicDemuxSocket {
           .record_sni_forward_decision("quic", "reject", "tls_policy", "none");
         return Ok(());
       };
-      self.remember_local(peer, client_scid, local_policy_index, snapshot.as_ref());
-      self.queue_local(local_policy_index, datagram, peer);
+      if !self.queue_local_batch(local_policy_index, batch, peer, snapshot.metrics.as_ref()) {
+        return Ok(());
+      }
+      self.remember_local(peer, client_scid, local_policy_index, snapshot);
       return Ok(());
     }
 
@@ -340,8 +459,10 @@ impl QuicDemuxSocket {
         snapshot
           .metrics
           .record_sni_forward_decision("quic", "local", "local_route", "local");
-        self.remember_local(peer, client_scid, local_policy_index, snapshot.as_ref());
-        self.queue_local(local_policy_index, datagram, peer);
+        if !self.queue_local_batch(local_policy_index, batch, peer, snapshot.metrics.as_ref()) {
+          return Ok(());
+        }
+        self.remember_local(peer, client_scid, local_policy_index, snapshot);
       }
       SniForwardDecision::Reject => {
         snapshot
@@ -349,30 +470,49 @@ impl QuicDemuxSocket {
           .record_sni_forward_decision("quic", "reject", "no_match", "none");
       }
       SniForwardDecision::Forward(rule) => {
-        let connection_permit =
-          match acquire_quic_forward_connection_permit(snapshot.as_ref(), peer).await {
-            Ok(permit) => permit,
-            Err(status) => {
-              snapshot.metrics.record_sni_forward_decision(
-                "quic",
-                "reject",
-                "connection_limit",
-                "none",
-              );
-              warn!(
-                peer = %peer,
-                status = %status,
-                "QUIC SNI forwarding rejected by connection limit"
-              );
-              return Ok(());
-            }
-          };
+        let connection_permit = match acquire_quic_forward_connection_permit(snapshot, peer).await {
+          Ok(permit) => permit,
+          Err(status) => {
+            snapshot.metrics.record_sni_forward_decision(
+              "quic",
+              "reject",
+              "connection_limit",
+              "none",
+            );
+            warn!(
+              peer = %peer,
+              status = %status,
+              "QUIC SNI forwarding rejected by connection limit"
+            );
+            return Ok(());
+          }
+        };
         snapshot
           .metrics
           .record_sni_forward_decision("quic", "forward", &rule.name, &rule.target);
         let (host, port) = crate::config::parse_stream_target(&rule.target)
           .with_context(|| format!("invalid SNI forwarding target {}", rule.target))?;
         let target = resolve_target_addr(&host, port).await?;
+        for datagram in &batch.datagrams {
+          if self.socket.send_to(datagram, target).await.is_err() {
+            snapshot.metrics.record_sni_forward_quic_initial_reassembly(
+              QuicInitialReassemblyOutcome::ForwardReplaySendFailed,
+            );
+            self.record_initial_diagnostic(
+              peer,
+              true,
+              "replay_forward",
+              "forward_replay_send_failed",
+              datagram.len(),
+              empty_initial_trace(),
+            );
+            warn!(peer = %peer, "QUIC Initial forwarding replay failed");
+            return Ok(());
+          }
+          snapshot
+            .metrics
+            .add_sni_forward_udp_bytes(datagram.len() as u64);
+        }
         self.remember_forward(
           QuicForwardRecord {
             peer,
@@ -382,15 +522,115 @@ impl QuicDemuxSocket {
             rule: &rule,
             connection_permit,
           },
-          snapshot.as_ref(),
+          snapshot,
         );
-        self.socket.send_to(datagram, target).await?;
-        snapshot
-          .metrics
-          .add_sni_forward_udp_bytes(datagram.len() as u64);
       }
     }
     Ok(())
+  }
+
+  fn record_initial_inspection(
+    &self,
+    _snapshot: &AppSnapshot,
+    peer: SocketAddr,
+    sni_forward_enabled: bool,
+    error: InspectError,
+    datagram_bytes: usize,
+  ) {
+    self.record_initial_diagnostic(
+      peer,
+      sni_forward_enabled,
+      error.stage(),
+      error.reason(),
+      datagram_bytes,
+      InitialDiagnosticTrace {
+        version: None,
+        header_bytes: 0,
+        decrypted_bytes: 0,
+        crypto_frame_bytes: 0,
+        crypto_frames: 0,
+        retained_pending_sessions: 0,
+        retained_crypto_bytes: 0,
+        retained_segments: 0,
+        retained_datagrams: 0,
+        retained_datagram_bytes: 0,
+      },
+    );
+  }
+
+  fn record_initial_diagnostic(
+    &self,
+    peer: SocketAddr,
+    sni_forward_enabled: bool,
+    stage: &'static str,
+    reason: &'static str,
+    datagram_bytes: usize,
+    mut trace: InitialDiagnosticTrace,
+  ) {
+    let aggregate = self.initial.diagnostic_aggregate();
+    trace.retained_pending_sessions = aggregate.retained_pending_sessions;
+    trace.retained_crypto_bytes = aggregate.retained_crypto_bytes;
+    trace.retained_segments = aggregate.retained_segments;
+    trace.retained_datagrams = aggregate.retained_datagrams;
+    trace.retained_datagram_bytes = aggregate.retained_datagram_bytes;
+    self.initial.emit_diagnostic(
+      peer,
+      if sni_forward_enabled {
+        "sni_forward"
+      } else {
+        "tls_policy_demux"
+      },
+      stage,
+      reason,
+      datagram_bytes,
+      trace,
+    );
+  }
+
+  fn queue_local_batch(
+    &self,
+    local_policy_index: usize,
+    batch: initial::ReplayBatch,
+    peer: SocketAddr,
+    metrics: &crate::metrics::Metrics,
+  ) -> bool {
+    let Some(local_tx) = self
+      .local_txs
+      .get(local_policy_index)
+      .or_else(|| self.local_txs.first())
+    else {
+      metrics.record_sni_forward_quic_initial_reassembly(
+        QuicInitialReassemblyOutcome::LocalReplayQueueFull,
+      );
+      self.record_initial_diagnostic(
+        peer,
+        true,
+        "replay_local",
+        "local_replay_queue_full",
+        0,
+        empty_initial_trace(),
+      );
+      return false;
+    };
+    let datagrams = batch.datagrams;
+    let Ok(permits) = local_tx.try_reserve_many(datagrams.len()) else {
+      metrics.record_sni_forward_quic_initial_reassembly(
+        QuicInitialReassemblyOutcome::LocalReplayQueueFull,
+      );
+      self.record_initial_diagnostic(
+        peer,
+        true,
+        "replay_local",
+        "local_replay_queue_full",
+        datagrams.iter().map(Vec::len).sum(),
+        empty_initial_trace(),
+      );
+      return false;
+    };
+    for (permit, bytes) in permits.zip(datagrams) {
+      permit.send(LocalDatagram { bytes, peer });
+    }
+    true
   }
 
   fn known_action(
@@ -500,8 +740,18 @@ impl QuicDemuxSocket {
   }
 
   fn expire_idle(&self, snapshot: &AppSnapshot) {
-    let mut sessions = lock_sessions(&self.sessions);
     let now = Instant::now();
+    let initial_limits = InitialReassemblyLimits::new(
+      &snapshot.config.sni_forward.quic_initial_reassembly,
+      snapshot.config.sni_forward.client_hello_max_bytes,
+      snapshot.config.limits.tls_handshake_timeout_ms,
+    );
+    for _ in 0..self.initial.expire(now, initial_limits) {
+      snapshot
+        .metrics
+        .record_sni_forward_quic_initial_reassembly(QuicInitialReassemblyOutcome::Expired);
+    }
+    let mut sessions = lock_sessions(&self.sessions);
     let expired = sessions.expire_forward(now, false);
     drop(sessions);
     for session in expired {
@@ -510,6 +760,7 @@ impl QuicDemuxSocket {
   }
 
   fn expire_all(&self, snapshot: &AppSnapshot) {
+    self.initial.clear_pending();
     let mut sessions = lock_sessions(&self.sessions);
     let expired = sessions.expire_forward(Instant::now(), true);
     drop(sessions);
@@ -616,6 +867,11 @@ pub(crate) fn extract_initial_sni(datagram: &[u8]) -> anyhow::Result<(Option<Str
   Ok((sni, client_scid))
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn exercise_quic_initial_reassembly_ranges(data: &[u8]) {
+  initial::exercise_crypto_range_merge(data);
+}
+
 fn end_forward_session(snapshot: &AppSnapshot, session: QuicForwardSession, outcome: &str) {
   snapshot.metrics.add_sni_forward_active_quic_session(-1);
   snapshot.metrics.record_sni_forward_session_end(
@@ -637,6 +893,21 @@ fn end_forward_session(snapshot: &AppSnapshot, session: QuicForwardSession, outc
     target_to_client_bytes = session.target_to_client,
     "SNI forwarding QUIC session ended"
   );
+}
+
+const fn empty_initial_trace() -> InitialDiagnosticTrace {
+  InitialDiagnosticTrace {
+    version: None,
+    header_bytes: 0,
+    decrypted_bytes: 0,
+    crypto_frame_bytes: 0,
+    crypto_frames: 0,
+    retained_pending_sessions: 0,
+    retained_crypto_bytes: 0,
+    retained_segments: 0,
+    retained_datagrams: 0,
+    retained_datagram_bytes: 0,
+  }
 }
 
 fn lock_sessions(

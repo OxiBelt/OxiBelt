@@ -72,7 +72,11 @@ fn parse_raw_client_hello_sni(data: &[u8]) -> anyhow::Result<Option<String>> {
   parse_client_hello_body_sni(body)
 }
 
-fn client_hello_message_len(data: &[u8]) -> anyhow::Result<Option<usize>> {
+/// Returns the declared TLS ClientHello handshake length once its four-byte
+/// header is available. QUIC Initial reassembly uses this to distinguish a
+/// fragmented handshake from a malformed completed handshake without parsing
+/// beyond the declared message.
+pub(crate) fn client_hello_message_len(data: &[u8]) -> anyhow::Result<Option<usize>> {
   if data.len() < 4 {
     return Ok(None);
   }

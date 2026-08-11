@@ -28,11 +28,18 @@ for the governed entry format.
 
 ### Configuration
 
-- No changes for this release.
+- Add the optional defaulted `[sni_forward.quic_initial_reassembly]` table for
+  bounded cross-datagram QUIC Initial CRYPTO reconstruction. It has no effect
+  on existing configurations that omit it and uses the epoch-1 defaults:
+  64 pending sessions, fragments, and datagrams per session; 131072 retained
+  datagram bytes per session; 4194304 total buffered bytes; and a 10000 ms
+  deadline capped by `limits.tls_handshake_timeout_ms`.
 
 ### Schema epochs
 
-- No changes for this release.
+- Retain native configuration schema epoch `1`. The nested QUIC Initial
+  reassembly table is additive and defaulted, so beta.2 and beta.3
+  configurations remain valid without migration.
 
 ### Deprecations and removals
 
@@ -65,7 +72,9 @@ for the governed entry format.
 
 ### Storage and state
 
-- No changes for this release.
+- QUIC Initial reassembly state is bounded, in-memory, and shared per logical
+  UDP bind only. No database, shared-state backend, durable record, or schema
+  migration is introduced.
 
 ### Upgrade validation
 
@@ -76,6 +85,11 @@ for the governed entry format.
 ```sh
 oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
 ```
+
+- When enabling split QUIC Initial ClientHello support, validate the new table
+  with the beta.4 binary before rollout. Its total budget covers retained raw
+  datagrams plus unique decrypted CRYPTO bytes; `client_hello_max_bytes`
+  remains the ClientHello bound.
 
 - When upgrading directly from `0.6.5`, create and inspect the epoch-1 sibling
   tree, then validate the migrated configuration before activation:
@@ -111,6 +125,11 @@ oxibeltctl config validate \
   operator-owned Gateway API CRDs must not be deleted as an implicit rollback.
   Rollback cannot recreate prior sockets, source ports, NAT or conntrack
   entries, exact Service endpoints, in-flight datagrams, or sessions.
+- Before returning to an older strict-unknown-field binary, remove the whole
+  `[sni_forward.quic_initial_reassembly]` table and validate the resulting
+  configuration with that binary. The reassembly state is not persisted and is
+  discarded on drain/restart; an older binary does not provide its
+  cross-datagram replay behavior.
 
 ### Known issues
 
@@ -130,6 +149,11 @@ oxibeltctl config validate \
 
 ### Security
 
+- Keep QUIC Initial reconstruction fail closed: conflicting overlaps, expiry,
+  capacity admission, fragment/datagram/byte limits, and replay-admission
+  failures reject the pending input without displacing established sessions.
+  DEBUG and TRACE diagnostics are sampled and redacted, and the fixed-outcome
+  reassembly metric has no peer, connection-ID, SNI, or error-text labels.
 - Keep the strict runtime contract unchanged and fail closed: the repaired
   fixture supplies the required seccomp expectation instead of weakening the
   validator, role capabilities, runtime hardening, or vulnerability policy.

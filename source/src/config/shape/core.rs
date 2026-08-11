@@ -94,6 +94,9 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "crypto.primitives" => crypto::CRYPTO_PRIMITIVES_CONFIG_KEYS,
     "crypto.primitive_backends" => crypto::CRYPTO_PRIMITIVE_BACKENDS_CONFIG_KEYS,
     "sni_forward" => sni_forward::SNI_FORWARD_CONFIG_KEYS,
+    "sni_forward.quic_initial_reassembly" => {
+      sni_forward::SNI_FORWARD_QUIC_INITIAL_REASSEMBLY_CONFIG_KEYS
+    }
     "sni_forward.rules" => sni_forward::SNI_FORWARD_RULE_KEYS,
     "tls" => allowed_keys::TLS_CONFIG_KEYS,
     "tls.1_2" => allowed_keys::TLS12_NEGOTIATION_CONFIG_KEYS,

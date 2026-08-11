@@ -29,6 +29,7 @@ pub(crate) use shared_state_api::SharedStatePoolStatus;
 #[cfg(feature = "admin-runtime")]
 mod secret_activation;
 mod sni_forward;
+pub(crate) use sni_forward::QuicInitialReassemblyOutcome;
 mod stream;
 mod upstream_client;
 

@@ -1,11 +1,50 @@
 //! SNI forwarding metric counters.
 //! Counters track routing and session outcomes without storing peer payload data.
 
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::MetricsConfig;
 
 use super::{Metrics, append_metric};
+
+const QUIC_INITIAL_REASSEMBLY_OUTCOMES: &[&str] = &[
+  "pending",
+  "completed",
+  "expired",
+  "capacity_rejected",
+  "limit_rejected",
+  "overlap_conflict",
+  "local_replay_queue_full",
+  "forward_replay_send_failed",
+];
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum QuicInitialReassemblyOutcome {
+  Pending,
+  Completed,
+  Expired,
+  CapacityRejected,
+  LimitRejected,
+  OverlapConflict,
+  LocalReplayQueueFull,
+  ForwardReplaySendFailed,
+}
+
+impl QuicInitialReassemblyOutcome {
+  const fn index(self) -> usize {
+    match self {
+      Self::Pending => 0,
+      Self::Completed => 1,
+      Self::Expired => 2,
+      Self::CapacityRejected => 3,
+      Self::LimitRejected => 4,
+      Self::OverlapConflict => 5,
+      Self::LocalReplayQueueFull => 6,
+      Self::ForwardReplaySendFailed => 7,
+    }
+  }
+}
 
 #[derive(Debug, Default)]
 pub(super) struct SniForwardMetrics {
@@ -16,6 +55,7 @@ pub(super) struct SniForwardMetrics {
   active_quic_sessions: AtomicU64,
   tcp_bytes_total: AtomicU64,
   udp_bytes_total: AtomicU64,
+  quic_initial_reassembly: [AtomicU64; QUIC_INITIAL_REASSEMBLY_OUTCOMES.len()],
 }
 
 impl Metrics {
@@ -94,6 +134,15 @@ impl Metrics {
     }
   }
 
+  /// Records a bounded QUIC Initial reassembly lifecycle outcome. This is a
+  /// fixed low-cardinality taxonomy, never a parser or transport error string.
+  pub(crate) fn record_sni_forward_quic_initial_reassembly(
+    &self,
+    outcome: QuicInitialReassemblyOutcome,
+  ) {
+    self.sni_forward.quic_initial_reassembly[outcome.index()].fetch_add(1, Ordering::Relaxed);
+  }
+
   pub(super) fn append_sni_forward_prometheus(&self, output: &mut String) {
     append_metric(
       output,
@@ -146,5 +195,13 @@ impl Metrics {
       "counter",
       self.sni_forward.udp_bytes_total.load(Ordering::Relaxed),
     );
+    output.push_str("# TYPE oxibelt_sni_forward_quic_initial_reassembly_total counter\n");
+    for (index, outcome) in QUIC_INITIAL_REASSEMBLY_OUTCOMES.iter().enumerate() {
+      let _ = writeln!(
+        output,
+        "oxibelt_sni_forward_quic_initial_reassembly_total{{outcome=\"{outcome}\"}} {}",
+        self.sni_forward.quic_initial_reassembly[index].load(Ordering::Relaxed),
+      );
+    }
   }
 }

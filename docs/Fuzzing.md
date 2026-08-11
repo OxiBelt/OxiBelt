@@ -24,7 +24,7 @@ matrices, and this metadata from drifting apart.
 | Target | Input contract and important invariant | Deliberately excluded |
 | --- | --- | --- |
 | `turn_protocol` | Bounded STUN, ChannelData, attributes, and authentication material; malformed lengths fail closed | Live sockets, relay allocation, credential lookup |
-| `tls_client_hello` | Raw and TLS-record-framed ClientHello parsing and SNI normalization | Live handshakes, keys, remote signers |
+| `tls_client_hello` | Raw and TLS-record-framed ClientHello parsing, bounded QUIC Initial CRYPTO range merging, and SNI normalization | Live handshakes, keys, remote signers |
 | `http_semantics` | Methods, URIs, authority, versions, and headers; ambiguous framing and forwarding state fail closed | Network I/O, connections, streaming bodies |
 | `compio_h1_response` | At most 128 KiB of response bytes, bounded fragmentation, and validated small protocol limits; framing and metadata remain deterministic and bounded | Live sockets, transport cancellation, and changes to Hyper |
 | `http3_webtransport` | HTTP/3 metadata, early-data state, and extended CONNECT protocols | Live QUIC/H3 sessions and datagrams |
