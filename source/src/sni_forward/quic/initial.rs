@@ -4,7 +4,7 @@
 //! separate from established QUIC forwarding sessions so incomplete Initials
 //! cannot evict a live local or forwarded connection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -478,24 +478,24 @@ impl SharedInitialReassembly {
       };
     }
 
-    if !state.entries.contains_key(&initial.key) {
-      if state.entries.len() >= limits.max_pending_sessions {
-        return IngestResult {
-          result: ReassemblyResult::Rejected(ReassemblyReject::Capacity),
-          expired: expired_count,
-        };
-      }
-      state.entries.insert(
-        initial.key,
-        PendingInitial {
+    let pending_at_capacity = state.entries.len() >= limits.max_pending_sessions;
+    let candidate_at_capacity = match state.entries.entry(initial.key) {
+      Entry::Occupied(_) => false,
+      Entry::Vacant(entry) => {
+        // A new Initial can complete without retaining a pending slot. Keep an
+        // at-capacity candidate under this same mutex so it uses the listener's
+        // shared byte budget, then remove it if reconstruction remains pending;
+        // every state observer takes this mutex and cannot see the extra entry.
+        entry.insert(PendingInitial {
           first_seen: now,
           crypto: Vec::new(),
           contributing_fragments: 0,
           datagrams: Vec::new(),
           raw_datagram_bytes: 0,
-        },
-      );
-    }
+        });
+        pending_at_capacity
+      }
+    };
 
     let mut datagram_contributed = false;
     for frame in &initial.frames {
@@ -614,10 +614,12 @@ impl SharedInitialReassembly {
     };
     let contiguous = entry.contiguous_crypto();
     if contiguous.len() < 4 {
-      return IngestResult {
-        result: ReassemblyResult::Pending,
-        expired: expired_count,
-      };
+      return pending_or_capacity(
+        &mut state,
+        initial.key,
+        candidate_at_capacity,
+        expired_count,
+      );
     };
     let declared_len = 4usize.saturating_add(
       ((contiguous[1] as usize) << 16) | ((contiguous[2] as usize) << 8) | contiguous[3] as usize,
@@ -637,10 +639,12 @@ impl SharedInitialReassembly {
       };
     }
     if contiguous.len() < declared_len {
-      return IngestResult {
-        result: ReassemblyResult::Pending,
-        expired: expired_count,
-      };
+      return pending_or_capacity(
+        &mut state,
+        initial.key,
+        candidate_at_capacity,
+        expired_count,
+      );
     }
     let client_hello = contiguous[..declared_len].to_vec();
     let Some(entry) = state.entries.remove(&initial.key) else {
@@ -701,6 +705,21 @@ fn remove_entry(state: &mut PendingState, key: InitialKey) {
   if let Some(entry) = state.entries.remove(&key) {
     state.reserved_bytes = state.reserved_bytes.saturating_sub(entry.reserved_bytes());
   }
+}
+
+fn pending_or_capacity(
+  state: &mut PendingState,
+  key: InitialKey,
+  candidate_at_capacity: bool,
+  expired: usize,
+) -> IngestResult {
+  let result = if candidate_at_capacity {
+    remove_entry(state, key);
+    ReassemblyResult::Rejected(ReassemblyReject::Capacity)
+  } else {
+    ReassemblyResult::Pending
+  };
+  IngestResult { result, expired }
 }
 
 /// Merges a verified-compatible CRYPTO range into sorted, non-overlapping
@@ -816,6 +835,15 @@ mod tests {
     }
   }
 
+  fn initial_reserved_bytes(initial: &InspectedInitial) -> usize {
+    initial.datagram.len()
+      + initial
+        .frames
+        .iter()
+        .map(|frame| frame.data.len())
+        .sum::<usize>()
+  }
+
   fn pending(result: IngestResult) {
     assert!(matches!(result.result, ReassemblyResult::Pending));
   }
@@ -926,6 +954,138 @@ mod tests {
     ));
     assert_eq!(shared.pending_len(), 0);
     assert_eq!(shared.reserved_bytes(), 0);
+  }
+
+  #[test]
+  fn full_pending_table_admits_complete_single_datagram_candidate() {
+    let shared = Arc::new(SharedInitialReassembly::default());
+    let now = Instant::now();
+    let incumbent: SocketAddr = "127.0.0.1:10010".parse().unwrap();
+    let candidate: SocketAddr = "127.0.0.1:10011".parse().unwrap();
+    let limits = limits(|config| config.max_pending_sessions = 1);
+    pending(shared.ingest(inspected(incumbent, 0, &[1, 0, 0, 16], 14), now, limits));
+    let baseline = shared.reserved_bytes();
+
+    let data = hello();
+    let mut initial = inspected(candidate, 8, &data[8..], 15);
+    initial.frames.push(quic_parser::CryptoFrame {
+      offset: 0,
+      data: data[..8].to_vec(),
+    });
+    let result = shared.ingest(initial, now, limits);
+    let ReassemblyResult::Completed(completed) = result.result else {
+      panic!("complete at-capacity candidate should not require a pending slot");
+    };
+
+    assert_eq!(completed.batch.datagrams.len(), 1);
+    assert_eq!(shared.pending_len(), 1);
+    assert!(shared.reserved_bytes() > baseline);
+    drop(completed);
+    assert_eq!(shared.pending_len(), 1);
+    assert_eq!(shared.reserved_bytes(), baseline);
+  }
+
+  #[test]
+  fn full_pending_table_rejects_incomplete_candidates_without_retention() {
+    let shared = Arc::new(SharedInitialReassembly::default());
+    let now = Instant::now();
+    let incumbent: SocketAddr = "127.0.0.1:10012".parse().unwrap();
+    let limits = limits(|config| config.max_pending_sessions = 1);
+    pending(shared.ingest(inspected(incumbent, 0, &[1, 0, 0, 16], 16), now, limits));
+    let baseline = shared.reserved_bytes();
+
+    for (peer, bytes, tag) in [
+      ("127.0.0.1:10013", &[1, 0, 0][..], 17),
+      ("127.0.0.1:10014", &[1, 0, 0, 16][..], 18),
+    ] {
+      assert!(matches!(
+        shared
+          .ingest(inspected(peer.parse().unwrap(), 0, bytes, tag), now, limits)
+          .result,
+        ReassemblyResult::Rejected(ReassemblyReject::Capacity)
+      ));
+      assert_eq!(shared.pending_len(), 1);
+      assert_eq!(shared.reserved_bytes(), baseline);
+    }
+  }
+
+  #[test]
+  fn at_capacity_candidates_share_the_global_replay_budget() {
+    let shared = Arc::new(SharedInitialReassembly::default());
+    let now = Instant::now();
+    let incumbent: SocketAddr = "127.0.0.1:10015".parse().unwrap();
+    pending(shared.ingest(
+      inspected(incumbent, 0, &[1, 0, 0, 16], 19),
+      now,
+      limits(|config| config.max_pending_sessions = 1),
+    ));
+    let baseline = shared.reserved_bytes();
+    let candidate = inspected("127.0.0.1:10016".parse().unwrap(), 0, &hello(), 20);
+    let exact_budget = baseline.saturating_add(initial_reserved_bytes(&candidate));
+    assert!(matches!(
+      shared
+        .ingest(
+          candidate,
+          now,
+          limits(|config| {
+            config.max_pending_sessions = 1;
+            config.max_total_buffered_bytes = exact_budget.saturating_sub(1);
+          }),
+        )
+        .result,
+      ReassemblyResult::Rejected(ReassemblyReject::Limit)
+    ));
+    assert_eq!(shared.pending_len(), 1);
+    assert_eq!(shared.reserved_bytes(), baseline);
+
+    let start = Arc::new(std::sync::Barrier::new(3));
+    let mut handles = Vec::new();
+    for (peer, tag) in [("127.0.0.1:10017", 21), ("127.0.0.1:10018", 22)] {
+      let shared = shared.clone();
+      let start = start.clone();
+      handles.push(std::thread::spawn(move || {
+        let initial = inspected(peer.parse().unwrap(), 0, &hello(), tag);
+        start.wait();
+        shared.ingest(
+          initial,
+          now,
+          limits(|config| {
+            config.max_pending_sessions = 1;
+            config.max_total_buffered_bytes = exact_budget;
+          }),
+        )
+      }));
+    }
+    start.wait();
+    let results: Vec<_> = handles
+      .into_iter()
+      .map(|handle| handle.join().expect("candidate thread should not panic"))
+      .collect();
+
+    assert_eq!(
+      results
+        .iter()
+        .filter(|result| matches!(&result.result, ReassemblyResult::Completed(_)))
+        .count(),
+      1
+    );
+    assert_eq!(
+      results
+        .iter()
+        .filter(|result| {
+          matches!(
+            &result.result,
+            ReassemblyResult::Rejected(ReassemblyReject::Limit)
+          )
+        })
+        .count(),
+      1
+    );
+    assert_eq!(shared.pending_len(), 1);
+    assert_eq!(shared.reserved_bytes(), exact_budget);
+    drop(results);
+    assert_eq!(shared.pending_len(), 1);
+    assert_eq!(shared.reserved_bytes(), baseline);
   }
 
   #[test]
