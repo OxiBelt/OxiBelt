@@ -1421,7 +1421,7 @@ Limit values must be greater than zero. `limits.max_request_body_bytes` is the d
 
 ### Global Overload Manager
 
-`[overload]` is disabled by default, preserving existing admission behavior. When enabled, OxiBelt samples process RSS, cgroup/host memory, open file descriptors, cgroup CPU usage, event-loop lag, and fixed-vocabulary active-work counters. It enters `soft` after `soft_enter_samples` consecutive soft breaches and enters `hard` immediately on a hard breach. Recovery requires `recovery_samples` samples below `recovery_ratio` times every soft threshold. A failed process probe retains the last good sample and enters hard overload only after `signal_stale_timeout_ms`; startup rejects enabled configurations whose critical RSS or descriptor probes are unavailable.
+`[overload]` is disabled by default, preserving existing admission behavior. When enabled, OxiBelt samples process RSS, hierarchy-paired cgroup memory usage and limits (v2 or v1), host memory, open file descriptors, cgroup CPU usage, event-loop lag, and fixed-vocabulary active-work counters. It enters `soft` after `soft_enter_samples` consecutive soft breaches and enters `hard` immediately on a hard breach. Recovery requires `recovery_samples` samples below `recovery_ratio` times every soft threshold. A failed process probe retains the last good sample and enters hard overload only after `signal_stale_timeout_ms`; startup rejects enabled configurations whose critical RSS or descriptor probes are unavailable.
 
 ```toml
 [overload]

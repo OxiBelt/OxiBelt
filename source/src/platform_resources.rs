@@ -7,6 +7,12 @@
 const CGROUP_V1_UNLIMITED_MEMORY_SENTINEL: u64 = 1_u64 << 60;
 const BYTES_PER_KIBIBYTE: u64 = 1_024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CgroupMemoryObservation {
+  pub(crate) current_bytes: Option<u64>,
+  pub(crate) limit_bytes: u64,
+}
+
 /// Returns a finite cgroup memory hard limit, when one is exposed by the
 /// process environment.
 ///
@@ -14,16 +20,37 @@ const BYTES_PER_KIBIBYTE: u64 = 1_024;
 /// treated as no finite limit. A finite v2 value takes precedence over v1;
 /// when v2 is unlimited or unavailable, a finite v1 value is considered.
 pub(crate) fn finite_cgroup_memory_limit_bytes() -> Option<u64> {
-  let v2 = crate::platform_fs::read_to_string("/sys/fs/cgroup/memory.max")
+  cgroup_memory_observation().map(|observation| observation.limit_bytes)
+}
+
+/// Returns current and finite hard-limit memory values from the same cgroup
+/// hierarchy. Pairing prevents a v2 current value or process RSS from
+/// substituting for same-hierarchy usage when a finite v1 limit is selected.
+pub(crate) fn cgroup_memory_observation() -> Option<CgroupMemoryObservation> {
+  let v2_limit = crate::platform_fs::read_to_string("/sys/fs/cgroup/memory.max")
     .ok()
     .and_then(|value| parse_cgroup_v2_memory_limit(&value));
-  if v2.is_some() {
-    return v2;
+  let v2_current = crate::platform_fs::read_to_string("/sys/fs/cgroup/memory.current")
+    .ok()
+    .and_then(|value| parse_cgroup_memory_current(&value));
+  if let Some(limit_bytes) = v2_limit {
+    return Some(CgroupMemoryObservation {
+      current_bytes: v2_current,
+      limit_bytes,
+    });
   }
 
-  crate::platform_fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+  let v1_limit = crate::platform_fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
     .ok()
-    .and_then(|value| parse_cgroup_v1_memory_limit(&value))
+    .and_then(|value| parse_cgroup_v1_memory_limit(&value));
+  let v1_current =
+    crate::platform_fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+      .ok()
+      .and_then(|value| parse_cgroup_memory_current(&value));
+  v1_limit.map(|limit_bytes| CgroupMemoryObservation {
+    current_bytes: v1_current,
+    limit_bytes,
+  })
 }
 
 /// Returns host `MemTotal` from `/proc/meminfo`, when it is valid and finite.
@@ -47,6 +74,10 @@ fn parse_cgroup_v1_memory_limit(value: &str) -> Option<u64> {
     .parse::<u64>()
     .ok()
     .filter(|value| *value > 0 && *value < CGROUP_V1_UNLIMITED_MEMORY_SENTINEL)
+}
+
+fn parse_cgroup_memory_current(value: &str) -> Option<u64> {
+  value.trim().parse::<u64>().ok()
 }
 
 fn parse_memtotal_bytes(value: &str) -> Option<u64> {
@@ -81,6 +112,13 @@ mod tests {
     assert_eq!(parse_cgroup_v1_memory_limit("18446744073709551615"), None);
     assert_eq!(parse_cgroup_v1_memory_limit("0"), None);
     assert_eq!(parse_cgroup_v1_memory_limit("not-a-limit"), None);
+  }
+
+  #[test]
+  fn current_memory_parser_accepts_zero_and_finite_usage() {
+    assert_eq!(parse_cgroup_memory_current(" 0\n"), Some(0));
+    assert_eq!(parse_cgroup_memory_current("123456"), Some(123_456));
+    assert_eq!(parse_cgroup_memory_current("not-usage"), None);
   }
 
   #[test]

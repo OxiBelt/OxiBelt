@@ -1346,6 +1346,10 @@ impl ManifestBuilder {
           "runtime.platform.cgroup_v1_memory_limit",
         ),
         (
+          "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+          "runtime.platform.cgroup_v1_memory_current",
+        ),
+        (
           "/sys/fs/cgroup/cpu.stat",
           "runtime.platform.cgroup_cpu_stat",
         ),

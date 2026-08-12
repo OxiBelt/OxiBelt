@@ -1,6 +1,6 @@
 //! Linux process and cgroup samples used by the overload manager.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
 pub(super) struct ProcessSample {
   pub(super) rss_bytes: u64,
@@ -14,9 +14,13 @@ pub(super) struct ProcessSample {
 
 pub(super) fn read_process_sample() -> Result<ProcessSample> {
   let rss_bytes = read_rss_bytes()?;
-  let memory_current_bytes = read_u64_file("/sys/fs/cgroup/memory.current").unwrap_or(rss_bytes);
-  let memory_limit_bytes = crate::platform_resources::finite_cgroup_memory_limit_bytes()
-    .or_else(crate::platform_resources::host_memory_bytes);
+  let cgroup_memory = crate::platform_resources::cgroup_memory_observation();
+  let host_memory = cgroup_memory
+    .is_none()
+    .then(crate::platform_resources::host_memory_bytes)
+    .flatten();
+  let (memory_current_bytes, memory_limit_bytes) =
+    select_memory_values(rss_bytes, cgroup_memory, host_memory)?;
   let fd_used = crate::platform_fs::count_directory_entries("/proc/self/fd")? as u64;
   let fd_limit = read_fd_limit()?;
   let cpu_usage_usec = read_cpu_usage_usec().unwrap_or(0);
@@ -36,6 +40,20 @@ pub(super) fn read_process_sample() -> Result<ProcessSample> {
   })
 }
 
+pub(super) fn select_memory_values(
+  rss_bytes: u64,
+  cgroup_memory: Option<crate::platform_resources::CgroupMemoryObservation>,
+  host_memory_bytes: Option<u64>,
+) -> Result<(u64, Option<u64>)> {
+  let Some(observation) = cgroup_memory else {
+    return Ok((rss_bytes, host_memory_bytes));
+  };
+  let current_bytes = observation
+    .current_bytes
+    .context("finite cgroup memory limit has no readable same-hierarchy usage value")?;
+  Ok((current_bytes, Some(observation.limit_bytes)))
+}
+
 fn read_rss_bytes() -> Result<u64> {
   crate::platform_fs::read_to_string("/proc/self/status")?
     .lines()
@@ -53,14 +71,6 @@ fn read_fd_limit() -> Result<u64> {
     .and_then(|line| line.split_whitespace().nth(3))
     .and_then(|value| value.parse::<u64>().ok())
     .ok_or_else(|| anyhow!("/proc/self/limits does not contain a finite open-file limit"))
-}
-
-fn read_u64_file(path: &str) -> Option<u64> {
-  crate::platform_fs::read_to_string(path)
-    .ok()?
-    .trim()
-    .parse()
-    .ok()
 }
 
 fn read_cpu_usage_usec() -> Option<u64> {

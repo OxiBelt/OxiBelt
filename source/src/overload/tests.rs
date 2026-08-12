@@ -33,6 +33,33 @@ fn soft_requires_two_samples_and_hard_is_immediate() {
 }
 
 #[test]
+fn cgroup_usage_above_the_hard_ratio_enters_hard_overload_when_rss_is_low() {
+  let runtime = OverloadRuntime::new(&OverloadConfig {
+    enabled: true,
+    ..Default::default()
+  });
+  let lifecycle = LifecycleState::default();
+
+  runtime.apply_process_sample(
+    ProcessSample {
+      rss_bytes: 100,
+      memory_current_bytes: 950,
+      memory_limit_bytes: Some(1_000),
+      fd_used: 1,
+      fd_limit: 1_000,
+      cpu_usage_usec: 0,
+      cpu_capacity: 1.0,
+    },
+    Duration::ZERO,
+    0,
+    &lifecycle,
+  );
+
+  assert_eq!(runtime.state(), OverloadState::Hard);
+  assert!(lifecycle.is_draining());
+}
+
+#[test]
 fn leases_release_when_dropped() {
   let runtime = OverloadRuntime::new(&OverloadConfig {
     enabled: true,
@@ -247,5 +274,27 @@ fn prometheus_output_uses_only_fixed_overload_labels() {
   drop(request);
   assert!(
     output.contains("oxibelt_overload_control_plane_capacity{plane=\"admin\",kind=\"connection\"}")
+  );
+}
+
+#[test]
+fn finite_cgroup_limit_requires_same_hierarchy_usage() {
+  let observation = crate::platform_resources::CgroupMemoryObservation {
+    current_bytes: None,
+    limit_bytes: 1_000,
+  };
+
+  let error = super::process::select_memory_values(100, Some(observation), Some(10_000))
+    .expect_err("RSS must not be paired with a finite cgroup limit");
+
+  assert!(error.to_string().contains("same-hierarchy usage"));
+}
+
+#[test]
+fn host_limit_is_paired_with_process_rss_without_a_cgroup_limit() {
+  assert_eq!(
+    super::process::select_memory_values(100, None, Some(10_000))
+      .expect("host fallback should remain valid"),
+    (100, Some(10_000))
   );
 }
