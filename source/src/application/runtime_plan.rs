@@ -8,7 +8,9 @@ use crate::runtime::topology::{
   RuntimeCapability, RuntimeRequestedPreset, RuntimeResolvedPreset, RuntimeTopologyCapabilities,
   RuntimeTopologyPolicy, RuntimeTopologyReason, RuntimeTopologySnapshot, resolve_runtime_topology,
 };
-use crate::runtime::topology_config::request_from_config;
+use crate::runtime::topology_config::{
+  capabilities_with_compio_direct_h1_budget, request_from_config,
+};
 
 pub(crate) struct ActivatedOwnedRuntime {
   pub(crate) runtime: MainRuntime,
@@ -21,6 +23,7 @@ pub(crate) fn activate_owned_runtime(
 ) -> anyhow::Result<ActivatedOwnedRuntime> {
   let request = request_from_config(config);
   let worker_threads = config.runtime.workers.tokio;
+  capabilities = capabilities_with_compio_direct_h1_budget(config, capabilities);
   let mut topology = resolve_runtime_topology(request, capabilities)
     .context("requested runtime topology cannot be activated")?;
   let mut active = active_runtime_for_topology(&topology);
@@ -38,6 +41,7 @@ pub(crate) fn activate_owned_runtime(
       );
       capabilities.compio_main =
         RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioRuntimeBuildFailed);
+      capabilities = capabilities_with_compio_direct_h1_budget(config, capabilities);
       topology = resolve_runtime_topology(request, capabilities)
         .context("fallback runtime topology cannot be activated")?;
       active = active_runtime_for_topology(&topology);

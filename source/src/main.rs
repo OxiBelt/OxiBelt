@@ -13,7 +13,9 @@ use oxibelt::runtime::topology::{
   RuntimeCapability, RuntimeRequestedPreset, RuntimeResolvedPreset, RuntimeTopologyPolicy,
   RuntimeTopologyReason, RuntimeTopologySnapshot, resolve_runtime_topology,
 };
-use oxibelt::runtime::topology_config::{available_capabilities, request_from_config};
+use oxibelt::runtime::topology_config::{
+  available_capabilities, capabilities_with_compio_direct_h1_budget, request_from_config,
+};
 
 mod runtime_diagnostics;
 use runtime_diagnostics::{
@@ -271,6 +273,7 @@ fn run_configuration_check(config: Config, override_warnings: Vec<String>) -> an
   if let Some(reason) = compio_preflight.failure_reason {
     capabilities.compio_main = RuntimeCapability::Unavailable(reason);
   }
+  capabilities = capabilities_with_compio_direct_h1_budget(&config, capabilities);
   let mut topology = resolve_runtime_topology(request, capabilities)
     .context("requested runtime topology cannot be activated")?;
   let mut active_runtime = active_runtime_for_topology(&topology);
@@ -288,6 +291,7 @@ fn run_configuration_check(config: Config, override_warnings: Vec<String>) -> an
       );
       capabilities.compio_main =
         RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioRuntimeBuildFailed);
+      capabilities = capabilities_with_compio_direct_h1_budget(&config, capabilities);
       topology = resolve_runtime_topology(request, capabilities)
         .context("fallback runtime topology cannot be activated")?;
       active_runtime = active_runtime_for_topology(&topology);

@@ -14,7 +14,9 @@ use oxibelt::runtime::topology::{
   RuntimeCapability, RuntimeRequestedPreset, RuntimeTopologyPolicy, RuntimeTopologyReason,
   resolve_runtime_topology,
 };
-use oxibelt::runtime::topology_config::{available_capabilities, request_from_config};
+use oxibelt::runtime::topology_config::{
+  available_capabilities, capabilities_with_compio_direct_h1_budget, request_from_config,
+};
 use serde::Serialize;
 use serde_json::json;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -308,6 +310,7 @@ fn run_runtime_check(config_path: &Path) -> RuntimeCheckReport {
       };
     }
     let started = Instant::now();
+    let capabilities = capabilities_with_compio_direct_h1_budget(&config, capabilities);
     match resolve_runtime_topology(topology_request, capabilities) {
       Ok(topology) => {
         report.stages.push(RuntimeCheckStage {

@@ -50,6 +50,7 @@ pub mod mitigation;
 pub mod netport_switcher;
 pub mod overload;
 pub(crate) mod platform_fs;
+pub(crate) mod platform_resources;
 mod pool_health;
 pub mod pools;
 mod process_globals;

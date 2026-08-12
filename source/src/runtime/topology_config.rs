@@ -59,6 +59,25 @@ pub fn available_capabilities(
   capabilities
 }
 
+/// Applies configuration-dependent Compio direct-H1 capability checks.
+///
+/// The budget calculation is also repeated by state construction as a final
+/// fail-closed check. This projection makes an already-impossible Compio
+/// direct-H1 selection visible to topology policy before activation.
+pub fn capabilities_with_compio_direct_h1_budget(
+  config: &Config,
+  mut capabilities: RuntimeTopologyCapabilities,
+) -> RuntimeTopologyCapabilities {
+  if config.runtime.direct_h1_io == RuntimeDirectH1IoMode::Compio
+    && capabilities.compio_direct_h1 == RuntimeCapability::Available
+    && crate::circuit_breakers::compio_direct_h1_budget(config).is_err()
+  {
+    capabilities.compio_direct_h1 =
+      RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioDirectH1Unavailable);
+  }
+  capabilities
+}
+
 pub fn capabilities_for_active(topology: &RuntimeTopologySnapshot) -> RuntimeTopologyCapabilities {
   let compio_main = if topology.resolved_preset == RuntimeResolvedPreset::HybridCompio {
     RuntimeCapability::Available
@@ -114,6 +133,11 @@ fn target_arch() -> RuntimeTargetArch {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::config::CapacitySetting;
+  use crate::runtime::backend::CompioDriverSelection;
+  use crate::runtime::topology::{
+    RuntimeDirectH1Backend, RuntimeTopologyOutcome, resolve_runtime_topology,
+  };
 
   fn default_config() -> Config {
     toml::from_str(
@@ -180,6 +204,77 @@ private_key = "privkey.pem"
     assert_eq!(
       topology.worker_applicability.compio_direct_h1_workers,
       super::super::topology::RuntimeWorkerApplicability::Inapplicable
+    );
+  }
+
+  fn impossible_compio_config(policy: ConfigRuntimeTopologyPolicy) -> Config {
+    let mut config = default_config();
+    config.runtime.direct_h1_io = RuntimeDirectH1IoMode::Compio;
+    config.runtime.topology_policy = policy;
+    config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(usize::MAX);
+    config
+  }
+
+  fn available_compio_capabilities() -> RuntimeTopologyCapabilities {
+    RuntimeTopologyCapabilities::available(
+      RuntimeTargetOs::Linux,
+      RuntimeTargetArch::X86_64,
+      Some(CompioDriverSelection::IoUring),
+    )
+  }
+
+  #[test]
+  fn impossible_compio_budget_falls_back_without_claiming_compio_workers() {
+    let config = impossible_compio_config(ConfigRuntimeTopologyPolicy::AllowFallback);
+    let capabilities =
+      capabilities_with_compio_direct_h1_budget(&config, available_compio_capabilities());
+
+    assert_eq!(
+      capabilities.compio_direct_h1,
+      RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioDirectH1Unavailable)
+    );
+    let topology = resolve_runtime_topology(request_from_config(&config), capabilities)
+      .expect("allow_fallback must retain the valid Tokio/Hyper direct-H1 backend");
+
+    assert_eq!(topology.outcome, RuntimeTopologyOutcome::Fallback);
+    assert_eq!(
+      topology.reason,
+      RuntimeTopologyReason::CompioDirectH1Unavailable
+    );
+    assert_eq!(
+      topology.direct_h1.resolved,
+      RuntimeDirectH1Backend::TokioHyper
+    );
+    assert_eq!(topology.workers.compio_direct_h1_workers, 0);
+  }
+
+  #[test]
+  fn impossible_compio_budget_rejects_require_exact_before_activation() {
+    let config = impossible_compio_config(ConfigRuntimeTopologyPolicy::RequireExact);
+    let capabilities =
+      capabilities_with_compio_direct_h1_budget(&config, available_compio_capabilities());
+
+    let rejection = resolve_runtime_topology(request_from_config(&config), capabilities)
+      .expect_err("require_exact must reject an impossible Compio direct-H1 budget");
+
+    assert_eq!(
+      rejection.reason,
+      RuntimeTopologyReason::CompioDirectH1Unavailable
+    );
+  }
+
+  #[test]
+  fn budget_overlay_preserves_an_existing_capability_failure() {
+    let config = impossible_compio_config(ConfigRuntimeTopologyPolicy::AllowFallback);
+    let mut capabilities = available_compio_capabilities();
+    capabilities.compio_direct_h1 =
+      RuntimeCapability::Unavailable(RuntimeTopologyReason::UnsupportedOperatingSystem);
+
+    let capabilities = capabilities_with_compio_direct_h1_budget(&config, capabilities);
+
+    assert_eq!(
+      capabilities.compio_direct_h1,
+      RuntimeCapability::Unavailable(RuntimeTopologyReason::UnsupportedOperatingSystem)
     );
   }
 }

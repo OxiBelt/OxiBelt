@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crate::config::{CircuitBreakerScopeConfig, Config};
+use crate::config::{CapacitySetting, CircuitBreakerScopeConfig, Config};
 use anyhow::{Context, ensure};
 
 const MAX_COMPIO_DIRECT_H1_WORKERS: usize = 256;
@@ -48,11 +48,13 @@ impl RuntimeResources {
       .unwrap_or(runtime_parallelism)
       .min(runtime_parallelism)
       .max(0.1);
-    let cgroup_memory = cgroup_memory_limit();
+    let cgroup_memory = crate::platform_resources::finite_cgroup_memory_limit_bytes();
     let memory_request = std::env::var("OXIBELT_KUBERNETES_MEMORY_REQUEST_BYTES")
       .ok()
-      .and_then(|value| value.parse::<u64>().ok());
-    let memory_bytes = effective_memory_bytes(cgroup_memory, memory_request);
+      .and_then(|value| value.parse::<u64>().ok())
+      .filter(|value| *value > 0);
+    let host_memory = crate::platform_resources::host_memory_bytes();
+    let memory_bytes = effective_memory_bytes(cgroup_memory, memory_request, host_memory);
     let buffering_bytes = config.proxy.buffering.max_memory_body_bytes.max(64 * 1024) as u64;
     let decoded_body_bytes = config
       .waf
@@ -230,29 +232,28 @@ pub(crate) struct CompioDirectH1Budget {
 }
 
 pub(crate) fn compio_direct_h1_budget(config: &Config) -> anyhow::Result<CompioDirectH1Budget> {
+  compio_direct_h1_budget_with_resources(config, RuntimeResources::discover(config))
+}
+
+pub(super) fn compio_direct_h1_budget_with_resources(
+  config: &Config,
+  resources: RuntimeResources,
+) -> anyhow::Result<CompioDirectH1Budget> {
   let worker_count = config.runtime.workers.compio_direct_h1;
   ensure!(
     worker_count > 0,
     "runtime.workers.compio_direct_h1 must be greater than 0 before resolving the Compio direct-H1 budget"
   );
-
-  let resources = RuntimeResources::discover(config);
   let safe_worker_count = compio_worker_memory_limit(resources.memory_bytes);
   ensure!(
     worker_count <= safe_worker_count,
     "resolved Compio direct-H1 worker count {worker_count} exceeds the internal resource safety limit {safe_worker_count}"
   );
-  let global = scope_defaults(
+  let mut global = scope_defaults(
     resources,
     AutoScope::Global,
     &config.circuit_breakers.global,
     None,
-  );
-  let per_origin = scope_defaults(
-    resources,
-    AutoScope::Pool,
-    &config.circuit_breakers.pool_defaults,
-    Some(&global),
   );
   let memory_connection_limit = compio_connection_memory_limit(resources.memory_bytes);
   let file_descriptor_connection_limit = usize::try_from(
@@ -262,41 +263,32 @@ pub(crate) fn compio_direct_h1_budget(config: &Config) -> anyhow::Result<CompioD
   let safe_connection_limit = memory_connection_limit
     .min(file_descriptor_connection_limit)
     .min(MAX_COMPIO_DIRECT_H1_CONNECTIONS);
-  ensure!(
-    global.connections <= safe_connection_limit,
-    "resolved Compio direct-H1 global connection capacity {} exceeds the internal resource safety limit {safe_connection_limit}",
-    global.connections
+  global.connections = compio_connection_capacity(
+    config.circuit_breakers.global.max_connections,
+    global.connections,
+    safe_connection_limit,
+  )?;
+  let safe_queue_capacity = compio_queue_memory_limit(resources.memory_bytes);
+  let (connections, pending_requests, queue_capacity_per_worker) = compio_queue_capacities(
+    worker_count,
+    global.connections,
+    config.circuit_breakers.global.max_connections,
+    global.pending_requests,
+    config.circuit_breakers.global.max_pending_requests,
+    safe_queue_capacity,
+  )?;
+  global.connections = connections;
+  global.pending_requests = pending_requests;
+  let per_origin = scope_defaults(
+    resources,
+    AutoScope::Pool,
+    &config.circuit_breakers.pool_defaults,
+    Some(&global),
   );
   let max_connections_per_origin = per_origin.connections.min(global.connections);
   ensure!(
-    max_connections_per_origin <= safe_connection_limit,
-    "resolved Compio direct-H1 per-origin connection capacity {max_connections_per_origin} exceeds the internal resource safety limit {safe_connection_limit}"
-  );
-  ensure!(
     global.connections > 0 && max_connections_per_origin > 0,
     "resolved Compio direct-H1 connection capacity is zero after process resource reservations"
-  );
-  // Worker handoff slots cover both the configured external pending share and
-  // the worker's share of the already-bounded active-operation ceiling. The
-  // global operation semaphore still caps queued plus active work at
-  // `global.connections`; this capacity prevents a one-slot cross-runtime
-  // convoy without admitting additional operations.
-  let queue_capacity_per_worker = global
-    .pending_requests
-    .div_ceil(worker_count)
-    .max(global.connections.div_ceil(worker_count))
-    .max(1);
-  let physical_queue_capacity = worker_count
-    .checked_mul(queue_capacity_per_worker)
-    .context("resolved Compio direct-H1 submission capacity is too large")?;
-  let combined_queue_capacity = physical_queue_capacity
-    .checked_add(global.pending_requests)
-    .context("resolved Compio direct-H1 combined queue and waiter capacity is too large")?;
-  let safe_queue_capacity = compio_queue_memory_limit(resources.memory_bytes);
-  ensure!(
-    combined_queue_capacity <= safe_queue_capacity,
-    "resolved Compio direct-H1 queue capacity {physical_queue_capacity} with {} waiters has combined capacity {combined_queue_capacity}, which exceeds the internal memory safety limit {safe_queue_capacity}",
-    global.pending_requests
   );
 
   Ok(CompioDirectH1Budget {
@@ -311,12 +303,150 @@ pub(crate) fn compio_direct_h1_budget(config: &Config) -> anyhow::Result<CompioD
   })
 }
 
+fn compio_connection_capacity(
+  setting: CapacitySetting,
+  candidate: usize,
+  safe_limit: usize,
+) -> anyhow::Result<usize> {
+  match setting {
+    CapacitySetting::Auto => Ok(candidate.min(safe_limit)),
+    CapacitySetting::Fixed(value) => {
+      ensure!(
+        value <= safe_limit,
+        "resolved Compio direct-H1 global connection capacity {value} exceeds the internal resource safety limit {safe_limit}"
+      );
+      Ok(value)
+    }
+  }
+}
+
+fn compio_queue_capacities(
+  worker_count: usize,
+  connection_candidate: usize,
+  connection_setting: CapacitySetting,
+  pending_candidate: usize,
+  pending_setting: CapacitySetting,
+  safe_queue_capacity: usize,
+) -> anyhow::Result<(usize, usize, usize)> {
+  ensure!(worker_count > 0, "Compio direct-H1 worker count is zero");
+  let mut connections = connection_candidate;
+  let pending = match pending_setting {
+    CapacitySetting::Fixed(value) => {
+      let available_for_physical = safe_queue_capacity.checked_sub(value).with_context(|| {
+        format!(
+          "resolved Compio direct-H1 fixed waiter capacity {value} exceeds the internal memory safety limit {safe_queue_capacity}"
+        )
+      })?;
+      let maximum_queue_per_worker = available_for_physical / worker_count;
+      let required_pending_queue = value.div_ceil(worker_count).max(1);
+      ensure!(
+        required_pending_queue <= maximum_queue_per_worker,
+        "resolved Compio direct-H1 fixed waiter capacity {value} cannot fit within the internal memory safety limit {safe_queue_capacity}"
+      );
+      let queue_connection_limit = worker_count
+        .checked_mul(maximum_queue_per_worker)
+        .context("resolved Compio direct-H1 queue connection capacity is too large")?;
+      match connection_setting {
+        CapacitySetting::Auto => connections = connections.min(queue_connection_limit),
+        CapacitySetting::Fixed(_) => ensure!(
+          connections <= queue_connection_limit,
+          "resolved Compio direct-H1 fixed connection capacity {connections} cannot fit with {value} fixed waiters within the internal memory safety limit {safe_queue_capacity}"
+        ),
+      }
+      value
+    }
+    CapacitySetting::Auto => {
+      if queue_projection(worker_count, connections, 0)
+        .is_none_or(|(_, combined)| combined > safe_queue_capacity)
+      {
+        ensure!(
+          connection_setting == CapacitySetting::Auto,
+          "resolved Compio direct-H1 fixed connection capacity {connections} cannot fit within the internal memory safety limit {safe_queue_capacity}"
+        );
+        let maximum_queue_per_worker = safe_queue_capacity / worker_count;
+        connections = connections.min(
+          worker_count
+            .checked_mul(maximum_queue_per_worker)
+            .context("resolved Compio direct-H1 queue connection capacity is too large")?,
+        );
+      }
+      maximum_auto_waiters(
+        worker_count,
+        connections,
+        pending_candidate,
+        safe_queue_capacity,
+      )
+    }
+  };
+  ensure!(
+    connections > 0,
+    "resolved Compio direct-H1 connection capacity is zero after queue memory reservations"
+  );
+  let (queue_capacity_per_worker, combined_queue_capacity) =
+    queue_projection(worker_count, connections, pending)
+      .context("resolved Compio direct-H1 queue capacity is too large")?;
+  let physical_queue_capacity = worker_count
+    .checked_mul(queue_capacity_per_worker)
+    .context("resolved Compio direct-H1 submission capacity is too large")?;
+  ensure!(
+    combined_queue_capacity <= safe_queue_capacity,
+    "resolved Compio direct-H1 queue capacity {physical_queue_capacity} with {pending} waiters has combined capacity {combined_queue_capacity}, which exceeds the internal memory safety limit {safe_queue_capacity}"
+  );
+  Ok((connections, pending, queue_capacity_per_worker))
+}
+
+fn maximum_auto_waiters(
+  worker_count: usize,
+  connections: usize,
+  candidate: usize,
+  safe_queue_capacity: usize,
+) -> usize {
+  let mut lower = 0_usize;
+  let mut upper = candidate;
+  while lower < upper {
+    let midpoint = lower + (upper - lower) / 2 + 1;
+    let fits = queue_projection(worker_count, connections, midpoint)
+      .is_some_and(|(_, combined)| combined <= safe_queue_capacity);
+    if fits {
+      lower = midpoint;
+    } else {
+      upper = midpoint - 1;
+    }
+  }
+  lower
+}
+
+fn queue_projection(
+  worker_count: usize,
+  connections: usize,
+  pending: usize,
+) -> Option<(usize, usize)> {
+  let queue_capacity_per_worker = pending
+    .div_ceil(worker_count)
+    .max(connections.div_ceil(worker_count))
+    .max(1);
+  worker_count
+    .checked_mul(queue_capacity_per_worker)?
+    .checked_add(pending)
+    .map(|combined| (queue_capacity_per_worker, combined))
+}
+
 fn clamp_ceil(value: f64, min: usize, max: usize) -> usize {
   value.ceil().clamp(min as f64, max as f64) as usize
 }
 
-fn effective_memory_bytes(cgroup: Option<u64>, kubernetes_request: Option<u64>) -> u64 {
-  cgroup.or(kubernetes_request).unwrap_or(512 * 1024 * 1024)
+fn effective_memory_bytes(
+  cgroup: Option<u64>,
+  kubernetes_request: Option<u64>,
+  host: Option<u64>,
+) -> u64 {
+  cgroup
+    .or_else(|| match (kubernetes_request, host) {
+      (Some(request), Some(host)) => Some(request.min(host)),
+      (Some(request), None) => Some(request),
+      (None, host) => host,
+    })
+    .unwrap_or(512 * 1024 * 1024)
 }
 
 fn effective_usable_file_descriptors(discovered: Option<u64>, reserved: u64) -> u64 {
@@ -378,24 +508,6 @@ fn cgroup_cpu_limit() -> Option<f64> {
   }
 }
 
-fn cgroup_memory_limit() -> Option<u64> {
-  [
-    "/sys/fs/cgroup/memory.max",
-    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-  ]
-  .into_iter()
-  .find_map(|path| {
-    let value = crate::platform_fs::read_to_string(path).ok()?;
-    let value = value.trim();
-    if value == "max" {
-      return None;
-    }
-    let value = value.parse::<u64>().ok()?;
-    // cgroup v1 uses a very large sentinel for an unlimited controller.
-    (value < (1_u64 << 60)).then_some(value)
-  })
-}
-
 fn file_descriptor_limit() -> Option<u64> {
   let limits = crate::platform_fs::read_to_string("/proc/self/limits").ok()?;
   limits.lines().find_map(|line| {
@@ -455,14 +567,22 @@ mod tests {
   #[test]
   fn known_memory_limits_are_not_inflated_to_the_fallback_floor() {
     assert_eq!(
-      effective_memory_bytes(Some(8 * 1024 * 1024), None),
+      effective_memory_bytes(Some(8 * 1024 * 1024), None, Some(4 * 1024 * 1024)),
       8 * 1024 * 1024
     );
     assert_eq!(
-      effective_memory_bytes(None, Some(12 * 1024 * 1024)),
+      effective_memory_bytes(None, Some(12 * 1024 * 1024), None),
       12 * 1024 * 1024
     );
-    assert_eq!(effective_memory_bytes(None, None), 512 * 1024 * 1024);
+    assert_eq!(
+      effective_memory_bytes(None, Some(12 * 1024 * 1024), Some(8 * 1024 * 1024)),
+      8 * 1024 * 1024
+    );
+    assert_eq!(
+      effective_memory_bytes(None, None, Some(16 * 1024 * 1024)),
+      16 * 1024 * 1024
+    );
+    assert_eq!(effective_memory_bytes(None, None, None), 512 * 1024 * 1024);
   }
 
   #[test]

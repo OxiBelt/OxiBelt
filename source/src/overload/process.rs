@@ -15,7 +15,8 @@ pub(super) struct ProcessSample {
 pub(super) fn read_process_sample() -> Result<ProcessSample> {
   let rss_bytes = read_rss_bytes()?;
   let memory_current_bytes = read_u64_file("/sys/fs/cgroup/memory.current").unwrap_or(rss_bytes);
-  let memory_limit_bytes = read_limit_file("/sys/fs/cgroup/memory.max").or_else(host_memory_bytes);
+  let memory_limit_bytes = crate::platform_resources::finite_cgroup_memory_limit_bytes()
+    .or_else(crate::platform_resources::host_memory_bytes);
   let fd_used = crate::platform_fs::count_directory_entries("/proc/self/fd")? as u64;
   let fd_limit = read_fd_limit()?;
   let cpu_usage_usec = read_cpu_usage_usec().unwrap_or(0);
@@ -60,22 +61,6 @@ fn read_u64_file(path: &str) -> Option<u64> {
     .trim()
     .parse()
     .ok()
-}
-
-fn read_limit_file(path: &str) -> Option<u64> {
-  let value = crate::platform_fs::read_to_string(path).ok()?;
-  let value = value.trim();
-  (value != "max").then(|| value.parse().ok()).flatten()
-}
-
-fn host_memory_bytes() -> Option<u64> {
-  crate::platform_fs::read_to_string("/proc/meminfo")
-    .ok()?
-    .lines()
-    .find_map(|line| line.strip_prefix("MemTotal:"))
-    .and_then(|value| value.split_whitespace().next())
-    .and_then(|value| value.parse::<u64>().ok())
-    .map(|kilobytes| kilobytes.saturating_mul(1_024))
 }
 
 fn read_cpu_usage_usec() -> Option<u64> {

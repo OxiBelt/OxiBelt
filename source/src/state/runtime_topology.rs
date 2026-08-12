@@ -7,7 +7,8 @@ use crate::runtime::topology::{
   RuntimeDirectH1Backend, RuntimeResolvedPreset, RuntimeTopologySnapshot, resolve_runtime_topology,
 };
 use crate::runtime::topology_config::{
-  capabilities_for_active, external_topology, request_from_config,
+  capabilities_for_active, capabilities_with_compio_direct_h1_budget, external_topology,
+  request_from_config,
 };
 
 use super::AppSnapshot;
@@ -26,11 +27,12 @@ pub(super) fn for_snapshot_build(
   if previous.runtime_topology.resolved_preset == RuntimeResolvedPreset::External {
     return Ok(external_topology(config));
   }
-  resolve_runtime_topology(
-    request_from_config(config),
+  let capabilities = capabilities_with_compio_direct_h1_budget(
+    config,
     capabilities_for_active(&previous.runtime_topology),
-  )
-  .context("replacement runtime topology is incompatible with the active process")
+  );
+  resolve_runtime_topology(request_from_config(config), capabilities)
+    .context("replacement runtime topology is incompatible with the active process")
 }
 
 pub(super) fn effective_direct_h1_io(

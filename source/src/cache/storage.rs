@@ -173,33 +173,8 @@ pub(super) fn auto_memory_cache_limit(config: &CacheConfig) -> usize {
 }
 
 pub fn detect_memory_limit_bytes() -> Option<u64> {
-  for path in [
-    "/sys/fs/cgroup/memory.max",
-    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-  ] {
-    let Ok(raw) = crate::platform_fs::read_to_string(path) else {
-      continue;
-    };
-    let raw = raw.trim();
-    if raw == "max" {
-      continue;
-    }
-    if let Ok(value) = raw.parse::<u64>()
-      && value > 0
-      && value < i64::MAX as u64
-    {
-      return Some(value);
-    }
-  }
-  crate::platform_fs::read_to_string("/proc/meminfo")
-    .ok()
-    .and_then(|raw| {
-      raw.lines().find_map(|line| {
-        let rest = line.strip_prefix("MemTotal:")?;
-        let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
-        Some(kb * 1024)
-      })
-    })
+  crate::platform_resources::finite_cgroup_memory_limit_bytes()
+    .or_else(crate::platform_resources::host_memory_bytes)
 }
 
 pub(super) fn validated_tmpfs_dir(path: &Path) -> anyhow::Result<PathBuf> {
