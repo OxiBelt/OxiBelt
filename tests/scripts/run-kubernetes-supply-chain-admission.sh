@@ -1269,12 +1269,53 @@ mapfile -t webhook_names < <(kube get validatingwebhookconfigurations \
 ((${#webhook_names[@]} == 1)) \
   || die "expected exactly one labeled admission webhook configuration"
 webhook_name="${webhook_names[0]}"
-kube get validatingwebhookconfiguration "${webhook_name}" -o json \
-  | jq -e '(.webhooks | length) == 1
-    and .webhooks[0].failurePolicy == "Fail"
-    and .webhooks[0].matchPolicy == "Exact"
-    and .webhooks[0].sideEffects == "None"' >/dev/null \
-  || die "live validating webhook is not fail closed and exact"
+canonical_webhook_contract() {
+  local expected_ca_bundle="$1"
+  kube get validatingwebhookconfiguration "${webhook_name}" -o json \
+    | jq -e \
+      --arg ca_bundle "${expected_ca_bundle}" \
+      --arg namespace "${namespace}" \
+      --arg release "${release_name}" \
+      --arg webhook "${release_name}.${namespace}.supply-chain.oxibelt.dev" '
+        (.webhooks | length) == 1
+          and .webhooks[0].name == $webhook
+          and .webhooks[0].admissionReviewVersions == ["v1"]
+          and .webhooks[0].failurePolicy == "Fail"
+          and .webhooks[0].matchPolicy == "Exact"
+          and .webhooks[0].sideEffects == "None"
+          and .webhooks[0].timeoutSeconds == 5
+          and (.webhooks[0].matchConditions // []) == []
+          and .webhooks[0].clientConfig.caBundle == $ca_bundle
+          and .webhooks[0].clientConfig.service == {
+            name: "oxibelt-admission",
+            namespace: $namespace,
+            path: "/validate",
+            port: 443
+          }
+          and .webhooks[0].namespaceSelector == {
+            matchLabels: {"kubernetes.io/metadata.name": $namespace}
+          }
+          and .webhooks[0].objectSelector == {matchLabels: {
+            "app.kubernetes.io/name": "oxibelt",
+            "app.kubernetes.io/instance": $release
+          }}
+          and .webhooks[0].rules == [{
+            apiGroups: [""],
+            apiVersions: ["v1"],
+            operations: ["CREATE", "UPDATE"],
+            resources: ["pods"],
+            scope: "Namespaced"
+          }, {
+            apiGroups: [""],
+            apiVersions: ["v1"],
+            operations: ["UPDATE"],
+            resources: ["pods/ephemeralcontainers"],
+            scope: "Namespaced"
+          }]
+      ' >/dev/null
+}
+canonical_webhook_contract "${public_ca_a}" \
+  || die "live validating webhook did not retain its exact release-scoped contract"
 
 "${script_dir}/check-helm-edge-secure-medium-v2.sh"
 
@@ -1329,6 +1370,14 @@ expect_denied() {
 
 base_pod obp204-exact "${work_dir}/pod-exact.json"
 expect_admitted "${work_dir}/pod-exact.json"
+base_pod obp204-unselected-pod "${work_dir}/pod-unselected.json"
+jq '
+  .metadata.labels["app.kubernetes.io/name"] = "unrelated"
+    | .metadata.annotations["oxibelt.dev/supply-chain-bundle-digest"] = "invalid-unselected"
+    | .spec.containers[0].image = "registry.invalid/unselected:latest"
+' "${work_dir}/pod-unselected.json" >"${work_dir}/pod-unselected.tmp"
+mv -- "${work_dir}/pod-unselected.tmp" "${work_dir}/pod-unselected.json"
+expect_admitted "${work_dir}/pod-unselected.json"
 jq --arg tools "ghcr.io/oxibelt/oxibelt-tools@${tools_digest}" '
   def secure($name): {
     name: $name,
@@ -1602,12 +1651,7 @@ service_targets_revision_and_tls_secret() {
 
 webhook_trusts_exact_ca_bundle() {
   local expected_ca_bundle="$1"
-  kube get validatingwebhookconfiguration "${webhook_name}" -o json \
-    | jq -e --arg ca_bundle "${expected_ca_bundle}" '
-        (.webhooks | length) == 1
-          and .webhooks[0].failurePolicy == "Fail"
-          and .webhooks[0].clientConfig.caBundle == $ca_bundle
-      ' >/dev/null
+  canonical_webhook_contract "${expected_ca_bundle}"
 }
 
 webhook_trusts_overlap_and_barrier() {
@@ -1620,11 +1664,45 @@ webhook_trusts_overlap_and_barrier() {
       --arg barrier_webhook "${barrier_webhook}" \
       --arg barrier_service "${rotation_barrier_service}" \
       --arg namespace "${namespace}" \
+      --arg release "${release_name}" \
+      --arg webhook "${release_name}.${namespace}.supply-chain.oxibelt.dev" \
       --arg barrier_label_key "${rotation_barrier_label_key}" \
       --arg barrier_label_value "${run_id}" '
         (.webhooks | length) == 2
+          and .webhooks[0].name == $webhook
+          and .webhooks[0].admissionReviewVersions == ["v1"]
           and .webhooks[0].failurePolicy == "Fail"
+          and .webhooks[0].matchPolicy == "Exact"
+          and .webhooks[0].sideEffects == "None"
+          and .webhooks[0].timeoutSeconds == 5
+          and (.webhooks[0].matchConditions // []) == []
           and .webhooks[0].clientConfig.caBundle == $ca_bundle
+          and .webhooks[0].clientConfig.service == {
+            name: "oxibelt-admission",
+            namespace: $namespace,
+            path: "/validate",
+            port: 443
+          }
+          and .webhooks[0].namespaceSelector == {
+            matchLabels: {"kubernetes.io/metadata.name": $namespace}
+          }
+          and .webhooks[0].objectSelector == {matchLabels: {
+            "app.kubernetes.io/name": "oxibelt",
+            "app.kubernetes.io/instance": $release
+          }}
+          and .webhooks[0].rules == [{
+            apiGroups: [""],
+            apiVersions: ["v1"],
+            operations: ["CREATE", "UPDATE"],
+            resources: ["pods"],
+            scope: "Namespaced"
+          }, {
+            apiGroups: [""],
+            apiVersions: ["v1"],
+            operations: ["UPDATE"],
+            resources: ["pods/ephemeralcontainers"],
+            scope: "Namespaced"
+          }]
           and .webhooks[1].name == $barrier_webhook
           and .webhooks[1].admissionReviewVersions == ["v1"]
           and .webhooks[1].failurePolicy == "Fail"
@@ -1870,7 +1948,7 @@ if [[ -n "${receipt_output}" ]]; then
         liveTlsWebhook: true,
         podClasses: ["regular", "init", "native-sidecar", "ephemeral"],
         failureClosedOutage: true,
-        noninterceptedResources: ["configmaps", "pods/status"],
+        noninterceptedResources: ["configmaps", "pods/status", "unselected pods"],
         bundleRotationRollback: true,
         tlsOverlapRotation: true,
         networkPolicyEnforcement: false,

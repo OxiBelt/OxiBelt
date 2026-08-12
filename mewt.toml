@@ -1,0 +1,22 @@
+db = "target/mewt.sqlite"
+
+[log]
+level = "info"
+color = false
+
+[targets]
+# Bound the required PR campaign to the overload selection invariant repaired
+# by the security review. Broader parser/resource and QUIC campaigns remain
+# better suited to scheduled runs.
+include = [
+  "source/src/overload/process.rs",
+]
+ignore = ["target", "tests", "fuzz"]
+
+[run]
+mutations = ["CR", "ER", "IF", "IT", "NR", "RBR"]
+comprehensive = true
+
+[test]
+cmd = "cargo test -p oxibelt --lib overload:: --locked"
+timeout = 300

@@ -838,6 +838,43 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
+  mutation-testing:
+    name: Cgroup mutation testing (mewt 4.0.0)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    if: github.actor != 'dependabot[bot]'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - name: Install pinned mewt
+        run: |
+          cargo +1.97.1 install mewt --version 4.0.0 --locked
+          test "$(mewt --version)" = "mewt 4.0.0"
+
+      - name: Run mutation campaign
+        run: tests/scripts/run-mutation-testing.sh
+
+      - name: Upload mutation evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-mutation-testing-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oxibelt-mutation-testing
+          if-no-files-found: warn
+          retention-days: 30
+
   unsafe-validation:
     name: Unsafe validation (stable)
     runs-on: ubuntu-26.04
@@ -3119,6 +3156,7 @@ jobs:
       - typescript-release-tooling
       - feature-graduation-exact-verification
       - fuzz-smoke
+      - mutation-testing
       - unsafe-validation
       - check-riscv64-cross
       - generate-test-matrices

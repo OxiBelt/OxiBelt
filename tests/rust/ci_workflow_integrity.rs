@@ -92,6 +92,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "typescript-release-tooling",
   "feature-graduation-exact-verification",
   "fuzz-smoke",
+  "mutation-testing",
   "unsafe-validation",
   "check-riscv64-cross",
   "generate-test-matrices",
@@ -150,6 +151,7 @@ const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
   "typescript-release-tooling",
   "feature-graduation-exact-verification",
   "fuzz-smoke",
+  "mutation-testing",
   "unsafe-validation",
   "check-riscv64-cross",
 ];
@@ -3708,6 +3710,18 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
     "(.webhooks | length) == 1",
     ".webhooks[0].failurePolicy == \"Fail\"",
     ".webhooks[0].matchPolicy == \"Exact\"",
+    ".webhooks[0].timeoutSeconds == 5",
+    "(.webhooks[0].matchConditions // []) == []",
+    "canonical_webhook_contract",
+    ".webhooks[0].clientConfig.service == {",
+    ".webhooks[0].namespaceSelector == {",
+    ".webhooks[0].objectSelector == {matchLabels: {",
+    "\"app.kubernetes.io/instance\": $release",
+    "resources: [\"pods/ephemeralcontainers\"]",
+    "pod-unselected.json",
+    "invalid-unselected",
+    "registry.invalid/unselected:latest",
+    "unselected pods",
     "no endpoints available",
     "pods/status",
     "bundleRotationRollback: true",
@@ -7103,6 +7117,69 @@ fn pr_non_benchmark_summary_is_exact_fail_closed_and_pr_concurrent() {
         "ordinary PR job {job_id} must not have a top-level skip condition"
       );
     }
+  }
+}
+
+#[test]
+fn mutation_testing_is_pinned_bounded_and_fail_closed() {
+  let workflow = workflow_text();
+  let job = workflow_job_text(&workflow, "mutation-testing");
+  let config = fs::read_to_string(repo_root().join("mewt.toml"))
+    .expect("mutation configuration should be readable");
+  let script = fs::read_to_string(repo_root().join("tests/scripts/run-mutation-testing.sh"))
+    .expect("mutation runner should be readable");
+
+  for expected in [
+    "runs-on: ubuntu-26.04",
+    "timeout-minutes: 120",
+    "permissions:\n      contents: read",
+    "persist-credentials: false",
+    "rustup toolchain install 1.97.1 --profile minimal",
+    "rustup default 1.97.1",
+    "cargo +1.97.1 install mewt --version 4.0.0 --locked",
+    "tests/scripts/run-mutation-testing.sh",
+    "if-no-files-found: warn",
+  ] {
+    assert!(
+      job.contains(expected),
+      "mutation workflow should enforce {expected}"
+    );
+  }
+
+  for expected in [
+    "source/src/overload/process.rs",
+    "mutations = [\"CR\", \"ER\", \"IF\", \"IT\", \"NR\", \"RBR\"]",
+    "comprehensive = true",
+    "timeout = 300",
+  ] {
+    assert!(
+      config.contains(expected),
+      "mutation configuration should enforce {expected}"
+    );
+  }
+
+  for expected in [
+    "set -Eeuo pipefail",
+    "umask 077",
+    "mewt 4.0.0 is required",
+    "mutation artifact directory must start absent",
+    "mutation artifact directory must be owned by the current user with mode 0700",
+    "mutate",
+    ".campaign.tested == .campaign.total_mutants",
+    "the complete configured mutation inventory must be tested without skips or timeouts",
+    ".outcome.status == \"TestFail\"",
+    "every configured mutant must be caught without skips, timeouts, or unknown outcomes",
+  ] {
+    assert!(
+      script.contains(expected),
+      "mutation runner should fail closed with {expected}"
+    );
+  }
+  for forbidden in ["docker-rootful", "continue-on-error: true"] {
+    assert!(
+      !job.contains(forbidden) && !script.contains(forbidden),
+      "mutation testing must not contain {forbidden}"
+    );
   }
 }
 

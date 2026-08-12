@@ -22,6 +22,7 @@ required_jobs=(
   node-dependency-admission
   typescript-release-tooling
   fuzz-smoke
+  mutation-testing
   unsafe-validation
   check-riscv64-cross
   generate-test-matrices
