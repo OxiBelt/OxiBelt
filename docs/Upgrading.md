@@ -878,6 +878,24 @@ roll out and roll back through the normal exact-revision, immutable-image-digest
 procedure, and keep each rebuild bound to the target revision's complete
 lockfiles and pinned builder inputs rather than mixing inputs across revisions.
 
+The subsequent fuzzing-harness maintenance keeps the `oxibeltctl` CLI in
+default and image builds through its explicit default `cli` feature. A
+`--no-default-features` build must request `--features cli` to build the
+executable, while fuzzing intentionally uses the library-only
+`--no-default-features --features fuzzing` configuration. Moving fingerprint
+normalization into reusable code does not change accepted rulepack
+fingerprints, signature verification, or trust decisions. The Admin canonical
+JSON helper and the WAF normalization, CRS parsing, and configuration-policy
+additions are fuzz-only entry points or behavior-preserving refactors; the fuzz
+targets do not by themselves establish live network, filesystem, or storage
+behavior or universal idempotence.
+
+This maintenance changes no Admin wire or audit schema, rulepack format or
+signature contract, native configuration schema or defaults, or persisted
+state. It requires no coordinated rollout or data migration. Roll back through
+the normal exact-revision, immutable-image procedure; an older binary need not
+build or run the new fuzz targets.
+
 A later staged-membership correction lets an instance outside an active legacy
 version-`1` epoch remain online as a non-participating learner when the legacy
 shared artifact key is not provisioned. The learner still cannot send an
