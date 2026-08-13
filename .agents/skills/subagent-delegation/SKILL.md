@@ -1,6 +1,6 @@
 ---
 name: subagent-delegation
-description: Route, delegate, and supervise Codex subagents for software-engineering work. Use when a task benefits from parallel exploration, repetitive implementation, test/log/document processing, semantic diagnosis, correctness or security review, or other bounded delegated work. Prefer cost-efficient gpt-5.6-terra and gpt-5.6-luna workers and escalate only when evidence requires it. Do not use this skill merely to choose or modify the primary agent's normal/plan mode, and do not spawn subagents for trivial work whose delegation overhead exceeds the task.
+description: Route, delegate, and supervise Codex subagents for software-engineering work. Use when a task benefits from parallel exploration, repetitive implementation, test/log/document processing, semantic diagnosis, correctness or security review, or other bounded delegated work. Prefer cost-efficient gpt-5.6-terra and gpt-5.6-luna workers and escalate only when evidence requires it. For authorized defensive security work, gpt-daybreak-blue-latest may be used when available, but its subagent reasoning effort must never exceed xhigh. Do not use this skill merely to choose or modify the primary agent's normal/plan mode, and do not spawn subagents for trivial work whose delegation overhead exceeds the task.
 ---
 
 # Subagent Delegation
@@ -126,6 +126,35 @@ A subproblem is both **high consequence** and **genuinely difficult**, for examp
 In those cases, request review by a stronger primary/review agent rather than pretending Terra has resolved the uncertainty.
 
 Do not escalate merely because the code is security-related. Straightforward validation logic, well-understood API usage, and mechanically checkable security properties can remain with Terra high.
+
+#### Optional Daybreak Blue security subagent
+
+For **authorized defensive security work**, `gpt-daybreak-blue-latest` may be used as a security-focused subagent when that model alias is available in the active Codex runtime.
+
+Suitable uses include:
+
+- Vulnerability discovery and source-backed security investigation.
+- Secure code review.
+- Authentication, authorization, ACL, privilege, and trust-boundary review.
+- Patch validation and regression review for security-sensitive changes.
+- Incident-response code investigation and root-cause analysis.
+- Security assessment of parsers, protocol handlers, unsafe/FFI boundaries, resource controls, and other attacker-influenced surfaces.
+- Independent validation of plausible high-impact findings discovered by cheaper workers.
+
+Use Daybreak Blue as a **semantic defensive-security worker**, not as a bulk repository reader. Continue to prefer Luna for mechanical enumeration and Terra for ordinary repository exploration when those workers can establish the necessary evidence more efficiently.
+
+Reasoning-effort policy for Daybreak Blue subagents:
+
+- Recommended default: `high`.
+- Use `xhigh` only for difficult, ambiguous, or high-consequence defensive security reasoning where deeper analysis is justified.
+- `medium` or lower is acceptable for bounded, well-specified security checks.
+- **Never configure a `gpt-daybreak-blue-latest` subagent above `xhigh`, even if a runtime exposes a higher setting such as `max`.**
+
+Do not infer that Daybreak Blue is always more accurate than Terra or Sol for every security task. Route based on the actual security question, available evidence, cost, and validation needs. For example, a large exhaustive call-site inventory should still go to Luna, while a nuanced authorization bypass investigation may justify Daybreak Blue `high` or `xhigh`.
+
+If `gpt-daybreak-blue-latest` is unavailable, unsupported, or rejected by the active runtime, fall back to `gpt-5.6-terra high` for ordinary security review and escalate to `gpt-5.6 high/xhigh` only when the existing escalation rules justify it.
+
+The availability of Daybreak Blue must **not** be used as a reason to widen security scope automatically. In particular, do not turn release preparation into a monolithic full-repository review merely because a stronger security-capable model is available. Apply the Security Review Scope Policy below unchanged.
 
 ---
 
@@ -374,6 +403,8 @@ A full-repository review may still be justified as an exception when one or more
 
 Even in these exceptional cases, prefer **partitioned, risk-directed repository coverage** over one monolithic high-end scan. Divide the repository into meaningful security surfaces, use cost-efficient workers for broad evidence collection, and escalate only suspicious or high-risk paths to stronger semantic review.
 
+When Daybreak Blue is available, reserve `gpt-daybreak-blue-latest high/xhigh` for security-relevant semantic investigation or validation within those partitions rather than assigning it indiscriminately to every file. The same `xhigh`-maximum reasoning constraint applies during release preparation.
+
 Do not claim release security readiness merely because the changed files passed review. The release review must also account for non-local security effects and semantically affected unchanged code. Conversely, do not require unchanged, previously well-covered code to be repeatedly re-reviewed without a concrete reason.
 
 ---
@@ -612,7 +643,8 @@ Prefer approximately:
 | Tests, logs, docs, evidence processing | Luna high/max |
 | General repository exploration | Terra medium |
 | Semantic diagnosis | Terra high |
-| Correctness / security review | Terra high |
+| Correctness / ordinary security review | Terra high |
+| Authorized defensive security investigation / review | `gpt-daybreak-blue-latest` high; `xhigh` only when justified |
 | Complex cross-agent integration | `gpt-5.6` high |
 | Exceptional high-risk integration | `gpt-5.6` xhigh |
 
@@ -679,6 +711,8 @@ Do not:
 - Treat successful compilation as proof of semantic correctness.
 - Treat passing tests as proof that a security invariant holds.
 - Treat benchmark improvement as proof that an optimization is safe.
+- Configure `gpt-daybreak-blue-latest` above `xhigh` reasoning effort.
+- Use Daybreak Blue as a justification for indiscriminate full-repository security rescans.
 - Accept a subagent's summary when the conclusion is high risk and easy to inspect directly.
 - Escalate models repeatedly without first identifying what uncertainty remains.
 - Return huge raw logs to the coordinating agent when a compact diagnosis is sufficient.
