@@ -143,6 +143,19 @@ regression_path = "tests/fixtures/fuzz-regressions/native_config"
 leak_policy = "enabled"
 
 [[target]]
+name = "config_policy_normalization"
+owner = "Configuration and operator tooling maintainers"
+max_input_bytes = 65536
+input_contract = "Untrusted bytes are decoded into bounded in-memory configuration, policy, identity, Admin, canonical JSON, and operator-tool normalization cases."
+invariants = ["parsing and normalization are deterministic and bounded", "canonical forms are stable only where their contracts require idempotence", "invalid or unsupported values fail closed without side effects"]
+unsupported_states = ["filesystem or environment lookup", "runtime publication, network, or storage access", "live secret material"]
+seed_dir = "fuzz/seeds/config_policy_normalization"
+dictionary = "fuzz/dictionaries/native_config.dict"
+coverage_landmarks = ["source/src/config/lb_policy_compat.rs:normalize_toml_with_profile", "source/apps/oxibeltctl/src/fuzzing.rs:exercise_config_policy_normalization"]
+regression_path = "tests/fixtures/fuzz-regressions/config_policy_normalization"
+leak_policy = "enabled"
+
+[[target]]
 name = "oxirule_expression"
 owner = "OxiRule parser and compiler maintainers"
 max_input_bytes = 8192
@@ -153,6 +166,19 @@ seed_dir = "fuzz/seeds/oxirule_expression"
 dictionary = "fuzz/dictionaries/oxirule_expression.dict"
 coverage_landmarks = ["source/src/waf/expression.rs:parse", "source/src/waf/expression.rs:analyze_with_profile"]
 regression_path = "tests/fixtures/fuzz-regressions/oxirule_expression"
+leak_policy = "enabled"
+
+[[target]]
+name = "waf_request_normalization"
+owner = "WAF and CRS compatibility maintainers"
+max_input_bytes = 8192
+input_contract = "Untrusted bytes are projected into bounded HTTP metadata and in-memory CRS syntax, parser, transform, and request-normalization processing cases."
+invariants = ["derived request views are deterministic and do not mutate raw metadata", "re-normalization remains bounded without imposing universal idempotence", "malformed CRS syntax and metadata fail closed without panics"]
+unsupported_states = ["filesystem-backed rule loading", "request body, network, database, or runtime state", "external function side effects"]
+seed_dir = "fuzz/seeds/waf_request_normalization"
+dictionary = "fuzz/dictionaries/waf_normalization.dict"
+coverage_landmarks = ["source/src/waf/normalization.rs:normalize_text", "source/src/waf/crs/parser.rs:parse_directive"]
+regression_path = "tests/fixtures/fuzz-regressions/waf_request_normalization"
 leak_policy = "enabled"
 
 [[target]]

@@ -93,10 +93,26 @@ license = "Apache-2.0"
 classification = "non-secret"
 
 [[seed]]
+target = "config_policy_normalization"
+path = "fuzz/seeds/config_policy_normalization/compatibility.toml"
+sha256 = "d0cb86f7cac5428f39fe8959343c5b55dc4056cab15813a1aa61a991c8caee5b"
+origin = "Repository-authored configuration compatibility aliases and canonical policy values."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
 target = "oxirule_expression"
 path = "fuzz/seeds/oxirule_expression/request-path.expr"
 sha256 = "d98e8518746101673a40bb332907a4f1c39730db940c7c6f1b8c8565c6a47980"
 origin = "Repository-authored expression using the public OxiRule schema documented in docs/OxiRule.md."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "waf_request_normalization"
+path = "fuzz/seeds/waf_request_normalization/nested-encoding.http"
+sha256 = "201435dc71ba1b8581832da33e92a834a4f68bf4f0fe339abfb17bbf2cfb7bac"
+origin = "Repository-authored nested HTTP encoding, metadata, and public CRS syntax."
 license = "Apache-2.0"
 classification = "non-secret"
 

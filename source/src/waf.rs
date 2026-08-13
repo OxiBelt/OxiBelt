@@ -102,6 +102,11 @@ use expression::{Expr, Parser};
 pub(crate) fn fuzz_expression(input: &[u8]) {
   expression::fuzz_parse_and_analyze(input);
 }
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_request_normalization(input: &[u8]) {
+  normalization::fuzz_request_normalization(input);
+}
 pub use external_files::validate_external_rule_group_file;
 pub use functions::WafFunctionConfig;
 use functions::{FunctionMap, compile_global_functions, compile_route_functions};

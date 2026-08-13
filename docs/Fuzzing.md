@@ -12,6 +12,9 @@ The fuzz crate is excluded from the stable workspace `default-members`. Normal
 OxiBelt builds do not enable the `fuzzing` feature or expose its internal
 harness facades.
 
+The pull-request matrix caps concurrent profile/target children at sixteen.
+The sustained campaign retains its separate `max-parallel: 4` resource bound.
+
 ## Program catalog and ownership
 
 [`fuzz/targets.toml`](../fuzz/targets.toml) is the source of truth for the
@@ -33,7 +36,9 @@ matrices, and this metadata from drifting apart.
 | `webrtc_turn` | TURN/STUN integrity, nonce, fingerprint, padding, and address cases | Relay listeners, databases, network allocation |
 | `syscall_boundaries` | Reversible ABI and marshalling decisions only | Applying Landlock, socket options, or other process-wide syscalls |
 | `native_config` | An in-memory graph of up to eight TOML documents, including includes and merges | Host filesystem, environment, runtime publication |
+| `config_policy_normalization` | Bounded in-memory config, policy, identity, Admin, canonical JSON, and operator-tool normalization | Filesystem, environment, runtime, storage, network, and live secrets |
 | `oxirule_expression` | Parsing and analysis against fixed Request, Response, and Stream schemas | Rule execution, body access, side-effectful functions |
+| `waf_request_normalization` | Bounded HTTP metadata and in-memory CRS syntax, transforms, and normalized request views | Filesystem-backed rules, request execution, network, storage, and external functions |
 | `admin_json_mutations` | Deserialization and pure validation for protected Admin mutation request types | Routing, storage, mutation execution |
 | `admin_mutation_envelope` | Canonical header parsing, encoding, and transcript binding | Signing keys, signature verification, handlers |
 | `cluster_rollout_state` | Framed commands and at most sixteen synthetic rollout members | PostgreSQL, snapshot replacement, member communication |
@@ -41,6 +46,14 @@ matrices, and this metadata from drifting apart.
 | `cache_metadata_key` | Metadata text, external-cache JSON, key templates, and variants | Cache file access, backend clients, fill coordination |
 | `gateway_api_translation` | At most sixteen in-memory Kubernetes objects and pure translation | Kubernetes clients, watches, leader election, filesystem rendering |
 | `tls_certificate_metadata` | At most four in-memory DER candidates and bounded metadata extraction | Certificate files, private keys, live TLS servers |
+
+Normalization targets assert deterministic parsing, bounded output, canonical
+forms where the owning API defines one, and non-mutation of source inputs.
+They do not impose universal idempotence: WAF percent and Unicode decoding is
+intentionally one pass, so a nested encoding may produce a different but still
+bounded value when the result is normalized again. Filesystem-backed path
+canonicalization, environment lookup, live secret material, runtime state,
+storage, and network access remain outside these pure fuzz facades.
 
 The protocol targets intentionally stop at deterministic parse and policy
 boundaries. Live HTTP/3, WebTransport, WebSocket, TURN, Gateway Controller, and

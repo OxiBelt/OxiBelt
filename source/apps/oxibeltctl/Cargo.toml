@@ -8,9 +8,15 @@ publish.workspace = true
 autobins = false
 
 [features]
-default = []
+default = ["cli"]
+cli = ["dep:sequoia-openpgp"]
 crypto-ring = ["oxibelt/crypto-ring", "rustls/ring"]
 mutation-pqc = ["oxibelt/mutation-pqc"]
+fuzzing = []
+
+[lib]
+name = "oxibeltctl"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -30,7 +36,7 @@ oxibelt = { workspace = true, features = ["admin-runtime", "config-tooling"] }
 oxibelt-build-identity.workspace = true
 oxibelt-deployment-diagnostics.workspace = true
 rustls.workspace = true
-sequoia-openpgp.workspace = true
+sequoia-openpgp = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -58,3 +64,4 @@ workspace = true
 [[bin]]
 name = "oxibeltctl"
 path = "src/main.rs"
+required-features = ["cli"]

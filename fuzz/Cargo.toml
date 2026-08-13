@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 oxibelt = { path = "../source", features = ["fuzzing", "mutation-pqc"] }
 oxibelt-gateway-controller = { path = "../source/apps/oxibelt-gateway-controller", features = ["fuzzing"] }
+oxibeltctl = { path = "../source/apps/oxibeltctl", default-features = false, features = ["fuzzing"] }
 
 [lints]
 workspace = true
@@ -86,8 +87,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "config_policy_normalization"
+path = "fuzz_targets/config_policy_normalization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "oxirule_expression"
 path = "fuzz_targets/oxirule_expression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "waf_request_normalization"
+path = "fuzz_targets/waf_request_normalization.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,14 @@
+[config]
+lb_policy_compat_profile = "nginx"
+
+[[upstream_pools]]
+name = "primary"
+algorithm = "least_conn"
+
+[[waf.rules]]
+name = "policy"
+when = "true"
+
+[[waf.rules.actions]]
+type = "set_load_balancing_policy"
+policy = "ip_hash"

@@ -30,6 +30,11 @@ mod store;
 use event::ADMIN_AUDIT_SCHEMA_VERSION;
 pub use event::{AdminAuditEvent, AdminAuditQuery, AdminAuditRecord};
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_canonical_json_bytes(value: &serde_json::Value) -> anyhow::Result<Vec<u8>> {
+  event::canonical_json_bytes(value)
+}
+
 #[derive(Clone)]
 pub struct AdminAuditRuntime {
   store: Option<PostgresAdminAuditStore>,

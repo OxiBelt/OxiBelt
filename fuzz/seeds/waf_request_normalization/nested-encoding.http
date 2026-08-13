@@ -1,0 +1,4 @@
+/safe/%252e%252e/Admin/%53ecret?role=%41DMIN&bad=%ZZ
+X-User:  ALICE%20ROOT
+Cookie: session=One; theme=Dark%20Mode
+SecRule REQUEST_URI "@contains union select" "id:942100,phase:2,t:urlDecodeUni,t:normalizePath"

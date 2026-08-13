@@ -14,6 +14,8 @@ use openpgp::parse::stream::{
 use openpgp::policy::StandardPolicy;
 use openpgp::types::{HashAlgorithm, SignatureType};
 
+use crate::fingerprint::normalize_fingerprint_pins;
+
 pub(crate) const OPENPGP_KEYRING_ENV: &str = "OXIBELT_RULEPACK_OPENPGP_KEYRING_DIR";
 const DEFAULT_OPENPGP_KEYRING_DIR: &str = "/etc/oxibelt/oxirule/trusted-rulepack-publishers";
 pub(crate) const MAX_OPENPGP_SIGNATURE_BYTES: usize = 128 * 1024;
@@ -194,27 +196,6 @@ fn read_bounded_regular_file(
   Ok(bytes)
 }
 
-fn normalize_fingerprint_pins(raw: &[String]) -> anyhow::Result<BTreeSet<String>> {
-  raw
-    .iter()
-    .map(|fingerprint| normalize_fingerprint_pin(fingerprint))
-    .collect()
-}
-
-fn normalize_fingerprint_pin(raw: &str) -> anyhow::Result<String> {
-  let normalized = raw
-    .chars()
-    .filter(|character| !matches!(character, ' ' | '\t' | '\n' | '\r' | ':'))
-    .flat_map(char::to_lowercase)
-    .collect::<String>();
-  if !matches!(normalized.len(), 40 | 64)
-    || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
-  {
-    bail!("--rulepack-openpgp-fingerprint requires a full 40- or 64-character hex fingerprint");
-  }
-  Ok(normalized)
-}
-
 struct RulepackVerificationHelper {
   certs: Vec<Cert>,
   pinned: BTreeSet<String>,
@@ -378,16 +359,6 @@ mod tests {
       keyring_dirs: &[],
       fingerprints: &[],
     }
-  }
-
-  #[test]
-  fn fingerprint_pins_must_be_full_hex() {
-    assert!(normalize_fingerprint_pin("AA BB:cc").is_err());
-    let fp = "0123456789abcdef0123456789abcdef01234567";
-    assert_eq!(
-      normalize_fingerprint_pin(fp).expect("fingerprint"),
-      fp.to_string()
-    );
   }
 
   #[test]

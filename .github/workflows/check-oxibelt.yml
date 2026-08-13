@@ -800,7 +800,9 @@ jobs:
           - webrtc_turn
           - syscall_boundaries
           - native_config
+          - config_policy_normalization
           - oxirule_expression
+          - waf_request_normalization
           - admin_json_mutations
           - admin_mutation_envelope
           - cluster_rollout_state

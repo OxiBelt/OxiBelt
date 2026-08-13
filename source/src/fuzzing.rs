@@ -9,14 +9,17 @@ use md5::{Digest, Md5};
 use url::Url;
 
 mod admin;
+mod config_policy;
 mod parsers;
 
 pub use admin::{
   exercise_admin_json_mutations, exercise_admin_mutation_envelope, exercise_cluster_rollout_state,
 };
+pub use config_policy::exercise_config_policy_normalization;
 pub use parsers::{
   exercise_cache_metadata_key, exercise_http_body_coding, exercise_native_config,
   exercise_oxirule_expression, exercise_tls_certificate_metadata,
+  exercise_waf_request_normalization,
 };
 
 use crate::config::{

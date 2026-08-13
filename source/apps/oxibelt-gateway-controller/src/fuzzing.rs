@@ -77,9 +77,39 @@ fn exercise(input: &[u8]) -> ExerciseReport {
     };
   };
 
-  assert!(
-    toml::from_str::<toml::Value>(&rendered.toml).is_ok(),
-    "Gateway translation produced invalid TOML"
+  // Reparse the generated document before comparing it.  Formatting and
+  // comments are implementation details; the fuzz invariant is that the
+  // generated configuration has the same TOML meaning when translation is
+  // repeated or the input snapshot is presented in another order.
+  let parsed_toml = toml::from_str::<toml::Value>(&rendered.toml)
+    .expect("Gateway translation produced invalid TOML");
+  let repeated = super::translate::translate_objects(&objects, &args)
+    .expect("repeating Gateway translation should preserve its result");
+  let repeated_toml = toml::from_str::<toml::Value>(&repeated.toml)
+    .expect("repeated Gateway translation produced invalid TOML");
+
+  let mut reordered_objects = objects.clone();
+  reordered_objects.reverse();
+  let reordered = super::translate::translate_objects(&reordered_objects, &args)
+    .expect("reordering a Gateway snapshot should preserve its result");
+  let reordered_toml = toml::from_str::<toml::Value>(&reordered.toml)
+    .expect("reordered Gateway translation produced invalid TOML");
+
+  assert_eq!(
+    parsed_toml, repeated_toml,
+    "repeated Gateway translation changed the semantic TOML"
+  );
+  assert_eq!(
+    rendered.diagnostics, repeated.diagnostics,
+    "repeated Gateway translation changed diagnostics"
+  );
+  assert_eq!(
+    parsed_toml, reordered_toml,
+    "reordered Gateway snapshot changed the semantic TOML"
+  );
+  assert_eq!(
+    rendered.diagnostics, reordered.diagnostics,
+    "reordered Gateway snapshot changed diagnostics"
   );
   ExerciseReport {
     documents,

@@ -8,6 +8,10 @@ pub fn exercise_oxirule_expression(data: &[u8]) {
   crate::waf::fuzz_expression(data);
 }
 
+pub fn exercise_waf_request_normalization(data: &[u8]) {
+  crate::waf::fuzz_request_normalization(data);
+}
+
 pub fn exercise_http_body_coding(data: &[u8]) {
   crate::proxy::http::waf_body_coding::fuzz_body_coding(data);
 }

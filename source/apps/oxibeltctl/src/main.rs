@@ -42,6 +42,8 @@ mod doctor_plan;
 mod doctor_plan_tests;
 #[path = "dynamic_policy_plan.rs"]
 mod dynamic_policy_plan;
+#[path = "fingerprint.rs"]
+mod fingerprint;
 #[path = "ipm_plan.rs"]
 mod ipm_plan;
 #[path = "mutation_signer.rs"]

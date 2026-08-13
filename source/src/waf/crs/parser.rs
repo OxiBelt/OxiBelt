@@ -30,14 +30,27 @@ impl CrsParser {
   pub(super) fn load_file(&mut self, path: &Path) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(path)
       .with_context(|| format!("failed to read CRS file {}", path.display()))?;
-    for (line_number, directive) in logical_lines(&raw).into_iter().enumerate() {
+    self.load_source(&raw, &format!("CRS {}", path.display()))
+  }
+
+  /// Parse an in-memory CRS source without reaching the filesystem.
+  ///
+  /// This keeps fuzzing on the same directive parser as file-backed rulepacks
+  /// while keeping the production file-loading boundary unchanged.
+  #[cfg(feature = "fuzzing")]
+  pub(super) fn load_str(&mut self, raw: &str) -> anyhow::Result<()> {
+    self.load_source(raw, "in-memory CRS source")
+  }
+
+  fn load_source(&mut self, raw: &str, source: &str) -> anyhow::Result<()> {
+    for (line_number, directive) in logical_lines(raw).into_iter().enumerate() {
       let directive = strip_comment(&directive);
       if directive.trim().is_empty() {
         continue;
       }
       self
         .parse_directive(&directive)
-        .with_context(|| format!("failed to parse CRS {}:{}", path.display(), line_number + 1))?;
+        .with_context(|| format!("failed to parse {source}:{}", line_number + 1))?;
     }
     Ok(())
   }
