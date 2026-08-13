@@ -3459,6 +3459,35 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
       "the Kubernetes rollout must install and wait for the required Gateway API CRD contract {expected}"
     );
   }
+  let gateway_api_download = script
+    .find("curl --fail --location --retry 8")
+    .expect("the Kubernetes rollout must use bounded retries for the pinned Gateway API manifest");
+  let gateway_api_checksum = script
+    .find("printf '%s  %s\\n' \"${gateway_api_sha256}\" \"${gateway_api_manifest}\" | sha256sum --check --status")
+    .expect("the Kubernetes rollout must verify the pinned Gateway API manifest digest");
+  let gateway_api_download_command = &script[gateway_api_download..gateway_api_checksum];
+  for expected in [
+    "--retry 8",
+    "--retry-delay 5",
+    "--retry-max-time 90",
+    "--connect-timeout 10",
+    "--max-time 30",
+    "--retry-all-errors",
+    "--output \"${gateway_api_manifest}\"",
+    "\"${gateway_api_url}\"",
+  ] {
+    assert!(
+      gateway_api_download_command.contains(expected),
+      "the pinned Gateway API manifest download must enforce {expected}"
+    );
+  }
+  assert!(
+    !gateway_api_download_command.contains("kind create cluster"),
+    "the Kubernetes rollout must not create the Kind cluster while downloading the manifest"
+  );
+  let cluster_create = script
+    .find("kind create cluster")
+    .expect("the Kubernetes rollout must create its isolated Kind cluster");
   let standard_crd_apply = script
     .find("kube apply --server-side --force-conflicts -f \"${gateway_api_manifest}\"")
     .expect("the Kubernetes rollout must install the pinned standard Gateway API CRDs");
@@ -3472,10 +3501,13 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     .find("kube create namespace \"${namespace}\"")
     .expect("the Kubernetes rollout must create its isolated namespace");
   assert!(
-    standard_crd_apply < oxibelt_crd_apply
+    gateway_api_download < gateway_api_checksum
+      && gateway_api_checksum < cluster_create
+      && cluster_create < standard_crd_apply
+      && standard_crd_apply < oxibelt_crd_apply
       && oxibelt_crd_apply < established_wait
       && established_wait < namespace_create,
-    "the Kubernetes rollout must establish the standard and OxiBelt Gateway API CRDs before installing namespaced workloads"
+    "the Kubernetes rollout must verify the pinned Gateway API manifest before creating the cluster and establish all CRDs before installing namespaced workloads"
   );
   assert!(
     !script.contains("v1alpha2") && !script.contains("kube patch crd"),

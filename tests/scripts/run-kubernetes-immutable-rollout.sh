@@ -1563,6 +1563,13 @@ external_base_bootstrap_is_unassigned Deployment templates/deployment.yaml \
 external_base_bootstrap_is_unassigned DaemonSet templates/daemonset.yaml \
   || die "external ConfigMap DaemonSet bootstrap must remain unassigned until controller reconciliation"
 
+curl --fail --location --retry 8 --retry-delay 5 --retry-max-time 90 \
+  --connect-timeout 10 --max-time 30 --retry-all-errors \
+  --silent --show-error \
+  --output "${gateway_api_manifest}" \
+  "${gateway_api_url}"
+printf '%s  %s\n' "${gateway_api_sha256}" "${gateway_api_manifest}" | sha256sum --check --status
+
 kind create cluster \
   --name "${cluster_name}" \
   --image "${kind_node_image}" \
@@ -1576,11 +1583,6 @@ docker exec "${cluster_name}-control-plane" \
   crictl inspecti "docker.io/${redis_kind_image}" >/dev/null \
   || die "Kind CRI did not retain the reviewed Valkey image alias"
 
-curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
-  --silent --show-error \
-  --output "${gateway_api_manifest}" \
-  "${gateway_api_url}"
-printf '%s  %s\n' "${gateway_api_sha256}" "${gateway_api_manifest}" | sha256sum --check --status
 kube apply --server-side --force-conflicts -f "${gateway_api_manifest}" >/dev/null
 kube apply --server-side --force-conflicts \
   -f "${repo_root}/deploy/kubernetes/oxibelt-gateway-controller/crds/oxibeltroutepolicies.gateway.oxibelt.dev.yaml" \
