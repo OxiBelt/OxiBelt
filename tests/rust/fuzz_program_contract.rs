@@ -669,7 +669,6 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "permissions:\n      contents: read",
       "timeout-minutes: 60",
       "name: Fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})",
-      "max-parallel: 16",
       "fuzz_profile:\n          - name: stable\n            toolchain: stable\n          - name: asan\n            toolchain: nightly-2026-08-04",
       "rustup toolchain install \"${{ matrix.fuzz_profile.toolchain }}\" --profile minimal",
       "cargo-fuzz --version 0.13.2",
@@ -683,6 +682,10 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
   assert!(
     !smoke.contains("ASAN_OPTIONS:") && !smoke.contains("LSAN_OPTIONS:"),
     "the fuzz runner, not the workflow, must configure sanitizer environments by profile"
+  );
+  assert!(
+    !smoke.contains("max-parallel:"),
+    "every fuzz-smoke matrix child must be independently schedulable"
   );
   let sustained = read_repo_file(".github/workflows/fuzz-sustained.yml");
   assert_contains_all(

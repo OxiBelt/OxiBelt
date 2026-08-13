@@ -12,8 +12,10 @@ The fuzz crate is excluded from the stable workspace `default-members`. Normal
 OxiBelt builds do not enable the `fuzzing` feature or expose its internal
 harness facades.
 
-The pull-request matrix caps concurrent profile/target children at sixteen.
-The sustained campaign retains its separate `max-parallel: 4` resource bound.
+The pull-request matrix does not set `max-parallel`, so every profile/target
+child is independently schedulable. GitHub runner and account capacity may
+still queue children. The sustained campaign retains its separate
+`max-parallel: 4` resource bound.
 
 ## Program catalog and ownership
 
