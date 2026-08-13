@@ -2259,6 +2259,32 @@ fn canonical_ci_requires_authenticated_exact_feature_graduation_evidence() {
     1,
     "only the trusted detached base policy may use immediate-previous Helm compatibility"
   );
+  let head_expectations_start = policy_run
+    .find("pnpm run feature-graduation:expectations")
+    .expect("head expectations command should be present");
+  let head_expectations_output = policy_run
+    .find("--output \"${OXIBELT_EXPECTATIONS}\"")
+    .expect("head expectations output should be present");
+  let base_expectations_start = policy_run
+    .rfind("pnpm run feature-graduation:expectations")
+    .expect("detached-base expectations command should be present");
+  let base_expectations_workspace = policy_run
+    .find("--workspace-path \"${base_worktree}\"")
+    .expect("detached-base expectations workspace should be present");
+  let compatibility_flag = policy_run
+    .find("--allow-previous-helm-compatibility true")
+    .expect("detached-base compatibility flag should be present");
+  let base_expectations_output = policy_run
+    .find("--output \"$(pwd)/${OXIBELT_BASE_EXPECTATIONS}\"")
+    .expect("detached-base expectations output should be present");
+  assert!(
+    head_expectations_start < head_expectations_output
+      && head_expectations_output < base_expectations_start
+      && base_expectations_start < base_expectations_workspace
+      && base_expectations_workspace < compatibility_flag
+      && compatibility_flag < base_expectations_output,
+    "the compatibility flag must belong only to the detached-base expectations command"
+  );
   assert!(
     policy_run
       .find(
