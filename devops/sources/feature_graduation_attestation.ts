@@ -17,6 +17,7 @@ import {
   LoadKubernetesGraduationPolicy,
   ValidateKubernetesGraduationEvidenceObject,
   ValidateKubernetesGraduationEvidenceSet,
+  type KubernetesGraduationPolicyValidationOptions,
   type KubernetesGraduationEvidenceReceipt,
   type KubernetesGraduationPolicy
 } from './kubernetes_graduation.js'
@@ -373,17 +374,28 @@ export function BuildFeatureGraduationExpectations(
   }
 }
 
-export function InspectFeatureGraduationPolicies(WorkspacePath: string): GraduationExpectations {
+export function InspectFeatureGraduationPolicies(
+  WorkspacePath: string,
+  KubernetesValidationOptions: KubernetesGraduationPolicyValidationOptions = {}
+): GraduationExpectations {
   const Root = ResolveWorkspace(WorkspacePath)
   return BuildFeatureGraduationExpectations(
     LoadFeatureGraduationPolicy(Root),
-    LoadKubernetesGraduationPolicy(Root)
+    LoadKubernetesGraduationPolicy(Root, KubernetesValidationOptions)
   )
 }
 
-export function WriteFeatureGraduationExpectations(WorkspacePath: string, OutputPath: string): void {
+export function WriteFeatureGraduationExpectations(
+  WorkspacePath: string,
+  OutputPath: string,
+  KubernetesValidationOptions: KubernetesGraduationPolicyValidationOptions = {}
+): void {
   const Root = ResolveWorkspace(WorkspacePath)
-  WriteCanonicalOutput(Root, OutputPath, CanonicalJson(InspectFeatureGraduationPolicies(Root)))
+  WriteCanonicalOutput(
+    Root,
+    OutputPath,
+    CanonicalJson(InspectFeatureGraduationPolicies(Root, KubernetesValidationOptions))
+  )
 }
 
 function ParseRunMetadata(Value: unknown): RunMetadata {
@@ -792,8 +804,27 @@ function RunCli(): void {
   const Parsed = ParseCli(Process.argv)
   const Root = ResolveWorkspace(CliValue(Parsed, '--workspace-path'))
   if (Parsed.mode === 'expectations') {
-    AssertKnownOptions(Parsed, ['--workspace-path', '--output'])
-    WriteFeatureGraduationExpectations(Root, CliValue(Parsed, '--output'))
+    AssertKnownOptions(Parsed, [
+      '--workspace-path',
+      '--output',
+      '--allow-previous-helm-compatibility'
+    ])
+    const AllowPreviousHelmCompatibilityValue =
+      Parsed.values.get('--allow-previous-helm-compatibility')
+    if (
+      AllowPreviousHelmCompatibilityValue !== undefined &&
+      (
+        AllowPreviousHelmCompatibilityValue.length !== 1 ||
+        AllowPreviousHelmCompatibilityValue[0] !== 'true'
+      )
+    ) {
+      throw new Error('--allow-previous-helm-compatibility must be exactly true when supplied')
+    }
+    WriteFeatureGraduationExpectations(
+      Root,
+      CliValue(Parsed, '--output'),
+      { AllowPreviousHelmCompatibility: AllowPreviousHelmCompatibilityValue !== undefined }
+    )
     return
   }
   if (Parsed.mode === 'seal') {

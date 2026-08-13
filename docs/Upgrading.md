@@ -126,6 +126,27 @@ then drain and restart. Do not roll back while relying on cross-datagram QUIC
 Initial SNI classification: the older binary cannot interpret the nested table
 or reproduce its bounded replay behavior.
 
+### Dependency and Helm toolchain refresh
+
+This source line refreshes the locked Rust and pnpm dependency graphs without
+changing the native configuration schema epoch, persisted state, or public
+configuration. Rebuild and redeploy each immutable image from the complete
+target source revision; do not combine binaries or dependency evidence from
+the old and new lockfiles.
+
+The Helm 4 compatibility and release-evidence contract advances from `4.2.3`
+to `4.2.4`, while the Helm 3 contract remains `3.21.3`. Operators using Helm 4
+must upgrade the client to exactly `4.2.4` before rendering, installing, or
+upgrading the chart. Evidence produced with Helm `4.2.3` does not satisfy the
+new exact-version predicate and must not be reused. Existing deployed objects
+need no state migration; render the chart again with the target client and
+review the result before applying it.
+
+Official image tooling now derives the pnpm version from the repository's
+exact hash-pinned `packageManager` declaration. Rollback must use the previous
+complete image, chart, lockfiles, and release evidence together rather than
+mixing dependency generations.
+
 ## General upgrade procedure
 
 1. Read the complete entry for the target version and confirm that the

@@ -470,6 +470,7 @@ jobs:
             [[ "$(git -C "${base_worktree}" rev-parse --verify HEAD^{commit})" == "${OXIBELT_BASE_REVISION}" ]]
             pnpm run feature-graduation:expectations \
               --workspace-path "${base_worktree}" \
+              --allow-previous-helm-compatibility true \
               --output "$(pwd)/${OXIBELT_BASE_EXPECTATIONS}"
             base_expectation_result="$(jq -er '
               select(

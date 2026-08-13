@@ -2228,6 +2228,7 @@ fn canonical_ci_requires_authenticated_exact_feature_graduation_evidence() {
     "git merge-base --is-ancestor \"${OXIBELT_BASE_REVISION}\" refs/remotes/origin/main",
     "git worktree add --detach \"${base_worktree}\" \"${OXIBELT_BASE_REVISION}\"",
     "--workspace-path \"${base_worktree}\"",
+    "--allow-previous-helm-compatibility true",
     "--output \"$(pwd)/${OXIBELT_BASE_EXPECTATIONS}\"",
     "if [[ \"${base_expectation_result}\" != \"${expectation_result}\" ]]",
     "if [[ \"${expectation_result}\" == \"supported\" ]]",
@@ -2250,6 +2251,13 @@ fn canonical_ci_requires_authenticated_exact_feature_graduation_evidence() {
       .count(),
     2,
     "the checked-out head helper must inspect both head and detached base policies"
+  );
+  assert_eq!(
+    policy_run
+      .matches("--allow-previous-helm-compatibility true")
+      .count(),
+    1,
+    "only the trusted detached base policy may use immediate-previous Helm compatibility"
   );
   assert!(
     policy_run

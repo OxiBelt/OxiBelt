@@ -799,7 +799,17 @@ export function ValidateKubernetesGraduationEvidenceDirectory(
   )
 }
 
-function ValidatePolicySemantics(Policy: KubernetesGraduationPolicy): void {
+export type KubernetesGraduationPolicyValidationOptions = {
+  AllowPreviousHelmCompatibility?: boolean
+}
+
+const CurrentHelmCompatibilityVersions = ['3.21.3', '4.2.4'] as const
+const PreviousHelmCompatibilityVersions = ['3.21.3', '4.2.3'] as const
+
+function ValidatePolicySemantics(
+  Policy: KubernetesGraduationPolicy,
+  Options: KubernetesGraduationPolicyValidationOptions = {}
+): void {
   AssertExactSet(
     'Kubernetes graduation feature ids',
     Policy.features.map(Feature => Feature.id),
@@ -815,11 +825,21 @@ function ValidatePolicySemantics(Policy: KubernetesGraduationPolicy): void {
     Policy.supportContract.kubernetes.minors.map(Minor => Minor.minor),
     ['1.34', '1.35', '1.36']
   )
-  AssertExactSet(
-    'Helm compatibility versions',
-    Policy.supportContract.helm.versions,
-    ['3.21.3', '4.2.4']
-  )
+  const HelmCompatibilityVersions = [...Policy.supportContract.helm.versions].sort()
+  const AcceptedHelmCompatibilityVersions = [
+    CurrentHelmCompatibilityVersions,
+    ...(Options.AllowPreviousHelmCompatibility ? [PreviousHelmCompatibilityVersions] : [])
+  ]
+  if (!AcceptedHelmCompatibilityVersions.some(Versions =>
+    ValuesEqual(HelmCompatibilityVersions, [...Versions].sort())
+  )) {
+    const Expected = AcceptedHelmCompatibilityVersions
+      .map(Versions => `[${Versions.join(', ')}]`)
+      .join(' or ')
+    throw new Error(
+      `Helm compatibility versions must be exactly ${Expected}, found [${HelmCompatibilityVersions.join(', ')}]`
+    )
+  }
   AssertExactSet(
     'Kubernetes architectures',
     Policy.supportContract.architectures.map(Architecture => Architecture.name),
@@ -922,22 +942,26 @@ function ValidatePolicySemantics(Policy: KubernetesGraduationPolicy): void {
 
 export function ValidateKubernetesGraduationPolicyObject(
   PolicyValue: unknown,
-  SchemaValue: unknown
+  SchemaValue: unknown,
+  Options: KubernetesGraduationPolicyValidationOptions = {}
 ): KubernetesGraduationPolicy {
   if (!IsObject(SchemaValue)) {
     throw new Error('Kubernetes graduation schema must be an object')
   }
   ValidateSchemaValue(PolicyValue, SchemaValue as JsonSchema, 'policy')
   const Policy = PolicyValue as KubernetesGraduationPolicy
-  ValidatePolicySemantics(Policy)
+  ValidatePolicySemantics(Policy, Options)
   return Policy
 }
 
-export function LoadKubernetesGraduationPolicy(WorkspacePath: string): KubernetesGraduationPolicy {
+export function LoadKubernetesGraduationPolicy(
+  WorkspacePath: string,
+  Options: KubernetesGraduationPolicyValidationOptions = {}
+): KubernetesGraduationPolicy {
   const Root = ResolveWorkspace(WorkspacePath)
   const PolicyValue = ParseJson(ReadBoundedFile(Root, PolicyPath), PolicyPath)
   const SchemaValue = ParseJson(ReadBoundedFile(Root, SchemaPath), SchemaPath)
-  return ValidateKubernetesGraduationPolicyObject(PolicyValue, SchemaValue)
+  return ValidateKubernetesGraduationPolicyObject(PolicyValue, SchemaValue, Options)
 }
 
 function MarkdownCode(Value: string): string {
