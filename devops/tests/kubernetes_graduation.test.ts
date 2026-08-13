@@ -245,6 +245,33 @@ test('preserves support inputs and rejects invalid promotion or platform scope',
   )
 })
 
+test('admits the immediate previous Helm contract only when explicitly requested', () => {
+  const PreviousPolicy = Policy()
+  PreviousPolicy.supportContract.helm.versions = ['3.21.3', '4.2.3']
+  const PreviousSchema = ReadJson(
+    'devops/config/kubernetes-feature-graduation.schema.json'
+  ) as Record<string, unknown>
+  const SupportContract = (PreviousSchema.properties as Record<string, unknown>)
+    .supportContract as Record<string, unknown>
+  const Helm = ((SupportContract.properties as Record<string, unknown>)
+    .helm as Record<string, unknown>)
+  const Versions = ((Helm.properties as Record<string, unknown>)
+    .versions as Record<string, unknown>)
+  const Items = Versions.items as Record<string, unknown>
+  Items.enum = ['3.21.3', '4.2.3']
+
+  Assert.throws(
+    () => ValidateKubernetesGraduationPolicyObject(PreviousPolicy, PreviousSchema),
+    /Helm compatibility versions must be exactly \[3\.21\.3, 4\.2\.4\]/
+  )
+  const Validated = ValidateKubernetesGraduationPolicyObject(
+    PreviousPolicy,
+    PreviousSchema,
+    { AllowPreviousHelmCompatibility: true }
+  )
+  Assert.deepEqual(Validated.supportContract.helm.versions, ['3.21.3', '4.2.3'])
+})
+
 test('renders detached gate descriptors and qualification platforms deterministically', () => {
   const First = RenderKubernetesGraduationTables(Policy())
   const Second = RenderKubernetesGraduationTables(structuredClone(Policy()))

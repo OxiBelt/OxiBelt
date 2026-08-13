@@ -9,4 +9,4 @@ minimumReleaseAge: 1440
 auditConfig:
   ignoreGhsas: []
 allowBuilds:
-  "esbuild@0.28.1": true
+  "esbuild@0.28.2": true

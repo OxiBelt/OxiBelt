@@ -157,6 +157,12 @@ criteria = "safe-to-deploy"
 delta = "0.12.3 -> 0.12.4"
 notes = "Reviewed the complete checksum-matched 0.12.3-to-0.12.4 source delta; poll-backed AsyncWrite now delegates vectored writes and flushes to the underlying descriptor and half-closes connected sockets on close. The Unix shutdown call receives a live BorrowedFd raw descriptor, Windows distinguishes files from sockets, non-socket and unconnected errors remain idempotent success, existing unsafe operation and ownership invariants are unchanged, and no build script was added."
 
+[[audits.compio-runtime]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.12.4 -> 0.12.5"
+notes = "Reviewed the complete checksum-matched 0.12.4-to-0.12.5 source delta; the only production change repairs Windows WSA event-interest bookkeeping by atomically masking cleared events and re-arming the remaining active mask. Socket and handle ownership, unsafe calls, non-Windows behavior, dependencies, and build-time behavior are unchanged, and the crate has no build script."
+
 [[audits.ctor]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -168,6 +174,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "1.0.10 -> 1.0.12"
 notes = "Reviewed the complete checksum-matched 1.0.10-to-1.0.12 source delta; the only production change pointer-aligns the Darwin force-link .quad anchor with p2align 3, strengthening rather than weakening the linker-record layout invariant, with startup synchronization, unsafe contracts, and external side effects otherwise unchanged."
+
+[[audits.ctor]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "1.0.12 -> 1.0.13"
+notes = "Reviewed the complete checksum-matched 1.0.12-to-1.0.13 source delta; production code only adds generated re-export documentation and advances the separately audited link-section and linktime-proc-macro patch releases. Constructor registration, startup synchronization, unsafe contracts, and external side effects are unchanged, and no build script is present."
 
 [[audits.data-encoding]]
 who = "OpenAI Codex"
@@ -235,11 +247,23 @@ criteria = "safe-to-deploy"
 version = "0.3.33"
 notes = "Reviewed the complete 0.3.33 facade and 0.3.32 delta together with every selected Futures companion crate; it adds no build script or external side effects and keeps the same MSRV and license while exposing the reviewed soundness and leak fixes."
 
+[[audits.futures]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.33 -> 0.3.34"
+notes = "Reviewed the checksum-matched 0.3.33-to-0.3.34 facade delta; production source is byte-for-byte unchanged apart from synchronized dependency versions, with no unsafe, build script, or external capability added."
+
 [[audits.futures-channel]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "0.3.33"
 notes = "Reviewed complete 0.3.33 channel source and the 0.3.32 delta; channel ownership, wakeup, cancellation, and close paths remain bounded and contain no build script or external side effects."
+
+[[audits.futures-channel]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.33 -> 0.3.34"
+notes = "Reviewed the checksum-matched 0.3.33-to-0.3.34 channel delta; production source is byte-for-byte unchanged, preserving ownership, wakeup, cancellation, and close behavior without a build script or external side effect."
 
 [[audits.futures-core]]
 who = "OpenAI Codex"
@@ -247,11 +271,23 @@ criteria = "safe-to-deploy"
 version = "0.3.33"
 notes = "Reviewed complete 0.3.33 core source and the 0.3.32 delta; the crate remains a side-effect-free trait layer with no build script, and pinning contracts are unchanged."
 
+[[audits.futures-core]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.33 -> 0.3.34"
+notes = "Reviewed the checksum-matched 0.3.33-to-0.3.34 core delta; production source is byte-for-byte unchanged and remains a side-effect-free trait layer with no build script."
+
 [[audits.futures-executor]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "0.3.33"
 notes = "Reviewed complete 0.3.33 executor source and the 0.3.32 delta; local and thread-pool scheduling preserve task ownership and wakeup invariants, with no build script or new external side effects."
+
+[[audits.futures-executor]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.33 -> 0.3.34"
+notes = "Reviewed the checksum-matched 0.3.33-to-0.3.34 executor delta; production source is byte-for-byte unchanged, preserving task ownership and wakeup behavior with no build script or new capability."
 
 [[audits.futures-io]]
 who = "OpenAI Codex"
@@ -259,11 +295,23 @@ criteria = "safe-to-deploy"
 version = "0.3.33"
 notes = "Reviewed complete 0.3.33 I/O trait source and the 0.3.32 delta; the crate remains a side-effect-free interface layer with no unsafe implementation, build script, or external operation."
 
+[[audits.futures-io]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.33 -> 0.3.34"
+notes = "Reviewed the checksum-matched 0.3.33-to-0.3.34 I/O trait delta; production source is byte-for-byte unchanged and remains a side-effect-free interface layer without unsafe code or a build script."
+
 [[audits.futures-macro]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "0.3.33"
 notes = "Reviewed complete 0.3.33 proc-macro source and the 0.3.32 delta; generated select and join state machines retain pinning and ownership checks and the macro performs no filesystem, network, or process effects."
+
+[[audits.futures-macro]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.33 -> 0.3.34"
+notes = "Reviewed the checksum-matched 0.3.33-to-0.3.34 proc-macro delta; expansion source is byte-for-byte unchanged and only the separately audited Syn 3 parser line advances. The macro performs no filesystem, network, process, or build-script activity."
 
 [[audits.futures-sink]]
 who = "OpenAI Codex"
@@ -271,11 +319,23 @@ criteria = "safe-to-deploy"
 version = "0.3.33"
 notes = "Reviewed complete 0.3.33 sink source and the 0.3.32 delta; the crate remains a side-effect-free trait layer with unchanged pinning and readiness contracts."
 
+[[audits.futures-sink]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.33 -> 0.3.34"
+notes = "Reviewed the checksum-matched 0.3.33-to-0.3.34 sink delta; production source is byte-for-byte unchanged and remains a side-effect-free trait layer with unchanged pinning and readiness contracts."
+
 [[audits.futures-task]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "0.3.33"
 notes = "Reviewed complete 0.3.33 task source and the 0.3.32 delta; ArcWake, waker, and spawn ownership invariants remain contained and the crate has no build script or external side effects."
+
+[[audits.futures-task]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.33 -> 0.3.34"
+notes = "Reviewed the checksum-matched 0.3.33-to-0.3.34 task delta; the only production change adds inlining to the pre-existing RawWaker clone helper, without changing its pointer, ownership, or reference-count invariants. No build script or external capability is added."
 
 [[audits.futures-util]]
 who = "OpenAI Codex"
@@ -283,17 +343,35 @@ criteria = "safe-to-deploy"
 version = "0.3.33"
 notes = "Reviewed complete 0.3.33 utility source and the 0.3.32 delta; it fixes the IterPinRef Send contract, FuturesUnordered IntoIter leak, ReadLine exception safety, and compat01 Miri behavior while preserving pinning, initialization, and wakeup invariants. Optional spin and portable-atomic-util edges are not selected by OxiBelt."
 
+[[audits.futures-util]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.33 -> 0.3.34"
+notes = "Reviewed the checksum-matched 0.3.33-to-0.3.34 utility delta; the only production change adds inlining to a pre-existing RawWaker clone helper, while other edits skip Miri-only doctests. Pinning, initialization, wakeup, and reference-count invariants are unchanged, with no build script or external capability."
+
 [[audits.glob]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "0.3.4"
 notes = "Reviewed the complete 0.3.4 source and 0.3.3 diff; it contains no unsafe, build script, or write side effects, and the update only adds error conversion and caches filenames while preserving caller-controlled lazy filesystem traversal."
 
+[[audits.granit-parser]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.0.7 -> 1.0.1"
+notes = "Reviewed the complete checksum-matched production-source delta. The no_std parser continues to forbid unsafe code and has no build script or external capability. It adds structured terminal errors and fallible buffered input so I/O, decoding, and byte-limit failures cannot be mistaken for EOF; NUL and invalid controls reject instead of truncating, counters use checked arithmetic, and malformed-input states terminate. Resource budgets remain supplied by the consuming serde-saphyr layer."
+
 [[audits.http]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "1.4.2 -> 1.5.0"
 notes = "Reviewed the complete checksum-matched 1.4.2-to-1.5.0 source delta. Header validation still scans every byte before the existing checked UTF-8 conversion, URI parsing replaces match ladders with equivalent byte-class tables and adds a MAX_LEN rejection before u16 offsets, empty builder paths are normalized without relaxing direct PathAndQuery parsing, and no changed unsafe, build, or IO boundary was found."
+
+[[audits.http-body-util]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.1.4 -> 0.1.5"
+notes = "Reviewed the complete checksum-matched 0.1.4-to-0.1.5 source delta; the only production edit changes a docs.rs-only documentation cfg, leaving Body polling and collection behavior byte-for-byte unchanged. The crate adds no unsafe, build script, or external capability."
 
 [[audits.hybrid-array]]
 who = "OpenAI Codex"
@@ -385,6 +463,12 @@ criteria = "safe-to-deploy"
 delta = "0.49.4 -> 0.49.8"
 notes = "Reviewed the complete checksum-matched 0.49.4-to-0.49.8 production canonicalization delta and its expanded tests. Canonical schema algebra gains exact rational, property-map, raw-gate, reference-fold, negation, and satisfiability handling while retaining canonicalization-specific 255-depth serialization, 1-MiB integer-digit and initial-preallocation caps, scratch-pool and fold budgets, and the capped intersection cache. New canonicalization options accept a caller-supplied retriever and base URI but perform no implicit IO; OxiBelt does not use canonicalization or those hooks. OxiBelt disables default features, so bundled HTTP and file retrieval remain absent, and its production validator selects the linear-time regex engine. The MIT-licensed crate contains no unsafe code or build script."
 
+[[audits.jsonschema]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.49.8 -> 0.49.9"
+notes = "Reviewed the complete checksum-matched 0.49.8-to-0.49.9 source delta. Changes are confined to canonicalization, which OxiBelt does not call: a one-million-meet budget fails partial expansion back to a raw operand, tagged oneOf folding requires a common required discriminator with pairwise-disjoint finite values, and sub-schema emission retains reachable definitions. Default HTTP and file retrieval remain disabled and no unsafe or build script is added."
+
 [[audits.jsonschema-regex]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -409,6 +493,12 @@ criteria = "safe-to-deploy"
 delta = "0.49.4 -> 0.49.8"
 notes = "Reviewed the complete checksum-matched 0.49.4-to-0.49.8 crate delta. Production ECMA-regex translation source is byte-for-byte unchanged and only synchronized package metadata moved; the crate remains safe Rust with no build script or external side effects."
 
+[[audits.jsonschema-regex]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.49.8 -> 0.49.9"
+notes = "Reviewed the complete checksum-matched 0.49.8-to-0.49.9 crate delta; production ECMA-regex translation source is byte-for-byte unchanged and only synchronized package metadata moved. The crate remains safe Rust with no build script or external side effect."
+
 [[audits.jsonschema-value]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -432,6 +522,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.49.4 -> 0.49.8"
 notes = "Reviewed the complete checksum-matched 0.49.4-to-0.49.8 source delta. Under the optional arbitrary-precision feature, comparisons now use exact BigFraction ordering for saturated or rounded-equal integer limits, and multipleOf rejects nonzero literals that underflow to f64 zero, correcting large and tiny-number rounding cases. OxiBelt does not enable arbitrary-precision and selects only the safe serde_json adapter; optional Python and Ruby unsafe adapters are unchanged. The MIT-licensed crate has no build script or external side effect."
+
+[[audits.jsonschema-value]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.49.8 -> 0.49.9"
+notes = "Reviewed the complete checksum-matched 0.49.8-to-0.49.9 crate delta; production value-adapter source is byte-for-byte unchanged and only synchronized package metadata moved. OxiBelt continues to select the safe serde_json adapter, with no build script or external side effect."
 
 [[audits.kio]]
 who = "OpenAI Codex"
@@ -475,11 +571,35 @@ criteria = "safe-to-deploy"
 delta = "0.19.1 -> 0.19.2"
 notes = "Reviewed the complete checksum-matched 0.19.1-to-0.19.2 source delta; safe section names still include a location hash, but proc-macro definition-site spans under a validated non-root crate base contribute token content to avoid unrelated churn. Linker ranges, Wasm allocation, pointer, and FFI unsafe implementations are unchanged."
 
+[[audits.link-section]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.19.2 -> 0.19.3"
+notes = "Reviewed the complete checksum-matched 0.19.2-to-0.19.3 source delta; Wasm reference-section const cells now carry the same trailing metadata-slot layout as static cells, and materialization checks the null fix-up pointer before writing, preventing an out-of-bounds read and garbage-pointer write. Native linker and FFI paths and explicit unsafe opt-ins are unchanged, with no build script."
+
 [[audits.linktime-proc-macro]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.2.0 -> 0.2.2"
 notes = "Reviewed the complete checksum-matched 0.2.0-to-0.2.2 proc-macro delta. The optional ignore_base suffix is resolved only from compiler-provided Span::local_file, rejected for empty or filesystem-root bases, and changes hashing from location to token content only within that base; the macro does not read file contents, execute commands, use unsafe code, or access the network."
+
+[[audits.linktime-proc-macro]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.2.2 -> 0.2.3"
+notes = "Reviewed the complete checksum-matched 0.2.2-to-0.2.3 proc-macro delta; location hashes serialize line and column as fixed u64 chunks, alphabet reduction avoids host-sized truncation, and absolute spans are relativized before the existing filename fallback. It reads only compiler-provided spans and current_dir, contains no unsafe or build script, and performs no command, file-content, or network access."
+
+[[audits.local-event]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.1.2 -> 0.1.3"
+notes = "Reviewed the complete checksum-matched 0.1.2-to-0.1.3 source delta; resolving a notified listener now removes its entry and decrements the outstanding count so later Drop cannot transfer an already consumed notification. Production remains safe single-threaded Rc and RefCell code with no dependencies, build script, or external side effect."
+
+[[audits.num-integer]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.1.46 -> 0.1.47"
+notes = "Reviewed the complete checksum-matched 0.1.46-to-0.1.47 source delta; the only runtime change implements normalized Karatsuba u128 square root with bounded intermediates and a checked correction step that preserves floor-square-root semantics. The crate adds no unsafe, build script, or external capability."
 
 [[audits.pest]]
 who = "OpenAI Codex"
@@ -487,11 +607,23 @@ criteria = "safe-to-deploy"
 version = "2.8.8"
 notes = "Reviewed the complete 2.8.8 parser and 2.8.7 diff; it has no unsafe, build script, or IO, and the source change only prevents node tagging during lookahead while retaining the opt-in parser call limit."
 
+[[audits.pest]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "2.8.8 -> 2.9.0"
+notes = "Reviewed the complete checksum-matched 2.8.8-to-2.9.0 parser delta; sequence parsing now snapshots and restores the grammar stack, and the new const Pratt API operates on Copy rule types and rejects chained operators. OxiBelt's transitive jsonpath grammar uses neither stack operations nor Pratt, and the crate adds no unsafe, build script, or external capability."
+
 [[audits.pest_derive]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "2.8.8"
 notes = "Reviewed the complete 2.8.8 proc-macro source and 2.8.7 diff; production code is unchanged and contains no unsafe, build script, or runtime side effects beyond delegated compile-time grammar generation."
+
+[[audits.pest_derive]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "2.8.8 -> 2.9.0"
+notes = "Reviewed the complete checksum-matched 2.8.8-to-2.9.0 proc-macro delta; production derive source is byte-for-byte unchanged apart from synchronized metadata and separately audited parser dependencies, with no unsafe, build script, or new external capability."
 
 [[audits.pest_generator]]
 who = "OpenAI Codex"
@@ -499,11 +631,23 @@ criteria = "safe-to-deploy"
 version = "2.8.8"
 notes = "Reviewed the complete 2.8.8 generator and 2.8.7 diff; production code is unchanged, has no unsafe or build script, and its only external side effect is the documented compile-time read of a caller-selected grammar file."
 
+[[audits.pest_generator]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "2.8.8 -> 2.9.0"
+notes = "Reviewed the complete checksum-matched 2.8.8-to-2.9.0 generator delta; the production change is a semantics-equivalent match guard, and the existing caller-selected compile-time grammar read is unchanged. No unsafe, build script, command, or network capability is added."
+
 [[audits.pest_meta]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "2.8.8"
 notes = "Reviewed the complete 2.8.8 grammar parser and 2.8.7 diff; production code is unchanged, contains no unsafe, build script, or IO, and rejects left-recursive and non-progressing grammars."
+
+[[audits.pest_meta]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "2.8.8 -> 2.9.0"
+notes = "Reviewed the complete checksum-matched 2.8.8-to-2.9.0 grammar-parser delta; production source is byte-for-byte unchanged apart from synchronized dependency metadata. It remains safe Rust without a build script or external capability."
 
 [[audits.polyval]]
 who = "OpenAI Codex"
@@ -516,6 +660,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "1.14.0"
 notes = "Reviewed complete 1.14.0 source and the 1.13.1 delta across architecture backends; s390x, LSFE, interrupt, and atomic-128 fixes preserve alignment and ordering invariants. OxiBelt selects the fallback AtomicU64 path only through fastbloom for QUIC anti-replay state."
+
+[[audits.portable-atomic]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "1.14.0 -> 1.15.0"
+notes = "Reviewed the complete checksum-matched 1.14.0-to-1.15.0 source delta across architecture backends. Pre-v6 Arm uses documented kuser barriers for ordered small and pointer atomics, s390x 128-bit CAS retains alignment and SeqCst semantics while removing mixed-size speculative loads, and RISC-V feature detection remains target and toolchain gated. Build changes are local rustc cfg probes with no downloader or network access; OxiBelt's selected fallback path and release architectures do not use the newly changed pre-v6 Arm or s390x paths."
 
 [[audits.proc-macro2]]
 who = "OpenAI Codex"
@@ -565,6 +715,12 @@ criteria = "safe-to-deploy"
 delta = "0.49.4 -> 0.49.8"
 notes = "Reviewed the complete checksum-matched 0.49.4-to-0.49.8 source delta. Draft detection now maps the standard version-less json-schema.org URI to Draft 2020-12; resolver, retrieval, registry traversal, recursion controls, and external capabilities are unchanged. The crate contains no unsafe code or build script."
 
+[[audits.referencing]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.49.8 -> 0.49.9"
+notes = "Reviewed the complete checksum-matched 0.49.8-to-0.49.9 crate delta; resolver, retrieval, registry, URI, and recursion-control production source is byte-for-byte unchanged and only synchronized package metadata moved. The crate adds no unsafe, build script, filesystem, network, or process capability."
+
 [[audits.regex-automata]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -583,11 +739,23 @@ criteria = "safe-to-deploy"
 version = "1.15.1"
 notes = "Audited full source of rustls-pki-types 1.15.1; certificate and key wrappers, bounded PEM and base64 decoding, IP parsing, and the revised DNS validator preserve input bounds and secret-handling boundaries; the sole fixed-array byte reinterpretation is size and alignment safe, with no build script, FFI, networking, or command execution."
 
+[[audits.rustls-webpki]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.103.13 -> 0.103.14"
+notes = "Reviewed the complete checksum-matched 0.103.13-to-0.103.14 source delta; ML-DSA exports are stabilized for aws-lc-rs and the CRL iteration refactor is equivalent. OxiBelt does not use ALL_VERIFICATION_ALGS: rustls keeps its curated certificate list and OxiBelt OCSP keeps an explicit algorithm list, so trust policy is not widened. The delta adds no unsafe or build script."
+
 [[audits.serde]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "1.0.229"
 notes = "Reviewed the complete 1.0.229 source and 1.0.228 diff; both UTF-8 unsafe sites preserve their invariants, hinted collection preallocation is capped at 1 MiB, and the build script only writes OUT_DIR and queries RUSTC --version."
+
+[[audits.serde-saphyr]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.0.29 -> 1.0.1"
+notes = "Reviewed the complete checksum-matched production-source delta and OxiBelt's default-features-disabled deserialize graph. The crate forbids unsafe code, has no build script, and selected features cannot access files, network, processes, or environment state. Deserialization budgets bound events, documents, nodes, depth, scalar and comment bytes, anchors, aliases, merge keys, replay events, and replay depth; breaches latch, alias ratios finalize before reset, recursive and unknown aliases reject, reader errors propagate, duplicate mappings reject by default, and NUL, invalid controls, and typeless non-finite floats fail closed."
 
 [[audits.serde_core]]
 who = "OpenAI Codex"
@@ -744,6 +912,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "1.0.9"
 notes = "Reviewed complete 1.0.9 facade source and verified release provenance and the synchronized webpki-root-certs 1.0.9 trust delta; the crate contains no unsafe code, build script, parsing, network access, or other side effects."
+
+[[audits.whoami]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "2.1.2 -> 2.1.3"
+notes = "Reviewed the complete checksum-matched 2.1.2-to-2.1.3 source delta; the native runtime change adds MATE desktop detection and internal Cow cleanup, while WASI and Redox changes are irrelevant to OxiBelt's Linux graph. OxiBelt receives the crate only through sqlx-postgres, and no unsafe, build script, or external capability is added."
 
 [[audits.xxhash-rust]]
 who = "OpenAI Codex"

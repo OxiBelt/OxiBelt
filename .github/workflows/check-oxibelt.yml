@@ -470,6 +470,7 @@ jobs:
             [[ "$(git -C "${base_worktree}" rev-parse --verify HEAD^{commit})" == "${OXIBELT_BASE_REVISION}" ]]
             pnpm run feature-graduation:expectations \
               --workspace-path "${base_worktree}" \
+              --allow-previous-helm-compatibility true \
               --output "$(pwd)/${OXIBELT_BASE_EXPECTATIONS}"
             base_expectation_result="$(jq -er '
               select(
@@ -2370,7 +2371,7 @@ jobs:
         run: tests/scripts/run-kubernetes-network-policy.sh --cni "${{ matrix.cni }}"
 
   kubernetes-current-compatibility:
-    name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.2.3 compatibility
+    name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.2.4 compatibility
     runs-on: ubuntu-26.04
     needs:
       - test
@@ -2405,7 +2406,7 @@ jobs:
       - name: Set up current Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.2.3
+          version: v4.2.4
 
       - name: Validate Helm 4 configuration
         run: |

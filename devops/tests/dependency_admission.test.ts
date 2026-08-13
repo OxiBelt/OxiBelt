@@ -29,7 +29,7 @@ function CreateFixture(): Fixture {
     packageManager: PackageManager,
     workspaces: ['packages'],
     dependencies: { alpha: '1.2.3' },
-    devDependencies: { esbuild: '0.28.1' }
+    devDependencies: { esbuild: '0.28.2' }
   })
   WriteJson(Path.join(Root, 'packages', 'package.json'), {
     name: '@fixture/packages',
@@ -48,7 +48,7 @@ minimumReleaseAge: 1440
 auditConfig:
   ignoreGhsas: []
 allowBuilds:
-  "esbuild@0.28.1": true
+  "esbuild@0.28.2": true
 `
   )
   Fs.writeFileSync(
@@ -64,8 +64,8 @@ importers:
         version: 1.2.3
     devDependencies:
       esbuild:
-        specifier: 0.28.1
-        version: 0.28.1
+        specifier: 0.28.2
+        version: 0.28.2
 
   packages: {}
 
@@ -74,14 +74,14 @@ packages:
   alpha@1.2.3:
     resolution: {integrity: ${Integrity}}
 
-  esbuild@0.28.1:
+  esbuild@0.28.2:
     resolution: {integrity: ${Integrity}}
 
 snapshots:
 
   alpha@1.2.3: {}
 
-  esbuild@0.28.1: {}
+  esbuild@0.28.2: {}
 `
   )
   const PolicyPath = Path.join(Root, 'dependency-policy.json')
@@ -94,7 +94,7 @@ snapshots:
       lifecycleScripts: [
         {
           package: 'esbuild',
-          version: '0.28.1',
+          version: '0.28.2',
           rationale: 'tsx requires the platform-specific esbuild compiler binary.'
         }
       ],
@@ -168,7 +168,7 @@ test('requires lifecycle-script approvals to be exact and policy-bound', TestCon
   const FixtureValue = CreateFixture()
   TestContext.after(() => Cleanup(FixtureValue))
   const WorkspacePath = Path.join(FixtureValue.root, 'pnpm-workspace.yaml')
-  const Workspace = Fs.readFileSync(WorkspacePath, 'utf8').replace('"esbuild@0.28.1": true', 'esbuild: true')
+  const Workspace = Fs.readFileSync(WorkspacePath, 'utf8').replace('"esbuild@0.28.2": true', 'esbuild: true')
   Fs.writeFileSync(WorkspacePath, Workspace)
 
   Assert.throws(() => Validate(FixtureValue), /allowBuilds must exactly match node.lifecycleScripts/)

@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "77131ac0b01528c7e1cefcb9808c857be92c7c60b7c9db0dc1f7727d8b5bb6a7",
+      "lockfileSha256": "040264ef1b9db2efcf07c68333c7bbd62966d758d2f887150e2e60fdb453ed87",
       "exemptionInventorySha256": "1e2d5af9c38cb5a30f475882980a7c45dc94632e237952445bd55abba8cbb2da",
       "exemptedPackageVersions": 421
     },
@@ -47,6 +47,7 @@
       "foldhash": ["0.1", "0.2"],
       "generic-array": ["0.14", "1"],
       "getrandom": ["0.2", "0.3", "0.4"],
+      "granit-parser": ["0.0.7", "1"],
       "hashbrown": ["0.15", "0.16", "0.17"],
       "inout": ["0.1", "0.2"],
       "itertools": ["0.13", "0.14"],
@@ -54,6 +55,7 @@
       "r-efi": ["5", "6"],
       "rand": ["0.10", "0.8"],
       "rand_core": ["0.10", "0.6"],
+      "serde-saphyr": ["0.0.29", "1"],
       "sha2": ["0.10", "0.11"],
       "shlex": ["1", "2"],
       "spki": ["0.7", "0.8"],
@@ -103,7 +105,7 @@
           "quinn-udp": ["0.5.15"],
           "rustls": ["0.23.43"],
           "rustls-pki-types": ["1.15.1"],
-          "rustls-webpki": ["0.103.13"],
+          "rustls-webpki": ["0.103.14"],
           "web-transport-proto": ["0.6.0"],
           "web-transport-quinn": ["0.12.0"],
           "web-transport-trait": ["0.4.0"]
@@ -113,9 +115,9 @@
       {
         "category": "parsing-serialization",
         "packages": {
-          "jsonschema": ["0.49.8"],
+          "jsonschema": ["0.49.9"],
           "serde": ["1.0.229"],
-          "serde-saphyr": ["0.0.29"],
+          "serde-saphyr": ["0.0.29", "1.0.1"],
           "serde_json": ["1.0.151"],
           "toml": ["1.1.4+spec-1.1.0"],
           "toml_edit": ["0.25.13+spec-1.1.0"]
@@ -179,7 +181,7 @@
     "lifecycleScripts": [
       {
         "package": "esbuild",
-        "version": "0.28.1",
+        "version": "0.28.2",
         "rationale": "tsx uses esbuild's install hook to select the exact platform-specific compiler binary. OxiBelt CI and release installs retain --ignore-scripts."
       }
     ],
@@ -190,7 +192,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:77131ac0b01528c7e1cefcb9808c857be92c7c60b7c9db0dc1f7727d8b5bb6a7",
+      "subject": "Cargo.lock@sha256:040264ef1b9db2efcf07c68333c7bbd62966d758d2f887150e2e60fdb453ed87",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -202,7 +204,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:77131ac0b01528c7e1cefcb9808c857be92c7c60b7c9db0dc1f7727d8b5bb6a7",
+      "subject": "Cargo.lock@sha256:040264ef1b9db2efcf07c68333c7bbd62966d758d2f887150e2e60fdb453ed87",
       "rationale": "Initial cargo-vet adoption freezes the exact current exemption inventory while imported and local audits replace it; no new package version is covered by this exception.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
