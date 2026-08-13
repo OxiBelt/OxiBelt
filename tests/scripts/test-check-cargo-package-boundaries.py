@@ -150,6 +150,69 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                     "never",
                 )
 
+    def test_operator_tools_commands_enable_only_the_cli_feature(self) -> None:
+        policy = CHECKER.POLICY_BY_LABEL["operator tools"]
+        self.assertEqual(
+            policy.feature_arguments,
+            ("--no-default-features", "--features", "cli"),
+        )
+        self.assertEqual(
+            dict(policy.expected_features),
+            {
+                "oxibeltctl": frozenset({"cli"}),
+                "oxibelt": frozenset({"admin-runtime", "config-tooling"}),
+            },
+        )
+
+        compile_command = dict(CHECKER.COMPILE_COMMANDS)["operator tools"]
+        self.assertIn("--bin", compile_command)
+        self.assertEqual(
+            compile_command[compile_command.index("--bin") + 1],
+            "oxibeltctl",
+        )
+        self.assertEqual(compile_command.count("--no-default-features"), 1)
+        self.assertNotIn("--all-features", compile_command)
+        self.assertEqual(compile_command.count("--features"), 1)
+        self.assertEqual(
+            compile_command[compile_command.index("--features") + 1],
+            "cli",
+        )
+
+    def test_operator_tools_graph_rejects_missing_or_extra_features(self) -> None:
+        policy = CHECKER.POLICY_BY_LABEL["operator tools"]
+        runtime = (
+            "oxibelt v0.0.0 (file:///workspace/source)|"
+            "admin-runtime,config-tooling\n"
+        )
+        allowed_graph = (
+            "oxibeltctl v0.0.0 "
+            "(file:///workspace/source/apps/oxibeltctl)|cli\n"
+            f"{runtime}"
+        )
+        summary = CHECKER.validate_profile_graph(
+            policy,
+            allowed_graph,
+            WORKSPACE_PACKAGES,
+        )
+        self.assertEqual(summary.workspace_packages, 2)
+
+        for features in ["", "default,cli", "fuzzing", "cli,fuzzing"]:
+            with self.subTest(features=features):
+                graph = (
+                    "oxibeltctl v0.0.0 "
+                    "(file:///workspace/source/apps/oxibeltctl)|"
+                    f"{features}\n{runtime}"
+                )
+                with self.assertRaisesRegex(
+                    CHECKER.BoundaryError,
+                    "oxibeltctl features are",
+                ):
+                    CHECKER.validate_profile_graph(
+                        policy,
+                        graph,
+                        WORKSPACE_PACKAGES,
+                    )
+
     def test_workspace_metadata_is_structured_and_complete(self) -> None:
         packages = [
             {"id": f"path+file:///workspace/{name}#0.0.0", "name": name}

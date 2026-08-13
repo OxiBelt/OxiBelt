@@ -168,10 +168,10 @@ POLICIES = (
     GraphPolicy(
         label="operator tools",
         package="oxibeltctl",
-        feature_arguments=("--no-default-features",),
+        feature_arguments=("--no-default-features", "--features", "cli"),
         allowed_workspace_packages=TOOLS_WORKSPACE_PACKAGES,
         expected_features=(
-            ("oxibeltctl", frozenset()),
+            ("oxibeltctl", frozenset({"cli"})),
             ("oxibelt", frozenset({"admin-runtime", "config-tooling"})),
         ),
     ),
@@ -304,6 +304,8 @@ COMPILE_COMMANDS = (
             "oxibeltctl",
             "--locked",
             "--no-default-features",
+            "--features",
+            "cli",
         ),
     ),
     (

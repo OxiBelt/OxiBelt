@@ -159,6 +159,84 @@ fn strict_package_is_isolated_from_compatibility_defaults() {
 #[test]
 fn workspace_consumers_enable_only_role_owned_oxibelt_features() {
   let tools_manifest = manifest("source/apps/oxibeltctl/Cargo.toml");
+  let tools_features = table(
+    &tools_manifest,
+    "features",
+    "operator-tools package manifest",
+  );
+  assert_eq!(
+    string_set(
+      tools_features
+        .get("default")
+        .expect("operator tools must declare default features"),
+      "operator-tools default features",
+    ),
+    BTreeSet::from(["cli".to_owned()]),
+    "operator tools must retain the CLI in default builds"
+  );
+  assert_eq!(
+    string_set(
+      tools_features
+        .get("cli")
+        .expect("operator tools must declare the `cli` feature"),
+      "operator-tools `cli` feature",
+    ),
+    BTreeSet::from(["dep:sequoia-openpgp".to_owned()]),
+    "the CLI feature must own only its optional OpenPGP dependency"
+  );
+  assert!(
+    string_set(
+      tools_features
+        .get("fuzzing")
+        .expect("operator tools must retain the `fuzzing` feature"),
+      "operator-tools `fuzzing` feature",
+    )
+    .is_empty(),
+    "the library-only fuzzing feature must remain separate from CLI dependencies"
+  );
+
+  let sequoia = dependency(
+    &tools_manifest,
+    "sequoia-openpgp",
+    "operator-tools package manifest",
+  );
+  assert_eq!(
+    sequoia.get("workspace").and_then(toml::Value::as_bool),
+    Some(true)
+  );
+  assert_eq!(
+    sequoia.get("optional").and_then(toml::Value::as_bool),
+    Some(true),
+    "OpenPGP must remain optional for library-only builds"
+  );
+
+  let tools_binaries = tools_manifest
+    .get("bin")
+    .and_then(toml::Value::as_array)
+    .expect("operator tools must declare explicit binaries");
+  assert_eq!(
+    tools_binaries.len(),
+    1,
+    "operator tools must expose exactly one production binary"
+  );
+  let tools_binary = tools_binaries[0]
+    .as_table()
+    .expect("operator-tools binary must be a table");
+  assert_eq!(
+    tools_binary.get("name").and_then(toml::Value::as_str),
+    Some("oxibeltctl")
+  );
+  assert_eq!(
+    string_set(
+      tools_binary
+        .get("required-features")
+        .expect("operator-tools binary must declare required features"),
+      "operator-tools binary required features",
+    ),
+    BTreeSet::from(["cli".to_owned()]),
+    "the operator-tools binary must require only the CLI feature"
+  );
+
   let tools_oxibelt = dependency(
     &tools_manifest,
     "oxibelt",
