@@ -3885,6 +3885,26 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
 #[test]
 fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
   let script = kubernetes_supply_chain_admission_script_text();
+  let expect_admitted = script
+    .split_once("expect_admitted() {")
+    .expect("supply-chain admission harness should define its admission helper")
+    .1
+    .split_once("\n}")
+    .expect("admission helper should have a bounded function body")
+    .0;
+  assert_eq!(
+    expect_admitted
+      .matches("kube -n \"${namespace}\" create --dry-run=server")
+      .count(),
+    1,
+    "admission helper should issue exactly one server-side dry-run"
+  );
+  for forbidden in ["wait_for", "while ", "until "] {
+    assert!(
+      !expect_admitted.contains(forbidden),
+      "admission helper must not retry through {forbidden}"
+    );
+  }
   for expected in [
     "semantic admission cache qualification requires exactly one control-plane node",
     "generate_ca_and_server b \"${rotation_barrier_service}.${namespace}.svc\"",
@@ -4016,9 +4036,25 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
   let semantic_barrier = rotation
     .find("wait_for \"semantic CA B trust barrier\" rotation_barrier_denied")
     .expect("a semantic CA B denial should acknowledge the new webhook snapshot");
+  let canonical_overlap_barrier_text = "if ! expect_admitted \"${work_dir}/pod-exact.json\"; then\n  die \"canonical admission did not adopt overlapping CA trust before TLS rotation\"\nfi";
+  let canonical_overlap_barrier = rotation
+    .find(canonical_overlap_barrier_text)
+    .expect("canonical admission should materialize the overlapping-CA client before rotation");
   let probe_start = rotation
     .find("touch \"${work_dir}/rotation-probe.running\"")
     .expect("TLS rotation should start its continuous admission probe");
+  let canonical_overlap_barrier_block = &rotation[semantic_barrier..probe_start];
+  assert_eq!(
+    canonical_overlap_barrier_block
+      .matches("expect_admitted \"${work_dir}/pod-exact.json\"")
+      .count(),
+    1,
+    "the canonical overlap barrier should issue exactly one admission request"
+  );
+  assert!(
+    !canonical_overlap_barrier_block.contains("wait_for \"canonical admission"),
+    "the canonical overlap barrier must fail immediately instead of retrying"
+  );
   let tls_apply = rotation
     .find("kube -n \"${namespace}\" apply -f \"${work_dir}/admission-tls-b-stage.yaml\"")
     .expect("TLS Secret B stage manifest should not replace the live webhook configuration");
@@ -4052,8 +4088,11 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
   let probe_stop = rotation
     .find("stop_rotation_probe")
     .expect("TLS rotation should stop its continuous probe");
+  let probe_diagnostics = rotation
+    .find("sed -n '1,40p' \"${work_dir}/rotation-probe.failures\" >&2")
+    .expect("TLS rotation failures should retain bounded probe diagnostics");
   let probe_check = rotation
-    .find("[[ ! -s \"${work_dir}/rotation-probe.failures\" ]]")
+    .find("if [[ -s \"${work_dir}/rotation-probe.failures\" ]]; then")
     .expect("TLS rotation should reject any continuous-probe failure");
   assert!(
     bundle_b_stage < bundle_b_rollout
@@ -4064,7 +4103,8 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
       && overlap_patch < overlap_readback
       && overlap_readback < probe_start
       && overlap_readback < semantic_barrier
-      && semantic_barrier < probe_start
+      && semantic_barrier < canonical_overlap_barrier
+      && canonical_overlap_barrier < probe_start
       && probe_start < tls_apply
       && tls_apply < deployment_readback
       && deployment_readback < rollout
@@ -4077,7 +4117,8 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
       && recovery < barrier_service_delete
       && barrier_service_delete < probe_stop
       && recovery < probe_stop
-      && probe_stop < probe_check,
+      && probe_stop < probe_check
+      && probe_check < probe_diagnostics,
     "TLS rotation must semantically prove CA B trust before switching endpoints"
   );
 }

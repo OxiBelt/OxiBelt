@@ -1822,6 +1822,9 @@ kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
 webhook_trusts_overlap_and_barrier "${ca_overlap}" "${rotation_barrier_webhook}" \
   || die "admission webhook did not retain overlap trust and the CA B barrier"
 wait_for "semantic CA B trust barrier" rotation_barrier_denied
+if ! expect_admitted "${work_dir}/pod-exact.json"; then
+  die "canonical admission did not adopt overlapping CA trust before TLS rotation"
+fi
 
 touch "${work_dir}/rotation-probe.running"
 : >"${work_dir}/rotation-probe.failures"
@@ -1869,8 +1872,11 @@ wait_for "rotation barrier webhook removal" \
 wait_for "admission after old CA removal" expect_admitted "${work_dir}/pod-exact.json"
 kube -n "${namespace}" delete service "${rotation_barrier_service}" --wait=true >/dev/null
 stop_rotation_probe
-[[ ! -s "${work_dir}/rotation-probe.failures" ]] \
-  || die "admission requests failed during overlapped TLS rotation"
+if [[ -s "${work_dir}/rotation-probe.failures" ]]; then
+  echo "Overlapped TLS rotation probe failures (first 40 lines):" >&2
+  sed -n '1,40p' "${work_dir}/rotation-probe.failures" >&2
+  die "admission requests failed during overlapped TLS rotation"
+fi
 
 kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_b}" \
   --timeout="${timeout_seconds}s"
