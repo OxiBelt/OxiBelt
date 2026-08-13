@@ -204,6 +204,27 @@ fn release_image_arch_scan_workflow_text() -> String {
     .expect("release image architecture scan workflow should be readable")
 }
 
+#[test]
+fn release_image_scan_derives_pnpm_provenance_from_the_hash_pinned_manifest() {
+  let workflow = release_image_arch_scan_workflow_text();
+
+  for expected in [
+    "pnpm_package_manager=\"$(jq -er '.packageManager | select(type == \"string\")' package.json)\"",
+    "^pnpm@([0-9]+\\.[0-9]+\\.[0-9]+)\\+sha512\\.[0-9a-f]{128}$",
+    "pnpm_version=\"${BASH_REMATCH[1]}\"",
+    "--arg pnpm \"pnpm ${pnpm_version}\"",
+  ] {
+    assert!(
+      workflow.contains(expected),
+      "release image scan should derive pnpm provenance from package.json: missing {expected}"
+    );
+  }
+  assert!(
+    !workflow.contains("--arg pnpm \"pnpm 11.20.0\""),
+    "release image scan must not retain a manually synchronized pnpm version"
+  );
+}
+
 fn release_rebuild_verification_workflow_text() -> String {
   fs::read_to_string(repo_root().join(".github/workflows/verify-release-rebuild.yml"))
     .expect("independent release rebuild workflow should be readable")
@@ -5346,7 +5367,7 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
     "current Kubernetes compatibility should wait for all primary dependency gates"
   );
   for expected in [
-    "name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.2.3 compatibility",
+    "name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.2.4 compatibility",
     "runs-on: ubuntu-26.04",
     "contents: read",
     "timeout-minutes: 15",
@@ -5361,7 +5382,7 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
     "kube_version: 1.36.1",
     "kubectl: v1.36.3",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v4.2.3",
+    "version: v4.2.4",
     "tests/scripts/check-helm-admin-config.sh",
     "tests/scripts/check-helm-base-config.sh",
     "tests/scripts/check-helm-edge-secure-medium-profile.sh",

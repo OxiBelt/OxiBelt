@@ -34,14 +34,14 @@
   "devDependencies": {
     "@types/node": "24.13.3",
     "@types/semver": "7.8.0",
-    "@typescript-eslint/eslint-plugin": "8.66.0",
-    "@typescript-eslint/parser": "8.66.0",
+    "@typescript-eslint/eslint-plugin": "8.67.0",
+    "@typescript-eslint/parser": "8.67.0",
     "eslint": "10.8.1",
-    "tsx": "4.23.11",
+    "tsx": "4.23.12",
     "typescript": "6.0.3"
   },
   "dependencies": {
     "semver": "7.8.5",
-    "smol-toml": "1.7.1"
+    "smol-toml": "1.8.0"
   }
 }

@@ -818,7 +818,7 @@ function ValidatePolicySemantics(Policy: KubernetesGraduationPolicy): void {
   AssertExactSet(
     'Helm compatibility versions',
     Policy.supportContract.helm.versions,
-    ['3.21.3', '4.2.3']
+    ['3.21.3', '4.2.4']
   )
   AssertExactSet(
     'Kubernetes architectures',

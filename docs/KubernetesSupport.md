@@ -25,7 +25,7 @@ its `kubernetes_immutable` data plane must reject versions outside
 `>=1.34.0-0 <1.37.0-0` with a clear diagnostic. This floor does not change the
 separate runtime Kubernetes discovery or active-request-autoscaling contracts.
 
-The test matrix uses Helm `3.21.3` and `4.2.3`. Each supported Kubernetes minor
+The test matrix uses Helm `3.21.3` and `4.2.4`. Each supported Kubernetes minor
 must pass end-to-end tests under both Helm lines at release-candidate cadence.
 The exact Kind images are reviewable registry inputs rather than workflow-local
 defaults. Updating the active-minor window, patch representatives, Kind
@@ -97,7 +97,7 @@ Operators still own the cluster admission chain, CNI configuration, external
 DNS, load-balancing, storage, webhook availability, and certificate issuance.
 
 The `edge-secure-medium` v2 deployment envelope targets this same Kubernetes
-1.34–1.36 and Helm 3.21.3/4.2.3 range. CI verifies its exact digest-pinned
+1.34–1.36 and Helm 3.21.3/4.2.4 range. CI verifies its exact digest-pinned
 strict-image render and server-side dry-run under restricted Pod Security
 labels, while the shared strict-data-plane harness supplies live
 RuntimeDefault/Landlock evidence. The dedicated supply-chain admission harness

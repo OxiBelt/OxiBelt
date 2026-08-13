@@ -105,7 +105,7 @@ fn graduation_registry_covers_the_complete_support_contract() {
   );
   assert_eq!(
     strings(&policy["supportContract"]["helm"]["versions"]),
-    BTreeSet::from(["3.21.3", "4.2.3"])
+    BTreeSet::from(["3.21.3", "4.2.4"])
   );
   assert_eq!(policy["supportContract"]["gatewayApi"]["version"], "v1.6.1");
   assert_eq!(
@@ -339,9 +339,9 @@ fn charts_workflows_and_harnesses_expose_the_same_experimental_policy() {
     read_repo("deploy/helm/oxibelt-gateway-controller/templates/_helpers.tpl");
   let data_helpers = read_repo("deploy/helm/oxibelt/templates/_helpers.tpl");
   for helpers in [&controller_helpers, &data_helpers] {
-    assert!(helpers.contains("Helm 3.21.3 or 4.2.3"));
+    assert!(helpers.contains("Helm 3.21.3 or 4.2.4"));
     assert!(helpers.contains("semverCompare \"=3.21.3\""));
-    assert!(helpers.contains("semverCompare \"=4.2.3\""));
+    assert!(helpers.contains("semverCompare \"=4.2.4\""));
     assert!(helpers.contains("oxibelt.dev/feature-status"));
     assert!(helpers.contains("oxibelt.dev/kubernetes-support-policy"));
   }
@@ -377,7 +377,7 @@ fn charts_workflows_and_harnesses_expose_the_same_experimental_policy() {
   }
   for expected in [
     "version: v3.21.3",
-    "version: v4.2.3",
+    "version: v4.2.4",
     "kubernetes-immutable-rollout:",
     "kubernetes-current-compatibility:",
     "configRollout.mode=kubernetes_immutable",

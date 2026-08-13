@@ -108,7 +108,7 @@ test('builds canonical exact two-chart OCI receipt and predicate', () => {
     Assert.equal(Predicate.schemaVersion, 3)
     Assert.equal(HelmChartRebuildPredicateType, 'https://oxibelt.dev/attestations/helm-chart-rebuild/v3')
     Assert.equal(Predicate.predicateType, HelmChartRebuildPredicateType)
-    Assert.deepEqual((Predicate.comparison as Record<string, unknown>).consumptionHelmVersions, ['v3.21.3', 'v4.2.3'])
+    Assert.deepEqual((Predicate.comparison as Record<string, unknown>).consumptionHelmVersions, ['v3.21.3', 'v4.2.4'])
     Assert.doesNotThrow(() => ValidateHelmChartPublishReceipt(structuredClone(Receipt)))
     Assert.doesNotThrow(() => ValidateHelmChartRebuildPredicate(structuredClone(Predicate)))
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }

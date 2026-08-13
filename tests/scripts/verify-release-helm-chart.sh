@@ -10,8 +10,8 @@ usage: verify-release-helm-chart.sh --mode <rebuild|consume> \
   --version <strict-semver> --chart-name <name> --expected-archive <path> \
   --work-directory <empty-directory> [--workspace-path <path> --release-ref <ref> --revision <sha>]
 
-`rebuild` requires Helm v4.2.3, an approved `helm_chart_release.ts` helper,
-and exact source inputs. `consume` permits Helm v3.21.3 or v4.2.3 and never
+`rebuild` requires Helm v4.2.4, an approved `helm_chart_release.ts` helper,
+and exact source inputs. `consume` permits Helm v3.21.3 or v4.2.4 and never
 claims cross-version package-byte production equality. Set HELM_BIN, ORAS_BIN,
 NODE_BIN, and HELM_CHART_RELEASE_HELPER to inject test fixtures.
 USAGE
@@ -81,10 +81,10 @@ helm_version="$("${helm_bin}" version --short)"
 oras_version="$("${oras_bin}" version)"
 [[ "${oras_version}" =~ (^|[[:space:]])1\.3\.3($|[[:space:]]) ]] || { echo "ORAS must be the approved 1.3.3 acquisition client" >&2; exit 1; }
 if [[ "${mode}" == rebuild ]]; then
-  [[ "${helm_version}" =~ ^v4\.2\.3(\+[0-9A-Za-z.-]+)?$ ]] || { echo "byte rebuild requires Helm v4.2.3, found ${helm_version}" >&2; exit 1; }
+  [[ "${helm_version}" =~ ^v4\.2\.4(\+[0-9A-Za-z.-]+)?$ ]] || { echo "byte rebuild requires Helm v4.2.4, found ${helm_version}" >&2; exit 1; }
   [[ "${release_ref}" == "refs/tags/${version}" && "${revision}" =~ ^[0-9a-f]{40}$ && -n "${workspace_path}" ]] || { usage; exit 2; }
 else
-  [[ "${helm_version}" =~ ^v(3\.21\.3|4\.2\.3)(\+[0-9A-Za-z.-]+)?$ ]] || { echo "consumption verification requires Helm 3.21.3 or 4.2.3, found ${helm_version}" >&2; exit 1; }
+  [[ "${helm_version}" =~ ^v(3\.21\.3|4\.2\.4)(\+[0-9A-Za-z.-]+)?$ ]] || { echo "consumption verification requires Helm 3.21.3 or 4.2.4, found ${helm_version}" >&2; exit 1; }
 fi
 
 trap 'rm -rf -- "${work_directory}/.verify-release-helm-chart"' EXIT

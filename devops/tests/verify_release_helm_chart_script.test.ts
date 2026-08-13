@@ -88,7 +88,7 @@ fi`)
     Assert.match(Commands, /helm:install .*--dry-run=client/)
     Assert.doesNotMatch(Commands, /helm:pull/)
     Assert.throws(() => RunScript(Arguments(Directory), Environment), /work directory must be empty/)
-    Assert.throws(() => RunScript(['--mode', 'rebuild', ...Arguments(RebuildWork).slice(2), '--workspace-path', Directory, '--release-ref', 'refs/tags/1.2.3', '--revision', 'a'.repeat(40)], Environment), /byte rebuild requires Helm v4\.2\.3/)
+    Assert.throws(() => RunScript(['--mode', 'rebuild', ...Arguments(RebuildWork).slice(2), '--workspace-path', Directory, '--release-ref', 'refs/tags/1.2.3', '--revision', 'a'.repeat(40)], Environment), /byte rebuild requires Helm v4\.2\.4/)
     for (const [Name, Expected] of [['extra', /unexpected JSON keys/], ['duplicate', /duplicate JSON key/], ['size', /exact raw manifest bytes/], ['digest', /exact raw manifest bytes/]] as const) {
       const BadDescriptorWork = Path.join(Directory, `bad-descriptor-${Name}-work`); Fs.mkdirSync(BadDescriptorWork)
       Assert.throws(() => RunScript(Arguments(BadDescriptorWork), { ...Environment, BAD_DESCRIPTOR: Name }), Expected)
