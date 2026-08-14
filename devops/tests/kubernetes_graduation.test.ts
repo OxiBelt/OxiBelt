@@ -143,7 +143,7 @@ test('accepts the exact experimental registry, support document, and lifecycle m
   const Loaded = ValidateKubernetesGraduationWorkspace(RepoRoot, GitHead())
   Assert.equal(Loaded.schemaVersion, 2)
   Assert.equal(Loaded.policyVersion, 4)
-  Assert.equal(Loaded.targetVersion, '0.7.1')
+  Assert.equal(Loaded.targetVersion, '0.8.0')
   Assert.deepEqual(
     Loaded.features.map(Feature => Feature.id).sort(),
     [...KubernetesGraduationFeatureIds].sort()
@@ -187,7 +187,7 @@ test('preserves support inputs and rejects invalid promotion or platform scope',
   }
   Assert.throws(
     () => ValidateKubernetesGraduationPolicyObject(WrongVersion, Schema),
-    /must bind target version 0.7.1/
+    /must bind target version 0.8.0/
   )
 
   const RiscvSupply = Policy()
@@ -286,19 +286,19 @@ test('renders detached gate descriptors and qualification platforms deterministi
 
 test('binds candidate and official beta phases to exact release refs', () => {
   ValidateKubernetesGraduationPhaseRef('candidate', 'refs/heads/main')
-  ValidateKubernetesGraduationPhaseRef('official_beta', 'refs/tags/0.7.1-beta.3')
+  ValidateKubernetesGraduationPhaseRef('official_beta', 'refs/tags/0.8.0-beta.3')
   Assert.throws(
     () => ValidateKubernetesGraduationPhaseRef('candidate', 'refs/heads/release'),
     /requires source ref refs\/heads\/main/
   )
   Assert.throws(
-    () => ValidateKubernetesGraduationPhaseRef('official_beta', 'refs/tags/0.7.1'),
-    /requires an exact 0.7.1 beta tag ref/
+    () => ValidateKubernetesGraduationPhaseRef('official_beta', 'refs/tags/0.8.0'),
+    /requires an exact 0.8.0 beta tag ref/
   )
   Assert.throws(
     () => ResolveKubernetesGraduationGitRefRevision(
       RepoRoot,
-      'refs/tags/0.7.1-beta.999999-does-not-exist'
+      'refs/tags/0.8.0-beta.999999-does-not-exist'
     ),
     /could not resolve expected source ref/
   )
@@ -344,13 +344,13 @@ test('requires a supported exact feature-scoped receipt with complete provenance
   )
   const OfficialBetaEvidence = structuredClone(Evidence)
   OfficialBetaEvidence.phase = 'official_beta'
-  OfficialBetaEvidence.sourceRef = 'refs/tags/0.7.1-beta.3'
+  OfficialBetaEvidence.sourceRef = 'refs/tags/0.8.0-beta.3'
   ValidateKubernetesGraduationEvidenceObject(
     OfficialBetaEvidence,
     Schema,
     PolicyValue,
     GitHead(),
-    'refs/tags/0.7.1-beta.3',
+    'refs/tags/0.8.0-beta.3',
     'official_beta'
   )
   const IncompleteOfficialBetaEvidence = structuredClone(OfficialBetaEvidence)
@@ -361,7 +361,7 @@ test('requires a supported exact feature-scoped receipt with complete provenance
       Schema,
       PolicyValue,
       GitHead(),
-      'refs/tags/0.7.1-beta.3',
+      'refs/tags/0.8.0-beta.3',
       'official_beta'
     ),
     /artifact subject names must be exactly/
@@ -369,7 +369,7 @@ test('requires a supported exact feature-scoped receipt with complete provenance
 
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceObject(
-      Evidence, Schema, PolicyValue, GitHead(), 'refs/tags/0.7.1-beta.3', 'candidate'
+      Evidence, Schema, PolicyValue, GitHead(), 'refs/tags/0.8.0-beta.3', 'candidate'
     ),
     /candidate qualification requires source ref refs\/heads\/main/
   )
@@ -392,7 +392,7 @@ test('requires a supported exact feature-scoped receipt with complete provenance
 
   const MutableArtifact = structuredClone(Evidence)
   MutableArtifact.artifactSubjects[1].reference =
-    'ghcr.io/oxibelt/charts/oxibelt-gateway-controller:0.7.1'
+    'ghcr.io/oxibelt/charts/oxibelt-gateway-controller:0.8.0'
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceObject(
       MutableArtifact, Schema, PolicyValue, GitHead(), 'refs/heads/main', 'candidate'

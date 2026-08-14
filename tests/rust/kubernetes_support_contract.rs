@@ -98,7 +98,7 @@ fn graduation_registry_covers_the_complete_support_contract() {
   assert_eq!(policy["policyVersion"], 4);
   assert_eq!(policy["lifecycleAuthority"], "docs/FeatureStatus.md");
   assert_eq!(policy["repository"], "OxiBelt/OxiBelt");
-  assert_eq!(policy["targetVersion"], "0.7.1");
+  assert_eq!(policy["targetVersion"], "0.8.0");
   assert_eq!(
     policy["supportContract"]["kubernetes"]["range"],
     ">=1.34.0-0 <1.37.0-0"

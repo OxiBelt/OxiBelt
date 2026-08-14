@@ -41,7 +41,7 @@
       "const": "OxiBelt/OxiBelt"
     },
     "targetVersion": {
-      "const": "0.7.1"
+      "const": "0.8.0"
     },
     "supportContract": {
       "type": "object",

@@ -185,8 +185,8 @@ function ValidatePhaseRef(PhaseValue: Phase, Ref: string): void {
   if (PhaseValue === 'candidate' && Ref !== 'refs/heads/main') {
     throw new Error('candidate phase requires refs/heads/main')
   }
-  if (PhaseValue === 'official_beta' && !/^refs\/tags\/0\.7\.1-beta\.[1-9][0-9]*$/.test(Ref)) {
-    throw new Error('official_beta phase requires a 0.7.1 beta tag ref')
+  if (PhaseValue === 'official_beta' && !/^refs\/tags\/0\.8\.0-beta\.[1-9][0-9]*$/.test(Ref)) {
+    throw new Error('official_beta phase requires a 0.8.0 beta tag ref')
   }
 }
 
