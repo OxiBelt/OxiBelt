@@ -7,9 +7,11 @@ import test from 'node:test'
 import * as Zlib from 'node:zlib'
 import {
   AssertExpectedHelmChartArchiveMembers,
+  CanonicalHelmPackagerVersion,
   HelmChartReleasePlanFilename,
   InstallHelmChartReleaseOutputsForTesting,
   InspectHelmChartArchive,
+  IsSupportedHelmPackagerVersion,
   MaximumCompressedArchiveBytes,
   MaximumArchiveMemberBytes,
   MaximumArchiveMembers,
@@ -99,6 +101,15 @@ function CloneWithOrigin(Origin: string): string {
   Git(Directory, 'remote', 'set-url', 'origin', Origin)
   return Directory
 }
+
+test('accepts only Helm 4.2.4 as the canonical chart packager', () => {
+  Assert.equal(CanonicalHelmPackagerVersion, 'v4.2.4')
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.2.4'), true)
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.2.4+g0123456'), true)
+  Assert.equal(IsSupportedHelmPackagerVersion('v3.21.3'), false)
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.2.3'), false)
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.2.5'), false)
+})
 
 test('prepares an exact-ref, canonical plan and deterministic transformed archives without touching chart sources', () => {
   const First = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-first-'))

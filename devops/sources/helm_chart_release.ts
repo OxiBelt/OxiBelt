@@ -12,6 +12,7 @@ import { ParseReleaseRef, ParseReleaseTag } from './docker_image_release.js'
 
 export const HelmChartReleasePlanSchemaVersion = 1
 export const HelmChartReleasePlanFilename = 'helm-chart-release-plan.json'
+export const CanonicalHelmPackagerVersion = 'v4.2.4'
 export const MaximumGitChartFiles = 256
 export const MaximumGitChartFileBytes = 1024 * 1024
 export const MaximumGitChartBytes = 8 * 1024 * 1024
@@ -27,7 +28,7 @@ const FullRevision = /^[0-9a-f]{40}$/
 const Semver = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/
 const Repository = 'OxiBelt/OxiBelt'
 const CanonicalOrigin = /^(?:https:\/\/github[.]com\/OxiBelt\/OxiBelt(?:[.]git)?|git@github[.]com:OxiBelt\/OxiBelt(?:[.]git)?|ssh:\/\/git@github[.]com\/OxiBelt\/OxiBelt(?:[.]git)?)$/
-const SupportedHelmVersion = /^v(?:3[.]21[.]3|4[.]2[.]3)(?:\+[0-9A-Za-z.-]+)?$/
+const SupportedHelmVersion = /^v4[.]2[.]4(?:\+[0-9A-Za-z.-]+)?$/
 
 type ChartSpec = {
   directory: string
@@ -271,17 +272,27 @@ function NormalizeDirectoryMetadata(Directory: string, Epoch: number): void {
   Fs.utimesSync(Directory, Epoch, Epoch)
 }
 
-function AssertSupportedHelm(): void {
-  const Version = execFileSync('helm', ['version', '--short'], {
-    encoding: 'utf8', maxBuffer: MaximumCliOutputBytes, stdio: ['ignore', 'pipe', 'pipe']
-  }).trim()
-  if (!SupportedHelmVersion.test(Version)) throw new Error(`unsupported Helm version: ${Version}`)
+export function IsSupportedHelmPackagerVersion(Value: string): boolean {
+  return SupportedHelmVersion.test(Value)
 }
 
-function RunHelmPackage(StageRoot: string, ChartDirectory: string, Version: string): Buffer {
+function ResolveHelmBinary(): string {
+  const Value = Process.env.OXIBELT_HELM_BIN ?? 'helm'
+  if (Value === '' || Value.includes('\0')) throw new Error('OXIBELT_HELM_BIN must name a non-empty executable')
+  return Value
+}
+
+function AssertSupportedHelm(HelmBinary: string): void {
+  const Version = execFileSync(HelmBinary, ['version', '--short'], {
+    encoding: 'utf8', maxBuffer: MaximumCliOutputBytes, stdio: ['ignore', 'pipe', 'pipe']
+  }).trim()
+  if (!IsSupportedHelmPackagerVersion(Version)) throw new Error(`unsupported Helm version: ${Version}`)
+}
+
+function RunHelmPackage(HelmBinary: string, StageRoot: string, ChartDirectory: string, Version: string): Buffer {
   const PackageDirectory = Path.join(StageRoot, 'package')
   Fs.mkdirSync(PackageDirectory, { mode: 0o755 })
-  execFileSync('helm', ['package', ChartDirectory, '--version', Version, '--app-version', Version, '--destination', PackageDirectory], {
+  execFileSync(HelmBinary, ['package', ChartDirectory, '--version', Version, '--app-version', Version, '--destination', PackageDirectory], {
     encoding: 'utf8', maxBuffer: MaximumCliOutputBytes, stdio: ['ignore', 'pipe', 'pipe']
   })
   const Expected = Path.join(PackageDirectory, `${Path.basename(ChartDirectory)}-${Version}.tgz`)
@@ -454,13 +465,14 @@ function BuildPlan(WorkspacePath: string, Ref: string, Revision: string, Epoch: 
 function BuildArchives(WorkspacePath: string, Revision: string, Epoch: number, Version: string): Map<string, Buffer> {
   const StageRoot = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-chart-release-'))
   try {
-    AssertSupportedHelm()
+    const HelmBinary = ResolveHelmBinary()
+    AssertSupportedHelm(HelmBinary)
     const Archives = new Map<string, Buffer>()
     for (const Spec of ChartSpecs) {
       const Files = ReadHelmChartTree(WorkspacePath, Revision, Spec)
       const Content = TransformedFiles(Files, Spec, Version)
       const ChartDirectory = WriteStagedChart(Path.join(StageRoot, Spec.name), Files, Content, Spec, Epoch)
-      Archives.set(Spec.name, RunHelmPackage(Path.join(StageRoot, Spec.name), ChartDirectory, Version))
+      Archives.set(Spec.name, RunHelmPackage(HelmBinary, Path.join(StageRoot, Spec.name), ChartDirectory, Version))
     }
     return Archives
   } finally {
