@@ -688,6 +688,7 @@ jobs:
           mkdir -p "${workspace_root}"
           install -D -m 0644 Cargo.toml "${workspace_root}/Cargo.toml"
           install -D -m 0644 Cargo.lock "${workspace_root}/Cargo.lock"
+          install -D -m 0644 package.json "${workspace_root}/package.json"
           while read -r manifest_path; do
             relative_path="${manifest_path#"${GITHUB_WORKSPACE}/"}"
             if [[ "${relative_path}" == "${manifest_path}" || "${relative_path}" == "Cargo.toml" ]]; then

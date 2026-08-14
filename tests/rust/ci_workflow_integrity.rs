@@ -206,22 +206,51 @@ fn release_image_arch_scan_workflow_text() -> String {
 
 #[test]
 fn release_image_scan_derives_pnpm_provenance_from_the_hash_pinned_manifest() {
-  let workflow = release_image_arch_scan_workflow_text();
+  let release_workflow = release_workflow_text();
+  let scan_workflow = release_image_arch_scan_workflow_text();
+  let prepare = workflow_job_text(&release_workflow, "prepare-release");
+  let scan = workflow_job_text(&scan_workflow, "scan");
+
+  assert!(
+    prepare.contains("install -D -m 0644 package.json \"${workspace_root}/package.json\""),
+    "prepare-release should stage the hash-pinned package manifest in the exact-revision metadata workspace"
+  );
 
   for expected in [
-    "pnpm_package_manager=\"$(jq -er '.packageManager | select(type == \"string\")' package.json)\"",
+    "pnpm_package_manager=\"$(jq -er '.packageManager | select(type == \"string\")' \"${RUNNER_TEMP}/oxibelt-release-metadata/workspace/package.json\")\"",
     "^pnpm@([0-9]+\\.[0-9]+\\.[0-9]+)\\+sha512\\.[0-9a-f]{128}$",
     "pnpm_version=\"${BASH_REMATCH[1]}\"",
     "--arg pnpm \"pnpm ${pnpm_version}\"",
   ] {
     assert!(
-      workflow.contains(expected),
-      "release image scan should derive pnpm provenance from package.json: missing {expected}"
+      scan.contains(expected),
+      "release image scan should derive pnpm provenance from the exact-revision metadata artifact: missing {expected}"
+    );
+  }
+  assert_eq!(
+    scan.matches("package.json").count(),
+    1,
+    "the scan job should reference only the artifact-backed package manifest"
+  );
+  assert!(
+    !regex::Regex::new(r#"--arg pnpm "pnpm [0-9]"#)
+      .expect("hard-coded pnpm version regex")
+      .is_match(&scan),
+    "release image scan must not use a manually synchronized pnpm version"
+  );
+  for forbidden in [
+    "actions/checkout@",
+    "Checkout release revision",
+    "git rev-parse",
+  ] {
+    assert!(
+      !scan.contains(forbidden),
+      "the artifact-backed scan job must not add a repository checkout: found {forbidden}"
     );
   }
   assert!(
-    !workflow.contains("--arg pnpm \"pnpm 11.20.0\""),
-    "release image scan must not retain a manually synchronized pnpm version"
+    !scan.contains("' package.json)"),
+    "release image scan must not read package.json from an implicit working directory"
   );
 }
 

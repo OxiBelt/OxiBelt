@@ -794,7 +794,7 @@ jobs:
 
           feature_graph_sha256="$(jq -cS '.cargo_builds' "${ARTIFACT_CONTRACT}" | sha256sum | awk '{print $1}')"
           buildx_version="$(docker buildx version | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')"
-          pnpm_package_manager="$(jq -er '.packageManager | select(type == "string")' package.json)"
+          pnpm_package_manager="$(jq -er '.packageManager | select(type == "string")' "${RUNNER_TEMP}/oxibelt-release-metadata/workspace/package.json")"
           [[ "${pnpm_package_manager}" =~ ^pnpm@([0-9]+\.[0-9]+\.[0-9]+)\+sha512\.[0-9a-f]{128}$ ]]
           pnpm_version="${BASH_REMATCH[1]}"
           rust_builder="$(jq -r '.build_parameters.rust_builder_image' "${ARTIFACT_CONTRACT}")"
