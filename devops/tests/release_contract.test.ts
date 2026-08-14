@@ -511,7 +511,7 @@ test('requires the latest beta and one documentation-only stable carry-forward c
     const BetaEntry = GovernedEntry('0.8.0-beta.1')
     WriteFile(Root, 'CHANGELOG-beta.md', `# Beta\n\n${BetaEntry}`)
     WriteFile(Root, 'source.txt', 'beta source\n')
-    const BetaRevision = Commit(Root, 'beta')
+    Commit(Root, 'beta')
     Git(Root, ['tag', '0.8.0-beta.1'])
 
     const StableEntry = GovernedEntry('0.8.0', '0.6.5', '`0.6.5`, `0.8.0-beta.1`')
