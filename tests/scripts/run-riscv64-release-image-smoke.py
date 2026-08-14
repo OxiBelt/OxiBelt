@@ -51,6 +51,12 @@ KEYSIGNER_SEED_COMMAND = (
     "chown 10002:10002 /cert/privkey.pem /cert/keysigner-token.b64 && "
     "chown 10002:10002 /cert"
 )
+CONTROLLER_LEASE_RESOURCE_PATH = (
+    "/apis/coordination.k8s.io/v1/namespaces/smoke/"
+    "leases/oxibelt-gateway-controller"
+)
+CONTROLLER_LEASE_COLLECTION_PATH = CONTROLLER_LEASE_RESOURCE_PATH.rsplit("/", 1)[0]
+CONTROLLER_LEASE_FIELD_SELECTOR = "metadata.name=oxibelt-gateway-controller"
 
 ROLE_BINARIES = {
     "standalone": (
@@ -515,6 +521,70 @@ def wait_for_service(
         sleep(0.25)
 
 
+def has_authenticated_controller_lease_observation(
+    requests: tuple[tuple[str, str, bool], ...],
+) -> bool:
+    resource_get = False
+    collection_watch = False
+    for method, target, authorized in requests:
+        if method != "GET" or not authorized:
+            continue
+        parsed = urllib.parse.urlsplit(target)
+        if parsed.path == CONTROLLER_LEASE_RESOURCE_PATH and not parsed.query:
+            resource_get = True
+            continue
+        if parsed.path != CONTROLLER_LEASE_COLLECTION_PATH:
+            continue
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        if (
+            query.get("watch") == ["true"]
+            and query.get("fieldSelector") == [CONTROLLER_LEASE_FIELD_SELECTOR]
+        ):
+            collection_watch = True
+    return resource_get and collection_watch
+
+
+def reject_kubernetes_writes(
+    requests: tuple[tuple[str, str, bool], ...],
+) -> None:
+    if any(method != "GET" for method, _, _ in requests):
+        raise SmokeError("Gateway controller attempted a Kubernetes write as nonleader")
+
+
+class ActiveHandlerTracker:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._accepting = True
+        self._active = 0
+
+    def admit(self) -> bool:
+        with self._condition:
+            if not self._accepting:
+                return False
+            self._active += 1
+            return True
+
+    def complete(self) -> None:
+        with self._condition:
+            self._active -= 1
+            self._condition.notify_all()
+
+    def stop_admission(self) -> None:
+        with self._condition:
+            self._accepting = False
+
+    def drain(self, timeout_seconds: float) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        with self._condition:
+            while self._active:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise SmokeError(
+                        "Kubernetes Lease mock handlers did not drain before timeout"
+                    )
+                self._condition.wait(remaining)
+
+
 class CommandRunner:
     def run(
         self,
@@ -562,7 +632,12 @@ class KubernetesLeaseMock:
         token: str,
     ) -> None:
         self.token = token
-        self.requests: list[tuple[str, str, bool]] = []
+        self._requests: list[tuple[str, str, bool]] = []
+        self._requests_lock = threading.Lock()
+        self._handlers = ActiveHandlerTracker()
+        self._close_lock = threading.Lock()
+        self._closed = False
+        self._started = False
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -585,15 +660,11 @@ class KubernetesLeaseMock:
 
             def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
                 authorized = self._authorized()
-                owner.requests.append(("GET", self.path, authorized))
+                owner.record_request("GET", self.path, authorized)
                 if not authorized:
                     self._send_json(401, {"message": "unauthorized"})
                     return
                 parsed = urllib.parse.urlsplit(self.path)
-                lease_path = (
-                    "/apis/coordination.k8s.io/v1/namespaces/smoke/"
-                    "leases/oxibelt-gateway-controller"
-                )
                 lease = {
                     "apiVersion": "coordination.k8s.io/v1",
                     "kind": "Lease",
@@ -609,20 +680,22 @@ class KubernetesLeaseMock:
                         "leaseTransitions": 1,
                     },
                 }
-                if parsed.path == lease_path:
+                if parsed.path == CONTROLLER_LEASE_RESOURCE_PATH:
                     self._send_json(200, lease)
                     return
-                if parsed.path == lease_path.rsplit("/", 1)[0]:
+                if parsed.path == CONTROLLER_LEASE_COLLECTION_PATH:
                     query = urllib.parse.parse_qs(parsed.query)
-                    if query.get("watch") == ["true"]:
+                    if (
+                        query.get("watch") == ["true"]
+                        and query.get("fieldSelector")
+                        == [CONTROLLER_LEASE_FIELD_SELECTOR]
+                    ):
                         self._send_json(200, {"type": "MODIFIED", "object": lease})
                         return
                 self._send_json(404, {"message": "not found"})
 
             def _reject_write(self) -> None:
-                owner.requests.append(
-                    (self.command, self.path, self._authorized())
-                )
+                owner.record_request(self.command, self.path, self._authorized())
                 self._send_json(403, {"message": "writes are forbidden in smoke"})
 
             do_PATCH = _reject_write  # type: ignore[assignment]
@@ -630,7 +703,33 @@ class KubernetesLeaseMock:
             do_PUT = _reject_write  # type: ignore[assignment]
             do_DELETE = _reject_write  # type: ignore[assignment]
 
-        self.server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+        class Server(http.server.ThreadingHTTPServer):
+            def process_request(
+                self,
+                request: Any,
+                client_address: Any,
+            ) -> None:
+                if not owner._handlers.admit():
+                    self.shutdown_request(request)
+                    return
+                try:
+                    super().process_request(request, client_address)
+                except BaseException:
+                    owner._handlers.complete()
+                    self.shutdown_request(request)
+                    raise
+
+            def process_request_thread(
+                self,
+                request: Any,
+                client_address: Any,
+            ) -> None:
+                try:
+                    super().process_request_thread(request, client_address)
+                finally:
+                    owner._handlers.complete()
+
+        self.server = Server(("0.0.0.0", 0), Handler)
         self.server.daemon_threads = True
         context = kubernetes_lease_server_context(cert_path, key_path)
         self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
@@ -646,11 +745,33 @@ class KubernetesLeaseMock:
 
     def start(self) -> None:
         self.thread.start()
+        self._started = True
+
+    def record_request(self, method: str, target: str, authorized: bool) -> None:
+        with self._requests_lock:
+            self._requests.append((method, target, authorized))
+
+    def request_snapshot(self) -> tuple[tuple[str, str, bool], ...]:
+        with self._requests_lock:
+            return tuple(self._requests)
 
     def close(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=HTTP_TIMEOUT_SECONDS)
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        try:
+            if self._started:
+                self.server.shutdown()
+            self._handlers.stop_admission()
+            self._handlers.drain(HTTP_TIMEOUT_SECONDS)
+        finally:
+            self._handlers.stop_admission()
+            self.server.server_close()
+            if self._started:
+                self.thread.join(timeout=HTTP_TIMEOUT_SECONDS)
+        if self._started and self.thread.is_alive():
+            raise SmokeError("Kubernetes Lease mock server did not stop before timeout")
 
 
 class DockerSmoke:
@@ -1454,20 +1575,19 @@ class DockerSmoke:
                     raise SmokeError(
                         f"Gateway controller {path} returned {status}, expected {expected}"
                     )
-            authenticated_gets = [
-                path
-                for method, path, authorized in mock.requests
-                if method == "GET" and authorized
-            ]
-            if not authenticated_gets or not any(
-                "watch=true" in path for path in authenticated_gets
-            ):
-                raise SmokeError(
-                    "Gateway controller did not perform authenticated Lease GET/watch requests"
-                )
-            if any(method != "GET" for method, _, _ in mock.requests):
-                raise SmokeError("Gateway controller attempted a Kubernetes write as nonleader")
+            def observed_lease_requests() -> bool:
+                requests = mock.request_snapshot()
+                reject_kubernetes_writes(requests)
+                return has_authenticated_controller_lease_observation(requests)
+
+            wait_for_service(
+                "Gateway controller authenticated Lease GET/watch",
+                lambda: self.container_state(container),
+                observed_lease_requests,
+            )
             self.stop_container(container)
+            mock.close()
+            reject_kubernetes_writes(mock.request_snapshot())
             self.remove_container(container)
         finally:
             mock.close()

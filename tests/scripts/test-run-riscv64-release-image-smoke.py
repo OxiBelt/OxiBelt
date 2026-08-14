@@ -600,6 +600,162 @@ class Riscv64ReleaseImageSmokeTest(unittest.TestCase):
                 "keysigner",
             )
 
+    def controller_resource_get(
+        self, *, authorized: bool = True, query: str = ""
+    ) -> tuple[str, str, bool]:
+        suffix = f"?{query}" if query else ""
+        return ("GET", f"{SMOKE.CONTROLLER_LEASE_RESOURCE_PATH}{suffix}", authorized)
+
+    def controller_collection_watch(
+        self, *, authorized: bool = True, query: str | None = None
+    ) -> tuple[str, str, bool]:
+        query = query or (
+            "fieldSelector=metadata.name%3Doxibelt-gateway-controller&"
+            "watch=true&allowWatchBookmarks=true&resourceVersion=1"
+        )
+        return (
+            "GET",
+            f"{SMOKE.CONTROLLER_LEASE_COLLECTION_PATH}?{query}",
+            authorized,
+        )
+
+    def test_controller_lease_observation_requires_exact_authenticated_reads(self) -> None:
+        requests = (
+            self.controller_resource_get(),
+            self.controller_collection_watch(),
+        )
+
+        self.assertTrue(SMOKE.has_authenticated_controller_lease_observation(requests))
+
+        cases = {
+            "unauthorized resource": (
+                self.controller_resource_get(authorized=False),
+                self.controller_collection_watch(),
+            ),
+            "unauthorized watch": (
+                self.controller_resource_get(),
+                self.controller_collection_watch(authorized=False),
+            ),
+            "resource only": (self.controller_resource_get(),),
+            "watch only": (self.controller_collection_watch(),),
+            "resource query": (
+                self.controller_resource_get(query="watch=true"),
+                self.controller_collection_watch(),
+            ),
+            "misleading watch": (
+                self.controller_resource_get(),
+                self.controller_collection_watch(
+                    query=(
+                        "fieldSelector=metadata.name%3Doxibelt-gateway-controller&"
+                        "watch=trueish"
+                    )
+                ),
+            ),
+            "wrong selector": (
+                self.controller_resource_get(),
+                self.controller_collection_watch(
+                    query="fieldSelector=metadata.name%3Dother&watch=true"
+                ),
+            ),
+            "wrong collection": (
+                self.controller_resource_get(),
+                (
+                    "GET",
+                    f"{SMOKE.CONTROLLER_LEASE_COLLECTION_PATH}/other?"
+                    "fieldSelector=metadata.name%3Doxibelt-gateway-controller&watch=true",
+                    True,
+                ),
+            ),
+        }
+        for name, observed in cases.items():
+            with self.subTest(name=name):
+                self.assertFalse(
+                    SMOKE.has_authenticated_controller_lease_observation(observed)
+                )
+
+    def test_controller_lease_observation_waits_for_delayed_watch(self) -> None:
+        snapshots = iter(
+            (
+                (),
+                (self.controller_resource_get(),),
+                (
+                    self.controller_resource_get(),
+                    self.controller_collection_watch(),
+                ),
+            )
+        )
+        observed = 0
+
+        def ready() -> bool:
+            nonlocal observed
+            observed += 1
+            requests = next(snapshots)
+            SMOKE.reject_kubernetes_writes(requests)
+            return SMOKE.has_authenticated_controller_lease_observation(requests)
+
+        moments = iter((0.0, 0.0, 0.25))
+        SMOKE.wait_for_service(
+            "Gateway controller authenticated Lease GET/watch",
+            lambda: (True, None),
+            ready,
+            timeout_seconds=1.0,
+            clock=lambda: next(moments),
+            sleep=lambda _seconds: None,
+        )
+
+        self.assertEqual(observed, 3)
+
+    def test_controller_lease_observation_rejects_writes_during_wait(self) -> None:
+        requests = ("PATCH", SMOKE.CONTROLLER_LEASE_RESOURCE_PATH, True)
+        with self.assertRaisesRegex(SMOKE.SmokeError, "Kubernetes write"):
+            SMOKE.reject_kubernetes_writes((requests,))
+
+    def test_controller_handler_drain_accounts_for_admitted_late_writes(self) -> None:
+        handlers = SMOKE.ActiveHandlerTracker()
+        self.assertTrue(handlers.admit())
+        handlers.stop_admission()
+        self.assertFalse(handlers.admit())
+
+        admitted_late_write = (
+            "PATCH",
+            SMOKE.CONTROLLER_LEASE_RESOURCE_PATH,
+            True,
+        )
+        with self.assertRaisesRegex(SMOKE.SmokeError, "Kubernetes write"):
+            SMOKE.reject_kubernetes_writes((admitted_late_write,))
+
+        handlers.complete()
+        handlers.drain(0.0)
+
+    def test_controller_handler_drain_times_out_fail_closed(self) -> None:
+        handlers = SMOKE.ActiveHandlerTracker()
+        self.assertTrue(handlers.admit())
+        handlers.stop_admission()
+        with self.assertRaisesRegex(SMOKE.SmokeError, "handlers did not drain"):
+            handlers.drain(0.0)
+        handlers.complete()
+        handlers.drain(0.0)
+
+    def test_controller_lease_observation_timeout_and_exit_fail_closed(self) -> None:
+        with self.assertRaisesRegex(
+            SMOKE.SmokeError, "authenticated Lease GET/watch did not become ready"
+        ):
+            moments = iter((0.0, 0.5))
+            SMOKE.wait_for_service(
+                "Gateway controller authenticated Lease GET/watch",
+                lambda: (True, None),
+                lambda: SMOKE.has_authenticated_controller_lease_observation(()),
+                timeout_seconds=0.5,
+                clock=lambda: next(moments),
+                sleep=lambda _seconds: None,
+            )
+        with self.assertRaisesRegex(SMOKE.SmokeError, "code 17"):
+            SMOKE.wait_for_service(
+                "Gateway controller authenticated Lease GET/watch",
+                lambda: (False, 17),
+                lambda: False,
+            )
+
     def test_readiness_fails_immediately_on_startup_crash(self) -> None:
         with self.assertRaisesRegex(SMOKE.SmokeError, "code 139"):
             SMOKE.wait_for_service(
