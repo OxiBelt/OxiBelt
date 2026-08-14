@@ -502,6 +502,50 @@ test('builds exact stable release notes and a digest-bound receipt', () => {
   }
 })
 
+test('requires the latest beta and one documentation-only stable carry-forward commit', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    Commit(Root, 'baseline')
+    Git(Root, ['tag', '0.6.5'])
+    const BetaEntry = GovernedEntry('0.8.0-beta.1')
+    WriteFile(Root, 'CHANGELOG-beta.md', `# Beta\n\n${BetaEntry}`)
+    WriteFile(Root, 'source.txt', 'beta source\n')
+    const BetaRevision = Commit(Root, 'beta')
+    Git(Root, ['tag', '0.8.0-beta.1'])
+
+    const StableEntry = GovernedEntry('0.8.0', '0.6.5', '`0.6.5`, `0.8.0-beta.1`')
+      .replace('## [0.8.0] - 2026-07-23', '## [0.8.0] - 2026-07-24')
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${StableEntry}\n${BaselineEntry}`)
+    WriteFile(Root, 'docs/Upgrading.md', '# Upgrading\n\n## Upgrade from 0.6.5\n\nStable carry-forward.\n')
+    const StableRevision = Commit(Root, 'stable documentation')
+    Git(Root, ['tag', '0.8.0'])
+
+    const Result = BuildReleaseCandidate({
+      workspacePath: Root,
+      ref: 'refs/tags/0.8.0',
+      revision: StableRevision
+    })
+    Assert.equal(Result.receipt.baseVersion, '0.6.5')
+    Assert.deepEqual(Result.receipt.supportedUpgradeSources, ['0.6.5', '0.8.0-beta.1'])
+
+    WriteFile(Root, 'source.txt', 'changed after beta\n')
+    const InvalidRevision = Commit(Root, 'non-documentation stable change')
+    Git(Root, ['tag', '--delete', '0.8.0'])
+    Git(Root, ['tag', '0.8.0'])
+    Assert.throws(
+      () => BuildReleaseCandidate({
+        workspacePath: Root,
+        ref: 'refs/tags/0.8.0',
+        revision: InvalidRevision
+      }),
+      /must be one documentation-only commit after 0\.8\.0-beta\.1/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
 test('requires a substantive candidate section for each changed compatibility surface', () => {
   const Root = CreateContractWorkspace()
   try {

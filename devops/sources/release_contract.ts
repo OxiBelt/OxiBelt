@@ -588,6 +588,15 @@ function AssertEntryBase(
   const RequiredSources = Tag.kind === 'beta' && Number(Tag.betaNumber ?? '0') > 1
     ? [ExpectedBase, PreviousStableEntry.version]
     : [ExpectedBase]
+  if (Tag.kind === 'stable') {
+    const TargetCore = `${Tag.major}.${Tag.minor}.${Tag.patch}`
+    const LatestBeta = Beta.entries.find(Candidate => {
+      const CandidateTag = ParseReleaseRef(`refs/tags/${Candidate.version}`)
+      return `${CandidateTag.major}.${CandidateTag.minor}.${CandidateTag.patch}` === TargetCore &&
+        Candidate.date <= Entry.date && Semver.lt(Candidate.version, Entry.version)
+    })
+    if (LatestBeta !== undefined) RequiredSources.push(LatestBeta.version)
+  }
   for (const RequiredSource of RequiredSources) {
     if (!Entry.supportedUpgradeSources.includes(RequiredSource)) {
       throw new Error(`release ${Entry.version} must support upgrade source ${RequiredSource}`)
@@ -612,6 +621,14 @@ function AssertEntryBase(
       throw new Error(
         `release ${Entry.version} has unsupported beta upgrade source ${SupportedSource}`
       )
+    }
+  }
+  if (Tag.kind === 'stable') {
+    const BetaSources = Entry.supportedUpgradeSources.filter(Source =>
+      ParseReleaseRef(`refs/tags/${Source}`).kind === 'beta'
+    )
+    if (BetaSources.length > 1) {
+      throw new Error(`release ${Entry.version} may name only the latest beta as a beta source`)
     }
   }
   return ExpectedBase
@@ -801,6 +818,30 @@ export function BuildReleaseCandidate(Options: ReleaseCandidateOptions): Release
       throw new Error(
         `supported upgrade source ${SupportedSource} (${SourceRevision}) is not an ancestor of ${RequestedRevision}`
       )
+    }
+  }
+  if (Tag.kind === 'stable') {
+    const BetaSource = Entry.supportedUpgradeSources.find(Source =>
+      ParseReleaseRef(`refs/tags/${Source}`).kind === 'beta'
+    )
+    if (BetaSource !== undefined) {
+      const BetaRevision = ResolveRevision(Root, `refs/tags/${BetaSource}`)
+      const StableCommits = RunGit(Root, ['rev-list', '--count', `${BetaRevision}..${RequestedRevision}`])
+      if (StableCommits !== '1') {
+        throw new Error(
+          `stable release ${Entry.version} must be one documentation-only commit after ${BetaSource}`
+        )
+      }
+      const StablePaths = ChangedPaths(Root, BetaRevision, RequestedRevision).sort()
+      const RequiredStablePaths = [StableChangelogPath, UpgradeGuidePath].sort()
+      if (
+        StablePaths.length !== RequiredStablePaths.length ||
+        StablePaths.some((PathValue, Index) => PathValue !== RequiredStablePaths[Index])
+      ) {
+        throw new Error(
+          `stable release ${Entry.version} may change only ${StableChangelogPath} and ${UpgradeGuidePath} after ${BetaSource}`
+        )
+      }
     }
   }
   AssertCandidateSections(Entry, ChangedPaths(Root, BaseRevision, RequestedRevision))
