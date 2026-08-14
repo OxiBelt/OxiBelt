@@ -474,10 +474,13 @@ rootless Docker daemon, verifies image and schema-v3 chart attestations through
 GitHub's API, resolves canonical GHCR digests, and rebuilds without consuming
 producer build outputs.
 
-Every automatic beta or stable verification seals one schema-1 release
+Every automatic beta or stable verification seals one schema-2 release
 qualification containing exactly 30 image receipts, two byte-identical chart
-receipts, 12 immutable index identities, and the exact producer and verifier
-run identities. Beta qualifications contain no mutable aliases. For a stable
+receipts, 12 immutable index identities with exact independently verified
+`amd64`, `arm64`, and `riscv64` child descriptor bindings, and the exact
+producer and verifier run identities. Both canonical tags for each role must
+resolve to the same index digest and child set. Beta qualifications contain no
+mutable aliases. For a stable
 qualification, the producer's exact release-contract receipt must name the
 sole latest same-target beta; that beta's exact aggregate bytes, tag, release,
 automatic verifier run, artifact identity, and SHA-256 are bound into the
@@ -488,8 +491,11 @@ The release producer writes only immutable versioned image and chart tags.
 `.github/workflows/promote-stable-aliases.yml` is the sole mutable-alias writer.
 It accepts only the newest published stable release and a complete automatic
 qualification, re-reads every immutable digest and both chart attestations in
-a read-only job, snapshots all 48 image aliases, then performs sequential
-idempotent promotion in one final `packages: write` job. Manual, beta, build,
+a read-only job, rechecks every index child against the sealed independent
+platform receipts, snapshots all 48 image aliases, then performs sequential
+idempotent promotion in one final `packages: write` job. That final job repeats
+the index-child readback immediately before mutation and promotes from the
+qualified immutable digest rather than a mutable source tag. Manual, beta, build,
 stale, replayed, incomplete, duplicated, or drifted qualifications fail
 closed; chart aliases are never created.
 

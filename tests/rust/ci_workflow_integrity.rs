@@ -9303,7 +9303,12 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     serde_json::json!({"actions": "read", "contents": "read", "packages": "write"})
   );
   assert_eq!(promotion.matches("packages: write").count(), 1);
-  assert_eq!(release.matches("Promote canonical multi-arch aliases").count(), 0);
+  assert_eq!(
+    release
+      .matches("Promote canonical multi-arch aliases")
+      .count(),
+    0
+  );
   assert_eq!(arch.matches("Promote canonical GHCR aliases").count(), 0);
 
   for expected in [
@@ -9332,6 +9337,51 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
   ] {
     assert!(verifier.contains(expected));
   }
+}
+
+#[test]
+fn stable_alias_promotion_binds_indexes_to_independent_platform_receipts() {
+  let verifier = release_rebuild_verification_workflow_text();
+  let promotion = stable_alias_promotion_workflow_text();
+
+  for expected in [
+    "qualified index children did not match independent platform receipts",
+    "qualified index tags for one role must resolve to one digest and child set",
+    "--argjson children \"${qualified_children}\"",
+    "(.manifests | all(.children | length == 3))",
+  ] {
+    assert!(
+      verifier.contains(expected),
+      "independent release qualification must bind {expected}"
+    );
+  }
+
+  for expected in [
+    "q.schemaVersion !== 2",
+    "qualified index descriptors are incomplete or duplicated",
+    "index children changed after qualification",
+    "\"${source_repository}@${source_digest}\"",
+  ] {
+    assert!(
+      promotion.contains(expected),
+      "stable alias promotion must reauthenticate {expected}"
+    );
+  }
+
+  let promotion_step = promotion
+    .split_once("- name: Promote only qualified image aliases")
+    .expect("promotion workflow should retain the sole alias mutation step")
+    .1;
+  let child_readback = promotion_step
+    .find("index children changed after qualification")
+    .expect("promotion should reauthenticate index children");
+  let alias_mutation = promotion_step
+    .find("docker buildx imagetools create")
+    .expect("promotion should retain the alias mutation sink");
+  assert!(
+    child_readback < alias_mutation,
+    "index children must be reauthenticated immediately before alias mutation"
+  );
 }
 
 #[test]

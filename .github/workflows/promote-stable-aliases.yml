@@ -95,7 +95,7 @@ jobs:
                   Object.keys(value).sort().join(',') !== [...keys].sort().join(',')) throw new Error(`${label} keys are not canonical`)
             }
             exactKeys(q, ['schemaVersion','repository','releaseKind','version','ref','tagObjectSha','commit','releaseId','publishedAt','producer','betaQualification','kind','verifier','receipts','manifests','aliases'], 'qualification')
-            if (q.schemaVersion !== 1 || q.kind !== 'release-qualification' || q.releaseKind !== 'stable' || q.repository !== 'OxiBelt/OxiBelt' ||
+            if (q.schemaVersion !== 2 || q.kind !== 'release-qualification' || q.releaseKind !== 'stable' || q.repository !== 'OxiBelt/OxiBelt' ||
                 !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(q.version ?? '') ||
                 q.ref !== `refs/tags/${q.version}` || !/^[0-9a-f]{40}$/.test(q.commit ?? '') ||
                 !/^[0-9a-f]{40}$/.test(q.tagObjectSha ?? '') || !Number.isSafeInteger(q.releaseId) || q.releaseId < 1) {
@@ -112,6 +112,53 @@ jobs:
                 new Set(q.aliases.map((entry) => entry.alias)).size !== 48 ||
                 q.aliases.some((entry) => entry.alias.startsWith('ghcr.io/oxibelt/charts/'))) {
               throw new Error('qualification receipt, manifest, or alias inventory is incomplete or duplicated')
+            }
+            const roleImages = new Map([
+              ['standalone', 'ghcr.io/oxibelt/oxibelt'],
+              ['dataplane', 'ghcr.io/oxibelt/oxibelt-dataplane'],
+              ['dataplane-strict', 'ghcr.io/oxibelt/oxibelt-dataplane-strict'],
+              ['controller', 'ghcr.io/oxibelt/oxibelt-gateway-controller'],
+              ['tools', 'ghcr.io/oxibelt/oxibelt-tools'],
+              ['keysigner', 'ghcr.io/oxibelt/oxibelt-keysigner'],
+            ])
+            const childIdentity = (child) => JSON.stringify({
+              artifactArch: child.artifactArch, digest: child.digest, os: child.os,
+              architecture: child.architecture, variant: child.variant,
+              mediaType: child.mediaType, size: child.size,
+            })
+            for (const manifest of q.manifests) {
+              exactKeys(manifest, ['role','image','canonicalTag','digest','children'], 'qualified index')
+              if (roleImages.get(manifest.role) !== manifest.image ||
+                  ![`${manifest.image}:${q.version}`, `${manifest.image}:${q.version}-alpine-musl`].includes(manifest.canonicalTag) ||
+                  !/^sha256:[0-9a-f]{64}$/.test(manifest.digest ?? '') || !Array.isArray(manifest.children) || manifest.children.length !== 3) {
+                throw new Error('qualified index identity is malformed')
+              }
+              for (const child of manifest.children) {
+                exactKeys(child, ['artifactArch','digest','os','architecture','variant','mediaType','size'], 'qualified index child')
+                const expectedArchitecture = {amd64: 'amd64', arm64: 'arm64', riscv64: 'riscv64'}[child.artifactArch]
+                if (expectedArchitecture !== child.architecture || child.os !== 'linux' ||
+                    !/^sha256:[0-9a-f]{64}$/.test(child.digest ?? '') ||
+                    !['application/vnd.oci.image.manifest.v1+json','application/vnd.docker.distribution.manifest.v2+json'].includes(child.mediaType) ||
+                    !Number.isSafeInteger(child.size) || child.size < 1 ||
+                    !(child.variant === null || (child.architecture === 'arm64' && child.variant === 'v8'))) {
+                  throw new Error('qualified index child identity is malformed')
+                }
+                const receipt = q.receipts.images.filter((entry) => entry.role === manifest.role &&
+                  entry.artifactArch === child.artifactArch && entry.digest === child.digest &&
+                  entry.os === child.os && entry.architecture === child.architecture)
+                if (receipt.length !== 1) throw new Error('qualified index child is not bound to one independent platform receipt')
+              }
+              if (new Set(manifest.children.map((child) => child.artifactArch)).size !== 3 ||
+                  new Set(manifest.children.map((child) => child.digest)).size !== 3) {
+                throw new Error('qualified index descriptors are incomplete or duplicated')
+              }
+            }
+            for (const [role, image] of roleImages) {
+              const manifests = q.manifests.filter((entry) => entry.role === role && entry.image === image)
+              if (manifests.length !== 2 || manifests[0].digest !== manifests[1].digest ||
+                  manifests[0].children.map(childIdentity).sort().join('\n') !== manifests[1].children.map(childIdentity).sort().join('\n')) {
+                throw new Error('qualified index tags for one role do not bind one digest and child set')
+              }
             }
             const verifier = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: q.verifier.runId})).data
             if (verifier.path !== q.verifier.workflowPath || verifier.event !== 'workflow_run' || verifier.status !== 'completed' ||
@@ -181,7 +228,7 @@ jobs:
           actual_sha="$(sha256sum "${BETA}" | awk '{print $1}')"
           [[ "${actual_sha}" == "${expected_sha}" ]]
           jq -e --slurpfile stable "${STABLE}" '
-            .schemaVersion == 1 and .kind == "release-qualification" and .releaseKind == "beta"
+            .schemaVersion == 2 and .kind == "release-qualification" and .releaseKind == "beta"
             and .version == $stable[0].betaQualification.version and .commit == $stable[0].betaQualification.commit
             and .tagObjectSha == $stable[0].betaQualification.tagObjectSha
             and .releaseId == $stable[0].betaQualification.releaseId
@@ -222,10 +269,41 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          normalize_index_children() {
+            jq -ce '
+              if ((.mediaType == "application/vnd.oci.image.index.v1+json"
+                    or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json")
+                  and (.manifests | type == "array" and length == 3)
+                  and all(.manifests[];
+                    ((.mediaType == "application/vnd.oci.image.manifest.v1+json"
+                      or .mediaType == "application/vnd.docker.distribution.manifest.v2+json")
+                     and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                     and (.size | type == "number" and . > 0)
+                     and .platform.os == "linux"
+                     and (.platform.architecture | IN("amd64", "arm64", "riscv64"))
+                     and ((.platform.variant // null) == null
+                       or (.platform.architecture == "arm64" and .platform.variant == "v8"))))
+                  and ([.manifests[].digest] | unique | length == 3)
+                  and ([.manifests[].platform.architecture] | sort == ["amd64", "arm64", "riscv64"]))
+              then [.manifests[] | {digest, os: .platform.os, architecture: .platform.architecture,
+                variant: (.platform.variant // null), mediaType, size}] | sort_by(.os, .architecture, .digest)
+              else error("qualified index descriptors are incomplete or duplicated")
+              end
+            '
+          }
           while IFS=$'\t' read -r tag digest; do
             resolved="$(docker buildx imagetools inspect "${tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
             [[ "${resolved}" == "${digest}" ]] || { echo "immutable image digest drift: ${tag}" >&2; exit 1; }
-          done < <(jq -r '(.receipts.images[] | [.canonicalTag, .digest]), (.manifests[] | [.canonicalTag, .digest]) | @tsv' "${QUALIFICATION}")
+          done < <(jq -r '.receipts.images[] | [.canonicalTag, .digest] | @tsv' "${QUALIFICATION}")
+          while IFS=$'\t' read -r tag digest expected_children_base64; do
+            manifest="$(docker buildx imagetools inspect "${tag}" --format '{{json .Manifest}}')"
+            resolved="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"${manifest}")"
+            [[ "${resolved}" == "${digest}" ]] || { echo "immutable index digest drift: ${tag}" >&2; exit 1; }
+            actual_children="$(normalize_index_children <<<"${manifest}")"
+            expected_children="$(base64 --decode <<<"${expected_children_base64}")"
+            [[ "${actual_children}" == "${expected_children}" ]] || { echo "index children changed after qualification: ${tag}" >&2; exit 1; }
+          done < <(jq -r '.manifests[] | [.canonicalTag, .digest,
+            (.children | map({digest, os, architecture, variant, mediaType, size}) | sort_by(.os, .architecture, .digest) | @base64)] | @tsv' "${QUALIFICATION}")
           while IFS=$'\t' read -r repository digest; do
             resolved="$("${ORAS_BIN}" manifest fetch --descriptor "${repository}@${digest}" | jq -r '.digest')"
             [[ "${resolved}" == "${digest}" ]] || { echo "immutable chart digest drift: ${repository}" >&2; exit 1; }
@@ -338,9 +416,43 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          normalize_index_children() {
+            jq -ce '
+              if ((.mediaType == "application/vnd.oci.image.index.v1+json"
+                    or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json")
+                  and (.manifests | type == "array" and length == 3)
+                  and all(.manifests[];
+                    ((.mediaType == "application/vnd.oci.image.manifest.v1+json"
+                      or .mediaType == "application/vnd.docker.distribution.manifest.v2+json")
+                     and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                     and (.size | type == "number" and . > 0)
+                     and .platform.os == "linux"
+                     and (.platform.architecture | IN("amd64", "arm64", "riscv64"))
+                     and ((.platform.variant // null) == null
+                       or (.platform.architecture == "arm64" and .platform.variant == "v8"))))
+                  and ([.manifests[].digest] | unique | length == 3)
+                  and ([.manifests[].platform.architecture] | sort == ["amd64", "arm64", "riscv64"]))
+              then [.manifests[] | {digest, os: .platform.os, architecture: .platform.architecture,
+                variant: (.platform.variant // null), mediaType, size}] | sort_by(.os, .architecture, .digest)
+              else error("qualified index descriptors are incomplete or duplicated")
+              end
+            '
+          }
           while IFS=$'\t' read -r alias source_tag source_digest kind expected_current; do
-            source_current="$(docker buildx imagetools inspect "${source_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            source_manifest="$(docker buildx imagetools inspect "${source_tag}" --format '{{json .Manifest}}')"
+            source_current="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"${source_manifest}")"
             [[ "${source_current}" == "${source_digest}" ]] || { echo "qualified immutable source drifted: ${source_tag}" >&2; exit 1; }
+            if [[ "${kind}" == index ]]; then
+              actual_children="$(normalize_index_children <<<"${source_manifest}")"
+              expected_children_base64="$(jq -er --arg source_tag "${source_tag}" '
+                [.manifests[] | select(.canonicalTag == $source_tag)] |
+                if length == 1 then (.[0].children | map({digest, os, architecture, variant, mediaType, size}) |
+                  sort_by(.os, .architecture, .digest) | @base64)
+                else error("qualified index source is not unique") end
+              ' "${PLAN}")"
+              expected_children="$(base64 --decode <<<"${expected_children_base64}")"
+              [[ "${actual_children}" == "${expected_children}" ]] || { echo "index children changed after qualification: ${source_tag}" >&2; exit 1; }
+            fi
             error_file="${RUNNER_TEMP}/alias-promote-inspect.log"
             if manifest="$(docker buildx imagetools inspect "${alias}" --format '{{json .Manifest}}' 2>"${error_file}")"; then
               actual_current="$(jq -r '.digest' <<<"${manifest}")"
@@ -353,7 +465,9 @@ jobs:
             [[ "${actual_current}" == "${expected_current}" ]] || { echo "alias changed after validation: ${alias}" >&2; exit 1; }
             if [[ "${actual_current}" != "${source_digest}" ]]; then
               prefer_index=false; [[ "${kind}" == index ]] && prefer_index=true
-              docker buildx imagetools create --prefer-index="${prefer_index}" --tag "${alias}" "${source_tag}"
+              source_repository="${source_tag%:*}"
+              [[ "${source_repository}" =~ ^ghcr\.io/oxibelt/[a-z0-9-]+$ ]]
+              docker buildx imagetools create --prefer-index="${prefer_index}" --tag "${alias}" "${source_repository}@${source_digest}"
             fi
             promoted="$(docker buildx imagetools inspect "${alias}" --format '{{json .Manifest}}' | jq -r '.digest')"
             [[ "${promoted}" == "${source_digest}" ]] || { echo "alias readback mismatch: ${alias}" >&2; exit 1; }

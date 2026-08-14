@@ -635,7 +635,7 @@ jobs:
               core.setOutput('beta_run_id', String(accepted.run.id))
               core.setOutput('beta_revision', betaTag.object.sha)
             }
-            const identity = {schemaVersion: 1, repository: 'OxiBelt/OxiBelt', releaseKind: stable ? 'stable' : 'beta', version,
+            const identity = {schemaVersion: 2, repository: 'OxiBelt/OxiBelt', releaseKind: stable ? 'stable' : 'beta', version,
               ref: `refs/tags/${version}`, tagObjectSha: ref.object.sha, commit: revision, releaseId: release.id,
               publishedAt: release.published_at, producer: {workflowPath: '.github/workflows/release.yml',
                 runId, runAttempt, event: 'release', headSha: revision, conclusion: 'success'},
@@ -659,7 +659,7 @@ jobs:
         run: |
           set -euo pipefail
           jq -e --slurpfile identity "${IDENTITY}" '
-            .schemaVersion == 1 and .kind == "release-qualification" and .releaseKind == "beta"
+            .schemaVersion == 2 and .kind == "release-qualification" and .releaseKind == "beta"
             and .version == $identity[0].betaQualification.version
             and .ref == $identity[0].betaQualification.ref
             and .tagObjectSha == $identity[0].betaQualification.tagObjectSha
@@ -742,10 +742,19 @@ jobs:
             role="$(jq -r '.build.role' "${receipt}")"; arch="$(jq -r '.build.artifactArch' "${receipt}")"
             case "${role}" in standalone) image=ghcr.io/oxibelt/oxibelt;; dataplane) image=ghcr.io/oxibelt/oxibelt-dataplane;; dataplane-strict) image=ghcr.io/oxibelt/oxibelt-dataplane-strict;; controller) image=ghcr.io/oxibelt/oxibelt-gateway-controller;; tools) image=ghcr.io/oxibelt/oxibelt-tools;; keysigner) image=ghcr.io/oxibelt/oxibelt-keysigner;; esac
             digest="$(jq -r '.published.imageDigest' "${receipt}")"; receipt_sha="$(sha256sum "${receipt}" | awk '{print $1}')"
+            platform="$(jq -er --arg role "${role}" --arg arch "${arch}" '
+              [.artifacts[] | select(.role == $role and .artifactArch == $arch)] |
+              if length == 1 then .[0].platform else error("release plan artifact identity is not unique") end
+            ' "${IMAGE_PLAN}")"
+            case "${arch}:${platform}" in
+              amd64v2:linux/amd64|amd64:linux/amd64|amd64v4:linux/amd64|arm64:linux/arm64|riscv64:linux/riscv64) ;;
+              *) echo "release plan artifact platform does not match ${arch}: ${platform}" >&2; exit 1 ;;
+            esac
+            platform_os="${platform%%/*}"; platform_architecture="${platform#*/}"
             canonical="${image}:${RELEASE_VERSION}-alpine-musl-${arch}"
             resolved="$(docker buildx imagetools inspect "${canonical}" --format '{{json .Manifest}}' | jq -r '.digest')"
             [[ "${resolved}" == "${digest}" ]]
-            images_json="$(jq -c --arg role "${role}" --arg arch "${arch}" --arg image "${image}" --arg canonical "${canonical}" --arg digest "${digest}" --arg receipt_sha "${receipt_sha}" '. + [{role: $role, artifactArch: $arch, image: $image, canonicalTag: $canonical, digest: $digest, receiptSha256: $receipt_sha}]' <<<"${images_json}")"
+            images_json="$(jq -c --arg role "${role}" --arg arch "${arch}" --arg image "${image}" --arg canonical "${canonical}" --arg digest "${digest}" --arg receipt_sha "${receipt_sha}" --arg os "${platform_os}" --arg architecture "${platform_architecture}" '. + [{role: $role, artifactArch: $arch, image: $image, canonicalTag: $canonical, digest: $digest, receiptSha256: $receipt_sha, os: $os, architecture: $architecture}]' <<<"${images_json}")"
             while read -r alias; do
               [[ -n "${alias}" ]] || continue
               aliases_json="$(jq -c --arg alias "${alias}" --arg source "${canonical}" --arg digest "${digest}" '. + [{alias: $alias, sourceTag: $source, sourceDigest: $digest, kind: "platform"}]' <<<"${aliases_json}")"
@@ -765,14 +774,68 @@ jobs:
             charts_json="$(jq -cn --argjson current "${charts_json}" --argjson receipt "${receipt_json}" --arg receipt_sha "${receipt_sha}" '$current + [$receipt + {receiptSha256: $receipt_sha}]')"
           done
           [[ "$(jq '[.[].chart] | unique | length' <<<"${charts_json}")" -eq 2 ]]
+          normalize_index_children() {
+            jq -ce '
+              if ((.mediaType == "application/vnd.oci.image.index.v1+json"
+                    or .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json")
+                  and (.manifests | type == "array" and length == 3)
+                  and all(.manifests[];
+                    ((.mediaType == "application/vnd.oci.image.manifest.v1+json"
+                      or .mediaType == "application/vnd.docker.distribution.manifest.v2+json")
+                     and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                     and (.size | type == "number" and . > 0)
+                     and .platform.os == "linux"
+                     and (.platform.architecture | IN("amd64", "arm64", "riscv64"))
+                     and ((.platform.variant // null) == null
+                       or (.platform.architecture == "arm64" and .platform.variant == "v8"))))
+                  and ([.manifests[].digest] | unique | length == 3)
+                  and ([.manifests[].platform.architecture] | sort == ["amd64", "arm64", "riscv64"]))
+              then [.manifests[] | {digest, os: .platform.os, architecture: .platform.architecture,
+                variant: (.platform.variant // null), mediaType, size}] | sort_by(.os, .architecture, .digest)
+              else error("qualified index descriptors are incomplete or duplicated")
+              end
+            '
+          }
           manifests_json='[]'
           for image in ghcr.io/oxibelt/oxibelt ghcr.io/oxibelt/oxibelt-dataplane ghcr.io/oxibelt/oxibelt-dataplane-strict ghcr.io/oxibelt/oxibelt-gateway-controller ghcr.io/oxibelt/oxibelt-tools ghcr.io/oxibelt/oxibelt-keysigner; do
+            role="$(jq -er --arg image "${image}" '
+              [.roles[] | select(.image == $image)] |
+              if length == 1 then .[0].role else error("release plan role identity is not unique") end
+            ' "${IMAGE_PLAN}")"
+            expected_children="$(jq -ce --arg role "${role}" '
+              [.[] | select(.role == $role and (.artifactArch | IN("amd64", "arm64", "riscv64"))) |
+                {artifactArch, digest, os, architecture}] | sort_by(.os, .architecture, .digest)
+            ' <<<"${images_json}")"
+            [[ "$(jq 'length' <<<"${expected_children}")" -eq 3 ]]
             release_tag="${image}:${RELEASE_VERSION}"
             alpine_tag="${image}:${RELEASE_VERSION}-alpine-musl"
-            release_digest="$(docker buildx imagetools inspect "${release_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
-            alpine_digest="$(docker buildx imagetools inspect "${alpine_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
-            [[ "${release_digest}" =~ ^sha256:[0-9a-f]{64}$ && "${alpine_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
-            manifests_json="$(jq -c --arg image "${image}" --arg release_tag "${release_tag}" --arg release_digest "${release_digest}" --arg alpine_tag "${alpine_tag}" --arg alpine_digest "${alpine_digest}" '. + [{image: $image, canonicalTag: $release_tag, digest: $release_digest}, {image: $image, canonicalTag: $alpine_tag, digest: $alpine_digest}]' <<<"${manifests_json}")"
+            for index_name in release alpine; do
+              if [[ "${index_name}" == release ]]; then index_tag="${release_tag}"; else index_tag="${alpine_tag}"; fi
+              index_manifest="$(docker buildx imagetools inspect "${index_tag}" --format '{{json .Manifest}}')"
+              index_digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"${index_manifest}")"
+              actual_children="$(normalize_index_children <<<"${index_manifest}")"
+              actual_identity="$(jq -c '[.[] | {digest, os, architecture}]' <<<"${actual_children}")"
+              expected_identity="$(jq -c '[.[] | {digest, os, architecture}]' <<<"${expected_children}")"
+              if [[ "${actual_identity}" != "${expected_identity}" ]]; then
+                echo "qualified index children did not match independent platform receipts: ${index_tag}" >&2
+                exit 1
+              fi
+              qualified_children="$(jq -cn --argjson expected "${expected_children}" --argjson actual "${actual_children}" '
+                [range(0; ($expected | length)) as $index | $expected[$index] + {
+                  variant: $actual[$index].variant, mediaType: $actual[$index].mediaType, size: $actual[$index].size
+                }]
+              ')"
+              manifests_json="$(jq -c --arg role "${role}" --arg image "${image}" --arg canonical_tag "${index_tag}" --arg digest "${index_digest}" --argjson children "${qualified_children}" '. + [{role: $role, image: $image, canonicalTag: $canonical_tag, digest: $digest, children: $children}]' <<<"${manifests_json}")"
+              if [[ "${index_name}" == release ]]; then
+                release_digest="${index_digest}"; release_children="${qualified_children}"
+              else
+                alpine_digest="${index_digest}"; alpine_children="${qualified_children}"
+              fi
+            done
+            if [[ "${release_digest}" != "${alpine_digest}" || "${release_children}" != "${alpine_children}" ]]; then
+              echo "qualified index tags for one role must resolve to one digest and child set: ${image}" >&2
+              exit 1
+            fi
             while IFS=$'\t' read -r source digest alias; do
               [[ -n "${alias}" ]] || continue
               aliases_json="$(jq -c --arg alias "${alias}" --arg source "${source}" --arg digest "${digest}" '. + [{alias: $alias, sourceTag: $source, sourceDigest: $digest, kind: "index"}]' <<<"${aliases_json}")"
@@ -781,13 +844,19 @@ jobs:
               [.canonicalGhcrTag, (if .canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end), .aliasGhcrTags[]] | @tsv
             ' "${IMAGE_PLAN}")
           done
+          jq -e '
+            length == 12 and ([.[].canonicalTag] | unique | length == 12)
+            and all(.[]; (.children | length == 3)
+              and ([.children[].artifactArch] | sort == ["amd64", "arm64", "riscv64"])
+              and ([.children[].digest] | unique | length == 3))
+          ' <<<"${manifests_json}" >/dev/null
           jq -S -n --slurpfile identity "${IDENTITY}" --arg verifier_sha "${VERIFIER_SHA}" --argjson verifier_run_id "${GITHUB_RUN_ID}" --argjson verifier_run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --argjson images "${images_json}" --argjson charts "${charts_json}" --argjson manifests "${manifests_json}" --argjson aliases "${aliases_json}" '
             $identity[0] + {kind: "release-qualification", verifier: {workflowPath: ".github/workflows/verify-release-rebuild.yml", workflowSha: $verifier_sha,
               runId: $verifier_run_id, runAttempt: $verifier_run_attempt, event: "workflow_run", conclusion: "success"},
               receipts: {images: ($images | sort_by(.role, .artifactArch)), charts: ($charts | sort_by(.chart))},
               manifests: ($manifests | sort_by(.image)), aliases: ($aliases | sort_by(.alias))}' >"${OUTPUT}"
-          jq -e '.schemaVersion == 1 and .kind == "release-qualification" and (.releaseKind == "stable" or .releaseKind == "beta") and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2 and (.manifests | length) == 12 and (if .releaseKind == "stable" then (.aliases | length) == 48 else .aliases == [] end)' "${OUTPUT}" >/dev/null
+          jq -e '.schemaVersion == 2 and .kind == "release-qualification" and (.releaseKind == "stable" or .releaseKind == "beta") and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2 and (.manifests | length) == 12 and (.manifests | all(.children | length == 3)) and (if .releaseKind == "stable" then (.aliases | length) == 48 else .aliases == [] end)' "${OUTPUT}" >/dev/null
 
       - name: Upload sealed release qualification
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
