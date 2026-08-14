@@ -2,7 +2,7 @@
 level = "info"
 
 [logging.access_log]
-enabled = true
+enabled = false
 stdout = true
 
 [access_log.system]

@@ -5,9 +5,6 @@ level = "info"
 enabled = true
 stdout = true
 
-[access_log.system]
-enabled = true
-
 [access_log.stdout]
 enabled = false
 schema = "ocsf"

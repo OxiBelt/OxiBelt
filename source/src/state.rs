@@ -8,7 +8,7 @@ use crate::cache::ResponseCache;
 use crate::client_identity::ClientIdentityRuntime;
 #[cfg(feature = "admin-runtime")]
 use crate::config::AdminAuditExportSink;
-use crate::config::{Config, RuntimeDirectH1IoMode, UpstreamConfig};
+use crate::config::{AccessLogConfig, Config, RuntimeDirectH1IoMode, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::external_auth::ExternalAuthRuntime;
@@ -149,6 +149,16 @@ pub struct AppSnapshot {
   pub(crate) alt_svc_header_values: AltSvcHeaderValues,
   pub(crate) http1_upgrades_possible: bool,
 }
+
+fn effective_access_log_config(
+  config: &AccessLogConfig,
+  legacy_system_enabled: bool,
+) -> AccessLogConfig {
+  let mut effective = config.clone();
+  effective.system.enabled |= legacy_system_enabled;
+  effective
+}
+
 impl AppSnapshot {
   pub(crate) fn admitted_reload_hardening(
     &self,
@@ -470,7 +480,10 @@ impl AppSnapshot {
     let mitigation = MitigationSink::new(&config, metrics.clone())
       .await
       .context("failed to build mitigation sink")?;
-    let access_log_runtime = AccessLogRuntime::new(&config.access_log, &config.crypto)
+    let effective_access_log =
+      effective_access_log_config(&config.access_log, config.logging.access_log.enabled);
+    let system_access_log_enabled = effective_access_log.system.enabled;
+    let access_log_runtime = AccessLogRuntime::new(&effective_access_log, &config.crypto)
       .await
       .context("failed to build access log runtime")?;
     #[cfg(feature = "admin-runtime")]
@@ -601,7 +614,7 @@ impl AppSnapshot {
     let system_access_log = SystemAccessLog::new(
       &config.logging.access_log,
       access_log_runtime,
-      config.access_log.system.enabled || config.logging.access_log.enabled,
+      system_access_log_enabled,
     )
     .await
     .context("failed to build system access log")?;
@@ -970,5 +983,7 @@ impl AppSnapshot {
   }
 }
 
+#[cfg(test)]
+mod access_log_tests;
 #[cfg(test)]
 mod tests;
