@@ -259,6 +259,11 @@ fn release_rebuild_verification_workflow_text() -> String {
     .expect("independent release rebuild workflow should be readable")
 }
 
+fn stable_alias_promotion_workflow_text() -> String {
+  fs::read_to_string(repo_root().join(".github/workflows/promote-stable-aliases.yml"))
+    .expect("stable alias promotion workflow should be readable")
+}
+
 fn release_rebuild_verification_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/verify-release-rebuild.sh"))
     .expect("independent release rebuild script should be readable")
@@ -2460,13 +2465,13 @@ fn supported_feature_graduation_prs_require_an_unchanged_base_contract() {
       {
         "scope": "features",
         "repository": "OxiBelt/OxiBelt",
-        "targetVersion": "0.7.1",
+        "targetVersion": "0.8.0",
         "policyDefinitionSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       {
         "scope": "kubernetes",
         "repository": "OxiBelt/OxiBelt",
-        "targetVersion": "0.7.1",
+        "targetVersion": "0.8.0",
         "policyDefinitionSha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       }
     ],
@@ -7753,10 +7758,13 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
     BTreeSet::from([
       "enforce-source-validation".to_owned(),
       "ghcr-index-attest".to_owned(),
-      "ghcr-index-promote".to_owned(),
       "ghcr-index-sbom".to_owned(),
       "ghcr-index-verify".to_owned(),
       "ghcr-manifest-publish".to_owned(),
+      "helm-chart-attest".to_owned(),
+      "helm-chart-prepare".to_owned(),
+      "helm-chart-publish".to_owned(),
+      "helm-chart-verify".to_owned(),
       "prepare-release".to_owned(),
       "release-contract".to_owned(),
       "release-image-arch".to_owned(),
@@ -7981,6 +7989,29 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
     release_jobs["release-image-arch"].needs,
     expected_needs(&["prepare-release", "release-vulnerability-gate"])
   );
+  assert_eq!(
+    release_jobs["helm-chart-publish"].needs,
+    expected_needs(&[
+      "prepare-release",
+      "helm-chart-prepare",
+      "release-vulnerability-gate"
+    ])
+  );
+  for job_id in [
+    "helm-chart-prepare",
+    "helm-chart-publish",
+    "helm-chart-attest",
+    "helm-chart-verify",
+  ] {
+    let condition = parsed_release["jobs"][job_id]["if"]
+      .as_str()
+      .unwrap_or_else(|| panic!("{job_id} should exclude build tags"));
+    assert!(
+      condition.contains("needs.prepare-release.outputs.kind == 'stable'")
+        && condition.contains("needs.prepare-release.outputs.kind == 'beta'"),
+      "{job_id} must publish Helm charts only for stable or beta releases"
+    );
+  }
   for job_id in [
     "release-image-arch-scan",
     "release-vulnerability-gate",
@@ -7989,7 +8020,10 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
     "ghcr-index-sbom",
     "ghcr-index-attest",
     "ghcr-index-verify",
-    "ghcr-index-promote",
+    "helm-chart-prepare",
+    "helm-chart-publish",
+    "helm-chart-attest",
+    "helm-chart-verify",
   ] {
     assert!(
       has_transitive_need(&release_jobs, job_id, "enforce-source-validation"),
@@ -8177,10 +8211,13 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     BTreeSet::from([
       "enforce-source-validation".to_owned(),
       "ghcr-index-attest".to_owned(),
-      "ghcr-index-promote".to_owned(),
       "ghcr-index-sbom".to_owned(),
       "ghcr-index-verify".to_owned(),
       "ghcr-manifest-publish".to_owned(),
+      "helm-chart-attest".to_owned(),
+      "helm-chart-prepare".to_owned(),
+      "helm-chart-publish".to_owned(),
+      "helm-chart-verify".to_owned(),
       "prepare-release".to_owned(),
       "release-contract".to_owned(),
       "release-image-arch".to_owned(),
@@ -8202,7 +8239,6 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     arch_jobs.keys().cloned().collect::<BTreeSet<_>>(),
     BTreeSet::from([
       "attest".to_owned(),
-      "promote".to_owned(),
       "publish".to_owned(),
       "verify".to_owned(),
     ])
@@ -8220,11 +8256,11 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     expected_needs(&["prepare-release", "release-vulnerability-gate"])
   );
   assert_eq!(
-    jobs["ghcr-index-promote"].needs,
+    jobs["helm-chart-publish"].needs,
     expected_needs(&[
       "prepare-release",
-      "ghcr-manifest-publish",
-      "ghcr-index-verify"
+      "helm-chart-prepare",
+      "release-vulnerability-gate"
     ])
   );
   assert!(scan_jobs["build"].needs.is_empty());
@@ -8236,17 +8272,12 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     arch_jobs["verify"].needs,
     vec!["publish".to_owned(), "attest".to_owned()]
   );
-  assert_eq!(
-    arch_jobs["promote"].needs,
-    vec!["publish".to_owned(), "verify".to_owned()]
-  );
   for job_id in [
     "release-image-arch",
     "ghcr-manifest-publish",
     "ghcr-index-sbom",
     "ghcr-index-attest",
     "ghcr-index-verify",
-    "ghcr-index-promote",
   ] {
     assert!(has_transitive_need(
       &jobs,
@@ -8323,7 +8354,6 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     "ghcr-index-sbom",
     "ghcr-index-attest",
     "ghcr-index-verify",
-    "ghcr-index-promote",
   ] {
     let includes = parsed["jobs"][job_id]["strategy"]["matrix"]["include"]
       .as_array()
@@ -8418,8 +8448,16 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
       }),
     ),
     (
-      "ghcr-index-promote",
+      "helm-chart-publish",
       serde_json::json!({"actions": "read", "contents": "read", "packages": "write"}),
+    ),
+    (
+      "helm-chart-attest",
+      serde_json::json!({"actions": "read", "attestations": "write", "contents": "read", "id-token": "write", "packages": "read"}),
+    ),
+    (
+      "helm-chart-verify",
+      serde_json::json!({"attestations": "read", "contents": "read", "packages": "read"}),
     ),
   ] {
     assert_eq!(
@@ -8450,10 +8488,6 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
         "contents": "read",
         "packages": "read"
       }),
-    ),
-    (
-      "promote",
-      serde_json::json!({"actions": "read", "contents": "read", "packages": "write"}),
     ),
   ] {
     assert_eq!(
@@ -8677,16 +8711,8 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
       "Verify platform subject was admitted by the global vulnerability gate",
     ),
     (
-      workflow_job_text(&arch_workflow, "promote"),
-      "Revalidate admitted platform subject before promotion",
-    ),
-    (
       workflow_job_text(&workflow, "ghcr-manifest-publish"),
       "Validate admitted manifest children before registry login",
-    ),
-    (
-      workflow_job_text(&workflow, "ghcr-index-promote"),
-      "Revalidate admitted index children before promotion",
     ),
   ];
   for (job, verification) in package_boundaries {
@@ -8711,18 +8737,13 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   let manifest = workflow_job_text(&workflow, "ghcr-manifest-publish");
   assert!(manifest.contains("for artifact_arch in amd64 arm64 riscv64"));
   assert!(!manifest.contains("aquasecurity/trivy-action@"));
-  assert!(
-    workflow_job_text(&workflow, "ghcr-index-promote")
-      .contains(".children[] | [.artifactArch, .digest] | @tsv")
-  );
-
   assert_eq!(scan_workflow.matches("packages: write").count(), 0);
-  assert_eq!(arch_workflow.matches("packages: write").count(), 2);
+  assert_eq!(arch_workflow.matches("packages: write").count(), 1);
   assert_eq!(workflow.matches("packages: write").count(), 3);
   assert_eq!(
     workflow.matches("push-to-registry: false").count()
       + arch_workflow.matches("push-to-registry: false").count(),
-    6,
+    8,
     "every attestation action must keep bundles in the GitHub Attestations API"
   );
   assert_eq!(
@@ -8732,7 +8753,7 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
       + arch_workflow
         .matches("actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2")
         .count(),
-    6
+    8
   );
 }
 
@@ -8744,12 +8765,10 @@ fn release_vulnerability_gate_preserves_attestation_and_digest_publication_chain
   let publish = workflow_job_text(&arch_workflow, "publish");
   let attest = workflow_job_text(&arch_workflow, "attest");
   let verify = workflow_job_text(&arch_workflow, "verify");
-  let promote = workflow_job_text(&arch_workflow, "promote");
   let manifest = workflow_job_text(&workflow, "ghcr-manifest-publish");
   let index_sbom = workflow_job_text(&workflow, "ghcr-index-sbom");
   let index_attest = workflow_job_text(&workflow, "ghcr-index-attest");
   let index_verify = workflow_job_text(&workflow, "ghcr-index-verify");
-  let index_promote = workflow_job_text(&workflow, "ghcr-index-promote");
 
   for expected in [
     "Validate Docker image artifact for publish",
@@ -8776,10 +8795,7 @@ fn release_vulnerability_gate_preserves_attestation_and_digest_publication_chain
     "validate-strict-dataplane-image.py",
   ] {
     assert!(
-      !publish.contains(forbidden)
-        && !promote.contains(forbidden)
-        && !manifest.contains(forbidden)
-        && !index_promote.contains(forbidden),
+      !publish.contains(forbidden) && !manifest.contains(forbidden),
       "registry mutation jobs must not execute build surface {forbidden}"
     );
   }
@@ -8956,6 +8972,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
   let workflow = release_workflow_text();
   let scan_workflow = release_image_arch_scan_workflow_text();
   let arch_workflow = release_image_arch_workflow_text();
+  let promotion_workflow = stable_alias_promotion_workflow_text();
   let caller_job_text = workflow_job_text(&workflow, "release-image-arch");
 
   for (artifact_arch, _, _, _) in OXIBELT_IMAGE_ARTIFACTS {
@@ -9000,7 +9017,8 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "Publish signed platform SBOM",
     "Publish signed platform rebuild recipe",
     "Verify GitHub API platform attestations",
-    "Promote canonical GHCR aliases",
+    "Publish exact-version Helm OCI charts",
+    "https://oxibelt.dev/attestations/helm-chart-rebuild/v3",
     "ghcr-manifest-publish",
     "Publish canonical multi-arch manifests",
     "ghcr-index-sbom",
@@ -9011,8 +9029,6 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "Publish signed index rebuild recipe",
     "ghcr-index-verify",
     "Verify GitHub API index attestations",
-    "ghcr-index-promote",
-    "Promote canonical multi-arch aliases",
     "if plan[\"schemaVersion\"] != 8:",
     "release plan must contain exactly 30 unique role/architecture artifacts",
     "release plan must contain exactly 12 unique role manifests",
@@ -9027,7 +9043,8 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     assert!(
       workflow.contains(expected)
         || scan_workflow.contains(expected)
-        || arch_workflow.contains(expected),
+        || arch_workflow.contains(expected)
+        || promotion_workflow.contains(expected),
       "release workflows should include {expected}"
     );
   }
@@ -9035,6 +9052,18 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     !workflow.contains("pattern: oxibelt-alpine-musl-*-image"),
     "release workflow should not download every image tar during manifest publishing"
   );
+  for forbidden in ["Promote canonical GHCR aliases", "ghcr-index-promote"] {
+    assert!(!workflow.contains(forbidden) && !arch_workflow.contains(forbidden));
+  }
+  for expected in [
+    "name: Promote qualified stable aliases",
+    "cancel-in-progress: false",
+    "name: Validate sealed stable qualification",
+    "name: Promote stable aliases sequentially",
+    "packages: write",
+  ] {
+    assert!(promotion_workflow.contains(expected));
+  }
   for removed in [
     "ghcr-index-admission-verify",
     "cosign",
@@ -9063,8 +9092,13 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
 
   assert_eq!(
     jobs.keys().cloned().collect::<BTreeSet<_>>(),
-    BTreeSet::from(["resolve".to_owned(), "verify".to_owned()]),
-    "independent rebuild workflow should separate immutable planning from rebuild verification"
+    BTreeSet::from([
+      "release-qualification".to_owned(),
+      "resolve".to_owned(),
+      "verify".to_owned(),
+      "verify-helm-chart".to_owned(),
+    ]),
+    "independent rebuild workflow should separate planning, image/chart rebuilds, and aggregate qualification"
   );
   assert_eq!(
     parsed["permissions"],
@@ -9129,6 +9163,12 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "--revision \"${RELEASE_REVISION}\"",
     "--verifier-sha \"${VERIFIER_SHA}\"",
     "Upload independent rebuild receipt",
+    "Rebuild ${{ matrix.chart }} Helm OCI chart independently",
+    "https://oxibelt.dev/attestations/helm-chart-rebuild/v3",
+    "release-qualification-${{ needs.resolve.outputs.revision }}",
+    "(.receipts.images | length) == 30",
+    "(.receipts.charts | length) == 2",
+    "$current + [$receipt + {receiptSha256: $receipt_sha}]",
   ] {
     assert!(
       workflow.contains(expected),
@@ -9136,8 +9176,6 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     );
   }
   for forbidden in [
-    "actions/download-artifact",
-    "oxibelt-release-metadata",
     "inputs.runner",
     "MANUAL_RUNNER",
     "attestations: write",
@@ -9234,6 +9272,65 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
       builder.contains(expected),
       "independent rebuild builder must separate trusted tools from release inputs: {expected}"
     );
+  }
+}
+
+#[test]
+fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation() {
+  let release = release_workflow_text();
+  let arch = release_image_arch_workflow_text();
+  let verifier = release_rebuild_verification_workflow_text();
+  let promotion = stable_alias_promotion_workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&promotion).expect("stable alias promotion workflow should parse");
+  let jobs = parse_jobs(&promotion);
+
+  assert_eq!(
+    parsed["on"]["workflow_run"]["workflows"],
+    serde_json::json!(["Independently verify release rebuilds"])
+  );
+  assert_eq!(parsed["concurrency"]["cancel-in-progress"], false);
+  assert_eq!(
+    jobs.keys().cloned().collect::<BTreeSet<_>>(),
+    BTreeSet::from(["promote".to_owned(), "validate".to_owned()])
+  );
+  assert_eq!(
+    parsed["jobs"]["validate"]["permissions"],
+    serde_json::json!({"actions": "read", "attestations": "read", "contents": "read", "packages": "read"})
+  );
+  assert_eq!(
+    parsed["jobs"]["promote"]["permissions"],
+    serde_json::json!({"actions": "read", "contents": "read", "packages": "write"})
+  );
+  assert_eq!(promotion.matches("packages: write").count(), 1);
+  assert_eq!(release.matches("Promote canonical multi-arch aliases").count(), 0);
+  assert_eq!(arch.matches("Promote canonical GHCR aliases").count(), 0);
+
+  for expected in [
+    "github.event.workflow_run.event == 'workflow_run'",
+    "q.releaseKind !== 'stable'",
+    "release-qualification-${{ steps.reauthenticate.outputs.beta_revision }}",
+    "stable release must be the single approved documentation-only commit after its beta source",
+    "stable publication occurred before the beta qualification completed its 24-hour soak",
+    "betaQualification.aggregateSha256",
+    "(.receipts.images | length) == 30",
+    "(.receipts.charts | length) == 2",
+    "q.aliases.some((entry) => entry.alias.startsWith('ghcr.io/oxibelt/charts/'))",
+    "alias changed after validation",
+    "Promote only qualified image aliases",
+  ] {
+    assert!(
+      promotion.contains(expected) || verifier.contains(expected),
+      "release qualification and promotion must enforce {expected}"
+    );
+  }
+  for expected in [
+    "if: needs.resolve.outputs.automatic == 'true'",
+    "releaseKind: stable ? 'stable' : 'beta'",
+    "if .releaseKind == \"stable\" then (.aliases | length) == 48 else .aliases == [] end",
+    "$current + [$receipt + {receiptSha256: $receipt_sha}]",
+  ] {
+    assert!(verifier.contains(expected));
   }
 }
 

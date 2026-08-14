@@ -50,10 +50,14 @@ jobs:
        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'release'))
     runs-on: ubuntu-26.04
     outputs:
+      automatic: ${{ steps.plan.outputs.automatic }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      release_version: ${{ steps.plan.outputs.release_version }}
       release_ref: ${{ steps.plan.outputs.release_ref }}
       revision: ${{ steps.plan.outputs.revision }}
       verifier_sha: ${{ steps.plan.outputs.verifier_sha }}
+      producer_run_id: ${{ steps.plan.outputs.producer_run_id }}
+      producer_run_attempt: ${{ steps.plan.outputs.producer_run_attempt }}
 
     steps:
       - name: Checkout approved verifier
@@ -112,7 +116,13 @@ jobs:
 
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             release_tag="${MANUAL_TAG}"
+            automatic=false
+            producer_run_id=0
+            producer_run_attempt=0
           else
+            automatic=true
+            producer_run_id="${{ github.event.workflow_run.id }}"
+            producer_run_attempt="${{ github.event.workflow_run.run_attempt }}"
             release_tag="${WORKFLOW_RUN_HEAD_BRANCH}"
             if [[ ! "${release_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
               mapfile -t matching_tags < <(
@@ -208,10 +218,14 @@ jobs:
             exit 1
           fi
           {
+            echo "automatic=${automatic}"
             echo "matrix=${matrix}"
+            echo "release_version=${release_tag}"
             echo "release_ref=${release_ref}"
             echo "revision=${revision}"
             echo "verifier_sha=${verifier_sha}"
+            echo "producer_run_id=${producer_run_id}"
+            echo "producer_run_attempt=${producer_run_attempt}"
           } >>"${GITHUB_OUTPUT}"
 
   verify:
@@ -342,5 +356,443 @@ jobs:
         with:
           name: rebuild-receipt-${{ matrix.role }}-${{ matrix.artifact_arch }}
           path: ${{ runner.temp }}/rebuild-receipt-${{ matrix.role }}-${{ matrix.artifact_arch }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-helm-chart:
+    name: Rebuild ${{ matrix.chart }} Helm OCI chart independently
+    needs: resolve
+    if: needs.resolve.outputs.automatic == 'true'
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chart: oxibelt
+            repository: ghcr.io/oxibelt/charts/oxibelt
+          - chart: oxibelt-gateway-controller
+            repository: ghcr.io/oxibelt/charts/oxibelt-gateway-controller
+
+    steps:
+      - name: Checkout approved verifier at its immutable revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.verifier_sha }}
+          path: verifier
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout independent release source as chart inputs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.release_ref }}
+          path: release
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup canonical Helm rebuild packager
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
+
+      - name: Enable hash-pinned pnpm and install verifier dependencies
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+          pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: verifier
+
+      - name: Install pinned ORAS acquisition client
+        env:
+          GOBIN: ${{ runner.temp }}/oras-bin
+        run: |
+          set -euo pipefail
+          mkdir -m 0700 "${GOBIN}"
+          go install oras.land/oras/cmd/oras@v1.3.3
+          "${GOBIN}/oras" version | grep -E '(^|[[:space:]])1\.3\.3($|[[:space:]])'
+
+      - name: Rebuild, authenticate, and compare exact chart bytes
+        env:
+          CHART: ${{ matrix.chart }}
+          GH_TOKEN: ${{ github.token }}
+          ORAS_BIN: ${{ runner.temp }}/oras-bin/oras
+          RELEASE_REF: ${{ needs.resolve.outputs.release_ref }}
+          RELEASE_REVISION: ${{ needs.resolve.outputs.revision }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+          REPOSITORY: ${{ matrix.repository }}
+          VERIFIER_SHA: ${{ needs.resolve.outputs.verifier_sha }}
+        run: |
+          set -euo pipefail
+          rebuilt="${RUNNER_TEMP}/rebuilt-helm-charts"
+          work="${RUNNER_TEMP}/verify-${CHART}"
+          mkdir -m 0700 "${rebuilt}" "${work}"
+          node --import tsx verifier/devops/sources/helm_chart_release.ts prepare \
+            --workspace-path release --ref "${RELEASE_REF}" --revision "${RELEASE_REVISION}" --output-directory "${rebuilt}"
+          descriptor="${RUNNER_TEMP}/${CHART}-descriptor.json"
+          "${ORAS_BIN}" manifest fetch --descriptor "${REPOSITORY}:${RELEASE_VERSION}" >"${descriptor}"
+          digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "${descriptor}")"
+          attestations="${RUNNER_TEMP}/${CHART}-attestations.json"
+          gh attestation verify "oci://${REPOSITORY}@${digest}" \
+            --repo OxiBelt/OxiBelt \
+            --signer-workflow OxiBelt/OxiBelt/.github/workflows/release.yml \
+            --signer-digest "${RELEASE_REVISION}" \
+            --source-digest "${RELEASE_REVISION}" \
+            --source-ref "${RELEASE_REF}" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --deny-self-hosted-runners \
+            --predicate-type https://oxibelt.dev/attestations/helm-chart-rebuild/v3 \
+            --limit 100 --format json >"${attestations}"
+          predicate="${RUNNER_TEMP}/${CHART}-predicate.json"
+          jq -c '
+            [.. | objects |
+              select(.predicateType? == "https://oxibelt.dev/attestations/helm-chart-rebuild/v3" and (.predicate? | type) == "object") |
+              .predicate] | unique |
+            if length == 1 then .[0] else error("expected one unique schema-v3 chart predicate") end
+          ' "${attestations}" >"${predicate}"
+          node --import tsx verifier/devops/sources/helm_chart_oci_release.ts validate-predicate --input "${predicate}"
+          jq -e --arg ref "${RELEASE_REF}" --arg revision "${RELEASE_REVISION}" --arg version "${RELEASE_VERSION}" '
+            .schemaVersion == 3
+            and .predicateType == "https://oxibelt.dev/attestations/helm-chart-rebuild/v3"
+            and .receipt.source == {ref: $ref, revision: $revision, commitEpoch: .receipt.source.commitEpoch, releaseVersion: $version}
+            and .comparison.exactPackageBytes == true
+            and .comparison.deterministicPackager == "v4.2.4"
+          ' "${predicate}" >/dev/null
+          ORAS_BIN="${ORAS_BIN}" HELM_CHART_RELEASE_HELPER="$(pwd)/verifier/devops/sources/helm_chart_release.ts" \
+            verifier/tests/scripts/verify-release-helm-chart.sh \
+              --mode rebuild --repository "${REPOSITORY}" --digest "${digest}" \
+              --version "${RELEASE_VERSION}" --chart-name "${CHART}" \
+              --expected-archive "${rebuilt}/${CHART}-${RELEASE_VERSION}.tgz" \
+              --work-directory "${work}" --workspace-path release \
+              --release-ref "${RELEASE_REF}" --revision "${RELEASE_REVISION}"
+          archive_sha="$(sha256sum "${rebuilt}/${CHART}-${RELEASE_VERSION}.tgz" | awk '{print $1}')"
+          predicate_sha="$(sha256sum "${predicate}" | awk '{print $1}')"
+          jq -S -n \
+            --arg chart "${CHART}" --arg repository "${REPOSITORY}" --arg digest "${digest}" \
+            --arg archive_sha256 "${archive_sha}" --arg predicate_sha256 "${predicate_sha}" \
+            --arg ref "${RELEASE_REF}" --arg revision "${RELEASE_REVISION}" \
+            --arg workflow_sha "${VERIFIER_SHA}" --argjson run_id "${GITHUB_RUN_ID}" \
+            --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
+            {schemaVersion: 1, outcome: "exact", chart: $chart,
+             subject: {repository: $repository, digest: $digest}, archiveSha256: $archive_sha256,
+             predicate: {schemaVersion: 3, sha256: $predicate_sha256,
+               type: "https://oxibelt.dev/attestations/helm-chart-rebuild/v3"},
+             source: {repository: "OxiBelt/OxiBelt", ref: $ref, revision: $revision},
+             workflow: {repository: "OxiBelt/OxiBelt", path: ".github/workflows/verify-release-rebuild.yml",
+               sha: $workflow_sha, runId: $run_id, runAttempt: $run_attempt}}' \
+            >"${RUNNER_TEMP}/helm-rebuild-receipt-${CHART}.json"
+
+      - name: Upload independent chart rebuild receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: helm-rebuild-receipt-${{ matrix.chart }}
+          path: ${{ runner.temp }}/helm-rebuild-receipt-${{ matrix.chart }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  release-qualification:
+    name: Seal release qualification
+    needs:
+      - resolve
+      - verify
+      - verify-helm-chart
+    if: needs.resolve.outputs.automatic == 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+
+    steps:
+      - name: Download exact producer release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-release-metadata
+          path: ${{ runner.temp }}/producer-release-metadata
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.resolve.outputs.producer_run_id }}
+
+      - name: Download exact producer release contract for stable qualification
+        if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: release-contract-${{ needs.resolve.outputs.revision }}
+          path: ${{ runner.temp }}/producer-release-contract
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.resolve.outputs.producer_run_id }}
+
+      - name: Authenticate immutable producer, tag, and release identity
+        id: identity
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          OUTPUT: ${{ runner.temp }}/release-identity.json
+          PRODUCER_RUN_ATTEMPT: ${{ needs.resolve.outputs.producer_run_attempt }}
+          PRODUCER_RUN_ID: ${{ needs.resolve.outputs.producer_run_id }}
+          RELEASE_CONTRACT: ${{ runner.temp }}/producer-release-contract/release-contract.json
+          RELEASE_REVISION: ${{ needs.resolve.outputs.revision }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+        with:
+          script: |
+            const fs = require('fs')
+            const version = process.env.RELEASE_VERSION
+            const revision = process.env.RELEASE_REVISION
+            const runId = Number(process.env.PRODUCER_RUN_ID)
+            const runAttempt = Number(process.env.PRODUCER_RUN_ATTEMPT)
+            const stable = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(version ?? '')
+            const beta = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.([1-9][0-9]*)$/.test(version ?? '')
+            if (`${context.repo.owner}/${context.repo.repo}` !== 'OxiBelt/OxiBelt' || (!stable && !beta) ||
+                !/^[0-9a-f]{40}$/.test(revision ?? '') || !Number.isSafeInteger(runId) || runId < 1 ||
+                !Number.isSafeInteger(runAttempt) || runAttempt < 1) {
+              core.setFailed('stable qualification source identity is malformed')
+              return
+            }
+            const run = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: runId})).data
+            if (run.path !== '.github/workflows/release.yml' || run.event !== 'release' ||
+                run.status !== 'completed' || run.conclusion !== 'success' || run.run_attempt !== runAttempt ||
+                run.head_sha !== revision || run.head_branch !== version ||
+                run.repository?.full_name !== 'OxiBelt/OxiBelt' || run.head_repository?.full_name !== 'OxiBelt/OxiBelt') {
+              core.setFailed('producer workflow identity or conclusion does not match the stable release')
+              return
+            }
+            const ref = (await github.rest.git.getRef({...context.repo, ref: `tags/${version}`})).data
+            if (ref.ref !== `refs/tags/${version}` || ref.object.type !== 'tag' || !/^[0-9a-f]{40}$/.test(ref.object.sha)) {
+              core.setFailed('stable release must use one immutable annotated tag object')
+              return
+            }
+            const tag = (await github.rest.git.getTag({...context.repo, tag_sha: ref.object.sha})).data
+            if (tag.tag !== version || tag.object.type !== 'commit' || tag.object.sha !== revision) {
+              core.setFailed('stable annotated tag does not resolve to the producer commit')
+              return
+            }
+            const release = (await github.rest.repos.getReleaseByTag({...context.repo, tag: version})).data
+            const latest = stable ? (await github.rest.repos.getLatestRelease(context.repo)).data : null
+            if ((stable && release.id !== latest.id) || release.tag_name !== version || release.draft || release.prerelease !== beta ||
+                release.target_commitish !== revision || release.published_at === null) {
+              core.setFailed('release is draft, stale, has the wrong channel, or is not bound to the exact commit')
+              return
+            }
+            let betaQualification = null
+            if (stable) {
+              const contractStat = fs.lstatSync(process.env.RELEASE_CONTRACT)
+              if (!contractStat.isFile() || contractStat.isSymbolicLink() || contractStat.size < 1 || contractStat.size > 262144) {
+                throw new Error('stable producer release contract is not one bounded regular file')
+              }
+              const contract = JSON.parse(fs.readFileSync(process.env.RELEASE_CONTRACT, 'utf8'))
+              const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+              const betaPattern = new RegExp(`^${escaped}-beta\\.([1-9][0-9]*)$`)
+              const betaSources = contract.supportedUpgradeSources?.filter((source) => betaPattern.test(source)) ?? []
+              if (contract.schemaVersion !== 1 || contract.kind !== 'stable' || contract.version !== version ||
+                  contract.ref !== `refs/tags/${version}` || contract.revision !== revision || betaSources.length !== 1) {
+                throw new Error('stable release contract must bind exactly one same-target beta source')
+              }
+              const releases = await github.paginate(github.rest.repos.listReleases, {...context.repo, per_page: 100})
+              const validBetas = releases.filter((candidate) => !candidate.draft && candidate.prerelease &&
+                candidate.published_at !== null && betaPattern.test(candidate.tag_name))
+              validBetas.sort((left, right) => Number(betaPattern.exec(right.tag_name)[1]) - Number(betaPattern.exec(left.tag_name)[1]))
+              const betaRelease = validBetas[0]
+              if (!betaRelease || betaRelease.tag_name !== betaSources[0]) {
+                throw new Error('release contract beta source is not the latest valid published beta')
+              }
+              const betaRef = (await github.rest.git.getRef({...context.repo, ref: `tags/${betaRelease.tag_name}`})).data
+              if (betaRef.object.type !== 'tag' || !/^[0-9a-f]{40}$/.test(betaRef.object.sha)) {
+                throw new Error('qualified beta must use an annotated tag')
+              }
+              const betaTag = (await github.rest.git.getTag({...context.repo, tag_sha: betaRef.object.sha})).data
+              if (betaTag.tag !== betaRelease.tag_name || betaTag.object.type !== 'commit' || !/^[0-9a-f]{40}$/.test(betaTag.object.sha)) {
+                throw new Error('qualified beta tag object is invalid')
+              }
+              const comparison = (await github.rest.repos.compareCommits({...context.repo, base: betaTag.object.sha, head: revision})).data
+              const changed = (comparison.files ?? []).map((file) => file.filename).sort()
+              if (comparison.ahead_by !== 1 || comparison.behind_by !== 0 || comparison.commits.length !== 1 ||
+                  changed.join(',') !== ['CHANGELOG.md', 'docs/Upgrading.md'].sort().join(',')) {
+                throw new Error('stable release must be the single approved documentation-only commit after its beta source')
+              }
+              const verifierRuns = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                ...context.repo, workflow_id: '.github/workflows/verify-release-rebuild.yml', event: 'workflow_run', status: 'success', per_page: 100,
+              })
+              const candidates = []
+              for (const candidate of verifierRuns) {
+                if (candidate.path !== '.github/workflows/verify-release-rebuild.yml' || candidate.event !== 'workflow_run' ||
+                    candidate.status !== 'completed' || candidate.conclusion !== 'success' || !Number.isInteger(candidate.run_attempt)) continue
+                const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {...context.repo, run_id: candidate.id, per_page: 100})
+                const matching = artifacts.filter((artifact) => !artifact.expired && artifact.name === `release-qualification-${betaTag.object.sha}`)
+                if (matching.length === 1) candidates.push({run: candidate, artifact: matching[0]})
+              }
+              candidates.sort((left, right) => right.run.id - left.run.id)
+              if (candidates.length < 1) throw new Error('latest beta has no successful automatic full qualification aggregate')
+              const accepted = candidates[0]
+              const soakStart = Math.max(Date.parse(betaRelease.published_at), Date.parse(accepted.run.updated_at))
+              if (!Number.isFinite(soakStart) || Date.parse(release.published_at) - soakStart < 24 * 60 * 60 * 1000) {
+                throw new Error('stable publication occurred before the beta qualification completed its 24-hour soak')
+              }
+              betaQualification = {version: betaRelease.tag_name, ref: `refs/tags/${betaRelease.tag_name}`,
+                tagObjectSha: betaRef.object.sha, commit: betaTag.object.sha, releaseId: betaRelease.id,
+                publishedAt: betaRelease.published_at, verifierRunId: accepted.run.id,
+                verifierRunAttempt: accepted.run.run_attempt, verifierWorkflowSha: accepted.run.head_sha,
+                verifierCompletedAt: accepted.run.updated_at,
+                artifactId: accepted.artifact.id, artifactName: accepted.artifact.name}
+              core.setOutput('beta_run_id', String(accepted.run.id))
+              core.setOutput('beta_revision', betaTag.object.sha)
+            }
+            const identity = {schemaVersion: 1, repository: 'OxiBelt/OxiBelt', releaseKind: stable ? 'stable' : 'beta', version,
+              ref: `refs/tags/${version}`, tagObjectSha: ref.object.sha, commit: revision, releaseId: release.id,
+              publishedAt: release.published_at, producer: {workflowPath: '.github/workflows/release.yml',
+                runId, runAttempt, event: 'release', headSha: revision, conclusion: 'success'},
+              ...(betaQualification === null ? {} : {betaQualification})}
+            fs.writeFileSync(process.env.OUTPUT, `${JSON.stringify(identity)}\n`, {encoding: 'utf8', flag: 'wx', mode: 0o600})
+
+      - name: Download exact beta qualification aggregate for stable soak binding
+        if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: release-qualification-${{ steps.identity.outputs.beta_revision }}
+          path: ${{ runner.temp }}/beta-release-qualification
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.identity.outputs.beta_run_id }}
+
+      - name: Bind stable identity to exact beta aggregate bytes
+        if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') }}
+        env:
+          BETA_QUALIFICATION: ${{ runner.temp }}/beta-release-qualification/release-qualification.json
+          IDENTITY: ${{ runner.temp }}/release-identity.json
+        run: |
+          set -euo pipefail
+          jq -e --slurpfile identity "${IDENTITY}" '
+            .schemaVersion == 1 and .kind == "release-qualification" and .releaseKind == "beta"
+            and .version == $identity[0].betaQualification.version
+            and .ref == $identity[0].betaQualification.ref
+            and .tagObjectSha == $identity[0].betaQualification.tagObjectSha
+            and .commit == $identity[0].betaQualification.commit
+            and .releaseId == $identity[0].betaQualification.releaseId
+            and .publishedAt == $identity[0].betaQualification.publishedAt
+            and .verifier.runId == $identity[0].betaQualification.verifierRunId
+            and .verifier.runAttempt == $identity[0].betaQualification.verifierRunAttempt
+            and .verifier.workflowSha == $identity[0].betaQualification.verifierWorkflowSha
+            and .verifier.event == "workflow_run" and .verifier.conclusion == "success"
+            and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2
+          ' "${BETA_QUALIFICATION}" >/dev/null
+          aggregate_sha256="$(sha256sum "${BETA_QUALIFICATION}" | awk '{print $1}')"
+          jq -S --arg aggregate_sha256 "${aggregate_sha256}" '.betaQualification.aggregateSha256 = $aggregate_sha256' "${IDENTITY}" >"${IDENTITY}.next"
+          mv "${IDENTITY}.next" "${IDENTITY}"
+
+      - name: Download exactly 30 image receipts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          pattern: rebuild-receipt-*
+          path: ${{ runner.temp }}/image-receipts
+          merge-multiple: true
+
+      - name: Download exactly two chart receipts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          pattern: helm-rebuild-receipt-*
+          path: ${{ runner.temp }}/chart-receipts
+          merge-multiple: true
+
+      - name: Start isolated rootless Docker for registry readback
+        uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
+        with:
+          version: v29.7.2
+          rootless: true
+          set-host: true
+          daemon-config: |
+            {"exec-opts": ["native.cgroupdriver=cgroupfs"]}
+
+      - name: Setup pinned Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.36.1
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
+
+      - name: Validate receipt inventory and snapshot immutable subjects
+        env:
+          CHART_RECEIPTS: ${{ runner.temp }}/chart-receipts
+          GH_TOKEN: ${{ github.token }}
+          IDENTITY: ${{ runner.temp }}/release-identity.json
+          IMAGE_PLAN: ${{ runner.temp }}/producer-release-metadata/image-plan.json
+          IMAGE_RECEIPTS: ${{ runner.temp }}/image-receipts
+          OUTPUT: ${{ runner.temp }}/release-qualification.json
+          RELEASE_REF: ${{ needs.resolve.outputs.release_ref }}
+          RELEASE_REVISION: ${{ needs.resolve.outputs.revision }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+          VERIFIER_SHA: ${{ needs.resolve.outputs.verifier_sha }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          jq -e --arg version "${RELEASE_VERSION}" --arg revision "${RELEASE_REVISION}" '
+            .schemaVersion == 8 and .version == $version and .revision == $revision
+            and (.kind == "stable" or .kind == "beta")
+          ' "${IMAGE_PLAN}" >/dev/null
+          mapfile -d '' image_files < <(find "${IMAGE_RECEIPTS}" -maxdepth 1 -type f -name 'rebuild-receipt-*.json' -print0)
+          mapfile -d '' chart_files < <(find "${CHART_RECEIPTS}" -maxdepth 1 -type f -name 'helm-rebuild-receipt-*.json' -print0)
+          [[ "${#image_files[@]}" -eq 30 && "${#chart_files[@]}" -eq 2 ]]
+          images_json='[]'
+          aliases_json='[]'
+          for receipt in "${image_files[@]}"; do
+            jq -e --arg ref "${RELEASE_REF}" --arg revision "${RELEASE_REVISION}" --arg sha "${VERIFIER_SHA}" \
+              --argjson run_id "${GITHUB_RUN_ID}" --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
+              .schemaVersion == 1 and (.outcome == "exact" or .outcome == "normalized_equivalent")
+              and .source == {repository: "OxiBelt/OxiBelt", ref: $ref, revision: $revision}
+              and .workflow == {repository: "OxiBelt/OxiBelt", path: ".github/workflows/verify-release-rebuild.yml",
+                sha: $sha, runId: $run_id, runAttempt: $run_attempt}
+              and (.build.role | IN("standalone", "dataplane", "dataplane-strict", "controller", "tools", "keysigner"))
+              and (.build.artifactArch | IN("amd64v2", "amd64", "amd64v4", "arm64", "riscv64"))
+              and (.published.imageDigest | test("^sha256:[0-9a-f]{64}$"))' "${receipt}" >/dev/null
+            role="$(jq -r '.build.role' "${receipt}")"; arch="$(jq -r '.build.artifactArch' "${receipt}")"
+            case "${role}" in standalone) image=ghcr.io/oxibelt/oxibelt;; dataplane) image=ghcr.io/oxibelt/oxibelt-dataplane;; dataplane-strict) image=ghcr.io/oxibelt/oxibelt-dataplane-strict;; controller) image=ghcr.io/oxibelt/oxibelt-gateway-controller;; tools) image=ghcr.io/oxibelt/oxibelt-tools;; keysigner) image=ghcr.io/oxibelt/oxibelt-keysigner;; esac
+            digest="$(jq -r '.published.imageDigest' "${receipt}")"; receipt_sha="$(sha256sum "${receipt}" | awk '{print $1}')"
+            canonical="${image}:${RELEASE_VERSION}-alpine-musl-${arch}"
+            resolved="$(docker buildx imagetools inspect "${canonical}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "${resolved}" == "${digest}" ]]
+            images_json="$(jq -c --arg role "${role}" --arg arch "${arch}" --arg image "${image}" --arg canonical "${canonical}" --arg digest "${digest}" --arg receipt_sha "${receipt_sha}" '. + [{role: $role, artifactArch: $arch, image: $image, canonicalTag: $canonical, digest: $digest, receiptSha256: $receipt_sha}]' <<<"${images_json}")"
+            while read -r alias; do
+              [[ -n "${alias}" ]] || continue
+              aliases_json="$(jq -c --arg alias "${alias}" --arg source "${canonical}" --arg digest "${digest}" '. + [{alias: $alias, sourceTag: $source, sourceDigest: $digest, kind: "platform"}]' <<<"${aliases_json}")"
+            done < <(jq -r --arg role "${role}" --arg arch "${arch}" '.artifacts[] | select(.role == $role and .artifactArch == $arch) | .aliasGhcrTags[]' "${IMAGE_PLAN}")
+          done
+          [[ "$(jq '[.[] | (.role + "/" + .artifactArch)] | unique | length' <<<"${images_json}")" -eq 30 ]]
+          charts_json='[]'
+          for receipt in "${chart_files[@]}"; do
+            jq -e --arg ref "${RELEASE_REF}" --arg revision "${RELEASE_REVISION}" --arg sha "${VERIFIER_SHA}" --argjson run_id "${GITHUB_RUN_ID}" --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
+              .schemaVersion == 1 and .outcome == "exact" and (.chart | IN("oxibelt", "oxibelt-gateway-controller"))
+              and .source == {repository: "OxiBelt/OxiBelt", ref: $ref, revision: $revision}
+              and .workflow == {repository: "OxiBelt/OxiBelt", path: ".github/workflows/verify-release-rebuild.yml", sha: $sha, runId: $run_id, runAttempt: $run_attempt}
+              and .predicate.schemaVersion == 3 and .predicate.type == "https://oxibelt.dev/attestations/helm-chart-rebuild/v3"
+              and (.subject.digest | test("^sha256:[0-9a-f]{64}$"))' "${receipt}" >/dev/null
+            receipt_sha="$(sha256sum "${receipt}" | awk '{print $1}')"
+            receipt_json="$(jq -c . "${receipt}")"
+            charts_json="$(jq -cn --argjson current "${charts_json}" --argjson receipt "${receipt_json}" --arg receipt_sha "${receipt_sha}" '$current + [$receipt + {receiptSha256: $receipt_sha}]')"
+          done
+          [[ "$(jq '[.[].chart] | unique | length' <<<"${charts_json}")" -eq 2 ]]
+          manifests_json='[]'
+          for image in ghcr.io/oxibelt/oxibelt ghcr.io/oxibelt/oxibelt-dataplane ghcr.io/oxibelt/oxibelt-dataplane-strict ghcr.io/oxibelt/oxibelt-gateway-controller ghcr.io/oxibelt/oxibelt-tools ghcr.io/oxibelt/oxibelt-keysigner; do
+            release_tag="${image}:${RELEASE_VERSION}"
+            alpine_tag="${image}:${RELEASE_VERSION}-alpine-musl"
+            release_digest="$(docker buildx imagetools inspect "${release_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            alpine_digest="$(docker buildx imagetools inspect "${alpine_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "${release_digest}" =~ ^sha256:[0-9a-f]{64}$ && "${alpine_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            manifests_json="$(jq -c --arg image "${image}" --arg release_tag "${release_tag}" --arg release_digest "${release_digest}" --arg alpine_tag "${alpine_tag}" --arg alpine_digest "${alpine_digest}" '. + [{image: $image, canonicalTag: $release_tag, digest: $release_digest}, {image: $image, canonicalTag: $alpine_tag, digest: $alpine_digest}]' <<<"${manifests_json}")"
+            while IFS=$'\t' read -r source digest alias; do
+              [[ -n "${alias}" ]] || continue
+              aliases_json="$(jq -c --arg alias "${alias}" --arg source "${source}" --arg digest "${digest}" '. + [{alias: $alias, sourceTag: $source, sourceDigest: $digest, kind: "index"}]' <<<"${aliases_json}")"
+            done < <(jq -r --arg release_tag "${release_tag}" --arg release_digest "${release_digest}" --arg alpine_tag "${alpine_tag}" --arg alpine_digest "${alpine_digest}" '
+              .manifests[] | select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
+              [.canonicalGhcrTag, (if .canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end), .aliasGhcrTags[]] | @tsv
+            ' "${IMAGE_PLAN}")
+          done
+          jq -S -n --slurpfile identity "${IDENTITY}" --arg verifier_sha "${VERIFIER_SHA}" --argjson verifier_run_id "${GITHUB_RUN_ID}" --argjson verifier_run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --argjson images "${images_json}" --argjson charts "${charts_json}" --argjson manifests "${manifests_json}" --argjson aliases "${aliases_json}" '
+            $identity[0] + {kind: "release-qualification", verifier: {workflowPath: ".github/workflows/verify-release-rebuild.yml", workflowSha: $verifier_sha,
+              runId: $verifier_run_id, runAttempt: $verifier_run_attempt, event: "workflow_run", conclusion: "success"},
+              receipts: {images: ($images | sort_by(.role, .artifactArch)), charts: ($charts | sort_by(.chart))},
+              manifests: ($manifests | sort_by(.image)), aliases: ($aliases | sort_by(.alias))}' >"${OUTPUT}"
+          jq -e '.schemaVersion == 1 and .kind == "release-qualification" and (.releaseKind == "stable" or .releaseKind == "beta") and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2 and (.manifests | length) == 12 and (if .releaseKind == "stable" then (.aliases | length) == 48 else .aliases == [] end)' "${OUTPUT}" >/dev/null
+
+      - name: Upload sealed release qualification
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: release-qualification-${{ needs.resolve.outputs.revision }}
+          path: ${{ runner.temp }}/release-qualification.json
           if-no-files-found: error
           retention-days: 30

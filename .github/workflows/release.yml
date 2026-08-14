@@ -739,6 +739,308 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  helm-chart-prepare:
+    name: Prepare immutable Helm OCI charts
+    runs-on: ubuntu-26.04
+    needs:
+      - prepare-release
+    if: needs.prepare-release.outputs.kind == 'stable' || needs.prepare-release.outputs.kind == 'beta'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout exact release chart source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.revision }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup canonical Helm packager
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+
+      - name: Install chart-planning dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Package both exact-version charts from tracked release inputs
+        env:
+          RELEASE_REF: ${{ needs.prepare-release.outputs.release_ref }}
+          RELEASE_REVISION: ${{ needs.prepare-release.outputs.revision }}
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/oxibelt-helm-chart-release"
+          mkdir -m 0700 "${output}"
+          node --import tsx devops/sources/helm_chart_release.ts prepare \
+            --workspace-path . \
+            --ref "${RELEASE_REF}" \
+            --revision "${RELEASE_REVISION}" \
+            --output-directory "${output}"
+          node --import tsx devops/sources/helm_chart_release.ts verify \
+            --workspace-path . \
+            --ref "${RELEASE_REF}" \
+            --revision "${RELEASE_REVISION}" \
+            --output-directory "${output}"
+
+      - name: Upload immutable chart packages and plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: helm-chart-release-${{ needs.prepare-release.outputs.revision }}
+          path: ${{ runner.temp }}/oxibelt-helm-chart-release
+          if-no-files-found: error
+          retention-days: 1
+
+  helm-chart-publish:
+    name: Publish exact-version Helm OCI charts
+    runs-on: ubuntu-26.04
+    needs:
+      - prepare-release
+      - helm-chart-prepare
+      - release-vulnerability-gate
+    if: >-
+      github.repository == 'OxiBelt/OxiBelt' &&
+      (needs.prepare-release.outputs.kind == 'stable' || needs.prepare-release.outputs.kind == 'beta')
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    outputs:
+      oxibelt_digest: ${{ steps.publish.outputs.oxibelt_digest }}
+      controller_digest: ${{ steps.publish.outputs.controller_digest }}
+
+    steps:
+      - name: Checkout exact release helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.revision }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Enable hash-pinned pnpm
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+
+      - name: Install receipt dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Setup canonical Helm publisher
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
+
+      - name: Install pinned ORAS acquisition client
+        env:
+          GOBIN: ${{ runner.temp }}/oras-bin
+        run: |
+          set -euo pipefail
+          mkdir -m 0700 "${GOBIN}"
+          go install oras.land/oras/cmd/oras@v1.3.3
+          "${GOBIN}/oras" version | grep -E '(^|[[:space:]])1\.3\.3($|[[:space:]])'
+
+      - name: Download immutable chart packages and plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: helm-chart-release-${{ needs.prepare-release.outputs.revision }}
+          path: ${{ runner.temp }}/oxibelt-helm-chart-release
+
+      - name: Publish only exact chart versions and capture raw OCI evidence
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORAS_BIN: ${{ runner.temp }}/oras-bin/oras
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          charts="${RUNNER_TEMP}/oxibelt-helm-chart-release"
+          evidence="${RUNNER_TEMP}/oxibelt-helm-oci-evidence"
+          mkdir -m 0700 "${evidence}"
+          printf '%s' "${GH_TOKEN}" | helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          printf '%s' "${GH_TOKEN}" | "${ORAS_BIN}" login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          for chart in oxibelt oxibelt-gateway-controller; do
+            repository="ghcr.io/oxibelt/charts/${chart}"
+            archive="${charts}/${chart}-${RELEASE_VERSION}.tgz"
+            inspect_error="${RUNNER_TEMP}/${chart}-inspect.log"
+            if "${ORAS_BIN}" manifest fetch --descriptor "${repository}:${RELEASE_VERSION}" >"${evidence}/${chart}-descriptor.json" 2>"${inspect_error}"; then
+              :
+            elif grep -Eqi 'manifest unknown|404|not found' "${inspect_error}"; then
+              helm push "${archive}" oci://ghcr.io/oxibelt/charts
+              "${ORAS_BIN}" manifest fetch --descriptor "${repository}:${RELEASE_VERSION}" >"${evidence}/${chart}-descriptor.json"
+            else
+              cat "${inspect_error}" >&2
+              exit 1
+            fi
+            digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "${evidence}/${chart}-descriptor.json")"
+            "${ORAS_BIN}" manifest fetch --output "${evidence}/${chart}-manifest.json" "${repository}@${digest}"
+            config_digest="$(jq -er '.config.digest | select(test("^sha256:[0-9a-f]{64}$"))' "${evidence}/${chart}-manifest.json")"
+            "${ORAS_BIN}" blob fetch --output "${evidence}/${chart}-config.json" "${repository}@${config_digest}"
+            if [[ "${chart}" == oxibelt ]]; then output_name=oxibelt_digest; else output_name=controller_digest; fi
+            echo "${output_name}=${digest}" >>"${GITHUB_OUTPUT}"
+          done
+
+          node --import tsx devops/sources/helm_chart_oci_release.ts build-receipt \
+            --plan "${charts}/helm-chart-release-plan.json" \
+            --oxibelt-archive "${charts}/oxibelt-${RELEASE_VERSION}.tgz" \
+            --oxibelt-descriptor "${evidence}/oxibelt-descriptor.json" \
+            --oxibelt-manifest "${evidence}/oxibelt-manifest.json" \
+            --oxibelt-config "${evidence}/oxibelt-config.json" \
+            --controller-archive "${charts}/oxibelt-gateway-controller-${RELEASE_VERSION}.tgz" \
+            --controller-descriptor "${evidence}/oxibelt-gateway-controller-descriptor.json" \
+            --controller-manifest "${evidence}/oxibelt-gateway-controller-manifest.json" \
+            --controller-config "${evidence}/oxibelt-gateway-controller-config.json" \
+            --output "${evidence}/helm-chart-publish-receipt.json"
+
+      - name: Upload bounded chart publication evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: helm-chart-oci-evidence-${{ needs.prepare-release.outputs.revision }}
+          path: ${{ runner.temp }}/oxibelt-helm-oci-evidence
+          if-no-files-found: error
+          retention-days: 1
+
+  helm-chart-attest:
+    name: Attest Helm OCI chart rebuild evidence
+    runs-on: ubuntu-26.04
+    needs:
+      - prepare-release
+      - helm-chart-prepare
+      - helm-chart-publish
+    if: >-
+      github.repository == 'OxiBelt/OxiBelt' &&
+      (needs.prepare-release.outputs.kind == 'stable' || needs.prepare-release.outputs.kind == 'beta')
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+      packages: read
+
+    steps:
+      - name: Checkout exact release helper and source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ needs.prepare-release.outputs.revision }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Setup canonical Helm rebuild packager
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
+
+      - name: Enable hash-pinned pnpm and install dependencies
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack install
+          pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Download chart publication inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          pattern: helm-chart-*-${{ needs.prepare-release.outputs.revision }}
+          path: ${{ runner.temp }}/oxibelt-chart-inputs
+
+      - name: Rebuild exact package bytes and validate schema-v3 predicate
+        env:
+          RELEASE_REF: ${{ needs.prepare-release.outputs.release_ref }}
+          RELEASE_REVISION: ${{ needs.prepare-release.outputs.revision }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          published="${RUNNER_TEMP}/oxibelt-chart-inputs/helm-chart-release-${RELEASE_REVISION}"
+          evidence="${RUNNER_TEMP}/oxibelt-chart-inputs/helm-chart-oci-evidence-${RELEASE_REVISION}"
+          rebuilt="${RUNNER_TEMP}/oxibelt-helm-chart-rebuilt"
+          mkdir -m 0700 "${rebuilt}"
+          node --import tsx devops/sources/helm_chart_release.ts prepare \
+            --workspace-path . --ref "${RELEASE_REF}" --revision "${RELEASE_REVISION}" --output-directory "${rebuilt}"
+          node --import tsx devops/sources/helm_chart_oci_release.ts build-predicate \
+            --receipt "${evidence}/helm-chart-publish-receipt.json" \
+            --rebuilt-plan "${rebuilt}/helm-chart-release-plan.json" \
+            --published-oxibelt "${published}/oxibelt-${RELEASE_VERSION}.tgz" \
+            --rebuilt-oxibelt "${rebuilt}/oxibelt-${RELEASE_VERSION}.tgz" \
+            --published-controller "${published}/oxibelt-gateway-controller-${RELEASE_VERSION}.tgz" \
+            --rebuilt-controller "${rebuilt}/oxibelt-gateway-controller-${RELEASE_VERSION}.tgz" \
+            --output "${RUNNER_TEMP}/helm-chart-rebuild-v3.json"
+          node --import tsx devops/sources/helm_chart_oci_release.ts validate-predicate \
+            --input "${RUNNER_TEMP}/helm-chart-rebuild-v3.json"
+
+      - name: Publish signed oxibelt chart rebuild predicate
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/oxibelt/charts/oxibelt
+          subject-digest: ${{ needs.helm-chart-publish.outputs.oxibelt_digest }}
+          predicate-type: https://oxibelt.dev/attestations/helm-chart-rebuild/v3
+          predicate-path: ${{ runner.temp }}/helm-chart-rebuild-v3.json
+          push-to-registry: false
+
+      - name: Publish signed controller chart rebuild predicate
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/oxibelt/charts/oxibelt-gateway-controller
+          subject-digest: ${{ needs.helm-chart-publish.outputs.controller_digest }}
+          predicate-type: https://oxibelt.dev/attestations/helm-chart-rebuild/v3
+          predicate-path: ${{ runner.temp }}/helm-chart-rebuild-v3.json
+          push-to-registry: false
+
+  helm-chart-verify:
+    name: Verify Helm OCI attestation API readback
+    runs-on: ubuntu-26.04
+    needs:
+      - prepare-release
+      - helm-chart-publish
+      - helm-chart-attest
+    if: >-
+      github.repository == 'OxiBelt/OxiBelt' &&
+      (needs.prepare-release.outputs.kind == 'stable' || needs.prepare-release.outputs.kind == 'beta')
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chart: oxibelt
+            repository: ghcr.io/oxibelt/charts/oxibelt
+            digest_output: oxibelt_digest
+          - chart: oxibelt-gateway-controller
+            repository: ghcr.io/oxibelt/charts/oxibelt-gateway-controller
+            digest_output: controller_digest
+
+    steps:
+      - name: Verify signed chart predicate through GitHub API
+        env:
+          DIGEST: ${{ matrix.chart == 'oxibelt' && needs.helm-chart-publish.outputs.oxibelt_digest || needs.helm-chart-publish.outputs.controller_digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_REF: ${{ needs.prepare-release.outputs.release_ref }}
+          RELEASE_REVISION: ${{ needs.prepare-release.outputs.revision }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://${{ matrix.repository }}@${DIGEST}" \
+            --repo OxiBelt/OxiBelt \
+            --signer-workflow OxiBelt/OxiBelt/.github/workflows/release.yml \
+            --signer-digest "${RELEASE_REVISION}" \
+            --source-digest "${RELEASE_REVISION}" \
+            --source-ref "${RELEASE_REF}" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            --deny-self-hosted-runners \
+            --predicate-type https://oxibelt.dev/attestations/helm-chart-rebuild/v3 \
+            --limit 100 \
+            --format json >"${RUNNER_TEMP}/${{ matrix.chart }}-attestations.json"
+          jq -e 'length >= 1' "${RUNNER_TEMP}/${{ matrix.chart }}-attestations.json" >/dev/null
+
   release-image-arch-scan:
     name: Build and scan release image (${{ matrix.image_role }}/${{ matrix.artifact_arch }})
     needs:
@@ -1792,125 +2094,3 @@ jobs:
             --output "${RUNNER_TEMP}/verified-index-rebuild.json"
           jq -e --slurpfile expected "${INDEX_REBUILD}" '. == $expected[0]' \
             "${RUNNER_TEMP}/verified-index-rebuild.json" >/dev/null
-
-  ghcr-index-promote:
-    name: Promote canonical multi-arch aliases (${{ matrix.image_role }})
-    runs-on: ubuntu-26.04
-    needs:
-      - prepare-release
-      - ghcr-manifest-publish
-      - ghcr-index-verify
-    if: github.repository == 'OxiBelt/OxiBelt'
-    permissions:
-      actions: read
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image_role: standalone
-            image: ghcr.io/oxibelt/oxibelt
-            artifact_prefix: oxibelt
-          - image_role: dataplane
-            image: ghcr.io/oxibelt/oxibelt-dataplane
-            artifact_prefix: oxibelt-dataplane
-          - image_role: dataplane-strict
-            image: ghcr.io/oxibelt/oxibelt-dataplane-strict
-            artifact_prefix: oxibelt-dataplane-strict
-          - image_role: controller
-            image: ghcr.io/oxibelt/oxibelt-gateway-controller
-            artifact_prefix: oxibelt-gateway-controller
-          - image_role: tools
-            image: ghcr.io/oxibelt/oxibelt-tools
-            artifact_prefix: oxibelt-tools
-          - image_role: keysigner
-            image: ghcr.io/oxibelt/oxibelt-keysigner
-            artifact_prefix: oxibelt-keysigner
-    env:
-      OXIBELT_GHCR_IMAGE: ${{ matrix.image }}
-      OXIBELT_IMAGE_ROLE: ${{ matrix.image_role }}
-
-    steps:
-      - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: oxibelt-release-metadata
-          path: ${{ runner.temp }}/oxibelt-release-metadata
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
-        with:
-          version: v0.36.1
-          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
-
-      - name: Download immutable index metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: ${{ matrix.artifact_prefix }}-release-index-metadata
-          path: ${{ runner.temp }}/oxibelt-index-metadata
-
-      - name: Download controlled vulnerability gate decision
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
-        with:
-          name: release-vulnerability-decision-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/oxibelt-vulnerability-decision
-
-      - name: Revalidate admitted index children before promotion
-        env:
-          DECISION: ${{ runner.temp }}/oxibelt-vulnerability-decision/image-vulnerability-decision.json
-          INDEX_METADATA: ${{ runner.temp }}/oxibelt-index-metadata/index-metadata.json
-          POLICY: ${{ runner.temp }}/oxibelt-release-metadata/policy/image-vulnerability-policy.json
-        run: |
-          set -euo pipefail
-
-          jq -e --arg role "${OXIBELT_IMAGE_ROLE}" --arg image "${OXIBELT_GHCR_IMAGE}" '
-            .schemaVersion == 2
-            and .role == $role
-            and .image == $image
-            and (.digest | test("^sha256:[0-9a-f]{64}$"))
-            and ([.children[].artifactArch] == ["amd64", "arm64", "riscv64"])
-          ' "${INDEX_METADATA}" >/dev/null
-          while IFS=$'\t' read -r artifact_arch digest; do
-            node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/image_vulnerability_policy.mjs" verify-subject \
-              --decision "${DECISION}" \
-              --policy "${POLICY}" \
-              --role "${OXIBELT_IMAGE_ROLE}" \
-              --architecture "${artifact_arch}" \
-              --channel "${{ needs.prepare-release.outputs.kind }}" \
-              --revision "${{ needs.prepare-release.outputs.revision }}" \
-              --run-id "${GITHUB_RUN_ID}" \
-              --run-attempt "${GITHUB_RUN_ATTEMPT}" \
-              --manifest-digest "${digest}"
-          done < <(jq -r '.children[] | [.artifactArch, .digest] | @tsv' "${INDEX_METADATA}")
-
-      - name: Promote digest to mutable aliases
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
-          INDEX_METADATA: ${{ runner.temp }}/oxibelt-index-metadata/index-metadata.json
-        run: |
-          set -euo pipefail
-
-          jq -e --arg role "${OXIBELT_IMAGE_ROLE}" --arg image "${OXIBELT_GHCR_IMAGE}" '
-            .schemaVersion == 2
-            and .role == $role
-            and .image == $image
-            and (.digest | test("^sha256:[0-9a-f]{64}$"))
-            and ([.children[].artifactArch] == ["amd64", "arm64", "riscv64"])
-          ' "${INDEX_METADATA}" >/dev/null
-          DIGEST="$(jq -r '.digest' "${INDEX_METADATA}")"
-          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "invalid promotion index digest: ${DIGEST}" >&2
-            exit 1
-          fi
-          printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-          while read -r alias_tag; do
-            [[ -n "${alias_tag}" ]] || continue
-            docker buildx imagetools create --prefer-index=true --tag "${alias_tag}" "${OXIBELT_GHCR_IMAGE}@${DIGEST}"
-            alias_digest="$(docker buildx imagetools inspect "${alias_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
-            if [[ "${alias_digest}" != "${DIGEST}" ]]; then
-              echo "alias ${alias_tag} resolved to ${alias_digest}, expected ${DIGEST}" >&2
-              exit 1
-            fi
-          done < <(jq -r --arg role "${OXIBELT_IMAGE_ROLE}" '.manifests[] | select(.role == $role) | .aliasGhcrTags[]' "${IMAGE_PLAN}")

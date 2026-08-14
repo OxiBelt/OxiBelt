@@ -174,13 +174,15 @@ rejected rather than parsed as a legacy compatibility form. Matching published
 and independently rebuilt archive bytes does not compensate for missing or
 substituted registry evidence.
 
-This helper does not publish or authenticate an attestation by itself, and no
-release workflow currently consumes it. The
-`github-workflow-authentication-required` receipt value is a required policy
-marker, not proof of identity. Before trusting a future signed predicate,
-verify the exact GitHub repository, signer workflow, source ref and revision,
-subject digest, predicate type, and trusted timestamp through the GitHub
-attestation API.
+The release workflow uses this helper to publish exactly the two versioned
+chart tags, build the bounded receipt, reproduce both packages with Helm
+v4.2.4, and attest the schema-v3 predicate through GitHub's attestation API.
+The `github-workflow-authentication-required` receipt value remains a policy
+marker rather than proof by itself. Consumers must verify the exact GitHub
+repository, signer workflow, source ref and revision, subject digest,
+predicate type, and trusted timestamp through the GitHub attestation API.
+Charts remain experimental and never receive a mutable `latest` or major
+alias.
 
 ## Verify GitHub attestations
 
@@ -465,12 +467,31 @@ cluster and do not place GitHub credentials in data-plane or admission Pods.
 
 `.github/workflows/verify-release-rebuild.yml` is a separate read-only
 consumer of published evidence. After a successful stable or beta release it
-rebuilds all six roles and five architecture variants. A manual dispatch can
-target one stable, beta, or build artifact. The job checks out the exact tag in
-a fresh tree, starts an isolated rootless Docker daemon, verifies the
-provenance, SBOM, and rebuild-recipe records through GitHub's API, resolves the
-canonical GHCR digest, and rebuilds without downloading artifacts from the
-producer workflow.
+rebuilds all six roles and five architecture variants plus both Helm charts.
+A manual dispatch can target one stable, beta, or build image artifact. The
+automatic job checks out the exact tag in a fresh tree, starts an isolated
+rootless Docker daemon, verifies image and schema-v3 chart attestations through
+GitHub's API, resolves canonical GHCR digests, and rebuilds without consuming
+producer build outputs.
+
+Every automatic beta or stable verification seals one schema-1 release
+qualification containing exactly 30 image receipts, two byte-identical chart
+receipts, 12 immutable index identities, and the exact producer and verifier
+run identities. Beta qualifications contain no mutable aliases. For a stable
+qualification, the producer's exact release-contract receipt must name the
+sole latest same-target beta; that beta's exact aggregate bytes, tag, release,
+automatic verifier run, artifact identity, and SHA-256 are bound into the
+stable qualification. Stable publication must occur at least 24 hours after
+both beta publication and completion of the beta qualification.
+
+The release producer writes only immutable versioned image and chart tags.
+`.github/workflows/promote-stable-aliases.yml` is the sole mutable-alias writer.
+It accepts only the newest published stable release and a complete automatic
+qualification, re-reads every immutable digest and both chart attestations in
+a read-only job, snapshots all 48 image aliases, then performs sequential
+idempotent promotion in one final `packages: write` job. Manual, beta, build,
+stale, replayed, incomplete, duplicated, or drifted qualifications fail
+closed; chart aliases are never created.
 
 Manual dispatch remains a diagnostic facility and is never accepted as
 release-admission evidence. Admission bundles accept only a successful

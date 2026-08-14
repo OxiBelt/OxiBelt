@@ -1,0 +1,360 @@
+name: Promote qualified stable aliases
+
+on:
+  workflow_run:
+    workflows: ["Independently verify release rebuilds"]
+    types: [completed]
+
+permissions:
+  actions: read
+  attestations: read
+  contents: read
+  packages: read
+
+concurrency:
+  group: oxibelt-stable-alias-promotion
+  cancel-in-progress: false
+
+env:
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+
+jobs:
+  validate:
+    name: Validate sealed stable qualification
+    if: >-
+      github.repository == 'OxiBelt/OxiBelt' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_run'
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      packages: read
+    outputs:
+      revision: ${{ steps.identity.outputs.revision }}
+
+    steps:
+      - name: Resolve exactly one qualification artifact
+        id: identity
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          VERIFIER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          VERIFIER_RUN_ID: ${{ github.event.workflow_run.id }}
+        with:
+          script: |
+            const runId = Number(process.env.VERIFIER_RUN_ID)
+            const runAttempt = Number(process.env.VERIFIER_RUN_ATTEMPT)
+            const run = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: runId})).data
+            if (`${context.repo.owner}/${context.repo.repo}` !== 'OxiBelt/OxiBelt' ||
+                run.path !== '.github/workflows/verify-release-rebuild.yml' || run.event !== 'workflow_run' ||
+                run.status !== 'completed' || run.conclusion !== 'success' || run.run_attempt !== runAttempt ||
+                run.repository?.full_name !== 'OxiBelt/OxiBelt' || run.head_repository?.full_name !== 'OxiBelt/OxiBelt' ||
+                !/^[0-9a-f]{40}$/.test(run.head_sha ?? '')) {
+              core.setFailed('automatic verifier run identity is not eligible for promotion')
+              return
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              {...context.repo, run_id: runId, per_page: 100})
+            const qualifications = artifacts.filter((artifact) =>
+              !artifact.expired && /^release-qualification-[0-9a-f]{40}$/.test(artifact.name))
+            if (qualifications.length !== 1) {
+              core.setFailed(`verifier must expose exactly one unexpired stable qualification, found ${qualifications.length}`)
+              return
+            }
+            const revision = qualifications[0].name.slice('release-qualification-'.length)
+            core.setOutput('revision', revision)
+
+      - name: Download sealed stable qualification from verifier run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: release-qualification-${{ steps.identity.outputs.revision }}
+          path: ${{ runner.temp }}/release-qualification
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Reauthenticate release, producer, and verifier identities
+        id: reauthenticate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          QUALIFICATION: ${{ runner.temp }}/release-qualification/release-qualification.json
+          VERIFIER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          VERIFIER_RUN_ID: ${{ github.event.workflow_run.id }}
+        with:
+          script: |
+            const fs = require('fs')
+            const path = process.env.QUALIFICATION
+            const stat = fs.lstatSync(path)
+            if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 4 * 1024 * 1024) {
+              core.setFailed('qualification must be one bounded regular file')
+              return
+            }
+            const q = JSON.parse(fs.readFileSync(path, 'utf8'))
+            const exactKeys = (value, keys, label) => {
+              if (!value || Array.isArray(value) || typeof value !== 'object' ||
+                  Object.keys(value).sort().join(',') !== [...keys].sort().join(',')) throw new Error(`${label} keys are not canonical`)
+            }
+            exactKeys(q, ['schemaVersion','repository','releaseKind','version','ref','tagObjectSha','commit','releaseId','publishedAt','producer','betaQualification','kind','verifier','receipts','manifests','aliases'], 'qualification')
+            if (q.schemaVersion !== 1 || q.kind !== 'release-qualification' || q.releaseKind !== 'stable' || q.repository !== 'OxiBelt/OxiBelt' ||
+                !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(q.version ?? '') ||
+                q.ref !== `refs/tags/${q.version}` || !/^[0-9a-f]{40}$/.test(q.commit ?? '') ||
+                !/^[0-9a-f]{40}$/.test(q.tagObjectSha ?? '') || !Number.isSafeInteger(q.releaseId) || q.releaseId < 1) {
+              throw new Error('qualification stable release identity is malformed')
+            }
+            if (q.verifier.workflowPath !== '.github/workflows/verify-release-rebuild.yml' || q.verifier.event !== 'workflow_run' ||
+                q.verifier.conclusion !== 'success' || q.verifier.runId !== Number(process.env.VERIFIER_RUN_ID) ||
+                q.verifier.runAttempt !== Number(process.env.VERIFIER_RUN_ATTEMPT) || !/^[0-9a-f]{40}$/.test(q.verifier.workflowSha ?? '')) {
+              throw new Error('qualification verifier identity does not match the triggering automatic run')
+            }
+            if (!Array.isArray(q.receipts?.images) || q.receipts.images.length !== 30 ||
+                !Array.isArray(q.receipts?.charts) || q.receipts.charts.length !== 2 ||
+                !Array.isArray(q.manifests) || q.manifests.length !== 12 || !Array.isArray(q.aliases) || q.aliases.length !== 48 ||
+                new Set(q.aliases.map((entry) => entry.alias)).size !== 48 ||
+                q.aliases.some((entry) => entry.alias.startsWith('ghcr.io/oxibelt/charts/'))) {
+              throw new Error('qualification receipt, manifest, or alias inventory is incomplete or duplicated')
+            }
+            const verifier = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: q.verifier.runId})).data
+            if (verifier.path !== q.verifier.workflowPath || verifier.event !== 'workflow_run' || verifier.status !== 'completed' ||
+                verifier.conclusion !== 'success' || verifier.run_attempt !== q.verifier.runAttempt || verifier.head_sha !== q.verifier.workflowSha) {
+              throw new Error('verifier API readback changed identity')
+            }
+            const producer = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: q.producer.runId})).data
+            if (q.producer.workflowPath !== '.github/workflows/release.yml' || q.producer.event !== 'release' || q.producer.conclusion !== 'success' ||
+                producer.path !== q.producer.workflowPath || producer.event !== 'release' || producer.status !== 'completed' || producer.conclusion !== 'success' ||
+                producer.run_attempt !== q.producer.runAttempt || producer.head_sha !== q.commit || producer.head_branch !== q.version) {
+              throw new Error('producer API readback changed identity')
+            }
+            const ref = (await github.rest.git.getRef({...context.repo, ref: `tags/${q.version}`})).data
+            const tag = ref.object.type === 'tag' ? (await github.rest.git.getTag({...context.repo, tag_sha: ref.object.sha})).data : null
+            const release = (await github.rest.repos.getReleaseByTag({...context.repo, tag: q.version})).data
+            const latest = (await github.rest.repos.getLatestRelease(context.repo)).data
+            if (ref.ref !== q.ref || ref.object.sha !== q.tagObjectSha || tag?.object?.type !== 'commit' || tag.object.sha !== q.commit ||
+                release.id !== q.releaseId || release.id !== latest.id || release.tag_name !== q.version || release.draft || release.prerelease ||
+                release.target_commitish !== q.commit || release.published_at !== q.publishedAt) {
+              throw new Error('stable tag or latest published release API readback changed identity')
+            }
+            const beta = q.betaQualification
+            if (!beta || !/^.+-beta\.[1-9][0-9]*$/.test(beta.version ?? '') || beta.ref !== `refs/tags/${beta.version}` ||
+                !/^[0-9a-f]{40}$/.test(beta.tagObjectSha ?? '') || !/^[0-9a-f]{40}$/.test(beta.commit ?? '') ||
+                !/^[0-9a-f]{64}$/.test(beta.aggregateSha256 ?? '') || !Number.isSafeInteger(beta.verifierRunId) ||
+                beta.artifactName !== `release-qualification-${beta.commit}`) {
+              throw new Error('stable qualification does not bind one exact beta aggregate')
+            }
+            const betaRef = (await github.rest.git.getRef({...context.repo, ref: `tags/${beta.version}`})).data
+            const betaTag = betaRef.object.type === 'tag' ? (await github.rest.git.getTag({...context.repo, tag_sha: betaRef.object.sha})).data : null
+            const betaRelease = (await github.rest.repos.getReleaseByTag({...context.repo, tag: beta.version})).data
+            const releases = await github.paginate(github.rest.repos.listReleases, {...context.repo, per_page: 100})
+            const betaPattern = new RegExp(`^${q.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-beta\\.([1-9][0-9]*)$`)
+            const validBetas = releases.filter((candidate) => !candidate.draft && candidate.prerelease && candidate.published_at !== null && betaPattern.test(candidate.tag_name))
+            validBetas.sort((left, right) => Number(betaPattern.exec(right.tag_name)[1]) - Number(betaPattern.exec(left.tag_name)[1]))
+            const betaRun = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: beta.verifierRunId})).data
+            const betaArtifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              {...context.repo, run_id: beta.verifierRunId, per_page: 100})
+            const betaArtifact = betaArtifacts.filter((artifact) => !artifact.expired && artifact.id === beta.artifactId && artifact.name === beta.artifactName)
+            const soakStart = Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt))
+            if (betaRef.object.sha !== beta.tagObjectSha || betaTag?.object?.sha !== beta.commit ||
+                betaRelease.id !== beta.releaseId || betaRelease.tag_name !== beta.version || validBetas[0]?.id !== beta.releaseId || betaRelease.draft || !betaRelease.prerelease ||
+                betaRelease.published_at !== beta.publishedAt || betaRun.path !== '.github/workflows/verify-release-rebuild.yml' ||
+                betaRun.event !== 'workflow_run' || betaRun.status !== 'completed' || betaRun.conclusion !== 'success' ||
+                betaRun.run_attempt !== beta.verifierRunAttempt || betaRun.head_sha !== beta.verifierWorkflowSha || betaRun.updated_at !== beta.verifierCompletedAt || betaArtifact.length !== 1 ||
+                !Number.isFinite(soakStart) || Date.parse(q.publishedAt) - soakStart < 24 * 60 * 60 * 1000) {
+              throw new Error('beta qualification API identity or completed 24-hour soak changed')
+            }
+            core.setOutput('beta_run_id', String(beta.verifierRunId))
+            core.setOutput('beta_revision', beta.commit)
+
+      - name: Download beta aggregate bound by the stable qualification
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: release-qualification-${{ steps.reauthenticate.outputs.beta_revision }}
+          path: ${{ runner.temp }}/beta-release-qualification
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.reauthenticate.outputs.beta_run_id }}
+
+      - name: Verify exact beta aggregate bytes and identity
+        env:
+          BETA: ${{ runner.temp }}/beta-release-qualification/release-qualification.json
+          STABLE: ${{ runner.temp }}/release-qualification/release-qualification.json
+        run: |
+          set -euo pipefail
+          expected_sha="$(jq -r '.betaQualification.aggregateSha256' "${STABLE}")"
+          actual_sha="$(sha256sum "${BETA}" | awk '{print $1}')"
+          [[ "${actual_sha}" == "${expected_sha}" ]]
+          jq -e --slurpfile stable "${STABLE}" '
+            .schemaVersion == 1 and .kind == "release-qualification" and .releaseKind == "beta"
+            and .version == $stable[0].betaQualification.version and .commit == $stable[0].betaQualification.commit
+            and .tagObjectSha == $stable[0].betaQualification.tagObjectSha
+            and .releaseId == $stable[0].betaQualification.releaseId
+            and .verifier.runId == $stable[0].betaQualification.verifierRunId
+            and .verifier.runAttempt == $stable[0].betaQualification.verifierRunAttempt
+            and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2
+          ' "${BETA}" >/dev/null
+
+      - name: Start isolated rootless Docker for registry validation
+        uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
+        with:
+          version: v29.7.2
+          rootless: true
+          set-host: true
+          daemon-config: |
+            {"exec-opts": ["native.cgroupdriver=cgroupfs"]}
+
+      - name: Setup pinned Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.36.1
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
+
+      - name: Install pinned ORAS acquisition client
+        env:
+          GOBIN: ${{ runner.temp }}/oras-bin
+        run: |
+          set -euo pipefail
+          mkdir -m 0700 "${GOBIN}"
+          go install oras.land/oras/cmd/oras@v1.3.3
+          "${GOBIN}/oras" version | grep -E '(^|[[:space:]])1\.3\.3($|[[:space:]])'
+
+      - name: Reread every immutable image and chart digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORAS_BIN: ${{ runner.temp }}/oras-bin/oras
+          QUALIFICATION: ${{ runner.temp }}/release-qualification/release-qualification.json
+        run: |
+          set -euo pipefail
+          printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          while IFS=$'\t' read -r tag digest; do
+            resolved="$(docker buildx imagetools inspect "${tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "${resolved}" == "${digest}" ]] || { echo "immutable image digest drift: ${tag}" >&2; exit 1; }
+          done < <(jq -r '(.receipts.images[] | [.canonicalTag, .digest]), (.manifests[] | [.canonicalTag, .digest]) | @tsv' "${QUALIFICATION}")
+          while IFS=$'\t' read -r repository digest; do
+            resolved="$("${ORAS_BIN}" manifest fetch --descriptor "${repository}@${digest}" | jq -r '.digest')"
+            [[ "${resolved}" == "${digest}" ]] || { echo "immutable chart digest drift: ${repository}" >&2; exit 1; }
+            gh attestation verify "oci://${repository}@${digest}" --repo OxiBelt/OxiBelt \
+              --signer-workflow OxiBelt/OxiBelt/.github/workflows/release.yml \
+              --signer-digest "$(jq -r '.commit' "${QUALIFICATION}")" --source-digest "$(jq -r '.commit' "${QUALIFICATION}")" \
+              --source-ref "$(jq -r '.ref' "${QUALIFICATION}")" --cert-oidc-issuer https://token.actions.githubusercontent.com \
+              --deny-self-hosted-runners --predicate-type https://oxibelt.dev/attestations/helm-chart-rebuild/v3 --limit 100 >/dev/null
+          done < <(jq -r '.receipts.charts[] | [.subject.repository, .subject.digest] | @tsv' "${QUALIFICATION}")
+
+      - name: Snapshot alias state for the final mutation boundary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT: ${{ runner.temp }}/release-qualification/release-qualification.json
+          OUTPUT: ${{ runner.temp }}/stable-alias-promotion-plan.json
+        run: |
+          set -euo pipefail
+          snapshots='[]'
+          while IFS=$'\t' read -r alias source_tag source_digest kind; do
+            error_file="${RUNNER_TEMP}/alias-inspect-error.log"
+            if manifest="$(docker buildx imagetools inspect "${alias}" --format '{{json .Manifest}}' 2>"${error_file}")"; then
+              current="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"${manifest}")"
+            elif grep -Eqi 'manifest unknown|404|not found' "${error_file}"; then
+              current=null
+            else
+              cat "${error_file}" >&2
+              exit 1
+            fi
+            snapshots="$(jq -c --arg alias "${alias}" --arg source_tag "${source_tag}" --arg source_digest "${source_digest}" --arg kind "${kind}" --arg current "${current}" '. + [{alias: $alias, sourceTag: $source_tag, sourceDigest: $source_digest, kind: $kind, currentDigest: (if $current == "null" then null else $current end)}]' <<<"${snapshots}")"
+          done < <(jq -r '.aliases[] | [.alias, .sourceTag, .sourceDigest, .kind] | @tsv' "${INPUT}")
+          jq -S --argjson snapshots "${snapshots}" --argjson validation_run_id "${GITHUB_RUN_ID}" --argjson validation_run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            '. + {promotionValidation: {workflowPath: ".github/workflows/promote-stable-aliases.yml", runId: $validation_run_id, runAttempt: $validation_run_attempt}, aliasSnapshots: ($snapshots | sort_by(.alias))}' "${INPUT}" >"${OUTPUT}"
+          jq -e '(.aliasSnapshots | length) == 48 and ([.aliasSnapshots[].alias] | unique | length) == 48' "${OUTPUT}" >/dev/null
+
+      - name: Upload validated promotion plan
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: stable-alias-promotion-plan-${{ steps.identity.outputs.revision }}
+          path: ${{ runner.temp }}/stable-alias-promotion-plan.json
+          if-no-files-found: error
+          retention-days: 1
+
+  promote:
+    name: Promote stable aliases sequentially
+    needs: validate
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download validated promotion plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: stable-alias-promotion-plan-${{ needs.validate.outputs.revision }}
+          path: ${{ runner.temp }}/stable-alias-promotion-plan
+
+      - name: Reauthenticate latest stable release immediately before mutation
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PLAN: ${{ runner.temp }}/stable-alias-promotion-plan/stable-alias-promotion-plan.json
+        with:
+          script: |
+            const fs = require('fs')
+            const q = JSON.parse(fs.readFileSync(process.env.PLAN, 'utf8'))
+            const ref = (await github.rest.git.getRef({...context.repo, ref: `tags/${q.version}`})).data
+            const tag = ref.object.type === 'tag' ? (await github.rest.git.getTag({...context.repo, tag_sha: ref.object.sha})).data : null
+            const release = (await github.rest.repos.getReleaseByTag({...context.repo, tag: q.version})).data
+            const latest = (await github.rest.repos.getLatestRelease(context.repo)).data
+            const producer = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: q.producer.runId})).data
+            const verifier = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: q.verifier.runId})).data
+            const beta = q.betaQualification
+            const betaRef = (await github.rest.git.getRef({...context.repo, ref: `tags/${beta.version}`})).data
+            const betaTag = betaRef.object.type === 'tag' ? (await github.rest.git.getTag({...context.repo, tag_sha: betaRef.object.sha})).data : null
+            const betaRelease = (await github.rest.repos.getReleaseByTag({...context.repo, tag: beta.version})).data
+            const releases = await github.paginate(github.rest.repos.listReleases, {...context.repo, per_page: 100})
+            const betaPattern = new RegExp(`^${q.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-beta\\.([1-9][0-9]*)$`)
+            const validBetas = releases.filter((candidate) => !candidate.draft && candidate.prerelease && candidate.published_at !== null && betaPattern.test(candidate.tag_name))
+            validBetas.sort((left, right) => Number(betaPattern.exec(right.tag_name)[1]) - Number(betaPattern.exec(left.tag_name)[1]))
+            const betaVerifier = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: beta.verifierRunId})).data
+            const betaArtifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              {...context.repo, run_id: beta.verifierRunId, per_page: 100})
+            const betaArtifact = betaArtifacts.filter((artifact) => !artifact.expired && artifact.id === beta.artifactId && artifact.name === beta.artifactName)
+            const soakStart = Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt))
+            if (ref.object.sha !== q.tagObjectSha || tag?.object?.sha !== q.commit || release.id !== q.releaseId ||
+                release.id !== latest.id || release.draft || release.prerelease || release.target_commitish !== q.commit ||
+                producer.path !== q.producer.workflowPath || producer.run_attempt !== q.producer.runAttempt || producer.conclusion !== 'success' ||
+                verifier.path !== q.verifier.workflowPath || verifier.run_attempt !== q.verifier.runAttempt || verifier.conclusion !== 'success' ||
+                betaRef.object.sha !== beta.tagObjectSha || betaTag?.object?.sha !== beta.commit || betaRelease.id !== beta.releaseId || validBetas[0]?.id !== beta.releaseId ||
+                betaRelease.draft || !betaRelease.prerelease || betaRelease.published_at !== beta.publishedAt ||
+                betaVerifier.path !== '.github/workflows/verify-release-rebuild.yml' || betaVerifier.event !== 'workflow_run' ||
+                betaVerifier.run_attempt !== beta.verifierRunAttempt || betaVerifier.head_sha !== beta.verifierWorkflowSha || betaVerifier.conclusion !== 'success' ||
+                betaVerifier.updated_at !== beta.verifierCompletedAt || betaArtifact.length !== 1 || !Number.isFinite(soakStart) ||
+                Date.parse(q.publishedAt) - soakStart < 24 * 60 * 60 * 1000 ||
+                q.promotionValidation.workflowPath !== '.github/workflows/promote-stable-aliases.yml') {
+              core.setFailed('promotion identity changed after read-only validation')
+            }
+
+      - name: Setup pinned Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        with:
+          version: v0.36.1
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
+
+      - name: Promote only qualified image aliases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN: ${{ runner.temp }}/stable-alias-promotion-plan/stable-alias-promotion-plan.json
+        run: |
+          set -euo pipefail
+          printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          while IFS=$'\t' read -r alias source_tag source_digest kind expected_current; do
+            source_current="$(docker buildx imagetools inspect "${source_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "${source_current}" == "${source_digest}" ]] || { echo "qualified immutable source drifted: ${source_tag}" >&2; exit 1; }
+            error_file="${RUNNER_TEMP}/alias-promote-inspect.log"
+            if manifest="$(docker buildx imagetools inspect "${alias}" --format '{{json .Manifest}}' 2>"${error_file}")"; then
+              actual_current="$(jq -r '.digest' <<<"${manifest}")"
+            elif grep -Eqi 'manifest unknown|404|not found' "${error_file}"; then
+              actual_current=null
+            else
+              cat "${error_file}" >&2
+              exit 1
+            fi
+            [[ "${actual_current}" == "${expected_current}" ]] || { echo "alias changed after validation: ${alias}" >&2; exit 1; }
+            if [[ "${actual_current}" != "${source_digest}" ]]; then
+              prefer_index=false; [[ "${kind}" == index ]] && prefer_index=true
+              docker buildx imagetools create --prefer-index="${prefer_index}" --tag "${alias}" "${source_tag}"
+            fi
+            promoted="$(docker buildx imagetools inspect "${alias}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "${promoted}" == "${source_digest}" ]] || { echo "alias readback mismatch: ${alias}" >&2; exit 1; }
+          done < <(jq -r '.aliasSnapshots[] | [.alias, .sourceTag, .sourceDigest, .kind, (.currentDigest // "null")] | @tsv' "${PLAN}")
