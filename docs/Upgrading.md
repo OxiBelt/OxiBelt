@@ -27,6 +27,7 @@ be used as a supported production upgrade source or target.
 
 | Source | Target | Status | Contract |
 | --- | --- | --- | --- |
+| `0.6.5` | `0.6.6` | Published maintenance release | Follow [Upgrade from 0.6.5 to 0.6.6](#upgrade-from-065-to-066). The signed tag remains on its maintenance commit; the later ledger and lineage reconciliation preserve history but do not recreate exact-tag qualification evidence. |
 | `0.6.5` | `0.7.0-beta.1` | Unpublished failed cut | The immutable tag failed the exact-revision release-contract job before draft creation. It has no GitHub Release or official artifacts and is not a deployable beta target. |
 | `0.6.5` | `0.7.0-beta.2` | Published failed cut | The immutable GitHub prerelease exists, but its `linux/riscv64` keysigner runtime smoke failed before official assets, manifests, attestations, or images were published. It is not a deployable beta target. |
 | `0.7.0-beta.1` | `0.7.0-beta.2` | Recovery source only | The later entry admits the exact beta tag for source-build recovery, but neither failed cut has an official artifact that can be promoted or republished. |
@@ -51,6 +52,33 @@ The release-specific changelog entry is authoritative when a row is marked
 `Recovery candidate` or `Conditional`. A tag cannot prepare a GitHub draft
 release until the matching entry and upgrade link pass the repository
 release-contract checker.
+
+## Upgrade from 0.6.5 to 0.6.6
+
+`0.6.6` is a narrow maintenance release that restores legacy
+`access_log.enable_system` runtime enablement for system records sent to
+stdout or OTLP. The canonical setting remains
+`access_log.system.enabled`; configurations using only that setting retain
+their behavior. There is no native configuration schema, database, Admin API,
+rulepack, or durable-state migration.
+
+Before rollout, validate the complete configuration with the target binary and
+confirm that the selected sink receives a probe record without exposing
+sensitive fields:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
+```
+
+Keep the prior image digest and matching configuration until log volume,
+redaction, transport authentication, and retention have been reviewed. To
+roll back, drain the `0.6.6` instance and restore the prior image and
+configuration together. Exported stdout or OTLP records cannot be retracted.
+
+The immutable signed `0.6.6` tag was published from its maintenance branch
+before the governed changelog entry existed. The later no-tree-change lineage
+merge makes that release an ancestor of development without moving the tag or
+claiming that post-publication documentation existed at the release revision.
 
 ### Recovery from the `0.7.0-beta.1` and `0.7.0-beta.2` failed cuts
 

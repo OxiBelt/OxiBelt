@@ -555,10 +555,12 @@ function HasMarkdownAnchor(Content: string, Anchor: string): boolean {
   return Slugs.has(Anchor)
 }
 
-function PreviousStable(Stable: Ledger, Version: string): ReleaseEntry {
-  const Previous = Stable.entries.find(Entry => Semver.lt(Entry.version, Version))
+function PreviousStable(Stable: Ledger, Entry: ReleaseEntry): ReleaseEntry {
+  const Previous = Stable.entries.find(Candidate =>
+    Semver.lt(Candidate.version, Entry.version) && Candidate.date <= Entry.date
+  )
   if (Previous === undefined) {
-    throw new Error(`release ${Version} has no preceding stable changelog entry`)
+    throw new Error(`release ${Entry.version} has no preceding stable changelog entry at its release date`)
   }
   return Previous
 }
@@ -569,7 +571,7 @@ function AssertEntryBase(
   Stable: Ledger,
   Beta: Ledger
 ): string {
-  const PreviousStableEntry = PreviousStable(Stable, Entry.version)
+  const PreviousStableEntry = PreviousStable(Stable, Entry)
   let ExpectedBase = PreviousStableEntry.version
   if (Tag.kind === 'beta' && Number(Tag.betaNumber ?? '0') > 1) {
     const PreviousBeta = `${Tag.major}.${Tag.minor}.${Tag.patch}-beta.${Number(Tag.betaNumber) - 1}`

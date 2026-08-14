@@ -148,6 +148,43 @@ test('accepts the forward-only historical baseline and governed stable entry', (
   }
 })
 
+test('does not rewrite an earlier beta base when a lower stable version is published later', () => {
+  const Stable066 = GovernedEntry('0.6.6', '0.6.5').replace(
+    '## [0.6.6] - 2026-07-23',
+    '## [0.6.6] - 2026-08-14'
+  )
+  const EarlierBeta = GovernedEntry('0.7.1-beta.1', '0.6.5').replace(
+    '## [0.7.1-beta.1] - 2026-07-23',
+    '## [0.7.1-beta.1] - 2026-08-11'
+  )
+  const Root = CreateContractWorkspace(`${Stable066}\n${BaselineEntry}`, EarlierBeta)
+  try {
+    ValidateRepositoryReleaseContract({ workspacePath: Root })
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('requires a stable published on the same date as a later beta', () => {
+  const Stable066 = GovernedEntry('0.6.6', '0.6.5').replace(
+    '## [0.6.6] - 2026-07-23',
+    '## [0.6.6] - 2026-08-14'
+  )
+  const LaterBeta = GovernedEntry('0.8.0-beta.1', '0.6.5').replace(
+    '## [0.8.0-beta.1] - 2026-07-23',
+    '## [0.8.0-beta.1] - 2026-08-14'
+  )
+  const Root = CreateContractWorkspace(`${Stable066}\n${BaselineEntry}`, LaterBeta)
+  try {
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({ workspacePath: Root }),
+      /release 0\.8\.0-beta\.1 must declare Changes since 0\.6\.6/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
 test('rejects cross-channel and placeholder-only release entries', () => {
   const CrossChannelRoot = CreateContractWorkspace(BaselineEntry, GovernedEntry())
   try {
