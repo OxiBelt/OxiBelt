@@ -357,6 +357,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Enable hash-pinned pnpm
         run: |
@@ -371,6 +372,12 @@ jobs:
 
       - name: Type-check TypeScript tooling
         run: pnpm run typecheck
+
+      - name: Setup canonical Helm packager
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.4
+          token: ""
 
       - name: Test DevOps tooling
         run: pnpm run test

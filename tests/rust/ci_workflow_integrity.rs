@@ -3154,6 +3154,10 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "pnpm install --frozen-lockfile --ignore-scripts",
     "pnpm run lint",
     "pnpm run typecheck",
+    "name: Setup canonical Helm packager",
+    "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
+    "version: v4.2.4",
+    "token: \"\"",
     "pnpm run test",
     "pnpm run kubernetes-graduation:check --expected-source-revision \"${GITHUB_SHA}\"",
     "pnpm run versioning:check",
@@ -3162,6 +3166,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "OXIBELT_CHANGE_BASE",
     "--change-base \"${OXIBELT_CHANGE_BASE}\"",
     "--change-head \"${OXIBELT_CHANGE_HEAD}\"",
+    "persist-credentials: false",
   ] {
     assert!(
       job_text.contains(expected),
@@ -3190,9 +3195,45 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
   let typecheck = job_text
     .find("pnpm run typecheck")
     .expect("TypeScript release tooling should type-check");
+  let helm = job_text
+    .find("name: Setup canonical Helm packager")
+    .expect("TypeScript release tooling should install the canonical Helm packager");
   let test = job_text
     .find("pnpm run test")
     .expect("TypeScript release tooling should test");
+  let helm_step = &job_text[helm..test];
+  assert!(
+    job_text.contains("    permissions:\n      contents: read\n\n    steps:"),
+    "TypeScript release tooling should expose only read-only contents permission"
+  );
+  for expected in [
+    "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
+    "version: v4.2.4",
+    "token: \"\"",
+  ] {
+    assert!(
+      helm_step.contains(expected),
+      "canonical Helm setup step should include {expected}"
+    );
+  }
+  assert_eq!(
+    helm_step.matches("version:").count(),
+    1,
+    "canonical Helm setup step should declare exactly one version"
+  );
+  let helm_inputs = helm_step
+    .split_once("        with:\n")
+    .expect("canonical Helm setup step should declare inputs")
+    .1
+    .lines()
+    .take_while(|line| !line.trim().is_empty())
+    .map(str::trim)
+    .collect::<Vec<_>>();
+  assert_eq!(
+    helm_inputs,
+    ["version: v4.2.4", "token: \"\""],
+    "canonical Helm setup should receive only the exact version and no GitHub token"
+  );
   let kubernetes_graduation = job_text
     .find("name: Validate Kubernetes graduation contract")
     .expect("TypeScript release tooling should validate Kubernetes graduation evidence");
@@ -3205,11 +3246,24 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
   assert!(
     install < lint
       && lint < typecheck
-      && typecheck < test
+      && typecheck < helm
+      && helm < test
       && test < kubernetes_graduation
       && kubernetes_graduation < versioning
       && versioning < release_contract,
-    "TypeScript release tooling should install, lint, type-check, test, validate Kubernetes graduation evidence, validate version state, and validate the release contract in order"
+    "TypeScript release tooling should install, lint, type-check, set up Helm, test, validate Kubernetes graduation evidence, validate version state, and validate the release contract in order"
+  );
+  assert_eq!(
+    job_text
+      .matches("azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1")
+      .count(),
+    1,
+    "TypeScript release tooling should install the canonical Helm packager exactly once"
+  );
+  assert_eq!(
+    job_text.matches("version: v4.2.4").count(),
+    1,
+    "TypeScript release tooling should declare Helm 4.2.4 exactly once"
   );
   for forbidden in [
     "contents: write",
