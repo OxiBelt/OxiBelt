@@ -46,6 +46,8 @@ be used as a supported production upgrade source or target.
 | `0.6.5` | `0.7.1-beta.4` | Recovery candidate | Follow [Upgrade from 0.6.5 to the 0.7.1 line](#upgrade-from-065-to-the-071-line). Treat beta.4 as available only after person review and every fresh exact-revision artifact and evidence gate succeeds. |
 | `0.7.1-beta.2` | `0.7.1-beta.4` | Recovery candidate | Direct configuration and state recovery is supported without a new native schema migration. Beta.2's incomplete rebuild evidence must not be reused; deploy only newly qualified beta.4 digests. |
 | `0.7.1-beta.3` | `0.7.1-beta.4` | Recovery source only | Beta.3's source configuration and state are accepted by the recovery candidate, but beta.3 has no official artifact to promote and cannot contribute release evidence. |
+| `0.6.6` | `0.8.0-beta.0` | Unpublished invalid cut | The immutable signed tag uses the forbidden beta.0 number, has no GitHub Release, and cannot be moved, repaired, published, or used as release evidence. |
+| `0.6.6` | `0.8.0-beta.1` | Qualification candidate | Follow [Upgrade from 0.6.6 to the 0.8.0 line](#upgrade-from-066-to-the-080-line). Deploy only after every fresh exact-revision artifact and automatic qualification gate succeeds. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -79,6 +81,58 @@ The immutable signed `0.6.6` tag was published from its maintenance branch
 before the governed changelog entry existed. The later no-tree-change lineage
 merge makes that release an ancestor of development without moving the tag or
 claiming that post-publication documentation existed at the release revision.
+
+## Upgrade from 0.6.6 to the 0.8.0 line
+
+`0.8.0-beta.1` is the first valid qualification candidate for this line. The
+immutable `0.8.0-beta.0` tag is invalid because release beta numbering begins
+at beta.1. Keep beta.0 as attributable failed-cut history; do not move its tag,
+create a release for it, attach artifacts, or reuse its workflow results.
+
+The `0.8.0` line advances native configuration from epoch `0` to epoch `1` and
+adds bounded proxy engines, activation planning, strict deployment hardening,
+durable Admin and shared-state behavior, Gateway Controller and Gateway API
+surfaces, signed supply-chain admission, reproducible image and Helm evidence,
+and expanded security testing. Every tracked general and Kubernetes feature
+remains experimental and unvalidated; this version target does not itself
+graduate a feature.
+
+Create and inspect a sibling epoch-1 tree rather than editing the active
+epoch-0 tree in place:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+Use Helm `4.2.4` for canonical packaging and reproducibility. Helm `3.21.3` or
+`4.2.4` may render and consume the charts. Inspect both exact-version chart
+manifests and their admission references before a staged rollout; do not rely
+on a mutable chart alias.
+
+Retain the `0.6.6` image digests, complete epoch-0 configuration tree,
+referenced assets, compatible PostgreSQL backup, admission bundle, audit
+evidence, controller rollback ConfigMaps, Gateway API CRDs and Lease, and
+shared UDP identity material. For rollback, stop new-version Admin,
+membership, shared-state, and UDP writers, drain the data plane before the
+controller, and restore the old binaries, configuration, and database
+together. Remove every unknown epoch-1 table before validating with `0.6.6`;
+there is no automatic down-migration, and external audit, telemetry, network,
+or client-visible effects cannot be undone.
+
+Beta.1 must produce fresh evidence for its exact revision: 30 immutable image
+subjects, both official exact-version Helm OCI charts, their independent
+rebuild receipts, and one complete automatic qualification receipt. Manual
+diagnostics and earlier release evidence cannot qualify it. Begin the 24-hour
+stable soak only after that evidence and person-reviewed publication are
+complete. A tracked change outside the eventual documentation-only stable
+commit requires beta.2 and restarts qualification.
 
 ### Recovery from the `0.7.0-beta.1` and `0.7.0-beta.2` failed cuts
 

@@ -100,10 +100,21 @@ uses the heading `## [VERSION] - YYYY-MM-DD`, followed by these metadata lines:
 - Upgrade guide: [Upgrade from PREVIOUS_VERSION](docs/Upgrading.md#exact-anchor)
 ```
 
-The comparison base for a stable release and for `beta.1` is the immediately
-preceding stable release. The comparison base for `beta.N`, where `N > 1`, is
-the preceding beta for the same target; that entry must list both the
-preceding beta and preceding stable release as supported upgrade sources.
+The comparison base for a stable release and for `beta.1` is the latest lower
+stable release available on that entry's release date. This date-aware rule
+preserves an earlier beta ledger when a lower maintenance stable is published
+later. The comparison base for `beta.N`, where `N > 1`, is the preceding beta
+for the same target; that entry must list both the preceding beta and preceding
+stable release as supported upgrade sources.
+
+When a target has a governed beta, its stable entry must also name the latest
+beta as a supported source. The stable tag must be exactly one commit after
+that beta, and the complete beta-to-stable delta must contain only
+`CHANGELOG.md` and `docs/Upgrading.md`. Any source, configuration, schema,
+dependency, workflow, Helm, controller, packaging, or other tracked change
+requires the next beta and a restarted qualification soak. Publish stable only
+after the latest beta's automatic 30-image and two-chart qualification has
+remained eligible for at least 24 hours.
 
 Every governed entry must contain these level-three sections in this order:
 `Configuration`, `Schema epochs`, `Deprecations and removals`, `Admin API`,

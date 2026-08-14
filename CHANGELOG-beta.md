@@ -15,6 +15,182 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.8.0-beta.1] - 2026-08-14
+
+> Fresh qualification candidate for the `0.8.0` line. The immutable
+> `0.8.0-beta.0` tag is an invalid failed cut because beta numbering starts at
+> beta.1. Do not move, recreate, publish, or attach artifacts to beta.0, and do
+> not reuse any result associated with it.
+
+- Changes since: `0.6.6`
+- Supported upgrade sources: `0.6.6`
+- Upgrade guide: [Upgrade from 0.6.6 to the 0.8.0 line](docs/Upgrading.md#upgrade-from-066-to-the-080-line)
+
+### Configuration
+
+- Add epoch-1 configuration activation planning, native schema and migration
+  tooling, resolved runtime-topology diagnostics, manifest-bound filesystem
+  confinement, strict seccomp expectations, typed secret-reference activation,
+  and the `edge-secure-medium` v2 deployment profile. Selected but unavailable
+  or unqualified capabilities continue to fail closed.
+- Add bounded persistent direct-H1, pooled direct-H2, adaptive multi-address
+  HTTP/3, and cross-datagram QUIC Initial reassembly controls. New tables are
+  optional and defaulted, but an operator must enable experimental engines
+  deliberately and validate the complete file tree before rollout.
+- Preserve both the canonical `access_log.system.enabled` setting and the
+  `0.6.6` legacy `access_log.enable_system` compatibility input.
+
+### Schema epochs
+
+- Advance the native configuration from epoch `0` at `0.6.6` to epoch `1`.
+  Use `oxibeltctl config migrate --from 0 --to 1`; there is no automatic
+  down-migration.
+- Add versioned deployment, confinement, feature-evidence, supply-chain
+  admission, workload-policy, and revocation schemas. Consumers must reject
+  unknown schema versions instead of interpreting a newer payload as an older
+  contract.
+
+### Deprecations and removals
+
+- Retain legacy system access-log enablement for compatibility, but keep
+  `access_log.system.enabled` as the canonical setting for new configuration.
+- Retire the earlier image-signature admission assumptions in favor of the
+  current digest-bound GitHub attestation, provenance, SBOM, vulnerability,
+  rebuild, and signed workload-policy evidence contracts. Old partial evidence
+  cannot qualify this cut.
+
+### Admin API
+
+- Add durable long-running Admin operations, external audit-chain anchoring,
+  atomic secret-reference activation, staged fixed-member cluster membership,
+  and version-2 membership epochs while preserving compatible version-1
+  learners.
+- Add explicit owned and embedded runtime APIs plus activation-plan and
+  resolved-topology diagnostics. Mutation decoding, signing, idempotency,
+  audit classification, and rollback remain bound to the shared fail-closed
+  control-plane contracts.
+
+### Feature lifecycle
+
+- Keep every general and Kubernetes feature in the tracked graduation
+  registries `experimental` and `unvalidated` for `0.8.0`. The expanded test
+  and attestation inventory is qualification machinery, not evidence of a
+  lifecycle promotion.
+- Bind future graduation evidence to the canonical repository, exact ref and
+  revision, target version, complete registry inventory, phase, and native
+  architecture or cluster requirements. Missing, stale, duplicate, or partial
+  evidence remains ineligible.
+
+### Rulepack compatibility
+
+- Retain the existing OxiRule and rulepack compatibility contract. The new
+  fuzz targets exercise parsing and normalization boundaries but do not
+  promote a new rulepack format or make an undocumented rule behavior change.
+
+### Executables and images
+
+- Add the Gateway Controller and strict data-plane delivery surfaces while
+  preserving the documented executable names and role separation for
+  `oxibelt`, `oxibeltctl`, `oxibelt-keysigner`, `oxibelt-netport-switcher`,
+  `oxibelt-gateway-controller`, and `oxibelt-dataplane-strict`.
+- Build and independently verify all 30 role and architecture image subjects
+  from this exact revision. Each subject requires its own runtime check,
+  immutable digest, SBOM, provenance, attestation, vulnerability decision,
+  and reproducible-build receipt.
+- Package both official Helm charts from tracked regular files with Helm
+  `4.2.4`, publish exact `0.8.0-beta.1` OCI versions, and verify their
+  descriptor, manifest, config, layer, attestation, and byte-identical rebuild
+  evidence. Helm `3.21.3` remains a supported consumer only.
+- Do not write stable image aliases during publication. Alias promotion is a
+  separate fail-closed operation after the automatic independent verifier has
+  accepted the exact 30-image and two-chart qualification set. Charts never
+  receive mutable aliases.
+
+### Storage and state
+
+- Serialize PostgreSQL shared-state initialization, add durable Admin
+  operation and membership records, and preserve append-only audit anchoring.
+  Stop new-version writers before rollback and restore a compatible database
+  backup with the old binaries.
+- Add shared durable UDP ownership and rollout state. Mixed-generation flows
+  have explicit admission and cleanup boundaries; rollback cannot recreate
+  sockets, source ports, NAT or conntrack entries, endpoint selection, or
+  in-flight datagrams.
+- QUIC Initial reassembly, HTTP pooling, resolver selection, and runtime
+  planning state remain bounded and in memory and are discarded on drain or
+  restart.
+
+### Upgrade validation
+
+- Create and inspect the epoch-1 sibling tree, then validate every referenced
+  file with the beta.1 binary before activation:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+- Render both charts with the selected supported client, inspect the complete
+  manifests and admission references, and perform a staged rollout with
+  readiness, drain, audit-anchor, shared-state, and Gateway Controller Lease
+  observations before increasing traffic.
+- Deploy beta.1 only after person review and the fresh exact-revision release
+  workflow, vulnerability policy, 30 image receipts, two chart receipts, and
+  aggregate qualification receipt all succeed. Start the 24-hour stable soak
+  only from that complete automatic evidence set.
+
+### Rollback and irreversible steps
+
+- Retain the `0.6.6` image digests, epoch-0 configuration tree, referenced
+  assets, PostgreSQL backup, signed admission bundle, audit evidence,
+  controller rollback ConfigMaps, Gateway API CRDs and Lease, and shared UDP
+  identity material until the beta.1 decision is complete.
+- Stop new-version Admin, membership, shared-state, and UDP writers; drain the
+  data plane before the controller; restore the epoch-0 tree and compatible
+  database with `0.6.6`; and remove whole unknown epoch-1 tables before
+  validating with the older strict parser. There is no automatic epoch-1
+  down-migration.
+- Externally witnessed audit checkpoints and already exported telemetry remain
+  append-only. Rollback cannot reproduce terminated connections, sessions,
+  datagrams, exact Service endpoints, or external side effects.
+
+### Known issues
+
+- The signed `0.8.0-beta.0` tag is forbidden release history and has no GitHub
+  Release. It cannot be repaired or used as the preceding beta; beta.1 starts
+  a fresh chain from stable `0.6.6`.
+- No beta.1 qualification exists until its exact hosted workflows produce and
+  verify all required artifacts and receipts. Local checks, development-build
+  tags, manual verifier runs, and evidence from earlier release lines do not
+  satisfy this gate.
+- The Gateway Controller, Gateway API, Helm integration, and every other
+  tracked feature remain experimental and unvalidated. Native
+  `linux/riscv64` cluster-runner graduation evidence remains unmet.
+- Performance comparison is optional and hosted-only for this cut. If it is
+  skipped, record it as unrun; it does not block the non-benchmark release
+  summary or stable qualification.
+
+### Security
+
+- Require the stable/beta vulnerability policy for every exact image subject:
+  block every `CRITICAL` finding and every fixable `HIGH` finding. A global
+  vulnerability allowance cannot rescue a failed role or architecture check.
+- Preserve fail-closed HTTP framing, TLS and CRLite decisions, QUIC Initial
+  fragment and replay admission, WebTransport isolation, shared-state
+  mutation, Kubernetes admission, confinement, secret-redaction, and audit
+  boundaries introduced since `0.6.6`.
+- Require digest-bound SBOM, provenance, GitHub attestation, Helm OCI schema-v3
+  raw evidence, signed admission evidence, independent rebuild receipts, and
+  one exact aggregate qualification result. Do not promote aliases when any
+  source, identity, digest, receipt, release, workflow, or readback binding is
+  missing or inconsistent.
+
 ## [0.7.1-beta.4] - 2026-08-11
 
 > Recovery candidate for the `0.7.1` line. This cut advances from the
