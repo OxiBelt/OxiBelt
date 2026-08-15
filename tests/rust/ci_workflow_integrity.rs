@@ -9187,6 +9187,11 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "working-directory: verifier",
     "node --import tsx devops/sources/versioning.ts",
     "--workspace-path ../release",
+    "Upload independently derived image plan",
+    "independent-image-plan-${{ steps.plan.outputs.revision }}",
+    "Download independently derived image plan",
+    "INDEPENDENT_IMAGE_PLAN: ${{ runner.temp }}/independent-release-metadata/independent-image-plan.json",
+    "independent image plan must be one regular non-symlink file",
     "expected_count=30",
     "def runner:",
     ".artifactArch == \"arm64\" then \"ubuntu-24.04-arm\"",
@@ -9238,6 +9243,8 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "packages: write",
     "docker-rootful",
     "continue-on-error",
+    "Download exact producer release metadata",
+    "producer-release-metadata/image-plan.json",
   ] {
     assert!(
       !workflow.contains(forbidden),
@@ -9376,6 +9383,9 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     "(.receipts.charts | length) == 2",
     "q.aliases.some((entry) => entry.alias.startsWith('ghcr.io/oxibelt/charts/'))",
     "alias changed after validation",
+    "Authenticate exact stable alias mapping",
+    "validate_stable_alias_mapping \"${QUALIFICATION}\" qualification",
+    "validate_stable_alias_mapping \"${PLAN}\" promotion",
     "Promote only qualified image aliases",
   ] {
     assert!(
@@ -9384,6 +9394,7 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     );
   }
   for expected in [
+    "schemaVersion: 3",
     "if: needs.resolve.outputs.automatic == 'true'",
     "releaseKind: stable ? 'stable' : 'beta'",
     "if .releaseKind == \"stable\" then (.aliases | length) == 48 else .aliases == [] end",
@@ -9411,7 +9422,7 @@ fn stable_alias_promotion_binds_indexes_to_independent_platform_receipts() {
   }
 
   for expected in [
-    "q.schemaVersion !== 2",
+    "q.schemaVersion !== 3",
     "qualified index descriptors are incomplete or duplicated",
     "index children changed after qualification",
     "\"${source_repository}@${source_digest}\"",
@@ -9436,6 +9447,275 @@ fn stable_alias_promotion_binds_indexes_to_independent_platform_receipts() {
     child_readback < alias_mutation,
     "index children must be reauthenticated immediately before alias mutation"
   );
+}
+
+#[test]
+fn stable_alias_mapping_validator_rejects_producer_controlled_variants() {
+  let workflow = stable_alias_promotion_workflow_text();
+  let validation_step = workflow
+    .split_once("- name: Authenticate exact stable alias mapping")
+    .expect("promotion workflow should authenticate exact aliases")
+    .1
+    .split_once("\n      - name: Start isolated rootless Docker for registry validation")
+    .expect("exact alias authentication should precede registry setup")
+    .0;
+  let mutation_step = workflow
+    .split_once("- name: Promote only qualified image aliases")
+    .expect("promotion workflow should retain the sole alias mutation step")
+    .1;
+  let extract_validator = |step: &str| {
+    let start = step
+      .find("          validate_stable_alias_mapping() {")
+      .expect("workflow step should define the exact alias validator");
+    let validator = &step[start..];
+    let end = validator
+      .find("\n          }\n          validate_stable_alias_mapping")
+      .expect("workflow step should call the exact alias validator")
+      + "\n          }".len();
+    validator[..end]
+      .lines()
+      .map(|line| line.strip_prefix("          ").unwrap_or(line))
+      .collect::<Vec<_>>()
+      .join("\n")
+  };
+  let validation_validator = extract_validator(validation_step);
+  let mutation_validator = extract_validator(mutation_step);
+  assert_eq!(
+    validation_validator, mutation_validator,
+    "read-only and packages-write jobs must execute the same exact alias validator"
+  );
+
+  let role_images = [
+    ("standalone", "ghcr.io/oxibelt/oxibelt"),
+    ("dataplane", "ghcr.io/oxibelt/oxibelt-dataplane"),
+    (
+      "dataplane-strict",
+      "ghcr.io/oxibelt/oxibelt-dataplane-strict",
+    ),
+    ("controller", "ghcr.io/oxibelt/oxibelt-gateway-controller"),
+    ("tools", "ghcr.io/oxibelt/oxibelt-tools"),
+    ("keysigner", "ghcr.io/oxibelt/oxibelt-keysigner"),
+  ];
+  let artifact_arches = [
+    ("amd64v2", "amd64"),
+    ("amd64", "amd64"),
+    ("amd64v4", "amd64"),
+    ("arm64", "arm64"),
+    ("riscv64", "riscv64"),
+  ];
+  let mut images = Vec::new();
+  let mut manifests = Vec::new();
+  let mut aliases = Vec::new();
+  for (role_index, (role, image)) in role_images.iter().enumerate() {
+    for (arch_index, (artifact_arch, architecture)) in artifact_arches.iter().enumerate() {
+      let identity = role_index * artifact_arches.len() + arch_index + 1;
+      let digest = format!("sha256:{identity:064x}");
+      let canonical_tag = format!("{image}:5.2.0-alpine-musl-{artifact_arch}");
+      images.push(serde_json::json!({
+        "role": role,
+        "artifactArch": artifact_arch,
+        "image": image,
+        "canonicalTag": canonical_tag,
+        "digest": digest,
+        "receiptSha256": format!("{:064x}", identity + 100),
+        "os": "linux",
+        "architecture": architecture,
+      }));
+      aliases.push(serde_json::json!({
+        "alias": format!("{image}:5-alpine-musl-{artifact_arch}"),
+        "sourceTag": canonical_tag,
+        "sourceDigest": digest,
+        "kind": "platform",
+      }));
+    }
+    for (manifest_index, suffix) in ["", "-alpine-musl"].iter().enumerate() {
+      let identity = 1000 + role_index * 2 + manifest_index;
+      let digest = format!("sha256:{identity:064x}");
+      let canonical_tag = format!("{image}:5.2.0{suffix}");
+      manifests.push(serde_json::json!({
+        "role": role,
+        "image": image,
+        "canonicalTag": canonical_tag,
+        "digest": digest,
+        "children": [],
+      }));
+      if suffix.is_empty() {
+        aliases.push(serde_json::json!({
+          "alias": format!("{image}:latest"),
+          "sourceTag": canonical_tag,
+          "sourceDigest": digest,
+          "kind": "index",
+        }));
+      } else {
+        for alias in [
+          format!("{image}:5-alpine-musl"),
+          format!("{image}:alpine-musl"),
+        ] {
+          aliases.push(serde_json::json!({
+            "alias": alias,
+            "sourceTag": canonical_tag,
+            "sourceDigest": digest,
+            "kind": "index",
+          }));
+        }
+      }
+    }
+  }
+  assert_eq!(images.len(), 30);
+  assert_eq!(manifests.len(), 12);
+  assert_eq!(aliases.len(), 48);
+
+  let qualification = serde_json::json!({
+    "schemaVersion": 3,
+    "repository": "OxiBelt/OxiBelt",
+    "releaseKind": "stable",
+    "version": "5.2.0",
+    "ref": "refs/tags/5.2.0",
+    "tagObjectSha": "1111111111111111111111111111111111111111",
+    "commit": "2222222222222222222222222222222222222222",
+    "releaseId": 1,
+    "publishedAt": "2026-08-15T00:00:00Z",
+    "producer": {},
+    "betaQualification": {},
+    "kind": "release-qualification",
+    "verifier": {},
+    "receipts": {"images": images, "charts": []},
+    "manifests": manifests,
+    "aliases": aliases,
+  });
+  let mut promotion = qualification.clone();
+  promotion["promotionValidation"] = serde_json::json!({
+    "workflowPath": ".github/workflows/promote-stable-aliases.yml",
+    "runId": 123,
+    "runAttempt": 1,
+  });
+  promotion["aliasSnapshots"] = serde_json::Value::Array(
+    qualification["aliases"]
+      .as_array()
+      .expect("qualification aliases should be an array")
+      .iter()
+      .map(|entry| {
+        serde_json::json!({
+          "alias": entry["alias"].clone(),
+          "sourceTag": entry["sourceTag"].clone(),
+          "sourceDigest": entry["sourceDigest"].clone(),
+          "kind": entry["kind"].clone(),
+          "currentDigest": null,
+        })
+      })
+      .collect(),
+  );
+
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-stable-alias-validator-")
+    .tempdir()
+    .expect("alias validator temp directory should be creatable");
+  let script = temp_dir.path().join("validate-stable-aliases.sh");
+  fs::write(
+    &script,
+    format!(
+      "set -euo pipefail\n{validation_validator}\nvalidate_stable_alias_mapping \"$1\" \"$2\"\n"
+    ),
+  )
+  .expect("alias validator script should be writable");
+  let run_case = |label: &str, value: &serde_json::Value, mode: &str| {
+    let input = temp_dir.path().join(format!("{label}.json"));
+    fs::write(
+      &input,
+      serde_json::to_vec(value).expect("alias fixture should serialize"),
+    )
+    .expect("alias fixture should be writable");
+    Command::new("bash")
+      .arg(&script)
+      .arg(&input)
+      .arg(mode)
+      .env("GITHUB_RUN_ID", "123")
+      .env("GITHUB_RUN_ATTEMPT", "1")
+      .output()
+      .unwrap_or_else(|error| panic!("alias validator case {label} should execute: {error}"))
+  };
+
+  for (label, value, mode) in [
+    ("qualification", &qualification, "qualification"),
+    ("promotion", &promotion, "promotion"),
+  ] {
+    let output = run_case(label, value, mode);
+    assert!(
+      output.status.success(),
+      "exact {label} fixture should pass: {}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+
+  let mut invalid_cases = Vec::new();
+  let mut schema_two = qualification.clone();
+  schema_two["schemaVersion"] = serde_json::json!(2);
+  invalid_cases.push(("schema-two", schema_two, "qualification"));
+
+  let mut rotated = qualification.clone();
+  let first_alias = rotated["aliases"][0]["alias"].clone();
+  rotated["aliases"][0]["alias"] = rotated["aliases"][5]["alias"].clone();
+  rotated["aliases"][5]["alias"] = first_alias;
+  invalid_cases.push(("cross-role-rotation", rotated, "qualification"));
+
+  let mut kind_swap = qualification.clone();
+  kind_swap["aliases"][0]["kind"] = serde_json::json!("index");
+  invalid_cases.push(("kind-swap", kind_swap, "qualification"));
+
+  let mut unexpected_repository = qualification.clone();
+  unexpected_repository["aliases"][0]["alias"] =
+    serde_json::json!("ghcr.io/oxibelt/not-official:5-alpine-musl-amd64v2");
+  invalid_cases.push((
+    "unexpected-repository",
+    unexpected_repository,
+    "qualification",
+  ));
+
+  let mut stale_source = qualification.clone();
+  stale_source["aliases"][0]["sourceTag"] =
+    serde_json::json!("ghcr.io/oxibelt/oxibelt:4.9.0-alpine-musl-amd64v2");
+  invalid_cases.push(("stale-source", stale_source, "qualification"));
+
+  let mut digest_mismatch = qualification.clone();
+  digest_mismatch["aliases"][0]["sourceDigest"] =
+    serde_json::json!(format!("sha256:{:064x}", 9999));
+  invalid_cases.push(("digest-mismatch", digest_mismatch, "qualification"));
+
+  let mut missing = qualification.clone();
+  missing["aliases"]
+    .as_array_mut()
+    .expect("aliases should be mutable")
+    .pop();
+  invalid_cases.push(("missing-alias", missing, "qualification"));
+
+  let mut duplicate = qualification.clone();
+  duplicate["aliases"][1] = duplicate["aliases"][0].clone();
+  invalid_cases.push(("duplicate-alias", duplicate, "qualification"));
+
+  let mut extra = qualification.clone();
+  let extra_alias = extra["aliases"][0].clone();
+  extra["aliases"]
+    .as_array_mut()
+    .expect("aliases should be mutable")
+    .push(extra_alias);
+  invalid_cases.push(("extra-alias", extra, "qualification"));
+
+  let mut snapshot_mismatch = promotion.clone();
+  snapshot_mismatch["aliasSnapshots"][0]["sourceTag"] =
+    serde_json::json!("ghcr.io/oxibelt/oxibelt:4.9.0-alpine-musl-amd64v2");
+  invalid_cases.push(("snapshot-mismatch", snapshot_mismatch, "promotion"));
+
+  let mut run_mismatch = promotion;
+  run_mismatch["promotionValidation"]["runId"] = serde_json::json!(124);
+  invalid_cases.push(("run-mismatch", run_mismatch, "promotion"));
+
+  for (label, value, mode) in invalid_cases {
+    let output = run_case(label, &value, mode);
+    assert!(
+      !output.status.success(),
+      "malformed alias fixture {label} must fail closed"
+    );
+  }
 }
 
 #[test]

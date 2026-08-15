@@ -714,6 +714,44 @@ test('stable image plan includes major aliases and stable manifest tags', () => 
     'ghcr.io/oxibelt/oxibelt:5-alpine-musl',
     'ghcr.io/oxibelt/oxibelt:alpine-musl'
   ])
+  const ActualAliases = [
+    ...Plan.artifacts.flatMap(Artifact => Artifact.aliasGhcrTags.map(Alias => ({
+      alias: Alias,
+      sourceTag: Artifact.canonicalGhcrTag,
+      kind: 'platform'
+    }))),
+    ...Plan.manifests.flatMap(Manifest => Manifest.aliasGhcrTags.map(Alias => ({
+      alias: Alias,
+      sourceTag: Manifest.canonicalGhcrTag,
+      kind: 'index'
+    })))
+  ].sort((Left, Right) => Left.alias.localeCompare(Right.alias))
+  const ArtifactArchs = ['amd64v2', 'amd64', 'amd64v4', 'arm64', 'riscv64'] as const
+  const ExpectedAliases = Plan.roles.flatMap(Role => [
+    ...ArtifactArchs.map(ArtifactArch => ({
+      alias: `${Role.image}:5-alpine-musl-${ArtifactArch}`,
+      sourceTag: `${Role.image}:5.2.0-alpine-musl-${ArtifactArch}`,
+      kind: 'platform'
+    })),
+    {
+      alias: `${Role.image}:latest`,
+      sourceTag: `${Role.image}:5.2.0`,
+      kind: 'index'
+    },
+    {
+      alias: `${Role.image}:5-alpine-musl`,
+      sourceTag: `${Role.image}:5.2.0-alpine-musl`,
+      kind: 'index'
+    },
+    {
+      alias: `${Role.image}:alpine-musl`,
+      sourceTag: `${Role.image}:5.2.0-alpine-musl`,
+      kind: 'index'
+    }
+  ]).sort((Left, Right) => Left.alias.localeCompare(Right.alias))
+  Assert.equal(ActualAliases.length, 48)
+  Assert.equal(new Set(ActualAliases.map(Alias => Alias.alias)).size, 48)
+  Assert.deepEqual(ActualAliases, ExpectedAliases)
   Assert.equal(Plan.schemaVersion, 8)
   Assert.equal(Plan.sourceRef, 'refs/tags/5.2.0')
   Assert.equal(Plan.sourceDirty, 'clean')
@@ -847,5 +885,7 @@ test('beta and build image plans do not include latest or major aliases', () => 
 
     Assert.equal(Serialized.includes(':latest'), false)
     Assert.equal(Serialized.includes(':5-alpine-musl'), false)
+    Assert.deepEqual(Plan.artifacts.flatMap(Artifact => Artifact.aliasGhcrTags), [])
+    Assert.deepEqual(Plan.manifests.flatMap(Manifest => Manifest.aliasGhcrTags), [])
   }
 })

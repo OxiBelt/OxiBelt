@@ -228,6 +228,15 @@ jobs:
             echo "producer_run_attempt=${producer_run_attempt}"
           } >>"${GITHUB_OUTPUT}"
 
+      - name: Upload independently derived image plan
+        if: steps.plan.outputs.automatic == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: independent-image-plan-${{ steps.plan.outputs.revision }}
+          path: ${{ runner.temp }}/independent-image-plan.json
+          if-no-files-found: error
+          retention-days: 30
+
   verify:
     name: Rebuild ${{ matrix.role }}/${{ matrix.artifact_arch }} independently
     needs: resolve
@@ -505,13 +514,11 @@ jobs:
       packages: read
 
     steps:
-      - name: Download exact producer release metadata
+      - name: Download independently derived image plan
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          name: oxibelt-release-metadata
-          path: ${{ runner.temp }}/producer-release-metadata
-          github-token: ${{ github.token }}
-          run-id: ${{ needs.resolve.outputs.producer_run_id }}
+          name: independent-image-plan-${{ needs.resolve.outputs.revision }}
+          path: ${{ runner.temp }}/independent-release-metadata
 
       - name: Download exact producer release contract for stable qualification
         if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') }}
@@ -635,7 +642,7 @@ jobs:
               core.setOutput('beta_run_id', String(accepted.run.id))
               core.setOutput('beta_revision', betaTag.object.sha)
             }
-            const identity = {schemaVersion: 2, repository: 'OxiBelt/OxiBelt', releaseKind: stable ? 'stable' : 'beta', version,
+            const identity = {schemaVersion: 3, repository: 'OxiBelt/OxiBelt', releaseKind: stable ? 'stable' : 'beta', version,
               ref: `refs/tags/${version}`, tagObjectSha: ref.object.sha, commit: revision, releaseId: release.id,
               publishedAt: release.published_at, producer: {workflowPath: '.github/workflows/release.yml',
                 runId, runAttempt, event: 'release', headSha: revision, conclusion: 'success'},
@@ -659,7 +666,7 @@ jobs:
         run: |
           set -euo pipefail
           jq -e --slurpfile identity "${IDENTITY}" '
-            .schemaVersion == 2 and .kind == "release-qualification" and .releaseKind == "beta"
+            .schemaVersion == 3 and .kind == "release-qualification" and .releaseKind == "beta"
             and .version == $identity[0].betaQualification.version
             and .ref == $identity[0].betaQualification.ref
             and .tagObjectSha == $identity[0].betaQualification.tagObjectSha
@@ -710,7 +717,7 @@ jobs:
           CHART_RECEIPTS: ${{ runner.temp }}/chart-receipts
           GH_TOKEN: ${{ github.token }}
           IDENTITY: ${{ runner.temp }}/release-identity.json
-          IMAGE_PLAN: ${{ runner.temp }}/producer-release-metadata/image-plan.json
+          INDEPENDENT_IMAGE_PLAN: ${{ runner.temp }}/independent-release-metadata/independent-image-plan.json
           IMAGE_RECEIPTS: ${{ runner.temp }}/image-receipts
           OUTPUT: ${{ runner.temp }}/release-qualification.json
           RELEASE_REF: ${{ needs.resolve.outputs.release_ref }}
@@ -719,11 +726,52 @@ jobs:
           VERIFIER_SHA: ${{ needs.resolve.outputs.verifier_sha }}
         run: |
           set -euo pipefail
+          if [[ ! -f "${INDEPENDENT_IMAGE_PLAN}" || -L "${INDEPENDENT_IMAGE_PLAN}" ]]; then
+            echo "independent image plan must be one regular non-symlink file" >&2
+            exit 1
+          fi
+          plan_size="$(stat -c %s "${INDEPENDENT_IMAGE_PLAN}")"
+          if [[ ! "${plan_size}" =~ ^[0-9]+$ ]] || (( plan_size < 1 || plan_size > 4 * 1024 * 1024 )); then
+            echo "independent image plan has an invalid size" >&2
+            exit 1
+          fi
+          expected_kind=stable
+          [[ "${RELEASE_VERSION}" == *-beta.* ]] && expected_kind=beta
+          release_major="${RELEASE_VERSION%%.*}"
+          jq -e --arg version "${RELEASE_VERSION}" --arg revision "${RELEASE_REVISION}" \
+            --arg ref "${RELEASE_REF}" --arg expected_kind "${expected_kind}" --arg major "${release_major}" '
+            def role_image:
+              if . == "standalone" then "ghcr.io/oxibelt/oxibelt"
+              elif . == "dataplane" then "ghcr.io/oxibelt/oxibelt-dataplane"
+              elif . == "dataplane-strict" then "ghcr.io/oxibelt/oxibelt-dataplane-strict"
+              elif . == "controller" then "ghcr.io/oxibelt/oxibelt-gateway-controller"
+              elif . == "tools" then "ghcr.io/oxibelt/oxibelt-tools"
+              elif . == "keysigner" then "ghcr.io/oxibelt/oxibelt-keysigner"
+              else error("unsupported image role") end;
+            .schemaVersion == 8 and .tag == $version and .version == $version
+            and .revision == $revision and .sourceRef == $ref and .kind == $expected_kind
+            and (.roles | type == "array" and length == 6)
+            and ([.roles[].role] | sort == ["controller","dataplane","dataplane-strict","keysigner","standalone","tools"])
+            and all(.roles[]; .image == (.role | role_image))
+            and (.artifacts | type == "array" and length == 30)
+            and ([.artifacts[] | (.role + "/" + .artifactArch)] | unique | length == 30)
+            and all(.artifacts[];
+              (.artifactArch | IN("amd64v2","amd64","amd64v4","arm64","riscv64"))
+              and .image == (.role | role_image)
+              and .canonicalGhcrTag == (.image + ":" + $version + "-alpine-musl-" + .artifactArch)
+              and .aliasGhcrTags == (if $expected_kind == "stable" then [(.image + ":" + $major + "-alpine-musl-" + .artifactArch)] else [] end))
+            and (.manifests | type == "array" and length == 12)
+            and ([.manifests[] | (.role + "/" + .name)] | unique | length == 12)
+            and all(.manifests[];
+              (.name | IN("release","alpine-musl"))
+              and .image == (.role | role_image)
+              and .canonicalGhcrTag == (if .name == "release" then (.image + ":" + $version) else (.image + ":" + $version + "-alpine-musl") end)
+              and .aliasGhcrTags ==
+                (if $expected_kind == "beta" then []
+                 elif .name == "release" then [(.image + ":latest")]
+                 else [(.image + ":" + $major + "-alpine-musl"), (.image + ":alpine-musl")] end))
+          ' "${INDEPENDENT_IMAGE_PLAN}" >/dev/null
           printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-          jq -e --arg version "${RELEASE_VERSION}" --arg revision "${RELEASE_REVISION}" '
-            .schemaVersion == 8 and .version == $version and .revision == $revision
-            and (.kind == "stable" or .kind == "beta")
-          ' "${IMAGE_PLAN}" >/dev/null
           mapfile -d '' image_files < <(find "${IMAGE_RECEIPTS}" -maxdepth 1 -type f -name 'rebuild-receipt-*.json' -print0)
           mapfile -d '' chart_files < <(find "${CHART_RECEIPTS}" -maxdepth 1 -type f -name 'helm-rebuild-receipt-*.json' -print0)
           [[ "${#image_files[@]}" -eq 30 && "${#chart_files[@]}" -eq 2 ]]
@@ -745,7 +793,7 @@ jobs:
             platform="$(jq -er --arg role "${role}" --arg arch "${arch}" '
               [.artifacts[] | select(.role == $role and .artifactArch == $arch)] |
               if length == 1 then .[0].platform else error("release plan artifact identity is not unique") end
-            ' "${IMAGE_PLAN}")"
+            ' "${INDEPENDENT_IMAGE_PLAN}")"
             case "${arch}:${platform}" in
               amd64v2:linux/amd64|amd64:linux/amd64|amd64v4:linux/amd64|arm64:linux/arm64|riscv64:linux/riscv64) ;;
               *) echo "release plan artifact platform does not match ${arch}: ${platform}" >&2; exit 1 ;;
@@ -758,7 +806,7 @@ jobs:
             while read -r alias; do
               [[ -n "${alias}" ]] || continue
               aliases_json="$(jq -c --arg alias "${alias}" --arg source "${canonical}" --arg digest "${digest}" '. + [{alias: $alias, sourceTag: $source, sourceDigest: $digest, kind: "platform"}]' <<<"${aliases_json}")"
-            done < <(jq -r --arg role "${role}" --arg arch "${arch}" '.artifacts[] | select(.role == $role and .artifactArch == $arch) | .aliasGhcrTags[]' "${IMAGE_PLAN}")
+            done < <(jq -r --arg role "${role}" --arg arch "${arch}" '.artifacts[] | select(.role == $role and .artifactArch == $arch) | .aliasGhcrTags[]' "${INDEPENDENT_IMAGE_PLAN}")
           done
           [[ "$(jq '[.[] | (.role + "/" + .artifactArch)] | unique | length' <<<"${images_json}")" -eq 30 ]]
           charts_json='[]'
@@ -801,7 +849,7 @@ jobs:
             role="$(jq -er --arg image "${image}" '
               [.roles[] | select(.image == $image)] |
               if length == 1 then .[0].role else error("release plan role identity is not unique") end
-            ' "${IMAGE_PLAN}")"
+            ' "${INDEPENDENT_IMAGE_PLAN}")"
             expected_children="$(jq -ce --arg role "${role}" '
               [.[] | select(.role == $role and (.artifactArch | IN("amd64", "arm64", "riscv64"))) |
                 {artifactArch, digest, os, architecture}] | sort_by(.os, .architecture, .digest)
@@ -842,7 +890,7 @@ jobs:
             done < <(jq -r --arg release_tag "${release_tag}" --arg release_digest "${release_digest}" --arg alpine_tag "${alpine_tag}" --arg alpine_digest "${alpine_digest}" '
               .manifests[] | select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
               [.canonicalGhcrTag, (if .canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end), .aliasGhcrTags[]] | @tsv
-            ' "${IMAGE_PLAN}")
+            ' "${INDEPENDENT_IMAGE_PLAN}")
           done
           jq -e '
             length == 12 and ([.[].canonicalTag] | unique | length == 12)
@@ -856,7 +904,7 @@ jobs:
               runId: $verifier_run_id, runAttempt: $verifier_run_attempt, event: "workflow_run", conclusion: "success"},
               receipts: {images: ($images | sort_by(.role, .artifactArch)), charts: ($charts | sort_by(.chart))},
               manifests: ($manifests | sort_by(.image)), aliases: ($aliases | sort_by(.alias))}' >"${OUTPUT}"
-          jq -e '.schemaVersion == 2 and .kind == "release-qualification" and (.releaseKind == "stable" or .releaseKind == "beta") and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2 and (.manifests | length) == 12 and (.manifests | all(.children | length == 3)) and (if .releaseKind == "stable" then (.aliases | length) == 48 else .aliases == [] end)' "${OUTPUT}" >/dev/null
+          jq -e '.schemaVersion == 3 and .kind == "release-qualification" and (.releaseKind == "stable" or .releaseKind == "beta") and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2 and (.manifests | length) == 12 and (.manifests | all(.children | length == 3)) and (if .releaseKind == "stable" then (.aliases | length) == 48 else .aliases == [] end)' "${OUTPUT}" >/dev/null
 
       - name: Upload sealed release qualification
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1

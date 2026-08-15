@@ -95,7 +95,7 @@ jobs:
                   Object.keys(value).sort().join(',') !== [...keys].sort().join(',')) throw new Error(`${label} keys are not canonical`)
             }
             exactKeys(q, ['schemaVersion','repository','releaseKind','version','ref','tagObjectSha','commit','releaseId','publishedAt','producer','betaQualification','kind','verifier','receipts','manifests','aliases'], 'qualification')
-            if (q.schemaVersion !== 2 || q.kind !== 'release-qualification' || q.releaseKind !== 'stable' || q.repository !== 'OxiBelt/OxiBelt' ||
+            if (q.schemaVersion !== 3 || q.kind !== 'release-qualification' || q.releaseKind !== 'stable' || q.repository !== 'OxiBelt/OxiBelt' ||
                 !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(q.version ?? '') ||
                 q.ref !== `refs/tags/${q.version}` || !/^[0-9a-f]{40}$/.test(q.commit ?? '') ||
                 !/^[0-9a-f]{40}$/.test(q.tagObjectSha ?? '') || !Number.isSafeInteger(q.releaseId) || q.releaseId < 1) {
@@ -228,7 +228,7 @@ jobs:
           actual_sha="$(sha256sum "${BETA}" | awk '{print $1}')"
           [[ "${actual_sha}" == "${expected_sha}" ]]
           jq -e --slurpfile stable "${STABLE}" '
-            .schemaVersion == 2 and .kind == "release-qualification" and .releaseKind == "beta"
+            .schemaVersion == 3 and .kind == "release-qualification" and .releaseKind == "beta"
             and .version == $stable[0].betaQualification.version and .commit == $stable[0].betaQualification.commit
             and .tagObjectSha == $stable[0].betaQualification.tagObjectSha
             and .releaseId == $stable[0].betaQualification.releaseId
@@ -236,6 +236,92 @@ jobs:
             and .verifier.runAttempt == $stable[0].betaQualification.verifierRunAttempt
             and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2
           ' "${BETA}" >/dev/null
+
+      - name: Authenticate exact stable alias mapping
+        env:
+          QUALIFICATION: ${{ runner.temp }}/release-qualification/release-qualification.json
+        run: |
+          set -euo pipefail
+          validate_stable_alias_mapping() {
+            local input="$1"
+            local mode="$2"
+            jq -e --arg mode "${mode}" --argjson current_run_id "${GITHUB_RUN_ID}" --argjson current_run_attempt "${GITHUB_RUN_ATTEMPT}" '
+              def exact_keys($expected):
+                type == "object" and ((keys | sort) == ($expected | sort));
+              def role_image($role):
+                if $role == "standalone" then "ghcr.io/oxibelt/oxibelt"
+                elif $role == "dataplane" then "ghcr.io/oxibelt/oxibelt-dataplane"
+                elif $role == "dataplane-strict" then "ghcr.io/oxibelt/oxibelt-dataplane-strict"
+                elif $role == "controller" then "ghcr.io/oxibelt/oxibelt-gateway-controller"
+                elif $role == "tools" then "ghcr.io/oxibelt/oxibelt-tools"
+                elif $role == "keysigner" then "ghcr.io/oxibelt/oxibelt-keysigner"
+                else error("unsupported qualified image role") end;
+              def expected_architecture($arch):
+                if $arch == "amd64v2" or $arch == "amd64" or $arch == "amd64v4" then "amd64"
+                elif $arch == "arm64" then "arm64"
+                elif $arch == "riscv64" then "riscv64"
+                else error("unsupported qualified artifact architecture") end;
+              def expected_aliases:
+                . as $q |
+                ([ $q.receipts.images[] |
+                  {alias: (role_image(.role) + ":" + ($q.version | split(".")[0]) + "-alpine-musl-" + .artifactArch),
+                   sourceTag: (role_image(.role) + ":" + $q.version + "-alpine-musl-" + .artifactArch),
+                   sourceDigest: .digest, kind: "platform"} ]
+                 + ([ $q.manifests[] |
+                    if .canonicalTag == (.image + ":" + $q.version) then
+                      [{alias: (.image + ":latest"), sourceTag: .canonicalTag, sourceDigest: .digest, kind: "index"}]
+                    elif .canonicalTag == (.image + ":" + $q.version + "-alpine-musl") then
+                      [{alias: (.image + ":" + ($q.version | split(".")[0]) + "-alpine-musl"), sourceTag: .canonicalTag, sourceDigest: .digest, kind: "index"},
+                       {alias: (.image + ":alpine-musl"), sourceTag: .canonicalTag, sourceDigest: .digest, kind: "index"}]
+                    else error("qualified index source tag is not canonical") end
+                  ] | add));
+              . as $q |
+              (($mode == "qualification" and
+                ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases"])))
+               or
+               ($mode == "promotion" and
+                ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases","promotionValidation","aliasSnapshots"]))))
+              and $q.schemaVersion == 3 and $q.kind == "release-qualification" and $q.releaseKind == "stable"
+              and $q.repository == "OxiBelt/OxiBelt"
+              and ($q.version | type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+              and ($q.receipts | exact_keys(["images","charts"]))
+              and ($q.receipts.images | type == "array" and length == 30)
+              and ([ $q.receipts.images[] | (.role + "/" + .artifactArch) ] | unique | length == 30)
+              and all($q.receipts.images[];
+                exact_keys(["role","artifactArch","image","canonicalTag","digest","receiptSha256","os","architecture"])
+                and (.artifactArch | IN("amd64v2","amd64","amd64v4","arm64","riscv64"))
+                and .image == role_image(.role)
+                and .canonicalTag == (.image + ":" + $q.version + "-alpine-musl-" + .artifactArch)
+                and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                and (.receiptSha256 | type == "string" and test("^[0-9a-f]{64}$"))
+                and .os == "linux" and .architecture == expected_architecture(.artifactArch))
+              and ($q.manifests | type == "array" and length == 12)
+              and ([ $q.manifests[].canonicalTag ] | unique | length == 12)
+              and all($q.manifests[];
+                exact_keys(["role","image","canonicalTag","digest","children"])
+                and .image == role_image(.role)
+                and (.canonicalTag == (.image + ":" + $q.version) or
+                     .canonicalTag == (.image + ":" + $q.version + "-alpine-musl"))
+                and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))
+              and ($q.aliases | type == "array" and length == 48)
+              and all($q.aliases[]; exact_keys(["alias","sourceTag","sourceDigest","kind"]))
+              and (($q | expected_aliases | sort_by(.alias)) as $expected |
+                ($expected | length == 48) and ([ $expected[].alias ] | unique | length == 48)
+                and ($q.aliases | sort_by(.alias)) == $expected
+                and (if $mode == "promotion" then
+                  ($q.promotionValidation | exact_keys(["workflowPath","runId","runAttempt"]))
+                  and $q.promotionValidation.workflowPath == ".github/workflows/promote-stable-aliases.yml"
+                  and $q.promotionValidation.runId == $current_run_id
+                  and $q.promotionValidation.runAttempt == $current_run_attempt
+                  and ($q.aliasSnapshots | type == "array" and length == 48)
+                  and all($q.aliasSnapshots[];
+                    exact_keys(["alias","sourceTag","sourceDigest","kind","currentDigest"])
+                    and (.currentDigest == null or (.currentDigest | type == "string" and test("^sha256:[0-9a-f]{64}$"))))
+                  and ([ $q.aliasSnapshots[] | {alias,sourceTag,sourceDigest,kind} ] | sort_by(.alias)) == $expected
+                else true end))
+            ' "${input}" >/dev/null
+          }
+          validate_stable_alias_mapping "${QUALIFICATION}" qualification
 
       - name: Start isolated rootless Docker for registry validation
         uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
@@ -415,6 +501,86 @@ jobs:
           PLAN: ${{ runner.temp }}/stable-alias-promotion-plan/stable-alias-promotion-plan.json
         run: |
           set -euo pipefail
+          validate_stable_alias_mapping() {
+            local input="$1"
+            local mode="$2"
+            jq -e --arg mode "${mode}" --argjson current_run_id "${GITHUB_RUN_ID}" --argjson current_run_attempt "${GITHUB_RUN_ATTEMPT}" '
+              def exact_keys($expected):
+                type == "object" and ((keys | sort) == ($expected | sort));
+              def role_image($role):
+                if $role == "standalone" then "ghcr.io/oxibelt/oxibelt"
+                elif $role == "dataplane" then "ghcr.io/oxibelt/oxibelt-dataplane"
+                elif $role == "dataplane-strict" then "ghcr.io/oxibelt/oxibelt-dataplane-strict"
+                elif $role == "controller" then "ghcr.io/oxibelt/oxibelt-gateway-controller"
+                elif $role == "tools" then "ghcr.io/oxibelt/oxibelt-tools"
+                elif $role == "keysigner" then "ghcr.io/oxibelt/oxibelt-keysigner"
+                else error("unsupported qualified image role") end;
+              def expected_architecture($arch):
+                if $arch == "amd64v2" or $arch == "amd64" or $arch == "amd64v4" then "amd64"
+                elif $arch == "arm64" then "arm64"
+                elif $arch == "riscv64" then "riscv64"
+                else error("unsupported qualified artifact architecture") end;
+              def expected_aliases:
+                . as $q |
+                ([ $q.receipts.images[] |
+                  {alias: (role_image(.role) + ":" + ($q.version | split(".")[0]) + "-alpine-musl-" + .artifactArch),
+                   sourceTag: (role_image(.role) + ":" + $q.version + "-alpine-musl-" + .artifactArch),
+                   sourceDigest: .digest, kind: "platform"} ]
+                 + ([ $q.manifests[] |
+                    if .canonicalTag == (.image + ":" + $q.version) then
+                      [{alias: (.image + ":latest"), sourceTag: .canonicalTag, sourceDigest: .digest, kind: "index"}]
+                    elif .canonicalTag == (.image + ":" + $q.version + "-alpine-musl") then
+                      [{alias: (.image + ":" + ($q.version | split(".")[0]) + "-alpine-musl"), sourceTag: .canonicalTag, sourceDigest: .digest, kind: "index"},
+                       {alias: (.image + ":alpine-musl"), sourceTag: .canonicalTag, sourceDigest: .digest, kind: "index"}]
+                    else error("qualified index source tag is not canonical") end
+                  ] | add));
+              . as $q |
+              (($mode == "qualification" and
+                ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases"])))
+               or
+               ($mode == "promotion" and
+                ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases","promotionValidation","aliasSnapshots"]))))
+              and $q.schemaVersion == 3 and $q.kind == "release-qualification" and $q.releaseKind == "stable"
+              and $q.repository == "OxiBelt/OxiBelt"
+              and ($q.version | type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+              and ($q.receipts | exact_keys(["images","charts"]))
+              and ($q.receipts.images | type == "array" and length == 30)
+              and ([ $q.receipts.images[] | (.role + "/" + .artifactArch) ] | unique | length == 30)
+              and all($q.receipts.images[];
+                exact_keys(["role","artifactArch","image","canonicalTag","digest","receiptSha256","os","architecture"])
+                and (.artifactArch | IN("amd64v2","amd64","amd64v4","arm64","riscv64"))
+                and .image == role_image(.role)
+                and .canonicalTag == (.image + ":" + $q.version + "-alpine-musl-" + .artifactArch)
+                and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                and (.receiptSha256 | type == "string" and test("^[0-9a-f]{64}$"))
+                and .os == "linux" and .architecture == expected_architecture(.artifactArch))
+              and ($q.manifests | type == "array" and length == 12)
+              and ([ $q.manifests[].canonicalTag ] | unique | length == 12)
+              and all($q.manifests[];
+                exact_keys(["role","image","canonicalTag","digest","children"])
+                and .image == role_image(.role)
+                and (.canonicalTag == (.image + ":" + $q.version) or
+                     .canonicalTag == (.image + ":" + $q.version + "-alpine-musl"))
+                and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")))
+              and ($q.aliases | type == "array" and length == 48)
+              and all($q.aliases[]; exact_keys(["alias","sourceTag","sourceDigest","kind"]))
+              and (($q | expected_aliases | sort_by(.alias)) as $expected |
+                ($expected | length == 48) and ([ $expected[].alias ] | unique | length == 48)
+                and ($q.aliases | sort_by(.alias)) == $expected
+                and (if $mode == "promotion" then
+                  ($q.promotionValidation | exact_keys(["workflowPath","runId","runAttempt"]))
+                  and $q.promotionValidation.workflowPath == ".github/workflows/promote-stable-aliases.yml"
+                  and $q.promotionValidation.runId == $current_run_id
+                  and $q.promotionValidation.runAttempt == $current_run_attempt
+                  and ($q.aliasSnapshots | type == "array" and length == 48)
+                  and all($q.aliasSnapshots[];
+                    exact_keys(["alias","sourceTag","sourceDigest","kind","currentDigest"])
+                    and (.currentDigest == null or (.currentDigest | type == "string" and test("^sha256:[0-9a-f]{64}$"))))
+                  and ([ $q.aliasSnapshots[] | {alias,sourceTag,sourceDigest,kind} ] | sort_by(.alias)) == $expected
+                else true end))
+            ' "${input}" >/dev/null
+          }
+          validate_stable_alias_mapping "${PLAN}" promotion
           printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           normalize_index_children() {
             jq -ce '
