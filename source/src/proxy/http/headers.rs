@@ -241,7 +241,10 @@ fn remove_inbound_forwarded_headers(headers: &mut HeaderMap) {
   headers.remove(FORWARDED);
 }
 
-pub(crate) fn sanitize_request_trailers_for_upstream(trailers: &mut HeaderMap) {
+pub(crate) fn sanitize_request_trailers_for_upstream(
+  trailers: &mut HeaderMap,
+  identity_headers: &[HeaderName],
+) {
   strip_hop_by_hop_headers(trailers);
   remove_inbound_forwarded_headers(trailers);
   trailers.remove(HOST);
@@ -252,6 +255,17 @@ pub(crate) fn sanitize_request_trailers_for_upstream(trailers: &mut HeaderMap) {
   trailers.remove(X_FORWARDED_PORT);
   trailers.remove(X_FORWARDED_PROTO);
   trailers.remove(X_REAL_IP);
+  // Identity and forwarding trailers are not part of the authenticated request
+  // metadata and must not be introduced after authorization has completed.
+  trailers.remove("remote-user");
+  trailers.remove("remote-groups");
+  trailers.remove("remote-email");
+  trailers.remove("remote-name");
+  trailers.remove("x-auth-user");
+  trailers.remove("x-forwarded-user");
+  for name in identity_headers {
+    trailers.remove(name);
+  }
 }
 
 fn effective_host_header_value(host: &str) -> Option<HeaderValue> {

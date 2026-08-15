@@ -51,6 +51,7 @@ required_jobs=(
   docker-integration-state-data
   docker-integration-ops
   docker-integration-security
+  docker-security-fuzz-smoke
   remote-signer-dos-docker
   browser-webdriver
 )

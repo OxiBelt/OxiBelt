@@ -41,6 +41,7 @@ const DOCKER_INTEGRATION_JOBS: &[&str] = &[
   "docker-integration-ops",
   "docker-integration-security",
 ];
+const DOCKER_SECURITY_FUZZ_JOB_COUNT: usize = 1;
 
 const OXIBELT_IMAGE_ARTIFACTS: &[(&str, &str, &str, &str)] = &[
   (
@@ -121,6 +122,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "docker-integration-state-data",
   "docker-integration-ops",
   "docker-integration-security",
+  "docker-security-fuzz-smoke",
   "remote-signer-dos-docker",
   "browser-webdriver",
 ];
@@ -177,6 +179,11 @@ fn repo_root() -> PathBuf {
 fn workflow_text() -> String {
   fs::read_to_string(repo_root().join(".github/workflows/check-oxibelt.yml"))
     .expect("check-oxibelt workflow should be readable")
+}
+
+fn docker_security_fuzz_sustained_workflow_text() -> String {
+  fs::read_to_string(repo_root().join(".github/workflows/docker-security-fuzz-sustained.yml"))
+    .expect("sustained Docker security fuzz workflow should be readable")
 }
 
 fn feature_graduation_workflow_text() -> String {
@@ -5619,6 +5626,110 @@ fn docker_integration_jobs_are_split_by_logical_group() {
 }
 
 #[test]
+fn docker_security_fuzz_smoke_is_catalogued_bounded_and_required() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("docker-security-fuzz-smoke")
+    .expect("workflow should define Docker security fuzz smoke");
+
+  assert_eq!(
+    job.needs,
+    vec![
+      "generate-test-matrices".to_owned(),
+      "docker-alpine-musl-image-amd64".to_owned(),
+      "docker-integration-helper-images".to_owned(),
+    ],
+    "Docker security fuzz smoke should consume the generated catalog and prebuilt images"
+  );
+  for expected in [
+    "docker_security_fuzz: ${{ steps.matrices.outputs.docker_security_fuzz }}",
+    "list --suite security-fuzz --format github-matrix",
+    "matrix: ${{ fromJson(needs.generate-test-matrices.outputs.docker_security_fuzz) }}",
+    "fail-fast: false",
+    "tests/scripts/run-docker-security-fuzz.sh smoke \"${{ matrix.target }}\"",
+    "OXIBELT_TEST_ARTIFACT_DIR:",
+    "failure() || cancelled()",
+    "retention-days: 90",
+  ] {
+    assert!(
+      workflow.contains(expected),
+      "Docker security fuzz smoke contract should include {expected}"
+    );
+  }
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "continue-on-error: true",
+  ] {
+    assert!(
+      !workflow_job_text(&workflow, "docker-security-fuzz-smoke").contains(forbidden),
+      "Docker security fuzz smoke must not contain {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn sustained_docker_security_fuzz_builds_once_and_is_resource_bounded() {
+  let workflow = docker_security_fuzz_sustained_workflow_text();
+  let parsed: serde_json::Value = serde_saphyr::from_str(&workflow)
+    .expect("sustained Docker security fuzz workflow should parse");
+
+  assert_eq!(parsed["permissions"]["contents"], "read");
+  assert_eq!(parsed["jobs"]["campaign"]["strategy"]["fail-fast"], false);
+  assert_eq!(parsed["jobs"]["campaign"]["strategy"]["max-parallel"], 2);
+  for expected in [
+    "github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch",
+    "list --suite security-fuzz --format github-matrix",
+    "tests/scripts/build-docker-image-artifact.sh",
+    "tests/scripts/build-docker-integration-helper-images-artifact.sh",
+    "tests/scripts/run-docker-security-fuzz.sh campaign \"${{ matrix.target }}\" 900",
+    "failure() || cancelled()",
+    "retention-days: 90",
+  ] {
+    assert!(
+      workflow.contains(expected),
+      "sustained Docker security fuzz contract should include {expected}"
+    );
+  }
+  assert_eq!(
+    workflow
+      .matches(
+        "github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch",
+      )
+      .count(),
+    2,
+    "manual campaigns may select a ref while scheduled campaigns stay default-branch-only"
+  );
+  assert_eq!(
+    workflow
+      .matches("tests/scripts/build-docker-image-artifact.sh")
+      .count(),
+    1,
+    "the sustained workflow should build the OxiBelt image exactly once"
+  );
+  assert_eq!(
+    workflow
+      .matches("tests/scripts/build-docker-integration-helper-images-artifact.sh")
+      .count(),
+    1,
+    "the sustained workflow should build helper images exactly once"
+  );
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "issues: write",
+    "pull-requests: write",
+    "contents: write",
+  ] {
+    assert!(
+      !workflow.contains(forbidden),
+      "sustained Docker security fuzz must not contain {forbidden}"
+    );
+  }
+}
+
+#[test]
 fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
   let root = repo_root();
   let read = |path: &str| {
@@ -6274,15 +6385,15 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     workflow
       .matches("name: Download Docker integration helper image artifact")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + 3,
-    "each Docker integration job plus all three Admin PostgreSQL durability jobs should download the helper image artifact"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3,
+    "each Docker integration/security-fuzz job plus all three Admin PostgreSQL durability jobs should download the helper image artifact"
   );
   assert_eq!(
     workflow
       .matches("name: Load Docker integration helper images")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len(),
-    "each Docker integration job should load the helper image tar"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT,
+    "each Docker integration/security-fuzz job should load the helper image tar"
   );
   for value in [
     "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
@@ -6296,7 +6407,14 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
   ] {
     let expected_count = if value == "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci" {
-      DOCKER_INTEGRATION_JOBS.len() + 3
+      DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3
+    } else if matches!(
+      value,
+      "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci"
+        | "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci"
+        | "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\""
+    ) {
+      DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT
     } else {
       DOCKER_INTEGRATION_JOBS.len()
     };
@@ -6328,8 +6446,8 @@ fn docker_integration_matrix_cargo_invocations_are_retry_hardened() {
   );
   assert_eq!(
     matrix_job.matches(cargo_matrix_helper).count(),
-    2,
-    "generate-test-matrices should retry both Docker and browser matrix helper calls"
+    3,
+    "generate-test-matrices should retry Docker integration, security-fuzz, and browser matrix helper calls"
   );
   assert!(
     !matrix_job

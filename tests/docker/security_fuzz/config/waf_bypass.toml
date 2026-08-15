@@ -1,0 +1,82 @@
+[logging]
+level = "warn"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = 1
+
+[runtime.accept]
+workers = 1
+reuse_port = false
+backlog = 1024
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = false
+max_http_version = "h1"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[waf.http_body_compression]
+mode = "transform"
+encodings = ["gzip", "deflate", "br", "zstd"]
+max_decoded_body_bytes = 65536
+max_expansion_ratio = 50
+decode_timeout_ms = 1000
+max_concurrent_bodies = 1
+
+[[waf.rules]]
+name = "security-fuzz-known-attack"
+phase = "request"
+priority = 1
+when = "Request.Http.Path.endsWith('/sf-known-attack') || Request.Body.contains('sf-known-attack') || (Request.Headers.has('X-Fuzz-Case') && Request.Headers.get('X-Fuzz-Case').contains('sf-known-attack'))"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked"
+
+[[upstreams]]
+name = "protected"
+origin = "http://mock-http:18080/protected"
+max_http_version = "h1"
+connect_timeout_ms = 1000
+request_timeout_ms = 3000
+preserve_host = false
+
+[[routes]]
+name = "protected"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "protected"
+
+[quic.socket]
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = 1
+reuse_port = false

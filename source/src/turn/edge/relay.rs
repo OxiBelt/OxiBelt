@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::bail;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -29,7 +29,24 @@ pub(super) fn spawn_peer_reader(
 ) {
   tokio::spawn(async move {
     let mut buffer = vec![0u8; 65_536];
-    while let Ok((len, peer)) = relay.recv_from(&mut buffer).await {
+    loop {
+      let received =
+        tokio::time::timeout(Duration::from_secs(1), relay.recv_from(&mut buffer)).await;
+      let (len, peer) = match received {
+        Ok(Ok(received)) => received,
+        Ok(Err(_)) => break,
+        Err(_) => {
+          let mut clients = edge.clients.lock().await;
+          remove_expired_client_state(&mut clients, client);
+          if !clients
+            .get(&client)
+            .is_some_and(|state| state.allocations.contains_key(&family))
+          {
+            break;
+          }
+          continue;
+        }
+      };
       let out = {
         let mut clients = edge.clients.lock().await;
         remove_expired_client_state(&mut clients, client);
@@ -140,6 +157,13 @@ pub(super) fn remove_expired_client_state(
   }
 }
 
+pub(super) fn remove_all_expired_client_state(clients: &mut HashMap<EdgeClient, EdgeClientState>) {
+  clients.retain(|_, state| {
+    expire_client_state(state);
+    !state.allocations.is_empty()
+  });
+}
+
 pub(super) async fn send_allocation_mismatch(
   sender: &EdgeSender,
   request_type: u16,
@@ -218,6 +242,8 @@ mod tests {
         ),
       ]),
       expires_at: now + Duration::from_secs(600),
+      _introspection_guard: crate::runtime_introspection::RuntimeIntrospectionState::new()
+        .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
     };
 
     expire_allocation_state(&mut allocation);
@@ -233,12 +259,17 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn expired_allocation_is_removed() {
-    let client = EdgeClient::Stream(1);
+  async fn expired_udp_client_and_allocation_release_introspection_guards() {
+    let runtime = crate::runtime_introspection::RuntimeIntrospectionState::new();
+    runtime.set_enabled(true);
+    let client = EdgeClient::Udp("127.0.0.1:49152".parse().expect("socket addr"));
     let mut clients = HashMap::from([(
       client,
       EdgeClientState {
         sender: EdgeSender::Stream(mpsc::channel(1).0),
+        _udp_client_guard: Some(
+          runtime.guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnUdpClient),
+        ),
         allocations: HashMap::from([(
           TurnRelayAddressFamily::Ipv4,
           EdgeAllocation {
@@ -247,14 +278,169 @@ mod tests {
             permissions: HashMap::new(),
             channels: HashMap::new(),
             expires_at: Instant::now() - Duration::from_secs(1),
+            _introspection_guard: runtime
+              .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
           },
         )]),
       },
     )]);
+    assert_eq!(runtime.connections().turn.udp_clients_active, 1);
+    assert_eq!(runtime.connections().turn.allocations_active, 1);
 
     remove_expired_client_state(&mut clients, client);
 
     assert!(!clients.contains_key(&client));
+    assert_eq!(runtime.connections().turn.udp_clients_active, 0);
+    assert_eq!(runtime.connections().turn.allocations_active, 0);
+  }
+
+  #[tokio::test]
+  async fn idle_expiry_task_reclaims_all_clients_without_followup_traffic() {
+    let runtime = crate::runtime_introspection::RuntimeIntrospectionState::new();
+    runtime.set_enabled(true);
+    let edge = EdgeState::new(runtime.clone());
+    for port in [49152, 49153] {
+      let client = EdgeClient::Udp(SocketAddr::from(([127, 0, 0, 1], port)));
+      edge.clients.lock().await.insert(
+        client,
+        EdgeClientState {
+          sender: EdgeSender::Stream(mpsc::channel(1).0),
+          allocations: HashMap::from([(
+            TurnRelayAddressFamily::Ipv4,
+            EdgeAllocation {
+              relay: Arc::new(bind_loopback_udp().await),
+              transaction_id: [5; 12],
+              permissions: HashMap::new(),
+              channels: HashMap::new(),
+              expires_at: Instant::now() - Duration::from_millis(500),
+              _introspection_guard: runtime
+                .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
+            },
+          )]),
+          _udp_client_guard: Some(
+            runtime.guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnUdpClient),
+          ),
+        },
+      );
+    }
+    let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+    let expiry_edge = edge.clone();
+    let expiry = tokio::spawn(async move {
+      expiry_edge.expire_until_shutdown(shutdown_rx).await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+      loop {
+        if edge.clients.lock().await.is_empty() {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await
+    .expect("expiry task should sweep idle clients without follow-up traffic");
+    assert_eq!(runtime.connections().turn.udp_clients_active, 0);
+    assert_eq!(runtime.connections().turn.allocations_active, 0);
+    shutdown.send(true).expect("expiry shutdown should send");
+    expiry.await.expect("expiry task should join");
+  }
+
+  #[tokio::test]
+  async fn clearing_one_listener_releases_only_its_introspection_guards() {
+    let runtime = crate::runtime_introspection::RuntimeIntrospectionState::new();
+    runtime.set_enabled(true);
+    let first = EdgeState::new(runtime.clone());
+    let second = EdgeState::new(runtime.clone());
+
+    for (edge, port) in [(&first, 49152), (&second, 49153)] {
+      let client = EdgeClient::Udp(SocketAddr::from(([127, 0, 0, 1], port)));
+      edge.clients.lock().await.insert(
+        client,
+        EdgeClientState {
+          sender: EdgeSender::Stream(mpsc::channel(1).0),
+          allocations: HashMap::from([(
+            TurnRelayAddressFamily::Ipv4,
+            EdgeAllocation {
+              relay: Arc::new(bind_loopback_udp().await),
+              transaction_id: [4; 12],
+              permissions: HashMap::new(),
+              channels: HashMap::new(),
+              expires_at: Instant::now() + Duration::from_secs(60),
+              _introspection_guard: runtime
+                .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
+            },
+          )]),
+          _udp_client_guard: Some(
+            runtime.guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnUdpClient),
+          ),
+        },
+      );
+    }
+
+    assert_eq!(runtime.connections().turn.udp_clients_active, 2);
+    assert_eq!(runtime.connections().turn.allocations_active, 2);
+    first.clear().await;
+    assert_eq!(runtime.connections().turn.udp_clients_active, 1);
+    assert_eq!(runtime.connections().turn.allocations_active, 1);
+    second.clear().await;
+    assert_eq!(runtime.connections().turn.udp_clients_active, 0);
+    assert_eq!(runtime.connections().turn.allocations_active, 0);
+  }
+
+  #[tokio::test]
+  async fn stream_read_error_releases_its_allocations() {
+    let runtime = crate::runtime_introspection::RuntimeIntrospectionState::new();
+    runtime.set_enabled(true);
+    let edge = EdgeState::new(runtime.clone());
+    let stream_id = 17;
+    insert_stream_allocation(&edge, &runtime, stream_id).await;
+    let (client, server) = tokio::io::duplex(64);
+    drop(client);
+    let (_listener_tx, listener_rx) = tokio::sync::watch::channel(false);
+    let lifecycle = crate::lifecycle::LifecycleState::default();
+    let drain =
+      crate::lifecycle::ConnectionDrain::new(listener_rx, lifecycle.subscribe(), Duration::ZERO);
+
+    super::super::serve_stream(
+      Box::new(server),
+      stream_id,
+      edge_relay_config_with_stream_queue_capacity(2),
+      drain,
+      edge,
+    )
+    .await
+    .expect_err("closed stream should fail frame parsing");
+
+    assert_eq!(runtime.connections().turn.allocations_active, 0);
+  }
+
+  #[tokio::test]
+  async fn stream_drain_releases_its_allocations() {
+    let runtime = crate::runtime_introspection::RuntimeIntrospectionState::new();
+    runtime.set_enabled(true);
+    let edge = EdgeState::new(runtime.clone());
+    let stream_id = 18;
+    insert_stream_allocation(&edge, &runtime, stream_id).await;
+    let (_client, server) = tokio::io::duplex(64);
+    let (listener_tx, listener_rx) = tokio::sync::watch::channel(false);
+    let lifecycle = crate::lifecycle::LifecycleState::default();
+    let drain =
+      crate::lifecycle::ConnectionDrain::new(listener_rx, lifecycle.subscribe(), Duration::ZERO);
+    listener_tx
+      .send(true)
+      .expect("drain receiver should remain");
+
+    super::super::serve_stream(
+      Box::new(server),
+      stream_id,
+      edge_relay_config_with_stream_queue_capacity(2),
+      drain,
+      edge,
+    )
+    .await
+    .expect("drain should close the TURN stream cleanly");
+
+    assert_eq!(runtime.connections().turn.allocations_active, 0);
   }
 
   #[test]
@@ -304,6 +490,33 @@ mod tests {
     UdpSocket::bind("127.0.0.1:0")
       .await
       .expect("bind loopback UDP")
+  }
+
+  async fn insert_stream_allocation(
+    edge: &EdgeState,
+    runtime: &Arc<crate::runtime_introspection::RuntimeIntrospectionState>,
+    stream_id: u64,
+  ) {
+    edge.clients.lock().await.insert(
+      EdgeClient::Stream(stream_id),
+      EdgeClientState {
+        sender: EdgeSender::Stream(mpsc::channel(1).0),
+        allocations: HashMap::from([(
+          TurnRelayAddressFamily::Ipv4,
+          EdgeAllocation {
+            relay: Arc::new(bind_loopback_udp().await),
+            transaction_id: [5; 12],
+            permissions: HashMap::new(),
+            channels: HashMap::new(),
+            expires_at: Instant::now() + Duration::from_secs(60),
+            _introspection_guard: runtime
+              .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
+          },
+        )]),
+        _udp_client_guard: None,
+      },
+    );
+    assert_eq!(runtime.connections().turn.allocations_active, 1);
   }
 
   fn edge_relay_config_with_stream_queue_capacity(

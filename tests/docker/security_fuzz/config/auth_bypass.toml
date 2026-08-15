@@ -1,0 +1,159 @@
+[logging]
+level = "warn"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = 1
+
+[runtime.accept]
+workers = 1
+reuse_port = false
+backlog = 1024
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = false
+max_http_version = "h1"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[external_auth]]
+name = "deny"
+provider = "authelia"
+endpoint = "http://mock-auth-deny:18080/status/401"
+timeout_ms = 500
+fail_policy = "closed"
+forward_headers = []
+identity_headers = ["remote-user", "x-auth-user", "x-forwarded-user"]
+max_response_body_bytes = 4096
+
+[[external_auth]]
+name = "allow"
+provider = "authelia"
+endpoint = "http://mock-auth-allow:18080/status/200"
+timeout_ms = 500
+fail_policy = "closed"
+forward_headers = []
+identity_headers = ["remote-user", "x-auth-user", "x-forwarded-user"]
+max_response_body_bytes = 4096
+
+[[external_auth]]
+name = "timeout-closed"
+provider = "authelia"
+endpoint = "http://mock-auth-allow:18080/status/200?header_delay_ms=1000"
+timeout_ms = 250
+fail_policy = "closed"
+forward_headers = []
+identity_headers = ["remote-user", "x-auth-user", "x-forwarded-user"]
+max_response_body_bytes = 4096
+
+[[external_auth]]
+name = "malformed-closed"
+provider = "authelia"
+endpoint = "http://mock-auth-allow:18080/status/200?h1_fault=malformed_head"
+timeout_ms = 250
+fail_policy = "closed"
+forward_headers = []
+identity_headers = ["remote-user", "x-auth-user", "x-forwarded-user"]
+max_response_body_bytes = 4096
+
+[[external_auth]]
+name = "reset-closed"
+provider = "authelia"
+endpoint = "http://mock-auth-allow:18080/status/200?h1_fault=half_close_after_head"
+timeout_ms = 250
+fail_policy = "closed"
+forward_headers = []
+identity_headers = ["remote-user", "x-auth-user", "x-forwarded-user"]
+max_response_body_bytes = 4096
+
+[[external_auth]]
+name = "malformed-open"
+provider = "authelia"
+endpoint = "http://mock-auth-allow:18080/status/200?h1_fault=malformed_head"
+timeout_ms = 250
+fail_policy = "open"
+forward_headers = []
+identity_headers = ["remote-user", "x-auth-user", "x-forwarded-user"]
+max_response_body_bytes = 4096
+
+[[upstreams]]
+name = "protected"
+origin = "http://mock-http:18080/protected"
+max_http_version = "h1"
+connect_timeout_ms = 1000
+request_timeout_ms = 3000
+preserve_host = false
+
+[[routes]]
+name = "deny"
+hosts = ["example.test"]
+path_prefix = "/deny"
+upstream = "protected"
+external_auth = "deny"
+
+[[routes]]
+name = "timeout-closed"
+hosts = ["example.test"]
+path_prefix = "/timeout-closed"
+upstream = "protected"
+external_auth = "timeout-closed"
+
+[[routes]]
+name = "malformed-closed"
+hosts = ["example.test"]
+path_prefix = "/malformed-closed"
+upstream = "protected"
+external_auth = "malformed-closed"
+
+[[routes]]
+name = "reset-closed"
+hosts = ["example.test"]
+path_prefix = "/reset-closed"
+upstream = "protected"
+external_auth = "reset-closed"
+
+[[routes]]
+name = "malformed-open"
+hosts = ["example.test"]
+path_prefix = "/malformed-open"
+upstream = "protected"
+external_auth = "malformed-open"
+
+[[routes]]
+name = "valid"
+hosts = ["example.test"]
+path_prefix = "/valid"
+upstream = "protected"
+external_auth = "allow"
+
+[quic.socket]
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = 1
+reuse_port = false

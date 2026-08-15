@@ -52,8 +52,8 @@ tracked-tree state (`clean`, `dirty`, or `unknown`), and build kind
 (`official_release`, `tagged_development`, `git_development`, or
 `source_archive`). `package_version` is the effective OxiBelt version and is
 never inferred from Cargo's private `0.0.0` workspace sentinel. Runtime
-snapshot and runtime-introspection format version `2`, plus support-bundle
-format version `3`, carry the same `package_version`, `source_revision`,
+snapshot format version `2`, runtime-introspection format version `3`, and
+support-bundle format version `3` carry the same `package_version`, `source_revision`,
 `source_ref`, `source_dirty`, and `build_kind` metadata together with the
 resolved runtime topology and bounded hardening evidence. The
 unauthenticated health endpoints intentionally omit build identity; use these
@@ -84,7 +84,9 @@ Compio direct-H1 ownership only when that experimental service is active.
   generation's redacted runtime snapshot.
 - `GET /admin/v1/runtime/introspection?redact=true` requires
   `runtime:ReadIntrospection` on `runtime:introspection/current` and adds live
-  connection, request, stream, tunnel, and flow counters.
+  connection, request, stream, tunnel, and flow counters, including active
+  TURN UDP clients and relay allocations. Runtime-introspection format version
+  `3` adds those two aggregate, redacted counts.
 - `GET /admin/v1/diagnostics/support-bundle?redact=true` requires
   `diagnostics:ReadSupportBundle` and embeds the same active-generation
   topology.

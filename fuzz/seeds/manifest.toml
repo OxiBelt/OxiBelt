@@ -29,6 +29,38 @@ license = "Apache-2.0"
 classification = "non-secret"
 
 [[seed]]
+target = "path_security_semantics"
+path = "fuzz/seeds/path_security_semantics/cve-class-paths.tokens"
+sha256 = "0456e1a177f9edbdbb6348f820eb5d7f4651794c24fc0f3c445e60ae5950235e"
+origin = "Repository-authored CVE-class-inspired path-normalization cases using only synthetic routes and names."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "waf_request_evaluation"
+path = "fuzz/seeds/waf_request_evaluation/must-block.tokens"
+sha256 = "c41883bb34eb4761d1642cc8e3e1d6e1538a9acee3da0c3ab28aefd332092a4d"
+origin = "Repository-authored fixed-WAF semantic attack marker with no production rule, credential, or traffic data."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "waf_request_evaluation"
+path = "fuzz/seeds/waf_request_evaluation/percent-encoded-path.tokens"
+sha256 = "7674cb007acab129d4005fba12c1dacb596f1d1b1898577353faceee00f6a4f4"
+origin = "Repository-authored percent-encoded normalized-path regression minimized from the bounded WAF security target."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
+target = "auth_request_semantics"
+path = "fuzz/seeds/auth_request_semantics/auth-boundaries.tokens"
+sha256 = "74c34720d33cd631120cd26e21dc4fc9dd49ffcc7305b3c77f70ef4031a92ff8"
+origin = "Repository-authored synthetic auth and trailer boundary vocabulary without usable credentials."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
 target = "compio_h1_response"
 path = "fuzz/seeds/compio_h1_response/fixed-length.http"
 sha256 = "c3e166b65962c92ed2882d6f933549f5837fc8e1afc2906473893665549721d7"

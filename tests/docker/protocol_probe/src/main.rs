@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -137,16 +137,46 @@ struct DownstreamArgs {
   authority: String,
   path: String,
   method: Method,
-  body: String,
+  body: Vec<u8>,
   body_bytes: Option<usize>,
   body_chunk_size: usize,
   zero_length_body_end_delay_ms: Option<u64>,
   omit_content_length: bool,
+  h3_reset_after_body_prefix: bool,
   headers: HeaderMap,
   ca_cert: String,
   tls_version: Option<DownstreamTlsVersion>,
   quic_initial_alpn_padding_bytes: usize,
   expect_status: Option<u16>,
+}
+
+#[derive(Clone, Copy)]
+enum DownstreamBodyEncoding {
+  Gzip,
+  Deflate,
+  Brotli,
+  Zstd,
+}
+
+impl DownstreamBodyEncoding {
+  fn parse(raw: &str) -> anyhow::Result<Self> {
+    match raw {
+      "gzip" => Ok(Self::Gzip),
+      "deflate" => Ok(Self::Deflate),
+      "br" => Ok(Self::Brotli),
+      "zstd" => Ok(Self::Zstd),
+      _ => bail!("unsupported request body content encoding: {raw}"),
+    }
+  }
+
+  fn label(self) -> &'static str {
+    match self {
+      Self::Gzip => "gzip",
+      Self::Deflate => "deflate",
+      Self::Brotli => "br",
+      Self::Zstd => "zstd",
+    }
+  }
 }
 
 const MAX_QUIC_INITIAL_ALPN_PADDING_BYTES: usize = 16 * 1024;
@@ -155,6 +185,78 @@ struct HttpGetArgs {
   host: String,
   port: u16,
   path: String,
+}
+
+/// A deliberately small raw HTTP/1.1 sender for bounded framing fuzzing.  It
+/// never follows redirects or retries, so a malformed frame cannot be
+/// transformed into a second request by the probe itself.
+struct RawHttpArgs {
+  host: String,
+  port: u16,
+  request_base64: String,
+  read_timeout_ms: u64,
+}
+
+/// Sends attacker-controlled HTTP/1 bytes inside a correctly authenticated
+/// TLS connection. This keeps framing fuzz cases at the real downstream TLS
+/// boundary without teaching the shell harness how to construct TLS records.
+struct RawTlsHttpArgs {
+  host: String,
+  port: u16,
+  server_name: String,
+  ca_cert: String,
+  request_base64: String,
+}
+
+struct RawH2Args {
+  host: String,
+  port: u16,
+  server_name: String,
+  ca_cert: String,
+  profile: RawH2Profile,
+}
+
+#[derive(Clone, Copy)]
+enum RawH2Profile {
+  DataOnStreamZero,
+  HeadersOnStreamZero,
+  SettingsOnStreamOne,
+}
+
+impl RawH2Profile {
+  fn parse(raw: &str) -> anyhow::Result<Self> {
+    match raw {
+      "data-stream-zero" => Ok(Self::DataOnStreamZero),
+      "headers-stream-zero" => Ok(Self::HeadersOnStreamZero),
+      "settings-stream-one" => Ok(Self::SettingsOnStreamOne),
+      _ => bail!("unsupported raw HTTP/2 profile: {raw}"),
+    }
+  }
+
+  fn label(self) -> &'static str {
+    match self {
+      Self::DataOnStreamZero => "data-stream-zero",
+      Self::HeadersOnStreamZero => "headers-stream-zero",
+      Self::SettingsOnStreamOne => "settings-stream-one",
+    }
+  }
+}
+
+/// Sends one bounded UDP datagram and does not wait for a response. It is used
+/// for malformed QUIC Initials, for which silence and connection close are
+/// both valid fail-closed outcomes.
+struct RawUdpArgs {
+  host: String,
+  port: u16,
+  payload_base64: String,
+}
+
+struct QuicInitialMutationArgs {
+  host: String,
+  port: u16,
+  server_name: String,
+  ca_cert: String,
+  xor_offset_from_end: usize,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -237,6 +339,26 @@ struct WebTransportMultiplexArgs {
   ca_cert: String,
   sessions: usize,
   expect_statuses: Vec<u16>,
+  extended_protocol: WebTransportProbeProtocol,
+  expect_rejected: bool,
+}
+
+#[derive(Clone, Copy)]
+enum WebTransportProbeProtocol {
+  WebTransport,
+  ConnectUdp,
+  None,
+}
+
+impl WebTransportProbeProtocol {
+  fn parse(raw: &str) -> anyhow::Result<Self> {
+    match raw {
+      "webtransport" => Ok(Self::WebTransport),
+      "connect-udp" => Ok(Self::ConnectUdp),
+      "none" => Ok(Self::None),
+      _ => bail!("unsupported extended CONNECT protocol: {raw}"),
+    }
+  }
 }
 
 struct WebTransportReloadGatedArgs {
@@ -320,6 +442,28 @@ enum TurnClientAuth {
   Missing,
 }
 
+#[derive(Clone, Copy)]
+enum TurnClientMutation {
+  None,
+  TruncatedAttribute,
+  LengthMismatch,
+  ChannelData,
+  ChannelLengthMismatch,
+}
+
+impl TurnClientMutation {
+  fn parse(raw: &str) -> anyhow::Result<Self> {
+    match raw {
+      "none" => Ok(Self::None),
+      "truncated-attribute" => Ok(Self::TruncatedAttribute),
+      "length-mismatch" => Ok(Self::LengthMismatch),
+      "channel-data" => Ok(Self::ChannelData),
+      "channel-length-mismatch" => Ok(Self::ChannelLengthMismatch),
+      _ => bail!("unsupported TURN mutation: {raw}"),
+    }
+  }
+}
+
 impl TurnClientAuth {
   fn parse(raw: &str) -> anyhow::Result<Self> {
     match raw {
@@ -335,6 +479,8 @@ impl TurnClientAuth {
 enum TurnClientExpect {
   Echo,
   NoResponse,
+  Rejected,
+  AllocateSuccess,
 }
 
 impl TurnClientExpect {
@@ -342,6 +488,8 @@ impl TurnClientExpect {
     match raw {
       "echo" => Ok(Self::Echo),
       "no-response" => Ok(Self::NoResponse),
+      "rejected" => Ok(Self::Rejected),
+      "allocate-success" => Ok(Self::AllocateSuccess),
       _ => bail!("unsupported TURN expectation: {raw}"),
     }
   }
@@ -358,6 +506,7 @@ struct TurnClientArgs {
   password: String,
   auth: TurnClientAuth,
   expect: TurnClientExpect,
+  mutation: TurnClientMutation,
 }
 
 impl DownstreamArgs {
@@ -393,6 +542,13 @@ async fn main() -> anyhow::Result<()> {
     "turn-client" => run_turn_client(parse_turn_client_args(args)?).await,
     "downstream" => run_downstream_client(parse_downstream_args(args)?).await,
     "http-get" => run_http_get(parse_http_get_args(args)?).await,
+    "raw-http" => run_raw_http(parse_raw_http_args(args)?).await,
+    "raw-tls-http" => run_raw_tls_http(parse_raw_tls_http_args(args)?).await,
+    "raw-h2" => run_raw_h2(parse_raw_h2_args(args)?).await,
+    "raw-udp" => run_raw_udp(parse_raw_udp_args(args)?).await,
+    "quic-initial-mutate" => {
+      run_quic_initial_mutation(parse_quic_initial_mutation_args(args)?).await
+    }
     "dpi-tls-client" => run_dpi_tls_client(parse_dpi_tls_args(args)?).await,
     "tls-resumption-load" => run_tls_resumption_load(parse_tls_resumption_load_args(args)?).await,
     "webtransport-multiplex" => {
@@ -413,7 +569,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
   eprintln!(
-        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64>\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
 }
 
@@ -627,6 +783,7 @@ fn parse_turn_client_args(
   let mut password = None;
   let mut auth = None;
   let mut expect = None;
+  let mut mutation = TurnClientMutation::None;
 
   while let Some(flag) = args.next() {
     let value = args
@@ -643,6 +800,7 @@ fn parse_turn_client_args(
       "--password" => password = Some(value),
       "--auth" => auth = Some(TurnClientAuth::parse(&value)?),
       "--expect" => expect = Some(TurnClientExpect::parse(&value)?),
+      "--mutation" => mutation = TurnClientMutation::parse(&value)?,
       _ => bail!("unknown turn-client flag: {flag}"),
     }
   }
@@ -662,6 +820,7 @@ fn parse_turn_client_args(
     password: password.ok_or_else(|| anyhow!("--password is required"))?,
     auth: auth.ok_or_else(|| anyhow!("--auth is required"))?,
     expect: expect.ok_or_else(|| anyhow!("--expect is required"))?,
+    mutation,
   })
 }
 
@@ -677,8 +836,14 @@ fn parse_webtransport_multiplex_args(
   let mut ca_cert = None;
   let mut sessions = None;
   let mut expect_statuses = None;
+  let mut extended_protocol = WebTransportProbeProtocol::WebTransport;
+  let mut expect_rejected = false;
 
   while let Some(flag) = args.next() {
+    if flag == "--expect-rejected" {
+      expect_rejected = true;
+      continue;
+    }
     let value = args
       .next()
       .ok_or_else(|| anyhow!("missing value for {flag}"))?;
@@ -704,13 +869,19 @@ fn parse_webtransport_multiplex_args(
           .collect::<anyhow::Result<Vec<u16>>>()?;
         expect_statuses = Some(parsed);
       }
+      "--extended-protocol" => {
+        extended_protocol = WebTransportProbeProtocol::parse(&value)?;
+      }
       _ => bail!("unknown webtransport-multiplex flag: {flag}"),
     }
   }
 
   let sessions = sessions.ok_or_else(|| anyhow!("--sessions is required"))?;
-  let expect_statuses = expect_statuses.ok_or_else(|| anyhow!("--expect-statuses is required"))?;
-  if expect_statuses.len() != sessions {
+  let expect_statuses = expect_statuses.unwrap_or_default();
+  if expect_rejected == !expect_statuses.is_empty() {
+    bail!("exactly one of --expect-statuses and --expect-rejected is required");
+  }
+  if !expect_rejected && expect_statuses.len() != sessions {
     bail!("--expect-statuses count must match --sessions");
   }
   let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
@@ -724,6 +895,8 @@ fn parse_webtransport_multiplex_args(
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
     sessions,
     expect_statuses,
+    extended_protocol,
+    expect_rejected,
   })
 }
 
@@ -849,11 +1022,14 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
   let mut authority = None;
   let mut path = None;
   let mut method = Method::GET;
-  let mut body = String::new();
+  let mut body = Vec::new();
+  let mut body_source_set = false;
+  let mut body_encoding = None;
   let mut body_bytes = None;
   let mut body_chunk_size = 16 * 1024;
   let mut zero_length_body_end_delay_ms = None;
   let mut omit_content_length = false;
+  let mut h3_reset_after_body_prefix = false;
   let mut headers = HeaderMap::new();
   let mut ca_cert = None;
   let mut tls_version = None;
@@ -861,9 +1037,16 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
   let mut expect_status = None;
 
   while let Some(flag) = args.next() {
-    if flag.as_str() == "--omit-content-length" {
-      omit_content_length = true;
-      continue;
+    match flag.as_str() {
+      "--omit-content-length" => {
+        omit_content_length = true;
+        continue;
+      }
+      "--h3-reset-after-body-prefix" => {
+        h3_reset_after_body_prefix = true;
+        continue;
+      }
+      _ => {}
     }
     let value = args
       .next()
@@ -876,7 +1059,25 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
       "--authority" => authority = Some(value),
       "--path" => path = Some(validate_origin_form_path(&value)?),
       "--method" => method = value.parse().context("invalid --method value")?,
-      "--body" => body = value,
+      "--body" => {
+        if body_source_set {
+          bail!("request body source may be specified only once");
+        }
+        body = value.into_bytes();
+        body_source_set = true;
+      }
+      "--body-base64" => {
+        if body_source_set {
+          bail!("request body source may be specified only once");
+        }
+        body = base64::engine::general_purpose::STANDARD
+          .decode(value)
+          .context("invalid --body-base64 value")?;
+        if body.len() > 64 * 1024 {
+          bail!("--body-base64 decoded body exceeds 65536 bytes");
+        }
+        body_source_set = true;
+      }
       "--body-bytes" => {
         let bytes = value.parse().context("invalid --body-bytes value")?;
         body_bytes = Some(bytes);
@@ -895,6 +1096,9 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         );
       }
       "--header" => insert_header(&mut headers, &value)?,
+      "--content-encoding" => {
+        body_encoding = Some(DownstreamBodyEncoding::parse(&value)?);
+      }
       "--ca-cert" => ca_cert = Some(value),
       "--tls-version" => tls_version = Some(DownstreamTlsVersion::parse(&value)?),
       "--quic-initial-alpn-padding" => {
@@ -926,6 +1130,19 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
       bail!("--zero-length-body-end-delay-ms cannot be combined with request body data");
     }
   }
+  if body_bytes.is_some() && body_source_set {
+    bail!("--body-bytes cannot be combined with --body or --body-base64");
+  }
+  if body_encoding.is_some() && !body_source_set {
+    bail!("--content-encoding requires --body or --body-base64");
+  }
+  if let Some(encoding) = body_encoding {
+    body = encode_downstream_body(&body, encoding)?;
+    headers.insert(
+      http::header::CONTENT_ENCODING,
+      HeaderValue::from_static(encoding.label()),
+    );
+  }
   if matches!(protocol, DownstreamProtocol::H3)
     && tls_version.is_some_and(|version| version != DownstreamTlsVersion::Tls13)
   {
@@ -933,6 +1150,14 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
   }
   if quic_initial_alpn_padding_bytes != 0 && !matches!(protocol, DownstreamProtocol::H3) {
     bail!("--quic-initial-alpn-padding is only supported for HTTP/3");
+  }
+  if h3_reset_after_body_prefix {
+    if !matches!(protocol, DownstreamProtocol::H3) {
+      bail!("--h3-reset-after-body-prefix is only supported for HTTP/3");
+    }
+    if body.is_empty() || body_bytes.is_some() {
+      bail!("--h3-reset-after-body-prefix requires a bounded explicit request body");
+    }
   }
   Ok(DownstreamArgs {
     protocol,
@@ -947,12 +1172,58 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     body_chunk_size,
     zero_length_body_end_delay_ms,
     omit_content_length,
+    h3_reset_after_body_prefix,
     headers,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
     tls_version,
     quic_initial_alpn_padding_bytes,
     expect_status,
   })
+}
+
+fn encode_downstream_body(
+  body: &[u8],
+  encoding: DownstreamBodyEncoding,
+) -> anyhow::Result<Vec<u8>> {
+  if body.len() > 64 * 1024 {
+    bail!("request body exceeds the 65536-byte encoding bound");
+  }
+  let encoded = match encoding {
+    DownstreamBodyEncoding::Gzip => {
+      let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+      encoder
+        .write_all(body)
+        .context("failed to gzip request body")?;
+      encoder
+        .finish()
+        .context("failed to finish gzip request body")?
+    }
+    DownstreamBodyEncoding::Deflate => {
+      let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+      encoder
+        .write_all(body)
+        .context("failed to deflate request body")?;
+      encoder
+        .finish()
+        .context("failed to finish deflate request body")?
+    }
+    DownstreamBodyEncoding::Brotli => {
+      let mut encoded = Vec::new();
+      {
+        let mut encoder = brotli::CompressorWriter::new(&mut encoded, 4096, 5, 22);
+        encoder
+          .write_all(body)
+          .context("failed to Brotli-encode request body")?;
+      }
+      encoded
+    }
+    DownstreamBodyEncoding::Zstd => zstd::stream::encode_all(std::io::Cursor::new(body), 3)
+      .context("failed to zstd-encode request body")?,
+  };
+  if encoded.len() > 64 * 1024 {
+    bail!("encoded request body exceeds 65536 bytes");
+  }
+  Ok(encoded)
 }
 
 fn parse_http_get_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<HttpGetArgs> {
@@ -987,6 +1258,155 @@ fn parse_http_get_args(mut args: impl Iterator<Item = String>) -> anyhow::Result
     host,
     port: port.ok_or_else(|| anyhow!("--port is required"))?,
     path,
+  })
+}
+
+fn parse_raw_http_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<RawHttpArgs> {
+  let mut host = None;
+  let mut port = None;
+  let mut request_base64 = None;
+  let mut read_timeout_ms = 1_000;
+  while let Some(flag) = args.next() {
+    let value = args
+      .next()
+      .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+    match flag.as_str() {
+      "--host" => host = Some(value),
+      "--port" => port = Some(value.parse().context("invalid --port value")?),
+      "--request-base64" => request_base64 = Some(value),
+      "--read-timeout-ms" => {
+        read_timeout_ms = value.parse().context("invalid --read-timeout-ms value")?;
+        if !(1..=5_000).contains(&read_timeout_ms) {
+          bail!("--read-timeout-ms must be between 1 and 5000");
+        }
+      }
+      _ => bail!("unknown raw-http flag: {flag}"),
+    }
+  }
+  Ok(RawHttpArgs {
+    host: host.ok_or_else(|| anyhow!("--host is required"))?,
+    port: port.ok_or_else(|| anyhow!("--port is required"))?,
+    request_base64: request_base64.ok_or_else(|| anyhow!("--request-base64 is required"))?,
+    read_timeout_ms,
+  })
+}
+
+fn parse_raw_tls_http_args(
+  mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<RawTlsHttpArgs> {
+  let mut host = None;
+  let mut port = None;
+  let mut server_name = None;
+  let mut ca_cert = None;
+  let mut request_base64 = None;
+  while let Some(flag) = args.next() {
+    let value = args
+      .next()
+      .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+    match flag.as_str() {
+      "--host" => host = Some(value),
+      "--port" => port = Some(value.parse().context("invalid --port value")?),
+      "--server-name" => server_name = Some(value),
+      "--ca-cert" => ca_cert = Some(value),
+      "--request-base64" => request_base64 = Some(value),
+      _ => bail!("unknown raw-tls-http flag: {flag}"),
+    }
+  }
+  Ok(RawTlsHttpArgs {
+    host: host.ok_or_else(|| anyhow!("--host is required"))?,
+    port: port.ok_or_else(|| anyhow!("--port is required"))?,
+    server_name: server_name.ok_or_else(|| anyhow!("--server-name is required"))?,
+    ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+    request_base64: request_base64.ok_or_else(|| anyhow!("--request-base64 is required"))?,
+  })
+}
+
+fn parse_raw_h2_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<RawH2Args> {
+  let mut host = None;
+  let mut port = None;
+  let mut server_name = None;
+  let mut ca_cert = None;
+  let mut profile = None;
+  while let Some(flag) = args.next() {
+    let value = args
+      .next()
+      .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+    match flag.as_str() {
+      "--host" => host = Some(value),
+      "--port" => port = Some(value.parse().context("invalid --port value")?),
+      "--server-name" => server_name = Some(value),
+      "--ca-cert" => ca_cert = Some(value),
+      "--profile" => profile = Some(RawH2Profile::parse(&value)?),
+      _ => bail!("unknown raw-h2 flag: {flag}"),
+    }
+  }
+  Ok(RawH2Args {
+    host: host.ok_or_else(|| anyhow!("--host is required"))?,
+    port: port.ok_or_else(|| anyhow!("--port is required"))?,
+    server_name: server_name.ok_or_else(|| anyhow!("--server-name is required"))?,
+    ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+    profile: profile.ok_or_else(|| anyhow!("--profile is required"))?,
+  })
+}
+
+fn parse_raw_udp_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<RawUdpArgs> {
+  let mut host = None;
+  let mut port = None;
+  let mut payload_base64 = None;
+  while let Some(flag) = args.next() {
+    let value = args
+      .next()
+      .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+    match flag.as_str() {
+      "--host" => host = Some(value),
+      "--port" => port = Some(value.parse().context("invalid --port value")?),
+      "--payload-base64" => payload_base64 = Some(value),
+      _ => bail!("unknown raw-udp flag: {flag}"),
+    }
+  }
+  Ok(RawUdpArgs {
+    host: host.ok_or_else(|| anyhow!("--host is required"))?,
+    port: port.ok_or_else(|| anyhow!("--port is required"))?,
+    payload_base64: payload_base64.ok_or_else(|| anyhow!("--payload-base64 is required"))?,
+  })
+}
+
+fn parse_quic_initial_mutation_args(
+  mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<QuicInitialMutationArgs> {
+  let mut host = None;
+  let mut port = None;
+  let mut server_name = None;
+  let mut ca_cert = None;
+  let mut xor_offset_from_end = None;
+  while let Some(flag) = args.next() {
+    let value = args
+      .next()
+      .ok_or_else(|| anyhow!("missing value for {flag}"))?;
+    match flag.as_str() {
+      "--host" => host = Some(value),
+      "--port" => port = Some(value.parse().context("invalid --port value")?),
+      "--server-name" => server_name = Some(value),
+      "--ca-cert" => ca_cert = Some(value),
+      "--xor-offset-from-end" => {
+        let offset = value
+          .parse()
+          .context("invalid --xor-offset-from-end value")?;
+        if !(1..=16).contains(&offset) {
+          bail!("--xor-offset-from-end must be between 1 and 16");
+        }
+        xor_offset_from_end = Some(offset);
+      }
+      _ => bail!("unknown quic-initial-mutate flag: {flag}"),
+    }
+  }
+  Ok(QuicInitialMutationArgs {
+    host: host.ok_or_else(|| anyhow!("--host is required"))?,
+    port: port.ok_or_else(|| anyhow!("--port is required"))?,
+    server_name: server_name.ok_or_else(|| anyhow!("--server-name is required"))?,
+    ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+    xor_offset_from_end: xor_offset_from_end
+      .ok_or_else(|| anyhow!("--xor-offset-from-end is required"))?,
   })
 }
 
@@ -1091,7 +1511,7 @@ fn insert_header(headers: &mut HeaderMap, raw: &str) -> anyhow::Result<()> {
   let (name, value) = raw
     .split_once(':')
     .ok_or_else(|| anyhow!("invalid --header value; expected name:value"))?;
-  headers.insert(
+  headers.append(
     HeaderName::try_from(name.trim()).context("invalid --header name")?,
     HeaderValue::from_str(value.trim()).context("invalid --header value")?,
   );
@@ -1319,7 +1739,10 @@ fn websocket_accept_key(key: &str) -> String {
 }
 
 struct WebSocketFrame {
+  fin: bool,
+  rsv: u8,
   opcode: u8,
+  masked: bool,
   payload: Vec<u8>,
 }
 
@@ -1332,6 +1755,8 @@ where
     return Ok(None);
   }
   let opcode = header[0] & 0x0f;
+  let fin = header[0] & 0x80 != 0;
+  let rsv = header[0] & 0x70;
   let masked = header[1] & 0x80 != 0;
   let mut len = u64::from(header[1] & 0x7f);
   if len == 126 {
@@ -1369,7 +1794,13 @@ where
       *byte ^= mask[index % mask.len()];
     }
   }
-  Ok(Some(WebSocketFrame { opcode, payload }))
+  Ok(Some(WebSocketFrame {
+    fin,
+    rsv,
+    opcode,
+    masked,
+    payload,
+  }))
 }
 
 async fn write_websocket_frame<S>(
@@ -1613,7 +2044,24 @@ async fn handle_websocket_echo_connection(mut stream: TcpStream) -> anyhow::Resu
     .await
     .context("failed to write WebSocket handshake response")?;
 
+  let mut fragmented = false;
   while let Some(frame) = read_websocket_frame(&mut stream).await? {
+    let control = matches!(frame.opcode, 0x8..=0xa);
+    let invalid = !frame.masked
+      || frame.rsv != 0
+      || (control && (!frame.fin || frame.payload.len() > 125))
+      || !matches!(frame.opcode, 0x0..=0x2 | 0x8..=0xa)
+      || (frame.opcode == 0x0 && !fragmented)
+      || (matches!(frame.opcode, 0x1 | 0x2) && fragmented);
+    if invalid {
+      write_websocket_frame(&mut stream, 0x8, &1002u16.to_be_bytes(), false).await?;
+      return Ok(());
+    }
+    if frame.opcode == 0x0 && frame.fin {
+      fragmented = false;
+    } else if matches!(frame.opcode, 0x1 | 0x2) && !frame.fin {
+      fragmented = true;
+    }
     if frame.opcode == 0x8 {
       write_websocket_frame(&mut stream, 0x8, &frame.payload, false).await?;
       return Ok(());
@@ -1793,12 +2241,8 @@ where
 }
 
 async fn run_turn_client(args: TurnClientArgs) -> anyhow::Result<()> {
-  let request = turn_request(&args);
-  let response = match args.transport {
-    TurnTransport::Udp => turn_udp_round_trip(&args, &request).await?,
-    TurnTransport::Tcp => turn_tcp_round_trip(&args, &request).await?,
-    TurnTransport::Tls => turn_tls_round_trip(&args, &request).await?,
-  };
+  let request = turn_request(&args, None);
+  let response = turn_round_trip(&args, &request).await?;
   match args.expect {
     TurnClientExpect::Echo => {
       let response = response.ok_or_else(|| anyhow!("expected TURN echo response"))?;
@@ -1817,6 +2261,40 @@ async fn run_turn_client(args: TurnClientArgs) -> anyhow::Result<()> {
         );
       }
     }
+    TurnClientExpect::Rejected => {
+      if let Some(response) = response {
+        if !is_stun_error_response(&response) {
+          let message_type = response
+            .get(..2)
+            .map(|value| u16::from_be_bytes([value[0], value[1]]));
+          let magic_cookie = response
+            .get(4..8)
+            .map(|value| u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+          bail!(
+            "TURN {} invalid authentication was not rejected (type={message_type:?}, cookie={magic_cookie:?}, bytes={})",
+            args.transport.label(),
+            response.len()
+          );
+        }
+      }
+    }
+    TurnClientExpect::AllocateSuccess => {
+      let challenge = response.ok_or_else(|| anyhow!("expected TURN nonce challenge"))?;
+      if !is_stun_error_response(&challenge) {
+        bail!("TURN edge allocation did not begin with an error challenge");
+      }
+      let nonce = stun_attr(&challenge, STUN_ATTR_NONCE)
+        .ok_or_else(|| anyhow!("TURN nonce challenge omitted NONCE"))?;
+      let authenticated = turn_request(&args, Some(nonce));
+      let response = turn_round_trip(&args, &authenticated)
+        .await?
+        .ok_or_else(|| anyhow!("expected TURN Allocate success response"))?;
+      if !is_stun_success_response(&response, STUN_ALLOCATE_REQUEST)
+        || stun_attr(&response, STUN_ATTR_XOR_RELAYED_ADDRESS).is_none()
+      {
+        bail!("TURN edge Allocate request did not create a relay allocation");
+      }
+    }
   }
   println!(
     "{}",
@@ -1825,10 +2303,35 @@ async fn run_turn_client(args: TurnClientArgs) -> anyhow::Result<()> {
       "expect": match args.expect {
         TurnClientExpect::Echo => "echo",
         TurnClientExpect::NoResponse => "no-response",
+        TurnClientExpect::Rejected => "rejected",
+        TurnClientExpect::AllocateSuccess => "allocate-success",
       },
     }))?
   );
   Ok(())
+}
+
+async fn turn_round_trip(args: &TurnClientArgs, request: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+  match args.transport {
+    TurnTransport::Udp => turn_udp_round_trip(args, request).await,
+    TurnTransport::Tcp => turn_tcp_round_trip(args, request).await,
+    TurnTransport::Tls => turn_tls_round_trip(args, request).await,
+  }
+}
+
+fn is_stun_error_response(frame: &[u8]) -> bool {
+  if frame.len() < STUN_HEADER_LEN {
+    return false;
+  }
+  let message_type = u16::from_be_bytes([frame[0], frame[1]]);
+  let magic_cookie = u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
+  magic_cookie == STUN_MAGIC_COOKIE && message_type & 0x0110 == 0x0110
+}
+
+fn is_stun_success_response(frame: &[u8], request_type: u16) -> bool {
+  frame.len() >= STUN_HEADER_LEN
+    && u16::from_be_bytes([frame[0], frame[1]]) == (request_type | 0x0100)
+    && u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]) == STUN_MAGIC_COOKIE
 }
 
 async fn handle_h3_upstream_connection(
@@ -2622,6 +3125,15 @@ async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> a
     })?
     .await
     .context("failed to connect downstream WebTransport")?;
+  if !args.expect_rejected
+    && matches!(
+      args.extended_protocol,
+      WebTransportProbeProtocol::WebTransport
+    )
+    && args.sessions == 1
+  {
+    return run_webtransport_data_client(&args, quinn_connection).await;
+  }
   let close_connection = quinn_connection.clone();
   let h3_connection = h3_quinn::Connection::new(quinn_connection);
   let (mut driver, mut send_request) = h3::client::builder()
@@ -2651,15 +3163,19 @@ async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> a
     held_streams.push(stream);
   }
 
-  if statuses != args.expect_statuses {
+  let rejected = statuses.iter().all(|status| !(200..300).contains(status));
+  if (args.expect_rejected && !rejected)
+    || (!args.expect_rejected && statuses != args.expect_statuses)
+  {
     eprintln!(
       "{}",
       serde_json::json!({
         "statuses": statuses,
         "expected_statuses": args.expect_statuses,
+        "expected_rejected": args.expect_rejected,
       })
     );
-    bail!("WebTransport multiplex statuses did not match expected statuses");
+    bail!("WebTransport multiplex statuses did not match the expected outcome");
   }
 
   close_connection.close(0u32.into(), b"probe complete");
@@ -2670,6 +3186,379 @@ async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> a
     "{}",
     serde_json::json!({
       "statuses": statuses,
+    })
+  );
+  Ok(())
+}
+
+async fn run_webtransport_data_client(
+  args: &WebTransportMultiplexArgs,
+  quinn_connection: h3_quinn::quinn::Connection,
+) -> anyhow::Result<()> {
+  let separator = if args.path.contains('?') { '&' } else { '?' };
+  let url = url::Url::parse(&format!(
+    "https://{}{}{}probe_session=0",
+    args.authority, args.path, separator
+  ))
+  .context("failed to build WebTransport data-session URL")?;
+  let request =
+    web_transport_quinn::proto::ConnectRequest::new(url).with_headers(args.headers.clone());
+  let session = tokio::time::timeout(
+    Duration::from_secs(2),
+    web_transport_quinn::Session::connect(quinn_connection, request),
+  )
+  .await
+  .context("timed out establishing WebTransport data session")?
+  .context("failed to establish WebTransport data session")?;
+
+  let stream_payload = format!("stream:{}", args.path).into_bytes();
+  let (mut send, mut recv) = tokio::time::timeout(Duration::from_secs(2), session.open_bi())
+    .await
+    .context("timed out opening WebTransport bidirectional stream")?
+    .context("failed to open WebTransport bidirectional stream")?;
+  send
+    .write_all(&stream_payload)
+    .await
+    .context("failed to send WebTransport stream payload")?;
+  send
+    .finish()
+    .context("failed to finish WebTransport stream payload")?;
+  let echoed_stream = tokio::time::timeout(Duration::from_secs(2), recv.read_to_end(64 * 1024))
+    .await
+    .context("timed out reading WebTransport stream echo")?
+    .context("failed to read WebTransport stream echo")?;
+  if echoed_stream != stream_payload {
+    bail!("WebTransport bidirectional stream echo changed payload binding");
+  }
+
+  let datagram_payload = Bytes::from(format!("datagram:{}", args.path));
+  session
+    .send_datagram(datagram_payload.clone())
+    .context("failed to send WebTransport datagram")?;
+  let echoed_datagram = tokio::time::timeout(Duration::from_secs(2), session.read_datagram())
+    .await
+    .context("timed out reading WebTransport datagram echo")?
+    .context("failed to read WebTransport datagram echo")?;
+  if echoed_datagram != datagram_payload {
+    bail!("WebTransport datagram echo changed session binding");
+  }
+
+  session.close(0, b"probe complete");
+  println!(
+    "{}",
+    serde_json::json!({
+      "statuses": [200],
+      "stream_echo_bytes": echoed_stream.len(),
+      "datagram_echo_bytes": echoed_datagram.len(),
+    })
+  );
+  Ok(())
+}
+
+async fn run_raw_http(args: RawHttpArgs) -> anyhow::Result<()> {
+  const MAX_REQUEST_BYTES: usize = 64 * 1024;
+  const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+  let request = base64::engine::general_purpose::STANDARD
+    .decode(args.request_base64)
+    .context("invalid --request-base64 value")?;
+  if request.is_empty() || request.len() > MAX_REQUEST_BYTES {
+    bail!("raw HTTP request must be between 1 and {MAX_REQUEST_BYTES} bytes");
+  }
+  let address = lookup_host((args.host.as_str(), args.port))
+    .await
+    .context("failed to resolve raw HTTP probe host")?
+    .next()
+    .ok_or_else(|| anyhow!("raw HTTP probe host resolved without an address"))?;
+  let mut stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(address))
+    .await
+    .context("raw HTTP probe connection timed out")?
+    .context("failed to connect raw HTTP probe")?;
+  tokio::time::timeout(Duration::from_secs(5), stream.write_all(&request))
+    .await
+    .context("raw HTTP probe write timed out")?
+    .context("failed to write raw HTTP request")?;
+  let mut response = vec![0u8; MAX_RESPONSE_BYTES];
+  let (read, outcome) = match tokio::time::timeout(
+    Duration::from_millis(args.read_timeout_ms),
+    stream.read(&mut response),
+  )
+  .await
+  {
+    Ok(Ok(0)) => (0, "closed"),
+    Ok(Ok(read)) => (read, "response"),
+    Ok(Err(error))
+      if matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+      ) =>
+    {
+      (0, "reset")
+    }
+    Ok(Err(error)) => return Err(error).context("failed to read raw HTTP response"),
+    Err(_) => (0, "timed-out"),
+  };
+  response.truncate(read);
+  println!(
+    "{}",
+    serde_json::json!({
+      "request_bytes": request.len(),
+      "response_bytes": response.len(),
+      "response_base64": base64::engine::general_purpose::STANDARD.encode(response),
+      "outcome": outcome,
+    })
+  );
+  Ok(())
+}
+
+async fn run_raw_tls_http(args: RawTlsHttpArgs) -> anyhow::Result<()> {
+  tokio::task::spawn_blocking(move || raw_tls_http(args))
+    .await
+    .context("raw TLS probe task failed")??;
+  Ok(())
+}
+
+fn raw_tls_http(args: RawTlsHttpArgs) -> anyhow::Result<()> {
+  const MAX_BYTES: usize = 64 * 1024;
+  let request = base64::engine::general_purpose::STANDARD
+    .decode(args.request_base64)
+    .context("invalid --request-base64 value")?;
+  if request.is_empty() || request.len() > MAX_BYTES {
+    bail!("raw TLS HTTP request must be between 1 and {MAX_BYTES} bytes");
+  }
+
+  let config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1", None)?;
+  let server_name = ServerName::try_from(args.server_name.clone())
+    .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
+  let mut connection = ClientConnection::new(Arc::new(config), server_name)
+    .context("failed to construct raw TLS client")?;
+  let mut stream = StdTcpStream::connect((args.host.as_str(), args.port))
+    .with_context(|| format!("failed to connect to {}:{}", args.host, args.port))?;
+  stream
+    .set_read_timeout(Some(Duration::from_millis(500)))
+    .context("failed to set raw TLS read timeout")?;
+  stream
+    .set_write_timeout(Some(Duration::from_secs(2)))
+    .context("failed to set raw TLS write timeout")?;
+  complete_rustls_handshake(&mut connection, &mut stream)?;
+  connection
+    .writer()
+    .write_all(&request)
+    .context("failed to write raw TLS plaintext")?;
+  flush_rustls(&mut connection, &mut stream)?;
+
+  let mut response = Vec::new();
+  loop {
+    drain_rustls_plaintext(&mut connection, &mut response)?;
+    if response.len() > MAX_BYTES {
+      bail!("raw TLS response exceeded {MAX_BYTES} bytes");
+    }
+    match connection.read_tls(&mut stream) {
+      Ok(0) => break,
+      Ok(_) => {
+        if connection.process_new_packets().is_err() {
+          break;
+        }
+      }
+      Err(error)
+        if matches!(
+          error.kind(),
+          io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ) =>
+      {
+        break;
+      }
+      Err(error) => return Err(error).context("failed to read raw TLS response"),
+    }
+  }
+  println!(
+    "{}",
+    serde_json::json!({
+      "request_bytes": request.len(),
+      "response_bytes": response.len(),
+      "response_base64": base64::engine::general_purpose::STANDARD.encode(response),
+    })
+  );
+  Ok(())
+}
+
+async fn run_raw_h2(args: RawH2Args) -> anyhow::Result<()> {
+  const CLIENT_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+  let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"h2", None)?;
+  client_config.enable_sni = true;
+  let connector = TlsConnector::from(Arc::new(client_config));
+  let stream = TcpStream::connect((args.host.as_str(), args.port))
+    .await
+    .with_context(|| {
+      format!(
+        "failed to connect raw HTTP/2 to {}:{}",
+        args.host, args.port
+      )
+    })?;
+  let server_name = ServerName::try_from(args.server_name.clone())
+    .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
+  let mut stream = connector
+    .connect(server_name, stream)
+    .await
+    .context("failed to establish raw HTTP/2 TLS")?;
+  if stream.get_ref().1.alpn_protocol() != Some(b"h2".as_slice()) {
+    bail!("raw HTTP/2 probe did not negotiate h2");
+  }
+  let invalid_frame: [u8; 9] = match args.profile {
+    RawH2Profile::DataOnStreamZero => [0, 0, 0, 0, 1, 0, 0, 0, 0],
+    RawH2Profile::HeadersOnStreamZero => [0, 0, 0, 1, 4, 0, 0, 0, 0],
+    RawH2Profile::SettingsOnStreamOne => [0, 0, 0, 4, 0, 0, 0, 0, 1],
+  };
+  let mut request = Vec::with_capacity(CLIENT_PREFACE.len() + 18);
+  request.extend_from_slice(CLIENT_PREFACE);
+  request.extend_from_slice(&[0, 0, 0, 4, 0, 0, 0, 0, 0]);
+  request.extend_from_slice(&invalid_frame);
+  stream
+    .write_all(&request)
+    .await
+    .context("failed to write raw HTTP/2 frame sequence")?;
+  let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+  let mut response = Vec::new();
+  let outcome = loop {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+      bail!("raw HTTP/2 peer sent neither GOAWAY nor a connection close");
+    }
+    let mut chunk = [0u8; 4096];
+    match tokio::time::timeout(remaining, stream.read(&mut chunk)).await {
+      Ok(Ok(0)) => break "closed",
+      Ok(Ok(len)) => {
+        response.extend_from_slice(&chunk[..len]);
+        if response.len() > 64 * 1024 {
+          bail!("raw HTTP/2 response exceeded 65536 bytes");
+        }
+        if contains_h2_goaway(&response) {
+          break "goaway";
+        }
+      }
+      Ok(Err(error))
+        if matches!(
+          error.kind(),
+          io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::UnexpectedEof
+        ) =>
+      {
+        break "reset";
+      }
+      Ok(Err(error)) => return Err(error).context("failed to read raw HTTP/2 outcome"),
+      Err(_) => bail!("raw HTTP/2 peer sent neither GOAWAY nor a connection close"),
+    }
+  };
+  println!(
+    "{}",
+    serde_json::json!({
+      "profile": args.profile.label(),
+      "request_bytes": request.len(),
+      "request_base64": base64::engine::general_purpose::STANDARD.encode(&request),
+      "response_bytes": response.len(),
+      "outcome": outcome,
+    })
+  );
+  Ok(())
+}
+
+fn contains_h2_goaway(bytes: &[u8]) -> bool {
+  let mut offset = 0usize;
+  while bytes.len().saturating_sub(offset) >= 9 {
+    let payload_len = (usize::from(bytes[offset]) << 16)
+      | (usize::from(bytes[offset + 1]) << 8)
+      | usize::from(bytes[offset + 2]);
+    let Some(frame_end) = offset.checked_add(9 + payload_len) else {
+      return false;
+    };
+    if frame_end > bytes.len() {
+      return false;
+    }
+    let frame_type = bytes[offset + 3];
+    let stream_id = u32::from_be_bytes([
+      bytes[offset + 5],
+      bytes[offset + 6],
+      bytes[offset + 7],
+      bytes[offset + 8],
+    ]) & 0x7fff_ffff;
+    if frame_type == 7 && stream_id == 0 {
+      return true;
+    }
+    offset = frame_end;
+  }
+  false
+}
+
+async fn run_raw_udp(args: RawUdpArgs) -> anyhow::Result<()> {
+  const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+  let payload = base64::engine::general_purpose::STANDARD
+    .decode(args.payload_base64)
+    .context("invalid --payload-base64 value")?;
+  if payload.is_empty() || payload.len() > MAX_PAYLOAD_BYTES {
+    bail!("raw UDP payload must be between 1 and {MAX_PAYLOAD_BYTES} bytes");
+  }
+  let address = lookup_host((args.host.as_str(), args.port))
+    .await
+    .context("failed to resolve raw UDP destination")?
+    .next()
+    .ok_or_else(|| anyhow!("raw UDP destination resolved without an address"))?;
+  let bind = if address.is_ipv6() {
+    "[::]:0"
+  } else {
+    "0.0.0.0:0"
+  };
+  let socket = tokio::net::UdpSocket::bind(bind)
+    .await
+    .context("failed to bind raw UDP probe")?;
+  let sent = socket
+    .send_to(&payload, address)
+    .await
+    .context("failed to send raw UDP payload")?;
+  if sent != payload.len() {
+    bail!("raw UDP probe sent {sent} of {} bytes", payload.len());
+  }
+  println!("{}", serde_json::json!({"sent_bytes": sent}));
+  Ok(())
+}
+
+async fn run_quic_initial_mutation(args: QuicInitialMutationArgs) -> anyhow::Result<()> {
+  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3", None)?;
+  let quic_crypto =
+    QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
+  let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
+  let remote_addr = resolve_remote_addr(&args.host, args.port).await?;
+  let (endpoint, mutated_initial_packets, response_datagrams, first_mutated_initial) =
+    mutating_quic_client_endpoint(remote_addr, args.xor_offset_from_end)?;
+  let connecting = endpoint
+    .connect_with(quic_config, remote_addr, &args.server_name)
+    .context("failed to start structured QUIC Initial mutation")?;
+  let outcome = match tokio::time::timeout(Duration::from_millis(750), connecting).await {
+    Ok(Ok(connection)) => {
+      connection.close(0u32.into(), b"unexpected mutated Initial acceptance");
+      bail!("structured QUIC Initial mutation unexpectedly completed a handshake");
+    }
+    Ok(Err(_)) => "connection-error",
+    Err(_) => "timed-out",
+  };
+  let mutated = mutated_initial_packets.load(Ordering::Relaxed);
+  if mutated == 0 {
+    bail!("structured QUIC mutation did not observe an Initial packet");
+  }
+  let first_mutated_initial = first_mutated_initial
+    .lock()
+    .map_err(|_| anyhow!("structured QUIC mutation capture lock was poisoned"))?
+    .clone()
+    .ok_or_else(|| anyhow!("structured QUIC mutation did not capture an Initial packet"))?;
+  println!(
+    "{}",
+    serde_json::json!({
+      "profile": "initial-crypto-integrity-bitflip",
+      "xor_offset_from_end": args.xor_offset_from_end,
+      "mutated_initial_packets": mutated,
+      "response_datagrams": response_datagrams.load(Ordering::Relaxed),
+      "outcome": outcome,
+      "first_mutated_initial_base64": base64::engine::general_purpose::STANDARD.encode(first_mutated_initial),
     })
   );
   Ok(())
@@ -3008,9 +3897,19 @@ fn webtransport_connect_request(
     .body(())
     .context("failed to build WebTransport CONNECT request")?;
   request.headers_mut().extend(args.headers.clone());
-  request
-    .extensions_mut()
-    .insert(h3::ext::Protocol::WEB_TRANSPORT);
+  match args.extended_protocol {
+    WebTransportProbeProtocol::WebTransport => {
+      request
+        .extensions_mut()
+        .insert(h3::ext::Protocol::WEB_TRANSPORT);
+    }
+    WebTransportProbeProtocol::ConnectUdp => {
+      request
+        .extensions_mut()
+        .insert(h3::ext::Protocol::CONNECT_UDP);
+    }
+    WebTransportProbeProtocol::None => {}
+  }
   Ok(request)
 }
 
@@ -3201,10 +4100,24 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
       sent += len;
     }
   } else if !args.body.is_empty() {
-    stream
-      .send_data(Bytes::from(args.body.clone()))
-      .await
-      .context("failed to send downstream HTTP/3 request body")?;
+    for chunk in args.body.chunks(args.body_chunk_size) {
+      stream
+        .send_data(Bytes::copy_from_slice(chunk))
+        .await
+        .context("failed to send downstream HTTP/3 request body")?;
+    }
+  }
+  if args.h3_reset_after_body_prefix {
+    stream.stop_stream(h3::error::Code::H3_REQUEST_INCOMPLETE);
+    stream.stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    close_connection.close(0u32.into(), b"malformed request complete");
+    let _ = tokio::time::timeout(Duration::from_millis(500), driver_task).await;
+    return Ok(serde_json::json!({
+      "protocol": args.protocol.label(),
+      "outcome": "request-stream-reset",
+      "request_body_prefix_bytes": args.body.len(),
+    }));
   }
   stream
     .finish()
@@ -3247,6 +4160,91 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
 struct CountingQuicUdpSocket {
   inner: Arc<dyn AsyncUdpSocket>,
   initial_packet_count: Arc<AtomicU64>,
+}
+
+#[derive(Debug)]
+struct MutatingQuicUdpSocket {
+  inner: Arc<dyn AsyncUdpSocket>,
+  xor_offset_from_end: usize,
+  mutated_initial_packets: Arc<AtomicU64>,
+  response_datagrams: Arc<AtomicU64>,
+  first_mutated_initial: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+impl AsyncUdpSocket for MutatingQuicUdpSocket {
+  fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+    self.inner.clone().create_io_poller()
+  }
+
+  fn try_send(&self, transmit: &h3_quinn::quinn::udp::Transmit) -> io::Result<()> {
+    let segment_size = transmit.segment_size.unwrap_or(transmit.contents.len());
+    if segment_size == 0 {
+      return self.inner.try_send(transmit);
+    }
+    let mut contents = transmit.contents.to_vec();
+    let mut mutated = 0u64;
+    for start in (0..contents.len()).step_by(segment_size) {
+      let end = (start + segment_size).min(contents.len());
+      if is_quic_initial_packet(&contents[start..end]) && end - start > self.xor_offset_from_end {
+        contents[end - self.xor_offset_from_end] ^= 0x01;
+        mutated += 1;
+      }
+    }
+    if mutated == 0 {
+      return self.inner.try_send(transmit);
+    }
+    if let Ok(mut captured) = self.first_mutated_initial.lock() {
+      if captured.is_none() {
+        *captured = contents
+          .chunks(segment_size)
+          .find(|packet| is_quic_initial_packet(packet))
+          .map(ToOwned::to_owned);
+      }
+    }
+    let mutated_transmit = h3_quinn::quinn::udp::Transmit {
+      destination: transmit.destination,
+      ecn: transmit.ecn,
+      contents: &contents,
+      segment_size: transmit.segment_size,
+      src_ip: transmit.src_ip,
+    };
+    self.inner.try_send(&mutated_transmit)?;
+    self
+      .mutated_initial_packets
+      .fetch_add(mutated, Ordering::Relaxed);
+    Ok(())
+  }
+
+  fn poll_recv(
+    &self,
+    cx: &mut TaskContext<'_>,
+    bufs: &mut [io::IoSliceMut<'_>],
+    meta: &mut [h3_quinn::quinn::udp::RecvMeta],
+  ) -> Poll<io::Result<usize>> {
+    let result = self.inner.poll_recv(cx, bufs, meta);
+    if let Poll::Ready(Ok(received)) = &result {
+      self
+        .response_datagrams
+        .fetch_add(*received as u64, Ordering::Relaxed);
+    }
+    result
+  }
+
+  fn local_addr(&self) -> io::Result<SocketAddr> {
+    self.inner.local_addr()
+  }
+
+  fn max_transmit_segments(&self) -> usize {
+    self.inner.max_transmit_segments()
+  }
+
+  fn max_receive_segments(&self) -> usize {
+    self.inner.max_receive_segments()
+  }
+
+  fn may_fragment(&self) -> bool {
+    self.inner.may_fragment()
+  }
 }
 
 impl AsyncUdpSocket for CountingQuicUdpSocket {
@@ -3309,6 +4307,42 @@ fn counted_quic_client_endpoint(
   Ok((endpoint, initial_packet_count))
 }
 
+fn mutating_quic_client_endpoint(
+  remote_addr: SocketAddr,
+  xor_offset_from_end: usize,
+) -> anyhow::Result<(
+  Endpoint,
+  Arc<AtomicU64>,
+  Arc<AtomicU64>,
+  Arc<Mutex<Option<Vec<u8>>>>,
+)> {
+  let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
+  let socket = std::net::UdpSocket::bind(client_bind_addr(remote_addr))
+    .context("failed to bind mutating downstream QUIC socket")?;
+  let socket = runtime
+    .wrap_udp_socket(socket)
+    .context("failed to prepare mutating downstream QUIC socket")?;
+  let mutated_initial_packets = Arc::new(AtomicU64::new(0));
+  let response_datagrams = Arc::new(AtomicU64::new(0));
+  let first_mutated_initial = Arc::new(Mutex::new(None));
+  let socket: Arc<dyn AsyncUdpSocket> = Arc::new(MutatingQuicUdpSocket {
+    inner: socket,
+    xor_offset_from_end,
+    mutated_initial_packets: mutated_initial_packets.clone(),
+    response_datagrams: response_datagrams.clone(),
+    first_mutated_initial: first_mutated_initial.clone(),
+  });
+  let endpoint =
+    Endpoint::new_with_abstract_socket(EndpointConfig::default(), None, socket, runtime)
+      .context("failed to construct mutating downstream QUIC endpoint")?;
+  Ok((
+    endpoint,
+    mutated_initial_packets,
+    response_datagrams,
+    first_mutated_initial,
+  ))
+}
+
 fn quic_initial_packets_in_transmit(transmit: &h3_quinn::quinn::udp::Transmit) -> u64 {
   let segment_size = transmit.segment_size.unwrap_or(transmit.contents.len());
   if segment_size == 0 {
@@ -3359,7 +4393,25 @@ fn downstream_h2_body(args: &DownstreamArgs) -> BoxBody<Bytes, Infallible> {
     .boxed();
   }
 
-  Full::new(Bytes::from(args.body.clone())).boxed()
+  if args.body.is_empty() || args.body_chunk_size >= args.body.len() {
+    return Full::new(Bytes::from(args.body.clone())).boxed();
+  }
+
+  let body = Arc::new(args.body.clone());
+  let chunk_size = args.body_chunk_size;
+  StreamBody::new(futures_util::stream::unfold(
+    (body, 0usize),
+    move |(body, sent)| async move {
+      if sent >= body.len() {
+        None
+      } else {
+        let end = (sent + chunk_size).min(body.len());
+        let chunk = Bytes::copy_from_slice(&body[sent..end]);
+        Some((Ok(Frame::data(chunk)), (body, end)))
+      }
+    },
+  ))
+  .boxed()
 }
 
 struct DelayedEndZeroLengthBody {
@@ -3607,14 +4659,21 @@ const STUN_ALLOCATE_REQUEST: u16 = 0x0003;
 const STUN_ATTR_USERNAME: u16 = 0x0006;
 const STUN_ATTR_MESSAGE_INTEGRITY: u16 = 0x0008;
 const STUN_ATTR_REALM: u16 = 0x0014;
+const STUN_ATTR_NONCE: u16 = 0x0015;
+const STUN_ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
+const STUN_ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
 
-fn turn_request(args: &TurnClientArgs) -> Vec<u8> {
+fn turn_request(args: &TurnClientArgs, nonce: Option<&[u8]>) -> Vec<u8> {
   let transaction_id = *b"oxibeltprobe";
   let mut attrs = vec![
     (STUN_ATTR_USERNAME, args.username.as_bytes().to_vec()),
     (STUN_ATTR_REALM, args.realm.as_bytes().to_vec()),
+    (STUN_ATTR_REQUESTED_TRANSPORT, vec![17, 0, 0, 0]),
   ];
-  match args.auth {
+  if let Some(nonce) = nonce {
+    attrs.push((STUN_ATTR_NONCE, nonce.to_vec()));
+  }
+  let mut request = match args.auth {
     TurnClientAuth::Missing => encode_stun_message(STUN_ALLOCATE_REQUEST, transaction_id, &attrs),
     TurnClientAuth::Invalid => {
       attrs.push((STUN_ATTR_MESSAGE_INTEGRITY, vec![0u8; 20]));
@@ -3627,7 +4686,65 @@ fn turn_request(args: &TurnClientArgs) -> Vec<u8> {
         &key,
       )
     }
+  };
+  match args.mutation {
+    TurnClientMutation::None => {}
+    TurnClientMutation::TruncatedAttribute => {
+      request.truncate(request.len().saturating_sub(3).max(STUN_HEADER_LEN));
+    }
+    TurnClientMutation::LengthMismatch => {
+      let declared = u16::from_be_bytes([request[2], request[3]]).saturating_add(12);
+      request[2..4].copy_from_slice(&declared.to_be_bytes());
+    }
+    TurnClientMutation::ChannelData => {
+      let payload_len = request.len().min(32) as u16;
+      let mut channel = Vec::with_capacity(4 + usize::from(payload_len));
+      channel.extend_from_slice(&0x4001u16.to_be_bytes());
+      channel.extend_from_slice(&payload_len.to_be_bytes());
+      channel.extend_from_slice(&request[..usize::from(payload_len)]);
+      request = channel;
+    }
+    TurnClientMutation::ChannelLengthMismatch => {
+      let payload_len = request.len().min(16) as u16;
+      let mut channel = Vec::with_capacity(4 + usize::from(payload_len));
+      channel.extend_from_slice(&0x4001u16.to_be_bytes());
+      channel.extend_from_slice(&payload_len.saturating_add(16).to_be_bytes());
+      channel.extend_from_slice(&request[..usize::from(payload_len)]);
+      request = channel;
+    }
   }
+  request
+}
+
+fn stun_attr(frame: &[u8], wanted: u16) -> Option<&[u8]> {
+  if frame.len() < STUN_HEADER_LEN
+    || u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]) != STUN_MAGIC_COOKIE
+  {
+    return None;
+  }
+  let declared = usize::from(u16::from_be_bytes([frame[2], frame[3]]));
+  let end = STUN_HEADER_LEN.checked_add(declared)?;
+  if declared % 4 != 0 || end > frame.len() {
+    return None;
+  }
+  let mut offset = STUN_HEADER_LEN;
+  while offset < end {
+    let header_end = offset.checked_add(4)?;
+    if header_end > end {
+      return None;
+    }
+    let kind = u16::from_be_bytes([frame[offset], frame[offset + 1]]);
+    let len = usize::from(u16::from_be_bytes([frame[offset + 2], frame[offset + 3]]));
+    let value_end = header_end.checked_add(len)?;
+    if value_end > end {
+      return None;
+    }
+    if kind == wanted {
+      return Some(&frame[header_end..value_end]);
+    }
+    offset = value_end.checked_add(turn_padding(len))?;
+  }
+  None
 }
 
 fn encode_stun_message(
@@ -3786,6 +4903,32 @@ fn load_root_store(path: &Path) -> anyhow::Result<RootCertStore> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn repeated_cli_headers_are_preserved() {
+    let mut headers = HeaderMap::new();
+    insert_header(&mut headers, "Authorization: first").expect("first header");
+    insert_header(&mut headers, "authorization: second").expect("second header");
+    let values = headers
+      .get_all(http::header::AUTHORIZATION)
+      .iter()
+      .map(|value| value.to_str().expect("ASCII header"))
+      .collect::<Vec<_>>();
+    assert_eq!(values, ["first", "second"]);
+  }
+
+  #[test]
+  fn h2_goaway_classifier_rejects_settings_only() {
+    let settings = [0, 0, 0, 4, 0, 0, 0, 0, 0];
+    let goaway = [0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    assert!(!contains_h2_goaway(&settings));
+    assert!(!contains_h2_goaway(&goaway[..12]));
+    assert!(contains_h2_goaway(&goaway));
+
+    let mut response = settings.to_vec();
+    response.extend_from_slice(&goaway);
+    assert!(contains_h2_goaway(&response));
+  }
 
   #[test]
   fn chunk_by_offsets_sorts_deduplicates_and_bounds_offsets() {

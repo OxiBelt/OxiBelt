@@ -14,7 +14,7 @@ use crate::diagnostics::{RuntimeSnapshot, build_runtime_snapshot};
 use crate::state::AppSnapshot;
 
 #[cfg(feature = "admin-runtime")]
-const RUNTIME_INTROSPECTION_FORMAT_VERSION: u32 = 2;
+const RUNTIME_INTROSPECTION_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Default)]
 pub struct RuntimeIntrospectionState {
@@ -33,6 +33,8 @@ pub struct RuntimeIntrospectionState {
   stream_listener_udp_flows: AtomicUsize,
   turn_tcp_connections: AtomicUsize,
   turn_tls_connections: AtomicUsize,
+  turn_udp_clients: AtomicUsize,
+  turn_allocations: AtomicUsize,
 }
 
 impl RuntimeIntrospectionState {
@@ -85,6 +87,8 @@ impl RuntimeIntrospectionState {
       turn: TurnConnectionSnapshot {
         tcp_connections_active: self.load(RuntimeIntrospectionCounter::TurnTcpConnection),
         tls_connections_active: self.load(RuntimeIntrospectionCounter::TurnTlsConnection),
+        udp_clients_active: self.load(RuntimeIntrospectionCounter::TurnUdpClient),
+        allocations_active: self.load(RuntimeIntrospectionCounter::TurnAllocation),
       },
     }
   }
@@ -126,6 +130,8 @@ impl RuntimeIntrospectionState {
       RuntimeIntrospectionCounter::StreamListenerUdpFlow => &self.stream_listener_udp_flows,
       RuntimeIntrospectionCounter::TurnTcpConnection => &self.turn_tcp_connections,
       RuntimeIntrospectionCounter::TurnTlsConnection => &self.turn_tls_connections,
+      RuntimeIntrospectionCounter::TurnUdpClient => &self.turn_udp_clients,
+      RuntimeIntrospectionCounter::TurnAllocation => &self.turn_allocations,
     }
   }
 }
@@ -146,6 +152,8 @@ pub enum RuntimeIntrospectionCounter {
   StreamListenerUdpFlow,
   TurnTcpConnection,
   TurnTlsConnection,
+  TurnUdpClient,
+  TurnAllocation,
 }
 
 pub struct RuntimeCounterGuard {
@@ -223,6 +231,8 @@ pub struct StreamConnectionSnapshot {
 pub struct TurnConnectionSnapshot {
   pub tcp_connections_active: usize,
   pub tls_connections_active: usize,
+  pub udp_clients_active: usize,
+  pub allocations_active: usize,
 }
 
 #[cfg(feature = "admin-runtime")]
@@ -274,10 +284,30 @@ mod tests {
     let state = RuntimeIntrospectionState::new();
     {
       let _guard = state.guard(RuntimeIntrospectionCounter::Http2Stream);
+      let _turn_udp = state.guard(RuntimeIntrospectionCounter::TurnUdpClient);
+      let _turn_allocation = state.guard(RuntimeIntrospectionCounter::TurnAllocation);
       assert_eq!(state.connections().http.http2_streams_active, 0);
+      assert_eq!(state.connections().turn.udp_clients_active, 0);
+      assert_eq!(state.connections().turn.allocations_active, 0);
     }
 
     assert_eq!(state.connections().http.http2_streams_active, 0);
+  }
+
+  #[test]
+  fn counter_guards_preserve_the_enablement_state_at_admission() {
+    let state = RuntimeIntrospectionState::new();
+    let disabled_guard = state.guard(RuntimeIntrospectionCounter::TurnUdpClient);
+    state.set_enabled(true);
+    assert_eq!(state.connections().turn.udp_clients_active, 0);
+
+    let enabled_guard = state.guard(RuntimeIntrospectionCounter::TurnUdpClient);
+    assert_eq!(state.connections().turn.udp_clients_active, 1);
+    state.set_enabled(false);
+    drop(enabled_guard);
+    assert_eq!(state.connections().turn.udp_clients_active, 0);
+    drop(disabled_guard);
+    assert_eq!(state.connections().turn.udp_clients_active, 0);
   }
 
   #[test]
@@ -286,10 +316,14 @@ mod tests {
     state.set_enabled(true);
     let _https = state.guard(RuntimeIntrospectionCounter::DownstreamHttpsTcpConnection);
     let _webtransport = state.guard(RuntimeIntrospectionCounter::WebTransportSession);
+    let _turn_udp = state.guard(RuntimeIntrospectionCounter::TurnUdpClient);
+    let _turn_allocation = state.guard(RuntimeIntrospectionCounter::TurnAllocation);
     let value = serde_json::to_value(state.connections()).expect("connections should serialize");
 
     assert_eq!(value["downstream"]["https_tcp_active"], 1);
     assert_eq!(value["tunnels"]["webtransport_sessions_active"], 1);
     assert_eq!(value["http"]["http1_connections_active"], 0);
+    assert_eq!(value["turn"]["udp_clients_active"], 1);
+    assert_eq!(value["turn"]["allocations_active"], 1);
   }
 }

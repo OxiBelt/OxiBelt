@@ -1,0 +1,10 @@
+# Repository-authored path-normalization vocabulary.
+dotdot="../"
+encoded_dot="%2e"
+encoded_slash="%2f"
+encoded_backslash="%5c"
+nested_dot="%252e"
+unicode_dot="%u002e"
+encoded_nul="%00"
+nested_nul="%2500"
+safe_prefix="/safe/"

@@ -328,6 +328,15 @@ fn request_trailer_sanitization_removes_sensitive_and_hop_by_hop_fields() {
   trailers.insert(X_FORWARDED_PORT, HeaderValue::from_static("80"));
   trailers.insert(X_FORWARDED_PROTO, HeaderValue::from_static("http"));
   trailers.insert(X_REAL_IP, HeaderValue::from_static("203.0.113.66"));
+  trailers.insert("remote-user", HeaderValue::from_static("attacker"));
+  trailers.insert("remote-groups", HeaderValue::from_static("admins"));
+  trailers.insert(
+    "remote-email",
+    HeaderValue::from_static("attacker@example.invalid"),
+  );
+  trailers.insert("remote-name", HeaderValue::from_static("Attacker"));
+  trailers.insert("x-auth-user", HeaderValue::from_static("attacker"));
+  trailers.insert("x-forwarded-user", HeaderValue::from_static("attacker"));
   trailers.insert(CONNECTION, HeaderValue::from_static("x-trailer-control"));
   trailers.insert("x-trailer-control", HeaderValue::from_static("remove-me"));
   trailers.insert(
@@ -335,7 +344,12 @@ fn request_trailer_sanitization_removes_sensitive_and_hop_by_hop_fields() {
     HeaderValue::from_static("Basic attacker"),
   );
 
-  sanitize_request_trailers_for_upstream(&mut trailers);
+  let custom_identity = HeaderName::from_static("x-custom-identity");
+  trailers.insert(
+    custom_identity.clone(),
+    HeaderValue::from_static("attacker"),
+  );
+  sanitize_request_trailers_for_upstream(&mut trailers, &[custom_identity.clone()]);
 
   assert_eq!(trailers["x-request-checksum"], "ok");
   assert_eq!(trailers[TE], "trailers");
@@ -349,6 +363,13 @@ fn request_trailer_sanitization_removes_sensitive_and_hop_by_hop_fields() {
     "x-forwarded-port",
     "x-forwarded-proto",
     "x-real-ip",
+    "remote-user",
+    "remote-groups",
+    "remote-email",
+    "remote-name",
+    "x-auth-user",
+    "x-forwarded-user",
+    custom_identity.as_str(),
     "connection",
     "x-trailer-control",
     "proxy-authorization",

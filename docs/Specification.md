@@ -129,10 +129,11 @@ authentication decision; release tag, commit, workflow identity, artifact
 digest, and provenance establish trust. Admin version metadata, capabilities,
 runtime introspection, support bundles, cluster build fencing, executable
 `--version`, OCI labels, and release artifact contracts consume this canonical
-identity. Runtime introspection retains format version `2`; the confinement
-contract advances the support-bundle format to version `3` to add bounded,
-redacted hardening evidence. Public readiness and liveness responses retain
-their existing non-identifying contract.
+identity. Runtime introspection uses format version `3` to add aggregate,
+redacted TURN UDP-client and allocation counters; the confinement contract
+advances the support-bundle format to version `3` to add bounded, redacted
+hardening evidence. Public readiness and liveness responses retain their
+existing non-identifying contract.
 
 ## Request Pipeline
 
@@ -458,7 +459,7 @@ Lifecycle endpoints are:
 - `POST /admin/v1/lifecycle/undrain`: requires `lifecycle:Undrain`, clears admin drain.
 - `GET /admin/v1/diagnostics/support-bundle?redact=true`: requires `diagnostics:ReadSupportBundle`, returns a redacted JSON support bundle with config status, redacted effective config when available, doctor output, runtime snapshot, WAF telemetry summaries, dynamic-policy summary, and Prometheus text. Optional `external_probe=KIND` query parameters require the same probe permissions as diagnostics preflight.
 - `GET /admin/v1/runtime/snapshot?redact=true`: requires `runtime:ReadSnapshot`, returns the redacted runtime snapshot section used by the support bundle.
-- `GET /admin/v1/runtime/introspection?redact=true`: requires `runtime:ReadIntrospection`, returns the redacted runtime snapshot plus live active counters for downstream connections, HTTP/1.1 requests, HTTP/2 streams, HTTP/3 requests, WebSocket tunnels, WebTransport sessions, stream listener TCP connections, stream listener UDP flows, and TURN TCP/TLS connections.
+- `GET /admin/v1/runtime/introspection?redact=true`: requires `runtime:ReadIntrospection`, returns runtime-introspection format version `3` with the redacted runtime snapshot plus live active counters for downstream connections, HTTP/1.1 requests, HTTP/2 streams, HTTP/3 requests, WebSocket tunnels, WebTransport sessions, stream listener TCP connections, stream listener UDP flows, TURN TCP/TLS connections, TURN UDP clients, and TURN relay allocations.
 - `GET /admin/v1/waf/rule-hits`, `GET /admin/v1/waf/rule-costs`, and `GET /admin/v1/waf/crs/compatibility`: require the matching `waf:GetRuleHits`, `waf:GetRuleCosts`, and `waf:GetCrsCompatibility` actions.
 - `POST /admin/v1/waf/rulepacks/plan`: requires `waf:PlanOxiRulePack`; route candidate inventory additionally requires `config:ReadRouteInventory`, content diff additionally requires `waf:ListOxiRulePacks`, and cost estimation additionally requires `waf:EstimateOxiRuleCost`. The endpoint is non-mutating, accepts schema version `2` rulepacks only, and returns route candidates without upstream origins, credentials, TLS details, token environment variables, or file paths.
 - `POST /admin/v1/waf/oxirule/check`, `test`, `explain`, `cost`, and `replay`: require `waf:CheckOxiRule`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, or `waf:ReplayOxiRule`; `check` also requires `waf:CheckOxiRuleGroup` when group candidates are supplied. Requests with `include_active_rules = true` require the same action on `oxirule/*`, except replay uses `replay/*`. These endpoints are synchronous, stateless, and never write OxiRule files.

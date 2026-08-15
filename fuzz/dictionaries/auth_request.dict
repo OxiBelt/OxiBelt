@@ -1,0 +1,6 @@
+# Repository-authored authentication boundary vocabulary.
+bearer="Bearer"
+authorization="Authorization"
+remote_user="Remote-User"
+auth_user="X-Auth-User"
+forwarded_user="X-Forwarded-User"

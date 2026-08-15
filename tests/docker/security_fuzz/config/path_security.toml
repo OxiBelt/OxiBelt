@@ -1,0 +1,58 @@
+[logging]
+level = "warn"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = 1
+
+[runtime.accept]
+workers = 1
+reuse_port = false
+backlog = 1024
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = false
+max_http_version = "h1"
+
+[proxy.static_files]
+sendfile = "off"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[routes]]
+name = "static"
+hosts = ["static.example.test"]
+path_prefix = "/static"
+static_root = "public"
+
+[quic.socket]
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = 1
+reuse_port = false

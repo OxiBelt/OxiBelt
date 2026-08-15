@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 const EXPECTED_TARGETS: &[&str] = &[
   "admin_json_mutations",
   "admin_mutation_envelope",
+  "auth_request_semantics",
   "cache_metadata_key",
   "cluster_rollout_state",
   "compio_h1_response",
@@ -17,12 +18,14 @@ const EXPECTED_TARGETS: &[&str] = &[
   "http_semantics",
   "native_config",
   "oxirule_expression",
+  "path_security_semantics",
   "syscall_boundaries",
   "tls_certificate_metadata",
   "tls_client_hello",
   "turn_protocol",
   "upstream_dns_resolution",
   "waf_request_normalization",
+  "waf_request_evaluation",
   "webrtc_turn",
   "websocket_frame",
 ];

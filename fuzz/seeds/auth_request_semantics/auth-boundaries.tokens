@@ -1,0 +1,4 @@
+Bearer synthetic-fuzz-token
+Remote-User: attacker-controlled
+Authorization trailer
+X-Forwarded-User trailer

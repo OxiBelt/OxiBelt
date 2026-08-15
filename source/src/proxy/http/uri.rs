@@ -60,12 +60,85 @@ pub(crate) fn validate_downstream_path(path: &str) -> anyhow::Result<()> {
 }
 
 fn contains_encoded_dot_or_separator(path: &[u8]) -> bool {
-  path.windows(3).any(|window| {
-    window[0] == b'%'
-      && ((window[1] == b'2'
-        && (window[2].eq_ignore_ascii_case(&b'e') || window[2].eq_ignore_ascii_case(&b'f')))
-        || (window[1] == b'5' && window[2].eq_ignore_ascii_case(&b'c')))
-  })
+  // Inspect a fixed number of decoding layers. OxiBelt and an upstream must
+  // not disagree merely because an unsafe separator was hidden behind an
+  // encoded percent sign (for example `%252e` or `%25252f`). The bound keeps
+  // validation work linear while covering deeper nesting than any OxiBelt
+  // normalization stage performs.
+  const MAX_PERCENT_DECODE_DEPTH: usize = 8;
+
+  let mut decoded = path.to_vec();
+  for _ in 0..MAX_PERCENT_DECODE_DEPTH {
+    if decoded.windows(3).any(|window| {
+      window[0] == b'%'
+        && ((window[1] == b'2'
+          && (window[2].eq_ignore_ascii_case(&b'e') || window[2].eq_ignore_ascii_case(&b'f')))
+          || (window[1] == b'5' && window[2].eq_ignore_ascii_case(&b'c')))
+    }) {
+      return true;
+    }
+    let Some(next) = percent_decode_path_once(&decoded) else {
+      break;
+    };
+    if next
+      .iter()
+      .any(|byte| *byte == b'\\' || *byte < 0x20 || *byte == 0x7f)
+      || next
+        .split(|byte| *byte == b'/')
+        .any(|segment| matches!(segment, b"." | b".."))
+    {
+      return true;
+    }
+    decoded = next;
+  }
+  false
+}
+
+fn percent_decode_path_once(path: &[u8]) -> Option<Vec<u8>> {
+  let mut decoded = Vec::with_capacity(path.len());
+  let mut changed = false;
+  let mut index = 0;
+  while index < path.len() {
+    if path[index] == b'%'
+      && index + 5 < path.len()
+      && matches!(path[index + 1], b'u' | b'U')
+      && let Some(codepoint) = hex_u16(&path[index + 2..index + 6])
+      && codepoint <= 0x7f
+    {
+      decoded.push(codepoint as u8);
+      changed = true;
+      index += 6;
+    } else if path[index] == b'%'
+      && index + 2 < path.len()
+      && let (Some(high), Some(low)) = (hex_nibble(path[index + 1]), hex_nibble(path[index + 2]))
+    {
+      decoded.push((high << 4) | low);
+      changed = true;
+      index += 3;
+    } else {
+      decoded.push(path[index]);
+      index += 1;
+    }
+  }
+  changed.then_some(decoded)
+}
+
+fn hex_u16(bytes: &[u8]) -> Option<u16> {
+  let mut value = 0u16;
+  for byte in bytes {
+    value = value.checked_mul(16)?;
+    value = value.checked_add(u16::from(hex_nibble(*byte)?))?;
+  }
+  Some(value)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+  match byte {
+    b'0'..=b'9' => Some(byte - b'0'),
+    b'a'..=b'f' => Some(byte - b'a' + 10),
+    b'A'..=b'F' => Some(byte - b'A' + 10),
+    _ => None,
+  }
 }
 
 pub(crate) fn rewrite_uri(
@@ -250,6 +323,20 @@ mod tests {
       "/safe/%2E/admin",
       "/safe/%2f/admin",
       "/safe/%5c/admin",
+      "/safe/%252e%252e/admin",
+      "/safe/%25252e%25252e/admin",
+      "/safe/%25%32%65%25%32%65/admin",
+      "/safe/%252fadmin",
+      "/safe/%255cadmin",
+      "/safe/%u002e%u002e/admin",
+      "/safe/%U002E%U002E/admin",
+      "/safe/%25u002e%25u002e/admin",
+      "/safe/%u0025u002e%u0025u002e/admin",
+      "/safe/%u002e%u002e%u002fadmin",
+      "/safe/%u002e%u002e%u005cadmin",
+      "/safe/%00/admin",
+      "/safe/%2500/admin",
+      "/safe/%u0000/admin",
       "/safe\\admin",
     ] {
       assert!(
@@ -260,5 +347,22 @@ mod tests {
 
     validate_downstream_path("/safe/admin").unwrap();
     validate_downstream_path("/safe/%20space").unwrap();
+  }
+
+  #[test]
+  fn nested_percent_route_bypass_regressions_fail_closed() {
+    let cases = include_str!(
+      "../../../../tests/fixtures/fuzz-regressions/path_security_semantics/nested-percent-route-bypass.txt"
+    );
+    for path in cases
+      .lines()
+      .map(str::trim)
+      .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+      assert!(
+        validate_downstream_path(path).is_err(),
+        "nested path case must be rejected: {path}"
+      );
+    }
   }
 }

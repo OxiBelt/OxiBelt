@@ -49,8 +49,10 @@ impl TurnListenerTask {
           let _ = task.await;
         }
         self.connections.wait_idle().await;
+        self.edge.clear().await;
         return true;
       }
+      self.edge.clear().await;
       false
     })
   }

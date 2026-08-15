@@ -48,6 +48,9 @@ matrices, and this metadata from drifting apart.
 | `cache_metadata_key` | Metadata text, external-cache JSON, key templates, and variants | Cache file access, backend clients, fill coordination |
 | `gateway_api_translation` | At most sixteen in-memory Kubernetes objects and pure translation | Kubernetes clients, watches, leader election, filesystem rendering |
 | `tls_certificate_metadata` | At most four in-memory DER candidates and bounded metadata extraction | Certificate files, private keys, live TLS servers |
+| `path_security_semantics` | Structured URI forms, route prefixes, rewrites, static lexical resolution, and WAF path views; rejected paths cannot become accepted at a later modeled stage | Filesystem access, static-file opening, network I/O |
+| `waf_request_evaluation` | Bounded request metadata and bodies against a fixed in-memory security ruleset; decoder or policy failure cannot silently become allow | Filesystem-backed rules, external functions, network and storage |
+| `auth_request_semantics` | Bounded headers, bearer parsing, route scope, backend outcome, fail policy, trusted identity replacement, and trailer sanitization; explicit denial never opens | External-auth network calls, credentials, live upstream forwarding |
 
 Normalization targets assert deterministic parsing, bounded output, canonical
 forms where the owning API defines one, and non-mutation of source inputs.
@@ -61,6 +64,67 @@ The protocol targets intentionally stop at deterministic parse and policy
 boundaries. Live HTTP/3, WebTransport, WebSocket, TURN, Gateway Controller, and
 storage behavior remains the responsibility of the repository's integration
 matrices.
+
+## Docker security-property fuzzing
+
+Pure fuzzing is complemented by a Docker program for properties that
+require real listeners, the release-like Alpine image, protocol state, or
+observable runtime cleanup. Its canonical target and bound catalog is
+[`tests/docker/security_fuzz/targets.toml`](../tests/docker/security_fuzz/targets.toml).
+The generated pull-request matrix runs these eight families independently:
+
+| Target | Catalog protocols | Boundary | Primary oracle |
+| --- | --- | --- | --- |
+| `path_security` | `h1`, `h2`, `h3` | Paths and static routing | A unique outside-root canary is never returned |
+| `tls_quic_sni` | `tls`, `quic` | TLS records, fragmented SNI handshakes, and QUIC Initial inputs | Malformed input fails closed and a later valid connection succeeds |
+| `http_framing` | `h1`, `h2`, `h3` | Request framing | The protected upstream observes no extra or desynchronized request |
+| `waf_bypass` | `h1`, `h2`, `h3` | WAF path, header, and bounded body representations | A must-block request never reaches the protected upstream |
+| `auth_bypass` | `h1`, `h2`, `h3` | External-auth results and identity headers | Invalid or explicit-deny auth never reaches the upstream; only a catalogued fail-open transport error may open |
+| `websocket_webtransport` | `ws`, `h3`, `webtransport` | WebSocket frame validity and WebTransport extended CONNECT/session behavior | Malformed session input stays isolated and active counts recover |
+| `turn_runtime` | `udp`, `tcp`, `tls` | TURN authentication and lifecycle | Invalid authentication and malformed STUN fail closed, documented upstream nonce challenges remain authoritative, and active runtime counts return to baseline |
+| `admin_authz` | `h1` | Admin authorization and mutation-state containment | Unauthorized requests leave the canonical redacted state projection unchanged |
+
+Each target derives structured selectors and bounded fields from its input,
+then applies only that protocol's semantic, wire, fragmentation, or raw
+mutations. An equality or no-downgrade oracle is applied only to transforms
+explicitly catalogued as meaning-preserving; arbitrary malformed input is
+instead required to fail closed without losing later valid service. Every
+case has a deterministic seed derived from the source revision, target,
+schema, run seed, and case index.
+
+Pull requests run at most 1,024 cases or 120 seconds per target, whichever is
+reached first. The default-branch sustained workflow runs each target for 900
+seconds with at most two target jobs in parallel. Per-case, recovery, payload,
+concurrency, per-session case-count, and 32-MiB evidence limits are enforced by
+the catalog and runner.
+
+Run the same bounded smoke tier locally with the standard `docker` command:
+
+```sh
+tests/scripts/run-docker-security-fuzz.sh smoke path_security --seed 42
+```
+
+Replay one exact case without regenerating earlier cases:
+
+```sh
+tests/scripts/run-docker-security-fuzz.sh replay path_security --seed 42 --case 17
+```
+
+Run a locally bounded campaign (the sustained job passes `900`):
+
+```sh
+tests/scripts/run-docker-security-fuzz.sh campaign path_security 120 --seed 42
+```
+
+The runner uses run-unique, label-scoped Docker resources and removes only
+those resources. On failure it writes a bounded private evidence bundle before
+cleanup: catalog and source versions, seed and case, case mutation metadata,
+bounded input and digest, structured probe observations, selected container
+state, logs, and the exact replay command. It does not capture container
+environments or test tokens. Generated evidence and corpora are never
+committed or opened as a public issue automatically; security-sensitive
+failures follow
+[`SECURITY.md`](../SECURITY.md).
 
 ## Setup and local runs
 
@@ -131,6 +195,11 @@ production data, use no symlinks, and stay within the per-target and aggregate
 limits in the catalog. Dictionaries under `fuzz/dictionaries/` follow
 libFuzzer's dictionary syntax and contain only public syntax or protocol
 vocabulary.
+
+CVE-inspired seeds are vulnerability-class regression inputs only. Their
+presence records a parser, normalization, framing, or policy pattern worth
+preserving; it does not claim that OxiBelt contained the historical
+third-party vulnerability associated with that CVE.
 
 Generated local inputs under `fuzz/corpus/`, direct `cargo-fuzz` crashes under
 `fuzz/artifacts/`, and reports under `fuzz/coverage/` are ignored. The guarded

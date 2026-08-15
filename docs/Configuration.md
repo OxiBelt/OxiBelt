@@ -3428,13 +3428,16 @@ resolved, and active direct-H1 transport state.
 
 `GET /admin/v1/runtime/introspection?redact=true` returns the redacted runtime
 snapshot plus live active connection, request, stream, WebSocket,
-WebTransport, stream-listener, and TURN TCP/TLS counters. It requires the
+WebTransport, stream-listener, TURN TCP/TLS, TURN UDP-client, and TURN relay
+allocation counters. It requires the
 separate `runtime:ReadIntrospection` action on
 `oxibelt:<namespace>:runtime:introspection/current`; `runtime:ReadSnapshot`
-does not authorize this endpoint. Runtime-introspection format version `2`
+does not authorize this endpoint. Runtime-introspection format version `3`
 uses the same topology object, so subsystem ownership and the active direct-H1
 transport can be compared with live counters without inferring topology from a
-mode name. The object contains fixed enums and counts only; it omits raw
+mode name. Version `3` adds `turn.udp_clients_active` and
+`turn.allocations_active`; both are aggregate counts and reveal no client or
+relay address. The object contains fixed enums and counts only; it omits raw
 preflight errors, paths, hostnames, routes, peers, and secrets.
 
 Active `GET /admin/v1/config/explain` responses use config-report format

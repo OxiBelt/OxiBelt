@@ -568,6 +568,31 @@ pub(crate) fn fuzz_body_coding(data: &[u8]) {
   }
 }
 
+/// Bounded synchronous decoder used by the pure WAF-evaluation fuzz facade.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_decode_body(
+  encoded: Bytes,
+  encoding: WafHttpBodyEncoding,
+) -> Result<Bytes, http::StatusCode> {
+  decode_body_sync(encoded, encoding, 64 * 1024).map_err(|error| {
+    let error = super::waf_body_capture::WafBodyCaptureError::Coding(error);
+    super::waf_body_capture::request_body_capture_error_response(&error).0
+  })
+}
+
+/// Bounded synchronous encoder used to construct meaning-preserving compressed
+/// representations for the pure WAF-evaluation fuzz facade.
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_encode_body(
+  decoded: Bytes,
+  encoding: WafHttpBodyEncoding,
+) -> Result<Bytes, http::StatusCode> {
+  encode_body_sync(decoded, encoding).map_err(|error| {
+    let error = super::waf_body_capture::WafBodyCaptureError::Coding(error);
+    super::waf_body_capture::request_body_capture_error_response(&error).0
+  })
+}
+
 #[cfg(test)]
 mod test_support;
 

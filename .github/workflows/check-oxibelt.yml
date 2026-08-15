@@ -817,6 +817,9 @@ jobs:
           - cache_metadata_key
           - gateway_api_translation
           - tls_certificate_metadata
+          - path_security_semantics
+          - waf_request_evaluation
+          - auth_request_semantics
 
     steps:
       - name: Checkout
@@ -1001,6 +1004,7 @@ jobs:
       docker_state_data: ${{ steps.matrices.outputs.docker_state_data }}
       docker_ops: ${{ steps.matrices.outputs.docker_ops }}
       docker_security: ${{ steps.matrices.outputs.docker_security }}
+      docker_security_fuzz: ${{ steps.matrices.outputs.docker_security_fuzz }}
       browser: ${{ steps.matrices.outputs.browser }}
 
     steps:
@@ -1058,6 +1062,12 @@ jobs:
           write_docker_matrix docker_state_data state-data
           write_docker_matrix docker_ops ops
           write_docker_matrix docker_security security
+
+          security_fuzz_matrix="$(
+            cargo_run_with_retry --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
+              list --suite security-fuzz --format github-matrix
+          )"
+          echo "docker_security_fuzz=${security_fuzz_matrix}" >> "${GITHUB_OUTPUT}"
 
           browser_matrix="$(
             cargo_run_with_retry --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix -- \
@@ -3068,6 +3078,76 @@ jobs:
           if-no-files-found: ignore
           retention-days: 0
 
+  docker-security-fuzz-smoke:
+    name: Docker security fuzz smoke (${{ matrix.target }})
+    runs-on: ubuntu-26.04
+    needs:
+      - generate-test-matrices
+      - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.generate-test-matrices.outputs.docker_security_fuzz) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup default 1.97.1
+
+      - name: Select AMD64 Docker image artifact
+        id: select-amd64-image
+        run: tests/scripts/select-amd64-docker-image-artifact.sh auto
+
+      - name: Download AMD64 Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image
+
+      - name: Load OxiBelt Docker image
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
+
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
+      - name: Run bounded Docker security fuzz smoke
+        env:
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
+          OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
+          OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
+          OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-security-fuzz/${{ matrix.target }}
+        run: tests/scripts/run-docker-security-fuzz.sh smoke "${{ matrix.target }}"
+
+      - name: Upload Docker security fuzz failure evidence
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-docker-security-fuzz-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oxibelt-docker-security-fuzz/${{ matrix.target }}
+          if-no-files-found: warn
+          retention-days: 90
+
   remote-signer-dos-docker:
     name: Docker remote signer DoS regression
     runs-on: ubuntu-26.04
@@ -3194,6 +3274,7 @@ jobs:
       - docker-integration-state-data
       - docker-integration-ops
       - docker-integration-security
+      - docker-security-fuzz-smoke
       - remote-signer-dos-docker
       - browser-webdriver
     if: ${{ always() && github.actor != 'dependabot[bot]' }}

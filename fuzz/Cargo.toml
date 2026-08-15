@@ -38,6 +38,27 @@ doc = false
 bench = false
 
 [[bin]]
+name = "path_security_semantics"
+path = "fuzz_targets/path_security_semantics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "waf_request_evaluation"
+path = "fuzz_targets/waf_request_evaluation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_request_semantics"
+path = "fuzz_targets/auth_request_semantics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "compio_h1_response"
 path = "fuzz_targets/compio_h1_response.rs"
 test = false

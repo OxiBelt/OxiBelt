@@ -648,9 +648,11 @@ change may full-reload only after OxiBelt stages the replacement service; a
 failure keeps the previous configuration, service, and reported topology
 active.
 
-Runtime snapshot, runtime introspection, support-bundle, and active config
-explain consumers must accept format version `2` before this upgrade. Version
-`2` adds the requested and resolved presets, fallback outcome/reason,
+Runtime snapshot, support-bundle, and active config explain consumers must
+accept format version `2` before this upgrade. Runtime-introspection consumers
+must accept format version `3`; version `3` adds the aggregate redacted
+`turn.udp_clients_active` and `turn.allocations_active` counters. Version `2`
+adds the requested and resolved presets, fallback outcome/reason,
 subsystem owners, worker allocations, compatibility boundaries, and active
 direct-H1 state. Public readiness also adds the bounded
 `X-OxiBelt-Runtime-Status` header. These surfaces do not expose raw capability

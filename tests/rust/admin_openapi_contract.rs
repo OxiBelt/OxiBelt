@@ -465,6 +465,19 @@ fn runtime_diagnostics_document_typed_redacted_hardening_evidence() {
     seccomp["properties"]["profile_identity_kernel_verified"]["const"],
     false
   );
+
+  let introspection = &spec["components"]["schemas"]["RuntimeIntrospectionRedacted"];
+  assert_eq!(
+    introspection["properties"]["metadata"]["$ref"],
+    "#/components/schemas/RuntimeIntrospectionMetadata"
+  );
+  assert_eq!(
+    spec["components"]["schemas"]["RuntimeIntrospectionMetadata"]["properties"]["format_version"]["const"],
+    3
+  );
+  let turn = &spec["components"]["schemas"]["RuntimeIntrospectionTurnConnections"];
+  assert_eq!(turn["properties"]["udp_clients_active"]["minimum"], 0);
+  assert_eq!(turn["properties"]["allocations_active"]["minimum"], 0);
 }
 
 #[test]

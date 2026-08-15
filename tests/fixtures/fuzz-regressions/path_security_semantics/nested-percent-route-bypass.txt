@@ -1,0 +1,16 @@
+# Repository-authored minimized path-normalization cases. These exercise the
+# CVE-2021-41773/CVE-2021-42013 vulnerability class without asserting that
+# OxiBelt was affected by either historical vulnerability.
+/safe/%252e%252e/admin
+/safe/%25252e%25252e/admin
+/safe/%25%32%65%25%32%65/admin
+/safe/%252fadmin
+/safe/%255cadmin
+/safe/%u002e%u002e/admin
+/safe/%25u002e%25u002e/admin
+/safe/%u0025u002e%u0025u002e/admin
+/safe/%u002e%u002e%u002fadmin
+/safe/%u002e%u002e%u005cadmin
+/safe/%00/admin
+/safe/%2500/admin
+/safe/%u0000/admin

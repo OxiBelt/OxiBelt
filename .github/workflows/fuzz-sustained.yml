@@ -49,6 +49,9 @@ jobs:
           - cache_metadata_key
           - gateway_api_translation
           - tls_certificate_metadata
+          - path_security_semantics
+          - waf_request_evaluation
+          - auth_request_semantics
 
     steps:
       - name: Checkout

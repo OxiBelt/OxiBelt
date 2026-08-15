@@ -19,6 +19,7 @@ use crate::config::{
 
 use super::EffectiveTimeouts;
 use super::body::{BoxError, ProxyBody};
+use super::headers::sanitize_request_trailers_for_upstream;
 
 const PRIORITY: HeaderName = HeaderName::from_static("priority");
 const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
@@ -252,6 +253,20 @@ pub(super) fn filter_trailers(
   DropTrailersBody { body }.boxed()
 }
 
+pub(super) fn sanitize_upstream_request_trailers(
+  body: ProxyBody,
+  identity_headers: Vec<HeaderName>,
+) -> ProxyBody {
+  if body.is_end_stream() {
+    return body;
+  }
+  SanitizeRequestTrailersBody {
+    body,
+    identity_headers,
+  }
+  .boxed()
+}
+
 pub(super) fn configured_error_response(
   config: &Config,
   request_id: &str,
@@ -345,6 +360,40 @@ fn sanitize_grpc_message(message: &str) -> String {
 
 struct DropTrailersBody {
   body: ProxyBody,
+}
+
+struct SanitizeRequestTrailersBody {
+  body: ProxyBody,
+  identity_headers: Vec<HeaderName>,
+}
+
+impl Body for SanitizeRequestTrailersBody {
+  type Data = Bytes;
+  type Error = BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    match Pin::new(&mut self.body).poll_frame(cx) {
+      Poll::Ready(Some(Ok(frame))) => match frame.into_trailers() {
+        Ok(mut trailers) => {
+          sanitize_request_trailers_for_upstream(&mut trailers, &self.identity_headers);
+          Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+        }
+        Err(frame) => Poll::Ready(Some(Ok(frame))),
+      },
+      other => other,
+    }
+  }
+
+  fn is_end_stream(&self) -> bool {
+    self.body.is_end_stream()
+  }
+
+  fn size_hint(&self) -> SizeHint {
+    self.body.size_hint()
+  }
 }
 
 impl Body for DropTrailersBody {
@@ -559,6 +608,45 @@ mod tests {
     let body = filter_trailers(body, TrailerMode::Drop, false);
     let collected = body.collect().await.expect("body should collect");
     assert!(collected.trailers().is_none());
+    assert_eq!(collected.to_bytes().as_ref(), b"abc");
+  }
+
+  #[tokio::test]
+  async fn passed_request_trailers_strip_security_fields_and_preserve_benign_fields() {
+    let (sender, body) = channel_body(4);
+    sender
+      .send(Ok(Frame::data(Bytes::from_static(b"abc"))))
+      .await
+      .expect("data frame should send");
+    let mut trailers = HeaderMap::new();
+    trailers.insert("x-request-checksum", HeaderValue::from_static("ok"));
+    trailers.insert(
+      http::header::AUTHORIZATION,
+      HeaderValue::from_static("Bearer attacker"),
+    );
+    trailers.insert(
+      http::header::COOKIE,
+      HeaderValue::from_static("sid=attacker"),
+    );
+    let custom_identity = HeaderName::from_static("x-custom-identity");
+    trailers.insert(
+      custom_identity.clone(),
+      HeaderValue::from_static("attacker"),
+    );
+    sender
+      .send(Ok(Frame::trailers(trailers)))
+      .await
+      .expect("trailer frame should send");
+    drop(sender);
+
+    let body = filter_trailers(body, TrailerMode::Pass, false);
+    let body = sanitize_upstream_request_trailers(body, vec![custom_identity.clone()]);
+    let collected = body.collect().await.expect("body should collect");
+    let trailers = collected.trailers().expect("benign trailers should remain");
+    assert_eq!(trailers["x-request-checksum"], "ok");
+    assert!(!trailers.contains_key(http::header::AUTHORIZATION));
+    assert!(!trailers.contains_key(http::header::COOKIE));
+    assert!(!trailers.contains_key(custom_identity));
     assert_eq!(collected.to_bytes().as_ref(), b"abc");
   }
 

@@ -1,0 +1,102 @@
+# Canonical Docker security-fuzz target catalog.  The runner and CI matrix read
+# this file through `oxibelt-docker-integration-matrix`; do not duplicate it in
+# shell or workflow YAML.
+schema_version = 1
+replay_schema_version = 1
+owner = "security-fuzz"
+pr_max_cases = 1024
+pr_max_seconds = 120
+sustained_default_seconds = 900
+sustained_max_cases = 1048576
+case_timeout_seconds = 5
+recovery_timeout_seconds = 15
+failure_artifact_max_bytes = 33554432
+failure_artifact_metadata = ["case", "case_seed", "input_sha256", "max_concurrent_sessions", "meaning_preserving_transforms", "oracle", "protocols", "replay", "required_helpers", "schema_version", "source_revision", "target"]
+
+[[target]]
+id = "path_security"
+description = "downstream path parsing, route selection, and static-root containment"
+protocols = ["h1", "h2", "h3"]
+payload_max_bytes = 4096
+session_max_cases = 4
+max_concurrent_sessions = 1
+required_helpers = ["protocol-probe"]
+oracle = "outside-root-canary"
+meaning_preserving_transforms = ["percent-hex-case", "unreserved-percent-encoding"]
+
+[[target]]
+id = "tls_quic_sni"
+description = "TLS and QUIC SNI parser rejection with post-failure recovery"
+protocols = ["tls", "quic"]
+payload_max_bytes = 16384
+session_max_cases = 8
+max_concurrent_sessions = 1
+required_helpers = ["mock-http", "protocol-probe"]
+oracle = "malformed-fails-closed-and-later-valid-succeeds"
+meaning_preserving_transforms = []
+
+[[target]]
+id = "http_framing"
+description = "HTTP/1.1, HTTP/2, and HTTP/3 framing boundary preservation"
+protocols = ["h1", "h2", "h3"]
+payload_max_bytes = 65536
+session_max_cases = 8
+max_concurrent_sessions = 1
+required_helpers = ["mock-http", "protocol-probe"]
+oracle = "upstream-boundary-count-no-desync"
+meaning_preserving_transforms = ["header-case", "equivalent-content-length"]
+
+[[target]]
+id = "waf_bypass"
+description = "request WAF blocking across HTTP versions and bounded body representations"
+protocols = ["h1", "h2", "h3"]
+payload_max_bytes = 65536
+session_max_cases = 8
+max_concurrent_sessions = 1
+required_helpers = ["mock-http", "protocol-probe"]
+oracle = "must-block-never-reaches-protected-upstream"
+meaning_preserving_transforms = ["body-fragmentation", "content-coding", "header-case", "unreserved-percent-encoding"]
+
+[[target]]
+id = "auth_bypass"
+description = "external-auth policy, header stripping, and fail-policy containment"
+protocols = ["h1", "h2", "h3"]
+payload_max_bytes = 16384
+session_max_cases = 8
+max_concurrent_sessions = 1
+required_helpers = ["mock-auth-allow", "mock-auth-deny", "mock-http", "protocol-probe"]
+oracle = "invalid-auth-never-reaches-upstream-except-permitted-fail-open-error"
+meaning_preserving_transforms = ["header-case"]
+
+[[target]]
+id = "websocket_webtransport"
+description = "WebSocket and WebTransport session binding and recovery"
+protocols = ["ws", "h3", "webtransport"]
+payload_max_bytes = 65536
+session_max_cases = 16
+max_concurrent_sessions = 2
+required_helpers = ["protocol-probe", "websocket-echo", "webtransport-echo"]
+oracle = "session-binding-count-and-recovery"
+meaning_preserving_transforms = []
+
+[[target]]
+id = "turn_runtime"
+description = "TURN proxy-pool authentication plus edge-relay UDP allocation and lifecycle recovery"
+protocols = ["udp", "tcp", "tls"]
+payload_max_bytes = 8192
+session_max_cases = 16
+max_concurrent_sessions = 1
+required_helpers = ["protocol-probe", "turn-tcp-echo", "turn-tls-echo", "turn-udp-echo"]
+oracle = "invalid-auth-and-malformed-stun-closed-nonstun-and-missing-upstream-authoritative-edge-allocation-visible-then-expires"
+meaning_preserving_transforms = []
+
+[[target]]
+id = "admin_authz"
+description = "Admin HTTP/1.1 authorization and mutation-state containment"
+protocols = ["h1"]
+payload_max_bytes = 65536
+session_max_cases = 4
+max_concurrent_sessions = 1
+required_helpers = ["mock-http", "postgres", "protocol-probe"]
+oracle = "unauthorized-canonical-state-digest-unchanged"
+meaning_preserving_transforms = ["header-case"]

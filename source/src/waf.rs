@@ -47,6 +47,8 @@ mod evaluator_values;
 mod expression;
 mod external_files;
 mod functions;
+#[cfg(feature = "fuzzing")]
+mod fuzz_security;
 mod http_body_compression;
 mod lb_policy_compat;
 mod malicious_intelligence_score;
@@ -106,6 +108,23 @@ pub(crate) fn fuzz_expression(input: &[u8]) {
 #[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_request_normalization(input: &[u8]) {
   normalization::fuzz_request_normalization(input);
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_normalize_path(path: &str) -> String {
+  normalization::normalize_path(path)
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_evaluate_security_request(
+  path: &str,
+  body: &[u8],
+  header_value: &str,
+  transform: u8,
+  protocol: u8,
+  body_coding: u8,
+) {
+  fuzz_security::evaluate(path, body, header_value, transform, protocol, body_coding);
 }
 pub use external_files::validate_external_rule_group_file;
 pub use functions::WafFunctionConfig;

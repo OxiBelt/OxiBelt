@@ -464,6 +464,8 @@ impl PlainProxyFastPath {
               timeouts.upstream_send,
             )
           };
+          let outbound_body =
+            semantics::sanitize_upstream_request_trailers(outbound_body, Vec::new());
           (Request::from_parts(parts, outbound_body), request_body_mode)
         }
       }

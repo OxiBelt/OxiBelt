@@ -1,0 +1,5 @@
+# Repository-authored fixed-WAF semantic marker vocabulary.
+attack="oxibelt_fuzz_attack"
+encoded_underscore="%5f"
+json_key="\"payload\""
+form_separator="&"

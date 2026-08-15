@@ -206,8 +206,13 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     };
     outbound = Request::from_parts(parts, body);
   }
-  let outbound = outbound
-    .map(|body| filter_trailers(body, state.config.proxy.http.trailers, native_grpc_request));
+  let identity_headers = state
+    .external_auth
+    .identity_headers_for(resolved.route.external_auth.as_deref());
+  let outbound = outbound.map(|body| {
+    let body = filter_trailers(body, state.config.proxy.http.trailers, native_grpc_request);
+    semantics::sanitize_upstream_request_trailers(body, identity_headers)
+  });
   let mut outbound = if upstream_version == HttpVersion::H3 {
     outbound
   } else {

@@ -8373,14 +8373,80 @@
       "RuntimeIntrospectionRedacted": {
         "type": "object",
         "required": [
-          "runtime"
+          "metadata",
+          "runtime",
+          "connections"
         ],
         "properties": {
+          "metadata": {
+            "$ref": "#/components/schemas/RuntimeIntrospectionMetadata"
+          },
           "runtime": {
             "$ref": "#/components/schemas/RuntimeSnapshotRedacted"
+          },
+          "connections": {
+            "$ref": "#/components/schemas/RuntimeIntrospectionConnections"
           }
         },
         "additionalProperties": true
+      },
+      "RuntimeIntrospectionMetadata": {
+        "type": "object",
+        "required": [
+          "format_version",
+          "redacted"
+        ],
+        "properties": {
+          "format_version": {
+            "type": "integer",
+            "const": 3
+          },
+          "redacted": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "RuntimeIntrospectionConnections": {
+        "type": "object",
+        "required": [
+          "turn"
+        ],
+        "properties": {
+          "turn": {
+            "$ref": "#/components/schemas/RuntimeIntrospectionTurnConnections"
+          }
+        },
+        "additionalProperties": true
+      },
+      "RuntimeIntrospectionTurnConnections": {
+        "type": "object",
+        "required": [
+          "tcp_connections_active",
+          "tls_connections_active",
+          "udp_clients_active",
+          "allocations_active"
+        ],
+        "properties": {
+          "tcp_connections_active": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "tls_connections_active": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "udp_clients_active": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "allocations_active": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "SupportBundleRedacted": {
         "type": "object",

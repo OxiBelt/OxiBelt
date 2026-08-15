@@ -226,6 +226,7 @@ fn bounded_toml_value(input: &mut FuzzInput<'_>) -> toml::Value {
   toml::Value::Table(root)
 }
 
+#[cfg(feature = "admin-runtime")]
 fn bounded_json(input: &mut FuzzInput<'_>, depth: usize, remaining: usize) -> Value {
   if depth >= 4 || remaining <= 1 {
     return match input.byte() % 5 {
@@ -279,6 +280,7 @@ impl<'a> FuzzInput<'a> {
     byte
   }
 
+  #[cfg(feature = "admin-runtime")]
   fn bool(&mut self) -> bool {
     self.byte() & 1 == 1
   }

@@ -44,6 +44,7 @@ pub struct TurnListenerTask {
   connections: TaskRegistry,
   graceful_timeout: Duration,
   tasks: Vec<JoinHandle<()>>,
+  edge: EdgeState,
 }
 
 pub struct BoundTurnListener {
@@ -131,10 +132,11 @@ impl BoundTurnListener {
     let long_connection_close_delay =
       Duration::from_millis(snapshot.config.runtime.drain.long_connection_close_delay_ms);
     let runtime_health = snapshot.runtime_health.clone();
+    let runtime_introspection = snapshot.runtime_introspection.clone();
     drop(snapshot);
     let (quiesce, quiesce_rx) = watch::channel(false);
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let edge = EdgeState::default();
+    let edge = EdgeState::new(runtime_introspection);
     let key = self.key();
     let connections = TaskRegistry::new(RuntimeTaskKind::TurnConnection, runtime_health);
     let mut tasks = Vec::new();
@@ -148,6 +150,13 @@ impl BoundTurnListener {
         edge.clone(),
         error_tx.clone(),
       );
+    }
+    if self.config.mode == WebRtcTurnListenerMode::EdgeRelay {
+      let expiry_edge = edge.clone();
+      let expiry_shutdown = shutdown_rx.clone();
+      tasks.push(tokio::spawn(async move {
+        expiry_edge.expire_until_shutdown(expiry_shutdown).await;
+      }));
     }
     for (index, listener) in self.tcp.into_iter().enumerate() {
       spawn_tcp_acceptor(
@@ -194,6 +203,7 @@ impl BoundTurnListener {
       connections,
       graceful_timeout,
       tasks,
+      edge,
     }
   }
 }
@@ -330,6 +340,8 @@ async fn serve_turn_udp(
   info!(name = %config.name, bind = %bind, "WebRTC TURN UDP listener started");
   let mut sessions: HashMap<SocketAddr, UdpProxySession> = HashMap::new();
   let mut buffer = vec![0u8; 65_536];
+  let mut expiry = tokio::time::interval(Duration::from_secs(1));
+  expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
   loop {
     tokio::select! {
       biased;
@@ -338,6 +350,9 @@ async fn serve_turn_udp(
           info!(name = %config.name, bind = %bind, "WebRTC TURN UDP listener stopped");
         }
         return Ok(());
+      }
+      _ = expiry.tick(), if config.mode == WebRtcTurnListenerMode::ProxyPool => {
+        expire_udp_sessions(&mut sessions, Duration::from_millis(config.idle_timeout_ms));
       }
       received = socket.recv_from(&mut buffer) => {
         let (len, client_addr) = received.context("failed to receive TURN UDP datagram")?;
@@ -373,6 +388,7 @@ struct UdpProxySession {
   upstream_task: JoinHandle<()>,
   _selection: TurnPoolSelection,
   last_activity: Instant,
+  _introspection_guard: crate::runtime_introspection::RuntimeCounterGuard,
 }
 
 impl Drop for UdpProxySession {
@@ -425,6 +441,10 @@ async fn proxy_udp_packet(
       upstream_task,
       _selection: selection,
       last_activity: Instant::now(),
+      _introspection_guard: state
+        .snapshot()
+        .runtime_introspection
+        .guard(RuntimeCounter::TurnUdpClient),
     });
   }
   if let Some(session) = sessions.get_mut(&client_addr) {
@@ -509,7 +529,12 @@ fn proxy_auth_allows(config: &WebRtcTurnListenerConfig, packet: &[u8]) -> anyhow
   if config.auth.mode == TurnAuthMode::PassThrough || !is_stun_message(packet) {
     return Ok(true);
   }
-  let message = parse_stun(packet)?;
+  let Ok(message) = parse_stun(packet) else {
+    // A datagram can have STUN discriminator bits and a magic cookie while
+    // still being structurally malformed. Treat that as attacker input to
+    // deny, not as a listener-task failure.
+    return Ok(false);
+  };
   match auth::validate_message(&config.auth, &config.realm, &message)? {
     AuthDecision::Pass | AuthDecision::Missing => Ok(true),
     AuthDecision::Invalid => Ok(false),

@@ -423,6 +423,17 @@ fn bearer_token_accepts_case_insensitive_scheme_and_rejects_ambiguous_values() {
     HeaderValue::from_static("Basic token-123"),
   );
   assert_eq!(bearer_token(&headers), None);
+
+  headers.clear();
+  headers.append(
+    http::header::AUTHORIZATION,
+    HeaderValue::from_static("Bearer token-123"),
+  );
+  headers.append(
+    http::header::AUTHORIZATION,
+    HeaderValue::from_static("Bearer token-456"),
+  );
+  assert_eq!(bearer_token(&headers), None);
 }
 
 #[test]

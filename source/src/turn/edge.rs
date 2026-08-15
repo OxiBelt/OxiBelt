@@ -11,34 +11,75 @@ use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::config::{TurnRelayAddressFamily, WebRtcTurnListenerConfig};
 use crate::lifecycle::ConnectionDrain;
+use crate::runtime_introspection::{
+  RuntimeCounterGuard, RuntimeIntrospectionCounter as RuntimeCounter, RuntimeIntrospectionState,
+};
 
 use super::auth::{self, AuthDecision};
 use super::listener::BoxedIo;
 use super::protocol::*;
 use relay::{
-  bind_relay_socket, expire_client_state, remove_expired_client_state, send,
-  send_allocation_mismatch, send_turn_error, spawn_peer_reader, stream_outbound_channel,
+  bind_relay_socket, expire_client_state, remove_all_expired_client_state,
+  remove_expired_client_state, send, send_allocation_mismatch, send_turn_error, spawn_peer_reader,
+  stream_outbound_channel,
 };
 use request::{
   address_family_attr, allocate_families, allocation_lifetime, peer_allowed, relay_family_config,
 };
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(super) struct EdgeState {
   clients: Arc<Mutex<HashMap<EdgeClient, EdgeClientState>>>,
+  runtime_introspection: Arc<RuntimeIntrospectionState>,
 }
 
 impl EdgeState {
+  pub(super) fn new(runtime_introspection: Arc<RuntimeIntrospectionState>) -> Self {
+    Self {
+      clients: Arc::new(Mutex::new(HashMap::new())),
+      runtime_introspection,
+    }
+  }
+
   pub(super) async fn has_udp_client(&self, client: SocketAddr) -> bool {
     self
       .clients
       .lock()
       .await
       .contains_key(&EdgeClient::Udp(client))
+  }
+
+  async fn remove_client(&self, client: EdgeClient) {
+    self.clients.lock().await.remove(&client);
+  }
+
+  pub(super) async fn clear(&self) {
+    self.clients.lock().await.clear();
+  }
+
+  pub(super) async fn remove_expired(&self) {
+    let mut clients = self.clients.lock().await;
+    remove_all_expired_client_state(&mut clients);
+  }
+
+  pub(super) async fn expire_until_shutdown(&self, mut shutdown: watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+      tokio::select! {
+        biased;
+        changed = shutdown.changed() => {
+          if changed.is_err() || *shutdown.borrow() {
+            break;
+          }
+        }
+        _ = interval.tick() => self.remove_expired().await,
+      }
+    }
   }
 }
 
@@ -57,6 +98,7 @@ enum EdgeSender {
 struct EdgeClientState {
   sender: EdgeSender,
   allocations: HashMap<TurnRelayAddressFamily, EdgeAllocation>,
+  _udp_client_guard: Option<RuntimeCounterGuard>,
 }
 
 struct EdgeAllocation {
@@ -65,6 +107,7 @@ struct EdgeAllocation {
   permissions: HashMap<IpAddr, Instant>,
   channels: HashMap<u16, EdgeChannelBinding>,
   expires_at: Instant,
+  _introspection_guard: RuntimeCounterGuard,
 }
 
 struct EdgeChannelBinding {
@@ -86,7 +129,8 @@ pub(super) async fn serve_stream(
   tokio::pin!(idle);
   let drain_close = drain.close_delay_elapsed();
   tokio::pin!(drain_close);
-  loop {
+  let result = async {
+    loop {
     tokio::select! {
       frame = read_turn_frame(&mut reader) => {
         let frame = frame?;
@@ -99,7 +143,11 @@ pub(super) async fn serve_stream(
       _ = &mut idle => return Ok(()),
       _ = &mut drain_close => return Ok(()),
     }
+    }
   }
+  .await;
+  edge.remove_client(client).await;
+  result
 }
 
 pub(super) async fn handle_udp_packet(
@@ -109,6 +157,20 @@ pub(super) async fn handle_udp_packet(
   client_addr: SocketAddr,
   packet: &[u8],
 ) -> anyhow::Result<()> {
+  // UDP datagram boundaries make structural parse failures attributable to
+  // this untrusted packet. Drop only that packet; I/O, authentication, and
+  // relay-state failures from processing a well-formed frame still propagate.
+  let malformed = if packet
+    .first()
+    .is_some_and(|byte| byte & 0b1100_0000 == 0b0100_0000)
+  {
+    parse_channel_data(packet).is_err()
+  } else {
+    parse_stun(packet).is_err()
+  };
+  if malformed {
+    return Ok(());
+  }
   process_frame(
     edge,
     config,
@@ -244,7 +306,7 @@ async fn process_frame(
       let mut peer_readers = Vec::with_capacity(bound_relays.len());
       {
         let mut clients = edge.clients.lock().await;
-        remove_expired_client_state(&mut clients, client);
+        remove_all_expired_client_state(&mut clients);
         let total_allocations = clients
           .values()
           .map(|state| state.allocations.len())
@@ -278,6 +340,11 @@ async fn process_frame(
         let state = clients.entry(client).or_insert_with(|| EdgeClientState {
           sender: sender.clone(),
           allocations: HashMap::new(),
+          _udp_client_guard: matches!(client, EdgeClient::Udp(_)).then(|| {
+            edge
+              .runtime_introspection
+              .guard(RuntimeCounter::TurnUdpClient)
+          }),
         });
         state.sender = sender.clone();
         if bound_relays
@@ -302,6 +369,9 @@ async fn process_frame(
               permissions: HashMap::new(),
               channels: HashMap::new(),
               expires_at: Instant::now() + Duration::from_secs(u64::from(lifetime)),
+              _introspection_guard: edge
+                .runtime_introspection
+                .guard(RuntimeCounter::TurnAllocation),
             },
           );
         }

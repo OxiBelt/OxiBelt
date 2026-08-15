@@ -88,6 +88,18 @@ struct OAuth2IntrospectionResponse {
 }
 
 impl ExternalAuthRuntime {
+  pub(crate) fn identity_headers_for(&self, provider_name: Option<&str>) -> Vec<HeaderName> {
+    let Some(provider_name) = provider_name else {
+      return Vec::new();
+    };
+    self
+      .inner
+      .as_ref()
+      .and_then(|inner| inner.providers.get(provider_name))
+      .map(|provider| provider.identity_headers.clone())
+      .unwrap_or_default()
+  }
+
   pub fn new(
     config: &Config,
     client: ControlHttpClient,
@@ -722,7 +734,11 @@ fn filter_terminal_response(
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-  let raw = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
+  let mut values = headers.get_all(http::header::AUTHORIZATION).iter();
+  let raw = values.next()?.to_str().ok()?;
+  if values.next().is_some() {
+    return None;
+  }
   let mut parts = raw.split_whitespace();
   let scheme = parts.next()?;
   let token = parts.next()?;
@@ -848,6 +864,199 @@ fn www_authenticate_header() -> HeaderMap {
     HeaderValue::from_static("Bearer"),
   );
   headers
+}
+
+/// Side-effect-free external-auth decision fixture for the pure fuzz program.
+/// It deliberately constructs the provider runtime locally and never creates a
+/// control-plane client or performs a network request.
+#[cfg(feature = "fuzzing")]
+#[allow(
+  clippy::expect_used,
+  reason = "fixed in-memory fuzz configuration must be valid for this target to run"
+)]
+pub(crate) fn fuzz_auth_request_semantics(
+  authorization: &str,
+  duplicate_authorization: &str,
+  identity: &str,
+  trailer_authorization: &str,
+  outcome: u8,
+  fail_open: bool,
+  route_path: &str,
+) {
+  use crate::proxy::http::headers::sanitize_request_trailers_for_upstream;
+
+  let config: ExternalAuthConfig = toml::from_str(if fail_open {
+    r#"
+name = "fuzz-auth"
+endpoint = "https://auth.example.test/check"
+fail_policy = "open"
+identity_headers = ["remote-user", "x-auth-user"]
+"#
+  } else {
+    r#"
+name = "fuzz-auth"
+endpoint = "https://auth.example.test/check"
+fail_policy = "closed"
+identity_headers = ["remote-user", "x-auth-user"]
+"#
+  })
+  .expect("fixed fuzz auth configuration should parse");
+  let (_, provider) = build_provider_runtime(&config)
+    .expect("fixed fuzz auth provider should construct without environment access");
+  let metrics = Metrics::new();
+  let request_uri = if route_path.starts_with('/') {
+    let Ok(uri) = route_path.parse::<http::Uri>() else {
+      return;
+    };
+    uri
+  } else {
+    http::Uri::from_static("/")
+  };
+  let mut request = Request::builder()
+    .method(Method::GET)
+    .uri(request_uri)
+    .body(())
+    .expect("bounded fuzz auth request URI should build");
+  if let Ok(value) = HeaderValue::from_str(authorization) {
+    request
+      .headers_mut()
+      .append(http::header::AUTHORIZATION, value);
+  }
+  if !duplicate_authorization.is_empty()
+    && let Ok(value) = HeaderValue::from_str(duplicate_authorization)
+  {
+    request
+      .headers_mut()
+      .append(http::header::AUTHORIZATION, value);
+  }
+  if let Ok(value) = HeaderValue::from_str(identity) {
+    request
+      .headers_mut()
+      .insert(HeaderName::from_static("remote-user"), value.clone());
+    request
+      .headers_mut()
+      .insert(HeaderName::from_static("x-auth-user"), value);
+  }
+  let supplied_identity = request
+    .headers()
+    .get("remote-user")
+    .and_then(|value| value.to_str().ok())
+    .map(str::to_owned);
+  strip_identity_headers(request.headers_mut(), &provider.identity_headers);
+  assert!(
+    request.headers().get("remote-user").is_none()
+      && request.headers().get("x-auth-user").is_none(),
+    "attacker-supplied identity headers survived stripping"
+  );
+
+  // Invoke the production bearer parser after stripping untrusted identity.
+  let authorization_count = request
+    .headers()
+    .get_all(http::header::AUTHORIZATION)
+    .iter()
+    .count();
+  let token = bearer_token(request.headers()).map(str::to_owned);
+  if authorization_count > 1 {
+    // The production bearer parser is invoked on every representable header
+    // sequence. The surrounding HTTP parser owns wire-level duplicate policy;
+    // this pure seam must not silently collapse the representation itself.
+    assert_eq!(
+      authorization_count, 2,
+      "duplicate credential representation changed before auth parsing"
+    );
+    assert!(
+      token.is_none(),
+      "duplicate credentials were accepted as one bearer token"
+    );
+  }
+  if let Some(token) = token.as_deref() {
+    assert!(
+      !token.is_empty() && !token.chars().any(char::is_whitespace),
+      "bearer parser returned a noncanonical token"
+    );
+  }
+
+  let raw_protected = crate::routes::path_prefix_matches("/protected", route_path);
+  let normalized_route = crate::waf::fuzz_normalize_path(route_path);
+  let nested_normalized_route = crate::waf::fuzz_normalize_path(&normalized_route);
+  assert_eq!(
+    raw_protected,
+    crate::routes::path_prefix_matches("/protected", route_path),
+    "route-scope classification was nondeterministic"
+  );
+  assert_eq!(
+    normalized_route,
+    crate::waf::fuzz_normalize_path(route_path),
+    "route normalization was nondeterministic"
+  );
+  if (raw_protected != crate::routes::path_prefix_matches("/protected", &nested_normalized_route))
+    && route_path
+      .bytes()
+      .any(|byte| matches!(byte, b'.' | b'%' | b'\\'))
+  {
+    assert!(
+      crate::proxy::http::uri::validate_downstream_path(route_path).is_err(),
+      "nested path interpretation moved a request across the auth scope"
+    );
+  }
+
+  let result = match outcome % 4 {
+    0 => {
+      let mut trusted = HashMap::new();
+      if outcome & 4 == 0 {
+        trusted.insert("remote-user".to_string(), "trusted-fuzz-user".to_string());
+      }
+      Ok(AuthCheck::Allowed(trusted))
+    }
+    1 => Ok(AuthCheck::Denied(ExternalAuthTerminal {
+      status: StatusCode::FORBIDDEN,
+      headers: HeaderMap::new(),
+      body: Bytes::new(),
+    })),
+    2 => Err(anyhow::anyhow!("synthetic malformed auth response")),
+    _ => Err(anyhow::anyhow!("synthetic auth transport failure")),
+  };
+  let decision = finish_auth_check(&mut request, &provider, metrics.as_ref(), result);
+  match outcome % 4 {
+    0 => {
+      assert!(matches!(decision, ExternalAuthOutcome::Allowed));
+      let expected_identity = (outcome & 4 == 0).then_some("trusted-fuzz-user");
+      assert_eq!(
+        request
+          .headers()
+          .get("remote-user")
+          .and_then(|value| value.to_str().ok()),
+        expected_identity,
+        "trusted identity must originate only from the auth result"
+      );
+    }
+    1 => assert!(
+      matches!(decision, ExternalAuthOutcome::Denied(_)),
+      "explicit denial must not be reclassified as a fail-open error"
+    ),
+    _ if fail_open => assert!(matches!(decision, ExternalAuthOutcome::Allowed)),
+    _ => assert!(matches!(decision, ExternalAuthOutcome::Denied(_))),
+  }
+  if supplied_identity.is_some() && outcome % 4 != 0 {
+    assert!(
+      request.headers().get("remote-user").is_none(),
+      "untrusted identity became trusted after a non-allow auth result"
+    );
+  }
+
+  let mut trailers = HeaderMap::new();
+  if let Ok(value) = HeaderValue::from_str(trailer_authorization) {
+    trailers.insert(http::header::AUTHORIZATION, value.clone());
+    trailers.insert(http::header::COOKIE, value.clone());
+    trailers.insert(HeaderName::from_static("x-forwarded-user"), value);
+  }
+  sanitize_request_trailers_for_upstream(&mut trailers, &provider.identity_headers);
+  assert!(
+    trailers.get(http::header::AUTHORIZATION).is_none()
+      && trailers.get(http::header::COOKIE).is_none()
+      && trailers.get("x-forwarded-user").is_none(),
+    "security-sensitive trailers crossed the upstream boundary"
+  );
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 mod oxibelt_docker_integration_matrix;
+mod security_fuzz_catalog;
 
 struct DockerCase {
   category: &'static str,
@@ -146,6 +147,7 @@ fn main() -> Result<()> {
   match args.remove(0).as_str() {
     "list" => list_command(&args),
     "materialize" => materialize_command(&args),
+    "security-fuzz" => security_fuzz_command(&args),
     _ => {
       usage();
       Err("unknown command".into())
@@ -169,7 +171,62 @@ fn list_command(args: &[String]) -> Result<()> {
       }
       print_browser_matrix()
     }
+    "security-fuzz" => {
+      if group.is_some() {
+        return Err("--group is not supported for the security-fuzz suite".into());
+      }
+      print_security_fuzz_matrix()
+    }
     _ => Err(format!("unsupported suite: {suite}").into()),
+  }
+}
+
+fn security_fuzz_command(args: &[String]) -> Result<()> {
+  let command = args.first().ok_or("missing security-fuzz command")?;
+  match command.as_str() {
+    "describe" => {
+      let target = security_fuzz_catalog::target(&arg_value(args, "--target")?)?;
+      let defaults = security_fuzz_catalog::defaults()?;
+      println!(
+        "{{\"id\":\"{}\",\"description\":\"{}\",\"protocols\":[{}],\"payload_max_bytes\":{},\"session_max_cases\":{},\"max_concurrent_sessions\":{},\"required_helpers\":[{}],\"oracle\":\"{}\",\"meaning_preserving_transforms\":[{}],\"schema_version\":{},\"replay_schema_version\":{},\"owner\":\"{}\",\"pr_max_cases\":{},\"pr_max_seconds\":{},\"sustained_default_seconds\":{},\"sustained_max_cases\":{},\"case_timeout_seconds\":{},\"recovery_timeout_seconds\":{},\"failure_artifact_max_bytes\":{}}}",
+        json_escape(&target.id),
+        json_escape(&target.description),
+        target
+          .protocols
+          .iter()
+          .map(|protocol| format!("\"{}\"", json_escape(protocol)))
+          .collect::<Vec<_>>()
+          .join(","),
+        target.payload_max_bytes,
+        target.session_max_cases,
+        target.max_concurrent_sessions,
+        target
+          .required_helpers
+          .iter()
+          .map(|helper| format!("\"{}\"", json_escape(helper)))
+          .collect::<Vec<_>>()
+          .join(","),
+        json_escape(&target.oracle),
+        target
+          .meaning_preserving_transforms
+          .iter()
+          .map(|transform| format!("\"{}\"", json_escape(transform)))
+          .collect::<Vec<_>>()
+          .join(","),
+        defaults.schema_version,
+        defaults.replay_schema_version,
+        json_escape(&defaults.owner),
+        defaults.pr_max_cases,
+        defaults.pr_max_seconds,
+        defaults.sustained_default_seconds,
+        defaults.sustained_max_cases,
+        defaults.case_timeout_seconds,
+        defaults.recovery_timeout_seconds,
+        defaults.failure_artifact_max_bytes,
+      );
+      Ok(())
+    }
+    _ => Err(format!("unknown security-fuzz command: {command}").into()),
   }
 }
 
@@ -200,7 +257,7 @@ fn materialize_command(args: &[String]) -> Result<()> {
 
 fn usage() {
   eprintln!(
-    "usage:\n  oxibelt-docker-integration-matrix list --suite <docker|browser> --format github-matrix [--group <docker-group>]\n  oxibelt-docker-integration-matrix materialize --suite <docker|browser> --category <name> --case <name> --output <dir>"
+    "usage:\n  oxibelt-docker-integration-matrix list --suite <docker|browser|security-fuzz> --format github-matrix [--group <docker-group>]\n  oxibelt-docker-integration-matrix materialize --suite <docker|browser> --category <name> --case <name> --output <dir>\n  oxibelt-docker-integration-matrix security-fuzz describe --target <target>"
   );
 }
 
@@ -286,6 +343,30 @@ fn print_browser_matrix() -> Result<()> {
         json_escape(scenario.description)
       );
     }
+  }
+  println!("]}}");
+  Ok(())
+}
+
+fn print_security_fuzz_matrix() -> Result<()> {
+  let targets = security_fuzz_catalog::targets()?;
+  let defaults = security_fuzz_catalog::defaults()?;
+  print!("{{\"include\":[");
+  for (index, target) in targets.iter().enumerate() {
+    if index > 0 {
+      print!(",");
+    }
+    print!(
+      "{{\"target\":\"{}\",\"name\":\"{}\",\"description\":\"{}\",\"payload_max_bytes\":{},\"session_max_cases\":{},\"max_concurrent_sessions\":{},\"pr_max_cases\":{},\"pr_max_seconds\":{}}}",
+      json_escape(&target.id),
+      json_escape(&target.id),
+      json_escape(&target.description),
+      target.payload_max_bytes,
+      target.session_max_cases,
+      target.max_concurrent_sessions,
+      defaults.pr_max_cases,
+      defaults.pr_max_seconds,
+    );
   }
   println!("]}}");
   Ok(())

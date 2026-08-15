@@ -295,7 +295,7 @@ where
 }
 
 fn sanitized_h3_request_trailers_frame(mut trailers: http::HeaderMap) -> Frame<Bytes> {
-  sanitize_request_trailers_for_upstream(&mut trailers);
+  sanitize_request_trailers_for_upstream(&mut trailers, &[]);
   Frame::trailers(trailers)
 }
 

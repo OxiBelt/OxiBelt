@@ -54,6 +54,45 @@ regression_path = "tests/fixtures/fuzz-regressions/http_semantics"
 leak_policy = "enabled"
 
 [[target]]
+name = "path_security_semantics"
+owner = "HTTP routing, URI, and static-file security maintainers"
+max_input_bytes = 4096
+input_contract = "Bounded structured request-target, query, route-prefix, rewrite, and origin-form selectors projected into production path boundaries."
+invariants = ["accepted downstream paths cannot normalize into parent traversal", "lexical static resolution remains beneath its configured root", "origin-form and absolute-form path decisions are deterministic"]
+unsupported_states = ["filesystem access or opening static files", "live downstream or upstream connections"]
+seed_dir = "fuzz/seeds/path_security_semantics"
+dictionary = "fuzz/dictionaries/path_security.dict"
+coverage_landmarks = ["source/src/fuzzing/security_semantics.rs:exercise_path_security_semantics", "source/src/proxy/http/uri.rs:validate_downstream_path", "source/src/proxy/http/static_files/path.rs:resolve_request_path"]
+regression_path = "tests/fixtures/fuzz-regressions/path_security_semantics"
+leak_policy = "enabled"
+
+[[target]]
+name = "waf_request_evaluation"
+owner = "WAF request evaluation and body-inspection maintainers"
+max_input_bytes = 16384
+input_contract = "Bounded structured request path, headers, body, representation transform, protocol selector, and content-coding selector evaluated by a fixed in-memory WAF ruleset."
+invariants = ["defined meaning-preserving malicious mutations remain blocked", "fixed-rule action resolution is deterministic", "body decoding remains bounded and malformed coding does not panic"]
+unsupported_states = ["filesystem-backed rule loading", "network, database, or runtime state"]
+seed_dir = "fuzz/seeds/waf_request_evaluation"
+dictionary = "fuzz/dictionaries/waf_evaluation.dict"
+coverage_landmarks = ["source/src/waf/fuzz_security.rs:evaluate", "source/src/waf/person_proof_request.rs:evaluate_request", "source/src/proxy/http/waf_body_coding.rs:fuzz_decode_body"]
+regression_path = "tests/fixtures/fuzz-regressions/waf_request_evaluation"
+leak_policy = "enabled"
+
+[[target]]
+name = "auth_request_semantics"
+owner = "External-auth and HTTP header security maintainers"
+max_input_bytes = 4096
+input_contract = "Bounded Authorization, identity-header, security-sensitive trailer, auth-result, fail-policy, and route-path selectors projected through production auth helpers."
+invariants = ["untrusted identity headers are stripped before auth decisions", "explicit denial never becomes fail-open success", "sensitive trailers cannot cross the upstream boundary"]
+unsupported_states = ["external auth network clients", "credential environment lookup or live identity providers"]
+seed_dir = "fuzz/seeds/auth_request_semantics"
+dictionary = "fuzz/dictionaries/auth_request.dict"
+coverage_landmarks = ["source/src/external_auth.rs:fuzz_auth_request_semantics", "source/src/external_auth.rs:finish_auth_check", "source/src/proxy/http/headers.rs:sanitize_request_trailers_for_upstream"]
+regression_path = "tests/fixtures/fuzz-regressions/auth_request_semantics"
+leak_policy = "enabled"
+
+[[target]]
 name = "compio_h1_response"
 owner = "Compio direct-H1 response protocol maintainers"
 max_input_bytes = 131072
