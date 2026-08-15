@@ -68,9 +68,7 @@ pub(super) fn evaluate(
       bytes: &decoded_body,
       is_truncated: false,
     }),
-    peer_addr: "203.0.113.7:44321"
-      .parse()
-      .expect("fixed documentation address should parse"),
+    peer_addr: std::net::SocketAddr::from(([203, 0, 113, 7], 44321)),
     client_asn: None,
     downstream_host: "fuzz.example.test",
     downstream_scheme: "https",

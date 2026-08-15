@@ -1037,7 +1037,7 @@ identity_headers = ["remote-user", "x-auth-user"]
     _ if fail_open => assert!(matches!(decision, ExternalAuthOutcome::Allowed)),
     _ => assert!(matches!(decision, ExternalAuthOutcome::Denied(_))),
   }
-  if supplied_identity.is_some() && outcome % 4 != 0 {
+  if supplied_identity.is_some() && !outcome.is_multiple_of(4) {
     assert!(
       request.headers().get("remote-user").is_none(),
       "untrusted identity became trusted after a non-allow auth result"

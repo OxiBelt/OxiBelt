@@ -349,7 +349,7 @@ fn request_trailer_sanitization_removes_sensitive_and_hop_by_hop_fields() {
     custom_identity.clone(),
     HeaderValue::from_static("attacker"),
   );
-  sanitize_request_trailers_for_upstream(&mut trailers, &[custom_identity.clone()]);
+  sanitize_request_trailers_for_upstream(&mut trailers, std::slice::from_ref(&custom_identity));
 
   assert_eq!(trailers["x-request-checksum"], "ok");
   assert_eq!(trailers[TE], "trailers");

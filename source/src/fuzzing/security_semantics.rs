@@ -76,9 +76,12 @@ pub fn exercise_path_security_semantics(
     );
   }
 
-  let origin =
-    Url::parse("https://upstream.example.test/base").expect("fixed fuzz upstream URL should parse");
-  let origin = UpstreamUriParts::from_url(&origin).expect("fixed fuzz upstream should be valid");
+  let Ok(origin) = Url::parse("https://upstream.example.test/base") else {
+    panic!("fixed fuzz upstream URL should parse");
+  };
+  let Ok(origin) = UpstreamUriParts::from_url(&origin) else {
+    panic!("fixed fuzz upstream should be valid");
+  };
   let rewritten = rewrite_uri(&origin, route_prefix, replacement_prefix, &uri);
   if validated.is_ok()
     && let Ok(rewritten) = rewritten
@@ -88,8 +91,11 @@ pub fn exercise_path_security_semantics(
       !has_parent_segment(rewritten_path),
       "trusted rewrite configuration introduced a parent traversal"
     );
-    let path_and_query = rewrite_path_and_query(&origin, route_prefix, replacement_prefix, &uri)
-      .expect("rewrite_uri and rewrite_path_and_query must agree");
+    let Ok(path_and_query) =
+      rewrite_path_and_query(&origin, route_prefix, replacement_prefix, &uri)
+    else {
+      panic!("rewrite_uri and rewrite_path_and_query must agree");
+    };
     assert_eq!(
       rewritten.path_and_query(),
       Some(&path_and_query),
