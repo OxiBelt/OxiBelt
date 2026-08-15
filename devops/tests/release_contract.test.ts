@@ -1,10 +1,11 @@
 import * as Assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import * as Crypto from 'node:crypto'
 import * as Fs from 'node:fs'
 import * as Os from 'node:os'
 import * as Path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   BuildReleaseCandidate,
   ValidateRepositoryReleaseContract,
@@ -13,6 +14,7 @@ import {
 } from '../sources/release_contract.js'
 
 const BaselineRevision = '1111111111111111111111111111111111111111'
+const ReleaseContractSource = fileURLToPath(new URL('../sources/release_contract.ts', import.meta.url))
 
 const BaselineEntry = `## [0.6.5] - 2026-07-16
 
@@ -179,6 +181,32 @@ test('requires a stable published on the same date as a later beta', () => {
     Assert.throws(
       () => ValidateRepositoryReleaseContract({ workspacePath: Root }),
       /release 0\.8\.0-beta\.1 must declare Changes since 0\.6\.6/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('requires the latest target beta even when the stable entry is backdated', () => {
+  const BetaOne = GovernedEntry('0.8.0-beta.1')
+  const BetaTwo = GovernedEntry(
+    '0.8.0-beta.2',
+    '0.8.0-beta.1',
+    '`0.8.0-beta.1`, `0.6.5`'
+  ).replace('## [0.8.0-beta.2] - 2026-07-23', '## [0.8.0-beta.2] - 2026-07-24')
+  const BackdatedStable = GovernedEntry(
+    '0.8.0',
+    '0.6.5',
+    '`0.6.5`, `0.8.0-beta.1`'
+  ).replace('## [0.8.0] - 2026-07-23', '## [0.8.0] - 2026-07-22')
+  const Root = CreateContractWorkspace(
+    `${BackdatedStable}\n${BaselineEntry}`,
+    `${BetaTwo}\n${BetaOne}`
+  )
+  try {
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({ workspacePath: Root }),
+      /release 0\.8\.0 must support upgrade source 0\.8\.0-beta\.2/
     )
   } finally {
     RemoveWorkspace(Root)
@@ -540,6 +568,125 @@ test('requires the latest beta and one documentation-only stable carry-forward c
         revision: InvalidRevision
       }),
       /must be one documentation-only commit after 0\.8\.0-beta\.1/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('rejects the backdated stable bypass through the candidate CLI', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 1;\n')
+    Commit(Root, 'baseline')
+    Git(Root, ['tag', '0.6.5'])
+
+    const BetaEntry = GovernedEntry('0.8.0-beta.1')
+    WriteFile(Root, 'CHANGELOG-beta.md', `# Beta\n\n${BetaEntry}`)
+    Commit(Root, 'beta')
+    Git(Root, ['tag', '0.8.0-beta.1'])
+
+    const BackdatedStable = GovernedEntry('0.8.0').replace(
+      '## [0.8.0] - 2026-07-23',
+      '## [0.8.0] - 2026-07-22'
+    )
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${BackdatedStable}\n${BaselineEntry}`)
+    WriteFile(Root, 'docs/Upgrading.md', '# Upgrading\n\n## Upgrade from 0.6.5\n\nStable carry-forward.\n')
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 2;\n')
+    const StableRevision = Commit(Root, 'backdated stable with source change')
+    Git(Root, ['tag', '0.8.0'])
+
+    const ReceiptOutput = Path.join(Root, 'release-contract.json')
+    const BodyOutput = Path.join(Root, 'release-body.md')
+    const Result = spawnSync(process.execPath, [
+      '--import',
+      'tsx',
+      ReleaseContractSource,
+      'candidate',
+      '--workspace-path',
+      Root,
+      '--ref',
+      'refs/tags/0.8.0',
+      '--revision',
+      StableRevision,
+      '--receipt-output',
+      ReceiptOutput,
+      '--body-output',
+      BodyOutput
+    ], { encoding: 'utf8' })
+
+    Assert.equal(Result.status, 1)
+    Assert.match(Result.stderr, /release 0\.8\.0 must support upgrade source 0\.8\.0-beta\.1/)
+    Assert.equal(Fs.existsSync(ReceiptOutput), false)
+    Assert.equal(Fs.existsSync(BodyOutput), false)
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('rejects a one-commit stable cut containing a non-documentation path', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 1;\n')
+    Commit(Root, 'baseline')
+    Git(Root, ['tag', '0.6.5'])
+
+    const BetaEntry = GovernedEntry('0.8.0-beta.1')
+    WriteFile(Root, 'CHANGELOG-beta.md', `# Beta\n\n${BetaEntry}`)
+    Commit(Root, 'beta')
+    Git(Root, ['tag', '0.8.0-beta.1'])
+
+    const BackdatedStable = GovernedEntry('0.8.0', '0.6.5', '`0.6.5`, `0.8.0-beta.1`')
+      .replace('## [0.8.0] - 2026-07-23', '## [0.8.0] - 2026-07-22')
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${BackdatedStable}\n${BaselineEntry}`)
+    WriteFile(Root, 'docs/Upgrading.md', '# Upgrading\n\n## Upgrade from 0.6.5\n\nStable carry-forward.\n')
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 2;\n')
+    const StableRevision = Commit(Root, 'stable with source change')
+    Git(Root, ['tag', '0.8.0'])
+
+    Assert.throws(
+      () => BuildReleaseCandidate({
+        workspacePath: Root,
+        ref: 'refs/tags/0.8.0',
+        revision: StableRevision
+      }),
+      /stable release 0\.8\.0 may change only CHANGELOG\.md and docs\/Upgrading\.md after 0\.8\.0-beta\.1/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('rejects a latest target beta that is not an ancestor of the stable cut', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    Commit(Root, 'baseline')
+    Git(Root, ['tag', '0.6.5'])
+
+    const BetaEntry = GovernedEntry('0.8.0-beta.1')
+    WriteFile(Root, 'CHANGELOG-beta.md', `# Beta\n\n${BetaEntry}`)
+    Commit(Root, 'beta')
+    Git(Root, ['tag', '0.8.0-beta.1'])
+
+    Git(Root, ['switch', '--detach', '0.6.5'])
+    const StableEntry = GovernedEntry('0.8.0', '0.6.5', '`0.6.5`, `0.8.0-beta.1`')
+      .replace('## [0.8.0] - 2026-07-23', '## [0.8.0] - 2026-07-24')
+    WriteFile(Root, 'CHANGELOG-beta.md', `# Beta\n\n${BetaEntry}`)
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${StableEntry}\n${BaselineEntry}`)
+    WriteFile(Root, 'docs/Upgrading.md', '# Upgrading\n\n## Upgrade from 0.6.5\n\nStable carry-forward.\n')
+    const StableRevision = Commit(Root, 'stable on divergent history')
+    Git(Root, ['tag', '0.8.0'])
+
+    Assert.throws(
+      () => BuildReleaseCandidate({
+        workspacePath: Root,
+        ref: 'refs/tags/0.8.0',
+        revision: StableRevision
+      }),
+      /latest beta 0\.8\.0-beta\.1 \([0-9a-f]{40}\) is not an ancestor of [0-9a-f]{40}/
     )
   } finally {
     RemoveWorkspace(Root)

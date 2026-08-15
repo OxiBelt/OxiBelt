@@ -565,6 +565,15 @@ function PreviousStable(Stable: Ledger, Entry: ReleaseEntry): ReleaseEntry {
   return Previous
 }
 
+function LatestTargetBeta(Beta: Ledger, Tag: ReleaseTagInfo): ReleaseEntry | undefined {
+  const TargetCore = `${Tag.major}.${Tag.minor}.${Tag.patch}`
+  return Beta.entries.find(Candidate => {
+    const CandidateTag = ParseReleaseRef(`refs/tags/${Candidate.version}`)
+    return `${CandidateTag.major}.${CandidateTag.minor}.${CandidateTag.patch}` === TargetCore &&
+      Semver.lt(Candidate.version, Tag.tag)
+  })
+}
+
 function AssertEntryBase(
   Entry: ReleaseEntry,
   Tag: ReleaseTagInfo,
@@ -588,15 +597,8 @@ function AssertEntryBase(
   const RequiredSources = Tag.kind === 'beta' && Number(Tag.betaNumber ?? '0') > 1
     ? [ExpectedBase, PreviousStableEntry.version]
     : [ExpectedBase]
-  if (Tag.kind === 'stable') {
-    const TargetCore = `${Tag.major}.${Tag.minor}.${Tag.patch}`
-    const LatestBeta = Beta.entries.find(Candidate => {
-      const CandidateTag = ParseReleaseRef(`refs/tags/${Candidate.version}`)
-      return `${CandidateTag.major}.${CandidateTag.minor}.${CandidateTag.patch}` === TargetCore &&
-        Candidate.date <= Entry.date && Semver.lt(Candidate.version, Entry.version)
-    })
-    if (LatestBeta !== undefined) RequiredSources.push(LatestBeta.version)
-  }
+  const LatestBeta = Tag.kind === 'stable' ? LatestTargetBeta(Beta, Tag) : undefined
+  if (LatestBeta !== undefined) RequiredSources.push(LatestBeta.version)
   for (const RequiredSource of RequiredSources) {
     if (!Entry.supportedUpgradeSources.includes(RequiredSource)) {
       throw new Error(`release ${Entry.version} must support upgrade source ${RequiredSource}`)
@@ -801,6 +803,7 @@ export function BuildReleaseCandidate(Options: ReleaseCandidateOptions): Release
     throw new Error(`${Ledger.path} has no governed entry for release ${Tag.tag}`)
   }
   const BaseVersion = AssertEntryBase(Entry, Tag, Contract.stable, Contract.beta)
+  const LatestBeta = Tag.kind === 'stable' ? LatestTargetBeta(Contract.beta, Tag) : undefined
   const BaseRevision = ResolveRevision(Root, `refs/tags/${BaseVersion}`)
   try {
     RunGit(Root, ['merge-base', '--is-ancestor', BaseRevision, RequestedRevision])
@@ -808,7 +811,7 @@ export function BuildReleaseCandidate(Options: ReleaseCandidateOptions): Release
     throw new Error(`release base ${BaseVersion} (${BaseRevision}) is not an ancestor of ${RequestedRevision}`)
   }
   for (const SupportedSource of Entry.supportedUpgradeSources) {
-    if (SupportedSource === BaseVersion) {
+    if (SupportedSource === BaseVersion || SupportedSource === LatestBeta?.version) {
       continue
     }
     const SourceRevision = ResolveRevision(Root, `refs/tags/${SupportedSource}`)
@@ -820,28 +823,31 @@ export function BuildReleaseCandidate(Options: ReleaseCandidateOptions): Release
       )
     }
   }
-  if (Tag.kind === 'stable') {
-    const BetaSource = Entry.supportedUpgradeSources.find(Source =>
-      ParseReleaseRef(`refs/tags/${Source}`).kind === 'beta'
-    )
-    if (BetaSource !== undefined) {
-      const BetaRevision = ResolveRevision(Root, `refs/tags/${BetaSource}`)
-      const StableCommits = RunGit(Root, ['rev-list', '--count', `${BetaRevision}..${RequestedRevision}`])
-      if (StableCommits !== '1') {
-        throw new Error(
-          `stable release ${Entry.version} must be one documentation-only commit after ${BetaSource}`
-        )
-      }
-      const StablePaths = ChangedPaths(Root, BetaRevision, RequestedRevision).sort()
-      const RequiredStablePaths = [StableChangelogPath, UpgradeGuidePath].sort()
-      if (
-        StablePaths.length !== RequiredStablePaths.length ||
-        StablePaths.some((PathValue, Index) => PathValue !== RequiredStablePaths[Index])
-      ) {
-        throw new Error(
-          `stable release ${Entry.version} may change only ${StableChangelogPath} and ${UpgradeGuidePath} after ${BetaSource}`
-        )
-      }
+  if (LatestBeta !== undefined) {
+    const BetaSource = LatestBeta.version
+    const BetaRevision = ResolveRevision(Root, `refs/tags/${BetaSource}`)
+    try {
+      RunGit(Root, ['merge-base', '--is-ancestor', BetaRevision, RequestedRevision])
+    } catch {
+      throw new Error(
+        `latest beta ${BetaSource} (${BetaRevision}) is not an ancestor of ${RequestedRevision}`
+      )
+    }
+    const StableCommits = RunGit(Root, ['rev-list', '--count', `${BetaRevision}..${RequestedRevision}`])
+    if (StableCommits !== '1') {
+      throw new Error(
+        `stable release ${Entry.version} must be one documentation-only commit after ${BetaSource}`
+      )
+    }
+    const StablePaths = ChangedPaths(Root, BetaRevision, RequestedRevision).sort()
+    const RequiredStablePaths = [StableChangelogPath, UpgradeGuidePath].sort()
+    if (
+      StablePaths.length !== RequiredStablePaths.length ||
+      StablePaths.some((PathValue, Index) => PathValue !== RequiredStablePaths[Index])
+    ) {
+      throw new Error(
+        `stable release ${Entry.version} may change only ${StableChangelogPath} and ${UpgradeGuidePath} after ${BetaSource}`
+      )
     }
   }
   AssertCandidateSections(Entry, ChangedPaths(Root, BaseRevision, RequestedRevision))
