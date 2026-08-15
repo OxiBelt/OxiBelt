@@ -26,6 +26,16 @@ const Heading = /^## \[([^\]]+)\] - (\d{4}-\d{2}-\d{2})[ \t]*$/gm
 const EmptySectionLine = '- No changes for this release.'
 const KnownIssuesEmptyLine = '- None known at release cut.'
 const PlaceholderText = /\b(?:TODO|TBD|FIXME|coming soon|placeholder)\b/i
+const HistoricalPreviousStableBases: ReadonlyMap<string, string> = new Map([
+  ['0.7.0-beta.1', '0.6.5'],
+  ['0.7.0-beta.2', '0.6.5'],
+  ['0.7.0-beta.3', '0.6.5'],
+  ['0.7.0-beta.4', '0.6.5'],
+  ['0.7.1-beta.1', '0.6.5'],
+  ['0.7.1-beta.2', '0.6.5'],
+  ['0.7.1-beta.3', '0.6.5'],
+  ['0.7.1-beta.4', '0.6.5']
+])
 
 export const RequiredReleaseSections = [
   'Configuration',
@@ -47,7 +57,6 @@ type RequiredReleaseSection = (typeof RequiredReleaseSections)[number]
 /* eslint-disable @typescript-eslint/naming-convention -- Parsed Markdown, CLI, receipt, and GitHub JSON records use stable lower-camel-case keys. */
 type ReleaseEntry = {
   version: string
-  date: string
   body: string
   raw: string
   historical: boolean
@@ -406,7 +415,6 @@ function ParseEntry(Version: string, DateValue: string, Body: string, Raw: strin
   if (Historical) {
     return {
       version: Version,
-      date: DateValue,
       body: Body.trim(),
       raw: Raw,
       historical: true,
@@ -479,7 +487,6 @@ function ParseEntry(Version: string, DateValue: string, Body: string, Raw: strin
 
   return {
     version: Version,
-    date: DateValue,
     body: Body.trim(),
     raw: Raw,
     historical: false,
@@ -556,11 +563,15 @@ function HasMarkdownAnchor(Content: string, Anchor: string): boolean {
 }
 
 function PreviousStable(Stable: Ledger, Entry: ReleaseEntry): ReleaseEntry {
-  const Previous = Stable.entries.find(Candidate =>
-    Semver.lt(Candidate.version, Entry.version) && Candidate.date <= Entry.date
-  )
+  const HistoricalBase = HistoricalPreviousStableBases.get(Entry.version)
+  const Previous = HistoricalBase === undefined
+    ? Stable.entries.find(Candidate => Semver.lt(Candidate.version, Entry.version))
+    : Stable.entries.find(Candidate => Candidate.version === HistoricalBase)
   if (Previous === undefined) {
-    throw new Error(`release ${Entry.version} has no preceding stable changelog entry at its release date`)
+    if (HistoricalBase !== undefined) {
+      throw new Error(`release ${Entry.version} requires missing historical stable base ${HistoricalBase}`)
+    }
+    throw new Error(`release ${Entry.version} has no preceding stable changelog entry`)
   }
   return Previous
 }

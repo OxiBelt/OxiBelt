@@ -87,6 +87,19 @@ oxibeltctl config validate /etc/oxibelt/config/oxibelt.toml --local-only
 `
 }
 
+function HistoricalBetaChain(Target: '0.7.0' | '0.7.1'): string {
+  const Entries: string[] = []
+  for (let BetaNumber = 4; BetaNumber >= 1; BetaNumber -= 1) {
+    const Version = `${Target}-beta.${BetaNumber}`
+    const ChangesSince = BetaNumber === 1 ? '0.6.5' : `${Target}-beta.${BetaNumber - 1}`
+    const SupportedSources = BetaNumber === 1
+      ? '`0.6.5`'
+      : `\`${ChangesSince}\`, \`0.6.5\``
+    Entries.push(GovernedEntry(Version, ChangesSince, SupportedSources))
+  }
+  return Entries.join('\n')
+}
+
 function WriteFile(Root: string, RelativePath: string, Content: string): void {
   const FilePath = Path.join(Root, RelativePath)
   Fs.mkdirSync(Path.dirname(FilePath), { recursive: true })
@@ -150,16 +163,13 @@ test('accepts the forward-only historical baseline and governed stable entry', (
   }
 })
 
-test('does not rewrite an earlier beta base when a lower stable version is published later', () => {
+test('preserves every exact historical beta base after a lower stable version is added', () => {
   const Stable066 = GovernedEntry('0.6.6', '0.6.5').replace(
     '## [0.6.6] - 2026-07-23',
     '## [0.6.6] - 2026-08-14'
   )
-  const EarlierBeta = GovernedEntry('0.7.1-beta.1', '0.6.5').replace(
-    '## [0.7.1-beta.1] - 2026-07-23',
-    '## [0.7.1-beta.1] - 2026-08-11'
-  )
-  const Root = CreateContractWorkspace(`${Stable066}\n${BaselineEntry}`, EarlierBeta)
+  const HistoricalBetas = `${HistoricalBetaChain('0.7.1')}\n${HistoricalBetaChain('0.7.0')}`
+  const Root = CreateContractWorkspace(`${Stable066}\n${BaselineEntry}`, HistoricalBetas)
   try {
     ValidateRepositoryReleaseContract({ workspacePath: Root })
   } finally {
@@ -167,20 +177,94 @@ test('does not rewrite an earlier beta base when a lower stable version is publi
   }
 })
 
-test('requires a stable published on the same date as a later beta', () => {
+test('requires the greatest lower stable even when a future beta is backdated', () => {
   const Stable066 = GovernedEntry('0.6.6', '0.6.5').replace(
     '## [0.6.6] - 2026-07-23',
     '## [0.6.6] - 2026-08-14'
   )
   const LaterBeta = GovernedEntry('0.8.0-beta.1', '0.6.5').replace(
     '## [0.8.0-beta.1] - 2026-07-23',
-    '## [0.8.0-beta.1] - 2026-08-14'
+    '## [0.8.0-beta.1] - 2026-08-13'
   )
   const Root = CreateContractWorkspace(`${Stable066}\n${BaselineEntry}`, LaterBeta)
   try {
     Assert.throws(
       () => ValidateRepositoryReleaseContract({ workspacePath: Root }),
       /release 0\.8\.0-beta\.1 must declare Changes since 0\.6\.6/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('does not extend historical base exceptions to another beta version', () => {
+  const Stable066 = GovernedEntry('0.6.6', '0.6.5').replace(
+    '## [0.6.6] - 2026-07-23',
+    '## [0.6.6] - 2026-08-14'
+  )
+  const BetaFive = GovernedEntry(
+    '0.7.1-beta.5',
+    '0.7.1-beta.4',
+    '`0.7.1-beta.4`, `0.6.5`'
+  ).replace('## [0.7.1-beta.5] - 2026-07-23', '## [0.7.1-beta.5] - 2026-08-13')
+  const Root = CreateContractWorkspace(
+    `${Stable066}\n${BaselineEntry}`,
+    `${BetaFive}\n${HistoricalBetaChain('0.7.1')}`
+  )
+  try {
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({ workspacePath: Root }),
+      /release 0\.7\.1-beta\.5 must support upgrade source 0\.6\.6/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('does not let a later beta roll its stable source backward', () => {
+  const Stable066 = GovernedEntry('0.6.6', '0.6.5').replace(
+    '## [0.6.6] - 2026-07-23',
+    '## [0.6.6] - 2026-08-14'
+  )
+  const BetaOne = GovernedEntry('0.8.0-beta.1', '0.6.6', '`0.6.6`')
+  const BackdatedBetaTwo = GovernedEntry(
+    '0.8.0-beta.2',
+    '0.8.0-beta.1',
+    '`0.8.0-beta.1`, `0.6.5`'
+  ).replace('## [0.8.0-beta.2] - 2026-07-23', '## [0.8.0-beta.2] - 2026-07-22')
+  const Root = CreateContractWorkspace(
+    `${Stable066}\n${BaselineEntry}`,
+    `${BackdatedBetaTwo}\n${BetaOne}`
+  )
+  try {
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({ workspacePath: Root }),
+      /release 0\.8\.0-beta\.2 must support upgrade source 0\.6\.6/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('does not let a stable with a beta roll its stable base backward', () => {
+  const Stable066 = GovernedEntry('0.6.6', '0.6.5').replace(
+    '## [0.6.6] - 2026-07-23',
+    '## [0.6.6] - 2026-08-14'
+  )
+  const BetaOne = GovernedEntry('0.8.0-beta.1', '0.6.6', '`0.6.6`')
+  const BackdatedStable = GovernedEntry(
+    '0.8.0',
+    '0.6.5',
+    '`0.6.5`, `0.8.0-beta.1`'
+  ).replace('## [0.8.0] - 2026-07-23', '## [0.8.0] - 2026-07-22')
+  const Root = CreateContractWorkspace(
+    `${BackdatedStable}\n${Stable066}\n${BaselineEntry}`,
+    BetaOne
+  )
+  try {
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({ workspacePath: Root }),
+      /release 0\.8\.0 must declare Changes since 0\.6\.6/
     )
   } finally {
     RemoveWorkspace(Root)
@@ -618,6 +702,61 @@ test('rejects the backdated stable bypass through the candidate CLI', () => {
 
     Assert.equal(Result.status, 1)
     Assert.match(Result.stderr, /release 0\.8\.0 must support upgrade source 0\.8\.0-beta\.1/)
+    Assert.equal(Fs.existsSync(ReceiptOutput), false)
+    Assert.equal(Fs.existsSync(BodyOutput), false)
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('rejects a backdated maintenance stable base through the candidate CLI', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 1;\n')
+    Commit(Root, 'baseline')
+    Git(Root, ['tag', '0.6.5'])
+
+    const Stable066 = GovernedEntry('0.6.6', '0.6.5').replace(
+      '## [0.6.6] - 2026-07-23',
+      '## [0.6.6] - 2026-08-14'
+    )
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${Stable066}\n${BaselineEntry}`)
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 2;\n')
+    Commit(Root, 'maintenance stable')
+    Git(Root, ['tag', '0.6.6'])
+
+    Git(Root, ['switch', '--detach', '0.6.5'])
+    const BackdatedStable = GovernedEntry('0.6.7', '0.6.5').replace(
+      '## [0.6.7] - 2026-07-23',
+      '## [0.6.7] - 2026-08-13'
+    )
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${BackdatedStable}\n${Stable066}\n${BaselineEntry}`)
+    WriteFile(Root, 'source/src/config/example.rs', 'pub const VALUE: u8 = 3;\n')
+    const StableRevision = Commit(Root, 'backdated maintenance stable')
+    Git(Root, ['tag', '0.6.7'])
+
+    const ReceiptOutput = Path.join(Root, 'release-contract.json')
+    const BodyOutput = Path.join(Root, 'release-body.md')
+    const Result = spawnSync(process.execPath, [
+      '--import',
+      'tsx',
+      ReleaseContractSource,
+      'candidate',
+      '--workspace-path',
+      Root,
+      '--ref',
+      'refs/tags/0.6.7',
+      '--revision',
+      StableRevision,
+      '--receipt-output',
+      ReceiptOutput,
+      '--body-output',
+      BodyOutput
+    ], { encoding: 'utf8' })
+
+    Assert.equal(Result.status, 1)
+    Assert.match(Result.stderr, /release 0\.6\.7 must declare Changes since 0\.6\.6/)
     Assert.equal(Fs.existsSync(ReceiptOutput), false)
     Assert.equal(Fs.existsSync(BodyOutput), false)
   } finally {

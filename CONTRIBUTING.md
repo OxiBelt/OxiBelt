@@ -100,12 +100,15 @@ uses the heading `## [VERSION] - YYYY-MM-DD`, followed by these metadata lines:
 - Upgrade guide: [Upgrade from PREVIOUS_VERSION](docs/Upgrading.md#exact-anchor)
 ```
 
-The comparison base for a stable release and for `beta.1` is the latest lower
-stable release available on that entry's release date. This date-aware rule
-preserves an earlier beta ledger when a lower maintenance stable is published
-later. The comparison base for `beta.N`, where `N > 1`, is the preceding beta
-for the same target; that entry must list both the preceding beta and preceding
-stable release as supported upgrade sources.
+The comparison base for a stable release and for `beta.1` is the greatest
+stable SemVer lower than the target. The exact historical entries
+`0.7.0-beta.1` through `0.7.0-beta.4` and `0.7.1-beta.1` through
+`0.7.1-beta.4` retain `0.6.5` as their stable base because their ledger
+lineage predates the later `0.6.6` maintenance release. This exception does
+not extend to another version. Entry dates are descriptive calendar metadata
+and never select a comparison base. The comparison base for `beta.N`, where
+`N > 1`, is the preceding beta for the same target; that entry must list both
+the preceding beta and preceding stable release as supported upgrade sources.
 
 When a target has a governed beta, its stable entry must also name the latest
 beta as a supported source. The stable tag must be exactly one commit after
