@@ -97,6 +97,11 @@ for the governed entry format.
   from this exact revision. Each subject requires its own runtime check,
   immutable digest, SBOM, provenance, attestation, vulnerability decision,
   and reproducible-build receipt.
+- Copy the canonical fuzz-regression fixtures only into the
+  `riscv64-musl-check` validation stage so RISC-V
+  `cargo check --all-targets --locked` compiles fixture-backed tests. This does
+  not alter delivered executables, image roles, runtime contents, or upgrade
+  procedures.
 - Package both official Helm charts from tracked regular files with Helm
   `4.2.4`, publish exact `0.8.0-beta.1` OCI versions, and verify their
   descriptor, manifest, config, layer, attestation, and byte-identical rebuild
