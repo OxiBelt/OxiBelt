@@ -6732,9 +6732,14 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
   let shared_builder_stage = &alpine_dockerfile[shared_builder_start..riscv64_check_start];
   let riscv64_check_stage = &alpine_dockerfile[riscv64_check_start..riscv64_check_end];
   let test_copy = "COPY tests/rust ./tests/rust";
+  let regression_fixture_copy =
+    "COPY tests/fixtures/fuzz-regressions ./tests/fixtures/fuzz-regressions";
   let test_copy_position = riscv64_check_stage
     .find(test_copy)
     .expect("RISC-V musl check stage should copy repository integration-test targets");
+  let regression_fixture_copy_position = riscv64_check_stage
+    .find(regression_fixture_copy)
+    .expect("RISC-V musl check stage should copy fuzz regression fixtures");
   let cargo_check_position = riscv64_check_stage
     .find("cargo check --all-targets --locked")
     .expect("RISC-V musl check stage should compile all targets");
@@ -6745,17 +6750,24 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
     "RISC-V cargo check coverage should keep both GNU and musl targets"
   );
   assert!(
-    !shared_builder_stage.contains(test_copy),
-    "shared Rust builder should not copy integration tests and invalidate every image cache"
+    !shared_builder_stage.contains(test_copy)
+      && !shared_builder_stage.contains(regression_fixture_copy),
+    "shared Rust builder should not copy test inputs and invalidate every image cache"
   );
   assert_eq!(
     alpine_dockerfile.matches(test_copy).count(),
     1,
     "only the RISC-V musl check stage should copy integration tests"
   );
+  assert_eq!(
+    alpine_dockerfile.matches(regression_fixture_copy).count(),
+    1,
+    "only the RISC-V musl check stage should copy fuzz regression fixtures"
+  );
   assert!(
-    test_copy_position < cargo_check_position,
-    "RISC-V musl check stage should copy integration tests before checking all targets"
+    test_copy_position < cargo_check_position
+      && regression_fixture_copy_position < cargo_check_position,
+    "RISC-V musl check stage should copy test inputs before checking all targets"
   );
   for expected in [
     "Cargo check for RISC-V GNU target",
