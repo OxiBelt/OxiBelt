@@ -474,7 +474,7 @@ rootless Docker daemon, verifies image and schema-v3 chart attestations through
 GitHub's API, resolves canonical GHCR digests, and rebuilds without consuming
 producer build outputs.
 
-Every automatic beta or stable verification seals one schema-2 release
+Every automatic beta or stable verification seals one schema-3 release
 qualification containing exactly 30 image receipts, two byte-identical chart
 receipts, 12 immutable index identities with exact independently verified
 `amd64`, `arm64`, and `riscv64` child descriptor bindings, and the exact
@@ -485,19 +485,24 @@ qualification, the producer's exact release-contract receipt must name the
 sole latest same-target beta; that beta's exact aggregate bytes, tag, release,
 automatic verifier run, artifact identity, and SHA-256 are bound into the
 stable qualification. Stable publication must occur at least 24 hours after
-both beta publication and completion of the beta qualification.
+both beta publication and completion of the beta qualification. The verifier
+derives every plan field and the complete stable alias inventory with its
+approved release-planning code; producer image-plan metadata is not a
+qualification input.
 
 The release producer writes only immutable versioned image and chart tags.
 `.github/workflows/promote-stable-aliases.yml` is the sole mutable-alias writer.
 It accepts only the newest published stable release and a complete automatic
 qualification, re-reads every immutable digest and both chart attestations in
 a read-only job, rechecks every index child against the sealed independent
-platform receipts, snapshots all 48 image aliases, then performs sequential
-idempotent promotion in one final `packages: write` job. That final job repeats
-the index-child readback immediately before mutation and promotes from the
-qualified immutable digest rather than a mutable source tag. Manual, beta, build,
-stale, replayed, incomplete, duplicated, or drifted qualifications fail
-closed; chart aliases are never created.
+platform receipts, and requires the exact 30 platform plus 18 index alias,
+source-tag, digest, and kind mappings before snapshotting. The final
+`packages: write` job derives and checks the same mapping and validation-run
+identity again before registry authentication, then performs sequential
+idempotent promotion from qualified immutable digests. It also repeats the
+index-child readback immediately before mutation. Manual, beta, build, stale,
+replayed, pre-schema-3, incomplete, duplicated, cross-role, or drifted
+qualifications fail closed; chart aliases are never created.
 
 Manual dispatch remains a diagnostic facility and is never accepted as
 release-admission evidence. Admission bundles accept only a successful
