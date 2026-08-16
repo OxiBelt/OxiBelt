@@ -3125,13 +3125,7 @@ async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> a
     })?
     .await
     .context("failed to connect downstream WebTransport")?;
-  if !args.expect_rejected
-    && matches!(
-      args.extended_protocol,
-      WebTransportProbeProtocol::WebTransport
-    )
-    && args.sessions == 1
-  {
+  if should_run_webtransport_data_client(&args) {
     return run_webtransport_data_client(&args, quinn_connection).await;
   }
   let close_connection = quinn_connection.clone();
@@ -3191,6 +3185,16 @@ async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> a
   Ok(())
 }
 
+fn should_run_webtransport_data_client(args: &WebTransportMultiplexArgs) -> bool {
+  !args.expect_rejected
+    && matches!(
+      args.extended_protocol,
+      WebTransportProbeProtocol::WebTransport
+    )
+    && args.sessions == 1
+    && args.expect_statuses.as_slice() == [200]
+}
+
 async fn run_webtransport_data_client(
   args: &WebTransportMultiplexArgs,
   quinn_connection: h3_quinn::quinn::Connection,
@@ -3244,6 +3248,7 @@ async fn run_webtransport_data_client(
   }
 
   session.close(0, b"probe complete");
+  let _ = session.closed().await;
   println!(
     "{}",
     serde_json::json!({
@@ -4903,6 +4908,60 @@ fn load_root_store(path: &Path) -> anyhow::Result<RootCertStore> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn webtransport_multiplex_args(
+    sessions: usize,
+    expect_statuses: Vec<u16>,
+    extended_protocol: WebTransportProbeProtocol,
+    expect_rejected: bool,
+  ) -> WebTransportMultiplexArgs {
+    WebTransportMultiplexArgs {
+      host: "proxy".to_string(),
+      port: 8443,
+      server_name: "proxy".to_string(),
+      authority: "example.test".to_string(),
+      path: "/wt".to_string(),
+      headers: HeaderMap::new(),
+      ca_cert: "ca.pem".to_string(),
+      sessions,
+      expect_statuses,
+      extended_protocol,
+      expect_rejected,
+    }
+  }
+
+  #[test]
+  fn webtransport_data_client_is_reserved_for_single_successful_session() {
+    let successful =
+      webtransport_multiplex_args(1, vec![200], WebTransportProbeProtocol::WebTransport, false);
+    assert!(should_run_webtransport_data_client(&successful));
+
+    for status in [201, 429, 503] {
+      let status_only = webtransport_multiplex_args(
+        1,
+        vec![status],
+        WebTransportProbeProtocol::WebTransport,
+        false,
+      );
+      assert!(!should_run_webtransport_data_client(&status_only));
+    }
+
+    let explicitly_rejected =
+      webtransport_multiplex_args(1, Vec::new(), WebTransportProbeProtocol::WebTransport, true);
+    assert!(!should_run_webtransport_data_client(&explicitly_rejected));
+
+    let multiple_sessions = webtransport_multiplex_args(
+      2,
+      vec![200, 429],
+      WebTransportProbeProtocol::WebTransport,
+      false,
+    );
+    assert!(!should_run_webtransport_data_client(&multiple_sessions));
+
+    let connect_udp =
+      webtransport_multiplex_args(1, vec![200], WebTransportProbeProtocol::ConnectUdp, false);
+    assert!(!should_run_webtransport_data_client(&connect_udp));
+  }
 
   #[test]
   fn repeated_cli_headers_are_preserved() {
