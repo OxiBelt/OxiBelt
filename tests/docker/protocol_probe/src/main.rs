@@ -37,7 +37,7 @@ use rustls::{
 };
 use sha1::Sha1;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{lookup_host, TcpListener, TcpStream};
+use tokio::net::{lookup_host, TcpListener, TcpStream, UdpSocket};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 #[derive(Clone, Copy)]
@@ -475,7 +475,7 @@ impl TurnClientAuth {
   }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum TurnClientExpect {
   Echo,
   NoResponse,
@@ -507,7 +507,10 @@ struct TurnClientArgs {
   auth: TurnClientAuth,
   expect: TurnClientExpect,
   mutation: TurnClientMutation,
+  allocation_hold_ms: Option<u64>,
 }
+
+const MAX_TURN_ALLOCATION_HOLD_MS: u64 = 10_000;
 
 impl DownstreamArgs {
   fn body_len(&self) -> usize {
@@ -569,7 +572,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
   eprintln!(
-        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected> [--ca-cert <pem>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64>\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected|allocate-success (UDP only)> [--mutation <name>] [--ca-cert <pem>] [--allocation-hold-ms <1..10000>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64>\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
 }
 
@@ -784,6 +787,7 @@ fn parse_turn_client_args(
   let mut auth = None;
   let mut expect = None;
   let mut mutation = TurnClientMutation::None;
+  let mut allocation_hold_ms = None;
 
   while let Some(flag) = args.next() {
     let value = args
@@ -801,6 +805,15 @@ fn parse_turn_client_args(
       "--auth" => auth = Some(TurnClientAuth::parse(&value)?),
       "--expect" => expect = Some(TurnClientExpect::parse(&value)?),
       "--mutation" => mutation = TurnClientMutation::parse(&value)?,
+      "--allocation-hold-ms" => {
+        let hold_ms = value
+          .parse::<u64>()
+          .context("invalid --allocation-hold-ms value")?;
+        if !(1..=MAX_TURN_ALLOCATION_HOLD_MS).contains(&hold_ms) {
+          bail!("--allocation-hold-ms must be between 1 and {MAX_TURN_ALLOCATION_HOLD_MS}");
+        }
+        allocation_hold_ms = Some(hold_ms);
+      }
       _ => bail!("unknown turn-client flag: {flag}"),
     }
   }
@@ -808,6 +821,25 @@ fn parse_turn_client_args(
   let transport = transport.ok_or_else(|| anyhow!("--transport is required"))?;
   if transport == TurnTransport::Tls && ca_cert.is_none() {
     bail!("TURN TLS client requires --ca-cert");
+  }
+  let auth = auth.ok_or_else(|| anyhow!("--auth is required"))?;
+  let expect = expect.ok_or_else(|| anyhow!("--expect is required"))?;
+  if expect == TurnClientExpect::AllocateSuccess && transport != TurnTransport::Udp {
+    bail!("allocate-success expectation requires UDP transport");
+  }
+  if allocation_hold_ms.is_some() {
+    if transport != TurnTransport::Udp {
+      bail!("--allocation-hold-ms requires UDP transport");
+    }
+    if !matches!(auth, TurnClientAuth::Valid) {
+      bail!("--allocation-hold-ms requires valid authentication");
+    }
+    if !matches!(expect, TurnClientExpect::AllocateSuccess) {
+      bail!("--allocation-hold-ms requires allocate-success expectation");
+    }
+    if !matches!(mutation, TurnClientMutation::None) {
+      bail!("--allocation-hold-ms requires no TURN mutation");
+    }
   }
   Ok(TurnClientArgs {
     transport,
@@ -818,9 +850,10 @@ fn parse_turn_client_args(
     username: username.ok_or_else(|| anyhow!("--username is required"))?,
     realm: realm.ok_or_else(|| anyhow!("--realm is required"))?,
     password: password.ok_or_else(|| anyhow!("--password is required"))?,
-    auth: auth.ok_or_else(|| anyhow!("--auth is required"))?,
-    expect: expect.ok_or_else(|| anyhow!("--expect is required"))?,
+    auth,
+    expect,
     mutation,
+    allocation_hold_ms,
   })
 }
 
@@ -2242,6 +2275,10 @@ where
 
 async fn run_turn_client(args: TurnClientArgs) -> anyhow::Result<()> {
   let request = turn_request(&args, None);
+  if args.expect == TurnClientExpect::AllocateSuccess && args.transport == TurnTransport::Udp {
+    run_turn_udp_allocate_success(&args, &request, args.allocation_hold_ms).await?;
+    return print_turn_client_result(args.transport, args.expect);
+  }
   let response = turn_round_trip(&args, &request).await?;
   match args.expect {
     TurnClientExpect::Echo => {
@@ -2279,28 +2316,21 @@ async fn run_turn_client(args: TurnClientArgs) -> anyhow::Result<()> {
       }
     }
     TurnClientExpect::AllocateSuccess => {
-      let challenge = response.ok_or_else(|| anyhow!("expected TURN nonce challenge"))?;
-      if !is_stun_error_response(&challenge) {
-        bail!("TURN edge allocation did not begin with an error challenge");
-      }
-      let nonce = stun_attr(&challenge, STUN_ATTR_NONCE)
-        .ok_or_else(|| anyhow!("TURN nonce challenge omitted NONCE"))?;
-      let authenticated = turn_request(&args, Some(nonce));
-      let response = turn_round_trip(&args, &authenticated)
-        .await?
-        .ok_or_else(|| anyhow!("expected TURN Allocate success response"))?;
-      if !is_stun_success_response(&response, STUN_ALLOCATE_REQUEST)
-        || stun_attr(&response, STUN_ATTR_XOR_RELAYED_ADDRESS).is_none()
-      {
-        bail!("TURN edge Allocate request did not create a relay allocation");
-      }
+      bail!("allocate-success expectation requires UDP transport");
     }
   }
+  print_turn_client_result(args.transport, args.expect)
+}
+
+fn print_turn_client_result(
+  transport: TurnTransport,
+  expect: TurnClientExpect,
+) -> anyhow::Result<()> {
   println!(
     "{}",
     serde_json::to_string(&serde_json::json!({
-      "transport": args.transport.label(),
-      "expect": match args.expect {
+      "transport": transport.label(),
+      "expect": match expect {
         TurnClientExpect::Echo => "echo",
         TurnClientExpect::NoResponse => "no-response",
         TurnClientExpect::Rejected => "rejected",
@@ -2308,6 +2338,42 @@ async fn run_turn_client(args: TurnClientArgs) -> anyhow::Result<()> {
       },
     }))?
   );
+  Ok(())
+}
+
+async fn run_turn_udp_allocate_success(
+  args: &TurnClientArgs,
+  request: &[u8],
+  hold_ms: Option<u64>,
+) -> anyhow::Result<()> {
+  let remote = resolve_remote_addr(&args.host, args.port).await?;
+  let socket = UdpSocket::bind(client_bind_addr(remote))
+    .await
+    .context("failed to bind TURN UDP client socket")?;
+  socket
+    .connect(remote)
+    .await
+    .context("failed to connect TURN UDP client socket")?;
+  let challenge = turn_udp_round_trip_on_socket(&socket, request)
+    .await?
+    .ok_or_else(|| anyhow!("expected TURN nonce challenge"))?;
+  if !is_stun_response_for_request(&challenge, request, STUN_ALLOCATE_REQUEST | 0x0110) {
+    bail!("TURN edge allocation did not begin with an error challenge");
+  }
+  let nonce = stun_attr(&challenge, STUN_ATTR_NONCE)
+    .ok_or_else(|| anyhow!("TURN nonce challenge omitted NONCE"))?;
+  let authenticated = turn_request(args, Some(nonce));
+  let response = turn_udp_round_trip_on_socket(&socket, &authenticated)
+    .await?
+    .ok_or_else(|| anyhow!("expected TURN Allocate success response"))?;
+  if !is_stun_response_for_request(&response, &authenticated, STUN_ALLOCATE_REQUEST | 0x0100)
+    || stun_attr(&response, STUN_ATTR_XOR_RELAYED_ADDRESS).is_none()
+  {
+    bail!("TURN edge Allocate request did not create a relay allocation");
+  }
+  if let Some(hold_ms) = hold_ms {
+    tokio::time::sleep(Duration::from_millis(hold_ms)).await;
+  }
   Ok(())
 }
 
@@ -2328,10 +2394,12 @@ fn is_stun_error_response(frame: &[u8]) -> bool {
   magic_cookie == STUN_MAGIC_COOKIE && message_type & 0x0110 == 0x0110
 }
 
-fn is_stun_success_response(frame: &[u8], request_type: u16) -> bool {
+fn is_stun_response_for_request(frame: &[u8], request: &[u8], response_type: u16) -> bool {
   frame.len() >= STUN_HEADER_LEN
-    && u16::from_be_bytes([frame[0], frame[1]]) == (request_type | 0x0100)
+    && request.len() >= STUN_HEADER_LEN
+    && u16::from_be_bytes([frame[0], frame[1]]) == response_type
     && u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]) == STUN_MAGIC_COOKIE
+    && frame[8..STUN_HEADER_LEN] == request[8..STUN_HEADER_LEN]
 }
 
 async fn handle_h3_upstream_connection(
@@ -4557,11 +4625,22 @@ async fn turn_udp_round_trip(
   request: &[u8],
 ) -> anyhow::Result<Option<Vec<u8>>> {
   let remote = resolve_remote_addr(&args.host, args.port).await?;
-  let socket = tokio::net::UdpSocket::bind(client_bind_addr(remote))
+  let socket = UdpSocket::bind(client_bind_addr(remote))
     .await
     .context("failed to bind TURN UDP client socket")?;
   socket
-    .send_to(request, remote)
+    .connect(remote)
+    .await
+    .context("failed to connect TURN UDP client socket")?;
+  turn_udp_round_trip_on_socket(&socket, request).await
+}
+
+async fn turn_udp_round_trip_on_socket(
+  socket: &UdpSocket,
+  request: &[u8],
+) -> anyhow::Result<Option<Vec<u8>>> {
+  socket
+    .send(request)
     .await
     .context("failed to send TURN UDP request")?;
   let mut response = vec![0u8; 65_536];
@@ -4908,6 +4987,213 @@ fn load_root_store(path: &Path) -> anyhow::Result<RootCertStore> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn turn_client_cli_args(
+    transport: &str,
+    auth: &str,
+    expect: &str,
+    mutation: &str,
+    allocation_hold_ms: Option<u64>,
+  ) -> Vec<String> {
+    let mut args = vec![
+      "--transport".to_string(),
+      transport.to_string(),
+      "--host".to_string(),
+      "127.0.0.1".to_string(),
+      "--port".to_string(),
+      "3478".to_string(),
+      "--username".to_string(),
+      "user".to_string(),
+      "--realm".to_string(),
+      "realm".to_string(),
+      "--password".to_string(),
+      "password".to_string(),
+      "--auth".to_string(),
+      auth.to_string(),
+      "--expect".to_string(),
+      expect.to_string(),
+      "--mutation".to_string(),
+      mutation.to_string(),
+    ];
+    if let Some(hold_ms) = allocation_hold_ms {
+      args.extend(["--allocation-hold-ms".to_string(), hold_ms.to_string()]);
+    }
+    args
+  }
+
+  #[test]
+  fn turn_allocation_hold_accepts_only_the_bounded_valid_udp_flow() {
+    let args = parse_turn_client_args(
+      turn_client_cli_args("udp", "valid", "allocate-success", "none", Some(10)).into_iter(),
+    )
+    .expect("valid allocation hold should parse");
+    assert_eq!(args.allocation_hold_ms, Some(10));
+  }
+
+  #[test]
+  fn turn_allocation_hold_rejects_invalid_values_and_modes() {
+    for hold_ms in [0, MAX_TURN_ALLOCATION_HOLD_MS + 1] {
+      let error = match parse_turn_client_args(
+        turn_client_cli_args("udp", "valid", "allocate-success", "none", Some(hold_ms)).into_iter(),
+      ) {
+        Ok(_) => panic!("out-of-range allocation hold should fail"),
+        Err(error) => error,
+      };
+      assert!(error.to_string().contains("allocation-hold-ms"));
+    }
+
+    for (transport, auth, expect, mutation, message) in [
+      (
+        "tcp",
+        "valid",
+        "allocate-success",
+        "none",
+        "allocate-success expectation requires UDP transport",
+      ),
+      (
+        "udp",
+        "invalid",
+        "allocate-success",
+        "none",
+        "valid authentication",
+      ),
+      (
+        "udp",
+        "valid",
+        "echo",
+        "none",
+        "allocate-success expectation",
+      ),
+      (
+        "udp",
+        "valid",
+        "allocate-success",
+        "truncated-attribute",
+        "no TURN mutation",
+      ),
+    ] {
+      let error = match parse_turn_client_args(
+        turn_client_cli_args(transport, auth, expect, mutation, Some(1)).into_iter(),
+      ) {
+        Ok(_) => panic!("invalid allocation hold combination should fail"),
+        Err(error) => error,
+      };
+      assert!(error.to_string().contains(message));
+    }
+  }
+
+  #[test]
+  fn turn_allocate_success_rejects_stream_transports_without_a_hold() {
+    for transport in ["tcp", "tls"] {
+      let mut args = turn_client_cli_args(transport, "valid", "allocate-success", "none", None);
+      if transport == "tls" {
+        args.extend(["--ca-cert".to_string(), "ca.pem".to_string()]);
+      }
+      let error = match parse_turn_client_args(args.into_iter()) {
+        Ok(_) => panic!("stream Allocate success should fail"),
+        Err(error) => error,
+      };
+      assert!(error
+        .to_string()
+        .contains("allocate-success expectation requires UDP transport"));
+    }
+  }
+
+  #[test]
+  fn stun_response_correlation_rejects_wrong_methods_and_transactions() {
+    let request = encode_stun_message(STUN_ALLOCATE_REQUEST, *b"request-id!!", &[]);
+    let matching = encode_stun_message(STUN_ALLOCATE_REQUEST | 0x0110, *b"request-id!!", &[]);
+    let wrong_method = encode_stun_message(0x0111, *b"request-id!!", &[]);
+    let wrong_transaction =
+      encode_stun_message(STUN_ALLOCATE_REQUEST | 0x0110, *b"other-id!!!!", &[]);
+
+    assert!(is_stun_response_for_request(
+      &matching,
+      &request,
+      STUN_ALLOCATE_REQUEST | 0x0110
+    ));
+    assert!(!is_stun_response_for_request(
+      &wrong_method,
+      &request,
+      STUN_ALLOCATE_REQUEST | 0x0110
+    ));
+    assert!(!is_stun_response_for_request(
+      &wrong_transaction,
+      &request,
+      STUN_ALLOCATE_REQUEST | 0x0110
+    ));
+  }
+
+  #[tokio::test]
+  async fn turn_udp_allocation_hold_reuses_socket_for_challenge_and_success() {
+    let server = UdpSocket::bind("127.0.0.1:0")
+      .await
+      .expect("bind test TURN server");
+    let server_addr = server.local_addr().expect("test TURN server address");
+    let server_task = tokio::spawn(async move {
+      let mut buffer = [0u8; 65_536];
+      let (first_len, first_peer) =
+        tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
+          .await
+          .expect("receive initial Allocate")
+          .expect("receive initial Allocate datagram");
+      assert!(first_len >= STUN_HEADER_LEN);
+      let first_transaction_id: [u8; 12] = buffer[8..STUN_HEADER_LEN]
+        .try_into()
+        .expect("initial Allocate transaction ID");
+      let challenge = encode_stun_message(
+        STUN_ALLOCATE_REQUEST | 0x0110,
+        first_transaction_id,
+        &[(STUN_ATTR_NONCE, b"test-nonce".to_vec())],
+      );
+      server
+        .send_to(&challenge, first_peer)
+        .await
+        .expect("send nonce challenge");
+
+      let (second_len, second_peer) =
+        tokio::time::timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
+          .await
+          .expect("receive authenticated Allocate")
+          .expect("receive authenticated Allocate datagram");
+      assert!(second_len >= STUN_HEADER_LEN);
+      assert_eq!(
+        first_peer, second_peer,
+        "allocation exchange must use one UDP socket"
+      );
+      let second_transaction_id: [u8; 12] = buffer[8..STUN_HEADER_LEN]
+        .try_into()
+        .expect("authenticated Allocate transaction ID");
+      let success = encode_stun_message(
+        STUN_ALLOCATE_REQUEST | 0x0100,
+        second_transaction_id,
+        &[(STUN_ATTR_XOR_RELAYED_ADDRESS, vec![0, 1, 2, 3, 4, 5, 6, 7])],
+      );
+      server
+        .send_to(&success, second_peer)
+        .await
+        .expect("send Allocate success");
+    });
+
+    let args = TurnClientArgs {
+      transport: TurnTransport::Udp,
+      host: "127.0.0.1".to_string(),
+      port: server_addr.port(),
+      server_name: "proxy".to_string(),
+      ca_cert: None,
+      username: "user".to_string(),
+      realm: "realm".to_string(),
+      password: "password".to_string(),
+      auth: TurnClientAuth::Valid,
+      expect: TurnClientExpect::AllocateSuccess,
+      mutation: TurnClientMutation::None,
+      allocation_hold_ms: Some(1),
+    };
+    run_turn_udp_allocate_success(&args, &turn_request(&args, None), Some(1))
+      .await
+      .expect("same-socket Allocate flow should succeed");
+    server_task.await.expect("test TURN server should finish");
+  }
 
   fn webtransport_multiplex_args(
     sessions: usize,

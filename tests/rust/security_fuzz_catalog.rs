@@ -345,6 +345,39 @@ mod tests {
   }
 
   #[test]
+  fn turn_runtime_observes_and_reaps_a_bounded_live_allocation() {
+    let fixture = fs::read_to_string(repository_path(
+      "tests/docker/security_fuzz/config/turn_runtime.toml",
+    ))
+    .expect("TURN security-fuzz fixture should be readable");
+    let executor = fs::read_to_string(repository_path("tests/docker/security_fuzz/executor.sh"))
+      .expect("security-fuzz executor should be readable");
+
+    assert!(
+      fixture.contains("max_allocation_lifetime_seconds = 5"),
+      "the TURN fixture must leave bounded headroom for live allocation introspection"
+    );
+    assert!(
+      executor.contains("--allocation-hold-ms 4000")
+        && executor.contains("wait_for_turn_allocation_visibility \"${client}\""),
+      "the TURN case must retain its allocation probe while polling runtime visibility"
+    );
+    assert!(
+      executor.contains(
+        "finish_turn_allocation_probe\n      turn_probe \"$(cat \"${work_dir}/last-turn-transport\""
+      ) && executor.contains("for _attempt in $(seq 1 100); do"),
+      "TURN recovery must reap the held probe before its bounded zero-count poll"
+    );
+    assert_eq!(
+      defaults()
+        .expect("catalog must parse and validate")
+        .recovery_timeout_seconds,
+      15,
+      "TURN allocation expiry must remain bounded by the catalog recovery timeout"
+    );
+  }
+
+  #[test]
   fn fuzz_session_lifecycle_preserves_fail_closed_restart_state() {
     let executor = fs::read_to_string(repository_path("tests/docker/security_fuzz/executor.sh"))
       .expect("security-fuzz executor should be readable");

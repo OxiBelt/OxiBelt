@@ -33,6 +33,7 @@ admin_token_file="${credential_dir}/admin.token"
 denied_token_file="${credential_dir}/denied.token"
 turn_username_file="${credential_dir}/turn.username"
 turn_password_file="${credential_dir}/turn.password"
+turn_allocation_client_file="${work_dir}/turn-allocation-client"
 postgres_password_file="${credential_dir}/postgres.password"
 mutation_private_key_file="${credential_dir}/mutation-signer.ed25519.pem"
 mutation_public_key_file="${credential_dir}/mutation-signer.ed25519.pub"
@@ -952,8 +953,88 @@ turn_probe() {
   fi
 }
 
+start_turn_allocation_probe() {
+  local client username turn_password
+  client="$(container_name turn-allocation)"
+  username="$(read_credential "${turn_username_file}")"
+  turn_password="$(read_credential "${turn_password_file}")"
+  [[ ! -e "${turn_allocation_client_file}" && ! -L "${turn_allocation_client_file}" ]] || {
+    echo "TURN allocation probe state already exists" >&2
+    return 1
+  }
+  if docker container inspect "${client}" >/dev/null 2>&1; then
+    echo "TURN allocation probe container already exists" >&2
+    return 1
+  fi
+  printf '%s\n' "${client}" >"${turn_allocation_client_file}"
+  if ! docker create \
+    --name "${client}" --label "${label}" --network "${network}" \
+    "${probe_image}" turn-client --transport udp --host proxy --port 3480 \
+    --username "${username}" --realm turn.example.test --password "${turn_password}" \
+    --auth valid --expect allocate-success --mutation none \
+    --allocation-hold-ms 4000 >/dev/null; then
+    rm -f "${turn_allocation_client_file}"
+    return 1
+  fi
+  docker start "${client}" >/dev/null
+  printf '%s\n' "${client}"
+}
+
+wait_for_turn_allocation_visibility() {
+  local client="$1" connections
+  for _attempt in $(seq 1 20); do
+    if [[ "$(docker inspect -f '{{.State.Running}}' "${client}" 2>/dev/null || echo false)" != "true" ]]; then
+      break
+    fi
+    connections="$(runtime_connections)"
+    if jq -e '.turn.allocations_active == 1 and .turn.udp_clients_active >= 1' \
+      <<<"${connections}" >/dev/null \
+      && [[ "$(docker inspect -f '{{.State.Running}}' "${client}" 2>/dev/null || echo false)" == "true" ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  docker logs "${client}" >&2 2>&1 || true
+  echo "TURN edge allocation did not become visible while its probe was active" >&2
+  return 1
+}
+
+finish_turn_allocation_probe() {
+  local client expected_client wait_output wait_status=0 output
+  [[ -e "${turn_allocation_client_file}" || -L "${turn_allocation_client_file}" ]] || return 0
+  [[ -f "${turn_allocation_client_file}" && ! -L "${turn_allocation_client_file}" ]] || {
+    echo "TURN allocation probe state is not a regular file" >&2
+    return 1
+  }
+  IFS= read -r client <"${turn_allocation_client_file}"
+  expected_client="$(container_name turn-allocation)"
+  [[ "${client}" == "${expected_client}" ]] || {
+    echo "TURN allocation probe state named an unexpected container" >&2
+    return 1
+  }
+  docker container inspect "${client}" >/dev/null 2>&1 || {
+    echo "TURN allocation probe container is missing" >&2
+    return 1
+  }
+  wait_output="$(timeout --foreground 10s docker wait "${client}" 2>&1)" || wait_status=$?
+  if ((wait_status != 0)); then
+    docker logs "${client}" >&2 2>&1 || true
+    echo "TURN allocation probe did not finish within its bounded hold" >&2
+    return 1
+  fi
+  output="${work_dir}/turn-edge-allocation.json"
+  (set +o pipefail; docker logs "${client}" 2>&1 | head -c 262144) >"${output}"
+  if [[ "${wait_output}" != "0" ]] \
+    || ! jq -e '.transport == "udp" and .expect == "allocate-success"' "${output}" >/dev/null; then
+    echo "TURN allocation probe did not complete successfully" >&2
+    return 1
+  fi
+  docker rm "${client}" >/dev/null
+  rm -f "${turn_allocation_client_file}"
+}
+
 case_turn_runtime() {
-  local b0 b1 b2 transport auth expectation output mutation username edge_mutation connections
+  local b0 b1 b2 transport auth expectation output mutation username edge_mutation client
   b0="$(input_byte 0)"; b1="$(input_byte 1)"; b2="$(input_byte 2)"
   require_concurrency_bound 1
   case $((b0 % 3)) in 0) transport=udp;; 1) transport=tcp;; *) transport=tls;; esac
@@ -993,14 +1074,8 @@ case_turn_runtime() {
   esac
   turn_probe udp invalid rejected "${work_dir}/turn-edge-malformed.json" \
     "${edge_mutation}" "$(read_credential "${turn_username_file}")" 3480
-  turn_probe udp valid allocate-success "${work_dir}/turn-edge-allocation.json" \
-    none "$(read_credential "${turn_username_file}")" 3480
-  connections="$(runtime_connections)"
-  jq -e '.turn.allocations_active == 1 and .turn.udp_clients_active >= 1' \
-    <<<"${connections}" >/dev/null || {
-    echo "TURN edge allocation did not become visible in runtime introspection" >&2
-    return 1
-  }
+  client="$(start_turn_allocation_probe)"
+  wait_for_turn_allocation_visibility "${client}"
 }
 
 case_admin_authz() {
@@ -1092,7 +1167,7 @@ wait_for_zero_tunnel_counts() {
 
 wait_for_zero_turn_counts() {
   local connections
-  for _attempt in $(seq 1 30); do
+  for _attempt in $(seq 1 100); do
     connections="$(runtime_connections)"
     if jq -e '.turn.tcp_connections_active == 0 and .turn.tls_connections_active == 0 and .turn.udp_clients_active == 0 and .turn.allocations_active == 0' \
       <<<"${connections}" >/dev/null; then
@@ -1152,6 +1227,7 @@ recovery_target() {
       wait_for_zero_tunnel_counts
       ;;
     turn_runtime)
+      finish_turn_allocation_probe
       turn_probe "$(cat "${work_dir}/last-turn-transport" 2>/dev/null || echo udp)" valid echo "${output}"
       wait_for_zero_turn_counts
       ;;

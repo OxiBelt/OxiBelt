@@ -132,7 +132,7 @@ max_allocations_per_listener = 1
 max_allocations_per_client = 1
 max_permissions_per_allocation = 1
 max_channels_per_allocation = 1
-max_allocation_lifetime_seconds = 1
+max_allocation_lifetime_seconds = 5
 
 [webrtc_turn_listeners.auth]
 mode = "enforce"
