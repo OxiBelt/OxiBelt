@@ -1,55 +1,87 @@
-
 run_case_checks() {
   local baseline after_create after_expire create_delta expire_delta
+  local load_container load_log load_pid
+  local observed_create=0 observed_expire=0
 
-  start_udp_turn_echo
-  sleep 1
-
+  wait_for_udp_turn_echo
   baseline="$(proxy_socket_fd_count)"
+  assert_socket_fd_count "${baseline}" "baseline"
+
   assert_udp_round_trip
-  send_udp_packets_from_unique_ports 32 "session-load"
-  sleep 1
-  after_create="$(proxy_socket_fd_count)"
-  create_delta=$((after_create - baseline))
-  if (( create_delta < 12 )); then
-    echo "socket fd counts: baseline=${baseline} after_create=${after_create}" >&2
+  start_udp_session_load 32 "session-load" load_container load_pid load_log
+  after_create="${baseline}"
+  for _ in $(seq 1 40); do
+    after_create="$(proxy_socket_fd_count)"
+    assert_socket_fd_count "${after_create}" "active load"
+    create_delta=$((after_create - baseline))
+    if ((create_delta >= 12)); then
+      observed_create=1
+      break
+    fi
+    sleep 0.1
+  done
+  if ((observed_create == 0)); then
+    cat "${load_log}" >&2 || true
     fail_with_diagnostics "TURN UDP load did not create the expected upstream sockets"
   fi
 
-  sleep 1
-  send_udp_packets_from_unique_ports 1 "expiration-trigger"
-  sleep 1
-  after_expire="$(proxy_socket_fd_count)"
+  if ! wait "${load_pid}"; then
+    cat "${load_log}" >&2 || true
+    docker rm -f "${load_container}" >/dev/null 2>&1 || true
+    fail_with_diagnostics "TURN UDP load client failed"
+  fi
+  docker rm -f "${load_container}" >/dev/null 2>&1 || true
+
+  after_expire="${after_create}"
+  for _ in $(seq 1 50); do
+    after_expire="$(proxy_socket_fd_count)"
+    assert_socket_fd_count "${after_expire}" "idle expiration"
+    expire_delta=$((after_expire - baseline))
+    if ((expire_delta <= 4)); then
+      observed_expire=1
+      break
+    fi
+    sleep 0.1
+  done
+  create_delta=$((after_create - baseline))
   expire_delta=$((after_expire - baseline))
   echo "TURN UDP socket fd counts: baseline=${baseline} after_create=${after_create} after_expire=${after_expire} create_delta=${create_delta} expire_delta=${expire_delta}"
-  if (( expire_delta > 4 )); then
+  if ((observed_expire == 0)); then
     fail_with_diagnostics "expired TURN UDP sessions still retained upstream sockets"
   fi
 
   assert_udp_round_trip
 }
 
-start_udp_turn_echo() {
-  docker run -d \
-    --name "oxibelt-turn-upstream-${run_id}" \
-    --label "${test_label}" \
-    --network "${network_name}" \
-    --network-alias mock-turn \
-    --entrypoint python \
-    "${mock_image}" \
-    -c '
+wait_for_udp_turn_echo() {
+  for _ in $(seq 1 50); do
+    if docker exec "${http_container}" python -c '
 import socket
 
+payload = b"ready"
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(("0.0.0.0", 3478))
-while True:
-    data, addr = sock.recvfrom(65535)
-    sock.sendto(data, addr)
-' >/dev/null
+sock.settimeout(0.2)
+sock.sendto(payload, ("mock-turn-udp", 3478))
+data, _ = sock.recvfrom(65535)
+if data != payload:
+    raise RuntimeError(f"unexpected TURN UDP readiness response: {data!r}")
+' >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.1
+  done
+  fail_with_diagnostics "TURN UDP upstream did not become ready"
 }
 
 proxy_socket_fd_count() {
   docker exec "${proxy_container}" sh -c 'count=0; for fd in /proc/1/fd/*; do target="$(readlink "$fd" 2>/dev/null || true)"; case "$target" in socket:*) count=$((count + 1));; esac; done; printf "%s" "$count"'
+}
+
+assert_socket_fd_count() {
+  local count="$1" phase="$2"
+  if [[ ! "${count}" =~ ^[0-9]+$ ]]; then
+    fail_with_diagnostics "TURN UDP socket fd count was nonnumeric during ${phase}"
+  fi
 }
 
 assert_udp_round_trip() {
@@ -78,13 +110,14 @@ if data != payload:
   docker rm -f "${client_container}" >/dev/null 2>&1 || true
 }
 
-send_udp_packets_from_unique_ports() {
-  local count="$1"
-  local payload="$2"
-  local client_container="oxibelt-turn-udp-load-${run_id}-${RANDOM}"
+start_udp_session_load() {
+  local count="$1" payload="$2"
+  local -n container_ref="$3" pid_ref="$4" log_ref="$5"
 
+  container_ref="oxibelt-turn-udp-load-${run_id}-${RANDOM}"
+  log_ref="${work_dir}/${container_ref}.log"
   docker create \
-    --name "${client_container}" \
+    --name "${container_ref}" \
     --label "${test_label}" \
     --network "${network_name}" \
     --entrypoint python \
@@ -97,18 +130,17 @@ import time
 count = int(sys.argv[1])
 payload = sys.argv[2].encode("utf-8")
 sockets = []
-for index in range(count):
+for _ in range(count):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", 0))
     sockets.append(sock)
-    sock.sendto(payload + b":" + str(index).encode("ascii"), ("proxy", 3478))
-time.sleep(0.2)
-for sock in sockets:
-    sock.close()
+
+deadline = time.monotonic() + 3
+while time.monotonic() < deadline:
+    for index, sock in enumerate(sockets):
+        sock.sendto(payload + b":" + str(index).encode("ascii"), ("proxy", 3478))
+    time.sleep(0.1)
 ' "${count}" "${payload}" >/dev/null
-  if ! docker start -a "${client_container}"; then
-    docker rm -f "${client_container}" >/dev/null 2>&1 || true
-    fail_with_diagnostics "TURN UDP load client failed"
-  fi
-  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  docker start -a "${container_ref}" >"${log_ref}" 2>&1 &
+  pid_ref="$!"
 }

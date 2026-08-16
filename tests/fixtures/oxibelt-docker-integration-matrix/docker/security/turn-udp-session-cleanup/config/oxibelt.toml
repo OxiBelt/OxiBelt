@@ -64,7 +64,7 @@ enabled = false
 
 [[turn_upstream_pools.servers]]
 id = "turn-a"
-origin = "turn://mock-turn:3478"
+origin = "turn://mock-turn-udp:3478"
 
 [[webrtc_turn_listeners]]
 name = "turn-proxy"

@@ -210,6 +210,8 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       ExpectStart::Success,
       Needs {
         http_upstream: true,
+        protocol_probe: true,
+        turn_udp_upstream: true,
         ..Needs::default()
       },
       None,
