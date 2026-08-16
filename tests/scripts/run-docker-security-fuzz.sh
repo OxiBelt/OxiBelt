@@ -192,7 +192,7 @@ load_target() {
 run_adapter_case() {
   local target="$1" case_index="$2" seed="$3" deadline="$4"
   local output_file="${work_dir}/case-${case_index}.log"
-  local case_started_at now remaining case_budget recovery_budget
+  local case_started_at now remaining case_budget recovery_budget case_status recovery_status
   case_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # The executor receives a deterministic, target-bounded binary case through
   # a file rather than a command argument, preventing shell parsing changes.
@@ -210,7 +210,8 @@ run_adapter_case() {
   ((remaining > 0)) || return 1
   case_budget="${case_timeout_seconds}"
   ((case_budget <= remaining)) || case_budget="${remaining}"
-  if ! timeout --foreground "${case_budget}s" \
+  case_status=0
+  timeout --foreground "${case_budget}s" \
     env \
       OXIBELT_SECURITY_FUZZ_RUN_ID="${run_id}" \
       OXIBELT_SECURITY_FUZZ_LABEL="${label}" \
@@ -227,7 +228,10 @@ run_adapter_case() {
       OXIBELT_SECURITY_FUZZ_MEANING_PRESERVING_TRANSFORMS="${target_transforms}" \
       OXIBELT_SECURITY_FUZZ_RECOVERY_TIMEOUT_SECONDS="${recovery_timeout_seconds}" \
       OXIBELT_SECURITY_FUZZ_DEADLINE_EPOCH_SECONDS="${deadline}" \
-      "${executor}" case >"${output_file}" 2>&1; then
+      "${executor}" case >"${output_file}" 2>&1 || case_status=$?
+  if ((case_status != 0)); then
+    printf 'security-fuzz executor phase=case exit_status=%s budget_seconds=%s\n' \
+      "${case_status}" "${case_budget}" >>"${output_file}"
     write_failure_artifacts "${target}" "${case_index}" "${seed}" "${output_file}"
     cat "${output_file}" >&2 || true
     return 1
@@ -241,7 +245,8 @@ run_adapter_case() {
   fi
   recovery_budget="${recovery_timeout_seconds}"
   ((recovery_budget <= remaining)) || recovery_budget="${remaining}"
-  if ! timeout --foreground "${recovery_budget}s" \
+  recovery_status=0
+  timeout --foreground "${recovery_budget}s" \
     env OXIBELT_SECURITY_FUZZ_RUN_ID="${run_id}" \
       OXIBELT_SECURITY_FUZZ_LABEL="${label}" \
       OXIBELT_SECURITY_FUZZ_TARGET="${target}" \
@@ -249,7 +254,10 @@ run_adapter_case() {
       OXIBELT_SECURITY_FUZZ_CASE_SEED="${seed}" \
       OXIBELT_SECURITY_FUZZ_INPUT_FILE="${input_file}" \
       OXIBELT_SECURITY_FUZZ_WORK_DIR="${work_dir}" \
-      "${executor}" recovery >>"${output_file}" 2>&1; then
+      "${executor}" recovery >>"${output_file}" 2>&1 || recovery_status=$?
+  if ((recovery_status != 0)); then
+    printf 'security-fuzz executor phase=recovery exit_status=%s budget_seconds=%s\n' \
+      "${recovery_status}" "${recovery_budget}" >>"${output_file}"
     write_failure_artifacts "${target}" "${case_index}" "${seed}" "${output_file}"
     return 1
   fi
@@ -272,7 +280,7 @@ run_adapter_case() {
 }
 
 start_executor_session() {
-  local start_timeout="${1:-60}"
+  local start_timeout="${1:-60}" start_status=0
   timeout --foreground "${start_timeout}s" \
     env \
       OXIBELT_SECURITY_FUZZ_RUN_ID="${run_id}" \
@@ -283,18 +291,28 @@ start_executor_session() {
       OXIBELT_SECURITY_FUZZ_ORACLE="${target_oracle}" \
       OXIBELT_SECURITY_FUZZ_MAX_CONCURRENT_SESSIONS="${target_max_concurrent_sessions}" \
       OXIBELT_SECURITY_FUZZ_RECOVERY_TIMEOUT_SECONDS="${recovery_timeout_seconds}" \
-      "${executor}" start
+      "${executor}" start || start_status=$?
+  if ((start_status != 0)); then
+    printf 'security-fuzz executor phase=start exit_status=%s budget_seconds=%s\n' \
+      "${start_status}" "${start_timeout}" >&2
+    return "${start_status}"
+  fi
   : >"${work_dir}/session-started"
 }
 
 stop_executor_session() {
-  local stop_timeout="${1:-30}"
+  local stop_timeout="${1:-30}" stop_status=0
   timeout --foreground "${stop_timeout}s" \
     env OXIBELT_SECURITY_FUZZ_RUN_ID="${run_id}" \
       OXIBELT_SECURITY_FUZZ_LABEL="${label}" \
       OXIBELT_SECURITY_FUZZ_TARGET="${target}" \
       OXIBELT_SECURITY_FUZZ_WORK_DIR="${work_dir}" \
-      "${executor}" stop
+      "${executor}" stop || stop_status=$?
+  if ((stop_status != 0)); then
+    printf 'security-fuzz executor phase=stop exit_status=%s budget_seconds=%s\n' \
+      "${stop_status}" "${stop_timeout}" >&2
+    return "${stop_status}"
+  fi
   rm -f "${work_dir}/session-started"
 }
 
@@ -419,6 +437,19 @@ while ((executed < max_cases)); do
 done
 if (( executed == 0 )); then
   echo "security-fuzz budget elapsed before a case could run" >&2
+  exit 1
+fi
+final_case=$((index - 1))
+final_seed="$(case_seed "${commit_sha}" "${target}" "${schema_version}" "${run_seed}" "${final_case}")"
+final_replay="tests/scripts/run-docker-security-fuzz.sh replay-session ${target} --seed ${run_seed} --case ${final_case}"
+if [[ "${command}" == "replay" ]]; then
+  final_replay="tests/scripts/run-docker-security-fuzz.sh replay ${target} --seed ${run_seed} --case ${final_case}"
+fi
+final_lifecycle_log="${work_dir}/session-final-stop.log"
+if ! stop_executor_session 10 >"${final_lifecycle_log}" 2>&1; then
+  write_failure_artifacts "${target}" "${final_case}" "${final_seed}" "${final_lifecycle_log}" \
+    "${final_replay}"
+  cat "${final_lifecycle_log}" >&2 || true
   exit 1
 fi
 printf 'security-fuzz %s target=%s cases=%s run-seed=%s schema=%s\n' \

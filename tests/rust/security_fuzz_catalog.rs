@@ -314,4 +314,51 @@ mod tests {
       );
     }
   }
+
+  #[test]
+  fn fuzz_session_lifecycle_preserves_fail_closed_restart_state() {
+    let executor = fs::read_to_string(repository_path("tests/docker/security_fuzz/executor.sh"))
+      .expect("security-fuzz executor should be readable");
+    let runner = fs::read_to_string(repository_path("tests/scripts/run-docker-security-fuzz.sh"))
+      .expect("security-fuzz runner should be readable");
+
+    assert!(
+      executor.contains(
+        "ln -sfn ../should-never-be-readable/canary.txt \"${config_dir}/public/canary-link.txt\""
+      ),
+      "path-security fixture preparation must remain idempotent across session restarts"
+    );
+    for phase in ["case", "recovery", "start", "stop"] {
+      assert!(
+        runner.contains(&format!(
+          "security-fuzz executor phase={phase} exit_status=%s"
+        )),
+        "security-fuzz lifecycle failures must retain phase and exit-status diagnostics"
+      );
+    }
+    assert!(
+      runner.contains("if ((start_status != 0)); then")
+        && runner.contains("return \"${start_status}\"")
+        && runner.contains("if ((stop_status != 0)); then")
+        && runner.contains("return \"${stop_status}\""),
+      "session markers must not mask failed executor start or stop commands"
+    );
+    assert!(
+      runner.contains("final_lifecycle_log=\"${work_dir}/session-final-stop.log\"")
+        && runner.contains("if ! stop_executor_session 10"),
+      "a successful fuzz command must verify final session teardown"
+    );
+    let stop_topology = executor
+      .split_once("stop_topology() {")
+      .and_then(|(_, suffix)| suffix.split_once("\n}\n\ncase \"${command}\" in"))
+      .map(|(body, _)| body)
+      .expect("security-fuzz executor must define stop_topology before command dispatch");
+    assert!(
+      stop_topology.contains("cleanup_status=1")
+        && stop_topology.contains("security-fuzz topology cleanup left scoped resources")
+        && stop_topology.contains("return 1")
+        && !stop_topology.contains("docker network rm \"${network}\" >/dev/null 2>&1 || true"),
+      "topology teardown must be convergent and fail closed"
+    );
+  }
 }

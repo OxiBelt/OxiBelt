@@ -183,7 +183,7 @@ prepare_config() {
     sha256sum "${cert_dir}/fullchain.pem" | awk '{print "outside-canary-" $1}' \
       >"${config_dir}/should-never-be-readable/canary.txt"
     cp "${config_dir}/should-never-be-readable/canary.txt" "${canary_file}"
-    ln -s ../should-never-be-readable/canary.txt "${config_dir}/public/canary-link.txt"
+    ln -sfn ../should-never-be-readable/canary.txt "${config_dir}/public/canary-link.txt"
   fi
 }
 
@@ -1191,9 +1191,40 @@ start_topology() {
 }
 
 stop_topology() {
-  docker ps -aq --filter "label=${label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
-  docker volume rm "${fixture_volume}" >/dev/null 2>&1 || true
-  docker network rm "${network}" >/dev/null 2>&1 || true
+  local cleanup_status=0 containers container
+  if ! containers="$(docker ps -aq --filter "label=${label}")"; then
+    echo "failed to enumerate scoped security-fuzz containers" >&2
+    return 1
+  fi
+  while read -r container; do
+    [[ -n "${container}" ]] || continue
+    if ! docker rm -f "${container}" >/dev/null; then
+      docker inspect "${container}" >/dev/null 2>&1 && cleanup_status=1
+    fi
+  done <<<"${containers}"
+  if docker volume inspect "${fixture_volume}" >/dev/null 2>&1 \
+    && ! docker volume rm "${fixture_volume}" >/dev/null; then
+    docker volume inspect "${fixture_volume}" >/dev/null 2>&1 && cleanup_status=1
+  fi
+  if docker network inspect "${network}" >/dev/null 2>&1 \
+    && ! docker network rm "${network}" >/dev/null; then
+    docker network inspect "${network}" >/dev/null 2>&1 && cleanup_status=1
+  fi
+
+  if ! containers="$(docker ps -aq --filter "label=${label}")"; then
+    cleanup_status=1
+  elif [[ -n "${containers}" ]]; then
+    cleanup_status=1
+  fi
+  docker volume inspect "${fixture_volume}" >/dev/null 2>&1 && cleanup_status=1
+  docker network inspect "${network}" >/dev/null 2>&1 && cleanup_status=1
+  if ((cleanup_status != 0)); then
+    echo "security-fuzz topology cleanup left scoped resources" >&2
+    docker ps -a --filter "label=${label}" --format '{{.Names}} {{.Status}}' >&2 || true
+    docker volume inspect "${fixture_volume}" >&2 || true
+    docker network inspect "${network}" >&2 || true
+    return 1
+  fi
 }
 
 case "${command}" in
