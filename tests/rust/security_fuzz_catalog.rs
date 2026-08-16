@@ -348,6 +348,12 @@ mod tests {
         && runner.contains("if ! stop_executor_session 10"),
       "a successful fuzz command must verify final session teardown"
     );
+    assert!(
+      executor.contains("assert_topology_absent() {")
+        && executor.contains("security-fuzz topology already contains scoped resources")
+        && executor.contains("  assert_topology_absent\n  generate_certificates"),
+      "a restarted fuzz session must reject stale scoped topology before creating resources"
+    );
     let stop_topology = executor
       .split_once("stop_topology() {")
       .and_then(|(_, suffix)| suffix.split_once("\n}\n\ncase \"${command}\" in"))

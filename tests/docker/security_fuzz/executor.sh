@@ -1161,6 +1161,28 @@ recovery_target() {
   esac
 }
 
+show_topology_diagnostics() {
+  docker ps -a --filter "label=${label}" --format '{{.Names}} {{.Status}}' >&2 || true
+  docker volume inspect "${fixture_volume}" >&2 || true
+  docker network inspect "${network}" >&2 || true
+}
+
+assert_topology_absent() {
+  local containers
+  if ! containers="$(docker ps -aq --filter "label=${label}")"; then
+    echo "failed to enumerate scoped security-fuzz containers" >&2
+    return 1
+  fi
+  if [[ -z "${containers}" ]] \
+    && ! docker volume inspect "${fixture_volume}" >/dev/null 2>&1 \
+    && ! docker network inspect "${network}" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "security-fuzz topology already contains scoped resources" >&2
+  show_topology_diagnostics
+  return 1
+}
+
 start_topology() {
   require_image "${proxy_image}"
   require_image "${mock_image}"
@@ -1168,6 +1190,7 @@ start_topology() {
   if [[ "${target}" == "admin_authz" ]]; then
     require_image "${postgres_image}"
   fi
+  assert_topology_absent
   generate_certificates
   generate_credentials
   generate_mutation_signer
@@ -1220,9 +1243,7 @@ stop_topology() {
   docker network inspect "${network}" >/dev/null 2>&1 && cleanup_status=1
   if ((cleanup_status != 0)); then
     echo "security-fuzz topology cleanup left scoped resources" >&2
-    docker ps -a --filter "label=${label}" --format '{{.Names}} {{.Status}}' >&2 || true
-    docker volume inspect "${fixture_volume}" >&2 || true
-    docker network inspect "${network}" >&2 || true
+    show_topology_diagnostics
     return 1
   fi
 }
