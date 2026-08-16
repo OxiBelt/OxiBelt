@@ -116,6 +116,17 @@ Use Helm `4.2.4` for canonical packaging and reproducibility. Helm `3.21.3` or
 manifests and their admission references before a staged rollout; do not rely
 on a mutable chart alias.
 
+The canonical `linux/amd64` image requires `x86-64-v3`. Release builders now
+apply that ISA consistently to Rust and bundled native C or C++ dependencies,
+including AWS-LC, zstd, and vendored OpenSSL. Before rollout, run
+`tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3` on each AMD64
+node or use the equivalent `oxibeltctl doctor` deployment check. Hosts that do
+not meet v3 must use the explicit `amd64v2` image by immutable digest; retain
+that digest for rollback because OxiBelt does not negotiate an ISA variant at
+runtime. Direct image builders should migrate from `OXIBELT_RUST_TARGET_CPU`
+to `OXIBELT_AMD64_TARGET_CPU`; the old name remains an alias, and specifying
+different values fails the build.
+
 Retain the `0.6.6` image digests, complete epoch-0 configuration tree,
 referenced assets, compatible PostgreSQL backup, admission bundle, audit
 evidence, controller rollback ConfigMaps, Gateway API CRDs and Lease, and

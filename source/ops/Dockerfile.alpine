@@ -79,6 +79,7 @@ ARG TARGETARCH
 ARG OXIBELT_RUST_BUILDER_STAGE
 ARG OXIBELT_RUST_CACHE_ID=native
 ARG OXIBELT_RUST_TARGET=
+ARG OXIBELT_AMD64_TARGET_CPU=
 ARG OXIBELT_RUST_TARGET_CPU=
 ARG OXIBELT_BUILD_VERSION
 ARG OXIBELT_BUILD_REVISION
@@ -109,6 +110,15 @@ ENV OXIBELT_BUILD_VERSION=${OXIBELT_BUILD_VERSION} \
     OXIBELT_BUILD_KIND=${OXIBELT_BUILD_KIND}
 
 RUN rust_target="${OXIBELT_RUST_TARGET}" && \
+    amd64_target_cpu="${OXIBELT_AMD64_TARGET_CPU}" && \
+    if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
+      if [ -n "${amd64_target_cpu}" ] && [ "${amd64_target_cpu}" != "${OXIBELT_RUST_TARGET_CPU}" ]; then \
+        echo "OXIBELT_AMD64_TARGET_CPU conflicts with legacy OXIBELT_RUST_TARGET_CPU" >&2; \
+        exit 1; \
+      fi; \
+      amd64_target_cpu="${OXIBELT_RUST_TARGET_CPU}"; \
+    fi && \
+    export AWS_LC_SYS_USE_SYSTEM=0 && \
     if [ -z "${rust_target}" ]; then \
       case "${TARGETARCH}" in \
         amd64) rust_target=x86_64-unknown-linux-musl ;; \
@@ -123,14 +133,16 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
           echo "x86_64 musl builds require the native AMD64 builder" >&2; \
           exit 1; \
         fi; \
-        case "${OXIBELT_RUST_TARGET_CPU}" in \
+        case "${amd64_target_cpu}" in \
           ""|x86-64-v2|x86-64-v3|x86-64-v4) ;; \
-          *) echo "unsupported OXIBELT_RUST_TARGET_CPU=${OXIBELT_RUST_TARGET_CPU}" >&2; exit 1 ;; \
+          *) echo "unsupported OXIBELT_AMD64_TARGET_CPU=${amd64_target_cpu}" >&2; exit 1 ;; \
         esac; \
         export CC_x86_64_unknown_linux_musl=musl-gcc; \
         export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc; \
-        if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
-          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Ctarget-cpu=${OXIBELT_RUST_TARGET_CPU}"; \
+        if [ -n "${amd64_target_cpu}" ]; then \
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Ctarget-cpu=${amd64_target_cpu}"; \
+          export CFLAGS_x86_64_unknown_linux_musl="-march=${amd64_target_cpu}"; \
+          export CXXFLAGS_x86_64_unknown_linux_musl="-march=${amd64_target_cpu}"; \
         fi \
         ;; \
       aarch64-unknown-linux-musl) \
@@ -138,8 +150,8 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
           echo "AArch64 musl builds require the native ARM64 builder" >&2; \
           exit 1; \
         fi; \
-        if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
-          echo "OXIBELT_RUST_TARGET_CPU is only supported with x86_64-unknown-linux-musl" >&2; \
+        if [ -n "${amd64_target_cpu}" ]; then \
+          echo "OXIBELT_AMD64_TARGET_CPU is only supported with x86_64-unknown-linux-musl" >&2; \
           exit 1; \
         fi; \
         export CC_aarch64_unknown_linux_musl=musl-gcc; \
@@ -150,8 +162,8 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
           echo "RISC-V musl builds require the cross-rs AMD64 builder" >&2; \
           exit 1; \
         fi; \
-        if [ -n "${OXIBELT_RUST_TARGET_CPU}" ]; then \
-          echo "OXIBELT_RUST_TARGET_CPU is only supported with x86_64-unknown-linux-musl" >&2; \
+        if [ -n "${amd64_target_cpu}" ]; then \
+          echo "OXIBELT_AMD64_TARGET_CPU is only supported with x86_64-unknown-linux-musl" >&2; \
           exit 1; \
         fi; \
         export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Ctarget-feature=+crt-static" \
@@ -161,7 +173,7 @@ RUN rust_target="${OXIBELT_RUST_TARGET}" && \
     rustup target add "${rust_target}" && \
     printf '%s' "${rust_target}" >/tmp/oxibelt-rust-target && \
     printf 'export OXIBELT_BUILD_RUST_TARGET=%s\n' "${rust_target}" >/tmp/oxibelt-build-env && \
-    env | grep -E '^(AR_|CC_|CXX_|CARGO_TARGET_|CMAKE_TOOLCHAIN_FILE_|BINDGEN_EXTRA_CLANG_ARGS_)' | \
+    env | grep -E '^(AR_|CC_|CXX_|CFLAGS_|CXXFLAGS_|CARGO_TARGET_|CMAKE_TOOLCHAIN_FILE_|BINDGEN_EXTRA_CLANG_ARGS_|AWS_LC_)' | \
       sed 's/^/export /' >>/tmp/oxibelt-build-env
 
 FROM builder AS riscv64-musl-check

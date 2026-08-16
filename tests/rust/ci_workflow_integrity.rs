@@ -537,6 +537,11 @@ fn docker_image_artifact_build_script_text() -> String {
     .expect("Docker image artifact build script should be readable")
 }
 
+fn release_target_build_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/build-targets.sh"))
+    .expect("release target build script should be readable")
+}
+
 fn strict_dataplane_image_validator_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/validate-strict-dataplane-image.py"))
     .expect("strict data-plane image validator should be readable")
@@ -888,6 +893,7 @@ fn alpine_dockerfile_builder_copies_workspace_members() {
 fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   let dockerfile = dockerfile_text();
   let script = docker_image_artifact_build_script_text();
+  let release_script = release_target_build_script_text();
   let workspace_manifest = fs::read_to_string(repo_root().join("Cargo.toml"))
     .expect("workspace Cargo.toml should be readable");
   let cli_manifest = fs::read_to_string(repo_root().join("source/apps/oxibeltctl/Cargo.toml"))
@@ -898,6 +904,8 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
     "ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24",
     "ARG OXIBELT_RUST_BUILDER_STAGE=builder-native",
     "ARG OXIBELT_RISCV64_TOOLCHAIN_PLATFORM=linux/amd64",
+    "ARG OXIBELT_AMD64_TARGET_CPU=",
+    "ARG OXIBELT_RUST_TARGET_CPU=",
     "ARG TARGETARCH",
     "FROM --platform=$BUILDPLATFORM ${RUST_BUILDER_IMAGE} AS builder-base",
     "FROM builder-base AS builder-native",
@@ -907,6 +915,11 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
     "riscv64) rust_target=riscv64gc-unknown-linux-musl",
     "CC_x86_64_unknown_linux_musl=musl-gcc",
     "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=\"-Ctarget-cpu=${amd64_target_cpu}\"",
+    "CFLAGS_x86_64_unknown_linux_musl=\"-march=${amd64_target_cpu}\"",
+    "CXXFLAGS_x86_64_unknown_linux_musl=\"-march=${amd64_target_cpu}\"",
+    "OXIBELT_AMD64_TARGET_CPU conflicts with legacy OXIBELT_RUST_TARGET_CPU",
+    "AWS_LC_SYS_USE_SYSTEM=0",
     "CC_aarch64_unknown_linux_musl=musl-gcc",
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc",
     "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS=\"-Ctarget-feature=+crt-static\"",
@@ -927,10 +940,39 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
     "rust_builder_stage=\"builder-riscv64\"",
     "OXIBELT_RUST_BUILDER_STAGE=${rust_builder_stage}",
     "OXIBELT_RUST_CACHE_ID=${rust_build_cache_key}",
+    "OXIBELT_AMD64_TARGET_CPU=${amd64_target_cpu}",
   ] {
     assert!(
       script.contains(expected),
       "Docker artifact builder should record the explicit musl build input: {expected}"
+    );
+  }
+
+  for expected in [
+    "select-amd64-docker-image-artifact.sh\" x86-64-v3",
+    "AWS_LC_SYS_USE_SYSTEM=0",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=\"-Ctarget-cpu=x86-64-v3\"",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=\"-Ctarget-cpu=x86-64-v3\"",
+    "CFLAGS_x86_64_unknown_linux_gnu=\"-march=x86-64-v3\"",
+    "CXXFLAGS_x86_64_unknown_linux_gnu=\"-march=x86-64-v3\"",
+    "CFLAGS_x86_64_unknown_linux_musl=\"-march=x86-64-v3\"",
+    "CXXFLAGS_x86_64_unknown_linux_musl=\"-march=x86-64-v3\"",
+  ] {
+    assert!(
+      release_script.contains(expected),
+      "release target builds should align Rust and native AMD64 ISA inputs: {expected}"
+    );
+  }
+
+  for forbidden in [
+    "export CFLAGS=",
+    "export CXXFLAGS=",
+    "export CPPFLAGS=",
+    "export LDFLAGS=",
+  ] {
+    assert!(
+      !dockerfile.contains(forbidden) && !release_script.contains(forbidden),
+      "release builders should not leak AMD64 ISA flags into global build inputs: {forbidden}"
     );
   }
 

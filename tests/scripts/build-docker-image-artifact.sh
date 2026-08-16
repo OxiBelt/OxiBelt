@@ -85,7 +85,7 @@ rust_builder_image="rust:${rust_toolchain_version}-trixie@sha256:1bcff4befb74059
 node_builder_image="node:24-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43"
 runtime_image="alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 rust_target=""
-rust_target_cpu=""
+amd64_target_cpu=""
 rust_builder_stage="builder-native"
 rust_build_cache_key=""
 derived_revision="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || true)"
@@ -157,7 +157,7 @@ case "${artifact_arch}" in
       exit 2
     fi
     rust_target="x86_64-unknown-linux-musl"
-    rust_target_cpu="x86-64-v2"
+    amd64_target_cpu="x86-64-v2"
     rust_build_cache_key="x86_64-musl-x86-64-v2"
     ;;
   amd64)
@@ -166,7 +166,7 @@ case "${artifact_arch}" in
       exit 2
     fi
     rust_target="x86_64-unknown-linux-musl"
-    rust_target_cpu="x86-64-v3"
+    amd64_target_cpu="x86-64-v3"
     rust_build_cache_key="x86_64-musl-x86-64-v3"
     ;;
   amd64v4)
@@ -175,7 +175,7 @@ case "${artifact_arch}" in
       exit 2
     fi
     rust_target="x86_64-unknown-linux-musl"
-    rust_target_cpu="x86-64-v4"
+    amd64_target_cpu="x86-64-v4"
     rust_build_cache_key="x86_64-musl-x86-64-v4"
     ;;
   arm64)
@@ -251,7 +251,7 @@ docker buildx build \
   --build-arg "OXIBELT_RUST_BUILDER_STAGE=${rust_builder_stage}" \
   --build-arg "OXIBELT_RUST_CACHE_ID=${rust_build_cache_key}" \
   --build-arg "OXIBELT_RUST_TARGET=${rust_target}" \
-  --build-arg "OXIBELT_RUST_TARGET_CPU=${rust_target_cpu}" \
+  --build-arg "OXIBELT_AMD64_TARGET_CPU=${amd64_target_cpu}" \
   --build-arg "OXIBELT_BUILD_VERSION=${oxibelt_version}" \
   --build-arg "OXIBELT_BUILD_REVISION=${oxibelt_revision}" \
   --build-arg "OXIBELT_BUILD_REF=${oxibelt_source_ref}" \

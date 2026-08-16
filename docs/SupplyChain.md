@@ -112,6 +112,15 @@ architecture tags also expose the platform variants. Resolve the exact tag
 intended for the target platform instead of assuming that two tags name the
 same digest.
 
+For AMD64 artifacts, the selected CPU policy applies to both Rust code through
+`-Ctarget-cpu` and bundled native C or C++ code through target-qualified
+`-march` flags. Thus `amd64v2`, `amd64`, and `amd64v4` consistently build at
+`x86-64-v2`, `x86-64-v3`, and `x86-64-v4`, respectively. Bindgen parsing keeps
+only its target and sysroot inputs; it does not inherit the code-generation
+ISA flag. Direct Docker builds should set `OXIBELT_AMD64_TARGET_CPU`.
+`OXIBELT_RUST_TARGET_CPU` remains a compatibility alias, and conflicting
+values are rejected.
+
 ## Select and record an immutable digest
 
 Start from an exact official repository and an approved version tag. Resolve

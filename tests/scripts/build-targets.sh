@@ -7,6 +7,8 @@ crate_root="${repo_root}/source"
 
 host_triple="$(rustc -Vv | sed -n 's/^host: //p')"
 
+export AWS_LC_SYS_USE_SYSTEM=0
+
 case "${host_triple}" in
   x86_64-unknown-linux-gnu)
     gnu_target="${host_triple}"
@@ -29,6 +31,16 @@ case "${host_triple}" in
     exit 1
     ;;
 esac
+
+if [[ "${gnu_target}" == "x86_64-unknown-linux-gnu" ]]; then
+  "${script_dir}/select-amd64-docker-image-artifact.sh" x86-64-v3 >/dev/null
+  export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Ctarget-cpu=x86-64-v3"
+  export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-Ctarget-cpu=x86-64-v3"
+  export CFLAGS_x86_64_unknown_linux_gnu="-march=x86-64-v3"
+  export CXXFLAGS_x86_64_unknown_linux_gnu="-march=x86-64-v3"
+  export CFLAGS_x86_64_unknown_linux_musl="-march=x86-64-v3"
+  export CXXFLAGS_x86_64_unknown_linux_musl="-march=x86-64-v3"
+fi
 
 echo "Installing Rust targets: ${gnu_target} ${musl_target}"
 rustup target add "${gnu_target}" "${musl_target}"
