@@ -316,6 +316,35 @@ mod tests {
   }
 
   #[test]
+  fn waf_bypass_fixture_binds_encoded_path_mutations_to_normalized_matching() {
+    let fixture = fs::read_to_string(repository_path(
+      "tests/docker/security_fuzz/config/waf_bypass.toml",
+    ))
+    .expect("WAF security-fuzz fixture should be readable");
+    let waf_bypass = targets()
+      .expect("catalog must parse and validate")
+      .into_iter()
+      .find(|target| target.id == "waf_bypass")
+      .expect("catalog must define the WAF bypass target");
+
+    assert!(
+      waf_bypass
+        .meaning_preserving_transforms
+        .iter()
+        .any(|transform| transform == "unreserved-percent-encoding"),
+      "the WAF bypass target must exercise percent-encoded path variants"
+    );
+    assert!(
+      fixture.contains("Request.Normalized.Http.Path.endsWith('/sf-known-attack')"),
+      "the WAF fixture must apply its encoded-path oracle to the normalized path view"
+    );
+    assert!(
+      !fixture.contains("Request.Http.Path.endsWith('/sf-known-attack')"),
+      "the WAF fixture must not apply its encoded-path oracle to the raw path view"
+    );
+  }
+
+  #[test]
   fn fuzz_session_lifecycle_preserves_fail_closed_restart_state() {
     let executor = fs::read_to_string(repository_path("tests/docker/security_fuzz/executor.sh"))
       .expect("security-fuzz executor should be readable");

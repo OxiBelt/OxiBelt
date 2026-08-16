@@ -54,7 +54,7 @@ max_concurrent_bodies = 1
 name = "security-fuzz-known-attack"
 phase = "request"
 priority = 1
-when = "Request.Http.Path.endsWith('/sf-known-attack') || Request.Body.contains('sf-known-attack') || (Request.Headers.has('X-Fuzz-Case') && Request.Headers.get('X-Fuzz-Case').contains('sf-known-attack'))"
+when = "Request.Normalized.Http.Path.endsWith('/sf-known-attack') || Request.Body.contains('sf-known-attack') || (Request.Headers.has('X-Fuzz-Case') && Request.Headers.get('X-Fuzz-Case').contains('sf-known-attack'))"
 
 [[waf.rules.actions]]
 type = "reject"
