@@ -615,3 +615,18 @@ fn claim_values_are_rendered_only_for_header_safe_scalars_and_string_arrays() {
     None
   );
 }
+
+#[cfg(feature = "fuzzing")]
+#[test]
+fn fuzz_route_scope_keeps_raw_and_waf_normalized_views_distinct() {
+  let path = "//protected/252e%969g7_jcret";
+  let normalized = crate::waf::fuzz_normalize_path(path);
+
+  assert!(!crate::routes::path_prefix_matches("/protected", path));
+  assert!(crate::routes::path_prefix_matches(
+    "/protected",
+    &normalized
+  ));
+
+  fuzz_auth_request_semantics("", "", "", "", 0, false, path);
+}

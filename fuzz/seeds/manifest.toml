@@ -37,6 +37,14 @@ license = "Apache-2.0"
 classification = "non-secret"
 
 [[seed]]
+target = "path_security_semantics"
+path = "fuzz/seeds/path_security_semantics/raw-normalized-view-separation.bin"
+sha256 = "82b36bef2263511e297770d541fd8ab4b154a58a3f9f6224beae184b73e2d412"
+origin = "Repository-authored minimized synthetic corpus input from the path-security ASan oracle; contains no production traffic."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
 target = "waf_request_evaluation"
 path = "fuzz/seeds/waf_request_evaluation/must-block.tokens"
 sha256 = "c41883bb34eb4761d1642cc8e3e1d6e1538a9acee3da0c3ab28aefd332092a4d"

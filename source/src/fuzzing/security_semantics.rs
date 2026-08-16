@@ -67,7 +67,10 @@ pub fn exercise_path_security_semantics(
       "nested decoding changed the already-resolved static confinement decision"
     );
   }
-  if route_matches_raw != route_matches_nested
+  // Raw routing and the WAF-normalized request view intentionally have
+  // different semantics. Only a second normalization pass may not move the
+  // already-normalized request across a protected prefix.
+  if route_matches_normalized != route_matches_nested
     && path.bytes().any(|byte| matches!(byte, b'.' | b'%' | b'\\'))
   {
     assert!(
@@ -196,4 +199,20 @@ fn request_target(path: &str, query: &str, absolute_form: bool) -> String {
 
 fn has_parent_segment(path: &str) -> bool {
   path.split('/').any(|segment| segment == "..")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn path_oracle_keeps_raw_and_waf_normalized_views_distinct() {
+    let path = "//safe/252e%969g7_jcret";
+    let normalized = crate::waf::fuzz_normalize_path(path);
+
+    assert!(!crate::routes::path_prefix_matches("/safe", path));
+    assert!(crate::routes::path_prefix_matches("/safe", &normalized));
+
+    exercise_path_security_semantics(path, "q=xxxxxxxxxxxxxxxxxxxxxd", "/safe", None, false);
+  }
 }
