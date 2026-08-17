@@ -21,7 +21,7 @@ EOF
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
-matrix_bin=(cargo run --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix --)
+matrix_bin=()
 run_id="$(date +%s)-${BASHPID:-$$}-${RANDOM}"
 label="oxibelt.security-fuzz.run=${run_id}"
 tmp_root="${repo_root}/tests/.tmp"
@@ -55,6 +55,48 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+prepare_matrix_bin() {
+  local build_receipt="${work_dir}/matrix-build.jsonl"
+  local matrix_artifact matrix_executable
+
+  if ! (
+    cd "${repo_root}"
+    cargo build --quiet --locked -p oxibelt --bin oxibelt-docker-integration-matrix \
+      --message-format=json-render-diagnostics >"${build_receipt}"
+  ); then
+    jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' \
+      "${build_receipt}" >&2 2>/dev/null || true
+    echo "failed to build the Docker integration matrix helper" >&2
+    return 1
+  fi
+
+  matrix_artifact="$(
+    jq -ces '
+      map(select(
+        .reason == "compiler-artifact"
+        and .target.name == "oxibelt-docker-integration-matrix"
+        and ((.target.kind? // []) | index("bin") != null)
+        and ((.executable? // null) | type == "string")
+      ))
+      | if length == 1 then .[0]
+        else error("expected exactly one Docker integration matrix executable")
+        end
+    ' "${build_receipt}"
+  )" || {
+    echo "Cargo did not report exactly one Docker integration matrix executable" >&2
+    return 1
+  }
+  matrix_executable="$(jq -er '.executable' <<<"${matrix_artifact}")" || {
+    echo "Cargo reported an invalid Docker integration matrix executable" >&2
+    return 1
+  }
+  if [[ ! -f "${matrix_executable}" || ! -x "${matrix_executable}" ]]; then
+    echo "Cargo reported a Docker integration matrix path that is not an executable file" >&2
+    return 1
+  fi
+  matrix_bin=("${matrix_executable}")
+}
 
 parse_positive_u64() {
   local name="$1" value="$2" maximum="$3"
@@ -345,6 +387,7 @@ while (($#)); do
 done
 
 mkdir -p "${work_dir}"
+prepare_matrix_bin
 load_target "${target}"
 executor="${OXIBELT_SECURITY_FUZZ_EXECUTOR:-${repo_root}/tests/docker/security_fuzz/executor.sh}"
 if [[ ! -x "${executor}" ]]; then

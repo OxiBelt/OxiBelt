@@ -255,11 +255,25 @@ fn valid_identifier(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::process::Command;
+
+  #[cfg(unix)]
+  use std::os::unix::fs::PermissionsExt;
 
   fn repository_path(path: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
       .join("..")
       .join(path)
+  }
+
+  #[cfg(unix)]
+  fn write_executable(path: &std::path::Path, contents: &str) {
+    fs::write(path, contents).expect("fake executable should be written");
+    let mut permissions = fs::metadata(path)
+      .expect("fake executable metadata should be readable")
+      .permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions).expect("fake executable should be executable");
   }
 
   #[test]
@@ -311,6 +325,202 @@ mod tests {
         rows[0].contains(&format!("| {documented_protocols} |")),
         "{} documentation protocols drifted from the catalog",
         target.id
+      );
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn fuzz_runner_builds_matrix_once_outside_the_input_budget() {
+    let fixture = tempfile::tempdir().expect("test fixture directory should be created");
+    let fixture_path = fixture.path();
+    let cargo_log = fixture_path.join("cargo.log");
+    let matrix_log = fixture_path.join("matrix.log");
+    let executor_log = fixture_path.join("executor.log");
+    let fake_matrix = fixture_path.join("oxibelt-docker-integration-matrix");
+    let fake_executor = fixture_path.join("executor");
+
+    write_executable(
+      &fixture_path.join("cargo"),
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+printf '%s\n' "$*" >>"${fixture_dir}/cargo.log"
+if [[ "${1:-}" == "build" ]]; then
+  jq -nc --arg executable "${fixture_dir}/oxibelt-docker-integration-matrix" \
+    '{reason:"compiler-artifact",target:{name:"oxibelt-docker-integration-matrix",kind:["bin"]},executable:$executable}'
+  exit 0
+fi
+sleep 6
+exit 1
+"#,
+    );
+    write_executable(
+      &fixture_path.join("docker"),
+      "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+    );
+    write_executable(
+      &fake_matrix,
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+printf '%s\n' "$*" >>"${fixture_dir}/matrix.log"
+if [[ "${1:-}" == "security-fuzz" && "${2:-}" == "describe" ]]; then
+  printf '%s\n' '{"schema_version":1,"replay_schema_version":1,"pr_max_cases":1,"pr_max_seconds":30,"sustained_default_seconds":30,"sustained_max_cases":16,"case_timeout_seconds":5,"recovery_timeout_seconds":5,"failure_artifact_max_bytes":1048576,"payload_max_bytes":1024,"session_max_cases":4,"max_concurrent_sessions":1,"required_helpers":["fake"],"oracle":"fake","protocols":["h1"],"meaning_preserving_transforms":[]}'
+  exit 0
+fi
+if [[ "${1:-}" == "security-fuzz" && "${2:-}" == "materialize-input" ]]; then
+  shift 2
+  output=""
+  while (($#)); do
+    if [[ "$1" == "--output" ]]; then
+      output="${2:-}"
+      break
+    fi
+    shift
+  done
+  [[ -n "${output}" && ! -e "${output}" && ! -L "${output}" ]]
+  printf 'bounded-input' >"${output}"
+  exit 0
+fi
+exit 2
+"#,
+    );
+    write_executable(
+      &fake_executor,
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+printf '%s\n' "${1:-}" >>"${fixture_dir}/executor.log"
+if [[ "${1:-}" == "case" ]]; then
+  [[ -s "${OXIBELT_SECURITY_FUZZ_INPUT_FILE:-}" ]]
+fi
+exit 0
+"#,
+    );
+
+    let path = format!(
+      "{}:{}",
+      fixture_path.display(),
+      std::env::var("PATH").expect("PATH should be set")
+    );
+    let output = Command::new("bash")
+      .arg(repository_path("tests/scripts/run-docker-security-fuzz.sh"))
+      .args(["smoke", "path_security", "--seed", "42"])
+      .env("PATH", path)
+      .env("OXIBELT_SECURITY_FUZZ_EXECUTOR", &fake_executor)
+      .output()
+      .expect("security-fuzz runner should execute");
+    assert!(
+      output.status.success(),
+      "runner failed\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cargo_calls = fs::read_to_string(cargo_log).expect("Cargo calls should be recorded");
+    assert_eq!(
+      cargo_calls.lines().count(),
+      1,
+      "matrix helper should build once"
+    );
+    assert!(cargo_calls.starts_with("build --quiet --locked"));
+    assert!(
+      !cargo_calls.contains("run"),
+      "input materialization must not launch Cargo inside its timeout"
+    );
+    let matrix_calls = fs::read_to_string(matrix_log).expect("matrix calls should be recorded");
+    let matrix_calls = matrix_calls.lines().collect::<Vec<_>>();
+    assert_eq!(matrix_calls.len(), 2);
+    assert_eq!(
+      matrix_calls[0],
+      "security-fuzz describe --target path_security"
+    );
+    assert!(
+      matrix_calls[1].starts_with("security-fuzz materialize-input --target path_security --seed ")
+        && matrix_calls[1].contains(" --output "),
+      "the resolved helper should own input materialization"
+    );
+    let executor_calls =
+      fs::read_to_string(executor_log).expect("executor calls should be recorded");
+    assert_eq!(
+      executor_calls.lines().collect::<Vec<_>>(),
+      ["start", "case", "recovery", "stop"]
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn fuzz_runner_rejects_ambiguous_or_invalid_matrix_artifacts() {
+    let fixture = tempfile::tempdir().expect("test fixture directory should be created");
+    let fixture_path = fixture.path();
+    let non_executable = fixture_path.join("non-executable-matrix");
+    fs::write(&non_executable, "not executable\n")
+      .expect("non-executable matrix fixture should be written");
+    write_executable(
+      &fixture_path.join("docker"),
+      "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+    );
+    write_executable(
+      &fixture_path.join("cargo"),
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+artifact() {
+  jq -nc --arg executable "$1" \
+    '{reason:"compiler-artifact",target:{name:"oxibelt-docker-integration-matrix",kind:["bin"]},executable:$executable}'
+}
+case "${FAKE_CARGO_MODE:-}" in
+  missing) printf '%s\n' '{"reason":"build-finished","success":true}' ;;
+  duplicate)
+    artifact "${fixture_dir}/first"
+    artifact "${fixture_dir}/second"
+    ;;
+  malformed) printf '%s\n' 'not-json' ;;
+  non-executable) artifact "${fixture_dir}/non-executable-matrix" ;;
+  *) exit 2 ;;
+esac
+"#,
+    );
+
+    let path = format!(
+      "{}:{}",
+      fixture_path.display(),
+      std::env::var("PATH").expect("PATH should be set")
+    );
+    for (mode, expected_error) in [
+      (
+        "missing",
+        "Cargo did not report exactly one Docker integration matrix executable",
+      ),
+      (
+        "duplicate",
+        "Cargo did not report exactly one Docker integration matrix executable",
+      ),
+      (
+        "malformed",
+        "Cargo did not report exactly one Docker integration matrix executable",
+      ),
+      (
+        "non-executable",
+        "Cargo reported a Docker integration matrix path that is not an executable file",
+      ),
+    ] {
+      let output = Command::new("bash")
+        .arg(repository_path("tests/scripts/run-docker-security-fuzz.sh"))
+        .args(["smoke", "path_security", "--seed", "42"])
+        .env("PATH", &path)
+        .env("FAKE_CARGO_MODE", mode)
+        .output()
+        .expect("security-fuzz runner should execute");
+      assert!(
+        !output.status.success(),
+        "{mode} artifact should fail closed"
+      );
+      assert!(
+        String::from_utf8_lossy(&output.stderr).contains(expected_error),
+        "{mode} artifact failure should report {expected_error:?}; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
       );
     }
   }
@@ -390,7 +600,7 @@ mod tests {
       ),
       "path-security fixture preparation must remain idempotent across session restarts"
     );
-    for phase in ["case", "recovery", "start", "stop"] {
+    for phase in ["input", "case", "recovery", "start", "stop"] {
       assert!(
         runner.contains(&format!(
           "security-fuzz executor phase={phase} exit_status=%s"
