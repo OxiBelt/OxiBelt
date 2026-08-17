@@ -2623,7 +2623,7 @@ jobs:
           OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
-        run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
+        run: timeout --kill-after=60s 20m tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
 
       - name: Upload Docker integration diagnostics
         if: failure()

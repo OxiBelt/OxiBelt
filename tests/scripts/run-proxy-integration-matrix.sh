@@ -338,28 +338,35 @@ PY
     ;;
 esac
 
+collect_container_log() {
+  local container_name="$1"
+  local output_name="$2"
+
+  timeout --kill-after=1s 2s docker logs "${container_name}" >"${logs_dir}/${output_name}" 2>&1 || true
+}
+
 collect_diagnostics() {
   mkdir -p "${logs_dir}"
-  docker logs "${proxy_container}" >"${logs_dir}/proxy.log" 2>&1 || true
-  docker logs "${proxy_b_container}" >"${logs_dir}/proxy-b.log" 2>&1 || true
-  docker logs "${http_container}" >"${logs_dir}/mock-http.log" 2>&1 || true
-  docker logs "${https_container}" >"${logs_dir}/mock-https.log" 2>&1 || true
-  docker logs "${alt_container}" >"${logs_dir}/mock-alt.log" 2>&1 || true
-  docker logs "${h2_container}" >"${logs_dir}/mock-h2.log" 2>&1 || true
-  docker logs "${h2c_container}" >"${logs_dir}/mock-h2c.log" 2>&1 || true
-  docker logs "${h1_stall_container}" >"${logs_dir}/mock-h1-stall.log" 2>&1 || true
-  docker logs "${h3_container}" >"${logs_dir}/mock-h3.log" 2>&1 || true
-  docker logs "${webtransport_container}" >"${logs_dir}/mock-webtransport.log" 2>&1 || true
-  docker logs "${websocket_container}" >"${logs_dir}/mock-websocket.log" 2>&1 || true
-  docker logs "${turn_udp_container}" >"${logs_dir}/mock-turn-udp.log" 2>&1 || true
-  docker logs "${turn_tcp_container}" >"${logs_dir}/mock-turn-tcp.log" 2>&1 || true
-  docker logs "${turn_tls_container}" >"${logs_dir}/mock-turn-tls.log" 2>&1 || true
-  docker logs "${dns_container}" >"${logs_dir}/mock-dns.log" 2>&1 || true
-  docker logs "${kubernetes_container}" >"${logs_dir}/mock-kubernetes.log" 2>&1 || true
-  docker logs "${nomad_container}" >"${logs_dir}/mock-nomad.log" 2>&1 || true
-  docker logs "${postgres_container}" >"${logs_dir}/postgres.log" 2>&1 || true
-  docker logs "${redis_container}" >"${logs_dir}/redis.log" 2>&1 || true
-  docker logs "${remote_signer_container}" >"${logs_dir}/remote-signer.log" 2>&1 || true
+  collect_container_log "${proxy_container}" "proxy.log"
+  collect_container_log "${proxy_b_container}" "proxy-b.log"
+  collect_container_log "${http_container}" "mock-http.log"
+  collect_container_log "${https_container}" "mock-https.log"
+  collect_container_log "${alt_container}" "mock-alt.log"
+  collect_container_log "${h2_container}" "mock-h2.log"
+  collect_container_log "${h2c_container}" "mock-h2c.log"
+  collect_container_log "${h1_stall_container}" "mock-h1-stall.log"
+  collect_container_log "${h3_container}" "mock-h3.log"
+  collect_container_log "${webtransport_container}" "mock-webtransport.log"
+  collect_container_log "${websocket_container}" "mock-websocket.log"
+  collect_container_log "${turn_udp_container}" "mock-turn-udp.log"
+  collect_container_log "${turn_tcp_container}" "mock-turn-tcp.log"
+  collect_container_log "${turn_tls_container}" "mock-turn-tls.log"
+  collect_container_log "${dns_container}" "mock-dns.log"
+  collect_container_log "${kubernetes_container}" "mock-kubernetes.log"
+  collect_container_log "${nomad_container}" "mock-nomad.log"
+  collect_container_log "${postgres_container}" "postgres.log"
+  collect_container_log "${redis_container}" "redis.log"
+  collect_container_log "${remote_signer_container}" "remote-signer.log"
 
   if [[ -n "${OXIBELT_TEST_ARTIFACT_DIR:-}" ]]; then
     mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
@@ -367,6 +374,28 @@ collect_diagnostics() {
     cp -R "${case_dir}" "${OXIBELT_TEST_ARTIFACT_DIR}/case" 2>/dev/null || true
   fi
 }
+
+diagnostics_signal_active=0
+handle_diagnostics_signal() {
+  local signal_name="$1"
+
+  # A caught no-op trap prevents handler reentry but resets to the default
+  # disposition in exec'd diagnostic children, keeping their timeouts bounded.
+  trap ':' TERM INT
+  if [[ "${diagnostics_signal_active}" == "1" ]]; then
+    exit 124
+  fi
+  diagnostics_signal_active=1
+  mkdir -p "${logs_dir}"
+  printf 'signal=%s\ncategory=%s\ncase=%s\n' \
+    "${signal_name}" "${category}" "${case_name}" >"${logs_dir}/termination.txt"
+  echo "Docker integration matrix interrupted by ${signal_name}: ${category}/${case_name}" >&2
+  collect_diagnostics
+  exit 124
+}
+
+trap 'handle_diagnostics_signal TERM' TERM
+trap 'handle_diagnostics_signal INT' INT
 
 fail_with_diagnostics() {
   echo "$1" >&2

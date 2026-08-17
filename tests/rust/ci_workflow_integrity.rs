@@ -5665,6 +5665,40 @@ fn docker_integration_jobs_are_split_by_logical_group() {
       "{job_id} should consume {output_name}"
     );
   }
+
+  let proxy_job_text = workflow_job_text(&workflow, "docker-integration-proxy");
+  assert!(
+    proxy_job_text.contains("timeout-minutes: 25"),
+    "the hard job timeout should leave time to upload timeout diagnostics"
+  );
+  let bounded_command = "timeout --kill-after=60s 20m tests/scripts/run-proxy-integration-matrix.sh \"${{ matrix.category }}\" \"${{ matrix.case }}\"";
+  assert!(
+    proxy_job_text.contains(bounded_command),
+    "the proxy matrix command should terminate early enough to collect and upload diagnostics"
+  );
+  assert_eq!(
+    workflow.matches(bounded_command).count(),
+    1,
+    "only the proxy matrix job should use this focused timeout wrapper"
+  );
+
+  let matrix_script = docker_integration_matrix_script_text();
+  for expected in [
+    "collect_container_log()",
+    "timeout --kill-after=1s 2s docker logs",
+    "handle_diagnostics_signal()",
+    "trap ':' TERM INT",
+    "trap 'handle_diagnostics_signal TERM' TERM",
+    "trap 'handle_diagnostics_signal INT' INT",
+    "${logs_dir}/termination.txt",
+    "collect_diagnostics",
+    "exit 124",
+  ] {
+    assert!(
+      matrix_script.contains(expected),
+      "the proxy matrix timeout diagnostic contract should include {expected}"
+    );
+  }
 }
 
 #[test]
