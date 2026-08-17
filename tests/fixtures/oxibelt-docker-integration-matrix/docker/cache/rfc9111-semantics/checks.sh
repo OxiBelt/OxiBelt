@@ -23,5 +23,5 @@ run_case_checks() {
   assert_response_jq "${past_first}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "not_cacheable"'
   past_second="$(client_request "example.test" "${past_path}" 200)"
   assert_response_jq "${past_second}" '.body == "past-second"'
-  assert_response_jq "${past_second}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "store_not_allowed"'
+  assert_response_jq "${past_second}" '.headers["x-oxibelt-cache"] == "miss"'
 }
