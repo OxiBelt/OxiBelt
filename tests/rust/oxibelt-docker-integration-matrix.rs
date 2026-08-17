@@ -1,7 +1,10 @@
 use std::env;
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -226,8 +229,79 @@ fn security_fuzz_command(args: &[String]) -> Result<()> {
       );
       Ok(())
     }
+    "materialize-input" => {
+      let target = arg_value(args, "--target")?;
+      let seed = arg_value(args, "--seed")?;
+      let output = PathBuf::from(arg_value(args, "--output")?);
+      materialize_security_fuzz_input(&target, &seed, &output)
+    }
     _ => Err(format!("unknown security-fuzz command: {command}").into()),
   }
+}
+
+fn materialize_security_fuzz_input(target_id: &str, seed: &str, output: &Path) -> Result<()> {
+  let target = security_fuzz_catalog::target(target_id)?;
+  if seed.len() != 64
+    || !seed
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+  {
+    return Err("security-fuzz seed must be exactly 64 lowercase hexadecimal characters".into());
+  }
+
+  let requested_bytes =
+    usize::from(u16::from_str_radix(&seed[..4], 16)?) % target.payload_max_bytes + 1;
+  let mut output_file = OpenOptions::new()
+    .write(true)
+    .create_new(true)
+    .open(output)
+    .map_err(|error| {
+      format!(
+        "failed to create security-fuzz input {}: {error}",
+        output.display()
+      )
+    })?;
+
+  let mut block = seed.to_string();
+  let mut written = 0;
+  while written < requested_bytes {
+    let decoded = decode_lower_hex_block(&block)?;
+    let chunk_len = decoded.len().min(requested_bytes - written);
+    output_file.write_all(&decoded[..chunk_len])?;
+    written += chunk_len;
+    block = encode_lower_hex(&Sha256::digest(block.as_bytes()));
+  }
+  output_file.flush()?;
+  Ok(())
+}
+
+fn decode_lower_hex_block(block: &str) -> Result<[u8; 32]> {
+  if block.len() != 64 {
+    return Err("security-fuzz generator block must contain 64 hexadecimal characters".into());
+  }
+  let mut decoded = [0_u8; 32];
+  for (index, pair) in block.as_bytes().chunks_exact(2).enumerate() {
+    decoded[index] = (lower_hex_nibble(pair[0])? << 4) | lower_hex_nibble(pair[1])?;
+  }
+  Ok(decoded)
+}
+
+fn lower_hex_nibble(byte: u8) -> Result<u8> {
+  match byte {
+    b'0'..=b'9' => Ok(byte - b'0'),
+    b'a'..=b'f' => Ok(byte - b'a' + 10),
+    _ => Err("security-fuzz generator block must be lowercase hexadecimal".into()),
+  }
+}
+
+fn encode_lower_hex(bytes: &[u8]) -> String {
+  const HEX: &[u8; 16] = b"0123456789abcdef";
+  let mut encoded = String::with_capacity(bytes.len() * 2);
+  for byte in bytes {
+    encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+    encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+  }
+  encoded
 }
 
 fn materialize_command(args: &[String]) -> Result<()> {
@@ -257,7 +331,7 @@ fn materialize_command(args: &[String]) -> Result<()> {
 
 fn usage() {
   eprintln!(
-    "usage:\n  oxibelt-docker-integration-matrix list --suite <docker|browser|security-fuzz> --format github-matrix [--group <docker-group>]\n  oxibelt-docker-integration-matrix materialize --suite <docker|browser> --category <name> --case <name> --output <dir>\n  oxibelt-docker-integration-matrix security-fuzz describe --target <target>"
+    "usage:\n  oxibelt-docker-integration-matrix list --suite <docker|browser|security-fuzz> --format github-matrix [--group <docker-group>]\n  oxibelt-docker-integration-matrix materialize --suite <docker|browser> --category <name> --case <name> --output <dir>\n  oxibelt-docker-integration-matrix security-fuzz describe --target <target>\n  oxibelt-docker-integration-matrix security-fuzz materialize-input --target <target> --seed <lowercase-hex> --output <file>"
   );
 }
 
@@ -811,6 +885,68 @@ mod tests {
       assert!(
         safe_path_component(OsStr::new(value), "test field").is_err(),
         "{value} should be rejected"
+      );
+    }
+  }
+
+  #[test]
+  fn security_fuzz_input_preserves_failed_admin_replay_bytes() {
+    let temp_dir = tempfile::tempdir().expect("test directory should be created");
+    let output = temp_dir.path().join("admin-authz.bin");
+    let seed = "ebbaf26c52af3732bba7e69fe26fb7d6c0398564e04c56628f4ccbe9cab285fd";
+
+    materialize_security_fuzz_input("admin_authz", seed, &output)
+      .expect("known security-fuzz input should materialize");
+    let input = fs::read(&output).expect("materialized input should be readable");
+
+    assert_eq!(input.len(), 60_347);
+    assert_eq!(
+      encode_lower_hex(&Sha256::digest(&input)),
+      "da7229f9edf5286b23e7c37e6412bbf2bdafa5e90721b4df1a05746de2159978"
+    );
+  }
+
+  #[test]
+  fn security_fuzz_input_rejects_noncanonical_seeds() {
+    let temp_dir = tempfile::tempdir().expect("test directory should be created");
+    for (index, seed) in [
+      "0",
+      "EBBAF26C52AF3732BBA7E69FE26FB7D6C0398564E04C56628F4CCBE9CAB285FD",
+      "gbbaf26c52af3732bba7e69fe26fb7d6c0398564e04c56628f4ccbe9cab285fd",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+      let output = temp_dir.path().join(format!("invalid-{index}.bin"));
+      assert!(
+        materialize_security_fuzz_input("admin_authz", seed, &output).is_err(),
+        "seed {seed} should be rejected"
+      );
+      assert!(!output.exists(), "invalid seed must not create output");
+    }
+  }
+
+  #[test]
+  fn security_fuzz_input_never_replaces_existing_output() {
+    let temp_dir = tempfile::tempdir().expect("test directory should be created");
+    let output = temp_dir.path().join("existing.bin");
+    fs::write(&output, b"preserve-me").expect("sentinel output should be created");
+    let seed = "ebbaf26c52af3732bba7e69fe26fb7d6c0398564e04c56628f4ccbe9cab285fd";
+
+    assert!(materialize_security_fuzz_input("admin_authz", seed, &output).is_err());
+    assert_eq!(
+      fs::read(&output).expect("sentinel output should remain readable"),
+      b"preserve-me"
+    );
+
+    #[cfg(unix)]
+    {
+      let symlink = temp_dir.path().join("symlink.bin");
+      std::os::unix::fs::symlink(&output, &symlink).expect("test symlink should be created");
+      assert!(materialize_security_fuzz_input("admin_authz", seed, &symlink).is_err());
+      assert_eq!(
+        fs::read(&output).expect("symlink target should remain readable"),
+        b"preserve-me"
       );
     }
   }

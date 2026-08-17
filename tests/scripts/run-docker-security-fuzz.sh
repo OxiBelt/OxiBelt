@@ -176,6 +176,8 @@ load_target() {
   sustained_max_cases="$(jq -er '.sustained_max_cases' <<<"${description}")"
   case_timeout_seconds="$(jq -er '.case_timeout_seconds' <<<"${description}")"
   recovery_timeout_seconds="$(jq -er '.recovery_timeout_seconds' <<<"${description}")"
+  input_timeout_seconds="${case_timeout_seconds}"
+  complete_case_budget_seconds=$((input_timeout_seconds + case_timeout_seconds + recovery_timeout_seconds))
   failure_artifact_max_bytes="$(jq -er '.failure_artifact_max_bytes' <<<"${description}")"
   target_payload_max_bytes="$(jq -er '.payload_max_bytes' <<<"${description}")"
   target_session_max_cases="$(jq -er '.session_max_cases' <<<"${description}")"
@@ -192,24 +194,37 @@ load_target() {
 run_adapter_case() {
   local target="$1" case_index="$2" seed="$3" deadline="$4"
   local output_file="${work_dir}/case-${case_index}.log"
-  local case_started_at now remaining case_budget recovery_budget case_status recovery_status
-  case_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local case_started_at now remaining case_budget recovery_budget
+  local input_status case_status recovery_status
   # The executor receives a deterministic, target-bounded binary case through
   # a file rather than a command argument, preventing shell parsing changes.
   local input_file="${work_dir}/case-${case_index}.bin"
-  local requested_bytes=$((16#${seed:0:4} % target_payload_max_bytes + 1))
-  : >"${input_file}"
-  local block="${seed}"
-  while [[ "$(wc -c <"${input_file}")" -lt "${requested_bytes}" ]]; do
-    printf '%s' "${block}" | tr '[:lower:]' '[:upper:]' | basenc --base16 -d >>"${input_file}"
-    block="$(printf '%s' "${block}" | sha256sum | awk '{print $1}')"
-  done
-  truncate -s "${requested_bytes}" "${input_file}"
+  : >"${output_file}"
+  input_status=0
+  (
+    cd "${repo_root}"
+    timeout --foreground "${input_timeout_seconds}s" \
+      "${matrix_bin[@]}" security-fuzz materialize-input \
+        --target "${target}" --seed "${seed}" --output "${input_file}"
+  ) >>"${output_file}" 2>&1 || input_status=$?
+  if ((input_status != 0)); then
+    printf 'security-fuzz executor phase=input exit_status=%s budget_seconds=%s\n' \
+      "${input_status}" "${input_timeout_seconds}" >>"${output_file}"
+    [[ -e "${input_file}" || -L "${input_file}" ]] || : >"${input_file}"
+    write_failure_artifacts "${target}" "${case_index}" "${seed}" "${output_file}"
+    cat "${output_file}" >&2 || true
+    return 1
+  fi
   now="$(date +%s)"
   remaining=$((deadline - now))
-  ((remaining > 0)) || return 1
+  if ((remaining < case_timeout_seconds + recovery_timeout_seconds)); then
+    adapter_case_started=0
+    rm -f "${input_file}"
+    return 0
+  fi
+  adapter_case_started=1
+  case_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   case_budget="${case_timeout_seconds}"
-  ((case_budget <= remaining)) || case_budget="${remaining}"
   case_status=0
   timeout --foreground "${case_budget}s" \
     env \
@@ -236,15 +251,7 @@ run_adapter_case() {
     cat "${output_file}" >&2 || true
     return 1
   fi
-  now="$(date +%s)"
-  remaining=$((deadline - now))
-  if ((remaining <= 0)); then
-    echo "security-fuzz deadline elapsed before post-case recovery" >>"${output_file}"
-    write_failure_artifacts "${target}" "${case_index}" "${seed}" "${output_file}"
-    return 1
-  fi
   recovery_budget="${recovery_timeout_seconds}"
-  ((recovery_budget <= remaining)) || recovery_budget="${remaining}"
   recovery_status=0
   timeout --foreground "${recovery_budget}s" \
     env OXIBELT_SECURITY_FUZZ_RUN_ID="${run_id}" \
@@ -364,7 +371,7 @@ case "${command}" in
     parse_positive_u64 "case" "${case_index}" "${sustained_max_cases}"
     if [[ "${command}" == "replay" ]]; then
       max_cases=1
-      duration=$((case_timeout_seconds + recovery_timeout_seconds))
+      duration="${complete_case_budget_seconds}"
     else
       max_cases="${case_index}"
       duration="${sustained_default_seconds}"
@@ -380,7 +387,8 @@ case "${command}" in
 esac
 
 # Cold image/container setup is intentionally outside the per-mutation budget;
-# once started, every mutation and recovery remains bounded by the catalog.
+# once started, input materialization, mutation, and recovery each receive a
+# complete catalog-derived budget.
 startup_log="${work_dir}/startup.log"
 if ! start_executor_session >"${startup_log}" 2>&1; then
   startup_case=1
@@ -399,9 +407,11 @@ index="${first_case}"
 while ((executed < max_cases)); do
   now="$(date +%s)"
   remaining=$((deadline - now))
-  ((remaining >= case_timeout_seconds + recovery_timeout_seconds)) || break
+  ((remaining >= complete_case_budget_seconds)) || break
   derived_seed="$(case_seed "${commit_sha}" "${target}" "${schema_version}" "${run_seed}" "${index}")"
+  adapter_case_started=0
   run_adapter_case "${target}" "${index}" "${derived_seed}" "${deadline}"
+  ((adapter_case_started == 1)) || break
   executed=$((executed + 1))
   index=$((index + 1))
   now="$(date +%s)"
