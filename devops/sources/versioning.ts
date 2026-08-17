@@ -15,7 +15,7 @@ import {
   RepositoryVersionPolicy
 } from './repository_version_policy.js'
 
-/* eslint-disable @typescript-eslint/naming-convention -- CLI options and release results use stable lower-camel-case keys. */
+/* oxlint-disable oxibelt/pascal-case -- CLI options and release results use stable lower-camel-case keys. */
 type CliParameters = {
   workspacePath?: string
   manifestPath?: string
@@ -61,7 +61,7 @@ type StagedWrite = PlannedWrite & {
   originalMoved: boolean
   installed: boolean
 }
-/* eslint-enable @typescript-eslint/naming-convention */
+/* oxlint-enable oxibelt/pascal-case */
 
 function FormatError(ErrorValue: unknown): string {
   if (ErrorValue instanceof Error) {

@@ -58,7 +58,7 @@ const SupplyChainArtifactRequirements = [
   'chart-gateway-controller|helm-chart|ghcr.io/oxibelt/charts/oxibelt-gateway-controller'
 ] as const
 
-/* eslint-disable @typescript-eslint/naming-convention -- Parsed policy and JSON Schema keys are stable lower-camel-case wire names. */
+/* oxlint-disable oxibelt/pascal-case -- Parsed policy and JSON Schema keys are stable lower-camel-case wire names. */
 type JsonObject = Record<string, unknown>
 
 type JsonSchema = {
@@ -240,7 +240,7 @@ type ParsedCli = {
   command: 'check' | 'render' | 'verify'
   parameters: CliParameters
 }
-/* eslint-enable @typescript-eslint/naming-convention */
+/* oxlint-enable oxibelt/pascal-case */
 
 function IsObject(Value: unknown): Value is JsonObject {
   return typeof Value === 'object' && Value !== null && !Array.isArray(Value)

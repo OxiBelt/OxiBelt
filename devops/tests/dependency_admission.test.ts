@@ -5,7 +5,7 @@ import * as Path from 'node:path'
 import test from 'node:test'
 import { ValidateDependencyAdmission } from '../sources/dependency_admission.js'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Test fixtures intentionally mirror external JSON and YAML keys. */
+/* oxlint-disable oxibelt/pascal-case -- Test fixtures intentionally mirror external JSON and YAML keys. */
 type Fixture = {
   root: string
   policyPath: string

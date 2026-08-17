@@ -54,7 +54,7 @@ export const RequiredReleaseSections = [
 
 type RequiredReleaseSection = (typeof RequiredReleaseSections)[number]
 
-/* eslint-disable @typescript-eslint/naming-convention -- Parsed Markdown, CLI, receipt, and GitHub JSON records use stable lower-camel-case keys. */
+/* oxlint-disable oxibelt/pascal-case -- Parsed Markdown, CLI, receipt, and GitHub JSON records use stable lower-camel-case keys. */
 type ReleaseEntry = {
   version: string
   body: string
@@ -149,7 +149,7 @@ type ParsedCli = {
   command: string
   parameters: CliParameters
 }
-/* eslint-enable @typescript-eslint/naming-convention */
+/* oxlint-enable oxibelt/pascal-case */
 
 const CompatibilitySurfaceSections: CompatibilitySurface[] = [
   {

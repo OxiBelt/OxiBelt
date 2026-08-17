@@ -17,7 +17,7 @@ const Source = `https://github.com/${Repository}`
 const Roles = ['standalone', 'dataplane', 'dataplane-strict', 'controller', 'tools', 'keysigner']
 const Archs = ['amd64v2', 'amd64', 'amd64v4', 'arm64', 'riscv64']
 
-/* eslint-disable @typescript-eslint/naming-convention -- Fixtures intentionally mirror external CycloneDX and GitHub JSON fields. */
+/* oxlint-disable oxibelt/pascal-case -- Fixtures intentionally mirror external CycloneDX and GitHub JSON fields. */
 function ReleasePlan(): ReturnType<typeof BuildImageReleasePlan> {
   return BuildImageReleasePlan({
     releaseTag: ParseReleaseTag(Version),

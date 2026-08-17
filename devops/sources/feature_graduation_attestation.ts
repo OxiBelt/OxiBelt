@@ -22,7 +22,7 @@ import {
   type KubernetesGraduationPolicy
 } from './kubernetes_graduation.js'
 
-/* eslint-disable @typescript-eslint/naming-convention -- This file defines stable sealed-attestation JSON wire keys. */
+/* oxlint-disable oxibelt/pascal-case -- This file defines stable sealed-attestation JSON wire keys. */
 type JsonObject = Record<string, unknown>
 
 export const FeatureGraduationPredicateType = 'https://oxibelt.dev/attestations/feature-graduation/v1'

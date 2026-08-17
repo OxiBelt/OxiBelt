@@ -4,7 +4,7 @@ import * as Toml from 'smol-toml'
 
 type TomlRecord = Record<string, unknown>
 
-/* eslint-disable @typescript-eslint/naming-convention -- Policy descriptors and reports use stable lower-camel-case keys. */
+/* oxlint-disable oxibelt/pascal-case -- Policy descriptors and reports use stable lower-camel-case keys. */
 type CargoPackagePolicy = {
   name: string
   manifestPath: string
@@ -39,7 +39,7 @@ export type VersionPolicyReport = {
   version: string
   violations: VersionPolicyViolation[]
 }
-/* eslint-enable @typescript-eslint/naming-convention */
+/* oxlint-enable oxibelt/pascal-case */
 
 const CommittedVersion = '0.0.0'
 const ArchiveVersion = '0.0.0-dev.archive'

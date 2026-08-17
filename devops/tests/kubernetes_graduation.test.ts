@@ -20,7 +20,7 @@ import {
   type KubernetesGraduationPolicy
 } from '../sources/kubernetes_graduation.js'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Fixture fields mirror detached receipt JSON. */
+/* oxlint-disable oxibelt/pascal-case -- Fixture fields mirror detached receipt JSON. */
 const RepoRoot = Path.resolve(Path.dirname(fileURLToPath(import.meta.url)), '../..')
 
 function ReadJson(RelativePath: string): unknown {

@@ -3,7 +3,7 @@ import * as Fs from 'node:fs'
 import * as Process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Rebuild predicates use stable lower-camel-case JSON keys. */
+/* oxlint-disable oxibelt/pascal-case -- Rebuild predicates use stable lower-camel-case JSON keys. */
 type JsonRecord = Record<string, unknown>
 
 export const RebuildPredicateType = 'https://oxibelt.dev/attestations/rebuild/v1'

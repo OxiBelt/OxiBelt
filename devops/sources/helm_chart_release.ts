@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url'
 import * as Zlib from 'node:zlib'
 import { ParseReleaseRef, ParseReleaseTag } from './docker_image_release.js'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Canonical release-plan JSON uses stable lower-camel-case keys. */
+/* oxlint-disable oxibelt/pascal-case -- Canonical release-plan JSON uses stable lower-camel-case keys. */
 
 export const HelmChartReleasePlanSchemaVersion = 1
 export const HelmChartReleasePlanFilename = 'helm-chart-release-plan.json'

@@ -10,7 +10,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck --workspaces --if-present",
-    "lint": "eslint \"devops/**/*.ts\" \"ui/*/source/**/*.ts\"",
+    "lint": "oxlint \"devops/**/*.ts\" \"ui/*/source/**/*.ts\" devops/oxlint-plugin.mjs",
     "test": "node --import tsx --test devops/tests/*.test.ts",
     "dependency-admission": "node --import tsx devops/sources/dependency_admission.ts --workspace-path . --policy-path supply-chain/dependency-policy.json",
     "image-vulnerability-policy:check": "node --import tsx devops/sources/image_vulnerability_policy.ts validate-policy --policy supply-chain/image-vulnerability-policy.json",
@@ -34,9 +34,8 @@
   "devDependencies": {
     "@types/node": "24.13.3",
     "@types/semver": "7.8.0",
-    "@typescript-eslint/eslint-plugin": "8.67.0",
-    "@typescript-eslint/parser": "8.67.0",
-    "eslint": "10.8.1",
+    "oxlint": "1.78.0",
+    "oxlint-tsgolint": "7.0.2001",
     "tsx": "4.23.12",
     "typescript": "6.0.3"
   },

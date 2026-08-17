@@ -3,7 +3,7 @@ import * as Fs from 'node:fs'
 import * as Process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Options and parsed release, CycloneDX, and GitHub JSON use stable lower-camel-case keys. */
+/* oxlint-disable oxibelt/pascal-case -- Options and parsed release, CycloneDX, and GitHub JSON use stable lower-camel-case keys. */
 type JsonRecord = Record<string, unknown>
 
 export type PlatformSbomOptions = {

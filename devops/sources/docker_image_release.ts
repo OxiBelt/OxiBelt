@@ -9,7 +9,7 @@ export type ReleaseKind = 'stable' | 'beta' | 'build'
 export type ImageRole = 'standalone' | 'dataplane' | 'dataplane-strict' | 'controller' | 'tools' | 'keysigner'
 export type EmbeddedAsset = 'admin-openapi' | 'person-proof'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Release metadata JSON uses stable lower-camel-case keys. */
+/* oxlint-disable oxibelt/pascal-case -- Release metadata JSON uses stable lower-camel-case keys. */
 export type ReleaseTagInfo = {
   tag: string
   major: string
@@ -95,7 +95,7 @@ type BuildImageReleasePlanOptions = {
   revision: string
   source: string
 }
-/* eslint-enable @typescript-eslint/naming-convention */
+/* oxlint-enable oxibelt/pascal-case */
 
 const BuildCommitPrefix = /^[0-9a-f]{8}$/
 

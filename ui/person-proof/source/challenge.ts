@@ -5,7 +5,7 @@ const ReturnPath = '__RETURN_PATH_JS__'
 const EmbeddedDifficulty = Number('__DIFFICULTY__')
 const Encoder = new TextEncoder()
 
-/* eslint-disable @typescript-eslint/naming-convention -- Challenge API payloads use lower-case JSON keys. */
+/* oxlint-disable oxibelt/pascal-case -- Challenge API payloads use lower-case JSON keys. */
 type SessionDocument = {
   session: string
   person_proof_mode: string
@@ -38,7 +38,7 @@ type VerifyResponse = {
   return_path?: string
   clearance?: ClearanceMetadata
 }
-/* eslint-enable @typescript-eslint/naming-convention */
+/* oxlint-enable oxibelt/pascal-case */
 
 const StatusElement = document.querySelector<HTMLElement>('[data-status]')
 

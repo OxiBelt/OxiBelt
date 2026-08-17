@@ -26,7 +26,7 @@ import {
   type KubernetesGraduationPolicy
 } from '../sources/kubernetes_graduation.js'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Fixtures mirror sealed attestation JSON. */
+/* oxlint-disable oxibelt/pascal-case -- Fixtures mirror sealed attestation JSON. */
 const RepoRoot = Path.resolve(Path.dirname(fileURLToPath(import.meta.url)), '../..')
 const Revision = 'a'.repeat(40)
 

@@ -18,7 +18,7 @@ import { RunVersioning } from '../sources/versioning.js'
 
 const PackageName = 'oxibelt'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Test fixtures mirror repository and release metadata keys. */
+/* oxlint-disable oxibelt/pascal-case -- Test fixtures mirror repository and release metadata keys. */
 type Workspace = {
   root: string
   manifestPath: string
@@ -29,7 +29,7 @@ type ReleasePlanSummary = {
   tag: string
   kind: string
 }
-/* eslint-enable @typescript-eslint/naming-convention */
+/* oxlint-enable oxibelt/pascal-case */
 
 function WriteWorkspaceFile(Root: string, RelativePath: string, Content: string): void {
   const FilePath = Path.join(Root, RelativePath)

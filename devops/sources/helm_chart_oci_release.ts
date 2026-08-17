@@ -5,7 +5,7 @@ import * as Process from 'node:process'
 import { pathToFileURL } from 'node:url'
 import { ParseReleaseTag } from './docker_image_release.js'
 
-/* eslint-disable @typescript-eslint/naming-convention -- OCI receipt JSON is a stable public contract. */
+/* oxlint-disable oxibelt/pascal-case -- OCI receipt JSON is a stable public contract. */
 
 type JsonObject = Record<string, unknown>
 

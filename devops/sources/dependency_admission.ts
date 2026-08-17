@@ -4,7 +4,7 @@ import * as Process from 'node:process'
 import { pathToFileURL } from 'node:url'
 import * as Semver from 'semver'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Policy, manifest, lockfile, and report keys are stable external interfaces. */
+/* oxlint-disable oxibelt/pascal-case -- Policy, manifest, lockfile, and report keys are stable external interfaces. */
 type JsonRecord = Record<string, unknown>
 
 type CliParameters = {
@@ -64,7 +64,7 @@ type LockDependency = {
   specifier: string
   version: string
 }
-/* eslint-enable @typescript-eslint/naming-convention */
+/* oxlint-enable oxibelt/pascal-case */
 
 const DependencyFields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'] as const
 const KnownNodePolicyFields = ['allowedRegistries', 'allowedLicenses', 'lifecycleScripts', 'auditExceptions']

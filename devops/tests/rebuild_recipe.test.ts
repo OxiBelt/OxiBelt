@@ -9,7 +9,7 @@ import {
   RebuildPredicateType
 } from '../sources/rebuild_recipe.js'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Fixtures and assertions mirror stable release JSON keys. */
+/* oxlint-disable oxibelt/pascal-case -- Fixtures and assertions mirror stable release JSON keys. */
 
 const Revision = 'a'.repeat(40)
 const Source = 'https://github.com/OxiBelt/OxiBelt'

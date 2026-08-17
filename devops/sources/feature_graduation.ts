@@ -5,7 +5,7 @@ import * as Process from 'node:process'
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
-/* eslint-disable @typescript-eslint/naming-convention -- Stable policy and receipt keys are external JSON wire names. */
+/* oxlint-disable oxibelt/pascal-case -- Stable policy and receipt keys are external JSON wire names. */
 const PolicyPath = 'devops/config/feature-graduation.json'
 const SchemaPath = 'devops/config/feature-graduation.schema.json'
 const FeatureStatusPath = 'docs/FeatureStatus.md'
