@@ -72,6 +72,9 @@ for the governed entry format.
 
 ### Feature lifecycle
 
+- Replace ESLint-only suppression directives with their Oxlint equivalents in
+  release tooling. This tooling-only migration does not change the lifecycle
+  registries, evidence schemas, promotion eligibility, or runtime behavior.
 - Keep every general and Kubernetes feature in the tracked graduation
   registries `experimental` and `unvalidated` for `0.8.0`. The expanded test
   and attestation inventory is qualification machinery, not evidence of a
