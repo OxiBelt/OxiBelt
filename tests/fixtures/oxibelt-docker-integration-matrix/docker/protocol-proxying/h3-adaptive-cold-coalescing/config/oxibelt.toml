@@ -35,7 +35,7 @@ detail = "detailed"
 
 [quic.upstream.resolution]
 max_endpoint_count = 16
-min_ttl_ms = 1000
+min_ttl_ms = 30000
 max_ttl_ms = 30000
 negative_ttl_ms = 1000
 address_family_stagger_ms = 250
