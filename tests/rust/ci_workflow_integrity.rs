@@ -8678,6 +8678,14 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     serde_json::json!({"actions": "read"})
   );
   assert_eq!(
+    parsed["jobs"]["release-vulnerability-gate"]["outputs"],
+    serde_json::json!({
+      "vulnerability_decision_artifact_name": "${{ steps.decision-identity.outputs.artifact_name }}",
+      "vulnerability_decision_run_attempt": "${{ steps.decision-identity.outputs.run_attempt }}"
+    }),
+    "the gate should export the exact producer identity for rerun-safe consumers"
+  );
+  assert_eq!(
     parsed["jobs"]["release-image-arch"]["permissions"],
     serde_json::json!({
       "actions": "read",
@@ -8697,14 +8705,21 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   }
   assert_eq!(
     parsed["jobs"]["release-image-arch"]["with"]["vulnerability_decision_artifact_name"].as_str(),
-    Some(
-      "${{ format('release-vulnerability-decision-{0}-{1}', github.run_id, github.run_attempt) }}"
-    ),
-    "release admission evidence should remain attempt-scoped"
+    Some("${{ needs.release-vulnerability-gate.outputs.vulnerability_decision_artifact_name }}"),
+    "release image publishers should use the gate producer artifact identity"
+  );
+  assert_eq!(
+    parsed["jobs"]["release-image-arch"]["with"]["vulnerability_decision_run_attempt"].as_str(),
+    Some("${{ needs.release-vulnerability-gate.outputs.vulnerability_decision_run_attempt }}"),
+    "release image publishers should verify the gate producer attempt"
   );
   assert!(parsed_scan["on"]["workflow_call"].get("secrets").is_none());
   assert_eq!(
     parsed_arch["on"]["workflow_call"]["inputs"]["vulnerability_decision_artifact_name"]["required"],
+    true
+  );
+  assert_eq!(
+    parsed_arch["on"]["workflow_call"]["inputs"]["vulnerability_decision_run_attempt"]["required"],
     true
   );
   for job_id in ["build", "scan", "runtime-smoke"] {
@@ -8967,6 +8982,11 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     "--scan-bundle",
     "--output \"${DECISION}\"",
     "--markdown-output \"${DECISION_MARKDOWN}\"",
+    "Capture controlled vulnerability gate producer identity",
+    "artifact_name=release-vulnerability-decision-%s-%s",
+    "name: ${{ steps.decision-identity.outputs.artifact_name }}",
+    "vulnerability_decision_artifact_name",
+    "vulnerability_decision_run_attempt",
     "Upload controlled vulnerability gate decision",
     "retention-days: 7",
     "Enforce vulnerability gate result",
@@ -9012,7 +9032,13 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   for (job, verification) in package_boundaries {
     for expected in [
       "packages: write",
+      "Validate controlled vulnerability gate producer identity",
       "Download controlled vulnerability gate decision",
+      "OXIBELT_VULNERABILITY_DECISION_ARTIFACT_NAME",
+      "OXIBELT_VULNERABILITY_DECISION_RUN_ATTEMPT",
+      "release-vulnerability-decision-${GITHUB_RUN_ID}-${producer_attempt}",
+      "^[1-9][0-9]*$",
+      "10#${producer_attempt} > 10#${consumer_attempt}",
       "image_vulnerability_policy.mjs\" verify-subject",
       "--manifest-digest",
       "docker login ghcr.io",
@@ -9027,8 +9053,34 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
       job.find(verification).unwrap() < job.find("docker login ghcr.io").unwrap(),
       "{verification} must precede registry login"
     );
+    assert!(
+      job
+        .find("Validate controlled vulnerability gate producer identity")
+        .unwrap()
+        < job
+          .find("Download controlled vulnerability gate decision")
+          .unwrap(),
+      "the gate producer identity must be validated before its decision is downloaded"
+    );
   }
   let manifest = workflow_job_text(&workflow, "ghcr-manifest-publish");
+  assert_eq!(
+    parsed["jobs"]["ghcr-manifest-publish"]["needs"],
+    serde_json::json!([
+      "prepare-release",
+      "release-vulnerability-gate",
+      "release-image-arch"
+    ]),
+    "manifest publishers should consume the global gate producer output directly"
+  );
+  let platform_publish = workflow_job_text(&arch_workflow, "publish");
+  for job in [&platform_publish, &manifest] {
+    assert!(job.contains("--run-attempt \"${OXIBELT_VULNERABILITY_DECISION_RUN_ATTEMPT}\""));
+    assert!(
+      !job.contains("--run-attempt \"${GITHUB_RUN_ATTEMPT}\""),
+      "publishers must verify the producer attempt rather than their rerun attempt"
+    );
+  }
   assert!(manifest.contains("for artifact_arch in amd64 arm64 riscv64"));
   assert!(!manifest.contains("aquasecurity/trivy-action@"));
   assert_eq!(scan_workflow.matches("packages: write").count(), 0);

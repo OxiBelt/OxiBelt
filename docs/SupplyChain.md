@@ -641,13 +641,18 @@ findings remain visible in the raw report.
 
 One read-only global gate evaluates the complete 30-subject matrix before any
 job with `packages: write` can start. The `schemaVersion: 2` decision remains
-bound to the current gate attempt and records `evidenceAttempt` for every
-subject. The current build-and-scan matrix must still succeed; prior evidence
-cannot admit a currently failed row. Each publisher revalidates that its role,
-architecture, current run attempt, revision, policy hash, evidence provenance,
-and manifest digest appear in the allowed decision before registry login or
-push. This prevents a clean matrix leg from publishing while another subject
-is missing or blocked.
+bound to the gate producer attempt and records `evidenceAttempt` for every
+subject. The gate exports its canonical artifact name and producer attempt to
+each publisher. A rerun may reuse that decision only from the same release run,
+with a nonempty canonical `release-vulnerability-decision-RUN_ID-ATTEMPT` name
+and a positive producer attempt no newer than the consumer; malformed,
+cross-run, missing, or future-attempt references fail before the artifact is
+downloaded. The current build-and-scan matrix must still succeed; prior
+evidence cannot admit a currently failed row. Each publisher revalidates that
+its role, architecture, gate producer attempt, revision, policy hash, evidence
+provenance, and manifest digest appear in the allowed decision before registry
+login or push. This prevents a clean matrix leg from publishing while another
+subject is missing or blocked.
 
 The versioned multi-architecture index is not redundantly vulnerability-scanned
 because it contains no package inventory beyond its platform children. Its
