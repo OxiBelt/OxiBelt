@@ -21,7 +21,7 @@ undocumented_unsafe_blocks = "deny"
 anyhow = "1.0.104"
 bytes = "1.12.1"
 futures-util = "0.3.34"
-h2 = "0.4.15"
+h2 = "0.4.16"
 h3 = "0.0.8"
 h3-quinn = { version = "0.0.10", features = ["datagram"] }
 hdrhistogram = "7.6.0"

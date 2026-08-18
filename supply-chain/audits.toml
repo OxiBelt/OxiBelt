@@ -361,6 +361,12 @@ criteria = "safe-to-deploy"
 delta = "0.0.7 -> 1.0.1"
 notes = "Reviewed the complete checksum-matched production-source delta. The no_std parser continues to forbid unsafe code and has no build script or external capability. It adds structured terminal errors and fallible buffered input so I/O, decoding, and byte-limit failures cannot be mistaken for EOF; NUL and invalid controls reject instead of truncating, counters use checked arithmetic, and malformed-input states terminate. Resource budgets remain supplied by the consuming serde-saphyr layer."
 
+[[audits.h2]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.4.15 -> 0.4.16"
+notes = "Reviewed the complete checksum-matched h2 0.4.15-to-0.4.16 production-source delta. The HTTP/2 receive path now charges a capped 25,600-byte framing-overhead budget for small and empty DATA frames, replenishing only when payload is delivered and issuing ENHANCE_YOUR_CALM on exhaustion, which bounds the advisory's queued-empty-frame resource attack. The remaining changes preserve protocol safety: 1xx push accounting is one-time, dropped buffered data releases capped flow-control capacity, trailers retain a waker, resets after received EOS preserve readable data, and zero-byte writes fail instead of spinning. Send buffering flushes outside stream locks; trailer headers receive existing RFC validation; HPACK reuses only fully copied scratch buffers and replaces its generated 4-bit decoder table with a bounds-checked 8-bit representation that rejects invalid EOS and padding. No dependency, feature, build-script, FFI, or unsafe-code change was introduced."
+
 [[audits.http]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
