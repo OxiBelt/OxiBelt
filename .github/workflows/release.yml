@@ -1569,6 +1569,27 @@ jobs:
         run: |
           set -euo pipefail
 
+          retry_inspect() {
+            local output="$1"
+            shift
+            local attempt status delay=5
+
+            for attempt in 1 2 3; do
+              if "$@" >"${output}"; then
+                return 0
+              else
+                status=$?
+              fi
+              if [[ "${attempt}" == 3 ]]; then
+                return "${status}"
+              fi
+              printf 'Registry inspect failed with status %s; retrying in %ss (%s/3): %s\n' \
+                "${status}" "${delay}" "${attempt}" "$*" >&2
+              sleep "${delay}"
+              delay=$((delay * 2))
+            done
+          }
+
           mapfile -t source_refs < <(jq -r '.sourceRefs[]' "${ADMITTED_CHILDREN}")
           expected_descriptors="$(jq -c '.expectedDescriptors' "${ADMITTED_CHILDREN}")"
           child_descriptors="$(jq -c '.childDescriptors' "${ADMITTED_CHILDREN}")"
@@ -1579,6 +1600,7 @@ jobs:
           fi
 
           primary_tag="${canonical_tags[0]}"
+          inspect_output="${RUNNER_TEMP}/canonical-index-inspect.json"
           inspect_error="${RUNNER_TEMP}/primary-index-inspect.log"
           if docker buildx imagetools inspect "${primary_tag}" --format '{{json .Manifest}}' >/dev/null 2>"${inspect_error}"; then
             :
@@ -1590,7 +1612,9 @@ jobs:
             exit 1
           fi
 
-          published_index="$(docker buildx imagetools inspect "${primary_tag}" --format '{{json .Manifest}}')"
+          retry_inspect "${inspect_output}" \
+            docker buildx imagetools inspect "${primary_tag}" --format '{{json .Manifest}}'
+          published_index="$(<"${inspect_output}")"
           actual_descriptors="$(jq -c '[.manifests[] | {digest: .digest, os: .platform.os, architecture: .platform.architecture, variant: (.platform.variant // null)}]' <<<"${published_index}")"
           if [[ "${actual_descriptors}" != "${expected_descriptors}" ]]; then
             echo "refusing to accept canonical index ${primary_tag} with unexpected platform descriptors" >&2
@@ -1619,7 +1643,10 @@ jobs:
               echo "failed to determine whether canonical index ${canonical_tag} already exists" >&2
               exit 1
             fi
-            canonical_digest="$(docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Manifest}}' | jq -r '.digest')"
+            retry_inspect "${inspect_output}" \
+              docker buildx imagetools inspect "${canonical_tag}" --format '{{json .Manifest}}'
+            existing="$(<"${inspect_output}")"
+            canonical_digest="$(jq -r '.digest' <<<"${existing}")"
             if [[ "${canonical_digest}" != "${digest}" ]]; then
               echo "canonical index ${canonical_tag} resolved to ${canonical_digest}, expected ${digest}" >&2
               exit 1

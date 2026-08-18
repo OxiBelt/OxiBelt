@@ -9206,6 +9206,13 @@ fn release_vulnerability_gate_preserves_attestation_and_digest_publication_chain
     "def expected_artifact_tags(arch):",
     ".manifests[] | select(.role == $role) | .canonicalGhcrTag",
     "sourceRefs: $source_refs",
+    "retry_inspect() {",
+    "local attempt status delay=5",
+    "for attempt in 1 2 3; do",
+    "sleep \"${delay}\"",
+    "delay=$((delay * 2))",
+    "published_index=\"$(<\"${inspect_output}\")\"",
+    "existing=\"$(<\"${inspect_output}\")\"",
     "actual_descriptors=",
     "expected_descriptors=",
     "child_descriptors=",
@@ -9216,6 +9223,29 @@ fn release_vulnerability_gate_preserves_attestation_and_digest_publication_chain
     assert!(
       manifest.contains(expected),
       "multi-arch manifest publication should retain {expected}"
+    );
+  }
+  let mut retry_sections = manifest.split("retry_inspect \"${inspect_output}\"");
+  retry_sections.next().unwrap();
+  let primary_retry = retry_sections.next().unwrap();
+  let secondary_retry = retry_sections.next().unwrap();
+  assert!(retry_sections.next().is_none());
+  assert!(
+    primary_retry.contains(
+      "docker buildx imagetools inspect \"${primary_tag}\" --format '{{json .Manifest}}'"
+    )
+  );
+  assert!(secondary_retry.contains(
+    "docker buildx imagetools inspect \"${canonical_tag}\" --format '{{json .Manifest}}'"
+  ));
+  for forbidden in [
+    "retry_inspect \"${inspect_output}\" docker buildx imagetools create",
+    "published_index=\"$(docker buildx imagetools inspect",
+    "canonical_digest=\"$(docker buildx imagetools inspect",
+  ] {
+    assert!(
+      !manifest.contains(forbidden),
+      "multi-arch manifest publication must not retain {forbidden}"
     );
   }
 
