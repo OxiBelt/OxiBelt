@@ -260,6 +260,64 @@ verify_kind_node_l4_probe_runtime() {
     || die "Kind control-plane node lacks the package-free Perl L4 probe runtime"
 }
 
+kind_cri_retains_reviewed_valkey() {
+  local config_digest
+  local image_json
+  local image_list
+  local manifest_digest="sha256:${redis_source_digest}"
+  local node="${cluster_name}-control-plane"
+
+  image_list="$(docker exec "${node}" ctr -n k8s.io images list \
+    "name==${redis_kind_image}")" \
+    || return 1
+  awk -v expected_reference="${redis_kind_image}" -v expected_digest="${manifest_digest}" '
+    NR == 1 { next }
+    NF {
+      rows += 1
+      if ($1 == expected_reference && $3 == expected_digest) matches += 1
+    }
+    END { exit !(rows == 1 && matches == 1) }
+  ' <<<"${image_list}" \
+    || return 1
+  config_digest="$(docker exec "${node}" ctr -n k8s.io content get "${manifest_digest}" \
+    | jq -er '
+      .config.digest
+        | select(type == "string" and test("^sha256:[a-f0-9]{64}$"))
+    ')" \
+    || return 1
+  image_json="$(docker exec "${node}" \
+    crictl inspecti "${redis_kind_image}" 2>/dev/null)" \
+    || return 1
+  jq -e \
+    --arg config_digest "${config_digest}" \
+    --arg image_tag "${redis_kind_image}" '
+      .status.id == $config_digest
+        and (((.status.repoTags // []) | index($image_tag)) != null)
+        and .info.imageSpec.architecture == "amd64"
+        and .info.imageSpec.os == "linux"
+    ' >/dev/null <<<"${image_json}"
+}
+
+print_kind_valkey_image_diagnostics() {
+  local node="${cluster_name}-control-plane"
+
+  echo "Kind Valkey image diagnostics for ${node}:" >&2
+  docker exec "${node}" ctr -n k8s.io images list \
+    "name==${redis_kind_image}" >&2 || true
+  docker exec "${node}" ctr -n k8s.io content get \
+    "sha256:${redis_source_digest}" 2>/dev/null \
+    | jq -c '{mediaType, config, platform}' >&2 \
+    || true
+  docker exec "${node}" crictl images --output json 2>/dev/null \
+    | jq -c \
+      --arg image_tag "${redis_kind_image}" '
+        [.images[]?
+          | select((((.repoTags // []) | index($image_tag)) != null))
+          | {id, repoTags, repoDigests}]
+      ' >&2 \
+    || true
+}
+
 probe_l4_round_trips() {
   local expected_namespace="$1"
   local expected_udp_backend="${2:-single}"
@@ -1478,8 +1536,8 @@ run_id="${run_id:0:24}"
 [[ "${run_id}" =~ ^[a-f0-9]{24}$ ]] || die "failed to derive a safe test run identifier"
 [[ "${redis_source_digest}" =~ ^[a-f0-9]{64}$ ]] \
   || die "the reviewed Valkey source image must use an exact sha256 manifest digest"
-redis_kind_image="oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}"
-[[ "${redis_kind_image}" =~ ^oxibelt-ci/valkey:sha256-[a-f0-9]{64}-[a-f0-9]{24}$ ]] \
+redis_kind_image="docker.io/oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}"
+[[ "${redis_kind_image}" =~ ^docker\.io/oxibelt-ci/valkey:sha256-[a-f0-9]{64}-[a-f0-9]{24}$ ]] \
   || die "failed to derive a safe Kind-local Valkey image alias"
 cluster_name="oxibelt-rollout-${run_id}"
 namespace="oxibelt-rollout-${run_id}"
@@ -1578,10 +1636,22 @@ cluster_created=1
 verify_kind_node_l4_probe_runtime
 
 kind load docker-image --name "${cluster_name}" \
-  "${dataplane_image}" "${controller_image}" "${redis_kind_image}"
-docker exec "${cluster_name}-control-plane" \
-  crictl inspecti "docker.io/${redis_kind_image}" >/dev/null \
-  || die "Kind CRI did not retain the reviewed Valkey image alias"
+  "${dataplane_image}" "${controller_image}"
+redis_kind_image_ready=0
+for attempt in 1 2 3; do
+  if kind load docker-image --name "${cluster_name}" "${redis_kind_image}" \
+    && kind_cri_retains_reviewed_valkey; then
+    redis_kind_image_ready=1
+    break
+  fi
+  if ((attempt < 3)); then
+    sleep 1
+  fi
+done
+if ((redis_kind_image_ready != 1)); then
+  print_kind_valkey_image_diagnostics
+  die "Kind CRI did not retain the reviewed Valkey image alias"
+fi
 
 kube apply --server-side --force-conflicts -f "${gateway_api_manifest}" >/dev/null
 kube apply --server-side --force-conflicts \

@@ -3471,7 +3471,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66",
     "redis_source_image=\"valkey/valkey:9-alpine@sha256:3fe38a705227d29534a199e876b38d5474dec4d3baca980ac6894df539416562\"",
     "redis_source_digest=\"${redis_source_image##*@sha256:}\"",
-    "redis_kind_image=\"oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}\"",
+    "redis_kind_image=\"docker.io/oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}\"",
     "redis_kind_image_created=0",
     "docker pull \"${redis_source_image}\"",
     "valkey/valkey@${redis_source_image##*@}",
@@ -3480,7 +3480,23 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "docker tag \"${redis_source_image}\" \"${redis_kind_image}\"",
     "rootless Docker did not create the reviewed Valkey Kind alias",
     "docker image rm --no-prune \"${redis_kind_image}\"",
-    "crictl inspecti \"docker.io/${redis_kind_image}\"",
+    "kind_cri_retains_reviewed_valkey()",
+    "ctr -n k8s.io images list",
+    "expected_digest=\"${manifest_digest}\"",
+    "rows == 1 && matches == 1",
+    "ctr -n k8s.io content get \"${manifest_digest}\"",
+    ".config.digest",
+    "crictl inspecti \"${redis_kind_image}\"",
+    ".status.id == $config_digest",
+    "(.status.repoTags // []) | index($image_tag)",
+    ".info.imageSpec.architecture == \"amd64\"",
+    ".info.imageSpec.os == \"linux\"",
+    "for attempt in 1 2 3",
+    "if ((attempt < 3)); then",
+    "sleep 1",
+    "kind load docker-image --name \"${cluster_name}\" \"${redis_kind_image}\"",
+    "print_kind_valkey_image_diagnostics",
+    "crictl images --output json",
     "Kind CRI did not retain the reviewed Valkey image alias",
     "sed \"s|OXIBELT_REDIS_KIND_IMAGE|${redis_kind_image}|g\"",
     "oxibelt-udp-flow-redis",
@@ -3594,6 +3610,23 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
       "Kubernetes immutable rollout script should preserve {expected}"
     );
   }
+  let role_image_load = "\"${dataplane_image}\" \"${controller_image}\"";
+  assert_eq!(
+    script.matches(role_image_load).count(),
+    1,
+    "the immutable rollout should load the role images exactly once"
+  );
+  let valkey_image_load =
+    "kind load docker-image --name \"${cluster_name}\" \"${redis_kind_image}\"";
+  assert_eq!(
+    script.matches(valkey_image_load).count(),
+    1,
+    "only the reviewed Valkey import should appear inside the bounded retry loop"
+  );
+  assert!(
+    !script.contains("\"${dataplane_image}\" \"${controller_image}\" \"${redis_kind_image}\""),
+    "the bounded Valkey retry must not reload the OxiBelt role images"
+  );
   for expected in [
     "tcp-probe, protocol: TCP, port: 9300, targetPort: 19300",
     "udp-probe, protocol: UDP, port: 5300, targetPort: 15300",
@@ -4776,7 +4809,8 @@ fn kubernetes_immutable_rollout_udp_flow_state_is_shared_and_restart_proven() {
     "readOnlyRootFilesystem: true",
     "emptyDir: { sizeLimit: 16Mi }",
     "rollout status deployment/oxibelt-udp-flow-redis",
-    "\"${dataplane_image}\" \"${controller_image}\" \"${redis_kind_image}\"",
+    "\"${dataplane_image}\" \"${controller_image}\"",
+    "kind load docker-image --name \"${cluster_name}\" \"${redis_kind_image}\"",
     "--set \"l4.idleTimeoutMs=3600000\"",
     "--set-string \"l4.udp.flowState=shared_required\"",
     "grep -Fq 'udp_flow_state = \"shared_required\"'",
