@@ -153,7 +153,7 @@ expected_sha="$(sha256sum "${expected_snapshot}" | awk '{print $1}')"
 read -r config_digest config_size layer_digest layer_size < <("${node_bin}" --input-type=module --eval '
 import * as Crypto from "node:crypto";
 import * as Fs from "node:fs";
-const [tagDescriptorPath, descriptorPath, manifestPath, expectedDigest, archiveSha, archiveSize] = process.argv.slice(1);
+const [tagDescriptorPath, descriptorPath, manifestPath, expectedDigest, archiveSha, archiveSize, expectedChartName, expectedVersion] = process.argv.slice(1);
 const assertNoDuplicateKeys = text => {
   let offset = 0; let nodes = 0;
   const skip = () => { while (/[\t\n\r ]/.test(text[offset] ?? "")) offset += 1; };
@@ -165,12 +165,31 @@ const assertNoDuplicateKeys = text => {
 const parseStrict = path => { const bytes = Fs.readFileSync(path); const text = bytes.toString("utf8"); if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("not UTF-8"); assertNoDuplicateKeys(text); return { bytes, value: JSON.parse(text) }; };
 const exactKeys = (value, keys) => { if (value === null || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== [...keys].sort().join(",")) throw new Error("unexpected JSON keys"); };
 const descriptorValue = (value, maximum) => { exactKeys(value, ["mediaType", "digest", "size"]); if (typeof value.mediaType !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value.digest ?? "") || !Number.isSafeInteger(value.size) || value.size <= 0 || value.size > maximum) throw new Error("invalid descriptor"); return value; };
+const expectedDescriptions = new Map([
+  ["oxibelt", "OxiBelt reverse proxy and WAF data plane"],
+  ["oxibelt-gateway-controller", "OxiBelt Gateway API controller"]
+]);
+const exactUtcSecond = value => {
+  if (typeof value !== "string" || !/^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$/.test(value)) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === `${value.slice(0, -1)}.000Z`;
+};
 const tagDescriptor = descriptorValue(parseStrict(tagDescriptorPath).value, 131072);
 const descriptor = descriptorValue(parseStrict(descriptorPath).value, 131072);
 const rawManifest = parseStrict(manifestPath);
 const manifest = rawManifest.value;
 const manifestKeys = Object.keys(manifest).sort().join(",");
-if (manifestKeys !== "config,layers,schemaVersion" && manifestKeys !== "config,layers,mediaType,schemaVersion") throw new Error("unexpected manifest JSON keys");
+if (manifestKeys === "annotations,config,layers,schemaVersion" || manifestKeys === "annotations,config,layers,mediaType,schemaVersion") {
+  const description = expectedDescriptions.get(expectedChartName);
+  if (description === undefined) throw new Error("unsupported chart identity");
+  exactKeys(manifest.annotations, ["org.opencontainers.image.created", "org.opencontainers.image.description", "org.opencontainers.image.title", "org.opencontainers.image.version", "oxibelt.dev/feature-status", "oxibelt.dev/kubernetes-support-policy"]);
+  if (!exactUtcSecond(manifest.annotations["org.opencontainers.image.created"]) ||
+      manifest.annotations["org.opencontainers.image.description"] !== description ||
+      manifest.annotations["org.opencontainers.image.title"] !== expectedChartName ||
+      manifest.annotations["org.opencontainers.image.version"] !== expectedVersion ||
+      manifest.annotations["oxibelt.dev/feature-status"] !== "experimental" ||
+      manifest.annotations["oxibelt.dev/kubernetes-support-policy"] !== "1") throw new Error("manifest annotations do not bind the exact chart identity");
+} else if (manifestKeys !== "config,layers,schemaVersion" && manifestKeys !== "config,layers,mediaType,schemaVersion") throw new Error("unexpected manifest JSON keys");
 if (tagDescriptor.mediaType !== descriptor.mediaType || tagDescriptor.digest !== descriptor.digest || tagDescriptor.size !== descriptor.size || descriptor.mediaType !== "application/vnd.oci.image.manifest.v1+json" || descriptor.digest !== expectedDigest || descriptor.size !== rawManifest.bytes.length || `sha256:${Crypto.createHash("sha256").update(rawManifest.bytes).digest("hex")}` !== expectedDigest || manifest.schemaVersion !== 2 || ("mediaType" in manifest && manifest.mediaType !== descriptor.mediaType)) throw new Error("tag and immutable manifest descriptors do not bind the same exact raw manifest bytes");
 const config = descriptorValue(manifest.config, 131072);
 if (config.mediaType !== "application/vnd.cncf.helm.config.v1+json") throw new Error("invalid Helm config descriptor");
@@ -178,7 +197,7 @@ if (!Array.isArray(manifest.layers) || manifest.layers.length !== 1) throw new E
 const layer = descriptorValue(manifest.layers[0], 16777216);
 if (layer.mediaType !== "application/vnd.cncf.helm.chart.content.v1.tar+gzip" || layer.digest !== `sha256:${archiveSha}` || layer.size !== Number(archiveSize)) throw new Error("chart layer does not bind exact archive");
 console.log(`${config.digest} ${config.size} ${layer.digest} ${layer.size}`);
-' "${tag_descriptor}" "${descriptor}" "${manifest}" "${digest}" "${expected_sha}" "$(stat -c%s -- "${expected_snapshot}")")
+' "${tag_descriptor}" "${descriptor}" "${manifest}" "${digest}" "${expected_sha}" "$(stat -c%s -- "${expected_snapshot}")" "${chart_name}" "${version}")
 [[ "${config_digest}" =~ ^sha256:[0-9a-f]{64}$ && "${config_size}" =~ ^[1-9][0-9]*$ && "${config_size}" -le "${maximum_json_bytes}" && "${layer_digest}" =~ ^sha256:[0-9a-f]{64}$ && "${layer_size}" =~ ^[1-9][0-9]*$ && "${layer_size}" -le "${maximum_archive_bytes}" ]] || { echo "manifest config or layer binding is invalid" >&2; exit 1; }
 fetch_bounded_output "${config_blob}" "${maximum_json_bytes}" "${oras_bin}" blob fetch --output "${config_blob}" "${repository}@${config_digest}"
 [[ -f "${config_blob}" && ! -L "${config_blob}" && "$(stat -c%s -- "${config_blob}")" -eq "${config_size}" ]] || { echo "registry config blob does not match its descriptor size" >&2; exit 1; }

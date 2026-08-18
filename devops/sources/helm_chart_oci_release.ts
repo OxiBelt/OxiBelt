@@ -22,6 +22,7 @@ const Sha256 = /^[0-9a-f]{64}$/
 const Digest = /^sha256:[0-9a-f]{64}$/
 const CanonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
 const Semver = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/
+const Rfc3339UtcSecond = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$/
 const Repository = 'OxiBelt/OxiBelt'
 const Provenance = 'github-workflow-authentication-required'
 const ChartContentMediaType = 'application/vnd.cncf.helm.chart.content.v1.tar+gzip'
@@ -40,14 +41,14 @@ const ExpectedTransformationRecipe = [
 
 const Charts = [
   {
-    name: 'oxibelt', directory: 'deploy/helm/oxibelt', repository: 'oci://ghcr.io/oxibelt/charts/oxibelt',
+    name: 'oxibelt', description: 'OxiBelt reverse proxy and WAF data plane', directory: 'deploy/helm/oxibelt', repository: 'oci://ghcr.io/oxibelt/charts/oxibelt',
     defaultImagePaths: [
       'deploy/helm/oxibelt/values.yaml',
       'deploy/helm/oxibelt/examples/strict-dataplane-values.yaml'
     ]
   },
   {
-    name: 'oxibelt-gateway-controller', directory: 'deploy/helm/oxibelt-gateway-controller', repository: 'oci://ghcr.io/oxibelt/charts/oxibelt-gateway-controller',
+    name: 'oxibelt-gateway-controller', description: 'OxiBelt Gateway API controller', directory: 'deploy/helm/oxibelt-gateway-controller', repository: 'oci://ghcr.io/oxibelt/charts/oxibelt-gateway-controller',
     defaultImagePaths: ['deploy/helm/oxibelt-gateway-controller/values.yaml']
   }
 ] as const
@@ -285,7 +286,25 @@ function EvidenceBytes(Value: unknown, Label: string): Buffer {
   return Bytes
 }
 
-function ManifestValue(Artifact: HelmChartOciArtifact | undefined, ExpectedDigest: string, ExpectedSize: number, Label: string): HelmChartOciManifestReceipt {
+function ManifestAnnotationsValue(Value: unknown, Expected: typeof Charts[number], Version: string, Label: string): void {
+  const Annotations = ObjectValue(Value, `${Label} OCI manifest.annotations`)
+  ExactKeys(Annotations, [
+    'org.opencontainers.image.created',
+    'org.opencontainers.image.description',
+    'org.opencontainers.image.title',
+    'org.opencontainers.image.version',
+    ...Object.keys(ExpectedAnnotations)
+  ], `${Label} OCI manifest.annotations`)
+  const Created = StringValue(Annotations['org.opencontainers.image.created'], `${Label} OCI manifest.annotations.created`)
+  const CreatedDate = new Date(Created)
+  if (!Rfc3339UtcSecond.test(Created) || !Number.isFinite(CreatedDate.getTime()) || CreatedDate.toISOString() !== `${Created.slice(0, -1)}.000Z`) throw new Error(`${Label} OCI manifest.annotations.created must be an exact UTC timestamp`)
+  if (Annotations['org.opencontainers.image.description'] !== Expected.description || Annotations['org.opencontainers.image.title'] !== Expected.name || Annotations['org.opencontainers.image.version'] !== Version) throw new Error(`${Label} OCI manifest annotations do not bind the exact chart identity`)
+  const OxiBeltAnnotations = Object.fromEntries(Object.keys(ExpectedAnnotations).map(Key => [Key, Annotations[Key]]))
+  ExactCanonical(OxiBeltAnnotations, ExpectedAnnotations, `${Label} OCI manifest annotations`)
+}
+
+function ManifestValue(Artifact: HelmChartOciArtifact | undefined, ExpectedDigest: string, ExpectedSize: number, Expected: typeof Charts[number], Version: string): HelmChartOciManifestReceipt {
+  const Label = Expected.name
   if (Artifact === undefined) throw new Error(`${Label} OCI artifact evidence is missing`)
   const DescriptorBytes = BoundedBytes(Artifact.descriptorBytes, MaximumHelmChartOciJsonBytes, `${Label} OCI descriptor`)
   const DescriptorDocument = ObjectValue(ParseStrictJson(DescriptorBytes, `${Label} OCI descriptor`), `${Label} OCI descriptor`)
@@ -294,7 +313,8 @@ function ManifestValue(Artifact: HelmChartOciArtifact | undefined, ExpectedDiges
   const ManifestBytes = BoundedBytes(Artifact.manifestBytes, MaximumHelmChartOciJsonBytes, `${Label} OCI manifest`)
   const Manifest = ObjectValue(ParseStrictJson(ManifestBytes, `${Label} OCI manifest`), `${Label} OCI manifest`)
   const ManifestKeys = Object.keys(Manifest).sort().join(',')
-  if (ManifestKeys !== 'config,layers,schemaVersion' && ManifestKeys !== 'config,layers,mediaType,schemaVersion') throw new Error(`${Label} OCI manifest has missing, unexpected, or substituted keys`)
+  if (ManifestKeys === 'annotations,config,layers,schemaVersion' || ManifestKeys === 'annotations,config,layers,mediaType,schemaVersion') ManifestAnnotationsValue(Manifest.annotations, Expected, Version, Label)
+  else if (ManifestKeys !== 'config,layers,schemaVersion' && ManifestKeys !== 'config,layers,mediaType,schemaVersion') throw new Error(`${Label} OCI manifest has missing, unexpected, or substituted keys`)
   if (DescriptorBinding.digest !== `sha256:${HelmChartOciSha256(ManifestBytes)}` || DescriptorBinding.size !== ManifestBytes.length || Manifest.schemaVersion !== 2 || ('mediaType' in Manifest && Manifest.mediaType !== DescriptorBinding.mediaType)) throw new Error(`${Label} OCI descriptor does not bind exact raw manifest bytes`)
   const digest = DescriptorBinding.digest
   const mediaType = DescriptorBinding.mediaType
@@ -320,7 +340,8 @@ function ManifestValue(Artifact: HelmChartOciArtifact | undefined, ExpectedDiges
   }
 }
 
-function ReceiptManifestValue(Value: unknown, ExpectedDigest: string, ExpectedSize: number, Label: string): HelmChartOciManifestReceipt {
+function ReceiptManifestValue(Value: unknown, ExpectedDigest: string, ExpectedSize: number, Expected: typeof Charts[number], Version: string): HelmChartOciManifestReceipt {
+  const Label = Expected.name
   const Manifest = ObjectValue(Value, `${Label} OCI manifest`)
   ExactKeys(Manifest, ['descriptor', 'digest', 'mediaType', 'bytes', 'config', 'layers', 'evidence'], `${Label} OCI manifest`)
   const DescriptorReceipt = ObjectValue(Manifest.descriptor, `${Label} OCI manifest.descriptor`)
@@ -343,7 +364,7 @@ function ReceiptManifestValue(Value: unknown, ExpectedDigest: string, ExpectedSi
     descriptorBytes: EvidenceBytes(Evidence.descriptorBase64, `${Label} OCI descriptor raw OCI evidence`),
     manifestBytes: EvidenceBytes(Evidence.manifestBase64, `${Label} OCI manifest raw OCI evidence`),
     configBytes: EvidenceBytes(Evidence.configBase64, `${Label} OCI config raw OCI evidence`)
-  }, ExpectedDigest, ExpectedSize, Label)
+  }, ExpectedDigest, ExpectedSize, Expected, Version)
   const Claimed = { descriptor: { bytes: DescriptorBytes, sha256: DescriptorSha256 }, digest, mediaType, bytes: ManifestBytes, config, layers: [layer] }
   const VerifiedSummary = { descriptor: Verified.descriptor, digest: Verified.digest, mediaType: Verified.mediaType, bytes: Verified.bytes, config: Verified.config, layers: Verified.layers }
   if (Canonical(Claimed) !== Canonical(VerifiedSummary)) throw new Error(`${Label} OCI manifest does not match raw OCI evidence`)
@@ -368,7 +389,7 @@ export function BuildHelmChartPublishReceipt(Options: BuildHelmChartPublishRecei
       if (!Buffer.isBuffer(Archive) || Archive.length === 0 || Archive.length > MaximumHelmChartOciArchiveBytes) throw new Error(`package bytes must be non-empty and at most ${MaximumHelmChartOciArchiveBytes} bytes for ${Expected.name}`)
       const archiveSha256 = HelmChartOciSha256(Archive)
       if (archiveSha256 !== Chart.archiveSha256) throw new Error(`package bytes do not match the plan digest for ${Expected.name}`)
-      const Manifest = ManifestValue(Options.artifacts[Expected.name], archiveSha256, Archive.length, Expected.name)
+      const Manifest = ManifestValue(Options.artifacts[Expected.name], archiveSha256, Archive.length, Expected, Version)
       return {
         name: Expected.name, sourceDirectory: Expected.directory, targetOciRepository: Expected.repository, tag: Version,
         filename: Chart.filename as string, package: { bytes: Archive.length, sha256: archiveSha256 },
@@ -405,7 +426,7 @@ export function ValidateHelmChartPublishReceipt(Value: unknown): HelmChartPublis
     const Package = ObjectValue(Chart.package, `${Expected.name}.package`); ExactKeys(Package, ['bytes', 'sha256'], `${Expected.name}.package`)
     const Size = NumberValue(Package.bytes, `${Expected.name}.package.bytes`); const Hash = StringValue(Package.sha256, `${Expected.name}.package.sha256`)
     if (!Sha256.test(Hash) || Size === 0 || Size > MaximumHelmChartOciArchiveBytes) throw new Error(`Helm chart publish receipt package binding is invalid for ${Expected.name}`)
-    const Manifest = ReceiptManifestValue(Chart.manifest, Hash, Size, Expected.name)
+    const Manifest = ReceiptManifestValue(Chart.manifest, Hash, Size, Expected, Version)
     const ExpectedImages = Expected.defaultImagePaths.map(path => ({ path, from: 'latest', to: Version }))
     if (!Array.isArray(Chart.defaultImages) || !Chart.defaultImages.every(Item => {
       if (!IsObject(Item)) return false

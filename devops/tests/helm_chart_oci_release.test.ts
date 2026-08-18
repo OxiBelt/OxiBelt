@@ -27,12 +27,13 @@ function Canonical(Value: unknown): string {
   return JSON.stringify(Value)
 }
 
-function Artifact(Archive: Buffer) {
+function Artifact(Archive: Buffer, Annotations?: Record<string, string>) {
   const ConfigBytes = Buffer.from('{"chart":"oci"}', 'utf8')
   const Manifest = {
     schemaVersion: 2,
     config: { mediaType: 'application/vnd.cncf.helm.config.v1+json', digest: `sha256:${HelmChartOciSha256(ConfigBytes)}`, size: ConfigBytes.length },
-    layers: [{ mediaType: 'application/vnd.cncf.helm.chart.content.v1.tar+gzip', digest: `sha256:${HelmChartOciSha256(Archive)}`, size: Archive.length }]
+    layers: [{ mediaType: 'application/vnd.cncf.helm.chart.content.v1.tar+gzip', digest: `sha256:${HelmChartOciSha256(Archive)}`, size: Archive.length }],
+    ...(Annotations === undefined ? {} : { annotations: Annotations })
   }
   const ManifestBytes = Buffer.from(JSON.stringify(Manifest, null, 2), 'utf8')
   const Descriptor = { mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: `sha256:${HelmChartOciSha256(ManifestBytes)}`, size: ManifestBytes.length }
@@ -111,6 +112,45 @@ test('builds canonical exact two-chart OCI receipt and predicate', () => {
     Assert.deepEqual((Predicate.comparison as Record<string, unknown>).consumptionHelmVersions, ['v3.21.3', 'v4.2.4'])
     Assert.doesNotThrow(() => ValidateHelmChartPublishReceipt(structuredClone(Receipt)))
     Assert.doesNotThrow(() => ValidateHelmChartRebuildPredicate(structuredClone(Predicate)))
+  } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
+})
+
+test('accepts only exact Helm 4 OCI manifest annotations', () => {
+  const FixtureValue = Fixture()
+  try {
+    const HelmAnnotations = (name: string, description: string) => ({
+      'org.opencontainers.image.created': '2026-08-18T11:25:22Z',
+      'org.opencontainers.image.description': description,
+      'org.opencontainers.image.title': name,
+      'org.opencontainers.image.version': '1.2.3-beta.1',
+      'oxibelt.dev/feature-status': 'experimental',
+      'oxibelt.dev/kubernetes-support-policy': '1'
+    })
+    const Build = (OxiBeltAnnotations: Record<string, string>, ControllerAnnotations: Record<string, string>) => BuildHelmChartPublishReceipt({
+      planBytes: FixtureValue.PlanBytes,
+      archives: FixtureValue.Archives,
+      artifacts: {
+        oxibelt: Artifact(FixtureValue.Archives.oxibelt, OxiBeltAnnotations),
+        'oxibelt-gateway-controller': Artifact(FixtureValue.Archives['oxibelt-gateway-controller'], ControllerAnnotations)
+      }
+    })
+    const OxiBeltAnnotations = HelmAnnotations('oxibelt', 'OxiBelt reverse proxy and WAF data plane')
+    const ControllerAnnotations = HelmAnnotations('oxibelt-gateway-controller', 'OxiBelt Gateway API controller')
+    Assert.doesNotThrow(() => Build(OxiBeltAnnotations, ControllerAnnotations))
+    for (const Mutate of [
+      (Annotations: Record<string, string>) => { delete Annotations['org.opencontainers.image.created'] },
+      (Annotations: Record<string, string>) => { Annotations.extra = 'value' },
+      (Annotations: Record<string, string>) => { Annotations['org.opencontainers.image.description'] = 'substituted' },
+      (Annotations: Record<string, string>) => { Annotations['org.opencontainers.image.title'] = 'substituted' },
+      (Annotations: Record<string, string>) => { Annotations['org.opencontainers.image.version'] = '1.2.3-beta.2' },
+      (Annotations: Record<string, string>) => { Annotations['org.opencontainers.image.created'] = '2026-02-31T11:25:22Z' },
+      (Annotations: Record<string, string>) => { Annotations['oxibelt.dev/feature-status'] = 'stable' },
+      (Annotations: Record<string, string>) => { Annotations['oxibelt.dev/kubernetes-support-policy'] = '2' }
+    ]) {
+      const Forged = structuredClone(OxiBeltAnnotations)
+      Mutate(Forged)
+      Assert.throws(() => Build(Forged, ControllerAnnotations), /annotations/)
+    }
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
