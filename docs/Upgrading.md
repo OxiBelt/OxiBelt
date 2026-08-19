@@ -47,13 +47,70 @@ be used as a supported production upgrade source or target.
 | `0.7.1-beta.2` | `0.7.1-beta.4` | Recovery candidate | Direct configuration and state recovery is supported without a new native schema migration. Beta.2's incomplete rebuild evidence must not be reused; deploy only newly qualified beta.4 digests. |
 | `0.7.1-beta.3` | `0.7.1-beta.4` | Recovery source only | Beta.3's source configuration and state are accepted by the recovery candidate, but beta.3 has no official artifact to promote and cannot contribute release evidence. |
 | `0.6.6` | `0.8.0-beta.0` | Unpublished invalid cut | The immutable signed tag uses the forbidden beta.0 number, has no GitHub Release, and cannot be moved, repaired, published, or used as release evidence. |
-| `0.6.6` | `0.8.0-beta.1` | Qualification candidate | Follow [Upgrade from 0.6.6 to the 0.8.0 line](#upgrade-from-066-to-the-080-line). Deploy only after every fresh exact-revision artifact and automatic qualification gate succeeds. |
+| `0.6.6` | `0.8.0-beta.1` | Published, not qualified | The prerelease was published, but its release-image workflow failed and independent rebuilds were skipped. Preserve it as attributable release history; do not use it as a stable source or reuse its evidence. |
+| `0.8.0-beta.1` | `0.8.0-beta.2` | Unpublished failed cut | The signed tag was created without a governed beta.2 entry, so exact-tag release-contract validation could not prepare a draft. Do not move, recreate, publish, attach artifacts to, or reuse evidence from this cut. |
+| `0.6.6` | `0.8.1-beta.1` | Qualification candidate | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Deploy only after person review and every fresh exact-revision artifact and automatic qualification gate succeeds. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
 `Recovery candidate` or `Conditional`. A tag cannot prepare a GitHub draft
 release until the matching entry and upgrade link pass the repository
 release-contract checker.
+
+## Upgrade from 0.6.6 to the 0.8.1 line
+
+`0.8.1-beta.1` is the fresh qualification candidate after the abandoned
+`0.8.0` line. The older `0.8.0-beta.0` tag is invalid, the published
+`0.8.0-beta.1` cut is unqualified, and `0.8.0-beta.2` failed before a governed
+entry could prepare its draft. Keep each as attributable release history; do
+not move a tag, attach artifacts, publish a replacement, or reuse its evidence.
+
+The `0.8.1` line carries epoch-1 configuration, bounded proxy engines,
+activation planning, strict deployment hardening, durable Admin and shared
+state, Gateway Controller and Gateway API surfaces, signed supply-chain
+admission, reproducible image and Helm evidence, and expanded security testing.
+All tracked general and Kubernetes features remain experimental and
+unvalidated.
+
+Create and inspect a sibling epoch-1 tree rather than editing the active
+epoch-0 tree in place:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+Use `[proxy.upstream_resolution]` for the canonical resolver policy. Epoch-1
+continues to accept `[quic.upstream.resolution]` as a deprecated compatibility
+input; migrate every leaf and do not configure the same effective leaf in both
+tables. Resolver-policy changes require `full_reload`.
+
+Use Helm `4.2.4` for canonical packaging and reproducibility; Helm `3.21.3`
+or `4.2.4` may render and consume the charts. Inspect both exact-version chart
+manifests and immutable admission references before staged rollout. On AMD64,
+select the immutable `x86-64-v3` image only on compatible hosts; otherwise use
+the explicit immutable `amd64v2` digest.
+
+Retain `0.6.6` image digests, epoch-0 configuration, referenced assets,
+compatible PostgreSQL backup, admission bundle, audit evidence, controller
+rollback ConfigMaps, Gateway API CRDs and Lease, and shared UDP identity
+material. To roll back, stop new-version writers, drain the data plane before
+the controller, restore the old binaries, configuration, and database together,
+and remove unknown epoch-1 tables before validating with `0.6.6`. External
+audit, telemetry, network, and client-visible effects cannot be undone.
+
+`0.8.1-beta.1` must produce fresh exact-revision evidence: 30 immutable image
+subjects, both official exact-version Helm OCI charts, their independent
+rebuild receipts, and one complete automatic qualification receipt. Begin the
+24-hour stable soak only after person-reviewed publication and that evidence
+complete. Any tracked change outside the eventual documentation-only stable
+commit requires `0.8.1-beta.2` and restarts qualification.
 
 ## Upgrade from 0.6.5 to 0.6.6
 
