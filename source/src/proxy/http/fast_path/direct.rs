@@ -2,7 +2,7 @@ use http::Method;
 
 use crate::config::{HttpVersion, ProxyProtocolEgressMode, RouteConfig, UpstreamConfig};
 use crate::proxy::http::EffectiveRetryPolicy;
-use crate::proxy::http::version::select_upstream_http_version;
+use crate::proxy::http::version::select_route_upstream_http_version;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
 use crate::waf::RequestWafDecision;
@@ -45,13 +45,12 @@ pub(super) fn select_direct_fast_path_upstream<'a>(
     return None;
   }
 
-  let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
-    select_upstream_http_version(
-      state.config.proxy.auto_upgrade.enabled,
-      state.config.proxy.auto_upgrade.max_http_version,
-      upstream.max_http_version,
-    )
-  });
+  let upstream_version = select_route_upstream_http_version(
+    resolved.route,
+    state.config.proxy.auto_upgrade.enabled,
+    state.config.proxy.auto_upgrade.max_http_version,
+    upstream.max_http_version,
+  );
   if upstream_version == HttpVersion::H3
     || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
   {

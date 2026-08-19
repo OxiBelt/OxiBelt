@@ -19,6 +19,7 @@ use crate::overload::OverloadState;
 use crate::pools::synthetic_upstream_name_for_id;
 use crate::proxy::http::body::ProxyBody;
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
+use crate::upstream_resolution::{CandidateSchedulerConfig, ResolutionPolicy};
 
 use super::super::stage_timing as timing;
 use super::connection::{
@@ -49,6 +50,7 @@ impl DirectH2Pools {
     outbound_revocation: &OutboundRevocationRuntime,
     circuit_breakers: Arc<CircuitBreakerRuntime>,
     circuit_pools: &[UpstreamPoolConfig],
+    resolution_config: &crate::config::UpstreamResolutionConfig,
   ) -> anyhow::Result<Self> {
     let mut pools = Vec::with_capacity(upstreams.len());
     for upstream in upstreams {
@@ -62,6 +64,7 @@ impl DirectH2Pools {
           outbound_revocation,
           circuit_breakers.clone(),
           circuit_pool_for_upstream(&upstream.name, circuit_pools),
+          resolution_config,
         )
         .transpose()
         .with_context(|| format!("failed to build direct H2 pool for {}", upstream.name))?
@@ -132,6 +135,10 @@ pub(super) struct DirectH2Pool {
   tls_config: Option<Arc<rustls::ClientConfig>>,
   circuit_breakers: Arc<CircuitBreakerRuntime>,
   circuit_pool: Option<Arc<str>>,
+  resolution_policy: ResolutionPolicy,
+  scheduler_policy: CandidateSchedulerConfig,
+  svcb_enabled: bool,
+  allowed_svcb_ports: Arc<[u16]>,
   changed: Arc<Notify>,
   waiters: Arc<Semaphore>,
   slots: Box<[DirectH2Slot]>,
@@ -387,6 +394,7 @@ impl DirectH2Pool {
     outbound_revocation: &OutboundRevocationRuntime,
     circuit_breakers: Arc<CircuitBreakerRuntime>,
     circuit_pool: Option<Arc<str>>,
+    resolution_config: &crate::config::UpstreamResolutionConfig,
   ) -> Option<anyhow::Result<Self>> {
     let origin = DirectH2Origin::from_url(&upstream.origin)?;
     let tls_config = if origin.scheme == "https" {
@@ -407,8 +415,13 @@ impl DirectH2Pool {
     let max_streams_per_slot = (http2_config.max_concurrent_streams as usize).max(1);
     let target_streams_per_slot =
       max_streams_per_slot.clamp(1, DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT);
-    Some(tls_config.transpose().map(|tls_config| {
-      Self {
+    let policies = crate::upstream_resolution::http_upstream_policies(resolution_config, upstream);
+    Some(tls_config.transpose().and_then(|tls_config| {
+      let (resolution_policy, scheduler_policy) = policies?;
+      let svcb_enabled = resolution_config.happy_eyeballs.svcb
+        == crate::config::UpstreamResolutionDnsMode::Auto
+        && scheduler_policy.mode() == crate::upstream_resolution::CandidateSchedulerMode::Enabled;
+      Ok(Self {
         generation: DirectH2PoolGeneration::new(),
         retired: AtomicBool::new(false),
         origin,
@@ -422,6 +435,10 @@ impl DirectH2Pool {
         tls_config,
         circuit_breakers,
         circuit_pool,
+        resolution_policy,
+        scheduler_policy,
+        svcb_enabled,
+        allowed_svcb_ports: Arc::from(upstream.svcb_allowed_ports.clone()),
         changed: Arc::new(Notify::new()),
         waiters: Arc::new(Semaphore::new(DIRECT_H2_MAX_WAITERS)),
         slots: (0..slot_count)
@@ -432,7 +449,7 @@ impl DirectH2Pool {
         release_slot_visits: AtomicUsize::new(0),
         #[cfg(test)]
         test_connector: None,
-      }
+      })
     }))
   }
 
@@ -907,6 +924,10 @@ impl DirectH2Pool {
       &self.http2_config,
       deadline,
       self.changed.clone(),
+      self.resolution_policy,
+      self.scheduler_policy,
+      self.svcb_enabled,
+      &self.allowed_svcb_ports,
     )
     .await
   }
@@ -1402,6 +1423,18 @@ impl DirectH2Pool {
       tls_config: None,
       circuit_breakers,
       circuit_pool: None,
+      resolution_policy: ResolutionPolicy::default(),
+      scheduler_policy: CandidateSchedulerConfig::new(
+        crate::upstream_resolution::CandidateSchedulerMode::Enabled,
+        Duration::from_millis(250),
+        Duration::from_millis(100),
+        4,
+        2,
+        1,
+      )
+      .expect("test Happy Eyeballs policy is valid"),
+      svcb_enabled: false,
+      allowed_svcb_ports: Arc::from([]),
       changed: Arc::new(Notify::new()),
       waiters: Arc::new(Semaphore::new(DIRECT_H2_MAX_WAITERS)),
       slots: (0..slot_count)

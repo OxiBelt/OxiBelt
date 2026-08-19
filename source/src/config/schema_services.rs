@@ -169,6 +169,10 @@ pub struct UpstreamConfig {
   pub origin: Url,
   #[serde(default = "default_proxy_max_http_version")]
   pub max_http_version: HttpVersion,
+  #[serde(default)]
+  pub happy_eyeballs_mode: HappyEyeballsMode,
+  #[serde(default)]
+  pub svcb_allowed_ports: Vec<u16>,
   #[serde(default = "default_connect_timeout_ms")]
   pub connect_timeout_ms: u64,
   #[serde(default = "default_request_timeout_ms")]
@@ -199,6 +203,15 @@ pub struct UpstreamConfig {
   pub tls: UpstreamTlsConfig,
   #[serde(skip)]
   pub extra_trusted_ca_certs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HappyEyeballsMode {
+  #[default]
+  Inherit,
+  V3,
+  Legacy,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]

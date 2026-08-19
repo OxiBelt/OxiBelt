@@ -162,7 +162,8 @@ pub use schema_runtime::*;
 pub use schema_services::*;
 pub use security_headers::*;
 use shape::{
-  allowed_config_keys, normalize_merged_lb_policy_compat, reject_removed_access_log_config,
+  allowed_config_keys, normalize_merged_lb_policy_compat,
+  normalize_merged_upstream_resolution_compat, reject_removed_access_log_config,
   validate_merged_toml_shape,
 };
 pub use shared_state::{

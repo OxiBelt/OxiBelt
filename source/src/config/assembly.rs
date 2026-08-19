@@ -7,6 +7,7 @@ impl Config {
     let path_roots = config_path_roots(path)?;
     let mut loaded = load_toml_with_includes(path)?;
     normalize_merged_lb_policy_compat(&mut loaded.value)?;
+    normalize_merged_upstream_resolution_compat(&mut loaded.value)?;
     validate_merged_toml_shape(&loaded.value)?;
     let mut config: Self = loaded
       .value
@@ -30,6 +31,7 @@ impl Config {
     let path_roots = config_path_roots(path)?;
     let mut loaded = load_toml_with_includes_and_overrides(path, overrides)?;
     normalize_merged_lb_policy_compat(&mut loaded.value)?;
+    normalize_merged_upstream_resolution_compat(&mut loaded.value)?;
     validate_merged_toml_shape(&loaded.value)?;
     let mut config: Self = loaded
       .value
@@ -63,6 +65,7 @@ impl Config {
     let mut value = loaded.value;
     operational_profile::apply_to_toml(&mut value)?;
     normalize_merged_lb_policy_compat(&mut value)?;
+    normalize_merged_upstream_resolution_compat(&mut value)?;
     validate_merged_toml_shape(&value)?;
     let config = Self::load(path)?;
     config.validate()?;

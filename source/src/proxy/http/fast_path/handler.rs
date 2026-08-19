@@ -146,13 +146,12 @@ impl PlainProxyFastPath {
       };
       let upstream = selected.upstream;
       let upstream_index = selected.upstream_index;
-      let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
-        select_upstream_http_version(
-          state.config.proxy.auto_upgrade.enabled,
-          state.config.proxy.auto_upgrade.max_http_version,
-          upstream.max_http_version,
-        )
-      });
+      let upstream_version = select_route_upstream_http_version(
+        resolved.route,
+        state.config.proxy.auto_upgrade.enabled,
+        state.config.proxy.auto_upgrade.max_http_version,
+        upstream.max_http_version,
+      );
       let pool_retry_context = if let Some(pool_name) = selected.pool_name() {
         access_log.set_upstream_pool(pool_name);
         Some((request.uri().clone(), pool_cookie_header.cloned()))

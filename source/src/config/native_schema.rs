@@ -241,8 +241,44 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     NativeConfigSecretClass::FileReference,
     NativeConfigActivation::DownstreamTlsReload,
   ),
-  full_reload("quic.upstream.resolution"),
-  full_reload("quic.upstream.resolution.*"),
+  deprecated_epoch1("quic.upstream.resolution", "proxy.upstream_resolution"),
+  deprecated_epoch1(
+    "quic.upstream.resolution.max_endpoint_count",
+    "proxy.upstream_resolution.max_endpoint_count",
+  ),
+  deprecated_epoch1(
+    "quic.upstream.resolution.min_ttl_ms",
+    "proxy.upstream_resolution.min_ttl_ms",
+  ),
+  deprecated_epoch1(
+    "quic.upstream.resolution.max_ttl_ms",
+    "proxy.upstream_resolution.max_ttl_ms",
+  ),
+  deprecated_epoch1(
+    "quic.upstream.resolution.negative_ttl_ms",
+    "proxy.upstream_resolution.negative_ttl_ms",
+  ),
+  deprecated_epoch1(
+    "quic.upstream.resolution.address_family_stagger_ms",
+    "proxy.upstream_resolution.happy_eyeballs.connection_attempt_delay_ms",
+  ),
+  deprecated_epoch1(
+    "quic.upstream.resolution.max_connect_attempts",
+    "proxy.upstream_resolution.happy_eyeballs.max_connect_attempts",
+  ),
+  deprecated_epoch1(
+    "quic.upstream.resolution.cooldown_base_ms",
+    "proxy.upstream_resolution.cooldown_base_ms",
+  ),
+  deprecated_epoch1(
+    "quic.upstream.resolution.cooldown_max_ms",
+    "proxy.upstream_resolution.cooldown_max_ms",
+  ),
+  full_reload("proxy.upstream_resolution"),
+  full_reload("proxy.upstream_resolution.*"),
+  full_reload("upstreams[].happy_eyeballs_mode"),
+  full_reload("upstreams[].svcb_allowed_ports"),
+  full_reload("routes[].upstream_http_version_mode"),
   conditional("runtime.main_runtime"),
   conditional("runtime.topology_policy"),
   restart("runtime.worker_threads"),
@@ -291,6 +327,21 @@ const fn deprecated(path: &'static str, replacement: &'static str) -> NativeConf
   NativeConfigFieldMetadata {
     path,
     introduced_epoch: 0,
+    deprecated_epoch: Some(1),
+    replacement: Some(replacement),
+    secret_class: NativeConfigSecretClass::None,
+    config_activation: NativeConfigActivation::FullReload,
+    reference_activation: NativeConfigActivation::None,
+  }
+}
+
+const fn deprecated_epoch1(
+  path: &'static str,
+  replacement: &'static str,
+) -> NativeConfigFieldMetadata {
+  NativeConfigFieldMetadata {
+    path,
+    introduced_epoch: 1,
     deprecated_epoch: Some(1),
     replacement: Some(replacement),
     secret_class: NativeConfigSecretClass::None,
@@ -631,6 +682,13 @@ fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
 
 #[cfg(feature = "config-tooling")]
 fn scalar_schema(path: &str) -> Value {
+  if path == "upstreams.svcb_allowed_ports" {
+    return json!({
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1, "maximum": 65_535}
+    });
+  }
   if let Some(values) = enum_values(path) {
     return json!({"type": "string", "enum": values});
   }
@@ -675,6 +733,22 @@ fn scalar_schema(path: &str) -> Value {
 #[cfg(feature = "config-tooling")]
 fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
   let range = match path {
+    "proxy.upstream_resolution.max_endpoint_count" => (1, 64),
+    "proxy.upstream_resolution.min_ttl_ms" | "proxy.upstream_resolution.max_ttl_ms" => {
+      (1, 3_600_000)
+    }
+    "proxy.upstream_resolution.negative_ttl_ms" => (1, 30_000),
+    "proxy.upstream_resolution.cooldown_base_ms" | "proxy.upstream_resolution.cooldown_max_ms" => {
+      (1, 300_000)
+    }
+    "proxy.upstream_resolution.happy_eyeballs.resolution_delay_ms" => (1, 5_000),
+    "proxy.upstream_resolution.happy_eyeballs.connection_attempt_delay_ms"
+    | "proxy.upstream_resolution.happy_eyeballs.minimum_connection_attempt_delay_ms"
+    | "proxy.upstream_resolution.happy_eyeballs.maximum_connection_attempt_delay_ms" => (10, 5_000),
+    "proxy.upstream_resolution.happy_eyeballs.max_connect_attempts" => (1, 16),
+    "proxy.upstream_resolution.happy_eyeballs.max_concurrent_attempts"
+    | "proxy.upstream_resolution.happy_eyeballs.preferred_address_family_count" => (1, 2),
+    "proxy.upstream_resolution.happy_eyeballs.last_resort_local_synthesis_delay_ms" => (1, 60_000),
     "quic.upstream.resolution.max_endpoint_count" => (1, 64),
     "quic.upstream.resolution.min_ttl_ms" | "quic.upstream.resolution.max_ttl_ms" => (1, 3_600_000),
     "quic.upstream.resolution.negative_ttl_ms" => (1, 30_000),
@@ -893,6 +967,26 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
       vec!["allow_fallback", "require_exact"],
     ),
     (
+      "proxy.upstream_resolution.happy_eyeballs.mode",
+      vec!["v3", "legacy"],
+    ),
+    (
+      "proxy.upstream_resolution.happy_eyeballs.svcb",
+      vec!["auto", "disabled"],
+    ),
+    (
+      "proxy.upstream_resolution.happy_eyeballs.pref64",
+      vec!["auto", "disabled"],
+    ),
+    (
+      "upstreams.happy_eyeballs_mode",
+      vec!["inherit", "v3", "legacy"],
+    ),
+    (
+      "routes.upstream_http_version_mode",
+      vec!["exact", "ceiling"],
+    ),
+    (
       "shared_state.failure_policies.udp_flows",
       vec!["reject_new_only"],
     ),
@@ -947,6 +1041,26 @@ fn default_value(path: &str) -> Option<Value> {
     | "runtime.worker_multipliers.compio_direct_h1" => json!(1.0),
     "shared_state.failure_policies.udp_flows" => json!("reject_new_only"),
     "shared_state.udp_flow_identity_key_env" => json!("OXIBELT_UDP_FLOW_IDENTITY_KEY"),
+    "proxy.upstream_resolution.max_endpoint_count" => json!(16),
+    "proxy.upstream_resolution.min_ttl_ms" => json!(1_000),
+    "proxy.upstream_resolution.max_ttl_ms" => json!(30_000),
+    "proxy.upstream_resolution.negative_ttl_ms" => json!(1_000),
+    "proxy.upstream_resolution.cooldown_base_ms" => json!(1_000),
+    "proxy.upstream_resolution.cooldown_max_ms" => json!(30_000),
+    "proxy.upstream_resolution.happy_eyeballs.mode" => json!("v3"),
+    "proxy.upstream_resolution.happy_eyeballs.resolution_delay_ms" => json!(50),
+    "proxy.upstream_resolution.happy_eyeballs.connection_attempt_delay_ms" => json!(250),
+    "proxy.upstream_resolution.happy_eyeballs.minimum_connection_attempt_delay_ms" => json!(100),
+    "proxy.upstream_resolution.happy_eyeballs.maximum_connection_attempt_delay_ms" => json!(2_000),
+    "proxy.upstream_resolution.happy_eyeballs.max_connect_attempts" => json!(4),
+    "proxy.upstream_resolution.happy_eyeballs.max_concurrent_attempts" => json!(2),
+    "proxy.upstream_resolution.happy_eyeballs.preferred_address_family_count" => json!(1),
+    "proxy.upstream_resolution.happy_eyeballs.last_resort_local_synthesis_delay_ms" => json!(2_000),
+    "proxy.upstream_resolution.happy_eyeballs.svcb"
+    | "proxy.upstream_resolution.happy_eyeballs.pref64" => json!("auto"),
+    "upstreams.happy_eyeballs_mode" => json!("inherit"),
+    "upstreams.svcb_allowed_ports" => json!([]),
+    "routes.upstream_http_version_mode" => json!("exact"),
     "sni_forward.quic_initial_reassembly.max_pending_sessions" => json!(64),
     "sni_forward.quic_initial_reassembly.max_fragments_per_session" => json!(64),
     "sni_forward.quic_initial_reassembly.max_datagrams_per_session" => json!(64),

@@ -47,6 +47,8 @@ pub struct RouteConfig {
   #[serde(default)]
   pub upstream_http_version: Option<HttpVersion>,
   #[serde(default)]
+  pub upstream_http_version_mode: UpstreamHttpVersionMode,
+  #[serde(default)]
   pub generic_http_upgrade: bool,
   #[serde(default)]
   pub connect_tunneling: bool,
@@ -78,6 +80,14 @@ pub struct RouteConfig {
   pub tls: RouteTlsConfig,
   #[serde(default)]
   pub waf: RouteWafConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamHttpVersionMode {
+  #[default]
+  Exact,
+  Ceiling,
 }
 
 impl RouteConfig {

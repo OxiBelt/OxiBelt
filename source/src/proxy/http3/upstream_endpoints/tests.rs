@@ -1,13 +1,30 @@
 use super::*;
 use crate::circuit_breakers::{AdmissionRejection, AdmissionRejectionReason};
+use crate::upstream_resolution::EndpointAddressFamily;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 
 struct DropObservedPending {
   dropped: Arc<AtomicBool>,
+}
+
+fn scheduler_policy(
+  mode: CandidateSchedulerMode,
+  max_concurrent_attempts: usize,
+  first_family_count: usize,
+) -> CandidateSchedulerConfig {
+  CandidateSchedulerConfig::new(
+    mode,
+    Duration::from_millis(10),
+    Duration::from_millis(10),
+    4,
+    max_concurrent_attempts,
+    first_family_count,
+  )
+  .unwrap()
 }
 
 impl Future for DropObservedPending {
@@ -50,7 +67,7 @@ fn family_interleave_preserves_bounded_rotation_order() {
     "127.0.0.2:443".parse().unwrap(),
   ];
   assert_eq!(
-    interleave_families(addresses),
+    interleave_families(addresses, 1),
     vec![
       "[::1]:443".parse().unwrap(),
       "127.0.0.1:443".parse().unwrap(),
@@ -84,11 +101,13 @@ fn one_success_preference_then_rotation_reaches_every_candidate() {
 
 #[tokio::test(start_paused = true)]
 async fn race_candidates_spaces_failure_driven_launches_at_the_attempt_floor() {
-  let mut policy = QuicUpstreamResolutionConfig::default();
-  policy.address_family_stagger_ms = 10;
-  policy.max_connect_attempts = 3;
-  policy.cooldown_base_ms = 1;
-  policy.cooldown_max_ms = 1;
+  let policy = QuicUpstreamResolutionConfig {
+    address_family_stagger_ms: 10,
+    max_connect_attempts: 3,
+    cooldown_base_ms: 1,
+    cooldown_max_ms: 1,
+    ..QuicUpstreamResolutionConfig::default()
+  };
   let health = Arc::new(tokio::sync::Mutex::new(EndpointSelectionState::default()));
   let metrics = Metrics::new();
   let attempts = Arc::new(StdMutex::new(Vec::new()));
@@ -105,8 +124,10 @@ async fn race_candidates_spaces_failure_driven_launches_at_the_attempt_floor() {
     async move {
       race_candidates::<(), _, _>(
         &policy,
+        scheduler_policy(CandidateSchedulerMode::Enabled, 2, 1),
         &health,
         expected,
+        None,
         started + Duration::from_millis(100),
         &metrics,
         move |address, _| {
@@ -161,11 +182,13 @@ async fn race_candidates_spaces_failure_driven_launches_at_the_attempt_floor() {
 
 #[tokio::test(start_paused = true)]
 async fn race_candidates_does_not_launch_after_a_deadline_shorter_than_the_stagger() {
-  let mut policy = QuicUpstreamResolutionConfig::default();
-  policy.address_family_stagger_ms = 10;
-  policy.max_connect_attempts = 2;
-  policy.cooldown_base_ms = 1;
-  policy.cooldown_max_ms = 1;
+  let policy = QuicUpstreamResolutionConfig {
+    address_family_stagger_ms: 10,
+    max_connect_attempts: 2,
+    cooldown_base_ms: 1,
+    cooldown_max_ms: 1,
+    ..QuicUpstreamResolutionConfig::default()
+  };
   let health = Arc::new(tokio::sync::Mutex::new(EndpointSelectionState::default()));
   let metrics = Metrics::new();
   let attempts = Arc::new(StdMutex::new(Vec::new()));
@@ -177,11 +200,13 @@ async fn race_candidates_does_not_launch_after_a_deadline_shorter_than_the_stagg
     async move {
       race_candidates::<(), _, _>(
         &policy,
+        scheduler_policy(CandidateSchedulerMode::Enabled, 2, 1),
         &health,
         vec![
           "127.0.0.1:443".parse().unwrap(),
           "127.0.0.2:443".parse().unwrap(),
         ],
+        None,
         started + Duration::from_millis(9),
         &metrics,
         move |address, _| {
@@ -206,12 +231,47 @@ async fn race_candidates_does_not_launch_after_a_deadline_shorter_than_the_stagg
 }
 
 #[tokio::test(start_paused = true)]
+async fn race_candidates_does_not_launch_when_the_deadline_is_already_expired() {
+  let policy = QuicUpstreamResolutionConfig {
+    address_family_stagger_ms: 10,
+    max_connect_attempts: 1,
+    cooldown_base_ms: 1,
+    cooldown_max_ms: 1,
+    ..QuicUpstreamResolutionConfig::default()
+  };
+  let health = tokio::sync::Mutex::new(EndpointSelectionState::default());
+  let metrics = Metrics::new();
+  let attempts = AtomicUsize::new(0);
+  let deadline = tokio::time::Instant::now();
+
+  let result = race_candidates::<(), _, _>(
+    &policy,
+    scheduler_policy(CandidateSchedulerMode::Enabled, 1, 1),
+    &health,
+    vec!["127.0.0.1:443".parse().unwrap()],
+    None,
+    deadline,
+    &metrics,
+    |_, _| {
+      attempts.fetch_add(1, Ordering::Relaxed);
+      async { Ok(()) }
+    },
+  )
+  .await;
+
+  assert!(result.is_err());
+  assert_eq!(attempts.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
 async fn race_candidates_retains_an_in_flight_candidate_after_admission_rejection() {
-  let mut policy = QuicUpstreamResolutionConfig::default();
-  policy.address_family_stagger_ms = 10;
-  policy.max_connect_attempts = 3;
-  policy.cooldown_base_ms = 1;
-  policy.cooldown_max_ms = 1;
+  let policy = QuicUpstreamResolutionConfig {
+    address_family_stagger_ms: 10,
+    max_connect_attempts: 3,
+    cooldown_base_ms: 1,
+    cooldown_max_ms: 1,
+    ..QuicUpstreamResolutionConfig::default()
+  };
   let health = Arc::new(tokio::sync::Mutex::new(EndpointSelectionState::default()));
   let metrics = Metrics::new();
   let attempts = Arc::new(StdMutex::new(Vec::new()));
@@ -230,8 +290,10 @@ async fn race_candidates_retains_an_in_flight_candidate_after_admission_rejectio
     async move {
       race_candidates::<(), _, _>(
         &policy,
+        scheduler_policy(CandidateSchedulerMode::Enabled, 2, 1),
         &health,
         vec![first, second, third],
+        None,
         started + Duration::from_millis(100),
         &metrics,
         move |address, _| {
@@ -272,11 +334,13 @@ async fn race_candidates_retains_an_in_flight_candidate_after_admission_rejectio
 
 #[tokio::test(start_paused = true)]
 async fn race_candidates_deadline_drops_pending_work_without_launching_another_candidate() {
-  let mut policy = QuicUpstreamResolutionConfig::default();
-  policy.address_family_stagger_ms = 10;
-  policy.max_connect_attempts = 2;
-  policy.cooldown_base_ms = 1;
-  policy.cooldown_max_ms = 1;
+  let policy = QuicUpstreamResolutionConfig {
+    address_family_stagger_ms: 10,
+    max_connect_attempts: 2,
+    cooldown_base_ms: 1,
+    cooldown_max_ms: 1,
+    ..QuicUpstreamResolutionConfig::default()
+  };
   let health = Arc::new(tokio::sync::Mutex::new(EndpointSelectionState::default()));
   let metrics = Metrics::new();
   let dropped = Arc::new(AtomicBool::new(false));
@@ -292,8 +356,10 @@ async fn race_candidates_deadline_drops_pending_work_without_launching_another_c
     async move {
       race_candidates(
         &policy,
+        scheduler_policy(CandidateSchedulerMode::Enabled, 2, 1),
         &health,
         vec![first, second],
+        None,
         started + Duration::from_millis(9),
         &metrics,
         move |address, _| {
@@ -312,4 +378,124 @@ async fn race_candidates_deadline_drops_pending_work_without_launching_another_c
   assert!(task.await.unwrap().is_err());
   assert!(dropped.load(Ordering::Acquire));
   assert_eq!(attempts.lock().unwrap().as_slice(), [first]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_mode_keeps_h3_attempts_sequential() {
+  let policy = QuicUpstreamResolutionConfig {
+    address_family_stagger_ms: 10,
+    max_connect_attempts: 2,
+    cooldown_base_ms: 1,
+    cooldown_max_ms: 1,
+    ..QuicUpstreamResolutionConfig::default()
+  };
+  let health = tokio::sync::Mutex::new(EndpointSelectionState::default());
+  let metrics = Metrics::new();
+  let attempts = Arc::new(StdMutex::new(Vec::new()));
+  let release_first = Arc::new(tokio::sync::Notify::new());
+  let first = "127.0.0.1:443".parse().unwrap();
+  let second = "127.0.0.2:443".parse().unwrap();
+  let started = tokio::time::Instant::now();
+  let task = tokio::spawn({
+    let attempts = Arc::clone(&attempts);
+    let release_first = Arc::clone(&release_first);
+    async move {
+      race_candidates::<(), _, _>(
+        &policy,
+        scheduler_policy(CandidateSchedulerMode::LegacySequential, 2, 1),
+        &health,
+        vec![first, second],
+        None,
+        started + Duration::from_millis(100),
+        &metrics,
+        move |address, _| {
+          let attempts = Arc::clone(&attempts);
+          let release_first = Arc::clone(&release_first);
+          async move {
+            attempts.lock().unwrap().push(address);
+            if address == first {
+              release_first.notified().await;
+              Err(anyhow::anyhow!("candidate failed"))
+            } else {
+              Ok(())
+            }
+          }
+        },
+      )
+      .await
+    }
+  });
+
+  tokio::task::yield_now().await;
+  tokio::time::advance(Duration::from_millis(20)).await;
+  tokio::task::yield_now().await;
+  assert_eq!(attempts.lock().unwrap().as_slice(), [first]);
+  release_first.notify_one();
+  tokio::time::advance(Duration::from_millis(10)).await;
+  tokio::task::yield_now().await;
+  assert!(task.await.unwrap().is_ok());
+  assert_eq!(attempts.lock().unwrap().as_slice(), [first, second]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn h3_race_admits_late_dns_candidates_without_restarting_the_first() {
+  let policy = QuicUpstreamResolutionConfig {
+    address_family_stagger_ms: 10,
+    max_connect_attempts: 2,
+    cooldown_base_ms: 1,
+    cooldown_max_ms: 1,
+    ..QuicUpstreamResolutionConfig::default()
+  };
+  let health = tokio::sync::Mutex::new(EndpointSelectionState::default());
+  let metrics = Metrics::new();
+  let attempts = Arc::new(StdMutex::new(Vec::new()));
+  let first = "192.0.2.1:443".parse().unwrap();
+  let second = "[2001:db8::1]:443".parse().unwrap();
+  let initial = Arc::from(vec![HappyEyeballsCandidate::new(
+    0,
+    EndpointAddressFamily::Ipv4,
+    first,
+  )]);
+  let (updates_tx, updates_rx) = tokio::sync::watch::channel(initial);
+  let started = tokio::time::Instant::now();
+  let task = tokio::spawn({
+    let attempts = Arc::clone(&attempts);
+    async move {
+      race_candidates(
+        &policy,
+        scheduler_policy(CandidateSchedulerMode::Enabled, 2, 1),
+        &health,
+        vec![first],
+        Some(updates_rx),
+        started + Duration::from_millis(100),
+        &metrics,
+        move |address, _| {
+          attempts.lock().unwrap().push(address);
+          async move {
+            if address == first {
+              std::future::pending().await
+            } else {
+              Ok(())
+            }
+          }
+        },
+      )
+      .await
+    }
+  });
+
+  tokio::task::yield_now().await;
+  tokio::time::advance(Duration::from_millis(5)).await;
+  updates_tx
+    .send(Arc::from(vec![
+      HappyEyeballsCandidate::new(0, EndpointAddressFamily::Ipv4, first),
+      HappyEyeballsCandidate::new(1, EndpointAddressFamily::Ipv6, second),
+    ]))
+    .unwrap();
+  tokio::task::yield_now().await;
+  assert_eq!(attempts.lock().unwrap().as_slice(), [first]);
+  tokio::time::advance(Duration::from_millis(5)).await;
+  tokio::task::yield_now().await;
+  assert!(task.await.unwrap().is_ok());
+  assert_eq!(attempts.lock().unwrap().as_slice(), [first, second]);
 }

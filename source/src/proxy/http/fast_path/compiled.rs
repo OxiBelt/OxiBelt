@@ -14,7 +14,7 @@ use crate::config::{
   RouteStaticFilesConfig, StaticFilesSendfileMode, UpstreamConfig,
 };
 use crate::proxy::http::uri::{self, UpstreamUriParts};
-use crate::proxy::http::version::select_upstream_http_version;
+use crate::proxy::http::version::select_route_upstream_http_version;
 use crate::proxy::http::{EffectiveRetryPolicy, EffectiveTimeouts};
 use crate::routes::{RouteExecutionPlan, RouteTable};
 use crate::state::AppSnapshot;
@@ -315,13 +315,12 @@ fn compile_proxy_action(
     return None;
   }
 
-  let upstream_version = route.upstream_http_version.unwrap_or_else(|| {
-    select_upstream_http_version(
-      config.proxy.auto_upgrade.enabled,
-      config.proxy.auto_upgrade.max_http_version,
-      upstream.max_http_version,
-    )
-  });
+  let upstream_version = select_route_upstream_http_version(
+    route,
+    config.proxy.auto_upgrade.enabled,
+    config.proxy.auto_upgrade.max_http_version,
+    upstream.max_http_version,
+  );
   if upstream_version != HttpVersion::H1
     || upstream.origin.scheme() != "http"
     || upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off

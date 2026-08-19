@@ -6,6 +6,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -13,15 +14,72 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-mod dns;
+use crate::config::{
+  HappyEyeballsMode, HappyEyeballsPolicyMode, UpstreamConfig, UpstreamResolutionConfig,
+};
 
-pub(crate) use dns::{DnsAnswer, DnsLookup, DnsQueryType, DnsResolverBackend, lookup_dns};
+mod dns;
+mod happy_eyeballs;
+mod pref64;
+mod rfc6724;
+mod tcp;
+
+pub(crate) use dns::{
+  DnsAnswer, DnsLookup, DnsQueryType, DnsResolverBackend, HttpsAlpn, HttpsRecord, HttpsTarget,
+  lookup_dns, lookup_dns_absolute_until,
+};
+pub(crate) use happy_eyeballs::{
+  CandidateAttemptError, CandidateRaceError, CandidateSchedulerConfig, CandidateSchedulerMode,
+  HappyEyeballsCandidate, race_happy_eyeballs_candidates,
+};
+pub(crate) use pref64::synthesize_pref64_ipv4_candidates;
+pub(crate) use tcp::{
+  HttpTransportProtocol, connect_http_ready_happy_eyeballs, connect_http_tcp_happy_eyeballs,
+  connect_tcp_happy_eyeballs, resolve_http_candidate_updates,
+  resolve_http_candidate_updates_with_resolver,
+};
 
 const DEFAULT_MAX_ENDPOINT_COUNT: usize = 16;
 const HARD_MAX_ENDPOINT_COUNT: usize = 64;
 const DEFAULT_MIN_TTL: Duration = Duration::from_secs(1);
 const DEFAULT_MAX_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_NEGATIVE_TTL: Duration = Duration::from_secs(1);
+const DEFAULT_RESOLUTION_DELAY: Duration = Duration::from_millis(50);
+
+pub(crate) fn http_upstream_policies(
+  config: &UpstreamResolutionConfig,
+  upstream: &UpstreamConfig,
+) -> anyhow::Result<(ResolutionPolicy, CandidateSchedulerConfig)> {
+  let resolution = ResolutionPolicy::new_with_resolution_delay(
+    config.max_endpoint_count,
+    Duration::from_millis(config.min_ttl_ms),
+    Duration::from_millis(config.max_ttl_ms),
+    Duration::from_millis(config.negative_ttl_ms),
+    Duration::from_millis(config.happy_eyeballs.resolution_delay_ms),
+  )?
+  .with_pref64_enabled(matches!(
+    config.happy_eyeballs.pref64,
+    crate::config::UpstreamResolutionDnsMode::Auto
+  ));
+  let mode = match upstream.happy_eyeballs_mode {
+    HappyEyeballsMode::V3 => CandidateSchedulerMode::Enabled,
+    HappyEyeballsMode::Legacy => CandidateSchedulerMode::LegacySequential,
+    HappyEyeballsMode::Inherit => match config.happy_eyeballs.mode {
+      HappyEyeballsPolicyMode::V3 => CandidateSchedulerMode::Enabled,
+      HappyEyeballsPolicyMode::Legacy => CandidateSchedulerMode::LegacySequential,
+    },
+  };
+  let happy = &config.happy_eyeballs;
+  let scheduler = CandidateSchedulerConfig::new(
+    mode,
+    Duration::from_millis(happy.connection_attempt_delay_ms),
+    Duration::from_millis(happy.minimum_connection_attempt_delay_ms),
+    happy.max_connect_attempts.min(config.max_endpoint_count),
+    happy.max_concurrent_attempts,
+    happy.preferred_address_family_count,
+  )?;
+  Ok((resolution, scheduler))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ResolutionErrorClass {
@@ -195,19 +253,16 @@ pub(crate) enum ResolutionSource {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedEndpointSet {
-  logical_origin: ResolutionOrigin,
   endpoints: Arc<[ResolvedEndpoint]>,
   valid_until: Instant,
-  stale_until: Option<Instant>,
+  #[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "retained for resolver-source tests")
+  )]
   source: ResolutionSource,
-  generation: u64,
 }
 
 impl ResolvedEndpointSet {
-  pub(crate) fn logical_origin(&self) -> &ResolutionOrigin {
-    &self.logical_origin
-  }
-
   pub(crate) fn endpoints(&self) -> &[ResolvedEndpoint] {
     &self.endpoints
   }
@@ -216,16 +271,9 @@ impl ResolvedEndpointSet {
     self.valid_until
   }
 
-  pub(crate) fn stale_until(&self) -> Option<Instant> {
-    self.stale_until
-  }
-
+  #[cfg(test)]
   pub(crate) fn source(&self) -> ResolutionSource {
     self.source
-  }
-
-  pub(crate) fn generation(&self) -> u64 {
-    self.generation
   }
 }
 
@@ -273,6 +321,8 @@ pub(crate) struct ResolutionPolicy {
   min_ttl: Duration,
   max_ttl: Duration,
   negative_ttl: Duration,
+  resolution_delay: Duration,
+  pref64_enabled: bool,
 }
 
 impl Default for ResolutionPolicy {
@@ -282,16 +332,52 @@ impl Default for ResolutionPolicy {
       min_ttl: DEFAULT_MIN_TTL,
       max_ttl: DEFAULT_MAX_TTL,
       negative_ttl: DEFAULT_NEGATIVE_TTL,
+      resolution_delay: DEFAULT_RESOLUTION_DELAY,
+      pref64_enabled: false,
     }
   }
 }
 
 impl ResolutionPolicy {
+  pub(crate) fn max_endpoint_count(self) -> usize {
+    self.max_endpoint_count
+  }
+
+  pub(crate) fn resolution_delay(self) -> Duration {
+    self.resolution_delay
+  }
+
+  pub(crate) fn pref64_enabled(self) -> bool {
+    self.pref64_enabled
+  }
+
+  fn with_pref64_enabled(mut self, enabled: bool) -> Self {
+    self.pref64_enabled = enabled;
+    self
+  }
+
+  #[cfg(test)]
   pub(crate) fn new(
     max_endpoint_count: usize,
     min_ttl: Duration,
     max_ttl: Duration,
     negative_ttl: Duration,
+  ) -> Result<Self, ResolutionError> {
+    Self::new_with_resolution_delay(
+      max_endpoint_count,
+      min_ttl,
+      max_ttl,
+      negative_ttl,
+      DEFAULT_RESOLUTION_DELAY,
+    )
+  }
+
+  pub(crate) fn new_with_resolution_delay(
+    max_endpoint_count: usize,
+    min_ttl: Duration,
+    max_ttl: Duration,
+    negative_ttl: Duration,
+    resolution_delay: Duration,
   ) -> Result<Self, ResolutionError> {
     if !(1..=HARD_MAX_ENDPOINT_COUNT).contains(&max_endpoint_count) {
       return Err(ResolutionError::new(
@@ -313,22 +399,30 @@ impl ResolutionPolicy {
         "upstream resolver negative TTL must be nonzero and no greater than max_ttl",
       ));
     }
+    if resolution_delay.is_zero() {
+      return Err(ResolutionError::new(
+        ResolutionErrorClass::InvalidInput,
+        "upstream resolver resolution delay must be nonzero",
+      ));
+    }
     Ok(Self {
       max_endpoint_count,
       min_ttl,
       max_ttl,
       negative_ttl,
+      resolution_delay,
+      pref64_enabled: false,
     })
   }
 }
 
 pub(crate) trait ResolverBackend: Send + Sync + 'static {
-  async fn lookup(
+  fn lookup(
     &self,
     name: &str,
     query_type: DnsQueryType,
     deadline: Instant,
-  ) -> Result<DnsLookup, ResolutionError>;
+  ) -> impl Future<Output = Result<DnsLookup, ResolutionError>> + Send;
 }
 
 pub(crate) type SharedEndpointResolver = EndpointResolver<DnsResolverBackend>;
@@ -416,10 +510,6 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     }
   }
 
-  pub(crate) fn logical_origin(&self) -> &ResolutionOrigin {
-    &self.inner.origin
-  }
-
   pub(crate) async fn resolve(&self, deadline: Instant) -> SharedResolutionResult {
     loop {
       if deadline <= Instant::now() {
@@ -499,20 +589,52 @@ impl<B: ResolverBackend> EndpointResolver<B> {
       );
     }
 
-    let (a, aaaa) = tokio::join!(
-      self
-        .inner
-        .backend
-        .lookup(self.inner.origin.host(), DnsQueryType::A, deadline,),
-      self
-        .inner
-        .backend
-        .lookup(self.inner.origin.host(), DnsQueryType::Aaaa, deadline,)
-    );
-    self.combine_dns_results(a, aaaa, generation)
+    let a = self
+      .inner
+      .backend
+      .lookup(self.inner.origin.host(), DnsQueryType::A, deadline);
+    let aaaa = self
+      .inner
+      .backend
+      .lookup(self.inner.origin.host(), DnsQueryType::Aaaa, deadline);
+    tokio::pin!(a);
+    tokio::pin!(aaaa);
+    let (a, aaaa) = tokio::select! {
+      a_result = &mut a => {
+        let a_has_addresses = dns_result_has_addresses(&a_result);
+        let aaaa_result = if a_has_addresses {
+          match tokio::time::timeout(self.inner.policy.resolution_delay, &mut aaaa).await {
+            Ok(result) => result,
+            Err(_) => Err(ResolutionError::new(
+              ResolutionErrorClass::Deadline,
+              "upstream AAAA lookup did not complete within the resolution delay",
+            )),
+          }
+        } else {
+          aaaa.await
+        };
+        (a_result, aaaa_result)
+      }
+      aaaa_result = &mut aaaa => {
+        let aaaa_has_addresses = dns_result_has_addresses(&aaaa_result);
+        let a_result = if aaaa_has_addresses {
+          match tokio::time::timeout(self.inner.policy.resolution_delay, &mut a).await {
+            Ok(result) => result,
+            Err(_) => Err(ResolutionError::new(
+              ResolutionErrorClass::Deadline,
+              "upstream A lookup did not complete within the resolution delay",
+            )),
+          }
+        } else {
+          a.await
+        };
+        (a_result, aaaa_result)
+      }
+    };
+    self.combine_dns_results(a, aaaa, generation).await
   }
 
-  fn combine_dns_results(
+  async fn combine_dns_results(
     &self,
     a: Result<DnsLookup, ResolutionError>,
     aaaa: Result<DnsLookup, ResolutionError>,
@@ -532,8 +654,12 @@ impl<B: ResolverBackend> EndpointResolver<B> {
               accepted = true;
               let endpoint = ResolvedEndpoint::ip(SocketAddr::new(ip, self.inner.origin.port));
               match endpoint.family {
-                EndpointAddressFamily::Ipv4 => ipv4.push(endpoint),
-                EndpointAddressFamily::Ipv6 => ipv6.push(endpoint),
+                EndpointAddressFamily::Ipv4 => {
+                  push_bounded_unique(&mut ipv4, endpoint, self.inner.policy.max_endpoint_count)
+                }
+                EndpointAddressFamily::Ipv6 => {
+                  push_bounded_unique(&mut ipv6, endpoint, self.inner.policy.max_endpoint_count)
+                }
               }
             }
           }
@@ -561,7 +687,17 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     }
     sort_and_deduplicate(&mut ipv4);
     sort_and_deduplicate(&mut ipv6);
-    let endpoints = interleave_bounded(ipv6, ipv4, self.inner.policy.max_endpoint_count);
+    let mut ordered = ipv6;
+    ordered.extend(ipv4);
+    rfc6724::sort_destinations(&mut ordered).await;
+    let first_family = ordered
+      .first()
+      .map(ResolvedEndpoint::family)
+      .unwrap_or(EndpointAddressFamily::Ipv6);
+    let (first, second): (Vec<_>, Vec<_>) = ordered
+      .into_iter()
+      .partition(|endpoint| endpoint.family() == first_family);
+    let endpoints = interleave_bounded(first, second, self.inner.policy.max_endpoint_count);
     let observed_ttl = Duration::from_millis(ttl_ms.unwrap_or_default());
     self.endpoint_set(
       endpoints,
@@ -576,7 +712,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     endpoints: Vec<ResolvedEndpoint>,
     ttl: Duration,
     source: ResolutionSource,
-    generation: u64,
+    _generation: u64,
   ) -> SharedResolutionResult {
     let valid_until = Instant::now().checked_add(ttl).ok_or_else(|| {
       ResolutionError::new(
@@ -585,12 +721,9 @@ impl<B: ResolverBackend> EndpointResolver<B> {
       )
     })?;
     Ok(Arc::new(ResolvedEndpointSet {
-      logical_origin: self.inner.origin.clone(),
       endpoints: endpoints.into(),
       valid_until,
-      stale_until: None,
       source,
-      generation,
     }))
   }
 
@@ -618,6 +751,25 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     };
     state.refresh = None;
   }
+}
+
+fn push_bounded_unique(
+  endpoints: &mut Vec<ResolvedEndpoint>,
+  endpoint: ResolvedEndpoint,
+  limit: usize,
+) {
+  if endpoints.len() < limit && !endpoints.contains(&endpoint) {
+    endpoints.push(endpoint);
+  }
+}
+
+fn dns_result_has_addresses(result: &Result<DnsLookup, ResolutionError>) -> bool {
+  result.as_ref().is_ok_and(|lookup| {
+    lookup
+      .answers
+      .iter()
+      .any(|answer| matches!(answer, DnsAnswer::Ip(_)))
+  })
 }
 
 enum ResolutionStart {

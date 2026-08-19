@@ -806,18 +806,12 @@ Security admission, or a validating webhook in place to make a failed v2
 rollout proceed. Existing v1 behavior, omission semantics, and tag-based image
 compatibility remain available through the explicit rollback revision.
 
-Post-beta.2 development also adds optional upstream HTTP/3 resolver controls
-under `[quic.upstream.resolution]`. Existing TOML remains valid and uses the
-documented defaults when these fields are omitted. The native configuration
-schema remains epoch `1`; no TOML migration or compatibility alias is needed.
-Changing any resolver field is classified as `full_reload`, which replaces the
-resolver and pool snapshot for new work while already-draining connections keep
-their normal bounded lifetime. Validate candidate TTL, endpoint, attempt,
-address-family stagger, and cooldown limits before activation, then monitor the
-fixed-cardinality upstream HTTP/3 resolver and pool metrics for negative-cache,
-connect-failure, saturation, and wait changes. To roll back, restore or omit the
-resolver fields and perform another full reload; this does not authorize
-cross-origin connection reuse or post-dispatch request replay.
+The protocol-neutral canonical resolver policy is now `[proxy.upstream_resolution]`.
+Epoch `1` still accepts `[quic.upstream.resolution]` as a deprecated compatibility
+input; move every leaf to the canonical table and do not configure the same
+effective leaf in both locations. Resolver-policy changes require `full_reload`;
+existing draining connections retain their bounded lifetime. Roll back by restoring
+the retained epoch-1 legacy table or the prior canonical values and reloading.
 
 Post-beta.2 development also refreshes the pinned RISC-V `cross-rs` builder
 source and image together with the rootless Docker input used for independent

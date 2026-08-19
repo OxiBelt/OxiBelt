@@ -16,7 +16,6 @@ use http_body_util::BodyExt;
 use hyper::body::Body;
 use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
 use crate::circuit_breakers::CircuitBreakerRuntime;
@@ -35,6 +34,7 @@ use crate::overload::{OverloadRuntime, WorkKind};
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 use crate::proxy::http::headers::is_upgrade_request;
+use crate::upstream_resolution::{CandidateSchedulerConfig, ResolutionPolicy};
 
 use super::request_body::FastPathRequestBodyMode;
 use super::stage_timing as timing;
@@ -89,16 +89,20 @@ impl DirectH1Pools {
   pub(crate) fn new(
     upstreams: &[UpstreamConfig],
     circuit_breakers: Arc<CircuitBreakerRuntime>,
-  ) -> Self {
-    Self {
-      pools: upstreams
-        .iter()
-        .map(|upstream| {
-          DirectH1Pool::new_with_circuit_breakers(upstream, Some(circuit_breakers.clone()))
-            .map(Arc::new)
-        })
-        .collect(),
-    }
+    resolution_config: &crate::config::UpstreamResolutionConfig,
+  ) -> anyhow::Result<Self> {
+    let pools = upstreams
+      .iter()
+      .map(|upstream| {
+        DirectH1Pool::new_with_circuit_breakers(
+          upstream,
+          Some(circuit_breakers.clone()),
+          resolution_config,
+        )
+        .map(|pool| pool.map(Arc::new))
+      })
+      .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(Self { pools })
   }
 
   fn for_upstream_index(&self, upstream_index: usize) -> Option<Arc<DirectH1Pool>> {
@@ -125,6 +129,8 @@ struct DirectH1Pool {
   #[cfg(target_os = "linux")]
   compio_resolution_gate: tokio::sync::Semaphore,
   circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
+  resolution_policy: ResolutionPolicy,
+  scheduler_policy: CandidateSchedulerConfig,
 }
 
 #[cfg(target_os = "linux")]
@@ -154,17 +160,28 @@ enum DirectH1PutError {
 impl DirectH1Pool {
   #[cfg(test)]
   fn new(upstream: &UpstreamConfig) -> Option<Self> {
-    Self::new_with_circuit_breakers(upstream, None)
+    Self::new_with_circuit_breakers(
+      upstream,
+      None,
+      &crate::config::UpstreamResolutionConfig::default(),
+    )
+    .ok()
+    .flatten()
   }
 
   fn new_with_circuit_breakers(
     upstream: &UpstreamConfig,
     circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
-  ) -> Option<Self> {
-    let origin = DirectH1Origin::from_url(&upstream.origin)?;
+    resolution_config: &crate::config::UpstreamResolutionConfig,
+  ) -> anyhow::Result<Option<Self>> {
+    let Some(origin) = DirectH1Origin::from_url(&upstream.origin) else {
+      return Ok(None);
+    };
+    let (resolution_policy, scheduler_policy) =
+      crate::upstream_resolution::http_upstream_policies(resolution_config, upstream)?;
     let max_idle = upstream.pool_max_idle_per_host;
     let shard_count = max_idle.clamp(1, DIRECT_H1_MAX_SHARDS);
-    Some(Self {
+    Ok(Some(Self {
       origin,
       connect_timeout: Duration::from_millis(upstream.connect_timeout_ms),
       idle_timeout: Duration::from_millis(upstream.idle_timeout_ms),
@@ -179,7 +196,9 @@ impl DirectH1Pool {
       #[cfg(target_os = "linux")]
       compio_resolution_gate: tokio::sync::Semaphore::new(1),
       circuit_breakers,
-    })
+      resolution_policy,
+      scheduler_policy,
+    }))
   }
 
   fn compio_connect_backoff_active(&self) -> bool {
@@ -466,6 +485,8 @@ async fn send_prepared_request(
     metrics.record_http_upstream_h1_http_primary_request();
   }
   let use_compio_transport = runtime_backend == DirectH1RuntimeBackend::Compio
+    && pool.scheduler_policy.mode()
+      == crate::upstream_resolution::CandidateSchedulerMode::LegacySequential
     && compio_transport_eligible(protocol, &prepared)
     && !pool.compio_connect_backoff_active()
     && compio_service.is_some();
@@ -799,21 +820,25 @@ async fn connect_sender_inner(
   if hot_path_metrics {
     metrics.record_http_upstream_h1_http_primary_pool_miss();
   }
-  let stream = tokio::time::timeout(
-    pool.connect_timeout,
-    TcpStream::connect((pool.origin.host.as_ref(), pool.origin.port)),
+  let deadline = tokio::time::Instant::now()
+    .checked_add(pool.connect_timeout)
+    .context("direct H1 upstream connection deadline overflowed")?;
+  let (stream, remote_addr) = crate::upstream_resolution::connect_tcp_happy_eyeballs(
+    pool.origin.host.as_ref(),
+    pool.origin.port,
+    &format!("direct-h1:{}:{}", pool.origin.host, pool.origin.port),
+    pool.resolution_policy,
+    pool.scheduler_policy,
+    deadline,
   )
   .await
-  .context("direct H1 upstream connect timed out")?
   .with_context(|| {
     format!(
       "failed to connect direct H1 upstream {}:{}",
       pool.origin.host, pool.origin.port
     )
   })?;
-  stream
-    .set_nodelay(true)
-    .context("failed to enable TCP_NODELAY for direct H1 upstream")?;
+  crate::tcp_socket::enable_tcp_nodelay(&stream, remote_addr, "direct H1 upstream");
   let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
     .await
     .context("failed to establish direct H1 upstream connection")?;

@@ -86,13 +86,12 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     );
   }
 
-  let mut upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
-    select_upstream_http_version(
-      state.config.proxy.auto_upgrade.enabled,
-      state.config.proxy.auto_upgrade.max_http_version,
-      upstream.max_http_version,
-    )
-  });
+  let mut upstream_version = select_route_upstream_http_version(
+    resolved.route,
+    state.config.proxy.auto_upgrade.enabled,
+    state.config.proxy.auto_upgrade.max_http_version,
+    upstream.max_http_version,
+  );
   let grpc_web_mode = if state.config.proxy.grpc_web.enabled && resolved.route.grpc_web {
     grpc_web::request_mode(request.headers())
   } else {

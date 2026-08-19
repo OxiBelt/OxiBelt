@@ -13,6 +13,7 @@ impl Config {
   }
 
   fn validate_common(&self) -> anyhow::Result<()> {
+    self.proxy.upstream_resolution.validate()?;
     if !self.listeners.http1
       && !self.listeners.http2
       && !self.listeners.http3
@@ -78,6 +79,15 @@ impl Config {
 
     let mut upstream_names = HashSet::new();
     for upstream in &self.upstreams {
+      let mut svcb_ports = HashSet::new();
+      for port in &upstream.svcb_allowed_ports {
+        if *port == 0 || !svcb_ports.insert(*port) {
+          bail!(
+            "upstream {} svcb_allowed_ports must contain unique nonzero ports",
+            upstream.name
+          );
+        }
+      }
       if upstream.name.trim().is_empty() {
         bail!("upstream name must not be empty");
       }
@@ -223,6 +233,14 @@ impl Config {
 
     let mut route_names = HashSet::new();
     for route in &self.routes {
+      if route.upstream_http_version_mode == UpstreamHttpVersionMode::Ceiling
+        && route.upstream_http_version.is_none()
+      {
+        bail!(
+          "route {} upstream_http_version_mode requires explicit upstream_http_version",
+          route.name
+        );
+      }
       if route.name.trim().is_empty() {
         bail!("route name must not be empty");
       }

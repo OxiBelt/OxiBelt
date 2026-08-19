@@ -365,9 +365,15 @@ impl AppSnapshot {
       "primary",
       Some(circuit_breakers.clone()),
       &config.upstream_pools,
+      &config.proxy.upstream_resolution,
     )
     .context("failed to build upstream HTTP clients")?;
-    let direct_h1_pools = DirectH1Pools::new(&upstreams, circuit_breakers.clone());
+    let direct_h1_pools = DirectH1Pools::new(
+      &upstreams,
+      circuit_breakers.clone(),
+      &config.proxy.upstream_resolution,
+    )
+    .context("failed to build direct HTTP/1 pools")?;
     let direct_h2_pools = DirectH2Pools::new(
       &upstreams,
       &config.proxy.trusted_ca_certs,
@@ -377,6 +383,7 @@ impl AppSnapshot {
       &outbound_revocation,
       circuit_breakers.clone(),
       &config.upstream_pools,
+      &config.proxy.upstream_resolution,
     )
     .context("failed to build direct HTTP/2 pools")?;
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
@@ -391,6 +398,7 @@ impl AppSnapshot {
       "health",
       Some(circuit_breakers.clone()),
       &config.upstream_pools,
+      &config.proxy.upstream_resolution,
     )
     .context("failed to build upstream health-check HTTP clients")?;
     let h3_clients = UpstreamH3Pools::new(
@@ -761,9 +769,15 @@ impl AppSnapshot {
       "primary",
       Some(circuit_breakers.clone()),
       &config.upstream_pools,
+      &config.proxy.upstream_resolution,
     )
     .context("failed to build upstream HTTP clients")?;
-    let direct_h1_pools = DirectH1Pools::new(&upstreams, circuit_breakers.clone());
+    let direct_h1_pools = DirectH1Pools::new(
+      &upstreams,
+      circuit_breakers.clone(),
+      &config.proxy.upstream_resolution,
+    )
+    .context("failed to build direct HTTP/1 pools")?;
     let direct_h2_pools = DirectH2Pools::new(
       &upstreams,
       &config.proxy.trusted_ca_certs,
@@ -773,6 +787,7 @@ impl AppSnapshot {
       &previous.outbound_revocation,
       circuit_breakers.clone(),
       &config.upstream_pools,
+      &config.proxy.upstream_resolution,
     )
     .context("failed to build direct HTTP/2 pools")?;
     let health_check_upstreams = PoolState::health_check_upstreams(&config.upstream_pools);
@@ -787,6 +802,7 @@ impl AppSnapshot {
       "health",
       Some(circuit_breakers.clone()),
       &config.upstream_pools,
+      &config.proxy.upstream_resolution,
     )
     .context("failed to build upstream health-check HTTP clients")?;
     let h3_clients = UpstreamH3Pools::new(
@@ -977,6 +993,7 @@ impl AppSnapshot {
       &self.outbound_revocation,
       self.circuit_breakers.clone(),
       &self.config.upstream_pools,
+      &self.config.proxy.upstream_resolution,
     )
     .context("failed to restage direct HTTP/2 pools for snapshot publication")?;
     Ok(())

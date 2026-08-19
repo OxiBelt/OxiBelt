@@ -9972,17 +9972,28 @@ fn quic_defaults_are_parsed() {
   assert_eq!(config.quic.transport.mtu_discovery.minimum_change, 20);
   assert_eq!(config.quic.downstream.transport, config.quic.transport);
   assert_eq!(config.quic.upstream.transport, config.quic.transport);
-  assert_eq!(config.quic.upstream.resolution.max_endpoint_count, 16);
-  assert_eq!(config.quic.upstream.resolution.min_ttl_ms, 1_000);
-  assert_eq!(config.quic.upstream.resolution.max_ttl_ms, 30_000);
-  assert_eq!(config.quic.upstream.resolution.negative_ttl_ms, 1_000);
+  assert_eq!(config.proxy.upstream_resolution.max_endpoint_count, 16);
+  assert_eq!(config.proxy.upstream_resolution.min_ttl_ms, 1_000);
+  assert_eq!(config.proxy.upstream_resolution.max_ttl_ms, 30_000);
+  assert_eq!(config.proxy.upstream_resolution.negative_ttl_ms, 1_000);
   assert_eq!(
-    config.quic.upstream.resolution.address_family_stagger_ms,
+    config
+      .proxy
+      .upstream_resolution
+      .happy_eyeballs
+      .connection_attempt_delay_ms,
     250
   );
-  assert_eq!(config.quic.upstream.resolution.max_connect_attempts, 4);
-  assert_eq!(config.quic.upstream.resolution.cooldown_base_ms, 1_000);
-  assert_eq!(config.quic.upstream.resolution.cooldown_max_ms, 30_000);
+  assert_eq!(
+    config
+      .proxy
+      .upstream_resolution
+      .happy_eyeballs
+      .max_connect_attempts,
+    4
+  );
+  assert_eq!(config.proxy.upstream_resolution.cooldown_base_ms, 1_000);
+  assert_eq!(config.proxy.upstream_resolution.cooldown_max_ms, 30_000);
   assert_eq!(config.quic.socket.receive_buffer_bytes, 0);
   assert!(config.quic.upstream_pool.enabled);
 }
@@ -10075,17 +10086,28 @@ max_lifetime_ms = 7777
   assert_eq!(config.quic.transport.mtu_discovery.minimum_change, 30);
   assert_eq!(config.quic.downstream.transport, config.quic.transport);
   assert_eq!(config.quic.upstream.transport, config.quic.transport);
-  assert_eq!(config.quic.upstream.resolution.max_endpoint_count, 12);
-  assert_eq!(config.quic.upstream.resolution.min_ttl_ms, 500);
-  assert_eq!(config.quic.upstream.resolution.max_ttl_ms, 45_000);
-  assert_eq!(config.quic.upstream.resolution.negative_ttl_ms, 750);
+  assert_eq!(config.proxy.upstream_resolution.max_endpoint_count, 12);
+  assert_eq!(config.proxy.upstream_resolution.min_ttl_ms, 500);
+  assert_eq!(config.proxy.upstream_resolution.max_ttl_ms, 45_000);
+  assert_eq!(config.proxy.upstream_resolution.negative_ttl_ms, 750);
   assert_eq!(
-    config.quic.upstream.resolution.address_family_stagger_ms,
+    config
+      .proxy
+      .upstream_resolution
+      .happy_eyeballs
+      .connection_attempt_delay_ms,
     10
   );
-  assert_eq!(config.quic.upstream.resolution.max_connect_attempts, 6);
-  assert_eq!(config.quic.upstream.resolution.cooldown_base_ms, 500);
-  assert_eq!(config.quic.upstream.resolution.cooldown_max_ms, 20_000);
+  assert_eq!(
+    config
+      .proxy
+      .upstream_resolution
+      .happy_eyeballs
+      .max_connect_attempts,
+    6
+  );
+  assert_eq!(config.proxy.upstream_resolution.cooldown_base_ms, 500);
+  assert_eq!(config.proxy.upstream_resolution.cooldown_max_ms, 20_000);
   assert_eq!(config.quic.socket.receive_buffer_bytes, 8192);
   assert!(!config.quic.upstream_pool.enabled);
 }
@@ -10219,77 +10241,77 @@ fn quic_upstream_resolution_invalid_values_are_rejected() {
     (
       "zero endpoints",
       "max_endpoint_count = 0",
-      "quic.upstream.resolution.max_endpoint_count must be between 1 and 64",
+      "proxy.upstream_resolution.max_endpoint_count must be between 1 and 64",
     ),
     (
       "too many endpoints",
       "max_endpoint_count = 65",
-      "quic.upstream.resolution.max_endpoint_count must be between 1 and 64",
+      "proxy.upstream_resolution.max_endpoint_count must be between 1 and 64",
     ),
     (
       "zero minimum TTL",
       "min_ttl_ms = 0",
-      "quic.upstream.resolution.min_ttl_ms must be between 1 and 3600000",
+      "proxy.upstream_resolution.min_ttl_ms must be between 1 and 3600000",
     ),
     (
       "minimum TTL above maximum TTL",
       "min_ttl_ms = 30001",
-      "quic.upstream.resolution.min_ttl_ms must be less than or equal to quic.upstream.resolution.max_ttl_ms",
+      "proxy.upstream_resolution.min_ttl_ms must be less than or equal to proxy.upstream_resolution.max_ttl_ms",
     ),
     (
       "maximum TTL above cap",
       "max_ttl_ms = 3600001",
-      "quic.upstream.resolution.max_ttl_ms must be between 1 and 3600000",
+      "proxy.upstream_resolution.max_ttl_ms must be between 1 and 3600000",
     ),
     (
       "zero negative TTL",
       "negative_ttl_ms = 0",
-      "quic.upstream.resolution.negative_ttl_ms must be between 1 and 30000",
+      "proxy.upstream_resolution.negative_ttl_ms must be between 1 and 30000",
     ),
     (
       "negative TTL above cap",
       "negative_ttl_ms = 30001",
-      "quic.upstream.resolution.negative_ttl_ms must be between 1 and 30000",
+      "proxy.upstream_resolution.negative_ttl_ms must be between 1 and 30000",
     ),
     (
       "negative TTL above maximum TTL",
       "min_ttl_ms = 500\nmax_ttl_ms = 500\nnegative_ttl_ms = 501",
-      "quic.upstream.resolution.negative_ttl_ms must be between 1 and 500",
+      "proxy.upstream_resolution.negative_ttl_ms must be between 1 and 500",
     ),
     (
       "address-family stagger below attempt floor",
       "address_family_stagger_ms = 9",
-      "quic.upstream.resolution.address_family_stagger_ms must be between 10 and 5000",
+      "proxy.upstream_resolution.happy_eyeballs.connection_attempt_delay_ms must be within the configured minimum and maximum attempt delays",
     ),
     (
       "address-family stagger above cap",
       "address_family_stagger_ms = 5001",
-      "quic.upstream.resolution.address_family_stagger_ms must be between 10 and 5000",
+      "proxy.upstream_resolution.happy_eyeballs.connection_attempt_delay_ms must be within the configured minimum and maximum attempt delays",
     ),
     (
       "zero connect attempts",
       "max_connect_attempts = 0",
-      "quic.upstream.resolution.max_connect_attempts must be between 1 and 16",
+      "proxy.upstream_resolution.happy_eyeballs.max_connect_attempts must be between 1 and 16",
     ),
     (
       "connect attempts above cap",
       "max_connect_attempts = 17",
-      "quic.upstream.resolution.max_connect_attempts must be between 1 and 16",
+      "proxy.upstream_resolution.happy_eyeballs.max_connect_attempts must be between 1 and 16",
     ),
     (
       "zero cooldown base",
       "cooldown_base_ms = 0",
-      "quic.upstream.resolution.cooldown_base_ms must be greater than 0",
+      "proxy.upstream_resolution.cooldown_base_ms must be greater than 0",
     ),
     (
       "cooldown maximum above cap",
       "cooldown_max_ms = 300001",
-      "quic.upstream.resolution.cooldown_max_ms must be between 1 and 300000",
+      "proxy.upstream_resolution.cooldown_max_ms must be between 1 and 300000",
     ),
     (
       "cooldown base above maximum",
       "cooldown_base_ms = 30001",
-      "quic.upstream.resolution.cooldown_base_ms must be less than or equal to quic.upstream.resolution.cooldown_max_ms",
+      "proxy.upstream_resolution.cooldown_base_ms must be less than or equal to proxy.upstream_resolution.cooldown_max_ms",
     ),
   ];
 

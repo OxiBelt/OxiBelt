@@ -679,6 +679,7 @@ private_key = "/tmp/key.pem"
       static_root: None,
       static_files: Default::default(),
       upstream_http_version: None,
+      upstream_http_version_mode: Default::default(),
       generic_http_upgrade: false,
       connect_tunneling: false,
       grpc_web: false,

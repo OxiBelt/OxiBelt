@@ -15,7 +15,7 @@ use crate::state::{AppSnapshot, UpstreamClientRef};
 use super::body::ProxyBody;
 use super::route_actions::{self, RouteActionRenderContext};
 use super::upstream::select_pool_upstream_excluding;
-use super::version::{select_upstream_http_version, upstream_request_version};
+use super::version::{select_route_upstream_http_version, upstream_request_version};
 use super::{EffectiveTimeouts, UpstreamFirstByteTimeout, full_body, is_idempotent, parts_clone};
 
 mod admission;
@@ -688,13 +688,12 @@ fn selected_upstream_http_version(
   route: &RouteConfig,
   upstream: &UpstreamConfig,
 ) -> HttpVersion {
-  route.upstream_http_version.unwrap_or_else(|| {
-    select_upstream_http_version(
-      state.config.proxy.auto_upgrade.enabled,
-      state.config.proxy.auto_upgrade.max_http_version,
-      upstream.max_http_version,
-    )
-  })
+  select_route_upstream_http_version(
+    route,
+    state.config.proxy.auto_upgrade.enabled,
+    state.config.proxy.auto_upgrade.max_http_version,
+    upstream.max_http_version,
+  )
 }
 
 fn retry_body_can_be_buffered(request: &Request<ProxyBody>, state: &AppSnapshot) -> bool {

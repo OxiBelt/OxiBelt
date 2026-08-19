@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant as StdInstant};
 
 use anyhow::Context;
@@ -22,23 +22,22 @@ use crate::config::{QuicConfig, QuicUpstreamResolutionConfig};
 use crate::metrics::Metrics;
 use crate::metrics::http3_upstream::{
   H3EndpointAttemptOutcome, H3EndpointFamily, H3EndpointSelectionEvent, H3PoolWaitOutcome,
-  H3PoolWaitScope, H3ResolverCacheEvent, H3ResolverOutcome,
+  H3PoolWaitScope, H3ResolverCacheEvent, H3ResolverErrorClass, H3ResolverOutcome,
 };
 use crate::upstream_resolution::{
-  EndpointAddressFamily, ResolutionError, ResolutionErrorClass, ResolutionOrigin, ResolutionPolicy,
-  ResolutionSource, ResolvedEndpointSet, SharedEndpointResolver,
+  CandidateSchedulerConfig, CandidateSchedulerMode, HappyEyeballsCandidate, HttpTransportProtocol,
+  ResolutionOrigin, ResolutionPolicy, SharedEndpointResolver,
+  resolve_http_candidate_updates_with_resolver,
 };
 
 const MAX_SIMULTANEOUS_FAMILY_ATTEMPTS: usize = 2;
 const RECENT_SUCCESS_PREFERENCE_USES: usize = 1;
 
 mod failure;
-mod telemetry;
 #[cfg(test)]
 mod tests;
 pub(super) use failure::SharedConnectFailure;
 use failure::admission_rejection;
-use telemetry::resolver_error_class;
 
 pub(super) struct AdmittedUpstream<T> {
   pub(super) connected: T,
@@ -46,29 +45,44 @@ pub(super) struct AdmittedUpstream<T> {
 }
 
 pub(super) struct H3ResolvedCandidates {
-  endpoint_set: Arc<ResolvedEndpointSet>,
+  updates: tokio::sync::watch::Receiver<Arc<[HappyEyeballsCandidate<SocketAddr>]>>,
+  valid_until: tokio::time::Instant,
 }
 
 pub(super) struct H3EndpointRuntime {
   resolver: SharedEndpointResolver,
+  origin_host: String,
+  origin_port: u16,
   server_name: String,
   client_config: h3_quinn::quinn::ClientConfig,
   quic_config: QuicConfig,
   quic_host_key_base_dir: Option<PathBuf>,
   circuit_breakers: Arc<CircuitBreakerRuntime>,
   policy: QuicUpstreamResolutionConfig,
+  resolution_policy: ResolutionPolicy,
+  scheduler_policy: CandidateSchedulerConfig,
+  svcb_enabled: bool,
+  allowed_svcb_ports: Arc<[u16]>,
   health: Mutex<EndpointSelectionState>,
-  last_resolution_generation: AtomicU64,
   last_valid_until: StdMutex<Option<tokio::time::Instant>>,
   refreshable: AtomicBool,
   refresh_in_flight: AtomicBool,
 }
 
 impl H3EndpointRuntime {
+  #[allow(
+    clippy::too_many_arguments,
+    reason = "constructor keeps independently validated transport and discovery policies explicit"
+  )]
   pub(super) fn new(
     logical_origin: &LogicalH3Origin,
     client_config: h3_quinn::quinn::ClientConfig,
     quic_config: QuicConfig,
+    policy: QuicUpstreamResolutionConfig,
+    resolution_policy: ResolutionPolicy,
+    scheduler_policy: CandidateSchedulerConfig,
+    svcb_enabled: bool,
+    allowed_svcb_ports: Arc<[u16]>,
     quic_host_key_base_dir: Option<PathBuf>,
     circuit_breakers: Arc<CircuitBreakerRuntime>,
   ) -> anyhow::Result<Self> {
@@ -77,22 +91,21 @@ impl H3EndpointRuntime {
       logical_origin.port,
       logical_origin.discovery_identity.clone(),
     )?;
-    let policy = ResolutionPolicy::new(
-      quic_config.upstream.resolution.max_endpoint_count,
-      Duration::from_millis(quic_config.upstream.resolution.min_ttl_ms),
-      Duration::from_millis(quic_config.upstream.resolution.max_ttl_ms),
-      Duration::from_millis(quic_config.upstream.resolution.negative_ttl_ms),
-    )?;
     Ok(Self {
-      resolver: SharedEndpointResolver::system(origin, policy),
+      resolver: SharedEndpointResolver::system(origin, resolution_policy),
+      origin_host: logical_origin.host.clone(),
+      origin_port: logical_origin.port,
       server_name: logical_origin.server_name.clone(),
       client_config,
-      policy: quic_config.upstream.resolution.clone(),
+      policy,
+      resolution_policy,
+      scheduler_policy,
+      svcb_enabled,
+      allowed_svcb_ports,
       quic_config,
       quic_host_key_base_dir,
       circuit_breakers,
       health: Mutex::new(EndpointSelectionState::default()),
-      last_resolution_generation: AtomicU64::new(0),
       last_valid_until: StdMutex::new(None),
       refreshable: AtomicBool::new(true),
       refresh_in_flight: AtomicBool::new(false),
@@ -105,87 +118,71 @@ impl H3EndpointRuntime {
     metrics: &Metrics,
   ) -> Result<H3ResolvedCandidates, SharedConnectFailure> {
     let started = StdInstant::now();
-    let result = self.resolver.resolve(deadline).await;
-    match result {
-      Ok(endpoint_set) => {
-        if endpoint_set.logical_origin() != self.resolver.logical_origin() {
-          metrics.observe_h3_resolver(H3ResolverOutcome::Error, started.elapsed());
-          return Err(SharedConnectFailure::message(
-            "upstream resolver returned a mismatched logical origin",
-            retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
-          ));
-        }
-        if endpoint_set.valid_until() <= tokio::time::Instant::now() {
-          metrics.observe_h3_resolver(H3ResolverOutcome::Error, started.elapsed());
-          return Err(SharedConnectFailure::message(
-            "upstream resolver returned an expired endpoint set",
-            retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
-          ));
-        }
-        if endpoint_set
-          .stale_until()
-          .is_some_and(|stale_until| stale_until < endpoint_set.valid_until())
-        {
-          metrics.observe_h3_resolver(H3ResolverOutcome::Error, started.elapsed());
-          return Err(SharedConnectFailure::message(
-            "upstream resolver returned an invalid stale endpoint bound",
-            retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
-          ));
-        }
-        let previous = self
-          .last_resolution_generation
-          .swap(endpoint_set.generation(), Ordering::AcqRel);
-        *lock_unpoisoned(&self.last_valid_until) = Some(endpoint_set.valid_until());
-        self.refreshable.store(
-          !matches!(endpoint_set.source(), ResolutionSource::Literal),
-          Ordering::Release,
-        );
-        metrics.record_h3_resolver_cache_event(if previous == endpoint_set.generation() {
-          H3ResolverCacheEvent::Hit
-        } else {
-          H3ResolverCacheEvent::Miss
-        });
+    let mut updates = resolve_http_candidate_updates_with_resolver(
+      self.resolver.clone(),
+      &self.origin_host,
+      self.origin_port,
+      self.resolution_policy,
+      HttpTransportProtocol::H3,
+      true,
+      self.svcb_enabled,
+      &self.allowed_svcb_ports,
+      deadline,
+    );
+    loop {
+      let snapshot = updates.borrow_and_update().clone();
+      if !snapshot.is_empty() {
+        let ipv4 = snapshot
+          .iter()
+          .filter(|candidate| candidate.value_ref().is_ipv4())
+          .count();
         metrics.observe_h3_resolver(H3ResolverOutcome::Success, started.elapsed());
         metrics.observe_h3_pool_wait(
           H3PoolWaitScope::Resolution,
           H3PoolWaitOutcome::Ready,
           started.elapsed(),
         );
-        let ipv4 = endpoint_set
-          .endpoints()
-          .iter()
-          .filter(|endpoint| endpoint.family() == EndpointAddressFamily::Ipv4)
-          .count();
-        let ipv6 = endpoint_set.endpoints().len().saturating_sub(ipv4);
         metrics.observe_h3_resolver_candidates(H3EndpointFamily::Ipv4, ipv4);
-        metrics.observe_h3_resolver_candidates(H3EndpointFamily::Ipv6, ipv6);
-        metrics
-          .observe_h3_resolver_candidates(H3EndpointFamily::All, endpoint_set.endpoints().len());
-        Ok(H3ResolvedCandidates { endpoint_set })
+        metrics.observe_h3_resolver_candidates(
+          H3EndpointFamily::Ipv6,
+          snapshot.len().saturating_sub(ipv4),
+        );
+        metrics.observe_h3_resolver_candidates(H3EndpointFamily::All, snapshot.len());
+        *lock_unpoisoned(&self.last_valid_until) = Some(deadline);
+        self.refreshable.store(true, Ordering::Release);
+        return Ok(H3ResolvedCandidates {
+          updates,
+          valid_until: deadline,
+        });
       }
-      Err(error) => {
-        let negative = matches!(
-          error.class(),
-          ResolutionErrorClass::NxDomain | ResolutionErrorClass::NoData
-        );
-        if negative {
-          metrics.record_h3_resolver_cache_event(H3ResolverCacheEvent::Negative);
+      tokio::select! {
+        _ = tokio::time::sleep_until(deadline) => {
+          metrics.observe_h3_resolver(H3ResolverOutcome::Error, started.elapsed());
+          metrics.observe_h3_pool_wait(
+            H3PoolWaitScope::Resolution,
+            H3PoolWaitOutcome::Error,
+            started.elapsed(),
+          );
+          return Err(SharedConnectFailure::message(
+            "upstream HTTP/3 resolution timed out",
+            deadline,
+          ));
         }
-        metrics.record_h3_resolver_error(resolver_error_class(error.class()));
-        metrics.observe_h3_resolver(
-          if negative {
-            H3ResolverOutcome::Negative
-          } else {
-            H3ResolverOutcome::Error
-          },
-          started.elapsed(),
-        );
-        metrics.observe_h3_pool_wait(
-          H3PoolWaitScope::Resolution,
-          H3PoolWaitOutcome::Error,
-          started.elapsed(),
-        );
-        Err(self.resolution_failure(error, deadline))
+        changed = updates.changed() => {
+          if changed.is_err() {
+            metrics.record_h3_resolver_error(H3ResolverErrorClass::Other);
+            metrics.observe_h3_resolver(H3ResolverOutcome::Error, started.elapsed());
+            metrics.observe_h3_pool_wait(
+              H3PoolWaitScope::Resolution,
+              H3PoolWaitOutcome::Error,
+              started.elapsed(),
+            );
+            return Err(SharedConnectFailure::message(
+              "upstream resolver returned no HTTP/3 candidates",
+              retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
+            ));
+          }
+        }
       }
     }
   }
@@ -317,22 +314,24 @@ impl H3EndpointRuntime {
     Connect: Fn(SocketAddr, tokio::time::Instant) -> ConnectFuture,
     ConnectFuture: Future<Output = anyhow::Result<AdmittedUpstream<T>>>,
   {
-    if resolved.endpoint_set.valid_until() <= tokio::time::Instant::now() {
+    if resolved.valid_until <= tokio::time::Instant::now() {
       return Err(SharedConnectFailure::message(
         "upstream endpoint set expired before connection selection",
         retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
       ));
     }
     let addresses = resolved
-      .endpoint_set
-      .endpoints()
+      .updates
+      .borrow()
       .iter()
-      .map(|endpoint| endpoint.socket_addr())
+      .map(|candidate| *candidate.value_ref())
       .collect::<Vec<_>>();
     race_candidates(
       &self.policy,
+      self.scheduler_policy,
       &self.health,
       addresses,
+      Some(resolved.updates),
       deadline,
       metrics,
       connect,
@@ -341,10 +340,16 @@ impl H3EndpointRuntime {
   }
 }
 
+#[allow(
+  clippy::too_many_arguments,
+  reason = "race core keeps policy, update stream, health, telemetry, and connector ownership explicit"
+)]
 async fn race_candidates<T, Connect, ConnectFuture>(
   policy: &QuicUpstreamResolutionConfig,
+  scheduler_policy: CandidateSchedulerConfig,
   health: &Mutex<EndpointSelectionState>,
   addresses: Vec<SocketAddr>,
+  mut updates: Option<tokio::sync::watch::Receiver<Arc<[HappyEyeballsCandidate<SocketAddr>]>>>,
   deadline: tokio::time::Instant,
   metrics: &Metrics,
   connect: Connect,
@@ -353,35 +358,69 @@ where
   Connect: Fn(SocketAddr, tokio::time::Instant) -> ConnectFuture,
   ConnectFuture: Future<Output = anyhow::Result<T>>,
 {
-  let plan = candidate_plan(policy, health, addresses, metrics).await;
+  if tokio::time::Instant::now() >= deadline {
+    return Err(SharedConnectFailure::message(
+      "upstream HTTP/3 endpoint race timed out",
+      deadline,
+    ));
+  }
+  let plan = candidate_plan(
+    policy,
+    scheduler_policy.first_family_count(),
+    health,
+    addresses,
+    metrics,
+  )
+  .await;
   if plan.candidates.is_empty() {
     return Err(SharedConnectFailure::message(
       "all upstream HTTP/3 endpoints are cooling down",
       plan.retry_at.unwrap_or(deadline),
     ));
   }
+  if tokio::time::Instant::now() >= deadline {
+    return Err(SharedConnectFailure::message(
+      "upstream HTTP/3 endpoint race timed out",
+      deadline,
+    ));
+  }
 
-  let mut candidates = plan.candidates.into_iter();
+  let mut candidates = VecDeque::from(plan.candidates);
+  let mut started_addresses = HashSet::new();
+  let mut attempts_started = 0usize;
   let mut in_flight = FuturesUnordered::new();
   let mut active_by_family = [0usize; 2];
   let first = candidates
-    .next()
+    .pop_front()
     .context("HTTP/3 candidate plan unexpectedly empty")
     .map_err(|error| SharedConnectFailure::from_error(error, deadline))?;
   record_candidate_started(metrics, first, &mut active_by_family);
+  started_addresses.insert(first);
+  attempts_started = attempts_started.saturating_add(1);
   in_flight.push(tagged_connect(first, connect(first, deadline)));
-  let stagger = Duration::from_millis(policy.address_family_stagger_ms);
+  let stagger = scheduler_policy.effective_connection_attempt_delay();
+  let max_concurrent_attempts = match scheduler_policy.mode() {
+    CandidateSchedulerMode::Enabled => scheduler_policy
+      .max_concurrent_attempts()
+      .min(MAX_SIMULTANEOUS_FAMILY_ATTEMPTS),
+    CandidateSchedulerMode::LegacySequential => 1,
+  };
   let mut next_launch = next_candidate_launch(tokio::time::Instant::now(), stagger, deadline);
   let mut last_endpoint_error = None;
   let mut admission_error = None;
 
   loop {
-    if in_flight.is_empty() && (admission_error.is_some() || candidates.as_slice().is_empty()) {
+    if in_flight.is_empty()
+      && (admission_error.is_some()
+        || attempts_started >= policy.effective_max_connect_attempts()
+        || (candidates.is_empty() && updates.is_none()))
+    {
       break;
     }
     let can_stagger = admission_error.is_none()
-      && in_flight.len() < MAX_SIMULTANEOUS_FAMILY_ATTEMPTS
-      && !candidates.as_slice().is_empty()
+      && attempts_started < policy.effective_max_connect_attempts()
+      && in_flight.len() < max_concurrent_attempts
+      && !candidates.is_empty()
       && next_launch < deadline;
     let has_in_flight = !in_flight.is_empty();
     tokio::select! {
@@ -425,9 +464,44 @@ where
           }
         }
       }
+      changed = async {
+        match &mut updates {
+          Some(updates) => updates.changed().await,
+          None => std::future::pending().await,
+        }
+      }, if updates.is_some() => {
+        match changed {
+          Ok(()) => {
+            let Some(updates_receiver) = updates.as_mut() else {
+              continue;
+            };
+            let snapshot = updates_receiver.borrow_and_update().clone();
+            let addresses = snapshot
+              .iter()
+              .map(|candidate| *candidate.value_ref())
+              .collect::<Vec<_>>();
+            let updated = candidate_plan(
+              policy,
+              scheduler_policy.first_family_count(),
+              health,
+              addresses,
+              metrics,
+            )
+            .await;
+            candidates = updated
+              .candidates
+              .into_iter()
+              .filter(|address| !started_addresses.contains(address))
+              .collect();
+          }
+          Err(_) => updates = None,
+        }
+      }
       _ = tokio::time::sleep_until(next_launch), if can_stagger => {
-        if let Some(address) = candidates.next() {
+        if let Some(address) = candidates.pop_front() {
           record_candidate_started(metrics, address, &mut active_by_family);
+          started_addresses.insert(address);
+          attempts_started = attempts_started.saturating_add(1);
           in_flight.push(tagged_connect(address, connect(address, deadline)));
           next_launch = next_candidate_launch(tokio::time::Instant::now(), stagger, deadline);
         }
@@ -455,6 +529,7 @@ where
 
 async fn candidate_plan(
   policy: &QuicUpstreamResolutionConfig,
+  first_family_count: usize,
   health: &Mutex<EndpointSelectionState>,
   addresses: Vec<SocketAddr>,
   metrics: &Metrics,
@@ -502,7 +577,7 @@ async fn candidate_plan(
   } else {
     metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::Rotated);
   }
-  let candidates = interleave_families(eligible)
+  let candidates = interleave_families(eligible, first_family_count)
     .into_iter()
     .take(policy.effective_max_connect_attempts())
     .collect();
@@ -569,19 +644,6 @@ async fn next_retry_at(health: &Mutex<EndpointSelectionState>) -> Option<tokio::
     .min()
 }
 
-impl H3EndpointRuntime {
-  fn resolution_failure(
-    &self,
-    error: ResolutionError,
-    deadline: tokio::time::Instant,
-  ) -> SharedConnectFailure {
-    SharedConnectFailure::message(
-      error.to_string(),
-      retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
-    )
-  }
-}
-
 fn retry_deadline(
   policy: &QuicUpstreamResolutionConfig,
   now: tokio::time::Instant,
@@ -645,7 +707,7 @@ where
   (address, future.await)
 }
 
-fn interleave_families(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+fn interleave_families(addresses: Vec<SocketAddr>, first_family_count: usize) -> Vec<SocketAddr> {
   let start_with_ipv6 = addresses.first().is_some_and(SocketAddr::is_ipv6);
   let mut ipv4 = addresses
     .iter()
@@ -657,7 +719,17 @@ fn interleave_families(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
     .filter(SocketAddr::is_ipv6)
     .collect::<VecDeque<_>>();
   let mut interleaved = Vec::with_capacity(ipv4.len().saturating_add(ipv6.len()));
-  let mut ipv6_turn = start_with_ipv6;
+  for _ in 0..first_family_count {
+    let candidate = if start_with_ipv6 {
+      ipv6.pop_front().or_else(|| ipv4.pop_front())
+    } else {
+      ipv4.pop_front().or_else(|| ipv6.pop_front())
+    };
+    if let Some(candidate) = candidate {
+      interleaved.push(candidate);
+    }
+  }
+  let mut ipv6_turn = !start_with_ipv6;
   while !ipv4.is_empty() || !ipv6.is_empty() {
     let candidate = if ipv6_turn {
       ipv6.pop_front().or_else(|| ipv4.pop_front())

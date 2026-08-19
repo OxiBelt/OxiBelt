@@ -153,7 +153,7 @@ use tunnel::*;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DownstreamListenerBind(pub(crate) SocketAddr);
 pub(crate) use self::timeouts::EffectiveTimeouts;
-use self::version::select_upstream_http_version;
+use self::version::select_route_upstream_http_version;
 pub(crate) use self::waf_body_capture::{
   capture_request_body_for_waf, capture_response_body_for_waf, request_body_capture_error_response,
   response_body_capture_error_response, waf_body_input,

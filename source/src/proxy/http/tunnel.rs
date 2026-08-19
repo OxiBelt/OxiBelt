@@ -65,6 +65,7 @@ pub(super) async fn handle_connect_request(
   let sticky_cookie = selected.sticky_cookie();
   let pool_report = state.pools.clone();
   let pool_selection = selected.into_pool_selection();
+  let upstream_resolution = state.config.proxy.upstream_resolution.clone();
   if request_version == http::Version::HTTP_11 || request_version == http::Version::HTTP_10 {
     let downstream_upgrade = hyper::upgrade::on(&mut request);
     let connection_limit_hold =
@@ -74,7 +75,8 @@ pub(super) async fn handle_connect_request(
       let result = async {
         let downstream = downstream_upgrade.await?;
         let downstream = TokioIo::new(downstream);
-        let upstream_stream = dial_tunnel_upstream(&upstream, client_addr, timeouts).await?;
+        let upstream_stream =
+          dial_tunnel_upstream(&upstream, &upstream_resolution, client_addr, timeouts).await?;
         copy_bidirectional_with_idle(downstream, upstream_stream, timeouts.websocket_idle, drain)
           .await?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
@@ -93,7 +95,7 @@ pub(super) async fn handle_connect_request(
     return response;
   }
 
-  match dial_tunnel_upstream(&upstream, client_addr, timeouts).await {
+  match dial_tunnel_upstream(&upstream, &upstream_resolution, client_addr, timeouts).await {
     Ok(upstream_stream) => {
       let body = bridge_connect_body(request.into_body(), upstream_stream, timeouts, drain);
       drop(pool_selection);
@@ -290,21 +292,24 @@ where
 
 pub(super) async fn dial_tunnel_upstream(
   upstream: &UpstreamConfig,
+  resolution_config: &crate::config::UpstreamResolutionConfig,
   client_addr: std::net::SocketAddr,
   timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<TcpStream> {
-  let remote_addr = resolve_upstream_tcp_addr(&upstream.origin).await?;
-  let mut stream = tokio::time::timeout(timeouts.upstream_connect, TcpStream::connect(remote_addr))
-    .await
-    .context("upstream tunnel connect timed out")??;
+  let (mut stream, remote_addr, connect_deadline) =
+    connect_upstream_tcp(upstream, resolution_config, timeouts, None).await?;
   crate::tcp_socket::enable_tcp_nodelay(&stream, remote_addr, "upstream tunnel");
-  crate::proxy_protocol_egress::write_header(
-    &mut stream,
-    upstream.proxy_protocol_egress,
-    client_addr,
-    remote_addr,
+  tokio::time::timeout_at(
+    connect_deadline,
+    crate::proxy_protocol_egress::write_header(
+      &mut stream,
+      upstream.proxy_protocol_egress,
+      client_addr,
+      remote_addr,
+    ),
   )
   .await
+  .context("upstream tunnel PROXY protocol egress header timed out")?
   .context("failed to write upstream PROXY protocol egress header")?;
   Ok(stream)
 }

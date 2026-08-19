@@ -3,12 +3,16 @@
 
 use anyhow::{Context, anyhow, bail};
 
-use super::{Config, ConfigPathRoots, operational_profile, validate_merged_toml_shape};
+use super::{
+  Config, ConfigPathRoots, normalize_merged_upstream_resolution_compat, operational_profile,
+  validate_merged_toml_shape,
+};
 
 impl Config {
   pub fn load_admin_inline_toml(raw: &str, active: &Self) -> anyhow::Result<Self> {
-    let value: toml::Value = toml::from_str(raw).context("failed to parse inline TOML")?;
+    let mut value: toml::Value = toml::from_str(raw).context("failed to parse inline TOML")?;
     reject_inline_include(&value)?;
+    normalize_merged_upstream_resolution_compat(&mut value)?;
     validate_merged_toml_shape(&value)?;
     let mut config: Self = value.try_into().context("failed to decode inline TOML")?;
     config.source_paths.config_entry = active.source_paths.config_entry.clone();
@@ -37,6 +41,7 @@ impl Config {
     let mut value: toml::Value = toml::from_str(raw).context("failed to parse inline TOML")?;
     reject_inline_include(&value)?;
     operational_profile::apply_to_toml(&mut value)?;
+    normalize_merged_upstream_resolution_compat(&mut value)?;
     validate_merged_toml_shape(&value)?;
     let config = Self::load_admin_inline_toml(raw, active)?;
     config.validate()?;

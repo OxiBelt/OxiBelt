@@ -284,6 +284,8 @@ impl PoolState {
             } else {
               HttpVersion::H2
             },
+            happy_eyeballs_mode: Default::default(),
+            svcb_allowed_ports: Vec::new(),
             connect_timeout_ms: 3_000,
             request_timeout_ms: 30_000,
             first_byte_timeout_ms: 30_000,
@@ -325,6 +327,8 @@ impl PoolState {
             } else {
               HttpVersion::H2
             },
+            happy_eyeballs_mode: Default::default(),
+            svcb_allowed_ports: Vec::new(),
             connect_timeout_ms: 3_000,
             request_timeout_ms: 30_000,
             first_byte_timeout_ms: 30_000,

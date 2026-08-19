@@ -5,7 +5,7 @@ use http::header::{CONNECTION, HOST};
 use http::{HeaderValue, Request};
 use http_body_util::Full;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use url::Url;
 
 use super::*;
@@ -95,7 +95,9 @@ fn direct_h1_pools_share_process_connection_admission() {
   let pools = DirectH1Pools::new(
     &[upstream("http://backend.internal:18080")],
     circuit_breakers.clone(),
-  );
+    &config.proxy.upstream_resolution,
+  )
+  .expect("direct H1 pools should build");
   let pool = pools
     .for_upstream_index(0)
     .expect("plain upstream should create a direct-H1 pool");
@@ -818,6 +820,8 @@ fn upstream(origin: &str) -> UpstreamConfig {
     name: "backend".to_string(),
     origin: Url::parse(origin).unwrap(),
     max_http_version: HttpVersion::H1,
+    happy_eyeballs_mode: Default::default(),
+    svcb_allowed_ports: Vec::new(),
     connect_timeout_ms: 100,
     request_timeout_ms: 100,
     first_byte_timeout_ms: 100,

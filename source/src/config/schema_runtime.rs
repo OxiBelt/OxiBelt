@@ -107,6 +107,8 @@ impl FromStr for HotReloadMode {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct ProxyConfig {
   #[serde(default)]
+  pub upstream_resolution: UpstreamResolutionConfig,
+  #[serde(default)]
   pub auto_upgrade: AutoUpgradeConfig,
   #[serde(default)]
   pub forwarded_headers: ForwardedHeadersConfig,
@@ -132,6 +134,233 @@ pub struct ProxyConfig {
   pub trusted_ca_certs: Vec<PathBuf>,
   #[serde(default)]
   pub upstream_revocation: OutboundTlsRevocationConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct UpstreamResolutionConfig {
+  #[serde(default = "default_upstream_resolution_max_endpoint_count")]
+  pub max_endpoint_count: usize,
+  #[serde(default = "default_upstream_resolution_min_ttl_ms")]
+  pub min_ttl_ms: u64,
+  #[serde(default = "default_upstream_resolution_max_ttl_ms")]
+  pub max_ttl_ms: u64,
+  #[serde(default = "default_upstream_resolution_negative_ttl_ms")]
+  pub negative_ttl_ms: u64,
+  #[serde(default = "default_upstream_resolution_cooldown_ms")]
+  pub cooldown_base_ms: u64,
+  #[serde(default = "default_upstream_resolution_cooldown_max_ms")]
+  pub cooldown_max_ms: u64,
+  #[serde(default)]
+  pub happy_eyeballs: HappyEyeballsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HappyEyeballsConfig {
+  #[serde(default)]
+  pub mode: HappyEyeballsPolicyMode,
+  #[serde(default = "default_upstream_resolution_delay_ms")]
+  pub resolution_delay_ms: u64,
+  #[serde(default = "default_upstream_resolution_stagger_ms")]
+  pub connection_attempt_delay_ms: u64,
+  #[serde(default = "default_upstream_resolution_minimum_stagger_ms")]
+  pub minimum_connection_attempt_delay_ms: u64,
+  #[serde(default = "default_upstream_resolution_maximum_stagger_ms")]
+  pub maximum_connection_attempt_delay_ms: u64,
+  #[serde(default = "default_upstream_resolution_attempts")]
+  pub max_connect_attempts: usize,
+  #[serde(default = "default_upstream_resolution_max_concurrent_attempts")]
+  pub max_concurrent_attempts: usize,
+  #[serde(default = "default_upstream_resolution_preferred_family_count")]
+  pub preferred_address_family_count: usize,
+  #[serde(default = "default_upstream_resolution_last_resort_delay_ms")]
+  pub last_resort_local_synthesis_delay_ms: u64,
+  #[serde(default)]
+  pub svcb: UpstreamResolutionDnsMode,
+  #[serde(default)]
+  pub pref64: UpstreamResolutionDnsMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HappyEyeballsPolicyMode {
+  #[default]
+  V3,
+  Legacy,
+}
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamResolutionDnsMode {
+  #[default]
+  Auto,
+  Disabled,
+}
+
+impl Default for UpstreamResolutionConfig {
+  fn default() -> Self {
+    Self {
+      max_endpoint_count: default_upstream_resolution_max_endpoint_count(),
+      min_ttl_ms: default_upstream_resolution_min_ttl_ms(),
+      max_ttl_ms: default_upstream_resolution_max_ttl_ms(),
+      negative_ttl_ms: default_upstream_resolution_negative_ttl_ms(),
+      cooldown_base_ms: default_upstream_resolution_cooldown_ms(),
+      cooldown_max_ms: default_upstream_resolution_cooldown_max_ms(),
+      happy_eyeballs: HappyEyeballsConfig::default(),
+    }
+  }
+}
+
+impl Default for HappyEyeballsConfig {
+  fn default() -> Self {
+    Self {
+      mode: HappyEyeballsPolicyMode::V3,
+      resolution_delay_ms: default_upstream_resolution_delay_ms(),
+      connection_attempt_delay_ms: default_upstream_resolution_stagger_ms(),
+      minimum_connection_attempt_delay_ms: default_upstream_resolution_minimum_stagger_ms(),
+      maximum_connection_attempt_delay_ms: default_upstream_resolution_maximum_stagger_ms(),
+      max_connect_attempts: default_upstream_resolution_attempts(),
+      max_concurrent_attempts: default_upstream_resolution_max_concurrent_attempts(),
+      preferred_address_family_count: default_upstream_resolution_preferred_family_count(),
+      last_resort_local_synthesis_delay_ms: default_upstream_resolution_last_resort_delay_ms(),
+      svcb: UpstreamResolutionDnsMode::Auto,
+      pref64: UpstreamResolutionDnsMode::Auto,
+    }
+  }
+}
+
+fn default_upstream_resolution_max_endpoint_count() -> usize {
+  16
+}
+fn default_upstream_resolution_min_ttl_ms() -> u64 {
+  1_000
+}
+fn default_upstream_resolution_max_ttl_ms() -> u64 {
+  30_000
+}
+fn default_upstream_resolution_negative_ttl_ms() -> u64 {
+  1_000
+}
+fn default_upstream_resolution_cooldown_ms() -> u64 {
+  1_000
+}
+fn default_upstream_resolution_cooldown_max_ms() -> u64 {
+  30_000
+}
+fn default_upstream_resolution_delay_ms() -> u64 {
+  50
+}
+fn default_upstream_resolution_stagger_ms() -> u64 {
+  250
+}
+fn default_upstream_resolution_minimum_stagger_ms() -> u64 {
+  100
+}
+fn default_upstream_resolution_maximum_stagger_ms() -> u64 {
+  2_000
+}
+fn default_upstream_resolution_attempts() -> usize {
+  4
+}
+fn default_upstream_resolution_max_concurrent_attempts() -> usize {
+  2
+}
+fn default_upstream_resolution_preferred_family_count() -> usize {
+  1
+}
+fn default_upstream_resolution_last_resort_delay_ms() -> u64 {
+  2_000
+}
+
+impl UpstreamResolutionConfig {
+  pub(super) fn validate(&self) -> anyhow::Result<()> {
+    const MAX_TTL_MS: u64 = 3_600_000;
+    const MAX_NEGATIVE_TTL_MS: u64 = 30_000;
+    const MAX_COOLDOWN_MS: u64 = 300_000;
+    const HARD_MINIMUM_ATTEMPT_DELAY_MS: u64 = 10;
+    const MAX_ATTEMPT_DELAY_MS: u64 = 5_000;
+
+    if !(1..=64).contains(&self.max_endpoint_count) {
+      bail!("proxy.upstream_resolution.max_endpoint_count must be between 1 and 64");
+    }
+    if self.min_ttl_ms == 0 || self.min_ttl_ms > MAX_TTL_MS {
+      bail!("proxy.upstream_resolution.min_ttl_ms must be between 1 and {MAX_TTL_MS}");
+    }
+    if self.max_ttl_ms == 0 || self.max_ttl_ms > MAX_TTL_MS {
+      bail!("proxy.upstream_resolution.max_ttl_ms must be between 1 and {MAX_TTL_MS}");
+    }
+    if self.min_ttl_ms > self.max_ttl_ms {
+      bail!(
+        "proxy.upstream_resolution.min_ttl_ms must be less than or equal to proxy.upstream_resolution.max_ttl_ms"
+      );
+    }
+    let maximum_negative_ttl_ms = self.max_ttl_ms.min(MAX_NEGATIVE_TTL_MS);
+    if self.negative_ttl_ms == 0 || self.negative_ttl_ms > maximum_negative_ttl_ms {
+      bail!(
+        "proxy.upstream_resolution.negative_ttl_ms must be between 1 and {maximum_negative_ttl_ms}"
+      );
+    }
+    if self.cooldown_base_ms == 0 {
+      bail!("proxy.upstream_resolution.cooldown_base_ms must be greater than 0");
+    }
+    if self.cooldown_max_ms == 0 || self.cooldown_max_ms > MAX_COOLDOWN_MS {
+      bail!("proxy.upstream_resolution.cooldown_max_ms must be between 1 and {MAX_COOLDOWN_MS}");
+    }
+    if self.cooldown_base_ms > self.cooldown_max_ms {
+      bail!(
+        "proxy.upstream_resolution.cooldown_base_ms must be less than or equal to proxy.upstream_resolution.cooldown_max_ms"
+      );
+    }
+
+    let happy = &self.happy_eyeballs;
+    if happy.resolution_delay_ms == 0 || happy.resolution_delay_ms > MAX_ATTEMPT_DELAY_MS {
+      bail!(
+        "proxy.upstream_resolution.happy_eyeballs.resolution_delay_ms must be between 1 and {MAX_ATTEMPT_DELAY_MS}"
+      );
+    }
+    if !(HARD_MINIMUM_ATTEMPT_DELAY_MS..=MAX_ATTEMPT_DELAY_MS)
+      .contains(&happy.minimum_connection_attempt_delay_ms)
+    {
+      bail!(
+        "proxy.upstream_resolution.happy_eyeballs.minimum_connection_attempt_delay_ms must be between {HARD_MINIMUM_ATTEMPT_DELAY_MS} and {MAX_ATTEMPT_DELAY_MS}"
+      );
+    }
+    if happy.maximum_connection_attempt_delay_ms < happy.minimum_connection_attempt_delay_ms
+      || happy.maximum_connection_attempt_delay_ms > MAX_ATTEMPT_DELAY_MS
+    {
+      bail!(
+        "proxy.upstream_resolution.happy_eyeballs.maximum_connection_attempt_delay_ms must be between minimum_connection_attempt_delay_ms and {MAX_ATTEMPT_DELAY_MS}"
+      );
+    }
+    if happy.connection_attempt_delay_ms < happy.minimum_connection_attempt_delay_ms
+      || happy.connection_attempt_delay_ms > happy.maximum_connection_attempt_delay_ms
+    {
+      bail!(
+        "proxy.upstream_resolution.happy_eyeballs.connection_attempt_delay_ms must be within the configured minimum and maximum attempt delays"
+      );
+    }
+    if !(1..=16).contains(&happy.max_connect_attempts) {
+      bail!(
+        "proxy.upstream_resolution.happy_eyeballs.max_connect_attempts must be between 1 and 16"
+      );
+    }
+    if !(1..=2).contains(&happy.max_concurrent_attempts) {
+      bail!(
+        "proxy.upstream_resolution.happy_eyeballs.max_concurrent_attempts must be between 1 and 2"
+      );
+    }
+    if !(1..=2).contains(&happy.preferred_address_family_count) {
+      bail!(
+        "proxy.upstream_resolution.happy_eyeballs.preferred_address_family_count must be between 1 and 2"
+      );
+    }
+    if happy.last_resort_local_synthesis_delay_ms < happy.connection_attempt_delay_ms
+      || happy.last_resort_local_synthesis_delay_ms > 60_000
+    {
+      bail!(
+        "proxy.upstream_resolution.happy_eyeballs.last_resort_local_synthesis_delay_ms must be between connection_attempt_delay_ms and 60000"
+      );
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]

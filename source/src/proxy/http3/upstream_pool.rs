@@ -15,13 +15,14 @@ use super::upstream_connection::{
 };
 use super::upstream_endpoints::{AdmittedUpstream, H3EndpointRuntime, SharedConnectFailure};
 use crate::circuit_breakers::CircuitBreakerRuntime;
-use crate::config::{Config, HttpVersion, UpstreamConfig};
+use crate::config::{Config, HttpVersion, QuicUpstreamResolutionConfig, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::metrics::http3_upstream::{H3PoolEvent, H3PoolWaitOutcome, H3PoolWaitScope};
 use crate::overload::{OverloadRuntime, WorkKind};
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::ProxyBody;
 use crate::tls;
+use crate::upstream_resolution::http_upstream_policies;
 
 mod connection;
 use connection::{OneShotH3Connection, PooledConnectionStatus, PooledH3Connection, PooledH3Lease};
@@ -72,10 +73,32 @@ impl UpstreamH3Pools {
         )
       })?;
       let logical_origin = LogicalH3Origin::new(upstream, inherited_roots)?;
+      let resolution = &config.proxy.upstream_resolution;
+      let (resolution_policy, scheduler_policy) = http_upstream_policies(resolution, upstream)?;
+      let endpoint_policy = QuicUpstreamResolutionConfig {
+        max_endpoint_count: resolution.max_endpoint_count,
+        min_ttl_ms: resolution.min_ttl_ms,
+        max_ttl_ms: resolution.max_ttl_ms,
+        negative_ttl_ms: resolution.negative_ttl_ms,
+        address_family_stagger_ms: scheduler_policy
+          .effective_connection_attempt_delay()
+          .as_millis()
+          .try_into()
+          .context("HTTP/3 connection-attempt delay exceeds u64")?,
+        max_connect_attempts: scheduler_policy.max_attempts(),
+        cooldown_base_ms: resolution.cooldown_base_ms,
+        cooldown_max_ms: resolution.cooldown_max_ms,
+      };
       let endpoints = Arc::new(H3EndpointRuntime::new(
         &logical_origin,
         client_config,
         config.quic.clone(),
+        endpoint_policy,
+        resolution_policy,
+        scheduler_policy,
+        resolution.happy_eyeballs.svcb == crate::config::UpstreamResolutionDnsMode::Auto
+          && scheduler_policy.mode() == crate::upstream_resolution::CandidateSchedulerMode::Enabled,
+        Arc::from(upstream.svcb_allowed_ports.clone()),
         config.source_paths.cert_dir.clone(),
         circuit_breakers.clone(),
       )?);

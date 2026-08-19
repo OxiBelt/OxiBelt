@@ -70,6 +70,42 @@ fn add_srv(
   add_record(response, owner, DNS_TYPE_SRV, ttl, &rdata);
 }
 
+fn add_https(
+  response: &mut Vec<u8>,
+  owner: &str,
+  ttl: u32,
+  priority: u16,
+  target: Option<&str>,
+  params: &[(u16, Vec<u8>)],
+) {
+  let mut rdata = Vec::new();
+  rdata.extend_from_slice(&priority.to_be_bytes());
+  if let Some(target) = target {
+    encode_dns_name(target, &mut rdata).expect("valid HTTPS target");
+  } else {
+    rdata.push(0);
+  }
+  for (key, value) in params {
+    rdata.extend_from_slice(&key.to_be_bytes());
+    rdata.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    rdata.extend_from_slice(value);
+  }
+  add_record(response, owner, DNS_TYPE_HTTPS, ttl, &rdata);
+}
+
+fn https_response(answer_count: u16) -> (DnsQuery, Vec<u8>) {
+  let query = test_query("svc.example", DnsQueryType::Https);
+  let response = response_start(
+    query.id,
+    0x8180,
+    "svc.example",
+    DnsQueryType::Https,
+    DNS_CLASS_IN,
+    answer_count,
+  );
+  (query, response)
+}
+
 #[test]
 fn response_accepts_matching_a_aaaa_and_ttl() {
   let a_query = test_query("App.Example.", DnsQueryType::A);
@@ -233,6 +269,7 @@ fn response_accepts_only_verified_owner_and_cname_chain() {
     Ipv4Addr::new(203, 0, 113, 66),
   );
   let lookup = parse_dns_response(&response, &query).expect("valid CNAME response");
+  assert!(lookup.accepted_cname());
   assert_eq!(lookup.ttl_ms, 5_000);
   assert_eq!(
     lookup.answers,
@@ -271,6 +308,306 @@ fn response_preserves_srv_priority_weight_and_port() {
       target: "target.example".to_string(),
     })]
   );
+}
+
+#[test]
+fn response_retains_only_bounded_https_transport_metadata() {
+  let (query, mut response) = https_response(2);
+  add_https(
+    &mut response,
+    "svc.example",
+    9,
+    1,
+    Some("Target.Example."),
+    &[
+      (HTTPS_PARAM_MANDATORY, vec![0, 1, 0, 3, 0, 4, 0, 6]),
+      (
+        HTTPS_PARAM_ALPN,
+        [
+          vec![2, b'h', b'2'],
+          vec![2, b'h', b'3'],
+          vec![8, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1'],
+          vec![6, b'f', b'u', b't', b'u', b'r', b'e'],
+        ]
+        .concat(),
+      ),
+      (HTTPS_PARAM_PORT, 443_u16.to_be_bytes().to_vec()),
+      (HTTPS_PARAM_IPV4_HINT, vec![192, 0, 2, 1, 198, 51, 100, 2]),
+      (HTTPS_PARAM_ECH, vec![0xff, 0, 1, 2]),
+      (
+        HTTPS_PARAM_IPV6_HINT,
+        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)
+          .octets()
+          .to_vec(),
+      ),
+      (65_000, vec![1, 2, 3]),
+    ],
+  );
+  add_https(&mut response, "svc.example", 7, 2, None, &[]);
+
+  let lookup = parse_dns_response(&response, &query).expect("valid HTTPS response");
+  assert_eq!(lookup.ttl_ms, 7_000);
+  assert_eq!(
+    lookup.answers,
+    vec![
+      DnsAnswer::Https(HttpsRecord {
+        priority: 1,
+        target: HttpsTarget::Absolute("target.example".to_string()),
+        alpn_present: true,
+        alpn: vec![HttpsAlpn::H2, HttpsAlpn::H3, HttpsAlpn::H1].into_boxed_slice(),
+        port: NonZeroU16::new(443),
+        ipv4_hints: vec![Ipv4Addr::new(192, 0, 2, 1), Ipv4Addr::new(198, 51, 100, 2)]
+          .into_boxed_slice(),
+        ipv6_hints: vec![Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)].into_boxed_slice(),
+      }),
+      DnsAnswer::Https(HttpsRecord {
+        priority: 2,
+        target: HttpsTarget::Owner,
+        alpn_present: false,
+        alpn: Box::default(),
+        port: None,
+        ipv4_hints: Box::default(),
+        ipv6_hints: Box::default(),
+      }),
+    ]
+  );
+}
+
+#[test]
+fn response_rejects_malformed_or_unsafe_https_parameters() {
+  let cases = [
+    (
+      "duplicate parameter",
+      1,
+      Some("target.example"),
+      vec![
+        (HTTPS_PARAM_PORT, 443_u16.to_be_bytes().to_vec()),
+        (HTTPS_PARAM_PORT, 8443_u16.to_be_bytes().to_vec()),
+      ],
+    ),
+    (
+      "unknown mandatory parameter",
+      1,
+      Some("target.example"),
+      vec![(HTTPS_PARAM_MANDATORY, vec![0, 9])],
+    ),
+    (
+      "unordered mandatory parameter",
+      1,
+      Some("target.example"),
+      vec![(HTTPS_PARAM_MANDATORY, vec![0, 3, 0, 1])],
+    ),
+    (
+      "mandatory ECH is rejected",
+      1,
+      Some("target.example"),
+      vec![
+        (HTTPS_PARAM_MANDATORY, vec![0, HTTPS_PARAM_ECH as u8]),
+        (HTTPS_PARAM_ECH, vec![1, 2]),
+      ],
+    ),
+    (
+      "zero port",
+      1,
+      Some("target.example"),
+      vec![(HTTPS_PARAM_PORT, vec![0, 0])],
+    ),
+    (
+      "bad IPv4 hint length",
+      1,
+      Some("target.example"),
+      vec![(HTTPS_PARAM_IPV4_HINT, vec![192, 0, 2])],
+    ),
+    (
+      "no-default ALPN without a supported identifier",
+      1,
+      Some("target.example"),
+      vec![
+        (HTTPS_PARAM_ALPN, vec![3, b'f', b'o', b'o']),
+        (HTTPS_PARAM_NO_DEFAULT_ALPN, Vec::new()),
+      ],
+    ),
+    (
+      "alias parameters",
+      0,
+      Some("target.example"),
+      vec![(HTTPS_PARAM_PORT, 443_u16.to_be_bytes().to_vec())],
+    ),
+    ("alias root target", 0, None, vec![]),
+  ];
+  for (name, priority, target, params) in cases {
+    let (query, mut response) = https_response(1);
+    add_https(&mut response, "svc.example", 10, priority, target, &params);
+    assert_eq!(
+      parse_dns_response(&response, &query)
+        .expect_err(name)
+        .class(),
+      ResolutionErrorClass::Malformed,
+      "{name} must fail closed"
+    );
+  }
+}
+
+#[test]
+fn response_rejects_https_alias_loops_and_record_overflow() {
+  let (query, mut loop_response) = https_response(1);
+  add_https(
+    &mut loop_response,
+    "svc.example",
+    10,
+    0,
+    Some("svc.example"),
+    &[],
+  );
+  assert_eq!(
+    parse_dns_response(&loop_response, &query)
+      .expect_err("self-referential HTTPS alias must fail")
+      .class(),
+    ResolutionErrorClass::Malformed
+  );
+
+  let (query, mut indirect_loop_response) = https_response(3);
+  add_cname(
+    &mut indirect_loop_response,
+    "svc.example",
+    10,
+    "alias.example",
+  );
+  add_https(
+    &mut indirect_loop_response,
+    "svc.example",
+    10,
+    0,
+    Some("alias.example"),
+    &[],
+  );
+  add_https(
+    &mut indirect_loop_response,
+    "alias.example",
+    10,
+    0,
+    Some("svc.example"),
+    &[],
+  );
+  assert_eq!(
+    parse_dns_response(&indirect_loop_response, &query)
+      .expect_err("indirect HTTPS alias loop must fail")
+      .class(),
+    ResolutionErrorClass::Malformed
+  );
+
+  let (query, mut overflow_response) = https_response((DNS_HTTPS_MAX_RECORDS + 1) as u16);
+  for _ in 0..=DNS_HTTPS_MAX_RECORDS {
+    add_https(
+      &mut overflow_response,
+      "svc.example",
+      10,
+      1,
+      Some("target.example"),
+      &[],
+    );
+  }
+  assert_eq!(
+    parse_dns_response(&overflow_response, &query)
+      .expect_err("HTTPS record overflow must fail")
+      .class(),
+    ResolutionErrorClass::Malformed
+  );
+}
+
+#[test]
+fn response_rejects_mixed_or_duplicate_https_alias_mode() {
+  let (query, mut mixed) = https_response(2);
+  add_https(&mut mixed, "svc.example", 10, 0, Some("alias.example"), &[]);
+  add_https(
+    &mut mixed,
+    "svc.example",
+    10,
+    1,
+    Some("target.example"),
+    &[],
+  );
+  assert_eq!(
+    parse_dns_response(&mixed, &query)
+      .expect_err("mixed AliasMode and ServiceMode must fail")
+      .class(),
+    ResolutionErrorClass::Malformed
+  );
+
+  let (query, mut duplicate) = https_response(2);
+  for _ in 0..2 {
+    add_https(
+      &mut duplicate,
+      "svc.example",
+      10,
+      0,
+      Some("alias.example"),
+      &[],
+    );
+  }
+  assert_eq!(
+    parse_dns_response(&duplicate, &query)
+      .expect_err("duplicate AliasMode records must fail")
+      .class(),
+    ResolutionErrorClass::Malformed
+  );
+}
+
+#[test]
+fn response_rejects_https_parameter_header_crossing_rdata() {
+  let (query, mut response) = https_response(2);
+  let truncated_parameter_header = [0, 1, 0, 0, HTTPS_PARAM_PORT as u8];
+  add_record(
+    &mut response,
+    "svc.example",
+    DNS_TYPE_HTTPS,
+    10,
+    &truncated_parameter_header,
+  );
+  add_a(
+    &mut response,
+    "svc.example",
+    10,
+    Ipv4Addr::new(192, 0, 2, 1),
+  );
+  assert_eq!(
+    parse_dns_response(&response, &query)
+      .expect_err("SvcParam header must stay inside its RDATA")
+      .class(),
+    ResolutionErrorClass::Malformed
+  );
+}
+
+#[test]
+fn response_rejects_https_hint_and_parameter_caps() {
+  let (query, mut hint_response) = https_response(1);
+  let mut hints = Vec::new();
+  for last in 0..=DNS_HTTPS_MAX_HINTS_PER_FAMILY {
+    hints.extend_from_slice(&[192, 0, 2, last as u8]);
+  }
+  add_https(
+    &mut hint_response,
+    "svc.example",
+    10,
+    1,
+    Some("target.example"),
+    &[(HTTPS_PARAM_IPV4_HINT, hints)],
+  );
+  assert!(parse_dns_response(&hint_response, &query).is_err());
+
+  let (query, mut params_response) = https_response(1);
+  let params = (10..=(10 + DNS_HTTPS_MAX_PARAMS as u16))
+    .map(|key| (key, Vec::new()))
+    .collect::<Vec<_>>();
+  add_https(
+    &mut params_response,
+    "svc.example",
+    10,
+    1,
+    Some("target.example"),
+    &params,
+  );
+  assert!(parse_dns_response(&params_response, &query).is_err());
 }
 
 #[test]

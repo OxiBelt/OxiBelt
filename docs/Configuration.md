@@ -1087,15 +1087,26 @@ stream_receive_window_bytes = 2097152
 [quic.upstream.transport.mtu_discovery]
 upper_bound = 1472
 
-[quic.upstream.resolution]
+[proxy.upstream_resolution]
 max_endpoint_count = 16
 min_ttl_ms = 1000
 max_ttl_ms = 30000
 negative_ttl_ms = 1000
-address_family_stagger_ms = 250
-max_connect_attempts = 4
 cooldown_base_ms = 1000
 cooldown_max_ms = 30000
+
+[proxy.upstream_resolution.happy_eyeballs]
+mode = "v3"
+resolution_delay_ms = 50
+connection_attempt_delay_ms = 250
+minimum_connection_attempt_delay_ms = 100
+maximum_connection_attempt_delay_ms = 2000
+max_connect_attempts = 4
+max_concurrent_attempts = 2
+preferred_address_family_count = 1
+last_resort_local_synthesis_delay_ms = 2000
+svcb = "auto"
+pref64 = "auto"
 
 [quic.socket]
 receive_buffer_bytes = 16777216
@@ -1123,13 +1134,15 @@ When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/
 
 `quic.socket.receive_buffer_bytes = 0` and `send_buffer_bytes = 0` keep the OS defaults. Nonzero socket buffer values are applied to UDP sockets, and startup fails if the OS rejects an explicitly configured buffer size. `quic.socket.workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].quic_socket`. When HTTP/3 is enabled, set `reuse_port = true` whenever the resolved worker count can be greater than one, which creates one `SO_REUSEPORT` UDP socket per downstream HTTP/3 worker. QUIC transport and pool numeric values must be greater than zero, except `keep_alive_interval_ms = 0`; socket receive/send buffer `0` is the explicit OS-default sentinel.
 
-`[quic.upstream.resolution]` controls the shared upstream HTTP/3 endpoint resolver. Successful A and AAAA answers are retained up to `max_endpoint_count` and cached until their DNS TTL after clamping it to `min_ttl_ms..=max_ttl_ms`. Selected NXDOMAIN and NODATA results are cached for `negative_ttl_ms`; this value may not exceed `min(max_ttl_ms, 30000)`. An existing healthy QUIC connection may continue while its endpoint set refreshes, but a new connection attempt does not rely indefinitely on an expired set.
+`[proxy.upstream_resolution]` is the protocol-neutral upstream resolver policy. Successful A and AAAA answers are bounded by `max_endpoint_count` and the TTL clamps; negative answers use `negative_ttl_ms`; address cooldown uses the bounded base and maximum values. Current HTTP/3 use remains compatible with the legacy `[quic.upstream.resolution]` input.
 
-The resolver prefers a recently successful address without pinning it forever, rotates among eligible candidates, and applies per-address cooldown starting at `cooldown_base_ms` and capped by `cooldown_max_ms`. IPv6 and IPv4 attempts are staggered by `address_family_stagger_ms`; every launch, including one triggered by an earlier failure, waits at least that interval after the preceding launch. At most `min(max_connect_attempts, max_endpoint_count)` candidates are tried for one connection operation. `max_endpoint_count` must be `1..=64`; both TTL clamps must be `1..=3600000` with `min_ttl_ms <= max_ttl_ms`; `address_family_stagger_ms` must be `10..=5000`; `max_connect_attempts` must be `1..=16`; and cooldown values must be positive with `cooldown_base_ms <= cooldown_max_ms <= 300000`.
+`happy_eyeballs.mode = "v3"` is the default implementation of the current Happy Eyeballs v3 Internet-Draft scheduling model; global `legacy` and per-upstream `happy_eyeballs_mode = "legacy"` are compatibility escapes. The delay fields are bounded and every candidate launch remains pre-dispatch and deadline-bounded. `svcb` and `pref64` accept only `auto` or `disabled`; they are security/compatibility escape hatches, not a way to supply arbitrary DNS targets, ports, or trust policy. Per-upstream `svcb_allowed_ports` is an explicit unique nonzero allowlist. `upstream_http_version_mode = "ceiling"` requires that route to explicitly set `upstream_http_version`; `exact` is the default.
+
+During native schema epoch `1`, `[quic.upstream.resolution]` is deprecated compatibility input. Its leaves map to the canonical policy, including `address_family_stagger_ms` to `happy_eyeballs.connection_attempt_delay_ms`. Disjoint canonical and legacy leaves may be combined; the same effective leaf in both locations is rejected even when values agree, so configuration never relies on precedence. Migrate to `[proxy.upstream_resolution]`; the alias is reserved for removal only in a future incompatible epoch.
 
 The upstream HTTP/3 pool multiplexes ordinary request forwarding over reusable QUIC connections when `quic.upstream_pool.enabled = true`. When disabled, ordinary requests use one-shot QUIC connections. One-shot HTTP/3 and WebTransport retain their dedicated connection lifetimes, but use the same bounded resolver component. Resolution, connection coalescing, and slot waits are bounded by the effective request deadline. Candidate failover is allowed only before request dispatch; a post-dispatch failure does not implicitly replay the request.
 
-Reusable connections are keyed by logical security and routing identity: protocol mode, normalized authority and TLS server name, verification/trust policy, client identity, configuration generation, and discovery identity. The selected IP address is connection state, not pool identity. OxiBelt does not coalesce across origins merely because their addresses or certificates overlap. Changing any `[quic.upstream.resolution]` field requires a full reload. These additive fields keep native configuration schema epoch `1`; omitted fields use the defaults above and require no migration.
+Reusable connections are keyed by logical security and routing identity: protocol mode, normalized authority and TLS server name, verification/trust policy, client identity, configuration generation, and discovery identity. The selected IP address is connection state, not pool identity. OxiBelt does not coalesce across origins merely because their addresses or certificates overlap. Changing any canonical `[proxy.upstream_resolution]` field, or its deprecated legacy alias, requires a full reload. These additive canonical fields keep native configuration schema epoch `1`; omitted fields use the defaults above. Configurations that still use the legacy alias should migrate as described above.
 
 ## SNI Forwarding
 

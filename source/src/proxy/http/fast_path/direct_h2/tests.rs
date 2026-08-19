@@ -915,6 +915,8 @@ fn upstream(origin: &str) -> UpstreamConfig {
     name: "backend".to_owned(),
     origin: Url::parse(origin).unwrap(),
     max_http_version: HttpVersion::H2,
+    happy_eyeballs_mode: Default::default(),
+    svcb_allowed_ports: Vec::new(),
     connect_timeout_ms: 100,
     request_timeout_ms: 100,
     first_byte_timeout_ms: 100,

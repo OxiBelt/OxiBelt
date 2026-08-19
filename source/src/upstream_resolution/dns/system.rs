@@ -29,16 +29,25 @@ const RESOLV_CONF_MAX_BYTES: u64 = 64 * 1024;
 pub(crate) struct DnsResolverBackend;
 
 impl ResolverBackend for DnsResolverBackend {
-  async fn lookup(
+  #[allow(
+    clippy::manual_async_fn,
+    reason = "the resolver trait requires an explicitly Send future for spawned cancellation-aware producers"
+  )]
+  fn lookup(
     &self,
     name: &str,
     query_type: DnsQueryType,
     deadline: Instant,
-  ) -> Result<DnsLookup, ResolutionError> {
-    if let Some(lookup) = lookup_hosts(name, query_type)? {
-      return Ok(lookup);
+  ) -> impl std::future::Future<Output = Result<DnsLookup, ResolutionError>> + Send {
+    async move {
+      if query_type == DnsQueryType::Https {
+        return lookup_dns_absolute_until(name, query_type, deadline).await;
+      }
+      if let Some(lookup) = lookup_hosts(name, query_type)? {
+        return Ok(lookup);
+      }
+      lookup_dns_until(name, query_type, deadline).await
     }
-    lookup_dns_until(name, query_type, deadline).await
   }
 }
 
@@ -47,7 +56,9 @@ pub(crate) async fn lookup_dns(
   name: &str,
   query_type: DnsQueryType,
 ) -> Result<(Vec<DnsAnswer>, u64), ResolutionError> {
-  if let Some(lookup) = lookup_hosts(name, query_type)? {
+  if query_type != DnsQueryType::Https
+    && let Some(lookup) = lookup_hosts(name, query_type)?
+  {
     return Ok((lookup.answers, lookup.ttl_ms));
   }
   let timeout = DNS_QUERY_TIMEOUT
@@ -56,8 +67,34 @@ pub(crate) async fn lookup_dns(
   let deadline = Instant::now()
     .checked_add(timeout)
     .ok_or_else(ResolutionError::deadline)?;
-  let lookup = lookup_dns_until(name, query_type, deadline).await?;
+  let lookup = if query_type == DnsQueryType::Https {
+    lookup_dns_absolute_until(name, query_type, deadline).await?
+  } else {
+    lookup_dns_until(name, query_type, deadline).await?
+  };
   Ok((lookup.answers, lookup.ttl_ms))
+}
+
+pub(crate) async fn lookup_dns_absolute_until(
+  name: &str,
+  query_type: DnsQueryType,
+  deadline: Instant,
+) -> Result<DnsLookup, ResolutionError> {
+  let resolver_config = resolver_config();
+  if resolver_config.nameservers.is_empty() {
+    return Err(ResolutionError::new(
+      ResolutionErrorClass::NoNameservers,
+      "no DNS nameservers configured",
+    ));
+  }
+  let canonical = canonical_dns_name(name).map_err(malformed_dns)?;
+  lookup_dns_candidate(
+    &canonical,
+    query_type,
+    &resolver_config.nameservers,
+    deadline,
+  )
+  .await
 }
 
 async fn lookup_dns_until(
@@ -332,7 +369,7 @@ fn lookup_hosts(
   name: &str,
   query_type: DnsQueryType,
 ) -> Result<Option<DnsLookup>, ResolutionError> {
-  if query_type == DnsQueryType::Srv {
+  if matches!(query_type, DnsQueryType::Srv | DnsQueryType::Https) {
     return Ok(None);
   }
   let canonical = canonical_dns_name(name).map_err(malformed_dns)?;
@@ -396,6 +433,7 @@ fn parse_hosts_lookup(
     answers,
     ttl_ms: DNS_DEFAULT_TTL_MS,
     source: ResolutionSource::Hosts,
+    accepted_cname: false,
   })
 }
 

@@ -31,7 +31,7 @@ use super::response::{
 };
 use super::route_actions::{self, RouteActionRenderContext};
 use super::uri::validate_downstream_path;
-use super::version::select_upstream_http_version;
+use super::version::select_route_upstream_http_version;
 use super::{EffectiveTimeouts, tags_ref};
 
 pub(crate) struct PreparedWebTransport {
@@ -555,7 +555,8 @@ pub(crate) async fn prepare_webtransport(
     )));
   }
 
-  let upstream_version = select_upstream_http_version(
+  let upstream_version = select_route_upstream_http_version(
+    resolved.route,
     state.config.proxy.auto_upgrade.enabled,
     state.config.proxy.auto_upgrade.max_http_version,
     upstream.max_http_version,

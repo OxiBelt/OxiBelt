@@ -302,15 +302,26 @@ minimum_change = 20
 #[quic.upstream.transport.mtu_discovery]
 #upper_bound = 1472
 
-[quic.upstream.resolution]
+[proxy.upstream_resolution]
 max_endpoint_count = 16
 min_ttl_ms = 1000
 max_ttl_ms = 30000
 negative_ttl_ms = 1000
-address_family_stagger_ms = 250
-max_connect_attempts = 4
 cooldown_base_ms = 1000
 cooldown_max_ms = 30000
+
+[proxy.upstream_resolution.happy_eyeballs]
+mode = "v3"
+resolution_delay_ms = 50
+connection_attempt_delay_ms = 250
+minimum_connection_attempt_delay_ms = 100
+maximum_connection_attempt_delay_ms = 2000
+max_connect_attempts = 4
+max_concurrent_attempts = 2
+preferred_address_family_count = 1
+last_resort_local_synthesis_delay_ms = 2000
+svcb = "auto"
+pref64 = "auto"
 
 [quic.socket]
 receive_buffer_bytes = 16777216

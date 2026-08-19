@@ -11,7 +11,7 @@ use crate::proxy::http::response::{text_response, with_route_security_headers};
 use crate::proxy::http::route_actions::{self, RouteActionRenderContext};
 use crate::proxy::http::semantics;
 use crate::proxy::http::uri::{self, UpstreamUriParts};
-use crate::proxy::http::version::select_upstream_http_version;
+use crate::proxy::http::version::select_route_upstream_http_version;
 use crate::routes::ResolvedRoute;
 use crate::state::AppSnapshot;
 use crate::waf::WafTransportNetwork;
@@ -123,13 +123,12 @@ pub(super) fn plain_proxy_fast_path_supported_route(
   let Some(upstream) = resolved.upstream else {
     return false;
   };
-  let upstream_version = resolved.route.upstream_http_version.unwrap_or_else(|| {
-    select_upstream_http_version(
-      state.config.proxy.auto_upgrade.enabled,
-      state.config.proxy.auto_upgrade.max_http_version,
-      upstream.max_http_version,
-    )
-  });
+  let upstream_version = select_route_upstream_http_version(
+    resolved.route,
+    state.config.proxy.auto_upgrade.enabled,
+    state.config.proxy.auto_upgrade.max_http_version,
+    upstream.max_http_version,
+  );
   upstream_version != HttpVersion::H3
     && upstream.proxy_protocol_egress == ProxyProtocolEgressMode::Off
 }

@@ -12,6 +12,8 @@ fn test_upstream(origin: &str) -> UpstreamConfig {
     name: "backend".to_string(),
     origin: Url::parse(origin).expect("test upstream URL should parse"),
     max_http_version: HttpVersion::H1,
+    happy_eyeballs_mode: Default::default(),
+    svcb_allowed_ports: Vec::new(),
     connect_timeout_ms: 100,
     request_timeout_ms: 100,
     first_byte_timeout_ms: 100,

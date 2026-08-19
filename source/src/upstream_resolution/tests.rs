@@ -39,24 +39,32 @@ impl FakeBackend {
 }
 
 impl ResolverBackend for FakeBackend {
-  async fn lookup(
+  #[allow(
+    clippy::manual_async_fn,
+    reason = "the production resolver trait intentionally requires a Send future"
+  )]
+  fn lookup(
     &self,
     _name: &str,
     query_type: DnsQueryType,
     _deadline: Instant,
-  ) -> Result<DnsLookup, ResolutionError> {
-    self.calls.fetch_add(1, Ordering::AcqRel);
-    if let Some(gate) = &self.gate {
-      let permit = gate
-        .acquire()
-        .await
-        .map_err(|_| ResolutionError::cancelled())?;
-      permit.forget();
-    }
-    match query_type {
-      DnsQueryType::A => self.a.clone(),
-      DnsQueryType::Aaaa => self.aaaa.clone(),
-      DnsQueryType::Srv => unreachable!("endpoint resolver only queries A and AAAA"),
+  ) -> impl std::future::Future<Output = Result<DnsLookup, ResolutionError>> + Send {
+    async move {
+      self.calls.fetch_add(1, Ordering::AcqRel);
+      if let Some(gate) = &self.gate {
+        let permit = gate
+          .acquire()
+          .await
+          .map_err(|_| ResolutionError::cancelled())?;
+        permit.forget();
+      }
+      match query_type {
+        DnsQueryType::A => self.a.clone(),
+        DnsQueryType::Aaaa => self.aaaa.clone(),
+        DnsQueryType::Srv | DnsQueryType::Https => {
+          unreachable!("endpoint resolver only queries A and AAAA")
+        }
+      }
     }
   }
 }
@@ -116,10 +124,32 @@ async fn mixed_family_results_are_deduplicated_interleaved_and_bounded() {
   let resolver = EndpointResolver::new_with_backend(origin("app.example"), backend, policy);
   let result = resolver.resolve(deadline()).await.expect("mixed result");
   assert_eq!(result.endpoints().len(), 3);
-  assert_eq!(result.endpoints()[0].family(), EndpointAddressFamily::Ipv6);
-  assert_eq!(result.endpoints()[1].family(), EndpointAddressFamily::Ipv4);
-  assert_eq!(result.endpoints()[2].family(), EndpointAddressFamily::Ipv6);
+  assert_ne!(
+    result.endpoints()[0].family(),
+    result.endpoints()[1].family()
+  );
+  assert_eq!(
+    result.endpoints()[0].family(),
+    result.endpoints()[2].family()
+  );
   assert_eq!(result.valid_until(), started + Duration::from_secs(5));
+}
+
+#[test]
+fn untrusted_family_answers_are_deduplicated_and_bounded_before_sorting() {
+  let mut endpoints = Vec::new();
+  for address in [
+    SocketAddr::from(([192, 0, 2, 1], 443)),
+    SocketAddr::from(([192, 0, 2, 1], 443)),
+    SocketAddr::from(([192, 0, 2, 2], 443)),
+  ] {
+    push_bounded_unique(&mut endpoints, ResolvedEndpoint::ip(address), 1);
+  }
+  assert_eq!(endpoints.len(), 1);
+  assert_eq!(
+    endpoints[0].socket_addr(),
+    SocketAddr::from(([192, 0, 2, 1], 443))
+  );
 }
 
 #[tokio::test(start_paused = true)]

@@ -18,6 +18,10 @@ use url::Url;
 use crate::config::{CryptoConfig, ProxyHttp2Config, UpstreamConfig};
 use crate::proxy::http::body::ProxyBody;
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
+use crate::upstream_resolution::{
+  CandidateAttemptError, CandidateRaceError, CandidateSchedulerConfig, ResolutionPolicy,
+  race_happy_eyeballs_candidates,
+};
 
 pub(super) type DirectH2Driver =
   Pin<Box<dyn Future<Output = Result<(), hyper::Error>> + Send + 'static>>;
@@ -62,6 +66,7 @@ impl DirectH2Origin {
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn connect_direct_h2(
   origin: &DirectH2Origin,
   tls_server_name: Option<&str>,
@@ -69,55 +74,116 @@ pub(super) async fn connect_direct_h2(
   http2_config: &ProxyHttp2Config,
   deadline: Instant,
   capacity_changed: Arc<Notify>,
+  resolution_policy: ResolutionPolicy,
+  scheduler_policy: CandidateSchedulerConfig,
+  svcb_enabled: bool,
+  allowed_svcb_ports: &[u16],
 ) -> Result<DirectH2Connected, DirectH2ConnectFailure> {
-  let stream = tokio::time::timeout_at(
-    deadline.into(),
-    TcpStream::connect((origin.host.as_str(), origin.port)),
+  let tokio_deadline = tokio::time::Instant::from_std(deadline);
+  let mut updates = crate::upstream_resolution::resolve_http_candidate_updates(
+    &origin.host,
+    origin.port,
+    &format!("direct-h2:{}:{}", origin.host, origin.port),
+    resolution_policy,
+    crate::upstream_resolution::HttpTransportProtocol::H2,
+    tls_config.is_some(),
+    svcb_enabled,
+    allowed_svcb_ports,
+    tokio_deadline,
   )
-  .await
-  .map_err(|_| DirectH2ConnectFailure {
-    class: DirectH2ConnectErrorClass::TcpConnect,
-    error: anyhow::anyhow!("direct H2 upstream connect timed out"),
-  })?
-  .with_context(|| {
-    format!(
-      "failed to connect direct H2 upstream {}:{}",
-      origin.host, origin.port
-    )
-  })
   .map_err(|error| DirectH2ConnectFailure {
     class: DirectH2ConnectErrorClass::TcpConnect,
     error,
   })?;
-  stream
-    .set_nodelay(true)
-    .context("failed to enable TCP_NODELAY for direct H2 upstream")
-    .map_err(|error| DirectH2ConnectFailure {
-      class: DirectH2ConnectErrorClass::TcpConnect,
-      error,
-    })?;
+  let server_name = tls_server_name.unwrap_or(origin.host.as_str()).to_owned();
+  race_happy_eyeballs_candidates(
+    &mut updates,
+    scheduler_policy,
+    tokio_deadline,
+    |candidate, _| {
+      let tls_config = tls_config.clone();
+      let server_name = server_name.clone();
+      let capacity_changed = capacity_changed.clone();
+      async move {
+        let address = candidate.into_value();
+        let stream = tokio::time::timeout_at(tokio_deadline, TcpStream::connect(address))
+          .await
+          .map_err(|_| {
+            CandidateAttemptError::Endpoint(DirectH2ConnectFailure {
+              class: DirectH2ConnectErrorClass::TcpConnect,
+              error: anyhow::anyhow!("direct H2 upstream candidate {address} timed out"),
+            })
+          })?
+          .with_context(|| format!("failed to connect direct H2 upstream candidate {address}"))
+          .map_err(|error| {
+            CandidateAttemptError::Endpoint(DirectH2ConnectFailure {
+              class: DirectH2ConnectErrorClass::TcpConnect,
+              error,
+            })
+          })?;
+        stream.set_nodelay(true).map_err(|error| {
+          CandidateAttemptError::Endpoint(DirectH2ConnectFailure {
+            class: DirectH2ConnectErrorClass::TcpConnect,
+            error: anyhow::Error::new(error)
+              .context("failed to enable TCP_NODELAY for direct H2 upstream"),
+          })
+        })?;
+        let connected = match tls_config {
+          Some(tls_config) => {
+            connect_tls_h2_until(
+              tls_config,
+              server_name,
+              stream,
+              http2_config,
+              deadline,
+              capacity_changed,
+            )
+            .await
+          }
+          None => h2_handshake_until_with_capacity_notify(
+            stream,
+            http2_config,
+            deadline,
+            capacity_changed,
+          )
+          .await
+          .map_err(|error| DirectH2ConnectFailure {
+            class: DirectH2ConnectErrorClass::H2Handshake,
+            error,
+          }),
+        };
+        connected.map_err(CandidateAttemptError::Endpoint)
+      }
+    },
+  )
+  .await
+  .map_err(map_candidate_race_error)
+}
 
-  match tls_config {
-    Some(tls_config) => {
-      let server_name = tls_server_name.unwrap_or(origin.host.as_str()).to_owned();
-      connect_tls_h2_until(
-        tls_config,
-        server_name,
-        stream,
-        http2_config,
-        deadline,
-        capacity_changed,
-      )
-      .await
+fn map_candidate_race_error(
+  error: CandidateRaceError<DirectH2ConnectFailure>,
+) -> DirectH2ConnectFailure {
+  match error {
+    CandidateRaceError::Exhausted {
+      admission_error: Some(error),
+      ..
     }
-    None => {
-      h2_handshake_until_with_capacity_notify(stream, http2_config, deadline, capacity_changed)
-        .await
-        .map_err(|error| DirectH2ConnectFailure {
-          class: DirectH2ConnectErrorClass::H2Handshake,
-          error,
-        })
-    }
+    | CandidateRaceError::Exhausted {
+      last_endpoint_error: Some(error),
+      admission_error: None,
+    } => error,
+    CandidateRaceError::Deadline => DirectH2ConnectFailure {
+      class: DirectH2ConnectErrorClass::TcpConnect,
+      error: anyhow::anyhow!("direct H2 upstream connection deadline elapsed"),
+    },
+    CandidateRaceError::NoCandidates
+    | CandidateRaceError::Exhausted {
+      last_endpoint_error: None,
+      admission_error: None,
+    } => DirectH2ConnectFailure {
+      class: DirectH2ConnectErrorClass::TcpConnect,
+      error: anyhow::anyhow!("direct H2 upstream resolver returned no usable candidates"),
+    },
   }
 }
 
@@ -255,6 +321,12 @@ async fn connect_tls_h2_until(
     class: DirectH2ConnectErrorClass::TlsHandshake,
     error,
   })?;
+  if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
+    return Err(DirectH2ConnectFailure {
+      class: DirectH2ConnectErrorClass::TlsHandshake,
+      error: anyhow::anyhow!("direct H2 upstream did not negotiate the h2 ALPN protocol"),
+    });
+  }
   h2_handshake_until_with_capacity_notify(tls, http2_config, deadline, capacity_changed)
     .await
     .map_err(|error| DirectH2ConnectFailure {

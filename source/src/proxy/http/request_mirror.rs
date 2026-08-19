@@ -21,7 +21,7 @@ use super::retry::send_one_shot_with_state;
 use super::route_action_runtime;
 use super::route_actions::{self, RouteActionRenderContext};
 use super::upstream::select_pool_upstream;
-use super::version::{select_upstream_http_version, upstream_request_version};
+use super::version::{select_route_upstream_http_version, upstream_request_version};
 
 const MAX_IN_FLIGHT_MIRROR_BODY_BYTES: usize = 64 * 1024 * 1024;
 static REQUEST_MIRROR_BODY_BUDGET: LazyLock<Arc<Semaphore>> =
@@ -339,13 +339,12 @@ fn mirror_upstream_version(
   route: &RouteConfig,
   upstream: &UpstreamConfig,
 ) -> HttpVersion {
-  route.upstream_http_version.unwrap_or_else(|| {
-    select_upstream_http_version(
-      state.config.proxy.auto_upgrade.enabled,
-      state.config.proxy.auto_upgrade.max_http_version,
-      upstream.max_http_version,
-    )
-  })
+  select_route_upstream_http_version(
+    route,
+    state.config.proxy.auto_upgrade.enabled,
+    state.config.proxy.auto_upgrade.max_http_version,
+    upstream.max_http_version,
+  )
 }
 
 #[allow(
