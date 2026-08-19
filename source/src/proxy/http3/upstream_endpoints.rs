@@ -112,14 +112,14 @@ impl H3EndpointRuntime {
           metrics.observe_h3_resolver(H3ResolverOutcome::Error, started.elapsed());
           return Err(SharedConnectFailure::message(
             "upstream resolver returned a mismatched logical origin",
-            self.retry_deadline(tokio::time::Instant::now(), deadline),
+            retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
           ));
         }
         if endpoint_set.valid_until() <= tokio::time::Instant::now() {
           metrics.observe_h3_resolver(H3ResolverOutcome::Error, started.elapsed());
           return Err(SharedConnectFailure::message(
             "upstream resolver returned an expired endpoint set",
-            self.retry_deadline(tokio::time::Instant::now(), deadline),
+            retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
           ));
         }
         if endpoint_set
@@ -129,7 +129,7 @@ impl H3EndpointRuntime {
           metrics.observe_h3_resolver(H3ResolverOutcome::Error, started.elapsed());
           return Err(SharedConnectFailure::message(
             "upstream resolver returned an invalid stale endpoint bound",
-            self.retry_deadline(tokio::time::Instant::now(), deadline),
+            retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
           ));
         }
         let previous = self
@@ -320,7 +320,7 @@ impl H3EndpointRuntime {
     if resolved.endpoint_set.valid_until() <= tokio::time::Instant::now() {
       return Err(SharedConnectFailure::message(
         "upstream endpoint set expired before connection selection",
-        self.retry_deadline(tokio::time::Instant::now(), deadline),
+        retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
       ));
     }
     let addresses = resolved
@@ -329,240 +329,247 @@ impl H3EndpointRuntime {
       .iter()
       .map(|endpoint| endpoint.socket_addr())
       .collect::<Vec<_>>();
-    let plan = self.candidate_plan(addresses, metrics).await;
-    if plan.candidates.is_empty() {
-      return Err(SharedConnectFailure::message(
-        "all upstream HTTP/3 endpoints are cooling down",
-        plan.retry_at.unwrap_or(deadline),
-      ));
+    race_candidates(
+      &self.policy,
+      &self.health,
+      addresses,
+      deadline,
+      metrics,
+      connect,
+    )
+    .await
+  }
+}
+
+async fn race_candidates<T, Connect, ConnectFuture>(
+  policy: &QuicUpstreamResolutionConfig,
+  health: &Mutex<EndpointSelectionState>,
+  addresses: Vec<SocketAddr>,
+  deadline: tokio::time::Instant,
+  metrics: &Metrics,
+  connect: Connect,
+) -> Result<T, SharedConnectFailure>
+where
+  Connect: Fn(SocketAddr, tokio::time::Instant) -> ConnectFuture,
+  ConnectFuture: Future<Output = anyhow::Result<T>>,
+{
+  let plan = candidate_plan(policy, health, addresses, metrics).await;
+  if plan.candidates.is_empty() {
+    return Err(SharedConnectFailure::message(
+      "all upstream HTTP/3 endpoints are cooling down",
+      plan.retry_at.unwrap_or(deadline),
+    ));
+  }
+
+  let mut candidates = plan.candidates.into_iter();
+  let mut in_flight = FuturesUnordered::new();
+  let mut active_by_family = [0usize; 2];
+  let first = candidates
+    .next()
+    .context("HTTP/3 candidate plan unexpectedly empty")
+    .map_err(|error| SharedConnectFailure::from_error(error, deadline))?;
+  record_candidate_started(metrics, first, &mut active_by_family);
+  in_flight.push(tagged_connect(first, connect(first, deadline)));
+  let stagger = Duration::from_millis(policy.address_family_stagger_ms);
+  let mut next_launch = next_candidate_launch(tokio::time::Instant::now(), stagger, deadline);
+  let mut last_endpoint_error = None;
+  let mut admission_error = None;
+
+  loop {
+    if in_flight.is_empty() && (admission_error.is_some() || candidates.as_slice().is_empty()) {
+      break;
     }
-
-    let mut candidates = plan.candidates.into_iter();
-    let mut in_flight = FuturesUnordered::new();
-    let mut active_by_family = [0usize; 2];
-    let first = candidates
-      .next()
-      .context("HTTP/3 candidate plan unexpectedly empty")
-      .map_err(|error| SharedConnectFailure::from_error(error, deadline))?;
-    record_candidate_started(metrics, first, &mut active_by_family);
-    in_flight.push(tagged_connect(first, connect(first, deadline)));
-    let stagger = Duration::from_millis(self.policy.address_family_stagger_ms);
-    let mut next_launch = tokio::time::Instant::now()
-      .checked_add(stagger)
-      .unwrap_or(deadline)
-      .min(deadline);
-    let mut last_endpoint_error = None;
-    let mut admission_error = None;
-
-    loop {
-      if in_flight.is_empty() {
-        if admission_error.is_some() {
-          break;
-        }
-        let Some(address) = candidates.next() else {
-          break;
+    let can_stagger = admission_error.is_none()
+      && in_flight.len() < MAX_SIMULTANEOUS_FAMILY_ATTEMPTS
+      && !candidates.as_slice().is_empty()
+      && next_launch < deadline;
+    let has_in_flight = !in_flight.is_empty();
+    tokio::select! {
+      _ = tokio::time::sleep_until(deadline) => {
+        record_candidate_cancellations(metrics, active_by_family);
+        return Err(SharedConnectFailure::message(
+          "upstream HTTP/3 endpoint race timed out",
+          deadline,
+        ));
+      }
+      result = in_flight.next(), if has_in_flight => {
+        let Some((address, result)) = result else {
+          continue;
         };
-        record_candidate_started(metrics, address, &mut active_by_family);
-        in_flight.push(tagged_connect(address, connect(address, deadline)));
-        next_launch = tokio::time::Instant::now()
-          .checked_add(stagger)
-          .unwrap_or(deadline)
-          .min(deadline);
-      }
-      let can_stagger = admission_error.is_none()
-        && in_flight.len() < MAX_SIMULTANEOUS_FAMILY_ATTEMPTS
-        && !candidates.as_slice().is_empty()
-        && next_launch < deadline;
-      let has_in_flight = !in_flight.is_empty();
-      tokio::select! {
-        _ = tokio::time::sleep_until(deadline) => {
-          record_candidate_cancellations(metrics, active_by_family);
-          return Err(SharedConnectFailure::message(
-            "upstream HTTP/3 endpoint race timed out",
-            deadline,
-          ));
-        }
-        result = in_flight.next(), if has_in_flight => {
-          let Some((address, result)) = result else {
-            continue;
-          };
-          decrement_active(address, &mut active_by_family);
-          match result {
-            Ok(connected) => {
-              metrics.record_h3_endpoint_attempt(
-                endpoint_family(address),
-                H3EndpointAttemptOutcome::Won,
-              );
-              self.record_success(address, metrics).await;
-              record_candidate_cancellations(metrics, active_by_family);
-              return Ok(connected);
-            }
-            Err(error) => {
-              if admission_rejection(&error).is_some() {
-                metrics.record_h3_endpoint_attempt(
-                  endpoint_family(address),
-                  H3EndpointAttemptOutcome::Canceled,
-                );
-                admission_error.get_or_insert(error);
-                continue;
-              }
-              metrics.record_h3_endpoint_attempt(
-                endpoint_family(address),
-                H3EndpointAttemptOutcome::Failed,
-              );
-              self.record_failure(address, metrics).await;
-              last_endpoint_error = Some(error);
-              if admission_error.is_none()
-                && in_flight.len() < MAX_SIMULTANEOUS_FAMILY_ATTEMPTS
-                && let Some(next) = candidates.next()
-              {
-                record_candidate_started(metrics, next, &mut active_by_family);
-                in_flight.push(tagged_connect(next, connect(next, deadline)));
-                next_launch = tokio::time::Instant::now()
-                  .checked_add(stagger)
-                  .unwrap_or(deadline)
-                  .min(deadline);
-              }
-            }
+        decrement_active(address, &mut active_by_family);
+        match result {
+          Ok(connected) => {
+            metrics.record_h3_endpoint_attempt(
+              endpoint_family(address),
+              H3EndpointAttemptOutcome::Won,
+            );
+            record_success(health, address, metrics).await;
+            record_candidate_cancellations(metrics, active_by_family);
+            return Ok(connected);
           }
-        }
-        _ = tokio::time::sleep_until(next_launch), if can_stagger => {
-          if let Some(address) = candidates.next() {
-            record_candidate_started(metrics, address, &mut active_by_family);
-            in_flight.push(tagged_connect(address, connect(address, deadline)));
-            next_launch = tokio::time::Instant::now()
-              .checked_add(stagger)
-              .unwrap_or(deadline)
-              .min(deadline);
+          Err(error) => {
+            if admission_rejection(&error).is_some() {
+              metrics.record_h3_endpoint_attempt(
+                endpoint_family(address),
+                H3EndpointAttemptOutcome::Canceled,
+              );
+              admission_error.get_or_insert(error);
+              continue;
+            }
+            metrics.record_h3_endpoint_attempt(
+              endpoint_family(address),
+              H3EndpointAttemptOutcome::Failed,
+            );
+            record_failure(policy, health, address, metrics).await;
+            last_endpoint_error = Some(error);
           }
         }
       }
-    }
-
-    let error = admission_error
-      .or(last_endpoint_error)
-      .unwrap_or_else(|| anyhow::anyhow!("upstream HTTP/3 endpoint set was exhausted"));
-    let now = tokio::time::Instant::now();
-    let retry_at = if let Some(admission) = admission_rejection(&error) {
-      now
-        .checked_add(admission.retry_after)
-        .unwrap_or(deadline)
-        .min(deadline)
-        .max(self.retry_deadline(now, deadline))
-    } else {
-      self
-        .next_retry_at()
-        .await
-        .unwrap_or_else(|| self.retry_deadline(now, deadline))
-    };
-    Err(SharedConnectFailure::from_error(error, retry_at))
-  }
-
-  async fn candidate_plan(&self, addresses: Vec<SocketAddr>, metrics: &Metrics) -> CandidatePlan {
-    let now = tokio::time::Instant::now();
-    let mut unique = Vec::new();
-    let mut seen = HashSet::new();
-    for address in addresses {
-      if seen.insert(address) {
-        unique.push(address);
-      }
-    }
-    let mut health = self.health.lock().await;
-    health.entries.retain(|address, _| seen.contains(address));
-    let mut eligible = Vec::new();
-    let mut retry_at = None;
-    for address in unique {
-      let entry = health.entries.entry(address).or_default();
-      match entry.cooldown {
-        EndpointCooldown::Ready => eligible.push(address),
-        EndpointCooldown::Until(until) if until <= now => {
-          entry.cooldown = EndpointCooldown::Ready;
-          metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::CooldownExpired);
-          eligible.push(address);
-        }
-        EndpointCooldown::Until(until) => {
-          retry_at =
-            Some(retry_at.map_or(until, |current: tokio::time::Instant| current.min(until)));
-          metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::CooldownSkipped);
-        }
-        EndpointCooldown::Indefinite => {
-          metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::CooldownSkipped);
+      _ = tokio::time::sleep_until(next_launch), if can_stagger => {
+        if let Some(address) = candidates.next() {
+          record_candidate_started(metrics, address, &mut active_by_family);
+          in_flight.push(tagged_connect(address, connect(address, deadline)));
+          next_launch = next_candidate_launch(tokio::time::Instant::now(), stagger, deadline);
         }
       }
     }
-    if eligible.is_empty() {
-      return CandidatePlan {
-        candidates: Vec::new(),
-        retry_at,
-      };
-    }
-
-    let (eligible, preferred_used) = rotate_with_preference(eligible, &mut health);
-    if preferred_used {
-      metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::SuccessPreferred);
-    } else {
-      metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::Rotated);
-    }
-    let candidates = interleave_families(eligible)
-      .into_iter()
-      .take(self.policy.effective_max_connect_attempts())
-      .collect();
-    CandidatePlan {
-      candidates,
-      retry_at,
-    }
   }
 
-  async fn record_success(&self, address: SocketAddr, metrics: &Metrics) {
-    let mut health = self.health.lock().await;
-    let entry = health.entries.entry(address).or_default();
-    entry.failures = 0;
-    entry.cooldown = EndpointCooldown::Ready;
-    health.preferred = Some(PreferredEndpoint {
-      address,
-      remaining: RECENT_SUCCESS_PREFERENCE_USES,
-    });
-    metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::SuccessPreferred);
-  }
-
-  async fn record_failure(&self, address: SocketAddr, metrics: &Metrics) {
-    let mut health = self.health.lock().await;
-    let entry = health.entries.entry(address).or_default();
-    entry.failures = entry.failures.saturating_add(1);
-    let shift = entry.failures.saturating_sub(1).min(63);
-    let multiplier = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
-    let delay_ms = self
-      .policy
-      .cooldown_base_ms
-      .saturating_mul(multiplier)
-      .min(self.policy.cooldown_max_ms);
-    entry.cooldown = tokio::time::Instant::now()
-      .checked_add(Duration::from_millis(delay_ms))
-      .map_or(EndpointCooldown::Indefinite, EndpointCooldown::Until);
-    if health
-      .preferred
-      .as_ref()
-      .is_some_and(|preferred| preferred.address == address)
-    {
-      health.preferred = None;
-    }
-    metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::CooldownEntered);
-  }
-
-  async fn next_retry_at(&self) -> Option<tokio::time::Instant> {
-    self
-      .health
-      .lock()
+  let error = admission_error
+    .or(last_endpoint_error)
+    .unwrap_or_else(|| anyhow::anyhow!("upstream HTTP/3 endpoint set was exhausted"));
+  let now = tokio::time::Instant::now();
+  let retry_at = if let Some(admission) = admission_rejection(&error) {
+    now
+      .checked_add(admission.retry_after)
+      .unwrap_or(deadline)
+      .min(deadline)
+      .max(retry_deadline(policy, now, deadline))
+  } else {
+    next_retry_at(health)
       .await
-      .entries
-      .values()
-      .filter_map(|entry| match entry.cooldown {
-        EndpointCooldown::Until(until) => Some(until),
-        EndpointCooldown::Ready | EndpointCooldown::Indefinite => None,
-      })
-      .min()
+      .unwrap_or_else(|| retry_deadline(policy, now, deadline))
+  };
+  Err(SharedConnectFailure::from_error(error, retry_at))
+}
+
+async fn candidate_plan(
+  policy: &QuicUpstreamResolutionConfig,
+  health: &Mutex<EndpointSelectionState>,
+  addresses: Vec<SocketAddr>,
+  metrics: &Metrics,
+) -> CandidatePlan {
+  let now = tokio::time::Instant::now();
+  let mut unique = Vec::new();
+  let mut seen = HashSet::new();
+  for address in addresses {
+    if seen.insert(address) {
+      unique.push(address);
+    }
+  }
+  let mut health = health.lock().await;
+  health.entries.retain(|address, _| seen.contains(address));
+  let mut eligible = Vec::new();
+  let mut retry_at = None;
+  for address in unique {
+    let entry = health.entries.entry(address).or_default();
+    match entry.cooldown {
+      EndpointCooldown::Ready => eligible.push(address),
+      EndpointCooldown::Until(until) if until <= now => {
+        entry.cooldown = EndpointCooldown::Ready;
+        metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::CooldownExpired);
+        eligible.push(address);
+      }
+      EndpointCooldown::Until(until) => {
+        retry_at = Some(retry_at.map_or(until, |current: tokio::time::Instant| current.min(until)));
+        metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::CooldownSkipped);
+      }
+      EndpointCooldown::Indefinite => {
+        metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::CooldownSkipped);
+      }
+    }
+  }
+  if eligible.is_empty() {
+    return CandidatePlan {
+      candidates: Vec::new(),
+      retry_at,
+    };
   }
 
+  let (eligible, preferred_used) = rotate_with_preference(eligible, &mut health);
+  if preferred_used {
+    metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::SuccessPreferred);
+  } else {
+    metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::Rotated);
+  }
+  let candidates = interleave_families(eligible)
+    .into_iter()
+    .take(policy.effective_max_connect_attempts())
+    .collect();
+  CandidatePlan {
+    candidates,
+    retry_at,
+  }
+}
+
+async fn record_success(
+  health: &Mutex<EndpointSelectionState>,
+  address: SocketAddr,
+  metrics: &Metrics,
+) {
+  let mut health = health.lock().await;
+  let entry = health.entries.entry(address).or_default();
+  entry.failures = 0;
+  entry.cooldown = EndpointCooldown::Ready;
+  health.preferred = Some(PreferredEndpoint {
+    address,
+    remaining: RECENT_SUCCESS_PREFERENCE_USES,
+  });
+  metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::SuccessPreferred);
+}
+
+async fn record_failure(
+  policy: &QuicUpstreamResolutionConfig,
+  health: &Mutex<EndpointSelectionState>,
+  address: SocketAddr,
+  metrics: &Metrics,
+) {
+  let mut health = health.lock().await;
+  let entry = health.entries.entry(address).or_default();
+  entry.failures = entry.failures.saturating_add(1);
+  let shift = entry.failures.saturating_sub(1).min(63);
+  let multiplier = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+  let delay_ms = policy
+    .cooldown_base_ms
+    .saturating_mul(multiplier)
+    .min(policy.cooldown_max_ms);
+  entry.cooldown = tokio::time::Instant::now()
+    .checked_add(Duration::from_millis(delay_ms))
+    .map_or(EndpointCooldown::Indefinite, EndpointCooldown::Until);
+  if health
+    .preferred
+    .as_ref()
+    .is_some_and(|preferred| preferred.address == address)
+  {
+    health.preferred = None;
+  }
+  metrics.record_h3_endpoint_selection(H3EndpointSelectionEvent::CooldownEntered);
+}
+
+async fn next_retry_at(health: &Mutex<EndpointSelectionState>) -> Option<tokio::time::Instant> {
+  health
+    .lock()
+    .await
+    .entries
+    .values()
+    .filter_map(|entry| match entry.cooldown {
+      EndpointCooldown::Until(until) => Some(until),
+      EndpointCooldown::Ready | EndpointCooldown::Indefinite => None,
+    })
+    .min()
+}
+
+impl H3EndpointRuntime {
   fn resolution_failure(
     &self,
     error: ResolutionError,
@@ -570,20 +577,31 @@ impl H3EndpointRuntime {
   ) -> SharedConnectFailure {
     SharedConnectFailure::message(
       error.to_string(),
-      self.retry_deadline(tokio::time::Instant::now(), deadline),
+      retry_deadline(&self.policy, tokio::time::Instant::now(), deadline),
     )
   }
+}
 
-  fn retry_deadline(
-    &self,
-    now: tokio::time::Instant,
-    request_deadline: tokio::time::Instant,
-  ) -> tokio::time::Instant {
-    now
-      .checked_add(Duration::from_millis(self.policy.cooldown_base_ms))
-      .unwrap_or(request_deadline)
-      .min(request_deadline)
-  }
+fn retry_deadline(
+  policy: &QuicUpstreamResolutionConfig,
+  now: tokio::time::Instant,
+  request_deadline: tokio::time::Instant,
+) -> tokio::time::Instant {
+  now
+    .checked_add(Duration::from_millis(policy.cooldown_base_ms))
+    .unwrap_or(request_deadline)
+    .min(request_deadline)
+}
+
+fn next_candidate_launch(
+  last_launch: tokio::time::Instant,
+  stagger: Duration,
+  deadline: tokio::time::Instant,
+) -> tokio::time::Instant {
+  last_launch
+    .checked_add(stagger)
+    .unwrap_or(deadline)
+    .min(deadline)
 }
 
 #[derive(Default)]
@@ -620,9 +638,9 @@ struct CandidatePlan {
 async fn tagged_connect<T, ConnectFuture>(
   address: SocketAddr,
   future: ConnectFuture,
-) -> (SocketAddr, anyhow::Result<AdmittedUpstream<T>>)
+) -> (SocketAddr, anyhow::Result<T>)
 where
-  ConnectFuture: Future<Output = anyhow::Result<AdmittedUpstream<T>>>,
+  ConnectFuture: Future<Output = anyhow::Result<T>>,
 {
   (address, future.await)
 }

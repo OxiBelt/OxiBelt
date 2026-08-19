@@ -115,7 +115,7 @@ fn declares_quic_upstream_resolution_schema_bounds_and_defaults() {
   let expected = [
     (
       "quic.upstream.resolution.address_family_stagger_ms",
-      1,
+      10,
       5_000,
       json!(250),
     ),

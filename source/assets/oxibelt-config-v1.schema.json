@@ -15263,7 +15263,7 @@
                   "default": 250,
                   "description": "OxiBelt native field `quic.upstream.resolution.address_family_stagger_ms`. Production Rust validation is authoritative.",
                   "maximum": 5000,
-                  "minimum": 1,
+                  "minimum": 10,
                   "type": "integer",
                   "x-oxibelt-config-activation": "full_reload",
                   "x-oxibelt-introduced-epoch": 1,

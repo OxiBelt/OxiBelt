@@ -678,7 +678,7 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     "quic.upstream.resolution.max_endpoint_count" => (1, 64),
     "quic.upstream.resolution.min_ttl_ms" | "quic.upstream.resolution.max_ttl_ms" => (1, 3_600_000),
     "quic.upstream.resolution.negative_ttl_ms" => (1, 30_000),
-    "quic.upstream.resolution.address_family_stagger_ms" => (1, 5_000),
+    "quic.upstream.resolution.address_family_stagger_ms" => (10, 5_000),
     "quic.upstream.resolution.max_connect_attempts" => (1, 16),
     "quic.upstream.resolution.cooldown_base_ms" | "quic.upstream.resolution.cooldown_max_ms" => {
       (1, 300_000)

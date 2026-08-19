@@ -51,6 +51,7 @@ const QUIC_MAX_UDP_PAYLOAD_SIZE: u16 = 65_527;
 const QUIC_UPSTREAM_RESOLUTION_MAX_ENDPOINT_COUNT: usize = 64;
 const QUIC_UPSTREAM_RESOLUTION_MAX_TTL_MS: u64 = 3_600_000;
 const QUIC_UPSTREAM_RESOLUTION_MAX_NEGATIVE_TTL_MS: u64 = 30_000;
+const QUIC_UPSTREAM_RESOLUTION_MIN_ADDRESS_FAMILY_STAGGER_MS: u64 = 10;
 const QUIC_UPSTREAM_RESOLUTION_MAX_ADDRESS_FAMILY_STAGGER_MS: u64 = 5_000;
 const QUIC_UPSTREAM_RESOLUTION_MAX_CONNECT_ATTEMPTS: usize = 16;
 const QUIC_UPSTREAM_RESOLUTION_MAX_COOLDOWN_MS: u64 = 300_000;
@@ -405,11 +406,11 @@ impl QuicUpstreamResolutionConfig {
         "quic.upstream.resolution.negative_ttl_ms must be between 1 and {maximum_negative_ttl_ms}"
       );
     }
-    if self.address_family_stagger_ms == 0
+    if self.address_family_stagger_ms < QUIC_UPSTREAM_RESOLUTION_MIN_ADDRESS_FAMILY_STAGGER_MS
       || self.address_family_stagger_ms > QUIC_UPSTREAM_RESOLUTION_MAX_ADDRESS_FAMILY_STAGGER_MS
     {
       bail!(
-        "quic.upstream.resolution.address_family_stagger_ms must be between 1 and {QUIC_UPSTREAM_RESOLUTION_MAX_ADDRESS_FAMILY_STAGGER_MS}"
+        "quic.upstream.resolution.address_family_stagger_ms must be between {QUIC_UPSTREAM_RESOLUTION_MIN_ADDRESS_FAMILY_STAGGER_MS} and {QUIC_UPSTREAM_RESOLUTION_MAX_ADDRESS_FAMILY_STAGGER_MS}"
       );
     }
     if !(1..=QUIC_UPSTREAM_RESOLUTION_MAX_CONNECT_ATTEMPTS).contains(&self.max_connect_attempts) {

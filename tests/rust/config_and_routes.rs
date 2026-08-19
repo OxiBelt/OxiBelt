@@ -10032,7 +10032,7 @@ max_endpoint_count = 12
 min_ttl_ms = 500
 max_ttl_ms = 45000
 negative_ttl_ms = 750
-address_family_stagger_ms = 100
+address_family_stagger_ms = 10
 max_connect_attempts = 6
 cooldown_base_ms = 500
 cooldown_max_ms = 20000
@@ -10081,7 +10081,7 @@ max_lifetime_ms = 7777
   assert_eq!(config.quic.upstream.resolution.negative_ttl_ms, 750);
   assert_eq!(
     config.quic.upstream.resolution.address_family_stagger_ms,
-    100
+    10
   );
   assert_eq!(config.quic.upstream.resolution.max_connect_attempts, 6);
   assert_eq!(config.quic.upstream.resolution.cooldown_base_ms, 500);
@@ -10257,14 +10257,14 @@ fn quic_upstream_resolution_invalid_values_are_rejected() {
       "quic.upstream.resolution.negative_ttl_ms must be between 1 and 500",
     ),
     (
-      "zero address-family stagger",
-      "address_family_stagger_ms = 0",
-      "quic.upstream.resolution.address_family_stagger_ms must be between 1 and 5000",
+      "address-family stagger below attempt floor",
+      "address_family_stagger_ms = 9",
+      "quic.upstream.resolution.address_family_stagger_ms must be between 10 and 5000",
     ),
     (
       "address-family stagger above cap",
       "address_family_stagger_ms = 5001",
-      "quic.upstream.resolution.address_family_stagger_ms must be between 1 and 5000",
+      "quic.upstream.resolution.address_family_stagger_ms must be between 10 and 5000",
     ),
     (
       "zero connect attempts",
