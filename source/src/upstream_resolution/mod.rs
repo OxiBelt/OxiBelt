@@ -101,6 +101,7 @@ pub(crate) enum ResolutionErrorClass {
 pub(crate) struct ResolutionError {
   class: ResolutionErrorClass,
   detail: Arc<str>,
+  dns_metadata_eligible: bool,
 }
 
 impl ResolutionError {
@@ -108,11 +109,21 @@ impl ResolutionError {
     Self {
       class,
       detail: detail.into(),
+      dns_metadata_eligible: false,
     }
   }
 
   pub(crate) fn class(&self) -> ResolutionErrorClass {
     self.class
+  }
+
+  pub(crate) fn dns_metadata_eligible(&self) -> bool {
+    self.dns_metadata_eligible
+  }
+
+  fn with_dns_metadata_eligible(mut self) -> Self {
+    self.dns_metadata_eligible = true;
+    self
   }
 
   fn negative_cacheable(&self) -> bool {
@@ -255,11 +266,8 @@ pub(crate) enum ResolutionSource {
 pub(crate) struct ResolvedEndpointSet {
   endpoints: Arc<[ResolvedEndpoint]>,
   valid_until: Instant,
-  #[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "retained for resolver-source tests")
-  )]
   source: ResolutionSource,
+  dns_metadata_eligible: bool,
 }
 
 impl ResolvedEndpointSet {
@@ -271,9 +279,12 @@ impl ResolvedEndpointSet {
     self.valid_until
   }
 
-  #[cfg(test)]
   pub(crate) fn source(&self) -> ResolutionSource {
     self.source
+  }
+
+  pub(crate) fn dns_metadata_eligible(&self) -> bool {
+    self.dns_metadata_eligible
   }
 }
 
@@ -544,6 +555,20 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     }
   }
 
+  pub(crate) async fn lookup_https_metadata(
+    &self,
+    deadline: Instant,
+  ) -> Result<DnsLookup, ResolutionError> {
+    if deadline <= Instant::now() {
+      return Err(ResolutionError::deadline());
+    }
+    self
+      .inner
+      .backend
+      .lookup(self.inner.origin.host(), DnsQueryType::Https, deadline)
+      .await
+  }
+
   fn begin_resolution(&self, now: Instant) -> ResolutionStart {
     let mut state = lock_unpoisoned(&self.inner.state);
     if let Some(cache) = &state.cache {
@@ -585,6 +610,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
         ))],
         self.inner.policy.max_ttl,
         ResolutionSource::Literal,
+        false,
         generation,
       );
     }
@@ -644,10 +670,20 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     let mut ipv6 = Vec::new();
     let mut ttl_ms = None;
     let mut source = None;
+    let mut dns_metadata_eligible = true;
+    let mut successful_lookups = 0usize;
     let mut errors = Vec::new();
     for result in [a, aaaa] {
       match result {
         Ok(lookup) => {
+          successful_lookups = successful_lookups.saturating_add(1);
+          dns_metadata_eligible &= lookup.source == ResolutionSource::Dns;
+          source = Some(match (source, lookup.source) {
+            (Some(ResolutionSource::Hosts), _) | (_, ResolutionSource::Hosts) => {
+              ResolutionSource::Hosts
+            }
+            (_, value) => value,
+          });
           let mut accepted = false;
           for answer in lookup.answers {
             if let DnsAnswer::Ip(ip) = answer {
@@ -665,12 +701,6 @@ impl<B: ResolverBackend> EndpointResolver<B> {
           }
           if accepted {
             ttl_ms = Some(ttl_ms.map_or(lookup.ttl_ms, |ttl: u64| ttl.min(lookup.ttl_ms)));
-            source = Some(match (source, lookup.source) {
-              (Some(ResolutionSource::Dns), _) | (_, ResolutionSource::Dns) => {
-                ResolutionSource::Dns
-              }
-              (_, value) => value,
-            });
           } else {
             errors.push(ResolutionError::new(
               ResolutionErrorClass::NoData,
@@ -678,12 +708,23 @@ impl<B: ResolverBackend> EndpointResolver<B> {
             ));
           }
         }
-        Err(error) => errors.push(error),
+        Err(error) => {
+          dns_metadata_eligible = false;
+          errors.push(error);
+        }
       }
     }
+    dns_metadata_eligible &= successful_lookups == 2;
 
     if ipv4.is_empty() && ipv6.is_empty() {
-      return Err(select_combined_error(errors));
+      let error = select_combined_error(errors);
+      return Err(
+        if dns_metadata_eligible && error.class() == ResolutionErrorClass::NoData {
+          error.with_dns_metadata_eligible()
+        } else {
+          error
+        },
+      );
     }
     sort_and_deduplicate(&mut ipv4);
     sort_and_deduplicate(&mut ipv6);
@@ -703,6 +744,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
       endpoints,
       observed_ttl.clamp(self.inner.policy.min_ttl, self.inner.policy.max_ttl),
       source.unwrap_or(ResolutionSource::Dns),
+      dns_metadata_eligible,
       generation,
     )
   }
@@ -712,6 +754,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     endpoints: Vec<ResolvedEndpoint>,
     ttl: Duration,
     source: ResolutionSource,
+    dns_metadata_eligible: bool,
     _generation: u64,
   ) -> SharedResolutionResult {
     let valid_until = Instant::now().checked_add(ttl).ok_or_else(|| {
@@ -724,6 +767,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
       endpoints: endpoints.into(),
       valid_until,
       source,
+      dns_metadata_eligible,
     }))
   }
 

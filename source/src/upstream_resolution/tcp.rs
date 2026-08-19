@@ -11,9 +11,9 @@ use tokio::time::Instant;
 
 use super::{
   CandidateAttemptError, CandidateRaceError, CandidateSchedulerConfig, DnsAnswer, DnsQueryType,
-  EndpointResolver, HappyEyeballsCandidate, HttpsAlpn, HttpsRecord, HttpsTarget, ResolutionOrigin,
-  ResolutionPolicy, lookup_dns_absolute_until, race_happy_eyeballs_candidates,
-  synthesize_pref64_ipv4_candidates,
+  EndpointResolver, HappyEyeballsCandidate, HttpsAlpn, HttpsRecord, HttpsTarget,
+  ResolutionErrorClass, ResolutionOrigin, ResolutionPolicy, ResolutionSource,
+  lookup_dns_absolute_until, race_happy_eyeballs_candidates, synthesize_pref64_ipv4_candidates,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -217,17 +217,45 @@ pub(crate) fn resolve_http_candidate_updates_with_resolver<B: super::ResolverBac
   let base_events = events_tx.clone();
   let base_cancellation = updates_tx.clone();
   let base_host = host.clone();
+  let metadata_resolver = resolver.clone();
   tokio::spawn(async move {
     let resolved = tokio::select! {
       _ = base_cancellation.closed() => return,
       resolved = resolver.resolve(deadline) => resolved,
     };
-    let Ok(resolved) = resolved else {
+    let (resolved, dns_metadata_eligible) = match resolved {
+      Ok(resolved) => {
+        if resolved.valid_until() <= Instant::now() {
+          return;
+        }
+        let eligible =
+          resolved.source() == ResolutionSource::Dns && resolved.dns_metadata_eligible();
+        (Some(resolved), eligible)
+      }
+      Err(error)
+        if error.class() == ResolutionErrorClass::NoData && error.dns_metadata_eligible() =>
+      {
+        (None, true)
+      }
+      Err(_) => return,
+    };
+    if svcb_enabled && dns_metadata_eligible && base_host.parse::<IpAddr>().is_err() {
+      spawn_http_svcb_candidate_producer(
+        metadata_resolver,
+        base_events.clone(),
+        base_cancellation.clone(),
+        configured_port,
+        resolution_policy,
+        protocol,
+        tls_enabled,
+        Arc::clone(&allowed_svcb_ports),
+        deadline,
+      );
+    }
+
+    let Some(resolved) = resolved else {
       return;
     };
-    if resolved.valid_until() <= Instant::now() {
-      return;
-    }
     let base: Arc<[HappyEyeballsCandidate<SocketAddr>]> = Arc::from(
       resolved
         .endpoints()
@@ -276,56 +304,6 @@ pub(crate) fn resolve_http_candidate_updates_with_resolver<B: super::ResolverBac
       }
     }
   });
-
-  if svcb_enabled && host.parse::<IpAddr>().is_err() {
-    let svcb_events = events_tx.clone();
-    let svcb_cancellation = updates_tx.clone();
-    let svcb_host = host.clone();
-    let allowed_ports = Arc::clone(&allowed_svcb_ports);
-    tokio::spawn(async move {
-      let metadata_deadline = Instant::now()
-        .checked_add(resolution_policy.resolution_delay())
-        .unwrap_or(deadline)
-        .min(deadline);
-      let lookup = tokio::select! {
-        _ = svcb_cancellation.closed() => return,
-        lookup = tokio::time::timeout_at(
-          metadata_deadline,
-          lookup_dns_absolute_until(&svcb_host, DnsQueryType::Https, deadline),
-        ) => lookup,
-      };
-      let https = match lookup {
-        Ok(Ok(lookup)) => Some(lookup),
-        Ok(Err(_)) | Err(_) => None,
-      };
-      let candidates = tokio::select! {
-        _ = svcb_cancellation.closed() => return,
-        candidates = apply_http_candidate_metadata(
-          configured_port,
-          Arc::from(Vec::<HappyEyeballsCandidate<SocketAddr>>::new()),
-          resolution_policy,
-          protocol,
-          tls_enabled,
-          &allowed_ports,
-          deadline,
-          https,
-        ) => candidates,
-      };
-      let Ok(candidates) = candidates else {
-        return;
-      };
-      let addresses = candidates
-        .iter()
-        .map(|candidate| *candidate.value_ref())
-        .collect::<Vec<_>>();
-      if !addresses.is_empty() {
-        tokio::select! {
-          _ = svcb_cancellation.closed() => {}
-          _ = svcb_events.send(HttpCandidateUpdate::Svcb(addresses)) => {}
-        }
-      }
-    });
-  }
   drop(events_tx);
 
   tokio::spawn(async move {
@@ -375,6 +353,63 @@ pub(crate) fn resolve_http_candidate_updates_with_resolver<B: super::ResolverBac
     }
   });
   updates_rx
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_http_svcb_candidate_producer<B: super::ResolverBackend>(
+  resolver: EndpointResolver<B>,
+  events: tokio::sync::mpsc::Sender<HttpCandidateUpdate>,
+  cancellation: watch::Sender<Arc<[HappyEyeballsCandidate<SocketAddr>]>>,
+  configured_port: u16,
+  resolution_policy: ResolutionPolicy,
+  protocol: HttpTransportProtocol,
+  tls_enabled: bool,
+  allowed_ports: Arc<[u16]>,
+  deadline: Instant,
+) {
+  tokio::spawn(async move {
+    let metadata_deadline = Instant::now()
+      .checked_add(resolution_policy.resolution_delay())
+      .unwrap_or(deadline)
+      .min(deadline);
+    let lookup = tokio::select! {
+      _ = cancellation.closed() => return,
+      lookup = tokio::time::timeout_at(
+        metadata_deadline,
+        resolver.lookup_https_metadata(deadline),
+      ) => lookup,
+    };
+    let https = match lookup {
+      Ok(Ok(lookup)) => Some(lookup),
+      Ok(Err(_)) | Err(_) => None,
+    };
+    let candidates = tokio::select! {
+      _ = cancellation.closed() => return,
+      candidates = apply_http_candidate_metadata(
+        configured_port,
+        Arc::from(Vec::<HappyEyeballsCandidate<SocketAddr>>::new()),
+        resolution_policy,
+        protocol,
+        tls_enabled,
+        &allowed_ports,
+        deadline,
+        https,
+      ) => candidates,
+    };
+    let Ok(candidates) = candidates else {
+      return;
+    };
+    let addresses = candidates
+      .iter()
+      .map(|candidate| *candidate.value_ref())
+      .collect::<Vec<_>>();
+    if !addresses.is_empty() {
+      tokio::select! {
+        _ = cancellation.closed() => {}
+        _ = events.send(HttpCandidateUpdate::Svcb(addresses)) => {}
+      }
+    }
+  });
 }
 
 pub(crate) async fn resolve_tcp_candidates(
@@ -610,7 +645,15 @@ fn candidate_race_error(error: CandidateRaceError<anyhow::Error>) -> anyhow::Err
 }
 
 #[cfg(test)]
+#[path = "tcp/provenance_tests.rs"]
+mod provenance_tests;
+
+#[cfg(test)]
 mod tests {
+  use super::super::ResolutionError;
+  use super::provenance_tests::{
+    PendingMetadataBackend, candidate_backend, ip_lookup, wait_for_candidate,
+  };
   use super::*;
   use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -736,6 +779,283 @@ mod tests {
         .collect::<Vec<_>>(),
       ["192.0.2.10:443".parse().unwrap()]
     );
+  }
+
+  #[tokio::test]
+  async fn hosts_pinned_base_never_queries_or_admits_svcb_metadata() {
+    let base_ip = "192.0.2.30".parse().unwrap();
+    let svcb_ip = "203.0.113.30".parse().unwrap();
+    let (backend, https_calls) = candidate_backend(
+      Ok(ip_lookup(ResolutionSource::Hosts, vec![base_ip])),
+      Ok(ip_lookup(ResolutionSource::Hosts, Vec::new())),
+      svcb_ip,
+    );
+    let resolver = EndpointResolver::new_with_backend(
+      ResolutionOrigin::new("pinned.example", 443, "hosts-pinned-test").unwrap(),
+      backend,
+      ResolutionPolicy::default(),
+    );
+    let mut updates = resolve_http_candidate_updates_with_resolver(
+      resolver,
+      "pinned.example",
+      443,
+      ResolutionPolicy::default(),
+      HttpTransportProtocol::H2,
+      true,
+      true,
+      &[],
+      Instant::now() + std::time::Duration::from_secs(1),
+    );
+
+    let addresses = wait_for_candidate(&mut updates, SocketAddr::new(base_ip, 443)).await;
+    assert_eq!(addresses, vec![SocketAddr::new(base_ip, 443)]);
+    assert_eq!(https_calls.load(Ordering::Acquire), 0);
+    assert!(!addresses.contains(&SocketAddr::new(svcb_ip, 443)));
+  }
+
+  #[tokio::test]
+  async fn literal_base_never_queries_svcb_metadata() {
+    let literal_ip = "192.0.2.35".parse().unwrap();
+    let error = ResolutionError::new(
+      ResolutionErrorClass::Internal,
+      "literal resolution must bypass the backend",
+    );
+    let (backend, https_calls) = candidate_backend(
+      Err(error.clone()),
+      Err(error),
+      "203.0.113.35".parse().unwrap(),
+    );
+    let resolver = EndpointResolver::new_with_backend(
+      ResolutionOrigin::new("192.0.2.35", 443, "literal-source-test").unwrap(),
+      backend,
+      ResolutionPolicy::default(),
+    );
+    let mut updates = resolve_http_candidate_updates_with_resolver(
+      resolver,
+      "192.0.2.35",
+      443,
+      ResolutionPolicy::default(),
+      HttpTransportProtocol::H2,
+      true,
+      true,
+      &[],
+      Instant::now() + std::time::Duration::from_secs(1),
+    );
+
+    let addresses = wait_for_candidate(&mut updates, SocketAddr::new(literal_ip, 443)).await;
+    assert_eq!(addresses, vec![SocketAddr::new(literal_ip, 443)]);
+    assert_eq!(https_calls.load(Ordering::Acquire), 0);
+  }
+
+  #[tokio::test]
+  async fn mixed_base_provenance_never_queries_svcb_metadata() {
+    let hosts_ip = "192.0.2.31".parse().unwrap();
+    let dns_ip = "2001:db8::31".parse().unwrap();
+    let svcb_ip = "203.0.113.31".parse().unwrap();
+    let (backend, https_calls) = candidate_backend(
+      Ok(ip_lookup(ResolutionSource::Hosts, vec![hosts_ip])),
+      Ok(ip_lookup(ResolutionSource::Dns, vec![dns_ip])),
+      svcb_ip,
+    );
+    let resolver = EndpointResolver::new_with_backend(
+      ResolutionOrigin::new("mixed.example", 443, "mixed-source-test").unwrap(),
+      backend,
+      ResolutionPolicy::default(),
+    );
+    let mut updates = resolve_http_candidate_updates_with_resolver(
+      resolver,
+      "mixed.example",
+      443,
+      ResolutionPolicy::default(),
+      HttpTransportProtocol::H2,
+      true,
+      true,
+      &[],
+      Instant::now() + std::time::Duration::from_secs(1),
+    );
+
+    let addresses = wait_for_candidate(&mut updates, SocketAddr::new(hosts_ip, 443)).await;
+    assert!(addresses.contains(&SocketAddr::new(dns_ip, 443)));
+    assert_eq!(https_calls.load(Ordering::Acquire), 0);
+    assert!(!addresses.contains(&SocketAddr::new(svcb_ip, 443)));
+  }
+
+  #[tokio::test]
+  async fn incomplete_dns_base_never_queries_svcb_metadata() {
+    let base_ip = "192.0.2.36".parse().unwrap();
+    let svcb_ip = "203.0.113.36".parse().unwrap();
+    let (backend, https_calls) = candidate_backend(
+      Ok(ip_lookup(ResolutionSource::Dns, vec![base_ip])),
+      Err(ResolutionError::new(
+        ResolutionErrorClass::Deadline,
+        "the second address-family lookup timed out",
+      )),
+      svcb_ip,
+    );
+    let resolver = EndpointResolver::new_with_backend(
+      ResolutionOrigin::new("partial-dns.example", 443, "partial-dns-test").unwrap(),
+      backend,
+      ResolutionPolicy::default(),
+    );
+    let mut updates = resolve_http_candidate_updates_with_resolver(
+      resolver,
+      "partial-dns.example",
+      443,
+      ResolutionPolicy::default(),
+      HttpTransportProtocol::H2,
+      true,
+      true,
+      &[],
+      Instant::now() + std::time::Duration::from_secs(1),
+    );
+
+    let addresses = wait_for_candidate(&mut updates, SocketAddr::new(base_ip, 443)).await;
+    assert_eq!(addresses, vec![SocketAddr::new(base_ip, 443)]);
+    assert_eq!(https_calls.load(Ordering::Acquire), 0);
+    assert!(!addresses.contains(&SocketAddr::new(svcb_ip, 443)));
+  }
+
+  #[tokio::test]
+  async fn dns_base_retains_svcb_candidates_ahead_of_base_candidates() {
+    let base_ip = "192.0.2.32".parse().unwrap();
+    let svcb_ip = "203.0.113.32".parse().unwrap();
+    let (backend, https_calls) = candidate_backend(
+      Ok(ip_lookup(ResolutionSource::Dns, vec![base_ip])),
+      Ok(ip_lookup(ResolutionSource::Dns, Vec::new())),
+      svcb_ip,
+    );
+    let resolver = EndpointResolver::new_with_backend(
+      ResolutionOrigin::new("dns.example", 443, "dns-source-test").unwrap(),
+      backend,
+      ResolutionPolicy::default(),
+    );
+    let mut updates = resolve_http_candidate_updates_with_resolver(
+      resolver,
+      "dns.example",
+      443,
+      ResolutionPolicy::default(),
+      HttpTransportProtocol::H2,
+      true,
+      true,
+      &[],
+      Instant::now() + std::time::Duration::from_secs(1),
+    );
+
+    let addresses = wait_for_candidate(&mut updates, SocketAddr::new(svcb_ip, 443)).await;
+    assert_eq!(https_calls.load(Ordering::Acquire), 1);
+    assert_eq!(
+      addresses,
+      vec![SocketAddr::new(svcb_ip, 443), SocketAddr::new(base_ip, 443)]
+    );
+  }
+
+  #[tokio::test]
+  async fn dns_nodata_retains_svcb_only_candidates() {
+    let svcb_ip = "203.0.113.33".parse().unwrap();
+    let (backend, https_calls) = candidate_backend(
+      Ok(ip_lookup(ResolutionSource::Dns, Vec::new())),
+      Ok(ip_lookup(ResolutionSource::Dns, Vec::new())),
+      svcb_ip,
+    );
+    let resolver = EndpointResolver::new_with_backend(
+      ResolutionOrigin::new("svcb-only.example", 443, "svcb-only-test").unwrap(),
+      backend,
+      ResolutionPolicy::default(),
+    );
+    let mut updates = resolve_http_candidate_updates_with_resolver(
+      resolver,
+      "svcb-only.example",
+      443,
+      ResolutionPolicy::default(),
+      HttpTransportProtocol::H2,
+      true,
+      true,
+      &[],
+      Instant::now() + std::time::Duration::from_secs(1),
+    );
+
+    let addresses = wait_for_candidate(&mut updates, SocketAddr::new(svcb_ip, 443)).await;
+    assert_eq!(https_calls.load(Ordering::Acquire), 1);
+    assert_eq!(addresses, vec![SocketAddr::new(svcb_ip, 443)]);
+  }
+
+  #[tokio::test]
+  async fn bare_nodata_and_resolution_failures_do_not_enable_svcb() {
+    for class in [
+      ResolutionErrorClass::NoData,
+      ResolutionErrorClass::NxDomain,
+      ResolutionErrorClass::ServerFailure,
+      ResolutionErrorClass::Malformed,
+      ResolutionErrorClass::Io,
+      ResolutionErrorClass::Deadline,
+    ] {
+      let error = ResolutionError::new(class, "candidate base resolution failed");
+      let (backend, https_calls) = candidate_backend(
+        Err(error.clone()),
+        Err(error),
+        "203.0.113.34".parse().unwrap(),
+      );
+      let resolver = EndpointResolver::new_with_backend(
+        ResolutionOrigin::new("failed.example", 443, "failed-source-test").unwrap(),
+        backend,
+        ResolutionPolicy::default(),
+      );
+      let mut updates = resolve_http_candidate_updates_with_resolver(
+        resolver,
+        "failed.example",
+        443,
+        ResolutionPolicy::default(),
+        HttpTransportProtocol::H2,
+        true,
+        true,
+        &[],
+        Instant::now() + std::time::Duration::from_secs(1),
+      );
+
+      assert!(updates.changed().await.is_err(), "{class:?}");
+      assert_eq!(https_calls.load(Ordering::Acquire), 0, "{class:?}");
+    }
+  }
+
+  #[tokio::test]
+  async fn dropping_candidate_updates_cancels_pending_svcb_metadata() {
+    let started = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let resolver = EndpointResolver::new_with_backend(
+      ResolutionOrigin::new("cancel-metadata.example", 443, "cancel-metadata-test").unwrap(),
+      PendingMetadataBackend {
+        started: Arc::clone(&started),
+        dropped: Arc::clone(&dropped),
+      },
+      ResolutionPolicy::default(),
+    );
+    let updates = resolve_http_candidate_updates_with_resolver(
+      resolver,
+      "cancel-metadata.example",
+      443,
+      ResolutionPolicy::default(),
+      HttpTransportProtocol::H2,
+      true,
+      true,
+      &[],
+      Instant::now() + std::time::Duration::from_secs(30),
+    );
+    for _ in 0..16 {
+      if started.load(Ordering::Acquire) == 1 {
+        break;
+      }
+      tokio::task::yield_now().await;
+    }
+    assert_eq!(started.load(Ordering::Acquire), 1);
+
+    drop(updates);
+    for _ in 0..16 {
+      if dropped.load(Ordering::Acquire) == 1 {
+        break;
+      }
+      tokio::task::yield_now().await;
+    }
+    assert_eq!(dropped.load(Ordering::Acquire), 1);
   }
 
   #[tokio::test]
