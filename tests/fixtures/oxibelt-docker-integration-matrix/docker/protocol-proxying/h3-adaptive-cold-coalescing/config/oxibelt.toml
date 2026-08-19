@@ -43,6 +43,10 @@ max_connect_attempts = 4
 cooldown_base_ms = 1000
 cooldown_max_ms = 30000
 
+[proxy.upstream_resolution.happy_eyeballs]
+svcb = "disabled"
+pref64 = "disabled"
+
 [quic.upstream_pool]
 enabled = true
 max_connections_per_upstream = 1

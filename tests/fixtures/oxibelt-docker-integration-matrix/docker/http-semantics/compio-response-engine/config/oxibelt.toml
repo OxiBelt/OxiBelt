@@ -61,6 +61,7 @@ fail_policy = "closed"
 name = "http-upstream"
 origin = "http://mock-http:18080/origin"
 max_http_version = "h1"
+happy_eyeballs_mode = "legacy"
 connect_timeout_ms = 3000
 request_timeout_ms = 30000
 first_byte_timeout_ms = 3000

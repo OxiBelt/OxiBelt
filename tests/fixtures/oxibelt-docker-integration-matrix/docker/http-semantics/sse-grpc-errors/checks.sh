@@ -8,5 +8,5 @@ run_case_checks() {
   assert_response_jq "${response}" '(.status == 502 or .status == 504) and (.body | fromjson | (.code == "connect_error" or .code == "read_timeout"))'
 
   response="$(client_request_with_headers "grpc.example.test" "/grpc.Matrix/Unary" 200 "POST" "" "Content-Type: application/grpc" "Grpc-Timeout: 1S")"
-  assert_response_jq "${response}" '.headers["grpc-status"] == "4"'
+  assert_response_jq "${response}" '.headers["grpc-status"] == "14"'
 }

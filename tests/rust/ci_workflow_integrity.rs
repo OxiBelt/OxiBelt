@@ -6095,6 +6095,73 @@ fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
 }
 
 #[test]
+fn happy_eyeballs_fixture_scopes_are_explicit() {
+  let root = repo_root();
+  let read_config = |path: &str| {
+    let text = fs::read_to_string(root.join(path))
+      .unwrap_or_else(|error| panic!("{path} should be readable: {error}"));
+    toml::from_str::<toml::Value>(&text)
+      .unwrap_or_else(|error| panic!("{path} should parse as TOML: {error}"))
+  };
+
+  for path in [
+    "tests/fixtures/oxibelt-docker-integration-matrix/docker/protocol-proxying/h3-adaptive-cold-coalescing/config/oxibelt.toml",
+    "tests/fixtures/oxibelt-docker-integration-matrix/docker/protocol-proxying/h3-adaptive-multi-address/config/oxibelt.toml",
+  ] {
+    let config = read_config(path);
+    let happy_eyeballs = config
+      .get("proxy")
+      .and_then(toml::Value::as_table)
+      .and_then(|proxy| proxy.get("upstream_resolution"))
+      .and_then(toml::Value::as_table)
+      .and_then(|resolution| resolution.get("happy_eyeballs"))
+      .and_then(toml::Value::as_table)
+      .unwrap_or_else(|| panic!("{path} should configure Happy Eyeballs discovery modes"));
+    assert_eq!(
+      happy_eyeballs.get("svcb").and_then(toml::Value::as_str),
+      Some("disabled"),
+      "{path} should isolate its A/AAAA assertions from SVCB discovery"
+    );
+    assert_eq!(
+      happy_eyeballs.get("pref64").and_then(toml::Value::as_str),
+      Some("disabled"),
+      "{path} should isolate its A/AAAA assertions from PREF64 discovery"
+    );
+  }
+
+  for (path, expected_upstream_count) in [
+    (
+      "tests/fixtures/oxibelt-docker-integration-matrix/docker/http-semantics/compio-transport-service/config/oxibelt.toml",
+      2,
+    ),
+    (
+      "tests/fixtures/oxibelt-docker-integration-matrix/docker/http-semantics/compio-response-engine/config/oxibelt.toml",
+      1,
+    ),
+  ] {
+    let config = read_config(path);
+    let upstreams = config
+      .get("upstreams")
+      .and_then(toml::Value::as_array)
+      .unwrap_or_else(|| panic!("{path} should configure its Compio upstreams"));
+    assert_eq!(
+      upstreams.len(),
+      expected_upstream_count,
+      "{path} should retain its expected upstream inventory"
+    );
+    assert!(
+      upstreams.iter().all(|upstream| {
+        upstream
+          .get("happy_eyeballs_mode")
+          .and_then(toml::Value::as_str)
+          == Some("legacy")
+      }),
+      "every Compio upstream in {path} should use the supported legacy scheduler"
+    );
+  }
+}
+
+#[test]
 fn compio_transport_fixture_uses_bounded_origin_controls_and_rootless_cleanup() {
   let root = repo_root();
   let read = |path: &str| {
