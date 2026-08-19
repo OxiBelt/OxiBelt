@@ -1033,8 +1033,33 @@ finish_turn_allocation_probe() {
   rm -f "${turn_allocation_client_file}"
 }
 
+read_last_turn_transport() {
+  local marker="${work_dir}/last-turn-transport" transport marker_size
+  [[ -f "${marker}" && ! -L "${marker}" ]] || {
+    echo "TURN recovery transport marker is not a regular file" >&2
+    return 1
+  }
+  if ! IFS= read -r transport <"${marker}"; then
+    echo "TURN recovery transport marker must contain one newline-terminated transport" >&2
+    return 1
+  fi
+  case "${transport}" in
+    udp|tcp|tls) ;;
+    *)
+      echo "TURN recovery transport marker contains an unsupported transport" >&2
+      return 1
+      ;;
+  esac
+  marker_size="$(wc -c <"${marker}")"
+  [[ "${marker_size}" -eq $(( ${#transport} + 1 )) ]] || {
+    echo "TURN recovery transport marker must contain exactly one transport" >&2
+    return 1
+  }
+  printf '%s\n' "${transport}"
+}
+
 case_turn_runtime() {
-  local b0 b1 b2 transport auth expectation output mutation username edge_mutation client
+  local b0 b1 b2 transport auth expectation output mutation username edge_mutation
   b0="$(input_byte 0)"; b1="$(input_byte 1)"; b2="$(input_byte 2)"
   require_concurrency_bound 1
   case $((b0 % 3)) in 0) transport=udp;; 1) transport=tcp;; *) transport=tls;; esac
@@ -1074,8 +1099,6 @@ case_turn_runtime() {
   esac
   turn_probe udp invalid rejected "${work_dir}/turn-edge-malformed.json" \
     "${edge_mutation}" "$(read_credential "${turn_username_file}")" 3480
-  client="$(start_turn_allocation_probe)"
-  wait_for_turn_allocation_visibility "${client}"
 }
 
 case_admin_authz() {
@@ -1195,7 +1218,14 @@ admin_valid_mutation() {
 }
 
 recovery_target() {
-  local output="${work_dir}/recovery.json"
+  local mode="${1:-post-case}" output="${work_dir}/recovery.json" client transport
+  case "${mode}" in
+    startup|post-case) ;;
+    *)
+      echo "unsupported security-fuzz recovery mode" >&2
+      return 1
+      ;;
+  esac
   docker inspect -f '{{.State.Running}}' "${proxy}" | grep -qx true
   case "${target}" in
     path_security)
@@ -1227,9 +1257,17 @@ recovery_target() {
       wait_for_zero_tunnel_counts
       ;;
     turn_runtime)
-      finish_turn_allocation_probe
-      turn_probe "$(cat "${work_dir}/last-turn-transport" 2>/dev/null || echo udp)" valid echo "${output}"
-      wait_for_zero_turn_counts
+      if [[ "${mode}" == "startup" ]]; then
+        turn_probe udp valid echo "${output}" \
+          && wait_for_zero_turn_counts
+      else
+        transport="$(read_last_turn_transport)" \
+          && client="$(start_turn_allocation_probe)" \
+          && wait_for_turn_allocation_visibility "${client}" \
+          && finish_turn_allocation_probe \
+          && turn_probe "${transport}" valid echo "${output}" \
+          && wait_for_zero_turn_counts
+      fi
       ;;
     admin_authz)
       admin_valid_mutation
@@ -1279,7 +1317,7 @@ start_topology() {
     if [[ "$(docker inspect -f '{{.State.Running}}' "${proxy}" 2>/dev/null || echo false)" != "true" ]]; then
       break
     fi
-    if recovery_target >/dev/null 2>&1; then
+    if recovery_target startup >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.25

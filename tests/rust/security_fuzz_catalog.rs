@@ -567,16 +567,78 @@ esac
       fixture.contains("max_allocation_lifetime_seconds = 5"),
       "the TURN fixture must leave bounded headroom for live allocation introspection"
     );
+    let case_start = executor
+      .find("case_turn_runtime() {")
+      .expect("TURN case must be present");
+    let case_end = executor[case_start..]
+      .find("\ncase_admin_authz() {")
+      .map(|offset| case_start + offset)
+      .expect("TURN case must end before the admin case");
+    let turn_case = &executor[case_start..case_end];
     assert!(
-      executor.contains("--allocation-hold-ms 4000")
-        && executor.contains("wait_for_turn_allocation_visibility \"${client}\""),
-      "the TURN case must retain its allocation probe while polling runtime visibility"
+      executor.contains("--allocation-hold-ms 4000"),
+      "the TURN allocation probe must retain its bounded 4000ms hold"
     );
     assert!(
-      executor.contains(
-        "finish_turn_allocation_probe\n      turn_probe \"$(cat \"${work_dir}/last-turn-transport\""
-      ) && executor.contains("for _attempt in $(seq 1 100); do"),
-      "TURN recovery must reap the held probe before its bounded zero-count poll"
+      !turn_case.contains("start_turn_allocation_probe")
+        && !turn_case.contains("wait_for_turn_allocation_visibility"),
+      "the 5-second TURN case must not spend its budget on allocation visibility"
+    );
+
+    let recovery_start = executor
+      .find("recovery_target() {")
+      .expect("recovery target dispatcher must be present");
+    let turn_recovery_start = executor[recovery_start..]
+      .find("    turn_runtime)\n")
+      .map(|offset| recovery_start + offset)
+      .expect("TURN recovery branch must be present");
+    let turn_recovery_end = executor[turn_recovery_start..]
+      .find("    admin_authz)\n")
+      .map(|offset| turn_recovery_start + offset)
+      .expect("TURN recovery branch must end before the admin branch");
+    let turn_recovery = &executor[turn_recovery_start..turn_recovery_end];
+
+    assert!(
+      executor.contains("if recovery_target startup >/dev/null 2>&1; then")
+        && turn_recovery.contains("if [[ \"${mode}\" == \"startup\" ]]; then")
+        && turn_recovery.contains(
+          r#"turn_probe udp valid echo "${output}" \
+          && wait_for_zero_turn_counts"#
+        ),
+      "TURN startup readiness must use a fixed clean UDP probe without requiring post-case state"
+    );
+
+    let allocation_start = turn_recovery
+      .find("client=\"$(start_turn_allocation_probe)\"")
+      .expect("TURN recovery must start the bounded allocation probe");
+    let allocation_visible = turn_recovery
+      .find("wait_for_turn_allocation_visibility \"${client}\"")
+      .expect("TURN recovery must observe the live allocation");
+    let allocation_finish = turn_recovery
+      .find("finish_turn_allocation_probe")
+      .expect("TURN recovery must reap the bounded allocation probe");
+    let transport_read = turn_recovery
+      .find("transport=\"$(read_last_turn_transport)\"")
+      .expect("TURN recovery must read a validated transport marker");
+    let clean_echo = turn_recovery
+      .find("turn_probe \"${transport}\" valid echo \"${output}\"")
+      .expect("TURN recovery must echo on the selected transport");
+    let zero_counts = turn_recovery
+      .rfind("wait_for_zero_turn_counts")
+      .expect("TURN recovery must poll for zero TURN counts");
+    assert!(
+      transport_read < allocation_start
+        && allocation_start < allocation_visible
+        && allocation_visible < allocation_finish
+        && allocation_finish < clean_echo
+        && clean_echo < zero_counts,
+      "TURN recovery must validate its selected transport before observing and reaping the held allocation, then echo and poll zero counts"
+    );
+    assert!(
+      executor.contains("[[ -f \"${marker}\" && ! -L \"${marker}\" ]]")
+        && executor.contains("udp|tcp|tls)")
+        && executor.contains("marker_size=\"$(wc -c <\"${marker}\")\""),
+      "TURN recovery must fail closed unless its transport marker is a regular, exact supported transport"
     );
     assert_eq!(
       defaults()
