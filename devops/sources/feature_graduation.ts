@@ -71,7 +71,7 @@ export type FeatureGraduationPolicy = {
   lifecycleAuthority: string
   evidenceSchema: string
   repository: string
-  targetVersion: '0.8.0'
+  targetVersion: '0.8.1'
   gates: Array<{
     id: string
     objective: string
@@ -782,8 +782,8 @@ function ValidatePhaseRef(Phase: (typeof FeatureGraduationPhases)[number], Ref: 
   if (Phase === 'candidate' && Ref !== 'refs/heads/main') {
     throw new Error('candidate qualification requires refs/heads/main')
   }
-  if (Phase === 'official_beta' && !/^refs\/tags\/0\.8\.0-beta\.[1-9][0-9]*$/.test(Ref)) {
-    throw new Error('official_beta qualification requires a 0.8.0 beta tag ref')
+  if (Phase === 'official_beta' && !/^refs\/tags\/0\.8\.1-beta\.[1-9][0-9]*$/.test(Ref)) {
+    throw new Error('official_beta qualification requires a 0.8.1 beta tag ref')
   }
 }
 

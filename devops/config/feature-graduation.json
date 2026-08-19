@@ -5,7 +5,7 @@
   "lifecycleAuthority": "docs/FeatureStatus.md",
   "evidenceSchema": "devops/config/feature-graduation-evidence.schema.json",
   "repository": "OxiBelt/OxiBelt",
-  "targetVersion": "0.8.0",
+  "targetVersion": "0.8.1",
   "gates": [
     { "id": "config-schema-api-snapshots", "objective": "Schema-v3 and public API snapshots bind the activation planner contract.", "appliesTo": ["config-activation-planner"] },
     { "id": "config-planner-executor-differential", "objective": "The planner never selects a weaker operation than execution for every required activation path.", "appliesTo": ["config-activation-planner"] },

@@ -195,7 +195,7 @@ feature-to-gate mappings, immutable Kubernetes inputs, generated-document
 freshness, intended qualification platforms, and agreement with
 `docs/FeatureStatus.md`. Gate rows are immutable requirements, not mutable
 pass/fail claims shared between features. A supported feature must bind target
-version `0.8.0` and retain no blocker.
+version `0.8.1` and retain no blocker.
 
 Qualification evidence is detached from the registry and scoped to one exact
 feature. `pnpm run kubernetes-graduation:verify` accepts only a bounded
@@ -225,7 +225,7 @@ or chart placeholders are not accepted. Adding any future subject requires an
 explicit policy change and therefore changes the policy hash.
 
 Candidate receipts require `refs/heads/main`; official-beta receipts require an
-exact `refs/tags/0.8.0-beta.N` ref. The verifier resolves the supplied ref and
+exact `refs/tags/0.8.1-beta.N` ref. The verifier resolves the supplied ref and
 the checked-out `HEAD` to the supplied full SHA before reading evidence. These
 local checks establish receipt structure and repository binding; the
 qualification workflow must separately authenticate the run, jobs, signer,

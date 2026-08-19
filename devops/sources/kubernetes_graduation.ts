@@ -84,7 +84,7 @@ export type KubernetesGraduationPolicy = {
   lifecycleAuthority: string
   evidenceSchema: string
   repository: 'OxiBelt/OxiBelt'
-  targetVersion: '0.8.0'
+  targetVersion: '0.8.1'
   supportContract: {
     kubernetes: {
       range: string
@@ -1155,8 +1155,8 @@ export function ValidateKubernetesGraduationPhaseRef(
   if (Phase === 'candidate' && Ref !== 'refs/heads/main') {
     throw new Error('candidate qualification requires source ref refs/heads/main')
   }
-  if (Phase === 'official_beta' && !/^refs\/tags\/0\.8\.0-beta\.[1-9][0-9]*$/.test(Ref)) {
-    throw new Error('official_beta qualification requires an exact 0.8.0 beta tag ref')
+  if (Phase === 'official_beta' && !/^refs\/tags\/0\.8\.1-beta\.[1-9][0-9]*$/.test(Ref)) {
+    throw new Error('official_beta qualification requires an exact 0.8.1 beta tag ref')
   }
 }
 

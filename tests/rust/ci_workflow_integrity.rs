@@ -2514,13 +2514,13 @@ fn supported_feature_graduation_prs_require_an_unchanged_base_contract() {
       {
         "scope": "features",
         "repository": "OxiBelt/OxiBelt",
-        "targetVersion": "0.8.0",
+        "targetVersion": "0.8.1",
         "policyDefinitionSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       {
         "scope": "kubernetes",
         "repository": "OxiBelt/OxiBelt",
-        "targetVersion": "0.8.0",
+        "targetVersion": "0.8.1",
         "policyDefinitionSha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       }
     ],

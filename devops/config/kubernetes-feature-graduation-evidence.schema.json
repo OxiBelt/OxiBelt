@@ -38,7 +38,7 @@
     },
     "intendedStatus": { "const": "supported" },
     "phase": { "enum": ["candidate", "official_beta"] },
-    "targetVersion": { "const": "0.8.0" },
+    "targetVersion": { "const": "0.8.1" },
     "repository": { "const": "OxiBelt/OxiBelt" },
     "sourceRef": {
       "type": "string",

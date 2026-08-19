@@ -59,7 +59,7 @@ function Receipt(
     featureId: Feature.id,
     intendedStatus: 'supported',
     phase: 'candidate',
-    targetVersion: '0.8.0',
+    targetVersion: '0.8.1',
     repository: 'OxiBelt/OxiBelt',
     sourceRef: 'refs/heads/main',
     sourceRevision: Revision,
@@ -121,7 +121,7 @@ function SupportedPolicy(
 
 test('accepts the exact experimental registry and FeatureStatus matrix', () => {
   const Loaded = ValidateFeatureGraduationWorkspace(RepoRoot)
-  Assert.equal(Loaded.targetVersion, '0.8.0')
+  Assert.equal(Loaded.targetVersion, '0.8.1')
   Assert.deepEqual(Loaded.features.map(Feature => Feature.id).sort(), [...FeatureGraduationFeatureIds].sort())
   Assert.ok(Loaded.features.every(Feature => Feature.status === 'experimental'))
   Assert.equal(Loaded.features.length, FeatureGraduationFeatureIds.length)
@@ -143,7 +143,7 @@ test('rejects unknown properties, unsupported platforms, and unsupported rows wi
 
   const UnsupportedVersion = Policy()
   UnsupportedVersion.features[0].status = 'supported'
-  Assert.throws(() => ValidateFeatureGraduationPolicyObject(UnsupportedVersion, Schema), /must bind target version 0.8.0/)
+  Assert.throws(() => ValidateFeatureGraduationPolicyObject(UnsupportedVersion, Schema), /must bind target version 0.8.1/)
 
   const UnsupportedDependency = Policy()
   const Sybil = UnsupportedDependency.features.find(Feature => Feature.id === 'sybil-rate-limit-identities')
@@ -318,11 +318,11 @@ test('CLI rejects caller-selected contracts and mismatched or unresolved exact r
 
   const MissingTag = Run(
     'verify', '--workspace-path', '.', '--expected-source-revision', GitHead(),
-    '--expected-source-ref', 'refs/tags/0.8.0-beta.999999', '--phase', 'official_beta',
+    '--expected-source-ref', 'refs/tags/0.8.1-beta.999999', '--phase', 'official_beta',
     '--evidence-dir', 'devops/config'
   )
   Assert.notEqual(MissingTag.status, 0)
-  Assert.match(MissingTag.stderr, /could not resolve refs\/tags\/0\.8\.0-beta\.999999/)
+  Assert.match(MissingTag.stderr, /could not resolve refs\/tags\/0\.8\.1-beta\.999999/)
 })
 
 test('loads only canonical regular evidence files below a non-symlink directory', () => {
