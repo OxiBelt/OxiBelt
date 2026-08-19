@@ -93,7 +93,7 @@ pub(crate) async fn synthesize_pref64_ipv4_candidates(
   max_count: usize,
   deadline: Instant,
 ) -> Vec<SocketAddr> {
-  if configured_port == 0 || max_count == 0 {
+  if ipv4_candidates.is_empty() || configured_port == 0 || max_count == 0 {
     return Vec::new();
   }
   let Some(pref64) = discover_pref64_if_ipv6_only(deadline).await else {
@@ -227,6 +227,10 @@ fn synthesize_candidates(
 
 #[cfg(test)]
 mod tests {
+  use std::time::Duration;
+
+  use futures_util::FutureExt as _;
+
   use super::*;
 
   fn rfc7050_answer(prefix: Ipv6Addr, prefix_len: u8, ipv4: Ipv4Addr) -> Ipv6Addr {
@@ -308,6 +312,17 @@ mod tests {
         "[64:ff9b::c000:201]:443".parse().unwrap(),
         "[64:ff9b::cb00:7103]:443".parse().unwrap(),
       ]
+    );
+  }
+
+  #[test]
+  fn empty_candidates_return_before_pref64_dns_discovery() {
+    let deadline = Instant::now()
+      .checked_add(Duration::from_secs(1))
+      .expect("test deadline");
+    assert_eq!(
+      synthesize_pref64_ipv4_candidates(&[], 443, 1, deadline).now_or_never(),
+      Some(Vec::new())
     );
   }
 
