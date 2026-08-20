@@ -15,6 +15,150 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.8.1-beta.2] - 2026-08-20
+
+> Fresh qualification candidate after beta.1's canonical validation exposed
+> release-harness flakes. Do not reuse beta.1 workflow results or any artifact,
+> attestation, rebuild, or qualification evidence from an earlier cut.
+
+- Changes since: `0.8.1-beta.1`
+- Supported upgrade sources: `0.8.1-beta.1`, `0.6.6`
+- Upgrade guide: [Upgrade from 0.6.6 to the 0.8.1 line](docs/Upgrading.md#upgrade-from-066-to-the-081-line)
+
+### Configuration
+
+- Preserve every supported epoch-1 configuration key, default, validation
+  rule, reload class, and compatibility alias from beta.1. The pool and WAF
+  changes are deterministic test-harness repairs and do not alter runtime
+  configuration or request policy.
+- Continue to use `[proxy.upstream_resolution]` as the canonical resolver
+  policy while retaining `[quic.upstream.resolution]` only as the documented
+  compatibility input.
+
+### Schema epochs
+
+- Keep native configuration at epoch `1` and retain every beta.1 deployment,
+  evidence, admission, workload-policy, revocation, and Helm OCI schema
+  version. This cut adds no schema field or migration.
+- Continue to migrate from epoch `0` with
+  `oxibeltctl config migrate --from 0 --to 1`; automatic down-migration remains
+  unsupported.
+
+### Deprecations and removals
+
+- Add no deprecation or removal. Preserve the legacy system access-log and
+  QUIC resolver compatibility inputs with the same conflict and precedence
+  checks as beta.1.
+- Keep partial or mismatched supply-chain evidence ineligible; the bounded
+  BuildKit bootstrap retry does not relax an exact digest or qualification
+  requirement.
+
+### Admin API
+
+- Preserve beta.1 Admin request, response, authentication, authorization,
+  idempotency, audit, membership, operation, and embedded-runtime contracts.
+  No Admin endpoint or wire representation changes in this cut.
+- Continue to fail closed on malformed mutation, identity, signature,
+  membership, secret-reference, and rollback evidence.
+
+### Feature lifecycle
+
+- Keep the general and Kubernetes graduation targets on `0.8.1`; every tracked
+  feature remains `experimental` and `unvalidated` until its complete
+  exact-revision evidence succeeds.
+- Correct the documented non-benchmark validation inventory to the existing 39
+  required aggregate jobs without changing lifecycle state or accepting
+  partial evidence.
+
+### Rulepack compatibility
+
+- Retain the beta.1 OxiRule and CRS compatibility contract. A unique test-only
+  WAF rejection sentinel strengthens the Docker fuzz oracle but does not alter
+  rule syntax, matching, normalization, precedence, or production responses.
+
+### Executables and images
+
+- Preserve the beta.1 executable names, six image roles, five platform
+  subjects per role, entrypoints, users, ports, and OCI identity contracts.
+- Pre-pull the same immutable BuildKit digest with bounded retry before release
+  Buildx setup. A failed pull still stops the job; no mutable tag, mirror,
+  image-build retry, or publication bypass is introduced.
+- Require all 30 fresh exact-revision image subjects and both Helm `4.2.4`
+  chart packages to complete vulnerability, SBOM, provenance, attestation,
+  independent-rebuild, and readback verification. Beta publication writes no
+  stable aliases, and charts receive no mutable aliases.
+
+### Storage and state
+
+- Change no persistent schema, serialization, shared-state, membership, audit,
+  resolver, pool, UDP ownership, or rollout-state behavior. The pool edit only
+  removes wall-clock dependence from an expiry unit test.
+- Continue to stop new-version writers and drain the data plane before any
+  rollback that restores an older compatible database and configuration tree.
+
+### Upgrade validation
+
+- Validate and inspect the epoch-1 sibling tree with the candidate binaries and
+  canonical Helm client before staged rollout:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+- Accept the fragmented HTTP/2 WAF body case only after the probe proves that
+  every bounded DATA fragment and END_STREAM were submitted, the response is
+  the exact WAF 403 sentinel, and the protected upstream count is unchanged.
+- Deploy only newly qualified beta.2 digests after the canonical 39-job
+  summary, person-reviewed release, all image and chart receipts, and the
+  aggregate automatic qualification receipt succeed.
+
+### Rollback and irreversible steps
+
+- Retain the `0.6.6` image digests, complete epoch-0 configuration tree,
+  referenced assets, compatible PostgreSQL backup, admission bundle, audit
+  evidence, controller rollback ConfigMaps, Gateway API CRDs and Lease, and
+  shared UDP identity material until qualification completes.
+- If upgrading from a locally built beta.1 revision, retain its binaries and
+  matching state only as a rollback source; beta.1 has no published official
+  artifacts or qualification evidence to promote into beta.2.
+- Stop new-version writers, drain the data plane before the controller, and
+  restore the selected older binaries, configuration, and database together.
+  External audit, telemetry, connection, session, datagram, and client-visible
+  effects cannot be recreated by rollback.
+
+### Known issues
+
+- The signed `0.8.1-beta.1` tag exists locally at its original commit but is
+  absent from GitHub, and that exact commit did not obtain trustworthy
+  canonical qualification. Preserve it without moving or deleting it; remote
+  beta.2 publication remains blocked until the predecessor lineage is resolved
+  under the immutable release contract.
+- `0.8.0-beta.0`, `0.8.0-beta.1`, and `0.8.0-beta.2` remain invalid,
+  unqualified, or unpublished failed-cut history and cannot supply evidence or
+  a stable-promotion source.
+- Native `linux/riscv64` cluster-runner graduation evidence remains unmet; all
+  tracked general and Kubernetes features remain experimental and unvalidated.
+
+### Security
+
+- Treat an HTTP/2 send failure, reset, incomplete body, missing completion
+  proof, unexpected status or response body, or protected-upstream reach as a
+  failed WAF fuzz case. Do not turn transport failure into a non-bypass result.
+- Keep the direct `h2` probe dependency on the already-audited locked 0.4.16
+  source and confine it to explicit bounded test bodies; it adds no runtime
+  dependency, feature, build script, or unsafe-code capability.
+- Preserve every beta.1 fail-closed request-framing, TLS, CRLite, QUIC,
+  resolver-provenance, confinement, secret, shared-state, admission, and
+  supply-chain boundary. Require one fresh exact aggregate qualification
+  result before any stable soak begins.
+
 ## [0.8.1-beta.1] - 2026-08-19
 
 > Fresh qualification candidate after the abandoned `0.8.0` line. Do not
