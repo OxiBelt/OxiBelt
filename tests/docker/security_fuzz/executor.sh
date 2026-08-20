@@ -738,7 +738,7 @@ case_waf_bypass() {
   if ((attack_location == 0)); then
     [[ $((b4 % 2)) == 0 ]] && path="/${marker}" || path='/%73f-known-attack'
   elif ((attack_location == 1)); then
-    body_value="${marker}-$(input_hex 5 16)"
+    body_value="${marker}"
   else
     header_value="${marker}-$(input_hex 29 8)"
   fi

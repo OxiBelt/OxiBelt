@@ -181,6 +181,9 @@ impl DownstreamBodyEncoding {
 }
 
 const MAX_QUIC_INITIAL_ALPN_PADDING_BYTES: usize = 16 * 1024;
+// Count the terminal empty DATA+END_STREAM frame too, leaving margin below
+// h2's 100-small-DATA-frame receive-side abuse budget.
+const MAX_H2_EAGER_BODY_DATA_FRAMES_INCLUDING_EOS: usize = 96;
 
 struct HttpGetArgs {
   host: String,
@@ -1208,6 +1211,13 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     if body.len() > 64 * 1024 {
       bail!("--h2-eager-body request body exceeds 65536 bytes");
     }
+    if h2_eager_body_data_frame_count(body.len(), body_chunk_size)
+      > MAX_H2_EAGER_BODY_DATA_FRAMES_INCLUDING_EOS
+    {
+      bail!(
+        "--h2-eager-body would emit more than {MAX_H2_EAGER_BODY_DATA_FRAMES_INCLUDING_EOS} HTTP/2 DATA frames"
+      );
+    }
     if zero_length_body_end_delay_ms.is_some() {
       bail!("--h2-eager-body cannot be combined with --zero-length-body-end-delay-ms");
     }
@@ -1278,6 +1288,11 @@ fn encode_downstream_body(
     bail!("encoded request body exceeds 65536 bytes");
   }
   Ok(encoded)
+}
+
+fn h2_eager_body_data_frame_count(body_len: usize, body_chunk_size: usize) -> usize {
+  debug_assert_ne!(body_chunk_size, 0);
+  body_len.div_ceil(body_chunk_size) + 1
 }
 
 fn parse_http_get_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<HttpGetArgs> {
@@ -5541,6 +5556,80 @@ mod tests {
       Err(error) => error,
     };
     assert!(error.to_string().contains("only supported for HTTP/2"));
+  }
+
+  #[test]
+  fn h2_eager_body_rejects_requests_above_the_data_frame_budget() {
+    let at_limit = parse_downstream_args(
+      downstream_cli_args(&[
+        "--body",
+        &"x".repeat(MAX_H2_EAGER_BODY_DATA_FRAMES_INCLUDING_EOS - 1),
+        "--body-chunk-size",
+        "1",
+        "--h2-eager-body",
+      ])
+      .into_iter(),
+    )
+    .expect("96 total eager H2 DATA frames should be accepted");
+    assert_eq!(
+      h2_eager_body_data_frame_count(at_limit.body.len(), at_limit.body_chunk_size),
+      MAX_H2_EAGER_BODY_DATA_FRAMES_INCLUDING_EOS
+    );
+
+    let error = match parse_downstream_args(
+      downstream_cli_args(&[
+        "--body",
+        &"x".repeat(MAX_H2_EAGER_BODY_DATA_FRAMES_INCLUDING_EOS),
+        "--body-chunk-size",
+        "1",
+        "--h2-eager-body",
+      ])
+      .into_iter(),
+    ) {
+      Ok(_) => panic!("eager H2 request above the DATA-frame budget must fail"),
+      Err(error) => error,
+    };
+    assert!(error
+      .to_string()
+      .contains("more than 96 HTTP/2 DATA frames"));
+  }
+
+  #[test]
+  fn h2_eager_body_waf_fixture_matrix_fits_one_byte_data_frame_budget() {
+    let marker = "sf-known-attack";
+    let formats = [
+      ("json", format!(r#"{{"attack":"{marker}"}}"#).into_bytes()),
+      ("form", format!("attack={marker}").into_bytes()),
+      (
+        "multipart",
+        format!(
+          "--sf\r\nContent-Disposition: form-data; name=\"attack\"\r\n\r\n{marker}\r\n--sf--\r\n"
+        )
+        .into_bytes(),
+      ),
+    ];
+    let encodings = [
+      ("identity", None),
+      ("gzip", Some(DownstreamBodyEncoding::Gzip)),
+      ("deflate", Some(DownstreamBodyEncoding::Deflate)),
+      ("br", Some(DownstreamBodyEncoding::Brotli)),
+      ("zstd", Some(DownstreamBodyEncoding::Zstd)),
+    ];
+
+    for (format_name, body) in formats {
+      for (encoding_name, encoding) in encodings {
+        let encoded = match encoding {
+          Some(encoding) => encode_downstream_body(&body, encoding)
+            .expect("fixture body encoding should remain bounded"),
+          None => body.clone(),
+        };
+        assert!(
+          h2_eager_body_data_frame_count(encoded.len(), 1)
+            <= MAX_H2_EAGER_BODY_DATA_FRAMES_INCLUDING_EOS,
+          "{format_name}/{encoding_name} must fit the one-byte eager H2 DATA-frame budget"
+        );
+      }
+    }
   }
 
   #[tokio::test]

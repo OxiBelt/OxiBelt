@@ -576,6 +576,10 @@ esac
       "only H2 body-location WAF cases must enable eager request delivery"
     );
     assert!(
+      executor.contains("body_value=\"${marker}\""),
+      "the H2 eager-body fixture must use the exact WAF marker within the DATA-frame budget"
+    );
+    assert!(
       executor.contains(".status == 403\n        and .body == \"security-fuzz-waf-body-blocked\"\n        and .request_body_complete == true"),
       "H2 body-location WAF cases must require status, sentinel, and completion proof"
     );
