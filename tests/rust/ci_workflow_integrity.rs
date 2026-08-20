@@ -10162,6 +10162,123 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
 }
 
 #[test]
+fn release_buildx_setups_precede_with_pinned_buildkit_retry_pull() {
+  let setup_action = "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c";
+  let prepull_name = "Pre-pull Docker BuildKit image";
+  let prepull_command = "\"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh\" \"${OXIBELT_BUILDKIT_IMAGE}\"";
+  let driver_opts = "image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
+  let pinned_image = "moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec";
+  let retry_script = docker_pull_retry_script_text();
+  assert!(
+    retry_script.contains("retry_command 3 docker pull \"${image}\""),
+    "release BuildKit pre-pulls must use the bounded retry helper"
+  );
+
+  let release_workflow = release_workflow_text();
+  let prepare_release = workflow_job_text(&release_workflow, "prepare-release");
+  let normalized_prepare_release = prepare_release
+    .replace('\\', "")
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ");
+  assert!(
+    normalized_prepare_release.contains(
+      "install -D -m 0755 tests/scripts/retry-docker-pull.sh \"${metadata_root}/helper/retry-docker-pull.sh\""
+    ),
+    "prepare-release should stage the executable retry helper into release metadata"
+  );
+  let helper_staging_position = prepare_release
+    .find("tests/scripts/retry-docker-pull.sh")
+    .expect("prepare-release should contain the retry helper staging command");
+  let metadata_upload_position = prepare_release
+    .find("      - name: Upload release metadata")
+    .expect("prepare-release should upload its metadata artifact");
+  assert!(
+    helper_staging_position < metadata_upload_position,
+    "prepare-release should stage the retry helper before uploading release metadata"
+  );
+
+  let workflows = [
+    ("release", release_workflow),
+    ("release-image-arch", release_image_arch_workflow_text()),
+  ];
+  let mut total_setup_count = 0;
+
+  for (workflow_name, workflow) in workflows {
+    let parsed: serde_json::Value =
+      serde_saphyr::from_str(&workflow).expect("release workflow should parse as YAML");
+    assert_eq!(
+      parsed["env"]["OXIBELT_BUILDKIT_IMAGE"],
+      serde_json::Value::String(pinned_image.to_owned()),
+      "{workflow_name} should retain the exact pinned BuildKit image digest"
+    );
+
+    let jobs = parsed["jobs"]
+      .as_object()
+      .expect("release workflow should define jobs");
+    let mut setup_count = 0;
+    let mut prepull_count = 0;
+    for (job_id, job) in jobs {
+      let Some(steps) = job.get("steps").and_then(serde_json::Value::as_array) else {
+        continue;
+      };
+      for (step_index, step) in steps.iter().enumerate() {
+        if step.get("name").and_then(serde_json::Value::as_str) == Some(prepull_name) {
+          prepull_count += 1;
+          assert_eq!(
+            step["run"].as_str(),
+            Some(prepull_command),
+            "{workflow_name}/{job_id} BuildKit pre-pull should invoke the retry helper with the pinned env image"
+          );
+        }
+        if step.get("uses").and_then(serde_json::Value::as_str) != Some(setup_action) {
+          continue;
+        }
+
+        setup_count += 1;
+        let previous = steps
+          .get(
+            step_index
+              .checked_sub(1)
+              .expect("Buildx setup should have a previous step"),
+          )
+          .expect("Buildx setup should have an immediately preceding step");
+        assert_eq!(
+          previous["name"].as_str(),
+          Some(prepull_name),
+          "{workflow_name}/{job_id} Buildx setup should immediately follow the BuildKit pre-pull"
+        );
+        assert_eq!(
+          previous["run"].as_str(),
+          Some(prepull_command),
+          "{workflow_name}/{job_id} Buildx setup should use the retry-backed pinned image pre-pull"
+        );
+        assert_eq!(
+          step["with"]["driver-opts"].as_str(),
+          Some(driver_opts),
+          "{workflow_name}/{job_id} Buildx setup should use the same pinned BuildKit image"
+        );
+      }
+    }
+
+    assert_eq!(
+      setup_count, 3,
+      "{workflow_name} should retain exactly three Buildx setup steps"
+    );
+    assert_eq!(
+      prepull_count, setup_count,
+      "{workflow_name} should have exactly one retry-backed BuildKit pre-pull per setup"
+    );
+    total_setup_count += setup_count;
+  }
+
+  assert_eq!(
+    total_setup_count, 6,
+    "release workflows should cover all six Buildx setup steps"
+  );
+}
+
+#[test]
 fn docker_retry_helpers_preserve_failed_command_status() {
   let repo = repo_root();
   let temp_dir = tempfile::Builder::new()
