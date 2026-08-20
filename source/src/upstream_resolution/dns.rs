@@ -99,6 +99,7 @@ pub(crate) struct DnsLookup {
   pub(super) answers: Vec<DnsAnswer>,
   pub(super) ttl_ms: u64,
   pub(super) source: ResolutionSource,
+  query_name: Option<Arc<str>>,
   accepted_cname: bool,
 }
 
@@ -109,8 +110,19 @@ impl DnsLookup {
       answers,
       ttl_ms,
       source: ResolutionSource::Dns,
+      query_name: None,
       accepted_cname: false,
     }
+  }
+
+  #[cfg(test)]
+  pub(super) fn with_query_name(mut self, name: impl Into<Arc<str>>) -> Self {
+    self.query_name = Some(name.into());
+    self
+  }
+
+  pub(crate) fn query_name(&self) -> Option<&str> {
+    self.query_name.as_deref()
   }
 
   /// Whether the accepted answer chain contained a CNAME.
@@ -358,6 +370,7 @@ pub(super) fn parse_dns_response(
     answers,
     ttl_ms: min_ttl_ms,
     source: ResolutionSource::Dns,
+    query_name: Some(Arc::from(query.name.clone())),
     accepted_cname,
   })
 }

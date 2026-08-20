@@ -125,6 +125,7 @@ fn response_accepts_matching_a_aaaa_and_ttl() {
   );
   let a = parse_dns_response(&a_response, &a_query).expect("valid A response");
   assert_eq!(a.ttl_ms, 12_000);
+  assert_eq!(a.query_name(), Some("app.example"));
   assert_eq!(
     a.answers,
     vec![DnsAnswer::Ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)))]

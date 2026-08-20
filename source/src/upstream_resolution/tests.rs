@@ -45,10 +45,11 @@ impl ResolverBackend for FakeBackend {
   )]
   fn lookup(
     &self,
-    _name: &str,
+    name: &str,
     query_type: DnsQueryType,
     _deadline: Instant,
   ) -> impl std::future::Future<Output = Result<DnsLookup, ResolutionError>> + Send {
+    let name = Arc::<str>::from(name.to_string());
     async move {
       self.calls.fetch_add(1, Ordering::AcqRel);
       if let Some(gate) = &self.gate {
@@ -58,13 +59,14 @@ impl ResolverBackend for FakeBackend {
           .map_err(|_| ResolutionError::cancelled())?;
         permit.forget();
       }
-      match query_type {
+      let lookup = match query_type {
         DnsQueryType::A => self.a.clone(),
         DnsQueryType::Aaaa => self.aaaa.clone(),
         DnsQueryType::Srv | DnsQueryType::Https => {
           unreachable!("endpoint resolver only queries A and AAAA")
         }
-      }
+      }?;
+      Ok(lookup.with_query_name(name))
     }
   }
 }
@@ -176,6 +178,45 @@ async fn positive_cache_applies_min_and_max_ttl_clamps() {
       .expect("refreshed result");
     assert_eq!(backend.calls(), 4);
   }
+}
+
+#[tokio::test(start_paused = true)]
+async fn dns_metadata_owner_survives_positive_and_nodata_caches() {
+  let positive = FakeBackend::positive(
+    vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+    30_000,
+    Vec::new(),
+    30_000,
+  );
+  let positive_resolver = EndpointResolver::new_with_backend(
+    origin("positive-owner.example"),
+    positive.clone(),
+    ResolutionPolicy::default(),
+  );
+  for _ in 0..2 {
+    let result = positive_resolver
+      .resolve(deadline())
+      .await
+      .expect("positive result");
+    assert_eq!(result.dns_metadata_owner(), Some("positive-owner.example"));
+  }
+  assert_eq!(positive.calls(), 2);
+
+  let nodata = FakeBackend::positive(Vec::new(), 30_000, Vec::new(), 30_000);
+  let nodata_resolver = EndpointResolver::new_with_backend(
+    origin("nodata-owner.example"),
+    nodata.clone(),
+    ResolutionPolicy::default(),
+  );
+  for _ in 0..2 {
+    let error = nodata_resolver
+      .resolve(deadline())
+      .await
+      .expect_err("NoData result");
+    assert_eq!(error.class(), ResolutionErrorClass::NoData);
+    assert_eq!(error.dns_metadata_owner(), Some("nodata-owner.example"));
+  }
+  assert_eq!(nodata.calls(), 2);
 }
 
 #[tokio::test(start_paused = true)]

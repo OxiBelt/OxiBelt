@@ -101,7 +101,7 @@ pub(crate) enum ResolutionErrorClass {
 pub(crate) struct ResolutionError {
   class: ResolutionErrorClass,
   detail: Arc<str>,
-  dns_metadata_eligible: bool,
+  dns_metadata_owner: Option<Arc<str>>,
 }
 
 impl ResolutionError {
@@ -109,7 +109,7 @@ impl ResolutionError {
     Self {
       class,
       detail: detail.into(),
-      dns_metadata_eligible: false,
+      dns_metadata_owner: None,
     }
   }
 
@@ -117,12 +117,12 @@ impl ResolutionError {
     self.class
   }
 
-  pub(crate) fn dns_metadata_eligible(&self) -> bool {
-    self.dns_metadata_eligible
+  pub(crate) fn dns_metadata_owner(&self) -> Option<&str> {
+    self.dns_metadata_owner.as_deref()
   }
 
-  fn with_dns_metadata_eligible(mut self) -> Self {
-    self.dns_metadata_eligible = true;
+  fn with_dns_metadata_owner(mut self, owner: Arc<str>) -> Self {
+    self.dns_metadata_owner = Some(owner);
     self
   }
 
@@ -267,7 +267,7 @@ pub(crate) struct ResolvedEndpointSet {
   endpoints: Arc<[ResolvedEndpoint]>,
   valid_until: Instant,
   source: ResolutionSource,
-  dns_metadata_eligible: bool,
+  dns_metadata_owner: Option<Arc<str>>,
 }
 
 impl ResolvedEndpointSet {
@@ -283,8 +283,8 @@ impl ResolvedEndpointSet {
     self.source
   }
 
-  pub(crate) fn dns_metadata_eligible(&self) -> bool {
-    self.dns_metadata_eligible
+  pub(crate) fn dns_metadata_owner(&self) -> Option<&str> {
+    self.dns_metadata_owner.as_deref()
   }
 }
 
@@ -557,6 +557,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
 
   pub(crate) async fn lookup_https_metadata(
     &self,
+    owner: &str,
     deadline: Instant,
   ) -> Result<DnsLookup, ResolutionError> {
     if deadline <= Instant::now() {
@@ -565,7 +566,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     self
       .inner
       .backend
-      .lookup(self.inner.origin.host(), DnsQueryType::Https, deadline)
+      .lookup(owner, DnsQueryType::Https, deadline)
       .await
   }
 
@@ -610,7 +611,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
         ))],
         self.inner.policy.max_ttl,
         ResolutionSource::Literal,
-        false,
+        None,
         generation,
       );
     }
@@ -670,14 +671,20 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     let mut ipv6 = Vec::new();
     let mut ttl_ms = None;
     let mut source = None;
-    let mut dns_metadata_eligible = true;
+    let mut dns_metadata_complete = true;
     let mut successful_lookups = 0usize;
+    let mut positive_owner: Option<Arc<str>> = None;
+    let mut positive_owner_conflict = false;
+    let mut empty_owner: Option<Arc<str>> = None;
+    let mut empty_owner_conflict = false;
     let mut errors = Vec::new();
     for result in [a, aaaa] {
       match result {
         Ok(lookup) => {
           successful_lookups = successful_lookups.saturating_add(1);
-          dns_metadata_eligible &= lookup.source == ResolutionSource::Dns;
+          dns_metadata_complete &= lookup.source == ResolutionSource::Dns;
+          let query_owner = lookup.query_name().map(Arc::<str>::from);
+          dns_metadata_complete &= query_owner.is_some();
           source = Some(match (source, lookup.source) {
             (Some(ResolutionSource::Hosts), _) | (_, ResolutionSource::Hosts) => {
               ResolutionSource::Hosts
@@ -700,8 +707,14 @@ impl<B: ResolverBackend> EndpointResolver<B> {
             }
           }
           if accepted {
+            merge_dns_metadata_owner(
+              &mut positive_owner,
+              &mut positive_owner_conflict,
+              query_owner,
+            );
             ttl_ms = Some(ttl_ms.map_or(lookup.ttl_ms, |ttl: u64| ttl.min(lookup.ttl_ms)));
           } else {
+            merge_dns_metadata_owner(&mut empty_owner, &mut empty_owner_conflict, query_owner);
             errors.push(ResolutionError::new(
               ResolutionErrorClass::NoData,
               "upstream DNS response contained no eligible address records",
@@ -709,22 +722,28 @@ impl<B: ResolverBackend> EndpointResolver<B> {
           }
         }
         Err(error) => {
-          dns_metadata_eligible = false;
+          dns_metadata_complete = false;
           errors.push(error);
         }
       }
     }
-    dns_metadata_eligible &= successful_lookups == 2;
+    dns_metadata_complete &= successful_lookups == 2;
+    let dns_metadata_owner = if !dns_metadata_complete || positive_owner_conflict {
+      None
+    } else if let Some(owner) = positive_owner {
+      Some(owner)
+    } else if !empty_owner_conflict {
+      empty_owner
+    } else {
+      None
+    };
 
     if ipv4.is_empty() && ipv6.is_empty() {
       let error = select_combined_error(errors);
-      return Err(
-        if dns_metadata_eligible && error.class() == ResolutionErrorClass::NoData {
-          error.with_dns_metadata_eligible()
-        } else {
-          error
-        },
-      );
+      return Err(match (dns_metadata_owner, error.class()) {
+        (Some(owner), ResolutionErrorClass::NoData) => error.with_dns_metadata_owner(owner),
+        _ => error,
+      });
     }
     sort_and_deduplicate(&mut ipv4);
     sort_and_deduplicate(&mut ipv6);
@@ -744,7 +763,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
       endpoints,
       observed_ttl.clamp(self.inner.policy.min_ttl, self.inner.policy.max_ttl),
       source.unwrap_or(ResolutionSource::Dns),
-      dns_metadata_eligible,
+      dns_metadata_owner,
       generation,
     )
   }
@@ -754,7 +773,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
     endpoints: Vec<ResolvedEndpoint>,
     ttl: Duration,
     source: ResolutionSource,
-    dns_metadata_eligible: bool,
+    dns_metadata_owner: Option<Arc<str>>,
     _generation: u64,
   ) -> SharedResolutionResult {
     let valid_until = Instant::now().checked_add(ttl).ok_or_else(|| {
@@ -767,7 +786,7 @@ impl<B: ResolverBackend> EndpointResolver<B> {
       endpoints: endpoints.into(),
       valid_until,
       source,
-      dns_metadata_eligible,
+      dns_metadata_owner,
     }))
   }
 
@@ -804,6 +823,21 @@ fn push_bounded_unique(
 ) {
   if endpoints.len() < limit && !endpoints.contains(&endpoint) {
     endpoints.push(endpoint);
+  }
+}
+
+fn merge_dns_metadata_owner(
+  current: &mut Option<Arc<str>>,
+  conflict: &mut bool,
+  candidate: Option<Arc<str>>,
+) {
+  let Some(candidate) = candidate else {
+    return;
+  };
+  match current {
+    Some(existing) if existing.as_ref() != candidate.as_ref() => *conflict = true,
+    Some(_) => {}
+    None => *current = Some(candidate),
   }
 }
 

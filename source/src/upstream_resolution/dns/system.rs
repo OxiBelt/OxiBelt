@@ -433,6 +433,7 @@ fn parse_hosts_lookup(
     answers,
     ttl_ms: DNS_DEFAULT_TTL_MS,
     source: ResolutionSource::Hosts,
+    query_name: None,
     accepted_cname: false,
   })
 }

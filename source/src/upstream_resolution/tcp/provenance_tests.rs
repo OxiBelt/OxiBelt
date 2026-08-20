@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -15,6 +15,7 @@ pub(super) struct CandidateBackend {
   aaaa: Result<DnsLookup, ResolutionError>,
   https: Result<DnsLookup, ResolutionError>,
   https_calls: Arc<AtomicUsize>,
+  https_names: Arc<Mutex<Vec<String>>>,
 }
 
 impl super::super::ResolverBackend for CandidateBackend {
@@ -24,20 +25,34 @@ impl super::super::ResolverBackend for CandidateBackend {
   )]
   fn lookup(
     &self,
-    _name: &str,
+    name: &str,
     query_type: DnsQueryType,
     _deadline: Instant,
   ) -> impl Future<Output = Result<DnsLookup, ResolutionError>> + Send {
+    let name = Arc::<str>::from(name.to_string());
     let result = match query_type {
       DnsQueryType::A => self.a.clone(),
       DnsQueryType::Aaaa => self.aaaa.clone(),
       DnsQueryType::Https => {
         self.https_calls.fetch_add(1, Ordering::AcqRel);
+        self
+          .https_names
+          .lock()
+          .expect("HTTPS query-name recorder poisoned")
+          .push(name.to_string());
         self.https.clone()
       }
       DnsQueryType::Srv => unreachable!("HTTP candidate resolution does not query SRV"),
     };
-    async move { result }
+    async move {
+      result.map(|lookup| {
+        if lookup.source == ResolutionSource::Dns && lookup.query_name().is_none() {
+          lookup.with_query_name(name)
+        } else {
+          lookup
+        }
+      })
+    }
   }
 }
 
@@ -62,17 +77,20 @@ impl super::super::ResolverBackend for PendingMetadataBackend {
   )]
   fn lookup(
     &self,
-    _name: &str,
+    name: &str,
     query_type: DnsQueryType,
     _deadline: Instant,
   ) -> impl Future<Output = Result<DnsLookup, ResolutionError>> + Send {
+    let name = Arc::<str>::from(name.to_string());
     async move {
       match query_type {
-        DnsQueryType::A => Ok(ip_lookup(
-          ResolutionSource::Dns,
-          vec!["192.0.2.20".parse().unwrap()],
-        )),
-        DnsQueryType::Aaaa => Ok(ip_lookup(ResolutionSource::Dns, Vec::new())),
+        DnsQueryType::A => Ok(
+          ip_lookup(ResolutionSource::Dns, vec!["192.0.2.20".parse().unwrap()])
+            .with_query_name(Arc::clone(&name)),
+        ),
+        DnsQueryType::Aaaa => {
+          Ok(ip_lookup(ResolutionSource::Dns, Vec::new()).with_query_name(Arc::clone(&name)))
+        }
         DnsQueryType::Https => {
           self.started.fetch_add(1, Ordering::AcqRel);
           let _guard = PendingMetadataGuard(Arc::clone(&self.dropped));
@@ -90,7 +108,7 @@ pub(super) fn ip_lookup(source: ResolutionSource, addresses: Vec<IpAddr>) -> Dns
   lookup
 }
 
-fn https_hint_lookup(address: IpAddr) -> DnsLookup {
+pub(super) fn https_hint_lookup(address: IpAddr) -> DnsLookup {
   DnsLookup::new(
     vec![DnsAnswer::Https(HttpsRecord {
       priority: 1,
@@ -111,21 +129,38 @@ fn https_hint_lookup(address: IpAddr) -> DnsLookup {
   )
 }
 
+pub(super) fn dns_lookup_at(owner: &str, addresses: Vec<IpAddr>) -> DnsLookup {
+  ip_lookup(ResolutionSource::Dns, addresses).with_query_name(Arc::<str>::from(owner.to_string()))
+}
+
+pub(super) fn candidate_backend_with_lookups(
+  a: Result<DnsLookup, ResolutionError>,
+  aaaa: Result<DnsLookup, ResolutionError>,
+  https: Result<DnsLookup, ResolutionError>,
+) -> (CandidateBackend, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
+  let https_calls = Arc::new(AtomicUsize::new(0));
+  let https_names = Arc::new(Mutex::new(Vec::new()));
+  (
+    CandidateBackend {
+      a,
+      aaaa,
+      https,
+      https_calls: Arc::clone(&https_calls),
+      https_names: Arc::clone(&https_names),
+    },
+    https_calls,
+    https_names,
+  )
+}
+
 pub(super) fn candidate_backend(
   a: Result<DnsLookup, ResolutionError>,
   aaaa: Result<DnsLookup, ResolutionError>,
   https_address: IpAddr,
 ) -> (CandidateBackend, Arc<AtomicUsize>) {
-  let https_calls = Arc::new(AtomicUsize::new(0));
-  (
-    CandidateBackend {
-      a,
-      aaaa,
-      https: Ok(https_hint_lookup(https_address)),
-      https_calls: Arc::clone(&https_calls),
-    },
-    https_calls,
-  )
+  let (backend, https_calls, _) =
+    candidate_backend_with_lookups(a, aaaa, Ok(https_hint_lookup(https_address)));
+  (backend, https_calls)
 }
 
 pub(super) async fn wait_for_candidate(
