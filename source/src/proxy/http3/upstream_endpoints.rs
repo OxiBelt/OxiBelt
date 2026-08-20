@@ -58,6 +58,7 @@ pub(super) struct H3EndpointRuntime {
   quic_config: QuicConfig,
   quic_host_key_base_dir: Option<PathBuf>,
   circuit_breakers: Arc<CircuitBreakerRuntime>,
+  circuit_pool: Option<Arc<str>>,
   policy: QuicUpstreamResolutionConfig,
   resolution_policy: ResolutionPolicy,
   scheduler_policy: CandidateSchedulerConfig,
@@ -85,6 +86,7 @@ impl H3EndpointRuntime {
     allowed_svcb_ports: Arc<[u16]>,
     quic_host_key_base_dir: Option<PathBuf>,
     circuit_breakers: Arc<CircuitBreakerRuntime>,
+    circuit_pool: Option<Arc<str>>,
   ) -> anyhow::Result<Self> {
     let origin = ResolutionOrigin::new(
       &logical_origin.host,
@@ -105,6 +107,7 @@ impl H3EndpointRuntime {
       quic_config,
       quic_host_key_base_dir,
       circuit_breakers,
+      circuit_pool,
       health: Mutex::new(EndpointSelectionState::default()),
       last_valid_until: StdMutex::new(None),
       refreshable: AtomicBool::new(true),
@@ -260,7 +263,7 @@ impl H3EndpointRuntime {
   ) -> anyhow::Result<AdmittedUpstream<ConnectedH3Upstream>> {
     let admission = self
       .circuit_breakers
-      .admit_upstream_connection(None, Some(deadline.into_std()))
+      .admit_upstream_connection(self.circuit_pool.as_deref(), Some(deadline.into_std()))
       .await
       .map_err(anyhow::Error::new)?;
     let connected = connect_h3_upstream(
@@ -285,7 +288,7 @@ impl H3EndpointRuntime {
   ) -> anyhow::Result<AdmittedUpstream<ConnectedQuinnUpstream>> {
     let admission = self
       .circuit_breakers
-      .admit_upstream_connection(None, Some(deadline.into_std()))
+      .admit_upstream_connection(self.circuit_pool.as_deref(), Some(deadline.into_std()))
       .await
       .map_err(anyhow::Error::new)?;
     let connected = connect_quinn_upstream(
@@ -387,6 +390,7 @@ where
 
   let mut candidates = VecDeque::from(plan.candidates);
   let mut started_addresses = HashSet::new();
+  let mut launched_with_peer = HashSet::new();
   let mut attempts_started = 0usize;
   let mut in_flight = FuturesUnordered::new();
   let mut active_by_family = [0usize; 2];
@@ -408,6 +412,7 @@ where
   let mut next_launch = next_candidate_launch(tokio::time::Instant::now(), stagger, deadline);
   let mut last_endpoint_error = None;
   let mut admission_error = None;
+  let mut deferred_admission = false;
 
   loop {
     if in_flight.is_empty()
@@ -418,6 +423,7 @@ where
       break;
     }
     let can_stagger = admission_error.is_none()
+      && !deferred_admission
       && attempts_started < policy.effective_max_connect_attempts()
       && in_flight.len() < max_concurrent_attempts
       && !candidates.is_empty()
@@ -435,6 +441,7 @@ where
         let Some((address, result)) = result else {
           continue;
         };
+        let may_self_contend = launched_with_peer.remove(&address);
         decrement_active(address, &mut active_by_family);
         match result {
           Ok(connected) => {
@@ -452,6 +459,16 @@ where
                 endpoint_family(address),
                 H3EndpointAttemptOutcome::Canceled,
               );
+              if may_self_contend {
+                started_addresses.remove(&address);
+                attempts_started = attempts_started.saturating_sub(1);
+                candidates.push_front(address);
+                deferred_admission = !in_flight.is_empty();
+                if !deferred_admission {
+                  next_launch = tokio::time::Instant::now();
+                }
+                continue;
+              }
               admission_error.get_or_insert(error);
               continue;
             }
@@ -461,6 +478,11 @@ where
             );
             record_failure(policy, health, address, metrics).await;
             last_endpoint_error = Some(error);
+            if deferred_admission {
+              deferred_admission = false;
+              admission_error = None;
+              next_launch = tokio::time::Instant::now();
+            }
           }
         }
       }
@@ -499,6 +521,9 @@ where
       }
       _ = tokio::time::sleep_until(next_launch), if can_stagger => {
         if let Some(address) = candidates.pop_front() {
+          if !in_flight.is_empty() {
+            launched_with_peer.insert(address);
+          }
           record_candidate_started(metrics, address, &mut active_by_family);
           started_addresses.insert(address);
           attempts_started = attempts_started.saturating_add(1);

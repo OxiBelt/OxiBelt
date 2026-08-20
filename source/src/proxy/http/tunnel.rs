@@ -59,9 +59,14 @@ pub(super) async fn handle_connect_request(
   let upstream = selected.upstream.clone();
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, &upstream);
   access_log.set_upstream(&upstream.name, upstream.origin.scheme());
-  if let Some(pool_name) = selected.pool_name() {
+  let selected_pool_name = selected.pool_name().map(Arc::<str>::from);
+  if let Some(pool_name) = selected_pool_name.as_deref() {
     access_log.set_upstream_pool(pool_name);
   }
+  let connection_admission = crate::upstream_resolution::ConnectionAdmissionContext::new(
+    state.circuit_breakers.clone(),
+    selected_pool_name,
+  );
   let sticky_cookie = selected.sticky_cookie();
   let pool_report = state.pools.clone();
   let pool_selection = selected.into_pool_selection();
@@ -75,8 +80,14 @@ pub(super) async fn handle_connect_request(
       let result = async {
         let downstream = downstream_upgrade.await?;
         let downstream = TokioIo::new(downstream);
-        let upstream_stream =
-          dial_tunnel_upstream(&upstream, &upstream_resolution, client_addr, timeouts).await?;
+        let upstream_stream = dial_tunnel_upstream(
+          &upstream,
+          &upstream_resolution,
+          client_addr,
+          timeouts,
+          connection_admission,
+        )
+        .await?;
         copy_bidirectional_with_idle(downstream, upstream_stream, timeouts.websocket_idle, drain)
           .await?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
@@ -95,7 +106,15 @@ pub(super) async fn handle_connect_request(
     return response;
   }
 
-  match dial_tunnel_upstream(&upstream, &upstream_resolution, client_addr, timeouts).await {
+  match dial_tunnel_upstream(
+    &upstream,
+    &upstream_resolution,
+    client_addr,
+    timeouts,
+    connection_admission,
+  )
+  .await
+  {
     Ok(upstream_stream) => {
       let body = bridge_connect_body(request.into_body(), upstream_stream, timeouts, drain);
       drop(pool_selection);
@@ -115,14 +134,17 @@ pub(super) async fn handle_connect_request(
     }
   }
 }
-pub(super) fn bridge_connect_body(
+pub(super) fn bridge_connect_body<U>(
   mut downstream_body: ProxyBody,
-  upstream: TcpStream,
+  upstream: U,
   timeouts: EffectiveTimeouts,
   mut drain: ConnectionDrain,
-) -> ProxyBody {
+) -> ProxyBody
+where
+  U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
   let (body_sender, body) = body::channel_body(16);
-  let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
+  let (mut upstream_reader, mut upstream_writer) = tokio::io::split(upstream);
   let mut downstream_to_upstream = tokio::spawn(async move {
     while let Some(frame) = downstream_body.frame().await {
       let frame = match frame {
@@ -295,10 +317,11 @@ pub(super) async fn dial_tunnel_upstream(
   resolution_config: &crate::config::UpstreamResolutionConfig,
   client_addr: std::net::SocketAddr,
   timeouts: EffectiveTimeouts,
-) -> anyhow::Result<TcpStream> {
+  admission: crate::upstream_resolution::ConnectionAdmissionContext,
+) -> anyhow::Result<crate::upstream_resolution::ConnectionAdmitted<TcpStream>> {
   let (mut stream, remote_addr, connect_deadline) =
-    connect_upstream_tcp(upstream, resolution_config, timeouts, None).await?;
-  crate::tcp_socket::enable_tcp_nodelay(&stream, remote_addr, "upstream tunnel");
+    connect_upstream_tcp(upstream, resolution_config, timeouts, admission).await?;
+  crate::tcp_socket::enable_tcp_nodelay(stream.get_ref(), remote_addr, "upstream tunnel");
   tokio::time::timeout_at(
     connect_deadline,
     crate::proxy_protocol_egress::write_header(

@@ -19,6 +19,7 @@ use crate::config::{Config, HttpVersion, QuicUpstreamResolutionConfig, UpstreamC
 use crate::metrics::Metrics;
 use crate::metrics::http3_upstream::{H3PoolEvent, H3PoolWaitOutcome, H3PoolWaitScope};
 use crate::overload::{OverloadRuntime, WorkKind};
+use crate::pools::circuit_pool_for_upstream;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::ProxyBody;
 use crate::tls;
@@ -101,6 +102,7 @@ impl UpstreamH3Pools {
         Arc::from(upstream.svcb_allowed_ports.clone()),
         config.source_paths.cert_dir.clone(),
         circuit_breakers.clone(),
+        circuit_pool_for_upstream(&upstream.name, &config.upstream_pools),
       )?);
       let pool = config.quic.upstream_pool.enabled.then(|| {
         Arc::new(H3PoolRuntime::new(

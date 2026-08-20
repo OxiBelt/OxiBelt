@@ -23,8 +23,8 @@ use crate::upstream_resolution::{CandidateSchedulerConfig, ResolutionPolicy};
 
 use super::super::stage_timing as timing;
 use super::connection::{
-  DirectH2ConnectErrorClass, DirectH2Connected, DirectH2Origin, build_h2_tls_config,
-  connect_direct_h2,
+  AdmittedDirectH2, DirectH2ConnectErrorClass, DirectH2ConnectFailure, DirectH2Connected,
+  DirectH2Origin, build_h2_tls_config, connect_direct_h2,
 };
 use super::metrics as metric_record;
 use super::{DIRECT_H2_MAX_SLOTS, DIRECT_H2_STREAMS_PER_SLOT_SOFT_LIMIT};
@@ -865,17 +865,6 @@ impl DirectH2Pool {
     let pool = self.clone();
     tokio::spawn(async move {
       metric_record::upstream_pool_miss(&pool, &metrics, hot_path_metrics);
-      let admission = pool
-        .circuit_breakers
-        .admit_upstream_connection(pool.circuit_pool.as_deref(), Some(attempt.deadline))
-        .await;
-      let admission = match admission {
-        Ok(admission) => admission,
-        Err(error) => {
-          pool.publish_admission_rejection(&attempt, error, &metrics, hot_path_metrics);
-          return;
-        }
-      };
       let connect_started = timing::start(timing_enabled);
       let connected = pool.connect(attempt.deadline).await;
       timing::record_metrics_plain_result(
@@ -886,20 +875,28 @@ impl DirectH2Pool {
         connect_started,
       );
       match connected {
-        Ok(connected) => {
+        Ok(AdmittedDirectH2 {
+          connected,
+          admission,
+        }) => {
           pool.publish_connected(attempt, connected, admission, metrics, hot_path_metrics);
         }
-        Err(failure) => pool.publish_connect_failure(
-          &attempt,
-          match failure.class {
-            DirectH2ConnectErrorClass::TcpConnect => DirectH2ErrorClass::TcpConnect,
-            DirectH2ConnectErrorClass::TlsHandshake => DirectH2ErrorClass::TlsHandshake,
-            DirectH2ConnectErrorClass::H2Handshake => DirectH2ErrorClass::H2Handshake,
-          },
-          failure.error,
-          &metrics,
-          hot_path_metrics,
-        ),
+        Err(DirectH2ConnectFailure::Admission(error)) => {
+          pool.publish_admission_rejection(&attempt, error, &metrics, hot_path_metrics);
+        }
+        Err(DirectH2ConnectFailure::Endpoint { class, error }) => {
+          pool.publish_connect_failure(
+            &attempt,
+            match class {
+              DirectH2ConnectErrorClass::TcpConnect => DirectH2ErrorClass::TcpConnect,
+              DirectH2ConnectErrorClass::TlsHandshake => DirectH2ErrorClass::TlsHandshake,
+              DirectH2ConnectErrorClass::H2Handshake => DirectH2ErrorClass::H2Handshake,
+            },
+            error,
+            &metrics,
+            hot_path_metrics,
+          );
+        }
       }
     });
   }
@@ -907,14 +904,27 @@ impl DirectH2Pool {
   async fn connect(
     &self,
     deadline: Instant,
-  ) -> Result<DirectH2Connected, super::connection::DirectH2ConnectFailure> {
+  ) -> Result<AdmittedDirectH2<DirectH2Connected>, DirectH2ConnectFailure> {
     #[cfg(test)]
     if let Some(connector) = &self.test_connector {
-      return connector(deadline).await.map_err(|error| {
-        super::connection::DirectH2ConnectFailure {
-          class: DirectH2ConnectErrorClass::H2Handshake,
-          error,
-        }
+      let connector = connector.clone();
+      return super::connection::admit_direct_h2_candidate(
+        self.circuit_breakers.clone(),
+        self.circuit_pool.clone(),
+        deadline.into(),
+        async move {
+          connector(deadline)
+            .await
+            .map_err(|error| DirectH2ConnectFailure::Endpoint {
+              class: DirectH2ConnectErrorClass::H2Handshake,
+              error,
+            })
+        },
+      )
+      .await
+      .map_err(|error| match error {
+        crate::upstream_resolution::CandidateAttemptError::Endpoint(error)
+        | crate::upstream_resolution::CandidateAttemptError::LocalAdmission(error) => error,
       });
     }
     connect_direct_h2(
@@ -928,6 +938,8 @@ impl DirectH2Pool {
       self.scheduler_policy,
       self.svcb_enabled,
       &self.allowed_svcb_ports,
+      self.circuit_breakers.clone(),
+      self.circuit_pool.clone(),
     )
     .await
   }

@@ -342,9 +342,10 @@ async fn acquire_shared_connection_admission(
   let Some(circuit_breakers) = operation.pool.circuit_breakers.clone() else {
     return Ok(None);
   };
+  let circuit_pool = operation.pool.circuit_pool.clone();
   let mut admission = tokio_handle.spawn(async move {
     circuit_breakers
-      .admit_upstream_connection(None, Some(deadline))
+      .admit_upstream_connection(circuit_pool.as_deref(), Some(deadline))
       .await
   });
   tokio::select! {

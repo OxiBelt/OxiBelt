@@ -34,9 +34,9 @@ pub(crate) use happy_eyeballs::{
 };
 pub(crate) use pref64::synthesize_pref64_ipv4_candidates;
 pub(crate) use tcp::{
-  HttpTransportProtocol, connect_http_ready_happy_eyeballs, connect_http_tcp_happy_eyeballs,
-  connect_tcp_happy_eyeballs, resolve_http_candidate_updates,
-  resolve_http_candidate_updates_with_resolver,
+  ConnectionAdmissionContext, ConnectionAdmitted, HttpTransportProtocol,
+  connect_http_ready_happy_eyeballs_admitted, connect_tcp_happy_eyeballs_admitted,
+  resolve_http_candidate_updates, resolve_http_candidate_updates_with_resolver,
 };
 
 const DEFAULT_MAX_ENDPOINT_COUNT: usize = 16;

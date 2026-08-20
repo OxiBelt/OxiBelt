@@ -15,14 +15,17 @@ use url::Url;
 
 use crate::cache::CacheStats;
 use crate::circuit_breakers::CircuitBreakerRuntime;
-use crate::config::{Config, MetricsConfig, ProxyHttp2Config, UpstreamConfig};
+use crate::config::{CapacitySetting, Config, MetricsConfig, ProxyHttp2Config, UpstreamConfig};
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::overload::{OverloadRuntime, OverloadState};
 use crate::proxy::http::body::ProxyBody;
 use crate::tls::TlsServerSessionStorageStats;
 
-use super::connection::{DirectH2Connected, h2_handshake, h2_handshake_until};
+use super::connection::{
+  DirectH2ConnectFailure, DirectH2Connected, admit_direct_h2_candidate, h2_handshake,
+  h2_handshake_until,
+};
 use super::pool::{DirectH2Pool, TestConnector};
 use super::send::dispatch_expired_for_test;
 use super::*;
@@ -445,6 +448,109 @@ async fn connection_failure_enters_cooldown_without_retry_storm() {
   let output = metrics_text(&metrics);
   assert!(output.contains("event=\"connect_error\"} 1"));
   assert!(output.contains("event=\"cooldown_entered\"} 1"));
+}
+
+#[tokio::test]
+async fn connection_admission_rejection_backpressures_without_polling_or_cooldown() {
+  let mut config = test_config();
+  config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(1);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
+  let circuit_breakers = CircuitBreakerRuntime::new(&config);
+  let occupied = circuit_breakers
+    .admit_upstream_connection(None, Some(Instant::now() + TEST_REQUEST_BUDGET))
+    .await
+    .expect("the first physical connection should occupy the only slot");
+  let attempts = Arc::new(AtomicUsize::new(0));
+  let pool = DirectH2Pool::for_test(
+    1,
+    1,
+    1,
+    TEST_REQUEST_BUDGET,
+    Duration::from_secs(30),
+    Duration::from_secs(60 * 60),
+    circuit_breakers,
+    connector({
+      let attempts = attempts.clone();
+      move |_| {
+        let attempts = attempts.clone();
+        async move {
+          attempts.fetch_add(1, Ordering::SeqCst);
+          successful_test_connection(None, None).await
+        }
+      }
+    }),
+  );
+  let metrics = Metrics::new();
+
+  assert!(
+    acquire(&pool, &metrics, TEST_REQUEST_BUDGET)
+      .await
+      .expect("pool acquisition should classify local capacity")
+      .is_none()
+  );
+  wait_for_slot_state(&pool, "backpressured").await;
+  assert_eq!(attempts.load(Ordering::SeqCst), 0);
+  let output = metrics_text(&metrics);
+  assert!(output.contains("event=\"capacity_full\"} 1"));
+  assert!(output.contains("event=\"cooldown_entered\"} 0"));
+  drop(occupied);
+}
+
+#[tokio::test]
+async fn direct_h2_candidates_hold_individual_connection_admissions() {
+  let mut config = test_config();
+  config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(2);
+  config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
+  let circuit_breakers = CircuitBreakerRuntime::new(&config);
+  let started = Arc::new(AtomicUsize::new(0));
+  let launch = |started: Arc<AtomicUsize>| async move {
+    started.fetch_add(1, Ordering::AcqRel);
+    std::future::pending::<Result<(), DirectH2ConnectFailure>>().await
+  };
+  let first = tokio::spawn(admit_direct_h2_candidate(
+    circuit_breakers.clone(),
+    None,
+    tokio::time::Instant::now() + TEST_REQUEST_BUDGET,
+    launch(started.clone()),
+  ));
+  let second = tokio::spawn(admit_direct_h2_candidate(
+    circuit_breakers.clone(),
+    None,
+    tokio::time::Instant::now() + TEST_REQUEST_BUDGET,
+    launch(started.clone()),
+  ));
+  while started.load(Ordering::Acquire) != 2 {
+    tokio::task::yield_now().await;
+  }
+
+  let third_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+  let result = admit_direct_h2_candidate(
+    circuit_breakers,
+    None,
+    tokio::time::Instant::now() + TEST_REQUEST_BUDGET,
+    {
+      let third_polled = third_polled.clone();
+      async move {
+        third_polled.store(true, Ordering::Release);
+        Ok(())
+      }
+    },
+  )
+  .await;
+  assert!(matches!(
+    result,
+    Err(
+      crate::upstream_resolution::CandidateAttemptError::LocalAdmission(
+        DirectH2ConnectFailure::Admission(_)
+      )
+    )
+  ));
+  assert!(!third_polled.load(Ordering::Acquire));
+
+  first.abort();
+  second.abort();
+  let _ = first.await;
+  let _ = second.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

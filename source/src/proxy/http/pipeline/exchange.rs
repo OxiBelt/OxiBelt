@@ -314,6 +314,7 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
         outbound,
         upstream,
         state,
+        selected_pool_name.as_deref(),
         upstream_version,
         client_addr,
         timeouts,

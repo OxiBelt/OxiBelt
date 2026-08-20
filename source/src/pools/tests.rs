@@ -335,6 +335,18 @@ fn synthetic_upstream_names_hash_discovery_style_server_ids() {
 }
 
 #[test]
+fn circuit_pool_lookup_uses_the_canonical_synthetic_upstream_identity() {
+  let mut pool = test_pool(LoadBalancingAlgorithm::PowerOfTwoChoices);
+  pool.servers[0].id = Some("primary".to_string());
+  let upstream_name = synthetic_upstream_name_for_id("app-pool", "primary");
+
+  assert_eq!(
+    circuit_pool_for_upstream(&upstream_name, &[pool]).as_deref(),
+    Some("app-pool")
+  );
+}
+
+#[test]
 fn outlier_ejection_excludes_all_servers_and_fails_closed() {
   let mut pool = test_pool(LoadBalancingAlgorithm::PowerOfTwoChoices);
   pool.outlier_ejection.enabled = true;

@@ -371,6 +371,7 @@ impl AppSnapshot {
     let direct_h1_pools = DirectH1Pools::new(
       &upstreams,
       circuit_breakers.clone(),
+      &config.upstream_pools,
       &config.proxy.upstream_resolution,
     )
     .context("failed to build direct HTTP/1 pools")?;
@@ -775,6 +776,7 @@ impl AppSnapshot {
     let direct_h1_pools = DirectH1Pools::new(
       &upstreams,
       circuit_breakers.clone(),
+      &config.upstream_pools,
       &config.proxy.upstream_resolution,
     )
     .context("failed to build direct HTTP/1 pools")?;

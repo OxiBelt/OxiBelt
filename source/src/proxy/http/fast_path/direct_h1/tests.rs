@@ -95,6 +95,7 @@ fn direct_h1_pools_share_process_connection_admission() {
   let pools = DirectH1Pools::new(
     &[upstream("http://backend.internal:18080")],
     circuit_breakers.clone(),
+    &[],
     &config.proxy.upstream_resolution,
   )
   .expect("direct H1 pools should build");

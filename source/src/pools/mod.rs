@@ -670,6 +670,21 @@ pub(crate) fn synthetic_upstream_name_for_id(pool: &str, server_id: &str) -> Str
   )
 }
 
+pub(crate) fn circuit_pool_for_upstream(
+  upstream_name: &str,
+  pools: &[UpstreamPoolConfig],
+) -> Option<Arc<str>> {
+  pools
+    .iter()
+    .find(|pool| {
+      pool.servers.iter().enumerate().any(|(index, server)| {
+        synthetic_upstream_name_for_id(&pool.name, &upstream_pool_server_id(index, server))
+          == upstream_name
+      })
+    })
+    .map(|pool| Arc::<str>::from(pool.name.as_str()))
+}
+
 fn server_id_is_public_label_safe(server_id: &str) -> bool {
   !server_id.is_empty()
     && server_id.len() <= 64

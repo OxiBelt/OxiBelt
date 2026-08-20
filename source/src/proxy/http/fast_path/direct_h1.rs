@@ -23,6 +23,7 @@ use crate::circuit_breakers::CircuitBreakerRuntime;
 use crate::circuit_breakers::{AdmissionRejection, AdmissionRejectionReason};
 use crate::config::{
   EarlyHintsMode, HttpVersion, ProxyProtocolEgressMode, RuntimeDirectH1IoMode, UpstreamConfig,
+  UpstreamPoolConfig,
 };
 use crate::metrics::Metrics;
 #[cfg(target_os = "linux")]
@@ -31,6 +32,7 @@ use crate::metrics::fast_path::labels::{
   DirectH1PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason,
 };
 use crate::overload::{OverloadRuntime, WorkKind};
+use crate::pools::circuit_pool_for_upstream;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 use crate::proxy::http::headers::is_upgrade_request;
@@ -89,6 +91,7 @@ impl DirectH1Pools {
   pub(crate) fn new(
     upstreams: &[UpstreamConfig],
     circuit_breakers: Arc<CircuitBreakerRuntime>,
+    circuit_pools: &[UpstreamPoolConfig],
     resolution_config: &crate::config::UpstreamResolutionConfig,
   ) -> anyhow::Result<Self> {
     let pools = upstreams
@@ -97,6 +100,7 @@ impl DirectH1Pools {
         DirectH1Pool::new_with_circuit_breakers(
           upstream,
           Some(circuit_breakers.clone()),
+          circuit_pool_for_upstream(&upstream.name, circuit_pools),
           resolution_config,
         )
         .map(|pool| pool.map(Arc::new))
@@ -129,6 +133,7 @@ struct DirectH1Pool {
   #[cfg(target_os = "linux")]
   compio_resolution_gate: tokio::sync::Semaphore,
   circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
+  circuit_pool: Option<Arc<str>>,
   resolution_policy: ResolutionPolicy,
   scheduler_policy: CandidateSchedulerConfig,
 }
@@ -163,6 +168,7 @@ impl DirectH1Pool {
     Self::new_with_circuit_breakers(
       upstream,
       None,
+      None,
       &crate::config::UpstreamResolutionConfig::default(),
     )
     .ok()
@@ -172,6 +178,7 @@ impl DirectH1Pool {
   fn new_with_circuit_breakers(
     upstream: &UpstreamConfig,
     circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
+    circuit_pool: Option<Arc<str>>,
     resolution_config: &crate::config::UpstreamResolutionConfig,
   ) -> anyhow::Result<Option<Self>> {
     let Some(origin) = DirectH1Origin::from_url(&upstream.origin) else {
@@ -196,6 +203,7 @@ impl DirectH1Pool {
       #[cfg(target_os = "linux")]
       compio_resolution_gate: tokio::sync::Semaphore::new(1),
       circuit_breakers,
+      circuit_pool,
       resolution_policy,
       scheduler_policy,
     }))
@@ -823,13 +831,17 @@ async fn connect_sender_inner(
   let deadline = tokio::time::Instant::now()
     .checked_add(pool.connect_timeout)
     .context("direct H1 upstream connection deadline overflowed")?;
-  let (stream, remote_addr) = crate::upstream_resolution::connect_tcp_happy_eyeballs(
+  let admission = pool.circuit_breakers.clone().map(|runtime| {
+    crate::upstream_resolution::ConnectionAdmissionContext::new(runtime, pool.circuit_pool.clone())
+  });
+  let (stream, remote_addr) = crate::upstream_resolution::connect_tcp_happy_eyeballs_admitted(
     pool.origin.host.as_ref(),
     pool.origin.port,
     &format!("direct-h1:{}:{}", pool.origin.host, pool.origin.port),
     pool.resolution_policy,
     pool.scheduler_policy,
     deadline,
+    admission,
   )
   .await
   .with_context(|| {
@@ -838,7 +850,7 @@ async fn connect_sender_inner(
       pool.origin.host, pool.origin.port
     )
   })?;
-  crate::tcp_socket::enable_tcp_nodelay(&stream, remote_addr, "direct H1 upstream");
+  crate::tcp_socket::enable_tcp_nodelay(stream.get_ref(), remote_addr, "direct H1 upstream");
   let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
     .await
     .context("failed to establish direct H1 upstream connection")?;

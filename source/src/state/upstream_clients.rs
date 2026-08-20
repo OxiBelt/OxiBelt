@@ -114,6 +114,12 @@ impl FixedHttpProtocol {
 }
 
 #[derive(Clone)]
+struct ConnectionAdmissionContext {
+  runtime: Arc<CircuitBreakerRuntime>,
+  pool: Option<Arc<str>>,
+}
+
+#[derive(Clone)]
 pub(crate) struct HappyEyeballsHttpConnector {
   host: Arc<str>,
   port: u16,
@@ -126,10 +132,11 @@ pub(crate) struct HappyEyeballsHttpConnector {
   allowed_svcb_ports: Arc<[u16]>,
   tls_config: Option<Arc<rustls::ClientConfig>>,
   server_name: Option<rustls::pki_types::ServerName<'static>>,
+  admission: Option<ConnectionAdmissionContext>,
 }
 
 impl Service<Uri> for HappyEyeballsHttpConnector {
-  type Response = ReadyHttpTransport;
+  type Response = AdmissionConnection<ReadyHttpTransport>;
   type Error = BoxError;
   type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -144,7 +151,7 @@ impl Service<Uri> for HappyEyeballsHttpConnector {
 }
 
 impl HappyEyeballsHttpConnector {
-  async fn connect(self) -> Result<ReadyHttpTransport, BoxError> {
+  async fn connect(self) -> Result<AdmissionConnection<ReadyHttpTransport>, BoxError> {
     let deadline = tokio::time::Instant::now()
       .checked_add(self.connect_timeout)
       .ok_or_else(|| -> BoxError {
@@ -168,38 +175,23 @@ impl HappyEyeballsHttpConnector {
     let protocol = self.protocol;
     let tls_config = self.tls_config;
     let server_name = self.server_name;
+    let admission = self.admission;
     crate::upstream_resolution::race_happy_eyeballs_candidates(
       &mut updates,
       self.scheduler_policy,
       deadline,
-      move |candidate, _| {
+      move |candidate, attempt_deadline| {
         let tls_config = tls_config.clone();
         let server_name = server_name.clone();
+        let admission = admission.clone();
         async move {
-          let address = candidate.into_value();
-          let stream = tokio::time::timeout_at(deadline, TcpStream::connect(address))
-            .await
-            .map_err(|_| {
-              crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::anyhow!(
-                "upstream TCP candidate {address} timed out"
-              ))
-            })?
-            .map_err(|error| {
-              crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::Error::new(error))
-            })?;
-          stream.set_nodelay(true).map_err(|error| {
-            crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::Error::new(error))
-          })?;
-          let io: Box<dyn ReadyHyperIo> = match (tls_config, server_name) {
-            (Some(tls_config), Some(server_name)) => {
-              let tls = tokio::time::timeout_at(
-                deadline,
-                TlsConnector::from(tls_config).connect(server_name, stream),
-              )
+          admit_http_candidate(admission, attempt_deadline, async move {
+            let address = candidate.into_value();
+            let stream = tokio::time::timeout_at(attempt_deadline, TcpStream::connect(address))
               .await
               .map_err(|_| {
                 crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::anyhow!(
-                  "upstream TLS handshake timed out"
+                  "upstream TCP candidate {address} timed out"
                 ))
               })?
               .map_err(|error| {
@@ -207,52 +199,107 @@ impl HappyEyeballsHttpConnector {
                   error,
                 ))
               })?;
-              if !protocol.accepts_negotiated_alpn(tls.get_ref().1.alpn_protocol()) {
+            stream.set_nodelay(true).map_err(|error| {
+              crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::Error::new(error))
+            })?;
+            let io: Box<dyn ReadyHyperIo> = match (tls_config, server_name) {
+              (Some(tls_config), Some(server_name)) => {
+                let tls = tokio::time::timeout_at(
+                  attempt_deadline,
+                  TlsConnector::from(tls_config).connect(server_name, stream),
+                )
+                .await
+                .map_err(|_| {
+                  crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::anyhow!(
+                    "upstream TLS handshake timed out"
+                  ))
+                })?
+                .map_err(|error| {
+                  crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::Error::new(
+                    error,
+                  ))
+                })?;
+                if !protocol.accepts_negotiated_alpn(tls.get_ref().1.alpn_protocol()) {
+                  return Err(crate::upstream_resolution::CandidateAttemptError::Endpoint(
+                    anyhow::anyhow!("upstream TLS negotiated an unexpected ALPN protocol"),
+                  ));
+                }
+                Box::new(TokioIo::new(tls))
+              }
+              (None, None) => Box::new(TokioIo::new(stream)),
+              _ => {
                 return Err(crate::upstream_resolution::CandidateAttemptError::Endpoint(
-                  anyhow::anyhow!("upstream TLS negotiated an unexpected ALPN protocol"),
+                  anyhow::anyhow!("upstream TLS connector has incomplete identity state"),
                 ));
               }
-              Box::new(TokioIo::new(tls))
-            }
-            (None, None) => Box::new(TokioIo::new(stream)),
-            _ => {
-              return Err(crate::upstream_resolution::CandidateAttemptError::Endpoint(
-                anyhow::anyhow!("upstream TLS connector has incomplete identity state"),
-              ));
-            }
-          };
-          Ok(ReadyHttpTransport {
-            io,
-            negotiated_h2: protocol.is_h2(),
+            };
+            Ok(ReadyHttpTransport {
+              io,
+              negotiated_h2: protocol.is_h2(),
+            })
           })
+          .await
         }
       },
     )
     .await
-    .map_err(|error| -> BoxError { Box::new(HttpCandidateRaceFailure(error)) })
+    .map_err(http_candidate_race_error)
   }
 }
 
-#[derive(Debug)]
-struct HttpCandidateRaceFailure(crate::upstream_resolution::CandidateRaceError<anyhow::Error>);
+async fn admit_http_candidate<T, F>(
+  admission: Option<ConnectionAdmissionContext>,
+  deadline: tokio::time::Instant,
+  connect: F,
+) -> Result<AdmissionConnection<T>, crate::upstream_resolution::CandidateAttemptError<anyhow::Error>>
+where
+  F: Future<Output = Result<T, crate::upstream_resolution::CandidateAttemptError<anyhow::Error>>>,
+{
+  let lease = match admission {
+    Some(admission) => Some(
+      admission
+        .runtime
+        .admit_upstream_connection(admission.pool.as_deref(), Some(deadline.into_std()))
+        .await
+        .map_err(|error| {
+          crate::upstream_resolution::CandidateAttemptError::LocalAdmission(anyhow::Error::new(
+            error,
+          ))
+        })?,
+    ),
+    None => None,
+  };
+  let inner = connect.await?;
+  Ok(AdmissionConnection {
+    inner,
+    _lease: lease,
+  })
+}
 
-impl std::fmt::Display for HttpCandidateRaceFailure {
-  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    match &self.0 {
-      crate::upstream_resolution::CandidateRaceError::Deadline => {
-        formatter.write_str("upstream connection deadline elapsed")
-      }
-      crate::upstream_resolution::CandidateRaceError::NoCandidates => {
-        formatter.write_str("upstream resolver returned no candidates")
-      }
-      crate::upstream_resolution::CandidateRaceError::Exhausted { .. } => {
-        formatter.write_str("upstream connection candidates were exhausted")
-      }
+fn http_candidate_race_error(
+  error: crate::upstream_resolution::CandidateRaceError<anyhow::Error>,
+) -> BoxError {
+  match error {
+    crate::upstream_resolution::CandidateRaceError::Exhausted {
+      admission_error: Some(error),
+      ..
     }
+    | crate::upstream_resolution::CandidateRaceError::Exhausted {
+      last_endpoint_error: Some(error),
+      admission_error: None,
+    } => error
+      .context("upstream connection candidates were exhausted")
+      .into(),
+    crate::upstream_resolution::CandidateRaceError::Deadline => {
+      anyhow::anyhow!("upstream connection deadline elapsed").into()
+    }
+    crate::upstream_resolution::CandidateRaceError::NoCandidates
+    | crate::upstream_resolution::CandidateRaceError::Exhausted {
+      last_endpoint_error: None,
+      admission_error: None,
+    } => anyhow::anyhow!("upstream resolver returned no candidates").into(),
   }
 }
-
-impl std::error::Error for HttpCandidateRaceFailure {}
 
 #[derive(Clone)]
 pub(super) struct ClientPool {
@@ -381,26 +428,15 @@ pub(crate) struct InstrumentedConnector<C> {
   metrics: Arc<Metrics>,
   version: &'static str,
   pool: &'static str,
-  circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
-  circuit_pool: Option<Arc<str>>,
 }
 
 impl<C> InstrumentedConnector<C> {
-  fn new(
-    inner: C,
-    metrics: Arc<Metrics>,
-    version: &'static str,
-    pool: &'static str,
-    circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
-    circuit_pool: Option<Arc<str>>,
-  ) -> Self {
+  fn new(inner: C, metrics: Arc<Metrics>, version: &'static str, pool: &'static str) -> Self {
     Self {
       inner,
       metrics,
       version,
       pool,
-      circuit_breakers,
-      circuit_pool,
     }
   }
 }
@@ -473,7 +509,7 @@ where
   C::Response: HyperRead + HyperWrite + Connection + Send + Unpin + 'static,
   C::Error: Into<BoxError>,
 {
-  type Response = AdmissionConnection<C::Response>;
+  type Response = C::Response;
   type Error = BoxError;
   type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -493,27 +529,13 @@ where
     let metrics = self.metrics.clone();
     let version = self.version;
     let pool = self.pool;
-    let circuit_breakers = self.circuit_breakers.clone();
-    let circuit_pool = self.circuit_pool.clone();
     let future = self.inner.call(dst);
     Box::pin(async move {
-      let lease = match circuit_breakers {
-        Some(runtime) => Some(
-          runtime
-            .admit_upstream_connection(circuit_pool.as_deref(), None)
-            .await
-            .map_err(|error| -> BoxError { Box::new(error) })?,
-        ),
-        None => None,
-      };
       let result: Result<C::Response, BoxError> = future.await.map_err(Into::into);
       if result.is_ok() {
         metrics.record_http_upstream_client_connection_created(version, scheme, pool);
       }
-      result.map(|inner| AdmissionConnection {
-        inner,
-        _lease: lease,
-      })
+      result
     })
   }
 }
@@ -628,6 +650,10 @@ fn build_client_pool(
     == crate::config::UpstreamResolutionDnsMode::Auto
     && scheduler_policy.mode() == crate::upstream_resolution::CandidateSchedulerMode::Enabled;
   let allowed_svcb_ports = Arc::<[u16]>::from(upstream.svcb_allowed_ports.clone());
+  let admission = circuit_breakers.map(|runtime| ConnectionAdmissionContext {
+    runtime,
+    pool: circuit_pool,
+  });
   let connector = |protocol, tls_config| HappyEyeballsHttpConnector {
     host: Arc::from(host.to_string()),
     port,
@@ -640,16 +666,10 @@ fn build_client_pool(
     allowed_svcb_ports: allowed_svcb_ports.clone(),
     tls_config: tls_enabled.then(|| Arc::new(tls_config)),
     server_name: tls_enabled.then(|| server_name.clone()),
+    admission: admission.clone(),
   };
   let h1_connector = connector(FixedHttpProtocol::H1, h1_tls_config);
-  let h1_connector = InstrumentedConnector::new(
-    h1_connector,
-    metrics.clone(),
-    "h1",
-    pool_label,
-    circuit_breakers.clone(),
-    circuit_pool.clone(),
-  );
+  let h1_connector = InstrumentedConnector::new(h1_connector, metrics.clone(), "h1", pool_label);
   let mut h1_builder = Client::builder(TokioExecutor::new());
   // Keep every retry visible to OxiBelt's deadline, retry budget, and circuit
   // accounting. Hyper-util otherwise retries a cancelled reused connection
@@ -659,14 +679,8 @@ fn build_client_pool(
   let h1_only = h1_builder.build(h1_connector);
 
   let negotiated_connector = connector(FixedHttpProtocol::H2, negotiated_tls_config);
-  let negotiated_connector = InstrumentedConnector::new(
-    negotiated_connector,
-    metrics.clone(),
-    "h2",
-    pool_label,
-    circuit_breakers.clone(),
-    circuit_pool.clone(),
-  );
+  let negotiated_connector =
+    InstrumentedConnector::new(negotiated_connector, metrics.clone(), "h2", pool_label);
   let mut negotiated_builder = Client::builder(TokioExecutor::new());
   negotiated_builder.retry_canceled_requests(false);
   crate::h2_tuning::apply_legacy_client_defaults(&mut negotiated_builder, http2_config);
@@ -690,15 +704,9 @@ fn build_client_pool(
     allowed_svcb_ports,
     tls_config: None,
     server_name: None,
+    admission,
   };
-  let h2c_http = InstrumentedConnector::new(
-    h2c_http,
-    metrics.clone(),
-    "h2c",
-    pool_label,
-    circuit_breakers,
-    circuit_pool,
-  );
+  let h2c_http = InstrumentedConnector::new(h2c_http, metrics.clone(), "h2c", pool_label);
   let h2c = h2c_builder.build(h2c_http);
 
   Ok(ClientPool {
@@ -818,8 +826,7 @@ mod tests {
   #[tokio::test]
   async fn connector_records_pool_miss_and_created_connection() {
     let metrics = Metrics::new();
-    let mut connector =
-      InstrumentedConnector::new(FakeConnector, metrics.clone(), "h1", "primary", None, None);
+    let mut connector = InstrumentedConnector::new(FakeConnector, metrics.clone(), "h1", "primary");
     connector
       .call("http://example.test/".parse().expect("URI should parse"))
       .await
@@ -839,22 +846,112 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn connector_holds_connection_admission_for_transport_lifetime() {
+  async fn candidate_holds_connection_admission_for_transport_lifetime() {
     let mut config: Config =
       toml::from_str(include_str!("../../config/oxibelt.toml")).expect("example config parses");
     config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(1);
     config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
     let runtime = CircuitBreakerRuntime::new(&config);
-    let metrics = Metrics::new();
-    let mut connector =
-      InstrumentedConnector::new(FakeConnector, metrics, "h1", "primary", Some(runtime), None);
-    let uri: Uri = "http://example.test/".parse().expect("URI should parse");
-    let first = connector
-      .call(uri.clone())
+    let admission = Some(ConnectionAdmissionContext {
+      runtime,
+      pool: None,
+    });
+    let first = admit_http_candidate(
+      admission.clone(),
+      tokio::time::Instant::now() + Duration::from_secs(1),
+      async { Ok::<_, crate::upstream_resolution::CandidateAttemptError<anyhow::Error>>(FakeIo) },
+    )
+    .await
+    .expect("first connection should be admitted");
+    assert!(
+      admit_http_candidate(
+        admission.clone(),
+        tokio::time::Instant::now() + Duration::from_secs(1),
+        async { Ok::<_, crate::upstream_resolution::CandidateAttemptError<anyhow::Error>>(FakeIo) },
+      )
       .await
-      .expect("first connection should be admitted");
-    assert!(connector.call(uri.clone()).await.is_err());
+      .is_err()
+    );
     drop(first);
-    assert!(connector.call(uri).await.is_ok());
+    assert!(
+      admit_http_candidate(
+        admission,
+        tokio::time::Instant::now() + Duration::from_secs(1),
+        async { Ok::<_, crate::upstream_resolution::CandidateAttemptError<anyhow::Error>>(FakeIo) },
+      )
+      .await
+      .is_ok()
+    );
+  }
+
+  #[tokio::test]
+  async fn concurrent_candidates_are_individually_admitted_before_connect() {
+    let mut config: Config =
+      toml::from_str(include_str!("../../config/oxibelt.toml")).expect("example config parses");
+    config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(2);
+    config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
+    let admission = Some(ConnectionAdmissionContext {
+      runtime: CircuitBreakerRuntime::new(&config),
+      pool: None,
+    });
+    let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let launch = |started: Arc<std::sync::atomic::AtomicUsize>| async move {
+      started.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+      std::future::pending::<
+        Result<FakeIo, crate::upstream_resolution::CandidateAttemptError<anyhow::Error>>,
+      >()
+      .await
+    };
+    let first = tokio::spawn(admit_http_candidate(
+      admission.clone(),
+      tokio::time::Instant::now() + Duration::from_secs(1),
+      launch(started.clone()),
+    ));
+    let second = tokio::spawn(admit_http_candidate(
+      admission.clone(),
+      tokio::time::Instant::now() + Duration::from_secs(1),
+      launch(started.clone()),
+    ));
+    while started.load(std::sync::atomic::Ordering::Acquire) != 2 {
+      tokio::task::yield_now().await;
+    }
+
+    let third_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = admit_http_candidate(
+      admission,
+      tokio::time::Instant::now() + Duration::from_secs(1),
+      {
+        let third_polled = third_polled.clone();
+        async move {
+          third_polled.store(true, std::sync::atomic::Ordering::Release);
+          Ok::<_, crate::upstream_resolution::CandidateAttemptError<anyhow::Error>>(FakeIo)
+        }
+      },
+    )
+    .await;
+    let error = match result {
+      Err(crate::upstream_resolution::CandidateAttemptError::LocalAdmission(error)) => error,
+      Err(crate::upstream_resolution::CandidateAttemptError::Endpoint(_)) => {
+        panic!("third candidate failure must retain local-admission provenance")
+      }
+      Ok(_) => panic!("third concurrent candidate must be rejected"),
+    };
+    assert!(!third_polled.load(std::sync::atomic::Ordering::Acquire));
+    let boxed =
+      http_candidate_race_error(crate::upstream_resolution::CandidateRaceError::Exhausted {
+        last_endpoint_error: None,
+        admission_error: Some(error),
+      });
+    let error = anyhow::Error::from_boxed(boxed);
+    assert!(error.chain().any(|source| {
+      source
+        .downcast_ref::<crate::circuit_breakers::AdmissionRejection>()
+        .is_some()
+    }));
+
+    first.abort();
+    second.abort();
+    let _ = first.await;
+    let _ = second.await;
   }
 }

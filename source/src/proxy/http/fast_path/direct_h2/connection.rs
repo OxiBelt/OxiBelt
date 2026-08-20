@@ -15,6 +15,7 @@ use tokio::sync::Notify;
 use tokio_rustls::TlsConnector;
 use url::Url;
 
+use crate::circuit_breakers::{AdmissionLease, AdmissionRejection, CircuitBreakerRuntime};
 use crate::config::{CryptoConfig, ProxyHttp2Config, UpstreamConfig};
 use crate::proxy::http::body::ProxyBody;
 use crate::tls::{OutboundRevocationRuntime, TlsResumptionState};
@@ -39,9 +40,18 @@ pub(super) enum DirectH2ConnectErrorClass {
   H2Handshake,
 }
 
-pub(super) struct DirectH2ConnectFailure {
-  pub(super) class: DirectH2ConnectErrorClass,
-  pub(super) error: anyhow::Error,
+pub(super) struct AdmittedDirectH2<T> {
+  pub(super) connected: T,
+  pub(super) admission: AdmissionLease,
+}
+
+#[derive(Debug)]
+pub(super) enum DirectH2ConnectFailure {
+  Admission(AdmissionRejection),
+  Endpoint {
+    class: DirectH2ConnectErrorClass,
+    error: anyhow::Error,
+  },
 }
 
 #[derive(Clone)]
@@ -78,7 +88,9 @@ pub(super) async fn connect_direct_h2(
   scheduler_policy: CandidateSchedulerConfig,
   svcb_enabled: bool,
   allowed_svcb_ports: &[u16],
-) -> Result<DirectH2Connected, DirectH2ConnectFailure> {
+  circuit_breakers: Arc<CircuitBreakerRuntime>,
+  circuit_pool: Option<Arc<str>>,
+) -> Result<AdmittedDirectH2<DirectH2Connected>, DirectH2ConnectFailure> {
   let tokio_deadline = tokio::time::Instant::from_std(deadline);
   let mut updates = crate::upstream_resolution::resolve_http_candidate_updates(
     &origin.host,
@@ -91,7 +103,7 @@ pub(super) async fn connect_direct_h2(
     allowed_svcb_ports,
     tokio_deadline,
   )
-  .map_err(|error| DirectH2ConnectFailure {
+  .map_err(|error| DirectH2ConnectFailure::Endpoint {
     class: DirectH2ConnectErrorClass::TcpConnect,
     error,
   })?;
@@ -100,64 +112,91 @@ pub(super) async fn connect_direct_h2(
     &mut updates,
     scheduler_policy,
     tokio_deadline,
-    |candidate, _| {
+    |candidate, attempt_deadline| {
       let tls_config = tls_config.clone();
       let server_name = server_name.clone();
       let capacity_changed = capacity_changed.clone();
+      let circuit_breakers = circuit_breakers.clone();
+      let circuit_pool = circuit_pool.clone();
       async move {
-        let address = candidate.into_value();
-        let stream = tokio::time::timeout_at(tokio_deadline, TcpStream::connect(address))
-          .await
-          .map_err(|_| {
-            CandidateAttemptError::Endpoint(DirectH2ConnectFailure {
-              class: DirectH2ConnectErrorClass::TcpConnect,
-              error: anyhow::anyhow!("direct H2 upstream candidate {address} timed out"),
-            })
-          })?
-          .with_context(|| format!("failed to connect direct H2 upstream candidate {address}"))
-          .map_err(|error| {
-            CandidateAttemptError::Endpoint(DirectH2ConnectFailure {
-              class: DirectH2ConnectErrorClass::TcpConnect,
-              error,
-            })
-          })?;
-        stream.set_nodelay(true).map_err(|error| {
-          CandidateAttemptError::Endpoint(DirectH2ConnectFailure {
-            class: DirectH2ConnectErrorClass::TcpConnect,
-            error: anyhow::Error::new(error)
-              .context("failed to enable TCP_NODELAY for direct H2 upstream"),
-          })
-        })?;
-        let connected = match tls_config {
-          Some(tls_config) => {
-            connect_tls_h2_until(
-              tls_config,
-              server_name,
-              stream,
-              http2_config,
-              deadline,
-              capacity_changed,
-            )
-            .await
-          }
-          None => h2_handshake_until_with_capacity_notify(
-            stream,
-            http2_config,
-            deadline,
-            capacity_changed,
-          )
-          .await
-          .map_err(|error| DirectH2ConnectFailure {
-            class: DirectH2ConnectErrorClass::H2Handshake,
-            error,
-          }),
-        };
-        connected.map_err(CandidateAttemptError::Endpoint)
+        admit_direct_h2_candidate(
+          circuit_breakers,
+          circuit_pool,
+          attempt_deadline,
+          async move {
+            let address = candidate.into_value();
+            let stream = tokio::time::timeout_at(attempt_deadline, TcpStream::connect(address))
+              .await
+              .map_err(|_| DirectH2ConnectFailure::Endpoint {
+                class: DirectH2ConnectErrorClass::TcpConnect,
+                error: anyhow::anyhow!("direct H2 upstream candidate {address} timed out"),
+              })?
+              .with_context(|| format!("failed to connect direct H2 upstream candidate {address}"))
+              .map_err(|error| DirectH2ConnectFailure::Endpoint {
+                class: DirectH2ConnectErrorClass::TcpConnect,
+                error,
+              })?;
+            stream
+              .set_nodelay(true)
+              .map_err(|error| DirectH2ConnectFailure::Endpoint {
+                class: DirectH2ConnectErrorClass::TcpConnect,
+                error: anyhow::Error::new(error)
+                  .context("failed to enable TCP_NODELAY for direct H2 upstream"),
+              })?;
+            match tls_config {
+              Some(tls_config) => {
+                connect_tls_h2_until(
+                  tls_config,
+                  server_name,
+                  stream,
+                  http2_config,
+                  attempt_deadline.into_std(),
+                  capacity_changed,
+                )
+                .await
+              }
+              None => h2_handshake_until_with_capacity_notify(
+                stream,
+                http2_config,
+                attempt_deadline.into_std(),
+                capacity_changed,
+              )
+              .await
+              .map_err(|error| DirectH2ConnectFailure::Endpoint {
+                class: DirectH2ConnectErrorClass::H2Handshake,
+                error,
+              }),
+            }
+          },
+        )
+        .await
       }
     },
   )
   .await
   .map_err(map_candidate_race_error)
+}
+
+pub(super) async fn admit_direct_h2_candidate<T, F>(
+  circuit_breakers: Arc<CircuitBreakerRuntime>,
+  circuit_pool: Option<Arc<str>>,
+  deadline: tokio::time::Instant,
+  connect: F,
+) -> Result<AdmittedDirectH2<T>, CandidateAttemptError<DirectH2ConnectFailure>>
+where
+  F: Future<Output = Result<T, DirectH2ConnectFailure>>,
+{
+  let admission = circuit_breakers
+    .admit_upstream_connection(circuit_pool.as_deref(), Some(deadline.into_std()))
+    .await
+    .map_err(|error| {
+      CandidateAttemptError::LocalAdmission(DirectH2ConnectFailure::Admission(error))
+    })?;
+  let connected = connect.await.map_err(CandidateAttemptError::Endpoint)?;
+  Ok(AdmittedDirectH2 {
+    connected,
+    admission,
+  })
 }
 
 fn map_candidate_race_error(
@@ -172,7 +211,7 @@ fn map_candidate_race_error(
       last_endpoint_error: Some(error),
       admission_error: None,
     } => error,
-    CandidateRaceError::Deadline => DirectH2ConnectFailure {
+    CandidateRaceError::Deadline => DirectH2ConnectFailure::Endpoint {
       class: DirectH2ConnectErrorClass::TcpConnect,
       error: anyhow::anyhow!("direct H2 upstream connection deadline elapsed"),
     },
@@ -180,7 +219,7 @@ fn map_candidate_race_error(
     | CandidateRaceError::Exhausted {
       last_endpoint_error: None,
       admission_error: None,
-    } => DirectH2ConnectFailure {
+    } => DirectH2ConnectFailure::Endpoint {
       class: DirectH2ConnectErrorClass::TcpConnect,
       error: anyhow::anyhow!("direct H2 upstream resolver returned no usable candidates"),
     },
@@ -302,7 +341,7 @@ async fn connect_tls_h2_until(
   capacity_changed: Arc<Notify>,
 ) -> Result<DirectH2Connected, DirectH2ConnectFailure> {
   let server_name = rustls::pki_types::ServerName::try_from(server_name).map_err(|error| {
-    DirectH2ConnectFailure {
+    DirectH2ConnectFailure::Endpoint {
       class: DirectH2ConnectErrorClass::TlsHandshake,
       error: anyhow::anyhow!("invalid upstream TLS server name: {error}"),
     }
@@ -312,24 +351,24 @@ async fn connect_tls_h2_until(
     TlsConnector::from(tls_config).connect(server_name, stream),
   )
   .await
-  .map_err(|_| DirectH2ConnectFailure {
+  .map_err(|_| DirectH2ConnectFailure::Endpoint {
     class: DirectH2ConnectErrorClass::TlsHandshake,
     error: anyhow::anyhow!("direct H2 upstream TLS handshake timed out"),
   })?
   .context("direct H2 upstream TLS handshake failed")
-  .map_err(|error| DirectH2ConnectFailure {
+  .map_err(|error| DirectH2ConnectFailure::Endpoint {
     class: DirectH2ConnectErrorClass::TlsHandshake,
     error,
   })?;
   if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
-    return Err(DirectH2ConnectFailure {
+    return Err(DirectH2ConnectFailure::Endpoint {
       class: DirectH2ConnectErrorClass::TlsHandshake,
       error: anyhow::anyhow!("direct H2 upstream did not negotiate the h2 ALPN protocol"),
     });
   }
   h2_handshake_until_with_capacity_notify(tls, http2_config, deadline, capacity_changed)
     .await
-    .map_err(|error| DirectH2ConnectFailure {
+    .map_err(|error| DirectH2ConnectFailure::Endpoint {
       class: DirectH2ConnectErrorClass::H2Handshake,
       error,
     })

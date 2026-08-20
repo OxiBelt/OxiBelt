@@ -333,6 +333,76 @@ async fn race_candidates_retains_an_in_flight_candidate_after_admission_rejectio
 }
 
 #[tokio::test(start_paused = true)]
+async fn race_candidates_retries_capacity_rejected_peer_after_first_failure() {
+  let policy = QuicUpstreamResolutionConfig {
+    address_family_stagger_ms: 10,
+    max_connect_attempts: 2,
+    cooldown_base_ms: 1,
+    cooldown_max_ms: 1,
+    ..QuicUpstreamResolutionConfig::default()
+  };
+  let health = Arc::new(tokio::sync::Mutex::new(EndpointSelectionState::default()));
+  let metrics = Metrics::new();
+  let attempts = Arc::new(StdMutex::new(Vec::new()));
+  let release_first = Arc::new(tokio::sync::Notify::new());
+  let first = "127.0.0.1:443".parse().unwrap();
+  let second = "127.0.0.2:443".parse().unwrap();
+  let started = tokio::time::Instant::now();
+  let task = tokio::spawn({
+    let health = Arc::clone(&health);
+    let metrics = Arc::clone(&metrics);
+    let attempts = Arc::clone(&attempts);
+    let release_first = Arc::clone(&release_first);
+    async move {
+      race_candidates::<(), _, _>(
+        &policy,
+        scheduler_policy(CandidateSchedulerMode::Enabled, 2, 1),
+        &health,
+        vec![first, second],
+        None,
+        started + Duration::from_millis(100),
+        &metrics,
+        move |address, _| {
+          let attempts = Arc::clone(&attempts);
+          let release_first = Arc::clone(&release_first);
+          async move {
+            let attempt = {
+              let mut attempts = attempts.lock().unwrap();
+              attempts.push(address);
+              attempts
+                .iter()
+                .filter(|candidate| **candidate == address)
+                .count()
+            };
+            if address == first {
+              release_first.notified().await;
+              return Err(anyhow::anyhow!("first endpoint failed"));
+            }
+            if attempt == 1 {
+              return Err(anyhow::Error::new(AdmissionRejection {
+                reason: AdmissionRejectionReason::ActiveLimit,
+                retry_after: Duration::from_millis(25),
+              }));
+            }
+            Ok(())
+          }
+        },
+      )
+      .await
+    }
+  });
+
+  tokio::task::yield_now().await;
+  tokio::time::advance(Duration::from_millis(10)).await;
+  tokio::task::yield_now().await;
+  assert_eq!(attempts.lock().unwrap().as_slice(), [first, second]);
+  release_first.notify_one();
+  tokio::task::yield_now().await;
+  assert!(task.await.unwrap().is_ok());
+  assert_eq!(attempts.lock().unwrap().as_slice(), [first, second, second]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn race_candidates_deadline_drops_pending_work_without_launching_another_candidate() {
   let policy = QuicUpstreamResolutionConfig {
     address_family_stagger_ms: 10,

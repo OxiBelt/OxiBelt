@@ -3,8 +3,11 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -15,6 +18,100 @@ use super::{
   ResolutionErrorClass, ResolutionOrigin, ResolutionPolicy, ResolutionSource,
   lookup_dns_absolute_until, race_happy_eyeballs_candidates, synthesize_pref64_ipv4_candidates,
 };
+use crate::circuit_breakers::{AdmissionLease, CircuitBreakerRuntime};
+
+#[derive(Clone)]
+pub(crate) struct ConnectionAdmissionContext {
+  runtime: Arc<CircuitBreakerRuntime>,
+  pool: Option<Arc<str>>,
+}
+
+impl ConnectionAdmissionContext {
+  pub(crate) fn new(runtime: Arc<CircuitBreakerRuntime>, pool: Option<Arc<str>>) -> Self {
+    Self { runtime, pool }
+  }
+}
+
+/// Couples a physical upstream transport to its connection-capacity lease.
+///
+/// Losing Happy Eyeballs attempts release this value when their futures are
+/// dropped. The winning value keeps the lease until the transport itself is
+/// dropped by its pool, protocol driver, or tunnel.
+pub(crate) struct ConnectionAdmitted<T> {
+  inner: T,
+  _admission: Option<AdmissionLease>,
+}
+
+impl<T> ConnectionAdmitted<T> {
+  pub(crate) fn get_ref(&self) -> &T {
+    &self.inner
+  }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for ConnectionAdmitted<T> {
+  fn poll_read(
+    self: Pin<&mut Self>,
+    context: &mut Context<'_>,
+    buffer: &mut ReadBuf<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    Pin::new(&mut self.get_mut().inner).poll_read(context, buffer)
+  }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for ConnectionAdmitted<T> {
+  fn poll_write(
+    self: Pin<&mut Self>,
+    context: &mut Context<'_>,
+    buffer: &[u8],
+  ) -> Poll<std::io::Result<usize>> {
+    Pin::new(&mut self.get_mut().inner).poll_write(context, buffer)
+  }
+
+  fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    Pin::new(&mut self.get_mut().inner).poll_flush(context)
+  }
+
+  fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    Pin::new(&mut self.get_mut().inner).poll_shutdown(context)
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    self.inner.is_write_vectored()
+  }
+
+  fn poll_write_vectored(
+    self: Pin<&mut Self>,
+    context: &mut Context<'_>,
+    buffers: &[std::io::IoSlice<'_>],
+  ) -> Poll<std::io::Result<usize>> {
+    Pin::new(&mut self.get_mut().inner).poll_write_vectored(context, buffers)
+  }
+}
+
+async fn admit_connection_candidate<T, F>(
+  admission: Option<ConnectionAdmissionContext>,
+  deadline: Instant,
+  connect: F,
+) -> Result<ConnectionAdmitted<T>, CandidateAttemptError<anyhow::Error>>
+where
+  F: Future<Output = anyhow::Result<T>>,
+{
+  let lease = match admission {
+    Some(admission) => Some(
+      admission
+        .runtime
+        .admit_upstream_connection(admission.pool.as_deref(), Some(deadline.into_std()))
+        .await
+        .map_err(|error| CandidateAttemptError::LocalAdmission(anyhow::Error::new(error)))?,
+    ),
+    None => None,
+  };
+  let inner = connect.await.map_err(CandidateAttemptError::Endpoint)?;
+  Ok(ConnectionAdmitted {
+    inner,
+    _admission: lease,
+  })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HttpTransportProtocol {
@@ -39,14 +136,16 @@ impl HttpTransportProtocol {
   }
 }
 
-pub(crate) async fn connect_tcp_happy_eyeballs(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn connect_tcp_happy_eyeballs_admitted(
   host: &str,
   port: u16,
   discovery_id: &str,
   resolution_policy: ResolutionPolicy,
   scheduler_config: CandidateSchedulerConfig,
   deadline: Instant,
-) -> anyhow::Result<(TcpStream, SocketAddr)> {
+  admission: Option<ConnectionAdmissionContext>,
+) -> anyhow::Result<(ConnectionAdmitted<TcpStream>, SocketAddr)> {
   let candidates =
     resolve_tcp_candidates(host, port, discovery_id, resolution_policy, deadline).await?;
   let (sender, mut updates) = watch::channel(candidates);
@@ -56,18 +155,23 @@ pub(crate) async fn connect_tcp_happy_eyeballs(
     &mut updates,
     scheduler_config,
     deadline,
-    |candidate, attempt_deadline| async move {
-      let address = candidate.into_value();
-      match tokio::time::timeout_at(attempt_deadline, TcpStream::connect(address)).await {
-        Ok(Ok(stream)) => Ok((stream, address)),
-        Ok(Err(error)) => Err(CandidateAttemptError::Endpoint(
-          anyhow::Error::new(error).context(format!(
-            "failed to connect upstream TCP candidate {address}"
-          )),
-        )),
-        Err(_) => Err(CandidateAttemptError::Endpoint(anyhow::anyhow!(
-          "upstream TCP candidate {address} timed out"
-        ))),
+    move |candidate, attempt_deadline| {
+      let admission = admission.clone();
+      async move {
+        let address = candidate.into_value();
+        let connected = admit_connection_candidate(admission, attempt_deadline, async move {
+          match tokio::time::timeout_at(attempt_deadline, TcpStream::connect(address)).await {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(error)) => Err(anyhow::Error::new(error).context(format!(
+              "failed to connect upstream TCP candidate {address}"
+            ))),
+            Err(_) => Err(anyhow::anyhow!(
+              "upstream TCP candidate {address} timed out"
+            )),
+          }
+        })
+        .await?;
+        Ok((connected, address))
       }
     },
   )
@@ -76,7 +180,7 @@ pub(crate) async fn connect_tcp_happy_eyeballs(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn connect_http_tcp_happy_eyeballs(
+pub(crate) async fn connect_http_ready_happy_eyeballs_admitted<T, Connect, ConnectFuture>(
   host: &str,
   port: u16,
   discovery_id: &str,
@@ -87,51 +191,9 @@ pub(crate) async fn connect_http_tcp_happy_eyeballs(
   svcb_enabled: bool,
   allowed_svcb_ports: &[u16],
   deadline: Instant,
-) -> anyhow::Result<(TcpStream, SocketAddr)> {
-  let mut updates = resolve_http_candidate_updates(
-    host,
-    port,
-    discovery_id,
-    resolution_policy,
-    protocol,
-    tls_enabled,
-    svcb_enabled,
-    allowed_svcb_ports,
-    deadline,
-  )?;
-  race_happy_eyeballs_candidates(
-    &mut updates,
-    scheduler_config,
-    deadline,
-    |candidate, attempt_deadline| async move {
-      let address = candidate.into_value();
-      match tokio::time::timeout_at(attempt_deadline, TcpStream::connect(address)).await {
-        Ok(Ok(stream)) => Ok((stream, address)),
-        Ok(Err(error)) => Err(CandidateAttemptError::Endpoint(anyhow::Error::new(error))),
-        Err(_) => Err(CandidateAttemptError::Endpoint(anyhow::anyhow!(
-          "upstream TCP candidate {address} timed out"
-        ))),
-      }
-    },
-  )
-  .await
-  .map_err(candidate_race_error)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn connect_http_ready_happy_eyeballs<T, Connect, ConnectFuture>(
-  host: &str,
-  port: u16,
-  discovery_id: &str,
-  resolution_policy: ResolutionPolicy,
-  scheduler_config: CandidateSchedulerConfig,
-  protocol: HttpTransportProtocol,
-  tls_enabled: bool,
-  svcb_enabled: bool,
-  allowed_svcb_ports: &[u16],
-  deadline: Instant,
+  admission: ConnectionAdmissionContext,
   connect: Connect,
-) -> anyhow::Result<T>
+) -> anyhow::Result<ConnectionAdmitted<T>>
 where
   Connect: Fn(SocketAddr, Instant) -> ConnectFuture,
   ConnectFuture: Future<Output = anyhow::Result<T>>,
@@ -151,10 +213,11 @@ where
     &mut updates,
     scheduler_config,
     deadline,
-    |candidate, attempt_deadline| {
+    move |candidate, attempt_deadline| {
+      let admission = admission.clone();
       let address = candidate.into_value();
       let future = connect(address, attempt_deadline);
-      async move { future.await.map_err(CandidateAttemptError::Endpoint) }
+      async move { admit_connection_candidate(Some(admission), attempt_deadline, future).await }
     },
   )
   .await
@@ -675,6 +738,44 @@ mod tests {
         std::future::pending().await
       }
     }
+  }
+
+  #[tokio::test]
+  async fn admitted_candidate_holds_capacity_until_the_transport_is_dropped() {
+    let mut config: crate::config::Config =
+      toml::from_str(include_str!("../../config/oxibelt.toml")).unwrap();
+    config.circuit_breakers.global.max_connections = crate::config::CapacitySetting::Fixed(1);
+    config.circuit_breakers.global.max_pending_requests = crate::config::CapacitySetting::Fixed(0);
+    let admission = Some(ConnectionAdmissionContext::new(
+      CircuitBreakerRuntime::new(&config),
+      None,
+    ));
+    let deadline = Instant::now() + std::time::Duration::from_secs(1);
+
+    let first = admit_connection_candidate(admission.clone(), deadline, async { Ok(()) })
+      .await
+      .expect("first candidate should acquire the physical-connection slot");
+    let connect_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rejected = admit_connection_candidate(admission.clone(), deadline, {
+      let connect_polled = Arc::clone(&connect_polled);
+      async move {
+        connect_polled.store(true, Ordering::Release);
+        Ok(())
+      }
+    })
+    .await;
+    assert!(matches!(
+      rejected,
+      Err(CandidateAttemptError::LocalAdmission(_))
+    ));
+    assert!(!connect_polled.load(Ordering::Acquire));
+
+    drop(first);
+    assert!(
+      admit_connection_candidate(admission, deadline, async { Ok(()) })
+        .await
+        .is_ok()
+    );
   }
 
   fn service_record(alpn_present: bool, alpn: Vec<HttpsAlpn>) -> HttpsRecord {

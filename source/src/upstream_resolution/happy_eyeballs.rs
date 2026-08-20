@@ -200,6 +200,7 @@ where
   let mut next_launch = deadline;
   let mut updates_closed = false;
   let mut launches_suppressed = false;
+  let mut deferred_admission = false;
   let mut last_endpoint_error = None;
   let mut admission_error = None;
 
@@ -209,7 +210,7 @@ where
     let now = Instant::now();
     if now >= deadline {
       // Returning drops `in_flight`, which is the cancellation mechanism.
-      return Err(CandidateRaceError::Deadline);
+      return Err(deadline_race_error(last_endpoint_error, admission_error));
     }
 
     let racing = config.mode() == CandidateSchedulerMode::Enabled;
@@ -233,8 +234,10 @@ where
         .checked_add(config.effective_connection_attempt_delay())
         .unwrap_or(deadline)
         .min(deadline);
+      let may_self_contend = !in_flight.is_empty();
       in_flight.push(tagged_attempt(
         candidate.clone(),
+        may_self_contend,
         connect(candidate, deadline),
       ));
       continue;
@@ -267,8 +270,57 @@ where
       && next_launch < deadline;
     let has_in_flight = !in_flight.is_empty();
     tokio::select! {
+      biased;
+      result = in_flight.next(), if has_in_flight => {
+        let Some((candidate, may_self_contend, result)) = result else {
+          continue;
+        };
+        let at_deadline = Instant::now() >= deadline;
+        if at_deadline {
+          return if let Err(CandidateAttemptError::LocalAdmission(error)) = result
+            && !may_self_contend
+          {
+            Err(deadline_race_error(last_endpoint_error, Some(error)))
+          } else {
+            Err(CandidateRaceError::Deadline)
+          };
+        }
+        match result {
+          Ok(ready) => return Ok(ready),
+          Err(CandidateAttemptError::Endpoint(error)) => {
+            last_endpoint_error = Some(error);
+            if deferred_admission {
+              deferred_admission = false;
+              launches_suppressed = false;
+              admission_error = None;
+              next_launch = Instant::now();
+            }
+          }
+          Err(CandidateAttemptError::LocalAdmission(error)) => {
+            // A racing peer can temporarily occupy the connection slot that
+            // this candidate needs. Defer the locally rejected candidate until
+            // an in-flight peer finishes instead of consuming its attempt or
+            // permanently suppressing the fallback address.
+            if may_self_contend {
+              started.remove(&candidate.id());
+              attempts_started = attempts_started.saturating_sub(1);
+              pending.push_front(candidate);
+              deferred_admission = !in_flight.is_empty();
+              launches_suppressed = deferred_admission;
+              if !deferred_admission {
+                next_launch = Instant::now();
+              }
+            } else {
+              admission_error = Some(error);
+              // Do not consume more endpoint or connection capacity locally.
+              // Existing attempts are still allowed to win.
+              launches_suppressed = true;
+            }
+          }
+        }
+      }
       _ = tokio::time::sleep_until(deadline) => {
-        return Err(CandidateRaceError::Deadline);
+        return Err(deadline_race_error(last_endpoint_error, admission_error));
       }
       changed = updates.changed(), if !updates_closed => {
         match changed {
@@ -279,37 +331,39 @@ where
           Err(_) => updates_closed = true,
         }
       }
-      result = in_flight.next(), if has_in_flight => {
-        let Some((_candidate_id, result)) = result else {
-          continue;
-        };
-        match result {
-          Ok(ready) => return Ok(ready),
-          Err(CandidateAttemptError::Endpoint(error)) => {
-            last_endpoint_error = Some(error);
-          }
-          Err(CandidateAttemptError::LocalAdmission(error)) => {
-            admission_error = Some(error);
-            // Do not consume more endpoint or connection capacity locally.
-            // Existing attempts are still allowed to win.
-            launches_suppressed = true;
-          }
-        }
-      }
       _ = tokio::time::sleep_until(next_launch), if can_wait_for_launch => {
       }
     }
   }
 }
 
+fn deadline_race_error<E>(
+  last_endpoint_error: Option<E>,
+  admission_error: Option<E>,
+) -> CandidateRaceError<E> {
+  if admission_error.is_some() {
+    CandidateRaceError::Exhausted {
+      last_endpoint_error,
+      admission_error,
+    }
+  } else {
+    CandidateRaceError::Deadline
+  }
+}
+
 async fn tagged_attempt<T, C, E, Fut>(
   candidate: HappyEyeballsCandidate<C>,
+  may_self_contend: bool,
   future: Fut,
-) -> (u64, Result<T, CandidateAttemptError<E>>)
+) -> (
+  HappyEyeballsCandidate<C>,
+  bool,
+  Result<T, CandidateAttemptError<E>>,
+)
 where
   Fut: Future<Output = Result<T, CandidateAttemptError<E>>>,
 {
-  (candidate.id(), future.await)
+  (candidate, may_self_contend, future.await)
 }
 
 fn replace_pending<C>(
@@ -382,6 +436,8 @@ mod tests {
   use tokio::sync::{Notify, watch};
 
   use super::*;
+  use crate::circuit_breakers::CircuitBreakerRuntime;
+  use crate::config::{CapacitySetting, Config};
 
   fn candidate(id: u64, family: EndpointAddressFamily) -> HappyEyeballsCandidate<u64> {
     HappyEyeballsCandidate::new(id, family, id)
@@ -535,6 +591,312 @@ mod tests {
     winner.notify_one();
     assert_eq!(task.await.expect("scheduler task"), Ok(1));
     assert_eq!(calls.load(Ordering::Acquire), 2);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn ready_loser_releases_its_connection_admission() {
+    let mut runtime_config: Config =
+      toml::from_str(include_str!("../../config/oxibelt.toml")).expect("example config parses");
+    runtime_config.circuit_breakers.global.max_connections = CapacitySetting::Fixed(2);
+    runtime_config.circuit_breakers.global.max_pending_requests = CapacitySetting::Fixed(0);
+    let runtime = CircuitBreakerRuntime::new(&runtime_config);
+    let (_sender, mut updates) = watch::channel(Arc::from([
+      candidate(1, EndpointAddressFamily::Ipv6),
+      candidate(2, EndpointAddressFamily::Ipv4),
+    ]));
+    let acquired = Arc::new(AtomicUsize::new(0));
+    let (release, release_rx) = watch::channel(false);
+    let task = tokio::spawn({
+      let runtime = runtime.clone();
+      let acquired = acquired.clone();
+      async move {
+        race_happy_eyeballs_candidates(
+          &mut updates,
+          config(
+            CandidateSchedulerMode::Enabled,
+            Duration::from_millis(10),
+            2,
+            2,
+            1,
+          ),
+          deadline(),
+          move |candidate, attempt_deadline| {
+            let runtime = runtime.clone();
+            let acquired = acquired.clone();
+            let mut release_rx = release_rx.clone();
+            async move {
+              let admission = runtime
+                .admit_upstream_connection(None, Some(attempt_deadline.into_std()))
+                .await
+                .map_err(CandidateAttemptError::LocalAdmission)?;
+              acquired.fetch_add(1, Ordering::AcqRel);
+              while !*release_rx.borrow() {
+                release_rx
+                  .changed()
+                  .await
+                  .expect("release sender remains open");
+              }
+              Ok((candidate.into_value(), admission))
+            }
+          },
+        )
+        .await
+      }
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    while acquired.load(Ordering::Acquire) != 2 {
+      tokio::task::yield_now().await;
+    }
+    release.send(true).expect("candidate receivers remain open");
+    let winner = task
+      .await
+      .expect("scheduler task")
+      .expect("one ready candidate wins");
+
+    let replacement = runtime
+      .admit_upstream_connection(
+        None,
+        Some(std::time::Instant::now() + Duration::from_secs(1)),
+      )
+      .await
+      .expect("dropping the ready loser releases one connection slot");
+    assert!(
+      runtime
+        .admit_upstream_connection(
+          None,
+          Some(std::time::Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .is_err(),
+      "the winner and replacement must occupy both connection slots"
+    );
+    drop(replacement);
+    drop(winner);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn self_contention_defers_rejected_candidate_until_peer_failure() {
+    let (_sender, mut updates) = watch::channel(Arc::from([
+      candidate(1, EndpointAddressFamily::Ipv6),
+      candidate(2, EndpointAddressFamily::Ipv4),
+    ]));
+    let first_failure = Arc::new(Notify::new());
+    let second_rejection = Arc::new(Notify::new());
+    let second_calls = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn({
+      let first_failure = first_failure.clone();
+      let second_rejection = second_rejection.clone();
+      let second_calls = second_calls.clone();
+      async move {
+        race_happy_eyeballs_candidates(
+          &mut updates,
+          config(
+            CandidateSchedulerMode::Enabled,
+            Duration::from_millis(10),
+            2,
+            2,
+            1,
+          ),
+          deadline(),
+          move |candidate, _| {
+            let first_failure = first_failure.clone();
+            let second_rejection = second_rejection.clone();
+            let second_calls = second_calls.clone();
+            async move {
+              if candidate.id() == 1 {
+                first_failure.notified().await;
+                // Make the local rejection ready before this endpoint result is
+                // yielded. The scheduler must remain correct if it consumes
+                // the endpoint failure first.
+                second_rejection.notify_one();
+                Err(CandidateAttemptError::Endpoint("first failed"))
+              } else if second_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                second_rejection.notified().await;
+                Err(CandidateAttemptError::LocalAdmission("peer owns slot"))
+              } else {
+                Ok(candidate.into_value())
+              }
+            }
+          },
+        )
+        .await
+      }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(second_calls.load(Ordering::Acquire), 1);
+    first_failure.notify_one();
+    assert_eq!(task.await.expect("scheduler task"), Ok(2));
+    assert_eq!(second_calls.load(Ordering::Acquire), 2);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn admission_rejection_at_deadline_retains_local_provenance() {
+    let (_sender, mut updates) =
+      watch::channel(Arc::from([candidate(1, EndpointAddressFamily::Ipv6)]));
+    let scheduled_deadline = Instant::now() + Duration::from_millis(20);
+    let task = tokio::spawn(async move {
+      race_happy_eyeballs_candidates(
+        &mut updates,
+        config(
+          CandidateSchedulerMode::Enabled,
+          Duration::from_millis(10),
+          1,
+          1,
+          1,
+        ),
+        scheduled_deadline,
+        move |_candidate, attempt_deadline| async move {
+          tokio::time::sleep_until(attempt_deadline).await;
+          Err::<u64, _>(CandidateAttemptError::LocalAdmission("locally full"))
+        },
+      )
+      .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(20)).await;
+    assert_eq!(
+      task.await.expect("scheduler task"),
+      Err(CandidateRaceError::Exhausted {
+        last_endpoint_error: None,
+        admission_error: Some("locally full"),
+      })
+    );
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn successful_candidate_at_deadline_remains_a_deadline() {
+    let (_sender, mut updates) =
+      watch::channel(Arc::from([candidate(1, EndpointAddressFamily::Ipv6)]));
+    let scheduled_deadline = Instant::now() + Duration::from_millis(20);
+    let task = tokio::spawn(async move {
+      race_happy_eyeballs_candidates(
+        &mut updates,
+        config(
+          CandidateSchedulerMode::Enabled,
+          Duration::from_millis(10),
+          1,
+          1,
+          1,
+        ),
+        scheduled_deadline,
+        move |candidate, attempt_deadline| async move {
+          tokio::time::sleep_until(attempt_deadline).await;
+          Ok::<_, CandidateAttemptError<&'static str>>(candidate.into_value())
+        },
+      )
+      .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(20)).await;
+    assert_eq!(
+      task.await.expect("scheduler task"),
+      Err(CandidateRaceError::Deadline)
+    );
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn deferred_self_contention_ends_at_the_absolute_deadline() {
+    let (_sender, mut updates) = watch::channel(Arc::from([
+      candidate(1, EndpointAddressFamily::Ipv6),
+      candidate(2, EndpointAddressFamily::Ipv4),
+    ]));
+    let scheduled_deadline = Instant::now() + Duration::from_millis(20);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn({
+      let calls = calls.clone();
+      async move {
+        race_happy_eyeballs_candidates(
+          &mut updates,
+          config(
+            CandidateSchedulerMode::Enabled,
+            Duration::from_millis(10),
+            2,
+            2,
+            1,
+          ),
+          scheduled_deadline,
+          move |candidate, _| {
+            let calls = calls.clone();
+            async move {
+              calls.fetch_add(1, Ordering::AcqRel);
+              if candidate.id() == 2 {
+                Err(CandidateAttemptError::LocalAdmission("locally full"))
+              } else {
+                std::future::pending::<Result<u64, CandidateAttemptError<&'static str>>>().await
+              }
+            }
+          },
+        )
+        .await
+      }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    tokio::time::advance(Duration::from_millis(10)).await;
+    assert_eq!(
+      task.await.expect("scheduler task"),
+      Err(CandidateRaceError::Deadline)
+    );
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn ready_peer_at_deadline_overrides_an_earlier_admission_rejection() {
+    let (_sender, mut updates) = watch::channel(Arc::from([
+      candidate(1, EndpointAddressFamily::Ipv6),
+      candidate(2, EndpointAddressFamily::Ipv4),
+    ]));
+    let scheduled_deadline = Instant::now() + Duration::from_millis(20);
+    let release_admission = Arc::new(Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let task = tokio::spawn({
+      let release_admission = release_admission.clone();
+      let calls = calls.clone();
+      async move {
+        race_happy_eyeballs_candidates(
+          &mut updates,
+          config(
+            CandidateSchedulerMode::Enabled,
+            Duration::from_millis(10),
+            2,
+            2,
+            1,
+          ),
+          scheduled_deadline,
+          move |candidate, attempt_deadline| {
+            let release_admission = release_admission.clone();
+            let calls = calls.clone();
+            async move {
+              calls.fetch_add(1, Ordering::AcqRel);
+              if candidate.id() == 1 {
+                release_admission.notified().await;
+                Err(CandidateAttemptError::LocalAdmission("locally full"))
+              } else {
+                tokio::time::sleep_until(attempt_deadline).await;
+                Ok(candidate.into_value())
+              }
+            }
+          },
+        )
+        .await
+      }
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    release_admission.notify_one();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    assert_eq!(
+      task.await.expect("scheduler task"),
+      Err(CandidateRaceError::Deadline)
+    );
   }
 
   #[tokio::test(start_paused = true)]

@@ -10,6 +10,7 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
   request: Request<ProxyBody>,
   upstream: &UpstreamConfig,
   state: &AppSnapshot,
+  pool_name: Option<&str>,
   upstream_version: HttpVersion,
   client_addr: std::net::SocketAddr,
   timeouts: EffectiveTimeouts,
@@ -73,7 +74,11 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
   let svcb_enabled = resolution_config.happy_eyeballs.svcb
     == crate::config::UpstreamResolutionDnsMode::Auto
     && scheduler_policy.mode() == crate::upstream_resolution::CandidateSchedulerMode::Enabled;
-  let io = crate::upstream_resolution::connect_http_ready_happy_eyeballs(
+  let admission = crate::upstream_resolution::ConnectionAdmissionContext::new(
+    state.circuit_breakers.clone(),
+    pool_name.map(Arc::<str>::from),
+  );
+  let io = crate::upstream_resolution::connect_http_ready_happy_eyeballs_admitted(
     host,
     port,
     &discovery_id,
@@ -87,6 +92,7 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
     svcb_enabled,
     &upstream.svcb_allowed_ports,
     connect_deadline,
+    admission,
     move |remote_addr, attempt_deadline| {
       let tls_identity = tls_identity.clone();
       async move {
@@ -267,8 +273,12 @@ pub(super) async fn connect_upstream_tcp(
   upstream: &UpstreamConfig,
   resolution_config: &crate::config::UpstreamResolutionConfig,
   timeouts: EffectiveTimeouts,
-  protocol: Option<TcpUpstreamHttpVersion>,
-) -> anyhow::Result<(TcpStream, std::net::SocketAddr, tokio::time::Instant)> {
+  admission: crate::upstream_resolution::ConnectionAdmissionContext,
+) -> anyhow::Result<(
+  crate::upstream_resolution::ConnectionAdmitted<TcpStream>,
+  std::net::SocketAddr,
+  tokio::time::Instant,
+)> {
   let port = upstream
     .origin
     .port_or_known_default()
@@ -288,40 +298,16 @@ pub(super) async fn connect_upstream_tcp(
     crate::upstream_resolution::http_upstream_policies(resolution_config, upstream)?;
   let discovery_id = format!("http:{}:{host}:{port}", upstream.name);
   let deadline = tokio::time::Instant::from_std(deadline);
-  let connection = match protocol {
-    Some(protocol) => {
-      crate::upstream_resolution::connect_http_tcp_happy_eyeballs(
-        host,
-        port,
-        &discovery_id,
-        resolution_policy,
-        scheduler_policy,
-        match protocol {
-          TcpUpstreamHttpVersion::H1 => crate::upstream_resolution::HttpTransportProtocol::H1,
-          TcpUpstreamHttpVersion::H2 => crate::upstream_resolution::HttpTransportProtocol::H2,
-        },
-        upstream.origin.scheme() == "https",
-        matches!(
-          resolution_config.happy_eyeballs.svcb,
-          crate::config::UpstreamResolutionDnsMode::Auto
-        ) && scheduler_policy.mode() == crate::upstream_resolution::CandidateSchedulerMode::Enabled,
-        &upstream.svcb_allowed_ports,
-        deadline,
-      )
-      .await
-    }
-    None => {
-      crate::upstream_resolution::connect_tcp_happy_eyeballs(
-        host,
-        port,
-        &discovery_id,
-        resolution_policy,
-        scheduler_policy,
-        deadline,
-      )
-      .await
-    }
-  };
+  let connection = crate::upstream_resolution::connect_tcp_happy_eyeballs_admitted(
+    host,
+    port,
+    &discovery_id,
+    resolution_policy,
+    scheduler_policy,
+    deadline,
+    Some(admission),
+  )
+  .await;
   let (stream, address) =
     connection.with_context(|| format!("failed to connect upstream host {host}:{port}"))?;
   Ok((stream, address, deadline))
