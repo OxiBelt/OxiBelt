@@ -15,6 +15,147 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.8.1-beta.3] - 2026-08-20
+
+> Fresh qualification candidate after beta.2 failed before draft creation.
+> Do not reuse beta.2 workflow results or any artifact, attestation, rebuild,
+> or qualification evidence from an earlier cut.
+
+- Changes since: `0.8.1-beta.2`
+- Supported upgrade sources: `0.8.1-beta.2`, `0.6.6`
+- Upgrade guide: [Upgrade from 0.6.6 to the 0.8.1 line](docs/Upgrading.md#upgrade-from-066-to-the-081-line)
+
+### Configuration
+
+- Preserve every supported epoch-1 configuration key, default, validation
+  rule, reload class, and compatibility alias from beta.2. This cut changes no
+  runtime configuration or request-routing policy.
+- Continue to use `[proxy.upstream_resolution]` as the canonical resolver
+  policy while retaining `[quic.upstream.resolution]` only as the documented
+  compatibility input.
+
+### Schema epochs
+
+- Keep native configuration at epoch `1` and retain every beta.2 deployment,
+  evidence, admission, workload-policy, revocation, and Helm OCI schema
+  version. This cut adds no schema field or migration.
+- Continue to migrate from epoch `0` with
+  `oxibeltctl config migrate --from 0 --to 1`; automatic down-migration remains
+  unsupported.
+
+### Deprecations and removals
+
+- Add no deprecation or removal. Preserve the legacy system access-log and
+  QUIC resolver compatibility inputs with the same conflict and precedence
+  checks as beta.2.
+- Keep partial or mismatched supply-chain evidence ineligible. Candidate
+  metadata is now read from the exact tagged Git tree rather than mutable
+  checkout files, without relaxing any receipt or publication requirement.
+
+### Admin API
+
+- Preserve beta.2 Admin request, response, authentication, authorization,
+  idempotency, audit, membership, operation, and embedded-runtime contracts.
+  No Admin endpoint or wire representation changes in this cut.
+- Continue to fail closed on malformed mutation, identity, signature,
+  membership, secret-reference, and rollback evidence.
+
+### Feature lifecycle
+
+- Keep the general and Kubernetes graduation targets on `0.8.1`; every tracked
+  feature remains `experimental` and `unvalidated` until its complete
+  exact-revision evidence succeeds.
+- Add no lifecycle state or evidence exception. Beta.3 requires one fresh
+  canonical 39-job non-benchmark validation summary.
+
+### Rulepack compatibility
+
+- Retain the beta.2 OxiRule and CRS compatibility contract. The strengthened
+  nested-path rejection and test oracle do not alter rule syntax, matching,
+  precedence, or production WAF responses.
+
+### Executables and images
+
+- Preserve the beta.2 executable names, six image roles, five platform
+  subjects per role, entrypoints, users, ports, and OCI identity contracts.
+- Require all 30 fresh exact-revision image subjects and both Helm `4.2.4`
+  chart packages to complete vulnerability, SBOM, provenance, attestation,
+  independent-rebuild, and readback verification. Beta publication writes no
+  stable aliases, and charts receive no mutable aliases.
+
+### Storage and state
+
+- Change no persistent schema, serialization, shared-state, membership, audit,
+  resolver, pool, UDP ownership, or rollout-state behavior.
+- Continue to stop new-version writers and drain the data plane before any
+  rollback that restores an older compatible database and configuration tree.
+
+### Upgrade validation
+
+- Validate and inspect the epoch-1 sibling tree with the candidate binaries and
+  canonical Helm client before staged rollout:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+- Exercise shallow, boundary-depth, over-depth, malformed, and benign encoded
+  paths over raw HTTP/1.1, HTTP/2, and HTTP/3. Dangerous paths must receive the
+  exact rejection and never reach the protected upstream; benign controls must
+  reach it exactly once.
+- Deploy only newly qualified beta.3 digests after the canonical 39-job
+  summary, person-reviewed release, all image and chart receipts, and the
+  aggregate automatic qualification receipt succeed.
+
+### Rollback and irreversible steps
+
+- Retain the `0.6.6` image digests, complete epoch-0 configuration tree,
+  referenced assets, compatible PostgreSQL backup, admission bundle, audit
+  evidence, controller rollback ConfigMaps, Gateway API CRDs and Lease, and
+  shared UDP identity material until qualification completes.
+- If upgrading from a source build at the beta.2 revision, retain its binaries
+  and matching state only as a rollback source; beta.2 has no published
+  official artifacts or qualification evidence to promote into beta.3.
+- Stop new-version writers, drain the data plane before the controller, and
+  restore the selected older binaries, configuration, and database together.
+  External audit, telemetry, connection, session, datagram, and client-visible
+  effects cannot be recreated by rollback.
+
+### Known issues
+
+- The signed `0.8.1-beta.1` tag remains only at its original local revision and
+  is absent from GitHub. The signed remote `0.8.1-beta.2` tag is immutable, but
+  draft preparation failed and no GitHub Release or official artifact exists.
+  Preserve both cuts without moving or deleting their tags and use no evidence
+  from either to qualify beta.3.
+- `0.8.0-beta.0`, `0.8.0-beta.1`, and `0.8.0-beta.2` remain invalid,
+  unqualified, or unpublished failed-cut history and cannot supply evidence or
+  a stable-promotion source.
+- Native `linux/riscv64` cluster-runner graduation evidence remains unmet; all
+  tracked general and Kubernetes features remain experimental and unvalidated.
+
+### Security
+
+- Reject a request path when a dangerous encoded token appears at any layer up
+  to the supported nesting limit or when another valid percent-decoding layer
+  remains after that limit. Validation stays bounded and occurs before routing
+  or upstream forwarding.
+- Bind the beta changelog, stable changelog, upgrade guide, and forbidden-build
+  ledger used for release-candidate metadata to bounded regular blobs in the
+  exact tagged Git tree. Dirty or later checkout files cannot qualify an older
+  candidate or alter its canonical release body.
+- Preserve every beta.2 fail-closed request-framing, TLS, CRLite, QUIC,
+  resolver-provenance, confinement, secret, shared-state, admission, and
+  supply-chain boundary. Require one fresh exact aggregate qualification
+  result before the 24-hour stable soak begins.
+
 ## [0.8.1-beta.2] - 2026-08-20
 
 > Fresh qualification candidate after beta.1's canonical validation exposed

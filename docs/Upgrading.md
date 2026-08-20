@@ -50,8 +50,11 @@ be used as a supported production upgrade source or target.
 | `0.6.6` | `0.8.0-beta.1` | Published, not qualified | The prerelease was published, but its release-image workflow failed and independent rebuilds were skipped. Preserve it as attributable release history; do not use it as a stable source or reuse its evidence. |
 | `0.8.0-beta.1` | `0.8.0-beta.2` | Unpublished failed cut | The signed tag was created without a governed beta.2 entry, so exact-tag release-contract validation could not prepare a draft. Do not move, recreate, publish, attach artifacts to, or reuse evidence from this cut. |
 | `0.6.6` | `0.8.1-beta.1` | Local, not qualified | The signed tag exists only locally at its original revision, whose canonical validation exposed release-harness flakes. It has no GitHub Release or official artifact and cannot provide qualification evidence. |
-| `0.6.6` | `0.8.1-beta.2` | Local qualification candidate | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Deploy only after the predecessor lineage is resolved and every fresh exact-revision artifact and automatic qualification gate succeeds. |
-| `0.8.1-beta.1` | `0.8.1-beta.2` | Local recovery source | Direct configuration and state recovery is supported without a new migration, but beta.1 has no official artifact or qualification evidence to promote. |
+| `0.6.6` | `0.8.1-beta.2` | Unpublished failed cut | The immutable signed remote tag exists, but draft preparation failed and no GitHub Release or official artifact was created. Preserve the tag as history and do not reuse its workflow evidence. |
+| `0.8.1-beta.1` | `0.8.1-beta.2` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.1 has no remote tag or official artifact and beta.2 has no release artifact to promote. |
+| `0.6.6` | `0.8.1-beta.3` | Qualification candidate | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Deploy only after every fresh exact-revision artifact and automatic qualification gate succeeds. |
+| `0.8.1-beta.2` | `0.8.1-beta.3` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.2 has no official artifact or qualification evidence to promote. |
+| `0.8.1-beta.3` | `0.8.1` | Conditional stable promotion | Promotion requires person-reviewed beta publication, complete exact-revision qualification, at least 24 hours of soak from the later of publication and verifier completion, and a documentation-only stable commit. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -61,12 +64,12 @@ release-contract checker.
 
 ## Upgrade from 0.6.6 to the 0.8.1 line
 
-`0.8.1-beta.2` is the local qualification candidate after beta.1's canonical
-validation exposed release-harness flakes. The signed beta.1 tag remains at
-its original local revision and is absent from GitHub; do not move or delete
-it, reinterpret an old rerun as trustworthy qualification, or reuse its
-workflow evidence. Remote beta.2 publication remains blocked until that
-predecessor lineage is resolved under the immutable release contract.
+`0.8.1-beta.3` is the fresh qualification candidate. The signed beta.1 tag
+remains at its original local revision and is absent from GitHub. The signed
+beta.2 tag exists remotely at its immutable revision, but draft preparation
+failed and no GitHub Release or official artifact was created. Do not move or
+delete either tag, reinterpret an old rerun as trustworthy qualification, or
+reuse evidence from either failed cut.
 
 The older `0.8.0-beta.0` tag is invalid, the published `0.8.0-beta.1` cut is
 unqualified, and `0.8.0-beta.2` failed before a governed entry could prepare
@@ -113,7 +116,7 @@ the controller, restore the old binaries, configuration, and database together,
 and remove unknown epoch-1 tables before validating with `0.6.6`. External
 audit, telemetry, network, and client-visible effects cannot be undone.
 
-`0.8.1-beta.2` must produce fresh exact-revision evidence: 30 immutable image
+`0.8.1-beta.3` must produce fresh exact-revision evidence: 30 immutable image
 subjects, both official exact-version Helm OCI charts, their independent
 rebuild receipts, and one complete automatic qualification receipt. Begin the
 24-hour stable soak only after person-reviewed publication and that evidence
