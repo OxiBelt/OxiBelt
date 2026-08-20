@@ -771,6 +771,9 @@ case_waf_bypass() {
       --body-chunk-size "$((b5 % 16 + 1))"
       --header "${header_name}: ${content_type}" --header "X-Fuzz-Case: ${header_value}"
     )
+    if ((protocol == 1 && attack_location == 1)); then
+      downstream_args+=(--h2-eager-body)
+    fi
     if [[ "${body_encoding}" == identity ]]; then
       downstream_args+=(--body "${body}")
     else
@@ -778,6 +781,16 @@ case_waf_bypass() {
         --content-encoding "${body_encoding}")
     fi
     probe_with_ca "${output}" "${downstream_args[@]}"
+    if ((protocol == 1 && attack_location == 1)); then
+      jq -e '
+        .status == 403
+        and .body == "security-fuzz-waf-body-blocked"
+        and .request_body_complete == true
+      ' "${output}" >/dev/null || {
+        echo "H2 WAF body rejection did not prove complete request delivery" >&2
+        return 1
+      }
+    fi
   fi
   after="$(request_count "${key}")"
   [[ "${after}" == "${before}" ]] || { echo "must-block request reached protected upstream" >&2; return 1; }

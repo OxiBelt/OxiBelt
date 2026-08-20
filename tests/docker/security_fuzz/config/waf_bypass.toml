@@ -42,6 +42,9 @@ enabled = true
 mode = "enforcing"
 fail_policy = "closed"
 
+[waf.limits]
+max_body_inspection_bytes = 1048576
+
 [waf.http_body_compression]
 mode = "transform"
 encodings = ["gzip", "deflate", "br", "zstd"]
@@ -59,7 +62,7 @@ when = "Request.Normalized.Http.Path.endsWith('/sf-known-attack') || Request.Bod
 [[waf.rules.actions]]
 type = "reject"
 status = 403
-body = "blocked"
+body = "security-fuzz-waf-body-blocked"
 
 [[upstreams]]
 name = "protected"

@@ -555,6 +555,37 @@ esac
   }
 
   #[test]
+  fn waf_bypass_h2_body_oracle_requires_complete_eager_delivery() {
+    let fixture = fs::read_to_string(repository_path(
+      "tests/docker/security_fuzz/config/waf_bypass.toml",
+    ))
+    .expect("WAF security-fuzz fixture should be readable");
+    let executor = fs::read_to_string(repository_path("tests/docker/security_fuzz/executor.sh"))
+      .expect("security-fuzz executor should be readable");
+
+    assert!(
+      fixture.contains("body = \"security-fuzz-waf-body-blocked\""),
+      "the WAF fixture must return a unique body-block sentinel"
+    );
+    assert!(
+      fixture.contains("[waf.limits]\nmax_body_inspection_bytes = 1048576"),
+      "the WAF fixture must inspect beyond the eager sender's 65536-byte cap so its sentinel proves EOF"
+    );
+    assert!(
+      executor.contains("if ((protocol == 1 && attack_location == 1)); then\n      downstream_args+=(--h2-eager-body)"),
+      "only H2 body-location WAF cases must enable eager request delivery"
+    );
+    assert!(
+      executor.contains(".status == 403\n        and .body == \"security-fuzz-waf-body-blocked\"\n        and .request_body_complete == true"),
+      "H2 body-location WAF cases must require status, sentinel, and completion proof"
+    );
+    assert!(
+      executor.contains("--body-chunk-size \"$((b5 % 16 + 1))\""),
+      "the WAF body oracle must retain one-byte fragmentation coverage"
+    );
+  }
+
+  #[test]
   fn turn_runtime_observes_and_reaps_a_bounded_live_allocation() {
     let fixture = fs::read_to_string(repository_path(
       "tests/docker/security_fuzz/config/turn_runtime.toml",

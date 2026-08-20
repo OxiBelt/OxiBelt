@@ -142,6 +142,7 @@ struct DownstreamArgs {
   body_chunk_size: usize,
   zero_length_body_end_delay_ms: Option<u64>,
   omit_content_length: bool,
+  h2_eager_body: bool,
   h3_reset_after_body_prefix: bool,
   headers: HeaderMap,
   ca_cert: String,
@@ -572,7 +573,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
   eprintln!(
-        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected|allocate-success (UDP only)> [--mutation <name>] [--ca-cert <pem>] [--allocation-hold-ms <1..10000>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64>\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected|allocate-success (UDP only)> [--mutation <name>] [--ca-cert <pem>] [--allocation-hold-ms <1..10000>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-base64 <base64>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--h2-eager-body] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64>\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
 }
 
@@ -1062,6 +1063,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
   let mut body_chunk_size = 16 * 1024;
   let mut zero_length_body_end_delay_ms = None;
   let mut omit_content_length = false;
+  let mut h2_eager_body = false;
   let mut h3_reset_after_body_prefix = false;
   let mut headers = HeaderMap::new();
   let mut ca_cert = None;
@@ -1073,6 +1075,10 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     match flag.as_str() {
       "--omit-content-length" => {
         omit_content_length = true;
+        continue;
+      }
+      "--h2-eager-body" => {
+        h2_eager_body = true;
         continue;
       }
       "--h3-reset-after-body-prefix" => {
@@ -1192,6 +1198,20 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
       bail!("--h3-reset-after-body-prefix requires a bounded explicit request body");
     }
   }
+  if h2_eager_body {
+    if !matches!(protocol, DownstreamProtocol::H2) {
+      bail!("--h2-eager-body is only supported for HTTP/2");
+    }
+    if !body_source_set || body_bytes.is_some() {
+      bail!("--h2-eager-body requires --body or --body-base64");
+    }
+    if body.len() > 64 * 1024 {
+      bail!("--h2-eager-body request body exceeds 65536 bytes");
+    }
+    if zero_length_body_end_delay_ms.is_some() {
+      bail!("--h2-eager-body cannot be combined with --zero-length-body-end-delay-ms");
+    }
+  }
   Ok(DownstreamArgs {
     protocol,
     host: host.ok_or_else(|| anyhow!("--host is required"))?,
@@ -1205,6 +1225,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     body_chunk_size,
     zero_length_body_end_delay_ms,
     omit_content_length,
+    h2_eager_body,
     h3_reset_after_body_prefix,
     headers,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
@@ -4085,6 +4106,10 @@ async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
     );
   }
 
+  if args.h2_eager_body {
+    return h2_eager_downstream_request(args, tls_stream, tls_version).await;
+  }
+
   let (mut sender, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
     .handshake(TokioIo::new(tls_stream))
     .await
@@ -4113,6 +4138,69 @@ async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
     &parts.headers,
     &body,
   ))
+}
+
+async fn h2_eager_downstream_request(
+  args: &DownstreamArgs,
+  tls_stream: tokio_rustls::client::TlsStream<TcpStream>,
+  tls_version: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+  let (mut sender, connection) = h2::client::handshake(tls_stream)
+    .await
+    .context("failed to establish direct downstream HTTP/2 client")?;
+  tokio::spawn(async move {
+    if let Err(error) = connection.await {
+      eprintln!("direct downstream HTTP/2 connection failed: {error}");
+    }
+  });
+
+  let request = downstream_request(args, Version::HTTP_2, ())?;
+  let response = send_h2_eager_body(&mut sender, request, &args.body, args.body_chunk_size).await?;
+  let (parts, mut body) = response.into_parts();
+  let mut response_body = BytesMut::new();
+  while let Some(chunk) = body.data().await {
+    let chunk = chunk.context("failed to read direct downstream HTTP/2 response body")?;
+    let len = chunk.len();
+    response_body.extend_from_slice(&chunk);
+    body
+      .flow_control()
+      .release_capacity(len)
+      .context("failed to release direct downstream HTTP/2 response capacity")?;
+  }
+
+  let mut output = response_json(
+    args.protocol.label(),
+    tls_version,
+    parts.status,
+    &parts.headers,
+    &response_body,
+  );
+  // This flag is deliberately emitted only after every DATA frame and the
+  // terminating END_STREAM frame have been accepted by the direct h2 sender.
+  output["request_body_complete"] = serde_json::Value::Bool(true);
+  Ok(output)
+}
+
+async fn send_h2_eager_body(
+  sender: &mut h2::client::SendRequest<Bytes>,
+  request: Request<()>,
+  body: &[u8],
+  body_chunk_size: usize,
+) -> anyhow::Result<Response<h2::RecvStream>> {
+  let (response, mut stream) = sender
+    .send_request(request, false)
+    .context("failed to send direct downstream HTTP/2 request headers")?;
+  for chunk in body.chunks(body_chunk_size) {
+    stream
+      .send_data(Bytes::copy_from_slice(chunk), false)
+      .context("failed to send direct downstream HTTP/2 request body")?;
+  }
+  stream
+    .send_data(Bytes::new(), true)
+    .context("failed to finish direct downstream HTTP/2 request body")?;
+  response
+    .await
+    .context("failed to receive direct downstream HTTP/2 response")
 }
 
 async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
@@ -4988,6 +5076,27 @@ fn load_root_store(path: &Path) -> anyhow::Result<RootCertStore> {
 mod tests {
   use super::*;
 
+  fn downstream_cli_args(extra: &[&str]) -> Vec<String> {
+    let mut args = vec![
+      "--protocol".to_string(),
+      "h2".to_string(),
+      "--host".to_string(),
+      "127.0.0.1".to_string(),
+      "--port".to_string(),
+      "8443".to_string(),
+      "--server-name".to_string(),
+      "proxy".to_string(),
+      "--authority".to_string(),
+      "example.test".to_string(),
+      "--path".to_string(),
+      "/".to_string(),
+      "--ca-cert".to_string(),
+      "ca.pem".to_string(),
+    ];
+    args.extend(extra.iter().map(|value| (*value).to_string()));
+    args
+  }
+
   fn turn_client_cli_args(
     transport: &str,
     auth: &str,
@@ -5379,6 +5488,179 @@ mod tests {
       Err(error) => error,
     };
     assert!(error.to_string().contains("only supported for HTTP/3"));
+  }
+
+  #[test]
+  fn h2_eager_body_accepts_only_explicit_bounded_h2_bodies() {
+    let body = parse_downstream_args(
+      downstream_cli_args(&["--body", "attack", "--h2-eager-body"]).into_iter(),
+    )
+    .expect("explicit H2 body should enable eager delivery");
+    assert!(body.h2_eager_body);
+
+    let encoded = parse_downstream_args(
+      downstream_cli_args(&["--body-base64", "YXR0YWNr", "--h2-eager-body"]).into_iter(),
+    )
+    .expect("explicit base64 H2 body should enable eager delivery");
+    assert_eq!(encoded.body, b"attack");
+
+    for extra in [
+      vec!["--h2-eager-body"],
+      vec!["--body-bytes", "4", "--h2-eager-body"],
+      vec![
+        "--body",
+        "attack",
+        "--zero-length-body-end-delay-ms",
+        "1",
+        "--h2-eager-body",
+      ],
+    ] {
+      assert!(
+        parse_downstream_args(downstream_cli_args(&extra).into_iter()).is_err(),
+        "invalid eager-body combination should fail closed: {extra:?}"
+      );
+    }
+
+    let mut oversized = downstream_cli_args(&["--body", "x", "--h2-eager-body"]);
+    let body_value = oversized
+      .iter()
+      .position(|value| value == "--body")
+      .expect("body flag")
+      + 1;
+    oversized[body_value] = "x".repeat(64 * 1024 + 1);
+    let error = match parse_downstream_args(oversized.into_iter()) {
+      Ok(_) => panic!("oversized eager H2 body must fail"),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("exceeds 65536 bytes"));
+
+    let mut h3 = downstream_cli_args(&["--body", "attack", "--h2-eager-body"]);
+    h3[1] = "h3".to_string();
+    let error = match parse_downstream_args(h3.into_iter()) {
+      Ok(_) => panic!("H3 must reject eager H2 body"),
+      Err(error) => error,
+    };
+    assert!(error.to_string().contains("only supported for HTTP/2"));
+  }
+
+  #[tokio::test]
+  async fn h2_eager_body_completes_before_receiving_response() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind direct H2 test server");
+    let address = listener.local_addr().expect("test server address");
+    let server = tokio::spawn(async move {
+      let (socket, _) = listener.accept().await.expect("accept direct H2 client");
+      let mut connection = h2::server::handshake(socket)
+        .await
+        .expect("handshake direct H2 server");
+      let (request, mut respond) = connection
+        .accept()
+        .await
+        .expect("accept direct H2 request")
+        .expect("direct H2 request should exist");
+      let mut body = request.into_body();
+      let mut received = Vec::new();
+      while let Some(chunk) = body.data().await {
+        let chunk = chunk.expect("read eager request body");
+        let len = chunk.len();
+        received.extend_from_slice(&chunk);
+        body
+          .flow_control()
+          .release_capacity(len)
+          .expect("release eager request capacity");
+      }
+      assert_eq!(received, b"attack");
+      respond
+        .send_response(
+          Response::builder().status(403).body(()).expect("response"),
+          true,
+        )
+        .expect("send direct H2 response");
+      let _ = tokio::time::timeout(
+        Duration::from_millis(100),
+        futures_util::future::poll_fn(|cx| connection.poll_closed(cx)),
+      )
+      .await;
+    });
+
+    let socket = TcpStream::connect(address)
+      .await
+      .expect("connect direct H2 test server");
+    let (mut sender, connection) = h2::client::handshake(socket)
+      .await
+      .expect("handshake direct H2 client");
+    let client = tokio::spawn(connection);
+    let response = send_h2_eager_body(
+      &mut sender,
+      Request::builder()
+        .uri("https://example.test/")
+        .body(())
+        .expect("request"),
+      b"attack",
+      1,
+    )
+    .await
+    .expect("eager H2 body should complete before response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    drop(sender);
+    server.await.expect("direct H2 server should finish");
+    client
+      .await
+      .expect("direct H2 client task should finish")
+      .expect("direct H2 client should close cleanly");
+  }
+
+  #[tokio::test]
+  async fn h2_eager_body_fails_when_peer_resets_before_response() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind resetting H2 test server");
+    let address = listener.local_addr().expect("test server address");
+    let server = tokio::spawn(async move {
+      let (socket, _) = listener.accept().await.expect("accept resetting H2 client");
+      let mut connection = h2::server::handshake(socket)
+        .await
+        .expect("handshake resetting H2 server");
+      let (_, mut respond) = connection
+        .accept()
+        .await
+        .expect("accept resetting H2 request")
+        .expect("resetting H2 request should exist");
+      respond.send_reset(h2::Reason::CANCEL);
+      let _ = tokio::time::timeout(
+        Duration::from_millis(100),
+        futures_util::future::poll_fn(|cx| connection.poll_closed(cx)),
+      )
+      .await;
+    });
+
+    let socket = TcpStream::connect(address)
+      .await
+      .expect("connect resetting H2 test server");
+    let (mut sender, connection) = h2::client::handshake(socket)
+      .await
+      .expect("handshake resetting H2 client");
+    let client = tokio::spawn(connection);
+    let error = tokio::time::timeout(
+      Duration::from_secs(1),
+      send_h2_eager_body(
+        &mut sender,
+        Request::builder()
+          .uri("https://example.test/")
+          .body(())
+          .expect("request"),
+        b"attack",
+        1,
+      ),
+    )
+    .await
+    .expect("peer reset should not hang")
+    .expect_err("peer reset must fail the eager body request");
+    assert!(error.to_string().contains("direct downstream HTTP/2"));
+    drop(sender);
+    server.await.expect("resetting H2 server should finish");
+    let _ = client.await;
   }
 
   fn synthetic_client_hello(server_name: &str) -> Vec<u8> {
