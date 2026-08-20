@@ -15,6 +15,127 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.8.1-beta.4] - 2026-08-20
+
+> Fresh qualification candidate after beta.3 published but its release-image
+> workflow failed before any canonical image could be published. Do not reuse
+> beta.3 artifacts, attestations, rebuilds, or qualification evidence.
+
+- Changes since: `0.8.1-beta.3`
+- Supported upgrade sources: `0.8.1-beta.3`, `0.6.6`
+- Upgrade guide: [Upgrade from 0.6.6 to the 0.8.1 line](docs/Upgrading.md#upgrade-from-066-to-the-081-line)
+
+### Configuration
+
+- Preserve every beta.3 epoch-1 key, default, validation rule, reload class,
+  compatibility alias, resolver policy, and route behavior. This recovery cut
+  changes no runtime configuration or request-processing policy.
+
+### Schema epochs
+
+- Keep native configuration at epoch `1` and retain every beta.3 deployment,
+  evidence, admission, workload-policy, revocation, and Helm OCI schema
+  version. No schema field or migration changes in this cut.
+
+### Deprecations and removals
+
+- Add no deprecation or removal. Invoking a staged release helper through its
+  declared shell interpreter only makes artifact consumption portable; it
+  does not relax an identity, digest, policy, or publication requirement.
+
+### Admin API
+
+- Preserve beta.3 Admin request, response, authentication, authorization,
+  idempotency, audit, membership, operation, and embedded-runtime contracts.
+  No Admin endpoint or wire representation changes in this cut.
+
+### Feature lifecycle
+
+- Keep the general and Kubernetes graduation targets on `0.8.1`. Every
+  tracked feature remains `experimental` and `unvalidated` until its complete
+  exact-revision evidence succeeds; beta.3 contributes no qualification.
+
+### Rulepack compatibility
+
+- Retain the beta.3 OxiRule and CRS compatibility contract without syntax,
+  matching, normalization, precedence, or production response changes.
+
+### Executables and images
+
+- Preserve the six image roles, five platform subjects per role, executable
+  names, entrypoints, users, ports, and OCI identity contracts from beta.3.
+- Stage the bounded BuildKit pull helper as artifact data and invoke it through
+  an explicitly quoted `bash` interpreter after download. Keep the immutable
+  BuildKit digest and every same-run artifact and vulnerability-decision
+  binding unchanged.
+- Require all 30 fresh beta.4 image subjects and both Helm `4.2.4` chart
+  packages to complete vulnerability, SBOM, provenance, attestation,
+  independent-rebuild, and registry readback verification.
+
+### Storage and state
+
+- Change no persistent schema, serialization, shared-state, membership, audit,
+  UDP ownership, resolver cache, connection-admission, or rollout-state
+  format. Beta.3 source state remains directly compatible for recovery.
+
+### Upgrade validation
+
+- Validate and inspect the epoch-1 sibling tree with the beta.4 binaries and
+  canonical Helm client before staged rollout:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+- Deploy only newly qualified beta.4 digests after person-reviewed
+  publication, canonical non-benchmark validation, all image and chart
+  receipts, independent rebuilds, and the aggregate automatic qualification
+  receipt succeed.
+
+### Rollback and irreversible steps
+
+- Retain the `0.6.6` image digests, complete epoch-0 configuration tree,
+  referenced assets, compatible PostgreSQL backup, admission bundle, audit
+  evidence, controller rollback ConfigMaps, Gateway API CRDs and Lease, and
+  shared UDP identity material until beta.4 qualification completes.
+- A beta.3 source deployment may be retained as a directly compatible rollback
+  source, but beta.3 has no qualified official image to promote or reuse.
+  Stop new-version writers and drain the data plane before restoring older
+  binaries, configuration, and database together.
+
+### Known issues
+
+- The immutable beta.3 GitHub prerelease exists, but release workflow
+  `32413789905` failed closed when all 30 image publication jobs attempted to
+  execute a downloaded helper whose executable mode was not preserved. The
+  failure occurred before those jobs could mutate GHCR. Preserve the tag and
+  release as failed-cut history and reuse none of its incomplete evidence.
+- The beta.1 tag remains local-only, and beta.2 remains an immutable
+  unpublished failed cut. The `0.8.0` beta cuts remain invalid, unqualified,
+  or unpublished history and cannot supply beta.4 qualification evidence.
+- Native `linux/riscv64` cluster-runner graduation evidence remains unmet; all
+  tracked general and Kubernetes features remain experimental and unvalidated.
+
+### Security
+
+- Preserve beta.3 nested-path rejection, external-auth trailer sanitization,
+  malformed TURN containment, effective-owner SVCB binding, per-candidate
+  connection admission, and all existing fail-closed release controls.
+- Consume the exact same-run release metadata helper through `bash` without
+  adding `eval`, unquoted input, mutable dependencies, broader permissions, or
+  a publication fallback. Artifact, vulnerability-decision, digest, and source
+  revision checks remain mandatory before any registry mutation.
+- Require a fresh exact beta.4 aggregate qualification result before starting
+  the 24-hour stable soak. Beta.3 publication time or workflow results do not
+  start or shorten that soak.
+
 ## [0.8.1-beta.3] - 2026-08-20
 
 > Fresh qualification candidate after beta.2 failed before draft creation.
