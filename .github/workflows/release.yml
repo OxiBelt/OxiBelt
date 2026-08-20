@@ -718,7 +718,7 @@ jobs:
           install -D -m 0644 \
             tests/scripts/select-amd64-docker-image-artifact.sh \
             "${metadata_root}/helper/select-amd64-docker-image-artifact.sh"
-          install -D -m 0755 \
+          install -D -m 0644 \
             tests/scripts/retry-docker-pull.sh \
             "${metadata_root}/helper/retry-docker-pull.sh"
           install -D -m 0755 \
@@ -1393,7 +1393,7 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-vulnerability-decision
 
       - name: Pre-pull Docker BuildKit image
-        run: '"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh" "${OXIBELT_BUILDKIT_IMAGE}"'
+        run: 'bash "${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh" "${OXIBELT_BUILDKIT_IMAGE}"'
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
@@ -1861,7 +1861,7 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-index-rebuild
 
       - name: Pre-pull Docker BuildKit image
-        run: '"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh" "${OXIBELT_BUILDKIT_IMAGE}"'
+        run: 'bash "${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh" "${OXIBELT_BUILDKIT_IMAGE}"'
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
@@ -2065,7 +2065,7 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-index-rebuild
 
       - name: Pre-pull Docker BuildKit image
-        run: '"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh" "${OXIBELT_BUILDKIT_IMAGE}"'
+        run: 'bash "${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh" "${OXIBELT_BUILDKIT_IMAGE}"'
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0

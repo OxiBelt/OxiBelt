@@ -10165,7 +10165,7 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
 fn release_buildx_setups_precede_with_pinned_buildkit_retry_pull() {
   let setup_action = "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c";
   let prepull_name = "Pre-pull Docker BuildKit image";
-  let prepull_command = "\"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh\" \"${OXIBELT_BUILDKIT_IMAGE}\"";
+  let prepull_command = "bash \"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh\" \"${OXIBELT_BUILDKIT_IMAGE}\"";
   let driver_opts = "image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
   let pinned_image = "moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec";
   let retry_script = docker_pull_retry_script_text();
@@ -10183,9 +10183,9 @@ fn release_buildx_setups_precede_with_pinned_buildkit_retry_pull() {
     .join(" ");
   assert!(
     normalized_prepare_release.contains(
-      "install -D -m 0755 tests/scripts/retry-docker-pull.sh \"${metadata_root}/helper/retry-docker-pull.sh\""
+      "install -D -m 0644 tests/scripts/retry-docker-pull.sh \"${metadata_root}/helper/retry-docker-pull.sh\""
     ),
-    "prepare-release should stage the executable retry helper into release metadata"
+    "prepare-release should stage the retry helper as artifact data"
   );
   let helper_staging_position = prepare_release
     .find("tests/scripts/retry-docker-pull.sh")
