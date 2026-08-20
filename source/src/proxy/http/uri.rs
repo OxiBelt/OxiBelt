@@ -7,6 +7,8 @@ use http::Uri;
 use http::uri::{Authority, PathAndQuery, Scheme};
 use url::{Position, Url};
 
+const MAX_PERCENT_DECODE_DEPTH: usize = 8;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct UpstreamUriParts {
   scheme: Scheme,
@@ -52,23 +54,22 @@ pub(crate) fn validate_downstream_path(path: &str) -> anyhow::Result<()> {
     }
   }
 
-  if contains_encoded_dot_or_separator(path.as_bytes()) {
-    anyhow::bail!("request path contains encoded dot or slash separators");
+  if contains_unsafe_or_over_nested_encoding(path.as_bytes()) {
+    anyhow::bail!("request path contains unsafe or overly nested encoding");
   }
 
   Ok(())
 }
 
-fn contains_encoded_dot_or_separator(path: &[u8]) -> bool {
-  // Inspect a fixed number of decoding layers. OxiBelt and an upstream must
-  // not disagree merely because an unsafe separator was hidden behind an
-  // encoded percent sign (for example `%252e` or `%25252f`). The bound keeps
-  // validation work linear while covering deeper nesting than any OxiBelt
-  // normalization stage performs.
-  const MAX_PERCENT_DECODE_DEPTH: usize = 8;
-
+fn contains_unsafe_or_over_nested_encoding(path: &[u8]) -> bool {
+  // Inspect every layer through the fixed decoding bound. OxiBelt and an
+  // upstream must not disagree merely because an unsafe separator was hidden
+  // behind an encoded percent sign (for example `%252e` or `%25252f`). Reject
+  // inputs that still decode after the bound instead of forwarding a layer we
+  // did not inspect. The bound keeps validation work linear while covering
+  // deeper nesting than any OxiBelt normalization stage performs.
   let mut decoded = path.to_vec();
-  for _ in 0..MAX_PERCENT_DECODE_DEPTH {
+  for depth in 0..=MAX_PERCENT_DECODE_DEPTH {
     if decoded.windows(3).any(|window| {
       window[0] == b'%'
         && ((window[1] == b'2'
@@ -80,6 +81,9 @@ fn contains_encoded_dot_or_separator(path: &[u8]) -> bool {
     let Some(next) = percent_decode_path_once(&decoded) else {
       break;
     };
+    if depth == MAX_PERCENT_DECODE_DEPTH {
+      return true;
+    }
     if next
       .iter()
       .any(|byte| *byte == b'\\' || *byte < 0x20 || *byte == 0x7f)
@@ -240,6 +244,10 @@ mod tests {
 
   use super::*;
 
+  fn nest_percent_encoding(value: &str, depth: usize) -> String {
+    (0..depth).fold(value.to_string(), |encoded, _| encoded.replace('%', "%25"))
+  }
+
   #[test]
   fn join_paths_handles_slashes() {
     assert_eq!(join_paths("/", "/api"), "/api");
@@ -364,5 +372,56 @@ mod tests {
         "nested path case must be rejected: {path}"
       );
     }
+  }
+
+  #[test]
+  fn percent_decode_depth_scans_every_allowed_layer() {
+    for token in ["%2e%2e", "%2f", "%5c", "%00", "%u002e%u002e"] {
+      for depth in 0..=MAX_PERCENT_DECODE_DEPTH {
+        let path = format!("/safe/{}/admin", nest_percent_encoding(token, depth));
+        assert!(
+          validate_downstream_path(&path).is_err(),
+          "unsafe token at decode depth {depth} must be rejected: {path}"
+        );
+      }
+    }
+
+    for token in ["%20", "%41", "%7e"] {
+      for depth in 0..MAX_PERCENT_DECODE_DEPTH {
+        let path = format!("/safe/{}/value", nest_percent_encoding(token, depth));
+        assert!(
+          validate_downstream_path(&path).is_ok(),
+          "benign token at decode depth {depth} must remain accepted: {path}"
+        );
+      }
+    }
+
+    for depth in 0..=MAX_PERCENT_DECODE_DEPTH {
+      let path = format!("/safe/{}/value", nest_percent_encoding("%zz", depth));
+      assert!(
+        validate_downstream_path(&path).is_ok(),
+        "terminal malformed encoding at depth {depth} must remain accepted: {path}"
+      );
+    }
+
+    for token in ["%20", "%41", "%7e"] {
+      let path = format!(
+        "/safe/{}/value",
+        nest_percent_encoding(token, MAX_PERCENT_DECODE_DEPTH)
+      );
+      assert!(
+        validate_downstream_path(&path).is_err(),
+        "encoding beyond the decode bound must fail closed: {path}"
+      );
+    }
+
+    let malformed_over_depth = format!(
+      "/safe/{}/value",
+      nest_percent_encoding("%zz", MAX_PERCENT_DECODE_DEPTH + 1)
+    );
+    assert!(
+      validate_downstream_path(&malformed_over_depth).is_err(),
+      "over-depth malformed encoding must fail closed: {malformed_over_depth}"
+    );
   }
 }

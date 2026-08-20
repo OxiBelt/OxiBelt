@@ -45,6 +45,20 @@ enabled = false
 mode = "enforcing"
 fail_policy = "closed"
 
+[[upstreams]]
+name = "recursive-observer"
+origin = "http://mock-http:18080/recursive"
+max_http_version = "h1"
+connect_timeout_ms = 1000
+request_timeout_ms = 3000
+preserve_host = false
+
+[[routes]]
+name = "recursive-observer"
+hosts = ["recursive.example.test"]
+path_prefix = "/"
+upstream = "recursive-observer"
+
 [[routes]]
 name = "static"
 hosts = ["static.example.test"]

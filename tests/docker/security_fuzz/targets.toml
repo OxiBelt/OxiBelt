@@ -15,13 +15,13 @@ failure_artifact_metadata = ["case", "case_seed", "input_sha256", "max_concurren
 
 [[target]]
 id = "path_security"
-description = "downstream path parsing, route selection, and static-root containment"
+description = "downstream path parsing, route selection, static-root containment, and recursive-decoding upstream isolation"
 protocols = ["h1", "h2", "h3"]
 payload_max_bytes = 4096
 session_max_cases = 4
 max_concurrent_sessions = 1
-required_helpers = ["protocol-probe"]
-oracle = "outside-root-canary"
+required_helpers = ["mock-http", "protocol-probe"]
+oracle = "unsafe-path-never-reaches-upstream"
 meaning_preserving_transforms = ["percent-hex-case", "unreserved-percent-encoding"]
 
 [[target]]

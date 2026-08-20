@@ -9,7 +9,7 @@ import time
 import gzip
 from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 
 TLS_CERT_FILE = os.environ.get("TLS_CERT_FILE")
@@ -19,6 +19,7 @@ UPSTREAM_NAME = os.environ.get("UPSTREAM_NAME", "mock-upstream")
 UPSTREAM_MARKER = "mock-upstream"
 ACCEPT_PROXY_PROTOCOL = os.environ.get("ACCEPT_PROXY_PROTOCOL", "0") == "1"
 CAPTURE_REQUESTS = os.environ.get("CAPTURE_REQUESTS", "0") == "1"
+RECURSIVE_DECODE_PATH = os.environ.get("RECURSIVE_DECODE_PATH", "0") == "1"
 HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 REQUEST_COUNTS = {}
 REQUEST_COUNTS_LOCK = threading.Lock()
@@ -243,6 +244,7 @@ class EchoHandler(BaseHTTPRequestHandler):
       "scheme": "https" if TLS_ENABLED else "http",
       "method": self.command,
       "path": self.path,
+      "recursive_path": _recursive_percent_decode(self.path) if RECURSIVE_DECODE_PATH else None,
       "request_version": self.request_version,
       "headers": {key.lower(): value for key, value in self.headers.items()},
       "body": body,
@@ -504,6 +506,16 @@ def _query_int(query, key, default):
     return int(query.get(key, [str(default)])[0])
   except (TypeError, ValueError):
     return default
+
+
+def _recursive_percent_decode(value, max_depth=16):
+  current = value
+  for _ in range(max_depth):
+    decoded = unquote(current, errors="replace")
+    if decoded == current:
+      return current
+    current = decoded
+  return current
 
 
 def _sequence_index(path, query):

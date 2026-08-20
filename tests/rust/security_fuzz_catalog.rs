@@ -736,4 +736,38 @@ esac
       "topology teardown must be convergent and fail closed"
     );
   }
+
+  #[test]
+  fn path_security_observes_nested_encoding_at_the_upstream_boundary() {
+    let executor = fs::read_to_string(repository_path("tests/docker/security_fuzz/executor.sh"))
+      .expect("security-fuzz executor should be readable");
+    let config = fs::read_to_string(repository_path(
+      "tests/docker/security_fuzz/config/path_security.toml",
+    ))
+    .expect("path-security config should be readable");
+    let path_target = target("path_security").expect("path-security target should exist");
+
+    assert_eq!(
+      path_target.required_helpers,
+      ["mock-http", "protocol-probe"],
+      "path-security must provision the protected upstream observer"
+    );
+    assert_eq!(
+      path_target.oracle, "unsafe-path-never-reaches-upstream",
+      "path-security must bind its oracle to the upstream boundary"
+    );
+    assert!(
+      config.contains("hosts = [\"recursive.example.test\"]")
+        && config.contains("origin = \"http://mock-http:18080/recursive\"")
+        && executor.contains("RECURSIVE_DECODE_PATH=1")
+        && executor
+          .contains("over-nested unsafe path reached the recursive-decoding upstream observer")
+        && executor.contains("jq -e '.status == 400' \"${work_dir}/path-nested-boundary.json\"")
+        && executor.contains("grep -q '^HTTP/1.1 400 '")
+        && executor.contains(".recursive_path == $expected")
+        && executor
+          .contains("bounded benign nested path did not reach the upstream observer exactly once"),
+      "the path-security oracle must distinguish proxy rejection from an unavailable observer"
+    );
+  }
 }

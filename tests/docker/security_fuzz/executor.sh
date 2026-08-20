@@ -190,7 +190,10 @@ prepare_config() {
 
 start_target_helpers() {
   case "${target}" in
-    path_security) ;;
+    path_security)
+      start_mock http mock-http -e LISTEN_PORT=18080 -e CONTROL_PORT=18081 \
+        -e UPSTREAM_NAME=recursive-path-observer -e RECURSIVE_DECODE_PATH=1
+      ;;
     tls_quic_sni|http_framing|waf_bypass|admin_authz)
       start_mock http mock-http -e LISTEN_PORT=18080 -e CONTROL_PORT=18081 \
         -e UPSTREAM_NAME=protected-upstream
@@ -561,6 +564,8 @@ case_key() {
 
 case_path_security() {
   local b0 b1 b2 protocol_index path_index path output body canary probe_value
+  local protocol key before after benign_key benign_before benign_after nested_path
+  local raw_request raw_response
   b0="$(input_byte 0)"; b1="$(input_byte 1)"; b2="$(input_byte 2)"
   require_concurrency_bound 1
   protocol_index=$((b0 % 3))
@@ -610,6 +615,52 @@ case_path_security() {
     echo "outside-root canary was disclosed" >&2
     return 1
   fi
+
+  protocol="${protocol_names[protocol_index]}"
+  key="$(case_key)-nested"
+  before="$(request_count "${key}")"
+  nested_path='/safe/%25252525252525252e%25252525252525252e/admin'
+  if [[ "${protocol}" == "h1" ]]; then
+    raw_request="$(printf 'GET %s?operation_id=%s HTTP/1.1\r\nHost: recursive.example.test\r\nConnection: close\r\n\r\n' \
+      "${nested_path}" "${key}" | base64 -w0)"
+    raw_tls_request "${raw_request}" "${work_dir}/path-nested-boundary.json"
+    raw_response="$(jq -er '.response_base64' "${work_dir}/path-nested-boundary.json" | base64 -d)"
+    grep -q '^HTTP/1.1 400 ' <<<"${raw_response}"
+  else
+    downstream_any_status "${protocol}" recursive.example.test \
+      "${nested_path}?operation_id=${key}" "${work_dir}/path-nested-boundary.json"
+    jq -e '.status == 400' "${work_dir}/path-nested-boundary.json" >/dev/null
+  fi
+  after="$(request_count "${key}")"
+  [[ "${after}" == "${before}" ]] || {
+    echo "over-nested unsafe path reached the recursive-decoding upstream observer" >&2
+    return 1
+  }
+
+  benign_key="$(case_key)-benign"
+  benign_before="$(request_count "${benign_key}")"
+  if [[ "${protocol}" == "h1" ]]; then
+    raw_request="$(printf 'GET /safe/%%2525252525252525zz/value?operation_id=%s HTTP/1.1\r\nHost: recursive.example.test\r\nConnection: close\r\n\r\n' \
+      "${benign_key}" | base64 -w0)"
+    raw_tls_request "${raw_request}" "${work_dir}/path-benign-boundary.json"
+    raw_response="$(jq -er '.response_base64' "${work_dir}/path-benign-boundary.json" | base64 -d)"
+    grep -q '^HTTP/1.1 200 ' <<<"${raw_response}"
+    grep -Fq "\"recursive_path\": \"/recursive/safe/%zz/value?operation_id=${benign_key}\"" \
+      <<<"${raw_response}"
+  else
+    downstream_any_status "${protocol}" recursive.example.test \
+      "/safe/%2525252525252525zz/value?operation_id=${benign_key}" \
+      "${work_dir}/path-benign-boundary.json"
+    jq -e '.status == 200' "${work_dir}/path-benign-boundary.json" >/dev/null
+    jq -e --arg expected "/recursive/safe/%zz/value?operation_id=${benign_key}" \
+      '.body | fromjson | .recursive_path == $expected' \
+      "${work_dir}/path-benign-boundary.json" >/dev/null
+  fi
+  benign_after="$(request_count "${benign_key}")"
+  [[ "${benign_after}" == "$((benign_before + 1))" ]] || {
+    echo "bounded benign nested path did not reach the upstream observer exactly once" >&2
+    return 1
+  }
 }
 
 case_tls_quic_sni() {

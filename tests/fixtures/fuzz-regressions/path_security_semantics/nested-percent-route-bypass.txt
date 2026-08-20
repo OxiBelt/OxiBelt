@@ -14,3 +14,4 @@
 /safe/%00/admin
 /safe/%2500/admin
 /safe/%u0000/admin
+/safe/%25252525252525252e%25252525252525252e/admin
