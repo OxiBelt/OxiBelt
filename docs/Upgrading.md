@@ -102,6 +102,22 @@ continues to accept `[quic.upstream.resolution]` as a deprecated compatibility
 input; migrate every leaf and do not configure the same effective leaf in both
 tables. Resolver-policy changes require `full_reload`.
 
+Beta.3 keeps the same circuit-breaker configuration surface, but enforces
+`global.max_connections` and configured pool `max_connections` for every
+physical Happy Eyeballs candidate before that candidate starts network work.
+The winning lease follows the pooled connection or tunnel; failed, losing,
+canceled, and stale attempts release it. When a racing peer temporarily owns
+the final slot, the rejected fallback is deferred and may retry after that peer
+fails under the original absolute deadline. Confirm that intentional address-
+family concurrency fits the configured global and pool limits, and monitor
+capacity rejections during staged rollout.
+
+HTTPS/SVCB discovery in beta.3 is also bound to the effective DNS query owner
+that supplied the base addresses. Deployments using search domains should
+verify that upstream DNS returns metadata for that accepted owner; hosts-pinned,
+mixed-provenance, conflicting-owner, and mismatched metadata responses now stay
+on their base addresses without SVCB expansion.
+
 Use Helm `4.2.4` for canonical packaging and reproducibility; Helm `3.21.3`
 or `4.2.4` may render and consume the charts. Inspect both exact-version chart
 manifests and immutable admission references before staged rollout. On AMD64,

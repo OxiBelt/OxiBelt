@@ -86,7 +86,9 @@ for the governed entry format.
 ### Storage and state
 
 - Change no persistent schema, serialization, shared-state, membership, audit,
-  resolver, pool, UDP ownership, or rollout-state behavior.
+  UDP ownership, or rollout-state format. Resolver metadata now stays bound to
+  the effective DNS owner, and connection admission now accounts for each
+  physical racing transport under both global and configured-pool capacity.
 - Continue to stop new-version writers and drain the data plane before any
   rollback that restores an older compatible database and configuration tree.
 
@@ -151,6 +153,16 @@ helm version --short
   ledger used for release-candidate metadata to bounded regular blobs in the
   exact tagged Git tree. Dirty or later checkout files cannot qualify an older
   candidate or alter its canonical release body.
+- Treat malformed TURN REST expiry fields as invalid credentials without
+  allowing one bad packet to terminate the listener task.
+- Query and admit HTTPS/SVCB metadata only for the canonical DNS owner that
+  supplied the usable base addresses. Conflicting, missing, hosts-file, or
+  mismatched response provenance remains ineligible for metadata expansion.
+- Acquire global and configured-pool connection capacity before each racing
+  HTTP transport attempt, retain the winning lease for the physical
+  connection lifetime, and release failed, losing, canceled, or stale attempts
+  by ownership. A candidate rejected only by a racing peer is retried after
+  that peer fails without relaxing the shared absolute deadline.
 - Preserve every beta.2 fail-closed request-framing, TLS, CRLite, QUIC,
   resolver-provenance, confinement, secret, shared-state, admission, and
   supply-chain boundary. Require one fresh exact aggregate qualification
