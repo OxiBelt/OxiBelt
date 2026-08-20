@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use super::*;
 use crate::config::{
@@ -373,8 +372,8 @@ fn outlier_ejection_expiry_restores_eligibility() {
   pool.servers[1].state = UpstreamPoolServerState::Maintenance;
   pool.outlier_ejection.enabled = true;
   pool.outlier_ejection.consecutive_failures = 1;
-  pool.outlier_ejection.base_ejection_ms = 1;
-  pool.outlier_ejection.max_ejection_ms = 1;
+  pool.outlier_ejection.base_ejection_ms = 30_000;
+  pool.outlier_ejection.max_ejection_ms = 30_000;
   let state = PoolState::new(&[pool], None);
   let first = synthetic_upstream_name("app-pool", 0);
 
@@ -385,11 +384,18 @@ fn outlier_ejection_expiry_restores_eligibility() {
       .is_err()
   );
 
-  std::thread::sleep(Duration::from_millis(5));
+  let runtime = app_pool_runtime(&state);
+  runtime.servers[0]
+    .ejected_until_ms
+    .store(now_millis(), Ordering::Relaxed);
   let selection = state
     .select("app-pool", "203.0.113.10".parse().unwrap(), "/", None)
     .unwrap();
   assert_eq!(selection.upstream_name, first);
+  assert_eq!(
+    runtime.servers[0].ejected_until_ms.load(Ordering::Relaxed),
+    0
+  );
 }
 
 #[test]
