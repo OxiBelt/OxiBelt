@@ -138,9 +138,7 @@ fn candidate_passwords(auth: &TurnAuthConfig, username: &str) -> anyhow::Result<
 }
 
 fn rest_username_expiry(username: &str) -> Option<u64> {
-  let Some((expiry, _rest)) = username.split_once(':') else {
-    return None;
-  };
+  let (expiry, _rest) = username.split_once(':')?;
   expiry.parse::<u64>().ok()
 }
 
