@@ -614,6 +614,84 @@ test('builds exact stable release notes and a digest-bound receipt', () => {
   }
 })
 
+test('does not let a later ledger qualify an older release tag', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    const TaggedRevision = Commit(Root, 'baseline without release entry')
+    Git(Root, ['tag', '0.6.5'])
+    Git(Root, ['tag', '0.7.0'])
+
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${GovernedEntry()}\n${BaselineEntry}`)
+    Commit(Root, 'add later release entry')
+
+    Assert.throws(
+      () => BuildReleaseCandidate({
+        workspacePath: Root,
+        ref: 'refs/tags/0.7.0',
+        revision: TaggedRevision
+      }),
+      /CHANGELOG\.md has no governed entry for release 0\.7\.0/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('ignores later working-tree ledger and guide changes for a tagged candidate', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    Commit(Root, 'baseline')
+    Git(Root, ['tag', '0.6.5'])
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${GovernedEntry()}\n${BaselineEntry}`)
+    const Revision = Commit(Root, 'release contract')
+    Git(Root, ['tag', '0.7.0'])
+
+    const Expected = BuildReleaseCandidate({
+      workspacePath: Root,
+      ref: 'refs/tags/0.7.0',
+      revision: Revision
+    })
+    WriteFile(Root, 'CHANGELOG.md', '# Stable\n\nUncommitted replacement.\n')
+    WriteFile(Root, 'docs/Upgrading.md', '# Upgrading\n\nUncommitted replacement.\n')
+    WriteFile(Root, 'CHANGELOG-build.md', '# Uncommitted forbidden ledger.\n')
+
+    const Actual = BuildReleaseCandidate({
+      workspacePath: Root,
+      ref: 'refs/tags/0.7.0',
+      revision: Revision
+    })
+    Assert.deepEqual(Actual, Expected)
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('rejects a forbidden build ledger tracked by the tagged revision', () => {
+  const Root = CreateContractWorkspace()
+  try {
+    Git(Root, ['init', '-q'])
+    Commit(Root, 'baseline')
+    Git(Root, ['tag', '0.6.5'])
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${GovernedEntry()}\n${BaselineEntry}`)
+    WriteFile(Root, 'CHANGELOG-build.md', '# Build releases are forbidden.\n')
+    const Revision = Commit(Root, 'release contract with forbidden ledger')
+    Git(Root, ['tag', '0.7.0'])
+
+    Assert.throws(
+      () => BuildReleaseCandidate({
+        workspacePath: Root,
+        ref: 'refs/tags/0.7.0',
+        revision: Revision
+      }),
+      /CHANGELOG-build\.md is forbidden/
+    )
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
 test('requires the latest beta and one documentation-only stable carry-forward commit', () => {
   const Root = CreateContractWorkspace()
   try {

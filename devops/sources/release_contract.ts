@@ -140,6 +140,9 @@ type LoadedContract = {
   upgradeGuide: string
 }
 
+type RepositoryFileReader = (RelativePath: string, MaximumBytes: number) => string
+type RepositoryFileExists = (RelativePath: string) => boolean
+
 type ReleaseCandidateResult = {
   receipt: ReleaseContractReceipt
   body: string
@@ -647,21 +650,24 @@ function AssertEntryBase(
   return ExpectedBase
 }
 
-function LoadContract(Root: string): LoadedContract {
-  if (Fs.existsSync(ResolveInputPath(Root, ForbiddenBuildChangelogPath))) {
+function LoadContractFromSource(
+  ReadFile: RepositoryFileReader,
+  FileExists: RepositoryFileExists
+): LoadedContract {
+  if (FileExists(ForbiddenBuildChangelogPath)) {
     throw new Error(`${ForbiddenBuildChangelogPath} is forbidden; build tags have no changelog ledger`)
   }
   const Stable = ParseLedger(
     StableChangelogPath,
     'stable',
-    ReadBoundedRepositoryFile(Root, StableChangelogPath, MaximumChangelogBytes)
+    ReadFile(StableChangelogPath, MaximumChangelogBytes)
   )
   const Beta = ParseLedger(
     BetaChangelogPath,
     'beta',
-    ReadBoundedRepositoryFile(Root, BetaChangelogPath, MaximumChangelogBytes)
+    ReadFile(BetaChangelogPath, MaximumChangelogBytes)
   )
-  const UpgradeGuide = ReadBoundedRepositoryFile(Root, UpgradeGuidePath, MaximumUpgradeGuideBytes)
+  const UpgradeGuide = ReadFile(UpgradeGuidePath, MaximumUpgradeGuideBytes)
   for (const Entry of [...Stable.entries, ...Beta.entries]) {
     if (!Entry.historical && !HasMarkdownAnchor(UpgradeGuide, Entry.upgradeGuideAnchor ?? '')) {
       throw new Error(
@@ -678,12 +684,86 @@ function LoadContract(Root: string): LoadedContract {
   return { stable: Stable, beta: Beta, upgradeGuide: UpgradeGuide }
 }
 
+function LoadContract(Root: string): LoadedContract {
+  return LoadContractFromSource(
+    (RelativePath, MaximumBytes) => ReadBoundedRepositoryFile(Root, RelativePath, MaximumBytes),
+    RelativePath => Fs.existsSync(ResolveInputPath(Root, RelativePath))
+  )
+}
+
 function RunGit(Root: string, Arguments: string[]): string {
   return execFileSync('git', ['-C', Root, ...Arguments], {
     encoding: 'utf8',
     maxBuffer: 2 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe']
   }).trim()
+}
+
+function RunGitBuffer(Root: string, Arguments: string[], MaximumOutputBytes: number): Buffer {
+  return execFileSync('git', ['-C', Root, ...Arguments], {
+    encoding: 'buffer',
+    maxBuffer: MaximumOutputBytes,
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+}
+
+function GitTreeEntry(Root: string, Revision: string, RelativePath: string): string | undefined {
+  ResolveInputPath(Root, RelativePath)
+  const Output = RunGitBuffer(Root, ['ls-tree', '-z', Revision, '--', RelativePath], 4096)
+  if (Output.length === 0) {
+    return undefined
+  }
+  const Text = Output.toString('utf8')
+  if (!Buffer.from(Text, 'utf8').equals(Output)) {
+    throw new Error(`Git tree entry is not UTF-8: ${RelativePath}`)
+  }
+  return Text
+}
+
+function ReadBoundedRepositoryFileAtRevision(
+  Root: string,
+  Revision: string,
+  RelativePath: string,
+  MaximumBytes: number
+): string {
+  const Entry = GitTreeEntry(Root, Revision, RelativePath)
+  const Match = Entry?.match(/^(100644|100755) blob ([0-9a-f]{40})\t([^\0]+)\0$/)
+  if (Match === null || Match === undefined || Match[3] !== RelativePath) {
+    throw new Error(`repository input must be a tracked regular file at ${Revision}: ${RelativePath}`)
+  }
+  const Object = Match[2]
+  const SizeText = RunGit(Root, ['cat-file', '-s', Object])
+  if (!/^[0-9]+$/.test(SizeText)) {
+    throw new Error(`Git reported an invalid blob size for ${RelativePath} at ${Revision}`)
+  }
+  const Size = Number(SizeText)
+  if (!Number.isSafeInteger(Size) || Size > MaximumBytes) {
+    throw new Error(`repository input exceeds ${MaximumBytes} bytes at ${Revision}: ${RelativePath}`)
+  }
+  const ContentBuffer = RunGitBuffer(Root, ['cat-file', 'blob', Object], MaximumBytes)
+  if (ContentBuffer.length !== Size) {
+    throw new Error(`Git blob size changed while reading ${RelativePath} at ${Revision}`)
+  }
+  const Content = ContentBuffer.toString('utf8')
+  if (!Buffer.from(Content, 'utf8').equals(ContentBuffer)) {
+    throw new Error(`repository input is not UTF-8 at ${Revision}: ${RelativePath}`)
+  }
+  if (Content.includes('\0')) {
+    throw new Error(`repository input contains a NUL byte at ${Revision}: ${RelativePath}`)
+  }
+  return Content
+}
+
+function LoadContractAtRevision(Root: string, Revision: string): LoadedContract {
+  return LoadContractFromSource(
+    (RelativePath, MaximumBytes) => ReadBoundedRepositoryFileAtRevision(
+      Root,
+      Revision,
+      RelativePath,
+      MaximumBytes
+    ),
+    RelativePath => GitTreeEntry(Root, Revision, RelativePath) !== undefined
+  )
 }
 
 function ResolveRevision(Root: string, Revisionish: string): string {
@@ -807,7 +887,7 @@ export function BuildReleaseCandidate(Options: ReleaseCandidateOptions): Release
     }
   }
 
-  const Contract = LoadContract(Root)
+  const Contract = LoadContractAtRevision(Root, RequestedRevision)
   const Ledger = Tag.kind === 'stable' ? Contract.stable : Contract.beta
   const Entry = Ledger.entries.find(Candidate => Candidate.version === Tag.tag)
   if (Entry === undefined || Entry.historical) {
