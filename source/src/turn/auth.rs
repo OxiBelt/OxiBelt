@@ -99,9 +99,9 @@ fn verify_nonce(raw: &str, realm: &str, auth: &TurnAuthConfig) -> anyhow::Result
   if nonce_realm != realm {
     return Ok(false);
   }
-  let issued = issued
-    .parse::<u64>()
-    .context("invalid TURN nonce timestamp")?;
+  let Ok(issued) = issued.parse::<u64>() else {
+    return Ok(false);
+  };
   let now = unix_time()?;
   if issued > now || now.saturating_sub(issued) > auth.nonce_ttl_seconds {
     return Ok(false);
@@ -128,7 +128,7 @@ fn candidate_passwords(auth: &TurnAuthConfig, username: &str) -> anyhow::Result<
     }
   }
   if let Some(secret) = rest_secret(auth)?
-    && let Some(expiry) = rest_username_expiry(username)?
+    && let Some(expiry) = rest_username_expiry(username)
     && expiry >= unix_time()?
   {
     let signature = hmac_sha1(secret.as_bytes(), username.as_bytes());
@@ -137,15 +137,11 @@ fn candidate_passwords(auth: &TurnAuthConfig, username: &str) -> anyhow::Result<
   Ok(passwords)
 }
 
-fn rest_username_expiry(username: &str) -> anyhow::Result<Option<u64>> {
+fn rest_username_expiry(username: &str) -> Option<u64> {
   let Some((expiry, _rest)) = username.split_once(':') else {
-    return Ok(None);
+    return None;
   };
-  Ok(Some(
-    expiry
-      .parse::<u64>()
-      .context("invalid TURN REST username timestamp")?,
-  ))
+  expiry.parse::<u64>().ok()
 }
 
 fn rest_secret(auth: &TurnAuthConfig) -> anyhow::Result<Option<String>> {
@@ -211,7 +207,9 @@ fn _hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
   use crate::config::{TurnAuthConfig, TurnAuthMode};
-  use crate::turn::protocol::{ALLOCATE_REQUEST, encode_message, parse_stun};
+  use crate::turn::protocol::{
+    ALLOCATE_REQUEST, encode_message, parse_stun, with_message_integrity,
+  };
 
   #[test]
   fn constant_time_equality_preserves_length_and_content_checks() {
@@ -236,11 +234,45 @@ mod tests {
 
   #[test]
   fn rest_username_expiry_is_parsed() {
-    assert_eq!(rest_username_expiry("1:user").unwrap(), Some(1));
+    assert_eq!(rest_username_expiry("1:user"), Some(1));
   }
 
   #[test]
   fn username_without_rest_separator_has_no_expiry() {
-    assert_eq!(rest_username_expiry("user").unwrap(), None);
+    assert_eq!(rest_username_expiry("user"), None);
+  }
+
+  #[test]
+  fn malformed_rest_username_is_an_invalid_credential_not_an_error() {
+    let auth = TurnAuthConfig {
+      mode: TurnAuthMode::Enforce,
+      rest_shared_secret: Some("test-secret".to_string()),
+      ..TurnAuthConfig::default()
+    };
+    let raw = with_message_integrity(
+      encode_message(
+        ALLOCATE_REQUEST,
+        [2u8; 12],
+        &[(ATTR_USERNAME, b"not-a-number:attacker".to_vec())],
+      ),
+      b"irrelevant-integrity-key",
+    );
+    let message = parse_stun(&raw).expect("STUN request should parse");
+    assert_eq!(
+      validate_message(&auth, "example.test", &message).expect("malformed credentials fail closed"),
+      AuthDecision::Invalid
+    );
+  }
+
+  #[test]
+  fn malformed_nonce_timestamp_is_invalid_not_an_error() {
+    let auth = TurnAuthConfig {
+      rest_shared_secret: Some("test-secret".to_string()),
+      ..TurnAuthConfig::default()
+    };
+    assert!(
+      !verify_nonce("not-a-number:example.test:signature", "example.test", &auth)
+        .expect("malformed nonce fails closed")
+    );
   }
 }
