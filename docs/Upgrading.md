@@ -54,9 +54,11 @@ be used as a supported production upgrade source or target.
 | `0.8.1-beta.1` | `0.8.1-beta.2` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.1 has no remote tag or official artifact and beta.2 has no release artifact to promote. |
 | `0.6.6` | `0.8.1-beta.3` | Published failed cut | The prerelease exists, but its release-image workflow failed before canonical image publication. Preserve the immutable tag and release; do not reuse its incomplete evidence. |
 | `0.8.1-beta.2` | `0.8.1-beta.3` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.2 has no official artifact or qualification evidence to promote. |
-| `0.6.6` | `0.8.1-beta.4` | Qualification candidate | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Deploy only after every fresh exact-revision artifact and automatic qualification gate succeeds. |
+| `0.6.6` | `0.8.1-beta.4` | Published, not qualified | The exact-version images and charts were published, but the automatic independent verifier failed before producing its rebuild matrix or any independent receipt. Preserve the immutable release and artifacts as history; do not promote or reuse their evidence. |
 | `0.8.1-beta.3` | `0.8.1-beta.4` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.3 has no qualified official image or evidence to promote. |
-| `0.8.1-beta.4` | `0.8.1` | Conditional stable promotion | Promotion requires person-reviewed beta publication, complete exact-revision qualification, at least 24 hours of soak from the later of publication and verifier completion, and a documentation-only stable commit. |
+| `0.6.6` | `0.8.1-beta.5` | Qualification candidate | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Deploy only after every fresh exact-revision artifact and automatic qualification gate succeeds. |
+| `0.8.1-beta.4` | `0.8.1-beta.5` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.4's published artifacts and incomplete verifier evidence cannot be promoted, relabeled, or reused. |
+| `0.8.1-beta.5` | `0.8.1` | Conditional stable promotion | Promotion requires person-reviewed beta publication, complete exact-revision qualification, at least 24 hours of soak from the later of publication and verifier completion, and a documentation-only stable commit. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -66,14 +68,18 @@ release-contract checker.
 
 ## Upgrade from 0.6.6 to the 0.8.1 line
 
-`0.8.1-beta.4` is the fresh qualification candidate. The signed beta.1 tag
+`0.8.1-beta.5` is the fresh qualification candidate. The signed beta.1 tag
 remains at its original local revision and is absent from GitHub. The signed
 beta.2 tag exists remotely at its immutable revision, but draft preparation
 failed and no GitHub Release or official artifact was created. The immutable
 beta.3 prerelease exists, but its release-image workflow failed before
 canonical image publication because downloaded artifact data did not retain a
-helper's executable mode. Do not move or delete these tags, reinterpret an old
-rerun as trustworthy qualification, or reuse evidence from a failed cut.
+helper's executable mode. Beta.4 published its exact-version image and chart
+set, but its automatic independent verifier failed before producing a rebuild
+matrix or any independent receipt because package-manager setup ran outside
+both sibling checkouts. Do not move or delete these tags, reinterpret an old
+rerun as trustworthy qualification, or reuse artifacts or evidence from a
+failed cut.
 
 The older `0.8.0-beta.0` tag is invalid, the published `0.8.0-beta.1` cut is
 unqualified, and `0.8.0-beta.2` failed before a governed entry could prepare
@@ -106,9 +112,10 @@ continues to accept `[quic.upstream.resolution]` as a deprecated compatibility
 input; migrate every leaf and do not configure the same effective leaf in both
 tables. Resolver-policy changes require `full_reload`.
 
-The beta.4 runtime keeps the same circuit-breaker configuration surface, but enforces
-`global.max_connections` and configured pool `max_connections` for every
-physical Happy Eyeballs candidate before that candidate starts network work.
+The beta.5 runtime keeps the same circuit-breaker configuration surface, but
+enforces `global.max_connections` and configured pool `max_connections` for
+every physical Happy Eyeballs candidate before that candidate starts network
+work.
 The winning lease follows the pooled connection or tunnel; failed, losing,
 canceled, and stale attempts release it. When a racing peer temporarily owns
 the final slot, the rejected fallback is deferred and may retry after that peer
@@ -116,7 +123,7 @@ fails under the original absolute deadline. Confirm that intentional address-
 family concurrency fits the configured global and pool limits, and monitor
 capacity rejections during staged rollout.
 
-HTTPS/SVCB discovery in beta.4 is also bound to the effective DNS query owner
+HTTPS/SVCB discovery in beta.5 is also bound to the effective DNS query owner
 that supplied the base addresses. Deployments using search domains should
 verify that upstream DNS returns metadata for that accepted owner; hosts-pinned,
 mixed-provenance, conflicting-owner, and mismatched metadata responses now stay
@@ -136,7 +143,7 @@ the controller, restore the old binaries, configuration, and database together,
 and remove unknown epoch-1 tables before validating with `0.6.6`. External
 audit, telemetry, network, and client-visible effects cannot be undone.
 
-`0.8.1-beta.4` must produce fresh exact-revision evidence: 30 immutable image
+`0.8.1-beta.5` must produce fresh exact-revision evidence: 30 immutable image
 subjects, both official exact-version Helm OCI charts, their independent
 rebuild receipts, and one complete automatic qualification receipt. Begin the
 24-hour stable soak only after person-reviewed publication and that evidence
