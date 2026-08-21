@@ -139,6 +139,10 @@ helm version --short
   captured recovery request succeeded, both unsafe paths were rejected, and no
   upstream leak was observed before the timeout. The tag remained local and
   was discarded; that failed preflight supplies no release evidence.
+- Exact pre-tag Check workflow `32470310304` then stopped at the mandatory
+  Rust lint gate because the new timeout validation used a collapsible nested
+  condition. Keep that source-only lint failure as attributable preflight
+  history; it produced no tag, release artifact, or qualification evidence.
 - The beta.1 tag remains local-only, beta.2 remains an immutable unpublished
   failed cut, beta.3 remains a published failed cut without canonical images,
   and beta.4 remains published without independent receipts. The `0.8.0` beta

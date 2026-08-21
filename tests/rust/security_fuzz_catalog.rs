@@ -178,18 +178,17 @@ fn validate_catalog(catalog: &Catalog) -> Result<()> {
     if target.max_concurrent_sessions == 0 || target.max_concurrent_sessions > 16 {
       return Err(format!("{} has an invalid concurrent session bound", target.id).into());
     }
-    if let Some(case_timeout_seconds) = target.case_timeout_seconds {
-      if case_timeout_seconds < catalog.case_timeout_seconds
-        || case_timeout_seconds > MAX_TARGET_CASE_TIMEOUT_SECONDS
-      {
-        return Err(
-          format!(
-            "{} has an invalid case timeout override; expected {}..={MAX_TARGET_CASE_TIMEOUT_SECONDS} seconds",
-            target.id, catalog.case_timeout_seconds
-          )
-          .into(),
-        );
-      }
+    if let Some(case_timeout_seconds) = target.case_timeout_seconds
+      && (case_timeout_seconds < catalog.case_timeout_seconds
+        || case_timeout_seconds > MAX_TARGET_CASE_TIMEOUT_SECONDS)
+    {
+      return Err(
+        format!(
+          "{} has an invalid case timeout override; expected {}..={MAX_TARGET_CASE_TIMEOUT_SECONDS} seconds",
+          target.id, catalog.case_timeout_seconds
+        )
+        .into(),
+      );
     }
     if target.required_helpers.is_empty()
       || target
