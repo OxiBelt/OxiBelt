@@ -69,6 +69,10 @@ for the governed entry format.
   from the immutable approved verifier checkout. Keep the tagged release
   checkout isolated as build input and address it through one explicit,
   non-parent-traversing sibling workspace path.
+- Keep Docker security-fuzz machine observations as stdout-only structured
+  JSON while retaining probe diagnostics in bounded executor logs. Preserve
+  every nonzero probe status as a failed case so asynchronous HTTP/2
+  diagnostics cannot corrupt or mask a qualification oracle.
 - Require all 30 fresh beta.5 image subjects and both Helm `4.2.4` chart
   packages to complete vulnerability, SBOM, provenance, attestation,
   independent-rebuild, and registry readback verification. Do not promote or
