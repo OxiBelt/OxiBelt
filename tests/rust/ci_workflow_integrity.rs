@@ -9562,6 +9562,75 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "independent rebuild containers should use the resolver-derived trusted runner"
   );
 
+  for (job_name, step_name) in [
+    ("resolve", "Enable hash-pinned pnpm"),
+    ("resolve", "Install release-planning dependencies"),
+    ("verify", "Enable hash-pinned pnpm"),
+    (
+      "verify",
+      "Install verifier dependencies without lifecycle scripts",
+    ),
+    (
+      "verify-helm-chart",
+      "Enable hash-pinned pnpm and install verifier dependencies",
+    ),
+  ] {
+    let steps = jobs[job_name]["steps"]
+      .as_array()
+      .unwrap_or_else(|| panic!("{job_name} should define steps"));
+    let step = steps
+      .iter()
+      .find(|step| step["name"].as_str() == Some(step_name))
+      .unwrap_or_else(|| panic!("{job_name} should define {step_name}"));
+    assert_eq!(
+      step["working-directory"], "verifier",
+      "{job_name} must resolve the hash-pinned package manager from the approved verifier checkout"
+    );
+  }
+
+  let chart_steps = jobs["verify-helm-chart"]["steps"]
+    .as_array()
+    .expect("independent chart rebuild should define steps");
+  let chart_rebuild = chart_steps
+    .iter()
+    .find(|step| {
+      step["name"].as_str() == Some("Rebuild, authenticate, and compare exact chart bytes")
+    })
+    .expect("independent chart rebuild should compare exact chart bytes");
+  assert_eq!(
+    chart_rebuild["working-directory"], "verifier",
+    "independent chart tooling must resolve dependencies from the approved verifier checkout"
+  );
+  assert_eq!(
+    chart_rebuild["env"]["RELEASE_WORKSPACE"], "${{ github.workspace }}/release",
+    "independent chart tooling should address the sibling release checkout without parent traversal"
+  );
+  let chart_run = chart_rebuild["run"]
+    .as_str()
+    .expect("independent chart rebuild should be a shell step");
+  for expected in [
+    "node --import tsx devops/sources/helm_chart_release.ts prepare",
+    "--workspace-path \"${RELEASE_WORKSPACE}\"",
+    "node --import tsx devops/sources/helm_chart_oci_release.ts validate-predicate",
+    "HELM_CHART_RELEASE_HELPER=\"$(pwd)/devops/sources/helm_chart_release.ts\"",
+    "tests/scripts/verify-release-helm-chart.sh",
+  ] {
+    assert!(
+      chart_run.contains(expected),
+      "independent chart rebuild should resolve {expected} from the verifier checkout"
+    );
+  }
+  for forbidden in [
+    "verifier/devops/sources/",
+    "verifier/tests/scripts/",
+    "--workspace-path release",
+  ] {
+    assert!(
+      !chart_run.contains(forbidden),
+      "verifier-relative chart rebuild must not retain {forbidden}"
+    );
+  }
+
   for expected in [
     "workflows: [\"Release OxiBelt images\"]",
     "github.event.workflow_run.conclusion == 'success'",
