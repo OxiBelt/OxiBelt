@@ -211,6 +211,29 @@ if [[ ! "${oxibelt_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9
   echo "the Docker build identity tuple is malformed" >&2
   exit 2
 fi
+if [[ ! "${oxibelt_created}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+  echo "the Docker image creation time must be second-resolution UTC RFC 3339" >&2
+  exit 2
+fi
+if ! source_date_epoch="$(
+  python3 -c '
+import datetime
+import sys
+
+try:
+    created = datetime.datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ")
+except ValueError:
+    raise SystemExit(1)
+created = created.replace(tzinfo=datetime.timezone.utc)
+epoch = int(created.timestamp())
+if epoch < 0:
+    raise SystemExit(1)
+print(epoch)
+' "${oxibelt_created}"
+)"; then
+  echo "the Docker image creation time is not a supported UTC timestamp" >&2
+  exit 2
+fi
 if [[ "${oxibelt_source_ref}" != "unknown" ]] &&
    [[ ! "${oxibelt_source_ref}" =~ ^refs/(heads|tags)/[A-Za-z0-9._/-]+$ ]]; then
   echo "the Docker build source ref is malformed" >&2
@@ -258,12 +281,13 @@ docker buildx build \
   --build-arg "OXIBELT_BUILD_DIRTY=${oxibelt_source_dirty}" \
   --build-arg "OXIBELT_BUILD_KIND=${oxibelt_build_kind}" \
   --build-arg "OXIBELT_CREATED=${oxibelt_created}" \
+  --build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}" \
   --build-arg "OXIBELT_SOURCE=${oxibelt_source}" \
   --build-arg "OXIBELT_REF_NAME=${oxibelt_ref_name}" \
   --target "${role}" \
   --tag "${image_tag}" \
   --metadata-file "${build_metadata_tmp}" \
-  --output "type=docker,dest=${image_tar}" \
+  --output "type=docker,dest=${image_tar},rewrite-timestamp=true" \
   "${repo_root}"
 
 mv -- "${build_metadata_tmp}" "${build_metadata}"

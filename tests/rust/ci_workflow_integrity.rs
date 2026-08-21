@@ -1064,6 +1064,29 @@ fn alpine_runtime_rootfs_is_assembled_without_target_execution() {
     );
   }
 
+  let package_validation = rootfs_script
+    .find("CA certificate bundle is missing")
+    .expect("rootfs preparation should validate the installed CA bundle");
+  let apk_log_cleanup = rootfs_script
+    .find("rm -f \"${rootfs}/var/log/apk.log\"")
+    .expect("rootfs preparation should remove APK's wall-clock transaction log");
+  let account_validation = rootfs_script
+    .find("for account_file in passwd group shadow")
+    .expect("rootfs preparation should validate account databases");
+  assert!(
+    package_validation < apk_log_cleanup && apk_log_cleanup < account_validation,
+    "APK's nondeterministic transaction log should be removed after package validation and before runtime assembly"
+  );
+  assert!(
+    rootfs_script
+      .contains("[ ! -e \"${rootfs}/var/log/apk.log\" ] && [ ! -L \"${rootfs}/var/log/apk.log\" ]"),
+    "rootfs preparation should fail closed if the APK transaction log remains"
+  );
+  assert!(
+    rootfs_script.contains("[ -d \"${rootfs}/var/log\" ] && [ ! -L \"${rootfs}/var/log\" ]"),
+    "rootfs preparation should reject a symbolic APK log parent"
+  );
+
   for forbidden in ["--allow-untrusted", "\nchroot ", "\neval ", "qemu-"] {
     assert!(
       !rootfs_script.contains(forbidden),
@@ -9784,6 +9807,10 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
   for expected in [
     "tool_root=\"$(cd -- \"${script_dir}/../..\" && pwd)\"",
     "source_root=\"${OXIBELT_DOCKER_IMAGE_SOURCE_ROOT:-${tool_root}}\"",
+    "the Docker image creation time must be second-resolution UTC RFC 3339",
+    "datetime.datetime.strptime(sys.argv[1], \"%Y-%m-%dT%H:%M:%SZ\")",
+    "--build-arg \"SOURCE_DATE_EPOCH=${source_date_epoch}\"",
+    "rewrite-timestamp=true",
     "python3 \"${tool_root}/tests/scripts/validate-ci-image-artifact.py\" create",
     "--repo-root \"${repo_root}\"",
   ] {

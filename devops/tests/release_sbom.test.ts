@@ -222,6 +222,133 @@ test('platform enrichment is deterministic and attaches binaries to the root dep
   Assert.equal(Dependency.dependsOn.some(Reference => Reference.startsWith('urn:oxibelt:binary:')), true)
 })
 
+test('platform enrichment removes only validated Trivy rebuild-variant metadata', () => {
+  const FirstOptions = PlatformOptions()
+  const SecondOptions = PlatformOptions()
+  const ConfigureInput = (Options: PlatformSbomOptions, Suffix: string): void => {
+    const Input = Options.trivySbom as Record<string, unknown>
+    const Root = RootComponent(Input)
+    Root.purl = `pkg:oci/oxibelt@${Digest('a')}?repository_url=index.docker.io%2Flibrary%2Foxibelt`
+    Input.components = [
+      {
+        type: 'operating-system',
+        name: 'alpine',
+        version: '3.24.1',
+        'bom-ref': `trivy-operating-system-${Suffix}`,
+        properties: [
+          { name: 'aquasecurity:trivy:Class', value: 'os-pkgs' },
+          { name: 'aquasecurity:trivy:Type', value: 'alpine' }
+        ]
+      },
+      {
+        type: 'library',
+        name: 'musl',
+        version: '1.2.5',
+        purl: 'pkg:apk/alpine/musl@1.2.5',
+        'bom-ref': 'pkg:apk/alpine/musl@1.2.5',
+        hashes: [{ alg: 'SHA-1', content: '1'.repeat(40) }],
+        properties: [
+          { name: 'aquasecurity:trivy:LayerDigest', value: Digest(Suffix) },
+          { name: 'aquasecurity:trivy:LayerDiffID', value: Digest(Suffix === '1' ? '2' : '3') },
+          { name: 'aquasecurity:trivy:PkgID', value: 'musl@1.2.5' }
+        ],
+        components: [{
+          type: 'library',
+          name: 'nested-fixture',
+          version: '1',
+          'bom-ref': 'pkg:generic/nested-fixture@1',
+          properties: [
+            { name: 'aquasecurity:trivy:LayerDigest', value: Digest(Suffix) },
+            { name: 'fixture:retained', value: 'yes' }
+          ]
+        }]
+      }
+    ]
+    Input.dependencies = [
+      {
+        ref: 'trivy-root',
+        dependsOn: [`trivy-operating-system-${Suffix}`, 'pkg:apk/alpine/musl@1.2.5']
+      },
+      {
+        ref: `trivy-operating-system-${Suffix}`,
+        dependsOn: ['pkg:apk/alpine/musl@1.2.5']
+      },
+      { ref: 'pkg:apk/alpine/musl@1.2.5', dependsOn: ['pkg:generic/nested-fixture@1'] },
+      { ref: 'pkg:generic/nested-fixture@1', dependsOn: [] }
+    ]
+  }
+  ConfigureInput(FirstOptions, '1')
+  ConfigureInput(SecondOptions, '2')
+
+  const First = BuildPlatformSbom(FirstOptions)
+  const Second = BuildPlatformSbom(SecondOptions)
+
+  Assert.deepEqual(First, Second)
+  Assert.equal(RootComponent(First).purl, undefined)
+  const Components = First.components as Array<Record<string, unknown>>
+  const OperatingSystem = Components.find(Component => Component.type === 'operating-system')
+  Assert.equal(OperatingSystem?.['bom-ref'], 'urn:oxibelt:operating-system:standalone:amd64')
+  const Musl = Components.find(Component => Component.name === 'musl')
+  Assert.ok(Musl)
+  Assert.equal(Musl.purl, 'pkg:apk/alpine/musl@1.2.5')
+  Assert.deepEqual(Musl.hashes, [{ alg: 'SHA-1', content: '1'.repeat(40) }])
+  Assert.deepEqual(Musl.properties, [{ name: 'aquasecurity:trivy:PkgID', value: 'musl@1.2.5' }])
+  const Nested = (Musl.components as Array<Record<string, unknown>>)[0]
+  Assert.deepEqual(Nested.properties, [{ name: 'fixture:retained', value: 'yes' }])
+  const Dependencies = First.dependencies as Array<{ ref: string, dependsOn: string[] }>
+  Assert.equal(Dependencies.some(Dependency => Dependency.ref.startsWith('trivy-operating-system-')), false)
+  Assert.equal(
+    Dependencies.some(Dependency => Dependency.dependsOn.some(Ref => Ref.startsWith('trivy-operating-system-'))),
+    false
+  )
+  Assert.equal(
+    Dependencies.some(Dependency => Dependency.ref === 'urn:oxibelt:operating-system:standalone:amd64'),
+    true
+  )
+})
+
+test('platform enrichment rejects malformed or ambiguous Trivy normalization metadata', () => {
+  const MalformedPurl = PlatformOptions()
+  RootComponent(MalformedPurl.trivySbom as Record<string, unknown>).purl =
+    `pkg:oci/oxibelt@${Digest('b')}`
+  Assert.throws(() => BuildPlatformSbom(MalformedPurl), /purl does not identify the local image digest/)
+
+  const MalformedLayerDigest = PlatformOptions()
+  const MalformedComponent = ((MalformedLayerDigest.trivySbom as Record<string, unknown>)
+    .components as Array<Record<string, unknown>>)[0]
+  MalformedComponent.properties = [
+    { name: 'aquasecurity:trivy:LayerDigest', value: 'sha256:not-a-digest' }
+  ]
+  Assert.throws(() => BuildPlatformSbom(MalformedLayerDigest), /LayerDigest must be a lowercase sha256 digest/)
+
+  const DuplicateLayerDigest = PlatformOptions()
+  const DuplicateComponent = ((DuplicateLayerDigest.trivySbom as Record<string, unknown>)
+    .components as Array<Record<string, unknown>>)[0]
+  DuplicateComponent.properties = [
+    { name: 'aquasecurity:trivy:LayerDiffID', value: Digest('1') },
+    { name: 'aquasecurity:trivy:LayerDiffID', value: Digest('2') }
+  ]
+  Assert.throws(() => BuildPlatformSbom(DuplicateLayerDigest), /duplicate property aquasecurity:trivy:LayerDiffID/)
+
+  const MultipleOperatingSystems = PlatformOptions()
+  ;(MultipleOperatingSystems.trivySbom as Record<string, unknown>).components = [
+    { type: 'operating-system', name: 'one', 'bom-ref': 'os-one' },
+    { type: 'operating-system', name: 'two', 'bom-ref': 'os-two' }
+  ]
+  Assert.throws(() => BuildPlatformSbom(MultipleOperatingSystems), /at most one operating-system component/)
+
+  const RewrittenRefCollision = PlatformOptions()
+  ;(RewrittenRefCollision.trivySbom as Record<string, unknown>).components = [
+    { type: 'operating-system', name: 'alpine', 'bom-ref': 'trivy-operating-system' },
+    {
+      type: 'library',
+      name: 'collision',
+      'bom-ref': 'urn:oxibelt:operating-system:standalone:amd64'
+    }
+  ]
+  Assert.throws(() => BuildPlatformSbom(RewrittenRefCollision), /duplicate component bom-ref/)
+})
+
 test('platform enrichment normalizes multi-valued Trivy root properties', () => {
   const Options = PlatformOptions('controller')
   const Plan = Options.imagePlan as ReturnType<typeof ReleasePlan>

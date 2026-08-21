@@ -50,6 +50,14 @@ for package in alpine-baselayout ca-certificates libgcc libssl3; do
 done
 [ -s "${rootfs}/etc/ssl/certs/ca-certificates.crt" ] || fail "CA certificate bundle is missing"
 
+# apk records wall-clock transaction times in this build-only log. Retaining it
+# would make otherwise identical runtime root filesystems differ across rebuilds.
+[ -d "${rootfs}/var/log" ] && [ ! -L "${rootfs}/var/log" ] || \
+  fail "target rootfs log directory is missing or symbolic"
+rm -f "${rootfs}/var/log/apk.log"
+[ ! -e "${rootfs}/var/log/apk.log" ] && [ ! -L "${rootfs}/var/log/apk.log" ] || \
+  fail "APK transaction log remains in target rootfs"
+
 for account_file in passwd group shadow; do
   [ -f "${rootfs}/etc/${account_file}" ] || fail "account database ${account_file} is missing"
 done

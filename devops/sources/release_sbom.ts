@@ -45,6 +45,10 @@ const MaximumAttestationBytes = 16 * 1024 * 1024
 const Sha256 = /^sha256:[0-9a-f]{64}$/
 const Sha256Value = /^[0-9a-f]{64}$/
 const ReservedPropertyPrefix = 'io.oxibelt.'
+const TrivyLayerPropertyNames = new Set([
+  'aquasecurity:trivy:LayerDigest',
+  'aquasecurity:trivy:LayerDiffID'
+])
 const ExpectedIndexArchs = ['amd64', 'arm64', 'riscv64'] as const
 const ProtectedPlatformPropertyNames = [
   'io.oxibelt.artifact.arch',
@@ -208,6 +212,28 @@ function CollectComponents(Value: unknown, Result: JsonRecord[] = []): JsonRecor
   return Result
 }
 
+function CollectComponentRecords(
+  Value: unknown,
+  Description: string,
+  Result: JsonRecord[] = []
+): JsonRecord[] {
+  if (Value === undefined) {
+    return Result
+  }
+  for (const [Index, Item] of ArrayValue(Value, Description).entries()) {
+    const Component = RecordValue(Item, `${Description}[${Index}]`)
+    Result.push(Component)
+    if (Component.components !== undefined) {
+      CollectComponentRecords(
+        Component.components,
+        `${Description}[${Index}].components`,
+        Result
+      )
+    }
+  }
+  return Result
+}
+
 function AssertUniqueBomRefs(Bom: JsonRecord, Description: string): void {
   const Seen = new Set<string>()
   const Metadata = RecordValue(Bom.metadata, `${Description} metadata`)
@@ -232,7 +258,80 @@ function ReplaceDependencyRef(Bom: JsonRecord, OldRef: string, NewRef: string): 
       Dependency.ref = NewRef
     }
     if (Array.isArray(Dependency.dependsOn)) {
-      Dependency.dependsOn = Dependency.dependsOn.map(Ref => Ref === OldRef ? NewRef : Ref)
+      Dependency.dependsOn = Dependency.dependsOn.map((Ref: unknown) => Ref === OldRef ? NewRef : Ref)
+    }
+  }
+}
+
+function RemoveTrivyRootPurl(Root: JsonRecord, LocalTag: string, Digest: string): void {
+  if (Root.purl === undefined) {
+    return
+  }
+  const Purl = StringValue(Root.purl, 'Trivy CycloneDX root component purl')
+  let DecodedPurl: string
+  try {
+    DecodedPurl = decodeURIComponent(Purl)
+  } catch {
+    throw new Error('Trivy CycloneDX root component purl is not valid percent-encoding')
+  }
+  const Separator = LocalTag.lastIndexOf(':')
+  if (Separator <= 0) {
+    throw new Error(`release artifact local tag is malformed: ${LocalTag}`)
+  }
+  const ExpectedPrefix = `pkg:oci/${LocalTag.slice(0, Separator)}@${Digest}`
+  if (DecodedPurl !== ExpectedPrefix && !DecodedPurl.startsWith(`${ExpectedPrefix}?`)) {
+    throw new Error('Trivy CycloneDX root component purl does not identify the local image digest')
+  }
+  delete Root.purl
+}
+
+function NormalizeTrivyComponents(
+  Bom: JsonRecord,
+  Value: unknown,
+  Role: string,
+  ArtifactArch: string
+): void {
+  const Components = CollectComponentRecords(Value, 'Trivy CycloneDX components')
+  const OperatingSystems = Components.filter(Component => Component.type === 'operating-system')
+  if (OperatingSystems.length > 1) {
+    throw new Error('Trivy CycloneDX SBOM must contain at most one operating-system component')
+  }
+  if (OperatingSystems.length === 1) {
+    const OperatingSystem = OperatingSystems[0]
+    const OldRef = StringValue(OperatingSystem['bom-ref'], 'Trivy operating-system component bom-ref')
+    const NewRef = `urn:oxibelt:operating-system:${Role}:${ArtifactArch}`
+    OperatingSystem['bom-ref'] = NewRef
+    ReplaceDependencyRef(Bom, OldRef, NewRef)
+  }
+
+  for (const [Index, Component] of Components.entries()) {
+    if (Component.properties === undefined) {
+      continue
+    }
+    const Retained: JsonRecord[] = []
+    const Removed = new Set<string>()
+    for (const PropertyValue of Properties(
+      Component.properties,
+      `Trivy CycloneDX component ${Index} properties`
+    )) {
+      const Name = StringValue(PropertyValue.name, `Trivy CycloneDX component ${Index} property name`)
+      const Value = StringValue(PropertyValue.value, `Trivy CycloneDX component ${Index} property value`)
+      if (!TrivyLayerPropertyNames.has(Name)) {
+        Retained.push(PropertyValue)
+        continue
+      }
+      if (Removed.has(Name)) {
+        throw new Error(`Trivy CycloneDX component ${Index} has duplicate property ${Name}`)
+      }
+      if (!Sha256.test(Value)) {
+        throw new Error(`Trivy CycloneDX component ${Index} property ${Name} must be a lowercase sha256 digest`)
+      }
+      Removed.add(Name)
+    }
+    if (Retained.length === 0) {
+      delete Component.properties
+    } else {
+      Component.properties = Retained
     }
   }
 }
@@ -421,6 +520,7 @@ export function BuildPlatformSbom(Options: PlatformSbomOptions): JsonRecord {
   if (!RootIdentifiesLocalTag(Root, LocalTag)) {
     throw new Error(`Trivy CycloneDX root component does not identify local image tag ${LocalTag}`)
   }
+  RemoveTrivyRootPurl(Root, LocalTag, Digest)
   const OldRootRef = StringValue(Root['bom-ref'], 'Trivy CycloneDX root component bom-ref')
   Root.type = 'container'
   Root.name = LocalTag
@@ -444,6 +544,7 @@ export function BuildPlatformSbom(Options: PlatformSbomOptions): JsonRecord {
 
   const Binaries = ValidateInventory(Options.binaryInventory, Role, Version)
   const Components = Bom.components === undefined ? [] : ArrayValue(Bom.components, 'Trivy CycloneDX components')
+  NormalizeTrivyComponents(Bom, Components, Options.role, Options.artifactArch)
   const BinaryRefs: string[] = []
   for (const Binary of Binaries) {
     const Name = String(Binary.name)

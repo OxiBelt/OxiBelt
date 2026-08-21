@@ -342,6 +342,31 @@ class ComparatorTest(unittest.TestCase):
         self.assertEqual(receipt["outcome"], "mismatch")
         self.assertIn("filesystem", receipt["differences"])
 
+    def test_apk_transaction_log_content_drift_remains_a_mismatch(self) -> None:
+        published = self.artifact(
+            "published-apk-log",
+            [("var/log/apk.log", b"apk transaction at 2026-08-21 05:28:01\n", 0o644)],
+        )
+        rebuilt = self.artifact(
+            "rebuilt-apk-log",
+            [("var/log/apk.log", b"apk transaction at 2026-08-21 06:07:22\n", 0o644)],
+        )
+
+        result, receipt = self.compare(published, rebuilt)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(receipt["outcome"], "mismatch")
+        self.assertIn("filesystem", receipt["differences"])
+        self.assertEqual(
+            receipt["diagnostics"]["filesystem"]["records"],
+            [
+                {
+                    "categories": ["content"],
+                    "pathFingerprint": "sha256:37681810e003fa38f27f134d7fd89b48c3b33bd150b85985751c842177777985",
+                }
+            ],
+        )
+
     def test_sbom_order_only_drift_is_normalized(self) -> None:
         entries = [("app/oxibelt", b"binary", 0o755)]
         published = self.artifact("published-sbom-order", entries)
