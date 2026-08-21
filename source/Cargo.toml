@@ -61,7 +61,7 @@ rustix = { version = "1.1.4", features = ["net", "process", "std"] }
 webpki = { package = "rustls-webpki", version = "0.103.14" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-serde-saphyr = { version = "1.0.1", default-features = false, features = ["deserialize"] }
+serde-saphyr = { version = "1.1.0", default-features = false, features = ["deserialize"] }
 sha1 = { version = "0.11.0", features = ["oid"] }
 sha2 = "0.11.0"
 socket2 = "0.6.5"
@@ -79,7 +79,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std
 unicode-normalization = "0.1.25"
 url = { version = "2.5.8", features = ["serde"] }
 webpki-roots = "1.0.9"
-web-transport-quinn = { version = "0.12.0", default-features = false, features = ["aws-lc-rs"] }
+web-transport-quinn = { version = "0.12.1", default-features = false, features = ["aws-lc-rs"] }
 quic-parser = { version = "0.1.5", default-features = false, features = ["aws-lc-rs"] }
 x509-cert = "0.3.0"
 # `x509-ocsp 0.2.1` still exposes `x509-cert 0.2` types in its public API.

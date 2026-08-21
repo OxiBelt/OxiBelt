@@ -1,4 +1,4 @@
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
+use aws_lc_rs::signature::Ed25519KeyPair;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 

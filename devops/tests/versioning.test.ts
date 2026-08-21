@@ -56,7 +56,7 @@ ${RootCargoPackages.map(Package => `  "${Path.posix.dirname(Package.manifestPath
 [workspace.package]
 version = "${ManifestVersion}"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.98"
 license = "Apache-2.0"
 publish = false
 `

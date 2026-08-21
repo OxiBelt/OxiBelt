@@ -15,7 +15,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
-  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
 
 jobs:
   prepare:
@@ -36,8 +36,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Generate security fuzz matrix
         id: matrix
@@ -52,7 +52,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -102,8 +102,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Download sustained Docker security fuzz images
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1

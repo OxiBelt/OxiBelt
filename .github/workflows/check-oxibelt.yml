@@ -71,7 +71,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
-  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
 
 jobs:
   # Keep this job independent. If test jobs need it, a PR can intentionally
@@ -110,8 +110,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Test Rust boundary tooling
         env:
@@ -187,7 +187,7 @@ jobs:
       fail-fast: false
       matrix:
         rust_version:
-          - 1.97.1
+          - 1.98.0
         runner:
           - ubuntu-26.04
           - ubuntu-26.04-arm
@@ -239,8 +239,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Install pinned Rust dependency tools
         run: |
@@ -867,12 +867,12 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Install pinned mewt
         run: |
-          cargo +1.97.1 install mewt --version 4.0.0 --locked
+          cargo +1.98.0 install mewt --version 4.0.0 --locked
           test "$(mewt --version)" = "mewt 4.0.0"
 
       - name: Run mutation campaign
@@ -916,7 +916,7 @@ jobs:
       fail-fast: false
       matrix:
         rust_version:
-          - 1.97.1
+          - 1.98.0
         target:
           - riscv64gc-unknown-linux-gnu
           - riscv64gc-unknown-linux-musl
@@ -965,7 +965,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         if: matrix.target == 'riscv64gc-unknown-linux-musl'
         with:
           version: v0.36.1
@@ -1015,8 +1015,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Generate matrices
         id: matrices
@@ -1096,8 +1096,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Install native build dependencies
         run: |
@@ -1148,7 +1148,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -1208,7 +1208,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -1285,7 +1285,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -1325,7 +1325,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -1363,7 +1363,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -1411,7 +1411,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -1457,7 +1457,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -1530,7 +1530,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -1635,7 +1635,7 @@ jobs:
             --expected-source-dirty "clean" \
             --expected-build-kind "git_development" \
             --expected-created "$(jq -r '.created' "${contract}")" \
-            --rust-builder-image "rust:1.97.1-trixie@sha256:1bcff4befb740599103a2c7cb51058e14479b2e35e3a34a3f0dc4ede09927488" \
+            --rust-builder-image "rust:1.98.0-trixie@sha256:7f7a53a25a0319dd8284e279d529d45759cb384d59b14cc6806132910f45522e" \
             --node-builder-image "node:24-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43" \
             --runtime-image "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b" \
             --repo-root "${GITHUB_WORKSPACE}"
@@ -1662,7 +1662,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.73.0
+          version: v0.74.0
           scan-type: image
           image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}
           format: json
@@ -1716,7 +1716,7 @@ jobs:
       - name: Generate local Trivy dependency snapshot
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.73.0
+          version: v0.74.0
           scan-type: image
           image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}
           format: github
@@ -1946,7 +1946,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
           version: v0.36.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -1982,8 +1982,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Download Docker integration helper image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -2018,8 +2018,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Download Docker integration helper image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -2054,8 +2054,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Download Docker integration helper image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -2086,13 +2086,13 @@ jobs:
       matrix:
         include:
           - kubernetes: v1.34.8
-            kubectl: v1.34.10
+            kubectl: v1.34.11
             node_image: kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256
           - kubernetes: v1.35.5
-            kubectl: v1.35.7
+            kubectl: v1.35.8
             node_image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
           - kubernetes: v1.36.1
-            kubectl: v1.36.3
+            kubectl: v1.36.4
             node_image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
 
     steps:
@@ -2189,7 +2189,7 @@ jobs:
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           version: v0.32.0
-          kubectl_version: v1.34.10
+          kubectl_version: v1.34.11
           install_only: true
 
       - name: Download AMD64 strict data-plane Docker image artifact
@@ -2226,8 +2226,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -2238,7 +2238,7 @@ jobs:
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           version: v0.32.0
-          kubectl_version: v1.34.10
+          kubectl_version: v1.34.11
           install_only: true
 
       - name: Download AMD64 strict data-plane Docker image artifact
@@ -2304,7 +2304,7 @@ jobs:
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           version: v0.32.0
-          kubectl_version: v1.34.10
+          kubectl_version: v1.34.11
           install_only: true
 
       - name: Select AMD64 Docker image artifact
@@ -2365,7 +2365,7 @@ jobs:
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           version: v0.32.0
-          kubectl_version: v1.34.10
+          kubectl_version: v1.34.11
           install_only: true
 
       - name: Install Minikube
@@ -2403,15 +2403,15 @@ jobs:
         include:
           - kubernetes: v1.34.8
             kube_version: 1.34.8
-            kubectl: v1.34.10
+            kubectl: v1.34.11
             node_image: kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256
           - kubernetes: v1.35.5
             kube_version: 1.35.5
-            kubectl: v1.35.7
+            kubectl: v1.35.8
             node_image: kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95
           - kubernetes: v1.36.1
             kube_version: 1.36.1
-            kubectl: v1.36.3
+            kubectl: v1.36.4
             node_image: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
 
     steps:
@@ -2509,8 +2509,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2583,8 +2583,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2657,8 +2657,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2731,8 +2731,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2805,8 +2805,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2879,8 +2879,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2953,8 +2953,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -3027,8 +3027,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -3102,8 +3102,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -3793,8 +3793,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          rustup default 1.97.1
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
 
       - name: Download Docker performance summary input artifacts
         id: download-performance-artifacts

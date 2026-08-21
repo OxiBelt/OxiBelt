@@ -1,7 +1,5 @@
 //! Opt-in PostgreSQL fault and fencing tests for the Admin-operation journal.
 
-use std::str::FromStr as _;
-
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;

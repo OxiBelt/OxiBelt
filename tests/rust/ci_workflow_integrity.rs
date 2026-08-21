@@ -900,7 +900,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
     .expect("oxibeltctl Cargo.toml should be readable");
 
   for expected in [
-    "ARG RUST_BUILDER_IMAGE=rust:1.97.1-trixie",
+    "ARG RUST_BUILDER_IMAGE=rust:1.98.0-trixie",
     "ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24",
     "ARG OXIBELT_RUST_BUILDER_STAGE=builder-native",
     "ARG OXIBELT_RISCV64_TOOLCHAIN_PLATFORM=linux/amd64",
@@ -933,7 +933,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   }
 
   for expected in [
-    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:1bcff4befb740599103a2c7cb51058e14479b2e35e3a34a3f0dc4ede09927488\"",
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:7f7a53a25a0319dd8284e279d529d45759cb384d59b14cc6806132910f45522e\"",
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",
@@ -1439,7 +1439,7 @@ fn source_structure_job_stays_independent() {
 
   let rust_install = exact_step(
     "Install Rust toolchain",
-    "rustup toolchain install 1.97.1 --profile minimal\nrustup default 1.97.1\n",
+    "rustup toolchain install 1.98.0 --profile minimal\nrustup default 1.98.0\n",
   );
   let boundary_unit_tests = exact_step(
     "Test Rust boundary tooling",
@@ -3096,8 +3096,8 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
     "runs-on: ubuntu-26.04",
     "contents: read",
     "name: Install Rust toolchain",
-    "rustup toolchain install 1.97.1 --profile minimal",
-    "rustup default 1.97.1",
+    "rustup toolchain install 1.98.0 --profile minimal",
+    "rustup default 1.98.0",
     "name: Install pinned Rust dependency tools",
     "cargo install cargo-audit --version 0.22.2 --locked",
     "cargo install cargo-deny --version 0.20.2 --locked",
@@ -3431,11 +3431,11 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "contents: read",
     "fail-fast: false",
     "kubernetes: v1.34.8",
-    "kubectl: v1.34.10",
+    "kubectl: v1.34.11",
     "kubernetes: v1.35.5",
-    "kubectl: v1.35.7",
+    "kubectl: v1.35.8",
     "kubernetes: v1.36.1",
-    "kubectl: v1.36.3",
+    "kubectl: v1.36.4",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
     "version: v3.21.3",
     "name: Validate Helm Admin configuration",
@@ -3899,10 +3899,10 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
     "name: Kubernetes supply-chain admission",
     "actions: read",
     "contents: read",
-    "rustup toolchain install 1.97.1 --profile minimal",
+    "rustup toolchain install 1.98.0 --profile minimal",
     "version: v3.21.3",
     "version: v0.32.0",
-    "kubectl_version: v1.34.10",
+    "kubectl_version: v1.34.11",
     "name: oxibelt-dataplane-strict-alpine-musl-amd64-image",
     "name: oxibelt-tools-alpine-musl-amd64-image",
     "OXIBELT_ADMISSION_STRICT_ARTIFACT_DIR:",
@@ -5284,7 +5284,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "tests/scripts/check-helm-autoscaling.sh",
     "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
     "version: v0.32.0",
-    "kubectl_version: v1.34.10",
+    "kubectl_version: v1.34.11",
     "install_only: true",
     "tests/scripts/select-amd64-docker-image-artifact.sh auto",
     "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}\"",
@@ -5434,7 +5434,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "name: Validate Helm NetworkPolicy configuration",
     "tests/scripts/check-helm-network-policy.sh",
     "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
-    "kubectl_version: v1.34.10",
+    "kubectl_version: v1.34.11",
     "install_only: true",
     "MINIKUBE_VERSION: v1.38.1",
     "MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e",
@@ -5454,7 +5454,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "--driver=docker",
     "--container-runtime=containerd",
     "--cni=\"${cni}\"",
-    "--kubernetes-version=v1.34.10",
+    "--kubernetes-version=v1.34.11",
     "--output=json",
     "--wait-timeout=\"${timeout_seconds}s\"",
     "'\"name=rootless\"'",
@@ -5602,13 +5602,13 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
     "fail-fast: false",
     "kubernetes: v1.34.8",
     "kube_version: 1.34.8",
-    "kubectl: v1.34.10",
+    "kubectl: v1.34.11",
     "kubernetes: v1.35.5",
     "kube_version: 1.35.5",
-    "kubectl: v1.35.7",
+    "kubectl: v1.35.8",
     "kubernetes: v1.36.1",
     "kube_version: 1.36.1",
-    "kubectl: v1.36.3",
+    "kubectl: v1.36.4",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
     "version: v4.2.4",
     "tests/scripts/check-helm-admin-config.sh",
@@ -7229,7 +7229,7 @@ fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
     "tests/scripts/validate-strict-dataplane-image.py",
     "if: matrix.role.name == 'dataplane-strict'",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
-    "version: v0.73.0",
+    "version: v0.74.0",
     "scan-type: image",
     "image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}",
     "format: json",
@@ -7680,9 +7680,9 @@ fn mutation_testing_is_pinned_bounded_and_fail_closed() {
     "timeout-minutes: 120",
     "permissions:\n      contents: read",
     "persist-credentials: false",
-    "rustup toolchain install 1.97.1 --profile minimal",
-    "rustup default 1.97.1",
-    "cargo +1.97.1 install mewt --version 4.0.0 --locked",
+    "rustup toolchain install 1.98.0 --profile minimal",
+    "rustup default 1.98.0",
+    "cargo +1.98.0 install mewt --version 4.0.0 --locked",
     "tests/scripts/run-mutation-testing.sh",
     "if-no-files-found: warn",
   ] {
@@ -7955,7 +7955,7 @@ fn dependency_snapshot_helper_normalizes_package_free_reports() {
     "version": 0,
     "detector": {
       "name": "trivy",
-      "version": "0.73.0",
+      "version": "0.74.0",
       "url": "https://github.com/aquasecurity/trivy"
     },
     "scanned": "2026-07-21T03:56:06Z"
@@ -9472,7 +9472,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "OXIBELT_DOCKER_IMAGE_CREATED",
     "OXIBELT_DOCKER_IMAGE_REF_NAME",
     "OXIBELT_DOCKER_IMAGE_SOURCE",
-    "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0",
+    "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
     "release-image-arch",
     "Publish canonical GHCR image",
@@ -9693,8 +9693,8 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "index(\"name=seccomp,profile=builtin\") != null",
     "docker info --format '{{.CgroupDriver}}'",
     "rootless verifier must use no host cgroup resource controller",
-    "moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec",
-    "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0",
+    "moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8",
+    "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0",
     "aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1",
     "pnpm install --frozen-lockfile --ignore-scripts",
     "tests/scripts/retry-docker-pull.sh",
@@ -10207,10 +10207,10 @@ fn stable_alias_mapping_validator_rejects_producer_controlled_variants() {
 fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let workflow = workflow_text();
   let script = docker_pull_retry_script_text();
-  let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0";
+  let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0";
   let prepull_step_name = "name: Pre-pull Docker BuildKit image";
   let prepull_command = "tests/scripts/retry-docker-pull.sh \"${OXIBELT_BUILDKIT_IMAGE}\"";
-  let pinned_image = "OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec";
+  let pinned_image = "OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8";
   let pinned_driver = "driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
   let setup_count = workflow.matches(setup_marker).count();
 
@@ -10259,11 +10259,11 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
 
 #[test]
 fn release_buildx_setups_precede_with_pinned_buildkit_retry_pull() {
-  let setup_action = "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c";
+  let setup_action = "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e";
   let prepull_name = "Pre-pull Docker BuildKit image";
   let prepull_command = "bash \"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh\" \"${OXIBELT_BUILDKIT_IMAGE}\"";
   let driver_opts = "image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
-  let pinned_image = "moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec";
+  let pinned_image = "moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8";
   let retry_script = docker_pull_retry_script_text();
   assert!(
     retry_script.contains("retry_command 3 docker pull \"${image}\""),

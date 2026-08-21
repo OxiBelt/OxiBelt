@@ -2,7 +2,7 @@
 name = "oxibelt-unsafe-harness"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.98"
 publish = false
 
 [dependencies]

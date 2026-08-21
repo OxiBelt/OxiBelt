@@ -505,7 +505,6 @@ fn decode_hex_digit(value: u8) -> anyhow::Result<u8> {
 
 #[cfg(test)]
 mod tests {
-  use base64::Engine as _;
   use serde_json::json;
 
   use super::*;

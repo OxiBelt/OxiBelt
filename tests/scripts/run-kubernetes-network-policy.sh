@@ -316,7 +316,7 @@ if ! minikube start \
   --driver=docker \
   --container-runtime=containerd \
   --cni="${cni}" \
-  --kubernetes-version=v1.34.10 \
+  --kubernetes-version=v1.34.11 \
   --output=json \
   --wait=all \
   --wait-timeout="${timeout_seconds}s" \
