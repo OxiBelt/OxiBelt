@@ -9848,6 +9848,14 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     parsed["jobs"]["promote"]["permissions"],
     serde_json::json!({"actions": "read", "contents": "read", "packages": "write"})
   );
+  assert_eq!(
+    parsed["jobs"]["validate"]["outputs"]["eligible"],
+    "${{ steps.eligibility.outputs.eligible }}"
+  );
+  assert_eq!(
+    parsed["jobs"]["promote"]["if"],
+    "needs.validate.result == 'success' && needs.validate.outputs.eligible == 'true'"
+  );
   assert_eq!(promotion.matches("packages: write").count(), 1);
   assert_eq!(
     release
@@ -9857,8 +9865,26 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
   );
   assert_eq!(arch.matches("Promote canonical GHCR aliases").count(), 0);
 
+  let validate_steps = parsed["jobs"]["validate"]["steps"]
+    .as_array()
+    .expect("stable alias validation should define steps");
+  let eligibility_index = validate_steps
+    .iter()
+    .position(|step| step["name"] == "Classify sealed release qualification")
+    .expect("stable alias validation should classify release eligibility");
+  for step in validate_steps.iter().skip(eligibility_index + 1) {
+    assert_eq!(
+      step["if"], "steps.eligibility.outputs.eligible == 'true'",
+      "stable-only step {} must require an eligible stable qualification",
+      step["name"]
+    );
+  }
+
   for expected in [
     "github.event.workflow_run.event == 'workflow_run'",
+    "qualification release envelope is not canonical",
+    "eligible=false",
+    "eligible=true",
     "q.releaseKind !== 'stable'",
     "release-qualification-${{ steps.reauthenticate.outputs.beta_revision }}",
     "stable release must be the single approved documentation-only commit after its beta source",
@@ -9886,6 +9912,191 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     "$current + [$receipt + {receiptSha256: $receipt_sha}]",
   ] {
     assert!(verifier.contains(expected));
+  }
+}
+
+#[test]
+fn stable_alias_promotion_classifies_beta_qualifications_before_promotion() {
+  let workflow = stable_alias_promotion_workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("stable alias promotion workflow should parse");
+  let classifier = parsed["jobs"]["validate"]["steps"]
+    .as_array()
+    .expect("stable alias validation should define steps")
+    .iter()
+    .find(|step| step["name"] == "Classify sealed release qualification")
+    .expect("stable alias validation should classify release eligibility")["run"]
+    .as_str()
+    .expect("release qualification classifier should be a shell step");
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-release-qualification-classifier-")
+    .tempdir()
+    .expect("release qualification classifier temp directory should be creatable");
+  let classifier_path = temp_dir.path().join("classify-release-qualification.sh");
+  fs::write(&classifier_path, classifier).expect("classifier fixture should be writable");
+
+  let revision = "2222222222222222222222222222222222222222";
+  let verifier_run_id = "123";
+  let verifier_run_attempt = "1";
+  let qualification =
+    |release_kind: &str, version: &str, aliases: Vec<serde_json::Value>| -> serde_json::Value {
+      serde_json::json!({
+        "schemaVersion": 3,
+        "repository": "OxiBelt/OxiBelt",
+        "releaseKind": release_kind,
+        "version": version,
+        "ref": format!("refs/tags/{version}"),
+        "tagObjectSha": "1111111111111111111111111111111111111111",
+        "commit": revision,
+        "releaseId": 1,
+        "publishedAt": "2026-08-21T12:43:38Z",
+        "producer": {
+          "workflowPath": ".github/workflows/release.yml",
+          "runId": 122,
+          "runAttempt": 1,
+          "event": "release",
+          "headSha": revision,
+          "conclusion": "success"
+        },
+        "kind": "release-qualification",
+        "verifier": {
+          "workflowPath": ".github/workflows/verify-release-rebuild.yml",
+          "workflowSha": "3333333333333333333333333333333333333333",
+          "runId": 123,
+          "runAttempt": 1,
+          "event": "workflow_run",
+          "conclusion": "success"
+        },
+        "receipts": {
+          "images": vec![serde_json::json!({}); 30],
+          "charts": vec![serde_json::json!({}); 2]
+        },
+        "manifests": vec![serde_json::json!({}); 12],
+        "aliases": aliases
+      })
+    };
+  let run_path_case = |label: &str, input: &Path| {
+    let github_output = temp_dir.path().join(format!("{label}-github-output"));
+    let output = Command::new("bash")
+      .arg(&classifier_path)
+      .env("QUALIFICATION", input)
+      .env("QUALIFICATION_REVISION", revision)
+      .env("VERIFIER_RUN_ID", verifier_run_id)
+      .env("VERIFIER_RUN_ATTEMPT", verifier_run_attempt)
+      .env("GITHUB_OUTPUT", &github_output)
+      .output()
+      .unwrap_or_else(|error| panic!("classifier case {label} should execute: {error}"));
+    let outputs = fs::read_to_string(&github_output).unwrap_or_default();
+    (output, outputs)
+  };
+  let run_json_case = |label: &str, value: &serde_json::Value| {
+    let input = temp_dir.path().join(format!("{label}.json"));
+    fs::write(
+      &input,
+      serde_json::to_vec(value).expect("qualification fixture should serialize"),
+    )
+    .unwrap_or_else(|error| panic!("qualification fixture {label} should be writable: {error}"));
+    run_path_case(label, &input)
+  };
+
+  let beta = qualification("beta", "0.8.1-beta.6", Vec::new());
+  let (beta_result, beta_outputs) = run_json_case("valid-beta", &beta);
+  assert!(
+    beta_result.status.success(),
+    "valid beta qualification should be a successful no-op: {}",
+    String::from_utf8_lossy(&beta_result.stderr)
+  );
+  assert_eq!(beta_outputs, "eligible=false\n");
+
+  let mut stable = qualification("stable", "0.8.1", vec![serde_json::json!({}); 48]);
+  stable["betaQualification"] = serde_json::json!({});
+  let (stable_result, stable_outputs) = run_json_case("valid-stable", &stable);
+  assert!(
+    stable_result.status.success(),
+    "valid stable qualification should remain eligible: {}",
+    String::from_utf8_lossy(&stable_result.stderr)
+  );
+  assert_eq!(stable_outputs, "eligible=true\n");
+
+  let assert_rejected = |label: &str, value: &serde_json::Value| {
+    let (output, outputs) = run_json_case(label, value);
+    assert!(
+      !output.status.success(),
+      "malformed qualification case {label} must fail closed"
+    );
+    assert!(
+      outputs.is_empty(),
+      "rejected qualification case {label} must not emit eligibility"
+    );
+  };
+  let mut beta_with_stable_binding = beta.clone();
+  beta_with_stable_binding["betaQualification"] = serde_json::json!({});
+  assert_rejected("beta-with-stable-binding", &beta_with_stable_binding);
+
+  let mut stable_without_beta = stable.clone();
+  stable_without_beta
+    .as_object_mut()
+    .expect("stable fixture should be an object")
+    .remove("betaQualification");
+  assert_rejected("stable-without-beta-binding", &stable_without_beta);
+
+  let mut wrong_schema = beta.clone();
+  wrong_schema["schemaVersion"] = serde_json::json!(2);
+  assert_rejected("wrong-schema", &wrong_schema);
+
+  let mut wrong_kind = beta.clone();
+  wrong_kind["kind"] = serde_json::json!("other-qualification");
+  assert_rejected("wrong-kind", &wrong_kind);
+
+  let mut unknown_release_kind = beta.clone();
+  unknown_release_kind["releaseKind"] = serde_json::json!("candidate");
+  assert_rejected("unknown-release-kind", &unknown_release_kind);
+
+  let mut wrong_revision = beta.clone();
+  wrong_revision["commit"] = serde_json::json!("4444444444444444444444444444444444444444");
+  assert_rejected("wrong-artifact-revision", &wrong_revision);
+
+  let mut wrong_verifier = beta.clone();
+  wrong_verifier["verifier"]["runId"] = serde_json::json!(124);
+  assert_rejected("wrong-verifier-run", &wrong_verifier);
+
+  let mut extra_key = beta.clone();
+  extra_key["unexpected"] = serde_json::json!(true);
+  assert_rejected("extra-top-level-key", &extra_key);
+
+  let malformed = temp_dir.path().join("malformed.json");
+  fs::write(&malformed, b"{").expect("malformed fixture should be writable");
+  let (malformed_result, malformed_outputs) = run_path_case("malformed", &malformed);
+  assert!(!malformed_result.status.success());
+  assert!(malformed_outputs.is_empty());
+
+  let empty = temp_dir.path().join("empty.json");
+  fs::write(&empty, b"").expect("empty fixture should be writable");
+  let (empty_result, empty_outputs) = run_path_case("empty", &empty);
+  assert!(!empty_result.status.success());
+  assert!(empty_outputs.is_empty());
+
+  let oversized = temp_dir.path().join("oversized.json");
+  fs::write(&oversized, vec![b' '; 4 * 1024 * 1024 + 1])
+    .expect("oversized fixture should be writable");
+  let (oversized_result, oversized_outputs) = run_path_case("oversized", &oversized);
+  assert!(!oversized_result.status.success());
+  assert!(oversized_outputs.is_empty());
+
+  #[cfg(unix)]
+  {
+    let beta_path = temp_dir.path().join("symlink-target.json");
+    fs::write(
+      &beta_path,
+      serde_json::to_vec(&beta).expect("beta fixture should serialize"),
+    )
+    .expect("symlink target should be writable");
+    let symlink = temp_dir.path().join("qualification-symlink.json");
+    std::os::unix::fs::symlink(&beta_path, &symlink)
+      .expect("qualification symlink should be creatable");
+    let (symlink_result, symlink_outputs) = run_path_case("symlink", &symlink);
+    assert!(!symlink_result.status.success());
+    assert!(symlink_outputs.is_empty());
   }
 }
 
