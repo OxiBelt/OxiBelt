@@ -331,6 +331,126 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
+  fn executor_keeps_probe_diagnostics_out_of_structured_observations() {
+    let fixture = tempfile::tempdir().expect("test fixture directory should be created");
+    let fixture_path = fixture.path();
+    write_executable(
+      &fixture_path.join("docker"),
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  inspect)
+    printf 'true\n'
+    ;;
+  start)
+    printf '%s\n' '{"status":200}'
+    printf '%s\n' 'downstream HTTP/2 connection failed: connection error' >&2
+    exit "${FAKE_DOCKER_START_STATUS:-0}"
+    ;;
+  create|cp|rm)
+    ;;
+  *)
+    printf 'unexpected fake docker command: %s\n' "$*" >&2
+    exit 97
+    ;;
+esac
+"#,
+    );
+    let path = format!(
+      "{}:{}",
+      fixture_path.display(),
+      std::env::var("PATH").expect("PATH should be set")
+    );
+    let executor = repository_path("tests/docker/security_fuzz/executor.sh");
+
+    let successful_work_dir = fixture_path.join("successful-recovery");
+    fs::create_dir(&successful_work_dir).expect("successful work directory should be created");
+    let successful = Command::new("bash")
+      .arg(&executor)
+      .arg("recovery")
+      .env("PATH", &path)
+      .env("OXIBELT_SECURITY_FUZZ_RUN_ID", "1-2-3")
+      .env(
+        "OXIBELT_SECURITY_FUZZ_LABEL",
+        "oxibelt.security-fuzz.run=1-2-3",
+      )
+      .env("OXIBELT_SECURITY_FUZZ_TARGET", "path_security")
+      .env("OXIBELT_SECURITY_FUZZ_WORK_DIR", &successful_work_dir)
+      .output()
+      .expect("security-fuzz recovery should execute");
+    assert!(
+      successful.status.success(),
+      "recovery failed\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&successful.stdout),
+      String::from_utf8_lossy(&successful.stderr)
+    );
+    assert!(
+      String::from_utf8_lossy(&successful.stderr)
+        .contains("downstream HTTP/2 connection failed: connection error"),
+      "probe diagnostics must remain visible on stderr"
+    );
+    let recovery = fs::read_to_string(successful_work_dir.join("recovery.json"))
+      .expect("recovery observation should be readable");
+    let observation: serde_json::Value =
+      serde_json::from_str(&recovery).expect("recovery observation should be one JSON value");
+    assert_eq!(observation, serde_json::json!({"status": 200}));
+
+    let failed_work_dir = fixture_path.join("failed-recovery");
+    fs::create_dir(&failed_work_dir).expect("failed work directory should be created");
+    let failed = Command::new("bash")
+      .arg(executor)
+      .arg("recovery")
+      .env("PATH", path)
+      .env("FAKE_DOCKER_START_STATUS", "42")
+      .env("OXIBELT_SECURITY_FUZZ_RUN_ID", "4-5-6")
+      .env(
+        "OXIBELT_SECURITY_FUZZ_LABEL",
+        "oxibelt.security-fuzz.run=4-5-6",
+      )
+      .env("OXIBELT_SECURITY_FUZZ_TARGET", "path_security")
+      .env("OXIBELT_SECURITY_FUZZ_WORK_DIR", &failed_work_dir)
+      .output()
+      .expect("failing security-fuzz recovery should execute");
+    assert_eq!(failed.status.code(), Some(42));
+    assert!(
+      String::from_utf8_lossy(&failed.stderr)
+        .contains("downstream HTTP/2 connection failed: connection error"),
+      "failed probes must retain their diagnostic"
+    );
+  }
+
+  #[test]
+  fn executor_keeps_all_machine_observation_streams_stdout_only() {
+    let executor = fs::read_to_string(repository_path("tests/docker/security_fuzz/executor.sh"))
+      .expect("security-fuzz executor should be readable");
+    let function_body = |start: &str, end: &str| {
+      executor
+        .split_once(start)
+        .and_then(|(_, suffix)| suffix.split_once(end))
+        .map(|(body, _)| body)
+        .unwrap_or_else(|| panic!("executor must contain {start} before {end}"))
+    };
+
+    let probe = function_body("probe_with_ca() {", "\n}\n\nprobe_without_files() {");
+    assert!(probe.contains("docker start -a \"${client}\" >\"${output_file}\" || status=$?"));
+    assert!(!probe.contains("docker start -a \"${client}\" >\"${output_file}\" 2>&1"));
+
+    let mock = function_body("mock_client() {", "\n}\n\ndownstream_request() {");
+    assert!(mock.contains("docker start -a \"${client}\" >\"${output_file}\" || status=$?"));
+    assert!(!mock.contains("docker start -a \"${client}\" >\"${output_file}\" 2>&1"));
+
+    let turn = function_body(
+      "finish_turn_allocation_probe() {",
+      "\n}\n\nread_last_turn_transport() {",
+    );
+    assert!(
+      turn.contains("(set +o pipefail; docker logs \"${client}\" | head -c 262144) >\"${output}\"")
+    );
+    assert!(!turn.contains("docker logs \"${client}\" 2>&1"));
+  }
+
+  #[cfg(unix)]
+  #[test]
   fn fuzz_runner_builds_matrix_once_outside_the_input_budget() {
     let fixture = tempfile::tempdir().expect("test fixture directory should be created");
     let fixture_path = fixture.path();

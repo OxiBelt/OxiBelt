@@ -304,7 +304,7 @@ probe_with_ca() {
     --name "${client}" --label "${label}" --network "${network}" \
     "${probe_image}" "$@" >/dev/null
   docker cp "${cert_dir}/ca.pem" "${client}:/tmp/ca.pem"
-  docker start -a "${client}" >"${output_file}" 2>&1 || status=$?
+  docker start -a "${client}" >"${output_file}" || status=$?
   docker rm -f "${client}" >/dev/null 2>&1 || true
   return "${status}"
 }
@@ -334,7 +334,7 @@ mock_client() {
   if [[ "${scheme}" == "https" ]]; then
     docker cp "${cert_dir}/ca.pem" "${client}:/tmp/ca.pem"
   fi
-  docker start -a "${client}" >"${output_file}" 2>&1 || status=$?
+  docker start -a "${client}" >"${output_file}" || status=$?
   docker rm -f "${client}" >/dev/null 2>&1 || true
   return "${status}"
 }
@@ -1087,7 +1087,7 @@ finish_turn_allocation_probe() {
     return 1
   fi
   output="${work_dir}/turn-edge-allocation.json"
-  (set +o pipefail; docker logs "${client}" 2>&1 | head -c 262144) >"${output}"
+  (set +o pipefail; docker logs "${client}" | head -c 262144) >"${output}"
   if [[ "${wait_output}" != "0" ]] \
     || ! jq -e '.transport == "udp" and .expect == "allocate-success"' "${output}" >/dev/null; then
     echo "TURN allocation probe did not complete successfully" >&2
