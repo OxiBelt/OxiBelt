@@ -15,6 +15,136 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.8.1-beta.7] - 2026-08-21
+
+> Fresh qualification candidate after the Rust, pnpm, workflow, container,
+> Kubernetes, Helm, and supply-chain dependency refresh. Beta.6 remains an
+> immutable published prerelease; do not reuse its artifacts, attestations,
+> rebuild receipts, or qualification evidence for beta.7.
+
+- Changes since: `0.8.1-beta.6`
+- Supported upgrade sources: `0.8.1-beta.6`, `0.6.6`
+- Upgrade guide: [Upgrade from 0.6.6 to the 0.8.1 line](docs/Upgrading.md#upgrade-from-066-to-the-081-line)
+
+### Configuration
+
+- Preserve every beta.6 epoch-1 key, default, validation rule, reload class,
+  compatibility alias, resolver policy, and route behavior. The dependency
+  refresh changes no runtime configuration or request-processing policy.
+
+### Schema epochs
+
+- Keep native configuration at epoch `1` and retain every beta.6 deployment,
+  evidence, admission, workload-policy, revocation, and Helm OCI schema
+  version. No schema field or migration changes in this cut.
+
+### Deprecations and removals
+
+- Add no deprecation or removal. The refresh changes supported toolchain and
+  dependency versions without removing a command, option, compatibility
+  alias, image role, or published contract.
+
+### Admin API
+
+- Preserve beta.6 Admin request, response, authentication, authorization,
+  idempotency, audit, membership, operation, and embedded-runtime contracts.
+  Updated parser, transport, and transitive dependencies do not change an
+  Admin endpoint or wire representation.
+
+### Feature lifecycle
+
+- Keep the general and Kubernetes graduation targets on `0.8.1`. Every
+  tracked feature remains `experimental` and `unvalidated` until its complete
+  exact-revision evidence succeeds; beta.6 evidence cannot qualify beta.7.
+
+### Rulepack compatibility
+
+- Retain the beta.6 OxiRule and CRS compatibility contract without syntax,
+  matching, normalization, precedence, or production response changes.
+
+### Executables and images
+
+- Preserve the six image roles, five platform subjects per role, executable
+  names, entrypoints, users, ports, and OCI identity contracts from beta.6.
+- Build the workspace and standalone probes with Rust `1.98.0`, refresh the
+  compatible Cargo graph, and advance the direct JSON Schema, YAML, HTTP/2,
+  and WebTransport dependencies. Preserve CLI, service, protocol, and image
+  role behavior.
+- Use pnpm `11.22.0`, Oxlint `1.79.0`, BuildKit `0.32.2` by immutable digest,
+  Trivy `0.74.0`, CodeQL `4.37.7`, Buildx `4.3.0`, and the supported
+  Kubernetes patch releases. Keep action commits, container digests, package
+  integrity hashes, and workflow assertions exact.
+- Require all 30 fresh beta.7 image subjects and both Helm `4.2.4` chart
+  packages to complete vulnerability, SBOM, provenance, attestation,
+  independent-rebuild, and registry readback verification. Do not promote or
+  republish beta.6 subjects under beta.7 tags.
+
+### Storage and state
+
+- Change no persistent schema, serialization, shared-state, membership, audit,
+  UDP ownership, resolver cache, connection-admission, or rollout-state
+  format. Beta.6 source state remains directly compatible.
+
+### Upgrade validation
+
+- Validate and inspect the epoch-1 sibling tree with the beta.7 binaries and
+  canonical Helm client before staged rollout:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+- Deploy only newly qualified beta.7 digests after person-reviewed
+  publication, canonical non-benchmark validation, all image and chart
+  receipts, independent rebuilds, and the aggregate automatic qualification
+  receipt succeed.
+
+### Rollback and irreversible steps
+
+- Retain the `0.6.6` and beta.6 image digests, complete epoch-0 and epoch-1
+  configuration trees, referenced assets, compatible PostgreSQL backups,
+  admission bundles, audit evidence, controller rollback ConfigMaps, Gateway
+  API CRDs and Lease, and shared UDP identity material until beta.7
+  qualification completes.
+- Stop new-version writers and drain the data plane before restoring beta.6 or
+  stable binaries, configuration, and database together. External audit,
+  telemetry, network, and client-visible effects cannot be undone.
+
+### Known issues
+
+- Beta.6 is an immutable published prerelease with its own exact-version
+  images, charts, attestations, and workflow evidence. Preserve that history,
+  but do not relabel or reuse any beta.6 subject or receipt as beta.7 evidence.
+- The beta.1 tag remains local-only, beta.2 remains an immutable unpublished
+  failed cut, beta.3 remains a published failed cut without canonical images,
+  and beta.4 and beta.5 remain published without complete independent image
+  receipts. The `0.8.0` beta cuts remain invalid, unqualified, or unpublished
+  history and cannot supply beta.7 qualification evidence.
+- Native `linux/riscv64` cluster-runner graduation evidence remains unmet; all
+  tracked general and Kubernetes features remain experimental and unvalidated.
+
+### Security
+
+- Advance `h2` to `0.4.18` throughout the root and independently resolved
+  probe graphs, retain the existing direct-HTTP/2 regression coverage, and
+  keep the TLS, QUIC, WebTransport, URI, framing, admission, and timeout
+  boundaries fail closed.
+- Keep Rust and Node dependency admission exact: approved registries only,
+  immutable lockfile checksums, no new lifecycle script, complete license and
+  advisory gates, and exact-version cargo-vet exemptions whose inventory hash
+  and count require review. Do not introduce wildcard exemptions or broaden
+  deployment criteria.
+- Require a fresh exact beta.7 aggregate qualification result before starting
+  the 24-hour stable soak. Beta.6 publication, artifacts, receipts, and
+  workflow completion times do not start or shorten that soak.
+
 ## [0.8.1-beta.6] - 2026-08-21
 
 > Fresh qualification candidate after beta.5 published its complete image and
