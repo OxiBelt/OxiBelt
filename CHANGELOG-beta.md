@@ -15,6 +15,143 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.8.1-beta.6] - 2026-08-21
+
+> Fresh qualification candidate after beta.5 published its complete image and
+> chart set but independent image rebuilds exposed build-time APK log content
+> and scanner serialization metadata. Do not reuse beta.5 artifacts,
+> attestations, rebuild receipts, or qualification evidence.
+
+- Changes since: `0.8.1-beta.5`
+- Supported upgrade sources: `0.8.1-beta.5`, `0.6.6`
+- Upgrade guide: [Upgrade from 0.6.6 to the 0.8.1 line](docs/Upgrading.md#upgrade-from-066-to-the-081-line)
+
+### Configuration
+
+- Preserve every beta.5 epoch-1 key, default, validation rule, reload class,
+  compatibility alias, resolver policy, and route behavior. This recovery cut
+  changes no runtime configuration or request-processing policy.
+
+### Schema epochs
+
+- Keep native configuration at epoch `1` and retain every beta.5 deployment,
+  evidence, admission, workload-policy, revocation, and Helm OCI schema
+  version. No schema field or migration changes in this cut.
+
+### Deprecations and removals
+
+- Add no deprecation or removal. Removing build-time-only rootfs and scanner
+  serialization variance corrects release evidence without weakening an
+  identity, digest, policy, semantic SBOM field, or publication gate.
+
+### Admin API
+
+- Preserve beta.5 Admin request, response, authentication, authorization,
+  idempotency, audit, membership, operation, and embedded-runtime contracts.
+  No Admin endpoint or wire representation changes in this cut.
+
+### Feature lifecycle
+
+- Keep the general and Kubernetes graduation targets on `0.8.1`. Every
+  tracked feature remains `experimental` and `unvalidated` until its complete
+  exact-revision evidence succeeds; beta.5 contributes no qualification.
+
+### Rulepack compatibility
+
+- Retain the beta.5 OxiRule and CRS compatibility contract without syntax,
+  matching, normalization, precedence, or production response changes.
+
+### Executables and images
+
+- Preserve the six image roles, five platform subjects per role, executable
+  names, entrypoints, users, ports, and OCI identity contracts from beta.5.
+- Remove `/var/log/apk.log` from the prepared Alpine rootfs after package and
+  CA validation, with fail-closed directory and absence postconditions, so APK
+  wall-clock diagnostics cannot become released filesystem content.
+- Derive BuildKit `SOURCE_DATE_EPOCH` from the canonical second-resolution UTC
+  release creation time and request exporter timestamp rewriting. Reject an
+  invalid or pre-epoch creation time instead of silently choosing a local
+  clock.
+- Canonicalize only validated Trivy serialization metadata: the local subject
+  digest purl, layer digest properties, layer diff-ID properties, and the
+  scanner-generated operating-system reference plus its dependency edges.
+  Preserve package identities, hashes, semantic properties, and dependencies,
+  and reject malformed, duplicate, conflicting, or ambiguous metadata.
+- Require all 30 fresh beta.6 image subjects and both Helm `4.2.4` chart
+  packages to complete vulnerability, SBOM, provenance, attestation,
+  independent-rebuild, and registry readback verification. Do not promote or
+  republish beta.5 subjects under beta.6 tags.
+
+### Storage and state
+
+- Change no persistent schema, serialization, shared-state, membership, audit,
+  UDP ownership, resolver cache, connection-admission, or rollout-state
+  format. Beta.5 source state remains directly compatible for recovery.
+
+### Upgrade validation
+
+- Validate and inspect the epoch-1 sibling tree with the beta.6 binaries and
+  canonical Helm client before staged rollout:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+- Deploy only newly qualified beta.6 digests after person-reviewed
+  publication, canonical non-benchmark validation, all image and chart
+  receipts, independent rebuilds, and the aggregate automatic qualification
+  receipt succeed.
+
+### Rollback and irreversible steps
+
+- Retain the `0.6.6` image digests, complete epoch-0 configuration tree,
+  referenced assets, compatible PostgreSQL backup, admission bundle, audit
+  evidence, controller rollback ConfigMaps, Gateway API CRDs and Lease, and
+  shared UDP identity material until beta.6 qualification completes.
+- A beta.5 source deployment may be retained as a directly compatible rollback
+  source, but beta.5 has no qualified official image or evidence to promote or
+  relabel. Stop new-version writers and drain the data plane before restoring
+  older binaries, configuration, and database together.
+
+### Known issues
+
+- The immutable beta.5 prerelease and its exact-version images and charts
+  exist. Release workflow `32450530430` completed successfully, and automatic
+  verifier workflow `32453049844` independently reproduced both charts, but
+  its first image rebuilds found normalized filesystem and SBOM differences.
+  The failed verifier cannot produce the complete 30-image receipt set or
+  aggregate qualification receipt. Preserve those artifacts as attributable
+  failed-cut history and reuse none of any partial receipts or incomplete
+  evidence.
+- The beta.1 tag remains local-only, beta.2 remains an immutable unpublished
+  failed cut, beta.3 remains a published failed cut without canonical images,
+  and beta.4 remains published without independent receipts. The `0.8.0` beta
+  cuts remain invalid, unqualified, or unpublished history and cannot supply
+  beta.6 qualification evidence.
+- Native `linux/riscv64` cluster-runner graduation evidence remains unmet; all
+  tracked general and Kubernetes features remain experimental and unvalidated.
+
+### Security
+
+- Preserve beta.5 nested-path rejection, external-auth trailer sanitization,
+  malformed TURN containment, effective-owner SVCB binding, per-candidate
+  connection admission, and all existing fail-closed release controls.
+- Keep the independent verifier globally read-only and rootless. Bind every
+  rebuilt subject and receipt to the exact producer run, tag, revision, digest,
+  attestation, role, and platform; treat normalization as a narrow removal of
+  validated non-semantic scanner or layer-serialization identity only.
+- Require a fresh exact beta.6 aggregate qualification result before starting
+  the 24-hour stable soak. Beta.5 publication, producer completion, chart
+  receipts, image failures, and workflow completion times do not start or
+  shorten that soak.
+
 ## [0.8.1-beta.5] - 2026-08-21
 
 > Fresh qualification candidate after beta.4 published its complete image and
