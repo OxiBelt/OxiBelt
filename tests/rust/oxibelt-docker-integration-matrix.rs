@@ -223,7 +223,7 @@ fn security_fuzz_command(args: &[String]) -> Result<()> {
         defaults.pr_max_seconds,
         defaults.sustained_default_seconds,
         defaults.sustained_max_cases,
-        defaults.case_timeout_seconds,
+        target.effective_case_timeout_seconds(defaults.case_timeout_seconds),
         defaults.recovery_timeout_seconds,
         defaults.failure_artifact_max_bytes,
       );

@@ -13,6 +13,10 @@ recovery_timeout_seconds = 15
 failure_artifact_max_bytes = 33554432
 failure_artifact_metadata = ["case", "case_seed", "input_sha256", "max_concurrent_sessions", "meaning_preserving_transforms", "oracle", "protocols", "replay", "required_helpers", "schema_version", "source_revision", "target"]
 
+# Target-specific case timeouts may raise the global default to at most 30
+# seconds. The complete input, case, and recovery budget remains bounded by the
+# campaign deadline.
+
 [[target]]
 id = "path_security"
 description = "downstream path parsing, route selection, static-root containment, and recursive-decoding upstream isolation"
@@ -20,6 +24,7 @@ protocols = ["h1", "h2", "h3"]
 payload_max_bytes = 4096
 session_max_cases = 4
 max_concurrent_sessions = 1
+case_timeout_seconds = 15
 required_helpers = ["mock-http", "protocol-probe"]
 oracle = "unsafe-path-never-reaches-upstream"
 meaning_preserving_transforms = ["percent-hex-case", "unreserved-percent-encoding"]

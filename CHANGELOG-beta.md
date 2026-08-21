@@ -77,6 +77,10 @@ for the governed entry format.
   scanner-generated operating-system reference plus its dependency edges.
   Preserve package identities, hashes, semantic properties, and dependencies,
   and reject malformed, duplicate, conflicting, or ambiguous metadata.
+- Give the path-security target a 15-second case budget for its serial H1/H2/H3
+  probe-container and upstream-observer checks. Keep every other target on the
+  global five-second default, reject target overrides outside `5..=30`
+  seconds, and preserve the 120-second PR campaign deadline.
 - Require all 30 fresh beta.6 image subjects and both Helm `4.2.4` chart
   packages to complete vulnerability, SBOM, provenance, attestation,
   independent-rebuild, and registry readback verification. Do not promote or
@@ -130,6 +134,11 @@ helm version --short
   aggregate qualification receipt. Preserve those artifacts as attributable
   failed-cut history and reuse none of any partial receipts or incomplete
   evidence.
+- Exact pre-tag Check workflow `32457898102` correctly withheld beta.6 after
+  its path-security job exhausted the former five-second case budget. The
+  captured recovery request succeeded, both unsafe paths were rejected, and no
+  upstream leak was observed before the timeout. The tag remained local and
+  was discarded; that failed preflight supplies no release evidence.
 - The beta.1 tag remains local-only, beta.2 remains an immutable unpublished
   failed cut, beta.3 remains a published failed cut without canonical images,
   and beta.4 remains published without independent receipts. The `0.8.0` beta
@@ -147,6 +156,10 @@ helm version --short
   rebuilt subject and receipt to the exact producer run, tag, revision, digest,
   attestation, role, and platform; treat normalization as a narrow removal of
   validated non-semantic scanner or layer-serialization identity only.
+- Preserve the security-fuzz case timeout as a fail-closed absolute bound.
+  Apply the larger allowance only to the path-security oracle whose serial
+  container probes cannot reliably complete within five hosted seconds; do
+  not relax recovery, campaign, concurrency, payload, or artifact limits.
 - Require a fresh exact beta.6 aggregate qualification result before starting
   the 24-hour stable soak. Beta.5 publication, producer completion, chart
   receipts, image failures, and workflow completion times do not start or

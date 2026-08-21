@@ -6,6 +6,8 @@ use serde::Deserialize;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+const MAX_TARGET_CASE_TIMEOUT_SECONDS: u64 = 30;
+
 #[derive(Debug, Deserialize)]
 struct Catalog {
   schema_version: u32,
@@ -44,9 +46,16 @@ pub(crate) struct Target {
   pub(crate) payload_max_bytes: usize,
   pub(crate) session_max_cases: usize,
   pub(crate) max_concurrent_sessions: usize,
+  case_timeout_seconds: Option<u64>,
   pub(crate) required_helpers: Vec<String>,
   pub(crate) oracle: String,
   pub(crate) meaning_preserving_transforms: Vec<String>,
+}
+
+impl Target {
+  pub(crate) fn effective_case_timeout_seconds(&self, default: u64) -> u64 {
+    self.case_timeout_seconds.unwrap_or(default)
+  }
 }
 
 pub(crate) fn targets() -> Result<Vec<Target>> {
@@ -169,6 +178,19 @@ fn validate_catalog(catalog: &Catalog) -> Result<()> {
     if target.max_concurrent_sessions == 0 || target.max_concurrent_sessions > 16 {
       return Err(format!("{} has an invalid concurrent session bound", target.id).into());
     }
+    if let Some(case_timeout_seconds) = target.case_timeout_seconds {
+      if case_timeout_seconds < catalog.case_timeout_seconds
+        || case_timeout_seconds > MAX_TARGET_CASE_TIMEOUT_SECONDS
+      {
+        return Err(
+          format!(
+            "{} has an invalid case timeout override; expected {}..={MAX_TARGET_CASE_TIMEOUT_SECONDS} seconds",
+            target.id, catalog.case_timeout_seconds
+          )
+          .into(),
+        );
+      }
+    }
     if target.required_helpers.is_empty()
       || target
         .required_helpers
@@ -242,6 +264,17 @@ fn validate_catalog(catalog: &Catalog) -> Result<()> {
   assert_eq!(lookup("websocket_webtransport").max_concurrent_sessions, 2);
   assert_eq!(lookup("turn_runtime").max_concurrent_sessions, 1);
   assert_eq!(lookup("admin_authz").max_concurrent_sessions, 1);
+  if lookup("path_security").case_timeout_seconds != Some(15)
+    || catalog
+      .target
+      .iter()
+      .filter(|target| target.id != "path_security")
+      .any(|target| target.case_timeout_seconds.is_some())
+  {
+    return Err(
+      "only path_security may override the approved 5-second case timeout with 15 seconds".into(),
+    );
+  }
   Ok(())
 }
 
@@ -280,6 +313,50 @@ mod tests {
   fn catalog_is_complete_and_bounded() {
     let targets = targets().expect("catalog must parse and validate");
     assert_eq!(targets.len(), 8);
+
+    let defaults = defaults().expect("catalog defaults must parse and validate");
+    let path_security = targets
+      .iter()
+      .find(|target| target.id == "path_security")
+      .expect("path security target must exist");
+    let tls_quic_sni = targets
+      .iter()
+      .find(|target| target.id == "tls_quic_sni")
+      .expect("TLS and QUIC target must exist");
+    assert_eq!(
+      path_security.effective_case_timeout_seconds(defaults.case_timeout_seconds),
+      15
+    );
+    assert_eq!(
+      tls_quic_sni.effective_case_timeout_seconds(defaults.case_timeout_seconds),
+      5
+    );
+  }
+
+  #[test]
+  fn catalog_rejects_case_timeout_overrides_outside_the_safe_range() {
+    let raw = fs::read_to_string(catalog_path()).expect("catalog fixture should be readable");
+
+    for invalid_timeout in [0, MAX_TARGET_CASE_TIMEOUT_SECONDS + 1] {
+      let mut catalog: Catalog =
+        toml::from_str(&raw).expect("canonical catalog fixture should parse");
+      catalog
+        .target
+        .iter_mut()
+        .find(|target| target.id == "path_security")
+        .expect("path security target must exist")
+        .case_timeout_seconds = Some(invalid_timeout);
+
+      let error = validate_catalog(&catalog)
+        .expect_err("an out-of-range target case timeout must fail closed");
+      assert!(
+        error.to_string().contains(&format!(
+          "invalid case timeout override; expected {}..={MAX_TARGET_CASE_TIMEOUT_SECONDS} seconds",
+          catalog.case_timeout_seconds
+        )),
+        "unexpected validation error: {error}"
+      );
+    }
   }
 
   #[test]
