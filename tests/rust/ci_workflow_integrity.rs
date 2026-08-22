@@ -8328,12 +8328,11 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
       .any(|rule| rule["type"] == "creation"),
     "the ruleset must gate rather than universally block release-tag creation"
   );
-  let binding_text = fs::read_to_string(
-    repo_root().join("devops/config/github-release-tag-ruleset-binding.json"),
-  )
-  .expect("release-tag ruleset binding should be readable");
-  let binding: serde_json::Value = serde_json::from_str(&binding_text)
-    .expect("release-tag ruleset binding should parse as JSON");
+  let binding_text =
+    fs::read_to_string(repo_root().join("devops/config/github-release-tag-ruleset-binding.json"))
+      .expect("release-tag ruleset binding should be readable");
+  let binding: serde_json::Value =
+    serde_json::from_str(&binding_text).expect("release-tag ruleset binding should parse as JSON");
   assert_eq!(
     binding,
     serde_json::json!({
@@ -8346,10 +8345,9 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
   );
   assert_eq!(binding["rulesetName"], ruleset["name"]);
 
-  let ruleset_guard = fs::read_to_string(
-    repo_root().join("tests/scripts/check-github-release-tag-ruleset.sh"),
-  )
-  .expect("release-tag ruleset guard should be readable");
+  let ruleset_guard =
+    fs::read_to_string(repo_root().join("tests/scripts/check-github-release-tag-ruleset.sh"))
+      .expect("release-tag ruleset guard should be readable");
   for expected in [
     "set -euo pipefail",
     "--visibility <public|authenticated>",
