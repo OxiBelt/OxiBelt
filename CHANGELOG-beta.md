@@ -15,12 +15,14 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
-## [0.8.1-beta.7] - 2026-08-21
+## [0.8.1-beta.7] - 2026-08-22
 
 > Fresh qualification candidate after the Rust, pnpm, workflow, container,
-> Kubernetes, Helm, and supply-chain dependency refresh. Beta.6 remains an
-> immutable published prerelease; do not reuse its artifacts, attestations,
-> rebuild receipts, or qualification evidence for beta.7.
+> Kubernetes, Helm, and supply-chain dependency refresh, stable-alias
+> eligibility classification, validation-matrix scheduling repair, and
+> release-tag governance repair. Beta.6 remains an immutable published
+> prerelease; do not reuse its artifacts, attestations, rebuild receipts, or
+> qualification evidence for beta.7.
 
 - Changes since: `0.8.1-beta.6`
 - Supported upgrade sources: `0.8.1-beta.6`, `0.6.6`
@@ -56,6 +58,10 @@ for the governed entry format.
 - Keep the general and Kubernetes graduation targets on `0.8.1`. Every
   tracked feature remains `experimental` and `unvalidated` until its complete
   exact-revision evidence succeeds; beta.6 evidence cannot qualify beta.7.
+- Classify a valid beta qualification envelope as ineligible for stable alias
+  promotion before stable-only fields are required. Keep that path read-only,
+  skip every registry mutation job, and retain strict validation and mutation
+  gates for stable qualification envelopes.
 
 ### Rulepack compatibility
 
@@ -74,6 +80,10 @@ for the governed entry format.
   Trivy `0.74.0`, CodeQL `4.37.7`, Buildx `4.3.0`, and the supported
   Kubernetes patch releases. Keep action commits, container digests, package
   integrity hashes, and workflow assertions exact.
+- Remove workflow-level concurrency caps from validation matrices so GitHub
+  can schedule independent rows according to runner availability. Preserve
+  fail-fast settings, per-job timeouts, rootless container isolation, and the
+  complete terminal summary gate.
 - Require all 30 fresh beta.7 image subjects and both Helm `4.2.4` chart
   packages to complete vulnerability, SBOM, provenance, attestation,
   independent-rebuild, and registry readback verification. Do not promote or
@@ -132,6 +142,12 @@ helm version --short
 
 ### Security
 
+- Bind the hosted release-tag ruleset to its existing repository ruleset ID,
+  restore `Non-benchmark validation summary` as the required GitHub Actions
+  check, and keep update, deletion, and bypass protections exact. Canonical
+  default-branch CI checks every publicly visible field, while an authenticated
+  operator preflight verifies the hidden bypass list before one explicit tag
+  ref is pushed; bulk `git push --tags` is not a release operation.
 - Advance `h2` to `0.4.18` throughout the root and independently resolved
   probe graphs, retain the existing direct-HTTP/2 regression coverage, and
   keep the TLS, QUIC, WebTransport, URI, framing, admission, and timeout
