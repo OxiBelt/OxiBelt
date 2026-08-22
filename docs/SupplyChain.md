@@ -48,7 +48,12 @@ Release-like tags are covered by the active, bypass-free desired state in
 GitHub Actions `Non-benchmark validation summary` status, while updates and
 deletions are blocked. Operators must wait for the canonical default-branch
 push at the intended commit to pass before creating a tag; a rejected tag
-creation can be retried after that check succeeds.
+creation can be retried after that check succeeds. Default-branch CI compares
+the public hosted ruleset fields with the tracked policy and its immutable
+repository binding. Because GitHub omits bypass actors from public responses,
+operators must also run the authenticated full-policy preflight before an
+explicit `git push origin "refs/tags/${release_tag}"`; governed releases must
+not use `git push --tags`.
 
 Before release preparation or publication, the release workflow resolves the
 tag to one full lowercase commit and uses read-only Actions, Checks, and

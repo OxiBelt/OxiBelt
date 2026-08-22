@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "repository": "OxiBelt/OxiBelt",
+  "rulesetId": 19606649,
+  "rulesetName": "release-tags-require-complete-validation"
+}

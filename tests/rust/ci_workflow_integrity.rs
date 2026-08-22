@@ -3231,6 +3231,10 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "version: v4.2.4",
     "token: \"\"",
     "pnpm run test",
+    "name: Verify hosted release-tag ruleset core policy",
+    "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'OxiBelt/OxiBelt'",
+    "GH_TOKEN: ${{ github.token }}",
+    "tests/scripts/check-github-release-tag-ruleset.sh --visibility public",
     "pnpm run kubernetes-graduation:check --expected-source-revision \"${GITHUB_SHA}\"",
     "pnpm run versioning:check",
     "pnpm run release-contract:check \\",
@@ -3249,6 +3253,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "pnpm run lint",
     "pnpm run typecheck",
     "pnpm run test",
+    "tests/scripts/check-github-release-tag-ruleset.sh --visibility public",
     "pnpm run kubernetes-graduation:check",
     "pnpm run versioning:check",
   ] {
@@ -3273,6 +3278,9 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
   let test = job_text
     .find("pnpm run test")
     .expect("TypeScript release tooling should test");
+  let release_tag_ruleset = job_text
+    .find("name: Verify hosted release-tag ruleset core policy")
+    .expect("TypeScript release tooling should verify the hosted release-tag ruleset");
   let helm_step = &job_text[helm..test];
   assert!(
     job_text.contains("    permissions:\n      contents: read\n\n    steps:"),
@@ -3320,10 +3328,11 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
       && lint < typecheck
       && typecheck < helm
       && helm < test
-      && test < kubernetes_graduation
+      && test < release_tag_ruleset
+      && release_tag_ruleset < kubernetes_graduation
       && kubernetes_graduation < versioning
       && versioning < release_contract,
-    "TypeScript release tooling should install, lint, type-check, set up Helm, test, validate Kubernetes graduation evidence, validate version state, and validate the release contract in order"
+    "TypeScript release tooling should install, lint, type-check, set up Helm, test, verify release-tag governance, validate Kubernetes graduation evidence, validate version state, and validate the release contract in order"
   );
   assert_eq!(
     job_text
@@ -8319,6 +8328,56 @@ fn release_publication_requires_exact_non_benchmark_source_validation() {
       .any(|rule| rule["type"] == "creation"),
     "the ruleset must gate rather than universally block release-tag creation"
   );
+  let binding_text = fs::read_to_string(
+    repo_root().join("devops/config/github-release-tag-ruleset-binding.json"),
+  )
+  .expect("release-tag ruleset binding should be readable");
+  let binding: serde_json::Value = serde_json::from_str(&binding_text)
+    .expect("release-tag ruleset binding should parse as JSON");
+  assert_eq!(
+    binding,
+    serde_json::json!({
+      "schemaVersion": 1,
+      "repository": "OxiBelt/OxiBelt",
+      "rulesetId": 19606649,
+      "rulesetName": "release-tags-require-complete-validation"
+    }),
+    "release-tag ruleset binding must preserve the canonical repository and ruleset identity"
+  );
+  assert_eq!(binding["rulesetName"], ruleset["name"]);
+
+  let ruleset_guard = fs::read_to_string(
+    repo_root().join("tests/scripts/check-github-release-tag-ruleset.sh"),
+  )
+  .expect("release-tag ruleset guard should be readable");
+  for expected in [
+    "set -euo pipefail",
+    "--visibility <public|authenticated>",
+    "gh api user",
+    "gh api --paginate --slurp",
+    "repos/${repository}/rulesets?includes_parents=true&per_page=100",
+    "repos/${repository}/rulesets/${ruleset_id}?includes_parents=true",
+    "pnpm run release-tag-ruleset:check",
+  ] {
+    assert!(
+      ruleset_guard.contains(expected),
+      "release-tag ruleset guard should contain {expected}"
+    );
+  }
+  for forbidden in [
+    "gh auth status",
+    "--method POST",
+    "--method PUT",
+    "--method PATCH",
+    "--method DELETE",
+    "Authorization:",
+    "set -x",
+  ] {
+    assert!(
+      !ruleset_guard.contains(forbidden),
+      "release-tag ruleset guard must not contain {forbidden}"
+    );
+  }
   let required_check = &ruleset["rules"][0]["parameters"]["required_status_checks"][0];
   assert_eq!(
     required_check["context"],

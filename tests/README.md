@@ -65,6 +65,11 @@ pnpm run kubernetes-graduation:check
 The tracked, bypass-free release-tag ruleset requires the configured GitHub
 Actions `Non-benchmark validation summary` context and application identity
 when matching tags are created and blocks later update or deletion. The
+`typescript-release-tooling` job runs
+`tests/scripts/check-github-release-tag-ruleset.sh --visibility public` on the
+canonical default branch to detect public policy or identity drift. The
+authenticated mode additionally proves the bypass list is empty and is the
+required operator preflight before pushing one explicit release-tag ref. The
 release workflow resolves the strict tag to one full revision, then
 independently uses read-only GitHub metadata to require the newest canonical
 default-branch `Check OxiBelt` push attempt for that exact revision to contain

@@ -382,6 +382,12 @@ jobs:
       - name: Test DevOps tooling
         run: pnpm run test
 
+      - name: Verify hosted release-tag ruleset core policy
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'OxiBelt/OxiBelt'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tests/scripts/check-github-release-tag-ruleset.sh --visibility public
+
       - name: Validate Kubernetes graduation contract
         run: pnpm run kubernetes-graduation:check --expected-source-revision "${GITHUB_SHA}"
 

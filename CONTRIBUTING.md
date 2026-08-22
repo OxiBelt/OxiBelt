@@ -148,6 +148,7 @@ release_tag=0.7.0-beta.2
 release_revision="$(git rev-parse HEAD)"
 release_preflight_dir="$(mktemp -d)"
 
+tests/scripts/check-github-release-tag-ruleset.sh --visibility authenticated
 git tag --sign --annotate "${release_tag}" \
   --message "Release ${release_tag}" "${release_revision}"
 git verify-tag "${release_tag}"
@@ -162,7 +163,16 @@ sed -n '1,$p' "${release_preflight_dir}/release-body.md"
 
 Review the complete receipt and body, then remove the temporary directory.
 Push the already-validated tag object only after the canonical default-branch
-validation for `release_revision` succeeds. If local candidate validation
+validation for `release_revision` succeeds. Recheck the authenticated hosted
+policy immediately before pushing exactly that tag ref:
+
+```sh
+tests/scripts/check-github-release-tag-ruleset.sh --visibility authenticated
+git push origin "refs/tags/${release_tag}"
+```
+
+Do not use `git push --tags` for a governed release: it can submit unrelated
+local tags and makes the rejected ref ambiguous. If local candidate validation
 fails, an unpushed local tag may be deleted and recreated after the defect is
 fixed. A tag that reached the remote is immutable and must never be moved,
 replaced, or deleted; advance to the next release version instead.
@@ -422,7 +432,12 @@ the GitHub Actions `Non-benchmark validation summary` status, and matching tags
 cannot be updated or deleted; the active policy has no bypass actors. Wait for
 the canonical default-branch push at the intended commit to pass before
 creating the tag, and retry tag creation after that check succeeds if an
-earlier attempt was rejected.
+earlier attempt was rejected. Canonical default-branch CI runs the public
+ruleset guard and fails on drift in every publicly visible policy field. GitHub
+omits bypass actors from that public response, so release operators must run
+`tests/scripts/check-github-release-tag-ruleset.sh --visibility authenticated`
+to prove the complete policy remains bypass-free before pushing one explicit
+tag ref.
 
 Release publication resolves the full tag ref and revision, then independently
 queries the newest attempt of the canonical default-branch `Check OxiBelt`
