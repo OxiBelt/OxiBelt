@@ -12,10 +12,10 @@ The fuzz crate is excluded from the stable workspace `default-members`. Normal
 OxiBelt builds do not enable the `fuzzing` feature or expose its internal
 harness facades.
 
-The pull-request matrix does not set `max-parallel`, so every profile/target
-child is independently schedulable. GitHub runner and account capacity may
-still queue children. The sustained campaign retains its separate
-`max-parallel: 4` resource bound.
+The pull-request and sustained matrices do not set `max-parallel`, so every
+profile/target child is independently schedulable. GitHub runner and account
+capacity may still queue children, while each job retains its explicit
+wall-clock timeout.
 
 ## Program catalog and ownership
 
@@ -94,9 +94,9 @@ schema, run seed, and case index.
 
 Pull requests run at most 1,024 cases or 120 seconds per target, whichever is
 reached first. The default-branch sustained workflow runs each target for 900
-seconds with at most two target jobs in parallel. Per-case, recovery, payload,
-concurrency, per-session case-count, and 32-MiB evidence limits are enforced by
-the catalog and runner.
+seconds. Its target jobs are independently schedulable subject to GitHub runner
+and account capacity. Per-case, recovery, payload, concurrency, per-session
+case-count, and 32-MiB evidence limits are enforced by the catalog and runner.
 
 Run the same bounded smoke tier locally with the standard `docker` command:
 

@@ -707,7 +707,6 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     campaign,
     &[
       "permissions:\n      contents: read",
-      "max-parallel: 4",
       "timeout-minutes: 120",
       "nightly-2026-08-04",
       "cargo-fuzz --version 0.13.2",
@@ -717,6 +716,10 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "retention-days: 30",
       "retention-days: 90",
     ],
+  );
+  assert!(
+    !campaign.contains("max-parallel:"),
+    "every sustained fuzz matrix child must be independently schedulable"
   );
   assert!(
     campaign

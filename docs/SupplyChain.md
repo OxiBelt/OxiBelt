@@ -522,8 +522,9 @@ daemon does not require an interactively authorized systemd scope. Docker
 reports no host cgroup resource controller in this configuration, so
 per-container CPU and memory limits are not enforced. The verifier does not
 depend on those limits: rootless user isolation, seccomp, and a cgroup
-namespace remain required, while the ephemeral runner, job timeout, and
-`max-parallel` bound resource exhaustion.
+namespace remain required, while the ephemeral runner and GitHub-enforced job
+timeout bound each rebuild job. Matrix children are independently schedulable;
+GitHub runner and account capacity provide the aggregate scheduling bound.
 
 The verifier writes a machine-readable receipt with one of four outcomes:
 

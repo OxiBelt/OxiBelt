@@ -5803,14 +5803,17 @@ fn docker_security_fuzz_smoke_is_catalogued_bounded_and_required() {
 }
 
 #[test]
-fn sustained_docker_security_fuzz_builds_once_and_is_resource_bounded() {
+fn sustained_docker_security_fuzz_builds_once_and_schedules_targets_independently() {
   let workflow = docker_security_fuzz_sustained_workflow_text();
   let parsed: serde_json::Value = serde_saphyr::from_str(&workflow)
     .expect("sustained Docker security fuzz workflow should parse");
 
   assert_eq!(parsed["permissions"]["contents"], "read");
   assert_eq!(parsed["jobs"]["campaign"]["strategy"]["fail-fast"], false);
-  assert_eq!(parsed["jobs"]["campaign"]["strategy"]["max-parallel"], 2);
+  assert!(
+    parsed["jobs"]["campaign"]["strategy"]["max-parallel"].is_null(),
+    "every sustained Docker security fuzz target must be independently schedulable"
+  );
   for expected in [
     "github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch",
     "list --suite security-fuzz --format github-matrix",
@@ -9583,6 +9586,14 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
   assert_eq!(
     jobs["verify"]["runs-on"], "${{ matrix.runner }}",
     "independent rebuild containers should use the resolver-derived trusted runner"
+  );
+  assert_eq!(
+    jobs["verify"]["strategy"]["fail-fast"], false,
+    "independent rebuild failures should not suppress sibling evidence"
+  );
+  assert!(
+    jobs["verify"]["strategy"]["max-parallel"].is_null(),
+    "every independent image rebuild must be independently schedulable"
   );
 
   for (job_name, step_name) in [
