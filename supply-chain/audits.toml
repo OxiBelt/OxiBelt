@@ -607,6 +607,12 @@ criteria = "safe-to-deploy"
 delta = "0.1.46 -> 0.1.47"
 notes = "Reviewed the complete checksum-matched 0.1.46-to-0.1.47 source delta; the only runtime change implements normalized Karatsuba u128 square root with bounded intermediates and a checked correction step that preserves floor-square-root semantics. The crate adds no unsafe, build script, or external capability."
 
+[[audits.online-dsl-forge]]
+who = "OpenAI Codex <codex@openai.com>"
+criteria = "safe-to-deploy"
+delta = "0.2.0 -> 0.3.0"
+notes = "Packaged production source and README are byte-identical to 0.2.0. The release only raises the MSRV and dependency floors already selected by OxiBelt and adds non-propagating development dependencies; it has no build script, proc macro, unsafe code, or new runtime capability."
+
 [[audits.pest]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"

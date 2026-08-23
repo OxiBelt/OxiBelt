@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-08-21",
+  "reviewedOn": "2026-08-23",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "222d722ece67e838604a196ee61c919a9717918ad107afc922c2d57c38384332",
+      "lockfileSha256": "e2038af108d060a8025541be7c4d20697c024ad664e2e7b86c594a98d98a3647",
       "exemptionInventorySha256": "bc56df64f73e811c2c8198d37f44cc905a5c8ca4f6e2a55073a90f084f685e7d",
       "exemptedPackageVersions": 432
     },
@@ -192,7 +192,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:222d722ece67e838604a196ee61c919a9717918ad107afc922c2d57c38384332",
+      "subject": "Cargo.lock@sha256:e2038af108d060a8025541be7c4d20697c024ad664e2e7b86c594a98d98a3647",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -204,7 +204,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:222d722ece67e838604a196ee61c919a9717918ad107afc922c2d57c38384332",
+      "subject": "Cargo.lock@sha256:e2038af108d060a8025541be7c4d20697c024ad664e2e7b86c594a98d98a3647",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
