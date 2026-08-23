@@ -15,6 +15,152 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.8.1-beta.8] - 2026-08-23
+
+> Fresh qualification candidate after repairing sustained-fuzz artifact
+> consumption and deterministic HTTP/2 WAF smoke framing, admitting
+> `online-dsl-forge` `0.3.0`, and refreshing the remaining admissible Rust,
+> CI, and benchmark dependencies. Beta.7 remains an immutable published
+> prerelease; do not reuse its artifacts, attestations, rebuild receipts, or
+> qualification evidence for beta.8.
+
+- Changes since: `0.8.1-beta.7`
+- Supported upgrade sources: `0.8.1-beta.7`, `0.6.6`
+- Upgrade guide: [Upgrade from 0.6.6 to the 0.8.1 line](docs/Upgrading.md#upgrade-from-066-to-the-081-line)
+
+### Configuration
+
+- Preserve every beta.7 epoch-1 key, default, validation rule, reload class,
+  compatibility alias, resolver policy, and route behavior. The dependency
+  refresh changes no runtime configuration or request-processing policy.
+
+### Schema epochs
+
+- Keep native configuration at epoch `1` and retain every beta.7 deployment,
+  evidence, admission, workload-policy, revocation, and Helm OCI schema
+  version. JSON Schema `0.51.0` validates and regenerates the existing native
+  and admission schemas without drift.
+
+### Deprecations and removals
+
+- Add no deprecation or removal. The refresh changes dependency and benchmark
+  tool versions without removing a command, option, compatibility alias,
+  image role, or published contract.
+
+### Admin API
+
+- Preserve beta.7 Admin request, response, authentication, authorization,
+  idempotency, audit, membership, operation, and embedded-runtime contracts.
+  No Admin endpoint or wire representation changes in this cut.
+
+### Feature lifecycle
+
+- Keep the general and Kubernetes graduation targets on `0.8.1`. Every
+  tracked feature remains `experimental` and `unvalidated` until its complete
+  exact-revision evidence succeeds; beta.7 evidence cannot qualify beta.8.
+- Preserve stable-alias eligibility classification and every stable-only
+  mutation gate. A beta.8 qualification envelope remains read-only and cannot
+  publish or promote stable aliases.
+
+### Rulepack compatibility
+
+- Retain the beta.7 OxiRule and CRS compatibility contract without syntax,
+  matching, normalization, precedence, or production response changes.
+- Admit the signed `online-dsl-forge` `0.3.0` package after verifying that its
+  packaged production source and README are byte-identical to `0.2.0`. Its
+  raised MSRV and dependency floors are already selected by OxiBelt, and its
+  new development dependencies do not propagate into the runtime graph.
+
+### Executables and images
+
+- Preserve the six image roles, five platform subjects per role, executable
+  names, entrypoints, users, ports, and OCI identity contracts from beta.7.
+- Build the workspace and standalone probes with Rust `1.98.0`. Advance
+  AES-GCM to `0.11.1`, CRC32 to `1.5.1`, JSON Schema and its companion crates
+  to `0.51.0`, `log` to `0.4.34`, and WebPKI to `0.103.15`; keep the three
+  independent probe lockfiles synchronized.
+- Pin CodeQL `4.37.8` to its immutable release commit, NGINX comparator
+  `1.31.4` to its verified source checksum, and OHA `1.16.0`. Preserve pnpm
+  `11.22.0`, Node 24 type policy, BuildKit `0.32.2`, Trivy `0.74.0`, Helm
+  `4.2.4`, and the supported Kubernetes image set.
+- Load sustained Docker security-fuzz artifacts from the nested paths emitted
+  by artifact download. Keep artifact identities, checksums, and the rootless
+  execution boundary unchanged.
+- Bound the `waf_bypass` HTTP/2 eager-body smoke case to the catalogued frame
+  budget by excluding benign non-body entropy. Preserve one-byte request-body
+  fragmentation, WAF semantics, and all other fuzz inputs.
+- Require all 30 fresh beta.8 image subjects and both Helm `4.2.4` chart
+  packages to complete vulnerability, SBOM, provenance, attestation,
+  independent-rebuild, and registry readback verification. Do not promote or
+  republish beta.7 subjects under beta.8 tags.
+
+### Storage and state
+
+- Change no persistent schema, serialization, shared-state, membership, audit,
+  UDP ownership, resolver cache, connection-admission, or rollout-state
+  format. Beta.7 source state remains directly compatible.
+
+### Upgrade validation
+
+- Validate and inspect the epoch-1 sibling tree with the beta.8 binaries and
+  canonical Helm client before staged rollout:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+- Deploy only newly qualified beta.8 digests after person-reviewed
+  publication, canonical non-benchmark validation, all image and chart
+  receipts, independent rebuilds, and the aggregate automatic qualification
+  receipt succeed.
+
+### Rollback and irreversible steps
+
+- Retain the `0.6.6` and beta.7 image digests, complete epoch-0 and epoch-1
+  configuration trees, referenced assets, compatible PostgreSQL backups,
+  admission bundles, audit evidence, controller rollback ConfigMaps, Gateway
+  API CRDs and Lease, and shared UDP identity material until beta.8
+  qualification completes.
+- Stop new-version writers and drain the data plane before restoring beta.7 or
+  stable binaries, configuration, and database together. External audit,
+  telemetry, network, and client-visible effects cannot be undone.
+
+### Known issues
+
+- Beta.7 is an immutable published prerelease with its own exact-version
+  images, charts, attestations, and workflow evidence. Preserve that history,
+  but do not relabel or reuse any beta.7 subject or receipt as beta.8 evidence.
+- Keep `generic-array` `0.14.7` while `crypto-common` selects that compatibility
+  line, and keep the `x509-cert` `0.2.5` alias required by `x509-ocsp`'s public
+  type family. Keep `@types/node` on the Node 24 line until the repository's
+  runtime policy advances; these are reviewed compatibility holds, not stale
+  lockfile resolution.
+- Native `linux/riscv64` cluster-runner graduation evidence remains unmet; all
+  tracked general and Kubernetes features remain experimental and unvalidated.
+
+### Security
+
+- Bind every new Rust archive to its crates.io checksum and record
+  safe-to-deploy Cargo-vet delta audits. The AES-GCM tag comparison remains
+  constant-time, WebPKI signature verification and OxiBelt's explicit TLS and
+  OCSP algorithm sets are unchanged, CRC SIMD paths stay CPU-gated and
+  bounds-checked, and JSON Schema retrieval features remain disabled.
+- Keep Rust and Node dependency admission exact: approved registries only,
+  immutable lockfile checksums, no new lifecycle script, complete license and
+  advisory gates, and exact-version Cargo-vet exemptions whose inventory hash
+  and count require review. Do not introduce wildcard exemptions or broaden
+  deployment criteria.
+- Require a fresh exact beta.8 aggregate qualification result before starting
+  the 24-hour stable soak. Beta.7 publication, artifacts, receipts, and
+  workflow completion times do not start or shorten that soak.
+
 ## [0.8.1-beta.7] - 2026-08-22
 
 > Fresh qualification candidate after the Rust, pnpm, workflow, container,
