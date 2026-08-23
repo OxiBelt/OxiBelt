@@ -80,8 +80,9 @@ for the governed entry format.
   to `0.51.0`, `log` to `0.4.34`, and WebPKI to `0.103.15`; keep the three
   independent probe lockfiles synchronized.
 - Pin CodeQL `4.37.8` to its immutable release commit, NGINX comparator
-  `1.31.4` to its verified source checksum, and OHA `1.16.0`. Preserve pnpm
-  `11.22.0`, Node 24 type policy, BuildKit `0.32.2`, Trivy `0.74.0`, Helm
+  `1.31.4` to its verified source checksum, OHA `1.16.0`, and pnpm `11.23.0`
+  to its registry integrity. Preserve the Node 24 type policy, BuildKit
+  `0.32.2`, Trivy `0.74.0`, Helm
   `4.2.4`, and the supported Kubernetes image set.
 - Load sustained Docker security-fuzz artifacts from the nested paths emitted
   by artifact download. Keep artifact identities, checksums, and the rootless
