@@ -19,8 +19,9 @@ for the governed entry format.
 
 > Fresh qualification candidate after repairing sustained-fuzz artifact
 > consumption and deterministic HTTP/2 WAF smoke framing, admitting
-> `online-dsl-forge` `0.3.0`, and refreshing the remaining admissible Rust,
-> CI, and benchmark dependencies. Beta.7 remains an immutable published
+> `online-dsl-forge` `0.3.0`, refreshing the remaining admissible Rust, CI,
+> and benchmark dependencies, and restoring the bounded hosted mutation
+> campaign. Beta.7 remains an immutable published
 > prerelease; do not reuse its artifacts, attestations, rebuild receipts, or
 > qualification evidence for beta.8.
 
@@ -90,6 +91,9 @@ for the governed entry format.
 - Bound the `waf_bypass` HTTP/2 eager-body smoke case to the catalogued frame
   budget by excluding benign non-body entropy. Preserve one-byte request-body
   fragmentation, WAF semantics, and all other fuzz inputs.
+- Raise the explicit mewt per-mutant ceiling to 602 seconds so a cold hosted
+  baseline can complete while retaining the 120-minute job cap, complete
+  30-mutant inventory, and fail-closed no-skip/no-timeout result checks.
 - Require all 30 fresh beta.8 image subjects and both Helm `4.2.4` chart
   packages to complete vulnerability, SBOM, provenance, attestation,
   independent-rebuild, and registry readback verification. Do not promote or

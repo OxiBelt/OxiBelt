@@ -19,4 +19,4 @@ comprehensive = true
 
 [test]
 cmd = "cargo test -p oxibelt --lib overload:: --locked"
-timeout = 300
+timeout = 602

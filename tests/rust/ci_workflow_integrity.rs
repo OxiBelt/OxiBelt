@@ -7713,7 +7713,7 @@ fn mutation_testing_is_pinned_bounded_and_fail_closed() {
     "source/src/overload/process.rs",
     "mutations = [\"CR\", \"ER\", \"IF\", \"IT\", \"NR\", \"RBR\"]",
     "comprehensive = true",
-    "timeout = 300",
+    "timeout = 602",
   ] {
     assert!(
       config.contains(expected),
