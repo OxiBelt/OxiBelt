@@ -5595,19 +5595,21 @@ mod tests {
   }
 
   #[test]
-  fn h2_eager_body_waf_fixture_matrix_fits_one_byte_data_frame_budget() {
+  fn h2_waf_fixture_matrix_fits_one_byte_data_frame_budget() {
     let marker = "sf-known-attack";
-    let formats = [
-      ("json", format!(r#"{{"attack":"{marker}"}}"#).into_bytes()),
-      ("form", format!("attack={marker}").into_bytes()),
-      (
-        "multipart",
-        format!(
-          "--sf\r\nContent-Disposition: form-data; name=\"attack\"\r\n\r\n{marker}\r\n--sf--\r\n"
-        )
-        .into_bytes(),
-      ),
-    ];
+    let formats = |value: &str| {
+      [
+        ("json", format!(r#"{{"attack":"{value}"}}"#).into_bytes()),
+        ("form", format!("attack={value}").into_bytes()),
+        (
+          "multipart",
+          format!(
+            "--sf\r\nContent-Disposition: form-data; name=\"attack\"\r\n\r\n{value}\r\n--sf--\r\n"
+          )
+          .into_bytes(),
+        ),
+      ]
+    };
     let encodings = [
       ("identity", None),
       ("gzip", Some(DownstreamBodyEncoding::Gzip)),
@@ -5616,7 +5618,7 @@ mod tests {
       ("zstd", Some(DownstreamBodyEncoding::Zstd)),
     ];
 
-    for (format_name, body) in formats {
+    for (format_name, body) in formats(marker) {
       for (encoding_name, encoding) in encodings {
         let encoded = match encoding {
           Some(encoding) => encode_downstream_body(&body, encoding)
@@ -5629,6 +5631,15 @@ mod tests {
           "{format_name}/{encoding_name} must fit the one-byte eager H2 DATA-frame budget"
         );
       }
+    }
+
+    let benign_value = "0".repeat(16);
+    for (format_name, body) in formats(&benign_value) {
+      assert!(
+        h2_eager_body_data_frame_count(body.len(), 1)
+          <= MAX_H2_EAGER_BODY_DATA_FRAMES_INCLUDING_EOS,
+        "benign {format_name} fixture must fit the one-byte H2 DATA-frame budget"
+      );
     }
   }
 

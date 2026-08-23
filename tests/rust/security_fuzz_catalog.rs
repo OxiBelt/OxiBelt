@@ -776,6 +776,10 @@ esac
       "the H2 eager-body fixture must use the exact WAF marker within the DATA-frame budget"
     );
     assert!(
+      executor.contains("path='/clean'; body_value=\"$(input_hex 5 8)\""),
+      "non-body WAF cases must retain bounded deterministic body entropy within the H2 DATA-frame budget"
+    );
+    assert!(
       executor.contains(".status == 403\n        and .body == \"security-fuzz-waf-body-blocked\"\n        and .request_body_complete == true"),
       "H2 body-location WAF cases must require status, sentinel, and completion proof"
     );

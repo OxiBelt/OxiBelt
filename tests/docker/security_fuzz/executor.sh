@@ -784,7 +784,7 @@ case_waf_bypass() {
   b0="$(input_byte 0)"; b1="$(input_byte 1)"; b2="$(input_byte 2)"; b3="$(input_byte 3)"; b4="$(input_byte 4)"; b5="$(input_byte 5)"
   require_concurrency_bound 1
   protocol=$((b0 % 3)); key="$(case_key)"
-  attack_location=$((b1 % 3)); path='/clean'; body_value="$(input_hex 5 24)"
+  attack_location=$((b1 % 3)); path='/clean'; body_value="$(input_hex 5 8)"
   header_value="case-$(input_hex 29 8)"
   if ((attack_location == 0)); then
     [[ $((b4 % 2)) == 0 ]] && path="/${marker}" || path='/%73f-known-attack'
