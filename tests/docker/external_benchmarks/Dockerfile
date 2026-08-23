@@ -1,6 +1,6 @@
 FROM rust:1.98.0-trixie AS oha-builder
 
-ARG OHA_VERSION=1.15.0
+ARG OHA_VERSION=1.16.0
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential clang cmake pkg-config && \

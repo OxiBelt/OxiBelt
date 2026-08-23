@@ -10821,11 +10821,11 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
     "comparator build script should produce deterministic tags and tar names"
   );
   assert!(
-    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.3")
+    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.4")
       && nginx_dockerfile.contains(
-        "ARG NGINX_SHA256=a7657c50811c2d92d9895395e8b873ef60398142c4db21eb647811c38f6dd525"
+        "ARG NGINX_SHA256=e6f20b644a17a643f059ae6467a1971fe2811587d025e071068753a1f1e3b3c3"
       )
-      && script.contains("--build-arg \"NGINX_VERSION=1.31.3\"")
+      && script.contains("--build-arg \"NGINX_VERSION=1.31.4\"")
       && nginx_dockerfile.contains("ARG NGINX_RUNTIME_IMAGE=alpine:3.24")
       && nginx_dockerfile.contains("FROM alpine:3.24 AS builder")
       && nginx_dockerfile.contains("sha256sum -c -")
@@ -10961,7 +10961,7 @@ fn docker_external_benchmark_image_job_builds_reusable_artifact() {
     );
   }
   assert!(
-    dockerfile.contains("ARG OHA_VERSION=1.15.0")
+    dockerfile.contains("ARG OHA_VERSION=1.16.0")
       && dockerfile.contains("ARG WRK_COMMIT=a211dd5a7050b1f9e8a9870b95513060e72ac4a0")
       && dockerfile.contains(
         "ARG WRK_SHA256=172dd2788b22b210d37a68f11c91e82fdba6583d2a544f04b398a66507031229"

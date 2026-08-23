@@ -40,7 +40,7 @@ case "${comparator}" in
   nginx)
     dockerfile="${repo_root}/tests/docker/performance_comparators/Dockerfile.nginx"
     build_args=(
-      --build-arg "NGINX_VERSION=1.31.3"
+      --build-arg "NGINX_VERSION=1.31.4"
       --build-arg "NGINX_TARGET_CPU=${target_cpu}"
     )
     ;;
