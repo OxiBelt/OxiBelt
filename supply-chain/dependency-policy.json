@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "e2038af108d060a8025541be7c4d20697c024ad664e2e7b86c594a98d98a3647",
+      "lockfileSha256": "1ff2781b70c3fd4ada6cad601fba7893b2e9ce45fc385caf2b6a0a06d99a9bd4",
       "exemptionInventorySha256": "bc56df64f73e811c2c8198d37f44cc905a5c8ca4f6e2a55073a90f084f685e7d",
       "exemptedPackageVersions": 432
     },
@@ -70,7 +70,7 @@
       {
         "category": "cryptography",
         "packages": {
-          "aes-gcm": ["0.11.0"],
+          "aes-gcm": ["0.11.1"],
           "argon2": ["0.5.3"],
           "aws-lc-fips-sys": ["0.14.1"],
           "aws-lc-rs": ["1.18.0"],
@@ -105,7 +105,7 @@
           "quinn-udp": ["0.5.15"],
           "rustls": ["0.23.43"],
           "rustls-pki-types": ["1.15.1"],
-          "rustls-webpki": ["0.103.14"],
+          "rustls-webpki": ["0.103.15"],
           "web-transport-proto": ["0.6.0"],
           "web-transport-quinn": ["0.12.1"],
           "web-transport-trait": ["0.4.0"]
@@ -115,7 +115,7 @@
       {
         "category": "parsing-serialization",
         "packages": {
-          "jsonschema": ["0.50.0"],
+          "jsonschema": ["0.51.0"],
           "serde": ["1.0.229"],
           "serde-saphyr": ["0.0.29", "1.1.0"],
           "serde_json": ["1.0.151"],
@@ -192,7 +192,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:e2038af108d060a8025541be7c4d20697c024ad664e2e7b86c594a98d98a3647",
+      "subject": "Cargo.lock@sha256:1ff2781b70c3fd4ada6cad601fba7893b2e9ce45fc385caf2b6a0a06d99a9bd4",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -204,7 +204,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:e2038af108d060a8025541be7c4d20697c024ad664e2e7b86c594a98d98a3647",
+      "subject": "Cargo.lock@sha256:1ff2781b70c3fd4ada6cad601fba7893b2e9ce45fc385caf2b6a0a06d99a9bd4",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
