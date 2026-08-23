@@ -112,8 +112,8 @@ jobs:
 
       - name: Load OxiBelt and helper images
         run: |
-          docker load --input "${RUNNER_TEMP}/oxibelt-security-fuzz-images/oxibelt-alpine-musl-amd64v2.tar"
-          docker load --input "${RUNNER_TEMP}/oxibelt-security-fuzz-images/oxibelt-docker-integration-helper-images.tar"
+          docker load --input "${RUNNER_TEMP}/oxibelt-security-fuzz-images/oxibelt-image/oxibelt-alpine-musl-amd64v2.tar"
+          docker load --input "${RUNNER_TEMP}/oxibelt-security-fuzz-images/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
 
       - name: Run fifteen-minute Docker security fuzz campaign
         env:
