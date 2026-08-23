@@ -84,7 +84,9 @@ async fn stream_runtime_rotation_reuses_unaffected_tasks() {
   let cert_dir = temp_dir.path().join("cert");
   std::fs::create_dir_all(&cert_dir).expect("certificate directory should be created");
   let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "stream-runtime-rotation");
-  let https_bind = unused_loopback_port().await;
+  let https_bind = "127.0.0.1:0"
+    .parse()
+    .expect("ephemeral HTTPS bind should parse");
   let tcp_bind = unused_loopback_port().await;
   let local_udp_bind = unused_loopback_udp_port().await;
   let shared_udp_bind = unused_loopback_udp_port().await;
@@ -243,7 +245,9 @@ async fn stream_bind_failure_keeps_last_good_state_and_task() {
       .expect("test private key should have a filename"),
   );
   let config_path = config_dir.join("oxibelt.toml");
-  let https_bind = unused_loopback_port().await;
+  let https_bind = "127.0.0.1:0"
+    .parse()
+    .expect("ephemeral HTTPS bind should parse");
   let initial_bind = unused_loopback_port().await;
   let initial_listeners = vec![stream_listener(
     "tcp",

@@ -94,6 +94,9 @@ for the governed entry format.
 - Raise the explicit mewt per-mutant ceiling to 602 seconds so a cold hosted
   baseline can complete while retaining the 120-minute job cap, complete
   30-mutant inventory, and fail-closed no-skip/no-timeout result checks.
+- Bind unused HTTPS listeners directly to kernel-assigned ports in stream
+  reload tests so released ephemeral reservations cannot be reclaimed by
+  concurrent work on hosted ARM runners.
 - Require all 30 fresh beta.8 image subjects and both Helm `4.2.4` chart
   packages to complete vulnerability, SBOM, provenance, attestation,
   independent-rebuild, and registry readback verification. Do not promote or
