@@ -649,6 +649,12 @@ criteria = "safe-to-deploy"
 delta = "0.2.0 -> 0.3.0"
 notes = "Packaged production source and README are byte-identical to 0.2.0. The release only raises the MSRV and dependency floors already selected by OxiBelt and adds non-propagating development dependencies; it has no build script, proc macro, unsafe code, or new runtime capability."
 
+[[audits.online-dsl-forge]]
+who = "OpenAI Codex <codex@openai.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.0 -> 0.3.1"
+notes = "Reviewed the complete checksum-matched 0.3.0-to-0.3.1 source delta. The parser now tracks serialized AST depth and fails closed before serde_json's default container-depth boundary; tokenization, spans, AST construction, and existing recursion limits otherwise remain intact. The crate adds no unsafe code, build script, proc macro, filesystem, process, or network capability."
+
 [[audits.pest]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -852,6 +858,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "3.0.3"
 notes = "Reviewed complete new 3.0.3 source; token-buffer cursor, parser-lifetime, thread-bound, and token-layout unsafe invariants are documented and maintained, parsing failures return structured errors, and the crate has no build script or runtime external side effects."
+
+[[audits.syn]]
+who = "OpenAI Codex <codex@openai.com>"
+criteria = "safe-to-deploy"
+delta = "3.0.3 -> 3.0.4"
+notes = "Reviewed the complete checksum-matched 3.0.3-to-3.0.4 source delta. The only parser behavior change routes foreign-function signatures through the existing signature parser with safe-function syntax enabled; unsafe implementation and token-buffer code are unchanged, and the crate adds no build script or external side effect."
 
 [[audits.synchrony]]
 who = "OpenAI Codex"

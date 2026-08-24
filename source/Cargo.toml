@@ -92,7 +92,7 @@ compio = { version = "0.19.1", default-features = false, features = ["bytes", "i
 compio-driver = { version = "0.12.4", default-features = false, features = ["io-uring", "polling"] }
 crc32fast = "1.5.1"
 memchr = "2.8.3"
-online-dsl-forge = "0.3.0"
+online-dsl-forge = "0.3.1"
 oxibelt-build-identity.workspace = true
 oxibelt-control-protocol.workspace = true
 
@@ -106,7 +106,7 @@ jsonschema.workspace = true
 loom = "0.7.2"
 pretty_assertions = "1.4.1"
 proc-macro2 = "1.0.107"
-syn = { version = "3.0.3", features = ["full", "visit"] }
+syn = { version = "3.0.4", features = ["full", "visit"] }
 tokio = { version = "1.53.1", features = ["test-util"] }
 
 [build-dependencies]
