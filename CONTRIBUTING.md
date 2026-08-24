@@ -117,7 +117,11 @@ that beta, and the complete beta-to-stable delta must contain only
 dependency, workflow, Helm, controller, packaging, or other tracked change
 requires the next beta and a restarted qualification soak. Publish stable only
 after the latest beta's automatic 30-image and two-chart qualification has
-remained eligible for at least 24 hours.
+remained eligible for at least 24 hours. The sole exception is the exact
+`0.8.1-beta.9` to `0.8.1` transition: it has no additional calendar delay
+after complete automatic qualification, but stable publication must still be
+at or after both beta publication and verifier completion. This exception does
+not apply to another beta, stable version, or release line.
 
 Every governed entry must contain these level-three sections in this order:
 `Configuration`, `Schema epochs`, `Deprecations and removals`, `Admin API`,

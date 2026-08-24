@@ -9961,7 +9961,7 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     "q.releaseKind !== 'stable'",
     "release-qualification-${{ steps.reauthenticate.outputs.beta_revision }}",
     "stable release must be the single approved documentation-only commit after its beta source",
-    "stable publication occurred before the beta qualification completed its 24-hour soak",
+    "stable publication occurred before the beta qualification completed its required delay",
     "betaQualification.aggregateSha256",
     "(.receipts.images | length) == 30",
     "(.receipts.charts | length) == 2",
@@ -9986,6 +9986,96 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
   ] {
     assert!(verifier.contains(expected));
   }
+  assert_eq!(
+    verifier
+      .matches("version === '0.8.1' && betaRelease.tag_name === '0.8.1-beta.9'")
+      .count(),
+    1,
+    "the one-release waiver must bind the exact stable and beta versions"
+  );
+  assert_eq!(
+    promotion
+      .matches("q.version === '0.8.1' && beta.version === '0.8.1-beta.9'")
+      .count(),
+    2,
+    "both stable-alias authorization passes must bind the exact waiver pair"
+  );
+  assert_eq!(
+    verifier
+      .matches("stablePublicationDelayMs < requiredStableQualificationDelayMs")
+      .count(),
+    1
+  );
+  assert_eq!(
+    promotion
+      .matches("stablePublicationDelayMs < requiredStableQualificationDelayMs")
+      .count(),
+    2
+  );
+  assert!(verifier.contains(": 24 * 60 * 60 * 1000"));
+  assert_eq!(promotion.matches(": 24 * 60 * 60 * 1000").count(), 2);
+
+  const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+  let required_delay = |stable: &str, beta: &str| {
+    if stable == "0.8.1" && beta == "0.8.1-beta.9" {
+      0
+    } else {
+      DAY_MS
+    }
+  };
+  let permits_publication = |stable: &str,
+                             beta: &str,
+                             stable_ms: Option<i64>,
+                             beta_ms: Option<i64>,
+                             verifier_ms: Option<i64>| {
+    let (Some(stable_ms), Some(beta_ms), Some(verifier_ms)) = (stable_ms, beta_ms, verifier_ms)
+    else {
+      return false;
+    };
+    stable_ms - beta_ms.max(verifier_ms) >= required_delay(stable, beta)
+  };
+
+  assert!(permits_publication(
+    "0.8.1",
+    "0.8.1-beta.9",
+    Some(2_000),
+    Some(1_000),
+    Some(2_000)
+  ));
+  assert!(!permits_publication(
+    "0.8.1",
+    "0.8.1-beta.9",
+    Some(1_999),
+    Some(1_000),
+    Some(2_000)
+  ));
+  for (stable, beta) in [
+    ("0.8.1", "0.8.1-beta.8"),
+    ("0.8.1", "0.8.1-beta.10"),
+    ("0.8.2", "0.8.1-beta.9"),
+  ] {
+    assert!(!permits_publication(
+      stable,
+      beta,
+      Some(2_000),
+      Some(1_000),
+      Some(2_000)
+    ));
+    assert!(permits_publication(
+      stable,
+      beta,
+      Some(2_000 + DAY_MS),
+      Some(1_000),
+      Some(2_000)
+    ));
+  }
+  assert!(!permits_publication(
+    "0.8.1",
+    "0.8.1-beta.9",
+    None,
+    Some(1_000),
+    Some(2_000)
+  ));
 }
 
 #[test]

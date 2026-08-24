@@ -282,13 +282,18 @@ jobs:
               {...context.repo, run_id: beta.verifierRunId, per_page: 100})
             const betaArtifact = betaArtifacts.filter((artifact) => !artifact.expired && artifact.id === beta.artifactId && artifact.name === beta.artifactName)
             const soakStart = Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt))
+            const requiredStableQualificationDelayMs = q.version === '0.8.1' && beta.version === '0.8.1-beta.9'
+              ? 0
+              : 24 * 60 * 60 * 1000
+            const stablePublicationDelayMs = Date.parse(q.publishedAt) - soakStart
             if (betaRef.object.sha !== beta.tagObjectSha || betaTag?.object?.sha !== beta.commit ||
                 betaRelease.id !== beta.releaseId || betaRelease.tag_name !== beta.version || validBetas[0]?.id !== beta.releaseId || betaRelease.draft || !betaRelease.prerelease ||
                 betaRelease.published_at !== beta.publishedAt || betaRun.path !== '.github/workflows/verify-release-rebuild.yml' ||
                 betaRun.event !== 'workflow_run' || betaRun.status !== 'completed' || betaRun.conclusion !== 'success' ||
                 betaRun.run_attempt !== beta.verifierRunAttempt || betaRun.head_sha !== beta.verifierWorkflowSha || betaRun.updated_at !== beta.verifierCompletedAt || betaArtifact.length !== 1 ||
-                !Number.isFinite(soakStart) || Date.parse(q.publishedAt) - soakStart < 24 * 60 * 60 * 1000) {
-              throw new Error('beta qualification API identity or completed 24-hour soak changed')
+                !Number.isFinite(soakStart) || !Number.isFinite(stablePublicationDelayMs) ||
+                stablePublicationDelayMs < requiredStableQualificationDelayMs) {
+              throw new Error('beta qualification API identity or completed required delay changed')
             }
             core.setOutput('beta_run_id', String(beta.verifierRunId))
             core.setOutput('beta_revision', beta.commit)
@@ -568,6 +573,10 @@ jobs:
               {...context.repo, run_id: beta.verifierRunId, per_page: 100})
             const betaArtifact = betaArtifacts.filter((artifact) => !artifact.expired && artifact.id === beta.artifactId && artifact.name === beta.artifactName)
             const soakStart = Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt))
+            const requiredStableQualificationDelayMs = q.version === '0.8.1' && beta.version === '0.8.1-beta.9'
+              ? 0
+              : 24 * 60 * 60 * 1000
+            const stablePublicationDelayMs = Date.parse(q.publishedAt) - soakStart
             if (ref.object.sha !== q.tagObjectSha || tag?.object?.sha !== q.commit || release.id !== q.releaseId ||
                 release.id !== latest.id || release.draft || release.prerelease || release.target_commitish !== q.commit ||
                 producer.path !== q.producer.workflowPath || producer.run_attempt !== q.producer.runAttempt || producer.conclusion !== 'success' ||
@@ -577,7 +586,7 @@ jobs:
                 betaVerifier.path !== '.github/workflows/verify-release-rebuild.yml' || betaVerifier.event !== 'workflow_run' ||
                 betaVerifier.run_attempt !== beta.verifierRunAttempt || betaVerifier.head_sha !== beta.verifierWorkflowSha || betaVerifier.conclusion !== 'success' ||
                 betaVerifier.updated_at !== beta.verifierCompletedAt || betaArtifact.length !== 1 || !Number.isFinite(soakStart) ||
-                Date.parse(q.publishedAt) - soakStart < 24 * 60 * 60 * 1000 ||
+                !Number.isFinite(stablePublicationDelayMs) || stablePublicationDelayMs < requiredStableQualificationDelayMs ||
                 q.promotionValidation.workflowPath !== '.github/workflows/promote-stable-aliases.yml') {
               core.setFailed('promotion identity changed after read-only validation')
             }

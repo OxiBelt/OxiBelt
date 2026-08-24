@@ -15,6 +15,143 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.8.1-beta.9] - 2026-08-24
+
+> Fresh qualification candidate after updating the owned OxiRule parser,
+> refreshing `syn`, advancing the dated fuzz toolchain, and binding a
+> one-release zero-delay stable gate to the exact beta.9-to-`0.8.1`
+> transition. Beta.8 remains an immutable published prerelease; do not reuse
+> its artifacts, attestations, rebuild receipts, or qualification evidence.
+
+- Changes since: `0.8.1-beta.8`
+- Supported upgrade sources: `0.8.1-beta.8`, `0.6.6`
+- Upgrade guide: [Upgrade from 0.6.6 to the 0.8.1 line](docs/Upgrading.md#upgrade-from-066-to-the-081-line)
+
+### Configuration
+
+- Preserve every beta.8 epoch-1 key, default, validation rule, reload class,
+  compatibility alias, resolver policy, and route behavior. This dependency
+  and release-control refresh changes no runtime configuration or request
+  processing policy.
+
+### Schema epochs
+
+- Keep native configuration at epoch `1` and retain every beta.8 deployment,
+  evidence, admission, workload-policy, revocation, and Helm OCI schema
+  version. No schema or migration bytes change in this cut.
+
+### Deprecations and removals
+
+- Add no deprecation or removal. No command, option, compatibility alias,
+  image role, or published contract is removed.
+
+### Admin API
+
+- Preserve beta.8 Admin request, response, authentication, authorization,
+  idempotency, audit, membership, operation, and embedded-runtime contracts.
+  No Admin endpoint or wire representation changes.
+
+### Feature lifecycle
+
+- Keep all general and Kubernetes graduation targets on `0.8.1`. Every
+  tracked feature remains `experimental` and `unvalidated` until complete
+  beta.9 exact-revision evidence succeeds.
+- Preserve every stable-only authorization and mutable-alias gate. The sole
+  timing exception is the exact `0.8.1-beta.9` to `0.8.1` transition: it may
+  proceed immediately after complete automatic qualification and beta
+  publication, but never before either timestamp. All other transitions keep
+  the 24-hour delay.
+
+### Rulepack compatibility
+
+- Retain the beta.8 OxiRule and CRS compatibility contract without syntax,
+  matching, normalization, precedence, or production response changes.
+- Update the directly executed, same-project `online-dsl-forge` parser from
+  `0.3.0` to `0.3.1` and bind its crates.io checksum and safe-to-deploy delta
+  audit. The parser package preserves the public DSL behavior exercised by the
+  repository contract tests.
+
+### Executables and images
+
+- Preserve the six image roles, five platform subjects per role, executable
+  names, entrypoints, users, ports, and OCI identity contracts from beta.8.
+- Update the direct development parser dependency `syn` from `3.0.3` to
+  `3.0.4`; synchronize the root, performance-probe, and protocol-probe lock
+  graphs while leaving the post-quantum probe graph unchanged.
+- Advance the pinned fuzz compiler from `nightly-2026-08-04` to
+  `nightly-2026-08-24` across workflows, local runners, contract tests, and
+  fuzzing documentation. Keep the stable compiler at Rust `1.98.0`.
+- Keep pnpm on the Node 24 policy line. Preserve every admitted GitHub Action,
+  container digest, BuildKit, Trivy, Helm, Kubernetes, minikube, and
+  non-benchmark tool pin already current in beta.8.
+- Require all 30 fresh beta.9 image subjects and both Helm `4.2.4` chart
+  packages to complete vulnerability, SBOM, provenance, attestation,
+  independent-rebuild, and registry readback verification. Do not promote or
+  republish beta.8 subjects under beta.9 tags.
+
+### Storage and state
+
+- Change no persistent schema, serialization, shared-state, membership, audit,
+  UDP ownership, resolver cache, connection-admission, or rollout-state
+  format. Beta.8 source state remains directly compatible.
+
+### Upgrade validation
+
+- Validate and inspect the epoch-1 sibling tree with the beta.9 binaries and
+  canonical Helm client before staged rollout:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
+  --from 0 --to 1
+oxibeltctl config validate \
+  /etc/oxibelt/config/oxibelt.toml.migrated-v1/oxibelt.toml \
+  --local-only
+helm version --short
+```
+
+- Deploy only newly qualified beta.9 digests after person-reviewed
+  publication, canonical non-benchmark validation, all image and chart
+  receipts, independent rebuilds, and the aggregate automatic qualification
+  receipt succeed.
+
+### Rollback and irreversible steps
+
+- Retain the `0.6.6` and beta.8 image digests, complete epoch-0 and epoch-1
+  configuration trees, referenced assets, compatible PostgreSQL backups,
+  admission bundles, audit evidence, controller rollback ConfigMaps, Gateway
+  API CRDs and Lease, and shared UDP identity material until beta.9
+  qualification completes.
+- Stop new-version writers and drain the data plane before restoring beta.8 or
+  stable binaries, configuration, and database together. External audit,
+  telemetry, network, and client-visible effects cannot be undone.
+
+### Known issues
+
+- Beta.8 is an immutable published prerelease with its own exact-version
+  images, charts, attestations, and workflow evidence. Preserve that history,
+  but do not relabel or reuse any beta.8 subject or receipt as beta.9 evidence.
+- Keep `generic-array` `0.14.7` while `crypto-common` selects that compatibility
+  line, and keep the `x509-cert` `0.2.5` alias required by `x509-ocsp`'s public
+  type family. Keep `@types/node` on the Node 24 line until the repository's
+  runtime policy advances; these remain reviewed compatibility holds.
+- Native `linux/riscv64` cluster-runner graduation evidence remains unmet; all
+  tracked general and Kubernetes features remain experimental and unvalidated.
+
+### Security
+
+- Bind the new Rust archives to their crates.io checksums and record
+  safe-to-deploy Cargo-vet delta audits for `online-dsl-forge` `0.3.0` to
+  `0.3.1` and `syn` `3.0.3` to `3.0.4`. Keep registries, licenses, lifecycle
+  scripts, exemptions, and lock-bound policy fail closed.
+- Require a fresh exact beta.9 aggregate qualification before any stable
+  publication. The zero-delay exception removes only additional calendar
+  waiting for the exact beta.9-to-`0.8.1` pair; it does not relax publication,
+  tag, latest-beta, receipt, rebuild, documentation-only commit, or alias
+  authorization requirements and rejects a stable timestamp before the later
+  of beta publication and verifier completion.
+
 ## [0.8.1-beta.8] - 2026-08-23
 
 > Fresh qualification candidate after repairing sustained-fuzz artifact

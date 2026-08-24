@@ -499,7 +499,11 @@ qualification, the producer's exact release-contract receipt must name the
 sole latest same-target beta; that beta's exact aggregate bytes, tag, release,
 automatic verifier run, artifact identity, and SHA-256 are bound into the
 stable qualification. Stable publication must occur at least 24 hours after
-both beta publication and completion of the beta qualification. The verifier
+both beta publication and completion of the beta qualification. The exact
+`0.8.1-beta.9` to `0.8.1` transition has a one-release zero-delay exception:
+publication may proceed immediately after complete qualification, but never
+before beta publication or verifier completion. Every other transition keeps
+the 24-hour requirement. The verifier
 derives every plan field and the complete stable alias inventory with its
 approved release-planning code; producer image-plan metadata is not a
 qualification input.

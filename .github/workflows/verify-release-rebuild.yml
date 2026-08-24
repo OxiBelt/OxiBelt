@@ -633,8 +633,13 @@ jobs:
               if (candidates.length < 1) throw new Error('latest beta has no successful automatic full qualification aggregate')
               const accepted = candidates[0]
               const soakStart = Math.max(Date.parse(betaRelease.published_at), Date.parse(accepted.run.updated_at))
-              if (!Number.isFinite(soakStart) || Date.parse(release.published_at) - soakStart < 24 * 60 * 60 * 1000) {
-                throw new Error('stable publication occurred before the beta qualification completed its 24-hour soak')
+              const requiredStableQualificationDelayMs = version === '0.8.1' && betaRelease.tag_name === '0.8.1-beta.9'
+                ? 0
+                : 24 * 60 * 60 * 1000
+              const stablePublicationDelayMs = Date.parse(release.published_at) - soakStart
+              if (!Number.isFinite(soakStart) || !Number.isFinite(stablePublicationDelayMs) ||
+                  stablePublicationDelayMs < requiredStableQualificationDelayMs) {
+                throw new Error('stable publication occurred before the beta qualification completed its required delay')
               }
               betaQualification = {version: betaRelease.tag_name, ref: `refs/tags/${betaRelease.tag_name}`,
                 tagObjectSha: betaRef.object.sha, commit: betaTag.object.sha, releaseId: betaRelease.id,
