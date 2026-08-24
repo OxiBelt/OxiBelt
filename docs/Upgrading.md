@@ -60,9 +60,9 @@ be used as a supported production upgrade source or target.
 | `0.8.1-beta.4` | `0.8.1-beta.5` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.4's published artifacts and incomplete verifier evidence cannot be promoted, relabeled, or reused. |
 | `0.6.6` | `0.8.1-beta.7` | Published, superseded | Preserve the immutable prerelease and its exact-version evidence, but do not use it to qualify beta.8 or stable promotion after the later fuzz-harness and dependency refresh. |
 | `0.8.1-beta.6` | `0.8.1-beta.7` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.6's published artifacts and exact-revision evidence cannot be promoted, relabeled, or reused. |
-| `0.6.6` | `0.8.1-beta.9` | Qualification candidate | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Deploy only after every fresh exact-revision artifact and automatic qualification gate succeeds. |
+| `0.6.6` | `0.8.1-beta.9` | Published, qualified | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Use only the fresh beta.9 exact-version artifacts and complete automatic qualification evidence; do not substitute an earlier beta subject or receipt. |
 | `0.8.1-beta.8` | `0.8.1-beta.9` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.8's published artifacts and exact-revision evidence cannot be promoted, relabeled, or reused for beta.9. |
-| `0.8.1-beta.9` | `0.8.1` | Conditional stable promotion | Promotion requires person-reviewed beta publication, complete exact-revision qualification, and a documentation-only stable commit. This exact transition has no additional calendar delay, but stable publication cannot predate beta publication or verifier completion. |
+| `0.8.1-beta.9` | `0.8.1` | Stable candidate | The stable source is exactly one documentation-only commit after the qualified beta.9 revision. This exact transition has no additional calendar delay, but stable publication cannot predate beta publication or verifier completion and remains subject to every stable-only release and alias gate. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -72,7 +72,8 @@ release-contract checker.
 
 ## Upgrade from 0.6.6 to the 0.8.1 line
 
-`0.8.1-beta.9` is the fresh qualification candidate. The signed beta.1 tag
+`0.8.1-beta.9` is the published and qualified source for stable promotion. The
+signed beta.1 tag
 remains at its original local revision and is absent from GitHub. The signed
 beta.2 tag exists remotely at its immutable revision, but draft preparation
 failed and no GitHub Release or official artifact was created. The immutable
@@ -157,15 +158,15 @@ the controller, restore the old binaries, configuration, and database together,
 and remove unknown epoch-1 tables before validating with `0.6.6`. External
 audit, telemetry, network, and client-visible effects cannot be undone.
 
-`0.8.1-beta.9` must produce fresh exact-revision evidence: 30 immutable image
+`0.8.1-beta.9` produced fresh exact-revision evidence for 30 immutable image
 subjects, both official exact-version Helm OCI charts, their independent
-rebuild receipts, and one complete automatic qualification receipt. The exact
-beta.9-to-`0.8.1` transition may proceed without an additional calendar delay
-after that evidence is complete and the beta is person-reviewed and published;
-stable publication still cannot predate beta publication or verifier
-completion. This one-release exception does not apply to any other transition.
-Any tracked change outside the eventual documentation-only stable commit
-requires a later beta and restarts qualification with the normal 24-hour gate.
+rebuild receipts, and one complete automatic qualification receipt. Its
+person-reviewed publication and verifier completion satisfy the exact
+beta.9-to-`0.8.1` transition's prerequisites without an additional calendar
+delay; stable publication still cannot predate either event. This one-release
+exception does not apply to any other transition. Any tracked change outside
+the documentation-only stable commit requires a later beta and restarts
+qualification with the normal 24-hour gate.
 
 ## Upgrade from 0.6.5 to 0.6.6
 
