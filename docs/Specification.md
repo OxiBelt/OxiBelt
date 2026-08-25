@@ -237,6 +237,8 @@ Targets may be:
 - A named `[[upstreams]]` entry.
 - A named `[[upstream_pools]]` entry.
 - A `static_root` directory.
+- A named Certificate Transparency log through `ct_log`; see
+  [Certificate Transparency operations](certificate-transparency.md).
 - A terminal `actions.redirect` response.
 
 Static targets serve only verified regular files beneath the configured `static_root`; directory listing is forbidden. Route-level `[routes.static_files]` convenience resolution evaluates the requested file, configured directory indexes, `try_files`, SPA fallback, and configured static error pages without leaving the same root-confinement and verified-open boundary. Static hot-object cache fill and cached-hit refresh also open the current file inside that boundary, and cached hits serve bytes only when the current validator still matches the cached object. Precompressed static variants are negotiated from `Accept-Encoding` q-values, skipped for range requests, and keep response metadata such as MIME overrides and cache-control policy tied to the selected route and logical asset. When a route enables WAF HTTP body compression transform and response body WAF inspection is required, precompressed static variants are decoded before response WAF or fail closed if HTTP transform semantics are unsafe.

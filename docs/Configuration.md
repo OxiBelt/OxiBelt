@@ -284,7 +284,7 @@ profile_version = 1
 Required routing inputs:
 
 - At least one `[[routes]]`, `[sni_forward]` rule/default target, `[[stream_listeners]]`, or `[[webrtc_turn_listeners]]`.
-- Each route must set exactly one of `upstream`, `upstream_pool`, `static_root`, or terminal `actions.redirect`.
+- Each route must set exactly one of `upstream`, `upstream_pool`, `static_root`, `ct_log`, or terminal `actions.redirect`.
 
 ## Operational Profiles
 
@@ -4370,7 +4370,9 @@ Fields:
 - `actions.request_headers` and `actions.response_headers`: optional route-level header modifiers with `set`, `add`, and `remove`. Request header actions cannot mutate OxiBelt-managed proxy identity or authority headers: `Host`, `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port`, `X-Real-IP`, or `CF-Connecting-IP`. Routes that use `external_auth` also cannot mutate that provider's configured `identity_headers`; those headers remain owned by the trusted auth result. This is a breaking hardening for configurations that previously used route actions to override proxy identity metadata.
 - `actions.cors`: optional route-level CORS policy with allowed origins, methods, headers, exposed headers, credentials, and max-age controls.
 - `actions.request_mirrors`: optional best-effort request mirroring to one or more upstream pools.
-- `upstream`, `upstream_pool`, `static_root`, or `actions.redirect`: exactly one target.
+- `ct_log`: named Certificate Transparency log target; see
+  [Certificate Transparency operations](certificate-transparency.md).
+- `upstream`, `upstream_pool`, `static_root`, `ct_log`, or `actions.redirect`: exactly one target.
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
 - `security_headers`: optional security response header policy; omitted means `default`, `off` disables OxiBelt-managed security header insertion for the route, and any other value must match `[[security.header_policies]].name`. Named security header policies must not use the exact lowercase names `default` or `off`.
@@ -4614,7 +4616,7 @@ Configuration validation rejects:
 - Missing all `[[routes]]`, `[sni_forward]` rule/default targets, `[[stream_listeners]]`, and `[[webrtc_turn_listeners]]`; duplicate names; empty route hosts; or unknown route targets.
 - Invalid SNI forwarding targets, duplicate SNI forwarding rule names or server-name patterns, unsupported wildcard placement, zero SNI forwarding timeouts or QUIC Initial reassembly limits, a per-session QUIC Initial buffer cap above its total cap, or QUIC SNI forwarding without downstream HTTP/3.
 - Invalid stream upstream-pool origins, unsupported stream pool algorithms, duplicate stream SNI rule names or server-name patterns, stream listener/SNI rule target conflicts, missing stream listener defaults without SNI rules, UDP stream listeners with PROXY protocol egress, stream listeners that reference a pool without matching `tcp://` or `udp://` servers, or `shared_required` UDP state without its shared backend, identity key, timeout floor, and same-backend connection-limit prerequisites.
-- Routes that set zero or more than one of `upstream`, `upstream_pool`, `static_root`, or `actions.redirect`.
+- Routes that set zero or more than one of `upstream`, `upstream_pool`, `static_root`, `ct_log`, or `actions.redirect`.
 - Unsafe route paths.
 - Unsupported upstream schemes or HTTP/3 upstreams without HTTPS.
 - Invalid runtime file paths or runtime files outside their purpose-specific directory.
