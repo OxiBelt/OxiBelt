@@ -69,6 +69,11 @@ their callers.
    re-export requires an explicit contract review and a corresponding policy
    test update.
 
+The public `ct` and `ct_runtime` roots are reviewed bridges for `oxibeltctl`
+CT monitoring, accepted-root management, shard planning, and explicit
+PostgreSQL administration. They do not authorize other role packages to
+acquire CT runtime ownership or add wildcard re-exports.
+
 ## Role feature matrix
 
 The workspace dependency on `oxibelt` disables default features. Every role

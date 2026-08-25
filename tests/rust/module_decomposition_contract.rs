@@ -676,6 +676,8 @@ fn root_public_modules_match_the_reviewed_compatibility_surface() {
     "client_identity",
     "config",
     "control_http",
+    "ct",
+    "ct_runtime",
     "diagnostics",
     "dynamic_policy",
     "external_auth",

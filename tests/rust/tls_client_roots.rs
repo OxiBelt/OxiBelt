@@ -1059,6 +1059,7 @@ async fn start_remote_signer_with_limits(
     socket_path: socket_path.clone(),
     socket_mode: 0o600,
     keys: vec![(key_id.to_string(), key_path.to_path_buf())],
+    ct_log_key: None,
     token_env: token_env.to_string(),
     token_file: None,
     token_reload_interval: Duration::from_millis(1000),

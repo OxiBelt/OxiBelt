@@ -2613,165 +2613,6 @@ fn push_u24(output: &mut Vec<u8>, value: usize) -> anyhow::Result<()> {
   Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn resolve_ranges(leaves: &[Hash], ranges: &[(u64, u64)]) -> Vec<Hash> {
-    ranges
-      .iter()
-      .map(|&(offset, count)| {
-        let start = usize::try_from(offset).unwrap();
-        let end = usize::try_from(offset + count).unwrap();
-        merkle::root_from_leaf_hashes(&leaves[start..end])
-      })
-      .collect()
-  }
-
-  #[test]
-  fn durable_range_plans_match_reference_merkle_proofs() {
-    let tree_sizes = (1..=65_u64)
-      .chain([127, 128, 129, 255, 256, 257])
-      .collect::<Vec<_>>();
-    for tree_size in tree_sizes {
-      let leaves = (0..tree_size)
-        .map(|index| merkle::leaf_hash(&index.to_be_bytes()))
-        .collect::<Vec<_>>();
-      let leaf_indexes = if tree_size <= 65 {
-        (0..tree_size).collect::<Vec<_>>()
-      } else {
-        vec![0, tree_size / 2, tree_size - 1]
-      };
-      for leaf_index in leaf_indexes {
-        let mut ranges = Vec::new();
-        collect_inclusion_ranges(0, tree_size, leaf_index, &mut ranges);
-        assert_eq!(
-          resolve_ranges(&leaves, &ranges),
-          merkle::inclusion_proof(&leaves, usize::try_from(leaf_index).unwrap()).unwrap()
-        );
-      }
-      let old_sizes = if tree_size <= 65 {
-        (0..=tree_size).collect::<Vec<_>>()
-      } else {
-        vec![0, 1, tree_size / 2, tree_size - 1, tree_size]
-      };
-      for old_size in old_sizes {
-        let mut ranges = Vec::new();
-        if old_size != 0 && old_size != tree_size {
-          collect_consistency_ranges(old_size, 0, tree_size, true, &mut ranges);
-        }
-        assert_eq!(
-          resolve_ranges(&leaves, &ranges),
-          merkle::consistency_proof(&leaves, usize::try_from(old_size).unwrap()).unwrap()
-        );
-      }
-    }
-  }
-
-  #[test]
-  fn static_tile_promotion_ignores_partial_lower_tiles() {
-    let hashes = (0..70_000_u64)
-      .map(|index| merkle::leaf_hash(&index.to_be_bytes()))
-      .collect::<Vec<_>>();
-
-    assert!(complete_static_tile_roots(&hashes[..255]).is_empty());
-    assert_eq!(complete_static_tile_roots(&hashes[..256]).len(), 1);
-    assert_eq!(complete_static_tile_roots(&hashes[..257]).len(), 1);
-    assert_eq!(complete_static_tile_roots(&hashes[..511]).len(), 1);
-    assert_eq!(complete_static_tile_roots(&hashes[..512]).len(), 2);
-
-    let level_one = complete_static_tile_roots(&hashes);
-    assert_eq!(level_one.len(), 273);
-    assert_eq!(
-      level_one[0],
-      merkle::root_from_leaf_hashes(&hashes[..crate::ct::static_ct::TILE_WIDTH])
-    );
-    assert_eq!(complete_static_tile_roots(&level_one).len(), 1);
-  }
-
-  #[test]
-  fn retired_artifact_paths_are_narrow_and_canonical() {
-    let checkpoint = retired_artifact_path(
-      CertificateTransparencyProtocol::StaticRfc6962V1,
-      "/logs/archive/checkpoint",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(checkpoint.relative_path(), "checkpoint");
-
-    let tile = retired_artifact_path(
-      CertificateTransparencyProtocol::StaticRfc6962V1,
-      "/logs/archive/tile/0/000.p/7",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(tile.relative_path(), "tile/0/000.p/7");
-
-    let fingerprint = "a".repeat(64);
-    let issuer = retired_artifact_path(
-      CertificateTransparencyProtocol::StaticRfc6962V1,
-      &format!("/logs/archive/issuer/{fingerprint}"),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(issuer.relative_path(), format!("issuer/{fingerprint}"));
-
-    let final_sth = retired_artifact_path(
-      CertificateTransparencyProtocol::Rfc9162V2,
-      "/logs/archive/ct/v2/get-final-sth",
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(final_sth.relative_path(), "checkpoint");
-    assert!(
-      retired_artifact_path(
-        CertificateTransparencyProtocol::Rfc9162V2,
-        "/logs/archive/tile/0/000",
-      )
-      .unwrap()
-      .is_none()
-    );
-  }
-
-  #[test]
-  fn retired_artifact_paths_reject_ambiguous_or_encoded_input() {
-    for path in [
-      "/logs//checkpoint",
-      "/logs/%2e%2e/checkpoint",
-      "/logs/../checkpoint",
-      "/logs/tile/0/0",
-      "/logs/tile/0/000/tile/0/000",
-      "/logs/issuer/ABCDEF",
-    ] {
-      assert!(
-        retired_artifact_path(CertificateTransparencyProtocol::StaticRfc6962V1, path).is_err(),
-        "accepted {path}"
-      );
-    }
-  }
-
-  #[test]
-  fn retired_artifact_url_appends_only_validated_relative_segments() {
-    let url =
-      retired_artifact_url("https://objects.example.test/tenant/log/", "tile/0/000.p/7").unwrap();
-    assert_eq!(
-      url.as_str(),
-      "https://objects.example.test/tenant/log/tile/0/000.p/7"
-    );
-    for source in [
-      "http://objects.example.test/log",
-      "https://user@objects.example.test/log",
-      "https://objects.example.test/log?version=1",
-      "https://objects.example.test/log%2fescape",
-      "https://objects.example.test/log/../escape",
-    ] {
-      assert!(retired_artifact_url(source, "checkpoint").is_err());
-    }
-    assert!(retired_artifact_url("https://objects.example.test/log", "../checkpoint").is_err());
-    assert!(retired_artifact_url("https://objects.example.test/log", "%2e%2e/checkpoint").is_err());
-  }
-}
-
 fn issuer_spki_hash(certificate_der: &[u8]) -> anyhow::Result<Hash> {
   let certificate = Certificate::from_der(certificate_der)?;
   let spki = certificate
@@ -3010,4 +2851,163 @@ fn is_submission_path(path: &str) -> bool {
   path.ends_with("/ct/v1/add-chain")
     || path.ends_with("/ct/v1/add-pre-chain")
     || path.ends_with("/ct/v2/submit-entry")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn resolve_ranges(leaves: &[Hash], ranges: &[(u64, u64)]) -> Vec<Hash> {
+    ranges
+      .iter()
+      .map(|&(offset, count)| {
+        let start = usize::try_from(offset).unwrap();
+        let end = usize::try_from(offset + count).unwrap();
+        merkle::root_from_leaf_hashes(&leaves[start..end])
+      })
+      .collect()
+  }
+
+  #[test]
+  fn durable_range_plans_match_reference_merkle_proofs() {
+    let tree_sizes = (1..=65_u64)
+      .chain([127, 128, 129, 255, 256, 257])
+      .collect::<Vec<_>>();
+    for tree_size in tree_sizes {
+      let leaves = (0..tree_size)
+        .map(|index| merkle::leaf_hash(&index.to_be_bytes()))
+        .collect::<Vec<_>>();
+      let leaf_indexes = if tree_size <= 65 {
+        (0..tree_size).collect::<Vec<_>>()
+      } else {
+        vec![0, tree_size / 2, tree_size - 1]
+      };
+      for leaf_index in leaf_indexes {
+        let mut ranges = Vec::new();
+        collect_inclusion_ranges(0, tree_size, leaf_index, &mut ranges);
+        assert_eq!(
+          resolve_ranges(&leaves, &ranges),
+          merkle::inclusion_proof(&leaves, usize::try_from(leaf_index).unwrap()).unwrap()
+        );
+      }
+      let old_sizes = if tree_size <= 65 {
+        (0..=tree_size).collect::<Vec<_>>()
+      } else {
+        vec![0, 1, tree_size / 2, tree_size - 1, tree_size]
+      };
+      for old_size in old_sizes {
+        let mut ranges = Vec::new();
+        if old_size != 0 && old_size != tree_size {
+          collect_consistency_ranges(old_size, 0, tree_size, true, &mut ranges);
+        }
+        assert_eq!(
+          resolve_ranges(&leaves, &ranges),
+          merkle::consistency_proof(&leaves, usize::try_from(old_size).unwrap()).unwrap()
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn static_tile_promotion_ignores_partial_lower_tiles() {
+    let hashes = (0..70_000_u64)
+      .map(|index| merkle::leaf_hash(&index.to_be_bytes()))
+      .collect::<Vec<_>>();
+
+    assert!(complete_static_tile_roots(&hashes[..255]).is_empty());
+    assert_eq!(complete_static_tile_roots(&hashes[..256]).len(), 1);
+    assert_eq!(complete_static_tile_roots(&hashes[..257]).len(), 1);
+    assert_eq!(complete_static_tile_roots(&hashes[..511]).len(), 1);
+    assert_eq!(complete_static_tile_roots(&hashes[..512]).len(), 2);
+
+    let level_one = complete_static_tile_roots(&hashes);
+    assert_eq!(level_one.len(), 273);
+    assert_eq!(
+      level_one[0],
+      merkle::root_from_leaf_hashes(&hashes[..crate::ct::static_ct::TILE_WIDTH])
+    );
+    assert_eq!(complete_static_tile_roots(&level_one).len(), 1);
+  }
+
+  #[test]
+  fn retired_artifact_paths_are_narrow_and_canonical() {
+    let checkpoint = retired_artifact_path(
+      CertificateTransparencyProtocol::StaticRfc6962V1,
+      "/logs/archive/checkpoint",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(checkpoint.relative_path(), "checkpoint");
+
+    let tile = retired_artifact_path(
+      CertificateTransparencyProtocol::StaticRfc6962V1,
+      "/logs/archive/tile/0/000.p/7",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(tile.relative_path(), "tile/0/000.p/7");
+
+    let fingerprint = "a".repeat(64);
+    let issuer = retired_artifact_path(
+      CertificateTransparencyProtocol::StaticRfc6962V1,
+      &format!("/logs/archive/issuer/{fingerprint}"),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(issuer.relative_path(), format!("issuer/{fingerprint}"));
+
+    let final_sth = retired_artifact_path(
+      CertificateTransparencyProtocol::Rfc9162V2,
+      "/logs/archive/ct/v2/get-final-sth",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(final_sth.relative_path(), "checkpoint");
+    assert!(
+      retired_artifact_path(
+        CertificateTransparencyProtocol::Rfc9162V2,
+        "/logs/archive/tile/0/000",
+      )
+      .unwrap()
+      .is_none()
+    );
+  }
+
+  #[test]
+  fn retired_artifact_paths_reject_ambiguous_or_encoded_input() {
+    for path in [
+      "/logs//checkpoint",
+      "/logs/%2e%2e/checkpoint",
+      "/logs/../checkpoint",
+      "/logs/tile/0/0",
+      "/logs/tile/0/000/tile/0/000",
+      "/logs/issuer/ABCDEF",
+    ] {
+      assert!(
+        retired_artifact_path(CertificateTransparencyProtocol::StaticRfc6962V1, path).is_err(),
+        "accepted {path}"
+      );
+    }
+  }
+
+  #[test]
+  fn retired_artifact_url_appends_only_validated_relative_segments() {
+    let url =
+      retired_artifact_url("https://objects.example.test/tenant/log/", "tile/0/000.p/7").unwrap();
+    assert_eq!(
+      url.as_str(),
+      "https://objects.example.test/tenant/log/tile/0/000.p/7"
+    );
+    for source in [
+      "http://objects.example.test/log",
+      "https://user@objects.example.test/log",
+      "https://objects.example.test/log?version=1",
+      "https://objects.example.test/log%2fescape",
+      "https://objects.example.test/log/../escape",
+    ] {
+      assert!(retired_artifact_url(source, "checkpoint").is_err());
+    }
+    assert!(retired_artifact_url("https://objects.example.test/log", "../checkpoint").is_err());
+    assert!(retired_artifact_url("https://objects.example.test/log", "%2e%2e/checkpoint").is_err());
+  }
 }

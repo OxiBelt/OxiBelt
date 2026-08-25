@@ -102,11 +102,11 @@ fn resolve_ct_log_key(
     );
   }
   let (key_id, key_path) = &keys[0];
-  let (profile_key_id, profile) = profiles[0];
+  let (profile_key_id, profile) = &profiles[0];
   if key_id != profile_key_id {
     bail!("--ct-log-profile key id must match --ct-log-key");
   }
-  Ok(Some((key_id.clone(), profile, key_path.clone())))
+  Ok(Some((key_id.clone(), *profile, key_path.clone())))
 }
 
 fn parse_key(value: &str) -> anyhow::Result<(String, PathBuf)> {
@@ -224,7 +224,7 @@ mod tests {
     let key = ("log-2026".to_string(), PathBuf::from("/run/keys/log.pem"));
     let profile = ("log-2026".to_string(), CtLogProfile::Rfc9162Ed25519);
     assert!(matches!(
-      resolve_ct_log_key(&[key.clone()], &[profile]),
+      resolve_ct_log_key(std::slice::from_ref(&key), &[profile]),
       Ok(Some((key_id, CtLogProfile::Rfc9162Ed25519, _))) if key_id == "log-2026"
     ));
     assert!(resolve_ct_log_key(&[key.clone(), key.clone()], &[]).is_err());

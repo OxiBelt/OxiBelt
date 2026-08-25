@@ -840,7 +840,7 @@ mod tests {
 
   #[test]
   fn merkle_helpers_reject_non_entries_and_cover_arbitrary_sizes() {
-    let entries: Vec<_> = (0..=255).map(|index| entry(index)).collect();
+    let entries: Vec<_> = (0..=255).map(entry).collect();
     for size in 0..=entries.len() {
       let root = merkle_tree_hash(&entries[..size]).unwrap();
       let encoded: Vec<Vec<u8>> = entries[..size]

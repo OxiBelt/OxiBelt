@@ -282,9 +282,8 @@ fn server_rejects_empty_and_mixed_purpose_keysets() {
 
   let ct_key =
     load_ct_log_key("ct-key", CtLogProfile::Rfc9162Ed25519, &key_path).expect("CT key should load");
-  let error = validate_server_key_sets(&HashMap::new(), &HashMap::new(), Some(&ct_key))
+  validate_server_key_sets(&HashMap::new(), &HashMap::new(), Some(&ct_key))
     .expect("one CT purpose should activate");
-  assert_eq!(error, ());
   let error = validate_server_key_sets(&tls_keys, &HashMap::new(), Some(&ct_key))
     .expect_err("TLS and CT keys require separate daemons");
   assert!(error.to_string().contains("purpose-exclusive"));
