@@ -15297,7 +15297,7 @@ path = "/edge{path_suffix}""#,
 status = 302
 location_template = "/new{path_suffix}""#,
       ),
-      "must set exactly one of upstream, upstream_pool, static_root, or actions.redirect",
+      "must set exactly one of upstream, upstream_pool, static_root, ct_log, or actions.redirect",
     ),
     (
       base.replace(
@@ -16381,7 +16381,7 @@ fn static_route_rejects_multiple_targets() {
   assert!(
     error
       .to_string()
-      .contains("exactly one of upstream, upstream_pool, static_root, or actions.redirect"),
+      .contains("exactly one of upstream, upstream_pool, static_root, ct_log, or actions.redirect"),
     "unexpected error: {error}"
   );
 }

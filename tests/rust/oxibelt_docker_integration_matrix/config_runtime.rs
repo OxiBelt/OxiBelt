@@ -462,7 +462,9 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       "routes must configure exactly one target kind",
       ExpectStart::Failure,
       Needs::default(),
-      Some("must set exactly one of upstream, upstream_pool, static_root, or actions.redirect"),
+      Some(
+        "must set exactly one of upstream, upstream_pool, static_root, ct_log, or actions.redirect",
+      ),
     ),
     docker_case(
       "config-invalid",
