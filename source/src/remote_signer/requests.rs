@@ -6,7 +6,8 @@ use base64::Engine;
 use rustls::SignatureScheme;
 
 use super::audit_checkpoint::{AUDIT_CHECKPOINT_SIGNING_DOMAIN, signing_message};
-use super::keys::{AuditCheckpointKey, ServerKey};
+use super::ct_log::validate_ct_transcript;
+use super::keys::{AuditCheckpointKey, CtLogKey, ServerKey};
 use super::protocol::{RemoteSignerRequest, RemoteSignerResponse, SignContext};
 use super::token::{RemoteSignerTokenProvider, request_token_is_valid};
 use super::{decode_base64, is_tls13_server_certificate_verify_message, signature_algorithm_name};
@@ -22,6 +23,7 @@ pub(super) fn process_request(
     request,
     keys,
     &HashMap::new(),
+    None,
     token_provider,
     allow_tls12_unstructured_signing,
   )
@@ -31,6 +33,7 @@ pub(super) fn process_request_with_audit_keys(
   request: RemoteSignerRequest,
   keys: &HashMap<String, ServerKey>,
   audit_checkpoint_keys: &HashMap<String, AuditCheckpointKey>,
+  ct_log_key: Option<&CtLogKey>,
   token_provider: &RemoteSignerTokenProvider,
   allow_tls12_unstructured_signing: bool,
 ) -> RemoteSignerResponse {
@@ -84,6 +87,22 @@ pub(super) fn process_request_with_audit_keys(
     RemoteSignerRequest::SignAuditCheckpointDigest { key_id, digest, .. } => {
       process_audit_checkpoint_sign(audit_checkpoint_keys, &key_id, &digest)
     }
+    RemoteSignerRequest::DescribeCtLogKey { key_id, .. } => match ct_log_key {
+      Some(key) if key_id == key.key_id => RemoteSignerResponse::DescribeCtLogKey {
+        public_key: base64::engine::general_purpose::STANDARD.encode(&key.public_key),
+        profile: key.profile,
+      },
+      _ => RemoteSignerResponse::Error {
+        code: "unknown_ct_log_key".to_string(),
+        message: "unknown CT log key id".to_string(),
+      },
+    },
+    RemoteSignerRequest::SignCtLogTranscript {
+      key_id,
+      transcript_class,
+      transcript,
+      ..
+    } => process_ct_log_sign(ct_log_key, &key_id, transcript_class, &transcript),
   }
 }
 
@@ -178,6 +197,61 @@ fn process_audit_checkpoint_sign(
     },
     Err(error) => RemoteSignerResponse::Error {
       code: "audit_checkpoint_signing_failed".to_string(),
+      message: error.to_string(),
+    },
+  }
+}
+
+fn process_ct_log_sign(
+  key: Option<&CtLogKey>,
+  key_id: &str,
+  transcript_class: super::CtTranscriptClass,
+  transcript: &str,
+) -> RemoteSignerResponse {
+  let Some(key) = key else {
+    return RemoteSignerResponse::Error {
+      code: "unknown_ct_log_key".to_string(),
+      message: "unknown CT log key id".to_string(),
+    };
+  };
+  // CT daemons have a single immutable key. `key_id` is still retained in the wire protocol for
+  // activation-time identity binding and to avoid accidentally accepting a blank selector.
+  if key_id != key.key_id {
+    return RemoteSignerResponse::Error {
+      code: "unknown_ct_log_key".to_string(),
+      message: "unknown CT log key id".to_string(),
+    };
+  }
+  let Ok(transcript) = decode_base64("CT transcript", transcript) else {
+    return RemoteSignerResponse::Error {
+      code: "invalid_ct_transcript".to_string(),
+      message: "CT transcript must be base64".to_string(),
+    };
+  };
+  if let Err(error) = validate_ct_transcript(key.profile, transcript_class, &transcript) {
+    return RemoteSignerResponse::Error {
+      code: "invalid_ct_transcript".to_string(),
+      message: error.to_string(),
+    };
+  }
+  let scheme = match key.profile {
+    super::CtLogProfile::Rfc6962P256Sha256 | super::CtLogProfile::Rfc9162P256Sha256 => {
+      SignatureScheme::ECDSA_NISTP256_SHA256
+    }
+    super::CtLogProfile::Rfc9162Ed25519 => SignatureScheme::ED25519,
+  };
+  let Some(signer) = key.key.choose_scheme(&[scheme]) else {
+    return RemoteSignerResponse::Error {
+      code: "invalid_ct_log_key".to_string(),
+      message: "CT log key does not support its configured immutable profile".to_string(),
+    };
+  };
+  match signer.sign(&transcript) {
+    Ok(signature) => RemoteSignerResponse::SignCtLogTranscript {
+      signature: base64::engine::general_purpose::STANDARD.encode(signature),
+    },
+    Err(error) => RemoteSignerResponse::Error {
+      code: "ct_log_signing_failed".to_string(),
       message: error.to_string(),
     },
   }

@@ -10,6 +10,7 @@ pub struct Config {
   pub logging: LoggingConfig,
   pub runtime: RuntimeConfig,
   pub crypto: CryptoConfig,
+  pub certificate_transparency: CertificateTransparencyConfig,
   pub listeners: ListenerConfig,
   pub tls: TlsConfig,
   pub quic: QuicConfig,
@@ -58,6 +59,8 @@ struct RawConfig {
   runtime: RawRuntimeConfig,
   #[serde(default)]
   crypto: CryptoConfig,
+  #[serde(default)]
+  certificate_transparency: CertificateTransparencyConfig,
   listeners: RawListenerConfig,
   tls: TlsConfig,
   #[serde(default)]
@@ -139,6 +142,7 @@ impl TryFrom<RawConfig> for Config {
       logging: raw.logging,
       runtime,
       crypto: raw.crypto,
+      certificate_transparency: raw.certificate_transparency,
       listeners,
       tls: raw.tls,
       quic,

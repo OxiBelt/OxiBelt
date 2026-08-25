@@ -128,6 +128,86 @@ fn discovery_instance_schema_is_typed_and_bounded() {
 }
 
 #[test]
+fn certificate_transparency_schema_publishes_epoch_one_defaults_and_reload_boundaries() {
+  let schema: serde_json::Value =
+    serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))
+      .expect("generated native schema should be JSON");
+
+  let ct = schema_node_for_metadata_path(&schema, "certificate_transparency");
+  assert_eq!(ct["properties"]["enabled"]["default"], false);
+  assert_eq!(
+    ct["properties"]["profile"]["enum"],
+    serde_json::json!(["local", "production"])
+  );
+  let logs = schema_node_for_metadata_path(&schema, "certificate_transparency.logs");
+  assert_eq!(logs["type"], "array");
+  assert_eq!(logs["maxItems"], 64);
+  assert_eq!(
+    logs["items"]["properties"]["protocol"]["enum"],
+    serde_json::json!(["static_rfc6962_v1", "rfc9162_v2"])
+  );
+  assert_eq!(
+    logs["items"]["properties"]["role"]["default"],
+    "retired_read_only"
+  );
+  assert_eq!(
+    logs["items"]["properties"]["shard"]["properties"]["start_ms"]["default"],
+    0
+  );
+  assert_eq!(
+    logs["items"]["properties"]["shard"]["properties"]["end_ms"]["default"],
+    u64::MAX
+  );
+  assert_eq!(
+    logs["items"]["properties"]["signed_root"]["properties"]["bundle_sha256"]["type"],
+    "string"
+  );
+  assert_eq!(
+    logs["items"]["properties"]["signed_root"]["properties"]["trusted_ed25519_keys"]["maxItems"],
+    64
+  );
+
+  for path in [
+    "certificate_transparency",
+    "certificate_transparency.logs[0].identity.public_key_file",
+    "certificate_transparency.logs[0].storage.posix_path",
+    "certificate_transparency.logs[0].storage.postgres_url_env",
+    "certificate_transparency.logs[0].storage.s3_secret_key_env",
+    "certificate_transparency.logs[0].signed_root.bundle_path",
+    "certificate_transparency.logs[0].shard.start_ms",
+  ] {
+    let metadata = native_config_field_metadata(path);
+    assert_eq!(
+      metadata.config_activation,
+      NativeConfigActivation::FullReload,
+      "{path} must require a complete CT rollout"
+    );
+    assert_ne!(
+      metadata.reference_activation,
+      NativeConfigActivation::DownstreamTlsReload,
+      "{path} must never use downstream TLS reload"
+    );
+  }
+  assert_eq!(
+    native_config_field_metadata("certificate_transparency.logs[0].signer.token_env").secret_class,
+    NativeConfigSecretClass::EnvironmentReference
+  );
+  assert_eq!(
+    native_config_field_metadata("certificate_transparency.logs[0].signer.token_file").secret_class,
+    NativeConfigSecretClass::FileReference
+  );
+
+  let ct_log = schema_node_for_metadata_path(&schema, "routes[].ct_log");
+  assert_eq!(ct_log["type"], "string");
+  let ct_surface = schema_node_for_metadata_path(&schema, "routes[].ct_surface");
+  assert_eq!(
+    ct_surface["enum"],
+    serde_json::json!(["submission", "monitoring"])
+  );
+  assert_eq!(ct_surface["default"], "submission");
+}
+
+#[test]
 fn quic_initial_reassembly_schema_is_defaulted_and_bounded() {
   let schema = generate_native_config_schema().expect("native schema should generate");
   let schema: serde_json::Value =

@@ -52,6 +52,7 @@ impl Config {
     security_headers::validate_security_headers(self)?;
     crypto::validate_crypto(self)?;
     self.validate_tls()?;
+    self.certificate_transparency.validate()?;
     self.quic.validate(self.listeners.http3)?;
     self.validate_http3_alt_svc_binds()?;
     self.validate_sni_forward()?;
@@ -260,12 +261,71 @@ impl Config {
       let target_count = usize::from(route.upstream.is_some())
         + usize::from(route.upstream_pool.is_some())
         + usize::from(route.static_root.is_some())
+        + usize::from(route.ct_log.is_some())
         + usize::from(route.actions.redirect.is_some());
       if target_count != 1 {
         bail!(
-          "route {} must set exactly one of upstream, upstream_pool, static_root, or actions.redirect",
+          "route {} must set exactly one of upstream, upstream_pool, static_root, ct_log, or actions.redirect",
           route.name
         );
+      }
+      if route.ct_log.is_none()
+        && route.ct_surface != CertificateTransparencyRouteSurface::Submission
+      {
+        bail!("route {} cannot set ct_surface without ct_log", route.name);
+      }
+      if let Some(ct_log) = &route.ct_log {
+        validate_runtime_identifier(&format!("route {} ct_log", route.name), ct_log)?;
+        if !self.certificate_transparency.enabled {
+          bail!(
+            "route {} requires certificate_transparency.enabled = true",
+            route.name
+          );
+        }
+        let Some(log) = self.certificate_transparency.log(ct_log) else {
+          bail!(
+            "route {} references unknown certificate transparency log {}",
+            route.name,
+            ct_log
+          );
+        };
+        if route.ct_surface == CertificateTransparencyRouteSurface::Monitoring
+          && log.protocol != CertificateTransparencyProtocol::StaticRfc6962V1
+        {
+          bail!(
+            "route {} monitoring ct_surface requires a static_rfc6962_v1 log",
+            route.name
+          );
+        }
+        if !route.waf.functions.is_empty()
+          || !route.waf.rulepack_files.is_empty()
+          || !route.waf.rule_group_files.is_empty()
+          || !route.waf.rule_groups.is_empty()
+          || !route.waf.rules.is_empty()
+        {
+          bail!(
+            "route {} cannot set waf when ct_log is configured",
+            route.name
+          );
+        }
+        if route.cache.is_some() {
+          bail!(
+            "route {} cannot set cache when ct_log is configured",
+            route.name
+          );
+        }
+        if route.retry.is_some() {
+          bail!(
+            "route {} cannot set retry when ct_log is configured",
+            route.name
+          );
+        }
+        if route.actions.rewrite.is_some() || route.actions.response_headers.has_actions() {
+          bail!(
+            "route {} cannot set response rewriting when ct_log is configured",
+            route.name
+          );
+        }
       }
       route_actions::validate_route_action_target_compatibility(route)?;
       route_actions::validate_route_action_pool_references(route, &pool_names)?;

@@ -12,6 +12,13 @@ level = "info"
 enabled = false
 stdout = true
 
+# Certificate Transparency is an additive, opt-in surface.  Define log
+# identities, signed-root trust, and storage only when the CT runtime is enabled.
+[certificate_transparency]
+enabled = false
+profile = "local" # local | production
+logs = []
+
 [sni_forward]
 enabled = false
 client_hello_max_bytes = 65536

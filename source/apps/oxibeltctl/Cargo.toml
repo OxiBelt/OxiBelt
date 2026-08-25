@@ -21,14 +21,17 @@ path = "src/lib.rs"
 [dependencies]
 anyhow.workspace = true
 aws-lc-rs.workspace = true
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 bytes.workspace = true
 clap.workspace = true
 crc32fast.workspace = true
 flate2.workspace = true
 getrandom.workspace = true
+der = "0.8.1"
 http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["server"] }
+hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["server"] }
 jiff.workspace = true
 libc.workspace = true
@@ -47,6 +50,8 @@ tokio-rustls.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 url.workspace = true
+webpki-roots.workspace = true
+x509-cert = "0.3.0"
 zeroize.workspace = true
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "musl"))'.dependencies]

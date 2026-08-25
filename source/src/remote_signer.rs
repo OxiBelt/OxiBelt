@@ -27,6 +27,7 @@ use protocol::{
 };
 
 mod audit_checkpoint;
+mod ct_log;
 mod keys;
 mod pool;
 mod protocol;
@@ -38,10 +39,15 @@ mod token;
 pub use audit_checkpoint::{
   AUDIT_CHECKPOINT_SIGNING_DOMAIN, AuditCheckpointSigner, AuditCheckpointSignerConfig,
 };
+pub(crate) use ct_log::validate_ct_log_public_key;
+pub use ct_log::{
+  CtLogProfile, CtLogSigner, CtLogSignerConfig, CtTranscriptClass, MAX_CT_TRANSCRIPT_BYTES,
+  STATIC_CHECKPOINT_TRANSCRIPT_DOMAIN, validate_ct_transcript,
+};
 
 use keys::{
-  AuditCheckpointKey, PREFERRED_SIGNATURE_SCHEMES, ServerKey, load_audit_checkpoint_keys,
-  load_server_keys,
+  AuditCheckpointKey, CtLogKey, PREFERRED_SIGNATURE_SCHEMES, ServerKey, load_audit_checkpoint_keys,
+  load_ct_log_key, load_server_keys,
 };
 #[cfg(test)]
 use requests::process_request;
@@ -354,6 +360,7 @@ pub struct SignerServerConfig {
   pub socket_path: PathBuf,
   pub socket_mode: u32,
   pub keys: Vec<(String, PathBuf)>,
+  pub ct_log_key: Option<(String, CtLogProfile, PathBuf)>,
   pub token_env: String,
   pub token_file: Option<PathBuf>,
   pub token_reload_interval: Duration,
@@ -396,9 +403,15 @@ pub async fn serve_with_audit_checkpoint_keys(
   )?;
   let keys = load_server_keys(&config.keys)?;
   let audit_checkpoint_keys = load_audit_checkpoint_keys(&audit_checkpoint_keys)?;
-  validate_server_key_sets(&keys, &audit_checkpoint_keys)?;
+  let ct_log_key = config
+    .ct_log_key
+    .as_ref()
+    .map(|(key_id, profile, path)| load_ct_log_key(key_id, *profile, path))
+    .transpose()?;
+  validate_server_key_sets(&keys, &audit_checkpoint_keys, ct_log_key.as_ref())?;
   let keys = Arc::new(keys);
   let audit_checkpoint_keys = Arc::new(audit_checkpoint_keys);
+  let ct_log_key = Arc::new(ct_log_key);
   let listener = bind_listener(&config.socket_path, config.socket_mode)?;
   let max_connections = config.max_connections;
   let io_timeout = config.io_timeout;
@@ -408,6 +421,7 @@ pub async fn serve_with_audit_checkpoint_keys(
     token_source = %token_provider.source_label(),
     tls_keys = keys.len(),
     audit_checkpoint_keys = audit_checkpoint_keys.len(),
+    ct_log_key = ct_log_key.is_some(),
     max_connections,
     io_timeout_ms = io_timeout.as_millis(),
     "remote private-key signer listening"
@@ -416,6 +430,7 @@ pub async fn serve_with_audit_checkpoint_keys(
   let connection_context = SignerConnectionContext {
     keys,
     audit_checkpoint_keys,
+    ct_log_key,
     token_provider,
     allow_peer_uids: Arc::new(config.allow_peer_uids),
     allow_peer_gids: Arc::new(config.allow_peer_gids),
@@ -446,13 +461,17 @@ pub async fn serve_with_audit_checkpoint_keys(
 fn validate_server_key_sets(
   keys: &HashMap<String, ServerKey>,
   audit_checkpoint_keys: &HashMap<String, AuditCheckpointKey>,
+  ct_log_key: Option<&CtLogKey>,
 ) -> anyhow::Result<()> {
-  if keys.is_empty() && audit_checkpoint_keys.is_empty() {
-    bail!("remote signer requires at least one --key or --audit-checkpoint-key entry");
+  let purposes = usize::from(!keys.is_empty())
+    + usize::from(!audit_checkpoint_keys.is_empty())
+    + usize::from(ct_log_key.is_some());
+  if purposes == 0 {
+    bail!("remote signer requires one --key, --audit-checkpoint-key, or --ct-log-key entry");
   }
-  if !keys.is_empty() && !audit_checkpoint_keys.is_empty() {
+  if purposes != 1 {
     bail!(
-      "remote signer daemons are purpose-exclusive; TLS and audit checkpoint keys require separate sockets, tokens, and peer allowlists"
+      "remote signer daemons are purpose-exclusive; TLS, audit checkpoint, and CT log keys require separate sockets, tokens, and peer allowlists"
     );
   }
   Ok(())
@@ -462,6 +481,7 @@ fn validate_server_key_sets(
 struct SignerConnectionContext {
   keys: Arc<HashMap<String, ServerKey>>,
   audit_checkpoint_keys: Arc<HashMap<String, AuditCheckpointKey>>,
+  ct_log_key: Arc<Option<CtLogKey>>,
   token_provider: RemoteSignerTokenProvider,
   allow_peer_uids: Arc<Vec<u32>>,
   allow_peer_gids: Arc<Vec<u32>>,
@@ -497,6 +517,7 @@ async fn handle_connection(
       request,
       &context.keys,
       &context.audit_checkpoint_keys,
+      context.ct_log_key.as_ref().as_ref(),
       &context.token_provider,
       context.allow_tls12_unstructured_signing,
     );

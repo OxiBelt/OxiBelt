@@ -44,6 +44,7 @@ fn audit_checkpoint_requests_are_purpose_bound_and_sign_only_domain_bound_digest
       },
       &tls_keys,
       &audit_keys,
+      None,
       &token_provider,
       true,
     ),
@@ -57,6 +58,7 @@ fn audit_checkpoint_requests_are_purpose_bound_and_sign_only_domain_bound_digest
       },
       &tls_keys,
       &audit_keys,
+      None,
       &token_provider,
       true,
     ),
@@ -72,6 +74,7 @@ fn audit_checkpoint_requests_are_purpose_bound_and_sign_only_domain_bound_digest
     },
     &tls_keys,
     &audit_keys,
+    None,
     &token_provider,
     true,
   );
@@ -113,6 +116,7 @@ fn audit_checkpoint_digest_rejects_non_32_byte_inputs() {
         },
         &HashMap::new(),
         &audit_keys,
+        None,
         &token_provider,
         false,
       ),
@@ -122,8 +126,147 @@ fn audit_checkpoint_digest_rejects_non_32_byte_inputs() {
 }
 
 #[test]
+fn ct_log_keys_are_purpose_bound_and_profiles_are_immutable() {
+  crate::tls::install_default_provider().expect("crypto provider should install");
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let ct_key_path = temp_dir.path().join("ct-ed25519.pem");
+  let tls_key_path = temp_dir.path().join("tls-ed25519.pem");
+  write_test_ed25519_private_key(&ct_key_path);
+  write_test_ed25519_private_key(&tls_key_path);
+  let ct_key = load_ct_log_key("ct-key", CtLogProfile::Rfc9162Ed25519, &ct_key_path)
+    .expect("Ed25519 key should load for RFC 9162 CT");
+  let tls_keys =
+    load_server_keys(&[("tls-key".to_string(), tls_key_path)]).expect("TLS key should load");
+  let token_provider = test_token_provider();
+
+  assert!(matches!(
+    process_request_with_audit_keys(
+      RemoteSignerRequest::DescribeKey { token: test_token(), key_id: "ct-key".to_string() },
+      &HashMap::new(), &HashMap::new(), Some(&ct_key), &token_provider, false,
+    ),
+    RemoteSignerResponse::Error { code, .. } if code == "unknown_key"
+  ));
+  assert!(matches!(
+    process_request_with_audit_keys(
+      RemoteSignerRequest::DescribeCtLogKey { token: test_token(), key_id: "tls-key".to_string() },
+      &tls_keys, &HashMap::new(), None, &token_provider, false,
+    ),
+    RemoteSignerResponse::Error { code, .. } if code == "unknown_ct_log_key"
+  ));
+  assert!(matches!(
+    process_request_with_audit_keys(
+      RemoteSignerRequest::DescribeCtLogKey { token: token_to_wire(&[0u8; 32]), key_id: "ct-key".to_string() },
+      &HashMap::new(), &HashMap::new(), Some(&ct_key), &token_provider, false,
+    ),
+    RemoteSignerResponse::Error { code, .. } if code == "unauthorized"
+  ));
+
+  let mismatch = load_ct_log_key(
+    "wrong-profile",
+    CtLogProfile::Rfc6962P256Sha256,
+    &ct_key_path,
+  )
+  .expect_err("Ed25519 must not activate a P-256 CT profile");
+  assert!(mismatch.to_string().contains("P-256"));
+}
+
+#[test]
+fn ct_log_signer_accepts_only_canonical_bounded_transcripts_and_signs_ed25519() {
+  crate::tls::install_default_provider().expect("crypto provider should install");
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let key_path = temp_dir.path().join("ct-ed25519.pem");
+  write_test_ed25519_private_key(&key_path);
+  let key =
+    load_ct_log_key("ct-key", CtLogProfile::Rfc9162Ed25519, &key_path).expect("CT key should load");
+  let token_provider = test_token_provider();
+  let transcript = ct_sth_transcript(1, 1);
+  let response = process_request_with_audit_keys(
+    RemoteSignerRequest::SignCtLogTranscript {
+      token: test_token(),
+      key_id: "ct-key".to_string(),
+      transcript_class: CtTranscriptClass::V2Sth,
+      transcript: base64::engine::general_purpose::STANDARD.encode(&transcript),
+    },
+    &HashMap::new(),
+    &HashMap::new(),
+    Some(&key),
+    &token_provider,
+    false,
+  );
+  let RemoteSignerResponse::SignCtLogTranscript { signature } = response else {
+    panic!("valid RFC 9162 STH must be signed");
+  };
+  let signature = base64::engine::general_purpose::STANDARD
+    .decode(signature)
+    .expect("signature should decode");
+  let raw_public_key =
+    keys::ed25519_public_key_from_spki(&key.public_key).expect("Ed25519 SPKI should normalize");
+  aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, raw_public_key)
+    .verify(&transcript, &signature)
+    .expect("signature must verify over the exact CT transcript");
+
+  for (class, transcript) in [
+    (CtTranscriptClass::V2Sth, Vec::new()),
+    (CtTranscriptClass::V2Sth, vec![1, 1]),
+    (CtTranscriptClass::V1Sth, ct_sth_transcript(0, 1)),
+    (
+      CtTranscriptClass::V2Sth,
+      vec![1; MAX_CT_TRANSCRIPT_BYTES + 1],
+    ),
+  ] {
+    assert!(matches!(
+      process_request_with_audit_keys(
+        RemoteSignerRequest::SignCtLogTranscript {
+          token: test_token(), key_id: "ct-key".to_string(), transcript_class: class,
+          transcript: base64::engine::general_purpose::STANDARD.encode(transcript),
+        },
+        &HashMap::new(), &HashMap::new(), Some(&key), &token_provider, false,
+      ),
+      RemoteSignerResponse::Error { code, .. } if code == "invalid_ct_transcript"
+    ));
+  }
+}
+
+#[test]
+fn ct_log_signer_signs_p256_rfc6962_tree_heads() {
+  crate::tls::install_default_provider().expect("crypto provider should install");
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let key_path = temp_dir.path().join("ct-p256.pem");
+  write_test_p256_private_key(&key_path);
+  let key = load_ct_log_key("ct-p256", CtLogProfile::Rfc6962P256Sha256, &key_path)
+    .expect("P-256 key should load for RFC 6962 CT");
+  let response = process_request_with_audit_keys(
+    RemoteSignerRequest::SignCtLogTranscript {
+      token: test_token(),
+      key_id: "ct-p256".to_string(),
+      transcript_class: CtTranscriptClass::V1Sth,
+      transcript: base64::engine::general_purpose::STANDARD.encode(ct_sth_transcript(0, 1)),
+    },
+    &HashMap::new(),
+    &HashMap::new(),
+    Some(&key),
+    &test_token_provider(),
+    false,
+  );
+  let RemoteSignerResponse::SignCtLogTranscript { signature } = response else {
+    panic!("valid RFC 6962 STH must be signed by P-256 key");
+  };
+  let signature = base64::engine::general_purpose::STANDARD
+    .decode(signature)
+    .expect("P-256 signature should decode");
+  assert!(!signature.is_empty() && signature.len() <= 80);
+  assert_eq!(key.public_key.len(), 91, "P-256 key must advertise SPKI");
+  aws_lc_rs::signature::UnparsedPublicKey::new(
+    &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
+    &key.public_key[26..],
+  )
+  .verify(&ct_sth_transcript(0, 1), &signature)
+  .expect("P-256 signature must verify over the exact CT transcript");
+}
+
+#[test]
 fn server_rejects_empty_and_mixed_purpose_keysets() {
-  assert!(validate_server_key_sets(&HashMap::new(), &HashMap::new()).is_err());
+  assert!(validate_server_key_sets(&HashMap::new(), &HashMap::new(), None).is_err());
 
   crate::tls::install_default_provider().expect("crypto provider should install");
   let temp_dir = tempfile::tempdir().expect("temp dir should create");
@@ -133,15 +276,24 @@ fn server_rejects_empty_and_mixed_purpose_keysets() {
     load_server_keys(&[("shared".to_string(), key_path.clone())]).expect("TLS key should load");
   let audit_keys = load_audit_checkpoint_keys(&[("shared".to_string(), key_path.clone())])
     .expect("audit key should load");
-  let error = validate_server_key_sets(&tls_keys, &audit_keys)
+  let error = validate_server_key_sets(&tls_keys, &audit_keys, None)
     .expect_err("one authentication boundary must not span purposes");
+  assert!(error.to_string().contains("purpose-exclusive"));
+
+  let ct_key =
+    load_ct_log_key("ct-key", CtLogProfile::Rfc9162Ed25519, &key_path).expect("CT key should load");
+  let error = validate_server_key_sets(&HashMap::new(), &HashMap::new(), Some(&ct_key))
+    .expect("one CT purpose should activate");
+  assert_eq!(error, ());
+  let error = validate_server_key_sets(&tls_keys, &HashMap::new(), Some(&ct_key))
+    .expect_err("TLS and CT keys require separate daemons");
   assert!(error.to_string().contains("purpose-exclusive"));
 
   let tls_keys = load_server_keys(&[("tls-key".to_string(), key_path.clone())])
     .expect("TLS key should load under a distinct id");
   let audit_keys = load_audit_checkpoint_keys(&[("audit-key".to_string(), key_path)])
     .expect("audit key should load under a distinct id");
-  let error = validate_server_key_sets(&tls_keys, &audit_keys)
+  let error = validate_server_key_sets(&tls_keys, &audit_keys, None)
     .expect_err("distinct key material still requires isolated daemons");
   assert!(error.to_string().contains("purpose-exclusive"));
 }
@@ -159,6 +311,7 @@ async fn async_audit_client_connects_to_an_audit_only_daemon() {
     socket_path: socket_path.clone(),
     socket_mode: 0o600,
     keys: Vec::new(),
+    ct_log_key: None,
     token_env: "UNUSED_TOKEN_ENV".to_string(),
     token_file: Some(token_path.clone()),
     token_reload_interval: Duration::from_millis(10),
@@ -211,6 +364,76 @@ async fn async_audit_client_connects_to_an_audit_only_daemon() {
   aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, client.public_key())
     .verify(&audit_checkpoint::signing_message(&digest), &signature)
     .expect("client signature must verify under the described raw key");
+
+  server.abort();
+  let _ = server.await;
+}
+
+#[tokio::test]
+async fn async_ct_client_connects_to_a_ct_only_daemon_and_signs() {
+  crate::tls::install_default_provider().expect("crypto provider should install");
+  let temp_dir = tempfile::tempdir().expect("temp dir should create");
+  let socket_path = temp_dir.path().join("ct-signer.sock");
+  let key_path = temp_dir.path().join("ct-ed25519.pem");
+  let token_path = temp_dir.path().join("token.b64");
+  write_test_ed25519_private_key(&key_path);
+  write_token_file(&token_path, &TEST_TOKEN);
+  let config = SignerServerConfig {
+    socket_path: socket_path.clone(),
+    socket_mode: 0o600,
+    keys: Vec::new(),
+    ct_log_key: Some(("ct-key".to_string(), CtLogProfile::Rfc9162Ed25519, key_path)),
+    token_env: "UNUSED_TOKEN_ENV".to_string(),
+    token_file: Some(token_path.clone()),
+    token_reload_interval: Duration::from_millis(10),
+    max_connections: 4,
+    io_timeout: Duration::from_secs(1),
+    allow_peer_uids: Vec::new(),
+    allow_peer_gids: Vec::new(),
+    allow_tls12_unstructured_signing: false,
+  };
+  let server = tokio::spawn(serve_with_audit_checkpoint_keys(config, Vec::new()));
+  for _ in 0..100 {
+    if socket_path.exists() {
+      break;
+    }
+    assert!(!server.is_finished(), "CT-only daemon exited before bind");
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(1)).await;
+  }
+  assert!(socket_path.exists(), "CT-only daemon must bind its socket");
+
+  let client = CtLogSigner::connect(CtLogSignerConfig {
+    socket_path,
+    key_id: "ct-key".to_string(),
+    profile: CtLogProfile::Rfc9162Ed25519,
+    token_env: "UNUSED_TOKEN_ENV".to_string(),
+    token_file: Some(token_path),
+    token_file_reload_base_dir: None,
+    token_reload_interval: Duration::from_millis(10),
+    connect_timeout: Duration::from_secs(1),
+    sign_timeout: Duration::from_secs(1),
+  })
+  .await
+  .expect("CT client should activate against a CT-only daemon");
+  assert_eq!(client.key_id(), "ct-key");
+  assert_eq!(client.profile(), CtLogProfile::Rfc9162Ed25519);
+  let transcript = ct_sth_transcript(1, 1);
+  let signature = client
+    .sign_transcript(CtTranscriptClass::V2Sth, &transcript)
+    .await
+    .expect("canonical RFC 9162 tree-head signing should succeed");
+  let raw_public_key = keys::ed25519_public_key_from_spki(client.public_key_spki())
+    .expect("CT signer must advertise Ed25519 SPKI");
+  aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, raw_public_key)
+    .verify(&transcript, &signature)
+    .expect("client signature must verify over the exact CT transcript");
+  assert!(
+    client
+      .sign_transcript(CtTranscriptClass::V1Sth, &ct_sth_transcript(0, 1))
+      .await
+      .is_err()
+  );
 
   server.abort();
   let _ = server.await;
@@ -663,6 +886,8 @@ fn request_kind(request: &RemoteSignerRequest) -> &'static str {
     RemoteSignerRequest::Sign { .. } => "sign",
     RemoteSignerRequest::DescribeAuditCheckpointKey { .. } => "describe_audit_checkpoint_key",
     RemoteSignerRequest::SignAuditCheckpointDigest { .. } => "sign_audit_checkpoint_digest",
+    RemoteSignerRequest::DescribeCtLogKey { .. } => "describe_ct_log_key",
+    RemoteSignerRequest::SignCtLogTranscript { .. } => "sign_ct_log_transcript",
   }
 }
 
@@ -679,4 +904,26 @@ fn write_test_ed25519_private_key(path: &std::path::Path) {
     format!("-----BEGIN PRIVATE KEY-----\n{encoded}\n-----END PRIVATE KEY-----\n"),
   )
   .expect("test Ed25519 private key should write");
+}
+
+fn ct_sth_transcript(version: u8, signature_type: u8) -> Vec<u8> {
+  if version == 1 {
+    let mut transcript = Vec::new();
+    transcript.extend_from_slice(&1_u64.to_be_bytes());
+    transcript.extend_from_slice(&1_u64.to_be_bytes());
+    transcript.push(32);
+    transcript.extend_from_slice(&[0x5a; 32]);
+    transcript.extend_from_slice(&0_u16.to_be_bytes());
+    return transcript;
+  }
+  let mut transcript = vec![version, signature_type];
+  transcript.extend_from_slice(&1_u64.to_be_bytes());
+  transcript.extend_from_slice(&1_u64.to_be_bytes());
+  transcript.extend_from_slice(&[0x5a; 32]);
+  transcript
+}
+
+fn write_test_p256_private_key(path: &std::path::Path) {
+  const PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgBco0bhesYtJK1VUe\npe7kkvKM1v1xaccBdoVgBF6n+kOhRANCAATTAU7hHHok4jFOBvcM1PuOsgTA3fSf\n7b/DC3GFw/s/yGf2LC0DAWv/EvoX5J/sVwMyhDdAyPl9TfwPzWxUQeAI\n-----END PRIVATE KEY-----\n";
+  std::fs::write(path, PEM).expect("test P-256 private key should write");
 }

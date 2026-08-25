@@ -9,6 +9,8 @@ use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
 use rustls::sign::SigningKey;
 use rustls::{SignatureAlgorithm, SignatureScheme};
 
+use super::protocol::CtLogProfile;
+
 pub(super) static PREFERRED_SIGNATURE_SCHEMES: &[SignatureScheme] = &[
   SignatureScheme::RSA_PSS_SHA512,
   SignatureScheme::RSA_PSS_SHA384,
@@ -34,6 +36,14 @@ pub(super) struct ServerKey {
 pub(super) struct AuditCheckpointKey {
   pub(super) key: Arc<dyn SigningKey>,
   pub(super) public_key: [u8; 32],
+}
+
+#[derive(Debug)]
+pub(super) struct CtLogKey {
+  pub(super) key_id: String,
+  pub(super) key: Arc<dyn SigningKey>,
+  pub(super) public_key: Vec<u8>,
+  pub(super) profile: CtLogProfile,
 }
 
 pub(super) fn load_server_keys(
@@ -97,11 +107,61 @@ pub(super) fn load_audit_checkpoint_keys(
   Ok(loaded)
 }
 
+pub(super) fn load_ct_log_key(
+  key_id: &str,
+  profile: CtLogProfile,
+  path: &Path,
+) -> anyhow::Result<CtLogKey> {
+  if key_id.trim().is_empty() {
+    bail!("CT log signer key id must not be empty");
+  }
+  let key =
+    load_signing_key(path).with_context(|| format!("failed to load CT log signer key {key_id}"))?;
+  validate_ct_log_signing_key(key_id, profile, key.as_ref())?;
+  let public_key = key
+    .public_key()
+    .ok_or_else(|| anyhow!("CT log signer key {key_id} has no public key"))?
+    .as_ref()
+    .to_vec();
+  Ok(CtLogKey {
+    key_id: key_id.to_string(),
+    key,
+    public_key,
+    profile,
+  })
+}
+
 fn validate_audit_checkpoint_signing_key(key_id: &str, key: &dyn SigningKey) -> anyhow::Result<()> {
   if key.algorithm() != SignatureAlgorithm::ED25519
     || key.choose_scheme(&[SignatureScheme::ED25519]).is_none()
   {
     bail!("audit checkpoint signer key {key_id} must be Ed25519");
+  }
+  Ok(())
+}
+
+fn validate_ct_log_signing_key(
+  key_id: &str,
+  profile: CtLogProfile,
+  key: &dyn SigningKey,
+) -> anyhow::Result<()> {
+  let expected = match profile {
+    CtLogProfile::Rfc6962P256Sha256 | CtLogProfile::Rfc9162P256Sha256 => (
+      SignatureAlgorithm::ECDSA,
+      SignatureScheme::ECDSA_NISTP256_SHA256,
+      "P-256 ECDSA/SHA-256",
+    ),
+    CtLogProfile::Rfc9162Ed25519 => (
+      SignatureAlgorithm::ED25519,
+      SignatureScheme::ED25519,
+      "Ed25519",
+    ),
+  };
+  if key.algorithm() != expected.0 || key.choose_scheme(&[expected.1]).is_none() {
+    bail!(
+      "CT log signer key {key_id} must support {} for profile {profile:?}",
+      expected.2
+    );
   }
   Ok(())
 }

@@ -5,6 +5,7 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "admin",
   "access_log",
   "cache",
+  "certificate_transparency",
   "circuit_breakers",
   "client_identity",
   "compression",

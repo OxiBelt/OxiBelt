@@ -10,24 +10,26 @@ use oxibelt::config::{
   AccessLogSchema, AccessTokenRateLimitSource, AdminAuditAcknowledgement, AdminAuditExportSink,
   AdminAuditMode, AdminAuditRequiredSink, AdminAuditStoreKind, AdminOperationsPersistence,
   AdminTransportMode, BackendFailureMode, BufferingMode, CacheStore, CapacitySetting,
-  CircuitFailureCondition, ClientIdentityAsnFailurePolicy, ClientIdentityAsnManagedStorage,
-  ClientIdentityAsnMode, CompressionConfig, CompressionProxiedPredicate,
-  CompressionUpstreamAcceptEncodingMode, Config, ConnectionLimitIdentityMode, CrliteCoveragePolicy,
-  CrliteFailurePolicy, CrliteManagedStorage, CrliteMode, CryptoPrimitiveBackend,
-  CryptoPrimitiveProvider, DatabaseMitigationMode, DnsDiscoveryRecordType, DynamicPolicyFailPolicy,
-  EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, ExternalAuthProvider,
-  ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind, ForwardedClientIpSource,
-  ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode, IpmPolicyEffect,
-  KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail,
-  MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityClass, PriorityMode,
-  PriorityRejectionPolicy, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeArtifact, RuntimeMainRuntimeMode,
-  RuntimeOverrides, SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
-  StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
-  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
-  TlsServerResumptionMode, TlsVersion, TrailerMode, UdpFlowState, UpstreamDiscoveryProvider,
-  UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
-  resolve_auto_worker_count,
+  CertificateTransparencyIdentityAlgorithm, CertificateTransparencyLogRole,
+  CertificateTransparencyProfile, CertificateTransparencyProtocol,
+  CertificateTransparencyRouteSurface, CircuitFailureCondition, ClientIdentityAsnFailurePolicy,
+  ClientIdentityAsnManagedStorage, ClientIdentityAsnMode, CompressionConfig,
+  CompressionProxiedPredicate, CompressionUpstreamAcceptEncodingMode, Config,
+  ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
+  CrliteMode, CryptoPrimitiveBackend, CryptoPrimitiveProvider, DatabaseMitigationMode,
+  DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
+  ExpectContinueMode, ExternalAuthProvider, ExternalCacheHandlerFailPolicy,
+  ExternalCacheHandlerKind, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
+  HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
+  LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode,
+  OutboundOcspMode, PriorityClass, PriorityMode, PriorityRejectionPolicy, ProxyProtocolEgressMode,
+  ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
+  RuntimeArtifact, RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
+  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
+  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
+  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
+  TrailerMode, UdpFlowState, UpstreamDiscoveryProvider, UpstreamEchMode,
+  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::hardening::RequiredHardeningFailurePolicy;
 use oxibelt::quic::load_host_key;
@@ -14777,6 +14779,27 @@ fn oxirule_reload_equivalence_rejects_non_waf_changes() {
 }
 
 #[test]
+fn oxirule_reload_equivalence_rejects_certificate_transparency_changes() {
+  let temp_dir = common::TempDir::new("hot-reload-certificate-transparency");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "hot-reload-certificate-transparency");
+  let base: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("base config should parse");
+
+  let mut changed = base.clone();
+  changed.certificate_transparency.profile = CertificateTransparencyProfile::Production;
+  assert!(!base.non_waf_equivalent(&changed));
+
+  let mut changed = base.clone();
+  changed.routes[0].ct_log = Some("ct-operator".to_string());
+  assert!(!base.non_waf_equivalent(&changed));
+
+  let mut changed = base.clone();
+  changed.routes[0].ct_surface = CertificateTransparencyRouteSurface::Monitoring;
+  assert!(!base.non_waf_equivalent(&changed));
+}
+
+#[test]
 fn downstream_http3_listener_validates() {
   let temp_dir = common::TempDir::new("downstream-http3");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "downstream-h3");
@@ -16574,4 +16597,293 @@ zstd = true
     cert = cert_file,
     key = key_file,
   )
+}
+
+fn local_ct_operator_config(base: &str) -> String {
+  let digest = "a".repeat(64);
+  format!(
+    r#"{base}
+
+[certificate_transparency]
+enabled = true
+profile = "local"
+
+[[certificate_transparency.logs]]
+name = "ct-operator"
+role = "operator"
+protocol = "static_rfc6962_v1"
+
+[certificate_transparency.logs.identity]
+algorithm = "p256"
+public_key_file = "ct-public.key"
+
+[certificate_transparency.logs.signer]
+socket_path = "/run/oxibelt-keysigner.sock"
+key_id = "ct-operator"
+token_env = "OXIBELT_CT_TOKEN"
+
+[certificate_transparency.logs.storage]
+posix_path = "/var/lib/oxibelt/ct"
+
+[certificate_transparency.logs.signed_root]
+bundle_path = "ct-roots.bundle"
+bundle_sha256 = "sha256:{digest}"
+trusted_ed25519_keys = ["ct-root-a.pub"]
+quorum = 1
+"#,
+    base = base,
+    digest = digest,
+  )
+}
+
+fn production_ct_operator_config(base: &str) -> String {
+  let digest = "b".repeat(64);
+  format!(
+    r#"{base}
+
+[certificate_transparency]
+enabled = true
+profile = "production"
+
+[[certificate_transparency.logs]]
+name = "ct-operator"
+role = "operator"
+protocol = "static_rfc6962_v1"
+
+[certificate_transparency.logs.identity]
+algorithm = "p256"
+public_key_file = "ct-public.key"
+
+[certificate_transparency.logs.signer]
+socket_path = "/run/oxibelt-keysigner.sock"
+key_id = "ct-operator"
+token_env = "OXIBELT_CT_TOKEN"
+
+[certificate_transparency.logs.storage]
+postgres_url_env = "OXIBELT_CT_POSTGRES_URL"
+s3_bucket = "oxibelt-ct-log"
+s3_region = "us-east-1"
+s3_endpoint = "https://s3.example.com"
+s3_prefix = "tenant-a/log"
+s3_access_key_env = "OXIBELT_CT_S3_ACCESS"
+s3_secret_key_env = "OXIBELT_CT_S3_SECRET"
+s3_session_token_env = "OXIBELT_CT_S3_SESSION"
+s3_virtual_hosted_style = true
+retention_seconds = 604800
+object_lock_enabled = true
+delete_denial_attestation_file = "delete-denial.attestation"
+
+[certificate_transparency.logs.signed_root]
+bundle_path = "ct-roots.bundle"
+bundle_sha256 = "sha256:{digest}"
+trusted_ed25519_keys = ["ct-root-a.pub", "ct-root-b.pub"]
+quorum = 2
+"#,
+    base = base,
+    digest = digest,
+  )
+}
+
+#[test]
+fn certificate_transparency_is_disabled_with_explicit_safe_defaults() {
+  let temp_dir = common::TempDir::new("ct-disabled-defaults");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ct-disabled");
+  let config: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("minimal config should parse");
+
+  assert!(!config.certificate_transparency.enabled);
+  assert_eq!(
+    config.certificate_transparency.profile,
+    CertificateTransparencyProfile::Local
+  );
+  assert!(config.certificate_transparency.logs.is_empty());
+  assert_eq!(
+    config.routes[0].ct_surface,
+    CertificateTransparencyRouteSurface::Submission
+  );
+}
+
+#[test]
+fn local_operator_ct_configuration_validates_without_private_key_material() {
+  let temp_dir = common::TempDir::new("ct-local-operator");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ct-local");
+  let config: Config = toml::from_str(&local_ct_operator_config(&common::minimal_config_toml(
+    &cert_path, &key_path,
+  )))
+  .expect("local CT configuration should parse");
+  config
+    .validate()
+    .expect("local CT configuration should validate");
+
+  let log = &config.certificate_transparency.logs[0];
+  assert_eq!(log.role, CertificateTransparencyLogRole::Operator);
+  assert_eq!(
+    log.protocol,
+    CertificateTransparencyProtocol::StaticRfc6962V1
+  );
+  assert_eq!(
+    log.identity.algorithm,
+    CertificateTransparencyIdentityAlgorithm::P256
+  );
+  assert_eq!(log.mmd_seconds, 60);
+  assert!(log.admission.reject_expired);
+  assert!(!log.admission.check_revocation);
+  assert!(!log.admission.check_eku);
+}
+
+#[test]
+fn certificate_transparency_allows_only_one_operator_log() {
+  let temp_dir = common::TempDir::new("ct-one-operator");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ct-one-operator");
+  let raw = format!(
+    "{}\n[[certificate_transparency.logs]]\nname = \"ct-operator-2\"\nrole = \"operator\"\n\n[certificate_transparency.logs.identity]\npublic_key_file = \"ct-public-2.key\"\n\n[certificate_transparency.logs.signer]\nsocket_path = \"/run/oxibelt-keysigner-2.sock\"\nkey_id = \"ct-operator-2\"\ntoken_env = \"OXIBELT_CT_TOKEN_2\"\n\n[certificate_transparency.logs.storage]\nposix_path = \"/var/lib/oxibelt/ct-2\"\n\n[certificate_transparency.logs.signed_root]\nbundle_path = \"ct-roots-2.bundle\"\nbundle_sha256 = \"sha256:{}\"\ntrusted_ed25519_keys = [\"ct-root-2.pub\"]\n",
+    local_ct_operator_config(&common::minimal_config_toml(&cert_path, &key_path)),
+    "c".repeat(64),
+  );
+  let config: Config = toml::from_str(&raw).expect("duplicate operator configuration should parse");
+  let error = config
+    .validate()
+    .expect_err("two operator logs must be rejected");
+  assert!(error.to_string().contains("at most one writable operator"));
+}
+
+#[test]
+fn production_operator_ct_configuration_requires_hardened_storage_and_root_quorum() {
+  let temp_dir = common::TempDir::new("ct-production-operator");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ct-production");
+  let valid: Config = toml::from_str(&production_ct_operator_config(
+    &common::minimal_config_toml(&cert_path, &key_path),
+  ))
+  .expect("production CT configuration should parse");
+  valid
+    .validate()
+    .expect("complete production CT configuration should validate");
+
+  let missing_postgres =
+    production_ct_operator_config(&common::minimal_config_toml(&cert_path, &key_path))
+      .replace("postgres_url_env = \"OXIBELT_CT_POSTGRES_URL\"\n", "");
+  let config: Config = toml::from_str(&missing_postgres).expect("invalid production config parses");
+  let error = config
+    .validate()
+    .expect_err("production operator storage must require PostgreSQL URL reference");
+  assert!(error.to_string().contains("postgres_url_env"));
+
+  let bad_quorum =
+    production_ct_operator_config(&common::minimal_config_toml(&cert_path, &key_path))
+      .replace("quorum = 2", "quorum = 1");
+  let config: Config = toml::from_str(&bad_quorum).expect("invalid quorum config parses");
+  let error = config
+    .validate()
+    .expect_err("production root quorum must be at least two");
+  assert!(error.to_string().contains("at least 2"));
+}
+
+#[test]
+fn certificate_transparency_protocol_identity_rules_are_fail_closed() {
+  let temp_dir = common::TempDir::new("ct-identity-rules");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ct-identity");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let v1_ed25519 =
+    local_ct_operator_config(&base).replace("algorithm = \"p256\"", "algorithm = \"ed25519\"");
+  let config: Config = toml::from_str(&v1_ed25519).expect("v1 identity config parses");
+  let error = config
+    .validate()
+    .expect_err("v1 logs must reject Ed25519 identities");
+  assert!(error.to_string().contains("p256"));
+
+  let v2_without_oid = local_ct_operator_config(&base).replace(
+    "protocol = \"static_rfc6962_v1\"",
+    "protocol = \"rfc9162_v2\"",
+  );
+  let config: Config = toml::from_str(&v2_without_oid).expect("v2 identity config parses");
+  let error = config.validate().expect_err("v2 logs must require an OID");
+  assert!(error.to_string().contains("identity.oid"));
+
+  let v2_ed25519 = local_ct_operator_config(&base)
+    .replace(
+      "protocol = \"static_rfc6962_v1\"",
+      "protocol = \"rfc9162_v2\"",
+    )
+    .replace(
+      "algorithm = \"p256\"\npublic_key_file = \"ct-public.key\"",
+      "algorithm = \"ed25519\"\npublic_key_file = \"ct-public.key\"\noid = \"1.2.3.4\"",
+    );
+  let config: Config = toml::from_str(&v2_ed25519).expect("v2 Ed25519 config should parse");
+  config
+    .validate()
+    .expect("v2 Ed25519 identity should validate");
+}
+
+#[test]
+fn certificate_transparency_route_surface_and_target_constraints_are_enforced() {
+  let temp_dir = common::TempDir::new("ct-routes");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "ct-routes");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let valid = format!(
+    r#"{}
+
+[[external_auth]]
+name = "ct-auth"
+provider = "gateway_ext_auth_http"
+endpoint = "http://127.0.0.1:19090"
+
+[[routes]]
+name = "ct-monitor"
+hosts = ["ct.example.com"]
+path_prefix = "/"
+ct_log = "ct-operator"
+ct_surface = "monitoring"
+external_auth = "ct-auth"
+"#,
+    local_ct_operator_config(&base),
+  );
+  let config: Config = toml::from_str(&valid).expect("CT route should parse");
+  config
+    .validate()
+    .expect("externally authenticated static monitoring route should validate");
+  assert_eq!(
+    config
+      .routes
+      .last()
+      .and_then(|route| route.external_auth.as_deref()),
+    Some("ct-auth")
+  );
+
+  let without_log = format!(
+    "{}\n[[routes]]\nname = \"ct-no-log\"\nhosts = [\"ct.example.com\"]\npath_prefix = \"/\"\nupstream = \"app\"\nct_surface = \"monitoring\"\n",
+    common::minimal_config_toml(&cert_path, &key_path),
+  );
+  let config: Config = toml::from_str(&without_log).expect("route surface config should parse");
+  let error = config
+    .validate()
+    .expect_err("monitoring surface must require ct_log");
+  assert!(error.to_string().contains("ct_surface without ct_log"));
+
+  let conflicting_target = format!(
+    "{}\n[[routes]]\nname = \"ct-upstream\"\nhosts = [\"ct.example.com\"]\npath_prefix = \"/\"\nupstream = \"app\"\nct_log = \"ct-operator\"\n",
+    local_ct_operator_config(&base),
+  );
+  let config: Config = toml::from_str(&conflicting_target).expect("conflicting route parses");
+  let error = config
+    .validate()
+    .expect_err("ct_log must be exclusive with upstream");
+  assert!(error.to_string().contains("exactly one of upstream"));
+
+  let v2_monitoring = format!(
+    "{}\n[[routes]]\nname = \"ct-v2-monitor\"\nhosts = [\"ct.example.com\"]\npath_prefix = \"/\"\nct_log = \"ct-operator\"\nct_surface = \"monitoring\"\n",
+    local_ct_operator_config(&base)
+      .replace(
+        "protocol = \"static_rfc6962_v1\"",
+        "protocol = \"rfc9162_v2\"",
+      )
+      .replace(
+        "algorithm = \"p256\"\npublic_key_file = \"ct-public.key\"",
+        "algorithm = \"p256\"\npublic_key_file = \"ct-public.key\"\noid = \"1.2.3\"",
+      ),
+  );
+  let config: Config = toml::from_str(&v2_monitoring).expect("v2 monitoring route parses");
+  let error = config
+    .validate()
+    .expect_err("monitoring must be restricted to static v1");
+  assert!(error.to_string().contains("static_rfc6962_v1"));
 }

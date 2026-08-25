@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-08-24",
+  "reviewedOn": "2026-08-25",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,9 +17,9 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "b971b9dc320fb76eed95f61a0bb77fe8a1b64b926f6bd518d82b4a3393555899",
-      "exemptionInventorySha256": "bc56df64f73e811c2c8198d37f44cc905a5c8ca4f6e2a55073a90f084f685e7d",
-      "exemptedPackageVersions": 432
+      "lockfileSha256": "d38cf86a8a3b0167f6590b22973b479a5c1e7067746fc4e69244a75ace8f37fa",
+      "exemptionInventorySha256": "d80b7e046a54425eb98d9f42556d9366bfdb59e250844745a1f707b5afbfe30e",
+      "exemptedPackageVersions": 446
     },
     "reviewTriggers": [
       "new direct dependency",
@@ -50,7 +50,7 @@
       "granit-parser": ["0.0.7", "1"],
       "hashbrown": ["0.15", "0.16", "0.17"],
       "inout": ["0.1", "0.2"],
-      "itertools": ["0.13", "0.14"],
+      "itertools": ["0.13", "0.14", "0.15"],
       "pem-rfc7468": ["0.7", "1"],
       "r-efi": ["5", "6"],
       "rand": ["0.10", "0.8"],
@@ -58,6 +58,7 @@
       "serde-saphyr": ["0.0.29", "1"],
       "sha2": ["0.10", "0.11"],
       "shlex": ["1", "2"],
+      "spin": ["0.9", "0.10"],
       "spki": ["0.7", "0.8"],
       "syn": ["2", "3"],
       "thiserror": ["1", "2"],
@@ -138,11 +139,12 @@
       {
         "category": "database",
         "packages": {
+          "object_store": ["0.14.1"],
           "sqlx": ["0.9.0"],
           "sqlx-core": ["0.9.0"],
           "sqlx-postgres": ["0.9.0"]
         },
-        "reviewBoundary": "query binding, TLS, credential handling, protocol parsing, and migration compatibility"
+        "reviewBoundary": "query binding, object-key and conditional-write semantics, TLS, cloud credential handling, protocol parsing, and migration compatibility"
       },
       {
         "category": "kubernetes",
@@ -193,24 +195,24 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:b971b9dc320fb76eed95f61a0bb77fe8a1b64b926f6bd518d82b4a3393555899",
+      "subject": "Cargo.lock@sha256:d38cf86a8a3b0167f6590b22973b479a5c1e7067746fc4e69244a75ace8f37fa",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-21",
+      "reviewedOn": "2026-08-25",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:b971b9dc320fb76eed95f61a0bb77fe8a1b64b926f6bd518d82b4a3393555899",
+      "subject": "Cargo.lock@sha256:d38cf86a8a3b0167f6590b22973b479a5c1e7067746fc4e69244a75ace8f37fa",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-21",
+      "reviewedOn": "2026-08-25",
       "expiresOn": "2026-10-19"
     },
     {

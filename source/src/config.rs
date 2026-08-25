@@ -26,6 +26,7 @@ mod allowed_keys;
 mod assembly;
 mod cache_external;
 mod cache_sections;
+mod certificate_transparency;
 mod circuit_breakers;
 mod client_identity;
 mod compression;
@@ -101,6 +102,7 @@ pub use cache_external::{
 pub use cache_sections::{
   CacheAdmissionConfig, CachePolicyRuleConfig, CacheStaleIfErrorConfig, CacheSurrogateConfig,
 };
+pub use certificate_transparency::*;
 pub use circuit_breakers::*;
 pub use client_identity::*;
 pub use compression::*;

@@ -251,6 +251,8 @@ mod tests {
       upstream: Some("app".to_string()),
       upstream_pool: None,
       static_root: None,
+      ct_log: None,
+      ct_surface: Default::default(),
       static_files: Default::default(),
       upstream_http_version: None,
       upstream_http_version_mode: Default::default(),

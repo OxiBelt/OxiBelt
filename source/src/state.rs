@@ -10,6 +10,7 @@ use crate::client_identity::ClientIdentityRuntime;
 use crate::config::AdminAuditExportSink;
 use crate::config::{AccessLogConfig, Config, RuntimeDirectH1IoMode, UpstreamConfig};
 use crate::control_http::ControlHttpClient;
+use crate::ct_runtime::CtRuntime;
 use crate::dynamic_policy::DynamicPolicyRuntime;
 use crate::external_auth::ExternalAuthRuntime;
 use crate::filesystem_access::FilesystemAccessManifest;
@@ -113,6 +114,7 @@ pub struct AppSnapshot {
   pub(crate) compression: Arc<CompressionState>,
   pub(crate) waf_body_coding: Arc<WafBodyCodingState>,
   pub(crate) static_files: Arc<StaticFilesRuntime>,
+  pub(crate) certificate_transparency: CtRuntime,
   pub metrics: Arc<Metrics>,
   pub(crate) runtime_health: Arc<RuntimeHealth>,
   pub(crate) runtime_generation: u64,
@@ -335,6 +337,10 @@ impl AppSnapshot {
     let metrics = previous
       .map(|snapshot| snapshot.metrics.clone())
       .unwrap_or_default();
+    let certificate_transparency =
+      CtRuntime::new(&config.certificate_transparency, metrics.clone())
+        .await
+        .context("failed to build Certificate Transparency runtime")?;
     let (runtime_health, runtime_generation, overload, circuit_breakers) =
       runtime_services::build(&config, previous)?;
     let (hardening_state, readiness_critical) = match hardening.outcome {
@@ -708,6 +714,7 @@ impl AppSnapshot {
       compression,
       waf_body_coding,
       static_files: Arc::new(static_files),
+      certificate_transparency,
       metrics,
       runtime_health,
       runtime_generation,
@@ -944,6 +951,7 @@ impl AppSnapshot {
       compression: previous.compression.clone(),
       waf_body_coding,
       static_files: Arc::new(static_files),
+      certificate_transparency: previous.certificate_transparency.clone(),
       metrics,
       runtime_health,
       runtime_generation,

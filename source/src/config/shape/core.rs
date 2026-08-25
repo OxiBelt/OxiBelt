@@ -93,6 +93,34 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "crypto" => crypto::CRYPTO_CONFIG_KEYS,
     "crypto.primitives" => crypto::CRYPTO_PRIMITIVES_CONFIG_KEYS,
     "crypto.primitive_backends" => crypto::CRYPTO_PRIMITIVE_BACKENDS_CONFIG_KEYS,
+    "certificate_transparency" => certificate_transparency::CERTIFICATE_TRANSPARENCY_CONFIG_KEYS,
+    "certificate_transparency.logs" => {
+      certificate_transparency::CERTIFICATE_TRANSPARENCY_LOG_CONFIG_KEYS
+    }
+    "certificate_transparency.logs.identity" => {
+      certificate_transparency::CERTIFICATE_TRANSPARENCY_IDENTITY_CONFIG_KEYS
+    }
+    "certificate_transparency.logs.signer" => {
+      certificate_transparency::CERTIFICATE_TRANSPARENCY_SIGNER_CONFIG_KEYS
+    }
+    "certificate_transparency.logs.storage" => {
+      certificate_transparency::CERTIFICATE_TRANSPARENCY_STORAGE_CONFIG_KEYS
+    }
+    "certificate_transparency.logs.shard" => {
+      certificate_transparency::CERTIFICATE_TRANSPARENCY_SHARD_CONFIG_KEYS
+    }
+    "certificate_transparency.logs.signed_root" => {
+      certificate_transparency::CERTIFICATE_TRANSPARENCY_SIGNED_ROOT_CONFIG_KEYS
+    }
+    "certificate_transparency.logs.publication" => {
+      certificate_transparency::CERTIFICATE_TRANSPARENCY_PUBLICATION_CONFIG_KEYS
+    }
+    "certificate_transparency.logs.gateway" => {
+      certificate_transparency::CERTIFICATE_TRANSPARENCY_GATEWAY_CONFIG_KEYS
+    }
+    "certificate_transparency.logs.admission" => {
+      certificate_transparency::CERTIFICATE_TRANSPARENCY_ADMISSION_CONFIG_KEYS
+    }
     "sni_forward" => sni_forward::SNI_FORWARD_CONFIG_KEYS,
     "sni_forward.quic_initial_reassembly" => {
       sni_forward::SNI_FORWARD_QUIC_INITIAL_REASSEMBLY_CONFIG_KEYS

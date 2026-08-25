@@ -264,6 +264,7 @@ impl Config {
       && self.shared_state == other.shared_state
       && self.dynamic_policy == other.dynamic_policy
       && self.external_auth == other.external_auth
+      && self.certificate_transparency == other.certificate_transparency
       && self.upstreams == other.upstreams
       && self.upstream_pools == other.upstream_pools
       && self.turn_upstream_pools == other.turn_upstream_pools

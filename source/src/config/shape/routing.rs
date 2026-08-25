@@ -165,6 +165,8 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "actions",
       "buffering",
       "cache",
+      "ct_log",
+      "ct_surface",
       "compression",
       "hosts",
       "match",

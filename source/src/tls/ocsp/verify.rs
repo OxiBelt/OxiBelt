@@ -171,7 +171,7 @@ fn verify_ocsp_signature(
   bail!("ocsp_unauthorized_responder")
 }
 
-fn verify_signature_with_cert(
+pub(crate) fn verify_signature_with_cert(
   cert_der: &[u8],
   algorithm_der: &[u8],
   message: &[u8],

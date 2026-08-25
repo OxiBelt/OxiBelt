@@ -3,6 +3,7 @@
 
 use super::*;
 
+mod ct;
 mod exchange;
 mod upstream;
 
@@ -421,6 +422,100 @@ where
         ));
       }
     }
+  }
+  // CT routes remain behind the same dynamic-policy and external-auth gates as
+  // upstream routes. Dispatch only after both gates have accepted the request.
+  if let Some(log_name) = resolved.route.ct_log.as_deref() {
+    if !ct::surface_allows(
+      resolved.route.ct_surface,
+      request.method(),
+      request.uri().path(),
+    ) {
+      return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
+        text_response(
+          StatusCode::NOT_FOUND,
+          "CT endpoint not available on this route",
+        ),
+        state.as_ref(),
+        evaluated_person_proof.as_ref(),
+        dynamic_person_proof_mutation_added,
+        &dynamic_challenge_response_mutations,
+      ));
+    }
+    let (parts, request_body) = request.into_parts();
+    let maximum = usize::try_from(max_request_body_bytes).unwrap_or(usize::MAX);
+    let request_body = body::with_read_timeout(
+      Limited::new(request_body, maximum),
+      client_body_timeout,
+      BodyTimeoutKind::DownstreamRequestRead,
+    );
+    let collected = match request_body.collect().await {
+      Ok(collected) => collected.to_bytes(),
+      Err(error) if body::error_is_body_length_limit(&error) => {
+        return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
+          text_response(StatusCode::PAYLOAD_TOO_LARGE, "CT request body too large"),
+          state.as_ref(),
+          evaluated_person_proof.as_ref(),
+          dynamic_person_proof_mutation_added,
+          &dynamic_challenge_response_mutations,
+        ));
+      }
+      Err(error) if error_is_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) => {
+        return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
+          text_response(StatusCode::REQUEST_TIMEOUT, "CT request body timed out"),
+          state.as_ref(),
+          evaluated_person_proof.as_ref(),
+          dynamic_person_proof_mutation_added,
+          &dynamic_challenge_response_mutations,
+        ));
+      }
+      Err(_) => {
+        return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
+          text_response(StatusCode::BAD_REQUEST, "invalid CT request body"),
+          state.as_ref(),
+          evaluated_person_proof.as_ref(),
+          dynamic_person_proof_mutation_added,
+          &dynamic_challenge_response_mutations,
+        ));
+      }
+    };
+    let ct_response = state
+      .certificate_transparency
+      .handle(
+        log_name,
+        &parts.method,
+        parts.uri.path(),
+        parts.uri.query(),
+        &collected,
+        &state.control_http,
+      )
+      .await;
+    let mut response = Response::new(
+      Full::new(ct_response.body)
+        .map_err(|never| -> body::BoxError { match never {} })
+        .boxed(),
+    );
+    *response.status_mut() = ct_response.status;
+    if let Ok(content_type) = http::HeaderValue::from_str(ct_response.content_type) {
+      response
+        .headers_mut()
+        .insert(http::header::CONTENT_TYPE, content_type);
+    }
+    response.headers_mut().insert(
+      http::header::CACHE_CONTROL,
+      if ct_response.immutable {
+        http::HeaderValue::from_static("public, max-age=31536000, immutable")
+      } else {
+        http::HeaderValue::from_static("no-store")
+      },
+    );
+    return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
+      response,
+      state.as_ref(),
+      evaluated_person_proof.as_ref(),
+      dynamic_person_proof_mutation_added,
+      &dynamic_challenge_response_mutations,
+    ));
   }
   let waf_body_compression_transform =
     crate::waf::route_http_body_compression_transform_enabled(&state.config, resolved.route);

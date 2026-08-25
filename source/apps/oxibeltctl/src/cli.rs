@@ -10,6 +10,8 @@ mod audit_cli;
 mod auth_cli;
 #[path = "config_compat_cli.rs"]
 mod config_compat_cli;
+#[path = "ct_cli.rs"]
+mod ct_cli;
 #[path = "doctor_cli.rs"]
 mod doctor_cli;
 #[path = "ipm_cli.rs"]
@@ -25,6 +27,7 @@ mod supply_chain_cli;
 pub(crate) use audit_cli::*;
 pub(crate) use auth_cli::*;
 pub(crate) use config_compat_cli::*;
+pub(crate) use ct_cli::*;
 pub(crate) use doctor_cli::*;
 pub(crate) use ipm_cli::*;
 pub(crate) use membership_cli::*;
@@ -85,6 +88,7 @@ pub(crate) enum Command {
   SupportBundle(SupportBundleArgs),
   Runtime(RuntimeCommand),
   Config(ConfigCommand),
+  Ct(CtCommand),
   Tls(TlsCommand),
   Lifecycle(LifecycleCommand),
   Pool(PoolCommand),

@@ -108,6 +108,16 @@ pub(super) enum RemoteSignerRequest {
     key_id: String,
     digest: String,
   },
+  DescribeCtLogKey {
+    token: String,
+    key_id: String,
+  },
+  SignCtLogTranscript {
+    token: String,
+    key_id: String,
+    transcript_class: CtTranscriptClass,
+    transcript: String,
+  },
 }
 
 impl RemoteSignerRequest {
@@ -116,7 +126,9 @@ impl RemoteSignerRequest {
       Self::DescribeKey { token, .. }
       | Self::Sign { token, .. }
       | Self::DescribeAuditCheckpointKey { token, .. }
-      | Self::SignAuditCheckpointDigest { token, .. } => token,
+      | Self::SignAuditCheckpointDigest { token, .. }
+      | Self::DescribeCtLogKey { token, .. }
+      | Self::SignCtLogTranscript { token, .. } => token,
     }
   }
 }
@@ -140,6 +152,13 @@ pub(super) enum RemoteSignerResponse {
   SignAuditCheckpointDigest {
     signature: String,
   },
+  DescribeCtLogKey {
+    public_key: String,
+    profile: CtLogProfile,
+  },
+  SignCtLogTranscript {
+    signature: String,
+  },
   Error {
     code: String,
     message: String,
@@ -151,6 +170,35 @@ pub(super) enum RemoteSignerResponse {
 pub(super) enum SignContext {
   Tls13ServerCertificateVerify,
   Tls12Unstructured,
+}
+
+/// Canonical CT transcript families that the purpose-bound CT signer accepts.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CtTranscriptClass {
+  V1Sct,
+  V1Sth,
+  StaticCheckpoint,
+  V2Sct,
+  V2Sth,
+  V2FinalSth,
+}
+
+/// Immutable signing profile advertised by a CT log key.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CtLogProfile {
+  Rfc6962P256Sha256,
+  Rfc9162P256Sha256,
+  Rfc9162Ed25519,
+}
+
+impl CtLogProfile {
+  pub const WIRE_VALUES: &[&str] = &[
+    "rfc6962_p256_sha256",
+    "rfc9162_p256_sha256",
+    "rfc9162_ed25519",
+  ];
 }
 
 #[cfg(test)]

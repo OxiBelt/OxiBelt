@@ -23,6 +23,26 @@ pub(super) fn validate_route_match_conflicts(routes: &[RouteConfig]) -> anyhow::
   conflicts::validate_route_match_conflicts(routes)
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CertificateTransparencyRouteSurface {
+  #[default]
+  Submission,
+  Monitoring,
+}
+
+impl CertificateTransparencyRouteSurface {
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Submission => "submission",
+      Self::Monitoring => "monitoring",
+    }
+  }
+}
+
+pub const CERTIFICATE_TRANSPARENCY_ROUTE_SURFACE_WIRE_VALUES: &[&str] =
+  &["submission", "monitoring"];
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RouteConfig {
   pub name: String,
@@ -42,6 +62,10 @@ pub struct RouteConfig {
   pub upstream_pool: Option<String>,
   #[serde(default)]
   pub static_root: Option<PathBuf>,
+  #[serde(default)]
+  pub ct_log: Option<String>,
+  #[serde(default)]
+  pub ct_surface: CertificateTransparencyRouteSurface,
   #[serde(default)]
   pub static_files: RouteStaticFilesConfig,
   #[serde(default)]

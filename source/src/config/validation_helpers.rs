@@ -288,6 +288,8 @@ pub(super) fn routes_without_waf_are_equivalent(
         && left.upstream == right.upstream
         && left.upstream_pool == right.upstream_pool
         && left.static_root == right.static_root
+        && left.ct_log == right.ct_log
+        && left.ct_surface == right.ct_surface
         && left.static_files == right.static_files
         && left.upstream_http_version == right.upstream_http_version
         && left.generic_http_upgrade == right.generic_http_upgrade

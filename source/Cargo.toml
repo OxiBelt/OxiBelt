@@ -53,6 +53,7 @@ hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1
 libc = "0.2.189"
 md-5 = "0.11.0"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "net", "process", "signal", "socket", "zerocopy"] }
+object_store.workspace = true
 openssl-probe.workspace = true
 regex = "1.13.1"
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }

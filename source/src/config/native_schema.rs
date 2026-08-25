@@ -113,6 +113,38 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     NativeConfigSecretClass::EnvironmentReference,
   ),
   secret(
+    "certificate_transparency.logs[].signer.token_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "certificate_transparency.logs[].signer.token_file",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
+    "certificate_transparency.logs[].storage.postgres_url_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "certificate_transparency.logs[].storage.postgres_url_file",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
+    "certificate_transparency.logs[].storage.s3_access_key_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "certificate_transparency.logs[].storage.s3_secret_key_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "certificate_transparency.logs[].storage.s3_session_token_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "certificate_transparency.logs[].storage.delete_denial_attestation_file",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
     "database.mitigation.connection_url",
     NativeConfigSecretClass::CredentialBearingUrl,
   ),
@@ -279,6 +311,10 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
   full_reload("upstreams[].happy_eyeballs_mode"),
   full_reload("upstreams[].svcb_allowed_ports"),
   full_reload("routes[].upstream_http_version_mode"),
+  full_reload("certificate_transparency"),
+  full_reload("certificate_transparency.*"),
+  full_reload("routes[].ct_log"),
+  full_reload("routes[].ct_surface"),
   conditional("runtime.main_runtime"),
   conditional("runtime.topology_policy"),
   restart("runtime.worker_threads"),
@@ -673,6 +709,12 @@ fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
   if shape_path == "upstream_pools.discovery" {
     object.insert("maxItems".to_string(), json!(64));
   }
+  if shape_path == "certificate_transparency.logs" {
+    object.insert("maxItems".to_string(), json!(64));
+  }
+  if shape_path == "certificate_transparency.logs.signed_root.trusted_ed25519_keys" {
+    object.insert("maxItems".to_string(), json!(64));
+  }
   if is_subject_alt_name_value_path(shape_path) {
     object.insert("minLength".to_string(), json!(1));
     object.insert("maxLength".to_string(), json!(253));
@@ -767,6 +809,21 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     | "sni_forward.quic_initial_reassembly.max_buffered_datagram_bytes_per_session"
     | "sni_forward.quic_initial_reassembly.max_total_buffered_bytes"
     | "sni_forward.quic_initial_reassembly.timeout_ms" => (1, u64::MAX),
+    "certificate_transparency.logs.mmd_seconds" => (1, 86_400),
+    "certificate_transparency.logs.signer.io_timeout_ms" => (1, 30_000),
+    "certificate_transparency.logs.shard.start_ms" => (0, u64::MAX),
+    "certificate_transparency.logs.shard.end_ms" => (0, u64::MAX),
+    "certificate_transparency.logs.signed_root.quorum" => (1, 64),
+    "certificate_transparency.logs.storage.retention_seconds" => (1, 315_360_000),
+    "certificate_transparency.logs.publication.max_chain_bytes"
+    | "certificate_transparency.logs.publication.max_pre_chain_bytes"
+    | "certificate_transparency.logs.gateway.max_proof_bytes"
+    | "certificate_transparency.logs.gateway.max_request_bytes"
+    | "certificate_transparency.logs.gateway.max_response_bytes" => (1, 64 * 1024 * 1024),
+    "certificate_transparency.logs.publication.max_pending_entries" => (1, 1_000_000),
+    "certificate_transparency.logs.gateway.max_entries" => (1, 100_000),
+    "certificate_transparency.logs.gateway.cache_max_bytes" => (1, 64 * 1024 * 1024),
+    "certificate_transparency.logs.gateway.cache_max_entries" => (1, 100_000),
     _ => return None,
   };
   Some(range)
@@ -780,6 +837,7 @@ fn is_array_path(path: &str) -> bool {
     "cache.external_handlers",
     "cache.policies",
     "cache.policies.rules",
+    "certificate_transparency.logs",
     "compression.policies",
     "connection_limits",
     "external_auth",
@@ -820,7 +878,10 @@ fn boolean_path(path: &str) -> bool {
   path.rsplit('.').next().is_some_and(|name| {
     name == "enabled"
       || name == "reuse_port"
+      || name == "s3_virtual_hosted_style"
+      || name.ends_with("_enabled")
       || name.starts_with("allow_")
+      || name.starts_with("check_")
       || name.starts_with("reject_")
       || name.starts_with("require_")
       || name.starts_with("strict_")
@@ -847,12 +908,21 @@ fn number_array_path(path: &str) -> bool {
 
 #[cfg(feature = "config-tooling")]
 fn integer_path(path: &str) -> bool {
+  if matches!(
+    path,
+    "certificate_transparency.logs.shard.start_ms"
+      | "certificate_transparency.logs.shard.end_ms"
+      | "certificate_transparency.logs.signed_root.quorum"
+  ) {
+    return true;
+  }
   path.rsplit('.').next().is_some_and(|name| {
     [
       "_bytes",
       "_capacity",
       "_count",
       "_depth",
+      "_entries",
       "_interval_ms",
       "_ms",
       "_port",
@@ -874,6 +944,7 @@ fn string_array_path(path: &str) -> bool {
     path,
     "external_auth.allowed_content_types"
       | "runtime.hardening.filesystem_manifest.expected_writable_paths"
+      | "certificate_transparency.logs.signed_root.trusted_ed25519_keys"
   ) {
     return true;
   }
@@ -891,6 +962,30 @@ fn string_path(path: &str) -> bool {
   matches!(
     path,
     "runtime.hardening.filesystem_manifest.expected_digest"
+      | "certificate_transparency.logs.name"
+      | "certificate_transparency.logs.identity.oid"
+      | "certificate_transparency.logs.identity.public_key_file"
+      | "certificate_transparency.logs.signer.key_id"
+      | "certificate_transparency.logs.signer.socket_path"
+      | "certificate_transparency.logs.signer.token_env"
+      | "certificate_transparency.logs.signer.token_file"
+      | "certificate_transparency.logs.storage.posix_path"
+      | "certificate_transparency.logs.storage.postgres_url_env"
+      | "certificate_transparency.logs.storage.postgres_url_file"
+      | "certificate_transparency.logs.storage.s3_bucket"
+      | "certificate_transparency.logs.storage.s3_region"
+      | "certificate_transparency.logs.storage.s3_endpoint"
+      | "certificate_transparency.logs.storage.s3_prefix"
+      | "certificate_transparency.logs.storage.s3_access_key_env"
+      | "certificate_transparency.logs.storage.s3_secret_key_env"
+      | "certificate_transparency.logs.storage.s3_session_token_env"
+      | "certificate_transparency.logs.storage.object_source_url"
+      | "certificate_transparency.logs.storage.delete_denial_attestation_file"
+      | "certificate_transparency.logs.signed_root.bundle_path"
+      | "certificate_transparency.logs.signed_root.bundle_sha256"
+      | "certificate_transparency.logs.gateway.origin_url"
+      | "certificate_transparency.logs.gateway.static_origin_url"
+      | "routes.ct_log"
       | "upstream_pools.discovery.id"
       | "upstream_pools.discovery.tls.subject_alt_names.value"
       | "upstream_pools.servers.tls.subject_alt_names.value"
@@ -923,6 +1018,22 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
   let values = BTreeMap::from([
     ("access_log.otlp.schema", vec!["ocsf", "ecs"]),
     ("access_log.stdout.schema", vec!["ocsf", "ecs"]),
+    (
+      "certificate_transparency.profile",
+      vec!["local", "production"],
+    ),
+    (
+      "certificate_transparency.logs.role",
+      vec!["operator", "gateway", "retired_read_only"],
+    ),
+    (
+      "certificate_transparency.logs.protocol",
+      vec!["static_rfc6962_v1", "rfc9162_v2"],
+    ),
+    (
+      "certificate_transparency.logs.identity.algorithm",
+      vec!["p256", "ed25519"],
+    ),
     (
       "config.lb_policy_compat_profile",
       vec!["strict", "nginx", "caddy"],
@@ -986,6 +1097,7 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
       "routes.upstream_http_version_mode",
       vec!["exact", "ceiling"],
     ),
+    ("routes.ct_surface", vec!["submission", "monitoring"]),
     (
       "shared_state.failure_policies.udp_flows",
       vec!["reject_new_only"],
@@ -1027,6 +1139,32 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
 fn default_value(path: &str) -> Option<Value> {
   let value = match path {
     "access_log.otlp.schema" | "access_log.stdout.schema" => json!("ocsf"),
+    "certificate_transparency.enabled" => json!(false),
+    "certificate_transparency.profile" => json!("local"),
+    "certificate_transparency.logs.role" => json!("retired_read_only"),
+    "certificate_transparency.logs.protocol" => json!("static_rfc6962_v1"),
+    "certificate_transparency.logs.mmd_seconds" => json!(60),
+    "certificate_transparency.logs.identity.algorithm" => json!("p256"),
+    "certificate_transparency.logs.signer.io_timeout_ms" => json!(1_000),
+    "certificate_transparency.logs.storage.s3_virtual_hosted_style" => json!(true),
+    "certificate_transparency.logs.storage.retention_seconds" => json!(604_800),
+    "certificate_transparency.logs.storage.object_lock_enabled" => json!(true),
+    "certificate_transparency.logs.shard.start_ms" => json!(0),
+    "certificate_transparency.logs.shard.end_ms" => json!(u64::MAX),
+    "certificate_transparency.logs.signed_root.quorum" => json!(1),
+    "certificate_transparency.logs.publication.max_chain_bytes" => json!(1_048_576),
+    "certificate_transparency.logs.publication.max_pre_chain_bytes" => json!(1_048_576),
+    "certificate_transparency.logs.publication.max_pending_entries" => json!(1_024),
+    "certificate_transparency.logs.gateway.max_entries" => json!(1_024),
+    "certificate_transparency.logs.gateway.cache_max_bytes" => json!(67_108_864),
+    "certificate_transparency.logs.gateway.cache_max_entries" => json!(10_000),
+    "certificate_transparency.logs.gateway.max_proof_bytes" => json!(1_048_576),
+    "certificate_transparency.logs.gateway.max_request_bytes" => json!(1_048_576),
+    "certificate_transparency.logs.gateway.max_response_bytes" => json!(8_388_608),
+    "certificate_transparency.logs.admission.reject_expired" => json!(true),
+    "certificate_transparency.logs.admission.check_revocation" => json!(false),
+    "certificate_transparency.logs.admission.check_eku" => json!(false),
+    "certificate_transparency.logs.admission.allow_precert_signing_ca" => json!(false),
     "config.lb_policy_compat_profile" => json!("strict"),
     "config.strict_unknown_fields" | "config.warn_on_deprecated_fields" => json!(true),
     "logging.level" => json!("info"),
@@ -1061,6 +1199,7 @@ fn default_value(path: &str) -> Option<Value> {
     "upstreams.happy_eyeballs_mode" => json!("inherit"),
     "upstreams.svcb_allowed_ports" => json!([]),
     "routes.upstream_http_version_mode" => json!("exact"),
+    "routes.ct_surface" => json!("submission"),
     "sni_forward.quic_initial_reassembly.max_pending_sessions" => json!(64),
     "sni_forward.quic_initial_reassembly.max_fragments_per_session" => json!(64),
     "sni_forward.quic_initial_reassembly.max_datagrams_per_session" => json!(64),
@@ -1093,6 +1232,10 @@ fn path_kind(path: &str) -> Option<&'static str> {
     || path.starts_with("tls.certificates.")
     || path == "tls.client_auth.ca_certs"
     || path.ends_with(".trusted_ca_certs")
+    || path.starts_with("certificate_transparency.logs.")
+      && (path.ends_with("_file")
+        || path.ends_with(".socket_path")
+        || path.ends_with(".bundle_path"))
   {
     return Some("cert_relative");
   }

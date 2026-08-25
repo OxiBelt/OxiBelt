@@ -66,6 +66,7 @@ pub use downstream_tcp::{build_server_config, build_server_config_with_resumptio
 #[cfg(feature = "admin-runtime")]
 pub use ocsp::OcspRuntimeStatus;
 pub(crate) use ocsp::OcspStapleRuntime;
+pub(crate) use ocsp::verify_signature_with_cert as verify_certificate_signature;
 pub(crate) use outbound_revocation::OutboundRevocationRuntime;
 #[cfg(feature = "admin-runtime")]
 pub use outbound_revocation::OutboundRevocationRuntimeStatus;

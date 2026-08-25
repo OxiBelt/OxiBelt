@@ -92,6 +92,7 @@ pub enum FilesystemAccessPurpose {
   PlatformObservation,
   RuntimeDiagnostics,
   RuntimeData,
+  CertificateTransparency,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -624,6 +625,7 @@ impl ManifestBuilder {
     builder.collect_downstream_tls(config)?;
     builder.collect_waf_and_discovery(config)?;
     builder.collect_trust_and_credentials(config)?;
+    builder.collect_certificate_transparency(config)?;
     builder.collect_cache_and_buffering(config)?;
     builder.collect_crlite(config)?;
     builder.collect_client_identity(config)?;
@@ -1075,6 +1077,82 @@ impl ManifestBuilder {
         "proxy.buffering.temp_dir",
         false,
       )?;
+    }
+    Ok(())
+  }
+
+  fn collect_certificate_transparency(&mut self, config: &Config) -> anyhow::Result<()> {
+    if !config.certificate_transparency.enabled {
+      return Ok(());
+    }
+    for (index, log) in config.certificate_transparency.logs.iter().enumerate() {
+      let prefix = format!("certificate_transparency.logs[{index}]");
+      if let Some(path) = &log.identity.public_key_file {
+        self.add_read_file(
+          path,
+          FilesystemAccessPurpose::CertificateTransparency,
+          format!("{prefix}.identity.public_key_file"),
+          true,
+        )?;
+      }
+      if let Some(path) = &log.signed_root.bundle_path {
+        self.add_read_file(
+          path,
+          FilesystemAccessPurpose::CertificateTransparency,
+          format!("{prefix}.signed_root.bundle_path"),
+          true,
+        )?;
+      }
+      for (key_index, path) in log.signed_root.trusted_ed25519_keys.iter().enumerate() {
+        self.add_read_file(
+          path,
+          FilesystemAccessPurpose::CertificateTransparency,
+          format!("{prefix}.signed_root.trusted_ed25519_keys[{key_index}]"),
+          true,
+        )?;
+      }
+      if let Some(path) = &log.signer.socket_path {
+        self.add(
+          path,
+          ManifestEntrySpec {
+            access: &[FilesystemAccessMode::ConnectUnixSocket],
+            purpose: FilesystemAccessPurpose::CertificateTransparency,
+            source_config_path: Some(format!("{prefix}.signer.socket_path")),
+            expected_type: FilesystemPathType::UnixSocket,
+            scope: FilesystemPathScope::Exact,
+            requires_parent_write: false,
+            optional: false,
+          },
+        )?;
+      }
+      for (suffix, path) in [
+        ("signer.token_file", log.signer.token_file.as_ref()),
+        (
+          "storage.postgres_url_file",
+          log.storage.postgres_url_file.as_ref(),
+        ),
+        (
+          "storage.delete_denial_attestation_file",
+          log.storage.delete_denial_attestation_file.as_ref(),
+        ),
+      ] {
+        if let Some(path) = path {
+          self.add_read_file(
+            path,
+            FilesystemAccessPurpose::CertificateTransparency,
+            format!("{prefix}.{suffix}"),
+            true,
+          )?;
+        }
+      }
+      if let Some(path) = &log.storage.posix_path {
+        self.add_write_directory(
+          path,
+          FilesystemAccessPurpose::CertificateTransparency,
+          format!("{prefix}.storage.posix_path"),
+          true,
+        )?;
+      }
     }
     Ok(())
   }

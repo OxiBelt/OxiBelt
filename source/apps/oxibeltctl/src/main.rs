@@ -33,6 +33,21 @@ mod config_plan;
 mod config_schema;
 #[path = "config_validate.rs"]
 mod config_validate;
+#[path = "ct.rs"]
+mod ct;
+#[path = "ct_io.rs"]
+mod ct_io;
+#[path = "ct_monitor.rs"]
+mod ct_monitor;
+#[path = "ct_postgres.rs"]
+mod ct_postgres;
+#[path = "ct_roots.rs"]
+mod ct_roots;
+#[path = "ct_shards.rs"]
+mod ct_shards;
+#[cfg(test)]
+#[path = "ct_tests.rs"]
+mod ct_tests;
 #[path = "doctor.rs"]
 mod doctor;
 #[path = "doctor_plan.rs"]
@@ -154,6 +169,9 @@ async fn run() -> anyhow::Result<i32> {
     return Ok(0);
   }
   if let Some(code) = supply_chain::run_if_requested(&cli.command).await? {
+    return Ok(code);
+  }
+  if let Some(code) = ct::run_if_requested(&cli.command).await? {
     return Ok(code);
   }
   let client = build_client(&cli.admin)?;

@@ -516,6 +516,12 @@ pub(crate) fn readiness_for_snapshot(snapshot: &crate::state::AppSnapshot) -> Re
       reason: ReadinessReason::RuntimeUnhealthy,
     };
   }
+  if !snapshot.certificate_transparency.is_ready() {
+    return ReadinessSnapshot {
+      state: ServerReadiness::NotReady,
+      reason: ReadinessReason::RuntimeUnhealthy,
+    };
+  }
   ReadinessSnapshot::ready()
 }
 

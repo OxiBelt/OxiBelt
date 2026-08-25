@@ -4688,6 +4688,603 @@
       "x-oxibelt-reference-activation": "none",
       "x-oxibelt-secret-class": "none"
     },
+    "certificate_transparency": {
+      "additionalProperties": false,
+      "description": "OxiBelt native field `certificate_transparency`. Production Rust validation is authoritative.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "OxiBelt native field `certificate_transparency.enabled`. Production Rust validation is authoritative.",
+          "type": "boolean",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "logs": {
+          "description": "OxiBelt native field `certificate_transparency.logs`. Production Rust validation is authoritative.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "admission": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `certificate_transparency.logs[].admission`. Production Rust validation is authoritative.",
+                "properties": {
+                  "allow_precert_signing_ca": {
+                    "default": false,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].admission.allow_precert_signing_ca`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "check_eku": {
+                    "default": false,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].admission.check_eku`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "check_revocation": {
+                    "default": false,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].admission.check_revocation`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "reject_expired": {
+                    "default": true,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].admission.reject_expired`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "gateway": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `certificate_transparency.logs[].gateway`. Production Rust validation is authoritative.",
+                "properties": {
+                  "cache_max_bytes": {
+                    "default": 67108864,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].gateway.cache_max_bytes`. Production Rust validation is authoritative.",
+                    "maximum": 67108864,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "cache_max_entries": {
+                    "default": 10000,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].gateway.cache_max_entries`. Production Rust validation is authoritative.",
+                    "maximum": 100000,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "max_entries": {
+                    "default": 1024,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].gateway.max_entries`. Production Rust validation is authoritative.",
+                    "maximum": 100000,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "max_proof_bytes": {
+                    "default": 1048576,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].gateway.max_proof_bytes`. Production Rust validation is authoritative.",
+                    "maximum": 67108864,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "max_request_bytes": {
+                    "default": 1048576,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].gateway.max_request_bytes`. Production Rust validation is authoritative.",
+                    "maximum": 67108864,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "max_response_bytes": {
+                    "default": 8388608,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].gateway.max_response_bytes`. Production Rust validation is authoritative.",
+                    "maximum": 67108864,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "origin_url": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].gateway.origin_url`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "static_origin_url": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].gateway.static_origin_url`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "identity": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `certificate_transparency.logs[].identity`. Production Rust validation is authoritative.",
+                "properties": {
+                  "algorithm": {
+                    "default": "p256",
+                    "description": "OxiBelt native field `certificate_transparency.logs[].identity.algorithm`. Production Rust validation is authoritative.",
+                    "enum": [
+                      "p256",
+                      "ed25519"
+                    ],
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "oid": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].identity.oid`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "public_key_file": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].identity.public_key_file`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-path-kind": "cert_relative",
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "mmd_seconds": {
+                "default": 60,
+                "description": "OxiBelt native field `certificate_transparency.logs[].mmd_seconds`. Production Rust validation is authoritative.",
+                "maximum": 86400,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "name": {
+                "description": "OxiBelt native field `certificate_transparency.logs[].name`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "protocol": {
+                "default": "static_rfc6962_v1",
+                "description": "OxiBelt native field `certificate_transparency.logs[].protocol`. Production Rust validation is authoritative.",
+                "enum": [
+                  "static_rfc6962_v1",
+                  "rfc9162_v2"
+                ],
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "publication": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `certificate_transparency.logs[].publication`. Production Rust validation is authoritative.",
+                "properties": {
+                  "max_chain_bytes": {
+                    "default": 1048576,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].publication.max_chain_bytes`. Production Rust validation is authoritative.",
+                    "maximum": 67108864,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "max_pending_entries": {
+                    "default": 1024,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].publication.max_pending_entries`. Production Rust validation is authoritative.",
+                    "maximum": 1000000,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "max_pre_chain_bytes": {
+                    "default": 1048576,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].publication.max_pre_chain_bytes`. Production Rust validation is authoritative.",
+                    "maximum": 67108864,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "role": {
+                "default": "retired_read_only",
+                "description": "OxiBelt native field `certificate_transparency.logs[].role`. Production Rust validation is authoritative.",
+                "enum": [
+                  "operator",
+                  "gateway",
+                  "retired_read_only"
+                ],
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "shard": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `certificate_transparency.logs[].shard`. Production Rust validation is authoritative.",
+                "properties": {
+                  "end_ms": {
+                    "default": 18446744073709551615,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].shard.end_ms`. Production Rust validation is authoritative.",
+                    "maximum": 18446744073709551615,
+                    "minimum": 0,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "start_ms": {
+                    "default": 0,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].shard.start_ms`. Production Rust validation is authoritative.",
+                    "maximum": 18446744073709551615,
+                    "minimum": 0,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "signed_root": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `certificate_transparency.logs[].signed_root`. Production Rust validation is authoritative.",
+                "properties": {
+                  "bundle_path": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].signed_root.bundle_path`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-path-kind": "cert_relative",
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "bundle_sha256": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].signed_root.bundle_sha256`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "quorum": {
+                    "default": 1,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].signed_root.quorum`. Production Rust validation is authoritative.",
+                    "maximum": 64,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "trusted_ed25519_keys": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].signed_root.trusted_ed25519_keys`. Production Rust validation is authoritative.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 64,
+                    "type": "array",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "signer": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `certificate_transparency.logs[].signer`. Production Rust validation is authoritative.",
+                "properties": {
+                  "io_timeout_ms": {
+                    "default": 1000,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].signer.io_timeout_ms`. Production Rust validation is authoritative.",
+                    "maximum": 30000,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "key_id": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].signer.key_id`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "socket_path": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].signer.socket_path`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-path-kind": "cert_relative",
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "token_env": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].signer.token_env`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "full_reload",
+                    "x-oxibelt-secret-class": "environment_reference"
+                  },
+                  "token_file": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].signer.token_file`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-path-kind": "cert_relative",
+                    "x-oxibelt-reference-activation": "full_reload",
+                    "x-oxibelt-secret-class": "file_reference"
+                  }
+                },
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "storage": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `certificate_transparency.logs[].storage`. Production Rust validation is authoritative.",
+                "properties": {
+                  "delete_denial_attestation_file": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.delete_denial_attestation_file`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-path-kind": "cert_relative",
+                    "x-oxibelt-reference-activation": "full_reload",
+                    "x-oxibelt-secret-class": "file_reference"
+                  },
+                  "object_lock_enabled": {
+                    "default": true,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.object_lock_enabled`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "object_source_url": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.object_source_url`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "posix_path": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.posix_path`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "postgres_url_env": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.postgres_url_env`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "full_reload",
+                    "x-oxibelt-secret-class": "environment_reference"
+                  },
+                  "postgres_url_file": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.postgres_url_file`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-path-kind": "cert_relative",
+                    "x-oxibelt-reference-activation": "full_reload",
+                    "x-oxibelt-secret-class": "file_reference"
+                  },
+                  "retention_seconds": {
+                    "default": 604800,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.retention_seconds`. Production Rust validation is authoritative.",
+                    "maximum": 315360000,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "s3_access_key_env": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.s3_access_key_env`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "full_reload",
+                    "x-oxibelt-secret-class": "environment_reference"
+                  },
+                  "s3_bucket": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.s3_bucket`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "s3_endpoint": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.s3_endpoint`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "s3_prefix": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.s3_prefix`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "s3_region": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.s3_region`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "s3_secret_key_env": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.s3_secret_key_env`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "full_reload",
+                    "x-oxibelt-secret-class": "environment_reference"
+                  },
+                  "s3_session_token_env": {
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.s3_session_token_env`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "full_reload",
+                    "x-oxibelt-secret-class": "environment_reference"
+                  },
+                  "s3_virtual_hosted_style": {
+                    "default": true,
+                    "description": "OxiBelt native field `certificate_transparency.logs[].storage.s3_virtual_hosted_style`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "type": "object"
+          },
+          "maxItems": 64,
+          "type": "array",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "profile": {
+          "default": "local",
+          "description": "OxiBelt native field `certificate_transparency.profile`. Production Rust validation is authoritative.",
+          "enum": [
+            "local",
+            "production"
+          ],
+          "type": "string",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        }
+      },
+      "type": "object",
+      "x-oxibelt-config-activation": "full_reload",
+      "x-oxibelt-introduced-epoch": 1,
+      "x-oxibelt-reference-activation": "none",
+      "x-oxibelt-secret-class": "none"
+    },
     "circuit_breakers": {
       "additionalProperties": false,
       "description": "OxiBelt native field `circuit_breakers`. Production Rust validation is authoritative.",
@@ -6369,27 +6966,9 @@
               "x-oxibelt-secret-class": "none"
             },
             "max_entries": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "array"
-                },
-                {
-                  "type": "object"
-                }
-              ],
               "description": "OxiBelt native field `client_identity.asn.max_entries`. Production Rust validation is authoritative.",
+              "minimum": 0,
+              "type": "integer",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
@@ -13725,27 +14304,9 @@
               "x-oxibelt-secret-class": "none"
             },
             "open_file_cache_max_entries": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "array"
-                },
-                {
-                  "type": "object"
-                }
-              ],
               "description": "OxiBelt native field `proxy.static_files.open_file_cache_max_entries`. Production Rust validation is authoritative.",
+              "minimum": 0,
+              "type": "integer",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
@@ -17562,6 +18123,27 @@
               }
             ],
             "description": "OxiBelt native field `routes[].connect_tunneling`. Production Rust validation is authoritative.",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "ct_log": {
+            "description": "OxiBelt native field `routes[].ct_log`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "ct_surface": {
+            "default": "submission",
+            "description": "OxiBelt native field `routes[].ct_surface`. Production Rust validation is authoritative.",
+            "enum": [
+              "submission",
+              "monitoring"
+            ],
+            "type": "string",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
             "x-oxibelt-reference-activation": "none",

@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use clap::Parser;
 use oxibelt::remote_signer::{
-  self, DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
+  self, CtLogProfile, DEFAULT_REMOTE_SIGNER_IO_TIMEOUT_MS, DEFAULT_REMOTE_SIGNER_MAX_CONNECTIONS,
   DEFAULT_REMOTE_SIGNER_TOKEN_RELOAD_INTERVAL_MS, SignerServerConfig,
 };
 
@@ -28,6 +28,12 @@ struct Cli {
     value_parser = parse_audit_checkpoint_key
   )]
   audit_checkpoint_keys: Vec<(String, PathBuf)>,
+
+  #[arg(long = "ct-log-key", value_name = "KEY_ID=PRIVATE_KEY_PEM", value_parser = parse_key)]
+  ct_log_keys: Vec<(String, PathBuf)>,
+
+  #[arg(long = "ct-log-profile", value_name = "KEY_ID=PROFILE", value_parser = parse_ct_log_profile)]
+  ct_log_profiles: Vec<(String, CtLogProfile)>,
 
   #[arg(long, default_value = "OXIBELT_KEYSIGNER_TOKEN")]
   token_env: String,
@@ -62,11 +68,13 @@ async fn main() -> anyhow::Result<()> {
   let cli = Cli::parse();
   oxibelt::runtime::init_tracing(&oxibelt::config::LoggingConfig::default())?;
   oxibelt::tls::install_default_provider()?;
+  let ct_log_key = resolve_ct_log_key(&cli.ct_log_keys, &cli.ct_log_profiles)?;
   remote_signer::serve_with_audit_checkpoint_keys(
     SignerServerConfig {
       socket_path: cli.socket,
       socket_mode: cli.socket_mode,
       keys: cli.keys,
+      ct_log_key,
       token_env: cli.token_env,
       token_file: cli.token_file,
       token_reload_interval: Duration::from_millis(cli.token_reload_interval_ms),
@@ -79,6 +87,26 @@ async fn main() -> anyhow::Result<()> {
     cli.audit_checkpoint_keys,
   )
   .await
+}
+
+fn resolve_ct_log_key(
+  keys: &[(String, PathBuf)],
+  profiles: &[(String, CtLogProfile)],
+) -> anyhow::Result<Option<(String, CtLogProfile, PathBuf)>> {
+  if keys.is_empty() && profiles.is_empty() {
+    return Ok(None);
+  }
+  if keys.len() != 1 || profiles.len() != 1 {
+    bail!(
+      "CT log signer requires exactly one --ct-log-key and one matching --ct-log-profile; rotate by creating a new CT log signer daemon"
+    );
+  }
+  let (key_id, key_path) = &keys[0];
+  let (profile_key_id, profile) = profiles[0];
+  if key_id != profile_key_id {
+    bail!("--ct-log-profile key id must match --ct-log-key");
+  }
+  Ok(Some((key_id.clone(), profile, key_path.clone())))
 }
 
 fn parse_key(value: &str) -> anyhow::Result<(String, PathBuf)> {
@@ -105,6 +133,25 @@ fn parse_audit_checkpoint_key(value: &str) -> anyhow::Result<(String, PathBuf)> 
     bail!("--audit-checkpoint-key private key path must not be empty");
   }
   Ok((key_id.to_string(), PathBuf::from(path)))
+}
+
+fn parse_ct_log_profile(value: &str) -> anyhow::Result<(String, CtLogProfile)> {
+  let Some((key_id, profile)) = value.split_once('=') else {
+    bail!("--ct-log-profile must use KEY_ID=PROFILE");
+  };
+  if key_id.trim().is_empty() {
+    bail!("--ct-log-profile key id must not be empty");
+  }
+  let profile = match profile {
+    "rfc6962_p256_sha256" => CtLogProfile::Rfc6962P256Sha256,
+    "rfc9162_p256_sha256" => CtLogProfile::Rfc9162P256Sha256,
+    "rfc9162_ed25519" => CtLogProfile::Rfc9162Ed25519,
+    _ => bail!(
+      "--ct-log-profile must use one of {}",
+      CtLogProfile::WIRE_VALUES.join(", ")
+    ),
+  };
+  Ok((key_id.to_string(), profile))
 }
 
 fn parse_socket_mode(value: &str) -> anyhow::Result<u32> {
@@ -170,5 +217,29 @@ mod tests {
     assert!(parse_audit_checkpoint_key("=/run/keys/audit.pem").is_err());
     assert!(parse_audit_checkpoint_key("audit=").is_err());
     assert!(parse_audit_checkpoint_key("audit").is_err());
+  }
+
+  #[test]
+  fn ct_log_key_requires_one_matching_immutable_profile() {
+    let key = ("log-2026".to_string(), PathBuf::from("/run/keys/log.pem"));
+    let profile = ("log-2026".to_string(), CtLogProfile::Rfc9162Ed25519);
+    assert!(matches!(
+      resolve_ct_log_key(&[key.clone()], &[profile]),
+      Ok(Some((key_id, CtLogProfile::Rfc9162Ed25519, _))) if key_id == "log-2026"
+    ));
+    assert!(resolve_ct_log_key(&[key.clone(), key.clone()], &[]).is_err());
+    assert!(
+      resolve_ct_log_key(
+        &[key],
+        &[("other".to_string(), CtLogProfile::Rfc9162Ed25519)],
+      )
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn ct_log_profile_parser_rejects_unknown_profiles() {
+    assert!(parse_ct_log_profile("log=future").is_err());
+    assert!(parse_ct_log_profile("=rfc9162_ed25519").is_err());
   }
 }

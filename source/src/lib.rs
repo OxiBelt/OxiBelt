@@ -32,6 +32,8 @@ pub mod client_identity;
 pub mod config;
 pub mod control_http;
 pub(crate) mod crypto;
+pub mod ct;
+pub mod ct_runtime;
 pub mod diagnostics;
 pub mod dynamic_policy;
 pub mod external_auth;

@@ -24,6 +24,7 @@ pub(super) use schedule::{classify_ocsp_error, failure_retry_time, next_refresh_
 #[cfg(feature = "admin-runtime")]
 pub use status::OcspRuntimeStatus;
 use status::{OcspStatusState, system_time_to_unix};
+pub(crate) use verify::verify_signature_with_cert;
 pub(in crate::tls) use verify::{
   OcspRequestContext, OcspVerificationContext, VerifiedOcspResponse, build_ocsp_request_context,
   verify_ocsp_response,
