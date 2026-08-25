@@ -63,12 +63,81 @@ be used as a supported production upgrade source or target.
 | `0.6.6` | `0.8.1-beta.9` | Published, qualified | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Use only the fresh beta.9 exact-version artifacts and complete automatic qualification evidence; do not substitute an earlier beta subject or receipt. |
 | `0.8.1-beta.8` | `0.8.1-beta.9` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.8's published artifacts and exact-revision evidence cannot be promoted, relabeled, or reused for beta.9. |
 | `0.8.1-beta.9` | `0.8.1` | Stable candidate | The stable source is exactly one documentation-only commit after the qualified beta.9 revision. This exact transition has no additional calendar delay, but stable publication cannot predate beta publication or verifier completion and remains subject to every stable-only release and alias gate. |
+| `0.8.1` | `0.9.0-beta.1` | Planned beta, not tagged | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). CT-disabled epoch-1 configurations need no native migration; enable CT only after fresh exact-candidate storage, signer, interoperability, load, and monitor evidence succeeds. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
 `Recovery candidate` or `Conditional`. A tag cannot prepare a GitHub draft
 release until the matching entry and upgrade link pass the repository
 release-contract checker.
+
+## Upgrade from 0.8.1 to the 0.9.0 line
+
+`0.9.0-beta.1` is a development ledger target, not a tag, GitHub Release,
+official artifact set, or qualified production release. It introduces native
+Certificate Transparency (CT) runtime, tooling, signer, and experimental Helm
+surfaces. CT remains disabled by default. An existing `0.8.1` epoch-1
+configuration that does not add `[certificate_transparency]` or `ct_log`
+routes needs no native schema migration and keeps its existing request
+behavior.
+
+Treat CT activation as a new service deployment. Use separate workloads for
+each writable operator, read-only gateway, purpose-exclusive signer, and
+independent monitor, and use separate writable operators for different
+protocols or temporal shards. A process owns at most one writable log. CT
+configuration and route changes require a full reload; do not introduce them
+during an unrelated in-place reload.
+
+The local POSIX storage profile and local schema version `1` are for
+development and interoperability testing only. Before enabling a production
+CT route, stop CT traffic, back up PostgreSQL, apply CT PostgreSQL schema
+version `3`, and verify the storage contract:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+oxibeltctl ct postgres migrate --database-url-env OXIBELT_CT_DATABASE_URL
+oxibeltctl ct postgres storage-check --database-url-env OXIBELT_CT_DATABASE_URL
+```
+
+Production CT also requires HTTPS S3-compatible versioned object storage,
+create-only and conditional-write behavior, object lock and retention,
+checksum readback, and an operator-supplied deletion-denial attestation. Pin
+the canonical accepted-root bundle by SHA-256 digest and require at least two
+independent Ed25519 signatures. Keep private log keys only in the
+purpose-bound keysigner and mount database, object-storage, signer, root, and
+public-identity secrets only into the workloads that own them.
+
+The `oxibelt-ct` chart is an experimental deployment scaffold and development
+version-inventory member. It is not one of the two official Helm charts in the
+release packaging, independent-rebuild, or qualification contract. Its opaque
+`log.config` remains the sole runtime configuration source, so the chart
+cannot derive a readiness probe and leaves its Service disabled by default.
+Render and review the selected profile without treating a successful template
+as production qualification:
+
+```sh
+helm lint --strict deploy/helm/oxibelt-ct
+helm template oxibelt-ct deploy/helm/oxibelt-ct \
+  --values deploy/helm/oxibelt-ct/values-production.yaml
+```
+
+Before production support, the exact candidate must pass RFC 6962, Static CT,
+and RFC 9162 interoperability; restart, signer-outage, PostgreSQL-failover,
+object-conflict, and replica-fencing tests; and resource-based load tests that
+hold the 60-second maximum merge delay without unbounded growth. An
+independent monitor outside the operator trust boundary must then observe
+seven continuous days without rollback, fork, invalid proof, or stale signed
+tree heads. Archive the root quorum, shard schedule, retention, deletion
+denial, immutable image, and monitor evidence for that exact revision.
+
+To roll back to `0.8.1`, stop submissions, drain CT gateways and operators,
+remove every `ct_log` and `ct_surface` route and the CT configuration, then
+restore and validate the `0.8.1` binary and configuration together. Retain the
+PostgreSQL backup, object-store versions, accepted-root snapshots, keys, and
+monitor witnesses. There is no CT down-migration. Published checkpoints,
+signed tree heads, receipts, and retained or object-locked objects are
+externally visible or immutable and cannot be retracted by rollback; never
+reuse a log identity to conceal a failed deployment.
 
 ## Upgrade from 0.6.6 to the 0.8.1 line
 

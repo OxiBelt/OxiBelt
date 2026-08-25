@@ -162,7 +162,8 @@ const NpmWorkspacePatterns = ['devops', 'ui/*']
 
 const HelmCharts = [
   'deploy/helm/oxibelt/Chart.yaml',
-  'deploy/helm/oxibelt-gateway-controller/Chart.yaml'
+  'deploy/helm/oxibelt-gateway-controller/Chart.yaml',
+  'deploy/helm/oxibelt-ct/Chart.yaml'
 ]
 
 const DockerAssignments: AssignmentPolicy[] = [
