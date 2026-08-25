@@ -294,12 +294,13 @@ fn config_wire_values_are_documented_in_config_reference_and_feature_matrix() {
 }
 
 #[test]
-fn configuration_route_target_docs_include_redirect_target() {
+fn configuration_route_target_docs_include_all_exclusive_targets() {
   let configuration = read_repo_file("docs/Configuration.md");
   for value in [
     "`upstream`",
     "`upstream_pool`",
     "`static_root`",
+    "`ct_log`",
     "`actions.redirect`",
   ] {
     assert!(
@@ -308,7 +309,8 @@ fn configuration_route_target_docs_include_redirect_target() {
     );
   }
   assert!(
-    configuration.contains("exactly one of `upstream`, `upstream_pool`, `static_root`, or"),
+    configuration
+      .contains("exactly one of `upstream`, `upstream_pool`, `static_root`, `ct_log`, or"),
     "docs/Configuration.md must document the route target exclusivity set"
   );
 }
