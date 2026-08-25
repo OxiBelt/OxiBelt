@@ -1,0 +1,8 @@
+apiVersion: v2
+name: oxibelt-ct
+description: Experimental role-isolated OxiBelt Certificate Transparency workload scaffold
+type: application
+version: 0.0.0
+appVersion: "0.0.0"
+annotations:
+  oxibelt.dev/feature-status: experimental

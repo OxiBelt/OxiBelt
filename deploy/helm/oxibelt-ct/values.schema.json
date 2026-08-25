@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "image", "role", "replicaCount", "log", "signer", "postgres", "objectStorage", "localStorage", "service", "networkPolicy", "resources", "signerResources", "podSecurityContext"],
+  "properties": {
+    "profile": {"enum": ["local", "production"]},
+    "image": {"$ref": "#/definitions/image"},
+    "role": {"enum": ["operator", "gateway"]},
+    "replicaCount": {"type": "integer", "minimum": 1, "maximum": 16},
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["config", "rootBundleSecret", "rootBundleSecretKey", "publicKeySecret", "publicKeySecretKey"],
+      "properties": {
+        "config": {"type": "string", "minLength": 1, "maxLength": 1048576, "description": "Complete authoritative OxiBelt TOML; chart values are not merged into it."},
+        "rootBundleSecret": {"$ref": "#/definitions/kubernetesName"},
+        "rootBundleSecretKey": {"$ref": "#/definitions/secretKey"},
+        "publicKeySecret": {"$ref": "#/definitions/kubernetesName"},
+        "publicKeySecretKey": {"$ref": "#/definitions/secretKey"}
+      }
+    },
+    "signer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "image", "keyId", "profile", "keySecret", "keySecretKey", "tokenSecret", "tokenSecretKey", "socketMode", "maxConnections", "ioTimeoutMillis", "tokenReloadIntervalMillis", "operatorUid", "signerUid", "sharedGid"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"$ref": "#/definitions/image"},
+        "keyId": {"$ref": "#/definitions/portableIdentifier"},
+        "profile": {"enum": ["rfc6962_p256_sha256", "rfc9162_p256_sha256", "rfc9162_ed25519"]},
+        "keySecret": {"$ref": "#/definitions/kubernetesName"},
+        "keySecretKey": {"$ref": "#/definitions/secretKey"},
+        "tokenSecret": {"$ref": "#/definitions/kubernetesName"},
+        "tokenSecretKey": {"$ref": "#/definitions/secretKey"},
+        "socketMode": {"const": "0660"},
+        "maxConnections": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "ioTimeoutMillis": {"type": "integer", "minimum": 1, "maximum": 30000},
+        "tokenReloadIntervalMillis": {"type": "integer", "minimum": 100, "maximum": 300000},
+        "operatorUid": {"const": 10001},
+        "signerUid": {"const": 10002},
+        "sharedGid": {"const": 20001}
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secret", "key", "migrate"],
+      "properties": {
+        "secret": {"type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63},
+        "key": {"$ref": "#/definitions/secretKey"},
+        "migrate": {"type": "boolean"}
+      }
+    },
+    "objectStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "credentialsSecret", "accessKeyKey", "secretKeyKey", "sessionTokenKey", "objectLock", "retentionSeconds", "deleteDenialAttestationConfigMap", "deleteDenialAttestationKey"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "credentialsSecret": {"type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63},
+        "accessKeyKey": {"$ref": "#/definitions/secretKey"},
+        "secretKeyKey": {"$ref": "#/definitions/secretKey"},
+        "sessionTokenKey": {"$ref": "#/definitions/secretKey"},
+        "objectLock": {"const": true},
+        "retentionSeconds": {"type": "integer", "minimum": 604800, "maximum": 315360000},
+        "deleteDenialAttestationConfigMap": {"type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63},
+        "deleteDenialAttestationKey": {"$ref": "#/definitions/secretKey"}
+      }
+    },
+    "localStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingClaim", "sizeLimit"],
+      "properties": {
+        "existingClaim": {"type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63},
+        "sizeLimit": {"type": "string", "pattern": "^[1-9][0-9]*(Ki|Mi|Gi|Ti)$"}
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "acknowledgeNoReadinessProbe", "port"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "acknowledgeNoReadinessProbe": {"type": "boolean"},
+        "port": {"type": "integer", "minimum": 1024, "maximum": 65535}
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "ingress", "egress"],
+      "properties": {
+        "enabled": {"const": true},
+        "ingress": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "ports"],
+            "properties": {
+              "from": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/definitions/networkPeer"}},
+              "ports": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"$ref": "#/definitions/networkPort"}}
+            }
+          }
+        },
+        "egress": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["to", "ports"],
+            "properties": {
+              "to": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/definitions/networkPeer"}},
+              "ports": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"$ref": "#/definitions/networkPort"}}
+            }
+          }
+        }
+      }
+    },
+    "resources": {"type": "object"},
+    "signerResources": {"type": "object"},
+    "podSecurityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runAsNonRoot", "fsGroup", "fsGroupChangePolicy", "seccompProfile"],
+      "properties": {
+        "runAsNonRoot": {"const": true},
+        "fsGroup": {"const": 20001},
+        "fsGroupChangePolicy": {"const": "OnRootMismatch"},
+        "seccompProfile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {"type": {"const": "RuntimeDefault"}}
+        }
+      }
+    }
+  },
+  "definitions": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$"},
+        "tag": {"type": "string", "pattern": "^$|^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$"},
+        "digest": {"type": "string", "pattern": "^$|^sha256:[0-9a-f]{64}$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "portableIdentifier": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$"},
+    "kubernetesName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63},
+    "secretKey": {"type": "string", "pattern": "^([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9._-]{0,251}[A-Za-z0-9])$"},
+    "networkPeer": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "podSelector": {"type": "object"},
+        "namespaceSelector": {"type": "object"},
+        "ipBlock": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cidr"],
+          "properties": {
+            "cidr": {"type": "string", "minLength": 3, "maxLength": 49},
+            "except": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 3, "maxLength": 49}}
+          }
+        }
+      }
+    },
+    "networkPort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port", "protocol"],
+      "properties": {
+        "port": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 65535}, {"type": "string", "pattern": "^[a-z]([-a-z0-9]*[a-z0-9])?$", "maxLength": 15}]},
+        "protocol": {"enum": ["TCP", "UDP", "SCTP"]},
+        "endPort": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"role": {"const": "operator"}}},
+      "then": {"properties": {"signer": {"properties": {"enabled": {"const": true}}}}},
+      "else": {"properties": {"signer": {"properties": {"enabled": {"const": false}}}, "postgres": {"properties": {"migrate": {"const": false}}}}}
+    },
+    {
+      "if": {"properties": {"service": {"properties": {"enabled": {"const": true}}}}},
+      "then": {"properties": {"service": {"properties": {"acknowledgeNoReadinessProbe": {"const": true}}}}}
+    },
+    {
+      "if": {"properties": {"profile": {"const": "local"}}},
+      "then": {"properties": {"replicaCount": {"const": 1}, "postgres": {"properties": {"migrate": {"const": false}}}, "objectStorage": {"properties": {"enabled": {"const": false}}}}}
+    },
+    {
+      "if": {"properties": {"profile": {"const": "production"}}},
+      "then": {
+        "properties": {
+          "image": {"properties": {"digest": {"pattern": "^sha256:[0-9a-f]{64}$"}}},
+          "networkPolicy": {"properties": {"ingress": {"minItems": 1}, "egress": {"minItems": 1}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"profile": {"const": "production"}, "role": {"const": "operator"}}},
+      "then": {
+        "properties": {
+          "replicaCount": {"minimum": 2},
+          "signer": {"properties": {"image": {"properties": {"digest": {"pattern": "^sha256:[0-9a-f]{64}$"}}}}},
+          "postgres": {"properties": {"secret": {"$ref": "#/definitions/kubernetesName"}}},
+          "objectStorage": {"properties": {"enabled": {"const": true}, "credentialsSecret": {"$ref": "#/definitions/kubernetesName"}, "deleteDenialAttestationConfigMap": {"$ref": "#/definitions/kubernetesName"}}}
+        }
+      }
+    }
+  ]
+}

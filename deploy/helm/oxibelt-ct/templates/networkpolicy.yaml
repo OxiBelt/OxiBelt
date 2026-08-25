@@ -1,0 +1,13 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "oxibelt-ct.name" . }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ include "oxibelt-ct.name" . }}
+  policyTypes: [Ingress, Egress]
+  ingress: {{ toJson .Values.networkPolicy.ingress }}
+  egress: {{ toJson .Values.networkPolicy.egress }}
+{{- end }}

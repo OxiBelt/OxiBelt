@@ -1,0 +1,153 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oxibelt-ct.name" . }}
+  labels:
+    app.kubernetes.io/name: oxibelt-ct
+    app.kubernetes.io/instance: {{ include "oxibelt-ct.name" . }}
+    app.kubernetes.io/component: {{ .Values.role | quote }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ include "oxibelt-ct.name" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oxibelt-ct
+        app.kubernetes.io/instance: {{ include "oxibelt-ct.name" . }}
+        app.kubernetes.io/component: {{ .Values.role | quote }}
+      annotations:
+        checksum/config: {{ .Values.log.config | sha256sum }}
+        oxibelt.dev/runtime-config-authority: log.config
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+{{ toYaml .Values.podSecurityContext | indent 8 }}
+      containers:
+      - name: {{ .Values.role }}
+        image: {{ include "oxibelt-ct.image" . | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command: ["/usr/local/bin/oxibelt"]
+        args: ["--config", "/etc/oxibelt/oxibelt.toml"]
+        securityContext:
+          runAsUser: {{ .Values.signer.operatorUid }}
+          runAsGroup: {{ .Values.signer.sharedGid }}
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: ["ALL"]}
+        ports:
+        - {name: https, containerPort: {{ .Values.service.port }}, protocol: TCP}
+        resources:
+{{ toYaml .Values.resources | indent 10 }}
+{{- if and (eq .Values.profile "production") (eq .Values.role "operator") }}
+        env:
+        - name: OXIBELT_CT_POSTGRES_URL
+          valueFrom: {secretKeyRef: {name: {{ .Values.postgres.secret }}, key: {{ .Values.postgres.key }}}}
+        - name: OXIBELT_CT_S3_ACCESS_KEY_ID
+          valueFrom: {secretKeyRef: {name: {{ .Values.objectStorage.credentialsSecret }}, key: {{ .Values.objectStorage.accessKeyKey }}}}
+        - name: OXIBELT_CT_S3_SECRET_ACCESS_KEY
+          valueFrom: {secretKeyRef: {name: {{ .Values.objectStorage.credentialsSecret }}, key: {{ .Values.objectStorage.secretKeyKey }}}}
+        - name: OXIBELT_CT_S3_SESSION_TOKEN
+          valueFrom: {secretKeyRef: {name: {{ .Values.objectStorage.credentialsSecret }}, key: {{ .Values.objectStorage.sessionTokenKey }}}}
+{{- end }}
+        volumeMounts:
+        - {name: config, mountPath: /etc/oxibelt, readOnly: true}
+        - {name: roots, mountPath: /run/oxibelt/ct/roots, readOnly: true}
+        - {name: identity, mountPath: /run/oxibelt/ct/identity, readOnly: true}
+{{- if eq .Values.role "operator" }}
+        - {name: signer-socket, mountPath: /run/oxibelt/ct/signer}
+        - {name: signer-token, mountPath: /run/oxibelt/ct/signer-token, readOnly: true}
+{{- if eq .Values.profile "local" }}
+        - {name: local-storage, mountPath: /var/lib/oxibelt-ct}
+{{- else }}
+        - {name: delete-denial, mountPath: /run/oxibelt/ct/storage-policy, readOnly: true}
+{{- end }}
+{{- end }}
+{{- if and (eq .Values.role "operator") .Values.signer.enabled }}
+      - name: keysigner
+        image: {{ include "oxibelt-ct.signerImage" . | quote }}
+        imagePullPolicy: {{ .Values.signer.image.pullPolicy }}
+        command: ["/usr/local/bin/oxibelt-keysigner"]
+        args:
+        - --socket
+        - /run/oxibelt/ct/signer/sign.sock
+        - --ct-log-key
+        - {{ printf "%s=/run/oxibelt/ct/signer-key/%s" .Values.signer.keyId .Values.signer.keySecretKey | quote }}
+        - --ct-log-profile
+        - {{ printf "%s=%s" .Values.signer.keyId .Values.signer.profile | quote }}
+        - --token-file
+        - {{ printf "/run/oxibelt/ct/signer-token/%s" .Values.signer.tokenSecretKey | quote }}
+        - --socket-mode
+        - {{ .Values.signer.socketMode | quote }}
+        - --max-connections
+        - {{ .Values.signer.maxConnections | quote }}
+        - --io-timeout-ms
+        - {{ .Values.signer.ioTimeoutMillis | quote }}
+        - --token-reload-interval-ms
+        - {{ .Values.signer.tokenReloadIntervalMillis | quote }}
+        - --allow-peer-uid
+        - {{ .Values.signer.operatorUid | quote }}
+        securityContext:
+          runAsUser: {{ .Values.signer.signerUid }}
+          runAsGroup: {{ .Values.signer.sharedGid }}
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: ["ALL"]}
+        readinessProbe:
+          exec: {command: ["test", "-S", "/run/oxibelt/ct/signer/sign.sock"]}
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 6
+        resources:
+{{ toYaml .Values.signerResources | indent 10 }}
+        volumeMounts:
+        - {name: signer-socket, mountPath: /run/oxibelt/ct/signer}
+        - {name: signer-key, mountPath: /run/oxibelt/ct/signer-key, readOnly: true}
+        - {name: signer-token, mountPath: /run/oxibelt/ct/signer-token, readOnly: true}
+{{- end }}
+      volumes:
+      - name: config
+        configMap: {name: {{ include "oxibelt-ct.name" . }}}
+      - name: roots
+        secret:
+          secretName: {{ .Values.log.rootBundleSecret }}
+          defaultMode: 0440
+          items:
+          - {key: {{ .Values.log.rootBundleSecretKey }}, path: root-bundle.json}
+      - name: identity
+        secret:
+          secretName: {{ .Values.log.publicKeySecret }}
+          defaultMode: 0440
+          items:
+          - {key: {{ .Values.log.publicKeySecretKey }}, path: public-key.der}
+{{- if eq .Values.role "operator" }}
+      - name: signer-socket
+        emptyDir: {medium: Memory, sizeLimit: 16Mi}
+      - name: signer-token
+        secret:
+          secretName: {{ .Values.signer.tokenSecret }}
+          defaultMode: 0440
+          items:
+          - {key: {{ .Values.signer.tokenSecretKey }}, path: {{ .Values.signer.tokenSecretKey }}}
+      - name: signer-key
+        secret:
+          secretName: {{ .Values.signer.keySecret }}
+          defaultMode: 0440
+          items:
+          - {key: {{ .Values.signer.keySecretKey }}, path: {{ .Values.signer.keySecretKey }}}
+{{- if eq .Values.profile "local" }}
+      - name: local-storage
+{{- if .Values.localStorage.existingClaim }}
+        persistentVolumeClaim: {claimName: {{ .Values.localStorage.existingClaim }}}
+{{- else }}
+        emptyDir: {sizeLimit: {{ .Values.localStorage.sizeLimit }}}
+{{- end }}
+{{- else }}
+      - name: delete-denial
+        configMap:
+          name: {{ .Values.objectStorage.deleteDenialAttestationConfigMap }}
+          items:
+          - {key: {{ .Values.objectStorage.deleteDenialAttestationKey }}, path: {{ .Values.objectStorage.deleteDenialAttestationKey }}}
+{{- end }}
+{{- end }}

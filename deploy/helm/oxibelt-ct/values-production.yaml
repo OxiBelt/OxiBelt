@@ -1,0 +1,41 @@
+profile: production
+replicaCount: 2
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+signer:
+  keyId: production-ct-log
+  image:
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+postgres: {secret: oxibelt-ct-postgres, key: database-url, migrate: true}
+objectStorage:
+  enabled: true
+  credentialsSecret: oxibelt-ct-object-storage
+  accessKeyKey: access-key-id
+  secretKeyKey: secret-access-key
+  sessionTokenKey: session-token
+  objectLock: true
+  retentionSeconds: 604800
+  deleteDenialAttestationConfigMap: oxibelt-ct-delete-denial
+  deleteDenialAttestationKey: delete-denial.json
+networkPolicy:
+  enabled: true
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: ingress-system}
+    ports: [{port: https, protocol: TCP}]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: database-system}
+    ports: [{port: 5432, protocol: TCP}]
+  - to:
+    # Replace this documentation-only TEST-NET range with the pinned S3 endpoint CIDR.
+    - ipBlock: {cidr: 203.0.113.0/24}
+    ports: [{port: 443, protocol: TCP}]
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+    ports:
+    - {port: 53, protocol: UDP}
+    - {port: 53, protocol: TCP}

@@ -1,0 +1,11 @@
+{{- if eq .Values.role "operator" -}}
+{{- if eq .Values.signer.keySecret .Values.signer.tokenSecret -}}
+{{- fail "signer.keySecret and signer.tokenSecret must be distinct Secrets" -}}
+{{- end -}}
+{{- if or (eq .Values.signer.keySecret .Values.log.rootBundleSecret) (eq .Values.signer.keySecret .Values.log.publicKeySecret) -}}
+{{- fail "the signer private-key Secret must be distinct from CT public trust Secrets" -}}
+{{- end -}}
+{{- if or (eq .Values.signer.tokenSecret .Values.log.rootBundleSecret) (eq .Values.signer.tokenSecret .Values.log.publicKeySecret) -}}
+{{- fail "the signer token Secret must be distinct from CT public trust Secrets" -}}
+{{- end -}}
+{{- end -}}

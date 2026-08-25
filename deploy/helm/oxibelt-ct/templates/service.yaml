@@ -1,0 +1,9 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "oxibelt-ct.name" . }}
+spec:
+  selector: {app.kubernetes.io/instance: {{ include "oxibelt-ct.name" . }}}
+  ports: [{name: https, port: {{ .Values.service.port }}, targetPort: https, protocol: TCP}]
+{{- end }}

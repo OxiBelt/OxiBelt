@@ -1,0 +1,20 @@
+profile: local
+replicaCount: 1
+postgres: {secret: "", key: database-url, migrate: false}
+objectStorage:
+  enabled: false
+  credentialsSecret: ""
+  accessKeyKey: access-key-id
+  secretKeyKey: secret-access-key
+  sessionTokenKey: session-token
+  objectLock: true
+  retentionSeconds: 604800
+  deleteDenialAttestationConfigMap: ""
+  deleteDenialAttestationKey: delete-denial.json
+networkPolicy:
+  enabled: true
+  ingress:
+  - from:
+    - podSelector: {}
+    ports: [{port: https, protocol: TCP}]
+  egress: []
