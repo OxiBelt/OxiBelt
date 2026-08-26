@@ -1,11 +1,11 @@
 //! CRS operator implementations.
 //! Operators consume normalized variables and return match state without mutating requests.
 
-use aho_corasick::AhoCorasick;
 use anyhow::bail;
 use regex::Regex;
 use std::sync::LazyLock;
 
+use super::super::literal_index::CompiledLiteralIndex;
 use super::super::{HybridRegex, WafLimits};
 use super::actions::expand_macros;
 use super::compatibility::SUPPORTED_OPERATORS;
@@ -130,43 +130,35 @@ impl CrsOperator {
 
 #[derive(Clone)]
 pub(super) struct CrsPhraseMatcher {
-  literal_automaton: Option<AhoCorasick>,
-  literal_has_empty: bool,
+  literal_index: CompiledLiteralIndex,
   dynamic_phrases: Vec<String>,
 }
 
 impl CrsPhraseMatcher {
   fn new(phrases: Vec<String>) -> anyhow::Result<Self> {
     let mut literal_phrases = Vec::new();
-    let mut literal_has_empty = false;
     let mut dynamic_phrases = Vec::new();
     for phrase in phrases {
       if contains_tx_macro(&phrase) {
         dynamic_phrases.push(phrase);
-      } else if phrase.is_empty() {
-        literal_has_empty = true;
       } else {
         literal_phrases.push(phrase);
       }
     }
-    let literal_automaton = if literal_phrases.is_empty() {
-      None
-    } else {
-      Some(AhoCorasick::new(literal_phrases)?)
-    };
+    let literal_index = CompiledLiteralIndex::new(
+      literal_phrases
+        .iter()
+        .enumerate()
+        .map(|(index, phrase)| (index, phrase.as_bytes())),
+    )?;
     Ok(Self {
-      literal_automaton,
-      literal_has_empty,
+      literal_index,
       dynamic_phrases,
     })
   }
 
   fn is_match(&self, value: &str, tx: &CrsTransaction<'_>) -> bool {
-    self.literal_has_empty
-      || self
-        .literal_automaton
-        .as_ref()
-        .is_some_and(|automaton| automaton.is_match(value))
+    self.literal_index.is_match(value)
       || self.dynamic_phrases.iter().any(|phrase| {
         let phrase = expand_macros(phrase, tx);
         value.contains(phrase.as_ref())

@@ -3525,6 +3525,136 @@ status = 409
   );
 }
 
+#[test]
+fn contains_pattern_set_index_preserves_empty_duplicate_overlap_and_lossy_offsets() {
+  let empty_engine = compile_waf_fragment(
+    "waf-contains-pattern-empty-order",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.pattern_sets]]
+name = "empty-first"
+kind = "contains"
+patterns = ["", "needle"]
+
+[[waf.rules]]
+name = "empty-pattern-order"
+phase = "request"
+priority = 10
+when = "Request.Body.scan('empty-first').Matched && Request.Body.scan('empty-first').Match == '' && Request.Body.scan('empty-first').Offset == 0"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 409
+"#,
+  );
+  let indexed_engine = compile_waf_fragment(
+    "waf-contains-pattern-index-semantics",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.pattern_sets]]
+name = "indexed-secrets"
+kind = "contains"
+patterns = ["secret", "secret", "boundary secret", "ret"]
+
+[[waf.rules]]
+name = "indexed-pattern-order"
+phase = "request"
+priority = 10
+when = "Request.Body.scan('indexed-secrets').Matched && Request.Body.scan('indexed-secrets').Pattern == 'secret' && Request.Body.scan('indexed-secrets').Match == 'secret' && Request.Body.scan('indexed-secrets').Offset == 12"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 410
+"#,
+  );
+
+  let method = Method::POST;
+  let uri: Uri = "/upload".parse().expect("URI should parse");
+  let headers = HeaderMap::new();
+  let tags = HashMap::new();
+  let peer_addr = "203.0.113.10:49152".parse().unwrap();
+  let empty_decision = empty_engine.evaluate_request(request_input_with_body(
+    &method, &uri, &headers, &tags, peer_addr, b"needle", false,
+  ));
+  let indexed_decision = indexed_engine.evaluate_request(request_input_with_body(
+    &method,
+    &uri,
+    &headers,
+    &tags,
+    peer_addr,
+    b"\xffboundary secret",
+    false,
+  ));
+
+  assert_eq!(
+    empty_decision
+      .terminal
+      .as_ref()
+      .map(|terminal| terminal.status),
+    Some(StatusCode::CONFLICT)
+  );
+  assert_eq!(
+    indexed_decision
+      .terminal
+      .as_ref()
+      .map(|terminal| terminal.status),
+    Some(StatusCode::GONE)
+  );
+}
+
+#[test]
+fn regex_pattern_set_shared_literal_index_preserves_advanced_order() {
+  let engine = compile_waf_fragment(
+    "waf-regex-pattern-shared-literal-index",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.pattern_sets]]
+name = "advanced-patterns"
+kind = "regex"
+patterns = ["needle(?=tail)", "fallback(?=done)", "(?<=prefix)value"]
+
+[[waf.rules]]
+name = "advanced-pattern-order"
+phase = "request"
+priority = 10
+when = "Request.Body.scan('advanced-patterns').Matched && Request.Body.scan('advanced-patterns').Pattern == 'needle(?=tail)' && Request.Body.scan('advanced-patterns').Match == 'needle' && Request.Body.scan('advanced-patterns').Offset == 13"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 409
+"#,
+  );
+
+  let method = Method::POST;
+  let uri: Uri = "/upload".parse().expect("URI should parse");
+  let headers = HeaderMap::new();
+  let tags = HashMap::new();
+  let decision = engine.evaluate_request(request_input_with_body(
+    &method,
+    &uri,
+    &headers,
+    &tags,
+    "203.0.113.10:49152".parse().unwrap(),
+    b"fallbackdone needletail prefixvalue",
+    false,
+  ));
+
+  assert_eq!(
+    decision.terminal.as_ref().map(|terminal| terminal.status),
+    Some(StatusCode::CONFLICT)
+  );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn large_request_body_helpers_match_inside_tokio_runtime() {
   let engine = compile_waf_fragment(

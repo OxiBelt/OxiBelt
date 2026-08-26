@@ -51,6 +51,7 @@ mod fuzz_security;
 mod http_body_compression;
 mod hybrid_regex;
 mod lb_policy_compat;
+mod literal_index;
 mod malicious_intelligence_score;
 pub mod metadata;
 mod mitigation_action;

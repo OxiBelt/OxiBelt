@@ -2,19 +2,19 @@
 
 use std::sync::Arc;
 
-use aho_corasick::AhoCorasick;
 use anyhow::{Context, bail};
 use fancy_regex::Regex as FancyRegex;
-use memchr::{memchr, memmem};
 use regex::{Regex, RegexBuilder};
 
 use super::WafLimits;
+use super::literal_index::CompiledLiteralIndex;
 
 #[derive(Clone)]
 pub(super) struct HybridRegex {
   pattern: Arc<str>,
   engine: HybridRegexEngine,
-  prefilter: Option<RequiredLiteralPrefilter>,
+  prefilter: Option<CompiledLiteralIndex>,
+  required_literals: Arc<[Arc<[u8]>]>,
   max_advanced_subject_bytes: usize,
 }
 
@@ -22,13 +22,6 @@ pub(super) struct HybridRegex {
 enum HybridRegexEngine {
   Linear(Regex),
   Advanced(FancyRegex),
-}
-
-#[derive(Clone)]
-enum RequiredLiteralPrefilter {
-  Byte(u8),
-  Substring(Arc<[u8]>),
-  Alternatives(AhoCorasick),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,11 +51,14 @@ impl HybridRegex {
   ) -> anyhow::Result<Self> {
     let mut linear = RegexBuilder::new(pattern);
     linear.case_insensitive(case_insensitive);
+    let required_literals = compile_required_literals(pattern, case_insensitive);
+    let prefilter = compile_prefilter(&required_literals)?;
     match linear.build() {
       Ok(regex) => Ok(Self {
         pattern: Arc::from(pattern),
         engine: HybridRegexEngine::Linear(regex),
-        prefilter: compile_prefilter(pattern, case_insensitive)?,
+        prefilter,
+        required_literals,
         max_advanced_subject_bytes: limits.max_advanced_regex_subject_bytes,
       }),
       Err(linear_error) => {
@@ -80,7 +76,8 @@ impl HybridRegex {
         Ok(Self {
           pattern: Arc::from(pattern),
           engine: HybridRegexEngine::Advanced(regex),
-          prefilter: compile_prefilter(pattern, case_insensitive)?,
+          prefilter,
+          required_literals,
           max_advanced_subject_bytes: limits.max_advanced_regex_subject_bytes,
         })
       }
@@ -95,11 +92,19 @@ impl HybridRegex {
     matches!(self.engine, HybridRegexEngine::Advanced(_))
   }
 
+  pub(super) fn required_literals(&self) -> &[Arc<[u8]>] {
+    &self.required_literals
+  }
+
   pub(super) fn is_match(&self, text: &str) -> anyhow::Result<bool> {
     self.check_advanced_subject(text)?;
     if !self.prefilter_matches(text) {
       return Ok(false);
     }
+    self.is_match_engine(text)
+  }
+
+  pub(super) fn is_match_engine(&self, text: &str) -> anyhow::Result<bool> {
     match &self.engine {
       HybridRegexEngine::Linear(regex) => Ok(regex.is_match(text)),
       HybridRegexEngine::Advanced(regex) => regex
@@ -113,6 +118,10 @@ impl HybridRegex {
     if !self.prefilter_matches(text) {
       return Ok(None);
     }
+    self.find_engine(text)
+  }
+
+  pub(super) fn find_engine<'a>(&self, text: &'a str) -> anyhow::Result<Option<HybridMatch<'a>>> {
     let bounds = match &self.engine {
       HybridRegexEngine::Linear(regex) => {
         regex.find(text).map(|found| (found.start(), found.end()))
@@ -125,7 +134,7 @@ impl HybridRegex {
     Ok(bounds.map(|(start, end)| HybridMatch { text, start, end }))
   }
 
-  fn check_advanced_subject(&self, text: &str) -> anyhow::Result<()> {
+  pub(super) fn check_advanced_subject(&self, text: &str) -> anyhow::Result<()> {
     if self.is_advanced() && text.len() > self.max_advanced_subject_bytes {
       bail!(
         "advanced WAF regex subject exceeds max_advanced_regex_subject_bytes ({})",
@@ -136,43 +145,32 @@ impl HybridRegex {
   }
 
   fn prefilter_matches(&self, text: &str) -> bool {
-    match &self.prefilter {
-      None => true,
-      Some(RequiredLiteralPrefilter::Byte(byte)) => memchr(*byte, text.as_bytes()).is_some(),
-      Some(RequiredLiteralPrefilter::Substring(literal)) => {
-        memmem::find(text.as_bytes(), literal).is_some()
-      }
-      Some(RequiredLiteralPrefilter::Alternatives(automaton)) => automaton.is_match(text),
-    }
+    self
+      .prefilter
+      .as_ref()
+      .is_none_or(|prefilter| prefilter.is_match(text))
   }
 }
 
-fn compile_prefilter(
-  pattern: &str,
-  case_insensitive: bool,
-) -> anyhow::Result<Option<RequiredLiteralPrefilter>> {
+fn compile_required_literals(pattern: &str, case_insensitive: bool) -> Arc<[Arc<[u8]>]> {
   if case_insensitive {
-    return Ok(None);
+    return Arc::from([]);
   }
-  let literals = required_literal_alternatives(pattern);
+  Arc::from(
+    required_literal_alternatives(pattern)
+      .into_iter()
+      .map(|literal| Arc::<[u8]>::from(literal.into_bytes()))
+      .collect::<Vec<_>>(),
+  )
+}
+
+fn compile_prefilter(literals: &[Arc<[u8]>]) -> anyhow::Result<Option<CompiledLiteralIndex>> {
   if literals.is_empty() {
     return Ok(None);
   }
-  if literals.len() > 1 {
-    return Ok(Some(RequiredLiteralPrefilter::Alternatives(
-      AhoCorasick::new(&literals).context("failed to compile WAF regex literal prefilter")?,
-    )));
-  }
-  let literal = literals.into_iter().next().unwrap_or_default().into_bytes();
-  if literal.len() == 1 {
-    Ok(Some(RequiredLiteralPrefilter::Byte(literal[0])))
-  } else if literal.is_empty() {
-    Ok(None)
-  } else {
-    Ok(Some(RequiredLiteralPrefilter::Substring(Arc::from(
-      literal,
-    ))))
-  }
+  CompiledLiteralIndex::new(literals.iter().map(|literal| (0usize, literal.as_ref())))
+    .map(Some)
+    .context("failed to compile WAF regex literal prefilter")
 }
 
 fn required_literal_alternatives(pattern: &str) -> Vec<String> {
@@ -401,5 +399,13 @@ mod tests {
         );
       }
     }
+  }
+
+  #[test]
+  fn case_insensitive_advanced_regexes_do_not_receive_case_sensitive_prefilters() {
+    let regex = HybridRegex::compile("NEEDLE(?=tail)", true, &WafLimits::default()).unwrap();
+    assert!(regex.is_advanced());
+    assert!(regex.required_literals().is_empty());
+    assert!(regex.is_match("needletail").unwrap());
   }
 }
