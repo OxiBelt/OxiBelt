@@ -63,7 +63,7 @@ pub(super) fn eval_body_call(
       Ok(Value::Bool(
         ctx
           .body_text_caches
-          .scan_pattern_set(text_slot, body, pattern_set_name, pattern_set)
+          .scan_pattern_set(text_slot, body, pattern_set_name, pattern_set)?
           .matched,
       ))
     }
@@ -81,7 +81,7 @@ pub(super) fn eval_body_call(
       Ok(Value::BodyScanResult(
         ctx
           .body_text_caches
-          .scan_pattern_set(text_slot, body, pattern_set_name, pattern_set),
+          .scan_pattern_set(text_slot, body, pattern_set_name, pattern_set)?,
       ))
     }
     "anomalyScore" => {

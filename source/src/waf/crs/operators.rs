@@ -6,6 +6,7 @@ use anyhow::bail;
 use regex::Regex;
 use std::sync::LazyLock;
 
+use super::super::{HybridRegex, WafLimits};
 use super::actions::expand_macros;
 use super::compatibility::SUPPORTED_OPERATORS;
 use super::model::CrsTransaction;
@@ -14,7 +15,7 @@ use super::utils::{invalid_url_encoding, invalid_utf8_encoding};
 
 #[derive(Clone)]
 pub(super) enum CrsOperator {
-  Regex(Regex),
+  Regex(HybridRegex),
   Contains(String),
   ContainsWord {
     needle: String,
@@ -38,10 +39,10 @@ pub(super) enum CrsOperator {
 }
 
 impl CrsOperator {
-  pub(super) fn parse(raw: &str) -> anyhow::Result<Self> {
+  pub(super) fn parse(raw: &str, limits: &WafLimits) -> anyhow::Result<Self> {
     let raw = raw.trim();
     if let Some(rest) = raw.strip_prefix('!') {
-      return Ok(Self::Negated(Box::new(Self::parse(rest)?)));
+      return Ok(Self::Negated(Box::new(Self::parse(rest, limits)?)));
     }
     if let Some(rest) = raw.strip_prefix('@') {
       let (name, arg) = rest
@@ -52,7 +53,7 @@ impl CrsOperator {
         bail!("unsupported CRS operator @{name}");
       }
       return match name {
-        "rx" => Ok(Self::Regex(Regex::new(arg)?)),
+        "rx" => Ok(Self::Regex(HybridRegex::compile(arg, false, limits)?)),
         "contains" => Ok(Self::Contains(arg.to_string())),
         "containsWord" => Ok(Self::ContainsWord {
           needle: arg.to_string(),
@@ -77,12 +78,12 @@ impl CrsOperator {
         _ => bail!("CRS compatibility matrix lists unimplemented operator @{name}"),
       };
     }
-    Ok(Self::Regex(Regex::new(raw)?))
+    Ok(Self::Regex(HybridRegex::compile(raw, false, limits)?))
   }
 
   pub(super) fn matches(&self, value: &str, tx: &CrsTransaction<'_>) -> anyhow::Result<bool> {
     let result = match self {
-      Self::Regex(regex) => regex.is_match(value),
+      Self::Regex(regex) => regex.is_match(value)?,
       Self::Contains(needle) => {
         let needle = expand_macros(needle, tx);
         value.contains(needle.as_ref())

@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use aho_corasick::AhoCorasick;
 use anyhow::{Context, bail};
-use regex::{Regex, RegexSet};
+use regex::RegexSet;
 
-use super::{WafLimits, WafPatternSetConfig, WafPatternSetKind, body_scan};
+use super::{HybridRegex, WafLimits, WafPatternSetConfig, WafPatternSetKind, body_scan};
 
 pub(super) fn validate_pattern_sets(
   pattern_sets: &[WafPatternSetConfig],
@@ -33,7 +33,7 @@ pub(super) fn validate_pattern_sets(
         bail!("WAF pattern set {} contains an oversized pattern", set.name);
       }
       if set.kind == WafPatternSetKind::Regex {
-        Regex::new(pattern).with_context(|| {
+        HybridRegex::compile(pattern, false, limits).with_context(|| {
           format!(
             "WAF pattern set {} contains an invalid regex pattern",
             set.name
@@ -60,8 +60,8 @@ pub(super) fn compile_pattern_sets(
         let patterns = config
           .patterns
           .iter()
-          .map(|pattern| Regex::new(pattern))
-          .collect::<Result<Vec<_>, _>>()
+          .map(|pattern| HybridRegex::compile(pattern, false, limits))
+          .collect::<anyhow::Result<Vec<_>>>()
           .with_context(|| format!("failed to compile WAF pattern set {}", config.name))?;
         CompiledPatternSet::Regex(
           CompiledRegexPatternSet::new(patterns)
@@ -156,40 +156,89 @@ impl CompiledContainsPatternSet {
 
 #[derive(Clone)]
 pub(crate) struct CompiledRegexPatternSet {
-  patterns: Arc<[Regex]>,
-  set: RegexSet,
+  patterns: Arc<[HybridRegex]>,
+  linear_set: RegexSet,
+  linear_set_indices: Arc<[Option<usize>]>,
 }
 
 impl CompiledRegexPatternSet {
-  fn new(patterns: Vec<Regex>) -> anyhow::Result<Self> {
-    let pattern_texts = patterns.iter().map(Regex::as_str).collect::<Vec<_>>();
-    let set = RegexSet::new(pattern_texts)?;
+  fn new(patterns: Vec<HybridRegex>) -> anyhow::Result<Self> {
+    let mut linear_patterns = Vec::new();
+    let linear_set_indices = patterns
+      .iter()
+      .map(|pattern| {
+        if pattern.is_advanced() {
+          None
+        } else {
+          let index = linear_patterns.len();
+          linear_patterns.push(pattern.as_str());
+          Some(index)
+        }
+      })
+      .collect::<Vec<_>>();
+    let linear_set = RegexSet::new(linear_patterns)?;
     Ok(Self {
       patterns: Arc::from(patterns),
-      set,
+      linear_set,
+      linear_set_indices: Arc::from(linear_set_indices),
     })
   }
 
-  pub(crate) fn is_match(&self, text: &str) -> bool {
-    self.set.is_match(text)
+  pub(crate) fn is_match(&self, text: &str) -> anyhow::Result<bool> {
+    let linear_matches = self.linear_set.matches(text);
+    for (pattern_index, pattern) in self.patterns.iter().enumerate() {
+      match self.linear_set_indices[pattern_index] {
+        Some(linear_index) if linear_matches.matched(linear_index) => return Ok(true),
+        Some(_) => {}
+        None if pattern.is_match(text)? => return Ok(true),
+        None => {}
+      }
+    }
+    Ok(false)
   }
 
-  pub(crate) fn scan(&self, text: &str, is_truncated: bool) -> body_scan::BodyScanResult {
-    let matches = self.set.matches(text);
-    for (index, pattern) in self.patterns.iter().enumerate() {
-      if !matches.matched(index) {
-        continue;
-      }
-      if let Some(found) = pattern.find(text) {
-        return body_scan::BodyScanResult {
+  pub(crate) fn scan(
+    &self,
+    text: &str,
+    is_truncated: bool,
+  ) -> anyhow::Result<body_scan::BodyScanResult> {
+    let linear_matches = self.linear_set.matches(text);
+    for (pattern_index, pattern) in self.patterns.iter().enumerate() {
+      let should_find = match self.linear_set_indices[pattern_index] {
+        Some(linear_index) => linear_matches.matched(linear_index),
+        None => true,
+      };
+      if should_find && let Some(found) = pattern.find(text)? {
+        return Ok(body_scan::BodyScanResult {
           matched: true,
           pattern: Some(pattern.as_str().to_string()),
           offset: Some(found.start()),
-          matched_text: Some(found.as_str().to_string()),
+          matched_text: Some(found.matched_text().to_string()),
           is_truncated,
-        };
+        });
       }
     }
-    body_scan::BodyScanResult::no_match(is_truncated)
+    Ok(body_scan::BodyScanResult::no_match(is_truncated))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn advanced_regex_scan_preserves_configured_pattern_order() {
+    let limits = WafLimits::default();
+    let patterns = ["(?<=token=)[a-z]+", "fallback"]
+      .into_iter()
+      .map(|pattern| HybridRegex::compile(pattern, false, &limits).unwrap())
+      .collect();
+    let set = CompiledRegexPatternSet::new(patterns).unwrap();
+    let result = set.scan("fallback token=secret", false).unwrap();
+
+    assert!(result.matched);
+    assert_eq!(result.pattern.as_deref(), Some("(?<=token=)[a-z]+"));
+    assert_eq!(result.offset, Some(15));
+    assert_eq!(result.matched_text.as_deref(), Some("secret"));
   }
 }

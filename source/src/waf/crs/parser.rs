@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
 
+use super::super::WafLimits;
 use super::actions::parse_setvar;
 use super::compatibility::{
   is_accepted_ignored_action_key, is_accepted_ignored_bare_action, is_accepted_ignored_directive,
@@ -27,10 +28,10 @@ impl CrsParser {
     }
   }
 
-  pub(super) fn load_file(&mut self, path: &Path) -> anyhow::Result<()> {
+  pub(super) fn load_file(&mut self, path: &Path, limits: &WafLimits) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(path)
       .with_context(|| format!("failed to read CRS file {}", path.display()))?;
-    self.load_source(&raw, &format!("CRS {}", path.display()))
+    self.load_source(&raw, &format!("CRS {}", path.display()), limits)
   }
 
   /// Parse an in-memory CRS source without reaching the filesystem.
@@ -39,23 +40,23 @@ impl CrsParser {
   /// while keeping the production file-loading boundary unchanged.
   #[cfg(feature = "fuzzing")]
   pub(super) fn load_str(&mut self, raw: &str) -> anyhow::Result<()> {
-    self.load_source(raw, "in-memory CRS source")
+    self.load_source(raw, "in-memory CRS source", &WafLimits::default())
   }
 
-  fn load_source(&mut self, raw: &str, source: &str) -> anyhow::Result<()> {
+  fn load_source(&mut self, raw: &str, source: &str, limits: &WafLimits) -> anyhow::Result<()> {
     for (line_number, directive) in logical_lines(raw).into_iter().enumerate() {
       let directive = strip_comment(&directive);
       if directive.trim().is_empty() {
         continue;
       }
       self
-        .parse_directive(&directive)
+        .parse_directive(&directive, limits)
         .with_context(|| format!("failed to parse {source}:{}", line_number + 1))?;
     }
     Ok(())
   }
 
-  fn parse_directive(&mut self, raw: &str) -> anyhow::Result<()> {
+  fn parse_directive(&mut self, raw: &str, limits: &WafLimits) -> anyhow::Result<()> {
     let raw = raw.trim();
     if let Some(rest) = raw.strip_prefix("SecMarker") {
       self
@@ -84,9 +85,9 @@ impl CrsParser {
       let rule = CrsRule::from_parts(
         variables
           .split('|')
-          .map(CrsVariable::parse)
+          .map(|variable| CrsVariable::parse(variable, limits))
           .collect::<anyhow::Result<Vec<_>>>()?,
-        CrsOperator::parse(&operator)?,
+        CrsOperator::parse(&operator, limits)?,
         &actions,
       )?;
       if let Some(CrsEntry::Rule(previous)) = self.entries.last_mut()
@@ -201,7 +202,7 @@ mod tests {
   fn parses_secrule_and_scores_with_setvar() {
     let rule = CrsRule::from_parts(
       vec![CrsVariable::RequestUri],
-      CrsOperator::parse("@contains union select").unwrap(),
+      CrsOperator::parse("@contains union select", &WafLimits::default()).unwrap(),
       "id:942100,phase:2,t:lowercase,tag:'paranoia-level/1',severity:'CRITICAL',setvar:'tx.anomaly_score_pl1=+%{tx.critical_anomaly_score}'",
     )
     .unwrap();

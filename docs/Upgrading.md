@@ -81,6 +81,16 @@ configuration that does not add `[certificate_transparency]` or `ct_log`
 routes needs no native schema migration and keeps its existing request
 behavior.
 
+Post-`0.8.1` development adds bounded lookahead and lookbehind support to
+configuration-authored OxiRule, OxiRule Group, regex pattern-set, and CRS
+regex literals. Existing patterns continue to prefer the linear Rust engine.
+Operators may optionally set `max_advanced_regex_subject_bytes` and
+`max_advanced_regex_backtracks` under `[waf.limits]`; omitted fields receive
+backward-compatible defaults. Patterns requiring PCRE syntax that is not
+accepted by `fancy-regex` remain invalid, and request-derived patterns do not
+gain advanced-regex support. Rollback requires removing advanced syntax and
+the two new optional keys from configurations consumed by an older binary.
+
 Treat CT activation as a new service deployment. Use separate workloads for
 each writable operator, read-only gateway, purpose-exclusive signer, and
 independent monitor, and use separate writable operators for different

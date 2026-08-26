@@ -4,16 +4,14 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use http::{HeaderMap, StatusCode, Version};
-use tracing::warn;
-
-use super::super::{WafBodyInput, WafRequestInput, WafResponseInput, body_scan};
+use super::super::{HybridRegex, WafBodyInput, WafRequestInput, WafResponseInput, body_scan};
 use super::actions::CrsAction;
 use super::engine::{CrsEngine, CrsHitKey};
 use super::operators::CrsOperator;
 use super::transforms::{CrsTransform, apply_transforms};
 use super::utils::{body_pairs, cookie_pairs, query_pairs, version_string};
 use super::variables::CrsVariable;
+use http::{HeaderMap, StatusCode, Version};
 
 #[derive(Clone)]
 pub(super) enum CrsEntry {
@@ -69,9 +67,7 @@ impl CrsRule {
       match matched {
         Ok(true) => return Ok(true),
         Ok(false) => {}
-        Err(error) => {
-          warn!(error = %error, "failed to resolve CRS variable");
-        }
+        Err(error) => return Err(error),
       }
     }
     Ok(false)
@@ -285,24 +281,22 @@ impl<'a> CrsTransaction<'a> {
       .or_else(|| self.default_tx_value(key.as_ref()))
   }
 
-  pub(super) fn tx_values_matching(&self, regex: &regex::Regex) -> Vec<String> {
+  pub(super) fn tx_values_matching(&self, regex: &HybridRegex) -> anyhow::Result<Vec<String>> {
     let mut values = Vec::new();
     for key in DEFAULT_TX_KEYS {
-      if regex.is_match(key)
+      if regex.is_match(key)?
         && !self.tx.contains_key(*key)
         && let Some(value) = self.default_tx_value(key)
       {
         values.push(value.into_owned());
       }
     }
-    values.extend(
-      self
-        .tx
-        .iter()
-        .filter(|(name, _)| regex.is_match(name))
-        .map(|(_, value)| value.clone()),
-    );
-    values
+    for (name, value) in &self.tx {
+      if regex.is_match(name)? {
+        values.push(value.clone());
+      }
+    }
+    Ok(values)
   }
 
   pub(super) fn inbound_score(&self) -> i64 {

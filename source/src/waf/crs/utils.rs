@@ -26,13 +26,22 @@ pub(super) fn version_string(version: Version) -> String {
   .to_string()
 }
 
-pub(super) fn header_values(headers: &HeaderMap, selector: &CrsSelector) -> Vec<String> {
-  match selector {
-    CrsSelector::Regex(regex) => headers
-      .iter()
-      .filter(|(name, _)| regex.is_match(name.as_str()))
-      .filter_map(|(_, value)| value.to_str().ok().map(ToString::to_string))
-      .collect(),
+pub(super) fn header_values(
+  headers: &HeaderMap,
+  selector: &CrsSelector,
+) -> anyhow::Result<Vec<String>> {
+  Ok(match selector {
+    CrsSelector::Regex(regex) => {
+      let mut values = Vec::new();
+      for (name, value) in headers {
+        if regex.is_match(name.as_str())?
+          && let Ok(value) = value.to_str()
+        {
+          values.push(value.to_string());
+        }
+      }
+      values
+    }
     CrsSelector::Exact(selector) => headers
       .get_all(selector)
       .iter()
@@ -42,7 +51,7 @@ pub(super) fn header_values(headers: &HeaderMap, selector: &CrsSelector) -> Vec<
       .values()
       .filter_map(|value| value.to_str().ok().map(ToString::to_string))
       .collect(),
-  }
+  })
 }
 
 pub(super) fn query_pairs(uri: &Uri) -> Vec<(String, String)> {

@@ -9,7 +9,7 @@ use http::StatusCode;
 use tracing::info;
 
 use super::super::{
-  WafMode, WafRequestInput, WafResponseInput, WafRuleHitSnapshot, WafTerminalResponse,
+  WafLimits, WafMode, WafRequestInput, WafResponseInput, WafRuleHitSnapshot, WafTerminalResponse,
 };
 use super::config::{
   WafCrsAllowlistConfig, WafCrsConfig, WafCrsRuleOverrideConfig, WafCrsRuleOverrideMode,
@@ -61,6 +61,7 @@ impl Default for CrsEngine {
 impl CrsEngine {
   pub(crate) fn compile(
     config: &WafCrsConfig,
+    limits: &WafLimits,
     previous_counters: &HashMap<CrsHitKey, Arc<AtomicU64>>,
   ) -> anyhow::Result<Self> {
     if !config.enabled {
@@ -69,10 +70,10 @@ impl CrsEngine {
     validate_config(config)?;
     let mut parser = CrsParser::new();
     if let Some(path) = &config.setup_file_resolved {
-      parser.load_file(path)?;
+      parser.load_file(path, limits)?;
     }
     for path in &config.rule_files_resolved {
-      parser.load_file(path)?;
+      parser.load_file(path, limits)?;
     }
     let mut rules = parser.entries;
     let mut counters = HashMap::new();

@@ -2,8 +2,8 @@
 //! Invalid selectors fail during rule loading rather than during request handling.
 
 use anyhow::bail;
-use regex::Regex;
 
+use super::super::{HybridRegex, WafLimits};
 use super::compatibility::SUPPORTED_VARIABLES;
 use super::model::CrsTransaction;
 use super::syntax::unquote_selector;
@@ -13,16 +13,20 @@ use super::utils::{header_values, select_pairs};
 pub(super) enum CrsSelector {
   Any,
   Exact(String),
-  Regex(Regex),
+  Regex(HybridRegex),
 }
 
 impl CrsSelector {
-  fn parse(selector: Option<&str>) -> anyhow::Result<Self> {
+  fn parse(selector: Option<&str>, limits: &WafLimits) -> anyhow::Result<Self> {
     let Some(selector) = selector else {
       return Ok(Self::Any);
     };
     if selector.starts_with('/') && selector.ends_with('/') && selector.len() > 2 {
-      Ok(Self::Regex(Regex::new(&selector[1..selector.len() - 1])?))
+      Ok(Self::Regex(HybridRegex::compile(
+        &selector[1..selector.len() - 1],
+        false,
+        limits,
+      )?))
     } else {
       Ok(Self::Exact(unquote_selector(selector)))
     }
@@ -49,12 +53,12 @@ pub(super) enum CrsVariable {
   ResponseHeadersNames,
   ResponseBody,
   Tx(String),
-  TxRegex(Regex),
+  TxRegex(HybridRegex),
   MatchedVar,
 }
 
 impl CrsVariable {
-  pub(super) fn parse(raw: &str) -> anyhow::Result<Self> {
+  pub(super) fn parse(raw: &str, limits: &WafLimits) -> anyhow::Result<Self> {
     let (name, selector) = raw
       .split_once(':')
       .map(|(name, selector)| (name.trim(), Some(selector.trim())))
@@ -70,7 +74,7 @@ impl CrsVariable {
       "REQUEST_BASENAME" => Ok(Self::RequestBasename),
       "REQUEST_METHOD" => Ok(Self::RequestMethod),
       "REQUEST_PROTOCOL" => Ok(Self::RequestProtocol),
-      "REQUEST_HEADERS" => Ok(Self::RequestHeaders(CrsSelector::parse(selector)?)),
+      "REQUEST_HEADERS" => Ok(Self::RequestHeaders(CrsSelector::parse(selector, limits)?)),
       "REQUEST_HEADERS_NAMES" => Ok(Self::RequestHeadersNames),
       "ARGS" => Ok(Self::Args),
       "ARGS_GET" | "QUERY_STRING" => Ok(Self::ArgsGet),
@@ -78,7 +82,7 @@ impl CrsVariable {
       "REQUEST_BODY" => Ok(Self::RequestBody),
       "RESPONSE_STATUS" => Ok(Self::ResponseStatus),
       "RESPONSE_PROTOCOL" => Ok(Self::ResponseProtocol),
-      "RESPONSE_HEADERS" => Ok(Self::ResponseHeaders(CrsSelector::parse(selector)?)),
+      "RESPONSE_HEADERS" => Ok(Self::ResponseHeaders(CrsSelector::parse(selector, limits)?)),
       "RESPONSE_HEADERS_NAMES" => Ok(Self::ResponseHeadersNames),
       "RESPONSE_BODY" => Ok(Self::ResponseBody),
       "MATCHED_VAR" => Ok(Self::MatchedVar),
@@ -87,7 +91,11 @@ impl CrsVariable {
           bail!("TX variable requires a selector")
         };
         if selector.starts_with('/') && selector.ends_with('/') && selector.len() > 2 {
-          Ok(Self::TxRegex(Regex::new(&selector[1..selector.len() - 1])?))
+          Ok(Self::TxRegex(HybridRegex::compile(
+            &selector[1..selector.len() - 1],
+            false,
+            limits,
+          )?))
         } else {
           Ok(Self::Tx(unquote_selector(selector).to_ascii_lowercase()))
         }
@@ -124,7 +132,7 @@ impl CrsVariable {
       Self::RequestMethod => visit(tx.request.method.as_str().to_string(), tx),
       Self::RequestProtocol => visit(tx.request_protocol(), tx),
       Self::RequestHeaders(selector) => {
-        for value in header_values(tx.request.headers, selector) {
+        for value in header_values(tx.request.headers, selector)? {
           if visit(value, tx)? {
             return Ok(true);
           }
@@ -185,7 +193,7 @@ impl CrsVariable {
         let Some(headers) = tx.response.as_ref().map(|view| view.headers) else {
           return Ok(false);
         };
-        for value in header_values(headers, selector) {
+        for value in header_values(headers, selector)? {
           if visit(value, tx)? {
             return Ok(true);
           }
@@ -213,7 +221,7 @@ impl CrsVariable {
         visit(value.into_owned(), tx)
       }
       Self::TxRegex(regex) => {
-        for value in tx.tx_values_matching(regex) {
+        for value in tx.tx_values_matching(regex)? {
           if visit(value, tx)? {
             return Ok(true);
           }

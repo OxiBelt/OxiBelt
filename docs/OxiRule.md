@@ -107,6 +107,44 @@ patterns = ["(?i)<script", "(?i)javascript:"]
 
 Supported pattern set kinds are `contains` and `regex`.
 
+Policy-authored regex literals use a bounded two-tier Rust matcher. OxiBelt
+tries the linear-time `regex` syntax first and falls back to `fancy-regex`
+only when the linear compiler rejects a configuration-authored literal. The
+advanced tier supports positive and negative lookahead, positive and negative
+lookbehind, backreferences, and the variable-length lookbehind forms accepted
+by `fancy-regex`'s `variable-lookbehinds` feature. For example:
+
+```toml
+[[waf.rule_groups]]
+name = "secure-prefix"
+when = "Request.Http.Path.matches('^/secure(?=/)')"
+
+[[waf.rules]]
+name = "tenant-admin"
+phase = "request"
+priority = 100
+groups = ["secure-prefix"]
+when = "Request.Http.Path.matches('(?<=/secure/[^/]+/)admin$')"
+```
+
+This behavior applies to native OxiRule and OxiRule Group regex arguments,
+`kind = "regex"` pattern sets, CRS `@rx` and implicit regex operators, and CRS
+regex selectors. It does not claim PCRE compatibility: a pattern must compile
+with either `regex` or `fancy-regex`, and unsupported combinations fail during
+configuration loading. Variable-length lookbehind cannot contain a
+backreference or another construct that `fancy-regex` requires its
+backtracking VM to execute inside that lookbehind.
+
+Only quoted/configuration-authored literals may use the advanced tier.
+Request-derived patterns such as
+`Request.Http.Path.matches(Request.QueryParams.get('pattern'))` continue to
+use `regex` only. Advanced subjects and backtracking are bounded by
+`max_advanced_regex_subject_bytes` and
+`max_advanced_regex_backtracks`; exceeding either budget is a WAF evaluation
+error handled by `fail_policy`. OxiBelt may use a conservative `memchr` or
+Aho-Corasick mandatory-literal prefilter before the full matcher, but omits the
+prefilter whenever it cannot prove that doing so preserves every match.
+
 Bounded user-defined functions can be configured globally or per route:
 
 ```toml

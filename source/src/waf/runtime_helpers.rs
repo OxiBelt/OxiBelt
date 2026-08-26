@@ -87,10 +87,10 @@ pub(super) fn pattern_set_matches(
   let set = sets
     .get(name)
     .ok_or_else(|| anyhow!("unknown WAF pattern set {name}"))?;
-  Ok(match set {
-    CompiledPatternSet::Contains(patterns) => patterns.is_match(text),
+  match set {
+    CompiledPatternSet::Contains(patterns) => Ok(patterns.is_match(text)),
     CompiledPatternSet::Regex(patterns) => patterns.is_match(text),
-  })
+  }
 }
 
 pub(super) fn ip_in_cidr(ip: &str, cidr: &str) -> anyhow::Result<bool> {

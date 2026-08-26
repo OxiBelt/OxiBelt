@@ -4529,6 +4529,185 @@ body = "cached regex matched"
 }
 
 #[test]
+fn oxirule_groups_support_lookahead_and_variable_lookbehind() {
+  let engine = compile_waf_fragment(
+    "waf-hybrid-regex-groups",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rule_groups]]
+name = "secure-prefix"
+when = "Request.Http.Path.matches('^/secure(?=/)')"
+
+[[waf.rules]]
+name = "advanced-lookaround"
+phase = "request"
+priority = 10
+groups = ["secure-prefix"]
+when = "Request.Http.Path.matches('(?<=/secure/[^/]+/)admin$')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "advanced regex matched"
+"#,
+  );
+
+  let rejected = evaluate_simple_request(&engine, "/secure/tenant/admin");
+  let allowed_suffix = evaluate_simple_request(&engine, "/secure/tenant/user");
+  let allowed_prefix = evaluate_simple_request(&engine, "/public/tenant/admin");
+
+  assert_eq!(
+    rejected.terminal.as_ref().map(|terminal| terminal.status),
+    Some(StatusCode::FORBIDDEN)
+  );
+  assert!(allowed_suffix.terminal.is_none());
+  assert!(allowed_prefix.terminal.is_none());
+}
+
+#[test]
+fn advanced_header_name_regex_preserves_case_insensitive_matching() {
+  let engine = compile_waf_fragment(
+    "waf-hybrid-header-name-regex",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "advanced-header-name"
+phase = "request"
+priority = 10
+when = "Request.Headers.anyNameMatches('^X-Advanced(?=-Header$)')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+"#,
+  );
+  let mut headers = HeaderMap::new();
+  headers.insert("x-advanced-header", HeaderValue::from_static("present"));
+  let tags = HashMap::new();
+  let method = Method::GET;
+  let uri: Uri = "/headers".parse().expect("URI should parse");
+  let decision = engine.evaluate_request(request_input(
+    &method,
+    &uri,
+    &headers,
+    &tags,
+    "203.0.113.10:49152".parse().unwrap(),
+  ));
+
+  assert_eq!(
+    decision.terminal.as_ref().map(|terminal| terminal.status),
+    Some(StatusCode::FORBIDDEN)
+  );
+}
+
+#[test]
+fn advanced_regex_subject_limit_uses_the_waf_fail_policy() {
+  let closed = compile_waf_fragment(
+    "waf-advanced-regex-limit-closed",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[waf.limits]
+max_advanced_regex_subject_bytes = 4
+
+[[waf.rules]]
+name = "bounded-advanced-regex"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.matches('(?=a)a')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+"#,
+  );
+  let open = compile_waf_fragment(
+    "waf-advanced-regex-limit-open",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "open"
+
+[waf.limits]
+max_advanced_regex_subject_bytes = 4
+
+[[waf.rules]]
+name = "bounded-advanced-regex"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.matches('(?=a)a')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+"#,
+  );
+
+  let closed_decision = evaluate_simple_request(&closed, "/aaaa");
+  let open_decision = evaluate_simple_request(&open, "/aaaa");
+
+  assert_eq!(
+    closed_decision
+      .terminal
+      .as_ref()
+      .map(|terminal| terminal.status),
+    Some(StatusCode::FORBIDDEN)
+  );
+  assert!(open_decision.terminal.is_none());
+  assert_eq!(only_rule_hit(&closed).hits, 0);
+  assert_eq!(only_rule_hit(&open).hits, 0);
+}
+
+#[test]
+fn crs_policy_regexes_support_lookaround() {
+  let (_temp_dir, config) = load_crs_fixture_config_with_rule(
+    "waf-crs-hybrid-regex",
+    "monitor",
+    r#"
+SecAction "id:920340,phase:1,msg:'Seed advanced selector',setvar:'tx.advanced_name=hit'"
+SecRule REQUEST_URI "@rx (?<=/tenant/)[a-z]+(?=/admin)" "id:920341,phase:1,msg:'Lookaround operator',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
+SecRule REQUEST_HEADERS:/^x-tenant(?=-id$)/ "@streq acme" "id:920342,phase:1,msg:'Lookahead selector',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
+SecRule TX:/(?<=advanced_)name/ "@streq hit" "id:920343,phase:2,msg:'Lookbehind TX selector',setvar:'tx.anomaly_score_pl1=+%{tx.notice_anomaly_score}'"
+"#,
+  );
+  let engine = WafEngine::new(&config).expect("WAF should compile");
+  let mut headers = HeaderMap::new();
+  headers.insert("x-tenant-id", HeaderValue::from_static("acme"));
+  let tags = HashMap::new();
+  let method = Method::GET;
+  let uri: Uri = "/app/tenant/acme/admin".parse().expect("URI should parse");
+  let decision = engine.evaluate_request(request_input(
+    &method,
+    &uri,
+    &headers,
+    &tags,
+    "203.0.113.10:49152".parse().unwrap(),
+  ));
+
+  assert!(decision.terminal.is_none());
+  let snapshots = engine.rule_hit_snapshots();
+  for id in ["920341", "920342", "920343"] {
+    let hit = snapshots
+      .iter()
+      .find(|hit| hit.id.as_deref() == Some(id))
+      .unwrap_or_else(|| panic!("missing CRS snapshot for {id}"));
+    assert_eq!(hit.hits, 1, "expected {id} to match once");
+  }
+}
+
+#[test]
 fn oxirule_dynamic_invalid_regex_still_uses_fail_policy() {
   let engine = compile_waf_fragment(
     "waf-dynamic-invalid-regex",
@@ -4564,6 +4743,20 @@ body = "dynamic regex matched"
   ));
 
   assert!(decision.terminal.is_none());
+  let advanced_uri: Uri = "/anything?pattern=%28%3F%3Danything%29"
+    .parse()
+    .expect("URI should parse");
+  let advanced_decision = engine.evaluate_request(request_input(
+    &method,
+    &advanced_uri,
+    &headers,
+    &tags,
+    "203.0.113.10:49152".parse().unwrap(),
+  ));
+  assert!(
+    advanced_decision.terminal.is_none(),
+    "request-derived lookahead must remain on the linear engine and fail open"
+  );
   assert_eq!(only_rule_hit(&engine).hits, 0);
 }
 

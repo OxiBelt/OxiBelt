@@ -79,9 +79,9 @@ pub(crate) fn scan_pattern_set_text(
   text: &str,
   is_truncated: bool,
   pattern_set: &CompiledPatternSet,
-) -> BodyScanResult {
+) -> anyhow::Result<BodyScanResult> {
   match pattern_set {
-    CompiledPatternSet::Contains(patterns) => patterns.scan(text, is_truncated),
+    CompiledPatternSet::Contains(patterns) => Ok(patterns.scan(text, is_truncated)),
     CompiledPatternSet::Regex(patterns) => patterns.scan(text, is_truncated),
   }
 }
@@ -90,7 +90,7 @@ pub(crate) fn scan_pattern_set_text_maybe_offloaded(
   text: Arc<str>,
   is_truncated: bool,
   pattern_set: &CompiledPatternSet,
-) -> BodyScanResult {
+) -> anyhow::Result<BodyScanResult> {
   if let Some(handle) = blocking_scan_handle(text.len()) {
     let pattern_set = pattern_set.clone();
     return run_on_blocking_pool(handle, move || {
@@ -98,13 +98,13 @@ pub(crate) fn scan_pattern_set_text_maybe_offloaded(
     })
     .unwrap_or_else(|error| {
       tracing::error!(error = %error, "failing WAF pattern-set scan closed");
-      BodyScanResult {
+      Ok(BodyScanResult {
         matched: true,
         pattern: Some("runtime-subsystem-unavailable".to_string()),
         offset: None,
         matched_text: None,
         is_truncated,
-      }
+      })
     });
   }
   scan_pattern_set_text(&text, is_truncated, pattern_set)

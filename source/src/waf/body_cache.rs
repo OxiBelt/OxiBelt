@@ -51,18 +51,18 @@ impl BodyTextCaches {
     body: WafBodyInput<'_>,
     pattern_set_name: &str,
     pattern_set: &CompiledPatternSet,
-  ) -> body_scan::BodyScanResult {
+  ) -> anyhow::Result<body_scan::BodyScanResult> {
     let key = (slot, pattern_set_name.to_string());
     if let Some(result) = self.scan_results.borrow().get(&key).cloned() {
-      return result;
+      return Ok(result);
     }
 
     let result = body_scan::scan_pattern_set_text_maybe_offloaded(
       self.text_arc(slot, body),
       body.is_truncated,
       pattern_set,
-    );
+    )?;
     self.scan_results.borrow_mut().insert(key, result.clone());
-    result
+    Ok(result)
   }
 }

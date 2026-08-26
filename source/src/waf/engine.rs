@@ -58,7 +58,7 @@ impl WafEngine {
     let rate_limits = rate_limits.unwrap_or_else(|| LimitState::new(shared_state.clone()));
     let pattern_sets = compile_pattern_sets(&config.waf.pattern_sets, &config.waf.limits)?;
     let global_functions = Arc::new(compile_global_functions(&config.waf.functions)?);
-    let crs = CrsEngine::compile(&config.waf.crs, &previous_crs_counters)?;
+    let crs = CrsEngine::compile(&config.waf.crs, &config.waf.limits, &previous_crs_counters)?;
     let global_rules = compile_rules(
       &config.waf.rules,
       RuleGroupScope {

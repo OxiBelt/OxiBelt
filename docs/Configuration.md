@@ -3721,6 +3721,8 @@ max_header_count = 128
 max_header_value_bytes = 8192
 max_mutations = 32
 max_regex_runtime_ms = 2
+max_advanced_regex_subject_bytes = 1048576
+max_advanced_regex_backtracks = 1000000
 max_helper_items = 128
 max_helper_pattern_count = 32
 max_helper_result_bytes = 8192
@@ -3758,6 +3760,18 @@ reason = "editor intentionally submits HTML"
 ```
 
 `max_body_inspection_bytes` controls the request body, response body, and native stream payload prefix captured for OxiRule and CRS body inspection. The default is `1048576` bytes. Bytes after this prefix are forwarded or replayed without inspection and are reflected through `Body.IsTruncated` or `Stream.Payload.IsTruncated`. The same value also bounds WebSocket stream-WAF frame buffering: an individual WebSocket frame payload larger than this value is closed fail-closed instead of being buffered for prefix inspection.
+
+Policy-authored WAF regex literals compile with the linear Rust `regex`
+engine first and fall back to bounded `fancy-regex` matching when lookahead,
+lookbehind, backreferences, or another supported advanced construct requires
+it. `max_advanced_regex_subject_bytes` limits the UTF-8 byte length presented
+to an advanced matcher, and `max_advanced_regex_backtracks` is passed to its
+backtracking budget. An exceeded subject, backtrack, or matcher stack limit is
+an evaluation error handled by `fail_policy`; input is not truncated into a
+different regex subject. The `edge-secure-medium` v1 and v2 profiles cap these
+values at `65536` and `100000`, respectively. Request-derived dynamic regex
+arguments remain restricted to the linear engine. Syntax must be accepted by
+`regex` or `fancy-regex`; PCRE-specific compatibility is not provided.
 
 `[waf.http_body_compression]` is off by default and opt-in per effective route. Global `mode = "transform"` enables the transform for routes that inherit it; route-level `[routes.waf.http_body_compression] mode = "off"` disables it for a route, and `mode = "transform"` enables it even when the global mode is `off`. Supported single `Content-Encoding` values are controlled by `encodings`; `identity` is a no-op, while multiple codings or unsupported codings fail closed. `max_decoded_body_bytes` is the decoded transform cap, `max_expansion_ratio` bounds compression-bomb expansion relative to the encoded bytes, `decode_timeout_ms` bounds each decode, and `max_concurrent_bodies = 0` uses an automatic CPU-sized concurrency budget covering each compressed-body transform from encoded-body collection through decode and request re-encode. `waf.limits.max_body_inspection_bytes` remains the OxiRule/CRS inspection prefix cap after any transform has produced a decoded view.
 
