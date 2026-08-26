@@ -14,7 +14,7 @@ use h3_quinn::quinn::crypto::rustls::QuicClientConfig;
 use h3_quinn::quinn::{ClientConfig as QuinnClientConfig, Endpoint};
 use hdrhistogram::Histogram;
 use http::header::{
-  CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HOST, HeaderName, HeaderValue, IF_NONE_MATCH,
+  HeaderName, HeaderValue, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH,
 };
 use http::{HeaderMap, Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::combinators::BoxBody;
@@ -558,7 +558,11 @@ fn parse_benchmark_headers(
 ) -> anyhow::Result<Vec<(HeaderName, HeaderValue)>> {
   let count = values
     .get("--benchmark-header-count")
-    .map(|value| value.parse::<usize>().context("invalid --benchmark-header-count value"))
+    .map(|value| {
+      value
+        .parse::<usize>()
+        .context("invalid --benchmark-header-count value")
+    })
     .transpose()?
     .unwrap_or(0);
   let value_bytes = values
@@ -574,9 +578,7 @@ fn parse_benchmark_headers(
     bail!("--benchmark-header-value-bytes requires --benchmark-header-count greater than zero");
   }
   if count > MAX_BENCHMARK_HEADER_COUNT {
-    bail!(
-      "--benchmark-header-count must be at most {MAX_BENCHMARK_HEADER_COUNT}; got {count}"
-    );
+    bail!("--benchmark-header-count must be at most {MAX_BENCHMARK_HEADER_COUNT}; got {count}");
   }
   if value_bytes > MAX_BENCHMARK_HEADER_VALUE_BYTES {
     bail!(
@@ -1127,32 +1129,32 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
   let total_requests_including_warmup = warmup_requests.saturating_add(snapshot.requests);
   let elapsed = args.duration.as_secs_f64();
   let mut result = serde_json::json!({
-        "type": "load",
-        "label": args.label,
-        "protocol": args.protocol.label(),
-        "duration_seconds": args.duration.as_secs(),
-        "warmup_seconds": args.warmup.as_secs(),
-        "concurrency": args.concurrency,
-        "h2_streams_per_connection": args.h2_streams_per_connection,
-        "h3_streams_per_connection": args.h3_streams_per_connection,
-        "tcp_nodelay": args.tcp_nodelay,
-        "authority": args.authority,
-        "path": args.path,
-        "method": args.method.as_str(),
-        "request_body_bytes": args.request_body.len(),
-        "chunked_request_body": args.chunked_request_body,
-        "requests": snapshot.requests,
-        "warmup_requests": warmup_requests,
-        "total_requests_including_warmup": total_requests_including_warmup,
-        "errors": snapshot.errors,
-        "rps": rate(snapshot.requests, elapsed),
-        "p50_ms": snapshot.p50_ms,
-        "p95_ms": snapshot.p95_ms,
-        "p99_ms": snapshot.p99_ms,
-        "statuses": status_json(snapshot.statuses),
-        "error_samples": snapshot.error_samples,
-        "unique_query_param": args.unique_query_param,
-    });
+      "type": "load",
+      "label": args.label,
+      "protocol": args.protocol.label(),
+      "duration_seconds": args.duration.as_secs(),
+      "warmup_seconds": args.warmup.as_secs(),
+      "concurrency": args.concurrency,
+      "h2_streams_per_connection": args.h2_streams_per_connection,
+      "h3_streams_per_connection": args.h3_streams_per_connection,
+      "tcp_nodelay": args.tcp_nodelay,
+      "authority": args.authority,
+      "path": args.path,
+      "method": args.method.as_str(),
+      "request_body_bytes": args.request_body.len(),
+      "chunked_request_body": args.chunked_request_body,
+      "requests": snapshot.requests,
+      "warmup_requests": warmup_requests,
+      "total_requests_including_warmup": total_requests_including_warmup,
+      "errors": snapshot.errors,
+      "rps": rate(snapshot.requests, elapsed),
+      "p50_ms": snapshot.p50_ms,
+      "p95_ms": snapshot.p95_ms,
+      "p99_ms": snapshot.p99_ms,
+      "statuses": status_json(snapshot.statuses),
+      "error_samples": snapshot.error_samples,
+      "unique_query_param": args.unique_query_param,
+  });
   if !args.benchmark_headers.is_empty() {
     result
       .as_object_mut()
@@ -3589,16 +3591,15 @@ mod tests {
   fn benchmark_headers_are_bounded_and_repeated_on_each_request() {
     let values = BTreeMap::from([
       ("--benchmark-header-count".to_owned(), "32".to_owned()),
-      (
-        "--benchmark-header-value-bytes".to_owned(),
-        "96".to_owned(),
-      ),
+      ("--benchmark-header-value-bytes".to_owned(), "96".to_owned()),
     ]);
     let headers = parse_benchmark_headers(&values).expect("bounded benchmark headers should parse");
     assert_eq!(headers.len(), 32);
     assert_eq!(headers[0].0.as_str(), "x-oxibelt-perf-00");
     assert_eq!(headers[31].0.as_str(), "x-oxibelt-perf-31");
-    assert!(headers.iter().all(|(_, value)| value.as_bytes().len() == 96));
+    assert!(headers
+      .iter()
+      .all(|(_, value)| value.as_bytes().len() == 96));
 
     let mut args = parse_load_args(
       [
@@ -3654,10 +3655,7 @@ mod tests {
         "--benchmark-header-value-bytes must be at most 1024",
       ),
       (
-        BTreeMap::from([(
-          "--benchmark-header-value-bytes".to_owned(),
-          "64".to_owned(),
-        )]),
+        BTreeMap::from([("--benchmark-header-value-bytes".to_owned(), "64".to_owned())]),
         "--benchmark-header-value-bytes requires --benchmark-header-count",
       ),
       (
