@@ -8,7 +8,7 @@ use tokio::runtime::{Handle, RuntimeFlavor};
 
 use crate::runtime_health::{RuntimeSubsystem, RuntimeSubsystemError};
 
-use super::CompiledPatternSet;
+use super::{CompiledPatternSet, HybridRegex};
 
 const BLOCKING_TEXT_SCAN_MIN_BYTES: usize = 64 * 1024;
 
@@ -61,12 +61,15 @@ pub(crate) fn matches_text_maybe_offloaded(text: Arc<str>, pattern: &str) -> any
   matches_text(&text, pattern)
 }
 
-pub(crate) fn matches_regex_text_maybe_offloaded(text: Arc<str>, regex: &Regex) -> bool {
+pub(crate) fn matches_hybrid_regex_text_maybe_offloaded(
+  text: Arc<str>,
+  regex: &HybridRegex,
+) -> anyhow::Result<bool> {
   if let Some(handle) = blocking_scan_handle(text.len()) {
     let regex = regex.clone();
     return run_on_blocking_pool(handle, move || regex.is_match(&text)).unwrap_or_else(|error| {
       tracing::error!(error = %error, "failing WAF regex match closed");
-      true
+      Ok(true)
     });
   }
   regex.is_match(&text)

@@ -45,6 +45,8 @@ const EDGE_SECURE_MEDIUM_MAX_WAF_HEADER_COUNT: usize = 128;
 const EDGE_SECURE_MEDIUM_MAX_WAF_HEADER_VALUE_BYTES: usize = 8_192;
 const EDGE_SECURE_MEDIUM_MAX_WAF_MUTATIONS: usize = 32;
 const EDGE_SECURE_MEDIUM_MAX_WAF_REGEX_RUNTIME_MS: u64 = 2;
+const EDGE_SECURE_MEDIUM_MAX_ADVANCED_REGEX_SUBJECT_BYTES: usize = 65_536;
+const EDGE_SECURE_MEDIUM_MAX_ADVANCED_REGEX_BACKTRACKS: usize = 100_000;
 const EDGE_SECURE_MEDIUM_MAX_WAF_HELPER_ITEMS: usize = 128;
 const EDGE_SECURE_MEDIUM_MAX_WAF_HELPER_PATTERN_COUNT: usize = 32;
 const EDGE_SECURE_MEDIUM_MAX_WAF_HELPER_RESULT_BYTES: usize = 8_192;
@@ -137,6 +139,8 @@ max_header_count = 128
 max_header_value_bytes = 8192
 max_mutations = 32
 max_regex_runtime_ms = 2
+max_advanced_regex_subject_bytes = 65536
+max_advanced_regex_backtracks = 100000
 max_helper_items = 128
 max_helper_pattern_count = 32
 max_helper_result_bytes = 8192
@@ -619,6 +623,8 @@ fn validate_waf_limits(limits: &crate::waf::WafLimits) -> anyhow::Result<()> {
     || limits.max_header_value_bytes > EDGE_SECURE_MEDIUM_MAX_WAF_HEADER_VALUE_BYTES
     || limits.max_mutations > EDGE_SECURE_MEDIUM_MAX_WAF_MUTATIONS
     || limits.max_regex_runtime_ms > EDGE_SECURE_MEDIUM_MAX_WAF_REGEX_RUNTIME_MS
+    || limits.max_advanced_regex_subject_bytes > EDGE_SECURE_MEDIUM_MAX_ADVANCED_REGEX_SUBJECT_BYTES
+    || limits.max_advanced_regex_backtracks > EDGE_SECURE_MEDIUM_MAX_ADVANCED_REGEX_BACKTRACKS
     || limits.max_helper_items > EDGE_SECURE_MEDIUM_MAX_WAF_HELPER_ITEMS
     || limits.max_helper_pattern_count > EDGE_SECURE_MEDIUM_MAX_WAF_HELPER_PATTERN_COUNT
     || limits.max_helper_result_bytes > EDGE_SECURE_MEDIUM_MAX_WAF_HELPER_RESULT_BYTES

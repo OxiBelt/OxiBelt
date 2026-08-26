@@ -3,9 +3,8 @@ use anyhow::{Context, anyhow, bail};
 use http::header::{HeaderName, HeaderValue, USER_AGENT};
 use http::{HeaderMap, Method, StatusCode, Uri, Version};
 use online_dsl_forge::{
-  BinaryOp as ForgeBinaryOp, CompiledRegexCache as ForgeCompiledRegexCache,
-  RegexFlavor as ForgeRegexFlavor, UnaryOp as ForgeUnaryOp, VerifiedExprKindRef,
-  VerifiedExpression,
+  BinaryOp as ForgeBinaryOp, RegexFlavor as ForgeRegexFlavor, UnaryOp as ForgeUnaryOp,
+  VerifiedExprKindRef, VerifiedExpression, VerifiedProgram,
 };
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
@@ -50,6 +49,7 @@ mod functions;
 #[cfg(feature = "fuzzing")]
 mod fuzz_security;
 mod http_body_compression;
+mod hybrid_regex;
 mod lb_policy_compat;
 mod malicious_intelligence_score;
 pub mod metadata;
@@ -135,6 +135,7 @@ pub use http_body_compression::{
   RouteWafHttpBodyCompressionConfig, RouteWafHttpBodyCompressionMode, WafHttpBodyCompressionConfig,
   WafHttpBodyCompressionMode, WafHttpBodyEncoding,
 };
+use hybrid_regex::HybridRegex;
 use malicious_intelligence_score as mi_score;
 pub use metadata::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 pub use mitigation_action::MitigationIntent;

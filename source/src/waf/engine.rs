@@ -71,6 +71,7 @@ impl WafEngine {
       global_functions.clone(),
       None,
       &config.waf.person_proof,
+      &config.waf.limits,
     )?;
     let mut route_rules = HashMap::new();
     for route in &config.routes {
@@ -93,6 +94,7 @@ impl WafEngine {
           global_functions.clone(),
           Some(functions.clone()),
           &config.waf.person_proof,
+          &config.waf.limits,
         )?,
       );
     }

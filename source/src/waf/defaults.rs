@@ -108,6 +108,14 @@ pub(super) fn default_max_regex_runtime_ms() -> u64 {
   2
 }
 
+pub(super) fn default_max_advanced_regex_subject_bytes() -> usize {
+  1_048_576
+}
+
+pub(super) fn default_max_advanced_regex_backtracks() -> usize {
+  1_000_000
+}
+
 pub(super) fn default_max_helper_items() -> usize {
   128
 }

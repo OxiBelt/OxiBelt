@@ -3116,6 +3116,7 @@ dependencies = [
  "criterion",
  "deadpool",
  "der 0.8.1",
+ "fancy-regex",
  "fastwebsockets",
  "flate2",
  "futures-util",

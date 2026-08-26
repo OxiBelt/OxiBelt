@@ -12,6 +12,7 @@ pub(super) fn compile_rules(
   global_functions: Arc<FunctionMap>,
   route_functions: Option<Arc<FunctionMap>>,
   person_proof_defaults: &WafPersonProofConfig,
+  limits: &WafLimits,
 ) -> anyhow::Result<Vec<CompiledRule>> {
   configs
     .iter()
@@ -58,11 +59,8 @@ pub(super) fn compile_rules(
         .request_body_need_with_functions(global_functions.as_ref(), route_functions.as_deref());
       let response_body_need = expression
         .response_body_need_with_functions(global_functions.as_ref(), route_functions.as_deref());
-      let regex_cache = CompiledRegexCache::from_rule_expression(
-        &expression,
-        global_functions.as_ref(),
-        route_functions.as_deref(),
-      );
+      let regex_cache = CompiledRegexCache::from_rule_expression(&expression, limits)
+        .with_context(|| format!("failed to compile WAF rule {} regex literals", rule.name))?;
       Ok(CompiledRule {
         name: rule.name.clone(),
         id: rule.id.clone().filter(|id| !id.is_empty()),
@@ -430,36 +428,134 @@ pub(super) struct CompiledAccessLogField {
 
 #[derive(Clone, Default)]
 pub(super) struct CompiledRegexCache {
-  pub(super) inner: ForgeCompiledRegexCache,
+  default: HashMap<String, HybridRegex>,
+  header_name: HashMap<String, HybridRegex>,
 }
 
 impl CompiledRegexCache {
   pub(super) fn from_rule_expression(
     expression: &Expr,
-    _global_functions: &FunctionMap,
-    _route_functions: Option<&FunctionMap>,
-  ) -> Self {
-    let inner = match expression.verified_program() {
-      Ok(program) => program.regex_cache().clone(),
-      Err(_) => ForgeCompiledRegexCache::default(),
-    };
-    Self { inner }
+    limits: &WafLimits,
+  ) -> anyhow::Result<Self> {
+    let program = expression.verified_program()?;
+    let mut cache = Self::default();
+    cache.collect_expression(program.root(), program, limits)?;
+    Ok(cache)
   }
 
-  pub(super) fn get(&self, flavor: RegexFlavor, pattern: &str) -> Option<&Regex> {
-    self.inner.get(forge_regex_flavor(flavor), pattern)
+  pub(super) fn get(&self, flavor: RegexFlavor, pattern: &str) -> Option<&HybridRegex> {
+    self.flavor(flavor).get(pattern)
+  }
+
+  fn flavor(&self, flavor: RegexFlavor) -> &HashMap<String, HybridRegex> {
+    match flavor {
+      RegexFlavor::Default => &self.default,
+      RegexFlavor::HeaderName => &self.header_name,
+    }
+  }
+
+  fn flavor_mut(&mut self, flavor: RegexFlavor) -> &mut HashMap<String, HybridRegex> {
+    match flavor {
+      RegexFlavor::Default => &mut self.default,
+      RegexFlavor::HeaderName => &mut self.header_name,
+    }
+  }
+
+  fn collect_expression(
+    &mut self,
+    expression: &VerifiedExpression,
+    program: &VerifiedProgram,
+    limits: &WafLimits,
+  ) -> anyhow::Result<()> {
+    match expression.kind() {
+      VerifiedExprKindRef::Array(items) => {
+        for item in items {
+          self.collect_expression(item, program, limits)?;
+        }
+      }
+      VerifiedExprKindRef::Member { receiver, .. } => {
+        self.collect_expression(receiver, program, limits)?;
+      }
+      VerifiedExprKindRef::FunctionCall { args, .. } => {
+        self.collect_call_regexes(expression, args, program, limits)?;
+        for arg in args {
+          self.collect_expression(arg, program, limits)?;
+        }
+      }
+      VerifiedExprKindRef::ExpressionFunctionCall { args, body, .. } => {
+        self.collect_call_regexes(expression, args, program, limits)?;
+        for arg in args {
+          self.collect_expression(arg, program, limits)?;
+        }
+        self.collect_expression(body, program, limits)?;
+      }
+      VerifiedExprKindRef::MethodCall { receiver, args, .. } => {
+        self.collect_call_regexes(expression, args, program, limits)?;
+        self.collect_expression(receiver, program, limits)?;
+        for arg in args {
+          self.collect_expression(arg, program, limits)?;
+        }
+      }
+      VerifiedExprKindRef::Unary { expr, .. } => {
+        self.collect_expression(expr, program, limits)?;
+      }
+      VerifiedExprKindRef::Binary { left, right, .. } => {
+        self.collect_expression(left, program, limits)?;
+        self.collect_expression(right, program, limits)?;
+      }
+      VerifiedExprKindRef::Null
+      | VerifiedExprKindRef::Bool(_)
+      | VerifiedExprKindRef::Int(_)
+      | VerifiedExprKindRef::Float(_)
+      | VerifiedExprKindRef::String(_)
+      | VerifiedExprKindRef::Identifier(_) => {}
+    }
+    Ok(())
+  }
+
+  fn collect_call_regexes(
+    &mut self,
+    expression: &VerifiedExpression,
+    args: &[VerifiedExpression],
+    program: &VerifiedProgram,
+    limits: &WafLimits,
+  ) -> anyhow::Result<()> {
+    let Some(ticket) = expression.capability_ticket() else {
+      return Ok(());
+    };
+    let Some(capability) = program.required_capability_metadata().get(ticket) else {
+      return Ok(());
+    };
+    for regex_arg in &capability.regex_args {
+      let Some(pattern) = args
+        .get(regex_arg.index)
+        .and_then(expression::verified_string_literal)
+      else {
+        continue;
+      };
+      let flavor = oxibelt_regex_flavor(regex_arg.flavor);
+      if self.flavor(flavor).contains_key(pattern) {
+        continue;
+      }
+      let case_insensitive = flavor == RegexFlavor::HeaderName;
+      self.flavor_mut(flavor).insert(
+        pattern.to_string(),
+        HybridRegex::compile(pattern, case_insensitive, limits)?,
+      );
+    }
+    Ok(())
   }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub(super) enum RegexFlavor {
   Default,
   HeaderName,
 }
 
-pub(super) fn forge_regex_flavor(flavor: RegexFlavor) -> ForgeRegexFlavor {
+fn oxibelt_regex_flavor(flavor: ForgeRegexFlavor) -> RegexFlavor {
   match flavor {
-    RegexFlavor::Default => ForgeRegexFlavor::Default,
-    RegexFlavor::HeaderName => ForgeRegexFlavor::HeaderName,
+    ForgeRegexFlavor::Default => RegexFlavor::Default,
+    ForgeRegexFlavor::HeaderName => RegexFlavor::HeaderName,
   }
 }

@@ -157,6 +157,10 @@ pub struct WafLimits {
   pub max_mutations: usize,
   #[serde(default = "default_max_regex_runtime_ms")]
   pub max_regex_runtime_ms: u64,
+  #[serde(default = "default_max_advanced_regex_subject_bytes")]
+  pub max_advanced_regex_subject_bytes: usize,
+  #[serde(default = "default_max_advanced_regex_backtracks")]
+  pub max_advanced_regex_backtracks: usize,
   #[serde(default = "default_max_helper_items")]
   pub max_helper_items: usize,
   #[serde(default = "default_max_helper_pattern_count")]
@@ -180,6 +184,8 @@ impl Default for WafLimits {
       max_header_value_bytes: default_max_header_value_bytes(),
       max_mutations: default_max_mutations(),
       max_regex_runtime_ms: default_max_regex_runtime_ms(),
+      max_advanced_regex_subject_bytes: default_max_advanced_regex_subject_bytes(),
+      max_advanced_regex_backtracks: default_max_advanced_regex_backtracks(),
       max_helper_items: default_max_helper_items(),
       max_helper_pattern_count: default_max_helper_pattern_count(),
       max_helper_result_bytes: default_max_helper_result_bytes(),

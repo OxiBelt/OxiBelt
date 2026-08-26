@@ -119,7 +119,7 @@ pub(super) fn eval_string_call(
     "endsWith" => Ok(Value::Bool(text.ends_with(expect_string_arg(args, 0)?))),
     "matches" => {
       let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
-      Ok(Value::Bool(regex.is_match(text)))
+      Ok(Value::Bool(regex.is_match(text)?))
     }
     "lowerAscii" => Ok(Value::String(text.to_ascii_lowercase())),
     "upperAscii" => Ok(Value::String(text.to_ascii_uppercase())),
@@ -188,12 +188,13 @@ pub(super) fn eval_header_call(
     ))),
     "anyNameMatches" => {
       let regex = header_name_regex_arg(args, 0, regex_args.get(RegexFlavor::HeaderName, 0))?;
-      Ok(Value::Bool(
+      Ok(Value::Bool(regex_matches_any(
+        &regex,
         headers
           .keys()
           .take(ctx.limits.max_helper_items)
-          .any(|name| regex.is_match(name.as_str())),
-      ))
+          .map(|name| name.as_str()),
+      )?))
     }
     "anyValueContains" => {
       let needle = expect_string_arg(args, 0)?;
@@ -207,35 +208,37 @@ pub(super) fn eval_header_call(
     }
     "anyValueMatches" => {
       let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
-      Ok(Value::Bool(
+      Ok(Value::Bool(regex_matches_any(
+        &regex,
         headers
           .values()
           .take(ctx.limits.max_helper_items)
-          .filter_map(|value| value.to_str().ok())
-          .any(|value| regex.is_match(value)),
-      ))
+          .filter_map(|value| value.to_str().ok()),
+      )?))
     }
     "anyEntryMatches" => {
       let name_regex = header_name_regex_arg(args, 0, regex_args.get(RegexFlavor::HeaderName, 0))?;
       let value_regex = regex_arg(args, 1, regex_args.get(RegexFlavor::Default, 1))?;
-      Ok(Value::Bool(
+      Ok(Value::Bool(regex_pairs_match_any(
+        &name_regex,
+        &value_regex,
         headers
           .iter()
           .take(ctx.limits.max_helper_items)
-          .filter_map(|(name, value)| value.to_str().ok().map(|value| (name, value)))
-          .any(|(name, value)| name_regex.is_match(name.as_str()) && value_regex.is_match(value)),
-      ))
+          .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value))),
+      )?))
     }
     "allEntriesMatch" => {
       let name_regex = header_name_regex_arg(args, 0, regex_args.get(RegexFlavor::HeaderName, 0))?;
       let value_regex = regex_arg(args, 1, regex_args.get(RegexFlavor::Default, 1))?;
-      Ok(Value::Bool(
+      Ok(Value::Bool(regex_pairs_match_all(
+        &name_regex,
+        &value_regex,
         headers
           .iter()
           .take(ctx.limits.max_helper_items)
-          .filter_map(|(name, value)| value.to_str().ok().map(|value| (name, value)))
-          .all(|(name, value)| name_regex.is_match(name.as_str()) && value_regex.is_match(value)),
-      ))
+          .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value))),
+      )?))
     }
     _ => bail!("unknown HeaderMap method {method}"),
   }
@@ -277,7 +280,10 @@ pub(super) fn eval_tag_call(
     ),
     "anyKeyMatches" => {
       let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
-      Ok(Value::Bool(tags.keys().any(|key| regex.is_match(key))))
+      Ok(Value::Bool(regex_matches_any(
+        &regex,
+        tags.keys().map(String::as_str),
+      )?))
     }
     "anyValueContains" => {
       let needle = expect_string_arg(args, 0)?;
@@ -288,9 +294,13 @@ pub(super) fn eval_tag_call(
     "anyEntryMatches" => {
       let key_regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
       let value_regex = regex_arg(args, 1, regex_args.get(RegexFlavor::Default, 1))?;
-      Ok(Value::Bool(tags.iter().any(|(key, value)| {
-        key_regex.is_match(key) && value_regex.is_match(value)
-      })))
+      Ok(Value::Bool(regex_pairs_match_any(
+        &key_regex,
+        &value_regex,
+        tags
+          .iter()
+          .map(|(key, value)| (key.as_str(), value.as_str())),
+      )?))
     }
     _ => bail!("unknown TagMap method {method}"),
   }
@@ -310,7 +320,10 @@ pub(super) fn eval_rule_tag_call(
     }
     "anyMatches" => {
       let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
-      Ok(Value::Bool(tags.iter().any(|tag| regex.is_match(tag))))
+      Ok(Value::Bool(regex_matches_any(
+        &regex,
+        tags.iter().map(String::as_str),
+      )?))
     }
     _ => bail!("unknown RuleTagSet method {method}"),
   }
@@ -479,9 +492,10 @@ pub(super) fn eval_pair_map_call(
     }
     "anyNameMatches" => {
       let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
-      Ok(Value::Bool(
-        pairs.iter().any(|(key, _)| regex.is_match(key)),
-      ))
+      Ok(Value::Bool(regex_matches_any(
+        &regex,
+        pairs.iter().map(|(key, _)| key.as_str()),
+      )?))
     }
     "anyValueContains" => {
       let needle = expect_string_arg(args, 0)?;
@@ -491,17 +505,60 @@ pub(super) fn eval_pair_map_call(
     }
     "anyValueMatches" => {
       let regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
-      Ok(Value::Bool(
-        pairs.iter().any(|(_, value)| regex.is_match(value)),
-      ))
+      Ok(Value::Bool(regex_matches_any(
+        &regex,
+        pairs.iter().map(|(_, value)| value.as_str()),
+      )?))
     }
     "anyEntryMatches" => {
       let key_regex = regex_arg(args, 0, regex_args.get(RegexFlavor::Default, 0))?;
       let value_regex = regex_arg(args, 1, regex_args.get(RegexFlavor::Default, 1))?;
-      Ok(Value::Bool(pairs.iter().any(|(key, value)| {
-        key_regex.is_match(key) && value_regex.is_match(value)
-      })))
+      Ok(Value::Bool(regex_pairs_match_any(
+        &key_regex,
+        &value_regex,
+        pairs
+          .iter()
+          .map(|(key, value)| (key.as_str(), value.as_str())),
+      )?))
     }
     _ => bail!("unknown bounded map method {method}"),
   }
+}
+
+fn regex_matches_any<'a>(
+  regex: &RegexSource<'_>,
+  values: impl IntoIterator<Item = &'a str>,
+) -> anyhow::Result<bool> {
+  for value in values {
+    if regex.is_match(value)? {
+      return Ok(true);
+    }
+  }
+  Ok(false)
+}
+
+fn regex_pairs_match_any<'a>(
+  key_regex: &RegexSource<'_>,
+  value_regex: &RegexSource<'_>,
+  pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> anyhow::Result<bool> {
+  for (key, value) in pairs {
+    if key_regex.is_match(key)? && value_regex.is_match(value)? {
+      return Ok(true);
+    }
+  }
+  Ok(false)
+}
+
+fn regex_pairs_match_all<'a>(
+  key_regex: &RegexSource<'_>,
+  value_regex: &RegexSource<'_>,
+  pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> anyhow::Result<bool> {
+  for (key, value) in pairs {
+    if !key_regex.is_match(key)? || !value_regex.is_match(value)? {
+      return Ok(false);
+    }
+  }
+  Ok(true)
 }

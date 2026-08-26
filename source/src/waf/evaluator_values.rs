@@ -42,8 +42,8 @@ impl Value {
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct CachedRegexArgs<'a> {
-  default: [Option<&'a Regex>; 2],
-  header_name: [Option<&'a Regex>; 2],
+  default: [Option<&'a HybridRegex>; 2],
+  header_name: [Option<&'a HybridRegex>; 2],
 }
 
 impl<'a> CachedRegexArgs<'a> {
@@ -64,7 +64,7 @@ impl<'a> CachedRegexArgs<'a> {
     regex_args
   }
 
-  pub(super) fn get(self, flavor: RegexFlavor, index: usize) -> Option<&'a Regex> {
+  pub(super) fn get(self, flavor: RegexFlavor, index: usize) -> Option<&'a HybridRegex> {
     match flavor {
       RegexFlavor::Default => self.default.get(index).copied().flatten(),
       RegexFlavor::HeaderName => self.header_name.get(index).copied().flatten(),
@@ -73,15 +73,15 @@ impl<'a> CachedRegexArgs<'a> {
 }
 
 pub(super) enum RegexSource<'a> {
-  Borrowed(&'a Regex),
+  Borrowed(&'a HybridRegex),
   Owned(Regex),
 }
 
 impl RegexSource<'_> {
-  pub(super) fn is_match(&self, value: &str) -> bool {
+  pub(super) fn is_match(&self, value: &str) -> anyhow::Result<bool> {
     match self {
       Self::Borrowed(regex) => regex.is_match(value),
-      Self::Owned(regex) => regex.is_match(value),
+      Self::Owned(regex) => Ok(regex.is_match(value)),
     }
   }
 }
@@ -89,7 +89,7 @@ impl RegexSource<'_> {
 pub(super) fn regex_arg<'a>(
   args: &[Value],
   index: usize,
-  cached: Option<&'a Regex>,
+  cached: Option<&'a HybridRegex>,
 ) -> anyhow::Result<RegexSource<'a>> {
   if let Some(regex) = cached {
     return Ok(RegexSource::Borrowed(regex));
@@ -102,7 +102,7 @@ pub(super) fn regex_arg<'a>(
 pub(super) fn header_name_regex_arg<'a>(
   args: &[Value],
   index: usize,
-  cached: Option<&'a Regex>,
+  cached: Option<&'a HybridRegex>,
 ) -> anyhow::Result<RegexSource<'a>> {
   if let Some(regex) = cached {
     return Ok(RegexSource::Borrowed(regex));

@@ -41,9 +41,9 @@ pub(super) fn eval_body_call(
       };
       let text = ctx.body_text_caches.text_arc(text_slot, body);
       if let Some(regex) = regex_args.get(RegexFlavor::Default, 0) {
-        Ok(Value::Bool(body_scan::matches_regex_text_maybe_offloaded(
-          text, regex,
-        )))
+        Ok(Value::Bool(
+          body_scan::matches_hybrid_regex_text_maybe_offloaded(text, regex)?,
+        ))
       } else {
         Ok(Value::Bool(body_scan::matches_text_maybe_offloaded(
           text,

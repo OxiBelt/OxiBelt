@@ -7,6 +7,12 @@ pub fn validate_config(config: &Config) -> anyhow::Result<()> {
   if config.waf.limits.max_person_proof_reuse_tokens == 0 {
     bail!("waf.limits.max_person_proof_reuse_tokens must be greater than 0");
   }
+  if config.waf.limits.max_advanced_regex_subject_bytes == 0 {
+    bail!("waf.limits.max_advanced_regex_subject_bytes must be greater than 0");
+  }
+  if config.waf.limits.max_advanced_regex_backtracks == 0 {
+    bail!("waf.limits.max_advanced_regex_backtracks must be greater than 0");
+  }
   if has_emit_mitigation_actions(config) && !config.database.mitigation.enabled {
     bail!("emit_mitigation actions require database.mitigation.enabled = true");
   }
