@@ -41,6 +41,10 @@ for the governed entry format.
   signer, and independent-monitor responsibilities separated. A CT route
   passes normal route admission but bypasses upstream proxying, static
   serving, cache, WAF, retry, and response rewriting.
+- Preserve route-action path-template syntax and validation while accelerating
+  the internal delimiter scan. Literal `?` and `#` remain rejected for rewrite
+  and redirect paths; TOML keys, defaults, schema epoch, accepted and rejected
+  configurations, reload class, and rollback procedure remain unchanged.
 
 ### Schema epochs
 
@@ -77,6 +81,9 @@ for the governed entry format.
   enforcement semantics. CT endpoints are not a WAF inspection surface: once
   a normal route admits a `ct_log` request, dispatch deliberately bypasses
   proxy, static, cache, WAF, retry, and response-rewrite behavior.
+- Accelerate percent-marker, normalization, malicious-input, and compiled
+  literal searches without changing OxiRule or CRS syntax, normalization
+  results, match precedence, request classification, or enforcement behavior.
 
 ### Executables and images
 
