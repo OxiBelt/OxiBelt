@@ -112,10 +112,8 @@ pub(super) fn parse_trailers(
   )?;
   let mut trailers = HeaderMap::with_capacity(limits.max_trailer_fields.min(16));
   for line in split_crlf(fields) {
-    let colon = line
-      .iter()
-      .position(|byte| *byte == b':')
-      .ok_or(ResponseProtocolFailureReason::InvalidTrailerField)?;
+    let colon =
+      memchr::memchr(b':', line).ok_or(ResponseProtocolFailureReason::InvalidTrailerField)?;
     let name = HeaderName::from_bytes(&line[..colon])
       .map_err(|_| ResponseProtocolFailureReason::InvalidTrailerField)?;
     if is_forbidden_trailer_name(&name) {
@@ -168,10 +166,7 @@ fn validate_raw_fields(
     if line.len() > max_field_bytes {
       return Err(size_reason);
     }
-    let colon = line
-      .iter()
-      .position(|byte| *byte == b':')
-      .ok_or(syntax_reason)?;
+    let colon = memchr::memchr(b':', line).ok_or(syntax_reason)?;
     if colon == 0
       || colon > MAX_HEADER_NAME_BYTES
       || !line[..colon].iter().copied().all(is_token_byte)
@@ -244,7 +239,7 @@ fn is_forbidden_trailer_name(name: &HeaderName) -> bool {
 }
 
 fn split_coding_parameters(bytes: &[u8]) -> Option<(&[u8], usize)> {
-  let semicolon = bytes.iter().position(|byte| *byte == b';');
+  let semicolon = memchr::memchr(b';', bytes);
   let name = trim_ows(&bytes[..semicolon.unwrap_or(bytes.len())]);
   if name.is_empty() || !name.iter().copied().all(is_token_byte) {
     return None;

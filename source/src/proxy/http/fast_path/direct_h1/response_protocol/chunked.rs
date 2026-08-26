@@ -4,7 +4,7 @@ pub(super) fn parse_chunk_size_line(
   line: &[u8],
   max_extension_bytes: usize,
 ) -> Result<u64, ResponseProtocolFailureReason> {
-  let (size, extension) = match line.iter().position(|byte| *byte == b';') {
+  let (size, extension) = match memchr::memchr(b';', line) {
     Some(index) => (&line[..index], Some(&line[index + 1..])),
     None => (line, None),
   };
@@ -35,10 +35,7 @@ pub(super) fn parse_chunk_size_line(
 
 fn validate_chunk_extensions(mut bytes: &[u8]) -> Result<(), ResponseProtocolFailureReason> {
   loop {
-    let name_end = bytes
-      .iter()
-      .position(|byte| *byte == b'=' || *byte == b';')
-      .unwrap_or(bytes.len());
+    let name_end = memchr::memchr2(b'=', b';', bytes).unwrap_or(bytes.len());
     if name_end == 0 || !bytes[..name_end].iter().copied().all(is_token_byte) {
       return Err(ResponseProtocolFailureReason::InvalidChunkExtension);
     }

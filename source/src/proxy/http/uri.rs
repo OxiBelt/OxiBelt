@@ -70,13 +70,16 @@ fn contains_unsafe_or_over_nested_encoding(path: &[u8]) -> bool {
   // deeper nesting than any OxiBelt normalization stage performs.
   let mut decoded = path.to_vec();
   for depth in 0..=MAX_PERCENT_DECODE_DEPTH {
-    if decoded.windows(3).any(|window| {
-      window[0] == b'%'
-        && ((window[1] == b'2'
-          && (window[2].eq_ignore_ascii_case(&b'e') || window[2].eq_ignore_ascii_case(&b'f')))
-          || (window[1] == b'5' && window[2].eq_ignore_ascii_case(&b'c')))
-    }) {
-      return true;
+    for index in memchr::memchr_iter(b'%', &decoded) {
+      let Some(encoded) = decoded.get(index + 1..index + 3) else {
+        continue;
+      };
+      if (encoded[0] == b'2'
+        && (encoded[1].eq_ignore_ascii_case(&b'e') || encoded[1].eq_ignore_ascii_case(&b'f')))
+        || (encoded[0] == b'5' && encoded[1].eq_ignore_ascii_case(&b'c'))
+      {
+        return true;
+      }
     }
     let Some(next) = percent_decode_path_once(&decoded) else {
       break;
@@ -99,31 +102,38 @@ fn contains_unsafe_or_over_nested_encoding(path: &[u8]) -> bool {
 }
 
 fn percent_decode_path_once(path: &[u8]) -> Option<Vec<u8>> {
+  let first_percent = memchr::memchr(b'%', path)?;
   let mut decoded = Vec::with_capacity(path.len());
   let mut changed = false;
-  let mut index = 0;
-  while index < path.len() {
-    if path[index] == b'%'
-      && index + 5 < path.len()
+  decoded.extend_from_slice(&path[..first_percent]);
+  let mut copy_start = first_percent;
+  let mut search_start = first_percent;
+  while let Some(relative) = memchr::memchr(b'%', &path[search_start..]) {
+    let index = search_start + relative;
+    decoded.extend_from_slice(&path[copy_start..index]);
+    if index + 5 < path.len()
       && matches!(path[index + 1], b'u' | b'U')
       && let Some(codepoint) = hex_u16(&path[index + 2..index + 6])
       && codepoint <= 0x7f
     {
       decoded.push(codepoint as u8);
       changed = true;
-      index += 6;
-    } else if path[index] == b'%'
-      && index + 2 < path.len()
+      search_start = index + 6;
+      copy_start = search_start;
+    } else if index + 2 < path.len()
       && let (Some(high), Some(low)) = (hex_nibble(path[index + 1]), hex_nibble(path[index + 2]))
     {
       decoded.push((high << 4) | low);
       changed = true;
-      index += 3;
+      search_start = index + 3;
+      copy_start = search_start;
     } else {
-      decoded.push(path[index]);
-      index += 1;
+      decoded.push(b'%');
+      search_start = index + 1;
+      copy_start = search_start;
     }
   }
+  decoded.extend_from_slice(&path[copy_start..]);
   changed.then_some(decoded)
 }
 

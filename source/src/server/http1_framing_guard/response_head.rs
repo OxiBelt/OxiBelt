@@ -77,7 +77,7 @@ fn response_status(head: &[u8]) -> Option<u16> {
 }
 
 fn validate_status_line(line: &[u8]) -> Option<u16> {
-  let version_end = line.iter().position(|byte| *byte == b' ')?;
+  let version_end = memchr::memchr(b' ', line)?;
   if !matches!(&line[..version_end], b"HTTP/1.0" | b"HTTP/1.1") {
     return None;
   }
@@ -104,7 +104,7 @@ fn validate_headers(mut headers: &[u8]) -> bool {
   while !headers.is_empty() {
     let line_end = memchr::memmem::find(headers, b"\r\n").unwrap_or(headers.len());
     let line = &headers[..line_end];
-    let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+    let Some(colon) = memchr::memchr(b':', line) else {
       return false;
     };
     if colon == 0

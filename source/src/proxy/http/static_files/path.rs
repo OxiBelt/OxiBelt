@@ -24,7 +24,7 @@ pub(crate) fn resolve_request_path(
     if raw_segment.is_empty() {
       continue;
     }
-    if raw_segment.as_bytes().contains(&b'%') {
+    if memchr::memchr(b'%', raw_segment.as_bytes()).is_some() {
       let segment = percent_decode_segment(raw_segment)?;
       validate_segment(&segment)?;
       candidate.push(segment);

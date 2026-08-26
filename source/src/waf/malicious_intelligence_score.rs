@@ -465,27 +465,22 @@ fn json_shape_score(text: &str) -> i64 {
 
 fn invalid_percent_count(text: &str) -> i64 {
   let bytes = text.as_bytes();
-  let mut index = 0;
   let mut count = 0;
-  while index < bytes.len() {
-    if bytes[index] == b'%' {
-      if index + 1 < bytes.len() && matches!(bytes[index + 1], b'u' | b'U') {
-        if index + 5 >= bytes.len()
-          || !bytes[index + 2..index + 6]
-            .iter()
-            .all(|byte| byte.is_ascii_hexdigit())
-        {
-          count += 1;
-        }
-        index += 1;
-      } else if index + 2 >= bytes.len()
-        || !bytes[index + 1].is_ascii_hexdigit()
-        || !bytes[index + 2].is_ascii_hexdigit()
+  for index in memchr::memchr_iter(b'%', bytes) {
+    if index + 1 < bytes.len() && matches!(bytes[index + 1], b'u' | b'U') {
+      if index + 5 >= bytes.len()
+        || !bytes[index + 2..index + 6]
+          .iter()
+          .all(|byte| byte.is_ascii_hexdigit())
       {
         count += 1;
       }
+    } else if index + 2 >= bytes.len()
+      || !bytes[index + 1].is_ascii_hexdigit()
+      || !bytes[index + 2].is_ascii_hexdigit()
+    {
+      count += 1;
     }
-    index += 1;
   }
   count
 }
@@ -537,6 +532,14 @@ mod tests {
   #[test]
   fn malformed_score_counts_invalid_percent_encoding() {
     assert!(malformed_score("/search?q=%zz%u00qq", "uri").unwrap() >= 20);
+  }
+
+  #[test]
+  fn invalid_percent_count_preserves_each_sequence_class() {
+    assert_eq!(invalid_percent_count("plain"), 0);
+    assert_eq!(invalid_percent_count("%20%u0041%U10ff"), 0);
+    assert_eq!(invalid_percent_count("%%%zz%u00qq%U123"), 5);
+    assert_eq!(invalid_percent_count("%u0025zz"), 0);
   }
 
   #[test]

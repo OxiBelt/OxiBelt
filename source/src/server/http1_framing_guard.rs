@@ -459,7 +459,7 @@ fn classify_head(head: &[u8]) -> HeadDisposition {
 
   for line in lines {
     let line = trim_trailing_cr(line);
-    let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+    let Some(colon) = memchr::memchr(b':', line) else {
       return HeadDisposition::Reject;
     };
     let name = &line[..colon];
@@ -671,7 +671,7 @@ impl ChunkDecoder {
               };
             }
             let trailer = &self.line[..self.line.len() - 2];
-            let Some(colon) = trailer.iter().position(|byte| *byte == b':') else {
+            let Some(colon) = memchr::memchr(b':', trailer) else {
               return ChunkProgress::invalid(offset);
             };
             if colon == 0

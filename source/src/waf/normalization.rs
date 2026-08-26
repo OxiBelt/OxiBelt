@@ -121,30 +121,34 @@ pub(crate) fn normalize_path(path: &str) -> String {
 fn decode_percent_and_unicode(input: &str) -> String {
   let mut out = String::with_capacity(input.len());
   let bytes = input.as_bytes();
-  let mut index = 0;
-  while index < bytes.len() {
-    if bytes[index] == b'%' {
-      if index + 5 < bytes.len()
-        && matches!(bytes[index + 1], b'u' | b'U')
-        && let Some(codepoint) = hex_u32(&bytes[index + 2..index + 6])
-        && let Some(ch) = char::from_u32(codepoint)
-      {
-        out.push(ch);
-        index += 6;
-        continue;
-      }
-      if index + 2 < bytes.len()
-        && let Some(byte) = hex_byte(bytes[index + 1], bytes[index + 2])
-      {
-        out.push(byte as char);
-        index += 3;
-        continue;
-      }
+  let mut copy_start = 0;
+  let mut search_start = 0;
+  while let Some(relative) = memchr::memchr(b'%', &bytes[search_start..]) {
+    let index = search_start + relative;
+    out.push_str(&input[copy_start..index]);
+    if index + 5 < bytes.len()
+      && matches!(bytes[index + 1], b'u' | b'U')
+      && let Some(codepoint) = hex_u32(&bytes[index + 2..index + 6])
+      && let Some(ch) = char::from_u32(codepoint)
+    {
+      out.push(ch);
+      search_start = index + 6;
+      copy_start = search_start;
+      continue;
     }
-    let ch = input[index..].chars().next().unwrap_or('\u{fffd}');
-    out.push(ch);
-    index += ch.len_utf8();
+    if index + 2 < bytes.len()
+      && let Some(byte) = hex_byte(bytes[index + 1], bytes[index + 2])
+    {
+      out.push(byte as char);
+      search_start = index + 3;
+      copy_start = search_start;
+      continue;
+    }
+    out.push('%');
+    search_start = index + 1;
+    copy_start = search_start;
   }
+  out.push_str(&input[copy_start..]);
   out
 }
 
@@ -361,6 +365,36 @@ impl<'a> FuzzInput<'a> {
 mod tests {
   use super::*;
 
+  fn scalar_decode_percent_and_unicode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+      if bytes[index] == b'%' {
+        if index + 5 < bytes.len()
+          && matches!(bytes[index + 1], b'u' | b'U')
+          && let Some(codepoint) = hex_u32(&bytes[index + 2..index + 6])
+          && let Some(ch) = char::from_u32(codepoint)
+        {
+          out.push(ch);
+          index += 6;
+          continue;
+        }
+        if index + 2 < bytes.len()
+          && let Some(byte) = hex_byte(bytes[index + 1], bytes[index + 2])
+        {
+          out.push(byte as char);
+          index += 3;
+          continue;
+        }
+      }
+      let ch = input[index..].chars().next().unwrap_or('\u{fffd}');
+      out.push(ch);
+      index += ch.len_utf8();
+    }
+    out
+  }
+
   #[test]
   fn path_normalization_decodes_unicode_percent_and_segments() {
     let uri: Uri = "/A/%75%6e%69%6f%6e/%2e%2e/%u0053ELECT//x".parse().unwrap();
@@ -371,5 +405,27 @@ mod tests {
   #[test]
   fn invalid_percent_sequences_are_preserved() {
     assert_eq!(normalize_text("%zz UNION\t SELECT"), "%zz union select");
+  }
+
+  #[test]
+  fn percent_search_matches_scalar_decoding_at_boundaries() {
+    for input in [
+      "",
+      "plain utf8 \u{1f642}",
+      "%",
+      "%%",
+      "%zz%41",
+      "%u0053%U0065",
+      "%uD800",
+      "%00tail",
+      "prefix%2Fmiddle%u1F642suffix",
+      "\u{00e9}%C3\u{1f642}",
+    ] {
+      assert_eq!(
+        decode_percent_and_unicode(input),
+        scalar_decode_percent_and_unicode(input),
+        "decoding changed for {input:?}"
+      );
+    }
   }
 }

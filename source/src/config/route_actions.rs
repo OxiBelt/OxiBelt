@@ -635,7 +635,7 @@ fn validate_route_action_path_template(
   if !template.starts_with('/') || template.starts_with("//") {
     bail!("route {} {field_name} must start with one '/'", route.name);
   }
-  if template.bytes().any(|byte| matches!(byte, b'?' | b'#')) {
+  if memchr::memchr2(b'?', b'#', template.as_bytes()).is_some() {
     bail!(
       "route {} {field_name} must not contain queries or fragments",
       route.name

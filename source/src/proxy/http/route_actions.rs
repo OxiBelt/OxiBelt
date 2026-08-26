@@ -387,7 +387,7 @@ fn validate_rendered_path(path: &str) -> anyhow::Result<()> {
   if !path.starts_with('/') || path.starts_with("//") {
     bail!("rendered route action path must start with one '/'");
   }
-  if path.bytes().any(|byte| matches!(byte, b'?' | b'#')) {
+  if memchr::memchr2(b'?', b'#', path.as_bytes()).is_some() {
     bail!("rendered route action path must not contain queries or fragments");
   }
   validate_downstream_path(path)
