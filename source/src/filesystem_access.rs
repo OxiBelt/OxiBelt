@@ -16,7 +16,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{
   BufferingMode, CacheStore, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode, Config,
-  CrliteConfig, CrliteManagedStorage, CrliteMode, RedisTrustStore, SharedStateBackendKind,
+  CrliteConfig, CrliteManagedStorage, CrliteMode, DownstreamCtLogListMode, DownstreamCtMode,
+  RedisTrustStore, SharedStateBackendKind,
 };
 use crate::hardening::{
   LandlockFilesystemRight, LandlockManifestProjection, LandlockManifestRule,
@@ -623,6 +624,7 @@ impl ManifestBuilder {
 
     builder.collect_configuration(config)?;
     builder.collect_downstream_tls(config)?;
+    builder.collect_downstream_ct(config)?;
     builder.collect_waf_and_discovery(config)?;
     builder.collect_trust_and_credentials(config)?;
     builder.collect_certificate_transparency(config)?;
@@ -950,6 +952,43 @@ impl ManifestBuilder {
       )?;
     }
     Ok(())
+  }
+
+  fn collect_downstream_ct(&mut self, config: &Config) -> anyhow::Result<()> {
+    let enabled = config.tls.ct.mode != DownstreamCtMode::Disabled
+      || config.tls.certificates.iter().any(|certificate| {
+        config.tls.ct.effective_mode(&certificate.ct) != DownstreamCtMode::Disabled
+      });
+    if !enabled {
+      return Ok(());
+    }
+    match config.tls.ct.log_list.mode {
+      DownstreamCtLogListMode::Managed => self.add_write_directory(
+        &config.tls.ct.log_list.cache_dir,
+        FilesystemAccessPurpose::CertificateTransparency,
+        "tls.ct.log_list.cache_dir",
+        true,
+      ),
+      DownstreamCtLogListMode::StaticFile => {
+        if let Some(path) = &config.tls.ct.log_list.file {
+          self.add_read_file(
+            path,
+            FilesystemAccessPurpose::CertificateTransparency,
+            "tls.ct.log_list.file",
+            true,
+          )?;
+        }
+        if let Some(path) = &config.tls.ct.log_list.signature_file {
+          self.add_read_file(
+            path,
+            FilesystemAccessPurpose::CertificateTransparency,
+            "tls.ct.log_list.signature_file",
+            true,
+          )?;
+        }
+        Ok(())
+      }
+    }
   }
 
   fn collect_waf_and_discovery(&mut self, config: &Config) -> anyhow::Result<()> {

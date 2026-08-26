@@ -176,3 +176,10 @@ path = "fuzz_targets/tls_certificate_metadata.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "downstream_ct"
+path = "fuzz_targets/downstream_ct.rs"
+test = false
+doc = false
+bench = false

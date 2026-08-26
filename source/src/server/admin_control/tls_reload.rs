@@ -8,6 +8,7 @@ pub(super) async fn build_downstream_tls_reload_configs(
   active: &AppSnapshot,
 ) -> anyhow::Result<(
   crate::tls::CrliteRuntime,
+  crate::tls::DownstreamCtRuntime,
   crate::tls::OcspStapleRuntime,
   crate::tls::DownstreamTlsServerConfig,
   Option<crate::tls::DownstreamQuicServerConfig>,
@@ -15,6 +16,9 @@ pub(super) async fn build_downstream_tls_reload_configs(
   let crlite = crate::tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
     .await
     .context("failed to build CRLite runtime")?;
+  let downstream_ct = crate::tls::DownstreamCtRuntime::new(&config.tls, active.metrics.clone())
+    .await
+    .context("failed to build downstream CT runtime")?;
   let ocsp_staple = crate::tls::OcspStapleRuntime::new(
     &config.crypto,
     &config.tls,
@@ -36,6 +40,7 @@ pub(super) async fn build_downstream_tls_reload_configs(
     Some(&active.tls_resumption),
     Some(&ocsp_staple),
     Some(&crlite),
+    Some(&downstream_ct),
   )
   .context("failed to rebuild downstream TLS config")?;
   let quic_server_config = if config.listeners.http3 {
@@ -49,11 +54,18 @@ pub(super) async fn build_downstream_tls_reload_configs(
         Some(&active.tls_resumption),
         Some(&ocsp_staple),
         Some(&crlite),
+        Some(&downstream_ct),
       )
       .context("failed to rebuild QUIC TLS config")?,
     )
   } else {
     None
   };
-  Ok((crlite, ocsp_staple, tls_server_config, quic_server_config))
+  Ok((
+    crlite,
+    downstream_ct,
+    ocsp_staple,
+    tls_server_config,
+    quic_server_config,
+  ))
 }

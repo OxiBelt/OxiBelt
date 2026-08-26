@@ -586,6 +586,30 @@
           "type": "array",
           "uniqueItems": true,
           "items": { "type": "string" }
+        },
+        "ct": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "policy", "cacheDir", "persistentVolumeClaimName"],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["disabled", "audit", "enforce"]
+            },
+            "policy": {
+              "type": "string",
+              "enum": ["chrome", "firefox"]
+            },
+            "cacheDir": {
+              "type": "string",
+              "pattern": "^/"
+            },
+            "persistentVolumeClaimName": {
+              "type": "string",
+              "pattern": "^$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+              "maxLength": 253
+            }
+          }
         }
       }
     },

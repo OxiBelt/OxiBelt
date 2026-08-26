@@ -8,7 +8,7 @@ The current implementation is a production-oriented foundation: configuration is
 
 - Downstream HTTP/1.1 and HTTP/2 over TCP, with optional HTTP/3 over QUIC.
 - Upstream HTTP/1.1, HTTP/2, and HTTP/3 forwarding.
-- TLS termination with `rustls`, `aws-lc-rs`, TLS 1.3 defaults, client certificate authentication, static/live OCSP stapling, opt-in upstream OCSP/CRLite revocation checks, experimental CRLite enforcement with local or managed filters, and preferred post-quantum key exchange support.
+- TLS termination with `rustls`, `aws-lc-rs`, TLS 1.3 defaults, client certificate authentication, static/live OCSP stapling, opt-in upstream OCSP/CRLite revocation checks, experimental CRLite enforcement, optional embedded-SCT verification with Chrome/Firefox-style audit or enforcement, and preferred post-quantum key exchange support.
 - Upstream TLS 1.3 ECH in GREASE or configured `ECHConfigList` mode.
 - Host and path-prefix routing, prefix replacement, upstream pools, local load-balancing state, and passive or active health marking.
 - WebSocket tunneling, opt-in generic HTTP/1.1 Upgrade and CONNECT tunneling, gRPC-Web translation, and WebTransport forwarding over HTTP/3.
@@ -313,7 +313,7 @@ The standard container layout is:
 
 ```text
 /etc/oxibelt/config   OxiBelt TOML configuration and included modules
-/etc/oxibelt/cert     TLS certificates, private keys, CA roots, OCSP, ECH files
+/etc/oxibelt/cert     TLS certificates, private keys, CA roots, OCSP, CT Log lists, ECH files
 /etc/oxibelt/oxirule  External .oxirule.toml rule files
 ```
 
@@ -424,7 +424,7 @@ Downstream ECH configuration and CRS stream-payload inspection for
 WebSocket/WebTransport remain reserved or deferred. SNI-based TCP TLS
 forwarding, same-port QUIC forwarding, dedicated TCP/UDP stream proxying, live
 OCSP fetch/refresh, opt-in upstream OCSP/CRLite revocation checks, and
-sticky-cookie upstream pools are current features. See
+sticky-cookie upstream pools, and opt-in downstream embedded-SCT verification are current features. SCT stapling is not implemented. See
 [docs/FeatureStatus.md](docs/FeatureStatus.md) for the canonical lifecycle
 matrix and [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work)
 for the design rationale behind reserved work.

@@ -50,6 +50,7 @@ fn partitioned_quic_policy_index_includes_certificate_identity() {
     None,
     None,
     None,
+    None,
   )
   .expect("QUIC server config should build");
 
@@ -175,6 +176,7 @@ fn downstream_tls_server_config(config: &crate::config::Config) -> DownstreamTls
     &config.listeners,
     &config.routes,
     0,
+    None,
     None,
     None,
     None,

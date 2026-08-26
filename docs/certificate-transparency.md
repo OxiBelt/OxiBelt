@@ -1,4 +1,12 @@
-# Certificate Transparency operations
+# Certificate Transparency operations and downstream verification
+
+OxiBelt keeps its CT Log operator role separate from its optional downstream TLS certificate-health role. The top-level `certificate_transparency` configuration below runs a Log. The independent `[tls.ct]` configuration verifies RFC 6962 v1 SCTs already embedded in configured downstream leaf certificates and can audit or reject non-compliant certificate activation and new handshakes.
+
+Downstream verification reconstructs the RFC 6962 precertificate `TBSCertificate` by removing only the final certificate's SCT-list extension, hashes the issuing certificate's SubjectPublicKeyInfo, and verifies each SCT signature against an authenticated Chromium v3 Log-list key. Parsing, reconstruction, signature verification, and browser-policy evaluation occur during snapshot construction or background refresh, never on the TLS handshake path. Multi-SNI certificates receive independent results bound to the exact certificate identity, and TCP TLS plus HTTP/3 share the same gate.
+
+Managed mode uses the official Chromium v3 detached signature and a build-pinned list-signing public key, persistently and atomically replaces a locked last-known-good bundle, rejects an authenticated update older than the available LKG, and treats a 70-day-old list as stale. Restoring the entire cache volume can also restore its local rollback baseline, so production deployments should protect PVC snapshots and restore authority. `audit` continues serving with bounded degraded status; `enforce` rejects activation or new handshakes. The `chrome-v1` and `firefox-v1` embedded-SCT profiles require distinct Logs and operators according to certificate lifetime and account for Log retirement and operator history. They are operator-facing certificate health policies, not a replacement for browser public-WebPKI validation.
+
+OxiBelt does not modify or re-sign downstream X.509 certificates, does not inject embedded SCTs, does not staple SCTs through TLS extension 18, and does not submit final certificates to public Logs. A private or local OxiBelt Log is not automatically trusted by Chrome, Firefox, Safari, or another public CT program.
 
 OxiBelt can run a Certificate Transparency (CT) log directly in the OxiBelt process. The
 implementation exposes the RFC 6962 v1 JSON API and Static CT v1.1 objects over one RFC 6962 tree,

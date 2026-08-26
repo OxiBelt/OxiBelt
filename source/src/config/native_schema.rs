@@ -822,6 +822,9 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     | "certificate_transparency.logs.gateway.max_response_bytes" => (1, 64 * 1024 * 1024),
     "certificate_transparency.logs.publication.max_pending_entries" => (1, 1_000_000),
     "certificate_transparency.logs.gateway.max_entries" => (1, 100_000),
+    "tls.ct.log_list.max_download_bytes" => (1, 16 * 1024 * 1024),
+    "tls.ct.log_list.request_timeout_ms" => (1, 30_000),
+    "tls.ct.log_list.refresh_interval_seconds" => (3_600, 604_800),
     "certificate_transparency.logs.gateway.cache_max_bytes" => (1, 64 * 1024 * 1024),
     "certificate_transparency.logs.gateway.cache_max_entries" => (1, 100_000),
     _ => return None,
@@ -1111,6 +1114,26 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
     ("tls.resumption.mode", vec!["off", "stateful", "stateless"]),
     ("tls.ssl_early_data", vec!["off", "safe_methods", "on"]),
     (
+      "tls.ct.mode",
+      super::DOWNSTREAM_CT_MODE_WIRE_VALUES.to_vec(),
+    ),
+    (
+      "tls.ct.policy",
+      super::DOWNSTREAM_CT_POLICY_WIRE_VALUES.to_vec(),
+    ),
+    (
+      "tls.ct.failure_policy",
+      super::DOWNSTREAM_CT_FAILURE_POLICY_WIRE_VALUES.to_vec(),
+    ),
+    (
+      "tls.ct.log_list.mode",
+      super::DOWNSTREAM_CT_LOG_LIST_MODE_WIRE_VALUES.to_vec(),
+    ),
+    (
+      "tls.certificates.ct.mode",
+      super::DOWNSTREAM_CT_MODE_WIRE_VALUES.to_vec(),
+    ),
+    (
       "upstream_pools.discovery.tls.subject_alt_names.type",
       vec!["dns", "uri"],
     ),
@@ -1220,6 +1243,14 @@ fn default_value(path: &str) -> Option<Value> {
     "quic.upstream.resolution.negative_ttl_ms" => json!(1_000),
     "tls.max_version" | "tls.min_version" => json!("tls1.3"),
     "tls.ssl_early_data" => json!("off"),
+    "tls.ct.mode" => json!("disabled"),
+    "tls.ct.policy" => json!("chrome"),
+    "tls.ct.failure_policy" => json!("reject_handshake"),
+    "tls.ct.log_list.mode" => json!("managed"),
+    "tls.ct.log_list.cache_dir" => json!("/var/lib/oxibelt/ct-log-list"),
+    "tls.ct.log_list.max_download_bytes" => json!(4_194_304),
+    "tls.ct.log_list.request_timeout_ms" => json!(5_000),
+    "tls.ct.log_list.refresh_interval_seconds" => json!(86_400),
     _ => return None,
   };
   Some(value)
@@ -1237,6 +1268,12 @@ fn path_kind(path: &str) -> Option<&'static str> {
         || path.ends_with(".socket_path")
         || path.ends_with(".bundle_path"))
   {
+    return Some("cert_relative");
+  }
+  if matches!(
+    path,
+    "tls.ct.log_list.file" | "tls.ct.log_list.signature_file"
+  ) {
     return Some("cert_relative");
   }
   if path.ends_with(".rule_files")

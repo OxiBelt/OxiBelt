@@ -48,6 +48,7 @@ pub(super) const TLS_CONFIG_KEYS: &[&str] = &[
   "certificates",
   "client_auth",
   "crlite",
+  "ct",
   "1_2",
   "1_3",
   "key_exchange_groups",

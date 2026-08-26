@@ -213,6 +213,14 @@ license = "Apache-2.0"
 classification = "non-secret"
 
 [[seed]]
+target = "downstream_ct"
+path = "fuzz/seeds/downstream_ct/minimal-log-list.json"
+sha256 = "7924e7baf73ac3d04e39b539802a2fa58e7e9542cdd5fb4e104e79785d2dba97"
+origin = "Repository-authored minimal unsigned CT log-list shape containing no keys or operational identifiers."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
 target = "upstream_dns_resolution"
 path = "fuzz/seeds/upstream_dns_resolution/a-response.hex"
 sha256 = "4fd29884da293d4c51663fa70c74bf8fecf6b3b9111bb9727dd585789e4cf184"

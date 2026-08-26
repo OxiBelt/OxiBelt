@@ -39,6 +39,7 @@ jobs:
           - syscall_boundaries
           - native_config
           - config_policy_normalization
+          - downstream_ct
           - oxirule_expression
           - waf_request_normalization
           - admin_json_mutations

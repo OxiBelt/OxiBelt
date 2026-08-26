@@ -17,6 +17,7 @@ mod crlite;
 mod ct;
 pub(crate) use ct::CtRejectionReason;
 mod detail;
+mod downstream_ct;
 pub(crate) mod fast_path;
 mod fast_path_methods;
 pub(crate) mod http3_upstream;
@@ -78,6 +79,7 @@ pub struct Metrics {
   mitigation_writer_healthy: AtomicU64,
   crlite: crlite::CrliteMetrics,
   ct: ct::CtMetrics,
+  downstream_ct: downstream_ct::DownstreamCtMetrics,
   ocsp: ocsp::OcspMetrics,
   outbound_revocation: outbound_revocation::OutboundRevocationMetrics,
   fast_path: fast_path::FastPathMetrics,
@@ -699,6 +701,7 @@ impl Metrics {
     );
     self.append_crlite_prometheus(&mut output);
     self.append_ct_prometheus(&mut output);
+    self.append_downstream_ct_prometheus(&mut output);
     self.append_ocsp_prometheus(&mut output);
     self.append_outbound_revocation_prometheus(&mut output);
     self.append_fast_path_prometheus(&mut output);

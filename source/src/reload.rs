@@ -207,6 +207,7 @@ impl ReloadManager {
       admin_mutations: active.admin_mutations.clone(),
       shared_state: active.shared_state.clone(),
       crlite: active.crlite.clone(),
+      downstream_ct: active.downstream_ct.clone(),
       ocsp_staple: active.ocsp_staple.clone(),
       tls_server_config: active.tls_server_config.clone(),
       #[cfg(feature = "admin-runtime")]
@@ -274,6 +275,9 @@ impl ReloadManager {
     let crlite = tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
+    let downstream_ct = tls::DownstreamCtRuntime::new(&config.tls, active.metrics.clone())
+      .await
+      .context("failed to build downstream CT runtime")?;
     let ocsp_staple = tls::OcspStapleRuntime::new(
       &config.crypto,
       &config.tls,
@@ -295,6 +299,7 @@ impl ReloadManager {
       Some(&active.tls_resumption),
       Some(&ocsp_staple),
       Some(&crlite),
+      Some(&downstream_ct),
     )
     .context("failed to rebuild downstream TLS config")?;
     let quic_server_config = if config.listeners.http3 {
@@ -308,6 +313,7 @@ impl ReloadManager {
           Some(&active.tls_resumption),
           Some(&ocsp_staple),
           Some(&crlite),
+          Some(&downstream_ct),
         )
         .context("failed to rebuild QUIC TLS config")?,
       )
@@ -400,6 +406,7 @@ impl ReloadManager {
       admin_mutations: active.admin_mutations.clone(),
       shared_state: active.shared_state.clone(),
       crlite,
+      downstream_ct,
       ocsp_staple,
       tls_server_config,
       #[cfg(feature = "admin-runtime")]
@@ -637,6 +644,18 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     .as_ref()
     .map(|path| canonicalize_under_base("tls.crlite.filter_file", cert_dir, path))
     .transpose()?;
+  let ct_log_list_file = config
+    .source_paths
+    .downstream_tls_ct_log_list_file
+    .as_ref()
+    .map(|path| canonicalize_under_base("tls.ct.log_list.file", cert_dir, path))
+    .transpose()?;
+  let ct_log_list_signature_file = config
+    .source_paths
+    .downstream_tls_ct_log_list_signature_file
+    .as_ref()
+    .map(|path| canonicalize_under_base("tls.ct.log_list.signature_file", cert_dir, path))
+    .transpose()?;
   let quic_host_key_file = config
     .source_paths
     .quic_host_key_file
@@ -740,6 +759,16 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
       failure_policy: old_tls.crlite.failure_policy,
       coverage_policy: old_tls.crlite.coverage_policy,
       managed: old_tls.crlite.managed,
+    },
+    ct: crate::config::DownstreamCtConfig {
+      log_list: crate::config::DownstreamCtLogListConfig {
+        file: ct_log_list_file,
+        signature_file: ct_log_list_signature_file,
+        ..old_tls.ct.log_list
+      },
+      mode: old_tls.ct.mode,
+      policy: old_tls.ct.policy,
+      failure_policy: old_tls.ct.failure_policy,
     },
   };
   config.quic = old_quic;

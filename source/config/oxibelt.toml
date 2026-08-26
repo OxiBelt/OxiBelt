@@ -257,6 +257,20 @@ mode = "disabled"
 # refresh_interval_seconds = 21600
 # request_timeout_ms = 3000
 
+[tls.ct]
+mode = "disabled" # disabled | audit | enforce
+policy = "chrome" # chrome | firefox
+failure_policy = "reject_handshake"
+
+[tls.ct.log_list]
+mode = "managed" # managed | static_file
+cache_dir = "/var/lib/oxibelt/ct-log-list"
+max_download_bytes = 4194304
+request_timeout_ms = 5000
+refresh_interval_seconds = 86400
+# file = "ct/log_list.json"
+# signature_file = "ct/log_list.sig"
+
 [quic]
 retry = true
 zero_rtt = "off"

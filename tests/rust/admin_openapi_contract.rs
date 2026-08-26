@@ -1240,6 +1240,66 @@ fn downstream_tls_status_documents_bounded_crlite_status() {
 }
 
 #[test]
+fn downstream_tls_status_documents_bounded_ct_status() {
+  let spec = openapi();
+  let schema = &spec["paths"]["/admin/v1/tls/downstream"]["get"]["responses"]["200"]["content"]["application/json"]
+    ["schema"];
+  let required = json_string_set(&schema["required"], "/admin/v1/tls/downstream.required");
+  assert!(required.contains("ct_mode"));
+  assert!(required.contains("ct"));
+  assert_eq!(
+    schema["properties"]["ct"]["$ref"],
+    "#/components/schemas/DownstreamCtStatus"
+  );
+
+  let ct = &spec["components"]["schemas"]["DownstreamCtStatus"];
+  let ct_required = json_string_set(&ct["required"], "DownstreamCtStatus.required");
+  for field in [
+    "enabled",
+    "mode",
+    "policy",
+    "policy_revision",
+    "failure_policy",
+    "log_list_mode",
+    "log_list_source",
+    "log_list_timestamp",
+    "log_list_age_seconds",
+    "cache_present",
+    "cache_persistent",
+    "last_refresh_at",
+    "next_refresh_at",
+    "last_error_code",
+    "certificates",
+  ] {
+    assert!(
+      ct_required.contains(field),
+      "CT status should require {field}"
+    );
+  }
+  assert_eq!(ct["properties"]["certificates"]["maxItems"], 257);
+  let properties = ct["properties"]
+    .as_object()
+    .expect("CT status properties should be an object");
+  for sensitive in [
+    "sni",
+    "certificate_identity",
+    "fingerprint",
+    "sct",
+    "signature",
+    "log_id",
+    "operator",
+    "url",
+    "cache_dir",
+    "file",
+  ] {
+    assert!(
+      !properties.contains_key(sensitive),
+      "CT status must not document sensitive field {sensitive}"
+    );
+  }
+}
+
+#[test]
 fn upstream_tls_status_documents_bounded_revocation_status() {
   let spec = openapi();
   let schema = &spec["paths"]["/admin/v1/tls/upstream"]["get"]["responses"]["200"]["content"]["application/json"]

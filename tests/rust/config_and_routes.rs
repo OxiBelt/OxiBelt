@@ -17,19 +17,20 @@ use oxibelt::config::{
   CompressionProxiedPredicate, CompressionUpstreamAcceptEncodingMode, Config,
   ConnectionLimitIdentityMode, CrliteCoveragePolicy, CrliteFailurePolicy, CrliteManagedStorage,
   CrliteMode, CryptoPrimitiveBackend, CryptoPrimitiveProvider, DatabaseMitigationMode,
-  DnsDiscoveryRecordType, DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode,
-  ExpectContinueMode, ExternalAuthProvider, ExternalCacheHandlerFailPolicy,
-  ExternalCacheHandlerKind, ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode,
-  HealthCheckProtocol, HotReloadMode, IpmPolicyEffect, KubernetesDiscoveryResource,
-  LbPolicyCompatProfile, LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode,
-  OutboundOcspMode, PriorityClass, PriorityMode, PriorityRejectionPolicy, ProxyProtocolEgressMode,
-  ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition,
-  RuntimeArtifact, RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
-  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
-  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
-  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
-  TrailerMode, UdpFlowState, UpstreamDiscoveryProvider, UpstreamEchMode,
-  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
+  DnsDiscoveryRecordType, DownstreamCtLogListMode, DownstreamCtMode, DownstreamCtPolicy,
+  DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
+  ExternalAuthProvider, ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind,
+  ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode,
+  IpmPolicyEffect, KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm,
+  MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityClass, PriorityMode,
+  PriorityRejectionPolicy, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
+  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeArtifact, RuntimeMainRuntimeMode,
+  RuntimeOverrides, SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
+  StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
+  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
+  TlsServerResumptionMode, TlsVersion, TrailerMode, UdpFlowState, UpstreamDiscoveryProvider,
+  UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
+  resolve_auto_worker_count,
 };
 use oxibelt::hardening::RequiredHardeningFailurePolicy;
 use oxibelt::quic::load_host_key;
@@ -13724,6 +13725,143 @@ failure_policy = "degraded_allow"
       .contains(&filter_path)
   );
   assert!(config.source_paths.runtime_files.contains(&filter_path));
+}
+
+#[test]
+fn downstream_ct_defaults_preserve_disabled_behavior() {
+  let temp_dir = common::TempDir::new("downstream-ct-defaults");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "downstream-ct-defaults");
+  let raw = common::minimal_config_toml(&cert_path, &key_path);
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+
+  assert_eq!(config.tls.ct.mode, DownstreamCtMode::Disabled);
+  assert_eq!(config.tls.ct.policy, DownstreamCtPolicy::Chrome);
+  assert_eq!(
+    config.tls.ct.log_list.mode,
+    DownstreamCtLogListMode::Managed
+  );
+  config
+    .validate()
+    .expect("default CT config should validate");
+}
+
+#[test]
+fn downstream_ct_parses_policy_and_per_certificate_mode_override() {
+  let temp_dir = common::TempDir::new("downstream-ct-override");
+  let (default_cert, default_key) =
+    common::create_self_signed_cert(temp_dir.path(), "downstream-ct-default");
+  let (sni_cert, sni_key) = common::create_self_signed_cert(temp_dir.path(), "downstream-ct-sni");
+  let raw = format!(
+    r#"
+{}
+
+[tls.ct]
+mode = "audit"
+policy = "firefox"
+
+[tls.ct.log_list]
+cache_dir = "{}"
+
+[tls.resumption]
+mode = "off"
+
+[[tls.certificates]]
+server_names = ["ct.example.test"]
+cert_chain = "{}"
+private_key = "{}"
+
+[tls.certificates.ct]
+mode = "enforce"
+"#,
+    common::minimal_config_toml(&default_cert, &default_key),
+    temp_dir.path().display(),
+    sni_cert.display(),
+    sni_key.display(),
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+
+  assert_eq!(config.tls.ct.mode, DownstreamCtMode::Audit);
+  assert_eq!(config.tls.ct.policy, DownstreamCtPolicy::Firefox);
+  assert_eq!(
+    config.tls.ct.effective_mode(&config.tls.certificates[0].ct),
+    DownstreamCtMode::Enforce
+  );
+  config.validate().expect("CT override should validate");
+}
+
+#[test]
+fn downstream_ct_static_files_are_tracked_for_tls_reload() {
+  let temp_dir = common::TempDir::new("downstream-ct-static-paths");
+  let config_path = write_loadable_config(&temp_dir, "downstream-ct-static-paths", |raw| {
+    raw
+      + r#"
+
+[tls.ct]
+mode = "audit"
+
+[tls.ct.log_list]
+mode = "static_file"
+file = "ct-log-list.json"
+signature_file = "ct-log-list.sig"
+"#
+  });
+  let list_path = temp_dir.path().join("cert").join("ct-log-list.json");
+  let signature_path = temp_dir.path().join("cert").join("ct-log-list.sig");
+  std::fs::write(&list_path, b"{}").expect("failed to write CT list fixture");
+  std::fs::write(&signature_path, b"signature").expect("failed to write CT signature fixture");
+
+  let config = Config::load(&config_path).expect("config should load");
+  let reload_files = config.source_paths.downstream_tls_reload_files();
+  assert_eq!(
+    config
+      .source_paths
+      .downstream_tls_ct_log_list_file
+      .as_deref(),
+    Some(list_path.as_path())
+  );
+  assert_eq!(
+    config
+      .source_paths
+      .downstream_tls_ct_log_list_signature_file
+      .as_deref(),
+    Some(signature_path.as_path())
+  );
+  assert!(reload_files.contains(&list_path));
+  assert!(reload_files.contains(&signature_path));
+}
+
+#[test]
+fn downstream_ct_rejects_mixed_managed_inputs_and_unknown_keys() {
+  let temp_dir = common::TempDir::new("downstream-ct-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "downstream-ct-invalid");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    + r#"
+
+[tls.ct.log_list]
+mode = "managed"
+file = "ct-log-list.json"
+"#;
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  assert!(
+    config
+      .validate()
+      .expect_err("managed/static source mix should fail")
+      .to_string()
+      .contains("cannot be used when mode = \"managed\"")
+  );
+
+  let config_path = write_loadable_config(&temp_dir, "downstream-ct-unknown", |raw| {
+    raw
+      + r#"
+
+[tls.ct]
+unexpected = true
+"#
+  });
+  let error = Config::load(&config_path).expect_err("unknown downstream CT key should fail");
+  assert!(error.to_string().contains("tls.ct.unexpected"), "{error:#}");
 }
 
 #[test]

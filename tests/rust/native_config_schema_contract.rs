@@ -208,6 +208,43 @@ fn certificate_transparency_schema_publishes_epoch_one_defaults_and_reload_bound
 }
 
 #[test]
+fn downstream_ct_schema_is_defaulted_bounded_and_strict() {
+  let schema: serde_json::Value =
+    serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))
+      .expect("generated native schema should be JSON");
+
+  let ct = schema_node_for_metadata_path(&schema, "tls.ct");
+  assert_eq!(ct["additionalProperties"], false);
+  assert_eq!(ct["properties"]["mode"]["default"], "disabled");
+  assert_eq!(
+    ct["properties"]["mode"]["enum"],
+    serde_json::json!(["disabled", "audit", "enforce"])
+  );
+  assert_eq!(
+    ct["properties"]["policy"]["enum"],
+    serde_json::json!(["chrome", "firefox"])
+  );
+
+  let log_list = schema_node_for_metadata_path(&schema, "tls.ct.log_list");
+  assert_eq!(log_list["additionalProperties"], false);
+  assert_eq!(log_list["properties"]["mode"]["default"], "managed");
+  assert_eq!(
+    log_list["properties"]["max_download_bytes"]["maximum"],
+    16_777_216
+  );
+  assert_eq!(
+    log_list["properties"]["refresh_interval_seconds"]["minimum"],
+    3_600
+  );
+  assert_eq!(
+    log_list["properties"]["file"]["x-oxibelt-path-kind"],
+    "cert_relative"
+  );
+  let certificate_ct = schema_node_for_metadata_path(&schema, "tls.certificates[].ct");
+  assert_eq!(certificate_ct["additionalProperties"], false);
+}
+
+#[test]
 fn quic_initial_reassembly_schema_is_defaulted_and_bounded() {
   let schema = generate_native_config_schema().expect("native schema should generate");
   let schema: serde_json::Value =

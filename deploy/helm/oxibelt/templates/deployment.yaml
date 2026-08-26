@@ -264,6 +264,10 @@ spec:
         - name: cache
           mountPath: /var/cache/oxibelt
         {{- end }}
+        {{- if ne .Values.tls.ct.mode "disabled" }}
+        - name: ct-log-list
+          mountPath: {{ .Values.tls.ct.cacheDir | quote }}
+        {{- end }}
         {{- range $volume := .Values.writableVolumes }}
         - name: {{ $volume.name }}
           mountPath: {{ $volume.mountPath | quote }}
@@ -359,6 +363,11 @@ spec:
           sizeLimit: {{ .Values.cacheVolume.sizeLimit | quote }}
           {{- else }} {}
           {{- end }}
+      {{- end }}
+      {{- if ne .Values.tls.ct.mode "disabled" }}
+      - name: ct-log-list
+        persistentVolumeClaim:
+          claimName: {{ .Values.tls.ct.persistentVolumeClaimName | quote }}
       {{- end }}
       {{- range $volume := .Values.writableVolumes }}
       - name: {{ $volume.name }}

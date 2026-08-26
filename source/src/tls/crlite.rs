@@ -652,6 +652,7 @@ mod tests {
         filter_file: Some(filter_file),
         ..CrliteConfig::default()
       },
+      ct: crate::config::DownstreamCtConfig::default(),
     }
   }
 

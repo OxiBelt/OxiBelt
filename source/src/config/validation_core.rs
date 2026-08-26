@@ -524,6 +524,11 @@ impl Config {
 
     validate_ocsp_config("tls.ocsp", &self.tls.ocsp)?;
     self.tls.crlite.validate()?;
+    let downstream_ct_enabled = self.tls.ct.mode != crate::config::DownstreamCtMode::Disabled
+      || self.tls.certificates.iter().any(|certificate| {
+        self.tls.ct.effective_mode(&certificate.ct) != crate::config::DownstreamCtMode::Disabled
+      });
+    self.tls.ct.validate(downstream_ct_enabled)?;
     self.client_identity.validate()?;
     crate::waf::validate_config(self)?;
     operational_profile::validate(self)?;

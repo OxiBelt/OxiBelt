@@ -821,6 +821,7 @@ request_timeout_ms = 1
       client_auth: TlsClientAuthConfig::default(),
       ocsp: OcspConfig::default(),
       crlite: crate::config::CrliteConfig::default(),
+      ct: crate::config::DownstreamCtConfig::default(),
     }
   }
 

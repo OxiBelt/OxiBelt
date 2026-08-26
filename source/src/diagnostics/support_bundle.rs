@@ -432,6 +432,8 @@ pub fn build_runtime_snapshot(snapshot: &AppSnapshot) -> RuntimeSnapshot {
         .downstream_tls_crlite_filter_file
         .is_some(),
       crlite: snapshot.crlite.status(),
+      ct_mode: snapshot.config.tls.ct.mode.as_str().to_string(),
+      ct: snapshot.downstream_ct.status(),
       ocsp_mode: format!("{:?}", snapshot.config.tls.ocsp.mode),
       ocsp_response_file_configured: snapshot
         .config

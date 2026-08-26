@@ -265,6 +265,13 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   );
   assert_eq!(values["securityContext"]["readOnlyRootFilesystem"], true);
   assert_eq!(values["podSecurityContext"]["runAsNonRoot"], true);
+  assert_eq!(values["tls"]["ct"]["mode"], "disabled");
+  assert_eq!(values["tls"]["ct"]["policy"], "chrome");
+  assert_eq!(
+    values["tls"]["ct"]["cacheDir"],
+    "/var/lib/oxibelt/ct-log-list"
+  );
+  assert_eq!(values["tls"]["ct"]["persistentVolumeClaimName"], "");
 
   let schema: Value = serde_json::from_str(&read_repo("deploy/helm/oxibelt/values.schema.json"))
     .expect("values.schema.json should parse as JSON");
@@ -307,6 +314,10 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(
     schema["properties"]["configRollout"]["properties"]["mode"]["enum"][1],
     "kubernetes_immutable"
+  );
+  assert_eq!(
+    schema["properties"]["tls"]["properties"]["ct"]["properties"]["mode"]["enum"],
+    serde_json::json!(["disabled", "audit", "enforce"])
   );
   assert_eq!(
     schema["properties"]["configRollout"]["properties"]["managedConfigPath"]["pattern"],

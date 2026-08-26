@@ -1141,6 +1141,8 @@
                     "remote_signer_enabled",
                     "crlite_mode",
                     "crlite",
+                    "ct_mode",
+                    "ct",
                     "ocsp_mode",
                     "ocsp_response_file",
                     "ocsp",
@@ -1339,6 +1341,17 @@
                         }
                       },
                       "additionalProperties": false
+                    },
+                    "ct_mode": {
+                      "type": "string",
+                      "enum": [
+                        "disabled",
+                        "audit",
+                        "enforce"
+                      ]
+                    },
+                    "ct": {
+                      "$ref": "#/components/schemas/DownstreamCtStatus"
                     },
                     "ocsp_mode": {
                       "type": "string"
@@ -6370,6 +6383,127 @@
       }
     },
     "schemas": {
+      "DownstreamCtStatus": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "mode",
+          "policy",
+          "policy_revision",
+          "failure_policy",
+          "log_list_mode",
+          "log_list_source",
+          "log_list_version",
+          "log_list_timestamp",
+          "log_list_age_seconds",
+          "cache_present",
+          "cache_persistent",
+          "last_refresh_at",
+          "next_refresh_at",
+          "last_error_code",
+          "certificates"
+        ],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "mode": {
+            "type": "string",
+            "enum": ["disabled", "audit", "enforce"]
+          },
+          "policy": {
+            "type": "string",
+            "enum": ["chrome", "firefox"]
+          },
+          "policy_revision": {
+            "type": "string",
+            "enum": ["chrome-v1", "firefox-v1"]
+          },
+          "failure_policy": {
+            "type": "string",
+            "enum": ["reject_handshake"]
+          },
+          "log_list_mode": {
+            "type": "string",
+            "enum": ["managed", "static_file"]
+          },
+          "log_list_source": {
+            "type": "string",
+            "enum": ["chromium_v3"]
+          },
+          "log_list_version": { "type": ["string", "null"] },
+          "log_list_timestamp": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "log_list_age_seconds": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "cache_present": { "type": "boolean" },
+          "cache_persistent": { "type": "boolean" },
+          "last_refresh_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "next_refresh_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "last_error_code": { "type": ["string", "null"] },
+          "certificates": {
+            "type": "array",
+            "maxItems": 257,
+            "items": {
+              "$ref": "#/components/schemas/DownstreamCertificateCtStatus"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DownstreamCertificateCtStatus": {
+        "type": "object",
+        "required": [
+          "index",
+          "default",
+          "enabled",
+          "mode",
+          "status",
+          "compliant",
+          "embedded_sct_count",
+          "verified_sct_count",
+          "invalid_sct_count",
+          "distinct_log_count",
+          "distinct_operator_count",
+          "required_log_count",
+          "last_checked_at",
+          "last_error_code"
+        ],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "default": { "type": "boolean" },
+          "enabled": { "type": "boolean" },
+          "mode": {
+            "type": "string",
+            "enum": ["disabled", "audit", "enforce"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["disabled", "compliant", "noncompliant", "degraded"]
+          },
+          "compliant": { "type": ["boolean", "null"] },
+          "embedded_sct_count": { "type": "integer", "minimum": 0 },
+          "verified_sct_count": { "type": "integer", "minimum": 0 },
+          "invalid_sct_count": { "type": "integer", "minimum": 0 },
+          "distinct_log_count": { "type": "integer", "minimum": 0 },
+          "distinct_operator_count": { "type": "integer", "minimum": 0 },
+          "required_log_count": { "type": "integer", "minimum": 0 },
+          "last_checked_at": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "last_error_code": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      },
       "MembershipMember": {
         "type": "object",
         "required": [

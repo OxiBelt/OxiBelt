@@ -27,6 +27,11 @@ for the governed entry format.
 
 ### Configuration
 
+- Add optional `[tls.ct]` downstream embedded-SCT verification. `audit` reports
+  Chrome/Firefox-style policy results and `enforce` fails closed for activation
+  and new handshakes; the existing default remains `disabled`. Managed mode
+  authenticates and persistently caches the official Chromium v3 Log list,
+  while static mode accepts a signed offline list.
 - Add the optional `[certificate_transparency]` configuration surface. It is
   disabled by default and requires explicit protocol, log identity, signer,
   accepted-root bundle, storage, shard, and limit configuration before a
@@ -53,7 +58,10 @@ for the governed entry format.
 
 ### Admin API
 
-- No changes for this release.
+- Extend authenticated downstream TLS status and support bundles with bounded
+  CT policy, Log-list freshness, and per-certificate count/error state. Add
+  fixed-cardinality aggregate CT metrics without exposing SNI, certificate
+  identities, SCTs, Log IDs, operators, URLs, or paths.
 
 ### Feature lifecycle
 

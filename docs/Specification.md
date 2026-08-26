@@ -214,6 +214,7 @@ Supported downstream TLS features:
 - Static file-based OCSP stapling and live OCSP fetch/refresh for downstream TLS.
 - Optional downstream TLS early data with global and per-route policy controls.
 - Experimental CRLite filter enforcement for configured downstream TLS certificates, including operator-supplied local filters and WebPKI-only managed Mozilla CRLite cache downloads.
+- Optional RFC 6962 v1 embedded-SCT signature verification and versioned Chrome/Firefox-style downstream certificate-health policy in audit or fail-closed enforcement mode. Authenticated Chromium v3 Log-list refresh and all certificate evaluation stay off the TLS handshake path; SCT stapling and managed certificate submission are not implemented.
 - Opt-in outbound TLS revocation checks for runtime upstream clients using live OCSP fetch/cache and experimental CRLite local or WebPKI-only managed filters.
 - Session tickets with configurable rotation interval.
 

@@ -199,6 +199,14 @@ render writable_pvc \
 assert_contains "${work_dir}/writable_pvc.yaml" 'claimName: "oxibelt-state-v1"'
 assert_contains "${work_dir}/writable_pvc.yaml" '"storage": "persistentVolumeClaim"'
 
+render downstream_ct \
+  --set tls.ct.mode=enforce \
+  --set tls.ct.persistentVolumeClaimName=oxibelt-ct-log-list
+assert_contains "${work_dir}/downstream_ct.yaml" \
+  'expected_writable_paths = ["/var/lib/oxibelt/ct-log-list"]'
+assert_contains "${work_dir}/downstream_ct.yaml" 'claimName: "oxibelt-ct-log-list"'
+assert_contains "${work_dir}/downstream_ct.yaml" 'mode = "enforce"'
+
 render unrestricted_reviewed \
   --set-json 'networkPolicy.egress.destinations=[{"name":"public-upstream","category":"upstream","unrestrictedCidrs":{"enabled":true,"justification":"reviewed public TLS origin"},"to":[{"ipBlock":{"cidr":"0.0.0.0/0"}}],"ports":[{"port":443,"protocol":"TCP"}]}]'
 assert_contains "${work_dir}/unrestricted_reviewed.yaml" 'cidr: 0.0.0.0/0'

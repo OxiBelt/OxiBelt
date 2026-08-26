@@ -309,3 +309,16 @@ dictionary = "fuzz/dictionaries/tls.dict"
 coverage_landmarks = ["source/src/tls/cert_metadata.rs:parse_certificate_metadata", "source/src/tls/cert_metadata.rs:client_certificate_metadata"]
 regression_path = "tests/fixtures/fuzz-regressions/tls_certificate_metadata"
 leak_policy = "enabled"
+
+[[target]]
+name = "downstream_ct"
+owner = "Downstream certificate-transparency maintainers"
+max_input_bytes = 131072
+input_contract = "Untrusted bytes are interpreted independently as embedded-SCT certificate DER, serialized SCT lists, Chromium v3 log-list JSON, and bounded synthetic policy inputs."
+invariants = ["DER, SCT-list, and log-list parsing never panic or consume beyond bounded input", "malformed inputs fail closed and cannot become policy-compliant by parsing alone", "Chrome and Firefox policy evaluation remains deterministic across bounded state combinations"]
+unsupported_states = ["live certificate chains or private keys", "network log-list refresh", "TLS handshakes or runtime publication"]
+seed_dir = "fuzz/seeds/downstream_ct"
+dictionary = "fuzz/dictionaries/tls.dict"
+coverage_landmarks = ["source/src/tls/downstream_ct/der.rs:extract_embedded_sct_material", "source/src/tls/downstream_ct/mod.rs:split_sct_list", "source/src/tls/downstream_ct/log_list.rs:parse_log_list", "source/src/tls/downstream_ct/policy.rs:evaluate"]
+regression_path = "tests/fixtures/fuzz-regressions/downstream_ct"
+leak_policy = "enabled"

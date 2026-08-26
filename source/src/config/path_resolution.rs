@@ -152,6 +152,11 @@ impl Config {
       &mut self.source_paths,
       &path_roots.cert_dir,
     )?;
+    downstream_ct::resolve_static_files(
+      &mut self.tls.ct,
+      &mut self.source_paths,
+      &path_roots.cert_dir,
+    )?;
     client_identity::resolve_asn_database_file(
       &mut self.client_identity.asn,
       &mut self.source_paths,

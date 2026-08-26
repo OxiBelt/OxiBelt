@@ -524,6 +524,7 @@ mod tests {
       client_auth: crate::config::TlsClientAuthConfig::default(),
       ocsp: crate::config::OcspConfig::default(),
       crlite: crate::config::CrliteConfig::default(),
+      ct: crate::config::DownstreamCtConfig::default(),
     };
     tls.crlite.mode = crate::config::CrliteMode::Managed;
     tls.crlite.managed.cache_dir = cache_dir;

@@ -33,6 +33,12 @@ mod client_roots;
 mod crlite;
 mod crlite_managed;
 mod crlite_runtime;
+mod downstream_ct;
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn exercise_downstream_ct_fuzzing(data: &[u8]) {
+  downstream_ct::exercise_fuzzing(data);
+}
 mod downstream_tcp;
 mod negotiation;
 mod ocsp;
@@ -58,6 +64,8 @@ pub(crate) use admin_quic::build_admin_quic_server_config_with_crypto_and_resump
 pub use admin_quic::build_admin_quic_server_config_with_resumption;
 pub(crate) use crlite_runtime::CrliteRuntime;
 pub use crlite_runtime::CrliteRuntimeStatus;
+pub(crate) use downstream_ct::DownstreamCtRuntime;
+pub use downstream_ct::{CertificateCtStatus, DownstreamCtRuntimeStatus};
 use downstream_tcp::{
   DownstreamTcpTlsBuild, build_downstream_tcp_server_config_for_tls12,
   build_downstream_tcp_server_config_for_tls13,
@@ -187,9 +195,11 @@ pub(crate) fn build_quic_server_config_with_crypto_and_resumption(
     resumption_state,
     None,
     None,
+    None,
   )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_quic_server_config_with_crypto_resumption_and_ocsp(
   crypto: &CryptoConfig,
   tls: &TlsConfig,
@@ -198,6 +208,7 @@ pub(crate) fn build_quic_server_config_with_crypto_resumption_and_ocsp(
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
+  ct_runtime: Option<&DownstreamCtRuntime>,
 ) -> anyhow::Result<QuinnServerConfig> {
   build_downstream_quic_server_config_for_tls13(
     tls,
@@ -210,6 +221,7 @@ pub(crate) fn build_quic_server_config_with_crypto_resumption_and_ocsp(
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
+    ct_runtime,
   )
 }
 
@@ -225,6 +237,7 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
+  ct_runtime: Option<&DownstreamCtRuntime>,
 ) -> anyhow::Result<QuinnServerConfig> {
   let provider = Arc::new(downstream_crypto_provider_for_tls13(
     crypto,
@@ -239,6 +252,9 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
   )?;
   if let Some(runtime) = crlite_runtime {
     cert_resolver = runtime.wrap_resolver(cert_resolver);
+  }
+  if let Some(runtime) = ct_runtime {
+    cert_resolver = runtime.wrap_resolver(cert_resolver, certificate_partition_identity);
   }
   let builder = ServerConfig::builder_with_provider(provider.clone())
     .with_protocol_versions(&[&rustls::version::TLS13])

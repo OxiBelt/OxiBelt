@@ -88,6 +88,7 @@ impl AppSnapshot {
       admin_mutations: previous.admin_mutations.clone(),
       shared_state: previous.shared_state.clone(),
       crlite: previous.crlite.clone(),
+      downstream_ct: previous.downstream_ct.clone(),
       ocsp_staple: previous.ocsp_staple.clone(),
       tls_server_config: previous.tls_server_config.clone(),
       #[cfg(feature = "admin-runtime")]

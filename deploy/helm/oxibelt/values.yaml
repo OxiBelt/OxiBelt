@@ -330,6 +330,7 @@ config:
     min_version = "tls1.3"
     max_version = "tls1.3"
     {{ include "oxibelt.publicTlsConfig" . }}
+    {{ include "oxibelt.publicTlsCtConfig" . }}
 
     [health]
     enabled = true
@@ -384,6 +385,13 @@ tls:
   # Providing names turns on required SNI and unknown-SNI rejection for the
   # public certificate. Leave empty for existing unprofiled behavior.
   serverNames: []
+  ct:
+    # Opt-in managed embedded-SCT certificate health gate. For audit/enforce,
+    # the existing PVC is mounted at cacheDir for restart persistence.
+    mode: disabled # disabled | audit | enforce
+    policy: chrome # chrome | firefox
+    cacheDir: /var/lib/oxibelt/ct-log-list
+    persistentVolumeClaimName: ""
 
 # Project exactly one Secret item whose mounted value is base64 text for a
 # 64-byte QUIC host key into the certificate root as `quic-host-key.b64`. The

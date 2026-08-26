@@ -948,6 +948,20 @@ mode = "disabled" # disabled | enforce | managed
 # refresh_interval_seconds = 21600
 # request_timeout_ms = 3000
 
+[tls.ct]
+mode = "disabled" # disabled | audit | enforce
+policy = "chrome" # chrome | firefox
+failure_policy = "reject_handshake"
+
+[tls.ct.log_list]
+mode = "managed" # managed | static_file
+cache_dir = "/var/lib/oxibelt/ct-log-list"
+max_download_bytes = 4194304
+request_timeout_ms = 5000
+refresh_interval_seconds = 86400
+# file = "ct/log_list.json"
+# signature_file = "ct/log_list.sig"
+
 [proxy.upstream_revocation.ocsp]
 mode = "disabled" # disabled | live_fetch
 # failure_policy = "fail_closed" # fail_closed | degraded_allow
@@ -1017,6 +1031,14 @@ Live OCSP fetches run at snapshot startup/reload and in a bounded background ref
 With `failure_policy = "fail_closed"`, missing, oversized, stale, hash-mismatched, unparseable, or unavailable CRLite filters reject startup or reload. With `failure_policy = "degraded_allow"`, those filter health failures are reported through Admin TLS status, support bundles, and public aggregate metrics while the existing TLS snapshot can continue. A `revoked` CRLite result always rejects the configured downstream certificate, even under `degraded_allow`. `coverage_policy = "allow_unknown"` permits CRLite `not_covered` and `not_enrolled` results; `require_good` rejects anything other than `good`.
 
 Managed CRLite storage defaults to `disk` at `/var/lib/oxibelt/crlite`, which should be a writable persistent volume in production. Use `tmpfs` with `tmpfs_dir = "/dev/shm/oxibelt-crlite"` for read-only root filesystems that still provide writable tmpfs. Use `memory` only for ephemeral deployments that accept refetching on every restart and possible fail-closed startup if the managed filter cannot be fetched. The cache contains public revocation data, but it is integrity-sensitive; keep the directory owned by the OxiBelt runtime user and avoid sharing write access with unrelated processes.
+
+`tls.ct` is a downstream certificate-health gate that verifies RFC 6962 v1 SCTs embedded in each configured leaf certificate. It is separate from the top-level `certificate_transparency` log-operator service and from CRLite metadata parsing. `audit` verifies and reports without rejecting a certificate. `enforce` rejects initial activation or reload when a certificate is non-compliant, and its resolver stops selecting a certificate for new TCP TLS or QUIC handshakes if a later Log-list refresh makes it non-compliant. Existing connections are not terminated. The default is `disabled`, so existing configurations and handshakes do not require a Log list.
+
+The versioned `chrome` and `firefox` profiles implement the embedded-SCT thresholds used by the current Chrome policy and Mozilla's CT policy enforcer: two distinct Logs for certificates with a lifetime of at most 180 days, otherwise three; at least two distinct Log operators; and at least one SCT from a currently acceptable Log. Retired-Log and previous-operator timestamps are evaluated at SCT issuance time. These are operator-selected health policies over the authenticated Chromium v3 Log list, not a claim that OxiBelt performs a browser's full public-WebPKI validation or update behavior.
+
+Managed Log-list mode downloads the fixed Chromium v3 JSON list and detached signature with a WebPKI-only client, verifies the build-pinned official list-signing key, bounds both responses, rejects an update older than the available cached or in-memory LKG, and atomically stores a signed bundle under an inter-process lock in `cache_dir`. A complete cache-volume restore also restores that local rollback baseline, so protect snapshot and restore authority separately. No CT network I/O, DER parsing, or SCT signature verification occurs during a handshake; the enforce path compares the resolver's selected chain with the evaluated chain and checks the absolute stale deadline. Use a private, persistent, writable directory in production. When the authenticated Log-list timestamp reaches 70 days of age, audit mode reports degradation and enforce mode rejects new handshakes; OxiBelt deliberately fails closed rather than copying Chrome's browser-side enforcement-disable fallback.
+
+`static_file` mode requires both `file` and `signature_file`; the paths are resolved under the certificate directory and participate in downstream TLS reload. The JSON must be an official Chromium v3 Log list and the signature must verify with the same pinned signing key. Per-certificate `[tls.certificates.ct] mode = "disabled" | "audit" | "enforce"` can override only the mode. OxiBelt does not fetch or staple TLS-delivered SCTs, does not submit certificate chains to public Logs, and does not modify or re-sign certificates.
 
 `proxy.upstream_revocation` enables opt-in revocation checks for runtime outbound TLS clients. It applies to HTTPS upstream clients, upstream-pool generated HTTPS clients, HTTP/3 and WebTransport upstream QUIC clients, external auth and discovery HTTP clients, `turns://` TURN upstreams, and diagnostics probes. The default is disabled for compatibility. When enabled globally, each direct `[[upstreams]]` entry can override the policy under `[upstreams.tls.upstream_revocation]`; upstream-pool forwarding, upstream-pool discovery, external auth, discovery, TURN, and diagnostics clients use the global policy. Active upstream-pool health checks can override only their health-check HTTPS client policy under `[upstream_pools.health_check.tls.upstream_revocation]`; that override does not affect forwarding clients. Standalone helper clients such as `oxibeltctl` fetches are outside this runtime policy.
 

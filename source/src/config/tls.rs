@@ -8,8 +8,8 @@ use anyhow::bail;
 use serde::{Deserialize, Deserializer};
 
 use super::{
-  CrliteConfig, QuicZeroRttMode, RouteTlsConfig, default_true,
-  resolve_existing_local_config_file_path_with_logical, validate_admin_server_name,
+  CrliteConfig, DownstreamCtCertificateConfig, DownstreamCtConfig, QuicZeroRttMode, RouteTlsConfig,
+  default_true, resolve_existing_local_config_file_path_with_logical, validate_admin_server_name,
   validate_tls_server_resumption,
 };
 
@@ -54,6 +54,7 @@ pub struct TlsConfig {
   pub client_auth: TlsClientAuthConfig,
   pub ocsp: OcspConfig,
   pub crlite: CrliteConfig,
+  pub ct: DownstreamCtConfig,
 }
 
 impl<'de> Deserialize<'de> for TlsConfig {
@@ -100,6 +101,8 @@ impl<'de> Deserialize<'de> for TlsConfig {
       ocsp: OcspConfig,
       #[serde(default)]
       crlite: CrliteConfig,
+      #[serde(default)]
+      ct: DownstreamCtConfig,
     }
 
     let raw = RawTlsConfig::deserialize(deserializer)?;
@@ -150,6 +153,7 @@ impl<'de> Deserialize<'de> for TlsConfig {
       client_auth: raw.client_auth,
       ocsp: raw.ocsp,
       crlite: raw.crlite,
+      ct: raw.ct,
     })
   }
 }
@@ -248,6 +252,8 @@ pub struct TlsCertificateConfig {
   pub remote_signer_key_id: Option<String>,
   #[serde(default)]
   pub ocsp: OcspConfig,
+  #[serde(default)]
+  pub ct: DownstreamCtCertificateConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

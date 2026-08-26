@@ -220,6 +220,9 @@ expected_digest = {{ $filesystemManifest.expectedDigest | quote }}
 {{- range $volume := .Values.writableVolumes -}}
 {{- $writablePaths = append $writablePaths $volume.mountPath -}}
 {{- end }}
+{{- if ne .Values.tls.ct.mode "disabled" -}}
+{{- $writablePaths = append $writablePaths .Values.tls.ct.cacheDir -}}
+{{- end }}
 expected_writable_paths = {{ $writablePaths | toJson }}
 {{ end -}}
 {{- end -}}
@@ -236,6 +239,20 @@ expected_writable_paths = {{ $writablePaths | toJson }}
 {{- printf "[%s]:%d" $address $port -}}
 {{- else -}}
 {{- printf "%s:%d" $address $port -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.publicTlsCtConfig" -}}
+{{- if ne .Values.tls.ct.mode "disabled" }}
+
+[tls.ct]
+mode = {{ .Values.tls.ct.mode | quote }}
+policy = {{ .Values.tls.ct.policy | quote }}
+failure_policy = "reject_handshake"
+
+[tls.ct.log_list]
+mode = "managed"
+cache_dir = {{ .Values.tls.ct.cacheDir | quote }}
 {{- end -}}
 {{- end -}}
 
@@ -325,6 +342,24 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- fail "tls.serverNames must not contain duplicate names" -}}
 {{- end -}}
 {{- $_ := set $seenServerNames $normalizedServerName true -}}
+{{- end -}}
+{{- if not (has .Values.tls.ct.mode (list "disabled" "audit" "enforce")) -}}
+{{- fail "tls.ct.mode must be disabled, audit, or enforce" -}}
+{{- end -}}
+{{- if not (has .Values.tls.ct.policy (list "chrome" "firefox")) -}}
+{{- fail "tls.ct.policy must be chrome or firefox" -}}
+{{- end -}}
+{{- if and (ne .Values.tls.ct.mode "disabled") (not .Values.tls.enabled) -}}
+{{- fail "tls.ct.mode requires tls.enabled=true" -}}
+{{- end -}}
+{{- if and (ne .Values.tls.ct.mode "disabled") (not (hasPrefix "/" .Values.tls.ct.cacheDir)) -}}
+{{- fail "tls.ct.cacheDir must be absolute when downstream CT is enabled" -}}
+{{- end -}}
+{{- if and (ne .Values.tls.ct.mode "disabled") (not .Values.tls.ct.persistentVolumeClaimName) -}}
+{{- fail "tls.ct.persistentVolumeClaimName is required when downstream CT is enabled" -}}
+{{- end -}}
+{{- if and .Values.tls.ct.persistentVolumeClaimName (or (gt (len .Values.tls.ct.persistentVolumeClaimName) 253) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" .Values.tls.ct.persistentVolumeClaimName))) -}}
+{{- fail "tls.ct.persistentVolumeClaimName must be a safe Kubernetes PVC name" -}}
 {{- end -}}
 {{- end -}}
 

@@ -14,7 +14,7 @@ use crate::config::{
 use super::certificate_partition::{
   DownstreamCertificatePartitions, downstream_certificate_partitions,
 };
-use super::{CrliteRuntime, OcspStapleRuntime, TlsResumptionState};
+use super::{CrliteRuntime, DownstreamCtRuntime, OcspStapleRuntime, TlsResumptionState};
 
 #[derive(Debug, Clone)]
 pub struct DownstreamTlsServerConfig {
@@ -188,6 +188,7 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
+  ct_runtime: Option<&DownstreamCtRuntime>,
 ) -> anyhow::Result<DownstreamTlsServerConfig> {
   let default_policy = tls.negotiation_policy();
   let certificate_partitions = downstream_resumption_partitions(tls)?;
@@ -203,6 +204,7 @@ pub(crate) fn build_downstream_tls_server_config_with_resumption_and_ocsp(
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
+    ct_runtime,
   );
   let default_key = TcpServerConfigKey {
     policy: default_policy.clone(),
@@ -314,6 +316,7 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
+  ct_runtime: Option<&DownstreamCtRuntime>,
 ) -> anyhow::Result<DownstreamQuicServerConfig> {
   let certificate_partitions = downstream_resumption_partitions(tls)?;
   let default_certificate_identity = certificate_partitions
@@ -336,6 +339,7 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
+    ct_runtime,
   )?;
   debug_assert_eq!(default_index, 0);
   if let Some(partitions) = &certificate_partitions {
@@ -354,6 +358,7 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
         resumption_state,
         ocsp_runtime,
         crlite_runtime,
+        ct_runtime,
       )?;
     }
   }
@@ -392,6 +397,7 @@ pub(crate) fn build_downstream_quic_server_config_with_resumption_and_ocsp(
         resumption_state,
         ocsp_runtime,
         crlite_runtime,
+        ct_runtime,
       )
       .with_context(|| {
         format!(
@@ -425,6 +431,7 @@ fn build_or_get_quic_policy(
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
+  ct_runtime: Option<&DownstreamCtRuntime>,
 ) -> anyhow::Result<usize> {
   if let Some(index) = policy_indices.get(&key) {
     return Ok(*index);
@@ -440,6 +447,7 @@ fn build_or_get_quic_policy(
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
+    ct_runtime,
   )?;
   let index = configs.len();
   configs.push(config);

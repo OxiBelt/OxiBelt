@@ -52,6 +52,10 @@ const TURN_REALM: &str = "fuzz.example.test";
 const TURN_USER: &str = "fuzz-user";
 const TURN_PASSWORD: &str = "fuzz-password";
 
+pub fn exercise_downstream_ct(data: &[u8]) {
+  crate::tls::exercise_downstream_ct_fuzzing(data);
+}
+
 pub fn exercise_tls_client_hello(data: &[u8]) {
   let data = bounded(data);
   let _ = crate::sni_forward::client_hello::tls_record_client_hello_sni(

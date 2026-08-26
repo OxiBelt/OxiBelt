@@ -135,6 +135,7 @@ pub struct AppSnapshot {
   pub(crate) admin_mutations: AdminMutationRuntime,
   pub shared_state: Option<Arc<SharedState>>,
   pub(crate) crlite: tls::CrliteRuntime,
+  pub(crate) downstream_ct: tls::DownstreamCtRuntime,
   pub(crate) ocsp_staple: tls::OcspStapleRuntime,
   pub tls_server_config: tls::DownstreamTlsServerConfig,
   #[cfg(feature = "admin-runtime")]
@@ -545,6 +546,9 @@ impl AppSnapshot {
     let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
       .await
       .context("failed to build CRLite runtime")?;
+    let downstream_ct = tls::DownstreamCtRuntime::new(&config.tls, metrics.clone())
+      .await
+      .context("failed to build downstream CT runtime")?;
     let ocsp_staple = tls::OcspStapleRuntime::new(
       &config.crypto,
       &config.tls,
@@ -566,6 +570,7 @@ impl AppSnapshot {
       Some(&tls_resumption),
       Some(&ocsp_staple),
       Some(&crlite),
+      Some(&downstream_ct),
     )
     .context("failed to build downstream TLS config")?;
     #[cfg(feature = "admin-runtime")]
@@ -592,6 +597,7 @@ impl AppSnapshot {
           Some(&tls_resumption),
           Some(&ocsp_staple),
           Some(&crlite),
+          Some(&downstream_ct),
         )
         .context("failed to build QUIC TLS config")?,
       )
@@ -735,6 +741,7 @@ impl AppSnapshot {
       admin_mutations,
       shared_state,
       crlite,
+      downstream_ct,
       ocsp_staple,
       tls_server_config,
       #[cfg(feature = "admin-runtime")]
@@ -972,6 +979,7 @@ impl AppSnapshot {
       admin_mutations: previous.admin_mutations.clone(),
       shared_state: previous.shared_state.clone(),
       crlite: previous.crlite.clone(),
+      downstream_ct: previous.downstream_ct.clone(),
       ocsp_staple: previous.ocsp_staple.clone(),
       tls_server_config: previous.tls_server_config.clone(),
       #[cfg(feature = "admin-runtime")]

@@ -12,6 +12,7 @@ const EXPECTED_TARGETS: &[&str] = &[
   "cluster_rollout_state",
   "compio_h1_response",
   "config_policy_normalization",
+  "downstream_ct",
   "gateway_api_translation",
   "http3_webtransport",
   "http_body_coding",
@@ -205,7 +206,7 @@ fn catalog_defines_the_complete_bounded_program() {
   assert_eq!(
     targets.keys().cloned().collect::<BTreeSet<_>>(),
     string_set(EXPECTED_TARGETS.iter().copied()),
-    "the fuzz catalog must preserve all twenty registered targets"
+    "the fuzz catalog must preserve every registered target"
   );
 
   assert_eq!(table_integer(&program, "max_seed_files_per_target"), 128);

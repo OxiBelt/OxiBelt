@@ -137,6 +137,7 @@ async fn downstream_sni_resolver_selects_exact_certificate_for_tcp() {
     private_key: Some(iam_key),
     remote_signer_key_id: None,
     ocsp: OcspConfig::default(),
+    ct: Default::default(),
   });
 
   let selected = tcp_selected_peer_certificate(tls_config, &ca_cert_path, "iam.example.me").await;
@@ -174,6 +175,7 @@ async fn downstream_sni_resolver_uses_default_for_unknown_sni() {
     private_key: Some(iam_key),
     remote_signer_key_id: None,
     ocsp: OcspConfig::default(),
+    ct: Default::default(),
   });
 
   let selected =
@@ -793,6 +795,7 @@ fn downstream_tls_config(
     client_auth,
     ocsp: OcspConfig::default(),
     crlite: oxibelt::config::CrliteConfig::default(),
+    ct: oxibelt::config::DownstreamCtConfig::default(),
   }
 }
 
@@ -908,6 +911,7 @@ fn remote_tls_config(
     client_auth: TlsClientAuthConfig::default(),
     ocsp: OcspConfig::default(),
     crlite: oxibelt::config::CrliteConfig::default(),
+    ct: oxibelt::config::DownstreamCtConfig::default(),
   }
 }
 

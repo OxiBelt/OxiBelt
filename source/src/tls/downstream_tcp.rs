@@ -17,8 +17,8 @@ use super::resumption::{
   TlsServerResumptionKey, client_auth_identity, configure_server_resumption,
 };
 use super::{
-  CrliteRuntime, OcspStapleRuntime, TlsResumptionState, downstream_client_cert_verifier, ocsp,
-  tls_protocol_versions,
+  CrliteRuntime, DownstreamCtRuntime, OcspStapleRuntime, TlsResumptionState,
+  downstream_client_cert_verifier, ocsp, tls_protocol_versions,
 };
 
 #[derive(Clone)]
@@ -30,10 +30,12 @@ pub(super) struct DownstreamTcpTlsBuild<'a> {
   resumption_state: Option<&'a TlsResumptionState>,
   ocsp_runtime: Option<&'a OcspStapleRuntime>,
   crlite_runtime: Option<&'a CrliteRuntime>,
+  ct_runtime: Option<&'a DownstreamCtRuntime>,
   certificate_partition_identity: Option<String>,
 }
 
 impl<'a> DownstreamTcpTlsBuild<'a> {
+  #[allow(clippy::too_many_arguments)]
   pub(super) fn new(
     crypto: &'a CryptoConfig,
     tls: &'a TlsConfig,
@@ -42,6 +44,7 @@ impl<'a> DownstreamTcpTlsBuild<'a> {
     resumption_state: Option<&'a TlsResumptionState>,
     ocsp_runtime: Option<&'a OcspStapleRuntime>,
     crlite_runtime: Option<&'a CrliteRuntime>,
+    ct_runtime: Option<&'a DownstreamCtRuntime>,
   ) -> Self {
     Self {
       crypto,
@@ -51,6 +54,7 @@ impl<'a> DownstreamTcpTlsBuild<'a> {
       resumption_state,
       ocsp_runtime,
       crlite_runtime,
+      ct_runtime,
       certificate_partition_identity: None,
     }
   }
@@ -106,9 +110,11 @@ pub(crate) fn build_server_config_with_crypto_and_resumption(
     resumption_state,
     None,
     None,
+    None,
   )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_server_config_with_crypto_resumption_and_ocsp(
   crypto: &CryptoConfig,
   tls: &TlsConfig,
@@ -117,6 +123,7 @@ pub(crate) fn build_server_config_with_crypto_resumption_and_ocsp(
   resumption_state: Option<&TlsResumptionState>,
   ocsp_runtime: Option<&OcspStapleRuntime>,
   crlite_runtime: Option<&CrliteRuntime>,
+  ct_runtime: Option<&DownstreamCtRuntime>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
   let build = DownstreamTcpTlsBuild::new(
     crypto,
@@ -126,6 +133,7 @@ pub(crate) fn build_server_config_with_crypto_resumption_and_ocsp(
     resumption_state,
     ocsp_runtime,
     crlite_runtime,
+    ct_runtime,
   );
   build_downstream_tcp_server_config_for_policy(
     build,
@@ -177,6 +185,12 @@ fn build_downstream_tcp_server_config_with_provider(
   )?;
   if let Some(runtime) = build.crlite_runtime {
     cert_resolver = runtime.wrap_resolver(cert_resolver);
+  }
+  if let Some(runtime) = build.ct_runtime {
+    cert_resolver = runtime.wrap_resolver(
+      cert_resolver,
+      build.certificate_partition_identity.as_deref(),
+    );
   }
   let builder = ServerConfig::builder_with_provider(provider.clone())
     .with_protocol_versions(versions)

@@ -8,6 +8,8 @@ pub struct TlsRuntimeSnapshot {
   pub crlite_mode: String,
   pub crlite_filter_file_configured: bool,
   pub crlite: crate::tls::CrliteRuntimeStatus,
+  pub ct_mode: String,
+  pub ct: crate::tls::DownstreamCtRuntimeStatus,
   pub ocsp_mode: String,
   pub ocsp_response_file_configured: bool,
   pub ocsp: crate::tls::OcspRuntimeStatus,
