@@ -990,41 +990,4 @@ fn unix_now() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use rustls::pki_types::CertificateDer;
-
-  #[test]
-  fn version_rollback_is_numeric_not_lexical() {
-    assert!(parse_version("89.30").unwrap() > parse_version("89.9").unwrap());
-    assert!(parse_version("89").is_err());
-    assert!(parse_version("89.beta").is_err());
-  }
-
-  #[test]
-  fn cache_base64_is_canonical_and_bounded() {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(b"list");
-    assert_eq!(decode_cache_base64(&encoded, 4).unwrap(), b"list");
-    assert!(decode_cache_base64(&encoded, 3).is_err());
-  }
-
-  #[test]
-  fn resolver_chain_binding_covers_every_certificate() {
-    let evaluated = vec![
-      CertificateDer::from(vec![1, 2, 3]),
-      CertificateDer::from(vec![4, 5, 6]),
-    ];
-    assert!(certificate_chain_matches(&evaluated, &evaluated));
-    assert!(!certificate_chain_matches(
-      &[CertificateDer::from(vec![1, 2, 3])],
-      &evaluated
-    ));
-    assert!(!certificate_chain_matches(
-      &[
-        CertificateDer::from(vec![1, 2, 3]),
-        CertificateDer::from(vec![4, 5, 7]),
-      ],
-      &evaluated
-    ));
-  }
-}
+mod tests;
