@@ -59,12 +59,12 @@ jobs:
 
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install nightly-2026-08-24 --profile minimal --component llvm-tools-preview
+          rustup toolchain install nightly-2026-08-26 --profile minimal --component llvm-tools-preview
 
       - name: Install pinned cargo-fuzz
         run: |
-          cargo +nightly-2026-08-24 install cargo-fuzz --version 0.13.2 --locked
-          test "$(cargo +nightly-2026-08-24 fuzz --version)" = "cargo-fuzz 0.13.2"
+          cargo +nightly-2026-08-26 install cargo-fuzz --version 0.13.2 --locked
+          test "$(cargo +nightly-2026-08-26 fuzz --version)" = "cargo-fuzz 0.13.2"
 
       - name: Restore bounded target corpus
         id: corpus-restore

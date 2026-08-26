@@ -24,7 +24,7 @@ fixture_a_input="${OXIBELT_ADMISSION_FIXTURE_A_DIR:-}"
 fixture_b_input="${OXIBELT_ADMISSION_FIXTURE_B_DIR:-}"
 receipt_output="${OXIBELT_ADMISSION_RECEIPT_OUTPUT:-}"
 
-rust_builder_image="rust:1.98.0-trixie@sha256:7f7a53a25a0319dd8284e279d529d45759cb384d59b14cc6806132910f45522e"
+rust_builder_image="rust:1.98.0-trixie@sha256:271849e998ffce5776454bbf98c5dc21baafc854ff8e566197908d3aca9a81e8"
 node_builder_image="node:24-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43"
 runtime_image="alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 

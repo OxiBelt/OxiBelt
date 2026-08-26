@@ -933,7 +933,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   }
 
   for expected in [
-    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:7f7a53a25a0319dd8284e279d529d45759cb384d59b14cc6806132910f45522e\"",
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:271849e998ffce5776454bbf98c5dc21baafc854ff8e566197908d3aca9a81e8\"",
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",

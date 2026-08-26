@@ -130,7 +130,7 @@ failures follow
 ## Setup and local runs
 
 CI uses moving `stable` for sanitizer-free smoke coverage and pins the
-AddressSanitizer and sustained profiles to `nightly-2026-08-24`. Both use
+AddressSanitizer and sustained profiles to `nightly-2026-08-26`. Both use
 `cargo-fuzz 0.13.2`. Stable Rust cannot enable cargo-fuzz's nightly-only
 sanitizer instrumentation, so the stable lane supplements rather than replaces
 the pinned sanitizer lane. Install the same tools so local reproduction does
@@ -138,7 +138,7 @@ not silently use a different compiler or driver:
 
 ```sh
 rustup toolchain install stable --profile minimal
-rustup toolchain install nightly-2026-08-24 --profile minimal --component llvm-tools-preview
+rustup toolchain install nightly-2026-08-26 --profile minimal --component llvm-tools-preview
 cargo +stable install cargo-fuzz --version 0.13.2 --locked
 ```
 
@@ -220,7 +220,7 @@ To promote a useful input:
    private identifiers, copyrighted material, and unexpected size.
 2. Verify that it reaches new behavior or protects a confirmed regression.
 3. Minimize a corpus with `tests/scripts/run-fuzz-target.sh cmin <target>` or a
-   crash with `cargo +nightly-2026-08-24 fuzz tmin <target> <reproducer>`.
+   crash with `cargo +nightly-2026-08-26 fuzz tmin <target> <reproducer>`.
 4. Add it under the target's reviewed seed or regression directory and record
    its provenance and digest. Never replace a reviewed seed silently.
 
@@ -260,9 +260,9 @@ Treat every reproducer as untrusted and potentially security-sensitive:
 
 1. Download it only into a temporary directory and verify the recorded digest.
 2. Reproduce with
-   `cargo +nightly-2026-08-24 fuzz run <target> <reproducer>`.
+   `cargo +nightly-2026-08-26 fuzz run <target> <reproducer>`.
 3. Minimize with
-   `cargo +nightly-2026-08-24 fuzz tmin <target> <reproducer>`.
+   `cargo +nightly-2026-08-26 fuzz tmin <target> <reproducer>`.
 4. Classify security-sensitive crashes through the private process in
    [`SECURITY.md`](../SECURITY.md); do not paste them into a public issue.
 5. Add the minimized input under
