@@ -446,18 +446,33 @@ fn cargo_vet_imports_and_bootstrap_inventory_are_locked() {
   let bootstrap_id = vet_policy["bootstrapException"]
     .as_str()
     .expect("cargo-vet needs a bootstrap exception id");
-  assert!(policy["exceptions"].as_array().is_some_and(|exceptions| {
-    exceptions.iter().any(|exception| {
-      exception["id"] == bootstrap_id
-        && exception["ecosystem"] == "rust"
-        && exception["control"] == "cargo-vet"
-        && exception["subject"]
-          == format!(
-            "Cargo.lock@sha256:{}",
-            vet_policy["lockfileSha256"].as_str().unwrap_or_default()
-          )
-    })
-  }));
+  assert_eq!(bootstrap_id, "rust-cargo-vet-bootstrap");
+  let lockfile_subject = format!(
+    "Cargo.lock@sha256:{}",
+    vet_policy["lockfileSha256"]
+      .as_str()
+      .expect("cargo-vet needs a lockfile digest")
+  );
+  let exceptions = policy["exceptions"]
+    .as_array()
+    .expect("dependency policy needs an exception inventory");
+  for (id, control) in [
+    (
+      "rust-duplicate-compatibility-bootstrap",
+      "duplicate-compatibility-lines",
+    ),
+    (bootstrap_id, "cargo-vet"),
+  ] {
+    assert!(
+      exceptions.iter().any(|exception| {
+        exception["id"] == id
+          && exception["ecosystem"] == "rust"
+          && exception["control"] == control
+          && exception["subject"].as_str() == Some(lockfile_subject.as_str())
+      }),
+      "{id} must bind {control} to the current Cargo.lock digest"
+    );
+  }
 
   let imports_lock = read("supply-chain/imports.lock");
   assert!(imports_lock.contains("[[audits.google."));
