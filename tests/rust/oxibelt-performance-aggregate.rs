@@ -33,7 +33,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 32;
+const COMPARISON_SCHEMA_VERSION: u32 = 33;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -44,6 +44,12 @@ const EXTERNAL_CLASSIFICATION_INFRA_DIAGNOSTIC: &str = "benchmark_infrastructure
 const PROFILE_CLASSIFICATION_VALIDATION: &str = "diagnostic_profile_validation";
 const PROFILE_CLASSIFICATION_ENV_UNAVAILABLE: &str = "profiling_environment_unavailable";
 const AMD64_TARGET_CPUS: [&str; 3] = ["x86-64-v2", "x86-64-v3", "x86-64-v4"];
+const TEXT_SEARCH_DIAGNOSTIC_SCENARIOS: [&str; 4] = [
+  "text-search-single-tail",
+  "text-search-multi-pattern-miss-overlap",
+  "text-search-advanced-regex-prefilter",
+  "text-search-header-route-framing",
+];
 const BODYFUL_COMPARATOR_SCENARIOS: [&str; 8] = [
   "post-1k-json-h2",
   "post-16k-json-h2",
@@ -893,6 +899,7 @@ struct BaselineGateContext {
   report: String,
   schema_version: Option<u32>,
   aggregates: BTreeMap<(String, String), AggregateStats>,
+  all_aggregates: BTreeMap<(String, String, String), AggregateStats>,
 }
 
 enum GateDisposition {
@@ -1234,6 +1241,7 @@ struct Report {
   direct_h2_promotion_evidence: Vec<DirectH2PromotionEvidence>,
   direct_h2_contention_evidence: Vec<DirectH2ContentionEvidence>,
   runtime_direct_h1_comparisons: Vec<RuntimeDirectH1Comparison>,
+  text_search_diagnostics: Vec<TextSearchDiagnostic>,
   amd64_isa_comparisons: Vec<Amd64IsaComparison>,
   probe_h2load_comparisons: Vec<ProbeH2loadComparison>,
   external_benchmarks: Vec<ExternalBenchmarkStats>,
@@ -1244,6 +1252,30 @@ struct Report {
   aggregates: Vec<AggregateStats>,
   warnings: Vec<String>,
   warnings_omitted: usize,
+}
+
+#[derive(Serialize)]
+struct TextSearchDiagnostic {
+  amd64_target_cpu: String,
+  scenario: String,
+  protocol: Option<String>,
+  sample_count: usize,
+  cpu_time_per_request_sample_count: usize,
+  median_rps: Option<f64>,
+  median_cpu_time_per_request_ns: Option<f64>,
+  median_p99_ms: Option<f64>,
+  baseline_report: Option<String>,
+  baseline_schema_version: Option<u32>,
+  baseline_sample_count: Option<usize>,
+  baseline_cpu_time_per_request_sample_count: Option<usize>,
+  baseline_median_rps: Option<f64>,
+  baseline_median_cpu_time_per_request_ns: Option<f64>,
+  baseline_median_p99_ms: Option<f64>,
+  rps_delta_percent: Option<f64>,
+  cpu_time_per_request_delta_percent: Option<f64>,
+  p99_delta_percent: Option<f64>,
+  classification: String,
+  reason: String,
 }
 
 #[derive(Deserialize)]
@@ -2176,6 +2208,8 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
   let direct_h2_contention_evidence = build_direct_h2_contention_evidence(&aggregate_map);
   let runtime_direct_h1_comparisons =
     build_runtime_direct_h1_comparisons(&aggregate_map, &primary_target_cpu);
+  let text_search_diagnostics =
+    build_text_search_diagnostics(&aggregate_map, baseline_gate_context.as_ref());
   let probe_h2load_comparisons =
     build_probe_h2load_comparisons(&aggregate_map, &external_benchmarks, &primary_target_cpu);
   let primary_reverse_proxy = primary_scenario_comparisons(&reverse_proxy, &primary_target_cpu);
@@ -2253,6 +2287,7 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     direct_h2_promotion_evidence,
     direct_h2_contention_evidence,
     runtime_direct_h1_comparisons,
+    text_search_diagnostics,
     amd64_isa_comparisons,
     probe_h2load_comparisons,
     external_benchmarks,
@@ -2379,14 +2414,27 @@ fn load_baseline_gate_context(
       return None;
     }
   };
-  let aggregates = baseline
+  let all_aggregates = baseline
     .aggregates
     .into_iter()
+    .map(|aggregate| {
+      (
+        (
+          aggregate.amd64_target_cpu.clone(),
+          aggregate.comparator.clone(),
+          aggregate.scenario.clone(),
+        ),
+        aggregate,
+      )
+    })
+    .collect::<BTreeMap<_, _>>();
+  let aggregates = all_aggregates
+    .values()
     .filter(|aggregate| aggregate.amd64_target_cpu == primary_target_cpu)
     .map(|aggregate| {
       (
         (aggregate.comparator.clone(), aggregate.scenario.clone()),
-        aggregate,
+        aggregate.clone(),
       )
     })
     .collect();
@@ -2394,6 +2442,7 @@ fn load_baseline_gate_context(
     report: label,
     schema_version: baseline.schema_version,
     aggregates,
+    all_aggregates,
   })
 }
 
@@ -4670,6 +4719,81 @@ fn build_runtime_direct_h1_comparisons(
     });
   }
 
+  rows
+}
+
+fn build_text_search_diagnostics(
+  aggregates: &AggregateMap,
+  baseline: Option<&BaselineGateContext>,
+) -> Vec<TextSearchDiagnostic> {
+  let mut rows = Vec::new();
+  for ((target_cpu, comparator, scenario), current) in aggregates {
+    if *comparator != Comparator::Oxibelt
+      || !TEXT_SEARCH_DIAGNOSTIC_SCENARIOS.contains(&scenario.as_str())
+    {
+      continue;
+    }
+    let before = baseline.and_then(|context| {
+      context.all_aggregates.get(&(
+        target_cpu.clone(),
+        Comparator::Oxibelt.as_str().to_owned(),
+        scenario.clone(),
+      ))
+    });
+    let (classification, reason) = match (baseline, before) {
+      (None, _) => (
+        "missing_baseline",
+        "no baseline performance report was provided; current diagnostic evidence remains available",
+      ),
+      (Some(_), None) => (
+        "missing_baseline",
+        "the baseline report does not contain this target and text-search scenario",
+      ),
+      (Some(_), Some(_)) if current.median_cpu_time_per_request_ns.is_none() => (
+        "missing_current_cpu_evidence",
+        "the current row does not contain process CPU-time-per-request evidence",
+      ),
+      (Some(_), Some(before)) if before.median_cpu_time_per_request_ns.is_none() => (
+        "missing_baseline_cpu_evidence",
+        "the baseline row does not contain process CPU-time-per-request evidence",
+      ),
+      (Some(_), Some(_)) => (
+        "comparable",
+        "baseline and current CPU/request, RPS, and p99 evidence are available; this row is diagnostic only",
+      ),
+    };
+
+    rows.push(TextSearchDiagnostic {
+      amd64_target_cpu: target_cpu.clone(),
+      scenario: scenario.clone(),
+      protocol: current.protocol_or_mode.clone(),
+      sample_count: current.sample_count,
+      cpu_time_per_request_sample_count: current.cpu_time_per_request_sample_count,
+      median_rps: current.median_rps,
+      median_cpu_time_per_request_ns: current.median_cpu_time_per_request_ns,
+      median_p99_ms: current.median_p99_ms,
+      baseline_report: baseline.map(|context| context.report.clone()),
+      baseline_schema_version: baseline.and_then(|context| context.schema_version),
+      baseline_sample_count: before.map(|row| row.sample_count),
+      baseline_cpu_time_per_request_sample_count: before
+        .map(|row| row.cpu_time_per_request_sample_count),
+      baseline_median_rps: before.and_then(|row| row.median_rps),
+      baseline_median_cpu_time_per_request_ns: before
+        .and_then(|row| row.median_cpu_time_per_request_ns),
+      baseline_median_p99_ms: before.and_then(|row| row.median_p99_ms),
+      rps_delta_percent: before.and_then(|row| percent_delta(row.median_rps, current.median_rps)),
+      cpu_time_per_request_delta_percent: before.and_then(|row| {
+        percent_delta(
+          row.median_cpu_time_per_request_ns,
+          current.median_cpu_time_per_request_ns,
+        )
+      }),
+      p99_delta_percent: before
+        .and_then(|row| percent_delta(row.median_p99_ms, current.median_p99_ms)),
+      classification: classification.to_owned(),
+      reason: reason.to_owned(),
+    });
+  }
   rows
 }
 
@@ -8638,6 +8762,7 @@ fn render_markdown(report: &Report) -> String {
   write_direct_h2_promotion_evidence_table(&mut markdown, &report.direct_h2_promotion_evidence);
   write_direct_h2_contention_evidence_table(&mut markdown, &report.direct_h2_contention_evidence);
   write_runtime_direct_h1_comparison_table(&mut markdown, &report.runtime_direct_h1_comparisons);
+  write_text_search_diagnostic_table(&mut markdown, &report.text_search_diagnostics);
   write_direct_h1_pool_diagnostics_table(&mut markdown, report);
   write_direct_h2_pool_diagnostics_table(&mut markdown, report);
   write_fast_path_stage_timing_table(&mut markdown, report);
@@ -8973,6 +9098,49 @@ fn write_runtime_direct_h1_comparison_table(
       row.experiment_tokio_hyper_pool_hit,
       row.status,
       markdown_escape_cell(&row.reason)
+    )
+    .unwrap();
+  }
+  writeln!(markdown).unwrap();
+}
+
+fn write_text_search_diagnostic_table(markdown: &mut String, rows: &[TextSearchDiagnostic]) {
+  writeln!(markdown, "\n## Text-search diagnostics\n").unwrap();
+  if rows.is_empty() {
+    writeln!(markdown, "No text-search diagnostic rows were found.\n").unwrap();
+    return;
+  }
+
+  writeln!(
+    markdown,
+    "| Target | Scenario | Protocol | Samples / CPU samples | Median RPS current / baseline / delta | Median CPU ns/request current / baseline / delta | Median p99 current / baseline / delta | Classification | Reason |"
+  )
+  .unwrap();
+  writeln!(
+    markdown,
+    "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |"
+  )
+  .unwrap();
+  for row in rows {
+    writeln!(
+      markdown,
+      "| `{}` | `{}` | `{}` | `{}` / `{}` | {} / {} / {} | {} / {} / {} | {} / {} / {} | `{}` | {} |",
+      row.amd64_target_cpu,
+      row.scenario,
+      row.protocol.as_deref().unwrap_or("-"),
+      row.sample_count,
+      row.cpu_time_per_request_sample_count,
+      format_number(row.median_rps),
+      format_number(row.baseline_median_rps),
+      format_percent(row.rps_delta_percent),
+      format_number(row.median_cpu_time_per_request_ns),
+      format_number(row.baseline_median_cpu_time_per_request_ns),
+      format_percent(row.cpu_time_per_request_delta_percent),
+      format_number(row.median_p99_ms),
+      format_number(row.baseline_median_p99_ms),
+      format_percent(row.p99_delta_percent),
+      row.classification,
+      markdown_escape_cell(&row.reason),
     )
     .unwrap();
   }
@@ -9948,6 +10116,19 @@ mod tests {
   }
 
   fn baseline_context_for(aggregates: &PrimaryAggregateMap) -> BaselineGateContext {
+    let all_aggregates = aggregates
+      .iter()
+      .map(|((comparator, scenario), aggregate)| {
+        (
+          (
+            aggregate.amd64_target_cpu.clone(),
+            comparator.as_str().to_owned(),
+            scenario.clone(),
+          ),
+          aggregate.clone(),
+        )
+      })
+      .collect();
     BaselineGateContext {
       report: "synthetic-baseline.json".to_owned(),
       schema_version: Some(COMPARISON_SCHEMA_VERSION),
@@ -9960,6 +10141,7 @@ mod tests {
           )
         })
         .collect(),
+      all_aggregates,
     }
   }
 

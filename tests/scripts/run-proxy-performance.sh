@@ -4,7 +4,7 @@ umask 077
 
 usage() {
   cat >&2 <<'EOF'
-usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
+usage: tests/scripts/run-proxy-performance.sh --profile smoke|benchmark|soak [--serving-type all|reverse-proxy|static-files|oxibelt-features|text-search-diagnostics|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run] [--comparators oxibelt,nginx,caddy,openresty]
 
 Environment:
   OXIBELT_DOCKER_IMAGE             OxiBelt image to test; built locally when unset
@@ -128,7 +128,7 @@ case "${profile}" in
 esac
 
 case "${serving_type}" in
-  all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run) ;;
+  all|reverse-proxy|static-files|oxibelt-features|text-search-diagnostics|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run) ;;
   *)
     usage
     exit 2
@@ -1690,8 +1690,28 @@ runtime_direct_h1_paired_load_label() {
 }
 
 proxy_cpu_ticks() {
-  local sample
+  local sample pid pid_after stat rest user_ticks system_ticks ticks_per_second
   [[ -n "${active_proxy_container:-}" ]] || return 1
+  pid="$(docker inspect --format '{{.State.Pid}}' "${active_proxy_container}" 2>/dev/null || true)"
+  if [[ "${pid}" =~ ^[1-9][0-9]*$ ]] \
+    && stat="$(cat "/proc/${pid}/stat" 2>/dev/null)"; then
+    rest="${stat##*) }"
+    set -- ${rest}
+    user_ticks="${12:-}"
+    system_ticks="${13:-}"
+    ticks_per_second="$(getconf CLK_TCK 2>/dev/null || true)"
+    pid_after="$(docker inspect --format '{{.State.Pid}}' "${active_proxy_container}" 2>/dev/null || true)"
+    case "${user_ticks}:${system_ticks}:${ticks_per_second}" in
+      *[!0-9:]*|::*|*:|:) ;;
+      *)
+        if [[ "${ticks_per_second}" -gt 0 && "${pid_after}" == "${pid}" ]]; then
+          printf '%s %s\n' "$((user_ticks + system_ticks))" "${ticks_per_second}"
+          return
+        fi
+        ;;
+    esac
+  fi
+
   sample="$(docker exec "${active_proxy_container}" sh -c '
     stat="$(cat /proc/1/stat 2>/dev/null)" || exit 1
     rest="${stat##*) }"
@@ -1855,12 +1875,32 @@ h2_multiplex_diagnostic_load_label() {
   esac
 }
 
+text_search_diagnostic_load_label() {
+  local label="$1"
+  local protocol="$2"
+  local host="$3"
+  case "${host}:${label}:${protocol}" in
+    oxibelt:oxibelt-text-search-single-tail:h2|oxibelt:oxibelt-text-search-multi-pattern-miss-overlap:h2|oxibelt:oxibelt-text-search-advanced-regex-prefilter:h2|oxibelt:oxibelt-text-search-header-route-framing:h1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 diagnostic_load_label() {
   direct_h2_diagnostic_load_label "$@" \
     || metrics_mode_diagnostic_load_label "$@" \
     || h3_inline_diagnostic_load_label "$@" \
     || runtime_direct_h1_diagnostic_load_label "$@" \
-    || h2_multiplex_diagnostic_load_label "$@"
+    || h2_multiplex_diagnostic_load_label "$@" \
+    || text_search_diagnostic_load_label "$@"
+}
+
+process_cpu_evidence_load_label() {
+  local label="$1"
+  runtime_direct_h1_paired_load_label "${label}" \
+    || case "${label}" in
+      oxibelt-text-search-single-tail|oxibelt-text-search-multi-pattern-miss-overlap|oxibelt-text-search-advanced-regex-prefilter|oxibelt-text-search-header-route-framing) return 0 ;;
+      *) return 1 ;;
+    esac
 }
 
 normalize_diagnostic_load_result() {
@@ -2405,8 +2445,10 @@ run_load() {
   fi
   if runtime_direct_h1_paired_load_label "${label}"; then
     compio_service_before="$(compio_direct_h1_service_metrics "${host}" "${label}-compio-service-before")"
-    cpu_ticks_before="$(proxy_cpu_ticks || true)"
     thread_cpu_ticks_before="$(proxy_thread_cpu_ticks || true)"
+  fi
+  if process_cpu_evidence_load_label "${label}"; then
+    cpu_ticks_before="$(proxy_cpu_ticks || true)"
   fi
   local -a probe_args=(
     load
@@ -2451,10 +2493,12 @@ run_load() {
       fail_with_diagnostics "performance probe failed before producing a valid result: ${label}"
     fi
   fi
-  if runtime_direct_h1_paired_load_label "${label}"; then
+  if process_cpu_evidence_load_label "${label}"; then
     cpu_ticks_after="$(proxy_cpu_ticks || true)"
-    thread_cpu_ticks_after="$(proxy_thread_cpu_ticks || true)"
     json="$(append_runtime_direct_h1_cpu_evidence "${json}" "${cpu_ticks_before}" "${cpu_ticks_after}")"
+  fi
+  if runtime_direct_h1_paired_load_label "${label}"; then
+    thread_cpu_ticks_after="$(proxy_thread_cpu_ticks || true)"
     json="$(append_runtime_direct_h1_thread_cpu_evidence "${json}" "${thread_cpu_ticks_before}" "${thread_cpu_ticks_after}")"
     compio_service_after="$(compio_direct_h1_service_metrics "${host}" "${label}-compio-service-after")"
     compio_service_delta="$(compio_direct_h1_service_delta "${compio_service_before}" "${compio_service_after}")"
@@ -3982,6 +4026,8 @@ run_oxibelt_tls_resumption_handshake_rows() {
 }
 
 run_oxibelt_specific_benchmarks() {
+  run_text_search_diagnostic_loads
+
   start_oxibelt waf-monitor oxibelt
   run_load "oxibelt-waf-monitor" h2 oxibelt "/perf/waf?body=ok" "${duration_seconds}" "${concurrency}"
 
@@ -4003,6 +4049,38 @@ run_oxibelt_specific_benchmarks() {
   sleep 2
   run_load "oxibelt-cache-revalidate" h2 oxibelt "/perf/cache-revalidate?body_repeat=4096&cache_control=public-max-age-1&etag=perf" "${duration_seconds}" "${concurrency}"
   run_load "oxibelt-cache-stale" h2 oxibelt "/perf/cache-stale?body_repeat=4096&cache_control=public-stale-revalidate" "${duration_seconds}" "${concurrency}"
+}
+
+run_text_search_diagnostic_loads() {
+  local path_padding
+  printf -v path_padding '%*s' 2048 ''
+  path_padding="${path_padding// /a}"
+
+  start_oxibelt text-search-single-tail oxibelt
+  run_load "oxibelt-text-search-single-tail" h2 oxibelt \
+    "/perf/text-search-single/${path_padding}needle-at-tail" \
+    "${duration_seconds}" "${concurrency}" --expect-status 403
+
+  start_oxibelt text-search-multi-pattern oxibelt
+  run_load "oxibelt-text-search-multi-pattern-miss-overlap" h2 oxibelt \
+    "/perf/text-search-multi/${path_padding}abababa" \
+    "${duration_seconds}" "${concurrency}" --expect-status 403
+
+  start_oxibelt text-search-advanced-regex oxibelt
+  run_load "oxibelt-text-search-advanced-regex-prefilter" h2 oxibelt \
+    "/perf/text-search-advanced/${path_padding}advanced-hittail" \
+    "${duration_seconds}" "${concurrency}" --expect-status 403
+
+  start_oxibelt text-search-header-route-framing oxibelt
+  run_load "oxibelt-text-search-header-route-framing" h1 oxibelt \
+    "/text-search-route-miss/final/${path_padding}" \
+    "${duration_seconds}" 1 \
+    --expect-status 404 \
+    --method POST \
+    --request-body-bytes 1024 \
+    --chunked-request-body 1 \
+    --benchmark-header-count 32 \
+    --benchmark-header-value-bytes 96
 }
 
 run_oxibelt_soak_and_stress() {
@@ -4241,6 +4319,12 @@ run_static_files_group() {
 run_oxibelt_features_group() {
   if has_comparator oxibelt; then
     run_oxibelt_specific_benchmarks
+  fi
+}
+
+run_text_search_diagnostics_group() {
+  if has_comparator oxibelt; then
+    run_text_search_diagnostic_loads
   fi
 }
 
@@ -4748,6 +4832,9 @@ case "${serving_type}" in
     ;;
   oxibelt-features)
     run_oxibelt_features_group
+    ;;
+  text-search-diagnostics)
+    run_text_search_diagnostics_group
     ;;
   oxibelt-soak-stress)
     run_oxibelt_soak_stress_group

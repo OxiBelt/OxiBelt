@@ -1064,7 +1064,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
   );
   assert!(
         script.contains(
-            "--serving-type all|reverse-proxy|static-files|oxibelt-features|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run"
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|text-search-diagnostics|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run"
         ),
         "usage should document every supported serving type"
     );
@@ -1073,6 +1073,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
     "reverse-proxy",
     "static-files",
     "oxibelt-features",
+    "text-search-diagnostics",
     "oxibelt-soak-stress",
     "accept-multipliers",
     "remote-signer",
@@ -1173,6 +1174,55 @@ fn oxibelt_bodyful_performance_gates_are_wired() {
 }
 
 #[test]
+fn text_search_diagnostics_are_cpu_measured_and_non_blocking() {
+  let script = performance_script_text();
+  let rows = extract_bash_function(&script, "run_text_search_diagnostic_loads");
+  let labels = extract_bash_function(&script, "text_search_diagnostic_load_label");
+  let cpu_labels = extract_bash_function(&script, "process_cpu_evidence_load_label");
+
+  for expected in [
+    "oxibelt-text-search-single-tail",
+    "oxibelt-text-search-multi-pattern-miss-overlap",
+    "oxibelt-text-search-advanced-regex-prefilter",
+    "oxibelt-text-search-header-route-framing",
+  ] {
+    assert!(
+      rows.contains(expected),
+      "missing text-search row {expected}"
+    );
+    assert!(labels.contains(expected), "{expected} must be diagnostic");
+    assert!(
+      cpu_labels.contains(expected),
+      "{expected} must collect process CPU/request evidence"
+    );
+  }
+  for expected in [
+    "--expect-status 403",
+    "--expect-status 404",
+    "/text-search-route-miss/final/",
+    "\"${duration_seconds}\" 1",
+    "--chunked-request-body 1",
+    "--benchmark-header-count 32",
+    "--benchmark-header-value-bytes 96",
+  ] {
+    assert!(
+      rows.contains(expected),
+      "text-search rows should contain {expected}"
+    );
+  }
+  assert!(
+    extract_bash_function(&script, "run_oxibelt_specific_benchmarks")
+      .contains("run_text_search_diagnostic_loads"),
+    "oxibelt-features should emit the tracked text-search rows"
+  );
+  assert!(
+    extract_bash_function(&script, "run_text_search_diagnostics_group")
+      .contains("run_text_search_diagnostic_loads"),
+    "the text-search-only serving type should emit only the tracked rows"
+  );
+}
+
+#[test]
 fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
   let script = performance_script_text();
 
@@ -1224,6 +1274,22 @@ fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
       "performance script should include runtime-direct-h1 experiment evidence: {expected}"
     );
   }
+}
+
+#[test]
+fn process_cpu_ticks_prefer_host_procfs_with_an_in_container_fallback() {
+  let script = performance_script_text();
+  let function = extract_bash_function(&script, "proxy_cpu_ticks");
+
+  assert!(function.contains("docker inspect --format '{{.State.Pid}}'"));
+  assert!(function.contains("cat \"/proc/${pid}/stat\""));
+  assert!(function.contains("getconf CLK_TCK"));
+  assert!(function.contains("docker exec"));
+  assert!(function.contains("/proc/1/stat"));
+  assert!(
+    function.find("/proc/${pid}/stat") < function.find("docker exec"),
+    "host-visible procfs must be preferred before the instrumented-image fallback"
+  );
 }
 
 #[test]
@@ -1959,6 +2025,10 @@ fn oxibelt_performance_fixtures_pin_worker_profile() {
     ("waf-prefix-inspection", 0.5),
     ("waf-size-only", 0.5),
     ("waf-monitor", 0.5),
+    ("text-search-single-tail", 0.5),
+    ("text-search-multi-pattern", 0.5),
+    ("text-search-advanced-regex", 0.5),
+    ("text-search-header-route-framing", 0.5),
     ("remote-signer", 0.5),
     ("baseline-accept-1", 1.0),
     ("baseline-classical-kx", 1.0),

@@ -78,6 +78,7 @@ fn run_aggregate_with_args(input_dir: &Path, output_dir: &Path, extra_args: &[St
     "## Diagnostic profiling",
     "## Pool/concurrency experiments",
     "## Runtime direct-H1 paired evidence",
+    "## Text-search diagnostics",
     "## OxiBelt-only results",
     "## Skipped/missing comparator rows",
     "## Sample quorum",
@@ -1590,7 +1591,7 @@ fn aggregates_repeated_samples_ratios_and_partial_rows() {
 
   let report = run_aggregate(&input_dir, &output_dir);
 
-  assert_eq!(report["schema_version"], 32);
+  assert_eq!(report["schema_version"], 33);
   assert_eq!(report["primary_target_cpu"], "x86-64-v3");
 
   let oxibelt_h1 = find_aggregate(&report, "oxibelt", "h1-keepalive");
@@ -2165,7 +2166,7 @@ fn runtime_direct_h1_pairs_gate_cpu_request_latency_and_backend_with_three_sampl
   );
 
   let report = run_aggregate(&input_dir, &output_dir);
-  assert_eq!(report["schema_version"], 32);
+  assert_eq!(report["schema_version"], 33);
   for (workload, _, expected_backend) in workloads {
     let comparison = find_runtime_direct_h1_comparison(&report, workload);
     assert_eq!(comparison["expected_experiment_backend"], expected_backend);
@@ -2219,6 +2220,113 @@ fn runtime_direct_h1_pairs_gate_cpu_request_latency_and_backend_with_three_sampl
   assert!(markdown.contains("RPS ratio (informational)"));
   assert!(markdown.contains("CPU/request ratio"));
   assert!(markdown.contains("| `post-1k-json-h2` | `h2` | `tokio_hyper`"));
+}
+
+#[test]
+fn text_search_rows_report_cpu_rps_p99_and_missing_baseline_without_gating() {
+  let temp_dir = TempDir::new();
+  let input_dir = temp_dir.path().join("input");
+  let output_dir = temp_dir.path().join("output");
+  let baseline_path = temp_dir.path().join("baseline.json");
+  let diagnostic_row = |label: &str, rps: f64, p99_ms: f64, cpu_ns: f64| {
+    json!({
+      "type": "load",
+      "label": label,
+      "protocol": "h2",
+      "requests": 1000,
+      "rps": rps,
+      "p50_ms": 1.0,
+      "p90_ms": 2.0,
+      "p95_ms": 3.0,
+      "p99_ms": p99_ms,
+      "errors": 0,
+      "diagnostic": true,
+      "diagnostic_status": "pass",
+      "cpu_time": {
+        "status": "available",
+        "cpu_time_per_request_ns": cpu_ns
+      }
+    })
+  };
+  write_results_array(
+    &input_dir.join("oxibelt-docker-performance-smoke-oxibelt-features-shard-1/run-1"),
+    vec![
+      diagnostic_row("oxibelt-text-search-single-tail", 120.0, 4.0, 80.0),
+      diagnostic_row(
+        "oxibelt-text-search-multi-pattern-miss-overlap",
+        90.0,
+        6.0,
+        110.0,
+      ),
+    ],
+  );
+
+  let mut baseline = aggregate_row(
+    "oxibelt",
+    "text-search-single-tail",
+    "oxibelt-only",
+    100.0,
+    5.0,
+  );
+  let baseline_object = baseline
+    .as_object_mut()
+    .expect("baseline aggregate should be an object");
+  baseline_object.insert("cpu_time_per_request_sample_count".to_owned(), json!(1));
+  baseline_object.insert("median_cpu_time_per_request_ns".to_owned(), json!(100.0));
+  write_baseline_report(&baseline_path, vec![baseline]);
+
+  let report = run_aggregate_with_args(
+    &input_dir,
+    &output_dir,
+    &[
+      "--baseline-report".to_owned(),
+      baseline_path.display().to_string(),
+    ],
+  );
+  let rows = report["text_search_diagnostics"]
+    .as_array()
+    .expect("text-search diagnostics should be an array");
+  assert_eq!(rows.len(), 2);
+  let comparable = rows
+    .iter()
+    .find(|row| row["scenario"] == "text-search-single-tail")
+    .expect("single-tail diagnostic should exist");
+  assert_eq!(comparable["classification"], "comparable");
+  assert_eq!(comparable["sample_count"], 1);
+  assert_eq!(comparable["cpu_time_per_request_sample_count"], 1);
+  assert_close(
+    comparable["rps_delta_percent"]
+      .as_f64()
+      .expect("RPS delta should exist"),
+    20.0,
+  );
+  assert_close(
+    comparable["cpu_time_per_request_delta_percent"]
+      .as_f64()
+      .expect("CPU/request delta should exist"),
+    -20.0,
+  );
+  assert_close(
+    comparable["p99_delta_percent"]
+      .as_f64()
+      .expect("p99 delta should exist"),
+    -20.0,
+  );
+  let missing = rows
+    .iter()
+    .find(|row| row["scenario"] == "text-search-multi-pattern-miss-overlap")
+    .expect("multi-pattern diagnostic should exist");
+  assert_eq!(missing["classification"], "missing_baseline");
+  assert!(
+    report["regression_gates"]["violations"]
+      .as_array()
+      .expect("violations should be an array")
+      .iter()
+      .all(|row| !row["scenario"]
+        .as_str()
+        .is_some_and(|scenario| scenario.starts_with("text-search-"))),
+    "text-search diagnostics must not create release prerequisites"
+  );
 }
 
 #[test]
@@ -2321,7 +2429,7 @@ fn schema_12_records_quorum_status_iteration_quality_and_distributions() {
     ],
   );
 
-  assert_eq!(report["schema_version"], 32);
+  assert_eq!(report["schema_version"], 33);
   assert_eq!(report["artifact_discovery"]["iteration_status_files"], 16);
   assert_eq!(report["sample_quality"]["ok_iterations"], 16);
   assert_eq!(report["sample_quality"]["failed_iterations"], 0);

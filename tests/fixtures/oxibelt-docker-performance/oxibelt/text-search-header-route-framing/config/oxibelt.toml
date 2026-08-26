@@ -1,0 +1,278 @@
+[logging]
+level = "warn"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.worker_multipliers]
+runtime = 1.0
+accept = 0.5
+quic_socket = 1.0
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http_bind = "0.0.0.0:8080"
+http_mode = "proxy"
+http1 = true
+http2 = true
+http3 = false
+
+[limits]
+max_connections = 200000
+max_connections_per_ip = 200000
+max_webtransport_sessions = 200000
+max_webtransport_sessions_per_ip = 200000
+max_requests_per_connection = 10000000
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[proxy.http2]
+adaptive_window = false
+initial_stream_window_bytes = 1048576
+initial_connection_window_bytes = 16777216
+max_frame_size_bytes = 65535
+max_concurrent_streams = 1024
+max_send_buf_size = 1048576
+keep_alive_interval_ms = 0
+keep_alive_timeout_ms = 20000
+keep_alive_while_idle = false
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "monitor"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "perf-upstream"
+origin = "http://perf-upstream:18080"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+pool_max_idle_per_host = 128
+preserve_host = false
+websocket = false
+webrtc = false
+webtransport = false
+
+[[routes]]
+name = "text-search-route-00"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-00"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-01"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-01"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-02"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-02"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-03"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-03"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-04"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-04"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-05"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-05"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-06"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-06"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-07"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-07"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-08"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-08"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-09"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-09"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-10"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-10"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-11"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-11"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-12"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-12"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-13"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-13"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-14"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-14"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-15"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-15"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-16"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-16"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-17"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-17"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-18"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-18"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-19"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-19"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-20"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-20"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-21"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-21"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-22"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-22"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-23"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-23"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-24"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-24"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-25"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-25"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-26"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-26"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-27"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-27"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-28"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-28"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-29"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-29"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-30"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-30"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "text-search-route-31"
+hosts = ["example.test"]
+path_prefix = "/text-search-route-31"
+upstream = "perf-upstream"
+
+[[routes]]
+name = "readiness"
+hosts = ["example.test"]
+path_prefix = "/ready"
+upstream = "perf-upstream"

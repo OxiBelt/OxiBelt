@@ -1,0 +1,102 @@
+[logging]
+level = "warn"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.worker_multipliers]
+runtime = 1.0
+accept = 0.5
+quic_socket = 1.0
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http_bind = "0.0.0.0:8080"
+http_mode = "proxy"
+http1 = true
+http2 = true
+http3 = false
+
+[limits]
+max_connections = 200000
+max_connections_per_ip = 200000
+max_webtransport_sessions = 200000
+max_webtransport_sessions_per_ip = 200000
+max_requests_per_connection = 10000000
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[proxy.http2]
+adaptive_window = false
+initial_stream_window_bytes = 1048576
+initial_connection_window_bytes = 16777216
+max_frame_size_bytes = 65535
+max_concurrent_streams = 1024
+max_send_buf_size = 1048576
+keep_alive_interval_ms = 0
+keep_alive_timeout_ms = 20000
+keep_alive_while_idle = false
+
+[compression]
+enabled = false
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.pattern_sets]]
+name = "text-search-single"
+kind = "contains"
+patterns = ["needle-at-tail"]
+
+[[waf.rules]]
+name = "text-search-single-tail"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.containsAny('text-search-single')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "text search diagnostic matched"
+
+[[upstreams]]
+name = "perf-upstream"
+origin = "http://perf-upstream:18080"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+pool_max_idle_per_host = 128
+preserve_host = false
+websocket = false
+webrtc = false
+webtransport = false
+
+[[routes]]
+name = "main-route"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "perf-upstream"

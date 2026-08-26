@@ -13,7 +13,9 @@ use futures_util::stream::FuturesUnordered;
 use h3_quinn::quinn::crypto::rustls::QuicClientConfig;
 use h3_quinn::quinn::{ClientConfig as QuinnClientConfig, Endpoint};
 use hdrhistogram::Histogram;
-use http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH};
+use http::header::{
+  CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HOST, HeaderName, HeaderValue, IF_NONE_MATCH,
+};
 use http::{HeaderMap, Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
@@ -32,6 +34,9 @@ const MAX_ERROR_SAMPLES: usize = 8;
 const REMOTE_ADDR_RESOLVE_ATTEMPTS: usize = 10;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TCP_NODELAY: bool = true;
+const MAX_BENCHMARK_HEADER_COUNT: usize = 64;
+const MAX_BENCHMARK_HEADER_VALUE_BYTES: usize = 1024;
+const MAX_BENCHMARK_HEADER_TOTAL_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Protocol {
@@ -133,6 +138,7 @@ struct LoadArgs {
   request_body: Bytes,
   request_content_type: Option<String>,
   chunked_request_body: bool,
+  benchmark_headers: Vec<(HeaderName, HeaderValue)>,
   expect_status: u16,
   unique_query_param: Option<String>,
   request_serial: Arc<AtomicU64>,
@@ -400,7 +406,7 @@ fn usage() {
   eprintln!(
         "usage:
   perf-probe upstream --listen <addr:port> [--name <name>] [--protocol <h1|h2c|h2>] [--cert <pem> --key <pem>]
-  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>] [--h2-streams-per-connection <n>] [--h3-streams-per-connection <n>] [--tcp-nodelay 0|1] [--method <method>] [--request-body-bytes <n>] [--request-body-kind bytes|json] [--chunked-request-body 0|1]
+  perf-probe load --protocol <h1|h1c|h2|h3> --host <host> --port <port> --server-name <name> --authority <authority> --path <path> --ca-cert <pem> --duration-seconds <n> --warmup-seconds <n> --concurrency <n> [--expect-status <status>] [--label <label>] [--unique-query-param <name>] [--h2-streams-per-connection <n>] [--h3-streams-per-connection <n>] [--tcp-nodelay 0|1] [--method <method>] [--request-body-bytes <n>] [--request-body-kind bytes|json] [--chunked-request-body 0|1] [--benchmark-header-count <n> --benchmark-header-value-bytes <n>]
   perf-probe handshake --protocol <h1|h2|h3> --host <host> --port <port> --server-name <name> --ca-cert <pem> --duration-seconds <n> --concurrency <n> [--label <label>] [--client-resumption fresh|worker] [--post-handshake-observe-ms <n>]
   perf-probe stress --mode <slowloris|large-header|large-body|idle|half-close|slow-post|slow-response|h2-rapid-stream-churn|h2-cl0-data|h3-cl0-data> --host <host> --port <port> --authority <authority> --connections <n> --duration-seconds <n> [--bytes <n>] [--label <label>] [--protocol <h1c|h1|h2|h3>] [--server-name <name>] [--ca-cert <pem>] [--path <path>] [--expect-status <status>] [--chunk-bytes <n>] [--chunk-delay-ms <n>] [--streams-per-connection <n>]
   perf-probe metrics --host <host> --port <port> --authority <authority> --path <path> [--label <label>]"
@@ -513,6 +519,7 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
       .to_owned(),
     )
   };
+  let benchmark_headers = parse_benchmark_headers(&values)?;
   Ok(LoadArgs {
     label: values
       .get("--label")
@@ -535,6 +542,7 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
     request_body,
     request_content_type,
     chunked_request_body,
+    benchmark_headers,
     expect_status: values
       .get("--expect-status")
       .map(|value| value.parse().context("invalid --expect-status value"))
@@ -543,6 +551,57 @@ fn parse_load_args(args: impl Iterator<Item = String>) -> anyhow::Result<LoadArg
     unique_query_param,
     request_serial: Arc::new(AtomicU64::new(0)),
   })
+}
+
+fn parse_benchmark_headers(
+  values: &BTreeMap<String, String>,
+) -> anyhow::Result<Vec<(HeaderName, HeaderValue)>> {
+  let count = values
+    .get("--benchmark-header-count")
+    .map(|value| value.parse::<usize>().context("invalid --benchmark-header-count value"))
+    .transpose()?
+    .unwrap_or(0);
+  let value_bytes = values
+    .get("--benchmark-header-value-bytes")
+    .map(|value| {
+      value
+        .parse::<usize>()
+        .context("invalid --benchmark-header-value-bytes value")
+    })
+    .transpose()?
+    .unwrap_or(if count == 0 { 0 } else { 64 });
+  if count == 0 && value_bytes != 0 {
+    bail!("--benchmark-header-value-bytes requires --benchmark-header-count greater than zero");
+  }
+  if count > MAX_BENCHMARK_HEADER_COUNT {
+    bail!(
+      "--benchmark-header-count must be at most {MAX_BENCHMARK_HEADER_COUNT}; got {count}"
+    );
+  }
+  if value_bytes > MAX_BENCHMARK_HEADER_VALUE_BYTES {
+    bail!(
+      "--benchmark-header-value-bytes must be at most {MAX_BENCHMARK_HEADER_VALUE_BYTES}; got {value_bytes}"
+    );
+  }
+  let total_bytes = count
+    .checked_mul(value_bytes)
+    .ok_or_else(|| anyhow!("benchmark header byte count overflowed"))?;
+  if total_bytes > MAX_BENCHMARK_HEADER_TOTAL_BYTES {
+    bail!(
+      "benchmark headers must total at most {MAX_BENCHMARK_HEADER_TOTAL_BYTES} value bytes; got {total_bytes}"
+    );
+  }
+
+  (0..count)
+    .map(|index| {
+      let name = HeaderName::from_bytes(format!("x-oxibelt-perf-{index:02}").as_bytes())
+        .context("generated benchmark header name was invalid")?;
+      let marker = b'a' + (index % 26) as u8;
+      let value = HeaderValue::from_bytes(&vec![marker; value_bytes])
+        .context("generated benchmark header value was invalid")?;
+      Ok((name, value))
+    })
+    .collect()
 }
 
 fn parse_handshake_args(args: impl Iterator<Item = String>) -> anyhow::Result<HandshakeArgs> {
@@ -1067,9 +1126,7 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
   let snapshot = stats.snapshot();
   let total_requests_including_warmup = warmup_requests.saturating_add(snapshot.requests);
   let elapsed = args.duration.as_secs_f64();
-  println!(
-    "{}",
-    serde_json::json!({
+  let mut result = serde_json::json!({
         "type": "load",
         "label": args.label,
         "protocol": args.protocol.label(),
@@ -1095,8 +1152,20 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
         "statuses": status_json(snapshot.statuses),
         "error_samples": snapshot.error_samples,
         "unique_query_param": args.unique_query_param,
-    })
-  );
+    });
+  if !args.benchmark_headers.is_empty() {
+    result
+      .as_object_mut()
+      .expect("load result must be an object")
+      .insert(
+        "benchmark_headers".to_owned(),
+        serde_json::json!({
+          "count": args.benchmark_headers.len(),
+          "value_bytes": args.benchmark_headers[0].1.as_bytes().len(),
+        }),
+      );
+  }
+  println!("{result}");
   Ok(())
 }
 
@@ -1645,6 +1714,9 @@ fn request<B>(args: &LoadArgs, version: Version, body: B) -> anyhow::Result<Requ
     if !args.chunked_request_body {
       request = request.header(CONTENT_LENGTH, args.request_body.len().to_string());
     }
+  }
+  for (name, value) in &args.benchmark_headers {
+    request = request.header(name, value);
   }
   request.body(body).map_err(Into::into)
 }
@@ -3511,6 +3583,100 @@ mod tests {
     assert_eq!(request.method(), Method::POST);
     assert!(request.headers().get(CONTENT_LENGTH).is_none());
     assert_eq!(request.headers()[CONTENT_TYPE], "application/json");
+  }
+
+  #[test]
+  fn benchmark_headers_are_bounded_and_repeated_on_each_request() {
+    let values = BTreeMap::from([
+      ("--benchmark-header-count".to_owned(), "32".to_owned()),
+      (
+        "--benchmark-header-value-bytes".to_owned(),
+        "96".to_owned(),
+      ),
+    ]);
+    let headers = parse_benchmark_headers(&values).expect("bounded benchmark headers should parse");
+    assert_eq!(headers.len(), 32);
+    assert_eq!(headers[0].0.as_str(), "x-oxibelt-perf-00");
+    assert_eq!(headers[31].0.as_str(), "x-oxibelt-perf-31");
+    assert!(headers.iter().all(|(_, value)| value.as_bytes().len() == 96));
+
+    let mut args = parse_load_args(
+      [
+        "--protocol",
+        "h1",
+        "--host",
+        "oxibelt",
+        "--port",
+        "8443",
+        "--server-name",
+        "proxy",
+        "--authority",
+        "example.test",
+        "--path",
+        "/perf/header-rich",
+        "--ca-cert",
+        "/tls/proxy-ca.pem",
+        "--duration-seconds",
+        "1",
+        "--warmup-seconds",
+        "0",
+        "--concurrency",
+        "1",
+      ]
+      .into_iter()
+      .map(str::to_owned),
+    )
+    .expect("base load args should parse");
+    args.benchmark_headers = headers;
+    let first = request(&args, Version::HTTP_11, Full::new(Bytes::new()))
+      .expect("first benchmark request should build");
+    let second = request(&args, Version::HTTP_11, Full::new(Bytes::new()))
+      .expect("second benchmark request should build");
+    assert_eq!(first.headers()["x-oxibelt-perf-00"].as_bytes().len(), 96);
+    assert_eq!(second.headers()["x-oxibelt-perf-31"].as_bytes().len(), 96);
+  }
+
+  #[test]
+  fn benchmark_headers_reject_oversized_or_incomplete_requests() {
+    for (values, expected) in [
+      (
+        BTreeMap::from([("--benchmark-header-count".to_owned(), "65".to_owned())]),
+        "--benchmark-header-count must be at most 64",
+      ),
+      (
+        BTreeMap::from([
+          ("--benchmark-header-count".to_owned(), "1".to_owned()),
+          (
+            "--benchmark-header-value-bytes".to_owned(),
+            "1025".to_owned(),
+          ),
+        ]),
+        "--benchmark-header-value-bytes must be at most 1024",
+      ),
+      (
+        BTreeMap::from([(
+          "--benchmark-header-value-bytes".to_owned(),
+          "64".to_owned(),
+        )]),
+        "--benchmark-header-value-bytes requires --benchmark-header-count",
+      ),
+      (
+        BTreeMap::from([
+          ("--benchmark-header-count".to_owned(), "64".to_owned()),
+          (
+            "--benchmark-header-value-bytes".to_owned(),
+            "1024".to_owned(),
+          ),
+        ]),
+        "benchmark headers must total at most 32768 value bytes",
+      ),
+    ] {
+      let error = parse_benchmark_headers(&values).expect_err("unsafe benchmark headers must fail");
+      assert!(
+        error.to_string().contains(expected),
+        "unexpected error for {values:?}: {error:#}"
+      );
+    }
   }
 
   #[test]
