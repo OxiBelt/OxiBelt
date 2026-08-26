@@ -4,6 +4,7 @@ set -eu
 rootfs="${1:-}"
 target_arch="${2:-}"
 config_source="${3:-}"
+openssl_package_version="3.5.8-r0"
 
 fail() {
   echo "prepare-alpine-rootfs: $*" >&2
@@ -42,11 +43,18 @@ seed_arch="$(tr -d '[:space:]' <"${rootfs}/etc/apk/arch")"
 
 apk --root "${rootfs}" --arch "${apk_arch}" --no-scripts --no-cache upgrade
 apk --root "${rootfs}" --arch "${apk_arch}" --no-scripts --no-cache add \
-  ca-certificates libgcc libssl3
+  ca-certificates libgcc \
+  "libcrypto3=${openssl_package_version}" \
+  "libssl3=${openssl_package_version}"
 
-for package in alpine-baselayout ca-certificates libgcc libssl3; do
+for package in alpine-baselayout ca-certificates libgcc libcrypto3 libssl3; do
   apk --root "${rootfs}" --arch "${apk_arch}" info --installed "${package}" >/dev/null || \
     fail "required target package is missing: ${package}"
+done
+for package in libcrypto3 libssl3; do
+  apk --root "${rootfs}" --arch "${apk_arch}" info --installed \
+    "${package}=${openssl_package_version}" >/dev/null || \
+    fail "required target package version is missing: ${package}=${openssl_package_version}"
 done
 [ -s "${rootfs}/etc/ssl/certs/ca-certificates.crt" ] || fail "CA certificate bundle is missing"
 

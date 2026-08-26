@@ -1055,7 +1055,12 @@ fn alpine_runtime_rootfs_is_assembled_without_target_execution() {
     "upgrade",
     "ca-certificates",
     "libgcc",
+    "libcrypto3",
     "libssl3",
+    "openssl_package_version=\"3.5.8-r0\"",
+    "\"libcrypto3=${openssl_package_version}\"",
+    "\"libssl3=${openssl_package_version}\"",
+    "\"${package}=${openssl_package_version}\"",
     "$4 == 10001 || $4 == 10002",
   ] {
     assert!(
