@@ -94,7 +94,7 @@ compio = { version = "0.19.1", default-features = false, features = ["bytes", "i
 compio-driver = { version = "0.12.4", default-features = false, features = ["io-uring", "polling"] }
 crc32fast = "1.5.1"
 memchr = "2.8.3"
-online-dsl-forge = "0.3.1"
+online-dsl-forge = "0.3.2"
 oxibelt-build-identity.workspace = true
 oxibelt-control-protocol.workspace = true
 

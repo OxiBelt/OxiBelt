@@ -26,7 +26,7 @@ flate2 = "1.1.9"
 futures-util = "0.3.34"
 h3 = "0.0.8"
 h3-quinn = { version = "0.0.10", default-features = false, features = ["datagram"] }
-h2 = "0.4.18"
+h2 = "0.4.19"
 http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.11.0", features = ["client", "http2", "server"] }
