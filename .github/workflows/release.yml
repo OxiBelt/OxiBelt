@@ -475,7 +475,7 @@ jobs:
             --ignoreConfig \
             --module NodeNext \
             --moduleResolution NodeNext \
-            --target ES2022 \
+            --target ES2024 \
             --types node \
             --outDir "${helper_root}"
           mv "${helper_root}/release_sbom.js" "${helper_root}/release_sbom.mjs"
