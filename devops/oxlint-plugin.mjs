@@ -50,11 +50,12 @@ const CheckBinding = (Context, Pattern) => {
 }
 
 const CheckProperty = (Context, Node) => {
+  if (Node.kind === 'constructor') return
   if (!Node.computed) ReportName(Context, Node.key)
 }
 
 const PascalCaseRule = {
-  meta: RuleMeta('Require PascalCase for variable-like and property declarations'),
+  meta: RuleMeta('Require PascalCase for variable-like, method, and property declarations'),
   create(Context) {
     const CheckFunction = Node => {
       ReportName(Context, Node.id)
@@ -80,10 +81,19 @@ const PascalCaseRule = {
       TSAbstractPropertyDefinition(Node) {
         CheckProperty(Context, Node)
       },
+      MethodDefinition(Node) {
+        CheckProperty(Context, Node)
+      },
+      TSAbstractMethodDefinition(Node) {
+        CheckProperty(Context, Node)
+      },
       TSParameterProperty(Node) {
         CheckBinding(Context, Node.parameter)
       },
       TSPropertySignature(Node) {
+        CheckProperty(Context, Node)
+      },
+      TSMethodSignature(Node) {
         CheckProperty(Context, Node)
       },
     }
