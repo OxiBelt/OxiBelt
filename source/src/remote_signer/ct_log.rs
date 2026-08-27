@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1, ED25519, UnparsedPublicKey};
 use base64::Engine;
 use tokio::net::UnixStream;
 
@@ -116,12 +117,7 @@ impl CtLogSigner {
         let signature = base64::engine::general_purpose::STANDARD
           .decode(signature)
           .context("CT log signer signature must contain base64")?;
-        if signature.is_empty() || signature.len() > 80 {
-          bail!("CT log signer signature has an invalid length");
-        }
-        if self.profile == CtLogProfile::Rfc9162Ed25519 && signature.len() != 64 {
-          bail!("CT log signer Ed25519 signature must be 64 bytes");
-        }
+        verify_ct_log_signature(self.profile, &self.public_key, transcript, &signature)?;
         Ok(signature)
       }
       RemoteSignerResponse::Error { code, message } => {
@@ -183,6 +179,42 @@ impl CtLogSigner {
         .with_context(|| format!("failed to connect to {}", self.socket_path.display()))?;
     write_async_frame_with_timeout(&mut stream, &request, self.sign_timeout).await?;
     read_async_frame_with_timeout(&mut stream, self.sign_timeout).await
+  }
+}
+
+/// Verifies a CT log signature against the activation-time pinned SPKI and exact transcript.
+///
+/// This is deliberately shared by the client response path and durable-receipt recovery: a
+/// well-formed IPC response or persisted receipt is not trusted until its signature verifies.
+pub(crate) fn verify_ct_log_signature(
+  profile: CtLogProfile,
+  public_key_spki: &[u8],
+  transcript: &[u8],
+  signature: &[u8],
+) -> anyhow::Result<()> {
+  if signature.is_empty() || signature.len() > 80 {
+    bail!("CT log signature has an invalid length");
+  }
+  match profile {
+    CtLogProfile::Rfc9162Ed25519 => {
+      if signature.len() != 64 {
+        bail!("CT log Ed25519 signature must be 64 bytes");
+      }
+      let public_key = super::keys::ed25519_public_key_from_spki(public_key_spki)
+        .context("CT log signer Ed25519 public key is malformed")?;
+      UnparsedPublicKey::new(&ED25519, public_key)
+        .verify(transcript, signature)
+        .map_err(|_| anyhow::anyhow!("CT log signature verification failed"))
+    }
+    CtLogProfile::Rfc6962P256Sha256 | CtLogProfile::Rfc9162P256Sha256 => {
+      validate_ct_log_public_key(profile, public_key_spki)?;
+      let point = public_key_spki
+        .get(26..)
+        .ok_or_else(|| anyhow::anyhow!("CT log signer P-256 public key is malformed"))?;
+      UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, point)
+        .verify(transcript, signature)
+        .map_err(|_| anyhow::anyhow!("CT log signature verification failed"))
+    }
   }
 }
 
@@ -363,6 +395,217 @@ fn validate_static_checkpoint(transcript: &[u8]) -> anyhow::Result<()> {
     bail!("CT static checkpoint transcript has an invalid canonical framing");
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::Duration;
+
+  use aws_lc_rs::rand::SystemRandom;
+  use aws_lc_rs::signature::{
+    ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, Ed25519KeyPair, KeyPair as _,
+  };
+  use base64::Engine as _;
+  use tokio::net::UnixListener;
+
+  use super::super::protocol::{
+    RemoteSignerRequest, RemoteSignerResponse, read_async_frame_with_timeout,
+    write_async_frame_with_timeout,
+  };
+  use super::{
+    CtLogProfile, CtLogSigner, CtLogSignerConfig, CtTranscriptClass, verify_ct_log_signature,
+  };
+
+  const ED25519_SPKI_PREFIX: &[u8] = &[
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+  ];
+  const P256_SPKI_PREFIX: &[u8] = &[
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
+    0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00,
+  ];
+
+  #[test]
+  fn ct_log_response_verification_rejects_ed25519_forgery_key_and_transcript_confusion() {
+    let key = Ed25519KeyPair::generate().expect("test key should generate");
+    let other_key = Ed25519KeyPair::generate().expect("second test key should generate");
+    let mut spki = ED25519_SPKI_PREFIX.to_vec();
+    spki.extend_from_slice(key.public_key().as_ref());
+    let mut other_spki = ED25519_SPKI_PREFIX.to_vec();
+    other_spki.extend_from_slice(other_key.public_key().as_ref());
+    let transcript = b"exact CT signer transcript";
+    let signature = key.sign(transcript);
+
+    verify_ct_log_signature(
+      CtLogProfile::Rfc9162Ed25519,
+      &spki,
+      transcript,
+      signature.as_ref(),
+    )
+    .expect("valid Ed25519 signer response must verify");
+    assert!(
+      verify_ct_log_signature(
+        CtLogProfile::Rfc9162Ed25519,
+        &spki,
+        b"different CT signer transcript",
+        signature.as_ref(),
+      )
+      .is_err()
+    );
+    assert!(
+      verify_ct_log_signature(
+        CtLogProfile::Rfc9162Ed25519,
+        &other_spki,
+        transcript,
+        signature.as_ref(),
+      )
+      .is_err()
+    );
+    assert!(
+      verify_ct_log_signature(CtLogProfile::Rfc9162Ed25519, &spki, transcript, &[0x5a; 64],)
+        .is_err()
+    );
+  }
+
+  #[test]
+  fn ct_log_response_verification_rejects_malformed_or_forged_p256_signatures() {
+    let random = SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random)
+      .expect("test key should generate");
+    let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref())
+      .expect("test key should parse");
+    let other_pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random)
+      .expect("second test key should generate");
+    let other_key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, other_pkcs8.as_ref())
+      .expect("second test key should parse");
+    let mut spki = P256_SPKI_PREFIX.to_vec();
+    spki.extend_from_slice(key.public_key().as_ref());
+    let mut other_spki = P256_SPKI_PREFIX.to_vec();
+    other_spki.extend_from_slice(other_key.public_key().as_ref());
+    let transcript = b"exact P-256 CT signer transcript";
+    let signature = key
+      .sign(&random, transcript)
+      .expect("test transcript should sign");
+
+    verify_ct_log_signature(
+      CtLogProfile::Rfc6962P256Sha256,
+      &spki,
+      transcript,
+      signature.as_ref(),
+    )
+    .expect("valid P-256 signer response must verify");
+    for (public_key, candidate) in [
+      (spki.as_slice(), b"malformed".as_slice()),
+      (other_spki.as_slice(), signature.as_ref()),
+    ] {
+      assert!(
+        verify_ct_log_signature(
+          CtLogProfile::Rfc6962P256Sha256,
+          public_key,
+          transcript,
+          candidate,
+        )
+        .is_err()
+      );
+    }
+    assert!(
+      verify_ct_log_signature(
+        CtLogProfile::Rfc6962P256Sha256,
+        &spki,
+        b"different P-256 CT signer transcript",
+        signature.as_ref(),
+      )
+      .is_err()
+    );
+  }
+
+  #[tokio::test]
+  async fn ct_log_client_rejects_a_well_formed_forged_ed25519_signer_response() {
+    let temp_dir = tempfile::tempdir().expect("temporary signer directory should create");
+    let socket_path = temp_dir.path().join("forged-ct-signer.sock");
+    let token_path = temp_dir.path().join("token.b64");
+    std::fs::write(
+      &token_path,
+      base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+    )
+    .expect("signer token should write");
+    let key = Ed25519KeyPair::generate().expect("test key should generate");
+    let mut public_key = ED25519_SPKI_PREFIX.to_vec();
+    public_key.extend_from_slice(key.public_key().as_ref());
+    let listener = UnixListener::bind(&socket_path).expect("forged signer listener should bind");
+    let server = tokio::spawn(async move {
+      let (mut describe_stream, _) = listener.accept().await.expect("describe connection");
+      assert!(matches!(
+        read_async_frame_with_timeout::<RemoteSignerRequest>(
+          &mut describe_stream,
+          Duration::from_secs(1),
+        )
+        .await
+        .expect("describe request"),
+        RemoteSignerRequest::DescribeCtLogKey { .. }
+      ));
+      write_async_frame_with_timeout(
+        &mut describe_stream,
+        &RemoteSignerResponse::DescribeCtLogKey {
+          public_key: base64::engine::general_purpose::STANDARD.encode(&public_key),
+          profile: CtLogProfile::Rfc9162Ed25519,
+        },
+        Duration::from_secs(1),
+      )
+      .await
+      .expect("describe response");
+
+      let (mut sign_stream, _) = listener.accept().await.expect("sign connection");
+      assert!(matches!(
+        read_async_frame_with_timeout::<RemoteSignerRequest>(
+          &mut sign_stream,
+          Duration::from_secs(1)
+        )
+        .await
+        .expect("sign request"),
+        RemoteSignerRequest::SignCtLogTranscript { .. }
+      ));
+      write_async_frame_with_timeout(
+        &mut sign_stream,
+        &RemoteSignerResponse::SignCtLogTranscript {
+          signature: base64::engine::general_purpose::STANDARD.encode([0x5a; 64]),
+        },
+        Duration::from_secs(1),
+      )
+      .await
+      .expect("forged sign response");
+    });
+
+    let client = CtLogSigner::connect(CtLogSignerConfig {
+      socket_path,
+      key_id: "ct-key".to_string(),
+      profile: CtLogProfile::Rfc9162Ed25519,
+      token_env: "UNUSED_CT_TEST_TOKEN".to_string(),
+      token_file: Some(token_path),
+      token_file_reload_base_dir: None,
+      token_reload_interval: Duration::from_secs(1),
+      connect_timeout: Duration::from_secs(1),
+      sign_timeout: Duration::from_secs(1),
+    })
+    .await
+    .expect("client should pin the described CT identity");
+    let transcript = {
+      let mut value = Vec::new();
+      value.extend_from_slice(&1_u64.to_be_bytes());
+      value.extend_from_slice(&1_u64.to_be_bytes());
+      value.push(32);
+      value.extend_from_slice(&[0x5a; 32]);
+      value.extend_from_slice(&0_u16.to_be_bytes());
+      value
+    };
+    assert!(
+      client
+        .sign_transcript(CtTranscriptClass::V2Sth, &transcript)
+        .await
+        .is_err(),
+      "a correct-length signature that does not authenticate the transcript must not escape"
+    );
+    server.await.expect("forged signer task should finish");
+  }
 }
 
 fn read_u16(input: &[u8], offset: &mut usize) -> anyhow::Result<usize> {

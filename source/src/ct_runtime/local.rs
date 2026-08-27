@@ -239,15 +239,23 @@ impl CtLocalStore {
     Ok(timestamp)
   }
 
-  pub async fn integrate_ready(&self) -> anyhow::Result<CtTreeState> {
+  pub async fn integrate_ready<F>(&self, verify: F) -> anyhow::Result<CtTreeState>
+  where
+    F: Fn(&CtStoredEntry) -> anyhow::Result<()>,
+  {
     let mut state = self.state.lock().await;
     if let Some(reason) = &state.frozen_reason {
       bail!("CT log is frozen: {reason}");
     }
-    for entry in &mut state.entries {
+    for (index, entry) in state.entries.iter_mut().enumerate() {
+      if entry.integrated {
+        continue;
+      }
       if entry.receipt.is_none() {
         break;
       }
+      let stored = stored_entry(index, entry)?;
+      verify(&stored)?;
       entry.integrated = true;
     }
     let integrated = state
@@ -520,5 +528,27 @@ mod tests {
       .unwrap();
     assert_eq!(replacement.leaf_index, first.leaf_index);
     assert!(replacement.timestamp_millis > first.timestamp_millis);
+  }
+
+  #[tokio::test]
+  async fn invalid_durable_receipt_is_not_integrated() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = CtLocalStore::open(directory.path(), "test-log", "rfc6962", &[1, 2, 3]).unwrap();
+    let reserved = store
+      .reserve_entry_with_limit(&[1; 32], 8, |_, _| Ok((vec![1], Vec::new(), [2; 32])))
+      .await
+      .unwrap();
+    store
+      .record_receipt(reserved.leaf_index, &[5])
+      .await
+      .unwrap();
+
+    assert!(
+      store
+        .integrate_ready(|_| bail!("invalid receipt"))
+        .await
+        .is_err()
+    );
+    assert_eq!(store.tree_state().await.unwrap().tree_size, 0);
   }
 }

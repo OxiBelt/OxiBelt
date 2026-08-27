@@ -372,11 +372,11 @@ impl CtPostgresStore {
 
   pub async fn integrate_next(
     &self,
-    expected_leaf_index: u64,
-    leaf_hash: [u8; 32],
+    expected: &CtStoredEntry,
     holder: &str,
     epoch: u64,
   ) -> anyhow::Result<CtTreeState> {
+    let expected_leaf_index = expected.leaf_index;
     let expected_leaf_index_i64 = to_i64(expected_leaf_index, "leaf index")?;
     let epoch_i64 = to_i64(epoch, "publisher epoch")?;
     let mut transaction = self
@@ -391,8 +391,8 @@ impl CtPostgresStore {
     if tree_size != expected_leaf_index_i64 {
       bail!("CT integration must advance exactly the current tree size");
     }
-    let entry_hash = sqlx::query_scalar::<_, Vec<u8>>(
-      "SELECT leaf_hash FROM oxibelt_ct_entries WHERE log_name=$1 AND leaf_index=$2 AND receipt IS NOT NULL AND integrated=FALSE FOR UPDATE",
+    let entry = sqlx::query(
+      "SELECT timestamp_millis,leaf_input,extra_data,leaf_hash,receipt FROM oxibelt_ct_entries WHERE log_name=$1 AND leaf_index=$2 AND receipt IS NOT NULL AND integrated=FALSE FOR UPDATE",
     )
     .bind(&self.log_name)
     .bind(expected_leaf_index_i64)
@@ -400,9 +400,16 @@ impl CtPostgresStore {
     .await
     .context("failed to lock CT entry for integration")?
     .ok_or_else(|| anyhow!("CT entry is not ready for integration"))?;
-    if entry_hash.as_slice() != leaf_hash {
-      bail!("CT entry leaf hash changed before integration");
+    let receipt: Option<Vec<u8>> = entry.try_get("receipt")?;
+    if to_u64(entry.try_get("timestamp_millis")?, "timestamp")? != expected.timestamp_millis
+      || entry.try_get::<Vec<u8>, _>("leaf_input")? != expected.leaf_input
+      || entry.try_get::<Vec<u8>, _>("extra_data")? != expected.extra_data
+      || entry.try_get::<Vec<u8>, _>("leaf_hash")?.as_slice() != expected.leaf_hash.as_slice()
+      || receipt.as_deref() != Some(expected.receipt.as_slice())
+    {
+      bail!("CT entry changed after durable receipt verification");
     }
+    let leaf_hash = expected.leaf_hash;
 
     sqlx::query(
       "INSERT INTO oxibelt_ct_nodes(log_name,level,node_index,hash) VALUES ($1,0,$2,$3) ON CONFLICT DO NOTHING",
@@ -1019,7 +1026,11 @@ mod tests {
       None
     );
     store
-      .integrate_next(first.leaf_index, first_hash, "alpha", alpha_epoch)
+      .integrate_next(
+        &store.next_unintegrated().await.unwrap().unwrap(),
+        "alpha",
+        alpha_epoch,
+      )
       .await
       .unwrap();
 
@@ -1030,7 +1041,11 @@ mod tests {
       .unwrap();
     store.record_receipt(second.leaf_index, &[2]).await.unwrap();
     let integrated = store
-      .integrate_next(second.leaf_index, second_hash, "alpha", alpha_epoch)
+      .integrate_next(
+        &store.next_unintegrated().await.unwrap().unwrap(),
+        "alpha",
+        alpha_epoch,
+      )
       .await
       .unwrap();
     assert_eq!(integrated.tree_size, 2);

@@ -39,11 +39,11 @@ mod token;
 pub use audit_checkpoint::{
   AUDIT_CHECKPOINT_SIGNING_DOMAIN, AuditCheckpointSigner, AuditCheckpointSignerConfig,
 };
-pub(crate) use ct_log::validate_ct_log_public_key;
 pub use ct_log::{
   CtLogProfile, CtLogSigner, CtLogSignerConfig, CtTranscriptClass, MAX_CT_TRANSCRIPT_BYTES,
   STATIC_CHECKPOINT_TRANSCRIPT_DOMAIN, validate_ct_transcript,
 };
+pub(crate) use ct_log::{validate_ct_log_public_key, verify_ct_log_signature};
 
 use keys::{
   AuditCheckpointKey, CtLogKey, PREFERRED_SIGNATURE_SCHEMES, ServerKey, load_audit_checkpoint_keys,

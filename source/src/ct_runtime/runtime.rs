@@ -39,7 +39,7 @@ use crate::ct::rfc9162::{
 use crate::ct::static_ct::{
   StaticCheckpoint, StaticTileLeaf, TileKind, TilePath, decode_data_tile, decode_hash_tile,
   encode_data_tile, encode_hash_tile, issuer_fingerprint, issuer_fingerprint_hex,
-  leaf_index_extension,
+  leaf_index_extension, parse_leaf_index_extension,
 };
 use crate::metrics::{CtRejectionReason, Metrics};
 use crate::remote_signer::{CtLogProfile, CtLogSigner, CtLogSignerConfig, CtTranscriptClass};
@@ -1150,27 +1150,137 @@ impl CtLogRuntime {
   }
 
   fn verify_log_signature(&self, transcript: &[u8], signature: &[u8]) -> anyhow::Result<()> {
-    match self.config.identity.algorithm {
-      CertificateTransparencyIdentityAlgorithm::P256 => {
-        let point = self
-          .public_key_spki
-          .get(26..)
-          .ok_or_else(|| anyhow!("CT P-256 public identity is malformed"))?;
-        aws_lc_rs::signature::UnparsedPublicKey::new(
-          &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
-          point,
-        )
-        .verify(transcript, signature)
-        .map_err(|_| anyhow!("CT signature verification failed"))
+    crate::remote_signer::verify_ct_log_signature(
+      self.signer_profile(),
+      &self.public_key_spki,
+      transcript,
+      signature,
+    )
+    .map_err(|_| anyhow!("CT signature verification failed"))
+  }
+
+  fn signer_profile(&self) -> CtLogProfile {
+    match (self.config.protocol, self.config.identity.algorithm) {
+      (CertificateTransparencyProtocol::StaticRfc6962V1, _) => CtLogProfile::Rfc6962P256Sha256,
+      (
+        CertificateTransparencyProtocol::Rfc9162V2,
+        CertificateTransparencyIdentityAlgorithm::P256,
+      ) => CtLogProfile::Rfc9162P256Sha256,
+      (
+        CertificateTransparencyProtocol::Rfc9162V2,
+        CertificateTransparencyIdentityAlgorithm::Ed25519,
+      ) => CtLogProfile::Rfc9162Ed25519,
+    }
+  }
+
+  fn verify_durable_v1_receipt(
+    &self,
+    sct: &SignedCertificateTimestampV1,
+    entry: &TimestampedEntryV1,
+  ) -> anyhow::Result<()> {
+    if sct.log_id != self.v1_log_id
+      || sct.timestamp != entry.timestamp
+      || sct.extensions != entry.extensions
+      || sct.signature.hash_algorithm != crate::ct::rfc6962::HASH_ALGORITHM_SHA256
+      || sct.signature.signature_algorithm != crate::ct::rfc6962::SIGNATURE_ALGORITHM_ECDSA
+    {
+      bail!("durable SCT does not match its reserved CT entry");
+    }
+    let transcript = encode_sct_signed_input(entry)
+      .map_err(|error| anyhow!("failed to encode durable SCT transcript: {error}"))?;
+    self
+      .verify_log_signature(&transcript, &sct.signature.signature)
+      .context("durable SCT signature verification failed")
+  }
+
+  fn verify_durable_v2_receipt(
+    &self,
+    item: &TransItemV2,
+    entry: &TransItemV2,
+    log_id: &LogIdV2,
+    leaf_index: u64,
+    timestamp: u64,
+    kind: CtSubmissionKind,
+  ) -> anyhow::Result<()> {
+    let sct = match (kind, item) {
+      (CtSubmissionKind::Certificate, TransItemV2::X509Sct(sct))
+      | (CtSubmissionKind::Precertificate, TransItemV2::PrecertificateSct(sct)) => sct,
+      _ => bail!("durable RFC 9162 receipt has the wrong SCT type"),
+    };
+    let expected_extensions = vec![ExtensionV2 {
+      extension_type: V2_LEAF_INDEX_EXTENSION,
+      data: leaf_index.to_be_bytes().to_vec(),
+    }];
+    if &sct.log_id != log_id || sct.timestamp != timestamp || sct.extensions != expected_extensions
+    {
+      bail!("durable RFC 9162 SCT does not match its reserved CT entry");
+    }
+    let transcript = TransItemV2::sct_signed_input(entry)
+      .map_err(|error| anyhow!("failed to encode durable RFC 9162 SCT transcript: {error}"))?;
+    self
+      .verify_log_signature(&transcript, &sct.signature)
+      .context("durable RFC 9162 SCT signature verification failed")
+  }
+
+  fn verify_stored_entry(&self, entry: &CtStoredEntry) -> anyhow::Result<()> {
+    match self.config.protocol {
+      CertificateTransparencyProtocol::StaticRfc6962V1 => {
+        let leaf = MerkleTreeLeafV1::decode(&entry.leaf_input)
+          .map_err(|error| anyhow!("durable RFC 6962 leaf is invalid: {error}"))?;
+        if leaf.0.timestamp != entry.timestamp_millis
+          || parse_leaf_index_extension(&leaf.0.extensions)
+            .map_err(|error| anyhow!("durable SCT leaf index extension is invalid: {error}"))?
+            != entry.leaf_index
+          || merkle::leaf_hash(&entry.leaf_input) != entry.leaf_hash
+        {
+          bail!("durable RFC 6962 entry does not match its stored identity");
+        }
+        let sct = SignedCertificateTimestampV1::decode(&entry.receipt)
+          .map_err(|error| anyhow!("durable SCT is invalid: {error}"))?;
+        self.verify_durable_v1_receipt(&sct, &leaf.0)
       }
-      CertificateTransparencyIdentityAlgorithm::Ed25519 => {
-        let key = self
-          .public_key_spki
-          .get(self.public_key_spki.len().saturating_sub(32)..)
-          .ok_or_else(|| anyhow!("CT Ed25519 public identity is malformed"))?;
-        aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, key)
-          .verify(transcript, signature)
-          .map_err(|_| anyhow!("CT signature verification failed"))
+      CertificateTransparencyProtocol::Rfc9162V2 => {
+        let leaf = TransItemV2::decode(&entry.leaf_input)
+          .map_err(|error| anyhow!("durable RFC 9162 leaf is invalid: {error}"))?;
+        let (kind, timestamp, extensions) = match &leaf {
+          TransItemV2::X509Entry(value) => (
+            CtSubmissionKind::Certificate,
+            value.timestamp,
+            &value.extensions,
+          ),
+          TransItemV2::PrecertificateEntry(value) => (
+            CtSubmissionKind::Precertificate,
+            value.timestamp,
+            &value.extensions,
+          ),
+          _ => bail!("durable RFC 9162 leaf is not a submission entry"),
+        };
+        let expected_extensions = vec![ExtensionV2 {
+          extension_type: V2_LEAF_INDEX_EXTENSION,
+          data: entry.leaf_index.to_be_bytes().to_vec(),
+        }];
+        if timestamp != entry.timestamp_millis
+          || extensions != &expected_extensions
+          || crate::ct::rfc9162::merkle_leaf_hash(&leaf)
+            .map_err(|error| anyhow!("failed to hash durable RFC 9162 leaf: {error}"))?
+            != entry.leaf_hash
+        {
+          bail!("durable RFC 9162 entry does not match its stored identity");
+        }
+        let receipt = TransItemV2::decode(&entry.receipt)
+          .map_err(|error| anyhow!("durable RFC 9162 SCT is invalid: {error}"))?;
+        let log_id = self
+          .v2_log_id
+          .as_ref()
+          .ok_or_else(|| anyhow!("RFC 9162 LogID is missing"))?;
+        self.verify_durable_v2_receipt(
+          &receipt,
+          &leaf,
+          log_id,
+          entry.leaf_index,
+          entry.timestamp_millis,
+          kind,
+        )
       }
     }
   }
@@ -1190,6 +1300,9 @@ impl CtLogRuntime {
     if let Some(receipt) = reserved.receipt {
       let sct = SignedCertificateTimestampV1::decode(&receipt)
         .map_err(|error| anyhow!("durable SCT is invalid: {error}"))?;
+      let (entry, _, _) =
+        v1_entry_parts(&chain, kind, reserved.leaf_index, reserved.timestamp_millis)?;
+      self.verify_durable_v1_receipt(&sct, &entry)?;
       self
         .record_receipt_and_publish(reserved.leaf_index, &receipt)
         .await?;
@@ -1432,6 +1545,16 @@ impl CtLogRuntime {
     if let Some(receipt) = reserved.receipt {
       let item = TransItemV2::decode(&receipt)
         .map_err(|error| anyhow!("durable RFC 9162 SCT is invalid: {error}"))?;
+      let (entry, _, _) =
+        v2_entry_parts(&chain, kind, reserved.leaf_index, reserved.timestamp_millis)?;
+      self.verify_durable_v2_receipt(
+        &item,
+        &entry,
+        &log_id,
+        reserved.leaf_index,
+        reserved.timestamp_millis,
+        kind,
+      )?;
       self
         .record_receipt_and_publish(reserved.leaf_index, &receipt)
         .await?;
@@ -1663,7 +1786,9 @@ impl CtLogRuntime {
     let _run = self.publisher_run.lock().await;
     match self.store()? {
       CtStore::Local(store) => {
-        let state = store.integrate_ready().await?;
+        let state = store
+          .integrate_ready(|entry| self.verify_stored_entry(entry))
+          .await?;
         self.publish_immutable_objects(&state).await?;
         self.publish_checkpoint_for_state(&state).await?;
         store.record_published_tree_size(state.tree_size).await?;
@@ -1674,9 +1799,8 @@ impl CtLogRuntime {
           return self.observe_standby_publication(store).await;
         };
         while let Some(entry) = store.next_unintegrated().await? {
-          store
-            .integrate_next(entry.leaf_index, entry.leaf_hash, &holder, epoch)
-            .await?;
+          self.verify_stored_entry(&entry)?;
+          store.integrate_next(&entry, &holder, epoch).await?;
         }
         let state = store.tree_state().await?;
         self.sync_checkpoint_version(&state).await;
