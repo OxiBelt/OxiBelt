@@ -68,7 +68,8 @@ be used as a supported production upgrade source or target.
 | `0.6.6` | `0.8.1-beta.9` | Published, qualified | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Use only the fresh beta.9 exact-version artifacts and complete automatic qualification evidence; do not substitute an earlier beta subject or receipt. |
 | `0.8.1-beta.8` | `0.8.1-beta.9` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.8's published artifacts and exact-revision evidence cannot be promoted, relabeled, or reused for beta.9. |
 | `0.8.1-beta.9` | `0.8.1` | Stable candidate | The stable source is exactly one documentation-only commit after the qualified beta.9 revision. This exact transition has no additional calendar delay, but stable publication cannot predate beta publication or verifier completion and remains subject to every stable-only release and alias gate. |
-| `0.8.1` | `0.9.0-beta.1` | Planned beta, not tagged | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). CT-disabled epoch-1 configurations need no native migration; enable CT only after fresh exact-candidate storage, signer, interoperability, load, and monitor evidence succeeds. The exact later `0.9.0-beta.1` to `0.9.0` transition has a one-time release-policy waiver, described below; the normal policy remains unchanged for every other transition. |
+| `0.8.1` | `0.9.0-beta.1` | Draft beta, not published | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). The signed tag and matching draft prerelease exist, but no publication, official artifact, or qualification claim follows from the draft. CT-disabled epoch-1 configurations need no native migration; enable CT only after fresh exact-candidate storage, signer, interoperability, load, and monitor evidence succeeds. |
+| `0.9.0-beta.1` | `0.9.0` | Stable candidate, not published | The stable source is exactly one documentation-only commit after beta.1. Beta publication must precede stable publication. This exact transition may waive beta independent qualification and the 24-hour interval, but stable keeps every normal exact artifact gate and its own 30-image/two-chart qualification before mutable aliases move. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -78,13 +79,16 @@ release-contract checker.
 
 ## Upgrade from 0.8.1 to the 0.9.0 line
 
-`0.9.0-beta.1` is a development ledger target, not a tag, GitHub Release,
-official artifact set, or qualified production release. It introduces native
-Certificate Transparency (CT) runtime, tooling, signer, and experimental Helm
-surfaces. CT remains disabled by default. An existing `0.8.1` epoch-1
-configuration that does not add `[certificate_transparency]` or `ct_log`
-routes needs no native schema migration and keeps its existing request
-behavior.
+`0.9.0-beta.1` has a signed immutable tag and matching draft prerelease, but it
+is not published and has no official artifact set or qualification claim. The
+`0.9.0` stable candidate is exactly one documentation-only commit after that
+beta tag. The beta draft and stable candidate are not deployable production
+releases. The release line
+introduces native Certificate Transparency (CT) runtime, tooling, signer, and
+experimental Helm surfaces. CT remains disabled by default. An existing
+`0.8.1` epoch-1 configuration that does not add
+`[certificate_transparency]` or `ct_log` routes needs no native schema
+migration and keeps its existing request behavior.
 
 For this exact release line, `0.9.0-beta.1` must be published before
 `0.9.0` is published, but stable publication may proceed without waiting for

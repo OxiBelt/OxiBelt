@@ -12,6 +12,171 @@ entries. See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.9.0] - 2026-08-27
+
+> Stable carry-forward of the person-reviewed `0.9.0-beta.1` source in exactly
+> one documentation-only commit. Certificate Transparency remains disabled by
+> default, experimental, and unvalidated; stable versioning, the one-time
+> predecessor-gate waiver, and release publication do not grant CT production
+> support.
+
+- Changes since: `0.8.1`
+- Supported upgrade sources: `0.8.1`, `0.9.0-beta.1`
+- Upgrade guide: [Upgrade from 0.8.1 to the 0.9.0 line](docs/Upgrading.md#upgrade-from-081-to-the-090-line)
+
+### Configuration
+
+- Add optional `[tls.ct]` downstream embedded-SCT verification. `audit` reports
+  Chrome/Firefox-style policy results and `enforce` fails closed for activation
+  and new handshakes; the default remains `disabled`. Managed mode authenticates
+  and persistently caches the official Chromium v3 Log list, while static mode
+  accepts a signed offline list.
+- Add optional `[certificate_transparency]` configuration. It is disabled by
+  default and requires explicit protocol, log identity, signer, accepted-root
+  bundle, storage, shard, and limit configuration before a `ct_log` route can
+  serve CT traffic. Activating or changing CT requires a full reload.
+- Limit each writable process to one CT log and keep operator, gateway, signer,
+  and independent-monitor responsibilities separated. A CT route passes normal
+  route admission but bypasses upstream proxying, static serving, cache, WAF,
+  retry, and response rewriting.
+- Preserve route-action path-template syntax and validation while accelerating
+  the internal delimiter scan. Literal `?` and `#` remain rejected for rewrite
+  and redirect paths; keys, defaults, schema epoch, accepted and rejected
+  configurations, reload class, and rollback behavior remain unchanged.
+- Preserve WAF keys and defaults while forcing policy-authored advanced-regex
+  match-time subject, backtrack, and matcher stack failures closed for request,
+  response, and stream phases, including when `waf.fail_policy = "open"`.
+  Unrelated evaluation failures retain the configured fail policy.
+
+### Schema epochs
+
+- Keep the native configuration schema at epoch `1` while adding optional CT
+  fields. A `0.8.1` epoch-1 configuration with CT disabled needs no native
+  migration and retains its existing behavior.
+- Introduce CT PostgreSQL schema version `3`. Production CT operators must run
+  the explicit migration while CT traffic is stopped; OxiBelt never performs a
+  live production CT migration. A `0.8.1` binary does not understand the CT
+  configuration fields or CT schema.
+
+### Deprecations and removals
+
+- No changes for this release.
+
+### Admin API
+
+- Extend authenticated downstream TLS status and support bundles with bounded
+  CT policy, Log-list freshness, and per-certificate count/error state. Add
+  fixed-cardinality aggregate CT metrics without exposing SNI, certificate
+  identities, SCTs, Log IDs, operators, URLs, or paths.
+
+### Feature lifecycle
+
+- Keep native Certificate Transparency and the `oxibelt-ct` Helm chart
+  `experimental` and `unvalidated`. They are not production-supported until
+  the exact candidate passes interoperability, failure, fencing, and
+  resource-based load gates and an independent monitor observes seven
+  continuous days without rollback, fork, invalid proof, or stale STH.
+- Require `0.9.0-beta.1` publication before `0.9.0` publication. For this exact
+  transition only, stable publication may waive the beta's independent
+  qualification and 24-hour eligibility interval. Stable still requires every
+  normal exact artifact and release gate and its own automatic 30-image and
+  two-chart qualification before mutable aliases move. No other transition
+  inherits this waiver.
+
+### Rulepack compatibility
+
+- Change no OxiRule syntax, CRS compatibility, rulepack schema, or successful
+  matching semantics. Advanced-regex match-time resource failures use the
+  phase's fail-closed decision instead of fail-open. CT endpoints remain
+  outside WAF inspection and deliberately bypass proxy, static, cache, WAF,
+  retry, and response-rewrite behavior after route admission.
+- Accelerate percent-marker, normalization, malicious-input, and compiled
+  literal searches without changing OxiRule or CRS syntax, normalization
+  results, match precedence, request classification, or enforcement behavior.
+
+### Executables and images
+
+- Add `oxibeltctl ct` commands for accepted-root bundles, shard planning,
+  independent monitoring, explicit PostgreSQL migration, and storage checks.
+  Extend `oxibelt-keysigner` with a purpose-exclusive CT log key and immutable
+  signing profile.
+- Preserve the six official image roles and two official release Helm charts.
+  Register `deploy/helm/oxibelt-ct/Chart.yaml` only in the development version
+  inventory; the experimental CT chart is not packaged, published, rebuilt,
+  qualified, or promoted by the official release chart contract.
+
+### Storage and state
+
+- Add crash-consistent local CT schema version `1` for development and
+  interoperability use only. Production CT uses PostgreSQL schema version `3`
+  for sequencing plus HTTPS S3-compatible versioned object storage with object
+  lock, retention, checksum readback, and an operator-supplied deletion-denial
+  attestation.
+- Require a stopped-traffic PostgreSQL migration and fresh storage checks
+  before production activation. There is no automatic live migration or
+  down-migration for CT state.
+
+### Upgrade validation
+
+- Validate the target binary, migrate and probe production CT storage before
+  enabling routes, and render the experimental chart under person review:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+oxibeltctl ct postgres migrate --database-url-env OXIBELT_CT_DATABASE_URL
+oxibeltctl ct postgres storage-check --database-url-env OXIBELT_CT_DATABASE_URL
+helm lint --strict deploy/helm/oxibelt-ct
+helm template oxibelt-ct deploy/helm/oxibelt-ct \
+  --values deploy/helm/oxibelt-ct/values-production.yaml
+```
+
+- Keep CT disabled until the accepted-root digest and signature quorum, log
+  identity, signer profile, shard interval, route limits, PostgreSQL backup,
+  object-lock retention, deletion denial, and independent monitor witness have
+  been reviewed against the exact candidate.
+
+### Rollback and irreversible steps
+
+- To return to `0.8.1`, stop new submissions, drain every CT operator and
+  gateway, remove `ct_log` and `ct_surface` routes and the CT configuration,
+  then validate and restore the `0.8.1` binary and configuration together.
+  Preserve PostgreSQL and object-store snapshots, root bundles, log keys, and
+  monitor witnesses until rollback is verified.
+- Published CT checkpoints, signed tree heads, receipts, and retained or
+  object-locked versions are externally visible or immutable and cannot be
+  retracted by rolling back OxiBelt. Do not delete or reuse a log identity to
+  conceal a failed cut.
+
+### Known issues
+
+- Production CT support remains unqualified until exact-candidate
+  interoperability, outage, failover, fencing, load, and seven-day independent
+  monitor requirements complete.
+- CT remains disabled by default and experimental/unvalidated. Beta or stable
+  publication, the one-time predecessor waiver, and stable artifact
+  qualification do not constitute CT production support.
+- The experimental chart keeps its Service disabled and cannot install a safe
+  readiness probe because `log.config` is opaque. Enabling the Service needs an
+  explicit no-readiness acknowledgement and does not make the deployment
+  production-supported.
+- OxiBelt does not inject SCTs into downstream TLS certificates and does not
+  provide an ACME service.
+
+### Security
+
+- Keep CT private keys in a purpose-bound `oxibelt-keysigner` process that
+  accepts exactly one CT key and immutable profile. Mount signer, operator,
+  gateway, storage, and accepted-root secrets only into their owning roles.
+- Verify every remote CT signer response against the configured signer key and
+  exact transcript before accepting, persisting, publishing, or returning CT
+  output; malformed or cryptographically invalid responses fail closed.
+- Pin accepted roots by exact SHA-256 bundle digest and require at least two
+  independent Ed25519 signatures in production. Require HTTPS object storage,
+  object lock and retention, deletion-denial policy, replica fencing, and
+  independent monitor evidence.
+- Anonymous CT submission remains supported; apply bounded request bodies,
+  route rate limits, timeouts, and worker admission before CT dispatch.
+
 ## [0.8.1] - 2026-08-24
 
 > Stable carry-forward of the person-reviewed `0.8.1-beta.9` source after its
