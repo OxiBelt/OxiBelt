@@ -397,6 +397,28 @@ fn validate_static_checkpoint(transcript: &[u8]) -> anyhow::Result<()> {
   Ok(())
 }
 
+fn read_u16(input: &[u8], offset: &mut usize) -> anyhow::Result<usize> {
+  let end = offset
+    .checked_add(2)
+    .ok_or_else(|| anyhow::anyhow!("CT transcript length overflows"))?;
+  let bytes = input
+    .get(*offset..end)
+    .ok_or_else(|| anyhow::anyhow!("CT transcript is truncated"))?;
+  *offset = end;
+  Ok(u16::from_be_bytes([bytes[0], bytes[1]]) as usize)
+}
+
+fn read_u24(input: &[u8], offset: &mut usize) -> anyhow::Result<usize> {
+  let end = offset
+    .checked_add(3)
+    .ok_or_else(|| anyhow::anyhow!("CT transcript length overflows"))?;
+  let bytes = input
+    .get(*offset..end)
+    .ok_or_else(|| anyhow::anyhow!("CT transcript is truncated"))?;
+  *offset = end;
+  Ok(((bytes[0] as usize) << 16) | ((bytes[1] as usize) << 8) | bytes[2] as usize)
+}
+
 #[cfg(test)]
 mod tests {
   use std::time::Duration;
@@ -606,26 +628,4 @@ mod tests {
     );
     server.await.expect("forged signer task should finish");
   }
-}
-
-fn read_u16(input: &[u8], offset: &mut usize) -> anyhow::Result<usize> {
-  let end = offset
-    .checked_add(2)
-    .ok_or_else(|| anyhow::anyhow!("CT transcript length overflows"))?;
-  let bytes = input
-    .get(*offset..end)
-    .ok_or_else(|| anyhow::anyhow!("CT transcript is truncated"))?;
-  *offset = end;
-  Ok(u16::from_be_bytes([bytes[0], bytes[1]]) as usize)
-}
-
-fn read_u24(input: &[u8], offset: &mut usize) -> anyhow::Result<usize> {
-  let end = offset
-    .checked_add(3)
-    .ok_or_else(|| anyhow::anyhow!("CT transcript length overflows"))?;
-  let bytes = input
-    .get(*offset..end)
-    .ok_or_else(|| anyhow::anyhow!("CT transcript is truncated"))?;
-  *offset = end;
-  Ok(((bytes[0] as usize) << 16) | ((bytes[1] as usize) << 8) | bytes[2] as usize)
 }
