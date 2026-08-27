@@ -68,8 +68,9 @@ be used as a supported production upgrade source or target.
 | `0.6.6` | `0.8.1-beta.9` | Published, qualified | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Use only the fresh beta.9 exact-version artifacts and complete automatic qualification evidence; do not substitute an earlier beta subject or receipt. |
 | `0.8.1-beta.8` | `0.8.1-beta.9` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.8's published artifacts and exact-revision evidence cannot be promoted, relabeled, or reused for beta.9. |
 | `0.8.1-beta.9` | `0.8.1` | Stable candidate | The stable source is exactly one documentation-only commit after the qualified beta.9 revision. This exact transition has no additional calendar delay, but stable publication cannot predate beta publication or verifier completion and remains subject to every stable-only release and alias gate. |
-| `0.8.1` | `0.9.0-beta.1` | Draft beta, not published | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). The signed tag and matching draft prerelease exist, but no publication, official artifact, or qualification claim follows from the draft. CT-disabled epoch-1 configurations need no native migration; enable CT only after fresh exact-candidate storage, signer, interoperability, load, and monitor evidence succeeds. |
-| `0.9.0-beta.1` | `0.9.0` | Stable candidate, not published | The stable source is exactly one documentation-only commit after beta.1. Beta publication must precede stable publication. This exact transition may waive beta independent qualification and the 24-hour interval, but stable keeps every normal exact artifact gate and its own 30-image/two-chart qualification before mutable aliases move. |
+| `0.8.1` | `0.9.0-beta.1` | Published, superseded | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). The immutable prerelease is published; use the published `0.9.0` stable release for the completed line unless a release-specific recovery procedure requires the beta. CT-disabled epoch-1 configurations need no native migration. |
+| `0.9.0-beta.1` | `0.9.0` | Published, qualified | The published stable release completed its own successful independent qualification. Its alias-promotion workflow did not complete the mutation step, so deploy only immutable `0.9.0` references; do not infer that mutable aliases identify this release. Later rerun failures are not reusable qualification evidence for this or another release and do not replace the successful exact-release qualification record. |
+| `0.9.0` | `0.9.1-beta.1` | Release candidate | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). This candidate changes only release-qualification registry descriptor readback handling; no runtime, configuration, schema, Admin, rulepack, image-role, or storage behavior changes. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -79,14 +80,15 @@ release-contract checker.
 
 ## Upgrade from 0.8.1 to the 0.9.0 line
 
-`0.9.0-beta.1` has a signed immutable tag and matching draft prerelease, but it
-is not published and has no official artifact set or qualification claim. The
-`0.9.0` stable candidate is exactly one documentation-only commit after that
-beta tag. The beta draft and stable candidate are not deployable production
-releases. The release line
+`0.9.0-beta.1` and `0.9.0` are published. The stable release completed its own
+successful independent qualification. Its alias-promotion workflow did not
+complete the mutation step, so deploy only immutable `0.9.0` references and do
+not infer that mutable aliases identify this release. Later rerun failures do
+not replace that exact successful qualification record and are not reusable
+evidence for the stable release or any other release. The release line
 introduces native Certificate Transparency (CT) runtime, tooling, signer, and
-experimental Helm surfaces. CT remains disabled by default. An existing
-`0.8.1` epoch-1 configuration that does not add
+experimental Helm surfaces. CT remains disabled by default. An existing `0.8.1`
+epoch-1 configuration that does not add
 `[certificate_transparency]` or `ct_log` routes needs no native schema
 migration and keeps its existing request behavior.
 
@@ -173,6 +175,29 @@ monitor witnesses. There is no CT down-migration. Published checkpoints,
 signed tree heads, receipts, and retained or object-locked objects are
 externally visible or immutable and cannot be retracted by rollback; never
 reuse a log identity to conceal a failed deployment.
+
+## Upgrade from 0.9.0 to the 0.9.1 line
+
+`0.9.1-beta.1` contains only the release-qualification registry readback
+hardening from `ece4a69c`. It applies a bounded retry budget to descriptor
+inspection failures and malformed responses before qualification sealing,
+immediately fails valid digest or child-manifest mismatches, and reports clearer
+expected-versus-actual exact inventory diagnostics. It makes no runtime,
+configuration, schema, Admin API, rulepack, image-role,
+package/chart-sentinel, or storage behavior change.
+
+No migration or configuration edit is required. Verify the candidate ledger
+before release governance evaluates the exact revision:
+
+```sh
+pnpm run release-contract:check
+```
+
+To roll back, retain the `0.9.0` binary, configuration, image references, and
+release records, then restore the `0.9.0` deployment as a unit. No state needs
+conversion. A descriptor read that exhausts its bounded retry budget, or any
+valid descriptor mismatch, must remain a failed qualification result; neither
+a later rerun failure nor a rerun for another release is reusable evidence.
 
 ## Upgrade from 0.6.6 to the 0.8.1 line
 

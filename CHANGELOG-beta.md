@@ -15,6 +15,86 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.9.1-beta.1] - 2026-08-27
+
+> Release-candidate ledger for the release-qualification registry readback
+> hardening in `ece4a69c`. This is CI qualification control-plane work only;
+> it changes no deployed OxiBelt behavior.
+
+- Changes since: `0.9.0`
+- Supported upgrade sources: `0.9.0`
+- Upgrade guide: [Upgrade from 0.9.0 to the 0.9.1 line](docs/Upgrading.md#upgrade-from-090-to-the-091-line)
+
+### Configuration
+
+- No runtime configuration, defaults, validation, reload behavior, or schema
+  input changes. Existing configurations retain their behavior.
+
+### Schema epochs
+
+- No native, database, Helm, or other persisted-state schema epoch changes.
+
+### Deprecations and removals
+
+- No changes for this release.
+
+### Admin API
+
+- No Admin API endpoint, authentication, authorization, request, response, or
+  observability contract changes.
+
+### Feature lifecycle
+
+- Preserve every existing feature lifecycle and release-policy gate. The
+  qualification verifier now applies bounded retries to registry descriptor
+  inspection failures and malformed responses before it seals a release
+  result.
+
+### Rulepack compatibility
+
+- No OxiRule, CRS, rulepack schema, matching, normalization, or enforcement
+  behavior changes.
+
+### Executables and images
+
+- Preserve executable names, image roles, package and chart sentinels, and
+  release inventories. Valid descriptor digest or child-manifest mismatches
+  fail immediately rather than being retried; failed readback diagnostics now
+  report the expected and actual exact inventories.
+
+### Storage and state
+
+- No storage format, migration, retention, object-store, or durable-state
+  behavior changes.
+
+### Upgrade validation
+
+- Validate this release ledger and the unchanged compatibility contract:
+
+```sh
+pnpm run release-contract:check
+```
+
+### Rollback and irreversible steps
+
+- No runtime rollback or data recovery is required. If a qualification run
+  cannot obtain a valid descriptor within its bounded retry budget, leave that
+  exact release qualification failed and investigate the reported inventory;
+  do not treat a later rerun as reusable evidence for another release.
+
+### Known issues
+
+- Registry inspection failures and descriptor-malformation faults can still
+  prevent a qualification result after the bounded retries. Valid inventory
+  mismatches remain fail-closed by design.
+
+### Security
+
+- Keep qualification sealing fail closed: descriptor inspection failures and
+  malformed responses may retry only within the bounded budget, while valid
+  digest and child-manifest mismatches fail immediately with actionable
+  exact-inventory diagnostics.
+
 ## [0.9.0-beta.1] - 2026-08-27
 
 > Release-candidate ledger for the first `0.9.0` Certificate Transparency
