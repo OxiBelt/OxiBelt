@@ -9943,6 +9943,28 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
   );
   assert_eq!(arch.matches("Promote canonical GHCR aliases").count(), 0);
 
+  let promote_steps = parsed["jobs"]["promote"]["steps"]
+    .as_array()
+    .expect("stable alias promotion should define mutation steps");
+  let buildx_index = promote_steps
+    .iter()
+    .position(|step| step["name"] == "Setup pinned Docker Buildx")
+    .expect("stable alias promotion should set up Buildx before final reauthentication");
+  let reauthentication_index = promote_steps
+    .iter()
+    .position(|step| {
+      step["name"] == "Reauthenticate latest stable release immediately before mutation"
+    })
+    .expect("stable alias promotion should reauthenticate immediately before mutation");
+  let mutation_index = promote_steps
+    .iter()
+    .position(|step| step["name"] == "Promote only qualified image aliases")
+    .expect("stable alias promotion should mutate aliases only after final reauthentication");
+  assert!(
+    buildx_index < reauthentication_index && reauthentication_index + 1 == mutation_index,
+    "the packages-write identity readback must follow tool setup and immediately precede registry authentication and mutation"
+  );
+
   let validate_steps = parsed["jobs"]["validate"]["steps"]
     .as_array()
     .expect("stable alias validation should define steps");
@@ -9950,10 +9972,16 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     .iter()
     .position(|step| step["name"] == "Classify sealed release qualification")
     .expect("stable alias validation should classify release eligibility");
+  let qualification_only = "${{ steps.eligibility.outputs.eligible == 'true' && steps.reauthenticate.outputs.beta_mode == 'qualification' }}";
   for step in validate_steps.iter().skip(eligibility_index + 1) {
+    let expected_if = match step["name"].as_str() {
+      Some("Download beta aggregate bound by the stable qualification")
+      | Some("Verify exact beta aggregate bytes and identity") => qualification_only,
+      _ => "steps.eligibility.outputs.eligible == 'true'",
+    };
     assert_eq!(
-      step["if"], "steps.eligibility.outputs.eligible == 'true'",
-      "stable-only step {} must require an eligible stable qualification",
+      step["if"], expected_if,
+      "stable-only step {} must require its expected eligible stable qualification gate",
       step["name"]
     );
   }
@@ -9967,7 +9995,12 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     "release-qualification-${{ steps.reauthenticate.outputs.beta_revision }}",
     "stable release must be the single approved documentation-only commit after its beta source",
     "stable publication occurred before the beta qualification completed its required delay",
+    "betaRelease.target_commitish !== betaTag.object.sha",
+    "betaRelease.target_commitish !== beta.commit",
+    "release.published_at !== q.publishedAt",
     "betaQualification.aggregateSha256",
+    "betaGateWaiver",
+    "0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver",
     "(.receipts.images | length) == 30",
     "(.receipts.charts | length) == 2",
     "q.aliases.some((entry) => entry.alias.startsWith('ghcr.io/oxibelt/charts/'))",
@@ -9986,7 +10019,7 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     "schemaVersion: 3",
     "if: needs.resolve.outputs.automatic == 'true'",
     "releaseKind: stable ? 'stable' : 'beta'",
-    "if .releaseKind == \"stable\" then (.aliases | length) == 48 else .aliases == [] end",
+    "if .releaseKind == \"stable\" then ((has(\"betaQualification\") and (has(\"betaGateWaiver\") | not)) or (has(\"betaGateWaiver\") and (has(\"betaQualification\") | not))) and (.aliases | length) == 48 else ((has(\"betaQualification\") | not) and (has(\"betaGateWaiver\") | not) and .aliases == []) end",
     "$current + [$receipt + {receiptSha256: $receipt_sha}]",
   ] {
     assert!(verifier.contains(expected));
@@ -10019,6 +10052,40 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
   );
   assert!(verifier.contains(": 24 * 60 * 60 * 1000"));
   assert_eq!(promotion.matches(": 24 * 60 * 60 * 1000").count(), 2);
+  assert_eq!(
+    verifier
+      .matches("betaRelease.target_commitish !== betaTag.object.sha")
+      .count(),
+    1,
+    "waiver creation must reject a beta release target that drifts from its annotated tag commit"
+  );
+  assert_eq!(
+    promotion
+      .matches("betaRelease.target_commitish !== beta.commit")
+      .count(),
+    2,
+    "both stable-alias authorization passes must reject beta release target drift"
+  );
+  assert_eq!(
+    promotion
+      .matches("release.published_at !== q.publishedAt")
+      .count(),
+    2,
+    "both stable-alias authorization passes must reject stable publication timestamp drift"
+  );
+
+  assert_eq!(
+    verifier
+      .matches("version === '0.9.0' && betaRelease.tag_name === '0.9.0-beta.1'")
+      .count(),
+    1,
+    "the beta aggregate waiver must bind the exact stable and beta versions"
+  );
+  assert_eq!(
+    promotion.matches("q.version !== '0.9.0'").count(),
+    2,
+    "both read-only validation and promotion reauthentication must reject every waiver pair except 0.9.0 from beta.1"
+  );
 
   const DAY_MS: i64 = 24 * 60 * 60 * 1000;
   let required_delay = |stable: &str, beta: &str| {
@@ -10186,6 +10253,35 @@ fn stable_alias_promotion_classifies_beta_qualifications_before_promotion() {
   );
   assert_eq!(stable_outputs, "eligible=true\n");
 
+  let mut waived_stable = qualification("stable", "0.9.0", vec![serde_json::json!({}); 48]);
+  waived_stable["betaGateWaiver"] = serde_json::json!({
+    "policyId": "0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver",
+    "stable": {
+      "version": "0.9.0",
+      "ref": "refs/tags/0.9.0",
+      "tagObjectSha": "1111111111111111111111111111111111111111",
+      "commit": revision,
+      "releaseId": 1,
+      "publishedAt": "2026-08-21T12:43:38Z"
+    },
+    "beta": {
+      "version": "0.9.0-beta.1",
+      "ref": "refs/tags/0.9.0-beta.1",
+      "tagObjectSha": "4444444444444444444444444444444444444444",
+      "commit": "5555555555555555555555555555555555555555",
+      "releaseId": 2,
+      "publishedAt": "2026-08-20T12:43:38Z"
+    },
+    "waivedRequirements": ["beta-independent-qualification", "24-hour-delay"]
+  });
+  let (waived_result, waived_outputs) = run_json_case("valid-beta-gate-waiver", &waived_stable);
+  assert!(
+    waived_result.status.success(),
+    "the exact beta-gate waiver should remain eligible: {}",
+    String::from_utf8_lossy(&waived_result.stderr)
+  );
+  assert_eq!(waived_outputs, "eligible=true\n");
+
   let assert_rejected = |label: &str, value: &serde_json::Value| {
     let (output, outputs) = run_json_case(label, value);
     assert!(
@@ -10207,6 +10303,27 @@ fn stable_alias_promotion_classifies_beta_qualifications_before_promotion() {
     .expect("stable fixture should be an object")
     .remove("betaQualification");
   assert_rejected("stable-without-beta-binding", &stable_without_beta);
+
+  let mut mixed_beta_gate_modes = waived_stable.clone();
+  mixed_beta_gate_modes["betaQualification"] = serde_json::json!({});
+  assert_rejected("mixed-beta-gate-modes", &mixed_beta_gate_modes);
+
+  let mut wrong_waiver_pair = waived_stable.clone();
+  wrong_waiver_pair["betaGateWaiver"]["beta"]["version"] = serde_json::json!("0.9.0-beta.2");
+  assert_rejected("wrong-beta-gate-waiver-pair", &wrong_waiver_pair);
+
+  let mut wrong_waived_requirement = waived_stable.clone();
+  wrong_waived_requirement["betaGateWaiver"]["waivedRequirements"] =
+    serde_json::json!(["24-hour-delay"]);
+  assert_rejected(
+    "wrong-beta-gate-waiver-requirements",
+    &wrong_waived_requirement,
+  );
+
+  let mut waiver_stable_drift = waived_stable.clone();
+  waiver_stable_drift["version"] = serde_json::json!("0.9.1");
+  waiver_stable_drift["ref"] = serde_json::json!("refs/tags/0.9.1");
+  assert_rejected("beta-gate-waiver-stable-drift", &waiver_stable_drift);
 
   let mut wrong_schema = beta.clone();
   wrong_schema["schemaVersion"] = serde_json::json!(2);

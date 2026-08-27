@@ -15,11 +15,13 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
-## [0.9.0-beta.1] - 2026-08-25
+## [0.9.0-beta.1] - 2026-08-27
 
-> Development ledger for the first `0.9.0` Certificate Transparency candidate.
-> No tag, GitHub Release, official artifact, qualification receipt, or stable
-> promotion is implied by this entry.
+> Release-candidate ledger for the first `0.9.0` Certificate Transparency
+> candidate. CT remains disabled by default, experimental, and unvalidated;
+> this entry makes no production-support claim. Publication, official
+> artifacts, qualification receipts, and stable promotion remain separately
+> governed.
 
 - Changes since: `0.8.1`
 - Supported upgrade sources: `0.8.1`
@@ -78,6 +80,14 @@ for the governed entry format.
   the exact candidate passes interoperability, failure, fencing, and
   resource-based load gates and an independent monitor observes seven
   continuous days without rollback, fork, invalid proof, or stale STH.
+- For this exact release line, `0.9.0-beta.1` must be published before
+  `0.9.0` is published, but the stable release may proceed without waiting for
+  beta.1's independent qualification or the 24-hour eligibility interval.
+  This one-time release-policy waiver does not relax stable's normal exact
+  artifact, provenance, vulnerability, attestation, or release gates, and
+  stable must complete its own automatic 30-image and two-chart qualification
+  before mutable aliases move. The normal policy remains unchanged for every
+  other transition.
 
 ### Rulepack compatibility
 
@@ -148,6 +158,9 @@ helm template oxibelt-ct deploy/helm/oxibelt-ct \
 - Production support remains unqualified until the exact-candidate
   interoperability, outage, failover, fencing, load, and seven-day independent
   monitor requirements complete.
+- CT remains disabled by default and experimental/unvalidated. Publication of
+  this beta, the one-time stable timing waiver, or stable's independent
+  artifact qualification does not constitute CT production support.
 - The experimental chart keeps its Service disabled and cannot install a safe
   readiness probe because `log.config` is opaque. Enabling the Service needs
   an explicit no-readiness acknowledgement and does not make the deployment
@@ -160,6 +173,9 @@ helm template oxibelt-ct deploy/helm/oxibelt-ct \
 - Keep CT private keys in a purpose-bound `oxibelt-keysigner` process that
   accepts exactly one CT key and immutable profile. Mount signer, operator,
   gateway, storage, and accepted-root secrets only into their owning roles.
+- Verify every remote CT signer response against the configured signer key and
+  exact transcript before accepting, persisting, publishing, or returning CT
+  output; malformed or cryptographically invalid responses fail closed.
 - Pin accepted roots by exact SHA-256 bundle digest and require at least two
   independent Ed25519 signatures in production. Require HTTPS object storage,
   object lock and retention, deletion-denial policy, replica fencing, and

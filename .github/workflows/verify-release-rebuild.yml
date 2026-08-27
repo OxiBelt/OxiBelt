@@ -583,6 +583,7 @@ jobs:
               return
             }
             let betaQualification = null
+            let betaGateWaiver = null
             if (stable) {
               const contractStat = fs.lstatSync(process.env.RELEASE_CONTRACT)
               if (!contractStat.isFile() || contractStat.isSymbolicLink() || contractStat.size < 1 || contractStat.size > 262144) {
@@ -609,7 +610,8 @@ jobs:
                 throw new Error('qualified beta must use an annotated tag')
               }
               const betaTag = (await github.rest.git.getTag({...context.repo, tag_sha: betaRef.object.sha})).data
-              if (betaTag.tag !== betaRelease.tag_name || betaTag.object.type !== 'commit' || !/^[0-9a-f]{40}$/.test(betaTag.object.sha)) {
+              if (betaTag.tag !== betaRelease.tag_name || betaTag.object.type !== 'commit' || !/^[0-9a-f]{40}$/.test(betaTag.object.sha) ||
+                  betaRelease.target_commitish !== betaTag.object.sha) {
                 throw new Error('qualified beta tag object is invalid')
               }
               const comparison = (await github.rest.repos.compareCommits({...context.repo, base: betaTag.object.sha, head: revision})).data
@@ -618,47 +620,62 @@ jobs:
                   changed.join(',') !== ['CHANGELOG.md', 'docs/Upgrading.md'].sort().join(',')) {
                 throw new Error('stable release must be the single approved documentation-only commit after its beta source')
               }
-              const verifierRuns = await github.paginate(github.rest.actions.listWorkflowRuns, {
-                ...context.repo, workflow_id: '.github/workflows/verify-release-rebuild.yml', event: 'workflow_run', status: 'success', per_page: 100,
-              })
-              const candidates = []
-              for (const candidate of verifierRuns) {
-                if (candidate.path !== '.github/workflows/verify-release-rebuild.yml' || candidate.event !== 'workflow_run' ||
-                    candidate.status !== 'completed' || candidate.conclusion !== 'success' || !Number.isInteger(candidate.run_attempt)) continue
-                const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {...context.repo, run_id: candidate.id, per_page: 100})
-                const matching = artifacts.filter((artifact) => !artifact.expired && artifact.name === `release-qualification-${betaTag.object.sha}`)
-                if (matching.length === 1) candidates.push({run: candidate, artifact: matching[0]})
+              const oneTimeBetaGateWaiver = version === '0.9.0' && betaRelease.tag_name === '0.9.0-beta.1'
+              if (oneTimeBetaGateWaiver) {
+                betaGateWaiver = {
+                  policyId: '0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver',
+                  stable: {version, ref: `refs/tags/${version}`, tagObjectSha: ref.object.sha, commit: revision,
+                    releaseId: release.id, publishedAt: release.published_at},
+                  beta: {version: betaRelease.tag_name, ref: `refs/tags/${betaRelease.tag_name}`,
+                    tagObjectSha: betaRef.object.sha, commit: betaTag.object.sha, releaseId: betaRelease.id,
+                    publishedAt: betaRelease.published_at},
+                  waivedRequirements: ['beta-independent-qualification', '24-hour-delay'],
+                }
+              } else {
+                const verifierRuns = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                  ...context.repo, workflow_id: '.github/workflows/verify-release-rebuild.yml', event: 'workflow_run', status: 'success', per_page: 100,
+                })
+                const candidates = []
+                for (const candidate of verifierRuns) {
+                  if (candidate.path !== '.github/workflows/verify-release-rebuild.yml' || candidate.event !== 'workflow_run' ||
+                      candidate.status !== 'completed' || candidate.conclusion !== 'success' || !Number.isInteger(candidate.run_attempt)) continue
+                  const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {...context.repo, run_id: candidate.id, per_page: 100})
+                  const matching = artifacts.filter((artifact) => !artifact.expired && artifact.name === `release-qualification-${betaTag.object.sha}`)
+                  if (matching.length === 1) candidates.push({run: candidate, artifact: matching[0]})
+                }
+                candidates.sort((left, right) => right.run.id - left.run.id)
+                if (candidates.length < 1) throw new Error('latest beta has no successful automatic full qualification aggregate')
+                const accepted = candidates[0]
+                const soakStart = Math.max(Date.parse(betaRelease.published_at), Date.parse(accepted.run.updated_at))
+                const requiredStableQualificationDelayMs = version === '0.8.1' && betaRelease.tag_name === '0.8.1-beta.9'
+                  ? 0
+                  : 24 * 60 * 60 * 1000
+                const stablePublicationDelayMs = Date.parse(release.published_at) - soakStart
+                if (!Number.isFinite(soakStart) || !Number.isFinite(stablePublicationDelayMs) ||
+                    stablePublicationDelayMs < requiredStableQualificationDelayMs) {
+                  throw new Error('stable publication occurred before the beta qualification completed its required delay')
+                }
+                betaQualification = {version: betaRelease.tag_name, ref: `refs/tags/${betaRelease.tag_name}`,
+                  tagObjectSha: betaRef.object.sha, commit: betaTag.object.sha, releaseId: betaRelease.id,
+                  publishedAt: betaRelease.published_at, verifierRunId: accepted.run.id,
+                  verifierRunAttempt: accepted.run.run_attempt, verifierWorkflowSha: accepted.run.head_sha,
+                  verifierCompletedAt: accepted.run.updated_at,
+                  artifactId: accepted.artifact.id, artifactName: accepted.artifact.name}
+                core.setOutput('beta_mode', 'qualification')
+                core.setOutput('beta_run_id', String(accepted.run.id))
+                core.setOutput('beta_revision', betaTag.object.sha)
               }
-              candidates.sort((left, right) => right.run.id - left.run.id)
-              if (candidates.length < 1) throw new Error('latest beta has no successful automatic full qualification aggregate')
-              const accepted = candidates[0]
-              const soakStart = Math.max(Date.parse(betaRelease.published_at), Date.parse(accepted.run.updated_at))
-              const requiredStableQualificationDelayMs = version === '0.8.1' && betaRelease.tag_name === '0.8.1-beta.9'
-                ? 0
-                : 24 * 60 * 60 * 1000
-              const stablePublicationDelayMs = Date.parse(release.published_at) - soakStart
-              if (!Number.isFinite(soakStart) || !Number.isFinite(stablePublicationDelayMs) ||
-                  stablePublicationDelayMs < requiredStableQualificationDelayMs) {
-                throw new Error('stable publication occurred before the beta qualification completed its required delay')
-              }
-              betaQualification = {version: betaRelease.tag_name, ref: `refs/tags/${betaRelease.tag_name}`,
-                tagObjectSha: betaRef.object.sha, commit: betaTag.object.sha, releaseId: betaRelease.id,
-                publishedAt: betaRelease.published_at, verifierRunId: accepted.run.id,
-                verifierRunAttempt: accepted.run.run_attempt, verifierWorkflowSha: accepted.run.head_sha,
-                verifierCompletedAt: accepted.run.updated_at,
-                artifactId: accepted.artifact.id, artifactName: accepted.artifact.name}
-              core.setOutput('beta_run_id', String(accepted.run.id))
-              core.setOutput('beta_revision', betaTag.object.sha)
             }
             const identity = {schemaVersion: 3, repository: 'OxiBelt/OxiBelt', releaseKind: stable ? 'stable' : 'beta', version,
               ref: `refs/tags/${version}`, tagObjectSha: ref.object.sha, commit: revision, releaseId: release.id,
               publishedAt: release.published_at, producer: {workflowPath: '.github/workflows/release.yml',
                 runId, runAttempt, event: 'release', headSha: revision, conclusion: 'success'},
-              ...(betaQualification === null ? {} : {betaQualification})}
+              ...(betaQualification === null ? {} : {betaQualification}),
+              ...(betaGateWaiver === null ? {} : {betaGateWaiver})}
             fs.writeFileSync(process.env.OUTPUT, `${JSON.stringify(identity)}\n`, {encoding: 'utf8', flag: 'wx', mode: 0o600})
 
       - name: Download exact beta qualification aggregate for stable soak binding
-        if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') }}
+        if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') && steps.identity.outputs.beta_mode == 'qualification' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
           name: release-qualification-${{ steps.identity.outputs.beta_revision }}
@@ -667,7 +684,7 @@ jobs:
           run-id: ${{ steps.identity.outputs.beta_run_id }}
 
       - name: Bind stable identity to exact beta aggregate bytes
-        if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') }}
+        if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') && steps.identity.outputs.beta_mode == 'qualification' }}
         env:
           BETA_QUALIFICATION: ${{ runner.temp }}/beta-release-qualification/release-qualification.json
           IDENTITY: ${{ runner.temp }}/release-identity.json
@@ -912,7 +929,7 @@ jobs:
               runId: $verifier_run_id, runAttempt: $verifier_run_attempt, event: "workflow_run", conclusion: "success"},
               receipts: {images: ($images | sort_by(.role, .artifactArch)), charts: ($charts | sort_by(.chart))},
               manifests: ($manifests | sort_by(.image)), aliases: ($aliases | sort_by(.alias))}' >"${OUTPUT}"
-          jq -e '.schemaVersion == 3 and .kind == "release-qualification" and (.releaseKind == "stable" or .releaseKind == "beta") and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2 and (.manifests | length) == 12 and (.manifests | all(.children | length == 3)) and (if .releaseKind == "stable" then (.aliases | length) == 48 else .aliases == [] end)' "${OUTPUT}" >/dev/null
+          jq -e '.schemaVersion == 3 and .kind == "release-qualification" and (.releaseKind == "stable" or .releaseKind == "beta") and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2 and (.manifests | length) == 12 and (.manifests | all(.children | length == 3)) and (if .releaseKind == "stable" then ((has("betaQualification") and (has("betaGateWaiver") | not)) or (has("betaGateWaiver") and (has("betaQualification") | not))) and (.aliases | length) == 48 else ((has("betaQualification") | not) and (has("betaGateWaiver") | not) and .aliases == []) end)' "${OUTPUT}" >/dev/null
 
       - name: Upload sealed release qualification
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1

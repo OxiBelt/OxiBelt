@@ -123,6 +123,22 @@ jobs:
               and (.receipts.charts | type == "array" and length == 2)
               and (.manifests | type == "array" and length == 12)
               and (.aliases | type == "array");
+            def release_identity:
+              exact_keys(["version","ref","tagObjectSha","commit","releaseId","publishedAt"])
+              and (.version | type == "string")
+              and .ref == ("refs/tags/" + .version)
+              and (.tagObjectSha | type == "string" and test("^[0-9a-f]{40}$"))
+              and (.commit | type == "string" and test("^[0-9a-f]{40}$"))
+              and (.releaseId | type == "number" and isfinite and floor == . and . > 0)
+              and (.publishedAt | type == "string" and (fromdateiso8601 | type == "number"));
+            def beta_gate_waiver:
+              exact_keys(["policyId","stable","beta","waivedRequirements"])
+              and .policyId == "0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver"
+              and (.stable | release_identity)
+              and (.beta | release_identity)
+              and .stable.version == "0.9.0" and .stable.ref == "refs/tags/0.9.0"
+              and .beta.version == "0.9.0-beta.1" and .beta.ref == "refs/tags/0.9.0-beta.1"
+              and .waivedRequirements == ["beta-independent-qualification","24-hour-delay"];
             if (exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","kind","verifier","receipts","manifests","aliases"])
                 and common_envelope
                 and .releaseKind == "beta"
@@ -136,6 +152,15 @@ jobs:
                   and (.version | type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
                   and .ref == ("refs/tags/" + .version)
                   and (.betaQualification | type == "object")
+                  and (.aliases | length == 48)) then
+              "stable"
+            elif (exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaGateWaiver","kind","verifier","receipts","manifests","aliases"])
+                  and common_envelope
+                  and .releaseKind == "stable" and .version == "0.9.0" and .ref == "refs/tags/0.9.0"
+                  and (.betaGateWaiver | beta_gate_waiver)
+                  and (.betaGateWaiver.stable.version == .version and .betaGateWaiver.stable.ref == .ref
+                    and .betaGateWaiver.stable.tagObjectSha == .tagObjectSha and .betaGateWaiver.stable.commit == .commit
+                    and .betaGateWaiver.stable.releaseId == .releaseId and .betaGateWaiver.stable.publishedAt == .publishedAt)
                   and (.aliases | length == 48)) then
               "stable"
             else
@@ -177,7 +202,12 @@ jobs:
               if (!value || Array.isArray(value) || typeof value !== 'object' ||
                   Object.keys(value).sort().join(',') !== [...keys].sort().join(',')) throw new Error(`${label} keys are not canonical`)
             }
-            exactKeys(q, ['schemaVersion','repository','releaseKind','version','ref','tagObjectSha','commit','releaseId','publishedAt','producer','betaQualification','kind','verifier','receipts','manifests','aliases'], 'qualification')
+            const hasBetaQualification = Object.prototype.hasOwnProperty.call(q, 'betaQualification')
+            const hasBetaGateWaiver = Object.prototype.hasOwnProperty.call(q, 'betaGateWaiver')
+            if (hasBetaQualification === hasBetaGateWaiver) throw new Error('stable qualification must bind exactly one beta gate mode')
+            exactKeys(q, hasBetaQualification
+              ? ['schemaVersion','repository','releaseKind','version','ref','tagObjectSha','commit','releaseId','publishedAt','producer','betaQualification','kind','verifier','receipts','manifests','aliases']
+              : ['schemaVersion','repository','releaseKind','version','ref','tagObjectSha','commit','releaseId','publishedAt','producer','betaGateWaiver','kind','verifier','receipts','manifests','aliases'], 'qualification')
             if (q.schemaVersion !== 3 || q.kind !== 'release-qualification' || q.releaseKind !== 'stable' || q.repository !== 'OxiBelt/OxiBelt' ||
                 !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(q.version ?? '') ||
                 q.ref !== `refs/tags/${q.version}` || !/^[0-9a-f]{40}$/.test(q.commit ?? '') ||
@@ -263,11 +293,33 @@ jobs:
                 release.target_commitish !== q.commit || release.published_at !== q.publishedAt) {
               throw new Error('stable tag or latest published release API readback changed identity')
             }
-            const beta = q.betaQualification
-            if (!beta || !/^.+-beta\.[1-9][0-9]*$/.test(beta.version ?? '') || beta.ref !== `refs/tags/${beta.version}` ||
+            const parseReleaseIdentity = (value, label) => {
+              exactKeys(value, ['version','ref','tagObjectSha','commit','releaseId','publishedAt'], label)
+              if (typeof value.version !== 'string' || value.ref !== `refs/tags/${value.version}` ||
+                  !/^[0-9a-f]{40}$/.test(value.tagObjectSha ?? '') || !/^[0-9a-f]{40}$/.test(value.commit ?? '') ||
+                  !Number.isSafeInteger(value.releaseId) || value.releaseId < 1 || !Number.isFinite(Date.parse(value.publishedAt ?? ''))) {
+                throw new Error(`${label} identity is malformed`)
+              }
+              return value
+            }
+            const waiver = hasBetaGateWaiver ? q.betaGateWaiver : null
+            if (waiver !== null) {
+              exactKeys(waiver, ['policyId','stable','beta','waivedRequirements'], 'beta gate waiver')
+              const stable = parseReleaseIdentity(waiver.stable, 'beta gate waiver stable')
+              const waivedBeta = parseReleaseIdentity(waiver.beta, 'beta gate waiver beta')
+              if (waiver.policyId !== '0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver' ||
+                  !Array.isArray(waiver.waivedRequirements) || waiver.waivedRequirements.join(',') !== 'beta-independent-qualification,24-hour-delay' ||
+                  q.version !== '0.9.0' || stable.version !== q.version || stable.ref !== q.ref || stable.tagObjectSha !== q.tagObjectSha ||
+                  stable.commit !== q.commit || stable.releaseId !== q.releaseId || stable.publishedAt !== q.publishedAt ||
+                  waivedBeta.version !== '0.9.0-beta.1' || waivedBeta.ref !== 'refs/tags/0.9.0-beta.1') {
+                throw new Error('beta gate waiver is not the exact authorized release pair')
+              }
+            }
+            const beta = waiver === null ? q.betaQualification : waiver.beta
+            if (waiver === null && (!beta || !/^.+-beta\.[1-9][0-9]*$/.test(beta.version ?? '') || beta.ref !== `refs/tags/${beta.version}` ||
                 !/^[0-9a-f]{40}$/.test(beta.tagObjectSha ?? '') || !/^[0-9a-f]{40}$/.test(beta.commit ?? '') ||
                 !/^[0-9a-f]{64}$/.test(beta.aggregateSha256 ?? '') || !Number.isSafeInteger(beta.verifierRunId) ||
-                beta.artifactName !== `release-qualification-${beta.commit}`) {
+                beta.artifactName !== `release-qualification-${beta.commit}`)) {
               throw new Error('stable qualification does not bind one exact beta aggregate')
             }
             const betaRef = (await github.rest.git.getRef({...context.repo, ref: `tags/${beta.version}`})).data
@@ -277,29 +329,32 @@ jobs:
             const betaPattern = new RegExp(`^${q.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-beta\\.([1-9][0-9]*)$`)
             const validBetas = releases.filter((candidate) => !candidate.draft && candidate.prerelease && candidate.published_at !== null && betaPattern.test(candidate.tag_name))
             validBetas.sort((left, right) => Number(betaPattern.exec(right.tag_name)[1]) - Number(betaPattern.exec(left.tag_name)[1]))
-            const betaRun = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: beta.verifierRunId})).data
-            const betaArtifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
-              {...context.repo, run_id: beta.verifierRunId, per_page: 100})
-            const betaArtifact = betaArtifacts.filter((artifact) => !artifact.expired && artifact.id === beta.artifactId && artifact.name === beta.artifactName)
-            const soakStart = Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt))
-            const requiredStableQualificationDelayMs = q.version === '0.8.1' && beta.version === '0.8.1-beta.9'
+            const betaRun = waiver === null ? (await github.rest.actions.getWorkflowRun({...context.repo, run_id: beta.verifierRunId})).data : null
+            const betaArtifacts = waiver === null ? await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              {...context.repo, run_id: beta.verifierRunId, per_page: 100}) : []
+            const betaArtifact = waiver === null ? betaArtifacts.filter((artifact) => !artifact.expired && artifact.id === beta.artifactId && artifact.name === beta.artifactName) : []
+            const soakStart = waiver === null ? Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt)) : Date.parse(beta.publishedAt)
+            const requiredStableQualificationDelayMs = waiver !== null || (q.version === '0.8.1' && beta.version === '0.8.1-beta.9')
               ? 0
               : 24 * 60 * 60 * 1000
             const stablePublicationDelayMs = Date.parse(q.publishedAt) - soakStart
             if (betaRef.object.sha !== beta.tagObjectSha || betaTag?.object?.sha !== beta.commit ||
-                betaRelease.id !== beta.releaseId || betaRelease.tag_name !== beta.version || validBetas[0]?.id !== beta.releaseId || betaRelease.draft || !betaRelease.prerelease ||
-                betaRelease.published_at !== beta.publishedAt || betaRun.path !== '.github/workflows/verify-release-rebuild.yml' ||
+                betaRelease.id !== beta.releaseId || betaRelease.tag_name !== beta.version || betaRelease.target_commitish !== beta.commit || validBetas[0]?.id !== beta.releaseId || betaRelease.draft || !betaRelease.prerelease ||
+                betaRelease.published_at !== beta.publishedAt || (waiver === null && (betaRun.path !== '.github/workflows/verify-release-rebuild.yml' ||
                 betaRun.event !== 'workflow_run' || betaRun.status !== 'completed' || betaRun.conclusion !== 'success' ||
-                betaRun.run_attempt !== beta.verifierRunAttempt || betaRun.head_sha !== beta.verifierWorkflowSha || betaRun.updated_at !== beta.verifierCompletedAt || betaArtifact.length !== 1 ||
+                betaRun.run_attempt !== beta.verifierRunAttempt || betaRun.head_sha !== beta.verifierWorkflowSha || betaRun.updated_at !== beta.verifierCompletedAt || betaArtifact.length !== 1)) ||
                 !Number.isFinite(soakStart) || !Number.isFinite(stablePublicationDelayMs) ||
                 stablePublicationDelayMs < requiredStableQualificationDelayMs) {
               throw new Error('beta qualification API identity or completed required delay changed')
             }
-            core.setOutput('beta_run_id', String(beta.verifierRunId))
-            core.setOutput('beta_revision', beta.commit)
+            if (waiver === null) {
+              core.setOutput('beta_mode', 'qualification')
+              core.setOutput('beta_run_id', String(beta.verifierRunId))
+              core.setOutput('beta_revision', beta.commit)
+            }
 
       - name: Download beta aggregate bound by the stable qualification
-        if: steps.eligibility.outputs.eligible == 'true'
+        if: ${{ steps.eligibility.outputs.eligible == 'true' && steps.reauthenticate.outputs.beta_mode == 'qualification' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
           name: release-qualification-${{ steps.reauthenticate.outputs.beta_revision }}
@@ -308,7 +363,7 @@ jobs:
           run-id: ${{ steps.reauthenticate.outputs.beta_run_id }}
 
       - name: Verify exact beta aggregate bytes and identity
-        if: steps.eligibility.outputs.eligible == 'true'
+        if: ${{ steps.eligibility.outputs.eligible == 'true' && steps.reauthenticate.outputs.beta_mode == 'qualification' }}
         env:
           BETA: ${{ runner.temp }}/beta-release-qualification/release-qualification.json
           STABLE: ${{ runner.temp }}/release-qualification/release-qualification.json
@@ -352,6 +407,20 @@ jobs:
                 elif $arch == "arm64" then "arm64"
                 elif $arch == "riscv64" then "riscv64"
                 else error("unsupported qualified artifact architecture") end;
+              def release_identity:
+                exact_keys(["version","ref","tagObjectSha","commit","releaseId","publishedAt"])
+                and (.version | type == "string") and .ref == ("refs/tags/" + .version)
+                and (.tagObjectSha | type == "string" and test("^[0-9a-f]{40}$"))
+                and (.commit | type == "string" and test("^[0-9a-f]{40}$"))
+                and (.releaseId | type == "number" and isfinite and floor == . and . > 0)
+                and (.publishedAt | type == "string" and (fromdateiso8601 | type == "number"));
+              def beta_gate_waiver:
+                exact_keys(["policyId","stable","beta","waivedRequirements"])
+                and .policyId == "0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver"
+                and (.stable | release_identity) and (.beta | release_identity)
+                and .stable.version == "0.9.0" and .stable.ref == "refs/tags/0.9.0"
+                and .beta.version == "0.9.0-beta.1" and .beta.ref == "refs/tags/0.9.0-beta.1"
+                and .waivedRequirements == ["beta-independent-qualification","24-hour-delay"];
               def expected_aliases:
                 . as $q |
                 ([ $q.receipts.images[] |
@@ -368,13 +437,21 @@ jobs:
                   ] | add));
               . as $q |
               (($mode == "qualification" and
-                ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases"])))
+                (($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases"]))
+                 or ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaGateWaiver","kind","verifier","receipts","manifests","aliases"]))))
                or
                ($mode == "promotion" and
-                ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases","promotionValidation","aliasSnapshots"]))))
+                (($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases","promotionValidation","aliasSnapshots"]))
+                 or ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaGateWaiver","kind","verifier","receipts","manifests","aliases","promotionValidation","aliasSnapshots"])))))
               and $q.schemaVersion == 3 and $q.kind == "release-qualification" and $q.releaseKind == "stable"
               and $q.repository == "OxiBelt/OxiBelt"
               and ($q.version | type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+              and ((($q | has("betaQualification")) and ($q.betaQualification | type == "object")) or
+                (($q | has("betaGateWaiver")) and ($q.betaGateWaiver | beta_gate_waiver)
+                  and $q.version == "0.9.0" and $q.ref == "refs/tags/0.9.0"
+                  and $q.betaGateWaiver.stable.version == $q.version and $q.betaGateWaiver.stable.ref == $q.ref
+                  and $q.betaGateWaiver.stable.tagObjectSha == $q.tagObjectSha and $q.betaGateWaiver.stable.commit == $q.commit
+                  and $q.betaGateWaiver.stable.releaseId == $q.releaseId and $q.betaGateWaiver.stable.publishedAt == $q.publishedAt))
               and ($q.receipts | exact_keys(["images","charts"]))
               and ($q.receipts.images | type == "array" and length == 30)
               and ([ $q.receipts.images[] | (.role + "/" + .artifactArch) ] | unique | length == 30)
@@ -546,6 +623,12 @@ jobs:
           name: stable-alias-promotion-plan-${{ needs.validate.outputs.revision }}
           path: ${{ runner.temp }}/stable-alias-promotion-plan
 
+      - name: Setup pinned Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
+        with:
+          version: v0.36.1
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
+
       - name: Reauthenticate latest stable release immediately before mutation
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -560,7 +643,42 @@ jobs:
             const latest = (await github.rest.repos.getLatestRelease(context.repo)).data
             const producer = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: q.producer.runId})).data
             const verifier = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: q.verifier.runId})).data
-            const beta = q.betaQualification
+            const hasBetaQualification = Object.prototype.hasOwnProperty.call(q, 'betaQualification')
+            const hasBetaGateWaiver = Object.prototype.hasOwnProperty.call(q, 'betaGateWaiver')
+            if (hasBetaQualification === hasBetaGateWaiver) throw new Error('stable promotion plan must bind exactly one beta gate mode')
+            const waiver = hasBetaGateWaiver ? q.betaGateWaiver : null
+            const parseReleaseIdentity = (value, label) => {
+              if (!value || Array.isArray(value) || typeof value !== 'object' ||
+                  Object.keys(value).sort().join(',') !== ['version','ref','tagObjectSha','commit','releaseId','publishedAt'].sort().join(',') ||
+                  typeof value.version !== 'string' || value.ref !== `refs/tags/${value.version}` ||
+                  !/^[0-9a-f]{40}$/.test(value.tagObjectSha ?? '') || !/^[0-9a-f]{40}$/.test(value.commit ?? '') ||
+                  !Number.isSafeInteger(value.releaseId) || value.releaseId < 1 || !Number.isFinite(Date.parse(value.publishedAt ?? ''))) {
+                throw new Error(`${label} identity is malformed`)
+              }
+              return value
+            }
+            if (waiver !== null) {
+              if (!waiver || Array.isArray(waiver) || typeof waiver !== 'object' ||
+                  Object.keys(waiver).sort().join(',') !== ['policyId','stable','beta','waivedRequirements'].sort().join(',') ||
+                  waiver.policyId !== '0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver' ||
+                  !Array.isArray(waiver.waivedRequirements) || waiver.waivedRequirements.join(',') !== 'beta-independent-qualification,24-hour-delay') {
+                throw new Error('beta gate waiver is malformed')
+              }
+              const stable = parseReleaseIdentity(waiver.stable, 'beta gate waiver stable')
+              const waivedBeta = parseReleaseIdentity(waiver.beta, 'beta gate waiver beta')
+              if (q.version !== '0.9.0' || stable.version !== q.version || stable.ref !== q.ref || stable.tagObjectSha !== q.tagObjectSha ||
+                  stable.commit !== q.commit || stable.releaseId !== q.releaseId || stable.publishedAt !== q.publishedAt ||
+                  waivedBeta.version !== '0.9.0-beta.1' || waivedBeta.ref !== 'refs/tags/0.9.0-beta.1') {
+                throw new Error('beta gate waiver is not the exact authorized release pair')
+              }
+            }
+            const beta = waiver === null ? q.betaQualification : waiver.beta
+            if (waiver === null && (!beta || !/^.+-beta\.[1-9][0-9]*$/.test(beta.version ?? '') || beta.ref !== `refs/tags/${beta.version}` ||
+                !/^[0-9a-f]{40}$/.test(beta.tagObjectSha ?? '') || !/^[0-9a-f]{40}$/.test(beta.commit ?? '') ||
+                !/^[0-9a-f]{64}$/.test(beta.aggregateSha256 ?? '') || !Number.isSafeInteger(beta.verifierRunId) ||
+                beta.artifactName !== `release-qualification-${beta.commit}`)) {
+              throw new Error('stable promotion plan does not bind one exact beta aggregate')
+            }
             const betaRef = (await github.rest.git.getRef({...context.repo, ref: `tags/${beta.version}`})).data
             const betaTag = betaRef.object.type === 'tag' ? (await github.rest.git.getTag({...context.repo, tag_sha: betaRef.object.sha})).data : null
             const betaRelease = (await github.rest.repos.getReleaseByTag({...context.repo, tag: beta.version})).data
@@ -568,34 +686,28 @@ jobs:
             const betaPattern = new RegExp(`^${q.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-beta\\.([1-9][0-9]*)$`)
             const validBetas = releases.filter((candidate) => !candidate.draft && candidate.prerelease && candidate.published_at !== null && betaPattern.test(candidate.tag_name))
             validBetas.sort((left, right) => Number(betaPattern.exec(right.tag_name)[1]) - Number(betaPattern.exec(left.tag_name)[1]))
-            const betaVerifier = (await github.rest.actions.getWorkflowRun({...context.repo, run_id: beta.verifierRunId})).data
-            const betaArtifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
-              {...context.repo, run_id: beta.verifierRunId, per_page: 100})
-            const betaArtifact = betaArtifacts.filter((artifact) => !artifact.expired && artifact.id === beta.artifactId && artifact.name === beta.artifactName)
-            const soakStart = Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt))
-            const requiredStableQualificationDelayMs = q.version === '0.8.1' && beta.version === '0.8.1-beta.9'
+            const betaVerifier = waiver === null ? (await github.rest.actions.getWorkflowRun({...context.repo, run_id: beta.verifierRunId})).data : null
+            const betaArtifacts = waiver === null ? await github.paginate(github.rest.actions.listWorkflowRunArtifacts,
+              {...context.repo, run_id: beta.verifierRunId, per_page: 100}) : []
+            const betaArtifact = waiver === null ? betaArtifacts.filter((artifact) => !artifact.expired && artifact.id === beta.artifactId && artifact.name === beta.artifactName) : []
+            const soakStart = waiver === null ? Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt)) : Date.parse(beta.publishedAt)
+            const requiredStableQualificationDelayMs = waiver !== null || (q.version === '0.8.1' && beta.version === '0.8.1-beta.9')
               ? 0
               : 24 * 60 * 60 * 1000
             const stablePublicationDelayMs = Date.parse(q.publishedAt) - soakStart
             if (ref.object.sha !== q.tagObjectSha || tag?.object?.sha !== q.commit || release.id !== q.releaseId ||
-                release.id !== latest.id || release.draft || release.prerelease || release.target_commitish !== q.commit ||
+                release.id !== latest.id || release.draft || release.prerelease || release.target_commitish !== q.commit || release.published_at !== q.publishedAt ||
                 producer.path !== q.producer.workflowPath || producer.run_attempt !== q.producer.runAttempt || producer.conclusion !== 'success' ||
                 verifier.path !== q.verifier.workflowPath || verifier.run_attempt !== q.verifier.runAttempt || verifier.conclusion !== 'success' ||
-                betaRef.object.sha !== beta.tagObjectSha || betaTag?.object?.sha !== beta.commit || betaRelease.id !== beta.releaseId || validBetas[0]?.id !== beta.releaseId ||
+                betaRef.object.sha !== beta.tagObjectSha || betaTag?.object?.sha !== beta.commit || betaRelease.id !== beta.releaseId || betaRelease.target_commitish !== beta.commit || validBetas[0]?.id !== beta.releaseId ||
                 betaRelease.draft || !betaRelease.prerelease || betaRelease.published_at !== beta.publishedAt ||
-                betaVerifier.path !== '.github/workflows/verify-release-rebuild.yml' || betaVerifier.event !== 'workflow_run' ||
+                (waiver === null && (betaVerifier.path !== '.github/workflows/verify-release-rebuild.yml' || betaVerifier.event !== 'workflow_run' ||
                 betaVerifier.run_attempt !== beta.verifierRunAttempt || betaVerifier.head_sha !== beta.verifierWorkflowSha || betaVerifier.conclusion !== 'success' ||
-                betaVerifier.updated_at !== beta.verifierCompletedAt || betaArtifact.length !== 1 || !Number.isFinite(soakStart) ||
+                betaVerifier.updated_at !== beta.verifierCompletedAt || betaArtifact.length !== 1)) || !Number.isFinite(soakStart) ||
                 !Number.isFinite(stablePublicationDelayMs) || stablePublicationDelayMs < requiredStableQualificationDelayMs ||
                 q.promotionValidation.workflowPath !== '.github/workflows/promote-stable-aliases.yml') {
               core.setFailed('promotion identity changed after read-only validation')
             }
-
-      - name: Setup pinned Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
-        with:
-          version: v0.36.1
-          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Promote only qualified image aliases
         env:
@@ -622,6 +734,20 @@ jobs:
                 elif $arch == "arm64" then "arm64"
                 elif $arch == "riscv64" then "riscv64"
                 else error("unsupported qualified artifact architecture") end;
+              def release_identity:
+                exact_keys(["version","ref","tagObjectSha","commit","releaseId","publishedAt"])
+                and (.version | type == "string") and .ref == ("refs/tags/" + .version)
+                and (.tagObjectSha | type == "string" and test("^[0-9a-f]{40}$"))
+                and (.commit | type == "string" and test("^[0-9a-f]{40}$"))
+                and (.releaseId | type == "number" and isfinite and floor == . and . > 0)
+                and (.publishedAt | type == "string" and (fromdateiso8601 | type == "number"));
+              def beta_gate_waiver:
+                exact_keys(["policyId","stable","beta","waivedRequirements"])
+                and .policyId == "0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver"
+                and (.stable | release_identity) and (.beta | release_identity)
+                and .stable.version == "0.9.0" and .stable.ref == "refs/tags/0.9.0"
+                and .beta.version == "0.9.0-beta.1" and .beta.ref == "refs/tags/0.9.0-beta.1"
+                and .waivedRequirements == ["beta-independent-qualification","24-hour-delay"];
               def expected_aliases:
                 . as $q |
                 ([ $q.receipts.images[] |
@@ -638,13 +764,21 @@ jobs:
                   ] | add));
               . as $q |
               (($mode == "qualification" and
-                ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases"])))
+                (($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases"]))
+                 or ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaGateWaiver","kind","verifier","receipts","manifests","aliases"]))))
                or
                ($mode == "promotion" and
-                ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases","promotionValidation","aliasSnapshots"]))))
+                (($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaQualification","kind","verifier","receipts","manifests","aliases","promotionValidation","aliasSnapshots"]))
+                 or ($q | exact_keys(["schemaVersion","repository","releaseKind","version","ref","tagObjectSha","commit","releaseId","publishedAt","producer","betaGateWaiver","kind","verifier","receipts","manifests","aliases","promotionValidation","aliasSnapshots"])))))
               and $q.schemaVersion == 3 and $q.kind == "release-qualification" and $q.releaseKind == "stable"
               and $q.repository == "OxiBelt/OxiBelt"
               and ($q.version | type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+              and ((($q | has("betaQualification")) and ($q.betaQualification | type == "object")) or
+                (($q | has("betaGateWaiver")) and ($q.betaGateWaiver | beta_gate_waiver)
+                  and $q.version == "0.9.0" and $q.ref == "refs/tags/0.9.0"
+                  and $q.betaGateWaiver.stable.version == $q.version and $q.betaGateWaiver.stable.ref == $q.ref
+                  and $q.betaGateWaiver.stable.tagObjectSha == $q.tagObjectSha and $q.betaGateWaiver.stable.commit == $q.commit
+                  and $q.betaGateWaiver.stable.releaseId == $q.releaseId and $q.betaGateWaiver.stable.publishedAt == $q.publishedAt))
               and ($q.receipts | exact_keys(["images","charts"]))
               and ($q.receipts.images | type == "array" and length == 30)
               and ([ $q.receipts.images[] | (.role + "/" + .artifactArch) ] | unique | length == 30)

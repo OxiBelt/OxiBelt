@@ -15,6 +15,11 @@ OxiBelt supports one stable step at a time:
   `X.Y.Z` target and the immediately preceding stable release;
 - the final `X.Y.Z` stable release may also accept the latest beta for that
   target when its stable changelog entry says so;
+- for the exact `0.9.0-beta.1` to `0.9.0` transition only, beta publication is
+  still required but the stable release may waive the beta's independent
+  qualification and 24-hour eligibility interval; stable still requires all
+  normal exact artifact gates and its own automatic 30-image and two-chart
+  qualification before mutable aliases move;
 - skipped stable versions, arbitrary downgrade paths, and cross-version
   controller/data-plane skew are unsupported unless an exact release entry
   explicitly adds and validates that path.
@@ -63,7 +68,7 @@ be used as a supported production upgrade source or target.
 | `0.6.6` | `0.8.1-beta.9` | Published, qualified | Follow [Upgrade from 0.6.6 to the 0.8.1 line](#upgrade-from-066-to-the-081-line). Use only the fresh beta.9 exact-version artifacts and complete automatic qualification evidence; do not substitute an earlier beta subject or receipt. |
 | `0.8.1-beta.8` | `0.8.1-beta.9` | Recovery source only | Direct configuration and state recovery is supported without a new migration, but beta.8's published artifacts and exact-revision evidence cannot be promoted, relabeled, or reused for beta.9. |
 | `0.8.1-beta.9` | `0.8.1` | Stable candidate | The stable source is exactly one documentation-only commit after the qualified beta.9 revision. This exact transition has no additional calendar delay, but stable publication cannot predate beta publication or verifier completion and remains subject to every stable-only release and alias gate. |
-| `0.8.1` | `0.9.0-beta.1` | Planned beta, not tagged | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). CT-disabled epoch-1 configurations need no native migration; enable CT only after fresh exact-candidate storage, signer, interoperability, load, and monitor evidence succeeds. |
+| `0.8.1` | `0.9.0-beta.1` | Planned beta, not tagged | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). CT-disabled epoch-1 configurations need no native migration; enable CT only after fresh exact-candidate storage, signer, interoperability, load, and monitor evidence succeeds. The exact later `0.9.0-beta.1` to `0.9.0` transition has a one-time release-policy waiver, described below; the normal policy remains unchanged for every other transition. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -80,6 +85,17 @@ surfaces. CT remains disabled by default. An existing `0.8.1` epoch-1
 configuration that does not add `[certificate_transparency]` or `ct_log`
 routes needs no native schema migration and keeps its existing request
 behavior.
+
+For this exact release line, `0.9.0-beta.1` must be published before
+`0.9.0` is published, but stable publication may proceed without waiting for
+the beta's independent qualification or 24-hour eligibility interval. This is
+a one-time predecessor-gate waiver: the stable candidate must still pass every
+normal exact artifact and release gate and complete its own automatic
+qualification with all 30 image receipts and both official chart receipts
+before mutable aliases move. It does not grant CT production support or waive
+the CT interoperability, failure, resource, or seven-day independent-monitor
+requirements. The normal beta qualification, soak, and stable-promotion policy
+remains unchanged for every other release transition.
 
 Post-`0.8.1` development adds bounded lookahead and lookbehind support to
 configuration-authored OxiRule, OxiRule Group, regex pattern-set, and CRS

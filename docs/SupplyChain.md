@@ -500,21 +500,35 @@ sole latest same-target beta; that beta's exact aggregate bytes, tag, release,
 automatic verifier run, artifact identity, and SHA-256 are bound into the
 stable qualification. Stable publication must occur at least 24 hours after
 both beta publication and completion of the beta qualification. The exact
-`0.8.1-beta.9` to `0.8.1` transition has a one-release zero-delay exception:
-publication may proceed immediately after complete qualification, but never
-before beta publication or verifier completion. Every other transition keeps
-the 24-hour requirement. The verifier
+`0.9.0-beta.1` to `0.9.0` transition has a one-time predecessor-gate waiver.
+For that pair, the stable qualification records the immutable published beta
+tag and release identity in an explicit waiver in place of the beta aggregate
+binding; `0.9.0-beta.1` must still be published, but stable publication need
+not wait for its independent qualification or the 24-hour eligibility
+interval. The stable release must still satisfy every normal exact artifact,
+provenance, vulnerability, attestation, and release gate and must complete
+its own automatic qualification with all 30 image receipts and both chart
+receipts. Mutable aliases remain unavailable until that stable qualification
+succeeds.
+The historical exact `0.8.1-beta.9` to `0.8.1` transition remains a separate
+one-release zero-delay exception: publication may proceed immediately after
+complete qualification, but never before beta publication or verifier
+completion. Every other transition keeps the 24-hour requirement and requires
+the beta qualification. The verifier
 derives every plan field and the complete stable alias inventory with its
 approved release-planning code; producer image-plan metadata is not a
 qualification input.
 
 The release producer writes only immutable versioned image and chart tags.
 `.github/workflows/promote-stable-aliases.yml` is the sole mutable-alias writer.
-It accepts only the newest published stable release and a complete automatic
-qualification, re-reads every immutable digest and both chart attestations in
-a read-only job, rechecks every index child against the sealed independent
-platform receipts, and requires the exact 30 platform plus 18 index alias,
-source-tag, digest, and kind mappings before snapshotting. The final
+It accepts only the newest published stable release and that release's
+complete automatic qualification, re-reads every immutable digest and both
+chart attestations in a read-only job, rechecks every index child against the
+sealed independent platform receipts, and requires the exact 30 platform plus
+18 index alias, source-tag, digest, and kind mappings before snapshotting. The
+`0.9.0-beta.1` predecessor-gate waiver cannot qualify stable or authorize an
+alias; it removes only the beta qualification and calendar prerequisites for
+that exact transition. The final
 `packages: write` job derives and checks the same mapping and validation-run
 identity again before registry authentication, then performs sequential
 idempotent promotion from qualified immutable digests. It also repeats the
