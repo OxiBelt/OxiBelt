@@ -763,7 +763,7 @@ jobs:
           expected_kind=stable
           [[ "${RELEASE_VERSION}" == *-beta.* ]] && expected_kind=beta
           release_major="${RELEASE_VERSION%%.*}"
-          jq -e --arg version "${RELEASE_VERSION}" --arg revision "${RELEASE_REVISION}" \
+          if ! jq -e --arg version "${RELEASE_VERSION}" --arg revision "${RELEASE_REVISION}" \
             --arg ref "${RELEASE_REF}" --arg expected_kind "${expected_kind}" --arg major "${release_major}" '
             def role_image:
               if . == "standalone" then "ghcr.io/oxibelt/oxibelt"
@@ -795,15 +795,56 @@ jobs:
                 (if $expected_kind == "beta" then []
                  elif .name == "release" then [(.image + ":latest")]
                  else [(.image + ":" + $major + "-alpine-musl"), (.image + ":alpine-musl")] end))
-          ' "${INDEPENDENT_IMAGE_PLAN}" >/dev/null
+          ' "${INDEPENDENT_IMAGE_PLAN}" >/dev/null; then
+            echo "independent image plan failed release identity or inventory validation" >&2
+            exit 1
+          fi
           printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          inspect_manifest_descriptor() {
+            local tag="$1"
+            local attempt delay descriptor normalized_descriptor status
+            local inspect_error
+            inspect_error="$(mktemp "${RUNNER_TEMP}/oxibelt-registry-inspect.XXXXXX")"
+            for attempt in 1 2 3; do
+              : >"${inspect_error}"
+              if descriptor="$(docker buildx imagetools inspect "${tag}" --format '{{json .Manifest}}' 2>"${inspect_error}")"; then
+                if normalized_descriptor="$(jq -ce '
+                  if type == "object" and (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+                  then .
+                  else error("registry descriptor is missing a valid digest")
+                  end
+                ' <<<"${descriptor}" 2>"${inspect_error}")"; then
+                  rm "${inspect_error}"
+                  printf '%s\n' "${normalized_descriptor}"
+                  return 0
+                fi
+                printf 'Registry inspect returned an invalid descriptor (%s/3): %s\n' "${attempt}" "${tag}" >&2
+              else
+                status=$?
+                printf 'Registry inspect failed with status %s (%s/3): %s\n' "${status}" "${attempt}" "${tag}" >&2
+              fi
+              sed -n '1,20p' "${inspect_error}" >&2
+              if [[ "${attempt}" -eq 3 ]]; then
+                rm "${inspect_error}"
+                printf 'Registry inspect exhausted three attempts: %s\n' "${tag}" >&2
+                return 1
+              fi
+              delay=$((attempt * 5))
+              printf 'Retrying registry inspect in %ss: %s\n' "${delay}" "${tag}" >&2
+              sleep "${delay}"
+            done
+          }
           mapfile -d '' image_files < <(find "${IMAGE_RECEIPTS}" -maxdepth 1 -type f -name 'rebuild-receipt-*.json' -print0)
           mapfile -d '' chart_files < <(find "${CHART_RECEIPTS}" -maxdepth 1 -type f -name 'helm-rebuild-receipt-*.json' -print0)
-          [[ "${#image_files[@]}" -eq 30 && "${#chart_files[@]}" -eq 2 ]]
+          if [[ "${#image_files[@]}" -ne 30 || "${#chart_files[@]}" -ne 2 ]]; then
+            printf 'release qualification requires exactly 30 image receipts and two chart receipts; found %s and %s\n' \
+              "${#image_files[@]}" "${#chart_files[@]}" >&2
+            exit 1
+          fi
           images_json='[]'
           aliases_json='[]'
           for receipt in "${image_files[@]}"; do
-            jq -e --arg ref "${RELEASE_REF}" --arg revision "${RELEASE_REVISION}" --arg sha "${VERIFIER_SHA}" \
+            if ! jq -e --arg ref "${RELEASE_REF}" --arg revision "${RELEASE_REVISION}" --arg sha "${VERIFIER_SHA}" \
               --argjson run_id "${GITHUB_RUN_ID}" --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
               .schemaVersion == 1 and (.outcome == "exact" or .outcome == "normalized_equivalent")
               and .source == {repository: "OxiBelt/OxiBelt", ref: $ref, revision: $revision}
@@ -811,7 +852,10 @@ jobs:
                 sha: $sha, runId: $run_id, runAttempt: $run_attempt}
               and (.build.role | IN("standalone", "dataplane", "dataplane-strict", "controller", "tools", "keysigner"))
               and (.build.artifactArch | IN("amd64v2", "amd64", "amd64v4", "arm64", "riscv64"))
-              and (.published.imageDigest | test("^sha256:[0-9a-f]{64}$"))' "${receipt}" >/dev/null
+              and (.published.imageDigest | test("^sha256:[0-9a-f]{64}$"))' "${receipt}" >/dev/null; then
+              echo "image rebuild receipt failed schema, source, workflow, or digest validation: ${receipt##*/}" >&2
+              exit 1
+            fi
             role="$(jq -r '.build.role' "${receipt}")"; arch="$(jq -r '.build.artifactArch' "${receipt}")"
             case "${role}" in standalone) image=ghcr.io/oxibelt/oxibelt;; dataplane) image=ghcr.io/oxibelt/oxibelt-dataplane;; dataplane-strict) image=ghcr.io/oxibelt/oxibelt-dataplane-strict;; controller) image=ghcr.io/oxibelt/oxibelt-gateway-controller;; tools) image=ghcr.io/oxibelt/oxibelt-tools;; keysigner) image=ghcr.io/oxibelt/oxibelt-keysigner;; esac
             digest="$(jq -r '.published.imageDigest' "${receipt}")"; receipt_sha="$(sha256sum "${receipt}" | awk '{print $1}')"
@@ -825,28 +869,46 @@ jobs:
             esac
             platform_os="${platform%%/*}"; platform_architecture="${platform#*/}"
             canonical="${image}:${RELEASE_VERSION}-alpine-musl-${arch}"
-            resolved="$(docker buildx imagetools inspect "${canonical}" --format '{{json .Manifest}}' | jq -r '.digest')"
-            [[ "${resolved}" == "${digest}" ]]
+            manifest_descriptor="$(inspect_manifest_descriptor "${canonical}")"
+            resolved="$(jq -r '.digest' <<<"${manifest_descriptor}")"
+            if [[ "${resolved}" != "${digest}" ]]; then
+              printf 'qualified platform digest mismatch for %s: expected %s, resolved %s\n' \
+                "${canonical}" "${digest}" "${resolved}" >&2
+              exit 1
+            fi
             images_json="$(jq -c --arg role "${role}" --arg arch "${arch}" --arg image "${image}" --arg canonical "${canonical}" --arg digest "${digest}" --arg receipt_sha "${receipt_sha}" --arg os "${platform_os}" --arg architecture "${platform_architecture}" '. + [{role: $role, artifactArch: $arch, image: $image, canonicalTag: $canonical, digest: $digest, receiptSha256: $receipt_sha, os: $os, architecture: $architecture}]' <<<"${images_json}")"
             while read -r alias; do
               [[ -n "${alias}" ]] || continue
               aliases_json="$(jq -c --arg alias "${alias}" --arg source "${canonical}" --arg digest "${digest}" '. + [{alias: $alias, sourceTag: $source, sourceDigest: $digest, kind: "platform"}]' <<<"${aliases_json}")"
             done < <(jq -r --arg role "${role}" --arg arch "${arch}" '.artifacts[] | select(.role == $role and .artifactArch == $arch) | .aliasGhcrTags[]' "${INDEPENDENT_IMAGE_PLAN}")
           done
-          [[ "$(jq '[.[] | (.role + "/" + .artifactArch)] | unique | length' <<<"${images_json}")" -eq 30 ]]
+          image_identity_count="$(jq '[.[] | (.role + "/" + .artifactArch)] | unique | length' <<<"${images_json}")"
+          if [[ "${image_identity_count}" -ne 30 ]]; then
+            printf 'release qualification image receipt identities are incomplete or duplicated: expected 30, found %s\n' \
+              "${image_identity_count}" >&2
+            exit 1
+          fi
           charts_json='[]'
           for receipt in "${chart_files[@]}"; do
-            jq -e --arg ref "${RELEASE_REF}" --arg revision "${RELEASE_REVISION}" --arg sha "${VERIFIER_SHA}" --argjson run_id "${GITHUB_RUN_ID}" --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
+            if ! jq -e --arg ref "${RELEASE_REF}" --arg revision "${RELEASE_REVISION}" --arg sha "${VERIFIER_SHA}" --argjson run_id "${GITHUB_RUN_ID}" --argjson run_attempt "${GITHUB_RUN_ATTEMPT}" '
               .schemaVersion == 1 and .outcome == "exact" and (.chart | IN("oxibelt", "oxibelt-gateway-controller"))
               and .source == {repository: "OxiBelt/OxiBelt", ref: $ref, revision: $revision}
               and .workflow == {repository: "OxiBelt/OxiBelt", path: ".github/workflows/verify-release-rebuild.yml", sha: $sha, runId: $run_id, runAttempt: $run_attempt}
               and .predicate.schemaVersion == 3 and .predicate.type == "https://oxibelt.dev/attestations/helm-chart-rebuild/v3"
-              and (.subject.digest | test("^sha256:[0-9a-f]{64}$"))' "${receipt}" >/dev/null
+              and (.subject.digest | test("^sha256:[0-9a-f]{64}$"))' "${receipt}" >/dev/null; then
+              echo "Helm rebuild receipt failed schema, source, workflow, or digest validation: ${receipt##*/}" >&2
+              exit 1
+            fi
             receipt_sha="$(sha256sum "${receipt}" | awk '{print $1}')"
             receipt_json="$(jq -c . "${receipt}")"
             charts_json="$(jq -cn --argjson current "${charts_json}" --argjson receipt "${receipt_json}" --arg receipt_sha "${receipt_sha}" '$current + [$receipt + {receiptSha256: $receipt_sha}]')"
           done
-          [[ "$(jq '[.[].chart] | unique | length' <<<"${charts_json}")" -eq 2 ]]
+          chart_identity_count="$(jq '[.[].chart] | unique | length' <<<"${charts_json}")"
+          if [[ "${chart_identity_count}" -ne 2 ]]; then
+            printf 'release qualification chart receipt identities are incomplete or duplicated: expected 2, found %s\n' \
+              "${chart_identity_count}" >&2
+            exit 1
+          fi
           normalize_index_children() {
             jq -ce '
               if ((.mediaType == "application/vnd.oci.image.index.v1+json"
@@ -879,18 +941,27 @@ jobs:
               [.[] | select(.role == $role and (.artifactArch | IN("amd64", "arm64", "riscv64"))) |
                 {artifactArch, digest, os, architecture}] | sort_by(.os, .architecture, .digest)
             ' <<<"${images_json}")"
-            [[ "$(jq 'length' <<<"${expected_children}")" -eq 3 ]]
+            expected_child_count="$(jq 'length' <<<"${expected_children}")"
+            if [[ "${expected_child_count}" -ne 3 ]]; then
+              printf 'independent platform receipts for %s require three index children; found %s\n' \
+                "${image}" "${expected_child_count}" >&2
+              exit 1
+            fi
             release_tag="${image}:${RELEASE_VERSION}"
             alpine_tag="${image}:${RELEASE_VERSION}-alpine-musl"
             for index_name in release alpine; do
               if [[ "${index_name}" == release ]]; then index_tag="${release_tag}"; else index_tag="${alpine_tag}"; fi
-              index_manifest="$(docker buildx imagetools inspect "${index_tag}" --format '{{json .Manifest}}')"
-              index_digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"${index_manifest}")"
-              actual_children="$(normalize_index_children <<<"${index_manifest}")"
+              index_manifest="$(inspect_manifest_descriptor "${index_tag}")"
+              index_digest="$(jq -r '.digest' <<<"${index_manifest}")"
+              if ! actual_children="$(normalize_index_children <<<"${index_manifest}")"; then
+                echo "qualified index descriptor has an invalid child manifest set: ${index_tag}" >&2
+                exit 1
+              fi
               actual_identity="$(jq -c '[.[] | {digest, os, architecture}]' <<<"${actual_children}")"
               expected_identity="$(jq -c '[.[] | {digest, os, architecture}]' <<<"${expected_children}")"
               if [[ "${actual_identity}" != "${expected_identity}" ]]; then
-                echo "qualified index children did not match independent platform receipts: ${index_tag}" >&2
+                printf 'qualified index children did not match independent platform receipts: %s\nexpected: %s\nactual: %s\n' \
+                  "${index_tag}" "${expected_identity}" "${actual_identity}" >&2
                 exit 1
               fi
               qualified_children="$(jq -cn --argjson expected "${expected_children}" --argjson actual "${actual_children}" '
@@ -906,7 +977,8 @@ jobs:
               fi
             done
             if [[ "${release_digest}" != "${alpine_digest}" || "${release_children}" != "${alpine_children}" ]]; then
-              echo "qualified index tags for one role must resolve to one digest and child set: ${image}" >&2
+              printf 'qualified index tags for one role must resolve to one digest and child set: %s\nrelease digest: %s\nalpine digest: %s\nrelease children: %s\nalpine children: %s\n' \
+                "${image}" "${release_digest}" "${alpine_digest}" "${release_children}" "${alpine_children}" >&2
               exit 1
             fi
             while IFS=$'\t' read -r source digest alias; do
@@ -917,19 +989,25 @@ jobs:
               [.canonicalGhcrTag, (if .canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end), .aliasGhcrTags[]] | @tsv
             ' "${INDEPENDENT_IMAGE_PLAN}")
           done
-          jq -e '
+          if ! jq -e '
             length == 12 and ([.[].canonicalTag] | unique | length == 12)
             and all(.[]; (.children | length == 3)
               and ([.children[].artifactArch] | sort == ["amd64", "arm64", "riscv64"])
               and ([.children[].digest] | unique | length == 3))
-          ' <<<"${manifests_json}" >/dev/null
+          ' <<<"${manifests_json}" >/dev/null; then
+            echo "qualified manifest inventory is incomplete, duplicated, or has invalid children" >&2
+            exit 1
+          fi
           jq -S -n --slurpfile identity "${IDENTITY}" --arg verifier_sha "${VERIFIER_SHA}" --argjson verifier_run_id "${GITHUB_RUN_ID}" --argjson verifier_run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --argjson images "${images_json}" --argjson charts "${charts_json}" --argjson manifests "${manifests_json}" --argjson aliases "${aliases_json}" '
             $identity[0] + {kind: "release-qualification", verifier: {workflowPath: ".github/workflows/verify-release-rebuild.yml", workflowSha: $verifier_sha,
               runId: $verifier_run_id, runAttempt: $verifier_run_attempt, event: "workflow_run", conclusion: "success"},
               receipts: {images: ($images | sort_by(.role, .artifactArch)), charts: ($charts | sort_by(.chart))},
               manifests: ($manifests | sort_by(.image)), aliases: ($aliases | sort_by(.alias))}' >"${OUTPUT}"
-          jq -e '.schemaVersion == 3 and .kind == "release-qualification" and (.releaseKind == "stable" or .releaseKind == "beta") and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2 and (.manifests | length) == 12 and (.manifests | all(.children | length == 3)) and (if .releaseKind == "stable" then ((has("betaQualification") and (has("betaGateWaiver") | not)) or (has("betaGateWaiver") and (has("betaQualification") | not))) and (.aliases | length) == 48 else ((has("betaQualification") | not) and (has("betaGateWaiver") | not) and .aliases == []) end)' "${OUTPUT}" >/dev/null
+          if ! jq -e '.schemaVersion == 3 and .kind == "release-qualification" and (.releaseKind == "stable" or .releaseKind == "beta") and (.receipts.images | length) == 30 and (.receipts.charts | length) == 2 and (.manifests | length) == 12 and (.manifests | all(.children | length == 3)) and (if .releaseKind == "stable" then ((has("betaQualification") and (has("betaGateWaiver") | not)) or (has("betaGateWaiver") and (has("betaQualification") | not))) and (.aliases | length) == 48 else ((has("betaQualification") | not) and (has("betaGateWaiver") | not) and .aliases == []) end)' "${OUTPUT}" >/dev/null; then
+            echo "sealed release qualification failed final aggregate validation" >&2
+            exit 1
+          fi
 
       - name: Upload sealed release qualification
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1

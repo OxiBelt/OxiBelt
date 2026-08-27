@@ -9732,6 +9732,68 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     );
   }
 
+  let qualification_steps = jobs["release-qualification"]["steps"]
+    .as_array()
+    .expect("release qualification should define steps");
+  let snapshot_step = qualification_steps
+    .iter()
+    .find(|step| {
+      step["name"].as_str() == Some("Validate receipt inventory and snapshot immutable subjects")
+    })
+    .expect("release qualification should validate and snapshot immutable subjects");
+  let snapshot_run = snapshot_step["run"]
+    .as_str()
+    .expect("release qualification snapshot should be a shell step");
+  let helper_start = snapshot_run
+    .find("inspect_manifest_descriptor() {")
+    .expect("release qualification should define a bounded registry inspect helper");
+  let helper_end = snapshot_run[helper_start..]
+    .find("mapfile -d '' image_files")
+    .map(|offset| helper_start + offset)
+    .expect("registry inspect helper should precede receipt processing");
+  let inspect_helper = &snapshot_run[helper_start..helper_end];
+  for expected in [
+    "for attempt in 1 2 3; do",
+    "delay=$((attempt * 5))",
+    "sleep \"${delay}\"",
+    "status=$?",
+    "Registry inspect returned an invalid descriptor",
+    "Registry inspect exhausted three attempts",
+    "registry descriptor is missing a valid digest",
+  ] {
+    assert!(
+      inspect_helper.contains(expected),
+      "release qualification registry reads should retain {expected}"
+    );
+  }
+  assert_eq!(
+    snapshot_run
+      .matches("docker buildx imagetools inspect")
+      .count(),
+    1,
+    "release qualification should route every registry descriptor read through one helper"
+  );
+  for expected in [
+    "manifest_descriptor=\"$(inspect_manifest_descriptor \"${canonical}\")\"",
+    "index_manifest=\"$(inspect_manifest_descriptor \"${index_tag}\")\"",
+    "if [[ \"${resolved}\" != \"${digest}\" ]]; then",
+    "qualified platform digest mismatch for %s: expected %s, resolved %s",
+    "qualified index children did not match independent platform receipts",
+    "expected: %s\\nactual: %s",
+    "release qualification requires exactly 30 image receipts and two chart receipts",
+    "sealed release qualification failed final aggregate validation",
+  ] {
+    assert!(
+      snapshot_run.contains(expected),
+      "release qualification should retain fail-closed diagnostic {expected}"
+    );
+  }
+  assert!(
+    !inspect_helper.contains("qualified platform digest mismatch")
+      && !inspect_helper.contains("qualified index children did not match"),
+    "valid digest and child-manifest mismatches must fail outside the transient read retry loop"
+  );
+
   for expected in [
     "workflows: [\"Release OxiBelt images\"]",
     "github.event.workflow_run.conclusion == 'success'",
