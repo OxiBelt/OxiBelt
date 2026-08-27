@@ -15,22 +15,20 @@ impl WafEngine {
 
     match self.evaluate_response_inner(input) {
       Ok(decision) => decision,
-      Err(error) => match self.fail_policy {
-        WafFailPolicy::Open => {
-          warn!(error = %error, "WAF response evaluation failed open");
-          ResponseWafDecision::default()
+      Err(error) if self.should_fail_open(&error) => {
+        warn!(error = %error, "WAF response evaluation failed open");
+        ResponseWafDecision::default()
+      }
+      Err(error) => {
+        warn!(error = %error, "WAF response evaluation failed closed");
+        ResponseWafDecision {
+          terminal: Some(WafHttpTerminal::response(
+            StatusCode::FORBIDDEN,
+            "WAF evaluation failed".to_string(),
+          )),
+          ..ResponseWafDecision::default()
         }
-        WafFailPolicy::Closed => {
-          warn!(error = %error, "WAF response evaluation failed closed");
-          ResponseWafDecision {
-            terminal: Some(WafHttpTerminal::response(
-              StatusCode::FORBIDDEN,
-              "WAF evaluation failed".to_string(),
-            )),
-            ..ResponseWafDecision::default()
-          }
-        }
-      },
+      }
     }
   }
 
@@ -41,19 +39,17 @@ impl WafEngine {
 
     match self.evaluate_stream_inner(input) {
       Ok(decision) => decision,
-      Err(error) => match self.fail_policy {
-        WafFailPolicy::Open => {
-          warn!(error = %error, "WAF stream evaluation failed open");
-          WafStreamDecision::default()
+      Err(error) if self.should_fail_open(&error) => {
+        warn!(error = %error, "WAF stream evaluation failed open");
+        WafStreamDecision::default()
+      }
+      Err(error) => {
+        warn!(error = %error, "WAF stream evaluation failed closed");
+        WafStreamDecision {
+          close: Some(WafStreamClose::default()),
+          ..WafStreamDecision::default()
         }
-        WafFailPolicy::Closed => {
-          warn!(error = %error, "WAF stream evaluation failed closed");
-          WafStreamDecision {
-            close: Some(WafStreamClose::default()),
-            ..WafStreamDecision::default()
-          }
-        }
-      },
+      }
     }
   }
 

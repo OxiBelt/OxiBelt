@@ -14,12 +14,12 @@ use oxibelt::waf::{
   OxiRuleDevtoolsEvalRequest, OxiRuleDevtoolsReplayRequest, OxiRuleFixture, OxiRuleGroupCandidate,
   OxiRuleHardeningPlanRequest, OxiRuleRequestFixture, OxiRuleResponseFixture, OxiRuleStreamFixture,
   PersonProofIssuedClearance, PersonProofMode, WafBodyInput, WafConditionMerge, WafEngine,
-  WafPhase, WafProtocol, WafRequestInput, WafResponseInput, WafRuleGroupConfig, WafStreamDirection,
-  WafStreamInput, WafStreamProtocol, WafStreamUnit, WafTlsMetadata, WafTransportMetadataInput,
-  WafTransportNetwork, WafWebSocketStreamMetadata, WafWebTransportStreamKind,
-  WafWebTransportStreamMetadata, analyze_oxirule, check_oxirule, compile_access_log_fields,
-  cost_oxirule, crs_compatibility_matrix, explain_oxirule, plan_oxirule_hardening, replay_oxirule,
-  test_oxirule,
+  WafFailPolicy, WafPhase, WafProtocol, WafRequestInput, WafResponseInput, WafRuleGroupConfig,
+  WafStreamDirection, WafStreamInput, WafStreamProtocol, WafStreamUnit, WafTlsMetadata,
+  WafTransportMetadataInput, WafTransportNetwork, WafWebSocketStreamMetadata,
+  WafWebTransportStreamKind, WafWebTransportStreamMetadata, analyze_oxirule, check_oxirule,
+  compile_access_log_fields, cost_oxirule, crs_compatibility_matrix, explain_oxirule,
+  plan_oxirule_hardening, replay_oxirule, test_oxirule,
 };
 use sha2::{Digest, Sha256};
 
@@ -4739,7 +4739,7 @@ status = 403
 }
 
 #[test]
-fn advanced_regex_subject_limit_uses_the_waf_fail_policy() {
+fn advanced_regex_subject_limit_fails_closed_even_with_open_policy() {
   let closed = compile_waf_fragment(
     "waf-advanced-regex-limit-closed",
     r#"
@@ -4788,16 +4788,235 @@ status = 418
   let closed_decision = evaluate_simple_request(&closed, "/aaaa");
   let open_decision = evaluate_simple_request(&open, "/aaaa");
 
-  assert_eq!(
-    closed_decision
-      .terminal
-      .as_ref()
-      .map(|terminal| terminal.status),
-    Some(StatusCode::FORBIDDEN)
-  );
-  assert!(open_decision.terminal.is_none());
+  for decision in [closed_decision, open_decision] {
+    assert_eq!(
+      decision.terminal.as_ref().map(|terminal| terminal.status),
+      Some(StatusCode::FORBIDDEN)
+    );
+  }
   assert_eq!(only_rule_hit(&closed).hits, 0);
   assert_eq!(only_rule_hit(&open).hits, 0);
+}
+
+#[test]
+fn advanced_regex_backtrack_limit_fails_closed_with_open_policy() {
+  let engine = compile_waf_fragment(
+    "waf-advanced-regex-backtrack-open",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "open"
+
+[waf.limits]
+max_advanced_regex_backtracks = 1
+
+[[waf.rules]]
+name = "bounded-advanced-regex"
+phase = "request"
+priority = 10
+when = "Request.QueryParams.get('value').matches('(x+x+)+(?>y)')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+"#,
+  );
+
+  let decision = evaluate_simple_request(&engine, "/?value=xxxxxxxxxxy");
+
+  assert_eq!(
+    decision.terminal.as_ref().map(|terminal| terminal.status),
+    Some(StatusCode::FORBIDDEN)
+  );
+  assert_eq!(only_rule_hit(&engine).hits, 0);
+}
+
+#[test]
+fn advanced_regex_pattern_set_failure_fails_closed_with_open_policy() {
+  let engine = compile_waf_fragment(
+    "waf-advanced-pattern-set-limit-open",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "open"
+
+[waf.limits]
+max_advanced_regex_subject_bytes = 4
+
+[[waf.pattern_sets]]
+name = "advanced-patterns"
+kind = "regex"
+patterns = ["(?=a)a"]
+
+[[waf.rules]]
+name = "bounded-advanced-pattern-set"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.matchesAny('advanced-patterns')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+"#,
+  );
+
+  let decision = evaluate_simple_request(&engine, "/aaaa");
+
+  assert_eq!(
+    decision.terminal.as_ref().map(|terminal| terminal.status),
+    Some(StatusCode::FORBIDDEN)
+  );
+  assert_eq!(only_rule_hit(&engine).hits, 0);
+}
+
+#[test]
+fn advanced_crs_regex_failure_fails_closed_with_open_policy() {
+  let (_temp_dir, mut config) = load_crs_fixture_config_with_rule(
+    "waf-advanced-crs-limit-open",
+    "enforcing",
+    r#"
+SecRule REQUEST_URI "@rx (?=a)a" "id:920350,phase:1,msg:'Bounded advanced regex',deny,status:418"
+"#,
+  );
+  config.waf.fail_policy = WafFailPolicy::Open;
+  config.waf.limits.max_advanced_regex_subject_bytes = 4;
+  let engine = WafEngine::new(&config).expect("WAF should compile");
+
+  let decision = evaluate_simple_request(&engine, "/aaaa");
+
+  assert_eq!(
+    decision.terminal.as_ref().map(|terminal| terminal.status),
+    Some(StatusCode::FORBIDDEN)
+  );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advanced_regex_failure_fails_closed_across_phase_entrypoints() {
+  let engine = compile_waf_fragment(
+    "waf-advanced-regex-phase-entrypoints",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "open"
+
+[waf.limits]
+max_advanced_regex_subject_bytes = 4
+
+[[waf.rules]]
+name = "bounded-request-regex"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.matches('(?=a)a')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+
+[[waf.rules]]
+name = "bounded-response-regex"
+phase = "response"
+priority = 10
+when = "Response.Body.matches('(?=a)a')"
+
+[[waf.rules.actions]]
+type = "reject_response"
+status = 418
+
+[[waf.rules]]
+name = "bounded-stream-regex"
+phase = "stream"
+priority = 10
+when = "Stream.Payload.matches('(?=a)a')"
+
+[[waf.rules.actions]]
+type = "close_stream"
+websocket_code = 4001
+webtransport_code = 4001
+reason = "configured close"
+"#,
+  );
+  let method = Method::GET;
+  let uri: Uri = "/aaaa".parse().expect("URI should parse");
+  let headers = HeaderMap::new();
+  let tags = HashMap::new();
+  let request = request_input(
+    &method,
+    &uri,
+    &headers,
+    &tags,
+    "203.0.113.10:49152".parse().unwrap(),
+  );
+
+  let request_decisions = [
+    engine.evaluate_request(request),
+    engine
+      .evaluate_request_with_person_proof_async(request, None, false)
+      .await,
+  ];
+  for decision in request_decisions {
+    assert_eq!(
+      decision.terminal.as_ref().map(|terminal| terminal.status),
+      Some(StatusCode::FORBIDDEN)
+    );
+  }
+
+  let body = WafBodyInput {
+    bytes: b"aaaaa",
+    is_truncated: false,
+  };
+  let response_input = WafResponseInput {
+    request,
+    response_id: "test-response-id",
+    received_at_unix_ms: 1_700_000_000_123,
+    version: http::Version::HTTP_11,
+    status: StatusCode::OK,
+    headers: &headers,
+    body: Some(body),
+    upstream_name: "app",
+    upstream_pool: None,
+    upstream_scheme: "http",
+    upstream_connect_time_ms: None,
+    upstream_first_byte_time_ms: Some(7),
+    upstream_error: None,
+  };
+  let response_decisions = [
+    engine.evaluate_response(response_input),
+    engine.evaluate_response_async(response_input).await,
+  ];
+  for decision in response_decisions {
+    assert_eq!(
+      decision.terminal.as_ref().map(|terminal| terminal.status),
+      Some(StatusCode::FORBIDDEN)
+    );
+  }
+
+  let stream_input = websocket_stream_input(
+    request,
+    WafStreamDirection::DownstreamToUpstream,
+    WafStreamUnit::WebsocketMessage,
+    b"aaaaa",
+    false,
+    WafWebSocketStreamMetadata {
+      opcode: "message",
+      fin: true,
+      is_control: false,
+      message_opcode: Some("text"),
+      frame_payload_size: 5,
+    },
+  );
+  let stream_decisions = [
+    engine.evaluate_stream(stream_input),
+    engine.evaluate_stream_async(stream_input).await,
+  ];
+  for decision in stream_decisions {
+    let close = decision.close.expect("advanced regex error should close");
+    assert_eq!(close.websocket_code, 1008);
+    assert_eq!(close.webtransport_code, 1);
+    assert_eq!(close.reason, "policy violation");
+  }
 }
 
 #[test]

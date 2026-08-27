@@ -90,6 +90,11 @@ backward-compatible defaults. Patterns requiring PCRE syntax that is not
 accepted by `fancy-regex` remain invalid, and request-derived patterns do not
 gain advanced-regex support. Rollback requires removing advanced syntax and
 the two new optional keys from configurations consumed by an older binary.
+Advanced match-time subject, backtrack, and matcher stack limit failures now
+use the request, response, or stream phase's fail-closed decision even when
+`waf.fail_policy = "open"`. Existing keys, defaults, and successful matching
+are unchanged, while unrelated WAF evaluation errors continue to follow the
+configured fail policy.
 
 Treat CT activation as a new service deployment. Use separate workloads for
 each writable operator, read-only gateway, purpose-exclusive signer, and

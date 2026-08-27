@@ -136,7 +136,7 @@ pub use http_body_compression::{
   RouteWafHttpBodyCompressionConfig, RouteWafHttpBodyCompressionMode, WafHttpBodyCompressionConfig,
   WafHttpBodyCompressionMode, WafHttpBodyEncoding,
 };
-use hybrid_regex::HybridRegex;
+use hybrid_regex::{HybridRegex, is_advanced_regex_evaluation_error};
 use malicious_intelligence_score as mi_score;
 pub use metadata::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 pub use mitigation_action::MitigationIntent;

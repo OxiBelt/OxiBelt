@@ -8,7 +8,7 @@ use super::{
   BodyTextCaches, CompiledAction, CompiledRule, EvalContext, HeaderMutation, LimitMode,
   PersonProofPolicyState, PersonProofRequestStatus, PersonProofState, RateLimitCheck,
   RateLimitContext, RequestWafDecision, TransactionBudget, WafActionConfig,
-  WafDuplicateMetadataPolicy, WafEngine, WafFailPolicy, WafHttpTerminal, WafMode, WafRequestInput,
+  WafDuplicateMetadataPolicy, WafEngine, WafHttpTerminal, WafMode, WafRequestInput,
   apply_crs_request_decision, apply_mitigation_http_action, person_proof_dynamic,
   person_proof_rate_limited_decision, record_request_tag, request_metadata_has_duplicates,
 };
@@ -181,22 +181,20 @@ impl WafEngine {
       suppress_clearance_mutation,
     ) {
       Ok(decision) => decision,
-      Err(error) => match self.fail_policy {
-        WafFailPolicy::Open => {
-          warn!(error = %error, "WAF request evaluation failed open");
-          RequestWafDecision::default()
+      Err(error) if self.should_fail_open(&error) => {
+        warn!(error = %error, "WAF request evaluation failed open");
+        RequestWafDecision::default()
+      }
+      Err(error) => {
+        warn!(error = %error, "WAF request evaluation failed closed");
+        RequestWafDecision {
+          terminal: Some(WafHttpTerminal::response(
+            StatusCode::FORBIDDEN,
+            "WAF evaluation failed".to_string(),
+          )),
+          ..RequestWafDecision::default()
         }
-        WafFailPolicy::Closed => {
-          warn!(error = %error, "WAF request evaluation failed closed");
-          RequestWafDecision {
-            terminal: Some(WafHttpTerminal::response(
-              StatusCode::FORBIDDEN,
-              "WAF evaluation failed".to_string(),
-            )),
-            ..RequestWafDecision::default()
-          }
-        }
-      },
+      }
     }
   }
 }
@@ -233,22 +231,20 @@ impl WafEngine {
       .await
     {
       Ok(decision) => decision,
-      Err(error) => match self.fail_policy {
-        WafFailPolicy::Open => {
-          warn!(error = %error, "WAF request evaluation failed open");
-          RequestWafDecision::default()
+      Err(error) if self.should_fail_open(&error) => {
+        warn!(error = %error, "WAF request evaluation failed open");
+        RequestWafDecision::default()
+      }
+      Err(error) => {
+        warn!(error = %error, "WAF request evaluation failed closed");
+        RequestWafDecision {
+          terminal: Some(WafHttpTerminal::response(
+            StatusCode::FORBIDDEN,
+            "WAF evaluation failed".to_string(),
+          )),
+          ..RequestWafDecision::default()
         }
-        WafFailPolicy::Closed => {
-          warn!(error = %error, "WAF request evaluation failed closed");
-          RequestWafDecision {
-            terminal: Some(WafHttpTerminal::response(
-              StatusCode::FORBIDDEN,
-              "WAF evaluation failed".to_string(),
-            )),
-            ..RequestWafDecision::default()
-          }
-        }
-      },
+      }
     }
   }
 

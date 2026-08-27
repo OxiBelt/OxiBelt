@@ -140,10 +140,13 @@ Request-derived patterns such as
 `Request.Http.Path.matches(Request.QueryParams.get('pattern'))` continue to
 use `regex` only. Advanced subjects and backtracking are bounded by
 `max_advanced_regex_subject_bytes` and
-`max_advanced_regex_backtracks`; exceeding either budget is a WAF evaluation
-error handled by `fail_policy`. OxiBelt may use a conservative `memchr` or
-Aho-Corasick mandatory-literal prefilter before the full matcher, but omits the
-prefilter whenever it cannot prove that doing so preserves every match.
+`max_advanced_regex_backtracks`. An advanced match-time subject, backtrack, or
+matcher stack limit in a request, response, or stream phase uses that phase's
+fail-closed decision even when `fail_policy = "open"`; unrelated WAF
+evaluation errors continue to follow `fail_policy`. OxiBelt may use a
+conservative `memchr` or Aho-Corasick mandatory-literal prefilter before the
+full matcher, but omits the prefilter whenever it cannot prove that doing so
+preserves every match.
 
 Bounded user-defined functions can be configured globally or per route:
 

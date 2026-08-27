@@ -1,9 +1,9 @@
 //! Bounded policy-authored regular expressions with conservative literal prefilters.
 
-use std::sync::Arc;
+use std::{error::Error as StdError, fmt, sync::Arc};
 
-use anyhow::{Context, bail};
-use fancy_regex::Regex as FancyRegex;
+use anyhow::Context;
+use fancy_regex::{Error as FancyRegexError, Regex as FancyRegex};
 use regex::{Regex, RegexBuilder};
 
 use super::WafLimits;
@@ -22,6 +22,39 @@ pub(super) struct HybridRegex {
 enum HybridRegexEngine {
   Linear(Regex),
   Advanced(FancyRegex),
+}
+
+#[derive(Debug)]
+enum AdvancedRegexEvaluationError {
+  SubjectTooLarge { limit: usize },
+  Matcher(FancyRegexError),
+}
+
+impl fmt::Display for AdvancedRegexEvaluationError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::SubjectTooLarge { limit } => write!(
+        formatter,
+        "advanced WAF regex subject exceeds max_advanced_regex_subject_bytes ({limit})"
+      ),
+      Self::Matcher(_) => formatter.write_str("advanced WAF regex evaluation failed"),
+    }
+  }
+}
+
+impl StdError for AdvancedRegexEvaluationError {
+  fn source(&self) -> Option<&(dyn StdError + 'static)> {
+    match self {
+      Self::SubjectTooLarge { .. } => None,
+      Self::Matcher(error) => Some(error),
+    }
+  }
+}
+
+pub(super) fn is_advanced_regex_evaluation_error(error: &anyhow::Error) -> bool {
+  error
+    .chain()
+    .any(|cause| cause.is::<AdvancedRegexEvaluationError>())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,7 +142,8 @@ impl HybridRegex {
       HybridRegexEngine::Linear(regex) => Ok(regex.is_match(text)),
       HybridRegexEngine::Advanced(regex) => regex
         .is_match(text)
-        .context("advanced WAF regex evaluation failed"),
+        .map_err(AdvancedRegexEvaluationError::Matcher)
+        .map_err(anyhow::Error::new),
     }
   }
 
@@ -128,7 +162,7 @@ impl HybridRegex {
       }
       HybridRegexEngine::Advanced(regex) => regex
         .find(text)
-        .context("advanced WAF regex evaluation failed")?
+        .map_err(AdvancedRegexEvaluationError::Matcher)?
         .map(|found| (found.start(), found.end())),
     };
     Ok(bounds.map(|(start, end)| HybridMatch { text, start, end }))
@@ -136,9 +170,11 @@ impl HybridRegex {
 
   pub(super) fn check_advanced_subject(&self, text: &str) -> anyhow::Result<()> {
     if self.is_advanced() && text.len() > self.max_advanced_subject_bytes {
-      bail!(
-        "advanced WAF regex subject exceeds max_advanced_regex_subject_bytes ({})",
-        self.max_advanced_subject_bytes
+      return Err(
+        AdvancedRegexEvaluationError::SubjectTooLarge {
+          limit: self.max_advanced_subject_bytes,
+        }
+        .into(),
       );
     }
     Ok(())
@@ -340,6 +376,10 @@ mod tests {
         .to_string()
         .contains("max_advanced_regex_subject_bytes")
     );
+    assert!(is_advanced_regex_evaluation_error(&error));
+    assert!(is_advanced_regex_evaluation_error(
+      &error.context("outer WAF evaluation context")
+    ));
   }
 
   #[test]
@@ -353,6 +393,7 @@ mod tests {
       .is_match("xxxxxxxxxxy")
       .expect_err("advanced backtracking must be bounded");
     assert!(error.to_string().contains("advanced WAF regex evaluation"));
+    assert!(is_advanced_regex_evaluation_error(&error));
   }
 
   #[test]

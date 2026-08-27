@@ -4,8 +4,7 @@ use tracing::warn;
 
 use super::{
   AccessLogRecord, CompiledAccessLogFields, PersonProofRequestSnapshot, ResponseWafDecision,
-  WafEngine, WafFailPolicy, WafHttpTerminal, WafResponseInput, WafStreamClose, WafStreamDecision,
-  WafStreamInput,
+  WafEngine, WafHttpTerminal, WafResponseInput, WafStreamClose, WafStreamDecision, WafStreamInput,
 };
 
 impl WafEngine {
@@ -41,22 +40,20 @@ impl WafEngine {
 
     match self.evaluate_response_inner_with_person_proof(input, &person_proof.status) {
       Ok(decision) => decision,
-      Err(error) => match self.fail_policy {
-        WafFailPolicy::Open => {
-          warn!(error = %error, "WAF response evaluation failed open");
-          ResponseWafDecision::default()
+      Err(error) if self.should_fail_open(&error) => {
+        warn!(error = %error, "WAF response evaluation failed open");
+        ResponseWafDecision::default()
+      }
+      Err(error) => {
+        warn!(error = %error, "WAF response evaluation failed closed");
+        ResponseWafDecision {
+          terminal: Some(WafHttpTerminal::response(
+            http::StatusCode::FORBIDDEN,
+            "WAF evaluation failed".to_string(),
+          )),
+          ..ResponseWafDecision::default()
         }
-        WafFailPolicy::Closed => {
-          warn!(error = %error, "WAF response evaluation failed closed");
-          ResponseWafDecision {
-            terminal: Some(WafHttpTerminal::response(
-              http::StatusCode::FORBIDDEN,
-              "WAF evaluation failed".to_string(),
-            )),
-            ..ResponseWafDecision::default()
-          }
-        }
-      },
+      }
     }
   }
 
@@ -83,19 +80,17 @@ impl WafEngine {
 
     match self.evaluate_stream_inner_with_person_proof(input, &person_proof.status) {
       Ok(decision) => decision,
-      Err(error) => match self.fail_policy {
-        WafFailPolicy::Open => {
-          warn!(error = %error, "WAF stream evaluation failed open");
-          WafStreamDecision::default()
+      Err(error) if self.should_fail_open(&error) => {
+        warn!(error = %error, "WAF stream evaluation failed open");
+        WafStreamDecision::default()
+      }
+      Err(error) => {
+        warn!(error = %error, "WAF stream evaluation failed closed");
+        WafStreamDecision {
+          close: Some(WafStreamClose::default()),
+          ..WafStreamDecision::default()
         }
-        WafFailPolicy::Closed => {
-          warn!(error = %error, "WAF stream evaluation failed closed");
-          WafStreamDecision {
-            close: Some(WafStreamClose::default()),
-            ..WafStreamDecision::default()
-          }
-        }
-      },
+      }
     }
   }
 

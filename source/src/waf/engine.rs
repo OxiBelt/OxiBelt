@@ -3,6 +3,10 @@
 use super::*;
 
 impl WafEngine {
+  pub(super) fn should_fail_open(&self, error: &anyhow::Error) -> bool {
+    self.fail_policy == WafFailPolicy::Open && !is_advanced_regex_evaluation_error(error)
+  }
+
   pub fn new(config: &Config) -> anyhow::Result<Self> {
     Self::new_with_previous(config, None, None)
   }

@@ -45,6 +45,10 @@ for the governed entry format.
   the internal delimiter scan. Literal `?` and `#` remain rejected for rewrite
   and redirect paths; TOML keys, defaults, schema epoch, accepted and rejected
   configurations, reload class, and rollback procedure remain unchanged.
+- Preserve WAF keys and defaults while forcing policy-authored advanced-regex
+  match-time subject, backtrack, and matcher stack failures closed for request,
+  response, and stream phases, including when `waf.fail_policy = "open"`.
+  Unrelated evaluation failures retain the configured fail policy.
 
 ### Schema epochs
 
@@ -77,10 +81,11 @@ for the governed entry format.
 
 ### Rulepack compatibility
 
-- Change no OxiRule syntax, CRS compatibility, rulepack schema, matching, or
-  enforcement semantics. CT endpoints are not a WAF inspection surface: once
-  a normal route admits a `ct_log` request, dispatch deliberately bypasses
-  proxy, static, cache, WAF, retry, and response-rewrite behavior.
+- Change no OxiRule syntax, CRS compatibility, rulepack schema, or successful
+  matching semantics. Advanced-regex match-time resource failures now use the
+  phase's fail-closed decision instead of fail-open; CT endpoints remain
+  outside the WAF inspection surface and deliberately bypass proxy, static,
+  cache, WAF, retry, and response-rewrite behavior after route admission.
 - Accelerate percent-marker, normalization, malicious-input, and compiled
   literal searches without changing OxiRule or CRS syntax, normalization
   results, match precedence, request classification, or enforcement behavior.
