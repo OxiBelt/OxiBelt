@@ -18,8 +18,9 @@ for the governed entry format.
 ## [0.9.1-beta.1] - 2026-08-27
 
 > Release-candidate ledger for the release-qualification registry readback
-> hardening in `ece4a69c`. This is CI qualification control-plane work only;
-> it changes no deployed OxiBelt behavior.
+> hardening in `ece4a69c` and the compatible `chacha20` patch refresh required
+> after `0.10.1` was yanked. Product interfaces and compatibility contracts are
+> unchanged.
 
 - Changes since: `0.9.0`
 - Supported upgrade sources: `0.9.0`
@@ -48,7 +49,8 @@ for the governed entry format.
 - Preserve every existing feature lifecycle and release-policy gate. The
   qualification verifier now applies bounded retries to registry descriptor
   inspection failures and malformed responses before it seals a release
-  result.
+  result. The runtime dependency graph advances `chacha20` from yanked
+  `0.10.1` to compatible `0.10.2` without changing enabled features.
 
 ### Rulepack compatibility
 
@@ -58,7 +60,8 @@ for the governed entry format.
 ### Executables and images
 
 - Preserve executable names, image roles, package and chart sentinels, and
-  release inventories. Valid descriptor digest or child-manifest mismatches
+  release inventories. Official binaries and images carry the compatible
+  `chacha20 0.10.2` patch. Valid descriptor digest or child-manifest mismatches
   fail immediately rather than being retried; failed readback diagnostics now
   report the expected and actual exact inventories.
 
@@ -94,6 +97,11 @@ pnpm run release-contract:check
   malformed responses may retry only within the bounded budget, while valid
   digest and child-manifest mismatches fail immediately with actionable
   exact-inventory diagnostics.
+- Replace yanked transitive `chacha20 0.10.1` with compatible `0.10.2`, retain
+  the existing `safe-to-deploy` cargo-vet criterion, and bind the refreshed
+  lock and exemption inventories to new immutable policy digests. The upstream
+  patch removes an accidental SSE4.1 intrinsic from the SSE2 backend used by
+  the enabled cipher and RNG feature paths.
 
 ## [0.9.0-beta.1] - 2026-08-27
 

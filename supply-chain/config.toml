@@ -215,7 +215,7 @@ version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.chacha20]]
-version = "0.10.1"
+version = "0.10.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.chacha20poly1305]]

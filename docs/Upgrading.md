@@ -70,7 +70,7 @@ be used as a supported production upgrade source or target.
 | `0.8.1-beta.9` | `0.8.1` | Stable candidate | The stable source is exactly one documentation-only commit after the qualified beta.9 revision. This exact transition has no additional calendar delay, but stable publication cannot predate beta publication or verifier completion and remains subject to every stable-only release and alias gate. |
 | `0.8.1` | `0.9.0-beta.1` | Published, superseded | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). The immutable prerelease is published; use the published `0.9.0` stable release for the completed line unless a release-specific recovery procedure requires the beta. CT-disabled epoch-1 configurations need no native migration. |
 | `0.9.0-beta.1` | `0.9.0` | Published, qualified | The published stable release completed its own successful independent qualification. Its alias-promotion workflow did not complete the mutation step, so deploy only immutable `0.9.0` references; do not infer that mutable aliases identify this release. Later rerun failures are not reusable qualification evidence for this or another release and do not replace the successful exact-release qualification record. |
-| `0.9.0` | `0.9.1-beta.1` | Release candidate | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). This candidate changes only release-qualification registry descriptor readback handling; no runtime, configuration, schema, Admin, rulepack, image-role, or storage behavior changes. |
+| `0.9.0` | `0.9.1-beta.1` | Release candidate | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). This candidate hardens release-qualification registry descriptor readback and replaces yanked transitive `chacha20 0.10.1` with compatible `0.10.2`; configuration, schema, Admin, rulepack, image-role, and storage contracts are unchanged. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -178,13 +178,16 @@ reuse a log identity to conceal a failed deployment.
 
 ## Upgrade from 0.9.0 to the 0.9.1 line
 
-`0.9.1-beta.1` contains only the release-qualification registry readback
-hardening from `ece4a69c`. It applies a bounded retry budget to descriptor
-inspection failures and malformed responses before qualification sealing,
-immediately fails valid digest or child-manifest mismatches, and reports clearer
-expected-versus-actual exact inventory diagnostics. It makes no runtime,
-configuration, schema, Admin API, rulepack, image-role,
-package/chart-sentinel, or storage behavior change.
+`0.9.1-beta.1` contains the release-qualification registry readback hardening
+from `ece4a69c` and a compatible transitive dependency patch. The verifier
+applies a bounded retry budget to descriptor inspection failures and malformed
+responses before qualification sealing, immediately fails valid digest or
+child-manifest mismatches, and reports clearer expected-versus-actual exact
+inventory diagnostics. The runtime graph replaces yanked `chacha20 0.10.1`
+with `0.10.2` without changing enabled features; the upstream patch removes an
+accidental SSE4.1 intrinsic from its SSE2 backend. Configuration, schema, Admin
+API, rulepack, image-role, package/chart-sentinel, and storage contracts remain
+unchanged.
 
 No migration or configuration edit is required. Verify the candidate ledger
 before release governance evaluates the exact revision:
