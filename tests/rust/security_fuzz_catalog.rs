@@ -669,6 +669,138 @@ exit 0
 
   #[cfg(unix)]
   #[test]
+  fn fuzz_runner_reserves_complete_rollover_budget() {
+    let fixture = tempfile::tempdir().expect("test fixture directory should be created");
+    let fixture_path = fixture.path();
+    let executor_log = fixture_path.join("executor.log");
+    let fake_matrix = fixture_path.join("oxibelt-docker-integration-matrix");
+    let fake_executor = fixture_path.join("executor");
+
+    write_executable(
+      &fixture_path.join("cargo"),
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+jq -nc --arg executable "${fixture_dir}/oxibelt-docker-integration-matrix" \
+  '{reason:"compiler-artifact",target:{name:"oxibelt-docker-integration-matrix",kind:["bin"]},executable:$executable}'
+"#,
+    );
+    write_executable(
+      &fixture_path.join("docker"),
+      "#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n",
+    );
+    write_executable(
+      &fake_matrix,
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "security-fuzz" && "${2:-}" == "describe" ]]; then
+  jq -nc --argjson seconds "${FAKE_PR_SECONDS}" \
+    '{schema_version:1,replay_schema_version:1,pr_max_cases:2,pr_max_seconds:$seconds,sustained_default_seconds:90,sustained_max_cases:2,case_timeout_seconds:1,recovery_timeout_seconds:1,failure_artifact_max_bytes:1048576,payload_max_bytes:1024,session_max_cases:1,max_concurrent_sessions:1,required_helpers:["fake"],oracle:"fake",protocols:["h1"],meaning_preserving_transforms:[]}'
+  exit 0
+fi
+if [[ "${1:-}" == "security-fuzz" && "${2:-}" == "materialize-input" ]]; then
+  shift 2
+  while (($#)); do
+    if [[ "$1" == "--output" ]]; then
+      printf 'bounded-input' >"$2"
+      exit 0
+    fi
+    shift
+  done
+fi
+exit 2
+"#,
+    );
+    write_executable(
+      &fake_executor,
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+printf '%s %s\n' "${1:-}" "${OXIBELT_SECURITY_FUZZ_WORK_DIR}" >>"${fixture_dir}/executor.log"
+if [[ "${1:-}" == "start" && "${FAKE_FAIL_SECOND_START:-0}" == 1 \
+  && "$(awk '$1 == "start" {count++} END {print count + 0}' "${fixture_dir}/executor.log")" == 2 ]]; then
+  : >"${OXIBELT_SECURITY_FUZZ_WORK_DIR}/partial-resource"
+  exit 42
+fi
+if [[ "${1:-}" == "case" ]]; then
+  [[ -s "${OXIBELT_SECURITY_FUZZ_INPUT_FILE:-}" ]]
+fi
+if [[ "${1:-}" == "stop" ]]; then
+  rm -f "${OXIBELT_SECURITY_FUZZ_WORK_DIR}/partial-resource"
+fi
+exit 0
+"#,
+    );
+
+    let path = format!(
+      "{}:{}",
+      fixture_path.display(),
+      std::env::var("PATH").expect("PATH should be set")
+    );
+    let run = |seconds: &str, fail_second_start: bool| {
+      Command::new("bash")
+        .arg(repository_path("tests/scripts/run-docker-security-fuzz.sh"))
+        .args(["smoke", "path_security", "--seed", "42"])
+        .env("PATH", &path)
+        .env("FAKE_PR_SECONDS", seconds)
+        .env(
+          "FAKE_FAIL_SECOND_START",
+          if fail_second_start { "1" } else { "0" },
+        )
+        .env("OXIBELT_SECURITY_FUZZ_EXECUTOR", &fake_executor)
+        .output()
+        .expect("security-fuzz runner should execute")
+    };
+
+    let underfunded = run("10", false);
+    assert!(
+      underfunded.status.success(),
+      "underfunded rollover should end cleanly\nstderr:\n{}",
+      String::from_utf8_lossy(&underfunded.stderr)
+    );
+    let lifecycle = fs::read_to_string(&executor_log).expect("executor calls should be recorded");
+    assert_eq!(
+      lifecycle
+        .lines()
+        .map(|line| line.split_whitespace().next().unwrap_or_default())
+        .collect::<Vec<_>>(),
+      ["start", "case", "recovery", "stop"]
+    );
+
+    fs::remove_file(&executor_log).expect("executor log should reset between scenarios");
+    let funded_failure = run("75", true);
+    assert_eq!(funded_failure.status.code(), Some(1));
+    assert!(
+      String::from_utf8_lossy(&funded_failure.stderr)
+        .contains("security-fuzz executor phase=start exit_status=42 budget_seconds=60"),
+      "a funded restart failure must remain fail-closed\nstderr:\n{}",
+      String::from_utf8_lossy(&funded_failure.stderr)
+    );
+    let lifecycle = fs::read_to_string(&executor_log).expect("executor calls should be recorded");
+    let lifecycle_lines = lifecycle.lines().collect::<Vec<_>>();
+    assert_eq!(
+      lifecycle_lines
+        .iter()
+        .map(|line| line.split_whitespace().next().unwrap_or_default())
+        .collect::<Vec<_>>(),
+      ["start", "case", "recovery", "stop", "start", "stop"]
+    );
+    let retained_work_dir = lifecycle_lines[0]
+      .split_once(' ')
+      .map(|(_, path)| PathBuf::from(path))
+      .expect("executor log should retain the isolated work directory");
+    let security_fuzz_tmp = fs::canonicalize(repository_path("tests/.tmp"))
+      .expect("security-fuzz temporary root should be canonicalizable");
+    assert!(retained_work_dir.starts_with(security_fuzz_tmp));
+    assert!(
+      !retained_work_dir.join("partial-resource").exists(),
+      "a failed restart must run bounded executor cleanup for partial topology resources"
+    );
+    fs::remove_dir_all(retained_work_dir).expect("failed-run fixture should be cleaned up");
+  }
+
+  #[cfg(unix)]
+  #[test]
   fn fuzz_runner_rejects_ambiguous_or_invalid_matrix_artifacts() {
     let fixture = tempfile::tempdir().expect("test fixture directory should be created");
     let fixture_path = fixture.path();
@@ -1053,9 +1185,31 @@ esac
       "a successful fuzz command must verify final session teardown"
     );
     assert!(
+      runner.contains("rollover_stop_timeout_seconds=10")
+        && runner.contains("rollover_start_timeout_seconds=60")
+        && runner.contains("+ rollover_start_timeout_seconds + complete_case_budget_seconds"),
+      "session rollover must reserve fixed stop, start, input, case, and recovery budgets"
+    );
+    assert!(
+      runner.contains("((remaining > rollover_budget_seconds)) || break")
+        && runner.contains("stop_executor_session \"${rollover_stop_timeout_seconds}\"")
+        && runner.contains("start_executor_session \"${rollover_start_timeout_seconds}\""),
+      "underfunded rollover must end cleanly while funded lifecycle commands stay bounded"
+    );
+    assert!(
+      runner.contains("cleanup_failed_executor_start() {")
+        && runner.contains(
+          "stop_executor_session \"${rollover_stop_timeout_seconds}\" >>\"${lifecycle_log}\" 2>&1"
+        )
+        && runner.matches("cleanup_failed_executor_start \"${").count() == 2,
+      "cold and rollover start failures must attempt bounded verified executor cleanup"
+    );
+    assert!(
       executor.contains("assert_topology_absent() {")
         && executor.contains("security-fuzz topology already contains scoped resources")
-        && executor.contains("  assert_topology_absent\n  generate_certificates"),
+        && executor.contains(
+          "  assert_topology_absent\n  reset_admin_startup_recovery_envelope\n  generate_certificates"
+        ),
       "a restarted fuzz session must reject stale scoped topology before creating resources"
     );
     let stop_topology = executor

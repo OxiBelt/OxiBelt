@@ -30,6 +30,8 @@ work_dir="$(mktemp -d "${tmp_root}/security-fuzz.XXXXXXXX")"
 chmod 0700 "${work_dir}"
 artifact_dir="${OXIBELT_TEST_ARTIFACT_DIR:-${work_dir}/artifacts}"
 keep_artifacts="${KEEP_TEST_ARTIFACTS:-0}"
+rollover_stop_timeout_seconds=10
+rollover_start_timeout_seconds=60
 
 cleanup() {
   if [[ -n "${executor:-}" && -x "${executor}" && -f "${work_dir}/session-started" ]]; then
@@ -366,6 +368,14 @@ stop_executor_session() {
   rm -f "${work_dir}/session-started"
 }
 
+cleanup_failed_executor_start() {
+  local lifecycle_log="$1"
+  if ! stop_executor_session "${rollover_stop_timeout_seconds}" >>"${lifecycle_log}" 2>&1; then
+    printf 'security-fuzz failed-start cleanup did not complete\n' >>"${lifecycle_log}"
+    return 1
+  fi
+}
+
 command="${1:-}"
 target="${2:-}"
 [[ -n "${command}" && -n "${target}" ]] || { usage; exit 2; }
@@ -390,6 +400,8 @@ done
 mkdir -p "${work_dir}"
 prepare_matrix_bin
 load_target "${target}"
+rollover_budget_seconds=$((rollover_stop_timeout_seconds \
+  + rollover_start_timeout_seconds + complete_case_budget_seconds))
 executor="${OXIBELT_SECURITY_FUZZ_EXECUTOR:-${repo_root}/tests/docker/security_fuzz/executor.sh}"
 if [[ ! -x "${executor}" ]]; then
   echo "security-fuzz executor is missing or not executable: ${executor}" >&2
@@ -435,6 +447,9 @@ esac
 # complete catalog-derived budget.
 startup_log="${work_dir}/startup.log"
 if ! start_executor_session >"${startup_log}" 2>&1; then
+  if ! cleanup_failed_executor_start "${startup_log}"; then
+    printf 'security-fuzz topology may remain after failed startup\n' >>"${startup_log}"
+  fi
   startup_case=1
   startup_seed="$(case_seed "${commit_sha}" "${target}" "${schema_version}" "${run_seed}" "${startup_case}")"
   : >"${work_dir}/case-${startup_case}.bin"
@@ -463,13 +478,11 @@ while ((executed < max_cases)); do
     && executed < max_cases \
     && now < deadline)); then
     remaining=$((deadline - now))
-    # Never exceed the per-session case bound merely because too little
-    # campaign time remains for a bounded stop/start rollover.
-    ((remaining >= 3)) || break
-    stop_budget=$((remaining - 1))
-    ((stop_budget > 10)) && stop_budget=10
+    # End after the completed session unless a bounded stop, start, and next
+    # complete case all fit with scheduling slack.
+    ((remaining > rollover_budget_seconds)) || break
     lifecycle_log="${work_dir}/session-rollover.log"
-    if ! stop_executor_session "${stop_budget}" >"${lifecycle_log}" 2>&1; then
+    if ! stop_executor_session "${rollover_stop_timeout_seconds}" >"${lifecycle_log}" 2>&1; then
       lifecycle_seed="$(case_seed "${commit_sha}" "${target}" "${schema_version}" "${run_seed}" "${index}")"
       : >"${work_dir}/case-${index}.bin"
       write_failure_artifacts "${target}" "${index}" "${lifecycle_seed}" "${lifecycle_log}" \
@@ -477,9 +490,11 @@ while ((executed < max_cases)); do
       cat "${lifecycle_log}" >&2 || true
       exit 1
     fi
-    remaining=$((deadline - $(date +%s)))
-    ((remaining > 0)) || break
-    if ! start_executor_session "${remaining}" >"${lifecycle_log}" 2>&1; then
+    if ! start_executor_session "${rollover_start_timeout_seconds}" >"${lifecycle_log}" 2>&1; then
+      if ! cleanup_failed_executor_start "${lifecycle_log}"; then
+        printf 'security-fuzz topology may remain after failed rollover startup\n' \
+          >>"${lifecycle_log}"
+      fi
       lifecycle_seed="$(case_seed "${commit_sha}" "${target}" "${schema_version}" "${run_seed}" "${index}")"
       : >"${work_dir}/case-${index}.bin"
       write_failure_artifacts "${target}" "${index}" "${lifecycle_seed}" "${lifecycle_log}" \
