@@ -17,6 +17,8 @@ work_dir="${OXIBELT_SECURITY_FUZZ_WORK_DIR:-}"
 [[ -n "${label}" && -n "${work_dir}" ]] || { echo "security-fuzz executor environment is incomplete" >&2; exit 2; }
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tests/docker/security_fuzz/admin_mutation_identity.sh
+source "${script_dir}/admin_mutation_identity.sh"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt:security-fuzz}"
 mock_image="${OXIBELT_MOCK_UPSTREAM_IMAGE:-oxibelt/mock-upstream:security-fuzz}"
 probe_image="${OXIBELT_PROTOCOL_PROBE_IMAGE:-oxibelt/protocol-probe:security-fuzz}"
@@ -37,6 +39,7 @@ turn_allocation_client_file="${work_dir}/turn-allocation-client"
 postgres_password_file="${credential_dir}/postgres.password"
 mutation_private_key_file="${credential_dir}/mutation-signer.ed25519.pem"
 mutation_public_key_file="${credential_dir}/mutation-signer.ed25519.pub"
+admin_startup_recovery_envelope_file="${work_dir}/admin-startup-recovery-envelope.json"
 
 container_name() {
   printf 'oxibelt-sf-%s-%s' "$1" "${run_id}"
@@ -429,6 +432,7 @@ append_mutation_transcript_field() {
 
 mutation_envelope_header() {
   local body="$1" principal="$2" variant="$3" method="$4" path="$5" precondition="$6" expected_previous_revision="$7" target="$8"
+  local request_id_override="${9:-}" new_revision_override="${10:-}"
   local content_digest signature wire signer_id issued_at expires_at request_id new_revision
   local cluster_id membership_revision transcript_file signature_file encoded_signature
   content_digest="sha256:$(printf '%s' "${body}" | sha256sum | awk '{print $1}')"
@@ -446,8 +450,19 @@ mutation_envelope_header() {
   esac
   issued_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   expires_at="$(date -u -d '+120 seconds' +%Y-%m-%dT%H:%M:%SZ)"
-  request_id="00000000-0000-4000-8000-$(input_hex 11 6)"
-  new_revision="sf-$(input_hex 17 16)"
+  if [[ -n "${request_id_override}" || -n "${new_revision_override}" ]]; then
+    [[ "${variant}" == "valid"
+      && "${request_id_override}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$
+      && "${new_revision_override}" =~ ^sf-[0-9a-f]{32}$ ]] || {
+      echo "invalid Admin recovery identity override" >&2
+      return 2
+    }
+    request_id="${request_id_override}"
+    new_revision="${new_revision_override}"
+  else
+    request_id="00000000-0000-4000-8000-$(input_hex 11 6)"
+    new_revision="sf-$(input_hex 17 16)"
+  fi
   cluster_id="$(jq -er '.cluster_id' <<<"${target}")"
   membership_revision="$(jq -er '.membership_revision' <<<"${target}")"
   transcript_file="${work_dir}/admin-mutation-transcript.bin"
@@ -1266,15 +1281,102 @@ wait_for_zero_turn_counts() {
   return 1
 }
 
+read_admin_startup_recovery_envelope() {
+  local size mode
+  [[ -f "${admin_startup_recovery_envelope_file}" \
+    && ! -L "${admin_startup_recovery_envelope_file}" ]] || {
+    echo "Admin startup recovery envelope cache is not a regular file" >&2
+    return 1
+  }
+  size="$(wc -c <"${admin_startup_recovery_envelope_file}")"
+  mode="$(stat -c '%a' "${admin_startup_recovery_envelope_file}")"
+  [[ "${size}" =~ ^[0-9]+$ && "${size}" -gt 0 && "${size}" -le 65536 \
+    && "${mode}" == "600" ]] || {
+    echo "Admin startup recovery envelope cache has unsafe metadata" >&2
+    return 1
+  }
+  jq -cer '
+    if (keys | sort) == ["mutation_header", "precondition"]
+      and (.precondition | type == "string" and length > 0 and length <= 256)
+      and (.mutation_header | type == "string" and length > 0 and length <= 32768)
+    then .
+    else error("invalid Admin startup recovery envelope cache")
+    end
+  ' "${admin_startup_recovery_envelope_file}"
+}
+
+write_admin_startup_recovery_envelope() {
+  local precondition="$1" mutation_header="$2" temporary
+  [[ ! -e "${admin_startup_recovery_envelope_file}" \
+    && ! -L "${admin_startup_recovery_envelope_file}" ]] || {
+    echo "refusing to replace an existing Admin startup recovery envelope cache" >&2
+    return 1
+  }
+  temporary="$(mktemp "${work_dir}/.admin-startup-recovery-envelope.XXXXXXXX")"
+  chmod 0600 "${temporary}"
+  if ! jq -cn --arg precondition "${precondition}" --arg mutation_header "${mutation_header}" \
+    '{precondition: $precondition, mutation_header: $mutation_header}' >"${temporary}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
+  if ! ln -- "${temporary}" "${admin_startup_recovery_envelope_file}"; then
+    rm -f "${temporary}"
+    return 1
+  fi
+  rm -f "${temporary}"
+}
+
+reset_admin_startup_recovery_envelope() {
+  [[ "${target}" == "admin_authz" ]] || return 0
+  if [[ -L "${admin_startup_recovery_envelope_file}" \
+    || (-e "${admin_startup_recovery_envelope_file}" \
+      && ! -f "${admin_startup_recovery_envelope_file}") ]]; then
+    echo "refusing to reset an unsafe Admin startup recovery envelope cache" >&2
+    return 1
+  fi
+  rm -f -- "${admin_startup_recovery_envelope_file}"
+}
+
 admin_valid_mutation() {
-  local output="${work_dir}/admin-recovery.json" admin_header admission_context precondition expected_previous_revision target mutation_header
+  local mode="$1" output="${work_dir}/admin-recovery.json" admin_header admission_context
+  local precondition expected_previous_revision target mutation_header content_digest case_entropy
+  local identity cached_envelope identity_fields=()
   admin_header="Authorization: Bearer $(read_credential "${admin_token_file}")"
-  admission_context="$(admin_admission_context)"
-  precondition="$(jq -er '.precondition' <<<"${admission_context}")"
-  expected_previous_revision="$(jq -er '.expected_previous_revision' <<<"${admission_context}")"
-  target="$(jq -cer '.target' <<<"${admission_context}")"
-  mutation_header="$(mutation_envelope_header '' admin valid POST \
-    /admin/v1/tls/downstream/reload "${precondition}" "${expected_previous_revision}" "${target}")"
+  case "${mode}" in
+    startup)
+      if [[ -e "${admin_startup_recovery_envelope_file}" \
+        || -L "${admin_startup_recovery_envelope_file}" ]]; then
+        cached_envelope="$(read_admin_startup_recovery_envelope)"
+        precondition="$(jq -er '.precondition' <<<"${cached_envelope}")"
+        mutation_header="$(jq -er '.mutation_header' <<<"${cached_envelope}")"
+      else
+        case_entropy="startup"
+      fi
+      ;;
+    post-case) case_entropy="${OXIBELT_SECURITY_FUZZ_CASE_SEED:-}" ;;
+    *) echo "unsupported Admin recovery mutation mode" >&2; return 2 ;;
+  esac
+  if [[ -z "${mutation_header:-}" ]]; then
+    admission_context="$(admin_admission_context)"
+    precondition="$(jq -er '.precondition' <<<"${admission_context}")"
+    expected_previous_revision="$(jq -er '.expected_previous_revision' <<<"${admission_context}")"
+    target="$(jq -cer '.target' <<<"${admission_context}")"
+    content_digest="sha256:$(printf '' | sha256sum | awk '{print $1}')"
+    identity="$(admin_valid_mutation_identity "${mode}" "${target}" POST \
+      /admin/v1/tls/downstream/reload "${precondition}" \
+      "${expected_previous_revision}" "${content_digest}" "${case_entropy}")"
+    mapfile -t identity_fields <<<"${identity}"
+    [[ "${#identity_fields[@]}" == 2 ]] || {
+      echo "Admin recovery identity helper returned an invalid result" >&2
+      return 1
+    }
+    mutation_header="$(mutation_envelope_header '' admin valid POST \
+      /admin/v1/tls/downstream/reload "${precondition}" "${expected_previous_revision}" "${target}" \
+      "${identity_fields[0]}" "${identity_fields[1]}")"
+    if [[ "${mode}" == "startup" ]]; then
+      write_admin_startup_recovery_envelope "${precondition}" "${mutation_header}"
+    fi
+  fi
   admin_request "${output}" /admin/v1/tls/downstream/reload 200 POST '' \
     "${admin_header}" "If-Match: \"${precondition}\"" \
     "X-OxiBelt-Mutation: ${mutation_header}"
@@ -1334,7 +1436,7 @@ recovery_target() {
       fi
       ;;
     admin_authz)
-      admin_valid_mutation
+      admin_valid_mutation "${mode}"
       ;;
   esac
 }
@@ -1369,6 +1471,7 @@ start_topology() {
     require_image "${postgres_image}"
   fi
   assert_topology_absent
+  reset_admin_startup_recovery_envelope
   generate_certificates
   generate_credentials
   generate_mutation_signer

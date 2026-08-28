@@ -173,7 +173,8 @@ write_failure_artifacts() {
   for observation_name in \
     path-case.json tls-quic-case.json framing-case.json waf-case.json \
     auth-case.json session-case.json turn-case.json turn-edge-malformed.json \
-    turn-edge-allocation.json admin-case.json \
+    turn-edge-allocation.json admin-case.json admin-recovery.json \
+    admin-admission-context.json \
     mutation.json recovery.json recovery-clean.json recovery-valid.json \
     runtime-introspection.json; do
     observation="${work_dir}/${observation_name}"

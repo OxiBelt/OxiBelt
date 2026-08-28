@@ -308,6 +308,28 @@ mod tests {
     fs::set_permissions(path, permissions).expect("fake executable should be executable");
   }
 
+  #[cfg(unix)]
+  fn admin_valid_mutation_identity(phase: &str, case_entropy: &str) -> std::process::Output {
+    Command::new("bash")
+      .arg("-c")
+      .arg(
+        r#"source "${IDENTITY_HELPER}"
+admin_valid_mutation_identity "${PHASE}" \
+  '{"membership_revision":"membership-a","cluster_id":"cluster-a"}' \
+  POST /admin/v1/tls/downstream/reload config-a revision-a \
+  sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
+  "${CASE_ENTROPY}""#,
+      )
+      .env(
+        "IDENTITY_HELPER",
+        repository_path("tests/docker/security_fuzz/admin_mutation_identity.sh"),
+      )
+      .env("PHASE", phase)
+      .env("CASE_ENTROPY", case_entropy)
+      .output()
+      .expect("Admin recovery identity helper should execute")
+  }
+
   #[test]
   fn catalog_is_complete_and_bounded() {
     let targets = targets().expect("catalog must parse and validate");
@@ -881,6 +903,119 @@ esac
         .recovery_timeout_seconds,
       15,
       "TURN allocation expiry must remain bounded by the catalog recovery timeout"
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn admin_recovery_identity_is_unique_and_replay_stable() {
+    const CASE_ENTROPY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let derive = |phase: &str, case_entropy: &str| {
+      let output = admin_valid_mutation_identity(phase, case_entropy);
+      assert!(
+        output.status.success(),
+        "identity helper failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+      );
+      String::from_utf8(output.stdout).expect("identity helper output should be UTF-8")
+    };
+
+    let identity = derive("post-case", CASE_ENTROPY);
+    assert_eq!(
+      identity, "d3bd28cc-0927-4101-8311-3fb3e35a0b5a\nsf-1bd015872330ae40432eaf69c196f789\n",
+      "the framed identity vector must retain its domain and canonical fields"
+    );
+    assert_ne!(
+      identity,
+      derive("startup", "startup"),
+      "recovery phases must not collide"
+    );
+    assert_ne!(
+      identity,
+      derive(
+        "post-case",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ),
+      "distinct deterministic cases must not share recovery identities"
+    );
+
+    let short_entropy = admin_valid_mutation_identity("post-case", "0000");
+    assert!(
+      !short_entropy.status.success(),
+      "post-case recovery must not collapse absent or short entropy to zeros"
+    );
+
+    let executor = fs::read_to_string(repository_path("tests/docker/security_fuzz/executor.sh"))
+      .expect("security-fuzz executor should be readable");
+    let admin_case = executor
+      .split_once("case_admin_authz() {")
+      .and_then(|(_, suffix)| suffix.split_once("\n}\n\ncase_target() {"))
+      .map(|(body, _)| body)
+      .expect("Admin case must end before target dispatch");
+    assert!(
+      !admin_case.contains("admin_valid_mutation_identity"),
+      "deliberately invalid Admin cases must retain their existing identity path"
+    );
+    assert!(
+      executor.contains(
+        "request_id=\"00000000-0000-4000-8000-$(input_hex 11 6)\"\n    new_revision=\"sf-$(input_hex 17 16)\""
+      ),
+      "invalid Admin envelope variants must retain sparse-input identities"
+    );
+    let admin_recovery = executor
+      .split_once("admin_valid_mutation() {")
+      .and_then(|(_, suffix)| suffix.split_once("\n}\n\nrecovery_target() {"))
+      .map(|(body, _)| body)
+      .expect("Admin valid recovery helper must end before target recovery dispatch");
+    let cache_read = admin_recovery
+      .find("cached_envelope=\"$(read_admin_startup_recovery_envelope)\"")
+      .expect("startup recovery must read its cached signed envelope");
+    let admission_read = admin_recovery
+      .find("admission_context=\"$(admin_admission_context)\"")
+      .expect("uncached recovery must read the current admission context");
+    let cache_write = admin_recovery
+      .find("write_admin_startup_recovery_envelope \"${precondition}\" \"${mutation_header}\"")
+      .expect("startup recovery must cache its precondition and signed envelope");
+    let request = admin_recovery
+      .find("admin_request \"${output}\" /admin/v1/tls/downstream/reload")
+      .expect("Admin recovery must submit its mutation");
+    assert!(
+      cache_read < admission_read && cache_write < request,
+      "startup retries must reuse one cached If-Match and signed mutation before sending"
+    );
+    assert!(
+      executor.contains("if (keys | sort) == [\"mutation_header\", \"precondition\"]")
+        && executor
+          .contains("mode=\"$(stat -c '%a' \"${admin_startup_recovery_envelope_file}\")\"")
+        && executor.contains("&& \"${mode}\" == \"600\" ]]"),
+      "startup envelope cache reads must validate exact shape and owner-only permissions"
+    );
+    let start_topology = executor
+      .split_once("start_topology() {")
+      .and_then(|(_, suffix)| suffix.split_once("\n}\n\nstop_topology() {"))
+      .map(|(body, _)| body)
+      .expect("topology start must end before topology stop");
+    let stale_topology_check = start_topology
+      .find("assert_topology_absent")
+      .expect("topology start must reject stale resources");
+    let cache_reset = start_topology
+      .find("reset_admin_startup_recovery_envelope")
+      .expect("each topology start must reset the prior signed startup envelope");
+    let signer_generation = start_topology
+      .find("generate_mutation_signer")
+      .expect("topology start must generate its mutation signer");
+    assert!(
+      stale_topology_check < cache_reset && cache_reset < signer_generation,
+      "a new topology must reset the old signed envelope only after proving stale resources absent"
+    );
+
+    let runner = fs::read_to_string(repository_path("tests/scripts/run-docker-security-fuzz.sh"))
+      .expect("security-fuzz runner should be readable");
+    assert!(
+      runner.contains("admin-case.json admin-recovery.json")
+        && runner.contains("admin-admission-context.json"),
+      "Admin failure artifacts must retain bounded case, recovery, and admission observations"
     );
   }
 
