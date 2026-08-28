@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+use syn::visit::Visit;
 
 const EXPECTED_TARGETS: &[&str] = &[
   "admin_json_mutations",
@@ -71,6 +72,71 @@ fn read_repo_file(path: &str) -> String {
 fn parse_repo_toml(path: &str) -> toml::Value {
   toml::from_str(&read_repo_file(path))
     .unwrap_or_else(|error| panic!("{path} should contain valid TOML: {error}"))
+}
+
+fn rust_source_owns_coverage_landmark_symbol(source: &str, symbol: &str) -> bool {
+  let terminal_symbol = symbol.rsplit("::").next().unwrap_or(symbol);
+  let Ok(file) = syn::parse_file(source) else {
+    return false;
+  };
+  let mut visitor = CoverageLandmarkVisitor {
+    terminal_symbol,
+    expects_type: matches!(terminal_symbol.as_bytes().first(), Some(b'A'..=b'Z')),
+    owns_symbol: false,
+  };
+  visitor.visit_file(&file);
+  visitor.owns_symbol
+}
+
+struct CoverageLandmarkVisitor<'a> {
+  terminal_symbol: &'a str,
+  expects_type: bool,
+  owns_symbol: bool,
+}
+
+impl CoverageLandmarkVisitor<'_> {
+  fn owns_function(&mut self, ident: &syn::Ident) {
+    self.owns_symbol |= !self.expects_type && ident == self.terminal_symbol;
+  }
+}
+
+impl<'ast> Visit<'ast> for CoverageLandmarkVisitor<'_> {
+  fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+    self.owns_function(&function.sig.ident);
+    syn::visit::visit_item_fn(self, function);
+  }
+
+  fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+    self.owns_function(&function.sig.ident);
+    syn::visit::visit_impl_item_fn(self, function);
+  }
+
+  fn visit_trait_item_fn(&mut self, function: &'ast syn::TraitItemFn) {
+    if function.default.is_some() {
+      self.owns_function(&function.sig.ident);
+    }
+    syn::visit::visit_trait_item_fn(self, function);
+  }
+
+  fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
+    if let syn::Type::Path(self_type) = implementation.self_ty.as_ref() {
+      self.owns_symbol |= self.expects_type
+        && implementation
+          .items
+          .iter()
+          .any(|item| matches!(item, syn::ImplItem::Fn(_)))
+        && self_type
+          .path
+          .segments
+          .last()
+          .is_some_and(|segment| segment.ident == self.terminal_symbol);
+    }
+    syn::visit::visit_item_impl(self, implementation);
+  }
+}
+
+fn source_owns_coverage_landmark_symbol(source_path: &str, symbol: &str) -> bool {
+  rust_source_owns_coverage_landmark_symbol(&read_repo_file(source_path), symbol)
 }
 
 fn required_string(table: &toml::Table, field: &str, context: &str) -> String {
@@ -201,6 +267,42 @@ fn table_integer(program: &toml::Table, key: &str) -> i64 {
 }
 
 #[test]
+fn coverage_landmark_ownership_rejects_lexical_decoys() {
+  let decoys = r#"
+const STRING_DECOY: &str = "pub fn string_decoy() {}";
+/* pub fn comment_decoy() {} */
+macro_rules! emit { ($($tokens:tt)*) => {} }
+emit!(pub fn macro_decoy() {});
+struct ResponseProtocolEngine;
+struct Wrapper<T>(T);
+impl Wrapper<ResponseProtocolEngine> {}
+"#;
+  for symbol in [
+    "string_decoy",
+    "comment_decoy",
+    "macro_decoy",
+    "ResponseProtocolEngine",
+  ] {
+    assert!(
+      !rust_source_owns_coverage_landmark_symbol(decoys, symbol),
+      "syntax-aware ownership must reject lexical decoy {symbol}"
+    );
+  }
+
+  let implementations = r#"
+pub(crate) async fn implemented_function() {}
+struct ImplementedType<T>(T);
+impl<T> ImplementedType<T> { fn run(&self) {} }
+"#;
+  for symbol in ["implemented_function", "ImplementedType"] {
+    assert!(
+      rust_source_owns_coverage_landmark_symbol(implementations, symbol),
+      "syntax-aware ownership must accept implementation {symbol}"
+    );
+  }
+}
+
+#[test]
 fn catalog_defines_the_complete_bounded_program() {
   let (program, targets) = catalog();
   assert_eq!(
@@ -300,6 +402,10 @@ fn catalog_defines_the_complete_bounded_program() {
       assert!(
         !symbol.trim().is_empty(),
         "coverage landmark symbol must not be empty"
+      );
+      assert!(
+        source_owns_coverage_landmark_symbol(source_path, symbol),
+        "coverage landmark source {source_path} must own the implementation for {symbol}"
       );
     }
     if let Some(dictionary) = &target.dictionary {

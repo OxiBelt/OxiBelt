@@ -101,7 +101,7 @@ invariants = ["incremental parsing and every terminal outcome remain determinist
 unsupported_states = ["live upstream or downstream sockets", "transport timeouts and background task cancellation", "changes to the established Hyper implementation"]
 seed_dir = "fuzz/seeds/compio_h1_response"
 dictionary = "fuzz/dictionaries/http.dict"
-coverage_landmarks = ["source/src/fuzzing.rs:exercise_compio_h1_response", "source/src/proxy/http/fast_path/direct_h1/response_protocol/mod.rs:ResponseProtocolEngine"]
+coverage_landmarks = ["source/src/fuzzing.rs:exercise_compio_h1_response", "source/src/proxy/http/fast_path/direct_h1/response_protocol/engine.rs:ResponseProtocolEngine"]
 regression_path = "tests/fixtures/fuzz-regressions/compio_h1_response"
 leak_policy = "enabled"
 
