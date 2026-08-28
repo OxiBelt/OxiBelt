@@ -15,12 +15,13 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
-## [0.9.1-beta.1] - 2026-08-27
+## [0.9.1-beta.1] - 2026-08-28
 
 > Release-candidate ledger for the release-qualification registry readback
 > hardening in `ece4a69c` and the compatible `chacha20` patch refresh required
-> after `0.10.1` was yanked. Product interfaces and compatibility contracts are
-> unchanged.
+> after `0.10.1` was yanked. Contributor linting also applies the existing
+> PascalCase declaration policy to method selectors. Product interfaces and
+> compatibility contracts are unchanged.
 
 - Changes since: `0.9.0`
 - Supported upgrade sources: `0.9.0`
@@ -51,6 +52,10 @@ for the governed entry format.
   inspection failures and malformed responses before it seals a release
   result. The runtime dependency graph advances `chacha20` from yanked
   `0.10.1` to compatible `0.10.2` without changing enabled features.
+- Extend the repository-only PascalCase lint rule to class accessors and
+  methods, abstract methods, and interface methods. Constructors and computed
+  members remain exempt. This contributor-tooling policy changes no shipped
+  runtime, configuration, API, rulepack, image, chart, or storage behavior.
 
 ### Rulepack compatibility
 
