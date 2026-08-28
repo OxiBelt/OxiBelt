@@ -31,7 +31,7 @@ const LintFixture = (Source: string, Rules: Record<string, 'error'>, Fix = false
   return { Output, ResultSource, Status: Result.status }
 }
 
-test('pascal-case preserves the existing selector and format contract', () => {
+test('pascal-case enforces declaration selectors and format contract', () => {
   const Valid = LintFixture(`
 import { lower as ImportedValue } from './external.js'
 const $Value = 1
@@ -41,16 +41,22 @@ try {} catch (lowerError) {}
 const ObjectValue = { lower: 1 }
 ObjectValue.lower
 class ExampleValue {
+  ['lowerMethod']() {}
   #PrivateValue = 1
   PropertyValue = 1
   ['lower'] = 2
   constructor(public ParameterValue: number) {}
-  get lower() { return 1 }
+  get AccessorValue() { return 1 }
+  MethodValue() {}
+}
+abstract class AbstractValue {
+  abstract MethodValue(): void
 }
 interface TypeValue {
   PropertyValue: string
   ['lower']: string
-  lower(): void
+  ['lowerMethod'](): void
+  MethodValue(): void
 }
 void ImportedValue
 void $Value
@@ -71,11 +77,25 @@ class ExampleValue {
   #lowerPrivate = 1
   lowerProperty = 1
   constructor(public lowerParameterProperty: number) {}
+  get lowerGetter() { return 1 }
+  set lowerSetter(Value: number) {}
+  lowerMethod() {}
 }
-interface TypeValue { lowerTypeProperty: string }
+abstract class AbstractValue {
+  abstract lowerAbstractMethod(): void
+}
+interface TypeValue {
+  lowerTypeProperty: string
+  lowerTypeMethod(): void
+}
 `, { 'oxibelt/pascal-case': 'error' })
   Assert.equal(Invalid.Status, 1, Invalid.Output)
   Assert.match(Invalid.Output, /oxibelt\(pascal-case\)/)
+  Assert.match(Invalid.Output, /Identifier 'lowerGetter' must be in PascalCase/)
+  Assert.match(Invalid.Output, /Identifier 'lowerSetter' must be in PascalCase/)
+  Assert.match(Invalid.Output, /Identifier 'lowerMethod' must be in PascalCase/)
+  Assert.match(Invalid.Output, /Identifier 'lowerAbstractMethod' must be in PascalCase/)
+  Assert.match(Invalid.Output, /Identifier 'lowerTypeMethod' must be in PascalCase/)
 })
 
 test('pascal-case honors narrow Oxlint suppression directives', () => {
