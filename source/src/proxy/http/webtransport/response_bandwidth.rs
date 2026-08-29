@@ -36,13 +36,19 @@ pub(crate) fn shape_webtransport_response(
   let Some(bandwidth) = bandwidth else {
     return Response::from_parts(parts, response_body);
   };
+  let response_body = if let Some(inlined) = parts
+    .extensions
+    .remove::<body::InlinedKnownSmallResponseBody>()
+  {
+    let (data, trailers) = inlined.into_parts();
+    body::materialized_known_small_body(data, trailers)
+  } else {
+    response_body
+  };
   parts.extensions.remove::<body::KnownSmallResponseBody>();
   parts
     .extensions
     .remove::<body::CompiledKnownSmallNoopResponse>();
-  parts
-    .extensions
-    .remove::<body::InlinedKnownSmallResponseBody>();
   Response::from_parts(
     parts,
     body::with_bandwidth(
@@ -67,6 +73,58 @@ mod tests {
   use super::*;
   use crate::bandwidth::{BandwidthPolicy, BandwidthRate};
   use crate::metrics::Metrics;
+
+  #[tokio::test]
+  async fn setup_response_materializes_inlined_known_small_body() {
+    let placeholder = http_body_util::Empty::<Bytes>::new()
+      .map_err(|never| -> body::BoxError { match never {} })
+      .boxed();
+    let mut response = Response::new(placeholder);
+    response
+      .extensions_mut()
+      .insert(body::KnownSmallResponseBody);
+    response
+      .extensions_mut()
+      .insert(body::CompiledKnownSmallNoopResponse);
+    response
+      .extensions_mut()
+      .insert(body::InlinedKnownSmallResponseBody::new(
+        Bytes::from_static(b"setup body"),
+        None,
+      ));
+
+    let response = shape_webtransport_response(
+      response,
+      Some(RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED)),
+      Metrics::new(),
+    );
+
+    assert!(
+      response
+        .extensions()
+        .get::<body::KnownSmallResponseBody>()
+        .is_none()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<body::CompiledKnownSmallNoopResponse>()
+        .is_none()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<body::InlinedKnownSmallResponseBody>()
+        .is_none()
+    );
+    let body = response
+      .into_body()
+      .collect()
+      .await
+      .expect("bandwidth-shaped setup response should collect")
+      .to_bytes();
+    assert_eq!(body.as_ref(), b"setup body");
+  }
 
   #[tokio::test(start_paused = true)]
   async fn setup_response_observes_unlimited_to_limited_reload() {

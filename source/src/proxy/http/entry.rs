@@ -259,13 +259,19 @@ pub(crate) fn with_final_response_bandwidth(
     .then(|| downstream_response_send_timeout(&response))
     .flatten();
   let (mut parts, response_body) = response.into_parts();
+  let response_body = if let Some(inlined) = parts
+    .extensions
+    .remove::<body::InlinedKnownSmallResponseBody>()
+  {
+    let (data, trailers) = inlined.into_parts();
+    body::materialized_known_small_body(data, trailers)
+  } else {
+    response_body
+  };
   parts.extensions.remove::<body::KnownSmallResponseBody>();
   parts
     .extensions
     .remove::<body::CompiledKnownSmallNoopResponse>();
-  parts
-    .extensions
-    .remove::<body::InlinedKnownSmallResponseBody>();
   Response::from_parts(
     parts,
     body::with_bandwidth(
@@ -285,4 +291,72 @@ pub(crate) fn with_final_tcp_response_bandwidth(
   metrics: Arc<crate::metrics::Metrics>,
 ) -> Response<ProxyBody> {
   with_final_response_bandwidth(response, limiter, metrics, WafTransportNetwork::Tcp)
+}
+
+#[cfg(test)]
+mod tests {
+  use http_body_util::BodyExt;
+
+  use super::*;
+  use crate::bandwidth::BandwidthPolicy;
+
+  #[tokio::test]
+  async fn final_response_bandwidth_materializes_inlined_h3_body() {
+    let placeholder = http_body_util::Empty::<bytes::Bytes>::new()
+      .map_err(|never| -> body::BoxError { match never {} })
+      .boxed();
+    let mut response = Response::new(placeholder);
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("x-upstream-trailer", "kept".parse().unwrap());
+    response
+      .extensions_mut()
+      .insert(body::KnownSmallResponseBody);
+    response
+      .extensions_mut()
+      .insert(body::CompiledKnownSmallNoopResponse);
+    response
+      .extensions_mut()
+      .insert(body::InlinedKnownSmallResponseBody::new(
+        bytes::Bytes::from_static(b"proxied body"),
+        Some(trailers),
+      ));
+
+    let response = with_final_response_bandwidth(
+      response,
+      RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED),
+      crate::metrics::Metrics::new(),
+      WafTransportNetwork::Udp,
+    );
+
+    assert!(
+      response
+        .extensions()
+        .get::<body::KnownSmallResponseBody>()
+        .is_none()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<body::CompiledKnownSmallNoopResponse>()
+        .is_none()
+    );
+    assert!(
+      response
+        .extensions()
+        .get::<body::InlinedKnownSmallResponseBody>()
+        .is_none()
+    );
+    let collected = response
+      .into_body()
+      .collect()
+      .await
+      .expect("bandwidth-shaped response should collect");
+    assert_eq!(
+      collected
+        .trailers()
+        .expect("inlined response trailers should survive bandwidth shaping")["x-upstream-trailer"],
+      "kept"
+    );
+    assert_eq!(collected.to_bytes().as_ref(), b"proxied body");
+  }
 }
