@@ -55,6 +55,7 @@ fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> Route
     security_headers: None,
     priority_class: Default::default(),
     buffering: Default::default(),
+    bandwidth: Default::default(),
     limits: Default::default(),
     timeouts: Default::default(),
     retry: None,
@@ -92,6 +93,7 @@ fn exact_host_beats_wildcard() {
       security_headers: None,
       priority_class: Default::default(),
       buffering: Default::default(),
+      bandwidth: Default::default(),
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
@@ -124,6 +126,7 @@ fn exact_host_beats_wildcard() {
       security_headers: None,
       priority_class: Default::default(),
       buffering: Default::default(),
+      bandwidth: Default::default(),
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
@@ -212,6 +215,7 @@ fn longer_path_prefix_wins() {
       security_headers: None,
       priority_class: Default::default(),
       buffering: Default::default(),
+      bandwidth: Default::default(),
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
@@ -244,6 +248,7 @@ fn longer_path_prefix_wins() {
       security_headers: None,
       priority_class: Default::default(),
       buffering: Default::default(),
+      bandwidth: Default::default(),
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,
@@ -425,5 +430,83 @@ fn simple_exact_host_shortcut_opts_out_for_context_matchers() {
     table
       .try_resolve_simple_exact_host("api.example.com", "/", &upstreams)
       .is_none()
+  );
+}
+
+#[tokio::test(start_paused = true)]
+async fn route_bandwidth_policy_is_staged_until_publication_and_reuses_live_handle() {
+  let mut initial_route = route("limited", &["example.com"], "/", "limited");
+  initial_route.bandwidth.upload_bytes_per_second = Some(100);
+  let upstreams = vec![upstream("limited")];
+  let initial = RouteTable::from_routes_for_tests(vec![initial_route.clone()]);
+  let limiter = initial
+    .resolve("example.com", "/", &upstreams)
+    .expect("initial route should resolve")
+    .bandwidth
+    .clone();
+  let mut flow = limiter.flow(crate::bandwidth::BandwidthDirection::Upload);
+  assert_eq!(flow.acquire(100).await.unwrap().bytes(), 100);
+
+  let mut updated_route = initial_route;
+  updated_route.bandwidth.upload_bytes_per_second = Some(200);
+  let candidate =
+    RouteTable::from_routes_with_previous_for_tests(vec![updated_route], Some(&initial));
+  let candidate_limiter = candidate
+    .resolve("example.com", "/", &upstreams)
+    .expect("candidate route should resolve")
+    .bandwidth;
+  assert!(Arc::ptr_eq(&limiter, candidate_limiter));
+  assert_eq!(
+    limiter
+      .policy()
+      .unwrap()
+      .upload
+      .bytes_per_second()
+      .unwrap()
+      .get(),
+    100
+  );
+
+  candidate.activate_bandwidth();
+  assert_eq!(
+    limiter
+      .policy()
+      .unwrap()
+      .upload
+      .bytes_per_second()
+      .unwrap()
+      .get(),
+    200
+  );
+  let next = flow.acquire(1);
+  tokio::pin!(next);
+  assert!(futures_util::poll!(next.as_mut()).is_pending());
+  tokio::time::advance(std::time::Duration::from_millis(5)).await;
+  assert_eq!(next.await.unwrap().bytes(), 1);
+}
+
+#[test]
+fn abandoned_route_bandwidth_candidate_does_not_mutate_live_policy() {
+  let mut initial_route = route("limited", &["example.com"], "/", "limited");
+  initial_route.bandwidth.download_bytes_per_second = Some(100);
+  let initial = RouteTable::from_routes_for_tests(vec![initial_route.clone()]);
+  let limiter = initial
+    .resolve("example.com", "/", &[upstream("limited")])
+    .expect("initial route should resolve")
+    .bandwidth
+    .clone();
+
+  initial_route.bandwidth.download_bytes_per_second = Some(200);
+  let _candidate =
+    RouteTable::from_routes_with_previous_for_tests(vec![initial_route], Some(&initial));
+  assert_eq!(
+    limiter
+      .policy()
+      .unwrap()
+      .download
+      .bytes_per_second()
+      .unwrap()
+      .get(),
+    100
   );
 }

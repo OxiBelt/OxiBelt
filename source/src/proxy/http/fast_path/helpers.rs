@@ -69,7 +69,7 @@ pub(super) fn fast_path_downstream_response_timeout(
   if known_small_response_body && transport_network != WafTransportNetwork::Udp {
     return response;
   }
-  with_downstream_response_timeout(response, timeout, transport_network)
+  with_downstream_response_timeout(response, timeout, transport_network, true)
 }
 
 pub(super) fn fast_path_outbound_request_body(

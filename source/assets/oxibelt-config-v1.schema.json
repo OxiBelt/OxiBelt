@@ -17755,6 +17755,37 @@
             "x-oxibelt-reference-activation": "none",
             "x-oxibelt-secret-class": "none"
           },
+          "bandwidth": {
+            "additionalProperties": false,
+            "description": "OxiBelt native field `routes[].bandwidth`. Production Rust validation is authoritative.",
+            "properties": {
+              "download_bytes_per_second": {
+                "description": "OxiBelt native field `routes[].bandwidth.download_bytes_per_second`. Production Rust validation is authoritative.",
+                "maximum": 18446744073709551615,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "upload_bytes_per_second": {
+                "description": "OxiBelt native field `routes[].bandwidth.upload_bytes_per_second`. Production Rust validation is authoritative.",
+                "maximum": 18446744073709551615,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "type": "object",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
           "buffering": {
             "additionalProperties": false,
             "description": "OxiBelt native field `routes[].buffering`. Production Rust validation is authoritative.",

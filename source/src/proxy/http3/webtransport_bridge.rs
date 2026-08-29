@@ -60,6 +60,9 @@ enum DispatcherEvent {
   DownstreamDatagram(StreamId, Bytes),
   DownstreamRequest(Request<()>, Box<H3RequestStream>),
   Activity(SessionId),
+  BandwidthWaitStarted(SessionId),
+  BandwidthWaitEnded(SessionId),
+  RegisterStreamTask(SessionId, tokio::task::JoinHandle<()>),
   #[cfg(feature = "admin-runtime")]
   AdminClose(SessionId, u32, String),
   Blocked(SessionId, WafStreamClose),
@@ -196,6 +199,23 @@ pub(super) async fn serve_webtransport_connection(
               session.record_activity();
             }
           }
+          Some(DispatcherEvent::BandwidthWaitStarted(session_id)) => {
+            if let Some(session) = sessions.get_mut(&session_id) {
+              session.begin_bandwidth_wait();
+            }
+          }
+          Some(DispatcherEvent::BandwidthWaitEnded(session_id)) => {
+            if let Some(session) = sessions.get_mut(&session_id) {
+              session.end_bandwidth_wait();
+            }
+          }
+          Some(DispatcherEvent::RegisterStreamTask(session_id, task)) => {
+            if let Some(session) = sessions.get_mut(&session_id) {
+              session.tasks.push(task);
+            } else {
+              task.abort();
+            }
+          }
           #[cfg(feature = "admin-runtime")]
           Some(DispatcherEvent::AdminClose(session_id, close_code, reason)) => {
             close_session_with_code(
@@ -328,9 +348,8 @@ fn next_idle_deadline(
 ) -> Option<tokio::time::Instant> {
   sessions
     .values()
-    .map(|session| {
-      tokio::time::Instant::from_std(session.last_activity + session.webtransport_idle())
-    })
+    .filter_map(ActiveWebTransportSession::idle_deadline)
+    .map(tokio::time::Instant::from_std)
     .min()
 }
 

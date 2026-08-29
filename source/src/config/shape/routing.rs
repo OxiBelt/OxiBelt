@@ -163,6 +163,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     ][..],
     "routes" => &[
       "actions",
+      "bandwidth",
       "buffering",
       "cache",
       "ct_log",
@@ -283,6 +284,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "request",
       "response",
     ][..],
+    "routes.bandwidth" => &["download_bytes_per_second", "upload_bytes_per_second"][..],
     "routes.limits" => &["max_request_body_bytes"][..],
     "routes.timeouts" => &[
       "client_body_timeout_ms",

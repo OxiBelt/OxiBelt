@@ -116,7 +116,8 @@ impl ReloadManager {
       active.mitigation.clone(),
     )
     .context("failed to rebuild WAF engine")?;
-    let route_table = RouteTable::new_with_waf(&config, &waf);
+    let route_table =
+      RouteTable::new_with_waf_and_previous(&config, &waf, Some(&active.route_table));
     let compiled_fast_path_actions = build_compiled_fast_path_actions(
       &config,
       &route_table,

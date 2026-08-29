@@ -32,6 +32,7 @@ pub(super) struct InitialContext<'state, 'request, 'access, 'transport, 'metadat
   pub(super) route_circuit_breaker_lease: crate::circuit_breakers::AdmissionLease,
   pub(super) tags: Option<HashMap<String, String>>,
   pub(super) client_body_timeout: Duration,
+  pub(super) upload_bandwidth_limited: bool,
   pub(super) max_request_body_bytes: u64,
   pub(super) verified_early_data: bool,
 }
@@ -143,6 +144,7 @@ where
     route_circuit_breaker_lease,
     mut tags,
     client_body_timeout,
+    upload_bandwidth_limited,
     max_request_body_bytes,
     verified_early_data,
   } = context;
@@ -339,7 +341,7 @@ where
       state.as_ref(),
       request_method,
       request_uri,
-      client_body_timeout,
+      (!upload_bandwidth_limited).then_some(client_body_timeout),
       request_version,
       client_addr,
       host,
@@ -407,7 +409,7 @@ where
         downstream_scheme,
         &resolved.route.name,
         usize::try_from(max_request_body_bytes).unwrap_or(usize::MAX),
-        client_body_timeout,
+        (!upload_bandwidth_limited).then_some(client_body_timeout),
       )
       .await
     {
@@ -444,11 +446,15 @@ where
     }
     let (parts, request_body) = request.into_parts();
     let maximum = usize::try_from(max_request_body_bytes).unwrap_or(usize::MAX);
-    let request_body = body::with_read_timeout(
-      Limited::new(request_body, maximum),
-      client_body_timeout,
-      BodyTimeoutKind::DownstreamRequestRead,
-    );
+    let request_body = if upload_bandwidth_limited {
+      request_body
+    } else {
+      body::with_read_timeout(
+        Limited::new(request_body, maximum),
+        client_body_timeout,
+        BodyTimeoutKind::DownstreamRequestRead,
+      )
+    };
     let collected = match request_body.collect().await {
       Ok(collected) => collected.to_bytes(),
       Err(error) if body::error_is_body_length_limit(&error) => {
@@ -523,12 +529,16 @@ where
     waf_body_compression_transform && request_body_need != BodyNeed::None;
   let response_waf_body_compression_transform =
     waf_body_compression_transform && response_body_need != BodyNeed::None;
-  let request = request.map(|body| {
-    body::with_read_timeout(
-      Limited::new(body, max_request_body_bytes as usize).boxed(),
-      client_body_timeout,
-      BodyTimeoutKind::DownstreamRequestRead,
-    )
+  let request = request.map(|request_body| {
+    if upload_bandwidth_limited {
+      request_body
+    } else {
+      body::with_read_timeout(
+        Limited::new(request_body, max_request_body_bytes as usize).boxed(),
+        client_body_timeout,
+        BodyTimeoutKind::DownstreamRequestRead,
+      )
+    }
   });
   let request_inspection_lease =
     if request_method != Method::CONNECT && request_body_need != BodyNeed::None {

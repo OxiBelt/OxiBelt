@@ -292,6 +292,27 @@ fn request_mirror_body_schema_publishes_the_runtime_admission_unit() {
 }
 
 #[test]
+fn route_bandwidth_schema_is_optional_positive_and_strict() {
+  let schema = generate_native_config_schema().expect("native schema should generate");
+  let schema: serde_json::Value =
+    serde_json::from_str(&schema).expect("generated schema should be JSON");
+  let bandwidth = schema_node_for_metadata_path(&schema, "routes[].bandwidth");
+  assert_eq!(bandwidth["type"], "object");
+  assert_eq!(bandwidth["additionalProperties"], false);
+  assert!(bandwidth.get("required").is_none());
+
+  for path in [
+    "routes[].bandwidth.upload_bytes_per_second",
+    "routes[].bandwidth.download_bytes_per_second",
+  ] {
+    let field = schema_node_for_metadata_path(&schema, path);
+    assert_eq!(field["type"], "integer", "unexpected type at {path}");
+    assert_eq!(field["minimum"], 1, "unexpected minimum at {path}");
+    assert_eq!(field["maximum"], u64::MAX, "unexpected maximum at {path}");
+  }
+}
+
+#[test]
 fn upstream_tls_subject_alt_names_schema_is_typed_and_bounded() {
   let schema = generate_native_config_schema().expect("native schema should generate");
   let schema: serde_json::Value =

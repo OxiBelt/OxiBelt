@@ -559,7 +559,7 @@ fn build_oxirule_reload_snapshot(
   config: Config,
   waf: WafEngine,
 ) -> AppSnapshot {
-  let route_table = RouteTable::new_with_waf(&config, &waf);
+  let route_table = RouteTable::new_with_waf_and_previous(&config, &waf, Some(&active.route_table));
   let request_path_features = RequestPathFeaturePlan::new(
     &config,
     active.cache.enabled(),

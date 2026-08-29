@@ -198,7 +198,7 @@ async fn gateway_request_body_capture_replays_body_and_enforces_policy() {
     &mut request,
     &provider,
     16,
-    std::time::Duration::from_secs(1),
+    Some(std::time::Duration::from_secs(1)),
   )
   .await
   {
@@ -230,7 +230,7 @@ async fn gateway_request_body_capture_replays_body_and_enforces_policy() {
     &mut oversized,
     &provider,
     16,
-    std::time::Duration::from_secs(1),
+    Some(std::time::Duration::from_secs(1)),
   )
   .await
   .expect_err("oversized request body must fail closed");
@@ -247,7 +247,7 @@ async fn gateway_request_body_capture_replays_body_and_enforces_policy() {
     &mut disallowed,
     &provider,
     16,
-    std::time::Duration::from_secs(1),
+    Some(std::time::Duration::from_secs(1)),
   )
   .await
   .expect_err("disallowed request body content type must fail closed");

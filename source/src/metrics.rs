@@ -1,16 +1,16 @@
 //! Prometheus metrics registration with low-cardinality labels constrained at call sites.
+use crate::cache::CacheStats;
+use crate::config::{MetricsConfig, MetricsDetail};
+use crate::tls::TlsServerSessionStorageStats;
 use http::StatusCode;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-
-use crate::cache::CacheStats;
-use crate::config::{MetricsConfig, MetricsDetail};
-use crate::tls::TlsServerSessionStorageStats;
-
 mod admin_audit;
 mod admin_membership;
 mod auth;
+mod bandwidth;
+pub use bandwidth::BandwidthTrafficClass;
 mod backend_failure;
 pub(crate) mod compio_direct_h1;
 mod crlite;
@@ -35,7 +35,6 @@ mod sni_forward;
 pub(crate) use sni_forward::QuicInitialReassemblyOutcome;
 mod stream;
 mod upstream_client;
-
 #[derive(Debug, Default)]
 pub struct Metrics {
   requests_total: StripedCounter,
@@ -67,6 +66,7 @@ pub struct Metrics {
   request_mirror_success_total: AtomicU64,
   request_mirror_errors_total: AtomicU64,
   request_mirror_skips_total: AtomicU64,
+  bandwidth: bandwidth::BandwidthMetrics,
   admin_audit: admin_audit::AdminAuditMetrics,
   admin_membership: admin_membership::AdminMembershipMetrics,
   #[cfg(feature = "admin-runtime")]
@@ -94,7 +94,6 @@ pub struct Metrics {
   pool: pool::PoolMetrics,
   detailed: Mutex<detail::DetailedMetrics>,
 }
-
 const COUNTER_STRIPES: usize = 64;
 static NEXT_COUNTER_STRIPE: AtomicUsize = AtomicUsize::new(0);
 
@@ -659,6 +658,7 @@ impl Metrics {
       self.dynamic_policy_active_policies.load(Ordering::Relaxed),
     );
     auth::append_auth_and_mirror_metrics(&mut output, self);
+    self.bandwidth.append_prometheus(&mut output);
     self.append_admin_audit_prometheus(&mut output);
     self.append_admin_membership_prometheus(&mut output);
     #[cfg(feature = "admin-runtime")]

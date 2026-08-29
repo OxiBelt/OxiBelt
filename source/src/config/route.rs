@@ -93,6 +93,8 @@ pub struct RouteConfig {
   #[serde(default)]
   pub buffering: RouteBufferingConfig,
   #[serde(default)]
+  pub bandwidth: RouteBandwidthConfig,
+  #[serde(default)]
   pub limits: RouteLimitsConfig,
   #[serde(default)]
   pub timeouts: RouteTimeoutConfig,
@@ -533,6 +535,28 @@ pub struct RouteBufferingConfig {
   pub max_memory_body_bytes: Option<usize>,
   #[serde(default)]
   pub max_temp_file_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RouteBandwidthConfig {
+  #[serde(default)]
+  pub upload_bytes_per_second: Option<u64>,
+  #[serde(default)]
+  pub download_bytes_per_second: Option<u64>,
+}
+
+impl RouteBandwidthConfig {
+  pub(super) fn validate(&self, route_name: &str) -> anyhow::Result<()> {
+    for (field, value) in [
+      ("upload_bytes_per_second", self.upload_bytes_per_second),
+      ("download_bytes_per_second", self.download_bytes_per_second),
+    ] {
+      if value == Some(0) {
+        bail!("route {route_name} bandwidth.{field} must be greater than 0");
+      }
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

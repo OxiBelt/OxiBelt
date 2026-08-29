@@ -628,7 +628,11 @@ impl AppSnapshot {
     )
     .await
     .context("failed to build WAF engine")?;
-    let route_table = RouteTable::new_with_waf(&config, &waf);
+    let route_table = RouteTable::new_with_waf_and_previous(
+      &config,
+      &waf,
+      previous.map(|snapshot| &snapshot.route_table),
+    );
     let sni_forward =
       SniForwardTable::new(&config).context("failed to build SNI forwarding table")?;
     let access_logs = AccessLogSinks::new(access_log_runtime.clone(), AccessLogSource::Waf);
@@ -767,7 +771,8 @@ impl AppSnapshot {
     let hardening = previous.admitted_reload_hardening(&config)?;
     let mut upstreams = config.upstreams.clone();
     upstreams.extend(PoolState::synthetic_upstreams(&config.upstream_pools));
-    let route_table = RouteTable::new_with_waf(&config, &previous.waf);
+    let route_table =
+      RouteTable::new_with_waf_and_previous(&config, &previous.waf, Some(&previous.route_table));
     let sni_forward =
       SniForwardTable::new(&config).context("failed to build SNI forwarding table")?;
     let (upstream_uri_parts, upstream_uri_parts_by_index) = build_upstream_uri_parts(&upstreams)?;

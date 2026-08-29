@@ -15,6 +15,7 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tracing::{debug, trace, warn};
 
+use crate::bandwidth::RouteBandwidthLimiter;
 use crate::config::{ConnectionLimitIdentityMode, HttpListenerMode};
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
@@ -56,6 +57,7 @@ use self::static_write::write_static_plan;
 struct TimedStaticResponsePlan {
   response: StaticResponsePlan,
   response_send_timeout: Duration,
+  bandwidth: Option<Arc<RouteBandwidthLimiter>>,
   access_log: Option<StaticFastPathContext>,
   silent_close: bool,
 }
@@ -433,6 +435,7 @@ async fn eligible_static_plan(
         response_send_timeout: Duration::from_millis(
           snapshot.config.limits.response_send_timeout_ms,
         ),
+        bandwidth: None,
         access_log: None,
         silent_close: false,
       });
@@ -459,6 +462,7 @@ async fn eligible_static_plan(
   if !resolved.execution_plan.fast_path.static_sendfile_like {
     return None;
   }
+  let bandwidth = resolved.bandwidth.clone();
   let static_root = resolved.route.static_root.as_deref()?;
   if resolved
     .route
@@ -539,6 +543,7 @@ async fn eligible_static_plan(
     return Some(TimedStaticResponsePlan {
       response: plan,
       response_send_timeout,
+      bandwidth: Some(bandwidth),
       access_log,
       silent_close: false,
     });
@@ -552,6 +557,7 @@ async fn eligible_static_plan(
         "request security context is unavailable",
       ),
       response_send_timeout,
+      bandwidth: Some(bandwidth),
       access_log: None,
       silent_close: false,
     });
@@ -566,6 +572,7 @@ async fn eligible_static_plan(
       access_log,
       response_send_timeout,
       plan,
+      bandwidth,
     )
     .await,
   )

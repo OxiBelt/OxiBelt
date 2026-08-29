@@ -335,8 +335,12 @@ fn known_small_tcp_response_timeout_selector_skips_backpressure_body() {
     .extensions_mut()
     .insert(body::KnownSmallResponseBody);
 
-  let response =
-    with_downstream_response_timeout(response, Duration::from_millis(1), WafTransportNetwork::Tcp);
+  let response = with_downstream_response_timeout(
+    response,
+    Duration::from_millis(1),
+    WafTransportNetwork::Tcp,
+    false,
+  );
 
   assert!(
     response
@@ -475,7 +479,7 @@ fn metrics_prometheus(metrics: &Metrics) -> String {
 }
 
 #[tokio::test]
-async fn streaming_tcp_fast_path_response_keeps_downstream_timeout_metadata() {
+async fn streaming_tcp_fast_path_response_defers_timeout_to_final_route_adapter() {
   let response = Response::builder()
     .status(StatusCode::OK)
     .body(proxy_body(b"streaming"))
@@ -499,7 +503,7 @@ async fn streaming_tcp_fast_path_response_keeps_downstream_timeout_metadata() {
       .extensions()
       .get::<DownstreamResponseTimeoutSelected>()
       .map(|selected| selected.0),
-    Some(DownstreamResponseTimeoutSelection::BackpressureBody)
+    Some(DownstreamResponseTimeoutSelection::MarkedOnly)
   );
 }
 

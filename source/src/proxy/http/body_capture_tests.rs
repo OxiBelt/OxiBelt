@@ -447,7 +447,8 @@ async fn h2_and_h3_content_length_zero_data_is_rejected() {
       .body(full_body(bytes::Bytes::from_static(b"x")))
       .expect("request should build");
 
-    let result = reject_content_length_zero_data(request, Duration::from_secs(1), version).await;
+    let result =
+      reject_content_length_zero_data(request, Some(Duration::from_secs(1)), version).await;
     let response = match result {
       Ok(_) => panic!("Content-Length: 0 DATA should be rejected for {version:?}"),
       Err(response) => response,

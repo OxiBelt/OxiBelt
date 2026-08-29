@@ -60,6 +60,7 @@ fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> Route
     security_headers: None,
     priority_class: Default::default(),
     buffering: Default::default(),
+    bandwidth: Default::default(),
     limits: Default::default(),
     timeouts: Default::default(),
     retry: None,

@@ -266,6 +266,7 @@ mod tests {
       security_headers: None,
       priority_class: Default::default(),
       buffering: Default::default(),
+      bandwidth: Default::default(),
       limits: Default::default(),
       timeouts: Default::default(),
       retry: None,

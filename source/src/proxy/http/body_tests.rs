@@ -10,9 +10,11 @@ use std::time::Duration;
 
 use super::{
   BodyTimeoutKind, BoxError, TIMEOUT_BODY_CHANNEL_CAPACITY, capture_prefix, channel_body,
-  error_is_timeout, known_small_no_trailers_body, with_backpressure_send_timeout, with_drop_guard,
-  with_poll_send_timeout, with_read_timeout,
+  error_is_timeout, known_small_no_trailers_body, with_backpressure_send_timeout, with_bandwidth,
+  with_drop_guard, with_poll_send_timeout, with_read_timeout,
 };
+use crate::bandwidth::{BandwidthDirection, BandwidthPolicy, BandwidthRate, RouteBandwidthLimiter};
+use crate::metrics::{BandwidthTrafficClass, Metrics};
 
 #[tokio::test]
 async fn capture_prefix_replays_full_body_after_truncation() {
@@ -339,6 +341,90 @@ async fn timeout_body_preserves_size_hint() {
   let size_hint = timed_body.size_hint();
   assert_eq!(size_hint.lower(), 3);
   assert_eq!(size_hint.upper(), Some(3));
+}
+
+#[tokio::test(start_paused = true)]
+async fn bandwidth_body_splits_payload_and_excludes_shaping_from_inner_read_timeout() {
+  let rate = BandwidthRate::BytesPerSecond(std::num::NonZeroU64::new(4).unwrap());
+  let limiter = RouteBandwidthLimiter::new(BandwidthPolicy::new(BandwidthRate::Unlimited, rate));
+  let source = Full::new(Bytes::from_static(b"abcdefgh"))
+    .map_err(|never| -> BoxError { match never {} })
+    .boxed();
+  let source = with_read_timeout(
+    source,
+    Duration::from_millis(100),
+    BodyTimeoutKind::UpstreamResponseRead,
+  );
+  let mut shaped = with_bandwidth(
+    source,
+    limiter,
+    BandwidthDirection::Download,
+    Metrics::new(),
+    BandwidthTrafficClass::Http,
+    Some(Duration::from_millis(100)),
+  );
+
+  let first = shaped
+    .frame()
+    .await
+    .expect("first grant should produce a frame")
+    .expect("first grant should succeed")
+    .into_data()
+    .expect("first frame should contain data");
+  assert_eq!(first.as_ref(), b"abcd");
+
+  let second = shaped.frame();
+  tokio::pin!(second);
+  assert!(futures_util::poll!(second.as_mut()).is_pending());
+  tokio::time::advance(Duration::from_millis(999)).await;
+  assert!(futures_util::poll!(second.as_mut()).is_pending());
+  tokio::time::advance(Duration::from_millis(1)).await;
+  let second = second
+    .await
+    .expect("refill should produce the second frame")
+    .expect("shaping delay must not trigger the inner read timeout")
+    .into_data()
+    .expect("second frame should contain data");
+  assert_eq!(second.as_ref(), b"efgh");
+  assert!(shaped.frame().await.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn bandwidth_body_observes_unlimited_to_limited_policy_updates() {
+  let limiter = RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED);
+  let (source_tx, source) = channel_body(1);
+  let mut shaped = with_bandwidth(
+    source,
+    limiter.clone(),
+    BandwidthDirection::Download,
+    Metrics::new(),
+    BandwidthTrafficClass::Http,
+    None,
+  );
+
+  source_tx
+    .send(Ok(Frame::data(Bytes::from_static(b"open"))))
+    .await
+    .unwrap();
+  let open = shaped.frame().await.unwrap().unwrap().into_data().unwrap();
+  assert_eq!(open.as_ref(), b"open");
+
+  let rate = BandwidthRate::BytesPerSecond(std::num::NonZeroU64::new(4).unwrap());
+  limiter
+    .update(BandwidthPolicy::new(BandwidthRate::Unlimited, rate))
+    .unwrap();
+  source_tx
+    .send(Ok(Frame::data(Bytes::from_static(b"slow"))))
+    .await
+    .unwrap();
+  let limited = shaped.frame();
+  tokio::pin!(limited);
+  assert!(futures_util::poll!(limited.as_mut()).is_pending());
+  tokio::time::advance(Duration::from_millis(249)).await;
+  assert!(futures_util::poll!(limited.as_mut()).is_pending());
+  tokio::time::advance(Duration::from_millis(1)).await;
+  let first = limited.await.unwrap().unwrap().into_data().unwrap();
+  assert_eq!(first.as_ref(), b"s");
 }
 
 #[test]

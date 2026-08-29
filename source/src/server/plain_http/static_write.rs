@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::io::{self, IoSlice};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ::http::{HeaderMap, StatusCode};
@@ -11,8 +12,10 @@ use tokio::net::TcpStream;
 use tracing::debug;
 
 use super::{TimedStaticResponsePlan, response_head::response_head_bytes, sendfile};
+use crate::bandwidth::{BandwidthDirection, BandwidthFlow, RouteBandwidthLimiter};
 use crate::config::StaticFilesSendfileWriteStrategy;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
+use crate::metrics::{BandwidthTrafficClass, Metrics};
 use crate::proxy::http::body::{BodyTimeoutError, BodyTimeoutKind};
 use crate::proxy::http::fast_path::stage_timing;
 use crate::proxy::http::static_files::{
@@ -30,6 +33,7 @@ pub(super) async fn write_static_plan(
   let TimedStaticResponsePlan {
     response,
     response_send_timeout,
+    bandwidth,
     ..
   } = plan;
   let StaticResponsePlan {
@@ -39,6 +43,7 @@ pub(super) async fn write_static_plan(
     response_heads,
   } = response;
   let response_send_timeout = *response_send_timeout;
+  let mut bandwidth = StaticResponseBandwidth::new(bandwidth.as_ref(), snapshot.metrics.clone());
   let stage_timing_metrics = snapshot.request_path_features.stage_timing_metrics;
   match body {
     StaticBodyPlan::Empty => {
@@ -98,14 +103,35 @@ pub(super) async fn write_static_plan(
         head_started_at,
       );
       let write_started_at = stage_timing::start(stage_timing_metrics);
-      let result = write_all_tcp_vectored(
-        stream,
-        head,
-        message.as_bytes(),
-        response_send_timeout,
-        "static fast-path text response write failed",
-      )
-      .await;
+      let result = if bandwidth.is_retained() {
+        async {
+          write_all_tcp(
+            stream,
+            head,
+            response_send_timeout,
+            "static fast-path text response head write failed",
+          )
+          .await?;
+          write_static_payload(
+            stream,
+            message.as_bytes(),
+            &mut bandwidth,
+            response_send_timeout,
+            "static fast-path text response body write failed",
+          )
+          .await
+        }
+        .await
+      } else {
+        write_all_tcp_vectored(
+          stream,
+          head,
+          message.as_bytes(),
+          response_send_timeout,
+          "static fast-path text response write failed",
+        )
+        .await
+      };
       stage_timing::record_metrics(
         &snapshot.metrics,
         stage_timing::PATH_STATIC_FILES,
@@ -142,14 +168,35 @@ pub(super) async fn write_static_plan(
         head_started_at,
       );
       let write_started_at = stage_timing::start(stage_timing_metrics);
-      let result = write_all_tcp_vectored(
-        stream,
-        head,
-        bytes.as_ref(),
-        response_send_timeout,
-        "static fast-path bytes response write failed",
-      )
-      .await;
+      let result = if bandwidth.is_retained() {
+        async {
+          write_all_tcp(
+            stream,
+            head,
+            response_send_timeout,
+            "static fast-path bytes response head write failed",
+          )
+          .await?;
+          write_static_payload(
+            stream,
+            bytes.as_ref(),
+            &mut bandwidth,
+            response_send_timeout,
+            "static fast-path bytes response body write failed",
+          )
+          .await
+        }
+        .await
+      } else {
+        write_all_tcp_vectored(
+          stream,
+          head,
+          bytes.as_ref(),
+          response_send_timeout,
+          "static fast-path bytes response write failed",
+        )
+        .await
+      };
       stage_timing::record_metrics(
         &snapshot.metrics,
         stage_timing::PATH_STATIC_FILES,
@@ -220,6 +267,7 @@ pub(super) async fn write_static_plan(
         file.len,
         chunk_bytes,
         response_send_timeout,
+        &mut bandwidth,
       )
       .await;
       if corked {
@@ -264,34 +312,44 @@ async fn sendfile_all(
   len: u64,
   chunk_bytes: usize,
   response_send_timeout: Duration,
+  bandwidth: &mut StaticResponseBandwidth,
 ) -> anyhow::Result<()> {
   let mut remaining = len;
   let mut offset = libc::off64_t::try_from(offset).context("static file offset is too large")?;
   let chunk_bytes = chunk_bytes.max(1);
   while remaining > 0 {
-    let count = remaining.min(chunk_bytes as u64) as usize;
-    let stream_ref: &TcpStream = &*stream;
-    match sendfile::sendfile_once(stream_ref, file, &mut offset, count) {
-      Ok(0) => bail!("static sendfile wrote zero bytes"),
-      Ok(sent) => remaining = remaining.saturating_sub(sent as u64),
-      Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-        downstream_send_timeout(
-          response_send_timeout,
-          stream.writable(),
-          "static sendfile socket wait failed",
-        )
-        .await?;
-        let stream_ref: &TcpStream = &*stream;
-        match stream_ref.try_io(Interest::WRITABLE, || {
-          sendfile::sendfile_once(stream_ref, file, &mut offset, count)
-        }) {
-          Ok(0) => bail!("static sendfile wrote zero bytes"),
-          Ok(sent) => remaining = remaining.saturating_sub(sent as u64),
-          Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-          Err(error) => return Err(error).context("static sendfile syscall failed"),
+    let requested = remaining.min(chunk_bytes as u64) as usize;
+    let mut granted = bandwidth.acquire(requested).await?;
+    while granted > 0 {
+      let stream_ref: &TcpStream = &*stream;
+      match sendfile::sendfile_once(stream_ref, file, &mut offset, granted) {
+        Ok(0) => bail!("static sendfile wrote zero bytes"),
+        Ok(sent) => {
+          granted = granted.saturating_sub(sent);
+          remaining = remaining.saturating_sub(sent as u64);
         }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+          downstream_send_timeout(
+            response_send_timeout,
+            stream.writable(),
+            "static sendfile socket wait failed",
+          )
+          .await?;
+          let stream_ref: &TcpStream = &*stream;
+          match stream_ref.try_io(Interest::WRITABLE, || {
+            sendfile::sendfile_once(stream_ref, file, &mut offset, granted)
+          }) {
+            Ok(0) => bail!("static sendfile wrote zero bytes"),
+            Ok(sent) => {
+              granted = granted.saturating_sub(sent);
+              remaining = remaining.saturating_sub(sent as u64);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error).context("static sendfile syscall failed"),
+          }
+        }
+        Err(error) => return Err(error).context("static sendfile syscall failed"),
       }
-      Err(error) => return Err(error).context("static sendfile syscall failed"),
     }
   }
   Ok(())
@@ -305,8 +363,65 @@ async fn sendfile_all(
   _len: u64,
   _chunk_bytes: usize,
   _response_send_timeout: Duration,
+  _bandwidth: &mut StaticResponseBandwidth,
 ) -> anyhow::Result<()> {
   bail!("kernel sendfile is not available on this platform")
+}
+
+struct StaticResponseBandwidth {
+  flow: Option<BandwidthFlow>,
+  metrics: Arc<Metrics>,
+}
+
+impl StaticResponseBandwidth {
+  fn new(limiter: Option<&Arc<RouteBandwidthLimiter>>, metrics: Arc<Metrics>) -> Self {
+    Self {
+      flow: limiter.map(|limiter| limiter.flow(BandwidthDirection::Download)),
+      metrics,
+    }
+  }
+
+  fn is_retained(&self) -> bool {
+    self.flow.is_some()
+  }
+
+  async fn acquire(&mut self, requested: usize) -> anyhow::Result<usize> {
+    let Some(flow) = self.flow.as_mut() else {
+      return Ok(requested);
+    };
+    if !flow.is_limited()? {
+      return Ok(requested);
+    }
+    let grant = flow.acquire(requested).await?;
+    self.metrics.record_bandwidth_shaped_bytes(
+      BandwidthDirection::Download,
+      BandwidthTrafficClass::Http,
+      u64::try_from(grant.bytes()).unwrap_or(u64::MAX),
+    );
+    if !grant.waited().is_zero() {
+      self.metrics.record_bandwidth_wait(
+        BandwidthDirection::Download,
+        BandwidthTrafficClass::Http,
+        grant.waited(),
+      );
+    }
+    Ok(grant.bytes())
+  }
+}
+
+async fn write_static_payload(
+  stream: &mut TcpStream,
+  mut bytes: &[u8],
+  bandwidth: &mut StaticResponseBandwidth,
+  response_send_timeout: Duration,
+  context: &'static str,
+) -> anyhow::Result<()> {
+  while !bytes.is_empty() {
+    let granted = bandwidth.acquire(bytes.len()).await?;
+    write_all_tcp(stream, &bytes[..granted], response_send_timeout, context).await?;
+    bytes = &bytes[granted..];
+  }
+  Ok(())
 }
 
 async fn write_static_file_head(
@@ -455,5 +570,80 @@ fn cached_or_rendered_response_head<'a>(
       response_head_bytes(status, headers, keep_alive, head_buffer);
       head_buffer.as_slice()
     }
+  }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+  use std::num::NonZeroU64;
+
+  use tokio::io::AsyncReadExt;
+
+  use super::*;
+  use crate::bandwidth::{BANDWIDTH_QUANTUM_BYTES, BandwidthPolicy, BandwidthRate};
+
+  #[tokio::test(start_paused = true)]
+  async fn sendfile_observes_mid_response_unlimited_to_limited_reload() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("payload.bin");
+    let payload = vec![b'x'; 4 + BANDWIDTH_QUANTUM_BYTES + 1];
+    std::fs::write(&path, &payload).unwrap();
+    let file = tokio::fs::File::open(&path).await.unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+    let mut client = client.unwrap();
+    let (mut server, _) = accepted.unwrap();
+
+    let limiter = RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED);
+    let mut bandwidth = StaticResponseBandwidth::new(Some(&limiter), Metrics::new());
+    sendfile_all(
+      &mut server,
+      &file,
+      0,
+      4,
+      BANDWIDTH_QUANTUM_BYTES * 2,
+      Duration::from_secs(5),
+      &mut bandwidth,
+    )
+    .await
+    .unwrap();
+    let mut open = [0u8; 4];
+    client.read_exact(&mut open).await.unwrap();
+    assert_eq!(&open, b"xxxx");
+
+    let rate =
+      BandwidthRate::BytesPerSecond(NonZeroU64::new((BANDWIDTH_QUANTUM_BYTES * 4) as u64).unwrap());
+    limiter
+      .update(BandwidthPolicy::new(BandwidthRate::Unlimited, rate))
+      .unwrap();
+    let writer = tokio::spawn(async move {
+      sendfile_all(
+        &mut server,
+        &file,
+        4,
+        (BANDWIDTH_QUANTUM_BYTES + 1) as u64,
+        BANDWIDTH_QUANTUM_BYTES * 2,
+        Duration::from_secs(5),
+        &mut bandwidth,
+      )
+      .await
+    });
+
+    let mut first_grant = vec![0u8; BANDWIDTH_QUANTUM_BYTES];
+    let first_read = client.read_exact(&mut first_grant);
+    tokio::pin!(first_read);
+    assert!(futures_util::poll!(first_read.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(249)).await;
+    assert!(futures_util::poll!(first_read.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    first_read.await.unwrap();
+    assert!(first_grant.iter().all(|byte| *byte == b'x'));
+
+    let next = client.read_u8();
+    tokio::pin!(next);
+    assert!(futures_util::poll!(next.as_mut()).is_pending());
+    writer.abort();
   }
 }

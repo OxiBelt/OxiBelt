@@ -303,8 +303,12 @@ fn known_small_response_bypasses_downstream_send_timeout_wrapper() {
       .is_some()
   );
 
-  let response =
-    with_downstream_response_timeout(response, Duration::from_millis(1), WafTransportNetwork::Tcp);
+  let response = with_downstream_response_timeout(
+    response,
+    Duration::from_millis(1),
+    WafTransportNetwork::Tcp,
+    false,
+  );
 
   assert!(
     response

@@ -1,31 +1,24 @@
 //! WAF inspection adapters for bidirectional stream transports.
 //! Stream decisions are direction-aware so close actions do not lose protocol context.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use anyhow::Context;
-use fastwebsockets::{
-  Frame, OpCode, Payload, Role, WebSocketError, WebSocketRead, WebSocketWrite,
-  after_handshake_split,
-};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tracing::warn;
+use fastwebsockets::{Frame, OpCode, WebSocketError, WebSocketRead};
+#[cfg(feature = "fuzzing")]
+use fastwebsockets::{Role, after_handshake_split};
+use tokio::io::AsyncRead;
 
 mod context;
+mod websocket_bridge;
 mod webtransport;
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) use websocket_bridge::bridge_websocket;
 pub(crate) use webtransport::{
   blocked_close, blocked_silent_close, check_webtransport_payload, webtransport_datagram_metadata,
   webtransport_stream_metadata,
 };
 
-use crate::lifecycle::ConnectionDrain;
 use crate::state::AppSnapshot;
 use crate::waf::{
   WafBodyInput, WafStreamClose, WafStreamDirection, WafStreamUnit, WafWebSocketStreamMetadata,
@@ -75,27 +68,27 @@ impl std::fmt::Display for StreamWafBlocked {
 impl std::error::Error for StreamWafBlocked {}
 
 #[derive(Clone)]
-struct OwnedWebSocketFrame {
-  fin: bool,
-  opcode: OpCode,
-  payload: Vec<u8>,
+pub(super) struct OwnedWebSocketFrame {
+  pub(super) fin: bool,
+  pub(super) opcode: OpCode,
+  pub(super) payload: Vec<u8>,
 }
 
-struct WebSocketMessageState {
+pub(super) struct WebSocketMessageState {
   active_opcode: Option<OpCode>,
   captured: Vec<u8>,
   captured_truncated: bool,
-  queued_frames: Vec<OwnedWebSocketFrame>,
+  queued_payload: Vec<u8>,
   released_after_truncated: bool,
 }
 
 impl WebSocketMessageState {
-  fn new(max_payload_bytes: usize) -> Self {
+  pub(super) fn new(max_payload_bytes: usize) -> Self {
     Self {
       active_opcode: None,
       captured: Vec::with_capacity(max_payload_bytes.min(16 * 1024)),
       captured_truncated: false,
-      queued_frames: Vec::new(),
+      queued_payload: Vec::with_capacity(max_payload_bytes.min(16 * 1024)),
       released_after_truncated: false,
     }
   }
@@ -104,200 +97,46 @@ impl WebSocketMessageState {
     self.active_opcode = None;
     self.captured.clear();
     self.captured_truncated = false;
-    self.queued_frames.clear();
+    self.queued_payload.clear();
     self.released_after_truncated = false;
   }
-}
 
-struct WebSocketFrameOutcome {
-  frames: Vec<OwnedWebSocketFrame>,
-  peer_close: bool,
-}
-
-#[derive(Clone, Copy)]
-enum WebSocketReadSide {
-  Downstream,
-  Upstream,
-}
-
-enum WebSocketReadEvent {
-  Downstream(Result<OwnedWebSocketFrame, String>),
-  Upstream(Result<OwnedWebSocketFrame, String>),
-}
-
-struct WebSocketReadTaskGuard {
-  tasks: Vec<JoinHandle<()>>,
-}
-
-impl WebSocketReadTaskGuard {
-  fn new() -> Self {
-    Self { tasks: Vec::new() }
+  fn queue_payload(&mut self, payload: &[u8]) {
+    self.queued_payload.extend_from_slice(payload);
   }
 
-  fn spawn<F>(&mut self, future: F)
-  where
-    F: std::future::Future<Output = ()> + Send + 'static,
-  {
-    self.tasks.push(tokio::spawn(future));
-  }
-}
-
-impl Drop for WebSocketReadTaskGuard {
-  fn drop(&mut self) {
-    for task in &self.tasks {
-      task.abort();
+  fn take_queued_frame(&mut self, fin: bool) -> OwnedWebSocketFrame {
+    OwnedWebSocketFrame {
+      fin,
+      opcode: self.active_opcode.unwrap_or(OpCode::Binary),
+      payload: std::mem::take(&mut self.queued_payload),
     }
   }
 }
 
-pub(crate) async fn bridge_websocket<D, U>(
-  downstream: D,
-  upstream: U,
-  state: Arc<AppSnapshot>,
-  context: StreamWafRequestContext,
-  idle_timeout: Duration,
-  mut drain: ConnectionDrain,
-) -> anyhow::Result<()>
+pub(super) struct WebSocketFrameOutcome {
+  pub(super) frames: Vec<OwnedWebSocketFrame>,
+  pub(super) peer_close: bool,
+}
+
+#[cfg(any(test, feature = "fuzzing"))]
+pub(super) fn configure_reader<R>(reader: &mut WebSocketRead<R>, max_payload_bytes: usize)
 where
-  D: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-  U: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-  let (downstream_read, downstream_write) = tokio::io::split(downstream);
-  let (upstream_read, upstream_write) = tokio::io::split(upstream);
-  let (mut downstream_reader, mut downstream_writer) =
-    after_handshake_split(downstream_read, downstream_write, Role::Server);
-  let (mut upstream_reader, mut upstream_writer) =
-    after_handshake_split(upstream_read, upstream_write, Role::Client);
-  configure_reader(&mut downstream_reader, context.max_payload_bytes());
-  configure_reader(&mut upstream_reader, context.max_payload_bytes());
-  let (read_tx, mut read_rx) = mpsc::channel(2);
-  let mut read_tasks = WebSocketReadTaskGuard::new();
-  read_tasks.spawn(read_websocket_frames(
-    downstream_reader,
-    read_tx.clone(),
-    WebSocketReadSide::Downstream,
-  ));
-  read_tasks.spawn(read_websocket_frames(
-    upstream_reader,
-    read_tx,
-    WebSocketReadSide::Upstream,
-  ));
-
-  let mut downstream_messages = WebSocketMessageState::new(context.max_payload_bytes());
-  let mut upstream_messages = WebSocketMessageState::new(context.max_payload_bytes());
-  let idle = tokio::time::sleep(idle_timeout);
-  tokio::pin!(idle);
-  let drain_close = drain.close_delay_elapsed();
-  tokio::pin!(drain_close);
-
-  loop {
-    tokio::select! {
-      event = read_rx.recv() => {
-        let Some(event) = event else {
-          return Ok(());
-        };
-        match event {
-          WebSocketReadEvent::Downstream(result) => {
-        let frame = result
-          .map_err(|error| anyhow::anyhow!("failed to read downstream WebSocket frame: {error}"))?;
-        let outcome = match inspect_websocket_frame(
-          state.as_ref(),
-          &context,
-          WafStreamDirection::DownstreamToUpstream,
-          frame,
-          &mut downstream_messages,
-        ) {
-          Ok(outcome) => outcome,
-          Err(blocked) => {
-            if blocked.is_silent_close() {
-              return Ok(());
-            }
-            if let Some(close) = blocked.close_option() {
-              close_websocket_pair(&mut downstream_writer, &mut upstream_writer, close).await;
-            }
-            return Ok(());
-          }
-        };
-        forward_websocket_frames(&mut upstream_writer, outcome.frames)
-          .await
-          .context("failed to forward downstream WebSocket frame")?;
-        if outcome.peer_close {
-          return Ok(());
-        }
-        idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
-          }
-          WebSocketReadEvent::Upstream(result) => {
-        let frame = result
-          .map_err(|error| anyhow::anyhow!("failed to read upstream WebSocket frame: {error}"))?;
-        let outcome = match inspect_websocket_frame(
-          state.as_ref(),
-          &context,
-          WafStreamDirection::UpstreamToDownstream,
-          frame,
-          &mut upstream_messages,
-        ) {
-          Ok(outcome) => outcome,
-          Err(blocked) => {
-            if blocked.is_silent_close() {
-              return Ok(());
-            }
-            if let Some(close) = blocked.close_option() {
-              close_websocket_pair(&mut downstream_writer, &mut upstream_writer, close).await;
-            }
-            return Ok(());
-          }
-        };
-        forward_websocket_frames(&mut downstream_writer, outcome.frames)
-          .await
-          .context("failed to forward upstream WebSocket frame")?;
-        if outcome.peer_close {
-          return Ok(());
-        }
-        idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
-          }
-        }
-      }
-      _ = &mut idle => {
-        return Err(anyhow::anyhow!("WebSocket stream WAF bridge idle timeout elapsed"));
-      }
-      _ = &mut drain_close => {
-        return Ok(());
-      }
-    }
-  }
-}
-
-async fn read_websocket_frames<R>(
-  mut reader: WebSocketRead<R>,
-  tx: mpsc::Sender<WebSocketReadEvent>,
-  side: WebSocketReadSide,
-) where
   R: AsyncRead + Unpin,
 {
-  loop {
-    let result = read_owned_frame(&mut reader)
-      .await
-      .map_err(|error| error.to_string());
-    let should_stop = result.is_err();
-    let event = match side {
-      WebSocketReadSide::Downstream => WebSocketReadEvent::Downstream(result),
-      WebSocketReadSide::Upstream => WebSocketReadEvent::Upstream(result),
-    };
-    if tx.send(event).await.is_err() || should_stop {
-      return;
-    }
-  }
+  configure_reader_controls(reader);
+  reader.set_max_message_size(websocket_max_frame_size(max_payload_bytes));
 }
 
-fn configure_reader<R>(reader: &mut WebSocketRead<R>, max_payload_bytes: usize)
+pub(super) fn configure_reader_controls<R>(reader: &mut WebSocketRead<R>)
 where
   R: AsyncRead + Unpin,
 {
   reader.set_auto_close(false);
   reader.set_auto_pong(false);
-  reader.set_max_message_size(websocket_max_frame_size(max_payload_bytes));
 }
 
+#[cfg(any(test, feature = "fuzzing"))]
 fn websocket_max_frame_size(max_payload_bytes: usize) -> usize {
   max_payload_bytes.saturating_add(1).max(1)
 }
@@ -324,7 +163,7 @@ pub(crate) async fn fuzz_websocket_frame(raw: &[u8], max_payload_bytes: usize) {
   let _ = inspect_prefix(raw, max_payload_bytes);
 }
 
-async fn read_owned_frame<R>(
+pub(super) async fn read_owned_frame<R>(
   reader: &mut WebSocketRead<R>,
 ) -> Result<OwnedWebSocketFrame, WebSocketError>
 where
@@ -332,6 +171,9 @@ where
 {
   let mut ignore_obligated_send = |_frame: Frame<'_>| async { Ok::<(), std::io::Error>(()) };
   let frame = reader.read_frame(&mut ignore_obligated_send).await?;
+  if websocket_is_control(frame.opcode) && frame.payload.len() > 125 {
+    return Err(WebSocketError::FrameTooLarge);
+  }
   Ok(OwnedWebSocketFrame {
     fin: frame.fin,
     opcode: frame.opcode,
@@ -339,7 +181,7 @@ where
   })
 }
 
-fn inspect_websocket_frame(
+pub(super) fn inspect_websocket_frame(
   state: &AppSnapshot,
   context: &StreamWafRequestContext,
   direction: WafStreamDirection,
@@ -422,7 +264,7 @@ fn inspect_initial_message_frame(
 
   messages.active_opcode = Some(frame.opcode);
   append_message_payload(messages, &frame.payload, context.max_payload_bytes());
-  messages.queued_frames.push(frame);
+  messages.queue_payload(&frame.payload);
 
   if messages.captured_truncated {
     evaluate_websocket_message(
@@ -435,9 +277,9 @@ fn inspect_initial_message_frame(
       messages.captured.len(),
     )?;
     messages.released_after_truncated = true;
-    let frames = std::mem::take(&mut messages.queued_frames);
+    let queued = messages.take_queued_frame(false);
     return Ok(WebSocketFrameOutcome {
-      frames,
+      frames: vec![queued],
       peer_close: false,
     });
   }
@@ -470,7 +312,8 @@ fn inspect_continuation_frame(
   }
 
   append_message_payload(messages, &frame.payload, context.max_payload_bytes());
-  messages.queued_frames.push(frame);
+  let finished = frame.fin;
+  messages.queue_payload(&frame.payload);
   if messages.captured_truncated {
     evaluate_websocket_message(
       state,
@@ -481,22 +324,18 @@ fn inspect_continuation_frame(
       true,
       messages.captured.len(),
     )?;
-    let frames = std::mem::take(&mut messages.queued_frames);
-    if frames.last().is_some_and(|queued| queued.fin) {
+    let queued = messages.take_queued_frame(finished);
+    if finished {
       messages.reset();
     } else {
       messages.released_after_truncated = true;
     }
     return Ok(WebSocketFrameOutcome {
-      frames,
+      frames: vec![queued],
       peer_close: false,
     });
   }
 
-  let finished = messages
-    .queued_frames
-    .last()
-    .is_some_and(|queued| queued.fin);
   if finished {
     evaluate_websocket_message(
       state,
@@ -507,10 +346,10 @@ fn inspect_continuation_frame(
       false,
       messages.captured.len(),
     )?;
-    let frames = std::mem::take(&mut messages.queued_frames);
+    let queued = messages.take_queued_frame(true);
     messages.reset();
     return Ok(WebSocketFrameOutcome {
-      frames,
+      frames: vec![queued],
       peer_close: false,
     });
   }
@@ -571,26 +410,6 @@ fn evaluate_websocket_message(
   }
 }
 
-async fn forward_websocket_frames<W>(
-  writer: &mut WebSocketWrite<W>,
-  frames: Vec<OwnedWebSocketFrame>,
-) -> Result<(), WebSocketError>
-where
-  W: AsyncWrite + Unpin,
-{
-  for frame in frames {
-    writer
-      .write_frame(Frame::new(
-        frame.fin,
-        frame.opcode,
-        None,
-        Payload::Owned(frame.payload),
-      ))
-      .await?;
-  }
-  writer.flush().await
-}
-
 pub(super) fn inspect_prefix(payload: &[u8], limit: usize) -> WafBodyInput<'_> {
   let copied = limit.min(payload.len());
   WafBodyInput {
@@ -618,7 +437,7 @@ fn websocket_opcode_name(opcode: OpCode) -> &'static str {
   }
 }
 
-fn websocket_is_control(opcode: OpCode) -> bool {
+pub(super) fn websocket_is_control(opcode: OpCode) -> bool {
   matches!(opcode, OpCode::Close | OpCode::Ping | OpCode::Pong)
 }
 
@@ -628,28 +447,4 @@ fn protocol_error_close() -> WafStreamClose {
     webtransport_code: 1,
     reason: "protocol error".to_string(),
   }
-}
-
-async fn close_websocket_pair<D, U>(
-  downstream: &mut WebSocketWrite<D>,
-  upstream: &mut WebSocketWrite<U>,
-  close: &WafStreamClose,
-) where
-  D: AsyncWrite + Unpin,
-  U: AsyncWrite + Unpin,
-{
-  if let Err(error) = downstream
-    .write_frame(Frame::close(close.websocket_code, close.reason.as_bytes()))
-    .await
-  {
-    warn!(error = %error, "failed to send downstream WebSocket WAF close frame");
-  }
-  if let Err(error) = upstream
-    .write_frame(Frame::close(close.websocket_code, close.reason.as_bytes()))
-    .await
-  {
-    warn!(error = %error, "failed to send upstream WebSocket WAF close frame");
-  }
-  let _ = downstream.flush().await;
-  let _ = upstream.flush().await;
 }

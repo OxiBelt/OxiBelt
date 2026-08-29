@@ -16,12 +16,15 @@ use hyper::body::{Body, Frame, SizeHint};
 use tokio::sync::mpsc;
 use tokio::time::Sleep;
 
+use crate::bandwidth::{BandwidthDirection, RouteBandwidthLimiter};
 use crate::limits::ConnectionPermit;
+use crate::metrics::{BandwidthTrafficClass, Metrics};
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
 pub(crate) type ProxyBodyFrame = Result<Frame<Bytes>, BoxError>;
 const TIMEOUT_BODY_CHANNEL_CAPACITY: usize = 16;
+const BANDWIDTH_BODY_CHANNEL_CAPACITY: usize = 1;
 pub(crate) const KNOWN_SMALL_BODY_MAX_BYTES: usize = 16 * 1024;
 type TerminalBodyError = Arc<Mutex<Option<BoxError>>>;
 
@@ -181,6 +184,164 @@ where
     size_hint,
   }
   .boxed()
+}
+
+/// Shapes data frames while leaving trailers and framing metadata uncharged.
+///
+/// The worker holds at most one source frame and the channel holds at most one
+/// granted chunk, so route-wide scheduling never becomes a payload queue.
+pub(crate) fn with_bandwidth<B>(
+  mut body: B,
+  limiter: Arc<RouteBandwidthLimiter>,
+  direction: BandwidthDirection,
+  metrics: Arc<Metrics>,
+  traffic: BandwidthTrafficClass,
+  backpressure_timeout: Option<Duration>,
+) -> ProxyBody
+where
+  B: Body<Data = Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<BoxError> + Send + Sync + 'static,
+{
+  if body.is_end_stream() {
+    return body.map_err(Into::into).boxed();
+  }
+
+  let size_hint = body.size_hint();
+  let terminal_error = Arc::new(Mutex::new(None));
+  let (sender, wrapped) = channel_body_with_size_hint_and_terminal_error(
+    BANDWIDTH_BODY_CHANNEL_CAPACITY,
+    size_hint,
+    Some(Arc::clone(&terminal_error)),
+  );
+  tokio::spawn(async move {
+    let mut flow = limiter.flow(direction);
+    while let Some(frame) = body.frame().await {
+      let frame = match frame {
+        Ok(frame) => frame,
+        Err(error) => {
+          let _ = send_bandwidth_frame(
+            &sender,
+            Err(error.into()),
+            backpressure_timeout,
+            &terminal_error,
+          )
+          .await;
+          return;
+        }
+      };
+      let frame = match frame.into_data() {
+        Ok(mut data) => {
+          if data.is_empty() {
+            if !send_bandwidth_frame(
+              &sender,
+              Ok(Frame::data(data)),
+              backpressure_timeout,
+              &terminal_error,
+            )
+            .await
+            {
+              return;
+            }
+            continue;
+          }
+          while !data.is_empty() {
+            let limited = match flow.is_limited() {
+              Ok(limited) => limited,
+              Err(error) => {
+                let _ = send_bandwidth_frame(
+                  &sender,
+                  Err(boxed_error(error)),
+                  backpressure_timeout,
+                  &terminal_error,
+                )
+                .await;
+                return;
+              }
+            };
+            if !limited {
+              if !send_bandwidth_frame(
+                &sender,
+                Ok(Frame::data(data)),
+                backpressure_timeout,
+                &terminal_error,
+              )
+              .await
+              {
+                return;
+              }
+              break;
+            }
+            let grant = tokio::select! {
+              biased;
+              () = sender.closed() => {
+                metrics.record_bandwidth_cancelled_reservation(direction, traffic);
+                return;
+              },
+              grant = flow.acquire(data.len()) => grant,
+            };
+            let grant = match grant {
+              Ok(grant) => grant,
+              Err(error) => {
+                let _ = send_bandwidth_frame(
+                  &sender,
+                  Err(boxed_error(error)),
+                  backpressure_timeout,
+                  &terminal_error,
+                )
+                .await;
+                return;
+              }
+            };
+            let granted = data.split_to(grant.bytes());
+            let granted_bytes = granted.len() as u64;
+            if !send_bandwidth_frame(
+              &sender,
+              Ok(Frame::data(granted)),
+              backpressure_timeout,
+              &terminal_error,
+            )
+            .await
+            {
+              return;
+            }
+            metrics.record_bandwidth_shaped_bytes(direction, traffic, granted_bytes);
+            if !grant.waited().is_zero() {
+              metrics.record_bandwidth_wait(direction, traffic, grant.waited());
+            }
+          }
+          continue;
+        }
+        Err(frame) => frame,
+      };
+      if !send_bandwidth_frame(&sender, Ok(frame), backpressure_timeout, &terminal_error).await {
+        return;
+      }
+    }
+  });
+  wrapped
+}
+
+async fn send_bandwidth_frame(
+  sender: &mpsc::Sender<ProxyBodyFrame>,
+  frame: ProxyBodyFrame,
+  timeout: Option<Duration>,
+  terminal_error: &TerminalBodyError,
+) -> bool {
+  let Some(timeout) = timeout else {
+    return sender.send(frame).await.is_ok();
+  };
+  match tokio::time::timeout(timeout, sender.send(frame)).await {
+    Ok(result) => result.is_ok(),
+    Err(_) => {
+      store_terminal_error(
+        terminal_error,
+        boxed_error(BodyTimeoutError::new(
+          BodyTimeoutKind::DownstreamResponseSend,
+        )),
+      );
+      false
+    }
+  }
 }
 
 pub(crate) fn error_is_body_length_limit(error: &BoxError) -> bool {

@@ -104,6 +104,46 @@ fn datagram_lookup_uses_associated_connect_stream_id() {
   );
 }
 
+#[test]
+fn datagram_pacer_queue_keeps_oldest_and_drops_newest() {
+  let (sender, mut receiver) = datagram_pacer_channel();
+
+  assert_eq!(
+    try_queue_datagram(&sender, Bytes::from_static(b"oldest")),
+    DatagramQueueOutcome::Queued
+  );
+  assert_eq!(
+    try_queue_datagram(&sender, Bytes::from_static(b"newest")),
+    DatagramQueueOutcome::DroppedNewest
+  );
+  let oldest = receiver.try_recv().expect("oldest datagram remains queued");
+  assert_eq!(oldest.payload, Bytes::from_static(b"oldest"));
+  assert_eq!(
+    try_queue_datagram(&sender, Bytes::from_static(b"still-newest")),
+    DatagramQueueOutcome::DroppedNewest,
+    "the single slot remains occupied until pacing finishes"
+  );
+  drop(oldest);
+
+  drop(receiver);
+  assert_eq!(
+    try_queue_datagram(&sender, Bytes::from_static(b"closed")),
+    DatagramQueueOutcome::Closed
+  );
+}
+
+#[test]
+fn stream_directions_map_to_client_upload_and_download() {
+  assert_eq!(
+    bandwidth_direction(WafStreamDirection::DownstreamToUpstream),
+    BandwidthDirection::Upload
+  );
+  assert_eq!(
+    bandwidth_direction(WafStreamDirection::UpstreamToDownstream),
+    BandwidthDirection::Download
+  );
+}
+
 #[tokio::test]
 async fn webtransport_session_permits_enforce_proxy_protocol_per_ip_limit() {
   let state = state_with_webtransport_session_limit("proxy_protocol").await;

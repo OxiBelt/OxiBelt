@@ -99,10 +99,16 @@ pub(super) fn route_execution_plan(
   waf: RouteWafExecutionPlan,
 ) -> RouteExecutionPlan {
   let features = route_feature_plan(config, route);
-  let can_plain_proxy = can_plain_proxy_fast_path(config, route) && waf.plain_proxy_fast_path_safe;
-  let can_static_sendfile =
-    can_static_sendfile_fast_path(config, route) && waf.static_sendfile_fast_path_safe;
-  let can_static_small_object = route.static_root.is_some()
+  let bandwidth_unlimited = route.bandwidth.upload_bytes_per_second.is_none()
+    && route.bandwidth.download_bytes_per_second.is_none();
+  let can_plain_proxy = bandwidth_unlimited
+    && can_plain_proxy_fast_path(config, route)
+    && waf.plain_proxy_fast_path_safe;
+  let can_static_sendfile = bandwidth_unlimited
+    && can_static_sendfile_fast_path(config, route)
+    && waf.static_sendfile_fast_path_safe;
+  let can_static_small_object = bandwidth_unlimited
+    && route.static_root.is_some()
     && !crate::waf::route_http_body_compression_transform_enabled(config, route)
     && !route.actions.has_actions()
     && route
@@ -117,7 +123,7 @@ pub(super) fn route_execution_plan(
       plain_proxy_h3: can_plain_proxy,
       static_small_object: can_static_small_object,
       static_sendfile_like: can_static_sendfile,
-      cache_hit: route.cache.is_some(),
+      cache_hit: bandwidth_unlimited && route.cache.is_some(),
     },
     features,
     waf,
@@ -263,6 +269,21 @@ sendfile = "auto"
     assert_eq!(plan.features, RouteFeaturePlan::default());
     assert_eq!(plan.waf.request, WafExecutionPlan::None);
     assert_eq!(plan.waf.response, WafExecutionPlan::None);
+  }
+
+  #[test]
+  fn route_bandwidth_limits_disable_every_payload_bypassing_fast_path() {
+    let bandwidth = r#"
+
+[routes.bandwidth]
+upload_bytes_per_second = 1024
+download_bytes_per_second = 2048
+"#;
+    let proxy = execution_plan(&minimal_proxy_config(bandwidth));
+    let static_plan = execution_plan(&minimal_static_config(bandwidth));
+
+    assert_eq!(proxy.fast_path, FastPathPlan::default());
+    assert_eq!(static_plan.fast_path, FastPathPlan::default());
   }
 
   #[test]

@@ -4837,6 +4837,72 @@ max_request_body_bytes = 8
 }
 
 #[test]
+fn route_bandwidth_limits_default_to_unlimited_and_parse_per_direction() {
+  let temp_dir = common::TempDir::new("route-bandwidth-config");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-bandwidth-config");
+  let raw = format!(
+    r#"
+{}
+
+[[routes]]
+name = "upload-limited"
+hosts = ["upload.example.com"]
+upstream = "app"
+
+[routes.bandwidth]
+upload_bytes_per_second = 1048576
+
+[[routes]]
+name = "bidirectional-limited"
+hosts = ["limited.example.com"]
+upstream = "app"
+
+[routes.bandwidth]
+upload_bytes_per_second = 2097152
+download_bytes_per_second = 4194304
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+
+  let unlimited = config
+    .routes
+    .iter()
+    .find(|route| route.name == "app-root")
+    .expect("default route should exist");
+  assert_eq!(unlimited.bandwidth.upload_bytes_per_second, None);
+  assert_eq!(unlimited.bandwidth.download_bytes_per_second, None);
+
+  let upload_limited = config
+    .routes
+    .iter()
+    .find(|route| route.name == "upload-limited")
+    .expect("upload-limited route should exist");
+  assert_eq!(
+    upload_limited.bandwidth.upload_bytes_per_second,
+    Some(1_048_576)
+  );
+  assert_eq!(upload_limited.bandwidth.download_bytes_per_second, None);
+
+  let bidirectional = config
+    .routes
+    .iter()
+    .find(|route| route.name == "bidirectional-limited")
+    .expect("bidirectional-limited route should exist");
+  assert_eq!(
+    bidirectional.bandwidth.upload_bytes_per_second,
+    Some(2_097_152)
+  );
+  assert_eq!(
+    bidirectional.bandwidth.download_bytes_per_second,
+    Some(4_194_304)
+  );
+}
+
+#[test]
 fn webtransport_session_limits_default_to_connection_limits_and_parse_overrides() {
   let temp_dir = common::TempDir::new("webtransport-session-limit-config");
   let (cert_path, key_path) =
@@ -4935,6 +5001,73 @@ max_request_body_bytes = 0
       .contains("limits.max_request_body_bytes must be greater than 0"),
     "unexpected error: {error}"
   );
+}
+
+#[test]
+fn route_bandwidth_values_must_be_positive_when_configured() {
+  let temp_dir = common::TempDir::new("route-bandwidth-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-bandwidth-invalid");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for (field, invalid_field) in [
+    ("upload_bytes_per_second", "upload_bytes_per_second = 0"),
+    ("download_bytes_per_second", "download_bytes_per_second = 0"),
+  ] {
+    let raw = format!("{base}\n\n[routes.bandwidth]\n{invalid_field}\n");
+    let config: Config = toml::from_str(&raw).expect("integer bandwidth should parse");
+    let error = config
+      .validate()
+      .expect_err("zero route bandwidth should be rejected");
+    assert!(
+      error
+        .to_string()
+        .contains(&format!("bandwidth.{field} must be greater than 0")),
+      "unexpected error: {error}"
+    );
+  }
+
+  for invalid_field in [
+    "upload_bytes_per_second = -1",
+    "download_bytes_per_second = 18446744073709551616",
+    "upload_bytes_per_second = \"1048576\"",
+  ] {
+    let raw = format!("{base}\n\n[routes.bandwidth]\n{invalid_field}\n");
+    toml::from_str::<Config>(&raw).expect_err("bandwidth must be an unsigned 64-bit integer");
+  }
+}
+
+#[test]
+fn route_bandwidth_values_must_be_positive_when_constructed_programmatically() {
+  let temp_dir = common::TempDir::new("route-bandwidth-programmatic-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-bandwidth-programmatic-invalid");
+  let raw = common::minimal_config_toml(&cert_path, &key_path);
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+
+  for direction in ["upload", "download"] {
+    let mut invalid = config.clone();
+    let route = invalid
+      .routes
+      .iter_mut()
+      .find(|route| route.name == "app-root")
+      .expect("default route should exist");
+    if direction == "upload" {
+      route.bandwidth.upload_bytes_per_second = Some(0);
+    } else {
+      route.bandwidth.download_bytes_per_second = Some(0);
+    }
+
+    let error = invalid
+      .validate()
+      .expect_err("zero programmatic route bandwidth should be rejected");
+    assert!(
+      error.to_string().contains(&format!(
+        "bandwidth.{direction}_bytes_per_second must be greater than 0"
+      )),
+      "unexpected error: {error}"
+    );
+  }
 }
 
 #[test]
@@ -12381,6 +12514,44 @@ max_request_body_bytes = 8"#,
   });
 
   Config::load(&config_path).expect("known route limits field should load");
+}
+
+#[test]
+fn config_load_accepts_route_bandwidth_fields_by_default() {
+  let temp_dir = common::TempDir::new("strict-route-bandwidth-known");
+  let config_path = write_loadable_config(&temp_dir, "strict-route-bandwidth-known", |raw| {
+    raw.replace(
+      "upstream = \"app\"",
+      r#"upstream = "app"
+
+[routes.bandwidth]
+upload_bytes_per_second = 1048576
+download_bytes_per_second = 4194304"#,
+    )
+  });
+
+  Config::load(&config_path).expect("known route bandwidth fields should load");
+}
+
+#[test]
+fn config_load_rejects_unknown_route_bandwidth_fields_by_default() {
+  let temp_dir = common::TempDir::new("strict-route-bandwidth-unknown");
+  let config_path = write_loadable_config(&temp_dir, "strict-route-bandwidth-unknown", |raw| {
+    raw.replace(
+      "upstream = \"app\"",
+      r#"upstream = "app"
+
+[routes.bandwidth]
+unexpected = true"#,
+    )
+  });
+
+  let error = Config::load(&config_path).expect_err("unknown route bandwidth field should fail");
+
+  assert!(
+    error.to_string().contains("routes.bandwidth.unexpected"),
+    "unexpected error: {error:#}"
+  );
 }
 
 #[test]

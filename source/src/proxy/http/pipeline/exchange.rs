@@ -476,7 +476,12 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
       &state.config.compression,
       &state.compression,
     );
-    return with_downstream_response_timeout(response, timeouts.response_send, transport_network);
+    return with_downstream_response_timeout(
+      response,
+      timeouts.response_send,
+      transport_network,
+      true,
+    );
   }
   let body = body::with_read_timeout(
     body,
@@ -663,7 +668,7 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     &state.compression,
   );
   let mut response =
-    with_downstream_response_timeout(response, timeouts.response_send, transport_network);
+    with_downstream_response_timeout(response, timeouts.response_send, transport_network, true);
   apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
   let response = with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
   state.record_hot_path_response(response.status());

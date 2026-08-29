@@ -16,6 +16,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::bandwidth::{BandwidthDirection, RouteBandwidthLimiter};
 use crate::config::{
   ConnectionLimitIdentityMode, HttpVersion, ProxyHttp2Config, ProxyProtocolEgressMode, RouteConfig,
   UpstreamConfig,
@@ -100,7 +101,11 @@ use self::circuit_breakers::{
 };
 #[cfg(feature = "admin-runtime")]
 pub(crate) use self::entry::handle_inner;
-pub(crate) use self::entry::{handle, handle_http3, handle_with_forwarded_header_cache};
+#[cfg(test)]
+pub(crate) use self::entry::with_final_response_bandwidth;
+pub(crate) use self::entry::{
+  handle, handle_http3, handle_with_forwarded_header_cache, with_final_tcp_response_bandwidth,
+};
 use self::flow_helpers::{
   elapsed_ms, emit_system_access_log, record_route_cache_event, record_route_cache_fill_stage,
   select_forwarded_client_addr, tags_ref,
@@ -159,7 +164,9 @@ pub(crate) use self::waf_body_capture::{
   response_body_capture_error_response, waf_body_input,
 };
 use self::waf_body_coding::has_non_identity_content_encoding;
-pub(crate) use self::webtransport::{PreparedWebTransport, prepare_webtransport};
+pub(crate) use self::webtransport::{
+  PreparedWebTransport, prepare_webtransport, shape_webtransport_response,
+};
 pub(crate) use tls_policy::route_matches_selected_tls_negotiation_policy;
 
 #[allow(clippy::too_many_arguments)]
@@ -179,6 +186,7 @@ pub(super) async fn handle_inner_impl<B>(
   drain: ConnectionDrain,
   access_log: &mut SystemAccessLogContext<'_>,
   request_connection_permit: &mut Option<ConnectionPermit>,
+  selected_bandwidth: &mut Option<Arc<RouteBandwidthLimiter>>,
   trace_context: Option<TraceContext>,
 ) -> Response<ProxyBody>
 where
@@ -335,6 +343,8 @@ where
   let Some(resolved) = resolved else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
+  let route_bandwidth = resolved.bandwidth.clone();
+  *selected_bandwidth = Some(route_bandwidth.clone());
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
   if state
     .overload
@@ -405,6 +415,27 @@ where
     }
   }
 
+  let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
+  let (request_parts, request_body) = request.into_parts();
+  let request_body = body::with_read_timeout(
+    Limited::new(
+      request_body,
+      usize::try_from(max_request_body_bytes).unwrap_or(usize::MAX),
+    ),
+    client_body_timeout,
+    BodyTimeoutKind::DownstreamRequestRead,
+  );
+  let request = Request::from_parts(
+    request_parts,
+    body::with_bandwidth(
+      request_body,
+      route_bandwidth,
+      BandwidthDirection::Upload,
+      state.metrics.clone(),
+      crate::metrics::BandwidthTrafficClass::Http,
+      None,
+    ),
+  );
   let verified_early_data = early_data::is_verified(&request);
   let cl0_guard_required =
     h2_or_h3_content_length_zero_guard_required(request_version, request.headers());
@@ -438,14 +469,12 @@ where
   } else {
     request
   };
-  let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-  let request =
-    match reject_content_length_zero_data(request, client_body_timeout, request_version).await {
-      Ok(request) => request,
-      Err(response) => {
-        return route_security.apply(response);
-      }
-    };
+  let request = match reject_content_length_zero_data(request, None, request_version).await {
+    Ok(request) => request,
+    Err(response) => {
+      return route_security.apply(response);
+    }
+  };
   let request = if cl0_guard_required {
     match fast_path::try_handle_plain_proxy(
       request,
@@ -501,6 +530,7 @@ where
     route_circuit_breaker_lease,
     tags,
     client_body_timeout,
+    upload_bandwidth_limited: true,
     max_request_body_bytes,
     verified_early_data,
   })

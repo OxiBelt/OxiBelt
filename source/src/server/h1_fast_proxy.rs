@@ -12,11 +12,10 @@ use ::http::header::{
 use ::http::{
   HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, Version,
 };
-use anyhow::Context as AnyhowContext;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Body;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio_rustls::server::TlsStream;
@@ -25,13 +24,13 @@ use tracing::{debug, trace, warn};
 use crate::config::{ConnectionLimitIdentityMode, ForwardedClientIpSource, HttpListenerMode};
 use crate::overload::OverloadState;
 use crate::proxy::http as proxy_http;
-use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 use crate::proxy::http::headers::{ForwardedHeaderCache, extract_downstream_port};
 use crate::proxy::http::request_framing::{
   RequestBodyFraming, VerifiedContentLengthZeroBody, request_body_framing,
 };
 use crate::proxy::http::response::is_silent_close_response;
+use crate::proxy::http::{SystemAccessLogContext, with_final_tcp_response_bandwidth};
 use crate::routes::{RouteMatchContext, RouteRequestProtocol, normalize_host};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
@@ -41,6 +40,8 @@ use super::plain_http::parse::{ParsedPlainRequest, ReadRequestOutcome, header_ha
 use super::plain_http::response_head::response_head_bytes;
 use super::prefixed_io::PrefixedIo;
 mod admission;
+mod io;
+use io::{shutdown_timeout, write_all_timeout};
 pub(super) enum H1FastProxyPreflight {
   Done,
   Continue {
@@ -238,6 +239,11 @@ pub(super) async fn try_handle_connection(
         });
       }
     };
+    let response = with_final_tcp_response_bandwidth(
+      response,
+      prepared.resolved.bandwidth.clone(),
+      snapshot.metrics.clone(),
+    );
 
     let Some(write_plan) =
       response_write_plan(&response, &request_method, close_after_request, timeout)
@@ -717,31 +723,6 @@ fn trailer_name_allowed(name: &HeaderName) -> bool {
     name.as_str(),
     "connection" | "content-length" | "transfer-encoding" | "upgrade"
   )
-}
-
-async fn write_all_timeout<I>(
-  stream: &mut I,
-  bytes: &[u8],
-  timeout: Duration,
-  context: &'static str,
-) -> anyhow::Result<()>
-where
-  I: AsyncWrite + Unpin,
-{
-  tokio::time::timeout(timeout, stream.write_all(bytes))
-    .await
-    .context(context)??;
-  Ok(())
-}
-
-async fn shutdown_timeout<I>(stream: &mut I, timeout: Duration) -> anyhow::Result<()>
-where
-  I: AsyncWrite + Unpin,
-{
-  tokio::time::timeout(timeout, stream.shutdown())
-    .await
-    .context("TLS H1 pre-Hyper response shutdown failed")??;
-  Ok(())
 }
 
 #[cfg(test)]

@@ -202,6 +202,27 @@ conversion. A descriptor read that exhausts its bounded retry budget, or any
 valid descriptor mismatch, must remain a failed qualification result; neither
 a later rerun failure nor a rerun for another release is reusable evidence.
 
+Post-`0.9.1-beta.1` development adds optional per-route native bandwidth
+limits under `[routes.bandwidth]`. Existing routes remain unlimited without
+the table, and each omitted direction remains unlimited. The two positive
+byte-per-second fields are process-local runtime policy and do not change
+persisted state, Admin wire formats, Gateway API or Helm policy, or native
+configuration schema epoch `1`. WebSockets without stream WAF retain their
+prior frame-size and extension behavior through a constant-memory wire-frame
+adapter. It excludes framing and control frames from accounting and rechecks
+live policy within each payload in bounded 16 KiB chunks, including for
+sessions that began unlimited. Validate a configuration that opts in before
+rollout:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+```
+
+For rollback to a binary without this option, remove every
+`[routes.bandwidth]` table before restoring the old binary. No bandwidth state
+needs migration or recovery; each process reconstructs its route-local budgets
+from configuration at startup.
+
 ## Upgrade from 0.6.6 to the 0.8.1 line
 
 `0.8.1-beta.9` is the published and qualified source for stable promotion. The

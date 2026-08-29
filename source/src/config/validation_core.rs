@@ -494,6 +494,7 @@ impl Config {
         }
       }
       route.timeouts.validate(&route.name)?;
+      route.bandwidth.validate(&route.name)?;
       route.limits.validate(&route.name)?;
       route.ipm.validate(&route.name)?;
       if let Some(retry) = &route.retry {

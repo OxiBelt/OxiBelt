@@ -2,6 +2,7 @@
 //! Static shortcuts still consult WAF plans before serving local content.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ::http::{StatusCode, Version};
@@ -9,6 +10,7 @@ use ::http::{StatusCode, Version};
 use super::{
   TimedStaticResponsePlan, parse::ParsedPlainRequest, static_access_log::StaticFastPathContext,
 };
+use crate::bandwidth::RouteBandwidthLimiter;
 use crate::dynamic_policy::DynamicPolicyContext;
 use crate::proxy::http::static_files::{self, StaticResponsePlan};
 use crate::routes::RouteWafExecutionPlan;
@@ -29,6 +31,7 @@ pub(super) async fn apply_static_waf(
   mut access_log: StaticFastPathContext,
   response_send_timeout: Duration,
   mut plan: StaticResponsePlan,
+  bandwidth: Arc<RouteBandwidthLimiter>,
 ) -> TimedStaticResponsePlan {
   let tls = WafTlsMetadata::default();
   let dynamic_policy = DynamicPolicyContext::default();
@@ -109,6 +112,7 @@ pub(super) async fn apply_static_waf(
       silent_close: terminal.is_silent_close(),
       response: static_waf_terminal_plan(terminal, &request_waf.response_header_mutations),
       response_send_timeout,
+      bandwidth: Some(bandwidth),
       access_log: Some(access_log),
     };
   }
@@ -119,6 +123,7 @@ pub(super) async fn apply_static_waf(
         "WAF selected an upstream target for a static route",
       ),
       response_send_timeout,
+      bandwidth: Some(bandwidth),
       access_log: Some(access_log),
       silent_close: false,
     };
@@ -157,6 +162,7 @@ pub(super) async fn apply_static_waf(
           "response security context is unavailable",
         ),
         response_send_timeout,
+        bandwidth: Some(bandwidth),
         access_log: Some(access_log),
         silent_close: false,
       };
@@ -189,6 +195,7 @@ pub(super) async fn apply_static_waf(
         silent_close: terminal.is_silent_close(),
         response: static_waf_terminal_plan(terminal, &mutations),
         response_send_timeout,
+        bandwidth: Some(bandwidth),
         access_log: Some(access_log),
       };
     }
@@ -198,6 +205,7 @@ pub(super) async fn apply_static_waf(
   TimedStaticResponsePlan {
     response: plan,
     response_send_timeout,
+    bandwidth: Some(bandwidth),
     access_log: Some(access_log),
     silent_close: false,
   }

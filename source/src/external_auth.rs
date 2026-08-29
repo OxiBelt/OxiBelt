@@ -184,7 +184,7 @@ impl ExternalAuthRuntime {
     downstream_scheme: &str,
     route_name: &str,
     request_body_limit: usize,
-    request_body_timeout: Duration,
+    request_body_timeout: Option<Duration>,
   ) -> ExternalAuthOutcome {
     let Some(inner) = &self.inner else {
       return ExternalAuthOutcome::Allowed;
@@ -249,7 +249,7 @@ async fn capture_gateway_request_body(
   request: &mut Request<ProxyBody>,
   provider: &ExternalAuthProviderRuntime,
   request_body_limit: usize,
-  request_body_timeout: Duration,
+  request_body_timeout: Option<Duration>,
 ) -> Result<Bytes, ExternalAuthTerminal> {
   let limit = provider
     .config
@@ -272,17 +272,21 @@ async fn capture_gateway_request_body(
     request.body_mut(),
     materialized_known_small_body(Bytes::new(), None),
   );
-  let collected = tokio::time::timeout(
-    request_body_timeout,
-    collect_bounded_request_body(original_body, limit),
-  )
-  .await
-  .map_err(|_| {
-    external_auth_request_rejection(
-      StatusCode::REQUEST_TIMEOUT,
-      "external auth request body timed out",
+  let collected = if let Some(request_body_timeout) = request_body_timeout {
+    tokio::time::timeout(
+      request_body_timeout,
+      collect_bounded_request_body(original_body, limit),
     )
-  })?
+    .await
+    .map_err(|_| {
+      external_auth_request_rejection(
+        StatusCode::REQUEST_TIMEOUT,
+        "external auth request body timed out",
+      )
+    })?
+  } else {
+    collect_bounded_request_body(original_body, limit).await
+  }
   .map_err(|error| match error {
     ExternalAuthRequestBodyError::TooLarge => external_auth_request_rejection(
       StatusCode::PAYLOAD_TOO_LARGE,

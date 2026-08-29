@@ -81,7 +81,7 @@ pub(super) fn uri_wire_len(uri: &http::Uri) -> usize {
 
 pub(super) async fn reject_content_length_zero_data<B>(
   request: Request<B>,
-  timeout: Duration,
+  timeout: Option<Duration>,
   version: http::Version,
 ) -> Result<Request<Either<B, ProxyBody>>, Response<ProxyBody>>
 where
@@ -95,7 +95,11 @@ where
 
   let request = request.map(|body| body.map_err(Into::into).boxed());
   let (parts, body) = request.into_parts();
-  let mut body = body::with_read_timeout(body, timeout, BodyTimeoutKind::DownstreamRequestRead);
+  let mut body = if let Some(timeout) = timeout {
+    body::with_read_timeout(body, timeout, BodyTimeoutKind::DownstreamRequestRead)
+  } else {
+    body
+  };
   while let Some(frame) = body.frame().await {
     let frame = match frame {
       Ok(frame) => frame,

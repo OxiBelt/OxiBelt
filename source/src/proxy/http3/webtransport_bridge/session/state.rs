@@ -10,6 +10,8 @@ use super::super::super::H3RequestStream;
 use super::super::super::upstream_connection::WebTransportConnectionGuard;
 use super::super::upstream_adapter::UpstreamWebTransportSession;
 use super::connection_limits::WebTransportSessionPermits;
+use super::datagram_pacing::DatagramPacerSender;
+use crate::bandwidth::RouteBandwidthLimiter;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::stream_waf::StreamWafRequestContext;
 use crate::runtime_introspection::RuntimeCounterGuard;
@@ -26,6 +28,8 @@ pub(in crate::proxy::http3::webtransport_bridge) struct ActiveWebTransportSessio
   pub(super) admin_guard: WebTransportSessionGuard,
   pub(super) _connection_permits: WebTransportSessionPermits,
   pub(super) _introspection_guard: RuntimeCounterGuard,
+  pub(super) bandwidth: Arc<RouteBandwidthLimiter>,
+  pub(super) downstream_datagrams: DatagramPacerSender,
   pub(super) stream_waf_state: Option<Arc<AppSnapshot>>,
   pub(super) metrics_state: Arc<AppSnapshot>,
   pub(super) stream_waf: Option<StreamWafRequestContext>,
@@ -35,16 +39,11 @@ pub(in crate::proxy::http3::webtransport_bridge) struct ActiveWebTransportSessio
   pub(super) trace_context: Option<TraceContext>,
   pub(super) started_at: TelemetryStart,
   pub(in crate::proxy::http3::webtransport_bridge) last_activity: Instant,
-  pub(super) tasks: Vec<JoinHandle<()>>,
+  pub(super) bandwidth_waiters: usize,
+  pub(in crate::proxy::http3::webtransport_bridge) tasks: Vec<JoinHandle<()>>,
 }
 
 impl ActiveWebTransportSession {
-  pub(in crate::proxy::http3::webtransport_bridge) fn webtransport_idle(
-    &self,
-  ) -> std::time::Duration {
-    self.timeouts.webtransport_idle
-  }
-
   pub(in crate::proxy::http3::webtransport_bridge) fn record_activity(&mut self) {
     self.last_activity = Instant::now();
     #[cfg(feature = "admin-runtime")]
@@ -53,6 +52,19 @@ impl ActiveWebTransportSession {
       .webtransport_admin
       .record_activity(self.admin_guard.id());
     self.reap_finished_tasks();
+  }
+
+  pub(in crate::proxy::http3::webtransport_bridge) fn begin_bandwidth_wait(&mut self) {
+    self.bandwidth_waiters = self.bandwidth_waiters.saturating_add(1);
+  }
+
+  pub(in crate::proxy::http3::webtransport_bridge) fn end_bandwidth_wait(&mut self) {
+    self.bandwidth_waiters = self.bandwidth_waiters.saturating_sub(1);
+    self.record_activity();
+  }
+
+  pub(in crate::proxy::http3::webtransport_bridge) fn idle_deadline(&self) -> Option<Instant> {
+    (self.bandwidth_waiters == 0).then(|| self.last_activity + self.timeouts.webtransport_idle)
   }
 
   pub(in crate::proxy::http3::webtransport_bridge) fn reap_finished_tasks(&mut self) {

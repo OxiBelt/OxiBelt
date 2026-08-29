@@ -12,10 +12,9 @@ use h3::error::Code;
 use h3::quic::StreamId;
 use h3_webtransport::SessionId;
 use http::{Request, Response, StatusCode};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::super::{H3RequestStream, connect_upstream_webtransport, respond_to_h3_request};
 use super::connection::DownstreamWebTransportConnection;
@@ -29,7 +28,7 @@ use crate::proxy::http::response::{is_silent_close_response, text_response};
 use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContext};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
-use crate::waf::{WafStreamClose, WafStreamDirection, WafWebTransportStreamKind};
+use crate::waf::{WafStreamDirection, WafWebTransportStreamKind};
 #[cfg(feature = "admin-runtime")]
 use crate::webtransport_admin::WebTransportSessionRegistration;
 
@@ -38,28 +37,48 @@ use crate::webtransport_admin::WebTransportSessionRegistration;
 mod admin_commands;
 #[path = "session/connection_limits.rs"]
 mod connection_limits;
+#[path = "session/datagram_pacing.rs"]
+mod datagram_pacing;
 #[path = "session/index.rs"]
 mod index;
+#[path = "session/lifecycle.rs"]
+mod lifecycle;
 #[path = "session/metrics.rs"]
 mod metrics;
 #[path = "session/silent_close.rs"]
 mod silent_close;
 #[path = "session/state.rs"]
 mod state;
+#[path = "session/stream_copy.rs"]
+mod stream_copy;
 #[path = "session/task_reporting.rs"]
 mod task_reporting;
+#[path = "session/traffic_shaping.rs"]
+mod traffic_shaping;
 
+use crate::bandwidth::{BandwidthDirection, RouteBandwidthLimiter};
+use crate::metrics::Metrics;
 #[cfg(feature = "admin-runtime")]
 pub(super) use admin_commands::close_session_with_code;
 #[cfg(feature = "admin-runtime")]
 use admin_commands::spawn_admin_session_command_forwarder;
 use connection_limits::acquire_webtransport_session_permits;
+use datagram_pacing::{
+  DatagramQueueOutcome, QueuedDatagram, bridge_upstream_datagrams, datagram_pacer_channel,
+  pace_downstream_datagrams, try_queue_datagram,
+};
 pub(super) use index::WebTransportSessionIndex;
 use index::session_id_for_stream_id;
+#[cfg(feature = "admin-runtime")]
+use lifecycle::close_session_inner;
+pub(super) use lifecycle::{close_all_sessions, close_expired_sessions, close_session};
 use metrics::record_session_end_metrics;
 pub(super) use silent_close::close_session_silent;
 pub(super) use state::ActiveWebTransportSession;
+use stream_copy::{copy_bidi_stream, copy_one_way};
 use task_reporting::{report_activity, report_session_task_result, report_stream_task_result};
+#[cfg(all(test, feature = "admin-runtime"))]
+use traffic_shaping::bandwidth_direction;
 const WEBTRANSPORT_DRAFT_HEADER: &str = "sec-webtransport-http3-draft";
 const WEBTRANSPORT_DRAFT_VALUE: &str = "draft02";
 
@@ -96,9 +115,18 @@ pub(super) async fn accept_webtransport_session(
       if is_silent_close_response(&response) {
         return Ok(());
       }
-      respond_to_h3_request(stream, *response).await?;
+      let response =
+        http_proxy::shape_webtransport_response(*response, None, snapshot.metrics.clone());
+      respond_to_h3_request(stream, response).await?;
       return Ok(());
     }
+  };
+  let shape_prepared_response = |response| {
+    http_proxy::shape_webtransport_response(
+      response,
+      Some(prepared.bandwidth.clone()),
+      snapshot.metrics.clone(),
+    )
   };
 
   #[cfg(feature = "admin-runtime")]
@@ -112,10 +140,10 @@ pub(super) async fn accept_webtransport_session(
   if snapshot.webtransport_admin.is_draining(&registration) {
     respond_to_h3_request(
       stream,
-      text_response(
+      shape_prepared_response(text_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "WebTransport session is draining",
-      ),
+      )),
     )
     .await?;
     return Ok(());
@@ -129,10 +157,10 @@ pub(super) async fn accept_webtransport_session(
   {
     respond_to_h3_request(
       stream,
-      text_response(
+      shape_prepared_response(text_response(
         StatusCode::SERVICE_UNAVAILABLE,
         "too many active WebTransport sessions",
-      ),
+      )),
     )
     .await?;
     return Ok(());
@@ -147,7 +175,11 @@ pub(super) async fn accept_webtransport_session(
   {
     Ok(permits) => permits,
     Err(status) => {
-      respond_to_h3_request(stream, text_response(status, "connection limit exceeded")).await?;
+      respond_to_h3_request(
+        stream,
+        shape_prepared_response(text_response(status, "connection limit exceeded")),
+      )
+      .await?;
       return Ok(());
     }
   };
@@ -155,7 +187,10 @@ pub(super) async fn accept_webtransport_session(
   if sessions.contains_key(&session_id) {
     respond_to_h3_request(
       stream,
-      text_response(StatusCode::CONFLICT, "duplicate WebTransport session"),
+      shape_prepared_response(text_response(
+        StatusCode::CONFLICT,
+        "duplicate WebTransport session",
+      )),
     )
     .await?;
     return Ok(());
@@ -172,10 +207,10 @@ pub(super) async fn accept_webtransport_session(
         );
         respond_to_h3_request(
           stream,
-          text_response(
+          shape_prepared_response(text_response(
             StatusCode::BAD_GATEWAY,
             "upstream WebTransport CONNECT failed",
-          ),
+          )),
         )
         .await?;
         return Ok(());
@@ -213,6 +248,8 @@ pub(super) async fn accept_webtransport_session(
     &prepared.route_name,
     &prepared.upstream.name,
   );
+  let bandwidth = prepared.bandwidth.clone();
+  let (downstream_datagrams, downstream_datagram_rx) = datagram_pacer_channel();
   let tasks = spawn_upstream_session_tasks(
     session_id,
     connect_stream_id,
@@ -221,6 +258,9 @@ pub(super) async fn accept_webtransport_session(
     events.clone(),
     stream_waf_state.clone(),
     stream_waf.clone(),
+    bandwidth.clone(),
+    snapshot.metrics.clone(),
+    downstream_datagram_rx,
   );
   #[cfg(feature = "admin-runtime")]
   let tasks = {
@@ -242,6 +282,8 @@ pub(super) async fn accept_webtransport_session(
       admin_guard,
       _connection_permits: connection_permits,
       _introspection_guard: introspection_guard,
+      bandwidth,
+      downstream_datagrams,
       stream_waf_state,
       metrics_state: snapshot,
       stream_waf,
@@ -251,12 +293,14 @@ pub(super) async fn accept_webtransport_session(
       trace_context: prepared.trace_context,
       started_at: crate::telemetry::TelemetryRuntime::start(),
       last_activity: Instant::now(),
+      bandwidth_waiters: 0,
       tasks,
     },
   );
   Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_upstream_session_tasks(
   session_id: SessionId,
   connect_stream_id: StreamId,
@@ -265,6 +309,9 @@ fn spawn_upstream_session_tasks(
   events: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
+  bandwidth: Arc<RouteBandwidthLimiter>,
+  metrics: Arc<Metrics>,
+  downstream_datagrams: mpsc::Receiver<QueuedDatagram>,
 ) -> Vec<JoinHandle<()>> {
   vec![
     tokio::spawn(report_session_task_result(
@@ -276,6 +323,8 @@ fn spawn_upstream_session_tasks(
         events.clone(),
         stream_waf_state.clone(),
         stream_waf.clone(),
+        bandwidth.clone(),
+        metrics.clone(),
       ),
       events.clone(),
     )),
@@ -288,6 +337,8 @@ fn spawn_upstream_session_tasks(
         events.clone(),
         stream_waf_state.clone(),
         stream_waf.clone(),
+        bandwidth.clone(),
+        metrics.clone(),
       ),
       events.clone(),
     )),
@@ -297,8 +348,24 @@ fn spawn_upstream_session_tasks(
         session_id,
         connect_stream_id,
         downstream,
-        upstream,
+        upstream.clone(),
         events.clone(),
+        stream_waf_state.clone(),
+        stream_waf.clone(),
+        bandwidth.clone(),
+        metrics.clone(),
+      ),
+      events.clone(),
+    )),
+    tokio::spawn(report_session_task_result(
+      session_id,
+      pace_downstream_datagrams(
+        session_id,
+        upstream,
+        downstream_datagrams,
+        events.clone(),
+        bandwidth,
+        metrics,
         stream_waf_state,
         stream_waf,
       ),
@@ -327,9 +394,12 @@ pub(super) fn handle_downstream_bidi_stream(
       events,
       session.stream_waf_state.clone(),
       session.stream_waf.clone(),
+      session.bandwidth.clone(),
+      session.metrics_state.metrics.clone(),
     )));
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bridge_downstream_bidi_stream(
   session_id: SessionId,
   stream: DownstreamBidiStream,
@@ -337,6 +407,8 @@ async fn bridge_downstream_bidi_stream(
   events: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
+  bandwidth: Arc<RouteBandwidthLimiter>,
+  metrics: Arc<Metrics>,
 ) {
   let (upstream_send, upstream_recv) = match upstream.open_bi().await {
     Ok(streams) => streams,
@@ -357,6 +429,8 @@ async fn bridge_downstream_bidi_stream(
       events,
       stream_waf_state,
       stream_waf,
+      bandwidth,
+      metrics,
     ),
     result_events,
   )
@@ -383,9 +457,12 @@ pub(super) fn handle_downstream_uni_stream(
       events,
       session.stream_waf_state.clone(),
       session.stream_waf.clone(),
+      session.bandwidth.clone(),
+      session.metrics_state.metrics.clone(),
     )));
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bridge_downstream_uni_stream(
   session_id: SessionId,
   stream: DownstreamUniRecvStream,
@@ -393,6 +470,8 @@ async fn bridge_downstream_uni_stream(
   events: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
+  bandwidth: Arc<RouteBandwidthLimiter>,
+  metrics: Arc<Metrics>,
 ) {
   let upstream_send = match upstream.open_uni().await {
     Ok(stream) => stream,
@@ -414,6 +493,8 @@ async fn bridge_downstream_uni_stream(
       WafWebTransportStreamKind::Uni,
       stream_waf_state,
       stream_waf,
+      bandwidth,
+      metrics,
     ),
     result_events,
   )
@@ -438,34 +519,56 @@ pub(super) fn handle_downstream_datagram(
     };
     session.record_activity();
 
-    if let (Some(state), Some(context)) = (
-      session.stream_waf_state.as_ref(),
-      session.stream_waf.as_ref(),
-    ) {
-      let len = payload.len();
-      if let Err(blocked) = stream_waf_bridge::check_webtransport_payload(
-        state.as_ref(),
-        Some(context),
-        WafStreamDirection::DownstreamToUpstream,
-        &payload,
-        stream_waf_bridge::webtransport_datagram_metadata(len),
-      ) {
-        if blocked.is_silent_close() {
-          silent_close = true;
-        } else if let Some(blocked_close) = blocked.close_option() {
-          close = Some(blocked_close.clone());
-        } else {
-          silent_close = true;
+    let upload_limited = session.bandwidth.policy().map_or(true, |policy| {
+      policy.upload != crate::bandwidth::BandwidthRate::Unlimited
+    });
+    if upload_limited {
+      match try_queue_datagram(&session.downstream_datagrams, payload) {
+        DatagramQueueOutcome::Queued => {}
+        DatagramQueueOutcome::DroppedNewest => {
+          session
+            .metrics_state
+            .metrics
+            .record_bandwidth_datagram_drop_newest(BandwidthDirection::Upload);
+          debug!(
+            ?session_id,
+            direction = "upload",
+            "dropped newest WebTransport datagram because bandwidth pacer queue is full"
+          );
+        }
+        DatagramQueueOutcome::Closed => {
+          end_session = true;
         }
       }
-    }
-
-    if close.is_none()
-      && !silent_close
-      && let Err(error) = session.upstream.send_datagram(payload)
-    {
-      warn!(?session_id, error = %error, "failed to send upstream WebTransport datagram");
-      end_session = true;
+    } else {
+      if let (Some(state), Some(context)) = (
+        session.stream_waf_state.as_ref(),
+        session.stream_waf.as_ref(),
+      ) {
+        let len = payload.len();
+        if let Err(blocked) = stream_waf_bridge::check_webtransport_payload(
+          state.as_ref(),
+          Some(context),
+          WafStreamDirection::DownstreamToUpstream,
+          &payload,
+          stream_waf_bridge::webtransport_datagram_metadata(len),
+        ) {
+          if blocked.is_silent_close() {
+            silent_close = true;
+          } else if let Some(blocked_close) = blocked.close_option() {
+            close = Some(blocked_close.clone());
+          } else {
+            silent_close = true;
+          }
+        }
+      }
+      if close.is_none()
+        && !silent_close
+        && let Err(error) = session.upstream.send_datagram(payload)
+      {
+        warn!(?session_id, error = %error, "failed to send upstream WebTransport datagram");
+        end_session = true;
+      }
     }
   }
 
@@ -491,11 +594,12 @@ pub(super) fn handle_downstream_datagram(
       session_index,
       session_id,
       None,
-      b"upstream WebTransport datagram send failed",
+      b"upstream WebTransport datagram pacer unavailable",
     );
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bridge_upstream_bidi(
   session_id: SessionId,
   downstream: Arc<DownstreamWebTransportConnection>,
@@ -503,13 +607,15 @@ async fn bridge_upstream_bidi(
   activity: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
+  bandwidth: Arc<RouteBandwidthLimiter>,
+  metrics: Arc<Metrics>,
 ) -> anyhow::Result<()> {
   loop {
     let (upstream_send, upstream_recv) = upstream.accept_bi().await?;
     report_activity(&activity, session_id);
     let stream = downstream.open_bi(session_id).await?;
     let stream_result_tx = activity.clone();
-    tokio::spawn(report_stream_task_result(
+    let task = tokio::spawn(report_stream_task_result(
       session_id,
       copy_bidi_stream(
         session_id,
@@ -519,12 +625,16 @@ async fn bridge_upstream_bidi(
         activity.clone(),
         stream_waf_state.clone(),
         stream_waf.clone(),
+        bandwidth.clone(),
+        metrics.clone(),
       ),
       stream_result_tx,
     ));
+    register_stream_task(&activity, session_id, task).await?;
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bridge_upstream_uni(
   session_id: SessionId,
   downstream: Arc<DownstreamWebTransportConnection>,
@@ -532,13 +642,15 @@ async fn bridge_upstream_uni(
   activity: mpsc::Sender<DispatcherEvent>,
   stream_waf_state: Option<Arc<AppSnapshot>>,
   stream_waf: Option<StreamWafRequestContext>,
+  bandwidth: Arc<RouteBandwidthLimiter>,
+  metrics: Arc<Metrics>,
 ) -> anyhow::Result<()> {
   loop {
     let upstream_recv = upstream.accept_uni().await?;
     report_activity(&activity, session_id);
     let downstream_send = downstream.open_uni(session_id).await?;
     let stream_result_tx = activity.clone();
-    tokio::spawn(report_stream_task_result(
+    let task = tokio::spawn(report_stream_task_result(
       session_id,
       copy_one_way(
         session_id,
@@ -549,117 +661,30 @@ async fn bridge_upstream_uni(
         WafWebTransportStreamKind::Uni,
         stream_waf_state.clone(),
         stream_waf.clone(),
+        bandwidth.clone(),
+        metrics.clone(),
       ),
       stream_result_tx,
     ));
+    register_stream_task(&activity, session_id, task).await?;
   }
 }
 
-async fn bridge_upstream_datagrams(
+async fn register_stream_task(
+  events: &mpsc::Sender<DispatcherEvent>,
   session_id: SessionId,
-  connect_stream_id: StreamId,
-  downstream: Arc<DownstreamWebTransportConnection>,
-  upstream: Arc<UpstreamWebTransportSession>,
-  activity: mpsc::Sender<DispatcherEvent>,
-  stream_waf_state: Option<Arc<AppSnapshot>>,
-  stream_waf: Option<StreamWafRequestContext>,
+  task: JoinHandle<()>,
 ) -> anyhow::Result<()> {
-  let mut sender = downstream.datagram_sender(connect_stream_id)?;
-  loop {
-    let datagram = upstream.read_datagram().await?;
-    report_activity(&activity, session_id);
-    if let (Some(state), Some(context)) = (stream_waf_state.as_ref(), stream_waf.as_ref()) {
-      stream_waf_bridge::check_webtransport_payload(
-        state.as_ref(),
-        Some(context),
-        WafStreamDirection::UpstreamToDownstream,
-        &datagram,
-        stream_waf_bridge::webtransport_datagram_metadata(datagram.len()),
-      )?;
+  if let Err(error) = events
+    .send(DispatcherEvent::RegisterStreamTask(session_id, task))
+    .await
+  {
+    if let DispatcherEvent::RegisterStreamTask(_, task) = error.0 {
+      task.abort();
     }
-    sender.send_datagram(datagram)?;
+    anyhow::bail!("WebTransport dispatcher closed before stream task registration");
   }
-}
-
-pub(super) fn close_expired_sessions(
-  sessions: &mut HashMap<SessionId, ActiveWebTransportSession>,
-  session_index: &mut WebTransportSessionIndex,
-) {
-  let now = Instant::now();
-  let expired = sessions
-    .iter()
-    .filter_map(|(session_id, session)| {
-      (session.last_activity + session.timeouts.webtransport_idle <= now).then_some(*session_id)
-    })
-    .collect::<Vec<_>>();
-  for session_id in expired {
-    close_session(
-      sessions,
-      session_index,
-      session_id,
-      None,
-      b"WebTransport idle timeout",
-    );
-  }
-}
-
-pub(super) fn close_all_sessions(
-  sessions: &mut HashMap<SessionId, ActiveWebTransportSession>,
-  session_index: &mut WebTransportSessionIndex,
-  reason: Option<&'static [u8]>,
-) {
-  let session_ids = sessions.keys().copied().collect::<Vec<_>>();
-  for session_id in session_ids {
-    close_session(
-      sessions,
-      session_index,
-      session_id,
-      None,
-      reason.unwrap_or(b"WebTransport connection closed"),
-    );
-  }
-}
-
-pub(super) fn close_session(
-  sessions: &mut HashMap<SessionId, ActiveWebTransportSession>,
-  session_index: &mut WebTransportSessionIndex,
-  session_id: SessionId,
-  close: Option<&WafStreamClose>,
-  fallback_reason: &'static [u8],
-) {
-  let (close_code, reason) = match close {
-    Some(close) => (close.webtransport_code, close.reason.as_bytes()),
-    None => (0, fallback_reason),
-  };
-  close_session_inner(
-    sessions,
-    session_index,
-    session_id,
-    close,
-    close_code,
-    reason,
-  );
-}
-
-fn close_session_inner(
-  sessions: &mut HashMap<SessionId, ActiveWebTransportSession>,
-  session_index: &mut WebTransportSessionIndex,
-  session_id: SessionId,
-  metrics_close: Option<&WafStreamClose>,
-  close_code: u32,
-  reason: &[u8],
-) {
-  let Some(mut session) = sessions.remove(&session_id) else {
-    return;
-  };
-  record_session_end_metrics(&session, metrics_close);
-  session_index.remove(session_id);
-  for task in session.tasks {
-    task.abort();
-  }
-  session.upstream.close(close_code, reason);
-  session.connect_stream.stop_stream(Code::H3_NO_ERROR);
-  session.connect_stream.stop_sending(Code::H3_NO_ERROR);
+  Ok(())
 }
 
 fn reset_unknown_bidi_stream(mut stream: DownstreamBidiStream) {
@@ -669,79 +694,6 @@ fn reset_unknown_bidi_stream(mut stream: DownstreamBidiStream) {
 
 fn stop_unknown_uni_stream(mut stream: DownstreamUniRecvStream) {
   h3::quic::RecvStream::stop_sending(&mut stream, Code::H3_REQUEST_CANCELLED.value());
-}
-
-async fn copy_bidi_stream<D>(
-  session_id: SessionId,
-  downstream: D,
-  mut upstream_send: UpstreamWebTransportSendStream,
-  mut upstream_recv: UpstreamWebTransportRecvStream,
-  activity: mpsc::Sender<DispatcherEvent>,
-  stream_waf_state: Option<Arc<AppSnapshot>>,
-  stream_waf: Option<StreamWafRequestContext>,
-) -> anyhow::Result<()>
-where
-  D: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-  let (mut downstream_recv, mut downstream_send) = tokio::io::split(downstream);
-  let downstream_to_upstream = copy_one_way(
-    session_id,
-    &mut downstream_recv,
-    &mut upstream_send,
-    activity.clone(),
-    WafStreamDirection::DownstreamToUpstream,
-    WafWebTransportStreamKind::Bidi,
-    stream_waf_state.clone(),
-    stream_waf.clone(),
-  );
-  let upstream_to_downstream = copy_one_way(
-    session_id,
-    &mut upstream_recv,
-    &mut downstream_send,
-    activity,
-    WafStreamDirection::UpstreamToDownstream,
-    WafWebTransportStreamKind::Bidi,
-    stream_waf_state,
-    stream_waf,
-  );
-  tokio::try_join!(downstream_to_upstream, upstream_to_downstream)?;
-  Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn copy_one_way<R, W>(
-  session_id: SessionId,
-  mut recv: R,
-  mut send: W,
-  activity: mpsc::Sender<DispatcherEvent>,
-  direction: WafStreamDirection,
-  stream_kind: WafWebTransportStreamKind,
-  stream_waf_state: Option<Arc<AppSnapshot>>,
-  stream_waf: Option<StreamWafRequestContext>,
-) -> anyhow::Result<()>
-where
-  R: AsyncRead + Unpin,
-  W: AsyncWrite + Unpin,
-{
-  let mut buffer = vec![0u8; 16 * 1024];
-  loop {
-    let read = recv.read(&mut buffer).await?;
-    if read == 0 {
-      send.shutdown().await?;
-      return Ok(());
-    }
-    if let (Some(state), Some(context)) = (stream_waf_state.as_ref(), stream_waf.as_ref()) {
-      stream_waf_bridge::check_webtransport_payload(
-        state.as_ref(),
-        Some(context),
-        direction,
-        &buffer[..read],
-        stream_waf_bridge::webtransport_stream_metadata(stream_kind),
-      )?;
-    }
-    send.write_all(&buffer[..read]).await?;
-    report_activity(&activity, session_id);
-  }
 }
 
 #[cfg(all(test, feature = "admin-runtime"))]

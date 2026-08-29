@@ -1,6 +1,9 @@
 use super::*;
+use crate::bandwidth::{BandwidthPolicy, BandwidthRate};
 use crate::config::{CapacitySetting, Config, PriorityClass};
 use crate::proxy::http::response::{silent_close_response, text_response};
+use std::num::NonZeroU64;
+use tokio::io::AsyncReadExt;
 
 mod common {
   include!(concat!(
@@ -133,6 +136,71 @@ fn ordinary_no_content_response_is_still_serialized_without_body() {
   assert!(write_plan.keep_alive);
   assert!(write_plan.skip_body);
   assert_eq!(write_plan.response_send_timeout, Duration::from_secs(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn tls_h1_fast_response_observes_mid_response_unlimited_to_limited_reload() {
+  let limiter = crate::bandwidth::RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED);
+  let (source_tx, source) = proxy_http::body::channel_body(1);
+  let mut response = Response::new(source);
+  response
+    .headers_mut()
+    .insert(CONTENT_LENGTH, HeaderValue::from_static("8"));
+  let response = proxy_http::with_final_response_bandwidth(
+    response,
+    limiter.clone(),
+    crate::metrics::Metrics::new(),
+    WafTransportNetwork::Tcp,
+  );
+  let (mut downstream, mut client) = tokio::io::duplex(4096);
+  let writer = tokio::spawn(async move {
+    let mut head = Vec::new();
+    write_response(
+      &mut downstream,
+      response,
+      true,
+      false,
+      Duration::from_secs(5),
+      &mut head,
+    )
+    .await
+  });
+
+  source_tx
+    .send(Ok(hyper::body::Frame::data(Bytes::from_static(b"open"))))
+    .await
+    .unwrap();
+  let head = read_response_head(&mut client).await;
+  assert!(head.ends_with(b"\r\n\r\n"));
+  let mut open = [0u8; 4];
+  client.read_exact(&mut open).await.unwrap();
+  assert_eq!(&open, b"open");
+
+  let rate = BandwidthRate::BytesPerSecond(NonZeroU64::new(4).unwrap());
+  limiter
+    .update(BandwidthPolicy::new(BandwidthRate::Unlimited, rate))
+    .unwrap();
+  source_tx
+    .send(Ok(hyper::body::Frame::data(Bytes::from_static(b"slow"))))
+    .await
+    .unwrap();
+  let first = client.read_u8();
+  tokio::pin!(first);
+  assert!(futures_util::poll!(first.as_mut()).is_pending());
+  tokio::time::advance(Duration::from_millis(249)).await;
+  assert!(futures_util::poll!(first.as_mut()).is_pending());
+  tokio::time::advance(Duration::from_millis(1)).await;
+  assert_eq!(first.await.unwrap(), b's');
+
+  writer.abort();
+}
+
+async fn read_response_head(stream: &mut tokio::io::DuplexStream) -> Vec<u8> {
+  let mut head = Vec::new();
+  while !head.ends_with(b"\r\n\r\n") {
+    head.push(stream.read_u8().await.unwrap());
+  }
+  head
 }
 
 fn parsed_get(host: &str) -> ParsedPlainRequest {

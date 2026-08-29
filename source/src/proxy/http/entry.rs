@@ -5,6 +5,7 @@ use std::sync::Arc;
 use http::Request;
 use hyper::body::{Body, Incoming};
 
+use crate::bandwidth::BandwidthDirection;
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
 use crate::state::AppSnapshot;
@@ -204,6 +205,7 @@ where
     }
   };
   let mut request_connection_permit = None;
+  let mut selected_bandwidth = None;
   let response = handle_inner_impl(
     request,
     peer_addr,
@@ -220,9 +222,15 @@ where
     drain,
     &mut access_log,
     &mut request_connection_permit,
+    &mut selected_bandwidth,
     trace_context,
   )
   .await;
+  let response = if let Some(limiter) = selected_bandwidth {
+    with_final_response_bandwidth(response, limiter, state.metrics.clone(), transport_network)
+  } else {
+    response
+  };
   let response = if let Some(permit) = request_connection_permit {
     with_connection_permit(response, permit)
   } else {
@@ -239,4 +247,42 @@ where
     telemetry_start,
   );
   response
+}
+
+pub(crate) fn with_final_response_bandwidth(
+  response: Response<ProxyBody>,
+  limiter: Arc<RouteBandwidthLimiter>,
+  metrics: Arc<crate::metrics::Metrics>,
+  transport_network: WafTransportNetwork,
+) -> Response<ProxyBody> {
+  let backpressure_timeout = (transport_network == WafTransportNetwork::Tcp)
+    .then(|| downstream_response_send_timeout(&response))
+    .flatten();
+  let (mut parts, response_body) = response.into_parts();
+  parts.extensions.remove::<body::KnownSmallResponseBody>();
+  parts
+    .extensions
+    .remove::<body::CompiledKnownSmallNoopResponse>();
+  parts
+    .extensions
+    .remove::<body::InlinedKnownSmallResponseBody>();
+  Response::from_parts(
+    parts,
+    body::with_bandwidth(
+      response_body,
+      limiter,
+      BandwidthDirection::Download,
+      metrics,
+      crate::metrics::BandwidthTrafficClass::Http,
+      backpressure_timeout,
+    ),
+  )
+}
+
+pub(crate) fn with_final_tcp_response_bandwidth(
+  response: Response<ProxyBody>,
+  limiter: Arc<RouteBandwidthLimiter>,
+  metrics: Arc<crate::metrics::Metrics>,
+) -> Response<ProxyBody> {
+  with_final_response_bandwidth(response, limiter, metrics, WafTransportNetwork::Tcp)
 }

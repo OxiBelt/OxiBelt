@@ -3,7 +3,10 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
+use std::sync::Arc;
 
+use crate::bandwidth::{BandwidthPolicy, BandwidthRate, RouteBandwidthLimiter};
 use crate::config::{Config, RouteConfig, UpstreamConfig};
 use crate::waf::WafEngine;
 
@@ -31,6 +34,8 @@ struct RouteEntry {
   matcher: CompiledRouteMatcher,
   execution_plan: RouteExecutionPlan,
   upstream_index: Option<usize>,
+  bandwidth: Arc<RouteBandwidthLimiter>,
+  staged_bandwidth_policy: BandwidthPolicy,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -96,23 +101,35 @@ pub struct ResolvedRoute<'a> {
   pub upstream: Option<&'a UpstreamConfig>,
   pub upstream_index: Option<usize>,
   pub execution_plan: &'a RouteExecutionPlan,
+  pub bandwidth: &'a Arc<RouteBandwidthLimiter>,
   pub path_captures: Vec<String>,
 }
 
 impl RouteTable {
   pub fn new(config: &Config) -> Self {
-    Self::new_with_waf_plan(config, |_| RouteWafExecutionPlan::disabled())
+    Self::new_with_waf_plan(config, |_| RouteWafExecutionPlan::disabled(), None)
   }
 
   pub fn new_with_waf(config: &Config, waf: &WafEngine) -> Self {
-    Self::new_with_waf_plan(config, |route| {
-      RouteWafExecutionPlan::from_waf(&route.name, waf)
-    })
+    Self::new_with_waf_and_previous(config, waf, None)
+  }
+
+  pub(crate) fn new_with_waf_and_previous(
+    config: &Config,
+    waf: &WafEngine,
+    previous: Option<&Self>,
+  ) -> Self {
+    Self::new_with_waf_plan(
+      config,
+      |route| RouteWafExecutionPlan::from_waf(&route.name, waf),
+      previous,
+    )
   }
 
   fn new_with_waf_plan(
     config: &Config,
     mut waf_plan_for_route: impl FnMut(&RouteConfig) -> RouteWafExecutionPlan,
+    previous: Option<&Self>,
   ) -> Self {
     let upstream_indices: HashMap<&str, usize> = config
       .upstreams
@@ -128,7 +145,18 @@ impl RouteTable {
         .upstream
         .as_deref()
         .and_then(|name| upstream_indices.get(name).copied());
-      table.push_route(route.clone(), execution_plan, upstream_index);
+      let staged_bandwidth_policy = route_bandwidth_policy(route);
+      let bandwidth = previous
+        .and_then(|previous| previous.bandwidth_for_route_name(&route.name))
+        .cloned()
+        .unwrap_or_else(|| RouteBandwidthLimiter::new(staged_bandwidth_policy));
+      table.push_route(
+        route.clone(),
+        execution_plan,
+        upstream_index,
+        bandwidth,
+        staged_bandwidth_policy,
+      );
     }
     table.rebuild_simple_exact_hosts();
     table
@@ -136,9 +164,28 @@ impl RouteTable {
 
   #[cfg(test)]
   fn from_routes_for_tests(routes: Vec<RouteConfig>) -> Self {
+    Self::from_routes_with_previous_for_tests(routes, None)
+  }
+
+  #[cfg(test)]
+  fn from_routes_with_previous_for_tests(
+    routes: Vec<RouteConfig>,
+    previous: Option<&Self>,
+  ) -> Self {
     let mut table = Self::empty();
     for route in routes {
-      table.push_route(route, RouteExecutionPlan::default(), None);
+      let staged_bandwidth_policy = route_bandwidth_policy(&route);
+      let bandwidth = previous
+        .and_then(|previous| previous.bandwidth_for_route_name(&route.name))
+        .cloned()
+        .unwrap_or_else(|| RouteBandwidthLimiter::new(staged_bandwidth_policy));
+      table.push_route(
+        route,
+        RouteExecutionPlan::default(),
+        None,
+        bandwidth,
+        staged_bandwidth_policy,
+      );
     }
     table.rebuild_simple_exact_hosts();
     table
@@ -160,6 +207,8 @@ impl RouteTable {
     route: RouteConfig,
     execution_plan: RouteExecutionPlan,
     upstream_index: Option<usize>,
+    bandwidth: Arc<RouteBandwidthLimiter>,
+    staged_bandwidth_policy: BandwidthPolicy,
   ) {
     let route_index = self.routes.len();
     let matcher = CompiledRouteMatcher::from_route(&route).unwrap_or_else(|error| {
@@ -199,7 +248,31 @@ impl RouteTable {
       matcher,
       execution_plan,
       upstream_index,
+      bandwidth,
+      staged_bandwidth_policy,
     });
+  }
+
+  fn bandwidth_for_route_name(&self, route_name: &str) -> Option<&Arc<RouteBandwidthLimiter>> {
+    self
+      .routes
+      .iter()
+      .find(|entry| entry.route.name == route_name)
+      .map(|entry| &entry.bandwidth)
+  }
+
+  /// Applies staged policy in the final, infallible publication phase.
+  /// Reused handles make the change visible to already-active route traffic.
+  pub(crate) fn activate_bandwidth(&self) {
+    for entry in &self.routes {
+      if let Err(error) = entry.bandwidth.update(entry.staged_bandwidth_policy) {
+        tracing::error!(
+          route = %entry.route.name,
+          error = %error,
+          "failed to activate validated route bandwidth policy"
+        );
+      }
+    }
   }
 
   fn rebuild_simple_exact_hosts(&mut self) {
@@ -369,6 +442,7 @@ impl RouteTable {
       upstream,
       upstream_index,
       execution_plan: &entry.execution_plan,
+      bandwidth: &entry.bandwidth,
       path_captures: route_match.match_result.path_captures,
     }
   }
@@ -405,6 +479,27 @@ impl RouteTable {
       *best = Some(candidate);
     }
   }
+}
+
+fn route_bandwidth_policy(route: &RouteConfig) -> BandwidthPolicy {
+  fn rate(value: Option<u64>) -> BandwidthRate {
+    value.map_or(BandwidthRate::Unlimited, |value| {
+      match NonZeroU64::new(value) {
+        Some(value) => BandwidthRate::BytesPerSecond(value),
+        None => {
+          tracing::error!(
+            "validated route bandwidth rate unexpectedly became zero; failing closed"
+          );
+          BandwidthRate::BytesPerSecond(NonZeroU64::MIN)
+        }
+      }
+    })
+  }
+
+  BandwidthPolicy::new(
+    rate(route.bandwidth.upload_bytes_per_second),
+    rate(route.bandwidth.download_bytes_per_second),
+  )
 }
 
 #[derive(Debug, Clone)]

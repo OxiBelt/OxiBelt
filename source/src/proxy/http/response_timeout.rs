@@ -32,8 +32,9 @@ pub(crate) fn with_downstream_response_timeout(
   response: Response<ProxyBody>,
   timeout: Duration,
   transport_network: WafTransportNetwork,
+  bandwidth_limited: bool,
 ) -> Response<ProxyBody> {
-  if transport_network == WafTransportNetwork::Udp {
+  if transport_network == WafTransportNetwork::Udp || bandwidth_limited {
     return mark_downstream_response_timeout(response, timeout);
   }
 

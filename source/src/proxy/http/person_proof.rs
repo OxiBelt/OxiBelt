@@ -33,7 +33,7 @@ pub(super) async fn handle_person_proof_api<B>(
   state: &AppSnapshot,
   request_method: Method,
   request_uri: http::Uri,
-  client_body_timeout: Duration,
+  client_body_timeout: Option<Duration>,
   request_version: http::Version,
   client_addr: std::net::SocketAddr,
   host: &str,
@@ -145,18 +145,25 @@ async fn handle_person_proof_verify<B>(
   input: WafRequestInput<'_>,
   verify_path: &str,
   content_type: Option<&str>,
-  client_body_timeout: Duration,
+  client_body_timeout: Option<Duration>,
   client_ip: std::net::IpAddr,
 ) -> Response<ProxyBody>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + 'static,
   B::Error: Into<body::BoxError> + Send + Sync + 'static,
 {
-  let body = body::with_read_timeout(
-    Limited::new(body, PERSON_PROOF_VERIFY_BODY_LIMIT),
-    client_body_timeout,
-    BodyTimeoutKind::DownstreamRequestRead,
-  );
+  let body = Limited::new(body, PERSON_PROOF_VERIFY_BODY_LIMIT)
+    .map_err(Into::into)
+    .boxed();
+  let body = if let Some(client_body_timeout) = client_body_timeout {
+    body::with_read_timeout(
+      body,
+      client_body_timeout,
+      BodyTimeoutKind::DownstreamRequestRead,
+    )
+  } else {
+    body
+  };
   let body = match body.collect().await {
     Ok(collected) => collected.to_bytes(),
     Err(error) if error_is_body_length_limit(&error) => {

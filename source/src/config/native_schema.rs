@@ -803,6 +803,9 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     "routes.actions.request_mirrors.max_body_bytes" => {
       (0, super::MAX_REQUEST_MIRROR_BODY_BYTES as u64)
     }
+    "routes.bandwidth.download_bytes_per_second" | "routes.bandwidth.upload_bytes_per_second" => {
+      (1, u64::MAX)
+    }
     "sni_forward.quic_initial_reassembly.max_pending_sessions"
     | "sni_forward.quic_initial_reassembly.max_fragments_per_session"
     | "sni_forward.quic_initial_reassembly.max_datagrams_per_session"

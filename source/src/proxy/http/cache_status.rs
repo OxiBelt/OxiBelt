@@ -206,7 +206,7 @@ pub(crate) fn cached_downstream_response(
     &state.config.compression,
     &state.compression,
   );
-  with_downstream_response_timeout(response, timeouts.response_send, transport_network)
+  with_downstream_response_timeout(response, timeouts.response_send, transport_network, true)
 }
 
 pub(crate) fn reconcile_cached_security(

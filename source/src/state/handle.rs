@@ -49,6 +49,7 @@ impl AppHandle {
     snapshot
       .overload
       .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
+    snapshot.route_table.activate_bandwidth();
     let (data_plane_drain, _) = watch::channel(false);
     let snapshot = Arc::new(snapshot);
     let handle = Self {
@@ -82,6 +83,10 @@ impl AppHandle {
     snapshot
       .overload
       .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
+    // This is the final infallible publication phase. Activate shared limiters
+    // before the ArcSwap so no request can observe a new route snapshot with
+    // the previous route policy.
+    snapshot.route_table.activate_bandwidth();
     let (data_plane_drain, _) = watch::channel(false);
     let snapshot = Arc::new(snapshot);
     let previous = self.current.swap(Arc::new(AppGeneration {
@@ -126,6 +131,7 @@ impl AppHandle {
     snapshot
       .overload
       .configure(&snapshot.config.overload, snapshot.lifecycle.as_ref());
+    snapshot.route_table.activate_bandwidth();
     let snapshot = Arc::new(snapshot);
     let (data_plane_drain, _) = watch::channel(false);
     let previous = self.current.swap(Arc::new(AppGeneration {

@@ -26,6 +26,7 @@ pub(crate) mod admin_list;
 #[cfg(feature = "admin-runtime")]
 pub mod admin_mutation;
 mod application;
+pub mod bandwidth;
 pub mod cache;
 pub mod circuit_breakers;
 pub mod client_identity;

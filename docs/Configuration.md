@@ -4337,6 +4337,10 @@ upstream = "app"
 [routes.limits]
 # max_request_body_bytes = 10485760
 
+[routes.bandwidth]
+# upload_bytes_per_second = 1048576
+# download_bytes_per_second = 4194304
+
 [routes.buffering]
 # request = "streaming"
 # response = "streaming"
@@ -4389,6 +4393,14 @@ upstream = "app"
 Route timeout overrides are optional. Omitted values inherit from `[limits]` for downstream behavior and from the selected `[[upstreams]]` entry for upstream behavior. TLS handshake and downstream header read timeouts are not route-level because route matching has not happened yet.
 
 Route limit overrides are optional. `routes.limits.max_request_body_bytes` inherits from `[limits].max_request_body_bytes` when omitted, and configured values must be greater than zero.
+
+`[routes.bandwidth]` optionally limits client-payload throughput for one route. `upload_bytes_per_second` applies to payload admitted from clients after route selection, and `download_bytes_per_second` applies to the final payload emitted to clients. Each field is an independent positive byte-per-second value; omitting either direction leaves that direction unlimited, and omitting the table preserves unlimited bandwidth. The upload and download budgets are shared by all concurrent traffic for that route within one OxiBelt process, including HTTP/1.1, HTTP/2, HTTP/3, CONNECT and Upgrade tunnels, WebSockets, and WebTransport. A newly constructed configured direction begins with up to one second of credit. Reloads preserve and clamp existing credit without minting a new burst; enabling a previously unlimited direction on a reused route starts it empty.
+
+Bandwidth accounting excludes headers, trailers, protocol framing, encryption overhead, retransmissions, internal retries, and mirror copies. Download accounting includes payload selected from upstreams, cache, static files, compression, locally generated responses, and route-selected error bodies. WebSocket Ping, Pong, and Close control frames are not charged. Each route and direction accepts at most 1024 pending limiter acquisitions; additional acquisitions fail closed instead of growing an unbounded payload wait queue. Bandwidth state is process-local and is not moved to a configured shared-state backend, so replicas enforce separate budgets. Limiter waits do not consume body/read/send or WebSocket/WebTransport idle timeouts, while absolute request, retry, drain, and graceful-shutdown deadlines continue to use wall-clock time.
+
+WebSockets without stream WAF use a constant-memory wire-frame adapter. It preserves masking, reserved bits, negotiated extensions, and existing frame sizes byte for byte; forwards framing without charging it; exempts Ping, Pong, and Close; and streams data payload through limiter grants no larger than 16 KiB. The adapter rechecks the shared route policy within an active frame, so a full reload from unlimited to limited reaches already-active traffic with at most the current bounded payload chunk admitted under the prior policy. WebSocket stream-WAF routes retain their separately documented frame and message inspection bounds and use base framing without extension negotiation.
+
+The bandwidth table is available only in native route TOML; it does not add a Gateway API, controller CRD, Helm policy, or `[[stream_listeners]]` field. Adding it is compatible with native configuration schema epoch `1` and takes effect on a full reload. Older binaries do not recognize the table, so remove `[routes.bandwidth]` before rolling back.
 
 Route buffering overrides are optional. Omitted values inherit from `[proxy.buffering]`; `temp_dir` is always global. CONNECT tunnels, HTTP Upgrade, and WebTransport forwarding remain streaming even when buffering is enabled.
 
