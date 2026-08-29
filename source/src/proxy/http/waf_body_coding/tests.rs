@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use base64::Engine as _;
 use http_body_util::{BodyExt, Full};
 use pretty_assertions::assert_eq;
 
@@ -36,6 +37,17 @@ async fn encoded_bytes(
   encoding: WafHttpBodyEncoding,
 ) -> Result<Bytes, WafBodyCodingError> {
   encode_body_sync(Bytes::from_static(bytes), encoding)
+}
+
+fn large_window_fuzz_regression() -> Vec<u8> {
+  base64::engine::general_purpose::STANDARD
+    .decode(
+      include_str!(
+        "../../../../../tests/fixtures/fuzz-regressions/http_body_coding/large-window.txt"
+      )
+      .trim(),
+    )
+    .expect("reviewed Brotli fuzz regression should be valid base64")
 }
 
 #[tokio::test]
@@ -162,6 +174,51 @@ async fn supported_encodings_roundtrip_and_preserve_decoded_capture() {
     let decoded = decode_body_sync(replayed, encoding, 1024).expect("replayed body should decode");
     assert_eq!(decoded.as_ref(), b"prefix secret suffix");
   }
+}
+
+#[test]
+fn brotli_large_window_fuzz_regression_fails_closed() {
+  let encoded = large_window_fuzz_regression();
+  assert_eq!(encoded.first().copied().unwrap_or_default() % 4, 2);
+
+  let error = decode_body_sync(
+    Bytes::copy_from_slice(&encoded[1..]),
+    WafHttpBodyEncoding::Br,
+    64 * 1024,
+  )
+  .expect_err("non-standard Large Window Brotli must fail closed");
+  assert_eq!(error.kind(), WafBodyCodingErrorKind::Malformed);
+}
+
+#[test]
+fn brotli_strict_decoder_accepts_standard_maximum_window() {
+  let original = Bytes::from(vec![b'a'; 8192]);
+  let encoded = read_encoded_sync(CompressorReader::new(
+    Cursor::new(original.clone()),
+    4096,
+    5,
+    24,
+  ))
+  .expect("standard Brotli with lgwin 24 should encode");
+  let decoded = decode_body_sync(encoded, WafHttpBodyEncoding::Br, original.len())
+    .expect("standard Brotli with lgwin 24 should decode");
+  assert_eq!(decoded, original);
+}
+
+#[tokio::test]
+async fn request_transform_rejects_large_window_brotli_as_malformed() {
+  let encoded = large_window_fuzz_regression();
+  let config = config_for_tests();
+  let state = WafBodyCodingState::new(&config);
+  let request = Request::builder()
+    .header(CONTENT_ENCODING, "br")
+    .body(body(Bytes::copy_from_slice(&encoded[1..])))
+    .expect("request should build");
+
+  let error = transform_request_body_for_waf(request, config, state, 8)
+    .await
+    .expect_err("Large Window Brotli request must fail closed");
+  assert_eq!(error.kind(), WafBodyCodingErrorKind::Malformed);
 }
 
 #[tokio::test]

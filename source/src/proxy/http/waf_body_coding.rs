@@ -6,7 +6,8 @@ use std::io::{self, Cursor, Read};
 use std::sync::Arc;
 use std::time::Duration;
 
-use brotli::{CompressorReader, Decompressor};
+use brotli::reader::StandardAlloc;
+use brotli::{BrotliDecompressStream, BrotliResult, BrotliState, CompressorReader};
 use bytes::{Bytes, BytesMut};
 use flate2::Compression as FlateCompression;
 use flate2::read::{GzDecoder, GzEncoder, ZlibDecoder, ZlibEncoder};
@@ -425,14 +426,78 @@ fn decode_body_sync(
     WafHttpBodyEncoding::Deflate => {
       read_decoded_sync(ZlibDecoder::new(Cursor::new(encoded)), max_bytes)
     }
-    WafHttpBodyEncoding::Br => {
-      read_decoded_sync(Decompressor::new(Cursor::new(encoded), 4096), max_bytes)
-    }
+    WafHttpBodyEncoding::Br => decode_brotli_strict(encoded, max_bytes),
     WafHttpBodyEncoding::Zstd => {
       let decoder = zstd::stream::Decoder::new(Cursor::new(encoded)).map_err(decode_io_error)?;
       read_decoded_sync(decoder, max_bytes)
     }
   }
+}
+
+fn decode_brotli_strict(encoded: Bytes, max_bytes: usize) -> Result<Bytes, WafBodyCodingError> {
+  const OUTPUT_CHUNK_BYTES: usize = 4096;
+
+  let mut state = BrotliState::new_strict(
+    StandardAlloc::default(),
+    StandardAlloc::default(),
+    StandardAlloc::default(),
+  );
+  let mut available_in = encoded.len();
+  let mut input_offset = 0usize;
+  let mut total_out = 0usize;
+  let mut decoded = Vec::new();
+
+  loop {
+    let remaining = max_bytes.saturating_sub(decoded.len());
+    let output_capacity = remaining.saturating_add(1).clamp(1, OUTPUT_CHUNK_BYTES);
+    let mut output = [0u8; OUTPUT_CHUNK_BYTES];
+    let mut available_out = output_capacity;
+    let mut output_offset = 0usize;
+    let previous_input_offset = input_offset;
+
+    let result = BrotliDecompressStream(
+      &mut available_in,
+      &mut input_offset,
+      encoded.as_ref(),
+      &mut available_out,
+      &mut output_offset,
+      &mut output[..output_capacity],
+      &mut total_out,
+      &mut state,
+    );
+
+    if output_offset > remaining {
+      return Err(WafBodyCodingError::new(
+        WafBodyCodingErrorKind::TooLarge,
+        "decoded body exceeds WAF body transform limit",
+      ));
+    }
+    decoded.extend_from_slice(&output[..output_offset]);
+
+    match result {
+      BrotliResult::ResultSuccess => {
+        if available_in != 0 || input_offset != encoded.len() {
+          return Err(invalid_brotli_stream());
+        }
+        return Ok(Bytes::from(decoded));
+      }
+      BrotliResult::ResultFailure | BrotliResult::NeedsMoreInput => {
+        return Err(invalid_brotli_stream());
+      }
+      BrotliResult::NeedsMoreOutput => {
+        if output_offset == 0 && input_offset == previous_input_offset {
+          return Err(invalid_brotli_stream());
+        }
+      }
+    }
+  }
+}
+
+fn invalid_brotli_stream() -> WafBodyCodingError {
+  decode_io_error(io::Error::new(
+    io::ErrorKind::InvalidData,
+    "invalid Brotli stream",
+  ))
 }
 
 fn encode_body_sync(

@@ -8,7 +8,10 @@ const REGRESSION_ROOT: &str = "../tests/fixtures/fuzz-regressions";
 /// Every committed reproducer must be named here and replayed by a focused
 /// test in this file or in the owning module. The empty initial registry makes
 /// an unreviewed fixture fail closed instead of silently entering the tree.
-const REGISTERED_FIXTURES: &[&str] = &["path_security_semantics/nested-percent-route-bypass.txt"];
+const REGISTERED_FIXTURES: &[&str] = &[
+  "http_body_coding/large-window.txt",
+  "path_security_semantics/nested-percent-route-bypass.txt",
+];
 
 fn fixture_files(root: &Path, directory: &Path, output: &mut BTreeSet<String>) {
   for entry in std::fs::read_dir(directory).expect("regression directory should be readable") {
