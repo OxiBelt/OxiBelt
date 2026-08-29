@@ -86,6 +86,12 @@ pub fn exercise_path_security_semantics(
     panic!("fixed fuzz upstream should be valid");
   };
   let rewritten = rewrite_uri(&origin, route_prefix, replacement_prefix, &uri);
+  if replacement_prefix.is_some() && route_prefix != "/" && !route_matches_raw {
+    assert!(
+      rewritten.is_err(),
+      "a nonmatching route prefix reached upstream rewriting"
+    );
+  }
   if validated.is_ok()
     && let Ok(rewritten) = rewritten
   {
@@ -214,5 +220,28 @@ mod tests {
     assert!(crate::routes::path_prefix_matches("/safe", &normalized));
 
     exercise_path_security_semantics(path, "q=xxxxxxxxxxxxxxxxxxxxxd", "/safe", None, false);
+  }
+
+  #[test]
+  fn rewrite_prefix_boundary_fuzz_regression_fails_closed() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+      "../../../tests/fixtures/fuzz-regressions/path_security_semantics/rewrite-prefix-boundary.json"
+    ))
+    .expect("reviewed path fuzz regression should be valid JSON");
+    exercise_path_security_semantics(
+      fixture["path"]
+        .as_str()
+        .expect("path fuzz regression should name a path"),
+      fixture["query"]
+        .as_str()
+        .expect("path fuzz regression should name a query"),
+      fixture["route_prefix"]
+        .as_str()
+        .expect("path fuzz regression should name a route prefix"),
+      fixture["replacement_prefix"].as_str(),
+      fixture["absolute_form"]
+        .as_bool()
+        .expect("path fuzz regression should select a request-target form"),
+    );
   }
 }

@@ -187,9 +187,13 @@ pub(crate) fn rewrite_path_and_query(
     let suffix = if route_prefix == "/" {
       incoming_path
     } else {
-      incoming_path
+      let suffix = incoming_path
         .strip_prefix(route_prefix)
-        .unwrap_or(incoming_path)
+        .ok_or_else(|| anyhow::anyhow!("request path is outside the route prefix boundary"))?;
+      if !suffix.is_empty() && !suffix.starts_with('/') {
+        anyhow::bail!("request path is outside the route prefix boundary");
+      }
+      suffix
     };
     join_paths(replacement, suffix)
   } else {
@@ -330,6 +334,44 @@ mod tests {
       rewritten.to_string(),
       "https://backend.internal/root/internal/users?active=true"
     );
+  }
+
+  #[test]
+  fn rewrite_uri_replaces_only_route_prefix_boundaries() {
+    let origin =
+      UpstreamUriParts::from_url(&Url::parse("https://backend.internal/root").unwrap()).unwrap();
+
+    for (uri, expected) in [
+      ("/safe?active=true", "/root/internal?active=true"),
+      (
+        "/safe/users?active=true",
+        "/root/internal/users?active=true",
+      ),
+    ] {
+      let rewritten =
+        rewrite_path_and_query(&origin, "/safe", Some("/internal"), &uri.parse().unwrap()).unwrap();
+      assert_eq!(rewritten.as_str(), expected);
+    }
+
+    for target in [
+      "/safeX",
+      "/safe..",
+      "http://public.example.com/safe../Qe_jw",
+    ] {
+      let error = rewrite_path_and_query(
+        &origin,
+        "/safe",
+        Some("/internal"),
+        &target.parse().unwrap(),
+      )
+      .expect_err("a sibling path must not be rewritten as a route child");
+      assert!(
+        error
+          .to_string()
+          .contains("outside the route prefix boundary"),
+        "unexpected error for {target}: {error:#}"
+      );
+    }
   }
 
   #[test]

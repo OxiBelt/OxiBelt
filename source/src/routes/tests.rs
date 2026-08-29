@@ -374,6 +374,27 @@ fn equal_host_and_path_score_keeps_route_order() {
 }
 
 #[test]
+fn route_prefix_does_not_match_sibling_path() {
+  let routes = vec![route("safe", &["example.com"], "/safe", "safe")];
+  let upstreams = vec![upstream("safe")];
+  let table = RouteTable::from_routes_for_tests(routes);
+
+  for path in ["/safe", "/safe/child"] {
+    let resolved = table
+      .resolve("example.com", path, &upstreams)
+      .expect("exact prefix and child path must resolve");
+    assert_eq!(resolved.route.name, "safe");
+  }
+
+  assert!(
+    table
+      .resolve("example.com", "/safe../Qe_jw", &upstreams)
+      .is_none(),
+    "a sibling path must not select the /safe route"
+  );
+}
+
+#[test]
 fn simple_exact_host_shortcut_matches_prefix_only_routes() {
   let routes = vec![
     route("root", &["example.com"], "/", "root"),

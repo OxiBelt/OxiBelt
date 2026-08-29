@@ -11,6 +11,7 @@ const REGRESSION_ROOT: &str = "../tests/fixtures/fuzz-regressions";
 const REGISTERED_FIXTURES: &[&str] = &[
   "http_body_coding/large-window.txt",
   "path_security_semantics/nested-percent-route-bypass.txt",
+  "path_security_semantics/rewrite-prefix-boundary.json",
 ];
 
 fn fixture_files(root: &Path, directory: &Path, output: &mut BTreeSet<String>) {
