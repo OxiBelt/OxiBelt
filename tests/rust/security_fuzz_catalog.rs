@@ -436,14 +436,32 @@ admin_valid_mutation_identity "${PHASE}" \
       &fixture_path.join("docker"),
       r#"#!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "${FAKE_DOCKER_CALLS_FILE:-}" ]]; then
+  printf '%s\n' "${1:-}" >>"${FAKE_DOCKER_CALLS_FILE}"
+fi
 case "${1:-}" in
   inspect)
     printf 'true\n'
     ;;
   start)
-    printf '%s\n' '{"status":200}'
-    printf '%s\n' 'downstream HTTP/2 connection failed: connection error' >&2
     exit "${FAKE_DOCKER_START_STATUS:-0}"
+    ;;
+  wait)
+    if [[ "${FAKE_DOCKER_WAIT_STATUS:-0}" != 0 ]]; then
+      printf '%s\n' 'fake docker wait failed' >&2
+      exit "${FAKE_DOCKER_WAIT_STATUS}"
+    fi
+    printf '%s\n' "${FAKE_DOCKER_CONTAINER_STATUS:-0}"
+    ;;
+  logs)
+    if [[ "${FAKE_DOCKER_LOG_OUTPUT:-json}" == json ]]; then
+      printf '%s\n' '{"status":200}'
+    fi
+    printf '%s\n' 'downstream HTTP/2 connection failed: connection error' >&2
+    if [[ "${FAKE_DOCKER_LOG_STATUS:-0}" != 0 ]]; then
+      printf '%s\n' 'fake docker logs failed' >&2
+      exit "${FAKE_DOCKER_LOG_STATUS}"
+    fi
     ;;
   create|cp|rm)
     ;;
@@ -461,21 +479,35 @@ esac
     );
     let executor = repository_path("tests/docker/security_fuzz/executor.sh");
 
+    let run_recovery = |work_dir: &std::path::Path, run_id: &str, extra_env: &[(&str, &str)]| {
+      let mut command = Command::new("bash");
+      command
+        .arg(&executor)
+        .arg("recovery")
+        .env("PATH", &path)
+        .env("OXIBELT_SECURITY_FUZZ_RUN_ID", run_id)
+        .env(
+          "OXIBELT_SECURITY_FUZZ_LABEL",
+          format!("oxibelt.security-fuzz.run={run_id}"),
+        )
+        .env("OXIBELT_SECURITY_FUZZ_TARGET", "path_security")
+        .env("OXIBELT_SECURITY_FUZZ_WORK_DIR", work_dir);
+      for (key, value) in extra_env {
+        command.env(key, value);
+      }
+      command
+        .output()
+        .expect("security-fuzz recovery should execute")
+    };
+
     let successful_work_dir = fixture_path.join("successful-recovery");
     fs::create_dir(&successful_work_dir).expect("successful work directory should be created");
-    let successful = Command::new("bash")
-      .arg(&executor)
-      .arg("recovery")
-      .env("PATH", &path)
-      .env("OXIBELT_SECURITY_FUZZ_RUN_ID", "1-2-3")
-      .env(
-        "OXIBELT_SECURITY_FUZZ_LABEL",
-        "oxibelt.security-fuzz.run=1-2-3",
-      )
-      .env("OXIBELT_SECURITY_FUZZ_TARGET", "path_security")
-      .env("OXIBELT_SECURITY_FUZZ_WORK_DIR", &successful_work_dir)
-      .output()
-      .expect("security-fuzz recovery should execute");
+    let successful_calls = fixture_path.join("successful-calls");
+    let successful = run_recovery(
+      &successful_work_dir,
+      "1-2-3",
+      &[("FAKE_DOCKER_CALLS_FILE", successful_calls.to_str().unwrap())],
+    );
     assert!(
       successful.status.success(),
       "recovery failed\nstdout:\n{}\nstderr:\n{}",
@@ -492,29 +524,80 @@ esac
     let observation: serde_json::Value =
       serde_json::from_str(&recovery).expect("recovery observation should be one JSON value");
     assert_eq!(observation, serde_json::json!({"status": 200}));
-
-    let failed_work_dir = fixture_path.join("failed-recovery");
-    fs::create_dir(&failed_work_dir).expect("failed work directory should be created");
-    let failed = Command::new("bash")
-      .arg(executor)
-      .arg("recovery")
-      .env("PATH", path)
-      .env("FAKE_DOCKER_START_STATUS", "42")
-      .env("OXIBELT_SECURITY_FUZZ_RUN_ID", "4-5-6")
-      .env(
-        "OXIBELT_SECURITY_FUZZ_LABEL",
-        "oxibelt.security-fuzz.run=4-5-6",
-      )
-      .env("OXIBELT_SECURITY_FUZZ_TARGET", "path_security")
-      .env("OXIBELT_SECURITY_FUZZ_WORK_DIR", &failed_work_dir)
-      .output()
-      .expect("failing security-fuzz recovery should execute");
-    assert_eq!(failed.status.code(), Some(42));
-    assert!(
-      String::from_utf8_lossy(&failed.stderr)
-        .contains("downstream HTTP/2 connection failed: connection error"),
-      "failed probes must retain their diagnostic"
+    assert_eq!(
+      fs::read_to_string(successful_calls)
+        .expect("successful Docker lifecycle should be recorded")
+        .lines()
+        .collect::<Vec<_>>(),
+      ["inspect", "create", "cp", "start", "wait", "logs", "rm"],
+      "successful probes must start detached, wait, collect logs, then clean up"
     );
+
+    for (name, extra_env, expected_status, expected_diagnostic) in [
+      (
+        "start-error",
+        vec![("FAKE_DOCKER_START_STATUS", "42")],
+        42,
+        None,
+      ),
+      (
+        "wait-error",
+        vec![("FAKE_DOCKER_WAIT_STATUS", "43")],
+        43,
+        Some("fake docker wait failed"),
+      ),
+      (
+        "logs-error",
+        vec![("FAKE_DOCKER_LOG_STATUS", "44")],
+        44,
+        Some("fake docker logs failed"),
+      ),
+      (
+        "container-error",
+        vec![("FAKE_DOCKER_CONTAINER_STATUS", "45")],
+        45,
+        Some("downstream HTTP/2 connection failed: connection error"),
+      ),
+      (
+        "empty-success-output",
+        vec![("FAKE_DOCKER_LOG_OUTPUT", "empty")],
+        1,
+        Some("security-fuzz probe completed without stdout"),
+      ),
+      (
+        "invalid-container-status",
+        vec![("FAKE_DOCKER_CONTAINER_STATUS", "invalid")],
+        1,
+        Some("security-fuzz probe returned an invalid container exit status"),
+      ),
+    ] {
+      let failed_work_dir = fixture_path.join(name);
+      fs::create_dir(&failed_work_dir).expect("failed work directory should be created");
+      let calls = fixture_path.join(format!("{name}-calls"));
+      let mut scenario_env = extra_env;
+      scenario_env.push(("FAKE_DOCKER_CALLS_FILE", calls.to_str().unwrap()));
+      let failed = run_recovery(&failed_work_dir, "4-5-6", &scenario_env);
+      assert_eq!(
+        failed.status.code(),
+        Some(expected_status),
+        "{name} must preserve its status"
+      );
+      if let Some(expected_diagnostic) = expected_diagnostic {
+        assert!(
+          String::from_utf8_lossy(&failed.stderr).contains(expected_diagnostic),
+          "{name} must retain its diagnostic; stderr:\n{}",
+          String::from_utf8_lossy(&failed.stderr)
+        );
+      }
+      let observed_calls_text =
+        fs::read_to_string(calls).expect("failed Docker lifecycle should be recorded");
+      let observed_calls = observed_calls_text.lines().collect::<Vec<_>>();
+      assert_eq!(
+        observed_calls.last(),
+        Some(&"rm"),
+        "{name} must clean up its probe container"
+      );
+    }
   }
 
   #[test]
@@ -529,13 +612,19 @@ esac
         .unwrap_or_else(|| panic!("executor must contain {start} before {end}"))
     };
 
+    let capture = function_body("capture_probe_output() {", "\n}\n\nprobe_with_ca() {");
+    assert!(capture.contains(": >\"${output_file}\""));
+    assert!(capture.contains("docker start \"${client}\" >/dev/null || start_status=$?"));
+    assert!(capture.contains("wait_output=\"$(docker wait \"${client}\")\" || wait_status=$?"));
+    assert!(capture.contains("docker logs \"${client}\" >\"${output_file}\" || logs_status=$?"));
+    assert!(!capture.contains("docker logs \"${client}\" 2>&1"));
+    assert!(capture.contains("security-fuzz probe completed without stdout"));
+
     let probe = function_body("probe_with_ca() {", "\n}\n\nprobe_without_files() {");
-    assert!(probe.contains("docker start -a \"${client}\" >\"${output_file}\" || status=$?"));
-    assert!(!probe.contains("docker start -a \"${client}\" >\"${output_file}\" 2>&1"));
+    assert!(probe.contains("capture_probe_output \"${client}\" \"${output_file}\" || status=$?"));
 
     let mock = function_body("mock_client() {", "\n}\n\ndownstream_request() {");
-    assert!(mock.contains("docker start -a \"${client}\" >\"${output_file}\" || status=$?"));
-    assert!(!mock.contains("docker start -a \"${client}\" >\"${output_file}\" 2>&1"));
+    assert!(mock.contains("capture_probe_output \"${client}\" \"${output_file}\" || status=$?"));
 
     let turn = function_body(
       "finish_turn_allocation_probe() {",

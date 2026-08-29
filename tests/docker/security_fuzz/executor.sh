@@ -299,6 +299,37 @@ start_proxy() {
   docker start "${proxy}" >/dev/null
 }
 
+capture_probe_output() {
+  local client="$1" output_file="$2"
+  local start_status=0 wait_status=0 logs_status=0 wait_output
+
+  : >"${output_file}"
+  docker start "${client}" >/dev/null || start_status=$?
+  if ((start_status != 0)); then
+    return "${start_status}"
+  fi
+
+  wait_output="$(docker wait "${client}")" || wait_status=$?
+  if ((wait_status != 0)); then
+    return "${wait_status}"
+  fi
+  if ! [[ "${wait_output}" =~ ^(0|[1-9][0-9]{0,2})$ ]] \
+    || ((10#${wait_output} > 255)); then
+    echo "security-fuzz probe returned an invalid container exit status: ${wait_output:-empty}" >&2
+    return 1
+  fi
+
+  docker logs "${client}" >"${output_file}" || logs_status=$?
+  if ((logs_status != 0)); then
+    return "${logs_status}"
+  fi
+  if [[ "${wait_output}" == 0 && ! -s "${output_file}" ]]; then
+    echo "security-fuzz probe completed without stdout" >&2
+    return 1
+  fi
+  return "$((10#${wait_output}))"
+}
+
 probe_with_ca() {
   local output_file="$1"; shift
   local client status=0
@@ -307,7 +338,7 @@ probe_with_ca() {
     --name "${client}" --label "${label}" --network "${network}" \
     "${probe_image}" "$@" >/dev/null
   docker cp "${cert_dir}/ca.pem" "${client}:/tmp/ca.pem"
-  docker start -a "${client}" >"${output_file}" || status=$?
+  capture_probe_output "${client}" "${output_file}" || status=$?
   docker rm -f "${client}" >/dev/null 2>&1 || true
   return "${status}"
 }
@@ -337,7 +368,7 @@ mock_client() {
   if [[ "${scheme}" == "https" ]]; then
     docker cp "${cert_dir}/ca.pem" "${client}:/tmp/ca.pem"
   fi
-  docker start -a "${client}" >"${output_file}" || status=$?
+  capture_probe_output "${client}" "${output_file}" || status=$?
   docker rm -f "${client}" >/dev/null 2>&1 || true
   return "${status}"
 }
