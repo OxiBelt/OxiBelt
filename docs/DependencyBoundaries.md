@@ -74,6 +74,13 @@ CT monitoring, accepted-root management, shard planning, and explicit
 PostgreSQL administration. They do not authorize other role packages to
 acquire CT runtime ownership or add wildcard re-exports.
 
+The public `bandwidth` root is the reviewed process-local scheduling surface
+used by the public `ResolvedRoute::bandwidth` limiter handle. It owns
+route-shared upload and download policy, flow, grant, and error mechanics; it
+does not own configuration parsing, persistence, deployment control, or
+cross-process coordination, and no role package acquires a new dependency or
+feature through this bridge.
+
 ## Role feature matrix
 
 The workspace dependency on `oxibelt` disables default features. Every role

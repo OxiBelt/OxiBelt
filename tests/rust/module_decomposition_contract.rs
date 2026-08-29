@@ -671,6 +671,7 @@ fn root_public_modules_match_the_reviewed_compatibility_surface() {
     "admin_audit",
     "admin_client",
     "admin_mutation",
+    "bandwidth",
     "cache",
     "circuit_breakers",
     "client_identity",
