@@ -39,6 +39,14 @@ def validate_http_token(raw_value: str, field_name: str) -> str:
   return value
 
 
+def validate_upgrade_offer(raw_value: str) -> str:
+  tokens = [
+    validate_http_token(token, "Upgrade token")
+    for token in raw_value.split(",")
+  ]
+  return ", ".join(tokens)
+
+
 def validate_header_value(raw_value: str) -> str:
   value = raw_value.strip()
   if "\r" in value or "\n" in value or "\0" in value:
@@ -316,6 +324,8 @@ def perform_upgrade(args, host_header, target_path, headers, body):
       os.close(ready_fd)
     if args.hold_after_headers_ms > 0:
       time.sleep(args.hold_after_headers_ms / 1000.0)
+    if args.upgrade_headers_only:
+      return response, b""
     sock.sendall(body)
     sock.settimeout(args.timeout)
     upgraded = sock.recv(4096)
@@ -341,6 +351,7 @@ def main() -> int:
   parser.add_argument("--proxy-protocol-line")
   parser.add_argument("--connect-tunnel", action="store_true")
   parser.add_argument("--upgrade-token")
+  parser.add_argument("--upgrade-headers-only", action="store_true")
   parser.add_argument("--signal-upgrade-ready", action="store_true")
   parser.add_argument("--dump-response-json", action="store_true")
   parser.add_argument("--expect-status", type=int)
@@ -371,8 +382,14 @@ def main() -> int:
       raise ValueError("--signal-upgrade-ready requires --upgrade-token")
     if args.signal_upgrade_ready and args.connect_tunnel:
       raise ValueError("--signal-upgrade-ready cannot be combined with --connect-tunnel")
+    if args.upgrade_headers_only and not args.upgrade_token:
+      raise ValueError("--upgrade-headers-only requires --upgrade-token")
+    if args.upgrade_headers_only and args.signal_upgrade_ready:
+      raise ValueError(
+        "--upgrade-headers-only cannot be combined with --signal-upgrade-ready"
+      )
     if args.upgrade_token:
-      args.upgrade_token = validate_http_token(args.upgrade_token, "Upgrade token")
+      args.upgrade_token = validate_upgrade_offer(args.upgrade_token)
     if args.proxy_protocol_line:
       args.proxy_protocol_line = validate_proxy_protocol_line(args.proxy_protocol_line)
     if args.path:

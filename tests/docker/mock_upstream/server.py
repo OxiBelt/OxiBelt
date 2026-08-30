@@ -21,6 +21,11 @@ ACCEPT_PROXY_PROTOCOL = os.environ.get("ACCEPT_PROXY_PROTOCOL", "0") == "1"
 CAPTURE_REQUESTS = os.environ.get("CAPTURE_REQUESTS", "0") == "1"
 RECURSIVE_DECODE_PATH = os.environ.get("RECURSIVE_DECODE_PATH", "0") == "1"
 HTTP_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+UPGRADE_RESPONSE_TOKEN = os.environ.get("UPGRADE_RESPONSE_TOKEN")
+if UPGRADE_RESPONSE_TOKEN is not None and not HTTP_TOKEN_RE.fullmatch(
+  UPGRADE_RESPONSE_TOKEN
+):
+  raise ValueError("UPGRADE_RESPONSE_TOKEN must be exactly one HTTP token")
 REQUEST_COUNTS = {}
 REQUEST_COUNTS_LOCK = threading.Lock()
 REQUEST_COUNT_KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -483,17 +488,25 @@ class EchoHandler(BaseHTTPRequestHandler):
     self.wfile.write(b"0\r\n\r\n")
 
   def _handle_upgrade(self):
-    upgrade = self.headers.get("upgrade")
+    upgrade_values = self.headers.get_all("upgrade", [])
     connection = self.headers.get("connection", "")
-    if not upgrade or "upgrade" not in connection.lower():
+    if not upgrade_values or "upgrade" not in connection.lower():
       return False
-    if not HTTP_TOKEN_RE.fullmatch(upgrade):
-      self.send_error(400, "invalid Upgrade token")
-      return True
+
+    offered_tokens = []
+    for value in upgrade_values:
+      for raw_token in value.split(","):
+        token = raw_token.strip()
+        if not HTTP_TOKEN_RE.fullmatch(token):
+          self.send_error(400, "invalid Upgrade token")
+          return True
+        offered_tokens.append(token)
+
+    selected_token = UPGRADE_RESPONSE_TOKEN or offered_tokens[0]
 
     self.send_response_only(101, "Switching Protocols")
     self.send_header("Connection", "Upgrade")
-    self.send_header("Upgrade", upgrade)
+    self.send_header("Upgrade", selected_token)
     self.end_headers()
     self.connection.settimeout(5.0)
     data = self.connection.recv(4096)

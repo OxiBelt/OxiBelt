@@ -4,8 +4,12 @@ use super::*;
 
 use crate::bandwidth::{BandwidthDirection, RouteBandwidthLimiter};
 
+#[path = "tunnel/upgrade_protocol.rs"]
+mod upgrade_protocol;
 #[path = "tunnel/websocket_wire.rs"]
 mod websocket_wire;
+
+use upgrade_protocol::UpgradeMode;
 
 pub(super) struct TunnelConnectionLimitHold {
   _request_permit: Option<ConnectionPermit>,
@@ -483,17 +487,14 @@ pub(super) async fn handle_upgrade_request(
     ));
   }
 
-  let websocket_upgrade = is_websocket_upgrade(&request);
+  let upgrade_mode = upgrade_protocol::authorize(
+    request.headers(),
+    state.config.proxy.upgrades.websocket,
+    state.config.proxy.upgrades.generic_http_upgrade,
+    resolved.route.generic_http_upgrade,
+  )?;
+  let websocket_upgrade = upgrade_mode == UpgradeMode::WebSocket;
   let websocket_framed_bridge = websocket_upgrade && stream_waf.is_some();
-  let generic_upgrade = !websocket_upgrade
-    && state.config.proxy.upgrades.generic_http_upgrade
-    && resolved.route.generic_http_upgrade;
-  if websocket_upgrade && !state.config.proxy.upgrades.websocket {
-    return None;
-  }
-  if !websocket_upgrade && !generic_upgrade {
-    return None;
-  }
 
   let selected = match select_request_upstream(
     state.as_ref(),
@@ -624,6 +625,12 @@ pub(super) async fn handle_upgrade_request(
     let response = upstream_response.map(|body| body.map_err(boxed_error).boxed());
     return Some(route_security.apply(response));
   }
+  if websocket_upgrade && !upgrade_protocol::is_websocket_selection(upstream_response.headers()) {
+    const MESSAGE: &str = "upstream did not select the WebSocket upgrade protocol";
+    state.pools.report_failure_async(&upstream.name).await;
+    access_log.record_upstream_error("protocol_error", MESSAGE);
+    return Some(route_security.text(StatusCode::BAD_GATEWAY, MESSAGE));
+  }
   if websocket_framed_bridge {
     remove_websocket_extensions(upstream_response.headers_mut());
   }
@@ -713,16 +720,6 @@ pub(super) async fn handle_upgrade_request(
   let mut response = upstream_response.map(|body| body.map_err(boxed_error).boxed());
   apply_sticky_cookie(&mut response, sticky_cookie.as_ref());
   Some(response)
-}
-
-pub(super) fn is_websocket_upgrade<B>(request: &Request<B>) -> bool {
-  request
-    .headers()
-    .get_all(http::header::UPGRADE)
-    .iter()
-    .filter_map(|value| value.to_str().ok())
-    .flat_map(|value| value.split(','))
-    .any(|value| value.trim().eq_ignore_ascii_case("websocket"))
 }
 
 fn remove_websocket_extensions(headers: &mut HeaderMap) {

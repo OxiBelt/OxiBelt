@@ -10,13 +10,18 @@ mock_image="oxibelt/mock-upstream:${run_id}"
 proxy_image="oxibelt/proxy-it:${run_id}"
 pq_probe_image="oxibelt/pq-probe:${run_id}"
 http_container="oxibelt-http-${run_id}"
+alternate_upgrade_container="oxibelt-alternate-upgrade-${run_id}"
 https_container="oxibelt-https-${run_id}"
 proxy_container="oxibelt-proxy-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
-  docker rm -f "${proxy_container}" "${https_container}" "${http_container}" >/dev/null 2>&1 || true
+  docker rm -f \
+    "${proxy_container}" \
+    "${https_container}" \
+    "${alternate_upgrade_container}" \
+    "${http_container}" >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
   docker rmi -f "${proxy_image}" "${mock_image}" "${pq_probe_image}" >/dev/null 2>&1 || true
   if [[ "${KEEP_TEST_ARTIFACTS:-0}" != "1" ]]; then
@@ -145,6 +150,11 @@ trusted_ca_certs = ["upstream-ca.pem"]
 enabled = true
 max_http_version = "h2"
 
+[proxy.upgrades]
+websocket = true
+generic_http_upgrade = true
+connect_tunneling = false
+
 [compression]
 enabled = true
 gzip = true
@@ -182,6 +192,20 @@ webtransport = true
 mode = "disabled"
 
 [[upstreams]]
+name = "alternate-upgrade"
+origin = "http://mock-alternate-upgrade:18082"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = false
+webtransport = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[upstreams]]
 name = "https-upstream"
 origin = "https://mock-https:18443/backend"
 max_http_version = "h1"
@@ -200,6 +224,25 @@ name = "http-route"
 hosts = ["http.example.test"]
 path_prefix = "/app"
 upstream = "http-upstream"
+
+[[routes]]
+name = "mixed-upgrade-blocked-route"
+hosts = ["mixed-upgrade-blocked.example.test"]
+path_prefix = "/upgrade"
+upstream = "alternate-upgrade"
+
+[[routes]]
+name = "generic-upgrade-route"
+hosts = ["generic-upgrade.example.test"]
+path_prefix = "/upgrade"
+upstream = "alternate-upgrade"
+generic_http_upgrade = true
+
+[[routes]]
+name = "websocket-mismatch-route"
+hosts = ["websocket-mismatch.example.test"]
+path_prefix = "/upgrade"
+upstream = "alternate-upgrade"
 
 [[routes]]
 name = "https-route"
@@ -250,6 +293,15 @@ docker run -d \
   --network-alias mock-http \
   -e LISTEN_PORT=18080 \
   -e UPSTREAM_NAME=http-upstream \
+  "${mock_image}" >/dev/null
+
+docker run -d \
+  --name "${alternate_upgrade_container}" \
+  --network "${network_name}" \
+  --network-alias mock-alternate-upgrade \
+  -e LISTEN_PORT=18082 \
+  -e UPSTREAM_NAME=alternate-upgrade \
+  -e UPGRADE_RESPONSE_TOKEN=h2c \
   "${mock_image}" >/dev/null
 
 docker create \
@@ -334,6 +386,49 @@ request_path_through_proxy() {
   return "${status}"
 }
 
+upgrade_through_proxy() {
+  local path="$1"
+  local host="$2"
+  local upgrade_offer="$3"
+  local expect_status="$4"
+  local body="$5"
+  local headers_only="$6"
+  local client_container="oxibelt-client-${run_id}-${RANDOM}"
+  local status=0
+  local client_args=(
+    /opt/mock_upstream/client.py
+    --path "${path}"
+    --host "${host}"
+    --ca-file /tmp/proxy-ca.pem
+    --upgrade-token "${upgrade_offer}"
+    --body "${body}"
+    --dump-response-json
+    --expect-status "${expect_status}"
+  )
+
+  if [[ "${headers_only}" == "1" ]]; then
+    client_args+=(--upgrade-headers-only)
+  fi
+
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint python \
+    "${mock_image}" \
+    "${client_args[@]}" >/dev/null
+  docker cp "${work_dir}/proxy-tls/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+
+  if docker start -a "${client_container}"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  return "${status}"
+}
+
 run_pq_probe() {
   local group="$1"
   local expect="$2"
@@ -400,6 +495,50 @@ echo "${https_response}" | grep -F '"path": "/backend/edge/v1/health?source=http
 echo "${https_response}" | grep -F '"host": "secure.example.test"'
 echo "${https_response}" | grep -F '"x-forwarded-host": "secure.example.test"'
 
+valid_websocket_response="$(
+  upgrade_through_proxy "/app/upgrade" "http.example.test" "websocket" 101 "" 1
+)"
+echo "${valid_websocket_response}" | grep -F '"status": 101'
+echo "${valid_websocket_response}" | grep -F '"upgrade": "websocket"'
+
+mixed_upgrade_blocked_response="$(
+  upgrade_through_proxy \
+    "/upgrade" \
+    "mixed-upgrade-blocked.example.test" \
+    "h2c, websocket" \
+    501 \
+    "" \
+    0
+)"
+echo "${mixed_upgrade_blocked_response}" | grep -F '"status": 501'
+echo "${mixed_upgrade_blocked_response}" | grep -F '"body": "unsupported HTTP upgrade request"'
+
+websocket_mismatch_response="$(
+  upgrade_through_proxy \
+    "/upgrade" \
+    "websocket-mismatch.example.test" \
+    "websocket" \
+    502 \
+    "" \
+    0
+)"
+echo "${websocket_mismatch_response}" | grep -F '"status": 502'
+echo "${websocket_mismatch_response}" \
+  | grep -F '"body": "upstream did not select the WebSocket upgrade protocol"'
+
+generic_upgrade_response="$(
+  upgrade_through_proxy \
+    "/upgrade" \
+    "generic-upgrade.example.test" \
+    "h2c, websocket" \
+    101 \
+    "alternate-protocol" \
+    0
+)"
+echo "${generic_upgrade_response}" | grep -F '"status": 101'
+echo "${generic_upgrade_response}" | grep -F '"upgrade": "h2c"'
+echo "${generic_upgrade_response}" | grep -F '"body": "upgraded:alternate-protocol"'
+
 static_response="$(request_path_through_proxy "/assets/secret.txt" "static.example.test" 200)"
 echo "${static_response}" | grep -F '"body": "INSIDE_VALIDATED_ROOT"'
 
@@ -427,5 +566,6 @@ pq_hybrid_output="$(run_pq_probe "x25519mlkem768" "success")"
 echo "${pq_hybrid_output}" | grep -F 'requested_group=X25519MLKEM768 negotiated_group=X25519MLKEM768'
 
 echo "HTTP and HTTPS proxy integration checks passed"
+echo "WebSocket and generic HTTP Upgrade protocol binding checks passed"
 echo "X25519 and X25519MLKEM768 both negotiate successfully with the current aws-lc-rs-based server"
 echo "HTTPS upstream proxying succeeds with TLS 1.3 ECH GREASE enabled"

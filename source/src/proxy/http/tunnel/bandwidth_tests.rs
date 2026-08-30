@@ -34,30 +34,6 @@ fn websocket_extension_negotiation_is_removed_before_framed_bridging() {
   assert_eq!(headers.get("x-preserved").unwrap(), "value");
 }
 
-#[test]
-fn websocket_upgrade_classification_accepts_comma_and_repeated_tokens() {
-  let comma = Request::builder()
-    .header(http::header::UPGRADE, "h2c, WebSocket")
-    .body(())
-    .unwrap();
-  assert!(is_websocket_upgrade(&comma));
-
-  let mut repeated = Request::new(());
-  repeated
-    .headers_mut()
-    .append(http::header::UPGRADE, "h2c".parse().unwrap());
-  repeated
-    .headers_mut()
-    .append(http::header::UPGRADE, "websocket".parse().unwrap());
-  assert!(is_websocket_upgrade(&repeated));
-
-  let other = Request::builder()
-    .header(http::header::UPGRADE, "h2c")
-    .body(())
-    .unwrap();
-  assert!(!is_websocket_upgrade(&other));
-}
-
 #[tokio::test(start_paused = true)]
 async fn tunnel_idle_timeout_pauses_during_deliberate_bandwidth_wait() {
   let (mut client, downstream) = tokio::io::duplex(64);
