@@ -119,22 +119,31 @@ class MockUpstreamServerHeaderValidationTests(unittest.TestCase):
 
     def test_upgrade_token_validator_rejects_cr_and_lf(self) -> None:
         for control in ("\r", "\n", "\r\n"):
-            with self.subTest(control=repr(control)):
-                token = f"websocket{control}{INJECTED_HEADER}: present"
-                self.assertIsNone(SERVER.HTTP_TOKEN_RE.fullmatch(token))
+            token = f"websocket{control}{INJECTED_HEADER}: present"
+            self.assertIsNone(SERVER.HTTP_TOKEN_RE.fullmatch(token))
 
-                handler = object.__new__(SERVER.EchoHandler)
-                handler.headers = {
-                    "upgrade": token,
-                    "connection": "Upgrade",
-                }
-                handler.send_error = mock.Mock()
+            for header_shape, upgrade_values in (
+                ("single", (token,)),
+                ("duplicate", ("websocket", token)),
+            ):
+                with self.subTest(
+                    control=repr(control),
+                    header_shape=header_shape,
+                ):
+                    headers = http.client.HTTPMessage()
+                    for upgrade_value in upgrade_values:
+                        headers.add_header("Upgrade", upgrade_value)
+                    headers.add_header("Connection", "Upgrade")
 
-                self.assertTrue(handler._handle_upgrade())
-                handler.send_error.assert_called_once_with(
-                    400,
-                    "invalid Upgrade token",
-                )
+                    handler = object.__new__(SERVER.EchoHandler)
+                    handler.headers = headers
+                    handler.send_error = mock.Mock()
+
+                    self.assertTrue(handler._handle_upgrade())
+                    handler.send_error.assert_called_once_with(
+                        400,
+                        "invalid Upgrade token",
+                    )
 
 
 class EarlyResponseSocket:
