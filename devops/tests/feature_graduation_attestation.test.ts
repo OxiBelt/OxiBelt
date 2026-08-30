@@ -114,7 +114,7 @@ function KubernetesReceipt(Policy: KubernetesGraduationPolicy, Reports: Array<{ 
     repository: Policy.repository, sourceRef: 'refs/heads/main', sourceRevision: Revision,
     generatedAt: '2026-08-08T12:00:00Z', qualifiedPlatforms: Feature.qualifiedPlatforms,
     workflow: { repository: Policy.repository, path: '.github/workflows/feature-graduation.yml', ref: Revision, runId: 7, runAttempt: 1, jobs: Feature.qualifiedPlatforms.map((Platform, Index) => ({ id: 201 + Index, name: `kubernetes-${Platform}`, conclusion: 'success' })) },
-    toolVersions: [{ name: 'helm', version: '3.21.3' }],
+    toolVersions: [{ name: 'helm', version: '3.21.4' }],
     artifactSubjects: Feature.requiredArtifacts.map((Requirement, Index) => {
       const digest = `sha256:${String(Index + 2).repeat(64)}`
       return { name: Requirement.name, kind: Requirement.kind, reference: `${Requirement.repository}@${digest}`, digest }

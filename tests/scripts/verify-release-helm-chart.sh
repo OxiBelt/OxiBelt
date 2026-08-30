@@ -11,7 +11,7 @@ usage: verify-release-helm-chart.sh --mode <rebuild|consume> \
   --work-directory <empty-directory> [--workspace-path <path> --release-ref <ref> --revision <sha>]
 
 `rebuild` requires Helm v4.2.4, an approved `helm_chart_release.ts` helper,
-and exact source inputs. `consume` permits Helm v3.21.3 or v4.2.4 and never
+and exact source inputs. `consume` permits Helm v3.21.4 or v4.2.4 and never
 claims cross-version package-byte production equality. Set HELM_BIN, ORAS_BIN,
 NODE_BIN, and HELM_CHART_RELEASE_HELPER to inject test fixtures.
 USAGE
@@ -79,12 +79,12 @@ work_directory="$(assert_no_symlink_path "${work_directory}" "work directory")" 
 
 helm_version="$("${helm_bin}" version --short)"
 oras_version="$("${oras_bin}" version)"
-[[ "${oras_version}" =~ (^|[[:space:]])1\.3\.3($|[[:space:]]) ]] || { echo "ORAS must be the approved 1.3.3 acquisition client" >&2; exit 1; }
+[[ "${oras_version}" =~ (^|[[:space:]])1\.3\.4($|[[:space:]]) ]] || { echo "ORAS must be the approved 1.3.4 acquisition client" >&2; exit 1; }
 if [[ "${mode}" == rebuild ]]; then
   [[ "${helm_version}" =~ ^v4\.2\.4(\+[0-9A-Za-z.-]+)?$ ]] || { echo "byte rebuild requires Helm v4.2.4, found ${helm_version}" >&2; exit 1; }
   [[ "${release_ref}" == "refs/tags/${version}" && "${revision}" =~ ^[0-9a-f]{40}$ && -n "${workspace_path}" ]] || { usage; exit 2; }
 else
-  [[ "${helm_version}" =~ ^v(3\.21\.3|4\.2\.4)(\+[0-9A-Za-z.-]+)?$ ]] || { echo "consumption verification requires Helm 3.21.3 or 4.2.4, found ${helm_version}" >&2; exit 1; }
+  [[ "${helm_version}" =~ ^v(3\.21\.4|4\.2\.4)(\+[0-9A-Za-z.-]+)?$ ]] || { echo "consumption verification requires Helm 3.21.4 or 4.2.4, found ${helm_version}" >&2; exit 1; }
 fi
 
 trap 'rm -rf -- "${work_directory}/.verify-release-helm-chart"' EXIT
@@ -226,8 +226,8 @@ const expectedAnnotations = new Map([["oxibelt.dev/feature-status", "experimenta
 if (annotations.size !== expectedAnnotations.size) throw new Error("local chart annotation set is invalid");
 for (const [key, value] of expectedAnnotations) if (annotations.get(key) !== value) throw new Error("local chart annotation value is invalid");
 ' "${chart_yaml}" "${chart_name}" "${version}"
-"${helm_bin}" lint --strict "${verified_archive}" --kube-version 1.34.8
-"${helm_bin}" template "${chart_name}" "${verified_archive}" --kube-version 1.34.8 >"${scratch}/rendered.yaml"
+"${helm_bin}" lint --strict "${verified_archive}" --kube-version 1.34.11
+"${helm_bin}" template "${chart_name}" "${verified_archive}" --kube-version 1.34.11 >"${scratch}/rendered.yaml"
 "${helm_bin}" install "${chart_name}" "${verified_archive}" --namespace verify --dry-run=client --debug >"${scratch}/install.yaml"
 
 if [[ "${mode}" == rebuild ]]; then

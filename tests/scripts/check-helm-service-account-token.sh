@@ -10,7 +10,7 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 data_chart_dir="${repo_root}/deploy/helm/oxibelt"
 v2_values="${data_chart_dir}/examples/edge-secure-medium-v2-values.yaml"
 controller_chart_dir="${repo_root}/deploy/helm/oxibelt-gateway-controller"
-kubernetes_version="1.34.8"
+kubernetes_version="1.34.11"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 

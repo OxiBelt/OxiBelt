@@ -8,7 +8,7 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 chart_dir="${repo_root}/deploy/helm/oxibelt-gateway-controller"
-kubernetes_version="1.34.8"
+kubernetes_version="1.34.11"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 

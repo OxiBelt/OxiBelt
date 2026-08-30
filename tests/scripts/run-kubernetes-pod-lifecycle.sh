@@ -11,7 +11,7 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
 # Keep the PR lifecycle lane on the oldest Kubernetes version in the
 # qualification window. The full version matrix runs in the rollout lane.
-kind_node_image="kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256"
+kind_node_image="kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d"
 timeout_seconds="${OXIBELT_KUBERNETES_POD_LIFECYCLE_TIMEOUT_SECONDS:-600}"
 
 if [[ "${OXIBELT_RUN_KUBERNETES_POD_LIFECYCLE:-}" != "1" ]]; then

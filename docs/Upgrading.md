@@ -297,7 +297,7 @@ verify that upstream DNS returns metadata for that accepted owner; hosts-pinned,
 mixed-provenance, conflicting-owner, and mismatched metadata responses now stay
 on their base addresses without SVCB expansion.
 
-Use Helm `4.2.4` for canonical packaging and reproducibility; Helm `3.21.3`
+Use Helm `4.2.4` for canonical packaging and reproducibility; Helm `3.21.4`
 or `4.2.4` may render and consume the charts. Inspect both exact-version chart
 manifests and immutable admission references before staged rollout. On AMD64,
 select the immutable `x86-64-v3` image only on compatible hosts; otherwise use
@@ -377,7 +377,7 @@ oxibeltctl config validate \
 helm version --short
 ```
 
-Use Helm `4.2.4` for canonical packaging and reproducibility. Helm `3.21.3` or
+Use Helm `4.2.4` for canonical packaging and reproducibility. Helm `3.21.4` or
 `4.2.4` may render and consume the charts. Inspect both exact-version chart
 manifests and their admission references before a staged rollout; do not rely
 on a mutable chart alias.
@@ -493,11 +493,12 @@ configuration. Rebuild and redeploy each immutable image from the complete
 target source revision; do not combine binaries or dependency evidence from
 the old and new lockfiles.
 
-The Helm 4 compatibility and release-evidence contract advances from `4.2.3`
-to `4.2.4`, while the Helm 3 contract remains `3.21.3`. Operators using Helm 4
-must upgrade the client to exactly `4.2.4` before rendering, installing, or
-upgrading the chart. Evidence produced with Helm `4.2.3` does not satisfy the
-new exact-version predicate and must not be reused. Existing deployed objects
+The Helm compatibility and release-evidence contract advances from `3.21.3`
+to `3.21.4` for Helm 3 and from `4.2.3` to `4.2.4` for Helm 4. Operators must
+upgrade the client to one of those exact versions before rendering, installing,
+or upgrading the chart. Evidence produced with Helm `3.21.3` or `4.2.3` does
+not satisfy the new exact-version predicate and must not be reused. Existing
+deployed objects
 need no state migration; render the chart again with the target client and
 review the result before applying it.
 

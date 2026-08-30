@@ -164,7 +164,7 @@ fn diagnoses_unsupported_kubernetes_minors_and_missing_gateway_apis() {
 #[test]
 fn accepts_qualified_kubernetes_minors_and_complete_gateway_api_v1() {
   let mut report = DiagnosticReport::new();
-  diagnose_server_version(&mut report, "v1.36.1", "1", "36+");
+  diagnose_server_version(&mut report, "v1.36.4", "1", "36+");
   let served = super::REQUIRED_GATEWAY_API_V1_RESOURCES
     .iter()
     .map(|resource| (*resource).to_string())

@@ -12,17 +12,17 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 gateway_api_version="v1.6.1"
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
 gateway_api_sha256="24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73"
-redis_source_image="valkey/valkey:9-alpine@sha256:3fe38a705227d29534a199e876b38d5474dec4d3baca980ac6894df539416562"
+redis_source_image="valkey/valkey:9-alpine@sha256:7bf043f6ff25ea50b557e2f6da8f76fce62775d766d943f076d1e66838099315"
 redis_source_digest="${redis_source_image##*@sha256:}"
 redis_kind_image=""
 # The scheduled qualification matrix may select only these reviewed Kind node
 # manifests. Arbitrary environment-provided images are rejected before Docker
 # or Kind creates resources.
-kind_node_image="${OXIBELT_KUBERNETES_KIND_NODE_IMAGE:-kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256}"
+kind_node_image="${OXIBELT_KUBERNETES_KIND_NODE_IMAGE:-kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d}"
 case "${kind_node_image}" in
-  "kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256" | \
-  "kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95" | \
-  "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5")
+  "kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d" | \
+  "kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0" | \
+  "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed")
     ;;
   *)
     echo "kubernetes immutable rollout test: unapproved Kind node image: ${kind_node_image}" >&2

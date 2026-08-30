@@ -1,5 +1,5 @@
 ARG RUST_BUILDER_IMAGE=rust:1.98.0-trixie@sha256:271849e998ffce5776454bbf98c5dc21baafc854ff8e566197908d3aca9a81e8
-ARG OXIBELT_NODE_IMAGE=node:24-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
+ARG OXIBELT_NODE_IMAGE=node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf
 ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 ARG OXIBELT_BUILD_VERSION=0.0.0-dev.archive
 ARG OXIBELT_BUILD_REVISION=unknown
@@ -40,10 +40,10 @@ RUN apt-get update && \
 
 FROM builder-base AS builder-native
 
-# cross-rs source revision: 55f847251389c5406df85579191c0eac412fab3a
+# cross-rs source revision: 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27
 # Copy only the compiler/sysroot. In particular, do not inherit the cross-rs
 # emulator helpers or its Cargo runner environment.
-FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:60372bf6ad955bc04ac9b0689476b05955b4e90fc2030d311be687025672cc6d AS riscv64-cross-toolchain
+FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:6123336467138e0bdc18fc7032032bd5772036ea5f48e91da49895b266fc3298 AS riscv64-cross-toolchain
 
 FROM builder-base AS builder-riscv64
 
@@ -70,7 +70,7 @@ RUN if [ "${BUILDARCH}" != "amd64" ]; then \
     test "$("${compiler}" -dumpmachine)" = "riscv64-unknown-linux-musl" && \
     test "$("${linker}" --version | sed -n '1p')" = "GNU ld (crosstool-NG UNKNOWN) 2.45" && \
     test "$(sha256sum "${compiler}" | awk '{print $1}')" = \
-      "3fe20d705129f8ba4ae6be393fd4c484479f688f576af78c0ff2bb10e59d5f86"
+      "8c94c9705057a062899d4a0acaf732bfe9b3fa29483f5ab3dd21594c4aa1a00d"
 
 FROM ${OXIBELT_RUST_BUILDER_STAGE} AS builder
 

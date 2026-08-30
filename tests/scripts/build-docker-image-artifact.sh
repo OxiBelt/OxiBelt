@@ -82,7 +82,7 @@ artifact_contract="${output_dir%/}/${artifact_prefix}-alpine-musl-${artifact_arc
 build_metadata_tmp=""
 rust_toolchain_version="1.98.0"
 rust_builder_image="rust:${rust_toolchain_version}-trixie@sha256:271849e998ffce5776454bbf98c5dc21baafc854ff8e566197908d3aca9a81e8"
-node_builder_image="node:24-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43"
+node_builder_image="node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf"
 runtime_image="alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 rust_target=""
 amd64_target_cpu=""
@@ -193,7 +193,7 @@ case "${artifact_arch}" in
     fi
     rust_target="riscv64gc-unknown-linux-musl"
     rust_builder_stage="builder-riscv64"
-    rust_build_cache_key="riscv64gc-musl-cross-rs-60372bf6"
+    rust_build_cache_key="riscv64gc-musl-cross-rs-61233364"
     ;;
   *)
     usage

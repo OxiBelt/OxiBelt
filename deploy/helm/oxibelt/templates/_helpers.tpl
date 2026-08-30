@@ -742,8 +742,8 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 
 {{- define "oxibelt.validateConfigRollout" -}}
 {{- $helmVersion := .Capabilities.HelmVersion.Version -}}
-{{- if not (or (semverCompare "=3.21.3" $helmVersion) (semverCompare "=4.2.4" $helmVersion)) -}}
-{{- fail (printf "OxiBelt Kubernetes qualification requires Helm 3.21.3 or 4.2.4, found %s; see docs/KubernetesSupport.md" $helmVersion) -}}
+{{- if not (or (semverCompare "=3.21.4" $helmVersion) (semverCompare "=4.2.4" $helmVersion)) -}}
+{{- fail (printf "OxiBelt Kubernetes qualification requires Helm 3.21.4 or 4.2.4, found %s; see docs/KubernetesSupport.md" $helmVersion) -}}
 {{- end -}}
 {{- $mode := .Values.configRollout.mode -}}
 {{- if not (has $mode (list "helm_immutable" "kubernetes_immutable")) -}}

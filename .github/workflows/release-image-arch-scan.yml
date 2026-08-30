@@ -801,7 +801,7 @@ jobs:
           node_builder="$(jq -r '.build_parameters.node_builder_image' "${ARTIFACT_CONTRACT}")"
           rust_target="$(jq -r '.rust_target' "${ARTIFACT_CONTRACT}")"
           if [[ "${OXIBELT_ARTIFACT_ARCH}" == "riscv64" ]]; then
-            cc_identity="cross-rs riscv64gc-musl toolchain 60372bf6"
+            cc_identity="cross-rs riscv64gc-musl toolchain 61233364"
           else
             cc_identity="Alpine 3.24 build-base musl toolchain"
           fi

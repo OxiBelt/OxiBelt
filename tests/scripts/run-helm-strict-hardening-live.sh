@@ -13,7 +13,7 @@ strict_values="${chart_dir}/examples/strict-dataplane-values.yaml"
 temp_root="${TMPDIR:-/tmp}"
 provider="${OXIBELT_KUBERNETES_PROVIDER:-minikube}"
 timeout_seconds="${OXIBELT_STRICT_HARDENING_TIMEOUT_SECONDS:-420}"
-kind_node_image="${OXIBELT_STRICT_HARDENING_KIND_NODE_IMAGE:-kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256}"
+kind_node_image="${OXIBELT_STRICT_HARDENING_KIND_NODE_IMAGE:-kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d}"
 minikube_kubernetes_version="${OXIBELT_STRICT_HARDENING_MINIKUBE_KUBERNETES_VERSION:-v1.34.11}"
 
 work_dir=""

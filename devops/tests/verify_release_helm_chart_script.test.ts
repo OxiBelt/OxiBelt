@@ -51,7 +51,7 @@ test('read-only Helm OCI verifier accepts injected consumption tools and rejects
     const WrongPolicy = WriteManifestVariant('wrong-policy', Helm4ManifestText.replace('"oxibelt.dev/feature-status":"experimental"', '"oxibelt.dev/feature-status":"stable"'))
     WriteExecutable(Path.join(Bin, 'helm'), `
 [[ -z "\${COMMAND_LOG:-}" ]] || printf 'helm:%s\\n' "$*" >>"\${COMMAND_LOG}"
-if [[ "$1 $2" == "version --short" ]]; then echo v3.21.3; exit 0; fi
+if [[ "$1 $2" == "version --short" ]]; then echo v3.21.4; exit 0; fi
 case "$1" in
   show) [[ "$2" == chart && "$3" == */oxibelt-1.2.3.tgz ]] || exit 8; if [[ "\${APP_VERSION_QUOTED:-}" == 1 ]]; then app_version='"1.2.3"'; else app_version='1.2.3'; fi; printf 'apiVersion: v2\\nname: oxibelt\\nversion: 1.2.3\\nappVersion: %s\\nannotations:\\n  oxibelt.dev/feature-status: experimental\\n  oxibelt.dev/kubernetes-support-policy: "1"\\n' "$app_version" ;;
   lint|template) : ;;
@@ -60,7 +60,7 @@ case "$1" in
 esac`)
     WriteExecutable(Path.join(Bin, 'oras'), `
 [[ -z "\${COMMAND_LOG:-}" ]] || printf 'oras:%s\\n' "$*" >>"\${COMMAND_LOG}"
-if [[ "$1" == version ]]; then echo "\${ORAS_VERSION:-Version: 1.3.3}"; exit 0; fi
+if [[ "$1" == version ]]; then echo "\${ORAS_VERSION:-Version: 1.3.4}"; exit 0; fi
 case "\${MANIFEST_VARIANT:-legacy}" in
   legacy) active_manifest='${Manifest}'; active_digest='${Digest}' ;;
   helm4) active_manifest='${Helm4Manifest}'; active_digest='${Helm4Digest}' ;;
@@ -148,7 +148,7 @@ fi`)
     const DuplicateWork = Path.join(Directory, 'duplicate-work'); Fs.mkdirSync(DuplicateWork)
     Assert.throws(() => RunScript([...Arguments(DuplicateWork), '--mode', 'consume'], Environment), /usage/)
     const OrasVersionWork = Path.join(Directory, 'oras-version-work'); Fs.mkdirSync(OrasVersionWork)
-    Assert.throws(() => RunScript(Arguments(OrasVersionWork), { ...Environment, ORAS_VERSION: 'Version: 9.9.9' }), /approved 1\.3\.3/)
+    Assert.throws(() => RunScript(Arguments(OrasVersionWork), { ...Environment, ORAS_VERSION: 'Version: 9.9.9' }), /approved 1\.3\.4/)
     const OversizedArchive = Path.join(Directory, 'oversized.tgz'); Fs.writeFileSync(OversizedArchive, Buffer.alloc(16 * 1024 * 1024 + 1))
     const OversizedWork = Path.join(Directory, 'oversized-work'); Fs.mkdirSync(OversizedWork)
     Assert.throws(() => RunScript([...Arguments(OversizedWork).map(Value => Value === Archive ? OversizedArchive : Value)], Environment), /source archive is outside/)

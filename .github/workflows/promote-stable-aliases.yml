@@ -515,8 +515,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -m 0700 "${GOBIN}"
-          go install oras.land/oras/cmd/oras@v1.3.3
-          "${GOBIN}/oras" version | grep -E '(^|[[:space:]])1\.3\.3($|[[:space:]])'
+          go install oras.land/oras/cmd/oras@v1.3.4
+          "${GOBIN}/oras" version | grep -E '(^|[[:space:]])1\.3\.4($|[[:space:]])'
 
       - name: Reread every immutable image and chart digest
         if: steps.eligibility.outputs.eligible == 'true'

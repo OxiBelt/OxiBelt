@@ -16,7 +16,7 @@ artifact_builder="${repo_root}/tests/scripts/build-docker-image-artifact.sh"
 temp_root="${TMPDIR:-/tmp}"
 provider="${OXIBELT_KUBERNETES_PROVIDER:-minikube}"
 timeout_seconds="${OXIBELT_ADMISSION_TIMEOUT_SECONDS:-600}"
-kind_node_image="${OXIBELT_ADMISSION_KIND_NODE_IMAGE:-kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256}"
+kind_node_image="${OXIBELT_ADMISSION_KIND_NODE_IMAGE:-kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d}"
 minikube_kubernetes_version="${OXIBELT_ADMISSION_MINIKUBE_KUBERNETES_VERSION:-v1.34.11}"
 strict_artifact_dir="${OXIBELT_ADMISSION_STRICT_ARTIFACT_DIR:-}"
 tools_artifact_dir="${OXIBELT_ADMISSION_TOOLS_ARTIFACT_DIR:-}"
@@ -25,7 +25,7 @@ fixture_b_input="${OXIBELT_ADMISSION_FIXTURE_B_DIR:-}"
 receipt_output="${OXIBELT_ADMISSION_RECEIPT_OUTPUT:-}"
 
 rust_builder_image="rust:1.98.0-trixie@sha256:271849e998ffce5776454bbf98c5dc21baafc854ff8e566197908d3aca9a81e8"
-node_builder_image="node:24-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43"
+node_builder_image="node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf"
 runtime_image="alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 
 work_dir=""
@@ -505,9 +505,9 @@ if [[ ! "${timeout_seconds}" =~ ^[1-9][0-9]{1,3}$ ]] \
   die "OXIBELT_ADMISSION_TIMEOUT_SECONDS must be between 120 and 3600"
 fi
 case "${kind_node_image}" in
-  kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256|\
-  kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95|\
-  kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5)
+  kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d|\
+  kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0|\
+  kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed)
     ;;
   *)
     die "unapproved Kind node image: ${kind_node_image}"

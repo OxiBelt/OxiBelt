@@ -105,7 +105,7 @@ fn graduation_registry_covers_the_complete_support_contract() {
   );
   assert_eq!(
     strings(&policy["supportContract"]["helm"]["versions"]),
-    BTreeSet::from(["3.21.3", "4.2.4"])
+    BTreeSet::from(["3.21.4", "4.2.4"])
   );
   assert_eq!(policy["supportContract"]["gatewayApi"]["version"], "v1.6.1");
   assert_eq!(
@@ -147,18 +147,18 @@ fn graduation_registry_covers_the_complete_support_contract() {
     [
       (
         "1.34",
-        "v1.34.8",
-        "kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256"
+        "v1.34.11",
+        "kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d"
       ),
       (
         "1.35",
-        "v1.35.5",
-        "kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95"
+        "v1.35.8",
+        "kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0"
       ),
       (
         "1.36",
-        "v1.36.1",
-        "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
+        "v1.36.4",
+        "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed"
       ),
     ]
   );
@@ -339,8 +339,8 @@ fn charts_workflows_and_harnesses_expose_the_same_experimental_policy() {
     read_repo("deploy/helm/oxibelt-gateway-controller/templates/_helpers.tpl");
   let data_helpers = read_repo("deploy/helm/oxibelt/templates/_helpers.tpl");
   for helpers in [&controller_helpers, &data_helpers] {
-    assert!(helpers.contains("Helm 3.21.3 or 4.2.4"));
-    assert!(helpers.contains("semverCompare \"=3.21.3\""));
+    assert!(helpers.contains("Helm 3.21.4 or 4.2.4"));
+    assert!(helpers.contains("semverCompare \"=3.21.4\""));
     assert!(helpers.contains("semverCompare \"=4.2.4\""));
     assert!(helpers.contains("oxibelt.dev/feature-status"));
     assert!(helpers.contains("oxibelt.dev/kubernetes-support-policy"));
@@ -362,9 +362,9 @@ fn charts_workflows_and_harnesses_expose_the_same_experimental_policy() {
   let workflow = read_repo(".github/workflows/check-oxibelt.yml");
   let rollout = read_repo("tests/scripts/run-kubernetes-immutable-rollout.sh");
   for expected in [
-    "v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256",
-    "v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95",
-    "v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5",
+    "v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d",
+    "v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0",
+    "v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
   ] {
     assert!(
       workflow.contains(expected),
@@ -376,7 +376,7 @@ fn charts_workflows_and_harnesses_expose_the_same_experimental_policy() {
     );
   }
   for expected in [
-    "version: v3.21.3",
+    "version: v3.21.4",
     "version: v4.2.4",
     "kubernetes-immutable-rollout:",
     "kubernetes-current-compatibility:",

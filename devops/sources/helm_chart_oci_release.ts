@@ -476,7 +476,7 @@ export function BuildHelmChartRebuildPredicate(Options: BuildHelmChartRebuildPre
   }
   const Predicate: JsonObject = {
     schemaVersion: HelmChartRebuildPredicateSchemaVersion, predicateType: HelmChartRebuildPredicateType, kind: 'helm-chart', receipt: Receipt,
-    comparison: { schemaVersion: 1, exactPackageBytes: true, deterministicPackager: 'v4.2.4', consumptionHelmVersions: ['v3.21.3', 'v4.2.4'] }
+    comparison: { schemaVersion: 1, exactPackageBytes: true, deterministicPackager: 'v4.2.4', consumptionHelmVersions: ['v3.21.4', 'v4.2.4'] }
   }
   return ValidateHelmChartRebuildPredicate(Predicate)
 }
@@ -488,7 +488,7 @@ export function ValidateHelmChartRebuildPredicate(Value: unknown): JsonObject {
   ValidateHelmChartPublishReceipt(Predicate.receipt)
   const Comparison = ObjectValue(Predicate.comparison, 'Helm chart rebuild predicate comparison')
   ExactKeys(Comparison, ['schemaVersion', 'exactPackageBytes', 'deterministicPackager', 'consumptionHelmVersions'], 'Helm chart rebuild predicate comparison')
-  if (Comparison.schemaVersion !== 1 || Comparison.exactPackageBytes !== true || Comparison.deterministicPackager !== 'v4.2.4' || Canonical(Comparison.consumptionHelmVersions) !== Canonical(['v3.21.3', 'v4.2.4'])) throw new Error('Helm chart rebuild predicate comparison contract is invalid')
+  if (Comparison.schemaVersion !== 1 || Comparison.exactPackageBytes !== true || Comparison.deterministicPackager !== 'v4.2.4' || Canonical(Comparison.consumptionHelmVersions) !== Canonical(['v3.21.4', 'v4.2.4'])) throw new Error('Helm chart rebuild predicate comparison contract is invalid')
   AssertEnvelopeSize(Predicate, 'Helm chart rebuild predicate')
   return Predicate
 }

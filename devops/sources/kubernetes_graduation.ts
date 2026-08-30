@@ -803,8 +803,8 @@ export type KubernetesGraduationPolicyValidationOptions = {
   AllowPreviousHelmCompatibility?: boolean
 }
 
-const CurrentHelmCompatibilityVersions = ['3.21.3', '4.2.4'] as const
-const PreviousHelmCompatibilityVersions = ['3.21.3', '4.2.3'] as const
+const CurrentHelmCompatibilityVersions = ['3.21.4', '4.2.4'] as const
+const PreviousHelmCompatibilityVersions = ['3.21.3', '4.2.4'] as const
 
 function ValidatePolicySemantics(
   Policy: KubernetesGraduationPolicy,

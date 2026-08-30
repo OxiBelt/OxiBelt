@@ -109,7 +109,7 @@ test('builds canonical exact two-chart OCI receipt and predicate', () => {
     Assert.equal(Predicate.schemaVersion, 3)
     Assert.equal(HelmChartRebuildPredicateType, 'https://oxibelt.dev/attestations/helm-chart-rebuild/v3')
     Assert.equal(Predicate.predicateType, HelmChartRebuildPredicateType)
-    Assert.deepEqual((Predicate.comparison as Record<string, unknown>).consumptionHelmVersions, ['v3.21.3', 'v4.2.4'])
+    Assert.deepEqual((Predicate.comparison as Record<string, unknown>).consumptionHelmVersions, ['v3.21.4', 'v4.2.4'])
     Assert.doesNotThrow(() => ValidateHelmChartPublishReceipt(structuredClone(Receipt)))
     Assert.doesNotThrow(() => ValidateHelmChartRebuildPredicate(structuredClone(Predicate)))
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
@@ -174,7 +174,7 @@ test('rejects plan/archive/manifest binding drift and receipt or predicate extra
     ]
     for (const [Value, Expected] of Cases) Assert.throws(() => ValidateHelmChartPublishReceipt(Value), Expected)
     const Predicate = BuildHelmChartRebuildPredicate({ receipt: Receipt, rebuiltPlanBytes: FixtureValue.PlanBytes, publishedArchives: FixtureValue.Archives, rebuiltArchives: FixtureValue.Archives })
-    Assert.throws(() => ValidateHelmChartRebuildPredicate({ ...Predicate, comparison: { ...(Predicate.comparison as Record<string, unknown>), deterministicPackager: 'v3.21.3' } }), /comparison contract/)
+    Assert.throws(() => ValidateHelmChartRebuildPredicate({ ...Predicate, comparison: { ...(Predicate.comparison as Record<string, unknown>), deterministicPackager: 'v3.21.4' } }), /comparison contract/)
     Assert.throws(() => ValidateHelmChartRebuildPredicate({ ...Predicate, unexpected: true }), /missing, unexpected/)
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })

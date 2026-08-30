@@ -25,7 +25,7 @@ its `kubernetes_immutable` data plane must reject versions outside
 `>=1.34.0-0 <1.37.0-0` with a clear diagnostic. This floor does not change the
 separate runtime Kubernetes discovery or active-request-autoscaling contracts.
 
-The test matrix uses Helm `3.21.3` and `4.2.4`. Each supported Kubernetes minor
+The test matrix uses Helm `3.21.4` and `4.2.4`. Each supported Kubernetes minor
 must pass end-to-end tests under both Helm lines at release-candidate cadence.
 The exact Kind images are reviewable registry inputs rather than workflow-local
 defaults. Updating the active-minor window, patch representatives, Kind
@@ -97,7 +97,7 @@ Operators still own the cluster admission chain, CNI configuration, external
 DNS, load-balancing, storage, webhook availability, and certificate issuance.
 
 The `edge-secure-medium` v2 deployment envelope targets this same Kubernetes
-1.34–1.36 and Helm 3.21.3/4.2.4 range. CI verifies its exact digest-pinned
+1.34–1.36 and Helm 3.21.4/4.2.4 range. CI verifies its exact digest-pinned
 strict-image render and server-side dry-run under restricted Pod Security
 labels, while the shared strict-data-plane harness supplies live
 RuntimeDefault/Landlock evidence. The dedicated supply-chain admission harness
@@ -128,9 +128,9 @@ API-server dry-run alone still does not establish live admission.
 
 | Kubernetes minor | CI representative | Immutable Kind node image |
 | --- | --- | --- |
-| `1.34` | `v1.34.8` | `kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256` |
-| `1.35` | `v1.35.5` | `kindest/node:v1.35.5@sha256:ce977ae6d65918d0b58a5f8b5e940429c2ce42fa3a5619ec2bbc60b949c0ac95` |
-| `1.36` | `v1.36.1` | `kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5` |
+| `1.34` | `v1.34.11` | `kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d` |
+| `1.35` | `v1.35.8` | `kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0` |
+| `1.36` | `v1.36.4` | `kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed` |
 
 ### Governed feature states
 

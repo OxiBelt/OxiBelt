@@ -8,7 +8,7 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 chart_dir="${repo_root}/deploy/helm/oxibelt"
-kubernetes_version="1.34.8"
+kubernetes_version="1.34.11"
 temp_root="${TMPDIR:-/tmp}"
 work_dir=""
 empty_config_digest="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
