@@ -197,7 +197,7 @@ notes = "Reviewed the complete checksum-matched 0.12.4-to-0.12.5 source delta; t
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.3.0 -> 0.3.1"
-notes = "Reviewed the complete checksum-matched 0.3.0-to-0.3.1 source delta. X86 AVX detection now requires the correct YMM operating-system state, Miri uses compile-time target-feature detection, and deprecated maximum-value calls are replaced without semantic change. The crate contains no unsafe code or build script and adds no external capability."
+notes = "Reviewed the complete checksum-matched 0.3.0-to-0.3.1 source delta. X86 AVX detection now requires the correct YMM operating-system state, Miri uses compile-time target-feature detection, and deprecated maximum-value calls are replaced without semantic change. Existing architecture-gated CPUID and XGETBV unsafe intrinsics retain their caller invariants, no unsafe block is added, and the crate has no build script or new external capability."
 
 [[audits.crc32fast]]
 who = "OpenAI Codex"
