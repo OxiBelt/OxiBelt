@@ -110,6 +110,12 @@ where
             "request body timed out",
           ));
         }
+        if body::error_is_body_length_limit(&error) {
+          return Err(text_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request body is too large",
+          ));
+        }
         warn!(error = %error, "failed to read Content-Length: 0 request body");
         return Err(text_response(
           StatusCode::BAD_REQUEST,

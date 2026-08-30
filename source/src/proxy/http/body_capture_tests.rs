@@ -19,6 +19,7 @@ use super::waf_body_capture::{
   request_body_is_definitely_empty, response_body_is_definitely_empty,
 };
 use super::*;
+use crate::bandwidth::BandwidthPolicy;
 
 struct PanicBody;
 
@@ -454,5 +455,42 @@ async fn h2_and_h3_content_length_zero_data_is_rejected() {
       Err(response) => response,
     };
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+  }
+}
+
+#[tokio::test]
+async fn h2_and_h3_content_length_zero_limited_data_is_payload_too_large() {
+  for version in [http::Version::HTTP_2, http::Version::HTTP_3] {
+    let request_body = body::with_read_timeout(
+      Limited::new(full_body(bytes::Bytes::from_static(b"abcdefgh")), 4),
+      Duration::from_secs(1),
+      BodyTimeoutKind::DownstreamRequestRead,
+    );
+    let request_body = body::with_bandwidth(
+      request_body,
+      RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED),
+      BandwidthDirection::Upload,
+      crate::metrics::Metrics::new(),
+      crate::metrics::BandwidthTrafficClass::Http,
+      None,
+    );
+    let request = Request::builder()
+      .version(version)
+      .header(http::header::CONTENT_LENGTH, "0")
+      .body(request_body)
+      .expect("request should build");
+
+    let response = match reject_content_length_zero_data(request, None, version).await {
+      Ok(_) => panic!("limited Content-Length: 0 DATA should be rejected for {version:?}"),
+      Err(response) => response,
+    };
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let response_body = response
+      .into_body()
+      .collect()
+      .await
+      .expect("limit response body should collect")
+      .to_bytes();
+    assert_eq!(response_body.as_ref(), b"request body is too large");
   }
 }
