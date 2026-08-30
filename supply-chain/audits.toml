@@ -37,6 +37,12 @@ criteria = "safe-to-deploy"
 version = "1.0.104"
 notes = "Reviewed complete 1.0.104 source and the 1.0.103 delta; error-erasure, downcast, pointer-ownership, and formatting-buffer unsafe invariants are contained, the build script only performs a Cargo-rustc probe in OUT_DIR, and the source delta is documentation-only."
 
+[[audits.argon2]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.6.0"
+notes = "Reviewed the complete checksum-matched 0.6.0 source and the 0.5.3 delta. The fallible aligned block allocator validates Layout, handles null, exposes only its exact zero-initialized extent, and deallocates with the same immutable layout. The private segment-view unsafe layer restricts writes to one lane and slice and cross-lane reads away from the active slice; validated parameter invariants prevent zero lanes and segments, and sequential plus Rayon KAT and PHC suites pass. Legacy v16 and v19 PHC verification and mismatch rejection are preserved, allocation failure maps fail closed, MSRV 1.85 is below the workspace floor, and the crate has no build script or external I/O."
+
 [[audits.async-compression]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -90,6 +96,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.23.0 -> 0.23.1"
 notes = "Reviewed the complete checksum-matched 0.23.0-to-0.23.1 crate delta; production encoding, decoding, SIMD dispatch, and unsafe blocks are unchanged, while tests now compile the generic SIMD wrapper only on supported architectures. OxiBelt's direct declarations continue to disable default features and select std, the existing clubcard-crlite edge continues to enable simd-unsafe through Cargo feature unification, and the crate has no build script or external side effects."
+
+[[audits.blake2]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.10.6 -> 0.11.0"
+notes = "Reviewed the complete checksum-matched 0.10.6-to-0.11.0 source delta. The digest 0.11 rewrite removes optional SIMD intrinsics and retains one unsafe byte-slice conversion over a fully initialized repr(C) tuple of four homogeneous integers, whose exact layout contains no padding. Fixed and variable output bounds and keyed initialization are checked, known-answer tests pass, and the crate has no build script or external side effects. OxiBelt selects no blake2 features."
 
 [[audits.cc]]
 who = "OpenAI Codex"
@@ -721,6 +733,12 @@ criteria = "safe-to-deploy"
 delta = "0.3.2 -> 0.3.3"
 notes = "Reviewed the complete checksum-matched 0.3.2-to-0.3.3 source delta. Float literal tokenization now accepts only finite parsed values, routing overflow and non-finite results through the existing diagnostic path before AST construction or evaluation. Recursion and token limits are unchanged, and the crate contains no unsafe code, build script, proc macro, filesystem, network, or process capability."
 
+[[audits.password-hash]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.5.0 -> 0.6.1"
+notes = "Reviewed the complete checksum-matched 0.5.0-to-0.6.1 source delta. PHC parsing moved to the separately audited phc crate while hashing and verification traits became format-generic; verification still requires salt and output, propagates parsed parameters, and compares outputs through PHC constant-time equality. The crate forbids unsafe code, has no build script or external side effects, and OxiBelt selects only phc and alloc without RNG access."
+
 [[audits.pest]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -768,6 +786,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "2.8.8 -> 2.9.0"
 notes = "Reviewed the complete checksum-matched 2.8.8-to-2.9.0 grammar-parser delta; production source is byte-for-byte unchanged apart from synchronized dependency metadata. It remains safe Rust without a build script or external capability."
+
+[[audits.phc]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.6.1"
+notes = "Reviewed the complete checksum-matched 0.6.1 source. Parsing is allocation-bounded with fixed limits for identifiers, parameters, values, decoded salts, and outputs; Base64 is fully validated and output equality uses ctutils constant-time comparison. The crate forbids unsafe code and has no build script, I/O, networking, or process execution. OxiBelt selects alloc only; optional RNG capabilities are disabled."
 
 [[audits.polyval]]
 who = "OpenAI Codex"

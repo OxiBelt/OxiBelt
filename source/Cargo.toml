@@ -20,7 +20,7 @@ anyhow = "1.0.104"
 aho-corasick = "1.1.5"
 arc-swap = "1.9.2"
 aws-lc-rs = { version = "1.18.0", default-features = false }
-argon2 = { version = "0.5.3", features = ["std"] }
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
 async-compression = { version = "0.4.43", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }

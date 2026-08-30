@@ -153,6 +153,21 @@ fn break_glass_credential(name: &str, principal: &str, secret: &str) -> IpmCrede
 }
 
 #[test]
+fn legacy_argon2id_phc_verification_remains_compatible() {
+  const LEGACY_ARGON2ID_HASH: &str =
+    "$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
+
+  assert!(bearer_matches_argon2id_hash(
+    LEGACY_ARGON2ID_HASH,
+    "password"
+  ));
+  assert!(!bearer_matches_argon2id_hash(
+    LEGACY_ARGON2ID_HASH,
+    "sassword"
+  ));
+}
+
+#[test]
 fn explicit_deny_wins_over_allow() {
   let runtime = runtime_with_policy(IpmPolicyConfig {
     name: "test".to_string(),
@@ -572,15 +587,12 @@ async fn legacy_bootstrap_does_not_need_break_glass_limiter() {
 }
 
 fn test_argon2id_hash(secret: &str) -> String {
-  use argon2::password_hash::SaltString;
   use argon2::{Algorithm, Params, PasswordHasher, Version};
 
   let params = Params::new(8, 1, 1, None).expect("test Argon2id params should build");
   let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-  let salt =
-    SaltString::encode_b64(b"oxibelt-test-salt").expect("test salt should be valid base64 salt");
   argon2
-    .hash_password(secret.as_bytes(), &salt)
+    .hash_password_with_salt(secret.as_bytes(), b"oxibelt-test-salt")
     .expect("test Argon2id hash should build")
     .to_string()
 }

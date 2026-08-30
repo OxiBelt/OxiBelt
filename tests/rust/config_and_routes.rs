@@ -40,15 +40,12 @@ use oxibelt::waf::{
 };
 
 fn test_argon2id_hash(secret: &str, memory_kib: u32) -> String {
-  use argon2::password_hash::SaltString;
   use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
 
   let params = Params::new(memory_kib, 1, 1, None).expect("test Argon2id params should build");
   let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-  let salt =
-    SaltString::encode_b64(b"oxibelt-test-salt").expect("test salt should be valid base64 salt");
   argon2
-    .hash_password(secret.as_bytes(), &salt)
+    .hash_password_with_salt(secret.as_bytes(), b"oxibelt-test-salt")
     .expect("test Argon2id hash should build")
     .to_string()
 }
