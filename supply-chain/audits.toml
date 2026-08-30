@@ -289,6 +289,12 @@ criteria = "safe-to-deploy"
 delta = "0.1.9 -> 0.1.10"
 notes = "Reviewed the complete checksum-matched 0.1.9-to-0.1.10 source delta. Windows-only tool discovery fixes Visual Studio instance enumeration, executable selection, and WinAPI declarations while retaining initialized COM ownership and registry/path validation. It adds no runtime dependency, build script, network access, or caller-independent process execution."
 
+[[audits.fraction]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.16.0 -> 0.17.0"
+notes = "Reviewed the complete checksum-matched 0.16.0-to-0.17.0 crate delta and its signed upstream release commit. Numeric-component parsers now reject embedded signs, validate radices before dispatch, report zero denominators explicitly for GenericFraction radix parsing, and use checked multiplication and addition for Unicode mixed numerators instead of wrapping or panicking; work and BigInt allocation remain proportional to input. OxiBelt selects only with-bigint. Optional Decimal, DynaInt, Unicode, and Juniper changes follow the same fail-closed parsing contract; existing unsafe fieldless-error Send/Sync implementations and the guarded generic cast are unchanged, and the crate has no build script or external side effect."
+
 [[audits.futures]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -553,6 +559,12 @@ criteria = "safe-to-deploy"
 delta = "0.50.0 -> 0.51.0"
 notes = "Reviewed the complete checksum-matched 0.50.0-to-0.51.0 crate delta and signed upstream release commits. Canonicalization gains bounded candidate witnesses and correctness fixes; validation fails closed on required unknown vocabularies, enforces format-assertion dialects, fixes recursive unevaluatedItems and unevaluatedProperties compilation with initialized cells plus instance-identity cycle guards, and corrects duration, URI-template, and ECMA-regex formats. OxiBelt disables default features, uses the safe serde_json adapter, explicitly selects Draft 7 and the linear Rust pattern engine for native configuration, and auto-detects only its fixed Draft 2020-12 admission schema; it does not use canonicalization, custom vocabularies, or format regex. HTTP and file retrieval remain absent, and no unsafe code, build script, or external side effect was added."
 
+[[audits.jsonschema]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.51.0 -> 0.52.0"
+notes = "Reviewed the complete checksum-matched 0.51.0-to-0.52.0 crate delta and its signed upstream release commit. Validation error traversal now collects directly into a vector proportional to the emitted errors and recursive validation checks its cycle guard before memoized results, preventing cached answers from overriding an active self-reference. Email and hostname validation gains checked, label-bounded Punycode decoding and correctness fixes; IDN formats are feature-gated and OxiBelt's schemas do not use them. Canonical reference folding adds at most eight settle rounds under the existing shared work budgets. OxiBelt keeps default features disabled, selects Draft 7 plus the linear Rust pattern engine for native configuration, and does not use canonicalization or external retrieval; HTTP, file, async, IDNA, macro, Python, and Ruby capabilities are absent from its selected graph. The selected source contains no unsafe code or build script."
+
 [[audits.jsonschema-regex]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -589,6 +601,12 @@ criteria = "safe-to-deploy"
 delta = "0.50.0 -> 0.51.0"
 notes = "Reviewed the complete checksum-matched 0.50.0-to-0.51.0 crate delta and signed upstream release commits. A fallible pattern-witness helper is used only by canonicalization and caps repeated expansion at 64 and witness checks at 256 bytes, while remaining allocation is proportional to the input pattern. The new non-recursive ECMA-262 Unicode syntax checker validates format regex with input-owned group-name bookkeeping; OxiBelt uses neither canonicalization nor that format and its existing Draft 7 pattern translation path is unchanged. The crate remains safe Rust with no build script or external side effect."
 
+[[audits.jsonschema-regex]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.51.0 -> 0.52.0"
+notes = "Reviewed the complete checksum-matched 0.51.0-to-0.52.0 crate delta and signed upstream release commit; production ECMA-262 translation source is byte-for-byte unchanged and only synchronized package metadata moved. The crate remains safe Rust with no build script or external side effect."
+
 [[audits.jsonschema-value]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -624,6 +642,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.50.0 -> 0.51.0"
 notes = "Reviewed the complete checksum-matched 0.50.0-to-0.51.0 crate delta and signed upstream release commits; production source is byte-for-byte unchanged and only synchronized package metadata moved. OxiBelt continues to select the safe serde_json adapter, with no build script or external side effect."
+
+[[audits.jsonschema-value]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.51.0 -> 0.52.0"
+notes = "Reviewed the complete checksum-matched 0.51.0-to-0.52.0 crate delta and signed upstream release commit; all production value-adapter source is byte-for-byte unchanged and only synchronized package and dependency metadata moved. OxiBelt selects the safe serde_json adapter, while optional Python and Ruby unsafe adapters remain unselected and unchanged; the crate has no build script or external side effect."
 
 [[audits.kio]]
 who = "OpenAI Codex"
@@ -876,6 +900,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.50.0 -> 0.51.0"
 notes = "Reviewed the complete checksum-matched 0.50.0-to-0.51.0 crate delta and signed upstream release commits. Version 0.50.1 is source-identical to 0.50.0; 0.51.0 adds the embedded Draft 2020-12 Format-Assertion meta-schema, distinguishes its vocabulary, reads required vocabularies even without an id, and injects only a fixed set of bundled schemas. Resolution, retrieval, URI handling, and traversal controls add no unsafe code, build script, filesystem, network, process, or other external capability."
+
+[[audits.referencing]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.51.0 -> 0.52.0"
+notes = "Reviewed the complete checksum-matched 0.51.0-to-0.52.0 crate delta and signed upstream release commit. The sole production change makes an explicitly forced draft supply standard vocabularies while preserving custom meta-schema vocabulary lookup. Resolver, URI, retrieval, registry deduplication, and the depth-128 iterative traversal fallback are unchanged; the default retriever performs no I/O, and OxiBelt selects neither async retrieval nor any external fetch capability. The crate contains no unsafe code or build script."
 
 [[audits.regex-automata]]
 who = "OpenAI Codex"
