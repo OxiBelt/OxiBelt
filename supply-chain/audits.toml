@@ -7,6 +7,12 @@ criteria = "safe-to-deploy"
 delta = "0.9.1 -> 0.9.2"
 notes = "Reviewed the complete checksum-matched 0.9.1-to-0.9.2 source delta and the rewritten hardware backends. Runtime cpufeatures tokens still select the active union variant before every x86 or AArch64 target-feature call, SIMD loads and stores traverse exact typed-array extents with compile-time divisibility checks, the portable fixslice backend is safe Rust, and the crate has no build script or external side effects."
 
+[[audits.aes]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.9.2 -> 0.9.3"
+notes = "Reviewed the complete checksum-matched 0.9.2-to-0.9.3 source delta. VAES-256 and VAES-512 dispatch is gated by runtime cpufeatures tokens before target-feature intrinsics, typed-array batch loads and stores retain fixed extents, and the portable backend remains safe Rust. AArch64 AES is disabled under Miri, removed cfg flags only selected the now-default VAES backends, and no build script or external capability was added."
+
 [[audits.aes-gcm]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -175,6 +181,12 @@ criteria = "safe-to-deploy"
 delta = "0.12.4 -> 0.12.5"
 notes = "Reviewed the complete checksum-matched 0.12.4-to-0.12.5 source delta; the only production change repairs Windows WSA event-interest bookkeeping by atomically masking cleared events and re-arming the remaining active mask. Socket and handle ownership, unsafe calls, non-Windows behavior, dependencies, and build-time behavior are unchanged, and the crate has no build script."
 
+[[audits.cpufeatures]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.3.0 -> 0.3.1"
+notes = "Reviewed the complete checksum-matched 0.3.0-to-0.3.1 source delta. X86 AVX detection now requires the correct YMM operating-system state, Miri uses compile-time target-feature detection, and deprecated maximum-value calls are replaced without semantic change. The crate contains no unsafe code or build script and adds no external capability."
+
 [[audits.crc32fast]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -204,6 +216,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "2.11.0 -> 2.11.1"
 notes = "Reviewed the complete checksum-matched 2.11.0-to-2.11.1 crate delta; production source, table-generation logic, unsafe blocks, and dependencies are byte-for-byte unchanged, with only package metadata and lockfile maintenance. The crate has no build script or external side effects."
+
+[[audits.deadpool]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.13.0 -> 0.13.1"
+notes = "Reviewed the complete checksum-matched 0.13.0-to-0.13.1 source delta. The selected Tokio managed-pool implementation remains safe Rust and its public pool behavior is unchanged; the release removes num_cpus and replaces its default-size helper with available_parallelism while the itertools update is development-only. No build script or external capability was added."
 
 [[audits.displaydoc]]
 who = "OpenAI Codex"
@@ -414,6 +432,18 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 version = "1.11.0"
 notes = "Reviewed the complete checksum-matched 1.11.0 source and the 1.10.1-to-1.11.0 delta; the changed HTTP/1 parser removes Content-Length and disables keep-alive when Transfer-Encoding is present, changed ReadBufCursor methods preserve initialized-length and capacity invariants, and the remaining unsafe edits are equivalent pointer casts or existing guarded header/index operations. OxiBelt adds a bounded pre-parser guard that retains its stricter rejection policy before service dispatch."
+
+[[audits.hyper]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "1.11.0 -> 1.11.1"
+notes = "Reviewed the complete checksum-matched 1.11.0-to-1.11.1 source delta. HTTP/1 head completion now accepts mixed LF and CRLF in the same cases as the parser, while OxiBelt's bounded pre-parser remains authoritative for stricter framing rejection. ReadBuf, header, body-length, client-dispatch, HTTP/2, and upgrade changes preserve initialized-length, index, ownership, and wakeup invariants; no build script or external capability was added."
+
+[[audits.indexmap]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "2.14.0 -> 2.14.1"
+notes = "Reviewed the complete checksum-matched 2.14.0-to-2.14.1 source delta. Equivalent comparisons are simplified only where the query and key types are identical, unified bounds assertions preserve panic-before-access behavior, and uniqueness and index checks precede construction of disjoint mutable references. Existing localized pointer casts are unchanged in contract, and the crate has no build script or external capability."
 
 [[audits.jiff]]
 who = "OpenAI Codex"
@@ -684,6 +714,12 @@ who = "OpenAI Codex <codex@openai.com>"
 criteria = "safe-to-deploy"
 delta = "0.3.1 -> 0.3.2"
 notes = "Reviewed the complete checksum-matched 0.3.1-to-0.3.2 crate delta. Production source is unchanged; package metadata only enables serde_json's float_roundtrip feature, preserving finite floating-point literals across AST serialization without adding unsafe code, a build script, proc-macro behavior, or external capability."
+
+[[audits.online-dsl-forge]]
+who = "OpenAI Codex <codex@openai.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.2 -> 0.3.3"
+notes = "Reviewed the complete checksum-matched 0.3.2-to-0.3.3 source delta. Float literal tokenization now accepts only finite parsed values, routing overflow and non-finite results through the existing diagnostic path before AST construction or evaluation. Recursion and token limits are unchanged, and the crate contains no unsafe code, build script, proc macro, filesystem, network, or process capability."
 
 [[audits.pest]]
 who = "OpenAI Codex"
