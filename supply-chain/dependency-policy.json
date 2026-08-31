@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-08-30",
+  "reviewedOn": "2026-08-31",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "03e47e47850b5b592221408c9fa98f97c1696b3552390277815091d4c1a69ab0",
+      "lockfileSha256": "e6cdf8cf2b3d911a49fbb79115713f5f2a53940987acae64ed39e2ef623b0a9f",
       "exemptionInventorySha256": "41e3230f9b4d3429cc63c5dd2364042eb7c963db31a03d3282c547da6c0faed3",
       "exemptedPackageVersions": 446
     },
@@ -198,24 +198,24 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:03e47e47850b5b592221408c9fa98f97c1696b3552390277815091d4c1a69ab0",
+      "subject": "Cargo.lock@sha256:e6cdf8cf2b3d911a49fbb79115713f5f2a53940987acae64ed39e2ef623b0a9f",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-30",
+      "reviewedOn": "2026-08-31",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:03e47e47850b5b592221408c9fa98f97c1696b3552390277815091d4c1a69ab0",
+      "subject": "Cargo.lock@sha256:e6cdf8cf2b3d911a49fbb79115713f5f2a53940987acae64ed39e2ef623b0a9f",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-27",
+      "reviewedOn": "2026-08-31",
       "expiresOn": "2026-10-19"
     },
     {
