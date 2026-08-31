@@ -63,7 +63,7 @@ rustix = { version = "1.1.4", features = ["net", "process", "std"] }
 webpki = { package = "rustls-webpki", version = "0.103.15" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-serde-saphyr = { version = "1.1.0", default-features = false, features = ["deserialize"] }
+serde-saphyr = { version = "1.2.0", default-features = false, features = ["deserialize"] }
 sha1 = { version = "0.11.0", features = ["oid"] }
 sha2 = "0.11.0"
 socket2 = "0.6.5"

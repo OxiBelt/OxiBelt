@@ -415,6 +415,12 @@ criteria = "safe-to-deploy"
 delta = "0.0.7 -> 1.0.1"
 notes = "Reviewed the complete checksum-matched production-source delta. The no_std parser continues to forbid unsafe code and has no build script or external capability. It adds structured terminal errors and fallible buffered input so I/O, decoding, and byte-limit failures cannot be mistaken for EOF; NUL and invalid controls reject instead of truncating, counters use checked arithmetic, and malformed-input states terminate. Resource budgets remain supplied by the consuming serde-saphyr layer."
 
+[[audits.granit-parser]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "1.1.0 -> 1.2.0"
+notes = "Reviewed the complete checksum-matched 1.1.0-to-1.2.0 production-source delta. The parser continues to forbid unsafe code and has no build script or external capability. New checked limits bound retained directive bytes, reserved directive parameters, and block-collection nesting; limit and malformed-input paths return structured errors instead of allowing unbounded memory or stack growth."
+
 [[audits.h2]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -565,6 +571,12 @@ criteria = "safe-to-deploy"
 delta = "0.51.0 -> 0.52.0"
 notes = "Reviewed the complete checksum-matched 0.51.0-to-0.52.0 crate delta and its signed upstream release commit. Validation error traversal now collects directly into a vector proportional to the emitted errors and recursive validation checks its cycle guard before memoized results, preventing cached answers from overriding an active self-reference. Email and hostname validation gains checked, label-bounded Punycode decoding and correctness fixes; IDN formats are feature-gated and OxiBelt's schemas do not use them. Canonical reference folding adds at most eight settle rounds under the existing shared work budgets. OxiBelt keeps default features disabled, selects Draft 7 plus the linear Rust pattern engine for native configuration, and does not use canonicalization or external retrieval; HTTP, file, async, IDNA, macro, Python, and Ruby capabilities are absent from its selected graph. The selected source contains no unsafe code or build script."
 
+[[audits.jsonschema]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.52.0 -> 0.52.1"
+notes = "Reviewed the complete checksum-matched 0.52.0-to-0.52.1 selected production-source delta. Validation errors lazily cache owned instance values with safe synchronization, and multipleOf uses checked exact decimal arithmetic with a conservative fallback instead of imprecise floating-point division. OxiBelt keeps default features disabled, selects Draft 7 plus the linear Rust pattern engine, and does not enable external retrieval, canonicalization, Python, or Ruby adapters. The selected source contains no unsafe code, build script, or external capability."
+
 [[audits.jsonschema-regex]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -607,6 +619,12 @@ criteria = "safe-to-deploy"
 delta = "0.51.0 -> 0.52.0"
 notes = "Reviewed the complete checksum-matched 0.51.0-to-0.52.0 crate delta and signed upstream release commit; production ECMA-262 translation source is byte-for-byte unchanged and only synchronized package metadata moved. The crate remains safe Rust with no build script or external side effect."
 
+[[audits.jsonschema-regex]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.52.0 -> 0.52.1"
+notes = "Reviewed the complete checksum-matched 0.52.0-to-0.52.1 crate delta; production ECMA-262 translation source is byte-for-byte unchanged and only synchronized package metadata moved. The crate remains safe Rust with no build script or external side effect."
+
 [[audits.jsonschema-value]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -648,6 +666,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.51.0 -> 0.52.0"
 notes = "Reviewed the complete checksum-matched 0.51.0-to-0.52.0 crate delta and signed upstream release commit; all production value-adapter source is byte-for-byte unchanged and only synchronized package and dependency metadata moved. OxiBelt selects the safe serde_json adapter, while optional Python and Ruby unsafe adapters remain unselected and unchanged; the crate has no build script or external side effect."
+
+[[audits.jsonschema-value]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.52.0 -> 0.52.1"
+notes = "Reviewed the complete checksum-matched 0.52.0-to-0.52.1 production-source delta. The selected serde_json adapter adds a safe OnceLock-backed lazy instance value and exact decimal multipleOf parsing with checked arithmetic. Optional Python and Ruby adapters, including their unsafe boundaries, are unchanged and unselected. The crate has no build script or external side effect."
 
 [[audits.kio]]
 who = "OpenAI Codex"
@@ -907,6 +931,12 @@ criteria = "safe-to-deploy"
 delta = "0.51.0 -> 0.52.0"
 notes = "Reviewed the complete checksum-matched 0.51.0-to-0.52.0 crate delta and signed upstream release commit. The sole production change makes an explicitly forced draft supply standard vocabularies while preserving custom meta-schema vocabulary lookup. Resolver, URI, retrieval, registry deduplication, and the depth-128 iterative traversal fallback are unchanged; the default retriever performs no I/O, and OxiBelt selects neither async retrieval nor any external fetch capability. The crate contains no unsafe code or build script."
 
+[[audits.referencing]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.52.0 -> 0.52.1"
+notes = "Reviewed the complete checksum-matched 0.52.0-to-0.52.1 crate delta; resolver, retrieval, registry, URI, and recursion-control production source is byte-for-byte unchanged and only synchronized package metadata moved. The crate adds no unsafe code, build script, filesystem, network, or process capability."
+
 [[audits.regex-automata]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -948,6 +978,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.0.29 -> 1.0.1"
 notes = "Reviewed the complete checksum-matched production-source delta and OxiBelt's default-features-disabled deserialize graph. The crate forbids unsafe code, has no build script, and selected features cannot access files, network, processes, or environment state. Deserialization budgets bound events, documents, nodes, depth, scalar and comment bytes, anchors, aliases, merge keys, replay events, and replay depth; breaches latch, alias ratios finalize before reset, recursive and unknown aliases reject, reader errors propagate, duplicate mappings reject by default, and NUL, invalid controls, and typeless non-finite floats fail closed."
+
+[[audits.serde-saphyr]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "1.1.0 -> 1.2.0"
+notes = "Reviewed the complete checksum-matched 1.1.0-to-1.2.0 production-source delta and OxiBelt's default-features-disabled deserialize graph. The crate continues to forbid unsafe code and has no build script. Deserialization adds budgets for recorded-anchor events and bytes, property interpolation work, and block and directive nesting, while explicit tag node-kind checks reject mismatches. Optional include and command-line filesystem paths plus serialization remain unselected; existing compatibility defaults are preserved and all selected limit breaches fail closed."
 
 [[audits.serde_core]]
 who = "OpenAI Codex"
