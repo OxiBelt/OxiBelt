@@ -246,6 +246,18 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     NativeConfigSecretClass::FileReference,
   ),
   secret(
+    "upstreams[].tls.client_identity.private_key",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
+    "upstream_pools[].servers[].tls.client_identity.private_key",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
+    "upstream_pools[].discovery[].tls.client_identity.private_key",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
     "upstream_pools[].sticky_cookie.secret_env",
     NativeConfigSecretClass::EnvironmentReference,
   ),
@@ -646,6 +658,11 @@ fn object_schema(shape_path: &str, metadata_path: &str) -> Value {
   {
     object.insert("required".to_string(), json!(["type", "value"]));
   }
+  if is_upstream_client_identity_path(shape_path)
+    && let Some(object) = schema.as_object_mut()
+  {
+    object.insert("required".to_string(), json!(["cert_chain", "private_key"]));
+  }
   schema
 }
 
@@ -993,8 +1010,14 @@ fn string_path(path: &str) -> bool {
       | "certificate_transparency.logs.gateway.static_origin_url"
       | "routes.ct_log"
       | "upstream_pools.discovery.id"
+      | "upstream_pools.discovery.tls.client_identity.cert_chain"
+      | "upstream_pools.discovery.tls.client_identity.private_key"
       | "upstream_pools.discovery.tls.subject_alt_names.value"
+      | "upstream_pools.servers.tls.client_identity.cert_chain"
+      | "upstream_pools.servers.tls.client_identity.private_key"
       | "upstream_pools.servers.tls.subject_alt_names.value"
+      | "upstreams.tls.client_identity.cert_chain"
+      | "upstreams.tls.client_identity.private_key"
       | "upstreams.tls.subject_alt_names.value"
   )
 }
@@ -1016,6 +1039,16 @@ fn is_subject_alt_name_value_path(path: &str) -> bool {
     "upstream_pools.discovery.tls.subject_alt_names.value"
       | "upstream_pools.servers.tls.subject_alt_names.value"
       | "upstreams.tls.subject_alt_names.value"
+  )
+}
+
+#[cfg(feature = "config-tooling")]
+fn is_upstream_client_identity_path(path: &str) -> bool {
+  matches!(
+    path,
+    "upstream_pools.discovery.tls.client_identity"
+      | "upstream_pools.servers.tls.client_identity"
+      | "upstreams.tls.client_identity"
   )
 }
 
@@ -1265,6 +1298,15 @@ fn path_kind(path: &str) -> Option<&'static str> {
     || path == "tls.private_key"
     || path.starts_with("tls.certificates.")
     || path == "tls.client_auth.ca_certs"
+    || matches!(
+      path,
+      "upstreams.tls.client_identity.cert_chain"
+        | "upstreams.tls.client_identity.private_key"
+        | "upstream_pools.servers.tls.client_identity.cert_chain"
+        | "upstream_pools.servers.tls.client_identity.private_key"
+        | "upstream_pools.discovery.tls.client_identity.cert_chain"
+        | "upstream_pools.discovery.tls.client_identity.private_key"
+    )
     || path.ends_with(".trusted_ca_certs")
     || path.starts_with("certificate_transparency.logs.")
       && (path.ends_with("_file")

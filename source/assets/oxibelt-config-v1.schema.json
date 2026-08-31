@@ -27264,6 +27264,39 @@
                   "additionalProperties": false,
                   "description": "OxiBelt native field `upstream_pools[].discovery[].tls`. Production Rust validation is authoritative.",
                   "properties": {
+                    "client_identity": {
+                      "additionalProperties": false,
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.client_identity`. Production Rust validation is authoritative.",
+                      "properties": {
+                        "cert_chain": {
+                          "description": "OxiBelt native field `upstream_pools[].discovery[].tls.client_identity.cert_chain`. Production Rust validation is authoritative.",
+                          "type": "string",
+                          "x-oxibelt-config-activation": "full_reload",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-path-kind": "cert_relative",
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        },
+                        "private_key": {
+                          "description": "OxiBelt native field `upstream_pools[].discovery[].tls.client_identity.private_key`. Production Rust validation is authoritative.",
+                          "type": "string",
+                          "x-oxibelt-config-activation": "full_reload",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-path-kind": "cert_relative",
+                          "x-oxibelt-reference-activation": "full_reload",
+                          "x-oxibelt-secret-class": "file_reference"
+                        }
+                      },
+                      "required": [
+                        "cert_chain",
+                        "private_key"
+                      ],
+                      "type": "object",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
                     "ech": {
                       "additionalProperties": false,
                       "description": "OxiBelt native field `upstream_pools[].discovery[].tls.ech`. Production Rust validation is authoritative.",
@@ -29023,6 +29056,39 @@
                   "additionalProperties": false,
                   "description": "OxiBelt native field `upstream_pools[].servers[].tls`. Production Rust validation is authoritative.",
                   "properties": {
+                    "client_identity": {
+                      "additionalProperties": false,
+                      "description": "OxiBelt native field `upstream_pools[].servers[].tls.client_identity`. Production Rust validation is authoritative.",
+                      "properties": {
+                        "cert_chain": {
+                          "description": "OxiBelt native field `upstream_pools[].servers[].tls.client_identity.cert_chain`. Production Rust validation is authoritative.",
+                          "type": "string",
+                          "x-oxibelt-config-activation": "full_reload",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-path-kind": "cert_relative",
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        },
+                        "private_key": {
+                          "description": "OxiBelt native field `upstream_pools[].servers[].tls.client_identity.private_key`. Production Rust validation is authoritative.",
+                          "type": "string",
+                          "x-oxibelt-config-activation": "full_reload",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-path-kind": "cert_relative",
+                          "x-oxibelt-reference-activation": "full_reload",
+                          "x-oxibelt-secret-class": "file_reference"
+                        }
+                      },
+                      "required": [
+                        "cert_chain",
+                        "private_key"
+                      ],
+                      "type": "object",
+                      "x-oxibelt-config-activation": "full_reload",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
                     "ech": {
                       "additionalProperties": false,
                       "description": "OxiBelt native field `upstream_pools[].servers[].tls.ech`. Production Rust validation is authoritative.",
@@ -29893,6 +29959,39 @@
             "additionalProperties": false,
             "description": "OxiBelt native field `upstreams[].tls`. Production Rust validation is authoritative.",
             "properties": {
+              "client_identity": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `upstreams[].tls.client_identity`. Production Rust validation is authoritative.",
+                "properties": {
+                  "cert_chain": {
+                    "description": "OxiBelt native field `upstreams[].tls.client_identity.cert_chain`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-path-kind": "cert_relative",
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "private_key": {
+                    "description": "OxiBelt native field `upstreams[].tls.client_identity.private_key`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-path-kind": "cert_relative",
+                    "x-oxibelt-reference-activation": "full_reload",
+                    "x-oxibelt-secret-class": "file_reference"
+                  }
+                },
+                "required": [
+                  "cert_chain",
+                  "private_key"
+                ],
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
               "ech": {
                 "additionalProperties": false,
                 "description": "OxiBelt native field `upstreams[].tls.ech`. Production Rust validation is authoritative.",

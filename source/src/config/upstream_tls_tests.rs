@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 
 use super::upstream_tls::hex_lower;
-use super::{UpstreamTlsConfig, UpstreamTlsSubjectAltName, UpstreamTlsTrust};
+use super::{
+  UpstreamTlsClientIdentityConfig, UpstreamTlsConfig, UpstreamTlsSubjectAltName, UpstreamTlsTrust,
+};
 
 fn ca_file(label: &str, bytes: &[u8]) -> PathBuf {
   let path = std::env::temp_dir().join(format!(
@@ -140,4 +142,79 @@ fn subject_alt_names_reject_excess_duplicate_or_ambiguous_identities() {
     .validate("test")
     .expect_err("duplicate SAN identities must fail closed");
   assert!(error.to_string().contains("must be unique"));
+}
+
+#[test]
+fn client_identity_requires_exact_fields_and_resolves_both_from_cert_root() {
+  let root = std::env::temp_dir().join(format!(
+    "oxibelt-upstream-client-identity-{}",
+    std::process::id()
+  ));
+  std::fs::create_dir_all(&root).expect("identity test root should be created");
+  let cert = root.join("identity.pem");
+  let key = root.join("identity.key");
+  std::fs::write(&cert, b"certificate").expect("identity certificate fixture should be written");
+  std::fs::write(&key, b"private-key").expect("identity key fixture should be written");
+
+  let mut policy: UpstreamTlsConfig = toml::from_str(
+    r#"
+[client_identity]
+cert_chain = "identity.pem"
+private_key = "identity.key"
+"#,
+  )
+  .expect("complete client identity should deserialize");
+  let source_paths = policy
+    .resolve_relative_paths(&root)
+    .expect("identity files should resolve from the certificate root");
+  assert_eq!(
+    source_paths,
+    vec![root.join("identity.pem"), root.join("identity.key")]
+  );
+  assert_eq!(
+    policy.client_identity,
+    Some(UpstreamTlsClientIdentityConfig {
+      cert_chain: cert
+        .canonicalize()
+        .expect("certificate path should canonicalize"),
+      private_key: key.canonicalize().expect("key path should canonicalize"),
+    })
+  );
+  let debug = format!(
+    "{:?}",
+    policy
+      .client_identity
+      .as_ref()
+      .expect("identity should remain set")
+  );
+  assert!(debug.contains("configured"));
+  assert!(!debug.contains("identity.key"));
+  assert!(!debug.contains("identity.pem"));
+
+  let missing_private_key = PathBuf::from("private-secret-layout/missing.key");
+  let mut missing_policy = UpstreamTlsConfig {
+    client_identity: Some(UpstreamTlsClientIdentityConfig {
+      cert_chain: PathBuf::from("identity.pem"),
+      private_key: missing_private_key.clone(),
+    }),
+    ..UpstreamTlsConfig::default()
+  };
+  let error = missing_policy
+    .resolve_relative_paths(&root)
+    .expect_err("a missing private key must fail closed during path resolution");
+  let rendered = format!("{error:#}");
+  assert!(rendered.contains("failed to resolve upstream TLS client identity file"));
+  assert!(!rendered.contains(&missing_private_key.display().to_string()));
+
+  for invalid in [
+    "[client_identity]\ncert_chain = \"identity.pem\"",
+    "[client_identity]\ncert_chain = \"identity.pem\"\nprivate_key = \"identity.key\"\nextra = \"no\"",
+  ] {
+    toml::from_str::<UpstreamTlsConfig>(invalid)
+      .expect_err("partial or unknown client identity fields must be rejected");
+  }
+
+  std::fs::remove_file(cert).expect("identity certificate fixture should be removed");
+  std::fs::remove_file(key).expect("identity key fixture should be removed");
+  std::fs::remove_dir(root).expect("identity test root should be removed");
 }

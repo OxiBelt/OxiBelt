@@ -409,6 +409,11 @@ impl TlsResumptionState {
     Ok(config)
   }
 
+  #[cfg(test)]
+  pub(super) fn upstream_client_config_count(&self) -> usize {
+    self.upstream_clients_guard().len()
+  }
+
   pub(crate) fn server_session_storage_stats(&self) -> TlsServerSessionStorageStats {
     let server = self.server_guard();
     let mut stats = TlsServerSessionStorageStats::default();

@@ -1,16 +1,23 @@
+use std::fs::OpenOptions;
+use std::io::Read as _;
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use h3_quinn::quinn::ClientConfig as QuinnClientConfig;
 use h3_quinn::quinn::crypto::rustls::QuicClientConfig;
 use rustls::ClientConfig;
 use rustls::client::{EchConfig, EchGreaseConfig, EchMode, Resumption};
 use rustls::crypto::hpke::Hpke;
-use rustls::pki_types::EchConfigListBytes;
+use rustls::pki_types::{CertificateDer, EchConfigListBytes, PrivateKeyDer, pem::PemObject as _};
+use rustls::sign::CertifiedKey;
+use zeroize::Zeroizing;
 
 use crate::config::{
   CryptoConfig, OutboundTlsRevocationConfig, QuicConfig, UpstreamEchConfig, UpstreamEchMode,
-  UpstreamTlsResumptionConfig, UpstreamTlsSubjectAltName, UpstreamTlsTrust,
+  UpstreamTlsClientIdentityConfig, UpstreamTlsResumptionConfig, UpstreamTlsSubjectAltName,
+  UpstreamTlsTrust,
 };
 
 use super::certificate_io::read_existing_file;
@@ -19,6 +26,122 @@ use super::outbound_revocation::OutboundRevocationRuntime;
 use super::resumption::{
   TlsResumptionState, upstream_client_config_key, upstream_client_resumption,
 };
+
+const MAX_UPSTREAM_CLIENT_IDENTITY_FILE_BYTES: u64 = 1024 * 1024;
+
+struct UpstreamClientIdentityMaterial {
+  certificates: Vec<CertificateDer<'static>>,
+  private_key: PrivateKeyDer<'static>,
+}
+
+/// Validate client-auth material before an upstream can be admitted. This
+/// deliberately gives callers no path or key bytes to surface in diagnostics.
+pub(crate) fn validate_upstream_client_identity(
+  identity: &UpstreamTlsClientIdentityConfig,
+  crypto: &CryptoConfig,
+) -> anyhow::Result<()> {
+  let material = load_upstream_client_identity(identity)?;
+  let provider = super::provider::crypto_provider(crypto)?;
+  CertifiedKey::from_der(material.certificates, material.private_key, &provider)
+    .context("upstream client certificate does not match its private key")?;
+  Ok(())
+}
+
+fn load_upstream_client_identity(
+  identity: &UpstreamTlsClientIdentityConfig,
+) -> anyhow::Result<UpstreamClientIdentityMaterial> {
+  let certificate_bytes = read_bounded_identity_file(&identity.cert_chain, false)?;
+  let certificates = CertificateDer::pem_slice_iter(&certificate_bytes)
+    .collect::<Result<Vec<_>, _>>()
+    .context("failed to parse upstream client certificate chain")?;
+  let leaf = certificates
+    .first()
+    .ok_or_else(|| anyhow!("upstream client certificate chain is empty"))?;
+  validate_upstream_client_leaf(leaf)?;
+
+  let private_key_bytes = read_bounded_identity_file(&identity.private_key, true)?;
+  validate_single_unencrypted_private_key(&private_key_bytes)?;
+  let private_key = PrivateKeyDer::from_pem_slice(&private_key_bytes)
+    .map_err(|_| anyhow!("failed to parse upstream client private key"))?;
+  Ok(UpstreamClientIdentityMaterial {
+    certificates,
+    private_key,
+  })
+}
+
+fn read_bounded_identity_file(
+  path: &std::path::Path,
+  private: bool,
+) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+  let canonical =
+    crate::config::canonicalize_existing_file("upstream TLS client identity file", path)
+      .map_err(|_| anyhow!("failed to resolve upstream TLS client identity file"))?;
+  let mut options = OpenOptions::new();
+  options
+    .read(true)
+    .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+  let file = options
+    .open(&canonical)
+    .context("failed to open upstream TLS client identity file")?;
+  let metadata = file
+    .metadata()
+    .context("failed to inspect upstream TLS client identity file")?;
+  if !metadata.is_file() {
+    bail!("upstream TLS client identity file must be a regular file");
+  }
+  if metadata.len() > MAX_UPSTREAM_CLIENT_IDENTITY_FILE_BYTES {
+    bail!("upstream TLS client identity file exceeds the size limit");
+  }
+  if private && metadata.permissions().mode() & 0o027 != 0 {
+    bail!(
+      "upstream TLS client private key must not be writable by group/world or readable by world"
+    );
+  }
+  let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len().try_into().unwrap_or(0)));
+  file
+    .take(MAX_UPSTREAM_CLIENT_IDENTITY_FILE_BYTES + 1)
+    .read_to_end(&mut bytes)
+    .context("failed to read upstream TLS client identity file")?;
+  if bytes.is_empty() || bytes.len() as u64 > MAX_UPSTREAM_CLIENT_IDENTITY_FILE_BYTES {
+    bail!("upstream TLS client identity file is empty or exceeds the size limit");
+  }
+  Ok(bytes)
+}
+
+fn validate_single_unencrypted_private_key(bytes: &[u8]) -> anyhow::Result<()> {
+  let text =
+    std::str::from_utf8(bytes).map_err(|_| anyhow!("upstream client private key must be PEM"))?;
+  let key_labels = text
+    .lines()
+    .filter_map(|line| line.strip_prefix("-----BEGIN "))
+    .filter_map(|line| line.strip_suffix("-----"))
+    .filter(|label| label.ends_with("PRIVATE KEY"))
+    .collect::<Vec<_>>();
+  if key_labels.len() != 1 {
+    bail!("upstream client private key must contain exactly one private key");
+  }
+  if key_labels[0] == "ENCRYPTED PRIVATE KEY" {
+    bail!("encrypted upstream client private keys are not supported");
+  }
+  Ok(())
+}
+
+fn validate_upstream_client_leaf(leaf: &CertificateDer<'_>) -> anyhow::Result<()> {
+  let metadata = crate::tls::parse_certificate_metadata(leaf)
+    .context("failed to parse upstream client certificate leaf")?;
+  let now = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .context("system time is before the Unix epoch")?
+    .as_secs()
+    .min(i64::MAX as u64) as i64;
+  if now < metadata.not_before_unix_seconds {
+    bail!("upstream client certificate leaf is not yet valid");
+  }
+  if now > metadata.not_after_unix_seconds {
+    bail!("upstream client certificate leaf is expired");
+  }
+  Ok(())
+}
 
 /// Builds the upstream TCP TLS client configuration used by proxy clients.
 pub fn build_upstream_client_config(
@@ -81,6 +204,7 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
     extra_root_certificates,
     UpstreamTlsTrust::Inherit,
     &[],
+    None,
     ech,
     resumption,
     state,
@@ -95,12 +219,31 @@ pub(super) fn build_upstream_client_config_with_trust(
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
   subject_alt_names: &[UpstreamTlsSubjectAltName],
+  client_identity: Option<&UpstreamTlsClientIdentityConfig>,
   ech: &UpstreamEchConfig,
   resumption: &UpstreamTlsResumptionConfig,
   state: Option<&TlsResumptionState>,
   upstream_name: &str,
   revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
 ) -> anyhow::Result<ClientConfig> {
+  let revocation_enabled = revocation
+    .as_ref()
+    .is_some_and(|(_, policy)| policy.enabled());
+  // A client identity is secret material. Do not retain a process-lifetime
+  // config that owns it and do not allow tickets to survive identity rotation.
+  if client_identity.is_some() {
+    return build_uncached_upstream_client_config(
+      crypto,
+      extra_root_certificates,
+      trust,
+      subject_alt_names,
+      client_identity,
+      ech,
+      resumption,
+      false,
+      revocation,
+    );
+  }
   let key = upstream_client_config_key(
     "tcp",
     crypto.tls_provider,
@@ -111,9 +254,6 @@ pub(super) fn build_upstream_client_config_with_trust(
     ech,
     resumption,
   )?;
-  let revocation_enabled = revocation
-    .as_ref()
-    .is_some_and(|(_, policy)| policy.enabled());
   if let Some(state) = state
     && !revocation_enabled
   {
@@ -123,6 +263,7 @@ pub(super) fn build_upstream_client_config_with_trust(
         extra_root_certificates,
         trust,
         subject_alt_names,
+        None,
         ech,
         resumption,
         false,
@@ -135,6 +276,7 @@ pub(super) fn build_upstream_client_config_with_trust(
     extra_root_certificates,
     trust,
     subject_alt_names,
+    None,
     ech,
     resumption,
     false,
@@ -148,6 +290,7 @@ fn build_uncached_upstream_client_config(
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
   subject_alt_names: &[UpstreamTlsSubjectAltName],
+  client_identity: Option<&UpstreamTlsClientIdentityConfig>,
   ech: &UpstreamEchConfig,
   resumption: &UpstreamTlsResumptionConfig,
   quic_only: bool,
@@ -175,6 +318,10 @@ fn build_uncached_upstream_client_config(
       .context("failed to configure upstream TLS versions")?,
   };
 
+  let client_identity = client_identity
+    .map(load_upstream_client_identity)
+    .transpose()?;
+  let has_client_identity = client_identity.is_some();
   let mut client_config = if !subject_alt_names.is_empty() || revocation.is_some() {
     let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
       .build()
@@ -186,14 +333,29 @@ fn build_uncached_upstream_client_config(
     } else {
       verifier
     };
-    builder
+    let builder = builder
       .dangerous()
-      .with_custom_certificate_verifier(verifier)
-      .with_no_client_auth()
+      .with_custom_certificate_verifier(verifier);
+    match client_identity {
+      Some(identity) => builder
+        .with_client_auth_cert(identity.certificates, identity.private_key)
+        .context("failed to configure upstream TLS client identity")?,
+      None => builder.with_no_client_auth(),
+    }
   } else {
-    builder.with_root_certificates(roots).with_no_client_auth()
+    let builder = builder.with_root_certificates(roots);
+    match client_identity {
+      Some(identity) => builder
+        .with_client_auth_cert(identity.certificates, identity.private_key)
+        .context("failed to configure upstream TLS client identity")?,
+      None => builder.with_no_client_auth(),
+    }
   };
-  client_config.resumption = effective_upstream_client_resumption(resumption, revocation_enabled);
+  client_config.resumption = if has_client_identity {
+    rustls::client::Resumption::disabled()
+  } else {
+    effective_upstream_client_resumption(resumption, revocation_enabled)
+  };
 
   Ok(client_config)
 }
@@ -302,6 +464,7 @@ pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revoc
     extra_root_certificates,
     UpstreamTlsTrust::Inherit,
     &[],
+    None,
     ech,
     quic,
     resumption,
@@ -317,6 +480,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
   subject_alt_names: &[UpstreamTlsSubjectAltName],
+  client_identity: Option<&UpstreamTlsClientIdentityConfig>,
   ech: &UpstreamEchConfig,
   quic: &QuicConfig,
   resumption: &UpstreamTlsResumptionConfig,
@@ -324,6 +488,21 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
   upstream_name: &str,
   revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
 ) -> anyhow::Result<QuinnClientConfig> {
+  if client_identity.is_some() {
+    let mut client_config = build_uncached_upstream_client_config(
+      crypto,
+      extra_root_certificates,
+      trust,
+      subject_alt_names,
+      client_identity,
+      ech,
+      resumption,
+      true,
+      revocation,
+    )?;
+    client_config.alpn_protocols = vec![b"h3".to_vec()];
+    return quic_client_config(client_config, quic);
+  }
   let key = upstream_client_config_key(
     "quic",
     crypto.tls_provider,
@@ -346,6 +525,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
         extra_root_certificates,
         trust,
         subject_alt_names,
+        None,
         ech,
         resumption,
         true,
@@ -358,6 +538,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
       extra_root_certificates,
       trust,
       subject_alt_names,
+      None,
       ech,
       resumption,
       true,
@@ -366,6 +547,13 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
   };
   client_config.alpn_protocols = vec![b"h3".to_vec()];
 
+  quic_client_config(client_config, quic)
+}
+
+fn quic_client_config(
+  client_config: ClientConfig,
+  quic: &QuicConfig,
+) -> anyhow::Result<QuinnClientConfig> {
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC client TLS config")?;
   let mut quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
@@ -435,8 +623,9 @@ mod tests {
   use crate::config::{
     Config, ListenerConfig, OcspConfig, ProxyProtocolConfig, Tls12CipherSuite,
     Tls12NegotiationConfig, Tls13CipherSuite, Tls13NegotiationConfig, TlsClientAuthConfig,
-    TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig, TlsVersion, UpstreamEchConfig,
-    UpstreamTlsConfig, UpstreamTlsResumptionConfig, UpstreamTlsSubjectAltName,
+    TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig, TlsVersion,
+    UpstreamEchConfig, UpstreamTlsClientIdentityConfig, UpstreamTlsConfig,
+    UpstreamTlsResumptionConfig, UpstreamTlsSubjectAltName,
   };
   use crate::metrics::Metrics;
   use rustls::HandshakeKind;
@@ -501,6 +690,178 @@ mod tests {
   }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn upstream_client_identity_disables_resumption_without_forcing_client_auth() {
+    let temp_dir = common::TempDir::new("upstream-client-identity-resumption");
+    let server_name = "upstream-client-identity.test";
+    let (ca_cert, ca_key) = common::create_self_signed_cert(temp_dir.path(), "identity-ca.test");
+    let (server_cert, server_key) =
+      common::create_ca_signed_server_cert(temp_dir.path(), server_name, &ca_cert, &ca_key);
+    let (client_cert, client_key) = common::create_ca_signed_client_cert(
+      temp_dir.path(),
+      "identity-client.test",
+      &ca_cert,
+      &ca_key,
+    );
+    let server_tls = test_tls_config(server_cert, server_key);
+    let policy = UpstreamTlsConfig {
+      client_identity: Some(UpstreamTlsClientIdentityConfig {
+        cert_chain: client_cert,
+        private_key: client_key,
+      }),
+      ..UpstreamTlsConfig::default()
+    };
+    let resumption = TlsResumptionState::default();
+    let client = build_upstream_client_config_with_trust(
+      &CryptoConfig::default(),
+      std::slice::from_ref(&ca_cert),
+      UpstreamTlsTrust::Inherit,
+      &policy.subject_alt_names,
+      policy.client_identity.as_ref(),
+      &policy.ech,
+      &policy.resumption,
+      Some(&resumption),
+      "client-identity-resumption",
+      None,
+    )
+    .expect("upstream client identity should build");
+    assert_eq!(
+      resumption.upstream_client_config_count(),
+      0,
+      "client identities must bypass the process-lifetime upstream client-config cache"
+    );
+
+    let (_, second_kind, first_tickets) =
+      run_two_handshakes(&server_tls, client, server_name).await;
+    assert!(first_tickets > 0, "server should offer TLS 1.3 tickets");
+    assert!(
+      matches!(
+        second_kind,
+        Some(HandshakeKind::Full | HandshakeKind::FullWithHelloRetryRequest)
+      ),
+      "an upstream client identity must force a fresh handshake even when the server did not request the certificate"
+    );
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn upstream_client_identity_is_presented_when_the_server_requires_it() {
+    let temp_dir = common::TempDir::new("upstream-client-identity-required");
+    let server_name = "upstream-client-identity-required.test";
+    let (ca_cert, ca_key) = common::create_self_signed_cert(temp_dir.path(), "identity-ca.test");
+    let (server_cert, server_key) =
+      common::create_ca_signed_server_cert(temp_dir.path(), server_name, &ca_cert, &ca_key);
+    let (client_cert, client_key) = common::create_ca_signed_client_cert(
+      temp_dir.path(),
+      "identity-client.test",
+      &ca_cert,
+      &ca_key,
+    );
+    let mut server_tls = test_tls_config(server_cert, server_key);
+    server_tls.client_auth = TlsClientAuthConfig {
+      mode: TlsClientAuthMode::Require,
+      ca_certs: vec![ca_cert.clone()],
+      ..TlsClientAuthConfig::default()
+    };
+    let policy = UpstreamTlsConfig {
+      client_identity: Some(UpstreamTlsClientIdentityConfig {
+        cert_chain: client_cert,
+        private_key: client_key,
+      }),
+      ..UpstreamTlsConfig::default()
+    };
+    let authenticated = build_upstream_client_config_with_trust(
+      &CryptoConfig::default(),
+      std::slice::from_ref(&ca_cert),
+      UpstreamTlsTrust::Inherit,
+      &policy.subject_alt_names,
+      policy.client_identity.as_ref(),
+      &policy.ech,
+      &policy.resumption,
+      None,
+      "identity-required",
+      None,
+    )
+    .expect("identity-bearing client should build");
+    assert!(
+      run_one_handshake(&server_tls, authenticated, server_name).await,
+      "the client certificate must be presented after the server CertificateRequest"
+    );
+
+    let unauthenticated = build_upstream_client_config_with_trust(
+      &CryptoConfig::default(),
+      std::slice::from_ref(&ca_cert),
+      UpstreamTlsTrust::Inherit,
+      &[],
+      None,
+      &UpstreamEchConfig::default(),
+      &UpstreamTlsResumptionConfig::default(),
+      None,
+      "identity-required-without-client-cert",
+      None,
+    )
+    .expect("identity-free client should build");
+    assert!(
+      !run_one_handshake(&server_tls, unauthenticated, server_name).await,
+      "the server must reject a client that does not present the required identity"
+    );
+  }
+
+  #[test]
+  fn upstream_client_identity_rejects_malformed_mismatched_and_unsafe_key_material() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp_dir = common::TempDir::new("upstream-client-identity-validation");
+    let (cert_one, key_one) = common::create_self_signed_cert(temp_dir.path(), "identity-one.test");
+    let (_cert_two, key_two) =
+      common::create_self_signed_cert(temp_dir.path(), "identity-two.test");
+    let mismatch = UpstreamTlsClientIdentityConfig {
+      cert_chain: cert_one.clone(),
+      private_key: key_two,
+    };
+    assert!(
+      validate_upstream_client_identity(&mismatch, &CryptoConfig::default()).is_err(),
+      "a client certificate and private key must match"
+    );
+
+    let malformed_key = temp_dir.path().join("malformed.key");
+    std::fs::write(&malformed_key, "not a PEM private key")
+      .expect("malformed fixture should write");
+    std::fs::set_permissions(&malformed_key, std::fs::Permissions::from_mode(0o600))
+      .expect("malformed fixture should retain a safe private-key mode");
+    let malformed = UpstreamTlsClientIdentityConfig {
+      cert_chain: cert_one.clone(),
+      private_key: malformed_key,
+    };
+    assert!(
+      validate_upstream_client_identity(&malformed, &CryptoConfig::default()).is_err(),
+      "malformed private key material must fail closed"
+    );
+
+    let missing_key = temp_dir.path().join("private-secret-layout/missing.key");
+    let missing = UpstreamTlsClientIdentityConfig {
+      cert_chain: cert_one.clone(),
+      private_key: missing_key.clone(),
+    };
+    let error = validate_upstream_client_identity(&missing, &CryptoConfig::default())
+      .expect_err("a missing private key must fail closed");
+    let missing_key_text = missing_key.to_string_lossy();
+    assert!(
+      !format!("{error:#}").contains(missing_key_text.as_ref()),
+      "identity errors must not disclose the configured private-key path"
+    );
+
+    std::fs::set_permissions(&key_one, std::fs::Permissions::from_mode(0o644))
+      .expect("unsafe mode should be applied");
+    let unsafe_mode = UpstreamTlsClientIdentityConfig {
+      cert_chain: cert_one,
+      private_key: key_one,
+    };
+    assert!(
+      validate_upstream_client_identity(&unsafe_mode, &CryptoConfig::default()).is_err(),
+      "world-readable private keys must fail closed"
+    );
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn explicit_subject_alt_names_separate_sni_from_certificate_identity() {
     let temp_dir = common::TempDir::new("upstream-explicit-san");
     let certificate_dns_name = "certificate.example.test";
@@ -527,6 +888,7 @@ mod tests {
         roots,
         UpstreamTlsTrust::Inherit,
         &policy.subject_alt_names,
+        None,
         &policy.ech,
         &policy.resumption,
         None,
@@ -675,10 +1037,7 @@ mod tests {
       .await
       .expect("server TLS handshake should not time out")
       .expect("server task should finish");
-    if succeeded {
-      server_result.expect("server TLS handshake should complete when the client accepted it");
-    }
-    succeeded
+    succeeded && server_result.is_ok()
   }
 
   async fn run_two_handshakes(

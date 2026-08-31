@@ -12,6 +12,7 @@ pq_probe_image="oxibelt/pq-probe:${run_id}"
 http_container="oxibelt-http-${run_id}"
 alternate_upgrade_container="oxibelt-alternate-upgrade-${run_id}"
 https_container="oxibelt-https-${run_id}"
+mtls_container="oxibelt-mtls-${run_id}"
 proxy_container="oxibelt-proxy-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
@@ -19,6 +20,7 @@ cleanup() {
   docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker rm -f \
     "${proxy_container}" \
+    "${mtls_container}" \
     "${https_container}" \
     "${alternate_upgrade_container}" \
     "${http_container}" >/dev/null 2>&1 || true
@@ -68,6 +70,20 @@ extendedKeyUsage = serverAuth
 
 [alt_names]
 DNS.1 = mock-https
+DNS.2 = mock-mtls
+EOF
+
+cat > "${work_dir}/upstream-client.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = oxibelt-upstream-client
+
+[req_ext]
+extendedKeyUsage = clientAuth
 EOF
 
 cat > "${work_dir}/downstream.cnf" <<'EOF'
@@ -108,6 +124,20 @@ openssl x509 -req -sha256 -days 1 \
   -extfile "${work_dir}/upstream-leaf.cnf" \
   -extensions req_ext \
   -out "${work_dir}/upstream-tls/server.pem" >/dev/null 2>&1
+
+openssl req -newkey rsa:2048 -sha256 -nodes \
+  -config "${work_dir}/upstream-client.cnf" \
+  -keyout "${work_dir}/upstream-tls/client.key" \
+  -out "${work_dir}/upstream-tls/client.csr" >/dev/null 2>&1
+
+openssl x509 -req -sha256 -days 1 \
+  -in "${work_dir}/upstream-tls/client.csr" \
+  -CA "${work_dir}/upstream-tls/ca.pem" \
+  -CAkey "${work_dir}/upstream-tls/ca.key" \
+  -CAserial "${work_dir}/upstream-tls/ca.srl" \
+  -extfile "${work_dir}/upstream-client.cnf" \
+  -extensions req_ext \
+  -out "${work_dir}/upstream-tls/client.pem" >/dev/null 2>&1
 
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
   -days 1 \
@@ -219,6 +249,26 @@ webtransport = true
 [upstreams.tls.ech]
 mode = "grease"
 
+[[upstreams]]
+name = "mtls-upstream"
+origin = "https://mock-mtls:19443/backend"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = true
+
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client/mtls/tls.crt"
+private_key = "upstream-client/mtls/tls.key"
+
+[[upstreams]]
+name = "mtls-missing-identity"
+origin = "https://mock-mtls:19443/backend"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = true
+
 [[routes]]
 name = "http-route"
 hosts = ["http.example.test"]
@@ -252,6 +302,18 @@ replace_prefix_with = "/edge"
 upstream = "https-upstream"
 
 [[routes]]
+name = "mtls-route"
+hosts = ["mtls.example.test"]
+path_prefix = "/secure"
+upstream = "mtls-upstream"
+
+[[routes]]
+name = "mtls-missing-identity-route"
+hosts = ["mtls-missing.example.test"]
+path_prefix = "/secure"
+upstream = "mtls-missing-identity"
+
+[[routes]]
 name = "static-route"
 hosts = ["static.example.test"]
 path_prefix = "/assets"
@@ -259,6 +321,11 @@ static_root = "/etc/oxibelt/static/public"
 EOF
 
 cp "${work_dir}/upstream-tls/ca.pem" "${work_dir}/proxy-tls/upstream-ca.pem"
+mkdir -p "${work_dir}/proxy-tls/upstream-client/mtls"
+cp "${work_dir}/upstream-tls/client.pem" \
+  "${work_dir}/proxy-tls/upstream-client/mtls/tls.crt"
+cp "${work_dir}/upstream-tls/client.key" \
+  "${work_dir}/proxy-tls/upstream-client/mtls/tls.key"
 chmod 644 \
   "${work_dir}/proxy-tls/fullchain.pem" \
   "${work_dir}/proxy-tls/privkey.pem" \
@@ -318,12 +385,34 @@ docker cp "${work_dir}/upstream-tls/server.key" "${https_container}:/tls/server.
 docker start "${https_container}" >/dev/null
 
 docker create \
+  --name "${mtls_container}" \
+  --network "${network_name}" \
+  --network-alias mock-mtls \
+  -e LISTEN_PORT=19443 \
+  -e UPSTREAM_NAME=mtls-upstream \
+  -e TLS_CERT_FILE=/tls/server.pem \
+  -e TLS_KEY_FILE=/tls/server.key \
+  -e TLS_CLIENT_CA_FILE=/tls/client-ca.pem \
+  -e TLS_REQUIRE_CLIENT_CERT=1 \
+  "${mock_image}" >/dev/null
+docker cp "${work_dir}/upstream-tls/server.pem" "${mtls_container}:/tls/server.pem"
+docker cp "${work_dir}/upstream-tls/server.key" "${mtls_container}:/tls/server.key"
+docker cp "${work_dir}/upstream-tls/ca.pem" "${mtls_container}:/tls/client-ca.pem"
+docker start "${mtls_container}" >/dev/null
+
+docker create \
   --name "${proxy_container}" \
   --network "${network_name}" \
   --network-alias proxy \
   "${proxy_image}" >/dev/null
 docker cp "${work_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
-docker cp "${work_dir}/proxy-tls/." "${proxy_container}:/etc/oxibelt/cert"
+docker cp -a "${work_dir}/proxy-tls/." "${proxy_container}:/etc/oxibelt/cert"
+# Rootless hosts cannot reliably chgrp a fixture to the image UID. Replace only
+# the client key through Docker's stopped-container tar extraction, whose
+# numeric ownership and mode come from the archive rather than host ownership.
+tar --create --file - --owner=10001 --group=10001 --mode=0440 \
+  -C "${work_dir}/proxy-tls/upstream-client/mtls" tls.key \
+  | docker cp -a - "${proxy_container}:/etc/oxibelt/cert/upstream-client/mtls"
 docker cp "${work_dir}/static" "${proxy_container}:/etc/oxibelt/static"
 docker start "${proxy_container}" >/dev/null
 
@@ -484,6 +573,10 @@ if [[ -z "${http_response:-}" ]]; then
 fi
 
 https_response="$(request_through_proxy "secure-health" "secure.example.test")"
+mtls_response="$(request_through_proxy "secure-mtls" "mtls.example.test")"
+mtls_missing_response="$(
+  request_path_through_proxy "/secure/missing" "mtls-missing.example.test" 502
+)"
 
 echo "${http_response}" | grep -F '"upstream": "http-upstream"'
 echo "${http_response}" | grep -F '"path": "/origin/app/ping?source=http"'
@@ -494,6 +587,9 @@ echo "${https_response}" | grep -F '"upstream": "https-upstream"'
 echo "${https_response}" | grep -F '"path": "/backend/edge/v1/health?source=https"'
 echo "${https_response}" | grep -F '"host": "secure.example.test"'
 echo "${https_response}" | grep -F '"x-forwarded-host": "secure.example.test"'
+
+echo "${mtls_response}" | grep -F '"upstream": "mtls-upstream"'
+echo "${mtls_missing_response}" | grep -F '"body": "upstream request failed"'
 
 valid_websocket_response="$(
   upgrade_through_proxy "/app/upgrade" "http.example.test" "websocket" 101 "" 1
@@ -569,3 +665,4 @@ echo "HTTP and HTTPS proxy integration checks passed"
 echo "WebSocket and generic HTTP Upgrade protocol binding checks passed"
 echo "X25519 and X25519MLKEM768 both negotiate successfully with the current aws-lc-rs-based server"
 echo "HTTPS upstream proxying succeeds with TLS 1.3 ECH GREASE enabled"
+echo "HTTPS upstream client authentication succeeds without leaking its identity to another upstream"

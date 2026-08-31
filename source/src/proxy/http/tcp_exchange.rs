@@ -39,33 +39,21 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
     crate::upstream_resolution::http_upstream_policies(resolution_config, upstream)?;
   let tls_enabled = upstream.origin.scheme() == "https";
   let tls_identity = if tls_enabled {
-    let revocation_policy = state.outbound_revocation.policy_for_upstream(upstream);
-    let revocation = Some((&state.outbound_revocation, revocation_policy));
-    let inherited_roots = state
-      .config
-      .proxy
-      .trusted_ca_certs
-      .iter()
-      .chain(&upstream.extra_trusted_ca_certs)
-      .cloned()
-      .collect::<Vec<_>>();
-    let mut tls_config = crate::tls::build_upstream_client_config_with_policy(
-      &state.config.crypto,
-      &inherited_roots,
-      &upstream.tls,
-      Some(&state.tls_resumption),
-      &upstream.name,
-      revocation,
-    )
-    .context("failed to build one-shot upstream TLS config")?;
-    tls_config.alpn_protocols = vec![upstream_version.as_alpn().to_vec()];
+    let tls_config = state
+      .clients
+      .one_shot_tls_config(upstream, upstream_version.into())
+      .ok_or_else(|| {
+        anyhow::anyhow!(
+          "one-shot upstream TLS config is unavailable for the active configuration generation"
+        )
+      })?;
     let Some(origin_host) = upstream.origin.host_str() else {
       anyhow::bail!("upstream origin has no host");
     };
     let server_name = upstream.tls.server_name.as_deref().unwrap_or(origin_host);
     let server_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
       .map_err(|error| anyhow::anyhow!("invalid upstream TLS server name: {error}"))?;
-    Some((Arc::new(tls_config), server_name))
+    Some((tls_config, server_name))
   } else {
     None
   };
@@ -143,6 +131,15 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
   .await
   .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))?
 }
+
+impl From<TcpUpstreamHttpVersion> for HttpVersion {
+  fn from(value: TcpUpstreamHttpVersion) -> Self {
+    match value {
+      TcpUpstreamHttpVersion::H1 => Self::H1,
+      TcpUpstreamHttpVersion::H2 => Self::H2,
+    }
+  }
+}
 #[derive(Clone, Copy)]
 pub(super) enum TcpUpstreamHttpVersion {
   H1,
@@ -157,13 +154,6 @@ impl TcpUpstreamHttpVersion {
       HttpVersion::H3 => {
         anyhow::bail!("PROXY protocol egress is not supported for HTTP/3 upstream")
       }
-    }
-  }
-
-  pub(super) fn as_alpn(self) -> &'static [u8] {
-    match self {
-      Self::H1 => b"http/1.1",
-      Self::H2 => b"h2",
     }
   }
 

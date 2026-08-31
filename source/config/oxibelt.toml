@@ -1453,6 +1453,12 @@ proxy_protocol_egress = "off"
 [upstreams.tls.ech]
 mode = "disabled"
 
+# Optional upstream client identity. Both PEM files resolve under the
+# certificate root; enabling it disables upstream TLS resumption.
+# [upstreams.tls.client_identity]
+# cert_chain = "upstream-client/app/tls.crt"
+# private_key = "upstream-client/app/tls.key"
+
 [upstreams.tls.resumption]
 # Ignored while the effective upstream revocation policy is enabled.
 mode = "enabled" # enabled | disabled

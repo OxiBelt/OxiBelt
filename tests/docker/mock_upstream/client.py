@@ -15,6 +15,7 @@ TARGET_PORT = 8443
 TARGET_PATHS = {
   "http-ping": "/app/ping?source=http",
   "secure-health": "/secure/v1/health?source=https",
+  "secure-mtls": "/secure/mtls?source=https",
   "waf-blocked": "/app/blocked",
 }
 HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")

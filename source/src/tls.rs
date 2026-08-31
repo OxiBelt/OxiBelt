@@ -104,7 +104,7 @@ pub use upstream_client::{
 };
 pub(crate) use upstream_client::{
   build_upstream_client_config_with_crypto_resumption_and_revocation,
-  build_webpki_client_config_with_crypto,
+  build_webpki_client_config_with_crypto, validate_upstream_client_identity,
 };
 pub(crate) use upstream_policy::{
   build_upstream_client_config_with_policy, build_upstream_quic_client_config_with_policy,

@@ -306,6 +306,12 @@ pub(super) struct ClientPool {
   h1_only: HyperClient,
   negotiated: HyperClient,
   h2c: H2cClient,
+  // These configurations are also used by the one-shot PROXY-protocol path.
+  // Keeping them in this snapshot-owned pool avoids synchronously reopening
+  // client identity, root, and key files on request workers.
+  one_shot_upstream: UpstreamConfig,
+  one_shot_h1_tls_config: Option<Arc<rustls::ClientConfig>>,
+  one_shot_h2_tls_config: Option<Arc<rustls::ClientConfig>>,
   metrics: Arc<Metrics>,
   pool_label: &'static str,
 }
@@ -337,6 +343,20 @@ impl ClientPool {
       }),
       HttpVersion::H3 => None,
     }
+  }
+
+  fn one_shot_tls_config(
+    &self,
+    upstream: &UpstreamConfig,
+    version: HttpVersion,
+  ) -> Option<Arc<rustls::ClientConfig>> {
+    // The map lookup is by stable logical name; this exact comparison makes
+    // the cache key the complete accepted upstream TLS/client identity.
+    (self.one_shot_upstream == *upstream).then(|| match version {
+      HttpVersion::H1 => self.one_shot_h1_tls_config.clone(),
+      HttpVersion::H2 => self.one_shot_h2_tls_config.clone(),
+      HttpVersion::H3 => None,
+    })?
   }
 }
 
@@ -419,6 +439,18 @@ impl UpstreamClientPools {
       .by_upstream
       .get(upstream_name)
       .and_then(|&index| self.for_upstream_index(index, origin_scheme, version))
+  }
+
+  pub(crate) fn one_shot_tls_config(
+    &self,
+    upstream: &UpstreamConfig,
+    version: HttpVersion,
+  ) -> Option<Arc<rustls::ClientConfig>> {
+    self
+      .by_upstream
+      .get(&upstream.name)
+      .and_then(|&index| self.pools.get(index))
+      .and_then(|pool| pool.one_shot_tls_config(upstream, version))
   }
 }
 
@@ -607,17 +639,7 @@ fn build_client_pool(
       .collect::<Vec<PathBuf>>();
     &root_certs
   };
-  let mut h1_tls_config = tls::build_upstream_client_config_with_policy(
-    crypto,
-    extra_root_certs,
-    &upstream.tls,
-    Some(tls_resumption),
-    &upstream.name,
-    Some((outbound_revocation, revocation_policy.clone())),
-  )
-  .context("failed to build HTTP/1.1 upstream TLS client")?;
-  h1_tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-  let mut negotiated_tls_config = tls::build_upstream_client_config_with_policy(
+  let tls_config = tls::build_upstream_client_config_with_policy(
     crypto,
     extra_root_certs,
     &upstream.tls,
@@ -625,7 +647,10 @@ fn build_client_pool(
     &upstream.name,
     Some((outbound_revocation, revocation_policy)),
   )
-  .context("failed to build negotiated upstream TLS client")?;
+  .context("failed to build upstream TLS client")?;
+  let mut h1_tls_config = tls_config.clone();
+  h1_tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+  let mut negotiated_tls_config = tls_config;
   negotiated_tls_config.alpn_protocols = vec![b"h2".to_vec()];
   let (resolution_policy, scheduler_policy) =
     crate::upstream_resolution::http_upstream_policies(resolution_config, upstream)?;
@@ -654,7 +679,9 @@ fn build_client_pool(
     runtime,
     pool: circuit_pool,
   });
-  let connector = |protocol, tls_config| HappyEyeballsHttpConnector {
+  let h1_tls_config = Arc::new(h1_tls_config);
+  let negotiated_tls_config = Arc::new(negotiated_tls_config);
+  let connector = |protocol, tls_config: Arc<rustls::ClientConfig>| HappyEyeballsHttpConnector {
     host: Arc::from(host.to_string()),
     port,
     discovery_id: Arc::from(format!("hyper:{}:{host}:{port}", upstream.name)),
@@ -664,11 +691,11 @@ fn build_client_pool(
     protocol,
     svcb_enabled,
     allowed_svcb_ports: allowed_svcb_ports.clone(),
-    tls_config: tls_enabled.then(|| Arc::new(tls_config)),
+    tls_config: tls_enabled.then_some(tls_config),
     server_name: tls_enabled.then(|| server_name.clone()),
     admission: admission.clone(),
   };
-  let h1_connector = connector(FixedHttpProtocol::H1, h1_tls_config);
+  let h1_connector = connector(FixedHttpProtocol::H1, h1_tls_config.clone());
   let h1_connector = InstrumentedConnector::new(h1_connector, metrics.clone(), "h1", pool_label);
   let mut h1_builder = Client::builder(TokioExecutor::new());
   // Keep every retry visible to OxiBelt's deadline, retry budget, and circuit
@@ -678,7 +705,7 @@ fn build_client_pool(
   apply_client_pool_defaults(&mut h1_builder, upstream);
   let h1_only = h1_builder.build(h1_connector);
 
-  let negotiated_connector = connector(FixedHttpProtocol::H2, negotiated_tls_config);
+  let negotiated_connector = connector(FixedHttpProtocol::H2, negotiated_tls_config.clone());
   let negotiated_connector =
     InstrumentedConnector::new(negotiated_connector, metrics.clone(), "h2", pool_label);
   let mut negotiated_builder = Client::builder(TokioExecutor::new());
@@ -713,6 +740,9 @@ fn build_client_pool(
     h1_only,
     negotiated,
     h2c,
+    one_shot_upstream: upstream.clone(),
+    one_shot_h1_tls_config: tls_enabled.then_some(h1_tls_config),
+    one_shot_h2_tls_config: tls_enabled.then_some(negotiated_tls_config),
     metrics,
     pool_label,
   })
@@ -758,6 +788,17 @@ mod tests {
   use hyper_util::client::legacy::connect::{Connected, Connection};
 
   use super::*;
+  use crate::config::{
+    CapacitySetting, Config, ProxyProtocolEgressMode, UpstreamTlsClientIdentityConfig,
+  };
+  use crate::state::AppSnapshot;
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
 
   #[test]
   fn fixed_protocol_alpn_acceptance_preserves_h1_fallback_and_requires_h2() {
@@ -768,8 +809,71 @@ mod tests {
     assert!(FixedHttpProtocol::H2.accepts_negotiated_alpn(Some(b"h2")));
     assert!(!FixedHttpProtocol::H2.accepts_negotiated_alpn(Some(b"http/1.1")));
   }
-  use crate::config::{CapacitySetting, Config};
 
+  #[tokio::test]
+  async fn one_shot_tls_configs_are_snapshot_scoped_and_identity_bound() {
+    let temp_dir = common::TempDir::new("one-shot-upstream-tls-cache");
+    let (cert_one, key_one) = common::create_self_signed_cert(temp_dir.path(), "one-shot-one.test");
+    let (cert_two, key_two) = common::create_self_signed_cert(temp_dir.path(), "one-shot-two.test");
+    let mut config: Config = toml::from_str(&common::minimal_config_toml(&cert_one, &key_one))
+      .expect("base config should parse");
+    let upstream = &mut config.upstreams[0];
+    upstream.origin =
+      url::Url::parse("https://one-shot-upstream.test:443/").expect("upstream URL should parse");
+    upstream.proxy_protocol_egress = ProxyProtocolEgressMode::V1;
+    upstream.tls.client_identity = Some(UpstreamTlsClientIdentityConfig {
+      cert_chain: cert_one.clone(),
+      private_key: key_one,
+    });
+    config.proxy.trusted_ca_certs = vec![cert_one];
+
+    let snapshot = AppSnapshot::new(config.clone())
+      .await
+      .expect("identity-bearing snapshot should build");
+    let upstream = &snapshot.upstreams[0];
+    let first = snapshot
+      .clients
+      .one_shot_tls_config(upstream, HttpVersion::H1)
+      .expect("one-shot TLS config should be staged");
+    let second = snapshot
+      .clients
+      .one_shot_tls_config(upstream, HttpVersion::H1)
+      .expect("repeated acquisition should reuse the staged config");
+    assert!(
+      Arc::ptr_eq(&first, &second),
+      "one generation must reuse its already-built one-shot TLS config"
+    );
+
+    let mut changed_upstream = upstream.clone();
+    changed_upstream.tls.client_identity = Some(UpstreamTlsClientIdentityConfig {
+      cert_chain: cert_two.clone(),
+      private_key: key_two.clone(),
+    });
+    assert!(
+      snapshot
+        .clients
+        .one_shot_tls_config(&changed_upstream, HttpVersion::H1)
+        .is_none(),
+      "a changed client identity must not select the active generation's TLS config"
+    );
+
+    config.upstreams[0].tls.client_identity = Some(UpstreamTlsClientIdentityConfig {
+      cert_chain: cert_two.clone(),
+      private_key: key_two,
+    });
+    config.proxy.trusted_ca_certs = vec![cert_two];
+    let reloaded = AppSnapshot::new_with_previous(config, Some(&snapshot))
+      .await
+      .expect("rotated identity snapshot should build");
+    let rotated = reloaded
+      .clients
+      .one_shot_tls_config(&reloaded.upstreams[0], HttpVersion::H1)
+      .expect("rotated generation should stage a new config");
+    assert!(
+      !Arc::ptr_eq(&first, &rotated),
+      "a new snapshot generation must not reuse the old identity-bearing TLS config"
+    );
+  }
   #[derive(Clone)]
   struct FakeConnector;
 

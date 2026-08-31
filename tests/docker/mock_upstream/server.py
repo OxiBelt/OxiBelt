@@ -15,6 +15,10 @@ from urllib.parse import parse_qs, unquote, urlsplit
 TLS_CERT_FILE = os.environ.get("TLS_CERT_FILE")
 TLS_KEY_FILE = os.environ.get("TLS_KEY_FILE")
 TLS_ENABLED = bool(TLS_CERT_FILE and TLS_KEY_FILE)
+TLS_CLIENT_CA_FILE = os.environ.get("TLS_CLIENT_CA_FILE")
+TLS_REQUIRE_CLIENT_CERT = os.environ.get("TLS_REQUIRE_CLIENT_CERT", "0") == "1"
+if TLS_REQUIRE_CLIENT_CERT and not TLS_CLIENT_CA_FILE:
+  raise ValueError("TLS_CLIENT_CA_FILE is required when TLS_REQUIRE_CLIENT_CERT=1")
 UPSTREAM_NAME = os.environ.get("UPSTREAM_NAME", "mock-upstream")
 UPSTREAM_MARKER = "mock-upstream"
 ACCEPT_PROXY_PROTOCOL = os.environ.get("ACCEPT_PROXY_PROTOCOL", "0") == "1"
@@ -615,6 +619,11 @@ def main():
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.options |= ssl.OP_NO_COMPRESSION
     context.load_cert_chain(TLS_CERT_FILE, TLS_KEY_FILE)
+    if TLS_CLIENT_CA_FILE:
+      context.load_verify_locations(cafile=TLS_CLIENT_CA_FILE)
+      context.verify_mode = (
+        ssl.CERT_REQUIRED if TLS_REQUIRE_CLIENT_CERT else ssl.CERT_OPTIONAL
+      )
     server.socket = context.wrap_socket(server.socket, server_side=True)
 
   control_thread = threading.Thread(

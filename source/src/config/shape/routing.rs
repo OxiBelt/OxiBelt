@@ -26,6 +26,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     ][..],
     "upstreams.tls" | "upstream_pools.servers.tls" | "upstream_pools.discovery.tls" => &[
       "ech",
+      "client_identity",
       "resumption",
       "server_name",
       "subject_alt_names",
@@ -34,6 +35,9 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "trusted_ca_sha256",
       "upstream_revocation",
     ][..],
+    "upstreams.tls.client_identity"
+    | "upstream_pools.servers.tls.client_identity"
+    | "upstream_pools.discovery.tls.client_identity" => &["cert_chain", "private_key"][..],
     "upstreams.tls.ech" | "upstream_pools.servers.tls.ech" | "upstream_pools.discovery.tls.ech" => {
       &["config_list_file", "mode"][..]
     }

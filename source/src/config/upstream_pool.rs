@@ -339,6 +339,18 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
     discovery
       .tls
       .validate(&format!("{} {:?} discovery", pool.name, discovery.provider))?;
+    if let Some(identity) = &discovery.tls.client_identity {
+      // Discovery is validated after paths are made root-relative, so this
+      // catches unusable identities before a discovered endpoint is admitted.
+      // The cryptographic pair check itself runs from Config validation where
+      // the configured provider is available.
+      if identity.cert_chain.as_os_str().is_empty() || identity.private_key.as_os_str().is_empty() {
+        bail!(
+          "upstream pool {} discovery tls.client_identity requires cert_chain and private_key",
+          pool.name
+        );
+      }
+    }
     if discovery.scheme == super::DiscoveryUpstreamScheme::Http
       && discovery.tls != UpstreamTlsConfig::default()
     {

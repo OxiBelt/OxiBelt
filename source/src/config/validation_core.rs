@@ -120,6 +120,16 @@ impl Config {
       }
 
       upstream.tls.validate(&upstream.name)?;
+      if upstream.origin.scheme() == "http" && upstream.tls.client_identity.is_some() {
+        bail!(
+          "upstream {} tls.client_identity requires an https:// origin",
+          upstream.name
+        );
+      }
+      if let Some(identity) = &upstream.tls.client_identity {
+        crate::tls::validate_upstream_client_identity(identity, &self.crypto)
+          .with_context(|| format!("upstream {} tls.client_identity is invalid", upstream.name))?;
+      }
       if upstream.connect_timeout_ms == 0
         || upstream.request_timeout_ms == 0
         || upstream.first_byte_timeout_ms == 0
@@ -200,6 +210,16 @@ impl Config {
         server
           .tls
           .validate(&format!("{} server {server_id}", pool.name))?;
+        if let Some(identity) = &server.tls.client_identity {
+          crate::tls::validate_upstream_client_identity(identity, &self.crypto).with_context(
+            || {
+              format!(
+                "upstream pool {} server {server_id} tls.client_identity is invalid",
+                pool.name
+              )
+            },
+          )?;
+        }
         if server.origin.scheme() == "http" && server.tls != UpstreamTlsConfig::default() {
           bail!(
             "upstream pool {} server {server_id} cannot configure tls for an http:// origin",
@@ -211,6 +231,19 @@ impl Config {
             "upstream pool {} server weight must be greater than 0",
             pool.name
           );
+        }
+      }
+      for discovery in &pool.discovery {
+        if let Some(identity) = &discovery.tls.client_identity {
+          crate::tls::validate_upstream_client_identity(identity, &self.crypto).with_context(
+            || {
+              format!(
+                "upstream pool {} {} discovery tls.client_identity is invalid",
+                pool.name,
+                discovery.effective_id()
+              )
+            },
+          )?;
         }
       }
       upstream_pool::validate_pool_discovery(pool)?;

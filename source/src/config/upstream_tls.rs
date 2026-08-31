@@ -2,9 +2,10 @@
 //! Exact CA digests bind generated paths to the bytes validated at configuration load.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -31,6 +32,28 @@ pub struct UpstreamTlsConfig {
   pub resumption: UpstreamTlsResumptionConfig,
   #[serde(default)]
   pub upstream_revocation: Option<OutboundTlsRevocationConfig>,
+  #[serde(default)]
+  pub client_identity: Option<UpstreamTlsClientIdentityConfig>,
+}
+
+/// Client certificate material presented to an HTTPS upstream when it asks for it.
+///
+/// Paths are intentionally omitted from `Debug`: TLS configuration is included in
+/// several runtime diagnostics and an identity path is sensitive deployment data.
+#[derive(Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamTlsClientIdentityConfig {
+  pub cert_chain: PathBuf,
+  pub private_key: PathBuf,
+}
+
+impl fmt::Debug for UpstreamTlsClientIdentityConfig {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("UpstreamTlsClientIdentityConfig")
+      .field("configured", &true)
+      .finish()
+  }
 }
 
 impl UpstreamTlsConfig {
@@ -66,6 +89,24 @@ impl UpstreamTlsConfig {
         Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
+    if let Some(identity) = &mut self.client_identity {
+      let (cert_chain, logical) = resolve_existing_local_config_file_path_with_logical(
+        "upstream TLS client_identity.cert_chain",
+        base_dir,
+        &identity.cert_chain,
+      )
+      .map_err(|_| anyhow!("failed to resolve upstream TLS client identity file"))?;
+      identity.cert_chain = cert_chain;
+      source_paths.push(logical);
+      let (private_key, logical) = resolve_existing_local_config_file_path_with_logical(
+        "upstream TLS client_identity.private_key",
+        base_dir,
+        &identity.private_key,
+      )
+      .map_err(|_| anyhow!("failed to resolve upstream TLS client identity file"))?;
+      identity.private_key = private_key;
+      source_paths.push(logical);
+    }
     Ok(source_paths)
   }
 

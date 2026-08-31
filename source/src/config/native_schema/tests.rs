@@ -92,6 +92,47 @@ fn assigns_quic_upstream_resolution_full_reload_activation() {
   }
 }
 
+#[test]
+fn upstream_client_identity_private_keys_are_redacted_file_references() {
+  for path in [
+    "upstreams[0].tls.client_identity.private_key",
+    "upstream_pools[0].servers[0].tls.client_identity.private_key",
+    "upstream_pools[0].discovery[0].tls.client_identity.private_key",
+  ] {
+    let metadata = native_config_field_metadata(path);
+    assert_eq!(
+      metadata.secret_class,
+      NativeConfigSecretClass::FileReference,
+      "{path} must be redacted as a file reference"
+    );
+    assert_eq!(
+      metadata.config_activation,
+      NativeConfigActivation::FullReload,
+      "{path}"
+    );
+    assert_eq!(
+      metadata.reference_activation,
+      NativeConfigActivation::FullReload,
+      "{path}"
+    );
+  }
+}
+
+#[cfg(feature = "config-tooling")]
+#[test]
+fn upstream_client_identity_paths_are_cert_relative() {
+  for path in [
+    "upstreams.tls.client_identity.cert_chain",
+    "upstreams.tls.client_identity.private_key",
+    "upstream_pools.servers.tls.client_identity.cert_chain",
+    "upstream_pools.servers.tls.client_identity.private_key",
+    "upstream_pools.discovery.tls.client_identity.cert_chain",
+    "upstream_pools.discovery.tls.client_identity.private_key",
+  ] {
+    assert_eq!(path_kind(path), Some("cert_relative"), "{path}");
+  }
+}
+
 #[cfg(feature = "config-tooling")]
 #[test]
 fn declares_canonical_and_compatibility_runtime_values() {
