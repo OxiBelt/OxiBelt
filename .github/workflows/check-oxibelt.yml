@@ -2135,7 +2135,7 @@ jobs:
         run: tests/scripts/check-helm-gateway-controller-ha.sh
 
       - name: Install Kind and kubectl
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
         with:
           version: v0.33.0
           kubectl_version: ${{ matrix.kubectl }}
@@ -2193,7 +2193,7 @@ jobs:
           tests/scripts/check-helm-edge-secure-medium-v2.sh
 
       - name: Install Kind and kubectl
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
         with:
           version: v0.33.0
           kubectl_version: v1.34.11
@@ -2242,7 +2242,7 @@ jobs:
           version: v3.21.4
 
       - name: Install Kind and kubectl
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
         with:
           version: v0.33.0
           kubectl_version: v1.34.11
@@ -2308,7 +2308,7 @@ jobs:
         run: tests/scripts/check-helm-autoscaling.sh
 
       - name: Install Kind and kubectl
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
         with:
           version: v0.33.0
           kubectl_version: v1.34.11
@@ -2369,7 +2369,7 @@ jobs:
         run: tests/scripts/check-helm-network-policy.sh
 
       - name: Install kubectl
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
         with:
           version: v0.33.0
           kubectl_version: v1.34.11
@@ -2446,7 +2446,7 @@ jobs:
           tests/scripts/check-helm-image-digest.sh
 
       - name: Install current Kind and kubectl
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
         with:
           version: v0.33.0
           kubectl_version: ${{ matrix.kubectl }}

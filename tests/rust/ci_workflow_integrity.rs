@@ -42,6 +42,9 @@ const DOCKER_INTEGRATION_JOBS: &[&str] = &[
   "docker-integration-security",
 ];
 const DOCKER_SECURITY_FUZZ_JOB_COUNT: usize = 1;
+const KIND_ACTION_RETRY_PIN: &str =
+  "helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165";
+const KIND_ACTION_V1_14_0_SHA: &str = "ef37e7f390d99f746eb8b610417061a60e82a6cc";
 
 const OXIBELT_IMAGE_ARTIFACTS: &[(&str, &str, &str, &str)] = &[
   (
@@ -3397,6 +3400,47 @@ fn rust_advisory_checks_gate_downstream_build_jobs() {
 }
 
 #[test]
+fn kind_action_installs_are_retry_hardened_and_install_only() {
+  let workflow = workflow_text();
+  let any_uses_marker = "uses: helm/kind-action@";
+  let uses_marker = format!("uses: {KIND_ACTION_RETRY_PIN}");
+
+  assert_eq!(
+    workflow.matches(any_uses_marker).count(),
+    6,
+    "the workflow should contain exactly the reviewed Kind action uses"
+  );
+  assert_eq!(
+    workflow.matches(&uses_marker).count(),
+    6,
+    "every Kind installation should use the exact upstream retry-fix commit"
+  );
+  assert!(
+    !workflow.contains(KIND_ACTION_V1_14_0_SHA),
+    "the one-shot v1.14.0 Kind action pin must not remain"
+  );
+
+  for (index, remainder) in workflow.split(&uses_marker).skip(1).enumerate() {
+    let action_step = remainder
+      .split_once("\n      - ")
+      .map_or(remainder, |(step, _)| step);
+    assert!(
+      action_step.contains("install_only: true"),
+      "Kind action use {index} must remain install-only"
+    );
+    for forbidden in ["registry:", "cloud_provider:"] {
+      assert!(
+        !action_step
+          .lines()
+          .map(str::trim_start)
+          .any(|line| line.starts_with(forbidden)),
+        "Kind action use {index} must not enable unreachable behavior with {forbidden}"
+      );
+    }
+  }
+}
+
+#[test]
 fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);
@@ -3467,7 +3511,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "tests/scripts/check-helm-service-account-token.sh",
     "name: Validate Gateway controller high availability",
     "tests/scripts/check-helm-gateway-controller-ha.sh",
-    "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
+    KIND_ACTION_RETRY_PIN,
     "version: v0.33.0",
     "kubectl_version: ${{ matrix.kubectl }}",
     "install_only: true",
@@ -5297,7 +5341,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "tests/scripts/check-helm-pod-lifecycle.sh",
     "name: Validate Helm autoscaling configuration",
     "tests/scripts/check-helm-autoscaling.sh",
-    "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
+    KIND_ACTION_RETRY_PIN,
     "version: v0.33.0",
     "kubectl_version: v1.34.11",
     "install_only: true",
@@ -5448,7 +5492,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "version: v3.21.4",
     "name: Validate Helm NetworkPolicy configuration",
     "tests/scripts/check-helm-network-policy.sh",
-    "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
+    KIND_ACTION_RETRY_PIN,
     "version: v0.33.0",
     "kubectl_version: v1.34.11",
     "install_only: true",
@@ -5637,7 +5681,7 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
     "tests/scripts/check-helm-autoscaling.sh",
     "tests/scripts/check-helm-network-policy.sh",
     "tests/scripts/check-helm-image-digest.sh",
-    "helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0",
+    KIND_ACTION_RETRY_PIN,
     "version: v0.33.0",
     "kubectl_version: ${{ matrix.kubectl }}",
     "kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d",
