@@ -2137,7 +2137,7 @@ jobs:
       - name: Install Kind and kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
-          version: v0.32.0
+          version: v0.33.0
           kubectl_version: ${{ matrix.kubectl }}
           install_only: true
 
@@ -2195,7 +2195,7 @@ jobs:
       - name: Install Kind and kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
-          version: v0.32.0
+          version: v0.33.0
           kubectl_version: v1.34.11
           install_only: true
 
@@ -2244,7 +2244,7 @@ jobs:
       - name: Install Kind and kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
-          version: v0.32.0
+          version: v0.33.0
           kubectl_version: v1.34.11
           install_only: true
 
@@ -2310,7 +2310,7 @@ jobs:
       - name: Install Kind and kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
-          version: v0.32.0
+          version: v0.33.0
           kubectl_version: v1.34.11
           install_only: true
 
@@ -2371,7 +2371,7 @@ jobs:
       - name: Install kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
-          version: v0.32.0
+          version: v0.33.0
           kubectl_version: v1.34.11
           install_only: true
 
@@ -2448,7 +2448,7 @@ jobs:
       - name: Install current Kind and kubectl
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
-          version: v0.32.0
+          version: v0.33.0
           kubectl_version: ${{ matrix.kubectl }}
           install_only: true
 
