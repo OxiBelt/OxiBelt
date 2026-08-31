@@ -38,6 +38,11 @@ pub const ROLLOUT_TARGET_KIND_LABEL: &str = "oxibelt.dev/rollout-target-kind";
 pub const LEASE_UID_ANNOTATION: &str = "oxibelt.dev/gateway-controller-lease-uid";
 pub const LEADER_EPOCH_ANNOTATION: &str = "oxibelt.dev/gateway-controller-leader-epoch";
 pub const HOLDER_IDENTITY_ANNOTATION: &str = "oxibelt.dev/gateway-controller-holder-identity";
+pub const CLIENT_IDENTITY_SECRETS_ANNOTATION: &str = "oxibelt.dev/gateway-upstream-client-secrets";
+pub const COMMITTED_CLIENT_IDENTITY_SECRETS_ANNOTATION: &str =
+  "oxibelt.dev/gateway-upstream-client-secrets-committed";
+pub const PREVIOUS_CLIENT_IDENTITY_SECRETS_ANNOTATION: &str =
+  "oxibelt.dev/gateway-upstream-client-secrets-previous";
 
 const CONTROLLER_NAME: &str = "oxibelt-gateway-controller";
 const DIGEST_DOMAIN: &[u8] = b"oxibelt-gateway-config-v1\0";
@@ -237,6 +242,9 @@ pub struct RolloutState {
   pub failed_revision: Option<String>,
   pub started_at_unix: Option<u64>,
   pub failure: Option<String>,
+  pub desired_client_identity_secrets: Vec<String>,
+  pub committed_client_identity_secrets: Vec<String>,
+  pub previous_client_identity_secrets: Vec<String>,
 }
 
 impl RolloutState {
@@ -262,6 +270,13 @@ impl RolloutState {
       failure: get(FAILURE_ANNOTATION)
         .filter(|value| !value.is_empty())
         .map(str::to_string),
+      desired_client_identity_secrets: annotation_list(get(CLIENT_IDENTITY_SECRETS_ANNOTATION)),
+      committed_client_identity_secrets: annotation_list(get(
+        COMMITTED_CLIENT_IDENTITY_SECRETS_ANNOTATION,
+      )),
+      previous_client_identity_secrets: annotation_list(get(
+        PREVIOUS_CLIENT_IDENTITY_SECRETS_ANNOTATION,
+      )),
     }
   }
 
@@ -276,6 +291,9 @@ impl RolloutState {
       failed_revision: None,
       started_at_unix: Some(now_unix),
       failure: None,
+      desired_client_identity_secrets: artifact.client_identity_secret_names.clone(),
+      committed_client_identity_secrets: previous.committed_client_identity_secrets.clone(),
+      previous_client_identity_secrets: previous.previous_client_identity_secrets.clone(),
     }
   }
 
@@ -328,8 +346,32 @@ impl RolloutState {
       FAILURE_ANNOTATION,
       self.failure.as_deref(),
     );
+    annotations.insert(
+      CLIENT_IDENTITY_SECRETS_ANNOTATION.to_string(),
+      Value::String(self.desired_client_identity_secrets.join(",")),
+    );
+    annotations.insert(
+      COMMITTED_CLIENT_IDENTITY_SECRETS_ANNOTATION.to_string(),
+      Value::String(self.committed_client_identity_secrets.join(",")),
+    );
+    annotations.insert(
+      PREVIOUS_CLIENT_IDENTITY_SECRETS_ANNOTATION.to_string(),
+      Value::String(self.previous_client_identity_secrets.join(",")),
+    );
     annotations
   }
+}
+
+fn annotation_list(value: Option<&str>) -> Vec<String> {
+  let mut values = value
+    .unwrap_or("")
+    .split(',')
+    .filter(|value| !value.is_empty())
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+  values.sort();
+  values.dedup();
+  values
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -453,6 +495,18 @@ pub(crate) fn validate_kubernetes_dns_label(name: &str, value: &str) -> anyhow::
     && !value.ends_with('-');
   if !valid {
     bail!("{name} must be a lowercase Kubernetes DNS label");
+  }
+  Ok(())
+}
+
+pub(crate) fn validate_kubernetes_dns_subdomain(name: &str, value: &str) -> anyhow::Result<()> {
+  let valid = !value.is_empty()
+    && value.len() <= 253
+    && value
+      .split('.')
+      .all(|segment| validate_kubernetes_dns_label(name, segment).is_ok());
+  if !valid {
+    bail!("{name} must be a lowercase Kubernetes DNS subdomain");
   }
   Ok(())
 }

@@ -2,8 +2,8 @@ use anyhow::{Context, bail};
 use serde_json::Value;
 
 use super::{
-  GeneratedExternalAuth, GeneratedKubernetesDiscovery, GeneratedPool, GeneratedRoute,
-  GeneratedServer, NamedExactMatch, ObjectKey, TranslationState, backend_port,
+  GeneratedClientIdentity, GeneratedExternalAuth, GeneratedKubernetesDiscovery, GeneratedPool,
+  GeneratedRoute, GeneratedServer, NamedExactMatch, ObjectKey, TranslationState, backend_port,
   backend_ref_is_service, backend_service_port, endpoint_slice_discovery_port,
   filters::ParsedRouteFilters, filters::parse_route_filters, intersect_hosts, sanitize_name,
   string_at,
@@ -21,6 +21,9 @@ impl TranslationState {
       ));
       return;
     }
+    let Ok(client_identity) = self.gateway_client_identity_for_route(route, &attachments) else {
+      return;
+    };
 
     let route_hosts = super::string_array_at(&route.spec, &["hostnames"]);
     let rules = route.spec.get("rules").and_then(Value::as_array);
@@ -72,8 +75,14 @@ impl TranslationState {
             continue;
           };
 
-          if !self.apply_parsed_route_filters(route, "HTTPRoute", &mut generated, filters, &source)
-          {
+          if !self.apply_parsed_route_filters(
+            route,
+            "HTTPRoute",
+            &mut generated,
+            filters,
+            &source,
+            client_identity.as_ref(),
+          ) {
             continue;
           }
           if generated.redirect.is_some()
@@ -98,6 +107,7 @@ impl TranslationState {
             rule.get("backendRefs").and_then(Value::as_array),
             &generated.name,
             &source,
+            client_identity.as_ref(),
           ) else {
             continue;
           };
@@ -116,6 +126,7 @@ impl TranslationState {
     backend_refs: Option<&Vec<Value>>,
     route_name: &str,
     source: &str,
+    client_identity: Option<&GeneratedClientIdentity>,
   ) -> Option<GeneratedPool> {
     let Some(backend_refs) = backend_refs else {
       self.diagnostics.push(crate::model::Diagnostic::error(
@@ -151,9 +162,13 @@ impl TranslationState {
     if self.backend_resolution == BackendResolution::EndpointSliceWatch {
       let mut discoveries = Vec::with_capacity(nonzero_backends.len());
       for (index, backend, weight) in nonzero_backends {
-        let Some(discovery) =
-          self.backend_discovery(route, from_kind, backend, index, weight, route_name)
-        else {
+        let Some(discovery) = self.backend_discovery(
+          route,
+          from_kind,
+          (backend, index, weight),
+          route_name,
+          client_identity,
+        ) else {
           if self.diagnostics.len() == diagnostics_before_backend_resolution {
             self.diagnostics.push(crate::model::Diagnostic::error(
               model_object_ref(route),
@@ -175,7 +190,9 @@ impl TranslationState {
 
     let mut servers = Vec::new();
     for (index, backend, weight) in nonzero_backends {
-      let Some(server) = self.backend_server(route, from_kind, backend, index, weight) else {
+      let Some(server) =
+        self.backend_server(route, from_kind, backend, index, weight, client_identity)
+      else {
         continue;
       };
       servers.push(server);
@@ -205,6 +222,7 @@ impl TranslationState {
     backend: &Value,
     index: usize,
     weight: u32,
+    client_identity: Option<&GeneratedClientIdentity>,
   ) -> Option<GeneratedServer> {
     if !backend_ref_is_service(backend) {
       self.diagnostics.push(crate::model::Diagnostic::error(
@@ -242,7 +260,10 @@ impl TranslationState {
       ));
       return None;
     };
-    let tls = self.backend_tls_for_service(route, &key).ok()?;
+    let mut tls = self.backend_tls_for_service(route, &key).ok()?;
+    if let (Some(tls), Some(client_identity)) = (&mut tls, client_identity) {
+      tls.client_identity = Some(client_identity.clone());
+    }
     let scheme = if tls.is_some() {
       "https"
     } else {
@@ -264,11 +285,11 @@ impl TranslationState {
     &mut self,
     route: &KubernetesObject,
     from_kind: &str,
-    backend: &Value,
-    index: usize,
-    weight: u32,
+    backend: (&Value, usize, u32),
     route_name: &str,
+    client_identity: Option<&GeneratedClientIdentity>,
   ) -> Option<GeneratedKubernetesDiscovery> {
+    let (backend, index, weight) = backend;
     if !backend_ref_is_service(backend) {
       self.diagnostics.push(crate::model::Diagnostic::error(
         model_object_ref(route),
@@ -315,7 +336,10 @@ impl TranslationState {
         return None;
       }
     };
-    let tls = self.backend_tls_for_service(route, &key).ok()?;
+    let mut tls = self.backend_tls_for_service(route, &key).ok()?;
+    if let (Some(tls), Some(client_identity)) = (&mut tls, client_identity) {
+      tls.client_identity = Some(client_identity.clone());
+    }
     Some(GeneratedKubernetesDiscovery {
       id: sanitize_name(&format!("{route_name}-backend-{index}-{namespace}-{name}")),
       weight_multiplier: weight,
@@ -339,6 +363,7 @@ impl TranslationState {
     generated: &mut GeneratedRoute,
     filters: ParsedRouteFilters,
     source: &str,
+    client_identity: Option<&GeneratedClientIdentity>,
   ) -> bool {
     if let Some(policy_ref) = filters.route_policy.as_ref()
       && let Err(error) =
@@ -358,9 +383,14 @@ impl TranslationState {
     for (index, mirror) in filters.request_mirrors.into_iter().enumerate() {
       let backend_refs = vec![mirror.backend_ref];
       let route_name = sanitize_name(&format!("{}-mirror-{index}", generated.name));
-      let Some(pool) =
-        self.backend_pool(route, from_kind, Some(&backend_refs), &route_name, source)
-      else {
+      let Some(pool) = self.backend_pool(
+        route,
+        from_kind,
+        Some(&backend_refs),
+        &route_name,
+        source,
+        client_identity,
+      ) else {
         return false;
       };
       let mut action = mirror.action;
@@ -380,7 +410,8 @@ impl TranslationState {
           return false;
         }
       };
-      let Some(server) = self.backend_server(route, from_kind, &auth.backend_ref, 0, 1) else {
+      let Some(server) = self.backend_server(route, from_kind, &auth.backend_ref, 0, 1, None)
+      else {
         return false;
       };
       let endpoint = match external_auth_endpoint(&server.origin, auth.path_prefix.as_deref()) {

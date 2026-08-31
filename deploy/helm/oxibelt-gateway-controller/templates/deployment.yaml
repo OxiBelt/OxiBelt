@@ -93,6 +93,9 @@ spec:
         {{- end }}
         - "--route-policy-max-request-body-bytes={{ include "oxibelt-gateway-controller.decimalInteger" (dict "name" "routePolicy.maxRequestBodyBytes" "value" .Values.routePolicy.maxRequestBodyBytes) }}"
         - "--route-policy-max-timeout-ms={{ include "oxibelt-gateway-controller.decimalInteger" (dict "name" "routePolicy.maxTimeoutMs" "value" .Values.routePolicy.maxTimeoutMs) }}"
+        {{- range $secret := .Values.upstreamClientTls.sourceSecretAllowlist }}
+        - "--upstream-client-tls-source-secret={{ $secret.namespace }}/{{ $secret.name }}:{{ default "tls.crt" $secret.certificateKey }}:{{ default "tls.key" $secret.privateKeyKey }}"
+        {{- end }}
         - "--compatibility-mode={{ .Values.compatibility.mode }}"
         {{- if eq .Values.compatibility.mode "rolling_upgrade" }}
         - "--compatibility-previous-version={{ .Values.compatibility.previousVersion }}"

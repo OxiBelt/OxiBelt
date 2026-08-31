@@ -1,8 +1,8 @@
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 
-use super::{RenderedConfig, translate_objects};
-use crate::cli::SharedArgs;
+use super::{RenderedConfig, TranslationDisposition, translate_objects};
+use crate::cli::{SharedArgs, SourceSecretAllowlistEntry};
 use crate::model::{DiagnosticSeverity, KubernetesObject};
 use oxibelt::config::Config;
 
@@ -60,6 +60,7 @@ fn args() -> SharedArgs {
     external_auth_allow_credentials: true,
     route_policy_max_request_body_bytes: 10_485_760,
     route_policy_max_timeout_ms: 30_000,
+    upstream_client_tls_source_secrets: Vec::new(),
     dry_run: false,
     health_bind: None,
   }
@@ -85,6 +86,29 @@ fn has_error_containing(rendered: &RenderedConfig, needle: &str) -> bool {
   })
 }
 
+fn base64_encode(bytes: &[u8]) -> String {
+  const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+  for chunk in bytes.chunks(3) {
+    let first = chunk[0];
+    let second = chunk.get(1).copied().unwrap_or(0);
+    let third = chunk.get(2).copied().unwrap_or(0);
+    encoded.push(ALPHABET[(first >> 2) as usize] as char);
+    encoded.push(ALPHABET[(((first & 0x03) << 4) | (second >> 4)) as usize] as char);
+    encoded.push(if chunk.len() > 1 {
+      ALPHABET[(((second & 0x0f) << 2) | (third >> 6)) as usize] as char
+    } else {
+      '='
+    });
+    encoded.push(if chunk.len() > 2 {
+      ALPHABET[(third & 0x3f) as usize] as char
+    } else {
+      '='
+    });
+  }
+  encoded
+}
+
 #[test]
 fn http_route_generates_weighted_pool_and_route() {
   let rendered = translate_objects(&objects(HTTP_FIXTURE), &args()).expect("translate");
@@ -94,6 +118,7 @@ fn http_route_generates_weighted_pool_and_route() {
     "{:?}",
     rendered.diagnostics
   );
+  assert_eq!(rendered.disposition, TranslationDisposition::Clean);
   assert!(rendered.toml.contains("[[upstream_pools]]"));
   assert!(
     rendered
@@ -854,6 +879,131 @@ spec:
 }
 
 #[test]
+fn gateway_client_certificate_is_validated_and_rendered_only_for_tls_backends() {
+  let temp_dir = common::TempDir::new("gateway-api-upstream-client");
+  let (certificate_path, private_key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "gateway-client.example.test");
+  let certificate = base64_encode(&std::fs::read(certificate_path).expect("certificate"));
+  let private_key = base64_encode(&std::fs::read(private_key_path).expect("private key"));
+  let gateway = HTTP_FIXTURE
+    .replace(
+      "  gatewayClassName: oxibelt",
+      "  gatewayClassName: oxibelt\n  tls:\n    backend:\n      clientCertificateRef: {name: gateway-client}",
+    )
+    .replace(
+      "    - name: canary\n      port: 8080\n      weight: 20\n",
+      "",
+    );
+  let raw = format!(
+    "{gateway}\n---\napiVersion: v1\nkind: Secret\nmetadata: {{name: gateway-client, namespace: default, uid: source-uid, resourceVersion: \"17\"}}\ntype: kubernetes.io/tls\ndata:\n  tls.crt: {certificate}\n  tls.key: {private_key}\n---\napiVersion: gateway.networking.k8s.io/v1\nkind: BackendTLSPolicy\nmetadata: {{name: app-tls, namespace: default}}\nspec:\n  targetRefs: [{{group: \"\", kind: Service, name: app}}]\n  validation:\n    hostname: backend.example.test\n    wellKnownCACertificates: System\n"
+  );
+  let mut allowed_args = args();
+  allowed_args
+    .upstream_client_tls_source_secrets
+    .push(SourceSecretAllowlistEntry {
+      namespace: "default".to_string(),
+      name: "gateway-client".to_string(),
+      certificate_key: "tls.crt".to_string(),
+      private_key_key: "tls.key".to_string(),
+    });
+
+  let rendered = translate_objects(&objects(&raw), &allowed_args).expect("translate");
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert_eq!(rendered.client_identities.len(), 1);
+  let identity = &rendered.client_identities[0];
+  assert!(
+    rendered
+      .toml
+      .contains("[upstream_pools.servers.tls.client_identity]")
+  );
+  assert!(
+    rendered
+      .toml
+      .contains(&format!("cert_chain = \"{}\"", identity.cert_chain_path()))
+  );
+  assert!(rendered.toml.contains(&format!(
+    "private_key = \"{}\"",
+    identity.private_key_path()
+  )));
+  assert!(!rendered.toml.contains(&private_key));
+  assert!(!format!("{identity:?}").contains(&private_key));
+
+  let denied = translate_objects(&objects(&raw), &args()).expect("translate denied source");
+  assert!(has_error_containing(
+    &denied,
+    "operator source Secret allowlist"
+  ));
+  assert_eq!(
+    denied.disposition,
+    TranslationDisposition::ClientIdentityDeprogram
+  );
+  assert!(denied.client_identities.is_empty());
+  assert!(!denied.toml.contains("[[routes]]"));
+  assert!(!denied.toml.contains("client_identity"));
+
+  let mixed_raw = format!(
+    "{raw}\n---\napiVersion: gateway.networking.k8s.io/v1\nkind: BackendTLSPolicy\nmetadata: {{name: conflicting-app-tls, namespace: default}}\nspec:\n  targetRefs: [{{group: \"\", kind: Service, name: app}}]\n  validation:\n    hostname: conflicting-backend.example.test\n    wellKnownCACertificates: System\n"
+  );
+  let mixed = translate_objects(&objects(&mixed_raw), &args()).expect("translate mixed errors");
+  assert!(has_error_containing(
+    &mixed,
+    "operator source Secret allowlist"
+  ));
+  assert!(has_error_containing(&mixed, "Conflicted"));
+  assert_eq!(
+    mixed.disposition,
+    TranslationDisposition::ClientIdentityDeprogram
+  );
+  assert!(mixed.disposition.is_publishable_for_static_target());
+  assert!(mixed.client_identities.is_empty());
+  assert!(!mixed.toml.contains("[[routes]]"));
+
+  let mismatched = translate_objects(
+    &objects(&raw.replace(&private_key, &certificate)),
+    &allowed_args,
+  )
+  .expect("translate mismatched key");
+  assert_eq!(
+    mismatched.disposition,
+    TranslationDisposition::ClientIdentityDeprogram
+  );
+  assert!(mismatched.client_identities.is_empty());
+  assert!(!mismatched.toml.contains("[[routes]]"));
+
+  let conflicting_raw = raw.replace(
+    "  parentRefs:\n  - name: edge\n    sectionName: https",
+    "  parentRefs:\n  - name: edge\n    sectionName: https\n  - name: edge-two\n    sectionName: https",
+  );
+  let conflicting_raw = format!(
+    "{conflicting_raw}\n---\napiVersion: gateway.networking.k8s.io/v1\nkind: Gateway\nmetadata: {{name: edge-two, namespace: default}}\nspec:\n  gatewayClassName: oxibelt\n  tls:\n    backend:\n      clientCertificateRef: {{name: gateway-client-two}}\n  listeners:\n  - name: https\n    protocol: HTTPS\n    port: 443\n    hostname: api.example.com\n---\napiVersion: v1\nkind: Secret\nmetadata: {{name: gateway-client-two, namespace: default, uid: source-uid-two, resourceVersion: \"17\"}}\ntype: kubernetes.io/tls\ndata:\n  tls.crt: {certificate}\n  tls.key: {private_key}\n"
+  );
+  allowed_args
+    .upstream_client_tls_source_secrets
+    .push(SourceSecretAllowlistEntry {
+      namespace: "default".to_string(),
+      name: "gateway-client-two".to_string(),
+      certificate_key: "tls.crt".to_string(),
+      private_key_key: "tls.key".to_string(),
+    });
+  let conflicted =
+    translate_objects(&objects(&conflicting_raw), &allowed_args).expect("translate conflict");
+  assert_eq!(
+    conflicted.disposition,
+    TranslationDisposition::ClientIdentityDeprogram
+  );
+  assert!(has_error_containing(
+    &conflicted,
+    "Gateways select different backend client identities"
+  ));
+  assert!(conflicted.client_identities.is_empty());
+  assert!(!conflicted.toml.contains("[[routes]]"));
+}
+
+#[test]
 fn backend_tls_policy_config_map_ca_is_content_addressed() {
   let raw = format!(
     "{}\n---\n{}",
@@ -1014,6 +1164,10 @@ spec:
   let rendered = translate_objects(&objects(&raw), &args()).expect("translate");
 
   assert!(has_error_containing(&rendered, "Conflicted"));
+  assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::PreserveLastGood
+  );
   assert!(!rendered.toml.contains("[[routes]]"));
   assert!(rendered.assets.is_empty());
 }

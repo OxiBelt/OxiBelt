@@ -3959,6 +3959,11 @@ proxy_protocol_egress = "off" # off | v1 | v2
 mode = "disabled" # disabled | grease | config_list
 # config_list_file = "app.echconfiglist"
 
+# Optional certificate presented when the authenticated upstream requests one.
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client/app/tls.crt"
+private_key = "upstream-client/app/tls.key"
+
 [upstreams.tls.resumption]
 mode = "enabled" # enabled | disabled
 session_cache_size = 1024
@@ -3975,7 +3980,7 @@ mode = "disabled" # disabled | enforce | managed
 # filter_file = "app-upstream-crlite.filter"
 ```
 
-Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. Upstream TLS resumption controls OxiBelt's client-side cache only; the upstream server still chooses whether its own tickets are stateful or stateless. When the effective outbound upstream revocation policy is enabled, OxiBelt disables upstream client-side resumption so every new upstream TLS connection reaches certificate and revocation verification. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection. `[upstreams.tls.upstream_revocation]` overrides the global runtime outbound revocation policy for that direct upstream; use `mode = "disabled"` in both nested tables to opt one upstream out of a global policy.
+Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. `[upstreams.tls.client_identity]` is valid only for HTTPS and requires both a nonempty PEM certificate chain and one matching unencrypted PEM private key beneath the certificate root. OxiBelt rejects malformed, mismatched, expired, or not-yet-valid material before accepting the runtime snapshot, presents the configured chain only when the authenticated upstream requests a client certificate, and never weakens ordinary CA, hostname/SNI, explicit SAN, ECH, or revocation verification. An enabled client identity disables upstream TLS resumption and the process-lifetime client-config cache so rotated private keys are not retained there. Upstream TLS resumption otherwise controls OxiBelt's client-side cache only; the upstream server still chooses whether its own tickets are stateful or stateless. When the effective outbound upstream revocation policy is enabled, OxiBelt also disables upstream client-side resumption so every new upstream TLS connection reaches certificate and revocation verification. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection. `[upstreams.tls.upstream_revocation]` overrides the global runtime outbound revocation policy for that direct upstream; use `mode = "disabled"` in both nested tables to opt one upstream out of a global policy.
 
 `request_timeout_ms` is the compatibility upper bound for sending a request and receiving response headers. `first_byte_timeout_ms` separately controls the response-header/first-byte wait and is capped by `request_timeout_ms` when both are configured. The guarded direct-H1 transports keep that response-head deadline active across any accepted informational responses until the final response head arrives. `read_timeout_ms` is an upstream response body idle timeout: progress resets the idle window while fixed-length data, chunk metadata and data, trailers, close-delimited bodies, SSE, and long downloads remain streaming. It is not a total response-body deadline. `send_timeout_ms` controls upstream request body send backpressure.
 
@@ -4061,6 +4066,10 @@ server_name = "app.internal.example"
 trust = "exclusive" # inherit | system | exclusive
 trusted_ca_certs = ["app-ca.pem"]
 trusted_ca_sha256 = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+
+[upstream_pools.servers.tls.client_identity]
+cert_chain = "upstream-client/app/tls.crt"
+private_key = "upstream-client/app/tls.key"
 
 [[upstream_pools.discovery]]
 provider = "file"
@@ -4170,7 +4179,10 @@ only system/WebPKI roots, and `exclusive` requires nonempty
 under the certificate root. `trusted_ca_sha256` must contain one lower-case
 SHA-256 digest for every CA file; startup and reload fail on missing files or a
 digest mismatch. Plain HTTP servers/discovery reject a nondefault TLS table.
-This per-member policy is used by forwarding and active probes. Health-check
+`tls.client_identity` has the same pair, path, validation, presentation, and
+resumption rules as direct upstreams and may also be set on a discovery
+template. This per-member policy is used by forwarding, active probes, and
+diagnostics; there is no separate health-check client identity. Health-check
 extra roots cannot augment members using `system` or `exclusive` trust.
 
 `upstream_pools.health_check` defaults remain compatible with existing configs: HTTP active checks use `GET /healthz`, `expected_status = [200, 204]`, `interval_ms = 5000`, `timeout_ms = 1000`, and thresholds `healthy_threshold = 2` / `unhealthy_threshold = 3`. `mode = "passive"` records passive request results only; `mode = "active"` schedules background probes when `enabled = true`. For HTTP probes, `method`, `path`, `health_port`, `health_host`, `headers`, and `body` build the probe request. `health_port` changes only the TCP connect port. `health_host` changes only the HTTP `Host` header; TLS SNI and hostname verification still use the probe URI host from the pool server origin. Header names and values must be valid HTTP fields, and OxiBelt rejects reserved hop-by-hop, forwarding identity, and `Host` headers in `headers`; use `health_host` for Host.

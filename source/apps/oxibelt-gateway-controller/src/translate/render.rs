@@ -437,6 +437,15 @@ fn render_backend_tls(out: &mut String, table: &str, tls: &super::GeneratedBacke
     out.push_str(&toml_string_array(&tls.trusted_ca_sha256));
     out.push('\n');
   }
+  if let Some(identity) = &tls.client_identity {
+    out.push_str("\n[");
+    out.push_str(table);
+    out.push_str(".client_identity]\ncert_chain = ");
+    out.push_str(&toml_string(&identity.cert_chain));
+    out.push_str("\nprivate_key = ");
+    out.push_str(&toml_string(&identity.private_key));
+    out.push('\n');
+  }
 }
 
 fn render_header_modifier(out: &mut String, name: &str, modifier: &super::HeaderModifierAction) {

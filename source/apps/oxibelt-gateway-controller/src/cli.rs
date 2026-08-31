@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::bail;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -7,6 +8,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 pub const DEFAULT_CONTROLLER_NAME: &str = "oxibelt.dev/gateway-controller";
 pub const DEFAULT_MANAGED_CONFIG_PATH: &str = "conf.d/gateway-api.generated.toml";
 pub const MAX_REQUEST_MIRROR_BODY_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS: usize = 64;
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt-gateway-controller")]
@@ -76,6 +78,8 @@ pub struct SharedArgs {
   pub route_policy_max_request_body_bytes: u64,
   #[arg(long, global = true, default_value_t = 30_000)]
   pub route_policy_max_timeout_ms: u64,
+  #[arg(long = "upstream-client-tls-source-secret", global = true)]
+  pub upstream_client_tls_source_secrets: Vec<SourceSecretAllowlistEntry>,
   #[arg(long, global = true)]
   pub dry_run: bool,
   #[arg(long, global = true)]
@@ -123,8 +127,80 @@ impl SharedArgs {
     if self.route_policy_max_timeout_ms == 0 || self.route_policy_max_timeout_ms > 300_000 {
       bail!("route-policy-max-timeout-ms must be between 1 and 300000");
     }
+    if self.upstream_client_tls_source_secrets.len() > MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS {
+      bail!(
+        "upstream-client-tls-source-secret may be repeated at most {MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS} times"
+      );
+    }
+    let mut source_secrets = std::collections::HashSet::new();
+    for entry in &self.upstream_client_tls_source_secrets {
+      if !source_secrets.insert((&entry.namespace, &entry.name)) {
+        bail!("upstream-client-tls-source-secret contains a duplicate namespace/name");
+      }
+    }
     Ok(())
   }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SourceSecretAllowlistEntry {
+  pub namespace: String,
+  pub name: String,
+  pub certificate_key: String,
+  pub private_key_key: String,
+}
+
+impl FromStr for SourceSecretAllowlistEntry {
+  type Err = String;
+
+  fn from_str(value: &str) -> Result<Self, Self::Err> {
+    let (reference, keys) = value.split_once(':').unwrap_or((value, "tls.crt:tls.key"));
+    let (namespace, name) = reference
+      .split_once('/')
+      .ok_or_else(|| "expected namespace/name[:certificateKey:privateKeyKey]".to_string())?;
+    let (certificate_key, private_key_key) = keys
+      .split_once(':')
+      .ok_or_else(|| "expected namespace/name[:certificateKey:privateKeyKey]".to_string())?;
+    super::rollout::validate_kubernetes_dns_label("namespace", namespace)
+      .map_err(|_| "namespace must be a Kubernetes DNS label".to_string())?;
+    super::rollout::validate_kubernetes_dns_subdomain("name", name)
+      .map_err(|_| "name must be a Kubernetes DNS subdomain".to_string())?;
+    for (label, key) in [
+      ("certificateKey", certificate_key),
+      ("privateKeyKey", private_key_key),
+    ] {
+      if !valid_secret_data_key(key) {
+        return Err(format!(
+          "{label} must be a valid Kubernetes Secret data key"
+        ));
+      }
+    }
+    if certificate_key == private_key_key {
+      return Err("certificateKey and privateKeyKey must differ".to_string());
+    }
+    Ok(Self {
+      namespace: namespace.to_string(),
+      name: name.to_string(),
+      certificate_key: certificate_key.to_string(),
+      private_key_key: private_key_key.to_string(),
+    })
+  }
+}
+
+fn valid_secret_data_key(value: &str) -> bool {
+  !value.is_empty()
+    && value.len() <= 253
+    && value
+      .bytes()
+      .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    && value
+      .as_bytes()
+      .first()
+      .is_some_and(u8::is_ascii_alphanumeric)
+    && value
+      .as_bytes()
+      .last()
+      .is_some_and(u8::is_ascii_alphanumeric)
 }
 
 fn validate_content_types(values: &[String]) -> anyhow::Result<()> {
@@ -340,7 +416,9 @@ pub struct RenderArgs {
 
 #[cfg(test)]
 mod tests {
-  use super::{Cli, Command, CompatibilityMode, UdpFlowState};
+  use super::{
+    Cli, Command, CompatibilityMode, MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS, UdpFlowState,
+  };
   use clap::Parser;
 
   #[test]
@@ -476,5 +554,50 @@ mod tests {
         "unexpected error for {option}: {error}"
       );
     }
+  }
+
+  #[test]
+  fn upstream_client_secret_names_accept_dns_subdomains_but_not_oversized_segments() {
+    let cli = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "--upstream-client-tls-source-secret=credentials/client.identity.example:client.crt:client.key",
+      "render",
+      "--input=objects.yaml",
+    ])
+    .expect("Secret DNS subdomain should parse");
+    assert_eq!(
+      cli.shared.upstream_client_tls_source_secrets[0].name,
+      "client.identity.example"
+    );
+
+    let oversized_segment = "a".repeat(64);
+    let argument =
+      format!("--upstream-client-tls-source-secret=credentials/{oversized_segment}.example");
+    let error = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      argument.as_str(),
+      "render",
+      "--input=objects.yaml",
+    ])
+    .expect_err("oversized DNS subdomain segment must fail");
+    assert!(error.to_string().contains("DNS subdomain"));
+  }
+
+  #[test]
+  fn upstream_client_secret_allowlist_is_bounded_for_direct_invocations() {
+    let mut arguments = vec!["oxibelt-gateway-controller".to_string()];
+    for index in 0..=MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS {
+      arguments.push(format!(
+        "--upstream-client-tls-source-secret=credentials/client-{index}"
+      ));
+    }
+    arguments.extend(["render".to_string(), "--input=objects.yaml".to_string()]);
+
+    let cli = Cli::try_parse_from(arguments).expect("CLI shape should parse before validation");
+    let error = cli
+      .shared
+      .validate()
+      .expect_err("direct invocations must retain the Helm allowlist ceiling");
+    assert!(error.to_string().contains("repeated at most 64 times"));
   }
 }

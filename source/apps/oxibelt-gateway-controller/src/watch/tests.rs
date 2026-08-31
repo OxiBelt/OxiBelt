@@ -33,6 +33,126 @@ fn watch_namespace_must_be_a_kubernetes_dns_label() {
 }
 
 #[test]
+fn static_targets_publish_only_clean_or_client_identity_deprogram_translations() {
+  use crate::translate::TranslationDisposition;
+
+  assert!(TranslationDisposition::Clean.is_publishable_for_static_target());
+  assert!(TranslationDisposition::ClientIdentityDeprogram.is_publishable_for_static_target());
+  assert!(!TranslationDisposition::PreserveLastGood.is_publishable_for_static_target());
+}
+
+#[tokio::test]
+async fn source_secret_watch_is_exact_name_bounded_and_does_not_echo_event_data() {
+  let listener = TcpListener::bind(("127.0.0.1", 0))
+    .await
+    .expect("watch mock should bind");
+  let address = listener.local_addr().expect("watch mock address");
+  let base_url = Url::parse(&format!("http://{address}")).expect("watch URL");
+  let body = [
+    br#"{"type":"MODIFIED","object":{"metadata":{"name":"client.identity","resourceVersion":"18"},"data":{"tls.key":"sensitive-private-key"}}}"#
+      .as_slice(),
+    b"\n",
+  ]
+  .concat();
+  let server = tokio::spawn(async move {
+    let (mut stream, _) = listener.accept().await.expect("watch connection");
+    let path = read_request_path(&mut stream)
+      .await
+      .expect("watch request path");
+    let headers = format!(
+      "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+      body.len()
+    );
+    stream
+      .write_all(headers.as_bytes())
+      .await
+      .expect("watch headers");
+    stream.write_all(&body).await.expect("watch body");
+    path
+  });
+  let token = TestToken::new();
+  let poller = KubernetesPoller {
+    client: ControlHttpClient::new(&[]).expect("control client"),
+    base_url,
+    service_account_token_path: token.path().to_path_buf(),
+    namespace: Some("default".to_string()),
+    leadership: None,
+    upstream_client_tls_source_secrets: Vec::new(),
+    controller_name: crate::cli::DEFAULT_CONTROLLER_NAME.to_string(),
+  };
+
+  assert_eq!(
+    watch_source_secret_once(&poller, "credentials", "client.identity", "17")
+      .await
+      .expect("material watch event"),
+    SourceSecretWatchOutcome::MaterialEvent
+  );
+  let target = server.await.expect("watch server");
+  let url = Url::parse(&format!("http://mock.invalid{target}")).expect("request URL");
+  assert_eq!(url.path(), "/api/v1/namespaces/credentials/secrets");
+  let query = |name: &str| {
+    url
+      .query_pairs()
+      .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+  };
+  assert_eq!(
+    query("fieldSelector").as_deref(),
+    Some("metadata.name=client.identity")
+  );
+  assert_eq!(query("watch").as_deref(), Some("true"));
+  assert_eq!(query("resourceVersion").as_deref(), Some("17"));
+
+  let error = source_secret_watch_event(
+    br#"{"type":"UNSUPPORTED","object":{"data":{"tls.key":"sensitive-private-key"}}}"#,
+    "client.identity",
+  )
+  .expect_err("unsupported event must fail closed");
+  assert!(!error.to_string().contains("sensitive-private-key"));
+}
+
+#[tokio::test]
+async fn source_secret_watch_rejects_an_oversized_event() {
+  let listener = TcpListener::bind(("127.0.0.1", 0))
+    .await
+    .expect("watch mock should bind");
+  let address = listener.local_addr().expect("watch mock address");
+  let base_url = Url::parse(&format!("http://{address}")).expect("watch URL");
+  let mut body = vec![b'x'; MAX_SOURCE_SECRET_WATCH_EVENT_BYTES];
+  body.push(b'\n');
+  let server = tokio::spawn(async move {
+    let (mut stream, _) = listener.accept().await.expect("watch connection");
+    let _ = read_request_path(&mut stream)
+      .await
+      .expect("watch request path");
+    let headers = format!(
+      "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+      body.len()
+    );
+    stream
+      .write_all(headers.as_bytes())
+      .await
+      .expect("watch headers");
+    stream.write_all(&body).await.expect("watch body");
+  });
+  let token = TestToken::new();
+  let poller = KubernetesPoller {
+    client: ControlHttpClient::new(&[]).expect("control client"),
+    base_url,
+    service_account_token_path: token.path().to_path_buf(),
+    namespace: Some("default".to_string()),
+    leadership: None,
+    upstream_client_tls_source_secrets: Vec::new(),
+    controller_name: crate::cli::DEFAULT_CONTROLLER_NAME.to_string(),
+  };
+
+  let error = watch_source_secret_once(&poller, "credentials", "client.identity", "17")
+    .await
+    .expect_err("oversized source Secret watch event must fail closed");
+  assert!(error.to_string().contains("exceeded"));
+  server.await.expect("watch server");
+}
+
+#[test]
 fn source_snapshot_digest_binds_semantics_and_ignores_status_or_map_order() {
   let first = KubernetesObject::from_value(json!({
     "apiVersion": "gateway.networking.k8s.io/v1",
@@ -85,28 +205,34 @@ fn source_snapshot_digest_binds_semantics_and_ignores_status_or_map_order() {
     "API bookkeeping must not create a new semantic rollout artifact"
   );
 
-  let secret = |value: &str| {
+  let secret = |value: &str, resource_version: &str| {
     KubernetesObject::from_value(json!({
       "apiVersion": "v1",
       "kind": "Secret",
-      "metadata": {"name": "backend-ca", "namespace": "default"},
+      "metadata": {
+        "name": "backend-ca",
+        "namespace": "default",
+        "uid": "source-secret-uid",
+        "resourceVersion": resource_version
+      },
       "data": {"ca.crt": value}
     }))
     .expect("secret object")
     .pop()
     .expect("secret item")
   };
-  let first_secret = secret("YQ==");
-  let second_secret = secret("Yg==");
+  let first_secret = secret("YQ==", "10");
+  let second_secret = secret("Yg==", "11");
   assert_ne!(
     source_snapshot_digest(std::slice::from_ref(&first_secret)),
     source_snapshot_digest(std::slice::from_ref(&second_secret)),
-    "internal rollout identity must bind Secret data used by translation"
+    "internal rollout identity must bind the source Secret resourceVersion without hashing data"
   );
+  let same_version_different_data = secret("Yw==", "10");
   assert_eq!(
-    redacted_source_snapshot_digest(std::slice::from_ref(&first_secret)),
-    redacted_source_snapshot_digest(std::slice::from_ref(&second_secret)),
-    "shareable explain identity must not expose a Secret equality oracle"
+    source_snapshot_digest(std::slice::from_ref(&first_secret)),
+    source_snapshot_digest(std::slice::from_ref(&same_version_different_data)),
+    "rollout identity must not expose a Secret-data equality oracle"
   );
 }
 
@@ -641,6 +767,8 @@ fn test_poller(api: &TestKubernetesApi, token: &TestToken) -> KubernetesPoller {
     service_account_token_path: token.path().to_path_buf(),
     namespace: Some("default".to_string()),
     leadership: None,
+    upstream_client_tls_source_secrets: Vec::new(),
+    controller_name: crate::cli::DEFAULT_CONTROLLER_NAME.to_string(),
   }
 }
 
@@ -672,6 +800,7 @@ fn shared_args() -> SharedArgs {
     external_auth_allow_credentials: false,
     route_policy_max_request_body_bytes: 10_485_760,
     route_policy_max_timeout_ms: 30_000,
+    upstream_client_tls_source_secrets: Vec::new(),
     dry_run: false,
     health_bind: None,
   }

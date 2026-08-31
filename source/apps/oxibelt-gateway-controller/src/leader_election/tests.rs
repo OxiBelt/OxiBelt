@@ -487,6 +487,8 @@ fn test_poller(base_url: Url, token_path: PathBuf) -> KubernetesPoller {
     service_account_token_path: token_path,
     namespace: Some("controllers".to_string()),
     leadership: None,
+    upstream_client_tls_source_secrets: Vec::new(),
+    controller_name: crate::cli::DEFAULT_CONTROLLER_NAME.to_string(),
   }
 }
 

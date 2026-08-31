@@ -17,6 +17,9 @@ impl TranslationState {
       ));
       return;
     }
+    let Ok(client_identity) = self.gateway_client_identity_for_route(route, &attachments) else {
+      return;
+    };
 
     let route_hosts = super::string_array_at(&route.spec, &["hostnames"]);
     let rules = route.spec.get("rules").and_then(Value::as_array);
@@ -68,8 +71,14 @@ impl TranslationState {
           }) else {
             continue;
           };
-          if !self.apply_parsed_route_filters(route, "GRPCRoute", &mut generated, filters, &source)
-          {
+          if !self.apply_parsed_route_filters(
+            route,
+            "GRPCRoute",
+            &mut generated,
+            filters,
+            &source,
+            client_identity.as_ref(),
+          ) {
             continue;
           }
           if let Some(pool) = self.backend_pool(
@@ -78,6 +87,7 @@ impl TranslationState {
             rule.get("backendRefs").and_then(Value::as_array),
             &generated.name,
             &source,
+            client_identity.as_ref(),
           ) {
             generated.upstream_pool = Some(pool.name.clone());
             self.pools.insert(pool.name.clone(), pool);

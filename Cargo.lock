@@ -3282,6 +3282,7 @@ dependencies = [
  "oxibelt-control-http",
  "oxibelt-control-protocol",
  "pretty_assertions",
+ "rustls",
  "serde",
  "serde-saphyr 1.2.0",
  "serde_json",
@@ -3291,6 +3292,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "x509-cert 0.3.0",
 ]
 
 [[package]]

@@ -6,6 +6,7 @@ use serde_json::Value;
 use super::cli::{BackendResolution, SharedArgs};
 use super::gateway_policy::{self, ListenerPolicy, ReferenceGrantInfo, RoutePolicyDecision};
 use super::model::{Diagnostic, KubernetesObject, ObjectKey, object_ref as model_object_ref};
+use super::upstream_client_tls::{self, ClientIdentityMaterial};
 
 #[path = "translate/backend_tls.rs"]
 mod backend_tls;
@@ -44,6 +45,21 @@ pub struct RenderedConfig {
   pub diagnostics: Vec<Diagnostic>,
   pub requires_exact_data_plane: bool,
   pub explanation: explain::TranslationExplanation,
+  pub client_identities: Vec<ClientIdentityMaterial>,
+  pub disposition: TranslationDisposition,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TranslationDisposition {
+  Clean,
+  ClientIdentityDeprogram,
+  PreserveLastGood,
+}
+
+impl TranslationDisposition {
+  pub const fn is_publishable_for_static_target(self) -> bool {
+    matches!(self, Self::Clean | Self::ClientIdentityDeprogram)
+  }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -80,6 +96,20 @@ struct GatewayInfo {
   namespace: String,
   name: String,
   listeners: Vec<ListenerInfo>,
+  client_identity: GatewayClientIdentityDecision,
+}
+
+#[derive(Debug, Clone)]
+enum GatewayClientIdentityDecision {
+  None,
+  Valid(GeneratedClientIdentity),
+  Invalid,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum GatewayClientIdentityError {
+  InvalidReference,
+  ConflictingAttachments,
 }
 
 #[derive(Debug, Clone)]
@@ -115,8 +145,10 @@ struct TranslationState {
   stream_listeners: BTreeMap<String, GeneratedStreamListener>,
   stream_pools: BTreeMap<String, GeneratedStreamPool>,
   backend_tls: HashMap<ObjectKey, BackendTlsDecision>,
+  client_identity_materials: BTreeMap<String, ClientIdentityMaterial>,
   assets: BTreeMap<String, RenderedAsset>,
   diagnostics: Vec<Diagnostic>,
+  client_identity_deprogram_diagnostics: HashSet<usize>,
 }
 
 #[derive(Clone)]
@@ -179,13 +211,57 @@ pub fn translate_objects(
   let requires_exact_data_plane = state.pools.values().any(|pool| pool.discoveries.len() > 1);
   let toml = render::render_toml(&state, args);
   let assets = state.assets.values().cloned().collect::<Vec<_>>();
+  let used_client_identities = state
+    .pools
+    .values()
+    .flat_map(|pool| {
+      pool
+        .servers
+        .iter()
+        .filter_map(|server| server.tls.as_ref())
+        .chain(
+          pool
+            .discoveries
+            .iter()
+            .filter_map(|discovery| discovery.tls.as_ref()),
+        )
+    })
+    .filter_map(|tls| tls.client_identity.as_ref())
+    .map(|identity| identity.derived_secret_name.clone())
+    .collect::<std::collections::BTreeSet<_>>();
+  let client_identities = used_client_identities
+    .into_iter()
+    .filter_map(|name| state.client_identity_materials.get(&name).cloned())
+    .collect();
   let explanation = explain::build_explanation(objects, &state, args, &toml, &assets)?;
+  let has_errors = state
+    .diagnostics
+    .iter()
+    .any(|diagnostic| diagnostic.severity == super::model::DiagnosticSeverity::Error);
+  let has_client_identity_deprogram_errors = state
+    .client_identity_deprogram_diagnostics
+    .iter()
+    .any(|index| {
+      state
+        .diagnostics
+        .get(*index)
+        .is_some_and(|diagnostic| diagnostic.severity == super::model::DiagnosticSeverity::Error)
+    });
+  let disposition = if has_client_identity_deprogram_errors {
+    TranslationDisposition::ClientIdentityDeprogram
+  } else if has_errors {
+    TranslationDisposition::PreserveLastGood
+  } else {
+    TranslationDisposition::Clean
+  };
   Ok(RenderedConfig {
     toml,
     assets,
     diagnostics: state.diagnostics,
     requires_exact_data_plane,
     explanation,
+    client_identities,
+    disposition,
   })
 }
 
@@ -198,6 +274,17 @@ fn normalized_policy_values(values: &[String]) -> HashSet<String> {
 }
 
 impl TranslationState {
+  fn push_client_identity_deprogram_error(
+    &mut self,
+    object: impl Into<String>,
+    message: impl Into<String>,
+  ) {
+    self
+      .client_identity_deprogram_diagnostics
+      .insert(self.diagnostics.len());
+    self.diagnostics.push(Diagnostic::error(object, message));
+  }
+
   fn generated_checkpoint(&self) -> GeneratedCheckpoint {
     GeneratedCheckpoint {
       pools: self.pools.clone(),
@@ -250,12 +337,136 @@ impl TranslationState {
     }
     for object in objects {
       if object.kind == "Gateway"
-        && let Some(gateway) = parse_gateway(object, &self.gateway_classes)
+        && let Some(mut gateway) = parse_gateway(object, &self.gateway_classes)
       {
+        gateway.client_identity = self.resolve_gateway_client_identity(object, objects, args);
         self.gateways.insert(object.key(), gateway);
       }
     }
     Ok(())
+  }
+
+  fn resolve_gateway_client_identity(
+    &mut self,
+    gateway: &KubernetesObject,
+    objects: &[KubernetesObject],
+    args: &SharedArgs,
+  ) -> GatewayClientIdentityDecision {
+    let reference = match upstream_client_tls::gateway_secret_reference(gateway) {
+      Ok(None) => return GatewayClientIdentityDecision::None,
+      Ok(Some(reference)) => reference,
+      Err(message) => {
+        self.push_client_identity_deprogram_error(
+          model_object_ref(gateway),
+          format!("invalid Gateway backend clientCertificateRef: {message}"),
+        );
+        return GatewayClientIdentityDecision::Invalid;
+      }
+    };
+    let allowlist =
+      upstream_client_tls::allowlist_by_source(&args.upstream_client_tls_source_secrets);
+    let Some(allowlist_entry) = allowlist.get(&reference).copied() else {
+      self.push_client_identity_deprogram_error(
+        model_object_ref(gateway),
+        format!(
+          "Gateway backend clientCertificateRef to Secret {}/{} is not permitted by the operator source Secret allowlist",
+          reference.namespace, reference.name
+        ),
+      );
+      return GatewayClientIdentityDecision::Invalid;
+    };
+    if reference.namespace != gateway.namespace()
+      && !gateway_policy::reference_allowed(
+        &self.reference_grants,
+        gateway,
+        "Gateway",
+        &reference.namespace,
+        "Secret",
+        &reference.name,
+      )
+    {
+      self.push_client_identity_deprogram_error(
+        model_object_ref(gateway),
+        format!(
+          "cross-namespace Gateway backend clientCertificateRef to Secret {}/{} requires ReferenceGrant",
+          reference.namespace, reference.name
+        ),
+      );
+      return GatewayClientIdentityDecision::Invalid;
+    }
+    let Some(secret) = objects
+      .iter()
+      .find(|object| object.kind == "Secret" && object.key() == reference)
+    else {
+      self.push_client_identity_deprogram_error(
+        model_object_ref(gateway),
+        format!(
+          "referenced client certificate Secret {}/{} was not found",
+          reference.namespace, reference.name
+        ),
+      );
+      return GatewayClientIdentityDecision::Invalid;
+    };
+    let material = match upstream_client_tls::validate_source_secret(secret, allowlist_entry) {
+      Ok(material) => material,
+      Err(error) => {
+        self.push_client_identity_deprogram_error(model_object_ref(gateway), error.to_string());
+        return GatewayClientIdentityDecision::Invalid;
+      }
+    };
+    let generated = GeneratedClientIdentity {
+      derived_secret_name: material.derived_secret_name.clone(),
+      cert_chain: material.cert_chain_path(),
+      private_key: material.private_key_path(),
+    };
+    self
+      .client_identity_materials
+      .insert(material.derived_secret_name.clone(), material);
+    GatewayClientIdentityDecision::Valid(generated)
+  }
+
+  fn gateway_client_identity_for_route(
+    &mut self,
+    route: &KubernetesObject,
+    attachments: &[RouteAttachment],
+  ) -> Result<Option<GeneratedClientIdentity>, GatewayClientIdentityError> {
+    if attachments.iter().any(|attachment| {
+      matches!(
+        attachment.gateway.client_identity,
+        GatewayClientIdentityDecision::Invalid
+      )
+    }) {
+      self.push_client_identity_deprogram_error(
+        model_object_ref(route),
+        "Gateway backend clientCertificateRef is invalid or unresolved",
+      );
+      return Err(GatewayClientIdentityError::InvalidReference);
+    }
+    let identities = attachments
+      .iter()
+      .filter_map(|attachment| match &attachment.gateway.client_identity {
+        GatewayClientIdentityDecision::None => Some(None),
+        GatewayClientIdentityDecision::Valid(identity) => {
+          Some(Some(identity.derived_secret_name.as_str()))
+        }
+        GatewayClientIdentityDecision::Invalid => None,
+      })
+      .collect::<std::collections::BTreeSet<_>>();
+    if identities.len() > 1 {
+      self.push_client_identity_deprogram_error(
+        model_object_ref(route),
+        "route attachment conflict: Gateways select different backend client identities for the same consolidated upstream",
+      );
+      return Err(GatewayClientIdentityError::ConflictingAttachments);
+    }
+    Ok(
+      attachments
+        .iter()
+        .find_map(|attachment| match &attachment.gateway.client_identity {
+          GatewayClientIdentityDecision::Valid(identity) => Some(identity.clone()),
+          GatewayClientIdentityDecision::None | GatewayClientIdentityDecision::Invalid => None,
+        }),
+    )
   }
 
   fn translate_tls_route(&mut self, route: &KubernetesObject) {
@@ -570,6 +781,7 @@ fn parse_gateway(
     namespace: object.namespace().to_string(),
     name: object.name().to_string(),
     listeners,
+    client_identity: GatewayClientIdentityDecision::None,
   })
 }
 

@@ -1,0 +1,6 @@
+upstreamClientTls:
+  sourceSecretAllowlist:
+  - namespace: backend-secrets
+    name: orders-client
+    certificateKey: tls.crt
+    privateKeyKey: tls.key

@@ -89,7 +89,7 @@ pub fn build_status_patches(
           objects,
           &namespace_labels,
           &status_addresses,
-          rollout_status,
+          (&diagnostics_by_object, rollout_status),
           &now,
         ));
       }
@@ -206,10 +206,31 @@ fn gateway_patch(
   objects: &[KubernetesObject],
   namespace_labels: &HashMap<String, BTreeMap<String, String>>,
   status_addresses: &[Value],
-  rollout_status: &RolloutStatus,
+  status: (&HashMap<String, Vec<&Diagnostic>>, &RolloutStatus),
   now: &str,
 ) -> StatusPatch {
+  let (diagnostics, rollout_status) = status;
   let listener_conflicts = listener_conflicts(&gateway.listeners);
+  let gateway_errors = diagnostics
+    .get(&model_object_ref(object))
+    .into_iter()
+    .flatten()
+    .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+    .collect::<Vec<_>>();
+  let resolved_refs = !gateway_errors.iter().any(|diagnostic| {
+    matches!(
+      diagnostic.code,
+      DiagnosticCode::RefNotPermitted | DiagnosticCode::InvalidClientCertificateRef
+    )
+  });
+  let resolved_reason = if gateway_errors
+    .iter()
+    .any(|diagnostic| diagnostic.code == DiagnosticCode::RefNotPermitted)
+  {
+    "RefNotPermitted"
+  } else {
+    "InvalidClientCertificateRef"
+  };
   let listeners = gateway
     .listeners
     .iter()
@@ -247,6 +268,18 @@ fn gateway_patch(
         bool_status(programmed.programmed),
         programmed.reason,
         &programmed.message,
+        object.metadata.generation,
+        now,
+      ),
+      condition(
+        "ResolvedRefs",
+        bool_status(resolved_refs),
+        if resolved_refs { "ResolvedRefs" } else { resolved_reason },
+        if resolved_refs {
+          "Gateway references are resolved"
+        } else {
+          "Gateway backend client certificate reference is invalid, unresolved, or not permitted"
+        },
         object.metadata.generation,
         now,
       )
@@ -450,7 +483,10 @@ fn route_parent_status(
     attachment::route_has_matching_listener(object, parent, gateway, namespace_labels);
   let has_reference_error = object_errors.iter().any(|diagnostic| {
     matches!(diagnostic.severity, DiagnosticSeverity::Error)
-      && diagnostic.code == DiagnosticCode::RefNotPermitted
+      && matches!(
+        diagnostic.code,
+        DiagnosticCode::RefNotPermitted | DiagnosticCode::InvalidClientCertificateRef
+      )
   });
   let not_programmed_by_precedence = object_errors.iter().any(|diagnostic| {
     diagnostic
@@ -465,7 +501,10 @@ fn route_parent_status(
   let resolved_refs = !has_reference_error;
   let has_nonreference_error = object_errors.iter().any(|diagnostic| {
     matches!(diagnostic.severity, DiagnosticSeverity::Error)
-      && diagnostic.code != DiagnosticCode::RefNotPermitted
+      && !matches!(
+        diagnostic.code,
+        DiagnosticCode::RefNotPermitted | DiagnosticCode::InvalidClientCertificateRef
+      )
   });
   let accepted = listener_matches && !has_nonreference_error;
   let programmed =
@@ -546,6 +585,11 @@ fn resolved_refs_reason(errors: &[&Diagnostic]) -> &'static str {
     .any(|diagnostic| diagnostic.code == DiagnosticCode::RefNotPermitted)
   {
     "RefNotPermitted"
+  } else if errors
+    .iter()
+    .any(|diagnostic| diagnostic.code == DiagnosticCode::InvalidClientCertificateRef)
+  {
+    "InvalidClientCertificateRef"
   } else if errors
     .iter()
     .any(|diagnostic| diagnostic.message.contains("protocol"))

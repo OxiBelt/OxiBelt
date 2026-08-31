@@ -219,6 +219,61 @@ fn ca_assets_are_digest_bound_and_projected_into_the_certificate_root() {
 }
 
 #[test]
+fn client_identity_revisions_are_artifact_bound_and_separately_projected() {
+  let first_secret = "oxibelt-upstream-client-11111111111111111111111111111111";
+  let rotated_secret = "oxibelt-upstream-client-22222222222222222222222222222222";
+  let artifact = ConfigArtifact::new_with_assets_and_client_identities(
+    &target(),
+    "conf.d/gateway-api.generated.toml",
+    "[[routes]]\n".to_string(),
+    Vec::new(),
+    vec![first_secret.to_string()],
+  )
+  .expect("client identity artifact");
+  let rotated = ConfigArtifact::new_with_assets_and_client_identities(
+    &target(),
+    "conf.d/gateway-api.generated.toml",
+    "[[routes]]\n".to_string(),
+    Vec::new(),
+    vec![rotated_secret.to_string()],
+  )
+  .expect("rotated client identity artifact");
+  assert_ne!(artifact.artifact_digest, rotated.artifact_digest);
+  assert_ne!(artifact.name, rotated.name);
+  assert_eq!(
+    artifact.manifest(&target())["metadata"]["annotations"][CLIENT_IDENTITY_SECRETS_ANNOTATION],
+    first_secret
+  );
+
+  let state = RolloutState::new_attempt(&artifact, &RolloutState::from_workload(&workload()), 1);
+  let patch = build_workload_patch(&workload(), &target(), &artifact, &state)
+    .expect("client identity workload patch");
+  let volumes = patch
+    .operations
+    .iter()
+    .find(|operation| operation["path"] == "/spec/template/spec/volumes")
+    .and_then(|operation| operation["value"].as_array())
+    .expect("combined volume replacement");
+  assert!(volumes.iter().any(|volume| {
+    volume["name"] == "gateway-config"
+      && volume["projected"]["sources"][1]["configMap"]["name"] == artifact.name
+  }));
+  assert!(volumes.iter().any(|volume| {
+    volume["secret"]["secretName"] == first_secret && volume["secret"]["defaultMode"] == 0o440
+  }));
+  let mounts = patch
+    .operations
+    .iter()
+    .find(|operation| operation["path"] == "/spec/template/spec/containers/0/volumeMounts")
+    .and_then(|operation| operation["value"].as_array())
+    .expect("client identity mount replacement");
+  assert!(mounts.iter().any(|mount| {
+    mount["mountPath"] == format!("/etc/oxibelt/cert/upstream-client/{first_secret}")
+      && mount["readOnly"] == true
+  }));
+}
+
+#[test]
 fn artifact_names_and_ownership_labels_are_scoped_to_the_target_kind() {
   let deployment = target();
   let mut daemon_set = deployment.clone();

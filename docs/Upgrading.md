@@ -223,6 +223,24 @@ For rollback to a binary without this option, remove every
 needs migration or recovery; each process reconstructs its route-local budgets
 from configuration at startup.
 
+Post-`0.9.1-beta.1` development also adds optional upstream client identities
+under `[upstreams.tls.client_identity]` and the equivalent pool-server or
+discovery TLS table. Existing configurations retain their prior no-client-
+certificate behavior. Before rollout, mount each certificate chain and
+unencrypted matching private key beneath the certificate root, validate the
+complete configuration, and confirm that the upstream still passes its normal
+server-certificate policy. Client-identity connections do not use outbound TLS
+resumption; established long-lived connections may retain the previous
+identity while a successful full reload drains them. Immediate compromise
+response therefore requires the upstream server to revoke or reject the old
+certificate.
+
+To roll back to a binary without upstream client identities, first remove each
+`tls.client_identity` table and any Gateway or Helm references that require it,
+then restore the prior binary and configuration together. Projected or
+controller-derived Kubernetes Secrets must be removed separately after no
+active or retained rollout references them.
+
 ## Upgrade from 0.6.6 to the 0.8.1 line
 
 `0.8.1-beta.9` is the published and qualified source for stable promotion. The

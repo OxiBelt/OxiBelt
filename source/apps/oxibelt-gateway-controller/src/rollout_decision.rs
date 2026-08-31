@@ -60,6 +60,7 @@ pub(super) fn prepare_rollback_state(
   failed.desired_revision = Some(rollback.name.clone());
   failed.desired_artifact_digest = Some(rollback.artifact_digest.clone());
   failed.desired_content_digest = Some(rollback.content_digest.clone());
+  failed.desired_client_identity_secrets = rollback.client_identity_secret_names.clone();
   failed.failure = Some(reason.to_string());
   failed
 }
@@ -122,6 +123,9 @@ mod tests {
       failed_revision: None,
       started_at_unix: Some(1),
       failure: None,
+      desired_client_identity_secrets: Vec::new(),
+      committed_client_identity_secrets: Vec::new(),
+      previous_client_identity_secrets: Vec::new(),
     }
   }
 

@@ -130,12 +130,41 @@ is also part of TCP/QUIC client and resumption identity, preventing reuse across
 different authentication policies.
 
 Multiple targets, target `sectionName`, `options`, cross-namespace CA refs,
-Secret refs, mTLS client identity, and certificate/SPKI pins are unsupported.
-They receive explicit
-policy status and never fall back to plaintext or broader TLS trust. Gateway
-API v1 does not define a portable client-identity or pin field, and a
-`ReferenceGrant` cannot make an otherwise invalid cross-namespace policy CA
+Secret CA refs, and certificate/SPKI pins are unsupported. They receive
+explicit policy status and never fall back to plaintext or broader TLS trust.
+A `ReferenceGrant` cannot make an otherwise invalid cross-namespace policy CA
 reference valid.
+
+Upstream client authentication is independent from this policy. Gateway API
+v1.6.1 supplies it through the selected Gateway's
+`spec.tls.backend.clientCertificateRef`, which must name a core Secret that the
+operator admitted in `upstreamClientTls.sourceSecretAllowlist`. Same-namespace
+references need no grant; cross-namespace references also require an exact
+`ReferenceGrant` from `Gateway` to the Secret. The allowlist may select the
+default `tls.crt` and `tls.key` fields or two explicit data keys from a
+`kubernetes.io/tls` or `Opaque` Secret. The controller rejects malformed,
+oversized, mismatched, encrypted, expired, or not-yet-valid identity material
+before publishing a rollout.
+
+The controller resolves each admitted source by an exact-name GET and runs a
+bounded, field-selected exact-name watch to wake reconciliation after Secret
+changes; the periodic reconciliation loop remains the fallback. It creates an
+immutable content-addressed Secret in the selected data-plane target namespace
+and mounts only that derived Secret below
+`/etc/oxibelt/cert/upstream-client/`. Source key bytes never enter generated
+TOML, ConfigMaps, status, explain output, logs, or artifact digests. A source
+UID or resource-version change produces a new derived name and workload
+rollout. A route attached through Gateways with different effective client
+identities is rejected instead of consolidating the upstreams. Server CA,
+hostname/SNI, and SAN verification from `BackendTLSPolicy` remains mandatory;
+client authentication never substitutes for it.
+
+After convergence the controller retains the current and immediately previous
+derived identity names for rollback. It deletes an older derived Secret only
+after proving exact controller/target/source lineage, absence from the target
+workload template and every observed Pod, and the Secret UID in the delete
+precondition. Rollback performs no Secret deletion; ambiguous ownership or
+references retain the Secret rather than risking an in-use key deletion.
 
 ## UDP Safety Bounds
 
@@ -438,10 +467,13 @@ for every target in the static replicated set.
 
 The target status is bounded and contains digests, revision names, conditions,
 and state only. It contains no generated TOML, request data, Admin endpoint,
-token, or Secret material. The per-target Roles grant no Secret access and can
-patch only the exact named workload. This initial mode is static replicated
-placement, not dynamic load-aware sharding, active/standby failover, or
-consistent-hash rebalancing.
+token, or Secret material. By default the per-target Roles grant no Secret
+access. Enabling the upstream client identity allowlist adds source Roles with
+exact Secret `resourceNames` and the target-namespace Secret verbs required to
+publish immutable derived identities; the controller still patches only the
+exact named workload. This initial mode is static replicated placement, not
+dynamic load-aware sharding, active/standby failover, or consistent-hash
+rebalancing.
 
 The base OxiBelt config must include the controller-owned path, usually with a
 glob, and set `runtime.hot_reload.mode = "off"`:
@@ -584,10 +616,14 @@ Role, exact-name Lease Role, metadata-only Lease, `PodDisruptionBudget`, soft
 hostname anti-affinity, health probes, and an example Gateway API manifest. The default Gateway
 API read Role is limited to the release namespace; set `watchAllNamespaces:
 true` only after reviewing the resulting cluster-wide permissions. The target
-Role grants no Secret access; it gets and creates ConfigMaps, lists Pods and,
-for a Deployment target, ReplicaSets, and may get and patch only the named
-Deployment or DaemonSet. It has no target namespace `watch` or `delete`
-permission. The controller chart defaults to the role-specific
+Role grants no Secret access unless `upstreamClientTls.sourceSecretAllowlist`
+is nonempty; it gets and creates ConfigMaps, lists Pods and, for a Deployment
+target, ReplicaSets, and may get and patch only the named Deployment or
+DaemonSet. Each allowlisted source gets a separate exact-name Secret Role.
+Opting in also permits target-namespace publication of controller-derived
+immutable Secrets. See
+`deploy/helm/oxibelt-gateway-controller/examples/upstream-mtls-values.yaml`.
+The controller chart defaults to the role-specific
 `ghcr.io/oxibelt/oxibelt-gateway-controller` image. It contains
 `/usr/local/bin/oxibelt-gateway-controller` and intentionally excludes
 `oxibelt`, `oxibeltctl`, and the public runtime filesystem. The data-plane

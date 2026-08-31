@@ -11,6 +11,8 @@ use super::rollout::{
   LEASE_UID_ANNOTATION, MANAGED_PATH_ANNOTATION, RolloutState, RolloutTarget, annotation,
 };
 
+#[path = "rollout_patch/client_identity.rs"]
+mod client_identity;
 #[path = "rollout_patch/generated_source.rs"]
 mod generated_source;
 #[path = "rollout_patch/volume.rs"]
@@ -464,7 +466,96 @@ pub fn build_workload_patch(
     &prior_state,
     &layout,
   )?;
+  let mut projected_workload = workload.clone();
+  apply_internal_operations(&mut projected_workload, &operations)?;
+  client_identity::patch_client_identity_secrets(
+    &mut operations,
+    &projected_workload,
+    target,
+    artifact,
+    layout.container_index,
+  )?;
   Ok(WorkloadPatch { operations })
+}
+
+fn apply_internal_operations(document: &mut Value, operations: &[Value]) -> anyhow::Result<()> {
+  for operation in operations {
+    let operation_kind = operation
+      .get("op")
+      .and_then(Value::as_str)
+      .context("internal JSON Patch operation kind is required")?;
+    if operation_kind == "test" {
+      continue;
+    }
+    let path = operation
+      .get("path")
+      .and_then(Value::as_str)
+      .context("internal JSON Patch path is required")?;
+    let (parent_path, token) = path
+      .rsplit_once('/')
+      .context("internal JSON Patch path must identify a child")?;
+    let token = token.replace("~1", "/").replace("~0", "~");
+    let parent = document
+      .pointer_mut(parent_path)
+      .with_context(|| format!("internal JSON Patch parent `{parent_path}` is missing"))?;
+    match parent {
+      Value::Object(object) => match operation_kind {
+        "add" | "replace" => {
+          let value = operation
+            .get("value")
+            .context("internal JSON Patch value is required")?
+            .clone();
+          object.insert(token, value);
+        }
+        "remove" => {
+          object
+            .remove(&token)
+            .context("internal JSON Patch object member is missing")?;
+        }
+        _ => bail!("unsupported internal JSON Patch operation"),
+      },
+      Value::Array(array) => {
+        if operation_kind == "add" && token == "-" {
+          array.push(
+            operation
+              .get("value")
+              .context("internal JSON Patch value is required")?
+              .clone(),
+          );
+          continue;
+        }
+        let index = token
+          .parse::<usize>()
+          .context("internal JSON Patch array index is invalid")?;
+        match operation_kind {
+          "add" => array.insert(
+            index,
+            operation
+              .get("value")
+              .context("internal JSON Patch value is required")?
+              .clone(),
+          ),
+          "replace" => {
+            *array
+              .get_mut(index)
+              .context("internal JSON Patch array index is missing")? = operation
+              .get("value")
+              .context("internal JSON Patch value is required")?
+              .clone();
+          }
+          "remove" => {
+            if index >= array.len() {
+              bail!("internal JSON Patch array index is missing");
+            }
+            array.remove(index);
+          }
+          _ => bail!("unsupported internal JSON Patch operation"),
+        }
+      }
+      _ => bail!("internal JSON Patch parent must be an object or array"),
+    }
+  }
+  Ok(())
 }
 
 pub fn add_leadership_fence(

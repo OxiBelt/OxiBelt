@@ -58,6 +58,14 @@ pub(super) struct GeneratedBackendTls {
   pub(super) trust: String,
   pub(super) trusted_ca_certs: Vec<String>,
   pub(super) trusted_ca_sha256: Vec<String>,
+  pub(super) client_identity: Option<GeneratedClientIdentity>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(super) struct GeneratedClientIdentity {
+  pub(super) derived_secret_name: String,
+  pub(super) cert_chain: String,
+  pub(super) private_key: String,
 }
 
 #[derive(Debug, Clone)]

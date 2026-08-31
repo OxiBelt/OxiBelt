@@ -28,6 +28,7 @@ fn args() -> SharedArgs {
     external_auth_allow_credentials: false,
     route_policy_max_request_body_bytes: 10_485_760,
     route_policy_max_timeout_ms: 30_000,
+    upstream_client_tls_source_secrets: Vec::new(),
     dry_run: false,
     health_bind: None,
   }
@@ -97,6 +98,99 @@ spec:
     gateway.status["listeners"][0]["conditions"][0]["status"],
     CONDITION_TRUE
   );
+}
+
+#[test]
+fn gateway_client_certificate_errors_use_top_level_resolved_refs_only() {
+  let objects = vec![
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: oxibelt}
+spec: {controllerName: oxibelt.dev/gateway-controller}
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: edge, namespace: frontend}
+spec:
+  gatewayClassName: oxibelt
+  tls:
+    backend:
+      clientCertificateRef: {name: client, namespace: credentials}
+  listeners:
+  - {name: https, protocol: HTTPS, port: 443}
+"#,
+    ),
+    object(
+      r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: app, namespace: frontend}
+spec:
+  parentRefs: [{name: edge, sectionName: https}]
+"#,
+    ),
+  ];
+
+  for (message, expected_reason) in [
+    (
+      "client certificate Secret leaf certificate is malformed",
+      "InvalidClientCertificateRef",
+    ),
+    (
+      "Gateway backend client certificate Secret cross-namespace reference requires ReferenceGrant",
+      "RefNotPermitted",
+    ),
+  ] {
+    let diagnostics = vec![
+      Diagnostic::error("Gateway/frontend/edge", message),
+      Diagnostic::error("HTTPRoute/frontend/app", message),
+    ];
+    let patches = build_status_patches(&objects, &args(), &diagnostics, &committed_rollout());
+    let gateway = patches
+      .iter()
+      .find(|patch| patch.resource == "gateways")
+      .expect("Gateway patch");
+    let gateway_conditions = gateway.status["conditions"].as_array().expect("conditions");
+    let condition = |condition_type: &str| {
+      gateway_conditions
+        .iter()
+        .find(|condition| condition["type"] == condition_type)
+        .expect("Gateway condition")
+    };
+    assert_eq!(condition("ResolvedRefs")["status"], CONDITION_FALSE);
+    assert_eq!(condition("ResolvedRefs")["reason"], expected_reason);
+    assert_eq!(condition("Accepted")["status"], CONDITION_TRUE);
+    assert_eq!(condition("Programmed")["status"], CONDITION_TRUE);
+
+    let listener_conditions = gateway.status["listeners"][0]["conditions"]
+      .as_array()
+      .expect("listener conditions");
+    assert_eq!(listener_conditions[1]["status"], CONDITION_TRUE);
+    assert_eq!(listener_conditions[2]["status"], CONDITION_TRUE);
+    assert_eq!(listener_conditions[2]["reason"], "ResolvedRefs");
+
+    let route = patches
+      .iter()
+      .find(|patch| patch.resource == "httproutes")
+      .expect("HTTPRoute patch");
+    assert_eq!(
+      route.status["parents"][0]["conditions"][1]["status"],
+      CONDITION_FALSE
+    );
+    assert_eq!(
+      route.status["parents"][0]["conditions"][1]["reason"],
+      expected_reason
+    );
+    assert_eq!(
+      route.status["parents"][0]["conditions"][2]["status"],
+      CONDITION_FALSE
+    );
+  }
 }
 
 #[test]

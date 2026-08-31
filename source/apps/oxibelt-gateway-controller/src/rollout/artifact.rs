@@ -9,6 +9,7 @@ pub struct ConfigArtifact {
   pub data_key: String,
   pub toml: String,
   pub assets: Vec<ConfigArtifactAsset>,
+  pub client_identity_secret_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -28,7 +29,17 @@ impl ConfigArtifact {
     target: &RolloutTarget,
     managed_path: &str,
     toml: String,
+    assets: Vec<ConfigArtifactAsset>,
+  ) -> anyhow::Result<Self> {
+    Self::new_with_assets_and_client_identities(target, managed_path, toml, assets, Vec::new())
+  }
+
+  pub fn new_with_assets_and_client_identities(
+    target: &RolloutTarget,
+    managed_path: &str,
+    toml: String,
     mut assets: Vec<ConfigArtifactAsset>,
+    mut client_identity_secret_names: Vec<String>,
   ) -> anyhow::Result<Self> {
     validate_artifact_context(target.artifact_context.as_deref())?;
     let data_key = validate_managed_config_path(managed_path)?;
@@ -44,6 +55,14 @@ impl ConfigArtifact {
         bail!("generated CA artifact paths and data keys must be unique");
       }
     }
+    client_identity_secret_names.sort();
+    client_identity_secret_names.dedup();
+    if client_identity_secret_names.iter().any(|name| {
+      !name.starts_with(super::super::upstream_client_tls::DERIVED_SECRET_PREFIX)
+        || validate_kubernetes_dns_label("derived upstream client Secret", name).is_err()
+    }) {
+      bail!("derived upstream client Secret names must be controller-owned Kubernetes DNS labels");
+    }
     let aggregate_bytes = toml.len()
       + assets
         .iter()
@@ -56,7 +75,12 @@ impl ConfigArtifact {
         MAX_CONFIG_MAP_DATA_BYTES
       );
     }
-    let artifact_digest = digest_artifact_bundle(managed_path, toml.as_bytes(), &assets);
+    let artifact_digest = digest_artifact_bundle_with_client_identities(
+      managed_path,
+      toml.as_bytes(),
+      &assets,
+      &client_identity_secret_names,
+    );
     let content_digest = digest_content(toml.as_bytes());
     let name = target.config_map_name(&artifact_digest);
     if name.len() > 253 {
@@ -70,6 +94,7 @@ impl ConfigArtifact {
       data_key,
       toml,
       assets,
+      client_identity_secret_names,
     })
   }
 
@@ -91,6 +116,10 @@ impl ConfigArtifact {
     annotations.insert(
       ARTIFACT_DIGEST_ANNOTATION.to_string(),
       Value::String(self.artifact_digest.clone()),
+    );
+    annotations.insert(
+      CLIENT_IDENTITY_SECRETS_ANNOTATION.to_string(),
+      Value::String(self.client_identity_secret_names.join(",")),
     );
     annotations.insert(
       CONFIG_DIGEST_ANNOTATION.to_string(),
@@ -151,6 +180,8 @@ impl ConfigArtifact {
       && annotation(existing, ARTIFACT_DIGEST_ANNOTATION) == Some(self.artifact_digest.as_str())
       && annotation(existing, CONFIG_DIGEST_ANNOTATION) == Some(self.content_digest.as_str())
       && annotation(existing, MANAGED_PATH_ANNOTATION) == Some(self.managed_path.as_str())
+      && annotation(existing, CLIENT_IDENTITY_SECRETS_ANNOTATION)
+        == Some(self.client_identity_secret_names.join(",").as_str())
       && annotation(existing, TARGET_CONTEXT_ANNOTATION) == target.artifact_context.as_deref()
   }
 
@@ -189,7 +220,19 @@ impl ConfigArtifact {
           .to_string(),
       });
     }
-    let artifact = Self::new_with_assets(target, managed_path, toml, assets)?;
+    let client_identity_secret_names = annotation(existing, CLIENT_IDENTITY_SECRETS_ANNOTATION)
+      .unwrap_or("")
+      .split(',')
+      .filter(|name| !name.is_empty())
+      .map(str::to_string)
+      .collect();
+    let artifact = Self::new_with_assets_and_client_identities(
+      target,
+      managed_path,
+      toml,
+      assets,
+      client_identity_secret_names,
+    )?;
     if artifact.name != name || !artifact.matches_existing(target, existing) {
       bail!("immutable ConfigMap does not match its deterministic rollout identity");
     }
@@ -227,6 +270,27 @@ pub(crate) fn digest_artifact_bundle(
     digest.update(asset.managed_path.as_bytes());
     digest.update(b"\0");
     digest.update(asset.content.as_bytes());
+  }
+  hex_digest(&digest.finalize())
+}
+
+fn digest_artifact_bundle_with_client_identities(
+  managed_path: &str,
+  content: &[u8],
+  assets: &[ConfigArtifactAsset],
+  client_identity_secret_names: &[String],
+) -> String {
+  let bundle_digest = digest_artifact_bundle(managed_path, content, assets);
+  if client_identity_secret_names.is_empty() {
+    return bundle_digest;
+  }
+  let mut digest = Sha256::new();
+  digest.update(DIGEST_DOMAIN);
+  digest.update(b"client-identities\0");
+  digest.update(bundle_digest.as_bytes());
+  for name in client_identity_secret_names {
+    digest.update(b"\0");
+    digest.update(name.as_bytes());
   }
   hex_digest(&digest.finalize())
 }

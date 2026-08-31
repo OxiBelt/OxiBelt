@@ -54,6 +54,29 @@
     },
     "backendResolution": { "type": "string", "enum": ["cluster_dns", "endpoint_slice_watch"] },
     "dryRun": { "type": "boolean" },
+    "upstreamClientTls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceSecretAllowlist"],
+      "properties": {
+        "sourceSecretAllowlist": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["namespace", "name"],
+            "properties": {
+              "namespace": { "type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" },
+              "certificateKey": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$", "default": "tls.crt" },
+              "privateKeyKey": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$", "default": "tls.key" }
+            }
+          }
+        }
+      }
+    },
     "filters": {
       "type": "object",
       "additionalProperties": false,

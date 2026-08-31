@@ -109,6 +109,29 @@ cert_chain = "tls.crt"
 private_key = "tls.key"
 ```
 
+Upstream client identities use an independent typed projection and do not
+enable downstream TLS or grant the data-plane ServiceAccount access to the
+Kubernetes API:
+
+```yaml
+upstreamTls:
+  clientIdentitySecretProjections:
+    - name: payments
+      secretName: payments-upstream-client
+      certificateKey: tls.crt
+      privateKeyKey: tls.key
+```
+
+The chart accepts either `kubernetes.io/tls` or `Opaque` source Secrets and
+projects only the selected keys as
+`upstream-client/payments/tls.crt` and `tls.key` beneath the certificate root,
+read-only at mode `0440`. The native direct-upstream, pool-server, or discovery
+`tls.client_identity` table must reference those relative paths. Alternate
+source keys are supported, but the mounted names remain canonical. Secret
+names and selected keys are included in the rollout/profile reference digest;
+Secret data is never rendered or hashed by Helm. Prefer immutable/versioned
+source names for direct Helm rollouts.
+
 In Kubernetes immutable rollout mode, rotate downstream TLS and Admin material
 by creating a new immutable/versioned Secret and applying a Helm rollout that
 references it. In-place Secret projection alone is not a claimed rotation
@@ -385,7 +408,13 @@ chart passes `--watch-namespace=<controller release namespace>` and grants
 only the namespace GET needed for that scope plus a namespaced Gateway API
 read Role. That Role lists the supported Gateway routes, BackendTLSPolicy,
 ReferenceGrant, and Services; patches only their status subresources; and can
-`get` but not list referenced ConfigMaps. It has no Secret access. Set
+`get` but not list referenced ConfigMaps. It has no Secret access by default.
+Each entry in `upstreamClientTls.sourceSecretAllowlist` adds a separate source
+Role restricted by the exact Secret `resourceName` for `get` and field-selected
+`watch`, and enables immutable derived Secret publication in the selected
+target namespace. The controller
+accepts `kubernetes.io/tls` or `Opaque` sources with default or explicit data
+keys; cross-namespace Gateway references still require a `ReferenceGrant`. Set
 `watchNamespace` to another single namespace when required.
 Set `watchAllNamespaces: true` only for an intentional cluster-wide
 controller; it is mutually exclusive with `watchNamespace` and changes the
@@ -755,20 +784,28 @@ rollout:
   configMapPrefix: oxibelt-gateway-config
 ```
 
-The controller chart has no Admin URL, Admin token, client certificate, or
-Secret permission. It uses only its projected Kubernetes API token and
+The controller chart has no Admin URL, Admin token, or embedded client
+certificate. It uses only its projected Kubernetes API token and
 `kube-root-ca.crt` CA. Its default Gateway API read Role is scoped to the
 controller release namespace and permits list operations plus status patching.
 BackendTLSPolicy public-CA resolution adds ConfigMap `get` without ConfigMap
-`list`; Secret-backed client identity is unsupported. The watched Gateway API
+`list`. Secret access remains disabled unless
+`upstreamClientTls.sourceSecretAllowlist` explicitly names each permitted
+source. The controller then uses exact source GETs plus field-selected watches
+and publishes immutable, content-addressed target Secrets mounted only into the selected OxiBelt
+container. Source private-key bytes are excluded from generated ConfigMaps,
+status, logs, explain output, and artifact digests. The watched Gateway API
 set includes v1 TCPRoute, UDPRoute, and BackendTLSPolicy. The cluster role is
 limited to GatewayClass list/status patch and an exact
 namespace GET. Its target-namespace Role gets and creates ConfigMaps, lists
 Pods and, for a Deployment target, ReplicaSets, and gets and patches only the
-named Deployment or DaemonSet. It neither watches nor deletes target-namespace
-resources. Generated immutable
-revisions are preserved for named rollback; their retention is operator
-controlled rather than controller garbage collected. ConfigMap access is still
+named Deployment or DaemonSet. Without the upstream-client-TLS opt-in it has no
+target Secret verbs. Generated immutable ConfigMap revisions are preserved for
+named rollback; their retention is operator controlled rather than controller
+garbage collected. Derived upstream-client Secrets retain the current and
+immediately previous names. Older names are deleted only after exact lineage,
+target-template, observed-Pod, and UID-precondition checks; uncertain cases and
+rollback retain them. ConfigMap access is still
 namespace scoped because content-addressed artifact names are known only at
 runtime.
 

@@ -350,6 +350,15 @@ pub fn objects_for_target(
     })
     .flat_map(backend_tls_config_map_refs)
     .collect::<BTreeSet<_>>();
+  let client_secret_keys = objects
+    .iter()
+    .filter(|object| object.kind == "Gateway" && gateways.contains(&object.key()))
+    .filter_map(|gateway| {
+      super::upstream_client_tls::gateway_secret_reference(gateway)
+        .ok()
+        .flatten()
+    })
+    .collect::<BTreeSet<_>>();
   let selected_namespaces = gateways
     .iter()
     .map(|key| key.namespace.clone())
@@ -368,8 +377,14 @@ pub fn objects_for_target(
       "Service" => service_keys.contains(&object.key()),
       "BackendTLSPolicy" => backend_tls_policies.contains(&object.key()),
       "ConfigMap" => config_map_keys.contains(&object.key()),
+      "Secret" => client_secret_keys.contains(&object.key()),
       "ReferenceGrant" => {
         reference_grant_supports_selected_backend(object, &selected_routes, &service_keys)
+          || reference_grant_supports_selected_gateway_secret(
+            object,
+            &gateways,
+            &client_secret_keys,
+          )
       }
       "Namespace" => selected_namespaces.contains(object.name()),
       KIND => false,
@@ -392,6 +407,49 @@ pub fn objects_for_target(
       ))
   });
   selected
+}
+
+fn reference_grant_supports_selected_gateway_secret(
+  grant: &KubernetesObject,
+  gateways: &BTreeSet<ObjectKey>,
+  secrets: &BTreeSet<ObjectKey>,
+) -> bool {
+  let from_matches = grant
+    .spec
+    .get("from")
+    .and_then(Value::as_array)
+    .is_some_and(|entries| {
+      entries.iter().any(|entry| {
+        entry.get("group").and_then(Value::as_str) == Some(super::gateway_policy::GATEWAY_GROUP)
+          && entry.get("kind").and_then(Value::as_str) == Some("Gateway")
+          && entry
+            .get("namespace")
+            .and_then(Value::as_str)
+            .is_some_and(|namespace| gateways.iter().any(|key| key.namespace == namespace))
+      })
+    });
+  from_matches
+    && grant
+      .spec
+      .get("to")
+      .and_then(Value::as_array)
+      .is_some_and(|entries| {
+        entries.iter().any(|entry| {
+          entry
+            .get("group")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+            && entry.get("kind").and_then(Value::as_str) == Some("Secret")
+            && secrets.iter().any(|secret| {
+              secret.namespace == grant.namespace()
+                && entry
+                  .get("name")
+                  .and_then(Value::as_str)
+                  .is_none_or(|name| secret.name == name)
+            })
+        })
+      })
 }
 
 fn service_refs_for_route(route: &KubernetesObject) -> Vec<ObjectKey> {

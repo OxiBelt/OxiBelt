@@ -214,6 +214,7 @@ fn translation_args(endpoint_slice_watch: bool) -> SharedArgs {
     external_auth_allow_credentials: false,
     route_policy_max_request_body_bytes: 10_485_760,
     route_policy_max_timeout_ms: 30_000,
+    upstream_client_tls_source_secrets: Vec::new(),
     dry_run: true,
     health_bind: None,
   }

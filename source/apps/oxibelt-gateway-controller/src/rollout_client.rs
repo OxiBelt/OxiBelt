@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -47,8 +48,9 @@ impl KubernetesPoller {
     compatibility: &CompatibilityPolicy,
     generated_toml: &str,
     generated_assets: &[super::translate::RenderedAsset],
+    client_identities: &[super::upstream_client_tls::ClientIdentityMaterial],
   ) -> anyhow::Result<RolloutStatus> {
-    let candidate = ConfigArtifact::new_with_assets(
+    let candidate = ConfigArtifact::new_with_assets_and_client_identities(
       target,
       &shared.managed_config_path,
       generated_toml.to_string(),
@@ -60,6 +62,10 @@ impl KubernetesPoller {
           content: asset.content.clone(),
         })
         .collect(),
+      client_identities
+        .iter()
+        .map(|identity| identity.derived_secret_name.clone())
+        .collect(),
     )?;
     let workload = self.get_required_json(&target.workload_path()).await?;
     compatibility
@@ -69,6 +75,9 @@ impl KubernetesPoller {
     self
       .preflight_base_config(target, &workload, &candidate.managed_path)
       .await?;
+    for identity in client_identities {
+      self.ensure_client_identity_secret(target, identity).await?;
+    }
     self.ensure_config_map(target, &candidate).await?;
     let state = RolloutState::from_workload(&workload);
 
@@ -182,7 +191,7 @@ impl KubernetesPoller {
       }
       ObservationDecision::Converged => {
         self
-          .advance_converged_state(target, workload, state, &active, rolling_back)
+          .advance_converged_state(target, workload, &pods, state, &active, rolling_back)
           .await
       }
       ObservationDecision::ConvergenceLost => Ok(convergence_lost_status(&state)),
@@ -200,6 +209,7 @@ impl KubernetesPoller {
     &self,
     target: &RolloutTarget,
     workload: &Value,
+    pods: &[Value],
     state: RolloutState,
     active: &ConfigArtifact,
     rolling_back: bool,
@@ -211,6 +221,11 @@ impl KubernetesPoller {
     }
     next.phase = next_phase;
     if next.phase == RolloutPhase::RolledBack {
+      if let Some(failed_revision) = next.failed_revision.as_deref()
+        && let Ok(failed_artifact) = self.load_artifact(target, failed_revision).await
+      {
+        next.previous_client_identity_secrets = failed_artifact.client_identity_secret_names;
+      }
       self.apply_state(target, workload, active, &next).await?;
       return Ok(RolloutStatus::from(&next));
     }
@@ -219,10 +234,23 @@ impl KubernetesPoller {
       return Ok(RolloutStatus::from(&next));
     }
     next.phase = RolloutPhase::Committed;
+    let retired_client_identity_secrets = next.previous_client_identity_secrets.clone();
+    next.previous_client_identity_secrets = next.committed_client_identity_secrets.clone();
+    next.committed_client_identity_secrets = active.client_identity_secret_names.clone();
+    next.desired_client_identity_secrets = active.client_identity_secret_names.clone();
     next.committed_revision = Some(active.name.clone());
     next.committed_content_digest = Some(active.content_digest.clone());
     next.failure = None;
     self.apply_state(target, workload, active, &next).await?;
+    self
+      .cleanup_retired_client_identity_secrets(
+        target,
+        &retired_client_identity_secrets,
+        &next,
+        workload,
+        pods,
+      )
+      .await;
     info!(revision = %active.name, digest = %active.content_digest, "committed immutable Gateway API configuration rollout");
     Ok(RolloutStatus::from(&next))
   }
@@ -341,6 +369,109 @@ impl KubernetesPoller {
       "Kubernetes ConfigMap create returned {status}: {}",
       response_message(&response)
     );
+  }
+
+  async fn ensure_client_identity_secret(
+    &self,
+    target: &RolloutTarget,
+    identity: &super::upstream_client_tls::ClientIdentityMaterial,
+  ) -> anyhow::Result<()> {
+    let path = format!(
+      "/api/v1/namespaces/{}/secrets/{}",
+      target.namespace, identity.derived_secret_name
+    );
+    if let Some(existing) = self.get_optional_json(&path).await? {
+      if identity.matches_existing(target, &existing) {
+        return Ok(());
+      }
+      bail!("immutable upstream client Secret name collision has different content or ownership");
+    }
+    let collection = format!("/api/v1/namespaces/{}/secrets", target.namespace);
+    let _permit = self.authorize_write().await?;
+    let body = serde_json::to_vec(&identity.manifest(target))
+      .context("failed to serialize immutable upstream client Secret")?;
+    let (status, _) = self
+      .request(
+        Method::POST,
+        &collection,
+        None,
+        Some("application/json"),
+        Some(body),
+      )
+      .await?;
+    if status.is_success() {
+      return Ok(());
+    }
+    if status == StatusCode::CONFLICT {
+      let existing = self
+        .get_optional_json(&path)
+        .await?
+        .context("Secret creation conflicted but no existing Secret was readable")?;
+      if identity.matches_existing(target, &existing) {
+        return Ok(());
+      }
+      bail!("immutable upstream client Secret name collision has different content or ownership");
+    }
+    bail!("Kubernetes immutable upstream client Secret create returned {status}");
+  }
+
+  async fn cleanup_retired_client_identity_secrets(
+    &self,
+    target: &RolloutTarget,
+    candidates: &[String],
+    state: &RolloutState,
+    workload: &Value,
+    pods: &[Value],
+  ) {
+    let retained = state
+      .desired_client_identity_secrets
+      .iter()
+      .chain(state.committed_client_identity_secrets.iter())
+      .chain(state.previous_client_identity_secrets.iter())
+      .collect::<HashSet<_>>();
+    let referenced = referenced_client_identity_secrets(workload, pods);
+    for name in candidates {
+      if retained.contains(name) || referenced.contains(name) {
+        continue;
+      }
+      if let Err(error) = self
+        .delete_retired_client_identity_secret(target, name)
+        .await
+      {
+        warn!(
+          secret = name,
+          error = %error,
+          "retained an older derived upstream client Secret after safe cleanup failed"
+        );
+      }
+    }
+  }
+
+  async fn delete_retired_client_identity_secret(
+    &self,
+    target: &RolloutTarget,
+    name: &str,
+  ) -> anyhow::Result<()> {
+    let path = format!("/api/v1/namespaces/{}/secrets/{name}", target.namespace);
+    let Some(existing) = self.get_optional_json(&path).await? else {
+      return Ok(());
+    };
+    let uid = retired_client_identity_secret_uid(target, name, &existing)?;
+    let _permit = self.authorize_write().await?;
+    let body = serde_json::to_vec(&delete_options_with_uid(&uid))?;
+    let (status, _) = self
+      .request(
+        Method::DELETE,
+        &path,
+        None,
+        Some("application/json"),
+        Some(body),
+      )
+      .await?;
+    if status.is_success() || status == StatusCode::NOT_FOUND {
+      return Ok(());
+    }
+    bail!("Kubernetes retired upstream client Secret delete returned {status}")
   }
 
   async fn preflight_base_config(
@@ -483,6 +614,134 @@ impl KubernetesPoller {
       .await?;
     Ok((response.status, response.body))
   }
+}
+
+fn referenced_client_identity_secrets(workload: &Value, pods: &[Value]) -> HashSet<String> {
+  let mut referenced = HashSet::new();
+  collect_secret_volume_references(
+    workload.pointer("/spec/template/spec/volumes"),
+    &mut referenced,
+  );
+  for pod in pods {
+    collect_secret_volume_references(pod.pointer("/spec/volumes"), &mut referenced);
+  }
+  referenced
+}
+
+fn collect_secret_volume_references(volumes: Option<&Value>, referenced: &mut HashSet<String>) {
+  for volume in volumes.and_then(Value::as_array).into_iter().flatten() {
+    if let Some(name) = volume
+      .pointer("/secret/secretName")
+      .and_then(Value::as_str)
+      .filter(|name| name.starts_with(super::upstream_client_tls::DERIVED_SECRET_PREFIX))
+    {
+      referenced.insert(name.to_string());
+    }
+  }
+}
+
+fn retired_client_identity_secret_uid(
+  target: &RolloutTarget,
+  name: &str,
+  existing: &Value,
+) -> anyhow::Result<String> {
+  if !name.starts_with(super::upstream_client_tls::DERIVED_SECRET_PREFIX) {
+    bail!("refusing to delete a Secret outside the controller-derived name prefix");
+  }
+  let metadata = existing
+    .get("metadata")
+    .context("retired upstream client Secret metadata is required")?;
+  if metadata.get("name").and_then(Value::as_str) != Some(name)
+    || metadata.get("namespace").and_then(Value::as_str) != Some(target.namespace.as_str())
+    || existing.get("immutable").and_then(Value::as_bool) != Some(true)
+    || existing.get("type").and_then(Value::as_str) != Some("kubernetes.io/tls")
+  {
+    bail!("refusing to delete a retired Secret without exact immutable identity");
+  }
+  let labels = metadata
+    .get("labels")
+    .context("retired upstream client Secret ownership labels are required")?;
+  if labels
+    .get(super::rollout::MANAGED_BY_LABEL)
+    .and_then(Value::as_str)
+    != Some("oxibelt-gateway-controller")
+    || labels
+      .get(super::rollout::ROLLOUT_TARGET_LABEL)
+      .and_then(Value::as_str)
+      != Some(target.name.as_str())
+    || labels
+      .get(super::rollout::ROLLOUT_TARGET_KIND_LABEL)
+      .and_then(Value::as_str)
+      != Some(target.kind.label_value())
+  {
+    bail!("refusing to delete a retired Secret without exact controller ownership");
+  }
+  let annotations = metadata
+    .get("annotations")
+    .context("retired upstream client Secret source annotations are required")?;
+  let source = annotations
+    .get(super::upstream_client_tls::DERIVED_SECRET_SOURCE_ANNOTATION)
+    .and_then(Value::as_str)
+    .context("retired upstream client Secret source identity is required")?;
+  let (source_namespace, source_name) = source
+    .split_once('/')
+    .filter(|(_, name)| !name.contains('/'))
+    .context("retired upstream client Secret source identity is invalid")?;
+  super::rollout::validate_kubernetes_dns_label("source Secret namespace", source_namespace)?;
+  super::rollout::validate_kubernetes_dns_subdomain("source Secret name", source_name)?;
+  let source_uid = annotations
+    .get(super::upstream_client_tls::DERIVED_SECRET_SOURCE_UID_ANNOTATION)
+    .and_then(Value::as_str)
+    .filter(|value| !value.is_empty())
+    .context("retired upstream client Secret source UID is required")?;
+  let source_resource_version = annotations
+    .get(super::upstream_client_tls::DERIVED_SECRET_SOURCE_VERSION_ANNOTATION)
+    .and_then(Value::as_str)
+    .filter(|value| !value.is_empty())
+    .context("retired upstream client Secret source resourceVersion is required")?;
+  let data = existing
+    .get("data")
+    .and_then(Value::as_object)
+    .context("retired upstream client Secret data is required")?;
+  if data.len() != 2
+    || !data.contains_key(super::upstream_client_tls::CERTIFICATE_DATA_KEY)
+    || !data.contains_key(super::upstream_client_tls::PRIVATE_KEY_DATA_KEY)
+  {
+    bail!("refusing to delete a retired Secret with noncanonical data keys");
+  }
+  let certificate_data = data
+    .get(super::upstream_client_tls::CERTIFICATE_DATA_KEY)
+    .and_then(Value::as_str)
+    .context("retired upstream client Secret certificate data is required")?;
+  let certificate_bytes = super::upstream_client_tls::decode_base64_bounded(
+    certificate_data,
+    super::upstream_client_tls::MAX_CERTIFICATE_BYTES,
+  )
+  .context("retired upstream client Secret certificate data is invalid")?;
+  let expected_name = super::upstream_client_tls::derived_secret_name_for_source(
+    source_namespace,
+    source_name,
+    source_uid,
+    source_resource_version,
+    &certificate_bytes,
+  );
+  if expected_name != name {
+    bail!("refusing to delete a retired Secret outside its exact source lineage");
+  }
+  metadata
+    .get("uid")
+    .and_then(Value::as_str)
+    .filter(|uid| !uid.is_empty())
+    .map(str::to_string)
+    .context("retired upstream client Secret UID is required")
+}
+
+fn delete_options_with_uid(uid: &str) -> Value {
+  serde_json::json!({
+    "apiVersion": "v1",
+    "kind": "DeleteOptions",
+    "preconditions": { "uid": uid },
+  })
 }
 
 fn workload_term_matches(workload: &Value, term: &super::leader_election::LeadershipTerm) -> bool {
@@ -685,6 +944,9 @@ mod tests {
       failed_revision: Some("rejected".to_string()),
       started_at_unix: None,
       failure: Some("PodRejected".to_string()),
+      desired_client_identity_secrets: Vec::new(),
+      committed_client_identity_secrets: Vec::new(),
+      previous_client_identity_secrets: Vec::new(),
     };
     assert!(candidate_is_blocked_after_failure(&state, "rejected"));
     assert!(!candidate_is_blocked_after_failure(&state, "changed"));
@@ -714,11 +976,96 @@ mod tests {
       failed_revision: None,
       started_at_unix: Some(1),
       failure: None,
+      desired_client_identity_secrets: Vec::new(),
+      committed_client_identity_secrets: Vec::new(),
+      previous_client_identity_secrets: Vec::new(),
     };
 
     let status = convergence_lost_status(&state);
     assert!(!status.is_committed());
     assert_eq!(status.reason.as_deref(), Some("ConvergenceLost"));
     assert_eq!(status.desired_revision.as_deref(), Some("revision"));
+  }
+
+  #[test]
+  fn retired_secret_cleanup_requires_exact_lineage_uid_and_no_live_references() {
+    let target = RolloutTarget {
+      namespace: "default".to_string(),
+      kind: WorkloadKind::Deployment,
+      name: "edge".to_string(),
+      container_name: "oxibelt".to_string(),
+      volume_name: "gateway-config".to_string(),
+      timeout: Duration::from_secs(300),
+      config_map_prefix: "oxibelt-gateway-config".to_string(),
+      artifact_context: None,
+    };
+    let certificate = "c2FtZS1wdWJsaWMtY2VydGlmaWNhdGU=";
+    let name = crate::upstream_client_tls::derived_secret_name_for_source(
+      "credentials",
+      "client.identity",
+      "source-uid",
+      "17",
+      b"same-public-certificate",
+    );
+    let secret = json!({
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": name,
+        "namespace": "default",
+        "uid": "derived-uid",
+        "labels": {
+          (crate::rollout::MANAGED_BY_LABEL): "oxibelt-gateway-controller",
+          (crate::rollout::ROLLOUT_TARGET_LABEL): "edge",
+          (crate::rollout::ROLLOUT_TARGET_KIND_LABEL): "deployment",
+        },
+        "annotations": {
+          (crate::upstream_client_tls::DERIVED_SECRET_SOURCE_ANNOTATION): "credentials/client.identity",
+          (crate::upstream_client_tls::DERIVED_SECRET_SOURCE_UID_ANNOTATION): "source-uid",
+          (crate::upstream_client_tls::DERIVED_SECRET_SOURCE_VERSION_ANNOTATION): "17",
+        },
+      },
+      "immutable": true,
+      "type": "kubernetes.io/tls",
+      "data": {"tls.crt": certificate, "tls.key": "a2V5"},
+    });
+    assert_eq!(
+      retired_client_identity_secret_uid(&target, &name, &secret).unwrap(),
+      "derived-uid"
+    );
+    assert_eq!(
+      delete_options_with_uid("derived-uid")["preconditions"]["uid"],
+      "derived-uid"
+    );
+
+    let mut wrong_owner = secret.clone();
+    wrong_owner["metadata"]["labels"][crate::rollout::ROLLOUT_TARGET_LABEL] = json!("other");
+    assert!(retired_client_identity_secret_uid(&target, &name, &wrong_owner).is_err());
+    let mut missing_uid = secret.clone();
+    missing_uid["metadata"]
+      .as_object_mut()
+      .unwrap()
+      .remove("uid");
+    assert!(retired_client_identity_secret_uid(&target, &name, &missing_uid).is_err());
+
+    let workload = json!({
+      "spec": {"template": {"spec": {"volumes": [
+        {"name": "current", "secret": {"secretName": "oxibelt-upstream-client-current"}}
+      ]}}}
+    });
+    let pods = [json!({
+      "metadata": {"deletionTimestamp": "2026-08-31T00:00:00Z"},
+      "spec": {"volumes": [
+        {"name": "retiring", "secret": {"secretName": name}}
+      ]}
+    })];
+    let referenced = referenced_client_identity_secrets(&workload, &pods);
+    assert!(referenced.contains("oxibelt-upstream-client-current"));
+    assert!(referenced.contains(&name));
+    assert_eq!(
+      convergence_transition(RolloutPhase::RollbackRequested, true),
+      RolloutPhase::RolledBack,
+      "rollback completion retains failed identities for a later proven cleanup"
+    );
   }
 }

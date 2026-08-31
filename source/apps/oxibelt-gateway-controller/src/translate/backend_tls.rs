@@ -237,6 +237,7 @@ impl TranslationState {
         trust: "system".to_string(),
         trusted_ca_certs: Vec::new(),
         trusted_ca_sha256: Vec::new(),
+        client_identity: None,
       }),
       (Some(_), _) => {
         self.policy_error(
@@ -376,6 +377,7 @@ impl TranslationState {
       trust: "exclusive".to_string(),
       trusted_ca_certs,
       trusted_ca_sha256,
+      client_identity: None,
     })
   }
 

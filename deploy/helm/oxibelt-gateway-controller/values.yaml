@@ -39,6 +39,16 @@ statusAddresses: []
 backendResolution: cluster_dns
 dryRun: false
 
+# Gateway.spec.tls.backend.clientCertificateRef remains inactive until its
+# exact source Secret is admitted here. The controller only performs bounded,
+# exact-name GETs and supports kubernetes.io/tls or Opaque Secret types.
+upstreamClientTls:
+  sourceSecretAllowlist: []
+  # - namespace: backend-secrets
+  #   name: orders-client
+  #   certificateKey: tls.crt
+  #   privateKeyKey: tls.key
+
 # Operator-owned admission bounds for route-authored Gateway filters. A zero
 # body limit retains bodyless mirroring/auth compatibility. ExternalAuth stays
 # blocked until credential forwarding is explicitly admitted.

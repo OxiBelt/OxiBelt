@@ -18,6 +18,7 @@ mod rollout_status;
 mod status;
 mod target_topology;
 mod translate;
+mod upstream_client_tls;
 mod watch;
 
 #[cfg(feature = "fuzzing")]

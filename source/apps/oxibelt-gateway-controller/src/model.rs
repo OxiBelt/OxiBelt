@@ -23,7 +23,7 @@ pub struct ObjectMeta {
   pub uid: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 pub struct KubernetesObject {
   #[serde(rename = "apiVersion")]
   pub api_version: String,
@@ -35,6 +35,26 @@ pub struct KubernetesObject {
   pub status: Value,
   #[serde(default)]
   pub data: BTreeMap<String, String>,
+  #[serde(default, rename = "type")]
+  pub resource_type: Option<String>,
+}
+
+impl std::fmt::Debug for KubernetesObject {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let mut debug = formatter.debug_struct("KubernetesObject");
+    debug
+      .field("api_version", &self.api_version)
+      .field("kind", &self.kind)
+      .field("metadata", &self.metadata)
+      .field("spec", &self.spec)
+      .field("status", &self.status);
+    if self.kind == "Secret" {
+      debug.field("data", &"[redacted]");
+    } else {
+      debug.field("data", &self.data);
+    }
+    debug.field("resource_type", &self.resource_type).finish()
+  }
 }
 
 impl KubernetesObject {
@@ -147,6 +167,7 @@ pub enum DiagnosticCode {
   ExceedsOperatorLimit,
   IncompatibleFilters,
   InvalidResource,
+  InvalidClientCertificateRef,
   NotProgrammed,
   RefNotPermitted,
   RequiresExactDataPlane,
@@ -160,6 +181,7 @@ impl DiagnosticCode {
       Self::ExceedsOperatorLimit => "ExceedsOperatorLimit",
       Self::IncompatibleFilters => "IncompatibleFilters",
       Self::InvalidResource => "InvalidResource",
+      Self::InvalidClientCertificateRef => "InvalidClientCertificateRef",
       Self::NotProgrammed => "NotProgrammed",
       Self::RefNotPermitted => "RefNotPermitted",
       Self::RequiresExactDataPlane => "RequiresExactDataPlane",
@@ -199,11 +221,16 @@ impl Diagnostic {
 }
 
 fn diagnostic_code(message: &str) -> DiagnosticCode {
-  if message.contains("ReferenceGrant")
+  if message.contains("operator source Secret allowlist")
+    || message.contains("ReferenceGrant")
     || message.contains("was not found")
     || message.contains("does not expose")
   {
     DiagnosticCode::RefNotPermitted
+  } else if message.contains("client certificate Secret")
+    || message.contains("clientCertificateRef") && message.contains("invalid")
+  {
+    DiagnosticCode::InvalidClientCertificateRef
   } else if message.contains("operator cap") {
     DiagnosticCode::ExceedsOperatorLimit
   } else if message.contains("filter") || message.contains("cannot be combined") {
@@ -223,4 +250,29 @@ fn diagnostic_code(message: &str) -> DiagnosticCode {
 
 pub fn object_ref(object: &KubernetesObject) -> String {
   format!("{}/{}/{}", object.kind, object.namespace(), object.name())
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+
+  use super::*;
+
+  #[test]
+  fn secret_debug_output_redacts_data() {
+    let secret = KubernetesObject::from_value(json!({
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {"name": "client", "namespace": "credentials"},
+      "type": "kubernetes.io/tls",
+      "data": {"tls.key": "sensitive-private-key"},
+    }))
+    .unwrap()
+    .pop()
+    .unwrap();
+    let output = format!("{secret:?}");
+    assert!(!output.contains("sensitive-private-key"));
+    assert!(output.contains("[redacted]"));
+    assert!(output.contains("credentials"));
+  }
 }

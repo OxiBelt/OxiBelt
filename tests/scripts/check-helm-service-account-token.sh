@@ -265,6 +265,26 @@ assert_not_contains "${work_dir}/controller-default.yaml" "verbs: [\"get\", \"pa
 assert_not_contains "${work_dir}/controller-default.yaml" "resources: [\"secrets\"]"
 assert_not_contains "${work_dir}/controller-default.yaml" "verbs: [\"delete\"]"
 
+# Upstream client TLS is an explicit opt-in. Source Secret reads are bound to
+# exact names, while generated immutable Secret lifecycle permissions remain
+# namespace-scoped to the configured rollout target and omit list/watch.
+render_controller upstream_client_tls_rbac \
+  --show-only templates/rbac.yaml \
+  --set-json 'upstreamClientTls.sourceSecretAllowlist=[{"namespace":"client-secrets","name":"orders-client","certificateKey":"client.pem","privateKeyKey":"client.key"}]'
+assert_occurrence_count "${work_dir}/controller-upstream_client_tls_rbac.yaml" 'resources: ["secrets"]' 2
+assert_contains "${work_dir}/controller-upstream_client_tls_rbac.yaml" 'namespace: "client-secrets"'
+assert_contains "${work_dir}/controller-upstream_client_tls_rbac.yaml" '  - "orders-client"'
+assert_contains "${work_dir}/controller-upstream_client_tls_rbac.yaml" 'verbs: ["get", "watch"]'
+assert_contains "${work_dir}/controller-upstream_client_tls_rbac.yaml" 'namespace: "default"'
+assert_contains "${work_dir}/controller-upstream_client_tls_rbac.yaml" 'verbs: ["get", "create", "delete"]'
+assert_not_contains "${work_dir}/controller-upstream_client_tls_rbac.yaml" 'verbs: ["get", "list", "watch"]'
+
+render_controller upstream_client_tls_deployment \
+  --show-only templates/deployment.yaml \
+  --set-json 'upstreamClientTls.sourceSecretAllowlist=[{"namespace":"client-secrets","name":"orders-client","certificateKey":"client.pem","privateKeyKey":"client.key"}]'
+assert_contains "${work_dir}/controller-upstream_client_tls_deployment.yaml" \
+  '--upstream-client-tls-source-secret=client-secrets/orders-client:client.pem:client.key'
+
 render_controller scoped_watch --set-string watchNamespace=edge-a
 assert_contains "${work_dir}/controller-scoped_watch.yaml" "--watch-namespace=edge-a"
 assert_contains "${work_dir}/controller-scoped_watch.yaml" "namespace: \"edge-a\""
@@ -300,5 +320,13 @@ expect_controller_failure_contains oversized_watch_namespace_helper \
   "watchNamespace must be a safe Kubernetes namespace name" \
   --skip-schema-validation \
   --set-string watchNamespace=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+expect_controller_failure_contains upstream_client_tls_duplicate_source_helper \
+  "upstreamClientTls.sourceSecretAllowlist contains duplicate client-secrets/orders-client" \
+  --skip-schema-validation \
+  --set-json 'upstreamClientTls.sourceSecretAllowlist=[{"namespace":"client-secrets","name":"orders-client","certificateKey":"tls.crt","privateKeyKey":"tls.key"},{"namespace":"client-secrets","name":"orders-client","certificateKey":"client.pem","privateKeyKey":"client.key"}]'
+expect_controller_failure_contains upstream_client_tls_same_key_helper \
+  "upstreamClientTls source Secret client-secrets/orders-client certificateKey and privateKeyKey must differ" \
+  --skip-schema-validation \
+  --set-json 'upstreamClientTls.sourceSecretAllowlist=[{"namespace":"client-secrets","name":"orders-client","certificateKey":"client.pem","privateKeyKey":"client.pem"}]'
 
 echo "Helm ServiceAccount token check passed"

@@ -148,6 +148,37 @@ subjects:
   namespace: {{ .Release.Namespace }}
 ---
 {{- end }}
+{{- range $secret := .Values.upstreamClientTls.sourceSecretAllowlist }}
+{{- $identity := printf "%s/%s" $secret.namespace $secret.name -}}
+{{- $roleName := printf "%s-client-secret-%s" (include "oxibelt-gateway-controller.name" $) (sha256sum $identity | trunc 12) | trunc 63 | trimSuffix "-" }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $roleName }}
+  namespace: {{ $secret.namespace | quote }}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames:
+  - {{ $secret.name | quote }}
+  verbs: ["get", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $roleName }}
+  namespace: {{ $secret.namespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $roleName }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "oxibelt-gateway-controller.name" $ }}
+  namespace: {{ $.Release.Namespace }}
+{{- end }}
+---
 {{- if eq (len .Values.rollout.targets) 0 }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -158,6 +189,11 @@ rules:
 - apiGroups: [""]
   resources: ["configmaps"]
   verbs: ["get", "create"]
+{{- if gt (len .Values.upstreamClientTls.sourceSecretAllowlist) 0 }}
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "delete"]
+{{- end }}
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["list"]
@@ -201,6 +237,11 @@ rules:
 - apiGroups: [""]
   resources: ["configmaps"]
   verbs: ["get", "create"]
+{{ if gt (len $.Values.upstreamClientTls.sourceSecretAllowlist) 0 }}
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "delete"]
+{{ end }}
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["list"]

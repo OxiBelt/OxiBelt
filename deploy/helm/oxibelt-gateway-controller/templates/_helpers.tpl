@@ -82,6 +82,25 @@ oxibelt.dev/kubernetes-support-policy: {{ index .Chart.Annotations "oxibelt.dev/
 {{- if and .Values.watchAllNamespaces .Values.watchNamespace -}}
 {{- fail "watchAllNamespaces=true cannot be combined with watchNamespace" -}}
 {{- end -}}
+{{- $sourceSecrets := dict -}}
+{{- range $secret := .Values.upstreamClientTls.sourceSecretAllowlist -}}
+{{- $identity := printf "%s/%s" $secret.namespace $secret.name -}}
+{{- if or (gt (len $secret.namespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $secret.namespace)) -}}
+{{- fail "upstreamClientTls source Secret namespaces must be safe Kubernetes DNS labels" -}}
+{{- end -}}
+{{- if or (gt (len $secret.name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $secret.name)) -}}
+{{- fail "upstreamClientTls source Secret names must be safe Kubernetes DNS subdomains" -}}
+{{- end -}}
+{{- if hasKey $sourceSecrets $identity -}}
+{{- fail (printf "upstreamClientTls.sourceSecretAllowlist contains duplicate %s" $identity) -}}
+{{- end -}}
+{{- $_ := set $sourceSecrets $identity true -}}
+{{- $certificateKey := default "tls.crt" $secret.certificateKey -}}
+{{- $privateKeyKey := default "tls.key" $secret.privateKeyKey -}}
+{{- if eq $certificateKey $privateKeyKey -}}
+{{- fail (printf "upstreamClientTls source Secret %s certificateKey and privateKeyKey must differ" $identity) -}}
+{{- end -}}
+{{- end -}}
 {{- if and (not .Values.watchAllNamespaces) .Values.watchNamespace (or (gt (len .Values.watchNamespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .Values.watchNamespace))) -}}
 {{- fail "watchNamespace must be a safe Kubernetes namespace name" -}}
 {{- end -}}

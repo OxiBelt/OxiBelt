@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use http::Request;
+use http_body_util::BodyExt;
 use oxibelt_control_http::{
   ControlHttpClient, ControlHttpResponseBodyLimitError, empty_body, full_body, uri_from_url,
 };
@@ -13,22 +14,29 @@ use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
 use url::Url;
 
-use super::cli::{RunArgs, SharedArgs};
+use super::cli::{
+  MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS, RunArgs, SharedArgs, SourceSecretAllowlistEntry,
+};
 use super::compatibility::CompatibilityPolicy;
+use super::gateway_policy;
 use super::health::ControllerHealth;
 use super::leader_election::{Leadership, WritePermit, validate_write_permit};
-use super::model::{DiagnosticSeverity, KubernetesObject};
+use super::model::KubernetesObject;
 use super::rollout;
 use super::rollout_status::RolloutStatus;
 use super::status;
 use super::target_topology::{TargetOutcome, TargetSet, objects_for_target};
 use super::translate;
+use super::upstream_client_tls;
 
 const DEFAULT_SERVICE_ACCOUNT_TOKEN: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 const DEFAULT_SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 pub(super) const KUBERNETES_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const REFERENCED_CONFIG_MAP_MAX_BODY_BYTES: usize = 320 * 1024;
+const REFERENCED_SECRET_MAX_BODY_BYTES: usize = 512 * 1024;
 const MAX_REFERENCED_CONFIG_MAPS: usize = 64;
+const SOURCE_SECRET_WATCH_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_SOURCE_SECRET_WATCH_EVENT_BYTES: usize = REFERENCED_SECRET_MAX_BODY_BYTES;
 
 #[derive(Clone)]
 pub struct KubernetesPoller {
@@ -37,6 +45,8 @@ pub struct KubernetesPoller {
   pub(super) service_account_token_path: PathBuf,
   pub(super) namespace: Option<String>,
   pub(super) leadership: Option<Leadership>,
+  pub(super) upstream_client_tls_source_secrets: Vec<SourceSecretAllowlistEntry>,
+  pub(super) controller_name: String,
 }
 
 impl KubernetesPoller {
@@ -63,6 +73,8 @@ impl KubernetesPoller {
       service_account_token_path: token_path.to_path_buf(),
       namespace: args.watch_namespace.clone(),
       leadership: None,
+      upstream_client_tls_source_secrets: args.upstream_client_tls_source_secrets.clone(),
+      controller_name: args.controller_name.clone(),
     })
   }
 
@@ -157,6 +169,16 @@ impl KubernetesPoller {
         objects.push(config_map);
       }
     }
+    let client_secrets = gateway_client_secret_refs(
+      &objects,
+      &self.upstream_client_tls_source_secrets,
+      &self.controller_name,
+    )?;
+    for (namespace, name) in client_secrets {
+      if let Some(secret) = self.get_secret(&namespace, &name).await? {
+        objects.push(secret);
+      }
+    }
     Ok(objects)
   }
 
@@ -214,6 +236,63 @@ impl KubernetesPoller {
       .with_context(|| format!("failed to parse Kubernetes ConfigMap from {path}"))?;
     if parsed.len() != 1 || parsed[0].kind != "ConfigMap" {
       bail!("Kubernetes API {path} did not return exactly one ConfigMap");
+    }
+    Ok(parsed.pop())
+  }
+
+  async fn get_secret(
+    &self,
+    namespace: &str,
+    name: &str,
+  ) -> anyhow::Result<Option<KubernetesObject>> {
+    validate_kubernetes_path_segment("Secret namespace", namespace)?;
+    validate_kubernetes_path_segment("Secret name", name)?;
+    let path = format!("/api/v1/namespaces/{namespace}/secrets/{name}");
+    let mut url = self.base_url.clone();
+    url.set_path(&path);
+    url.set_query(None);
+    let request = Request::builder()
+      .method(http::Method::GET)
+      .uri(uri_from_url(&url)?)
+      .header(http::header::ACCEPT, "application/json")
+      .header(http::header::AUTHORIZATION, self.bearer()?)
+      .body(empty_body())?;
+    let response = match self
+      .client
+      .request(
+        request,
+        Duration::from_secs(10),
+        REFERENCED_SECRET_MAX_BODY_BYTES,
+      )
+      .await
+    {
+      Ok(response) => response,
+      Err(error) => {
+        if let Some(limit_error) = error.downcast_ref::<ControlHttpResponseBodyLimitError>()
+          && (limit_error.status().is_success()
+            || limit_error.status() == http::StatusCode::NOT_FOUND)
+        {
+          warn!(
+            namespace,
+            name,
+            status = %limit_error.status(),
+            max_body_bytes = limit_error.max_body_bytes(),
+            "referenced upstream client Secret response exceeded the bounded body limit"
+          );
+          return Ok(None);
+        }
+        return Err(error);
+      }
+    };
+    if response.status == http::StatusCode::NOT_FOUND {
+      return Ok(None);
+    }
+    if !response.status.is_success() {
+      bail!("Kubernetes API Secret GET returned {}", response.status);
+    }
+    let mut parsed = parse_list(response.body).context("failed to parse referenced Secret")?;
+    if parsed.len() != 1 || parsed[0].kind != "Secret" {
+      bail!("Kubernetes API Secret GET did not return exactly one Secret");
     }
     Ok(parsed.pop())
   }
@@ -384,6 +463,67 @@ fn backend_tls_config_map_refs(
   Ok(refs)
 }
 
+fn gateway_client_secret_refs(
+  objects: &[KubernetesObject],
+  allowlist_entries: &[SourceSecretAllowlistEntry],
+  controller_name: &str,
+) -> anyhow::Result<BTreeSet<(String, String)>> {
+  let allowlist = upstream_client_tls::allowlist_by_source(allowlist_entries);
+  let accepted_classes = objects
+    .iter()
+    .filter(|object| object.kind == "GatewayClass")
+    .filter_map(|object| {
+      object
+        .spec
+        .get("controllerName")
+        .and_then(Value::as_str)
+        .filter(|controller| *controller == controller_name)
+        .map(|_| object.name())
+    })
+    .collect::<std::collections::HashSet<_>>();
+  let grants = objects
+    .iter()
+    .filter(|object| object.kind == "ReferenceGrant")
+    .filter_map(gateway_policy::parse_reference_grant)
+    .collect::<Vec<_>>();
+  let mut references = BTreeSet::new();
+  for gateway in objects.iter().filter(|object| {
+    object.kind == "Gateway"
+      && object
+        .spec
+        .get("gatewayClassName")
+        .and_then(Value::as_str)
+        .is_some_and(|class| accepted_classes.contains(class))
+  }) {
+    let Ok(Some(reference)) = upstream_client_tls::gateway_secret_reference(gateway) else {
+      continue;
+    };
+    if !allowlist.contains_key(&reference) {
+      continue;
+    }
+    if reference.namespace != gateway.namespace()
+      && !gateway_policy::reference_allowed(
+        &grants,
+        gateway,
+        "Gateway",
+        &reference.namespace,
+        "Secret",
+        &reference.name,
+      )
+    {
+      continue;
+    }
+    references.insert((reference.namespace, reference.name));
+  }
+  if references.len() > MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS {
+    bail!(
+      "Gateway snapshot references {} permitted upstream client Secrets; maximum is {MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS}",
+      references.len()
+    );
+  }
+  Ok(references)
+}
+
 fn validate_kubernetes_path_segment(label: &str, value: &str) -> anyhow::Result<()> {
   let valid = !value.is_empty()
     && value.len() <= 253
@@ -416,9 +556,20 @@ pub async fn run_poll_loop(
   mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
   let interval = Duration::from_millis(args.poll_interval_ms.max(250));
-  loop {
+  let (wake_sender, mut wake_receiver) = tokio::sync::mpsc::channel(1);
+  let mut source_secret_watches = tokio::task::JoinSet::new();
+  for source in &shared.upstream_client_tls_source_secrets {
+    source_secret_watches.spawn(run_source_secret_watch_loop(
+      kubernetes.clone(),
+      source.clone(),
+      interval,
+      wake_sender.clone(),
+      shutdown.clone(),
+    ));
+  }
+  let result = loop {
     if *shutdown.borrow() {
-      return Ok(());
+      break Ok(());
     }
     if leadership.is_leader() {
       match reconcile_once(&kubernetes, shared, args, compatibility).await {
@@ -432,11 +583,196 @@ pub async fn run_poll_loop(
     tokio::select! {
       changed = shutdown.changed() => {
         if changed.is_err() || *shutdown.borrow() {
-          return Ok(());
+          break Ok(());
         }
       }
+      _ = wake_receiver.recv() => {}
       _ = tokio::time::sleep(interval) => {}
     }
+  };
+  source_secret_watches.abort_all();
+  result
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SourceSecretWatchOutcome {
+  MaterialEvent,
+  Reconnect,
+}
+
+async fn run_source_secret_watch_loop(
+  kubernetes: KubernetesPoller,
+  source: SourceSecretAllowlistEntry,
+  retry_interval: Duration,
+  wake_sender: tokio::sync::mpsc::Sender<()>,
+  mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+  loop {
+    if *shutdown.borrow() {
+      return;
+    }
+    let result = async {
+      let Some(secret) = kubernetes
+        .get_secret(&source.namespace, &source.name)
+        .await?
+      else {
+        return Ok(SourceSecretWatchOutcome::Reconnect);
+      };
+      let resource_version = secret
+        .metadata
+        .resource_version
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .context("source Secret metadata.resourceVersion is required")?;
+      watch_source_secret_once(
+        &kubernetes,
+        &source.namespace,
+        &source.name,
+        resource_version,
+      )
+      .await
+    }
+    .await;
+    match result {
+      Ok(SourceSecretWatchOutcome::MaterialEvent) => {
+        let _ = wake_sender.try_send(());
+        continue;
+      }
+      Ok(SourceSecretWatchOutcome::Reconnect) => {}
+      Err(error) => warn!(
+        namespace = source.namespace,
+        name = source.name,
+        error = %error,
+        "upstream client source Secret watch ended; reconnecting from an exact GET"
+      ),
+    }
+    tokio::select! {
+      changed = shutdown.changed() => {
+        if changed.is_err() || *shutdown.borrow() {
+          return;
+        }
+      }
+      _ = tokio::time::sleep(retry_interval) => {}
+    }
+  }
+}
+
+async fn watch_source_secret_once(
+  kubernetes: &KubernetesPoller,
+  namespace: &str,
+  name: &str,
+  resource_version: &str,
+) -> anyhow::Result<SourceSecretWatchOutcome> {
+  validate_kubernetes_path_segment("Secret namespace", namespace)?;
+  validate_kubernetes_path_segment("Secret name", name)?;
+  let mut url = kubernetes.base_url.clone();
+  url.set_path(&format!("/api/v1/namespaces/{namespace}/secrets"));
+  url.set_query(None);
+  {
+    let mut query = url.query_pairs_mut();
+    query.append_pair("fieldSelector", &format!("metadata.name={name}"));
+    query.append_pair("watch", "true");
+    query.append_pair("allowWatchBookmarks", "true");
+    query.append_pair("resourceVersion", resource_version);
+    query.append_pair(
+      "timeoutSeconds",
+      &SOURCE_SECRET_WATCH_TIMEOUT.as_secs().to_string(),
+    );
+  }
+  let request = Request::builder()
+    .method(http::Method::GET)
+    .uri(uri_from_url(&url)?)
+    .header(http::header::ACCEPT, "application/json")
+    .header(http::header::AUTHORIZATION, kubernetes.bearer()?)
+    .body(empty_body())?;
+  let response = kubernetes
+    .client
+    .request_stream(
+      request,
+      SOURCE_SECRET_WATCH_TIMEOUT.saturating_add(Duration::from_secs(2)),
+    )
+    .await?;
+  if response.status == http::StatusCode::GONE {
+    return Ok(SourceSecretWatchOutcome::Reconnect);
+  }
+  if !response.status.is_success() {
+    bail!(
+      "Kubernetes upstream client source Secret watch returned {}",
+      response.status
+    );
+  }
+  let mut body = response.body;
+  let mut buffer = Vec::new();
+  tokio::time::timeout(
+    SOURCE_SECRET_WATCH_TIMEOUT.saturating_add(Duration::from_secs(1)),
+    async {
+      while let Some(frame) = body.frame().await {
+        let frame = frame.context("Kubernetes source Secret watch body failed")?;
+        let Some(data) = frame.data_ref() else {
+          continue;
+        };
+        for chunk in data.split_inclusive(|byte| *byte == b'\n') {
+          if buffer.len().saturating_add(chunk.len()) > MAX_SOURCE_SECRET_WATCH_EVENT_BYTES {
+            bail!(
+              "Kubernetes source Secret watch event exceeded {MAX_SOURCE_SECRET_WATCH_EVENT_BYTES} bytes"
+            );
+          }
+          buffer.extend_from_slice(chunk);
+          if chunk.last() != Some(&b'\n') {
+            continue;
+          }
+          let mut event_len = buffer.len().saturating_sub(1);
+          if event_len > 0 && buffer[event_len - 1] == b'\r' {
+            event_len -= 1;
+          }
+          let outcome = if buffer[..event_len]
+            .iter()
+            .all(|byte| byte.is_ascii_whitespace())
+          {
+            None
+          } else {
+            source_secret_watch_event(&buffer[..event_len], name)?
+          };
+          buffer.clear();
+          if let Some(outcome) = outcome {
+            return Ok(outcome);
+          }
+        }
+      }
+      if !buffer.is_empty() {
+        bail!("Kubernetes source Secret watch ended with an incomplete event");
+      }
+      bail!("Kubernetes source Secret watch ended before a material event")
+    },
+  )
+  .await
+  .context("Kubernetes source Secret watch timed out")?
+}
+
+fn source_secret_watch_event(
+  event: &[u8],
+  expected_name: &str,
+) -> anyhow::Result<Option<SourceSecretWatchOutcome>> {
+  let event: Value = serde_json::from_slice(event)
+    .map_err(|_| anyhow::anyhow!("failed to parse Kubernetes source Secret watch event"))?;
+  match event.get("type").and_then(Value::as_str) {
+    Some("BOOKMARK") => Ok(None),
+    Some("ADDED" | "MODIFIED" | "DELETED") => {
+      if event
+        .pointer("/object/metadata/name")
+        .and_then(Value::as_str)
+        != Some(expected_name)
+      {
+        bail!("Kubernetes source Secret watch returned an object outside its field selector");
+      }
+      Ok(Some(SourceSecretWatchOutcome::MaterialEvent))
+    }
+    Some("ERROR") if event.pointer("/object/code").and_then(Value::as_u64) == Some(410) => {
+      Ok(Some(SourceSecretWatchOutcome::Reconnect))
+    }
+    Some("ERROR") => bail!("Kubernetes source Secret watch returned a non-recoverable ERROR event"),
+    Some(_) => bail!("Kubernetes source Secret watch returned an unsupported event type"),
+    None => bail!("Kubernetes source Secret watch event has no valid type"),
   }
 }
 
@@ -461,12 +797,7 @@ async fn reconcile_once(
           let target_objects =
             objects_for_target(&objects, target, shared.status_service.as_deref());
           let translation_succeeded = translate::translate_objects(&target_objects, shared)
-            .is_ok_and(|rendered| {
-              !rendered
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
-            });
+            .is_ok_and(|rendered| rendered.disposition.is_publishable_for_static_target());
           TargetOutcome {
             target: target.clone(),
             source_snapshot_digest: source_snapshot_digest(&target_objects),
@@ -499,6 +830,7 @@ async fn reconcile_once(
             compatibility,
             &rendered.toml,
             &rendered.assets,
+            &rendered.client_identities,
           )
           .await
         {
@@ -679,14 +1011,7 @@ async fn reconcile_static_targets(
     ));
     let snapshot_digest = source_snapshot_digest(&target_objects);
     let rendered = match translate::translate_objects(&target_objects, shared) {
-      Ok(rendered)
-        if !rendered
-          .diagnostics
-          .iter()
-          .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error) =>
-      {
-        rendered
-      }
+      Ok(rendered) if rendered.disposition.is_publishable_for_static_target() => rendered,
       Ok(_) | Err(_) => {
         outcomes.push(TargetOutcome {
           target: target.clone(),
@@ -711,6 +1036,7 @@ async fn reconcile_static_targets(
           compatibility,
           &bound_toml,
           &rendered.assets,
+          &rendered.client_identities,
         )
         .await?;
       if rollout_status.phase.is_committed() {
@@ -776,7 +1102,7 @@ async fn apply_status_patches(
 }
 
 pub(crate) fn source_snapshot_digest(objects: &[KubernetesObject]) -> String {
-  source_snapshot_digest_with_secret_data(objects, true)
+  source_snapshot_digest_with_secret_data(objects, false)
 }
 
 pub(crate) fn redacted_source_snapshot_digest(objects: &[KubernetesObject]) -> String {
@@ -794,6 +1120,8 @@ fn source_snapshot_digest_with_secret_data(
       let metadata_digest = digest_canonical_json(&json!({
         "annotations": &object.metadata.annotations,
         "labels": &object.metadata.labels,
+        "secret_uid": (object.kind == "Secret").then_some(&object.metadata.uid),
+        "secret_resource_version": (object.kind == "Secret").then_some(&object.metadata.resource_version),
       }));
       let data_digest = if object.data.is_empty() {
         String::new()
