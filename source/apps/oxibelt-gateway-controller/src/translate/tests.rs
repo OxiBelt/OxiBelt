@@ -5,6 +5,7 @@ use super::{RenderedConfig, TranslationDisposition, translate_objects};
 use crate::cli::{SharedArgs, SourceSecretAllowlistEntry};
 use crate::model::{DiagnosticSeverity, KubernetesObject};
 use oxibelt::config::Config;
+use oxibelt::routes::RouteTable;
 
 mod common {
   include!(concat!(
@@ -535,6 +536,27 @@ fn oxibelt_route_policy_applies_bounded_waf_body_and_timeout_controls() {
   assert!(rendered.toml.contains("upstream_request_timeout_ms = 2500"));
   assert!(rendered.toml.contains("groups = [\"edge-baseline\"]"));
   generated_toml_validates_with_waf_group(&rendered.toml, "edge-baseline");
+
+  let invalid_identity = raw.replace(
+    "  gatewayClassName: oxibelt",
+    "  gatewayClassName: oxibelt\n  tls:\n    backend:\n      clientCertificateRef: {name: gateway-client}",
+  );
+  let tombstone =
+    translate_objects(&objects(&invalid_identity), &args()).expect("translate policy tombstone");
+  assert_eq!(
+    tombstone.disposition,
+    TranslationDisposition::ClientIdentityDeprogram
+  );
+  assert!(
+    tombstone
+      .toml
+      .contains("[routes.actions.direct_response]\nstatus = 503")
+  );
+  assert!(!tombstone.toml.contains("# Policy:"));
+  assert!(!tombstone.toml.contains("max_request_body_bytes"));
+  assert!(!tombstone.toml.contains("upstream_request_timeout_ms"));
+  assert!(!tombstone.toml.contains("[routes.waf.request]"));
+  generated_toml_validates(&tombstone.toml);
 }
 
 #[test]
@@ -942,8 +964,82 @@ fn gateway_client_certificate_is_validated_and_rendered_only_for_tls_backends() 
     TranslationDisposition::ClientIdentityDeprogram
   );
   assert!(denied.client_identities.is_empty());
-  assert!(!denied.toml.contains("[[routes]]"));
+  assert!(denied.toml.contains("[[routes]]"));
+  assert!(
+    denied
+      .toml
+      .contains("[routes.actions.direct_response]\nstatus = 503")
+  );
+  assert!(denied.toml.contains("hosts = [\"api.example.com\"]"));
+  assert!(denied.toml.contains("path_prefix = \"/api\""));
+  assert!(denied.toml.contains("methods = [\"GET\"]"));
+  assert!(!denied.toml.contains("upstream_pool ="));
   assert!(!denied.toml.contains("client_identity"));
+  assert!(denied.requires_exact_data_plane);
+  generated_toml_validates(&denied.toml);
+
+  let methodless = translate_objects(&objects(&raw.replace("      method: GET\n", "")), &args())
+    .expect("translate methodless denied source");
+  let route_table_temp = common::TempDir::new("gateway-api-tombstone-routing");
+  let (route_table_cert, route_table_key) =
+    common::create_self_signed_cert(route_table_temp.path(), "gateway-api-tombstone-routing");
+  let route_table_raw = format!(
+    "{}\n[runtime.hardening.seccomp]\nexpectation = \"required\"\n{}",
+    common::minimal_config_toml(&route_table_cert, &route_table_key)
+      .replace("hosts = [\"example.com\"]", "hosts = [\"api.example.com\"]"),
+    methodless.toml
+  );
+  let route_table_config: Config =
+    toml::from_str(&route_table_raw).expect("tombstone routing config should parse");
+  route_table_config
+    .validate()
+    .expect("tombstone routing config should validate");
+  let route_table = RouteTable::new(&route_table_config);
+  let narrow = route_table
+    .resolve(
+      "api.example.com",
+      "/api/private",
+      &route_table_config.upstreams,
+    )
+    .expect("narrow tombstone should resolve");
+  assert_eq!(narrow.route.name, "gwapi-http-default-app-0-0");
+  assert_eq!(
+    narrow
+      .route
+      .actions
+      .direct_response
+      .as_ref()
+      .map(|action| action.status),
+    Some(503)
+  );
+  let broad = route_table
+    .resolve("api.example.com", "/public", &route_table_config.upstreams)
+    .expect("broad fallback should remain available outside the narrow match");
+  assert_eq!(broad.route.name, "app-root");
+
+  let detailed_raw = raw.replace(
+    "    - path:\n        type: PathPrefix\n        value: /api\n      method: GET",
+    "    - path:\n        type: Exact\n        value: /api/admin\n      method: POST\n      headers:\n      - name: x-tenant\n        value: acme\n      queryParams:\n      - name: mode\n        value: admin",
+  );
+  let detailed =
+    translate_objects(&objects(&detailed_raw), &args()).expect("translate detailed tombstone");
+  assert_eq!(
+    detailed.disposition,
+    TranslationDisposition::ClientIdentityDeprogram
+  );
+  assert!(detailed.toml.contains("path_prefix = \"/api/admin\""));
+  assert!(
+    detailed
+      .toml
+      .contains("[routes.match.path]\nexact = \"/api/admin\"")
+  );
+  assert!(detailed.toml.contains("methods = [\"POST\"]"));
+  assert!(detailed.toml.contains("priority = 10000"));
+  assert!(detailed.toml.contains("name = \"x-tenant\""));
+  assert!(detailed.toml.contains("exact = \"acme\""));
+  assert!(detailed.toml.contains("name = \"mode\""));
+  assert!(detailed.toml.contains("exact = \"admin\""));
+  generated_toml_validates(&detailed.toml);
 
   let mixed_raw = format!(
     "{raw}\n---\napiVersion: gateway.networking.k8s.io/v1\nkind: BackendTLSPolicy\nmetadata: {{name: conflicting-app-tls, namespace: default}}\nspec:\n  targetRefs: [{{group: \"\", kind: Service, name: app}}]\n  validation:\n    hostname: conflicting-backend.example.test\n    wellKnownCACertificates: System\n"
@@ -954,13 +1050,26 @@ fn gateway_client_certificate_is_validated_and_rendered_only_for_tls_backends() 
     "operator source Secret allowlist"
   ));
   assert!(has_error_containing(&mixed, "Conflicted"));
-  assert_eq!(
-    mixed.disposition,
-    TranslationDisposition::ClientIdentityDeprogram
-  );
-  assert!(mixed.disposition.is_publishable_for_static_target());
+  assert_eq!(mixed.disposition, TranslationDisposition::PreserveLastGood);
+  assert!(!mixed.disposition.is_publishable());
   assert!(mixed.client_identities.is_empty());
   assert!(!mixed.toml.contains("[[routes]]"));
+
+  let malformed_match = translate_objects(
+    &objects(&raw.replace("type: PathPrefix", "type: RegularExpression")),
+    &args(),
+  )
+  .expect("translate invalid identity with malformed match");
+  assert!(has_error_containing(
+    &malformed_match,
+    "RegularExpression path matches are unsupported in v1"
+  ));
+  assert_eq!(
+    malformed_match.disposition,
+    TranslationDisposition::PreserveLastGood
+  );
+  assert!(!malformed_match.disposition.is_publishable());
+  assert!(!malformed_match.toml.contains("[[routes]]"));
 
   let mismatched = translate_objects(
     &objects(&raw.replace(&private_key, &certificate)),
@@ -972,7 +1081,13 @@ fn gateway_client_certificate_is_validated_and_rendered_only_for_tls_backends() 
     TranslationDisposition::ClientIdentityDeprogram
   );
   assert!(mismatched.client_identities.is_empty());
-  assert!(!mismatched.toml.contains("[[routes]]"));
+  assert!(
+    mismatched
+      .toml
+      .contains("[routes.actions.direct_response]\nstatus = 503")
+  );
+  assert!(!mismatched.toml.contains("upstream_pool ="));
+  generated_toml_validates(&mismatched.toml);
 
   let conflicting_raw = raw.replace(
     "  parentRefs:\n  - name: edge\n    sectionName: https",
@@ -1000,7 +1115,129 @@ fn gateway_client_certificate_is_validated_and_rendered_only_for_tls_backends() 
     "Gateways select different backend client identities"
   ));
   assert!(conflicted.client_identities.is_empty());
-  assert!(!conflicted.toml.contains("[[routes]]"));
+  assert_eq!(conflicted.toml.matches("[[routes]]").count(), 1);
+  assert!(
+    conflicted
+      .toml
+      .contains("[routes.actions.direct_response]\nstatus = 503")
+  );
+  assert!(!conflicted.toml.contains("upstream_pool ="));
+  generated_toml_validates(&conflicted.toml);
+}
+
+#[test]
+fn invalid_gateway_client_certificate_generates_match_equivalent_grpc_tombstone() {
+  let raw = GRPC_FIXTURE.replace(
+    "  gatewayClassName: oxibelt",
+    "  gatewayClassName: oxibelt\n  tls:\n    backend:\n      clientCertificateRef: {name: gateway-client}",
+  );
+
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate gRPC tombstone");
+
+  assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::ClientIdentityDeprogram
+  );
+  assert!(rendered.requires_exact_data_plane);
+  assert!(
+    rendered
+      .toml
+      .contains("[routes.actions.direct_response]\nstatus = 503")
+  );
+  assert!(rendered.toml.contains("path_prefix = \"/pkg.Echo/Say\""));
+  assert!(rendered.toml.contains("exact = \"/pkg.Echo/Say\""));
+  assert!(rendered.toml.contains("methods = [\"POST\"]"));
+  assert!(rendered.toml.contains("name = \"x-tenant\""));
+  assert!(rendered.toml.contains("exact = \"acme\""));
+  assert!(!rendered.toml.contains("upstream_pool ="));
+  assert!(!rendered.toml.contains("[routes.actions.request_headers]"));
+  assert!(!rendered.toml.contains("request_mirrors"));
+  assert!(rendered.client_identities.is_empty());
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn client_identity_tombstone_name_collisions_preserve_last_good() {
+  let invalid_gateway_tls = "  gatewayClassName: oxibelt\n  tls:\n    backend:\n      clientCertificateRef: {name: gateway-client}";
+  let http = HTTP_FIXTURE
+    .replace("  gatewayClassName: oxibelt", invalid_gateway_tls)
+    .replace(
+      "kind: HTTPRoute\nmetadata:\n  name: app\n  namespace: default",
+      "kind: HTTPRoute\nmetadata:\n  name: foo--bar\n  namespace: default",
+    );
+  let http = format!(
+    "{http}\n---\n{}",
+    r#"apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: foo-bar
+  namespace: default
+spec:
+  parentRefs:
+  - name: edge
+    sectionName: https
+  hostnames:
+  - api.example.com
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /other
+      method: GET
+    backendRefs:
+    - name: app
+      port: 8080
+"#
+  );
+  let rendered = translate_objects(&objects(&http), &args()).expect("translate HTTP collision");
+  assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::PreserveLastGood
+  );
+  assert!(!rendered.disposition.is_publishable());
+  assert!(has_error_containing(
+    &rendered,
+    "tombstone name `gwapi-http-default-foo-bar-0-0` collides with a distinct route match"
+  ));
+
+  let grpc = GRPC_FIXTURE
+    .replace("  gatewayClassName: oxibelt", invalid_gateway_tls)
+    .replace(
+      "kind: GRPCRoute\nmetadata:\n  name: echo\n  namespace: rpc",
+      "kind: GRPCRoute\nmetadata:\n  name: echo--route\n  namespace: rpc",
+    );
+  let grpc = format!(
+    "{grpc}\n---\n{}",
+    r#"apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: echo-route
+  namespace: rpc
+spec:
+  parentRefs:
+  - name: edge
+    namespace: default
+  rules:
+  - matches:
+    - method:
+        service: pkg.Echo
+        method: Other
+    backendRefs:
+    - name: echo
+      namespace: default
+      port: 50051
+"#
+  );
+  let rendered = translate_objects(&objects(&grpc), &args()).expect("translate gRPC collision");
+  assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::PreserveLastGood
+  );
+  assert!(!rendered.disposition.is_publishable());
+  assert!(has_error_containing(
+    &rendered,
+    "tombstone name `gwapi-grpc-rpc-echo-route-0-0` collides with a distinct route match"
+  ));
 }
 
 #[test]

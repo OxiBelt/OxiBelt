@@ -212,6 +212,12 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       out.push_str(&toml_string(upstream_pool));
       out.push('\n');
     }
+    if let Some(status) = route.direct_response_status {
+      out.push_str("[routes.actions.direct_response]\n");
+      out.push_str("status = ");
+      out.push_str(&status.to_string());
+      out.push('\n');
+    }
     if let Some(external_auth) = &route.external_auth {
       out.push_str("external_auth = ");
       out.push_str(&toml_string(external_auth));

@@ -284,7 +284,7 @@ profile_version = 1
 Required routing inputs:
 
 - At least one `[[routes]]`, `[sni_forward]` rule/default target, `[[stream_listeners]]`, or `[[webrtc_turn_listeners]]`.
-- Each route must set exactly one of `upstream`, `upstream_pool`, `static_root`, `ct_log`, or terminal `actions.redirect`.
+- Each route must set exactly one of `upstream`, `upstream_pool`, `static_root`, `ct_log`, terminal `actions.redirect`, or terminal `actions.direct_response`.
 
 ## Operational Profiles
 
@@ -4293,6 +4293,9 @@ upstream = "app"
 # status = 308
 # location_template = "/new{path_suffix}?{query}"
 
+#[routes.actions.direct_response]
+# status = 503
+
 #[[routes.actions.request_headers.set]]
 # name = "x-route"
 # value = "api-v1"
@@ -4429,12 +4432,13 @@ Fields:
 - `replace_prefix_with`: optional upstream path prefix replacement.
 - `actions.rewrite`: optional upstream request URI rewrite for proxy routes. It can set `path`, `query`, or both. Omitted `query` preserves the original query; `query = ""` removes it.
 - `actions.redirect`: terminal redirect target with required `status` and `location_template`.
+- `actions.direct_response`: terminal status-only target. `status` is required and must be an integer from `400` through `599`; the response body is empty.
 - `actions.request_headers` and `actions.response_headers`: optional route-level header modifiers with `set`, `add`, and `remove`. Request header actions cannot mutate OxiBelt-managed proxy identity or authority headers: `Host`, `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port`, `X-Real-IP`, or `CF-Connecting-IP`. Routes that use `external_auth` also cannot mutate that provider's configured `identity_headers`; those headers remain owned by the trusted auth result. This is a breaking hardening for configurations that previously used route actions to override proxy identity metadata.
 - `actions.cors`: optional route-level CORS policy with allowed origins, methods, headers, exposed headers, credentials, and max-age controls.
 - `actions.request_mirrors`: optional best-effort request mirroring to one or more upstream pools.
 - `ct_log`: named Certificate Transparency log target; see
   [Certificate Transparency operations](certificate-transparency.md).
-- `upstream`, `upstream_pool`, `static_root`, `ct_log`, or `actions.redirect`: exactly one target.
+- `upstream`, `upstream_pool`, `static_root`, `ct_log`, `actions.redirect`, or `actions.direct_response`: exactly one target.
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
 - `security_headers`: optional security response header policy; omitted means `default`, `off` disables OxiBelt-managed security header insertion for the route, and any other value must match `[[security.header_policies]].name`. Named security header policies must not use the exact lowercase names `default` or `off`.
@@ -4446,6 +4450,8 @@ Route path values must start with `/` and must not contain control characters, b
 Route action templates support `{scheme}`, `{host}`, `{path}`, `{path_suffix}`, `{query}`, `{query:name}`, and `{capture:N}`. Capture references require `match.path.regex` and must refer to a valid regex capture index; `{capture:0}` is the full regex match. `actions.rewrite` is mutually exclusive with `replace_prefix_with`, `static_root`, and `actions.redirect`, and requires `upstream` or `upstream_pool`. Rendered rewrite paths must remain origin-form paths beginning with one `/`. When rendering `actions.rewrite.query`, token output is percent-encoded as a query component so request-derived values cannot add extra parameters; omit `query` to preserve the original downstream query string unchanged.
 
 `actions.redirect.status` must be `301`, `302`, `303`, `307`, or `308`. Redirect locations are origin-relative only: the rendered `location_template` must start with `/` and not `//`; absolute redirects are intentionally out of scope. Redirect routes run after route matching, route IPM, route rate limits, dynamic policy, and built-in Person proof API handling, then return before external auth, request WAF, static files, cache, body capture, or upstream selection. Redirect routes therefore reject `external_auth`, route-level WAF config, cache, buffering, retry, upstream HTTP version overrides, upgrades, CONNECT, and gRPC-Web.
+
+`actions.direct_response` is deliberately narrower than redirect handling. After the normal listener, framing, global admission, route selection, downstream TLS-policy, and early-data checks, it returns the configured empty error response before route circuit breakers, route IPM, route rate limits, dynamic policy, Person proof, CORS, external auth, WAF, mirroring, body reads, cache, static files, or upstream selection. It cannot be combined with rewrites, header/CORS/mirror actions, route policies, route limits, route security-header selection, or upstream-only features. Global access logging and response metrics still observe the selected route and final status.
 
 Route header modifiers are validated with the same framing safety boundary as WAF header mutations. They cannot mutate hop-by-hop or request framing headers such as `connection`, `content-length`, `transfer-encoding`, `te`, `trailer`, `upgrade`, `proxy-authenticate`, or `proxy-authorization`. Request header modifiers run after forwarded-header normalization and WAF request mutations, before upstream dispatch. Response header modifiers run after security headers and WAF response mutations, before downstream response finalization and cache status headers.
 

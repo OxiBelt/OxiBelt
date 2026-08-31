@@ -17,9 +17,8 @@ impl TranslationState {
       ));
       return;
     }
-    let Ok(client_identity) = self.gateway_client_identity_for_route(route, &attachments) else {
-      return;
-    };
+    let client_identity = self.gateway_client_identity_for_route(route, &attachments);
+    let tombstone = client_identity.is_tombstone();
 
     let route_hosts = super::string_array_at(&route.spec, &["hostnames"]);
     let rules = route.spec.get("rules").and_then(Value::as_array);
@@ -71,13 +70,15 @@ impl TranslationState {
           }) else {
             continue;
           };
+          let tombstone_checkpoint = tombstone.then(|| self.generated_checkpoint());
+          let tombstone_route = tombstone.then(|| generated.clone());
           if !self.apply_parsed_route_filters(
             route,
             "GRPCRoute",
             &mut generated,
             filters,
             &source,
-            client_identity.as_ref(),
+            client_identity.as_identity(),
           ) {
             continue;
           }
@@ -87,8 +88,13 @@ impl TranslationState {
             rule.get("backendRefs").and_then(Value::as_array),
             &generated.name,
             &source,
-            client_identity.as_ref(),
+            client_identity.as_identity(),
           ) {
+            if let (Some(checkpoint), Some(route)) = (tombstone_checkpoint, tombstone_route) {
+              self.restore_generated(checkpoint);
+              self.push_client_identity_tombstone(route);
+              continue;
+            }
             generated.upstream_pool = Some(pool.name.clone());
             self.pools.insert(pool.name.clone(), pool);
           } else {
@@ -135,6 +141,7 @@ fn grpc_match_route(
       queries: Vec::new(),
       priority: 11_000 - (rule_index as i32 * 100) - match_index as i32,
       upstream_pool: None,
+      direct_response_status: None,
       rewrite: None,
       redirect: None,
       request_headers: Default::default(),

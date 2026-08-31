@@ -274,6 +274,95 @@ fn client_identity_revisions_are_artifact_bound_and_separately_projected() {
 }
 
 #[test]
+fn client_identity_mounts_are_removed_for_tombstones_and_restored_on_recovery() {
+  let secret = "oxibelt-upstream-client-11111111111111111111111111111111";
+  let identity_artifact = ConfigArtifact::new_with_assets_and_client_identities(
+    &target(),
+    "conf.d/gateway-api.generated.toml",
+    "[[routes]]\n".to_string(),
+    Vec::new(),
+    vec![secret.to_string()],
+  )
+  .expect("identity artifact");
+  let tombstone_artifact = ConfigArtifact::new(
+    &target(),
+    "conf.d/gateway-api.generated.toml",
+    "[[routes]]\n[routes.actions.direct_response]\nstatus = 503\n".to_string(),
+  )
+  .expect("tombstone artifact");
+
+  let mut mounted = projected_workload(&identity_artifact);
+  let mount_state = RolloutState::new_attempt(
+    &identity_artifact,
+    &RolloutState::from_workload(&mounted),
+    1,
+  );
+  let mount_patch = build_workload_patch(&mounted, &target(), &identity_artifact, &mount_state)
+    .expect("identity mount patch");
+  for (path, pointer) in [
+    ("/spec/template/spec/volumes", "/spec/template/spec/volumes"),
+    (
+      "/spec/template/spec/containers/0/volumeMounts",
+      "/spec/template/spec/containers/0/volumeMounts",
+    ),
+  ] {
+    let value = mount_patch
+      .operations
+      .iter()
+      .find(|operation| operation["path"] == path)
+      .map(|operation| operation["value"].clone())
+      .expect("identity projection replacement");
+    *mounted
+      .pointer_mut(pointer)
+      .expect("workload projection path") = value;
+  }
+
+  let tombstone_state = RolloutState::new_attempt(
+    &tombstone_artifact,
+    &RolloutState::from_workload(&mounted),
+    2,
+  );
+  let removal = build_workload_patch(&mounted, &target(), &tombstone_artifact, &tombstone_state)
+    .expect("tombstone removal patch");
+  let removed_volumes = removal
+    .operations
+    .iter()
+    .find(|operation| operation["path"] == "/spec/template/spec/volumes")
+    .map(|operation| operation["value"].clone())
+    .expect("managed identity volume removal");
+  let removed_mounts = removal
+    .operations
+    .iter()
+    .find(|operation| operation["path"] == "/spec/template/spec/containers/0/volumeMounts")
+    .map(|operation| operation["value"].clone())
+    .expect("managed identity mount removal");
+  assert!(!removed_volumes.to_string().contains(secret));
+  assert!(!removed_mounts.to_string().contains(secret));
+
+  let recovered_from = projected_workload(&tombstone_artifact);
+  let recovery_state = RolloutState::new_attempt(
+    &identity_artifact,
+    &RolloutState::from_workload(&recovered_from),
+    3,
+  );
+  let recovery = build_workload_patch(
+    &recovered_from,
+    &target(),
+    &identity_artifact,
+    &recovery_state,
+  )
+  .expect("identity recovery patch");
+  assert!(recovery.operations.iter().any(|operation| {
+    operation["path"] == "/spec/template/spec/volumes"
+      && operation["value"].to_string().contains(secret)
+  }));
+  assert!(recovery.operations.iter().any(|operation| {
+    operation["path"] == "/spec/template/spec/containers/0/volumeMounts"
+      && operation["value"].to_string().contains(secret)
+  }));
+}
+
+#[test]
 fn artifact_names_and_ownership_labels_are_scoped_to_the_target_kind() {
   let deployment = target();
   let mut daemon_set = deployment.clone();

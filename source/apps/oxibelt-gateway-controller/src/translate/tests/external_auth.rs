@@ -1,6 +1,6 @@
 use super::{
-  HTTP_FILTER_FIXTURE, args, generated_toml_validates, has_error_containing, objects,
-  translate_objects,
+  HTTP_FILTER_FIXTURE, TranslationDisposition, args, generated_toml_validates,
+  has_error_containing, objects, translate_objects,
 };
 
 const ROUTE_AUTHORIZATION_ALLOWLIST: &str =
@@ -130,5 +130,41 @@ fn grpc_external_auth_omitted_request_headers_remain_empty() {
       .contains("provider = \"gateway_ext_auth_http\"")
   );
   assert!(rendered.toml.contains("forward_headers = []"));
+  generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn client_identity_tombstone_discards_every_route_filter_and_auth_side_effect() {
+  let raw = HTTP_FILTER_FIXTURE.replace(
+    "  gatewayClassName: oxibelt",
+    "  gatewayClassName: oxibelt\n  tls:\n    backend:\n      clientCertificateRef: {name: gateway-client}",
+  );
+
+  let rendered = translate_objects(&objects(&raw), &args()).expect("translate filtered tombstone");
+
+  assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::ClientIdentityDeprogram
+  );
+  assert!(
+    rendered
+      .toml
+      .contains("[routes.actions.direct_response]\nstatus = 503")
+  );
+  for absent in [
+    "[[upstream_pools]]",
+    "[[external_auth]]",
+    "[routes.actions.request_headers]",
+    "[routes.actions.response_headers]",
+    "[routes.actions.cors]",
+    "[[routes.actions.request_mirrors]]",
+    "external_auth =",
+    "upstream_pool =",
+  ] {
+    assert!(
+      !rendered.toml.contains(absent),
+      "tombstone retained side effect {absent}"
+    );
+  }
   generated_toml_validates(&rendered.toml);
 }

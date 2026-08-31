@@ -663,6 +663,11 @@ fn object_schema(shape_path: &str, metadata_path: &str) -> Value {
   {
     object.insert("required".to_string(), json!(["cert_chain", "private_key"]));
   }
+  if shape_path == "routes.actions.direct_response"
+    && let Some(object) = schema.as_object_mut()
+  {
+    object.insert("required".to_string(), json!(["status"]));
+  }
   schema
 }
 
@@ -820,6 +825,7 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     "routes.actions.request_mirrors.max_body_bytes" => {
       (0, super::MAX_REQUEST_MIRROR_BODY_BYTES as u64)
     }
+    "routes.actions.direct_response.status" => (400, 599),
     "routes.bandwidth.download_bytes_per_second" | "routes.bandwidth.upload_bytes_per_second" => {
       (1, u64::MAX)
     }

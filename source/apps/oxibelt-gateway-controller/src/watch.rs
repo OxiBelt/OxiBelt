@@ -785,7 +785,6 @@ async fn reconcile_once(
   let objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
   let target_set = TargetSet::from_objects(&objects, args, &shared.controller_name)?;
   let rendered = translate::translate_objects(&objects, shared)?;
-  compatibility.validate_generated_capabilities(rendered.requires_exact_data_plane)?;
   status::print_diagnostics(&rendered.diagnostics);
   let mut target_outcomes = Vec::new();
   let rollout_status = if shared.dry_run {
@@ -797,7 +796,12 @@ async fn reconcile_once(
           let target_objects =
             objects_for_target(&objects, target, shared.status_service.as_deref());
           let translation_succeeded = translate::translate_objects(&target_objects, shared)
-            .is_ok_and(|rendered| rendered.disposition.is_publishable_for_static_target());
+            .is_ok_and(|rendered| {
+              rendered.disposition.is_publishable()
+                && compatibility
+                  .validate_generated_capabilities(rendered.requires_exact_data_plane)
+                  .is_ok()
+            });
           TargetOutcome {
             target: target.clone(),
             source_snapshot_digest: source_snapshot_digest(&target_objects),
@@ -808,7 +812,17 @@ async fn reconcile_once(
         })
         .collect();
     }
-    RolloutStatus::pending("DryRun")
+    match &target_set {
+      TargetSet::Legacy(_)
+        if !rendered.disposition.is_publishable()
+          || compatibility
+            .validate_generated_capabilities(rendered.requires_exact_data_plane)
+            .is_err() =>
+      {
+        RolloutStatus::failed("TranslationFailed")
+      }
+      TargetSet::Legacy(_) | TargetSet::StaticReplicated(_) => RolloutStatus::pending("DryRun"),
+    }
   } else {
     apply_status_patches(
       kubernetes,
@@ -820,33 +834,42 @@ async fn reconcile_once(
     .await?;
     match &target_set {
       TargetSet::Legacy(target) => {
-        kubernetes
-          .preflight_target_compatibility_for(target, compatibility)
-          .await?;
-        match kubernetes
-          .reconcile_immutable_rollout_for(
-            shared,
-            target,
-            compatibility,
-            &rendered.toml,
-            &rendered.assets,
-            &rendered.client_identities,
-          )
-          .await
+        if !rendered.disposition.is_publishable() {
+          RolloutStatus::failed("TranslationFailed")
+        } else if let Err(error) =
+          compatibility.validate_generated_capabilities(rendered.requires_exact_data_plane)
         {
-          Ok(status) => status,
-          Err(error) => {
-            let rollout_status = RolloutStatus::failed("RolloutFailed");
-            let failed_objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
-            apply_status_patches(
-              kubernetes,
-              &failed_objects,
-              shared,
-              &rendered.diagnostics,
-              &rollout_status,
-            )
+          warn!(error = %error, "generated configuration is not compatible with the target data plane");
+          RolloutStatus::failed("TranslationFailed")
+        } else {
+          kubernetes
+            .preflight_target_compatibility_for(target, compatibility)
             .await?;
-            return Err(error);
+          match kubernetes
+            .reconcile_immutable_rollout_for(
+              shared,
+              target,
+              compatibility,
+              &rendered.toml,
+              &rendered.assets,
+              &rendered.client_identities,
+            )
+            .await
+          {
+            Ok(status) => status,
+            Err(error) => {
+              let rollout_status = RolloutStatus::failed("RolloutFailed");
+              let failed_objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
+              apply_status_patches(
+                kubernetes,
+                &failed_objects,
+                shared,
+                &rendered.diagnostics,
+                &rollout_status,
+              )
+              .await?;
+              return Err(error);
+            }
           }
         }
       }
@@ -1011,7 +1034,7 @@ async fn reconcile_static_targets(
     ));
     let snapshot_digest = source_snapshot_digest(&target_objects);
     let rendered = match translate::translate_objects(&target_objects, shared) {
-      Ok(rendered) if rendered.disposition.is_publishable_for_static_target() => rendered,
+      Ok(rendered) if rendered.disposition.is_publishable() => rendered,
       Ok(_) | Err(_) => {
         outcomes.push(TargetOutcome {
           target: target.clone(),

@@ -17069,6 +17069,30 @@
                 "x-oxibelt-reference-activation": "none",
                 "x-oxibelt-secret-class": "none"
               },
+              "direct_response": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `routes[].actions.direct_response`. Production Rust validation is authoritative.",
+                "properties": {
+                  "status": {
+                    "description": "OxiBelt native field `routes[].actions.direct_response.status`. Production Rust validation is authoritative.",
+                    "maximum": 599,
+                    "minimum": 400,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
               "redirect": {
                 "additionalProperties": false,
                 "description": "OxiBelt native field `routes[].actions.redirect`. Production Rust validation is authoritative.",

@@ -10,6 +10,7 @@ pub(super) struct GeneratedRoute {
   pub(super) queries: Vec<NamedExactMatch>,
   pub(super) priority: i32,
   pub(super) upstream_pool: Option<String>,
+  pub(super) direct_response_status: Option<u16>,
   pub(super) rewrite: Option<RewriteAction>,
   pub(super) redirect: Option<RedirectAction>,
   pub(super) request_headers: HeaderModifierAction,
@@ -129,10 +130,29 @@ pub(super) struct GeneratedExternalAuth {
   pub(super) allowed_content_types: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(super) struct NamedExactMatch {
   pub(super) name: String,
   pub(super) value: String,
+}
+
+impl GeneratedRoute {
+  pub(super) fn has_same_client_identity_tombstone_match(&self, other: &Self) -> bool {
+    route_source_identity(&self.source) == route_source_identity(&other.source)
+      && self.name == other.name
+      && self.path_prefix == other.path_prefix
+      && self.path_exact == other.path_exact
+      && self.methods == other.methods
+      && self.headers == other.headers
+      && self.queries == other.queries
+      && self.priority == other.priority
+  }
+}
+
+fn route_source_identity(source: &str) -> &str {
+  source
+    .split_once(" via Gateway/")
+    .map_or(source, |(identity, _)| identity)
 }
 
 #[derive(Debug, Clone)]

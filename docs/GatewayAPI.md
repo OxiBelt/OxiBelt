@@ -146,6 +146,19 @@ default `tls.crt` and `tls.key` fields or two explicit data keys from a
 oversized, mismatched, encrypted, expired, or not-yet-valid identity material
 before publishing a rollout.
 
+If the effective client identity is invalid or unresolved, the controller does
+not omit the affected HTTPRoute or GRPCRoute and expose a broader matching
+route. It first validates that every affected match and all unrelated route
+semantics can be reconstructed, then replaces those matches with equivalent
+terminal empty-body `503` routes. These tombstones retain the generated route
+name, listener/route hostname intersection, path, method, exact header/query or
+gRPC method match, priority, and order, while omitting backends, client
+identity, filters, mirrors, external auth, route policy, and WAF effects. Any
+malformed match or unrelated translation error preserves the last good rollout
+instead of publishing a partial tombstone set. Tombstone artifacts require
+exact controller/data-plane compatibility; rolling-upgrade compatibility
+preserves the last good artifact.
+
 The controller resolves each admitted source by an exact-name GET and runs a
 bounded, field-selected exact-name watch to wake reconciliation after Secret
 changes; the periodic reconciliation loop remains the fallback. It creates an
@@ -154,8 +167,11 @@ and mounts only that derived Secret below
 `/etc/oxibelt/cert/upstream-client/`. Source key bytes never enter generated
 TOML, ConfigMaps, status, explain output, logs, or artifact digests. A source
 UID or resource-version change produces a new derived name and workload
-rollout. A route attached through Gateways with different effective client
-identities is rejected instead of consolidating the upstreams. Server CA,
+rollout. Publishing a tombstone revision removes managed client-identity
+mounts; a later valid Secret restores ordinary forwarding and the newly derived
+mount in one immutable rollout. A route attached through Gateways with
+different effective client identities is rejected instead of consolidating the
+upstreams. Server CA,
 hostname/SNI, and SAN verification from `BackendTLSPolicy` remains mandatory;
 client authentication never substitutes for it.
 
@@ -512,7 +528,7 @@ At reconcile time the controller:
 1. Polls Gateway API resources and Services from the Kubernetes API.
 2. Renders and validates deterministic TOML plus any referenced public CA
    assets with ownership/source comments. Resource-invalid fragments are
-   omitted or replaced by explicit terminal rejection; snapshot, authorization,
+   omitted or replaced by match-equivalent explicit terminal rejection; snapshot, authorization,
    artifact, or final validation failures stop publication.
 3. Computes the raw SHA-256 of the exact TOML bytes and a tagged full-artifact
    digest, then creates or reuses an immutable ConfigMap named

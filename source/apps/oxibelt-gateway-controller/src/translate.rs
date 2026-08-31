@@ -57,7 +57,7 @@ pub enum TranslationDisposition {
 }
 
 impl TranslationDisposition {
-  pub const fn is_publishable_for_static_target(self) -> bool {
+  pub const fn is_publishable(self) -> bool {
     matches!(self, Self::Clean | Self::ClientIdentityDeprogram)
   }
 }
@@ -106,10 +106,23 @@ enum GatewayClientIdentityDecision {
   Invalid,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum GatewayClientIdentityError {
-  InvalidReference,
-  ConflictingAttachments,
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum RouteClientIdentityDecision {
+  Available(Option<GeneratedClientIdentity>),
+  Tombstone,
+}
+
+impl RouteClientIdentityDecision {
+  fn is_tombstone(&self) -> bool {
+    matches!(self, Self::Tombstone)
+  }
+
+  fn as_identity(&self) -> Option<&GeneratedClientIdentity> {
+    match self {
+      Self::Available(identity) => identity.as_ref(),
+      Self::Tombstone => None,
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -203,12 +216,18 @@ pub fn translate_objects(
     }
     if state.diagnostics[diagnostic_start..]
       .iter()
-      .any(|diagnostic| diagnostic.severity == super::model::DiagnosticSeverity::Error)
+      .enumerate()
+      .any(|(offset, diagnostic)| {
+        diagnostic.severity == super::model::DiagnosticSeverity::Error
+          && !state
+            .client_identity_deprogram_diagnostics
+            .contains(&(diagnostic_start + offset))
+      })
     {
       state.restore_generated(checkpoint);
     }
   }
-  let requires_exact_data_plane = state.pools.values().any(|pool| pool.discoveries.len() > 1);
+  let requires_exact_data_plane = state.requires_exact_data_plane();
   let toml = render::render_toml(&state, args);
   let assets = state.assets.values().cloned().collect::<Vec<_>>();
   let used_client_identities = state
@@ -234,25 +253,24 @@ pub fn translate_objects(
     .filter_map(|name| state.client_identity_materials.get(&name).cloned())
     .collect();
   let explanation = explain::build_explanation(objects, &state, args, &toml, &assets)?;
-  let has_errors = state
+  let error_indices = state
     .diagnostics
     .iter()
-    .any(|diagnostic| diagnostic.severity == super::model::DiagnosticSeverity::Error);
-  let has_client_identity_deprogram_errors = state
-    .client_identity_deprogram_diagnostics
-    .iter()
-    .any(|index| {
-      state
-        .diagnostics
-        .get(*index)
-        .is_some_and(|diagnostic| diagnostic.severity == super::model::DiagnosticSeverity::Error)
-    });
-  let disposition = if has_client_identity_deprogram_errors {
-    TranslationDisposition::ClientIdentityDeprogram
-  } else if has_errors {
-    TranslationDisposition::PreserveLastGood
-  } else {
-    TranslationDisposition::Clean
+    .enumerate()
+    .filter_map(|(index, diagnostic)| {
+      (diagnostic.severity == super::model::DiagnosticSeverity::Error).then_some(index)
+    })
+    .collect::<Vec<_>>();
+  let disposition = match error_indices.as_slice() {
+    [] => TranslationDisposition::Clean,
+    indices
+      if indices
+        .iter()
+        .all(|index| state.client_identity_deprogram_diagnostics.contains(index)) =>
+    {
+      TranslationDisposition::ClientIdentityDeprogram
+    }
+    _ => TranslationDisposition::PreserveLastGood,
   };
   Ok(RenderedConfig {
     toml,
@@ -274,6 +292,38 @@ fn normalized_policy_values(values: &[String]) -> HashSet<String> {
 }
 
 impl TranslationState {
+  fn requires_exact_data_plane(&self) -> bool {
+    self.pools.values().any(|pool| pool.discoveries.len() > 1)
+      || self
+        .routes
+        .iter()
+        .any(|route| route.direct_response_status.is_some())
+  }
+
+  fn push_client_identity_tombstone(&mut self, mut route: GeneratedRoute) {
+    route.direct_response_status = Some(503);
+    if let Some(existing_index) = self.routes.iter().position(|existing| {
+      existing.name == route.name && existing.direct_response_status == Some(503)
+    }) {
+      if self.routes[existing_index].has_same_client_identity_tombstone_match(&route) {
+        let existing = &mut self.routes[existing_index];
+        existing.hosts.extend(route.hosts);
+        existing.hosts.sort();
+        existing.hosts.dedup();
+      } else {
+        self.diagnostics.push(Diagnostic::error(
+          route.source,
+          format!(
+            "generated client-identity tombstone name `{}` collides with a distinct route match",
+            route.name
+          ),
+        ));
+      }
+    } else {
+      self.routes.push(route);
+    }
+  }
+
   fn push_client_identity_deprogram_error(
     &mut self,
     object: impl Into<String>,
@@ -429,7 +479,7 @@ impl TranslationState {
     &mut self,
     route: &KubernetesObject,
     attachments: &[RouteAttachment],
-  ) -> Result<Option<GeneratedClientIdentity>, GatewayClientIdentityError> {
+  ) -> RouteClientIdentityDecision {
     if attachments.iter().any(|attachment| {
       matches!(
         attachment.gateway.client_identity,
@@ -440,7 +490,7 @@ impl TranslationState {
         model_object_ref(route),
         "Gateway backend clientCertificateRef is invalid or unresolved",
       );
-      return Err(GatewayClientIdentityError::InvalidReference);
+      return RouteClientIdentityDecision::Tombstone;
     }
     let identities = attachments
       .iter()
@@ -457,16 +507,14 @@ impl TranslationState {
         model_object_ref(route),
         "route attachment conflict: Gateways select different backend client identities for the same consolidated upstream",
       );
-      return Err(GatewayClientIdentityError::ConflictingAttachments);
+      return RouteClientIdentityDecision::Tombstone;
     }
-    Ok(
-      attachments
-        .iter()
-        .find_map(|attachment| match &attachment.gateway.client_identity {
-          GatewayClientIdentityDecision::Valid(identity) => Some(identity.clone()),
-          GatewayClientIdentityDecision::None | GatewayClientIdentityDecision::Invalid => None,
-        }),
-    )
+    RouteClientIdentityDecision::Available(attachments.iter().find_map(|attachment| {
+      match &attachment.gateway.client_identity {
+        GatewayClientIdentityDecision::Valid(identity) => Some(identity.clone()),
+        GatewayClientIdentityDecision::None | GatewayClientIdentityDecision::Invalid => None,
+      }
+    }))
   }
 
   fn translate_tls_route(&mut self, route: &KubernetesObject) {

@@ -1,4 +1,4 @@
-//! Route-level rewrite and redirect actions.
+//! Route-level direct-response, rewrite, and redirect actions.
 //! Templates combine validated config with untrusted request metadata, so rendered outputs are rechecked before use.
 
 use std::str::FromStr;
@@ -115,6 +115,15 @@ pub(super) fn resolved_redirect_response(
     resolved_context(resolved, downstream_scheme, downstream_host, downstream_uri),
     downstream_port,
   )
+}
+
+pub(super) fn direct_response(route: &RouteConfig) -> anyhow::Result<Option<Response<ProxyBody>>> {
+  let Some(direct_response) = route.actions.direct_response.as_ref() else {
+    return Ok(None);
+  };
+  let status = StatusCode::from_u16(direct_response.status)
+    .map_err(|error| anyhow::anyhow!("actions.direct_response.status is invalid: {error}"))?;
+  Ok(Some(text_response(status, "")))
 }
 
 pub(super) fn redirect_response(
@@ -421,9 +430,13 @@ fn validate_legacy_redirect_location(location: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
   use http::Uri;
+  use http_body_util::BodyExt;
 
   use super::*;
-  use crate::config::{RouteActionsConfig, RouteRedirectActionConfig, RouteRewriteActionConfig};
+  use crate::config::{
+    RouteActionsConfig, RouteDirectResponseActionConfig, RouteRedirectActionConfig,
+    RouteRewriteActionConfig,
+  };
 
   fn route_with_rewrite(path: Option<&str>, query: Option<&str>) -> RouteConfig {
     RouteConfig {
@@ -631,6 +644,30 @@ mod tests {
     let uri = Uri::from_static("/api/orders");
 
     assert!(redirect_response(&route, context(&route, &[], &uri), 443).is_err());
+  }
+
+  #[tokio::test]
+  async fn direct_response_has_only_the_configured_error_status_and_an_empty_body() {
+    let mut route = route_with_rewrite(None, None);
+    route.upstream = None;
+    route.actions = RouteActionsConfig {
+      direct_response: Some(RouteDirectResponseActionConfig { status: 503 }),
+      ..Default::default()
+    };
+
+    let response = direct_response(&route).unwrap().unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.headers().is_empty());
+    assert!(
+      response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .is_empty()
+    );
   }
 
   #[test]

@@ -28,6 +28,7 @@ pub struct RouteFeaturePlan {
   pub cache: bool,
   pub compression: bool,
   pub connect_tunneling: bool,
+  pub direct_response_action: bool,
   pub external_auth: bool,
   pub generic_http_upgrade: bool,
   pub grpc_web: bool,
@@ -135,6 +136,7 @@ fn route_feature_plan(config: &Config, route: &RouteConfig) -> RouteFeaturePlan 
     cache: config.cache.enabled && route.static_root.is_none(),
     compression: config.compression.enabled && route.compression.as_deref() != Some("off"),
     connect_tunneling: route.connect_tunneling,
+    direct_response_action: route.actions.direct_response.is_some(),
     external_auth: route.external_auth.is_some(),
     generic_http_upgrade: route.generic_http_upgrade,
     grpc_web: route.grpc_web,
@@ -257,6 +259,28 @@ sendfile = "auto"
       .resolve("example.com", "/", &config.upstreams)
       .expect("route should resolve")
       .execution_plan
+  }
+
+  #[test]
+  fn direct_response_is_terminal_and_never_uses_proxy_or_static_fast_paths() {
+    let temp_dir = common::TempDir::new("route-plan-direct-response");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "route-plan-direct-response");
+    let raw = common::minimal_config_toml(&cert_path, &key_path)
+      .replace(
+        "[compression]\nenabled = true",
+        "[compression]\nenabled = false",
+      )
+      .replace(
+        "upstream = \"app\"",
+        "[routes.actions.direct_response]\nstatus = 503",
+      );
+    let config = parse_config(&raw);
+
+    let plan = execution_plan(&config);
+
+    assert!(plan.features.direct_response_action);
+    assert_eq!(plan.fast_path, FastPathPlan::default());
   }
 
   #[test]

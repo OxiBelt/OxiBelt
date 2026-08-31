@@ -200,12 +200,14 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     ][..],
     "routes.actions" => &[
       "cors",
+      "direct_response",
       "redirect",
       "request_headers",
       "request_mirrors",
       "response_headers",
       "rewrite",
     ][..],
+    "routes.actions.direct_response" => &["status"][..],
     "routes.actions.cors" => &[
       "allow_credentials",
       "allow_headers",

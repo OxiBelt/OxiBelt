@@ -107,7 +107,7 @@ pub(super) fn build_explanation(
     .collect::<Vec<_>>();
   let artifact_digest =
     digest_artifact_bundle(&args.managed_config_path, toml.as_bytes(), &artifact_assets);
-  let requires_exact_data_plane = state.pools.values().any(|pool| pool.discoveries.len() > 1);
+  let requires_exact_data_plane = state.requires_exact_data_plane();
   let sources = objects
     .iter()
     .filter(|object| object.kind != "Secret")

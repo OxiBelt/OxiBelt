@@ -366,6 +366,14 @@ where
     return route_security.apply(response);
   }
   access_log.set_route_name(&resolved.route.name);
+  match route_actions::direct_response(resolved.route) {
+    Ok(Some(response)) => return route_security.apply(response),
+    Ok(None) => {}
+    Err(error) => {
+      warn!(error = %error, route = %resolved.route.name, "failed to build route direct response");
+      return route_security.text(StatusCode::INTERNAL_SERVER_ERROR, "invalid direct response");
+    }
+  }
   let route_circuit_breaker_lease = match state
     .circuit_breakers
     .admit_route_scope_request(&resolved.route.name, None)

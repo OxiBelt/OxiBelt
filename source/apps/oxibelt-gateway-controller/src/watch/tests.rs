@@ -33,12 +33,12 @@ fn watch_namespace_must_be_a_kubernetes_dns_label() {
 }
 
 #[test]
-fn static_targets_publish_only_clean_or_client_identity_deprogram_translations() {
+fn rollout_targets_publish_only_clean_or_client_identity_deprogram_translations() {
   use crate::translate::TranslationDisposition;
 
-  assert!(TranslationDisposition::Clean.is_publishable_for_static_target());
-  assert!(TranslationDisposition::ClientIdentityDeprogram.is_publishable_for_static_target());
-  assert!(!TranslationDisposition::PreserveLastGood.is_publishable_for_static_target());
+  assert!(TranslationDisposition::Clean.is_publishable());
+  assert!(TranslationDisposition::ClientIdentityDeprogram.is_publishable());
+  assert!(!TranslationDisposition::PreserveLastGood.is_publishable());
 }
 
 #[tokio::test]

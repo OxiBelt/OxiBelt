@@ -15363,6 +15363,65 @@ path = "/new{path_suffix}""#,
 }
 
 #[test]
+fn route_actions_parse_bounded_exclusive_direct_response_target() {
+  let temp_dir = common::TempDir::new("route-actions-direct-response");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "route-actions-direct-response");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let raw = base.replace(
+    "upstream = \"app\"",
+    "[routes.actions.direct_response]\nstatus = 503",
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+
+  config
+    .validate()
+    .expect("bounded direct response should validate");
+  assert_eq!(
+    config.routes[0]
+      .actions
+      .direct_response
+      .as_ref()
+      .expect("direct response should parse")
+      .status,
+    503
+  );
+
+  for (replacement, expected) in [
+    (
+      "[routes.actions.direct_response]\nstatus = 399",
+      "must be between 400 and 599",
+    ),
+    (
+      "[routes.actions.direct_response]\nstatus = 600",
+      "must be between 400 and 599",
+    ),
+    (
+      "upstream = \"app\"\n[routes.actions.direct_response]\nstatus = 503",
+      "must set exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response",
+    ),
+    (
+      "external_auth = \"auth\"\n[routes.actions.direct_response]\nstatus = 503",
+      "cannot be combined with route actions, policies, or upstream-only features",
+    ),
+  ] {
+    let raw = base.replace("upstream = \"app\"", replacement);
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("invalid direct response should fail closed");
+    assert!(
+      error.to_string().contains(expected),
+      "expected {expected:?}, got {error}"
+    );
+  }
+
+  let missing = base.replace("upstream = \"app\"", "[routes.actions.direct_response]");
+  let error = toml::from_str::<Config>(&missing).expect_err("direct status must be required");
+  assert!(error.to_string().contains("missing field `status`"));
+}
+
+#[test]
 fn route_actions_parse_header_cors_mirror_and_gateway_auth_blocks() {
   let temp_dir = common::TempDir::new("route-actions-parity-valid");
   let (cert_path, key_path) =
@@ -15603,7 +15662,7 @@ path = "/edge{path_suffix}""#,
 status = 302
 location_template = "/new{path_suffix}""#,
       ),
-      "must set exactly one of upstream, upstream_pool, static_root, ct_log, or actions.redirect",
+      "must set exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response",
     ),
     (
       base.replace(
@@ -16687,7 +16746,7 @@ fn static_route_rejects_multiple_targets() {
   assert!(
     error
       .to_string()
-      .contains("exactly one of upstream, upstream_pool, static_root, ct_log, or actions.redirect"),
+      .contains("exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response"),
     "unexpected error: {error}"
   );
 }

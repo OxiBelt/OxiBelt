@@ -128,6 +128,19 @@ fn discovery_instance_schema_is_typed_and_bounded() {
 }
 
 #[test]
+fn direct_response_schema_requires_a_bounded_error_status() {
+  let schema: serde_json::Value =
+    serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))
+      .expect("generated native schema should be JSON");
+  let direct_response = schema_node_for_metadata_path(&schema, "routes[].actions.direct_response");
+  assert_eq!(direct_response["required"], serde_json::json!(["status"]));
+  let status = schema_node_for_metadata_path(&schema, "routes[].actions.direct_response.status");
+  assert_eq!(status["type"], "integer");
+  assert_eq!(status["minimum"], 400);
+  assert_eq!(status["maximum"], 599);
+}
+
+#[test]
 fn certificate_transparency_schema_publishes_epoch_one_defaults_and_reload_boundaries() {
   let schema: serde_json::Value =
     serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))

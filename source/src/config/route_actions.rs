@@ -1,5 +1,5 @@
 //! Route action configuration and validation.
-//! Rewrite and redirect templates are validated before the HTTP data path renders them.
+//! Terminal responses and rewrite/redirect templates are validated before the HTTP data path.
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -20,6 +20,8 @@ pub const MAX_REQUEST_MIRROR_BODY_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteActionsConfig {
   #[serde(default)]
+  pub direct_response: Option<RouteDirectResponseActionConfig>,
+  #[serde(default)]
   pub rewrite: Option<RouteRewriteActionConfig>,
   #[serde(default)]
   pub redirect: Option<RouteRedirectActionConfig>,
@@ -35,13 +37,19 @@ pub struct RouteActionsConfig {
 
 impl RouteActionsConfig {
   pub fn has_actions(&self) -> bool {
-    self.rewrite.is_some()
+    self.direct_response.is_some()
+      || self.rewrite.is_some()
       || self.redirect.is_some()
       || self.request_headers.has_actions()
       || self.response_headers.has_actions()
       || self.cors.is_some()
       || !self.request_mirrors.is_empty()
   }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RouteDirectResponseActionConfig {
+  pub status: u16,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -119,6 +127,14 @@ pub struct RouteRequestMirrorConfig {
 
 pub(crate) fn validate_route_actions_config(route: &RouteConfig) -> anyhow::Result<()> {
   let route_name = &route.name;
+  if let Some(direct_response) = &route.actions.direct_response
+    && !(400..=599).contains(&direct_response.status)
+  {
+    bail!(
+      "route {route_name} actions.direct_response.status {} must be between 400 and 599",
+      direct_response.status
+    );
+  }
   if route.actions.rewrite.is_some() && route.actions.redirect.is_some() {
     bail!("route {route_name} cannot configure both actions.rewrite and actions.redirect");
   }
@@ -357,6 +373,40 @@ fn route_waf_is_configured(route: &RouteConfig) -> bool {
 pub(crate) fn validate_route_action_target_compatibility(
   route: &RouteConfig,
 ) -> anyhow::Result<()> {
+  if route.actions.direct_response.is_some()
+    && (route.replace_prefix_with.is_some()
+      || route.actions.rewrite.is_some()
+      || route.actions.request_headers.has_actions()
+      || route.actions.response_headers.has_actions()
+      || route.actions.cors.is_some()
+      || !route.actions.request_mirrors.is_empty()
+      || route.external_auth.is_some()
+      || route.ipm != Default::default()
+      || route.cache.is_some()
+      || route.compression.is_some()
+      || route.security_headers.is_some()
+      || route.priority_class != Default::default()
+      || route.static_files != Default::default()
+      || route.ct_surface != Default::default()
+      || route.buffering != Default::default()
+      || route.bandwidth != Default::default()
+      || route.limits != Default::default()
+      || route.timeouts != Default::default()
+      || route.retry.is_some()
+      || route.circuit_breaker.is_some()
+      || route.tls != Default::default()
+      || route_waf_is_configured(route)
+      || route.upstream_http_version.is_some()
+      || route.upstream_http_version_mode != Default::default()
+      || route.generic_http_upgrade
+      || route.connect_tunneling
+      || route.grpc_web)
+  {
+    bail!(
+      "route {} actions.direct_response cannot be combined with route actions, policies, or upstream-only features",
+      route.name
+    );
+  }
   if route.actions.rewrite.is_some() {
     if route.static_root.is_some() {
       bail!(

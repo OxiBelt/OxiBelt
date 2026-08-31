@@ -145,6 +145,24 @@ pub(crate) async fn prepare_webtransport(
       resolved.route,
     )));
   }
+  match route_actions::direct_response(resolved.route) {
+    Ok(Some(response)) => {
+      return Err(preparation_error!(with_route_security_headers(
+        response,
+        &state.config.security,
+        resolved.route,
+      )));
+    }
+    Ok(None) => {}
+    Err(error) => {
+      warn!(error = %error, route = %resolved.route.name, "failed to build route direct response");
+      return Err(preparation_error!(with_route_security_headers(
+        text_response(StatusCode::INTERNAL_SERVER_ERROR, "invalid direct response"),
+        &state.config.security,
+        resolved.route,
+      )));
+    }
+  }
   let client_asn = state.client_identity.asn.lookup(client_addr.ip());
 
   let mut evaluated_person_proof = None;

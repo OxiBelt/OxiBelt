@@ -302,6 +302,7 @@ fn configuration_route_target_docs_include_all_exclusive_targets() {
     "`static_root`",
     "`ct_log`",
     "`actions.redirect`",
+    "`actions.direct_response`",
   ] {
     assert!(
       configuration.contains(value),
@@ -309,8 +310,9 @@ fn configuration_route_target_docs_include_all_exclusive_targets() {
     );
   }
   assert!(
-    configuration
-      .contains("exactly one of `upstream`, `upstream_pool`, `static_root`, `ct_log`, or"),
+    configuration.contains(
+      "exactly one of `upstream`, `upstream_pool`, `static_root`, `ct_log`, terminal `actions.redirect`, or terminal `actions.direct_response`"
+    ),
     "docs/Configuration.md must document the route target exclusivity set"
   );
 }

@@ -83,7 +83,7 @@ impl CompatibilityPolicy {
   ) -> anyhow::Result<()> {
     if requires_exact_data_plane && self.mode != CompatibilityMode::Exact {
       bail!(
-        "weighted multi-Service EndpointSlice discovery requires compatibility mode `exact`; the permitted previous-minor data plane cannot parse discovery instance identity"
+        "generated configuration uses current-version-only route or discovery semantics and requires compatibility mode `exact`; the permitted previous-minor data plane may not parse it safely"
       );
     }
     Ok(())
@@ -308,7 +308,7 @@ mod tests {
   }
 
   #[test]
-  fn weighted_multi_service_discovery_requires_exact_mode() {
+  fn current_version_only_generated_capabilities_require_exact_mode() {
     let exact =
       CompatibilityPolicy::from_args_at(&args(CompatibilityMode::Exact), "0.7.0", 0).unwrap();
     assert!(exact.validate_generated_capabilities(true).is_ok());

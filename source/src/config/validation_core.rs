@@ -295,10 +295,11 @@ impl Config {
         + usize::from(route.upstream_pool.is_some())
         + usize::from(route.static_root.is_some())
         + usize::from(route.ct_log.is_some())
-        + usize::from(route.actions.redirect.is_some());
+        + usize::from(route.actions.redirect.is_some())
+        + usize::from(route.actions.direct_response.is_some());
       if target_count != 1 {
         bail!(
-          "route {} must set exactly one of upstream, upstream_pool, static_root, ct_log, or actions.redirect",
+          "route {} must set exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response",
           route.name
         );
       }
@@ -367,23 +368,24 @@ impl Config {
         &route.upstream_pool,
         &route.static_root,
         &route.actions.redirect,
+        &route.actions.direct_response,
       ) {
-        (Some(upstream), None, None, None) if !upstream_names.contains(upstream) => {
+        (Some(upstream), None, None, None, None) if !upstream_names.contains(upstream) => {
           bail!(
             "route {} references unknown upstream {}",
             route.name,
             upstream
           );
         }
-        (None, Some(pool), None, None) if !pool_names.contains(pool) => {
+        (None, Some(pool), None, None, None) if !pool_names.contains(pool) => {
           bail!(
             "route {} references unknown upstream_pool {}",
             route.name,
             pool
           );
         }
-        (Some(_), None, None, None) | (None, Some(_), None, None) => {}
-        (None, None, Some(static_root), None) => {
+        (Some(_), None, None, None, None) | (None, Some(_), None, None, None) => {}
+        (None, None, Some(static_root), None, None) => {
           crate::config::validate_static_root(static_root)
             .with_context(|| format!("route {} static_root is invalid", route.name))?;
           if route.replace_prefix_with.is_some() {
@@ -411,7 +413,7 @@ impl Config {
             );
           }
         }
-        (None, None, None, Some(_)) => {}
+        (None, None, None, Some(_), None) | (None, None, None, None, Some(_)) => {}
         _ => {}
       }
       if route.static_root.is_none() && route.static_files.has_convenience_options() {
