@@ -293,10 +293,12 @@
 {{- end -}}
 
 {{- define "oxibelt.secretReferencesDigest" -}}
+{{- $upstreamTlsReferences := include "oxibelt.upstreamTlsSecretReferenceList" . | fromJsonArray -}}
 {{- $references := dict
       "publicTls" (dict "enabled" .Values.tls.enabled "secretName" .Values.tls.secretName)
       "quicHostKey" (dict "secretName" .Values.quic.hostKeySecretName "key" .Values.quic.hostKeySecretKey)
       "redis" .Values.sharedState.redisSecretProjections
+      "upstreamTls" $upstreamTlsReferences
       "adminToken" (dict "secretName" .Values.admin.tokenSecretName "key" .Values.admin.tokenSecretKey)
       "adminTls" (dict "secretName" .Values.admin.tls.secretName "certKey" .Values.admin.tls.certKey "privateKeyKey" .Values.admin.tls.privateKeyKey)
       "adminClientCa" (dict "secretName" .Values.admin.mtls.clientCaSecretName "key" .Values.admin.mtls.clientCaSecretKey) -}}
@@ -325,6 +327,7 @@
 {{- $storage := ternary "emptyDir" "persistentVolumeClaim" (hasKey $volume "emptyDir") -}}
 {{- $mounts = append $mounts (dict "name" $volume.name "mountPath" $volume.mountPath "purpose" $volume.purpose "storage" $storage) -}}
 {{- end -}}
+{{- $upstreamTlsReferences := include "oxibelt.upstreamTlsSecretReferenceList" . | fromJsonArray -}}
 {{- $publicPorts := list -}}
 {{- if .Values.service.ports.http.enabled -}}{{- $publicPorts = append $publicPorts "http" -}}{{- end -}}
 {{- if .Values.service.ports.https.enabled -}}{{- $publicPorts = append $publicPorts "https" -}}{{- end -}}
@@ -341,7 +344,7 @@
       "network" (dict "defaultDenyIngress" true "defaultDenyEgress" true "ingress" (dict "public" (dict "allowAll" .Values.networkPolicy.ingress.public.allowAll "peerCount" (len .Values.networkPolicy.ingress.public.from) "ports" $publicPorts) "metrics" (dict "peerCount" (len .Values.networkPolicy.ingress.metrics.from)) "admin" (dict "peerCount" (len .Values.networkPolicy.ingress.admin.from))) "dnsEgressEnabled" .Values.networkPolicy.egress.dns.enabled "egressDestinations" $destinations "fqdnDestinations" $fqdnDestinations)
       "writableMounts" $mounts
       "availability" (dict "workloadKind" .Values.workload.kind "podDisruptionBudget" .Values.podDisruptionBudget "podDistribution" .Values.podDistribution)
-      "artifactIdentities" (dict "configDigest" (include "oxibelt.configDigest" .) "oxiruleDigest" (include "oxibelt.oxiruleConfigMapDigest" .) "secretReferencesDigest" (include "oxibelt.secretReferencesDigest" .) "tlsReferences" (dict "publicSecretName" .Values.tls.secretName "quicHostKeySecretName" .Values.quic.hostKeySecretName) "hardeningProfileDigest" (include "oxibelt.hardeningProfileDigest" .) "filesystemManifestExpectationPresent" true "filesystemManifestDigestWithheld" true)
+      "artifactIdentities" (dict "configDigest" (include "oxibelt.configDigest" .) "oxiruleDigest" (include "oxibelt.oxiruleConfigMapDigest" .) "secretReferencesDigest" (include "oxibelt.secretReferencesDigest" .) "tlsReferences" (dict "publicSecretName" .Values.tls.secretName "quicHostKeySecretName" .Values.quic.hostKeySecretName "upstreamClientIdentitySecretProjections" $upstreamTlsReferences) "hardeningProfileDigest" (include "oxibelt.hardeningProfileDigest" .) "filesystemManifestExpectationPresent" true "filesystemManifestDigestWithheld" true)
       "supplyChainBundle" (dict "payloadDigest" .Values.supplyChainAdmission.bundle.payloadDigest "keyId" .Values.supplyChainAdmission.bundle.keyId "imageReference" (printf "%s@%s" $repository .Values.image.digest) "admissionRequired" true)
       "unmetRequirements" (list) -}}
 {{- $report | toPrettyJson -}}

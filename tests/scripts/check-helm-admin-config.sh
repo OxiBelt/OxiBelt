@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Validate the semantic Admin and Redis Secret projection combinations that
-# cannot be proved by static YAML/JSON parsing alone. This script never creates
-# Kubernetes resources.
+# Validate the semantic Admin, upstream client identity, and Redis Secret
+# projection combinations that cannot be proved by static YAML/JSON parsing
+# alone. This script never creates Kubernetes resources.
 set -euo pipefail
 
 umask 077
@@ -138,6 +138,30 @@ render redis_acl_projection_daemonset \
 assert_contains "${work_dir}/redis_acl_projection_daemonset.yaml" "kind: DaemonSet"
 assert_contains "${work_dir}/redis_acl_projection_daemonset.yaml" "path: \"redis/redis-main/password\""
 
+render upstream_client_identity_projection \
+  --set tls.enabled=false \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].name=payments \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].secretName=payments-client
+assert_contains "${work_dir}/upstream_client_identity_projection.yaml" "name: \"payments-client\""
+assert_contains "${work_dir}/upstream_client_identity_projection.yaml" "key: \"tls.crt\""
+assert_contains "${work_dir}/upstream_client_identity_projection.yaml" "key: \"tls.key\""
+assert_contains "${work_dir}/upstream_client_identity_projection.yaml" "path: \"upstream-client/payments/tls.crt\""
+assert_contains "${work_dir}/upstream_client_identity_projection.yaml" "path: \"upstream-client/payments/tls.key\""
+assert_contains "${work_dir}/upstream_client_identity_projection.yaml" "defaultMode: 288"
+assert_contains "${work_dir}/upstream_client_identity_projection.yaml" "mountPath: /etc/oxibelt/cert"
+assert_contains "${work_dir}/upstream_client_identity_projection.yaml" "readOnly: true"
+
+render upstream_client_identity_projection_daemonset \
+  --set tls.enabled=false \
+  --set-string workload.kind=DaemonSet \
+  --set-json 'upstreamTls.clientIdentitySecretProjections=[{"name":"ledger","secretName":"ledger.client-identity","certificateKey":"client.pem","privateKeyKey":"client.key"}]'
+assert_contains "${work_dir}/upstream_client_identity_projection_daemonset.yaml" "kind: DaemonSet"
+assert_contains "${work_dir}/upstream_client_identity_projection_daemonset.yaml" "name: \"ledger.client-identity\""
+assert_contains "${work_dir}/upstream_client_identity_projection_daemonset.yaml" "key: \"client.pem\""
+assert_contains "${work_dir}/upstream_client_identity_projection_daemonset.yaml" "key: \"client.key\""
+assert_contains "${work_dir}/upstream_client_identity_projection_daemonset.yaml" "path: \"upstream-client/ledger/tls.crt\""
+assert_contains "${work_dir}/upstream_client_identity_projection_daemonset.yaml" "path: \"upstream-client/ledger/tls.key\""
+
 render private_tls_bearer \
   --set admin.enabled=true \
   --set-string admin.tokenSecretName=admin-token \
@@ -259,5 +283,42 @@ expect_failure redis_secret_path_escape "items[].path must be a safe relative pa
   --set-string sharedState.redisSecretProjections[0].secretName=redis-main-credentials \
   --set-string sharedState.redisSecretProjections[0].items[0].key=password \
   --set-string sharedState.redisSecretProjections[0].items[0].path=../password
+
+expect_failure upstream_client_identity_name \
+  "upstreamTls.clientIdentitySecretProjections[0].name must be a safe lower-case DNS label" \
+  --skip-schema-validation \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].name=Payments \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].secretName=payments-client
+
+expect_failure upstream_client_identity_secret_name \
+  "upstreamTls.clientIdentitySecretProjections[0].secretName must be a safe Kubernetes Secret DNS name" \
+  --skip-schema-validation \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].name=payments \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].secretName=payments_client
+
+expect_failure upstream_client_identity_key \
+  "upstreamTls.clientIdentitySecretProjections[0].certificateKey must be a safe Kubernetes Secret key" \
+  --skip-schema-validation \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].name=payments \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].secretName=payments-client \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].certificateKey=client/cert
+
+expect_failure upstream_client_identity_duplicate_name \
+  "upstreamTls.clientIdentitySecretProjections must not reuse a projection name" \
+  --skip-schema-validation \
+  --set-json 'upstreamTls.clientIdentitySecretProjections=[{"name":"payments","secretName":"payments-client"},{"name":"payments","secretName":"payments-client-2"}]'
+
+expect_failure upstream_client_identity_duplicate_key \
+  "upstreamTls.clientIdentitySecretProjections[0].certificateKey and privateKeyKey must differ" \
+  --skip-schema-validation \
+  --set-json 'upstreamTls.clientIdentitySecretProjections=[{"name":"payments","secretName":"payments-client","certificateKey":"client.pem","privateKeyKey":"client.pem"}]'
+
+expect_failure upstream_client_identity_mount_path \
+  "tls.mountPath must be the cert sibling of config.mountPath" \
+  --skip-schema-validation \
+  --set tls.enabled=false \
+  --set-string tls.mountPath=/tmp/invalid-cert-root \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].name=payments \
+  --set-string upstreamTls.clientIdentitySecretProjections[0].secretName=payments-client
 
 echo "Helm Admin configuration check passed"

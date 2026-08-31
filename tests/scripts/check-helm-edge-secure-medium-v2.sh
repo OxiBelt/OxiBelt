@@ -142,6 +142,24 @@ assert_not_contains "${work_dir}/deployment.yaml" '    - pods/*'
 assert_not_contains "${work_dir}/deployment.yaml" '    - */*'
 assert_contains "${work_dir}/deployment.yaml" 'default-deny'
 
+render upstream_client_identity \
+  --set-json 'upstreamTls.clientIdentitySecretProjections=[{"name":"payments","secretName":"payments-client"}]'
+for expected in \
+  'name: "payments-client"' \
+  'key: "tls.crt"' \
+  'key: "tls.key"' \
+  'path: "upstream-client/payments/tls.crt"' \
+  'path: "upstream-client/payments/tls.key"' \
+  'defaultMode: 288' \
+  'mountPath: /etc/oxibelt/cert' \
+  '"upstreamClientIdentitySecretProjections": [' \
+  '"certificateKey": "tls.crt"' \
+  '"privateKeyKey": "tls.key"'; do
+  assert_contains "${work_dir}/upstream_client_identity.yaml" "${expected}"
+done
+assert_contains "${work_dir}/upstream_client_identity.yaml" 'readOnly: true'
+assert_not_contains "${work_dir}/upstream_client_identity.yaml" 'resources: ["secrets"]'
+
 render webhook-image-rotated \
   --set-string supplyChainAdmission.webhook.image.digest=sha256:4444444444444444444444444444444444444444444444444444444444444444
 baseline_admission_revision="$(annotation_value "${work_dir}/deployment.yaml" 'oxibelt.dev/supply-chain-bundle')"
@@ -235,6 +253,7 @@ render secret_reference_changed --set-string tls.secretName=oxibelt-public-tls-v
 default_config_checksum="$(annotation_value "${work_dir}/deployment.yaml" checksum/oxibelt-config)"
 default_secret_checksum="$(annotation_value "${work_dir}/deployment.yaml" checksum/oxibelt-secret-references)"
 default_hardening_checksum="$(annotation_value "${work_dir}/deployment.yaml" checksum/oxibelt-hardening-profile)"
+default_profile_report_checksum="$(annotation_value "${work_dir}/deployment.yaml" checksum/oxibelt-profile-report)"
 changed_config_checksum="$(annotation_value "${work_dir}/secret_reference_changed.yaml" checksum/oxibelt-config)"
 changed_secret_checksum="$(annotation_value "${work_dir}/secret_reference_changed.yaml" checksum/oxibelt-secret-references)"
 changed_hardening_checksum="$(annotation_value "${work_dir}/secret_reference_changed.yaml" checksum/oxibelt-hardening-profile)"
@@ -244,6 +263,15 @@ changed_hardening_checksum="$(annotation_value "${work_dir}/secret_reference_cha
   || die "TLS Secret reference unexpectedly changed the native configuration checksum"
 [[ "${default_hardening_checksum}" == "${changed_hardening_checksum}" ]] \
   || die "TLS Secret reference unexpectedly changed the hardening checksum"
+
+render upstream_secret_reference_changed \
+  --set-json 'upstreamTls.clientIdentitySecretProjections=[{"name":"payments","secretName":"payments-client-v2"}]'
+upstream_changed_secret_checksum="$(annotation_value "${work_dir}/upstream_secret_reference_changed.yaml" checksum/oxibelt-secret-references)"
+upstream_changed_profile_report_checksum="$(annotation_value "${work_dir}/upstream_secret_reference_changed.yaml" checksum/oxibelt-profile-report)"
+[[ "${default_secret_checksum}" != "${upstream_changed_secret_checksum}" ]] \
+  || die "Secret-reference checksum did not change with the upstream client identity Secret reference"
+[[ "${default_profile_report_checksum}" != "${upstream_changed_profile_report_checksum}" ]] \
+  || die "profile-report checksum did not change with the upstream client identity Secret reference"
 
 render config_changed --set-string operationalProfile.wafMode=monitor
 [[ "${default_config_checksum}" != "$(annotation_value "${work_dir}/config_changed.yaml" checksum/oxibelt-config)" ]] \

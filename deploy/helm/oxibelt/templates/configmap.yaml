@@ -1,6 +1,7 @@
 {{- include "oxibelt.validateConfigRollout" . -}}
 {{- include "oxibelt.validateBaseConfigKey" . -}}
 {{- include "oxibelt.validateRedisSecretProjections" . -}}
+{{- include "oxibelt.validateUpstreamTlsSecretProjections" . -}}
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
 {{- include "oxibelt.validateRuntimeHardening" . -}}

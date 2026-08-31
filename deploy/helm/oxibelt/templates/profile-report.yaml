@@ -2,6 +2,7 @@
 {{- include "oxibelt.validateBaseConfigKey" . -}}
 {{- include "oxibelt.validateKubernetesServiceAccount" . -}}
 {{- include "oxibelt.validateRedisSecretProjections" . -}}
+{{- include "oxibelt.validateUpstreamTlsSecretProjections" . -}}
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
 {{- include "oxibelt.validateRuntimeHardening" . -}}

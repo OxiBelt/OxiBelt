@@ -3,12 +3,14 @@
 {{- include "oxibelt.validateWorkloadRollout" . -}}
 {{- include "oxibelt.validateKubernetesServiceAccount" . -}}
 {{- include "oxibelt.validateRedisSecretProjections" . -}}
+{{- include "oxibelt.validateUpstreamTlsSecretProjections" . -}}
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
 {{- include "oxibelt.validateAdditionalServicePorts" . -}}
 {{- include "oxibelt.validateRuntimeHardening" . -}}
 {{- include "oxibelt.validateOperationalProfileV2" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
+{{- $hasUpstreamTlsSecretProjections := gt (len (.Values.upstreamTls.clientIdentitySecretProjections | default (list))) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
 {{- $hasKubernetesApiAccess := eq (include "oxibelt.kubernetesApiAccessEnabled" .) "true" -}}
 {{- $cacheVolumeEnabled := eq (include "oxibelt.cacheVolumeEnabled" .) "true" -}}
@@ -250,7 +252,7 @@ spec:
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
         {{- end }}
-        {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasQuicHostKey }}
+        {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasUpstreamTlsSecretProjections $hasQuicHostKey }}
         - name: tls
           mountPath: {{ include "oxibelt.certMountPath" . }}
           readOnly: true
@@ -290,7 +292,7 @@ spec:
           - key: gateway-config-directory
             path: {{ .Values.configRollout.managedConfigPath | quote }}
 {{ end }}
-      {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasQuicHostKey }}
+      {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasUpstreamTlsSecretProjections $hasQuicHostKey }}
       - name: tls
         projected:
           # Decimal 288 is POSIX mode 0440. Kubernetes applies the Pod fsGroup
@@ -323,6 +325,15 @@ spec:
               - key: {{ .Values.admin.mtls.clientCaSecretKey }}
                 path: admin-client-ca/ca.crt
           {{- end }}
+          {{- end }}
+          {{- range $projection := .Values.upstreamTls.clientIdentitySecretProjections }}
+          - secret:
+              name: {{ required "upstreamTls.clientIdentitySecretProjections[].secretName is required" $projection.secretName | quote }}
+              items:
+              - key: {{ ($projection.certificateKey | default "tls.crt") | quote }}
+                path: {{ printf "upstream-client/%s/tls.crt" $projection.name | quote }}
+              - key: {{ ($projection.privateKeyKey | default "tls.key") | quote }}
+                path: {{ printf "upstream-client/%s/tls.key" $projection.name | quote }}
           {{- end }}
           {{- range $projection := .Values.sharedState.redisSecretProjections }}
           - secret:

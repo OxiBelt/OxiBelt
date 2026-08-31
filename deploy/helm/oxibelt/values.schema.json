@@ -628,6 +628,44 @@
         }
       }
     },
+    "upstreamTls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clientIdentitySecretProjections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "secretName"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+                "maxLength": 63
+              },
+              "secretName": {
+                "type": "string",
+                "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$",
+                "maxLength": 253
+              },
+              "certificateKey": {
+                "type": "string",
+                "default": "tls.crt",
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "maxLength": 253
+              },
+              "privateKeyKey": {
+                "type": "string",
+                "default": "tls.key",
+                "pattern": "^[A-Za-z0-9._-]+$",
+                "maxLength": 253
+              }
+            }
+          }
+        }
+      }
+    },
     "sharedState": {
       "type": "object",
       "properties": {

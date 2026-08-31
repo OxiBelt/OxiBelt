@@ -822,6 +822,76 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- end -}}
 {{- end -}}
 
+{{- define "oxibelt.validateUpstreamTlsSecretProjections" -}}
+{{- $upstreamTls := .Values.upstreamTls | default (dict) -}}
+{{- if not (kindIs "map" $upstreamTls) -}}
+{{- fail "upstreamTls must be an object" -}}
+{{- end -}}
+{{- $projections := $upstreamTls.clientIdentitySecretProjections | default (list) -}}
+{{- if not (kindIs "slice" $projections) -}}
+{{- fail "upstreamTls.clientIdentitySecretProjections must be an array" -}}
+{{- end -}}
+{{- $projectionNames := dict -}}
+{{- $projectedPaths := dict -}}
+{{- range $index, $projection := $projections -}}
+{{- $field := printf "upstreamTls.clientIdentitySecretProjections[%d]" $index -}}
+{{- if not (kindIs "map" $projection) -}}
+{{- fail (printf "%s must be an object" $field) -}}
+{{- end -}}
+{{- $name := $projection.name | default "" -}}
+{{- if or (not (kindIs "string" $name)) (not $name) -}}
+{{- fail (printf "%s.name is required" $field) -}}
+{{- else if or (gt (len $name) 63) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $name)) -}}
+{{- fail (printf "%s.name must be a safe lower-case DNS label up to 63 characters" $field) -}}
+{{- end -}}
+{{- if hasKey $projectionNames $name -}}
+{{- fail "upstreamTls.clientIdentitySecretProjections must not reuse a projection name" -}}
+{{- end -}}
+{{- $_ := set $projectionNames $name true -}}
+{{- $secretName := $projection.secretName | default "" -}}
+{{- if or (not (kindIs "string" $secretName)) (not $secretName) -}}
+{{- fail (printf "%s.secretName is required" $field) -}}
+{{- else if or (gt (len $secretName) 253) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?([.][a-z0-9]([a-z0-9-]*[a-z0-9])?)*$" $secretName)) -}}
+{{- fail (printf "%s.secretName must be a safe Kubernetes Secret DNS name" $field) -}}
+{{- end -}}
+{{- $certificateKey := $projection.certificateKey | default "tls.crt" -}}
+{{- if or (not (kindIs "string" $certificateKey)) (not $certificateKey) -}}
+{{- fail (printf "%s.certificateKey must be a nonempty Kubernetes Secret key" $field) -}}
+{{- else if or (gt (len $certificateKey) 253) (not (regexMatch "^[A-Za-z0-9._-]+$" $certificateKey)) -}}
+{{- fail (printf "%s.certificateKey must be a safe Kubernetes Secret key" $field) -}}
+{{- end -}}
+{{- $privateKeyKey := $projection.privateKeyKey | default "tls.key" -}}
+{{- if or (not (kindIs "string" $privateKeyKey)) (not $privateKeyKey) -}}
+{{- fail (printf "%s.privateKeyKey must be a nonempty Kubernetes Secret key" $field) -}}
+{{- else if or (gt (len $privateKeyKey) 253) (not (regexMatch "^[A-Za-z0-9._-]+$" $privateKeyKey)) -}}
+{{- fail (printf "%s.privateKeyKey must be a safe Kubernetes Secret key" $field) -}}
+{{- end -}}
+{{- if and (kindIs "string" $certificateKey) (kindIs "string" $privateKeyKey) (eq $certificateKey $privateKeyKey) -}}
+{{- fail (printf "%s.certificateKey and privateKeyKey must differ" $field) -}}
+{{- end -}}
+{{- $certificatePath := printf "upstream-client/%s/tls.crt" $name -}}
+{{- $privateKeyPath := printf "upstream-client/%s/tls.key" $name -}}
+{{- if or (hasKey $projectedPaths $certificatePath) (hasKey $projectedPaths $privateKeyPath) -}}
+{{- fail "upstreamTls.clientIdentitySecretProjections must not produce colliding projected paths" -}}
+{{- end -}}
+{{- $_ := set $projectedPaths $certificatePath true -}}
+{{- $_ := set $projectedPaths $privateKeyPath true -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.upstreamTlsSecretReferenceList" -}}
+{{- $upstreamTls := .Values.upstreamTls | default (dict) -}}
+{{- $references := list -}}
+{{- range $projection := ($upstreamTls.clientIdentitySecretProjections | default (list)) -}}
+{{- $references = append $references (dict
+      "name" $projection.name
+      "secretName" $projection.secretName
+      "certificateKey" ($projection.certificateKey | default "tls.crt")
+      "privateKeyKey" ($projection.privateKeyKey | default "tls.key")) -}}
+{{- end -}}
+{{- $references | toJson -}}
+{{- end -}}
+
 {{- define "oxibelt.validateAdmin" -}}
 {{- include "oxibelt.validateImageRole" . -}}
 {{- include "oxibelt.validateCacheVolume" . -}}
@@ -832,6 +902,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- $configMountPath := trimSuffix "/" .Values.config.mountPath -}}
 {{- $expectedCertMountPath := include "oxibelt.certMountPath" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
+{{- $hasUpstreamTlsSecretProjections := gt (len (.Values.upstreamTls.clientIdentitySecretProjections | default (list))) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
 {{- if eq .Values.image.role "dataplane-strict" -}}
 {{- if or $admin.enabled $admin.service.enabled $admin.insecureDevelopmentMode.enabled $admin.tls.enabled $admin.mtls.enabled -}}
@@ -852,7 +923,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if or (not (hasPrefix "/" $configMountPath)) (eq $configMountPath "/") -}}
 {{- fail "config.mountPath must be an absolute non-root directory" -}}
 {{- end -}}
-{{- if and (or .Values.tls.enabled (and $admin.enabled $admin.tls.enabled) $hasRedisSecretProjections $hasQuicHostKey) (ne (trimSuffix "/" .Values.tls.mountPath) $expectedCertMountPath) -}}
+{{- if and (or .Values.tls.enabled (and $admin.enabled $admin.tls.enabled) $hasRedisSecretProjections $hasUpstreamTlsSecretProjections $hasQuicHostKey) (ne (trimSuffix "/" .Values.tls.mountPath) $expectedCertMountPath) -}}
 {{- fail "tls.mountPath must be the cert sibling of config.mountPath" -}}
 {{- end -}}
 {{- if and $admin.service.enabled (not $admin.enabled) -}}

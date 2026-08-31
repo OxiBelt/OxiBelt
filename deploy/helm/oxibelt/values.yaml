@@ -393,6 +393,18 @@ tls:
     cacheDir: /var/lib/oxibelt/ct-log-list
     persistentVolumeClaimName: ""
 
+# Project selected upstream mTLS client identities into the same read-only
+# certificate root. Kubernetes TLS and Opaque Secret types are both usable;
+# only the selected keys are mounted. Each entry becomes
+# `/etc/oxibelt/cert/upstream-client/<name>/tls.crt` and `tls.key`.
+upstreamTls:
+  clientIdentitySecretProjections: []
+  # - name: payments
+  #   secretName: payments-upstream-client
+  #   # These keys default to tls.crt and tls.key when omitted.
+  #   certificateKey: tls.crt
+  #   privateKeyKey: tls.key
+
 # Project exactly one Secret item whose mounted value is base64 text for a
 # 64-byte QUIC host key into the certificate root as `quic-host-key.b64`. The
 # profile preset requires this Secret but the unprofiled chart leaves it opt-in
