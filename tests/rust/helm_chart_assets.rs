@@ -1158,6 +1158,10 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(values["podAntiAffinity"]["enabled"], true);
   assert_eq!(values["controllerName"], "oxibelt.dev/gateway-controller");
   assert_eq!(values["backendResolution"], "cluster_dns");
+  assert_eq!(
+    values["upstreamClientTls"]["sourceSecretAllowlist"],
+    json!([])
+  );
   assert_eq!(values["l4"]["bindAddress"], "0.0.0.0");
   assert_eq!(values["l4"]["connectTimeoutMs"], 3000);
   assert_eq!(values["l4"]["idleTimeoutMs"], 75000);
@@ -1365,6 +1369,37 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(rbac.contains("verbs: [\"list\"]"));
   assert!(rbac.contains("verbs: [\"patch\"]"));
   assert!(rbac.contains("kind: Role"));
+  let source_secret_rule = concat!(
+    "resources: [\"secrets\"]\n",
+    "  resourceNames:\n",
+    "  - {{ $secret.name | quote }}\n",
+    "  verbs: [\"get\", \"watch\"]"
+  );
+  assert_eq!(
+    rbac.matches(source_secret_rule).count(),
+    1,
+    "allowlisted source Secret access should be exact-name get/watch"
+  );
+  let target_secret_lifecycle_rule =
+    "resources: [\"secrets\"]\n  verbs: [\"get\", \"create\", \"delete\"]";
+  assert_eq!(
+    rbac.matches(target_secret_lifecycle_rule).count(),
+    2,
+    "single- and multi-target rollout Roles should grant the exact derived Secret lifecycle verbs"
+  );
+  assert_eq!(
+    rbac.matches("resources: [\"secrets\"]").count(),
+    3,
+    "RBAC should contain only the exact source rule and two target lifecycle rules"
+  );
+  assert_eq!(
+    rbac.matches("\"delete\"").count(),
+    2,
+    "delete should be confined to the two derived Secret lifecycle rules"
+  );
+  assert!(!rbac.contains("deletecollection"));
+  assert!(!rbac.contains("verbs: [\"*\"]"));
+  assert!(!rbac.contains("resources: [\"*\"]"));
   let rollout_role = rbac
     .split("name: {{ include \"oxibelt-gateway-controller.name\" . }}-rollout")
     .nth(1)
@@ -1377,11 +1412,14 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert!(rollout_role.contains("resourceNames:"));
   assert!(rollout_role.contains("verbs: [\"get\", \"patch\"]"));
   assert!(!rollout_role.contains("watch"));
-  assert!(!rollout_role.contains("delete"));
+  assert!(
+    rollout_role.contains("{{- if gt (len .Values.upstreamClientTls.sourceSecretAllowlist) 0 }}")
+  );
+  assert!(rollout_role.contains(target_secret_lifecycle_rule));
   assert!(!rbac.contains("verbs: [\"get\", \"list\", \"watch\"]"));
   assert!(!rbac.contains("verbs: [\"get\", \"patch\", \"update\"]"));
-  assert!(!rbac.contains("secrets"));
   assert!(rbac.contains("range $index, $target := .Values.rollout.targets"));
+  assert!(rbac.contains("{{ if gt (len $.Values.upstreamClientTls.sourceSecretAllowlist) 0 }}"));
   assert!(rbac.contains("resourceNames:\n  - {{ $target.workloadRef.name | quote }}"));
   assert_eq!(
     rbac
