@@ -268,8 +268,9 @@ assert_not_contains "${work_dir}/controller-default.yaml" "verbs: [\"delete\"]"
 # Upstream client TLS is an explicit opt-in. Source Secret reads are bound to
 # exact names, while generated immutable Secret lifecycle permissions remain
 # namespace-scoped to the configured rollout target and omit list/watch.
+# Render the full chart because Helm 3.21.4's --show-only path drops the first
+# ranged RBAC document even though the normal installation path renders it.
 render_controller upstream_client_tls_rbac \
-  --show-only templates/rbac.yaml \
   --set-json 'upstreamClientTls.sourceSecretAllowlist=[{"namespace":"client-secrets","name":"orders-client","certificateKey":"client.pem","privateKeyKey":"client.key"}]'
 assert_occurrence_count "${work_dir}/controller-upstream_client_tls_rbac.yaml" 'resources: ["secrets"]' 2
 assert_contains "${work_dir}/controller-upstream_client_tls_rbac.yaml" 'namespace: "client-secrets"'
