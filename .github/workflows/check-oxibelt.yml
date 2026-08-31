@@ -801,7 +801,7 @@ jobs:
           - name: stable
             toolchain: stable
           - name: asan
-            toolchain: nightly-2026-08-26
+            toolchain: nightly-2026-08-30
         fuzz_target:
           - turn_protocol
           - tls_client_hello
