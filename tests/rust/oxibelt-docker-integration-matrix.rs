@@ -128,6 +128,7 @@ struct Needs {
   turn_udp_upstream: bool,
   turn_tcp_upstream: bool,
   turn_tls_upstream: bool,
+  coturn: bool,
   dns_server: bool,
   kubernetes_server: bool,
   nomad_server: bool,
@@ -512,6 +513,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     bool_env(case.needs.turn_tls_upstream)
   ));
   manifest.push_str(&format!(
+    "CASE_NEED_COTURN={}\n",
+    bool_env(case.needs.coturn)
+  ));
+  manifest.push_str(&format!(
     "CASE_NEED_DNS_SERVER={}\n",
     bool_env(case.needs.dns_server)
   ));
@@ -806,6 +811,10 @@ fn browser_scenarios() -> Vec<BrowserScenario> {
     BrowserScenario {
       name: "hot-reload",
       description: "browser observes full config and TLS hot reload",
+    },
+    BrowserScenario {
+      name: "webrtc-turn",
+      description: "relay-only WebRTC data channels use OxiBelt TURN UDP, TCP, and TLS",
     },
   ]
 }

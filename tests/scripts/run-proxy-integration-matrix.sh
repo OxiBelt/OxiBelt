@@ -31,6 +31,7 @@ pq_probe_image="${OXIBELT_PQ_PROBE_IMAGE:-oxibelt/pq-probe:${run_id}}"
 protocol_probe_image="${OXIBELT_PROTOCOL_PROBE_IMAGE:-oxibelt/protocol-probe:${run_id}}"
 postgres_image="${OXIBELT_POSTGRES_IMAGE:-oxibelt/postgres:${run_id}}"
 redis_image="${OXIBELT_REDIS_IMAGE:-valkey/valkey:9-alpine}"
+coturn_image="${OXIBELT_COTURN_IMAGE:-ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/proxy-matrix:${run_id}}"
 keysigner_image="${OXIBELT_KEYSIGNER_DOCKER_IMAGE:-${proxy_image}}"
 require_preloaded_helper_images="${OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES:-0}"
@@ -77,6 +78,7 @@ websocket_container="oxibelt-websocket-${run_id}"
 turn_udp_container="oxibelt-turn-udp-${run_id}"
 turn_tcp_container="oxibelt-turn-tcp-${run_id}"
 turn_tls_container="oxibelt-turn-tls-${run_id}"
+coturn_container="oxibelt-coturn-${run_id}"
 dns_container="oxibelt-dns-${run_id}"
 kubernetes_container="oxibelt-kubernetes-${run_id}"
 nomad_container="oxibelt-nomad-${run_id}"
@@ -361,6 +363,7 @@ collect_diagnostics() {
   collect_container_log "${turn_udp_container}" "mock-turn-udp.log"
   collect_container_log "${turn_tcp_container}" "mock-turn-tcp.log"
   collect_container_log "${turn_tls_container}" "mock-turn-tls.log"
+  collect_container_log "${coturn_container}" "coturn.log"
   collect_container_log "${dns_container}" "mock-dns.log"
   collect_container_log "${kubernetes_container}" "mock-kubernetes.log"
   collect_container_log "${nomad_container}" "mock-nomad.log"
@@ -1642,8 +1645,9 @@ protocol_probe_turn_client() {
       docker rm -f "${client_container}" >/dev/null 2>&1 || true
       printf '%s' "${output}"
       return 0
+    else
+      status=$?
     fi
-    status=$?
     append_container_stderr "${client_container}"
     docker rm -f "${client_container}" >/dev/null 2>&1 || true
     sleep 1
@@ -1652,6 +1656,67 @@ protocol_probe_turn_client() {
   echo "TURN protocol probe failed after retries with status ${status}: transport=${transport} auth=${auth} expect=${expect}" >&2
   echo "${output}" >&2
   fail_with_diagnostics "TURN protocol probe did not observe expected ${expect} result"
+}
+
+coturn_turn_client() {
+  local port="$1"
+  local transport="$2"
+  local family="$3"
+  local relay_transport="$4"
+  local client_container output status
+  local transport_args=()
+  local family_args=()
+  local relay_args=()
+  local ca_args=()
+
+  case "${transport}" in
+    udp) ;;
+    tcp) transport_args=(-t) ;;
+    tls)
+      transport_args=(-t -S)
+      ca_args=(-E /tmp/proxy-ca.pem)
+      ;;
+    *) fail_with_diagnostics "unsupported coturn client transport ${transport}" ;;
+  esac
+  case "${family}" in
+    ipv4) family_args=(-X) ;;
+    ipv6) family_args=(-x) ;;
+    *) fail_with_diagnostics "unsupported coturn client relay family ${family}" ;;
+  esac
+  case "${relay_transport}" in
+    udp) ;;
+    tcp) relay_args=(-T) ;;
+    *) fail_with_diagnostics "unsupported coturn client relay transport ${relay_transport}" ;;
+  esac
+
+  client_container="$(unique_docker_container_name "oxibelt-coturn-client")"
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --entrypoint turnutils_uclient \
+    "${coturn_image}" \
+    -y -c -n 3 -m 1 -z 10 \
+    -u turn-user -w turn-password \
+    -p "${port}" \
+    "${transport_args[@]}" \
+    "${family_args[@]}" \
+    "${relay_args[@]}" \
+    "${ca_args[@]}" \
+    proxy >/dev/null
+  if [[ "${transport}" == "tls" ]]; then
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+  fi
+  if output="$(timeout --kill-after=5s 45s docker start -a "${client_container}" 2>"$(container_stderr_log "${client_container}")")"; then
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    printf '%s' "${output}"
+    return 0
+  else
+    status=$?
+  fi
+  append_container_stderr "${client_container}"
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  fail_with_diagnostics "coturn client interoperability probe failed with status ${status}: transport=${transport} family=${family} relay_transport=${relay_transport}"
 }
 
 protocol_probe_tls_resumption_load() {
@@ -2087,6 +2152,7 @@ DNS.5 = sni-forward.test
 DNS.6 = sni-default.test
 DNS.7 = quic-forward.test
 DNS.8 = mock-turn-tls
+DNS.9 = coturn
 EOF
 
 cat >"${work_dir}/downstream.cnf" <<'EOF'
@@ -2304,6 +2370,10 @@ if [[ "${CASE_NEED_REDIS}" == "1" ]]; then
   if ! redis_is_ready; then
     fail_with_diagnostics "Redis/Valkey did not become ready"
   fi
+fi
+
+if [[ "${CASE_NEED_COTURN}" == "1" ]]; then
+  require_preloaded_helper_image "${coturn_image}"
 fi
 
 if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
@@ -2599,6 +2669,35 @@ if [[ "${CASE_NEED_TURN_TLS_UPSTREAM}" == "1" ]]; then
   docker cp "${upstream_tls_dir}/server.pem" "${turn_tls_container}:/tls/server.pem"
   docker cp "${upstream_tls_dir}/server.key" "${turn_tls_container}:/tls/server.key"
   docker start "${turn_tls_container}" >/dev/null
+fi
+
+if [[ "${CASE_NEED_COTURN}" == "1" ]]; then
+  docker create \
+    --name "${coturn_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias coturn \
+    --user 65534:65534 \
+    --cap-drop=ALL \
+    --cap-add=NET_BIND_SERVICE \
+    --security-opt no-new-privileges \
+    "${coturn_image}" \
+    --log-file=stdout \
+    --no-cli \
+    --fingerprint \
+    --lt-cred-mech \
+    --realm=turn.example.test \
+    --user=turn-user:turn-password \
+    --pidfile=/tmp/turnserver.pid \
+    --listening-port=3478 \
+    --tls-listening-port=5349 \
+    --min-port=49152 \
+    --max-port=49215 \
+    --cert=/tmp/server.pem \
+    --pkey=/tmp/server.key >/dev/null
+  docker cp "${upstream_tls_dir}/server.pem" "${coturn_container}:/tmp/server.pem"
+  docker cp "${upstream_tls_dir}/server.key" "${coturn_container}:/tmp/server.key"
+  docker start "${coturn_container}" >/dev/null
 fi
 
 proxy_dns_args=()

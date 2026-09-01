@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <chromium|firefox> [basic-navigation|waf-request|waf-response|person-proof|hot-reload]" >&2
+  echo "usage: $0 <chromium|firefox> [basic-navigation|waf-request|waf-response|person-proof|hot-reload|webrtc-turn]" >&2
 }
 
 browser="${1:-}"
@@ -21,7 +21,7 @@ case "${browser}" in
 esac
 
 case "${scenario}" in
-  basic-navigation|waf-request|waf-response|person-proof|hot-reload) ;;
+  basic-navigation|waf-request|waf-response|person-proof|hot-reload|webrtc-turn) ;;
   *)
     usage
     exit 2
@@ -33,6 +33,16 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 runner_temp="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 upstream_port="${OXIBELT_BROWSER_UPSTREAM_PORT:-18080}"
 proxy_port="${OXIBELT_BROWSER_PROXY_PORT:-18443}"
+turn_udp_port="${OXIBELT_BROWSER_TURN_UDP_PORT:-13478}"
+turn_tcp_port="${OXIBELT_BROWSER_TURN_TCP_PORT:-13479}"
+turn_tls_port="${OXIBELT_BROWSER_TURN_TLS_PORT:-15349}"
+turn_relay_start="${OXIBELT_BROWSER_TURN_RELAY_START:-15000}"
+turn_relay_end="${OXIBELT_BROWSER_TURN_RELAY_END:-15031}"
+turn_v6_udp_port="${OXIBELT_BROWSER_TURN_V6_UDP_PORT:-23478}"
+turn_v6_tcp_port="${OXIBELT_BROWSER_TURN_V6_TCP_PORT:-23479}"
+turn_v6_tls_port="${OXIBELT_BROWSER_TURN_V6_TLS_PORT:-25349}"
+turn_v6_relay_start="${OXIBELT_BROWSER_TURN_V6_RELAY_START:-25000}"
+turn_v6_relay_end="${OXIBELT_BROWSER_TURN_V6_RELAY_END:-25031}"
 session_id=""
 driver_base_url=""
 upstream_pid=""
@@ -130,6 +140,16 @@ webdriver_execute_async() {
     --request POST \
     --data "$(jq -n --arg script "${script}" '{script: $script, args: []}')" \
     "${driver_base_url}/session/${session_id}/execute/async" | jq -c ".value"
+}
+
+webdriver_set_script_timeout() {
+  local timeout_ms="$1"
+
+  curl --silent --show-error --fail-with-body \
+    --header "Content-Type: application/json" \
+    --request POST \
+    --data "$(jq -n --argjson timeout_ms "${timeout_ms}" '{script: $timeout_ms}')" \
+    "${driver_base_url}/session/${session_id}/timeouts" >/dev/null
 }
 
 webdriver_body_text() {
@@ -380,7 +400,7 @@ mkdir -p "${config_dir}" "${cert_dir}"
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
   -days 1 \
   -subj "/CN=localhost" \
-  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1" \
   -keyout "${cert_dir}/privkey.pem" \
   -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
 chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
@@ -392,11 +412,15 @@ if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   fi
 
   proxy_bind_addr="0.0.0.0"
+  turn_bind_addr="0.0.0.0"
+  turn_v6_bind_addr="::"
   proxy_origin_host="host.docker.internal"
   cert_chain="fullchain.pem"
   private_key="privkey.pem"
 else
   proxy_bind_addr="127.0.0.1"
+  turn_bind_addr="127.0.0.1"
+  turn_v6_bind_addr="::1"
   proxy_origin_host="127.0.0.1"
   cert_chain="fullchain.pem"
   private_key="privkey.pem"
@@ -545,6 +569,69 @@ path_prefix = "/app"
 upstream = "browser-upstream"
 EOF
 
+if [[ "${scenario}" == "webrtc-turn" ]]; then
+  cat >> "${config_dir}/oxibelt.toml" <<EOF
+
+[[webrtc_turn_listeners]]
+name = "browser-turn-edge"
+mode = "edge_relay"
+bind_udp = "${turn_bind_addr}:${turn_udp_port}"
+bind_tcp = "${turn_bind_addr}:${turn_tcp_port}"
+bind_tls = "${turn_bind_addr}:${turn_tls_port}"
+realm = "turn.localhost"
+idle_timeout_ms = 30000
+
+[[webrtc_turn_listeners.relay_families]]
+family = "ipv4"
+public_ip = "127.0.0.1"
+relay_bind_ip = "${turn_bind_addr}"
+
+[webrtc_turn_listeners.relay_families.relay_port_range]
+start = ${turn_relay_start}
+end = ${turn_relay_end}
+
+[webrtc_turn_listeners.peer_policy]
+allow_loopback_peers = true
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+nonce_ttl_seconds = 60
+
+[[webrtc_turn_listeners.auth.static_credentials]]
+username = "browser-turn-user"
+password = "browser-turn-password"
+
+[[webrtc_turn_listeners]]
+name = "browser-turn-edge-v6"
+mode = "edge_relay"
+bind_udp = "[${turn_v6_bind_addr}]:${turn_v6_udp_port}"
+bind_tcp = "[${turn_v6_bind_addr}]:${turn_v6_tcp_port}"
+bind_tls = "[${turn_v6_bind_addr}]:${turn_v6_tls_port}"
+realm = "turn.localhost"
+idle_timeout_ms = 30000
+
+[[webrtc_turn_listeners.relay_families]]
+family = "ipv6"
+public_ip = "::1"
+relay_bind_ip = "${turn_v6_bind_addr}"
+
+[webrtc_turn_listeners.relay_families.relay_port_range]
+start = ${turn_v6_relay_start}
+end = ${turn_v6_relay_end}
+
+[webrtc_turn_listeners.peer_policy]
+allow_loopback_peers = true
+
+[webrtc_turn_listeners.auth]
+mode = "enforce"
+nonce_ttl_seconds = 60
+
+[[webrtc_turn_listeners.auth.static_credentials]]
+username = "browser-turn-user"
+password = "browser-turn-password"
+EOF
+fi
+
 LISTEN_PORT="${upstream_port}" \
   UPSTREAM_NAME="browser-upstream" \
   python3 "${repo_root}/tests/docker/mock_upstream/server.py" >"${upstream_log}" 2>&1 &
@@ -562,11 +649,24 @@ fi
 
 if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   proxy_container="oxibelt-browser-proxy-${browser}-$(date +%s)-$$"
-  docker create \
+  docker_create_args=(
     --name "${proxy_container}" \
     --add-host host.docker.internal:host-gateway \
-    -p "127.0.0.1:${proxy_port}:${proxy_port}" \
-    "${OXIBELT_DOCKER_IMAGE}" >/dev/null
+    -p "127.0.0.1:${proxy_port}:${proxy_port}"
+  )
+  if [[ "${scenario}" == "webrtc-turn" ]]; then
+    docker_create_args+=(
+      -p "127.0.0.1:${turn_udp_port}:${turn_udp_port}/udp"
+      -p "127.0.0.1:${turn_tcp_port}:${turn_tcp_port}/tcp"
+      -p "127.0.0.1:${turn_tls_port}:${turn_tls_port}/tcp"
+      -p "127.0.0.1:${turn_relay_start}-${turn_relay_end}:${turn_relay_start}-${turn_relay_end}/udp"
+      -p "[::1]:${turn_v6_udp_port}:${turn_v6_udp_port}/udp"
+      -p "[::1]:${turn_v6_tcp_port}:${turn_v6_tcp_port}/tcp"
+      -p "[::1]:${turn_v6_tls_port}:${turn_v6_tls_port}/tcp"
+      -p "[::1]:${turn_v6_relay_start}-${turn_v6_relay_end}:${turn_v6_relay_start}-${turn_v6_relay_end}/udp"
+    )
+  fi
+  docker create "${docker_create_args[@]}" "${OXIBELT_DOCKER_IMAGE}" >/dev/null
   docker cp "${config_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
   docker cp "${cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
   docker start "${proxy_container}" >/dev/null
@@ -712,7 +812,7 @@ PY
     openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
       -days 1 \
       -subj "/CN=localhost" \
-      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1" \
       -keyout "${cert_dir}/privkey.pem" \
       -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
     chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
@@ -724,5 +824,99 @@ PY
     webdriver_navigate "${reload_url}"
     wait_for_body_contains "browser hot reloaded" "hot reload after" >/dev/null
     echo "${browser} WebDriver observed hot-reloaded config and TLS material."
+    ;;
+  webrtc-turn)
+    test_url="https://localhost:${proxy_port}/app/webrtc-turn?browser=${browser}"
+    webdriver_navigate "${test_url}"
+    wait_for_upstream_json "/origin/app/webrtc-turn?browser=${browser}" "WebRTC TURN bootstrap" >/dev/null
+    webdriver_set_script_timeout 150000
+
+    turn_result="$(
+      webdriver_execute_async \
+        "const done = arguments[arguments.length - 1];
+         const cases = [
+           {url: 'turn:127.0.0.1:${turn_udp_port}?transport=udp', family: 'ipv4'},
+           {url: 'turn:127.0.0.1:${turn_tcp_port}?transport=tcp', family: 'ipv4'},
+           {url: 'turns:127.0.0.1:${turn_tls_port}?transport=tcp', family: 'ipv4'},
+           {url: 'turn:[::1]:${turn_v6_udp_port}?transport=udp', family: 'ipv6'},
+           {url: 'turn:[::1]:${turn_v6_tcp_port}?transport=tcp', family: 'ipv6'},
+           {url: 'turns:[::1]:${turn_v6_tls_port}?transport=tcp', family: 'ipv6'}
+         ];
+         const run = async (testCase) => {
+           const {url, family} = testCase;
+           const configuration = {
+             iceServers: [{urls: [url], username: 'browser-turn-user', credential: 'browser-turn-password'}],
+             iceTransportPolicy: 'relay'
+           };
+           const left = new RTCPeerConnection(configuration);
+           const right = new RTCPeerConnection(configuration);
+           const relayCandidates = {left: 0, right: 0, familyMatches: 0};
+           let received = null;
+           let opened = false;
+           const close = () => { left.close(); right.close(); };
+           left.onicecandidate = async (event) => {
+             if (event.candidate) {
+               if (event.candidate.type === 'relay' || event.candidate.candidate.includes(' typ relay ')) {
+                 relayCandidates.left += 1;
+                 const address = event.candidate.address || event.candidate.candidate.split(' ')[4] || '';
+                 if ((family === 'ipv6') === address.includes(':')) relayCandidates.familyMatches += 1;
+               }
+               await right.addIceCandidate(event.candidate);
+             }
+           };
+           right.onicecandidate = async (event) => {
+             if (event.candidate) {
+               if (event.candidate.type === 'relay' || event.candidate.candidate.includes(' typ relay ')) {
+                 relayCandidates.right += 1;
+                 const address = event.candidate.address || event.candidate.candidate.split(' ')[4] || '';
+                 if ((family === 'ipv6') === address.includes(':')) relayCandidates.familyMatches += 1;
+               }
+               await left.addIceCandidate(event.candidate);
+             }
+           };
+           right.ondatachannel = (event) => {
+             event.channel.onmessage = (message) => { received = message.data; };
+           };
+           const channel = left.createDataChannel('oxibelt-turn');
+           channel.onopen = () => { opened = true; channel.send('relayed-through-oxibelt'); };
+           await left.setLocalDescription(await left.createOffer());
+           await right.setRemoteDescription(left.localDescription);
+           await right.setLocalDescription(await right.createAnswer());
+           await left.setRemoteDescription(right.localDescription);
+           const deadline = Date.now() + 20000;
+           while (Date.now() < deadline && received !== 'relayed-through-oxibelt') {
+             await new Promise((resolve) => setTimeout(resolve, 100));
+           }
+           const result = {url, family, opened, received, relayCandidates};
+           close();
+           if (!opened || received !== 'relayed-through-oxibelt' || relayCandidates.left < 1 || relayCandidates.right < 1 || relayCandidates.familyMatches < 2) {
+             throw new Error('relay-only data channel did not complete: ' + JSON.stringify(result));
+           }
+           return result;
+         };
+         (async () => {
+           try {
+             const results = [];
+             for (const testCase of cases) results.push(await run(testCase));
+             done({ok: true, results});
+           } catch (error) {
+             done({ok: false, error: String(error)});
+           }
+         })();"
+    )"
+    if ! jq -e \
+      '.ok == true
+        and (.results | length) == 6
+        and all(.results[]; .opened == true
+          and .received == "relayed-through-oxibelt"
+          and .relayCandidates.left > 0
+          and .relayCandidates.right > 0
+          and .relayCandidates.familyMatches > 1)' <<<"${turn_result}" >/dev/null; then
+      echo "Expected ${browser} to establish dual-stack relay-only data channels over TURN UDP, TCP, and TLS:" >&2
+      echo "${turn_result}" >&2
+      show_diagnostics
+      exit 1
+    fi
+    echo "${browser} WebDriver relayed dual-stack WebRTC data over OxiBelt TURN UDP, TCP, and TLS."
     ;;
 esac

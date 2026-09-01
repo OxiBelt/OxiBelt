@@ -160,6 +160,9 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["workload"]["daemonSet"]["maxUnavailable"], 1);
   assert_eq!(values["workload"]["daemonSet"]["maxSurge"], 0);
   assert_eq!(values["service"]["type"], "LoadBalancer");
+  assert_eq!(values["service"]["externalTrafficPolicy"], "Local");
+  assert_eq!(values["service"]["ipFamilyPolicy"], "");
+  assert!(values["service"]["ipFamilies"].is_array());
   assert!(values["service"]["additionalPorts"].is_array());
   assert_eq!(
     values["service"]["additionalPorts"]
@@ -169,6 +172,25 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     0
   );
   assert_eq!(values["service"]["ports"]["http3"]["targetPort"], 8443);
+  assert_eq!(values["turn"]["enabled"], false);
+  assert_eq!(values["turn"]["configMode"], "external");
+  assert_eq!(values["turn"]["mode"], "proxy_pool");
+  assert_eq!(values["turn"]["control"]["udp"]["port"], 3478);
+  assert_eq!(values["turn"]["control"]["tcp"]["port"], 3478);
+  assert_eq!(values["turn"]["control"]["tls"]["port"], 5349);
+  assert_eq!(values["turn"]["relay"]["udp"]["enabled"], false);
+  assert_eq!(values["turn"]["relay"]["tcp"]["enabled"], false);
+  assert!(values["turn"]["proxy"]["udpPool"]["servers"].is_array());
+  assert!(values["turn"]["proxy"]["tcpPool"]["servers"].is_array());
+  assert!(values["turn"]["proxy"]["tlsPool"]["servers"].is_array());
+  assert_eq!(
+    values["turn"]["auth"]["passwordAlgorithms"],
+    json!(["sha256", "md5"])
+  );
+  assert_eq!(values["turn"]["auth"]["restSharedSecretFile"], "");
+  assert_eq!(values["turn"]["auth"]["nonceSecretFile"], "");
+  assert_eq!(values["turn"]["auth"]["previousNonceSecretFile"], "");
+  assert!(values["turn"]["secretProjections"].is_array());
   assert_eq!(values["operationalProfile"]["name"], "");
   assert_eq!(values["operationalProfile"]["version"], 1);
   assert_eq!(values["operationalProfile"]["wafMode"], "enforcing");
@@ -440,6 +462,44 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     schema["properties"]["service"]["properties"]["additionalPorts"]["maxItems"],
     32
   );
+  assert_eq!(
+    schema["properties"]["service"]["properties"]["ipFamilyPolicy"]["enum"],
+    serde_json::json!(["", "SingleStack", "PreferDualStack", "RequireDualStack"])
+  );
+  assert_eq!(
+    schema["properties"]["service"]["properties"]["ipFamilies"]["maxItems"],
+    2
+  );
+  assert_eq!(
+    schema["definitions"]["turnRelayRange"]["properties"]["start"]["minimum"],
+    1024
+  );
+  assert_eq!(
+    schema["definitions"]["turnSecretProjection"]["properties"]["items"]["items"]["properties"]["path"]
+      ["pattern"],
+    "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+  );
+  assert_eq!(
+    schema["definitions"]["turnCredential"]["required"],
+    json!(["username", "passwordFile"])
+  );
+  assert_eq!(
+    schema["definitions"]["turnServerTls"]["properties"]["trust"]["enum"],
+    json!(["inherit", "system", "exclusive"])
+  );
+  assert_eq!(
+    schema["definitions"]["turnServerTls"]["properties"]["clientIdentity"]["required"],
+    json!(["certChain", "privateKey"])
+  );
+  assert_eq!(
+    schema["definitions"]["turnProxyPool"]["required"],
+    json!(["name", "servers"])
+  );
+  assert_eq!(
+    schema["definitions"]["turnProxyServer"]["properties"]["origin"]["pattern"],
+    "^(turn|turn\\+tcp|turns)://[^/?#]+$"
+  );
+  assert_eq!(schema["properties"]["turn"]["$ref"], "#/definitions/turn");
   assert_eq!(
     schema["definitions"]["additionalServicePort"]["properties"]["targetPort"]["minimum"],
     1024
@@ -893,6 +953,15 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "gateway-config-directory",
     "command: [{{ include \"oxibelt.imageExecutable\" . | quote }}]",
     "oxibelt.validateAdmin",
+    "oxibelt.validateTurn",
+    "turn.secretProjections",
+    "path: {{ $item.path | quote }}",
+    "checksum/oxibelt-turn-secret-references",
+    "name: turn-udp",
+    "name: turn-tcp",
+    "name: turn-tls",
+    "turn.relay.udp.start",
+    "turn.relay.tcp.start",
     "oxibelt.validateKubernetesServiceAccount",
     "automountServiceAccountToken: false",
     "oxibelt.kubernetesApiAccessEnabled",
@@ -947,6 +1016,15 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "gateway-config-directory",
     "command: [{{ include \"oxibelt.imageExecutable\" . | quote }}]",
     "oxibelt.validateAdmin",
+    "oxibelt.validateTurn",
+    "turn.secretProjections",
+    "path: {{ $item.path | quote }}",
+    "checksum/oxibelt-turn-secret-references",
+    "name: turn-udp",
+    "name: turn-tcp",
+    "name: turn-tls",
+    "turn.relay.udp.start",
+    "turn.relay.tcp.start",
     "projected:",
     "defaultMode: 288",
     "admin-server/tls.crt",
@@ -1049,6 +1127,21 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "oxibelt.deploymentAffinity",
     "oxibelt.validateNetworkPolicy",
     "oxibelt.validateAdditionalServicePorts",
+    "oxibelt.validateTurn",
+    "turn.configMode=generated",
+    "may expand to at most 256 ports",
+    "turn UDP and TCP relay ranges may expand to at most 512 ports combined",
+    "native relay_port_range serves RFC6062 TCP and UDP allocations",
+    "oxibelt.turnSecretReferencesDigest",
+    "password_algorithms",
+    "rest_shared_secret_file",
+    "nonce_secret_file",
+    "previous_nonce_secret_file",
+    "password_file",
+    "turn.proxy.tlsPool.servers",
+    "turn_upstream_pools.servers.tls",
+    "client_identity",
+    "projected by turn.secretProjections",
     "service.additionalPorts[].targetPort must be an unprivileged numeric port",
     "networkPolicy.cilium.enabled requires networkPolicy.enabled=true",
     "kubernetes-api egress destination",
@@ -1073,6 +1166,13 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   assert!(service.contains("protocol: UDP"));
   assert!(service.contains("targetPort: http3"));
   assert!(service.contains("range $port := .Values.service.additionalPorts"));
+  assert!(service.contains("ipFamilyPolicy: {{ .Values.service.ipFamilyPolicy }}"));
+  assert!(service.contains("ipFamilies:"));
+  assert!(service.contains("name: turn-udp"));
+  assert!(service.contains("name: turn-tcp"));
+  assert!(service.contains("name: turn-tls"));
+  assert!(service.contains("untilStep (int .Values.turn.relay.udp.start)"));
+  assert!(service.contains("untilStep (int .Values.turn.relay.tcp.start)"));
   assert!(service.contains("targetPort: {{ $port.targetPort }}"));
   assert!(deployment.contains("containerPort: {{ $port.targetPort }}"));
   assert!(daemonset.contains("containerPort: {{ $port.targetPort }}"));
@@ -1112,6 +1212,11 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "port\" \"http\"",
     "port\" \"http3\"",
     ".Values.service.additionalPorts",
+    ".Values.turn.relay.udp.start",
+    ".Values.turn.relay.tcp.start",
+    "endPort",
+    "turn-udp",
+    "turn-tls",
     "networkPolicy.egress.destinations",
     "policyTypes",
   ] {
@@ -1129,6 +1234,9 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
     "matchPattern: \"*\"",
     "oxibelt.ciliumSelectorLabels",
     "networkPolicy.cilium.enabled",
+    "turnIngressPorts",
+    "bounded TURN ranges",
+    "untilStep (int .Values.turn.relay.udp.start)",
   ] {
     assert!(
       cilium_network_policy.contains(needle),

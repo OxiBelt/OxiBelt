@@ -76,6 +76,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("security", "websocket-stream-waf-frame-limit"),
   ("security", "turn-udp-session-cleanup"),
   ("security", "webrtc-turn-auth-transports"),
+  ("security", "webrtc-turn-coturn-interop"),
   ("config-invalid", "strict-unknown-field"),
   ("config-invalid", "emit-mitigation-udf-payload-exclusion"),
   ("listener-http", "redirect-to-https"),

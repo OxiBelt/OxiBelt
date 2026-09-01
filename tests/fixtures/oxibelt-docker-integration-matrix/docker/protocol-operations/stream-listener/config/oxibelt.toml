@@ -58,3 +58,12 @@ target = "mock-http:18080"
 connect_timeout_ms = 3000
 idle_timeout_ms = 30000
 proxy_protocol_egress = "off"
+
+[[stream_listeners]]
+name = "raw-udp"
+network = "udp"
+bind = "0.0.0.0:15433"
+target = "mock-turn-udp:3478"
+connect_timeout_ms = 3000
+idle_timeout_ms = 30000
+proxy_protocol_egress = "off"

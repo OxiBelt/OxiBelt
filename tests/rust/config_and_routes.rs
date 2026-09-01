@@ -11474,8 +11474,11 @@ weight = 1
 name = "turn-edge"
 mode = "proxy_pool"
 bind_udp = "127.0.0.1:0"
+bind_udp_additional = ["[::1]:0"]
 bind_tcp = "127.0.0.1:0"
+bind_tcp_additional = ["[::1]:0"]
 bind_tls = "127.0.0.1:0"
+bind_tls_additional = ["[::1]:0"]
 realm = "example.test"
 udp_pool = "turn-udp"
 tcp_pool = "turn-tcp"
@@ -11492,6 +11495,145 @@ rest_shared_secret = "turn-secret"
   config
     .validate()
     .expect("TURN proxy listener should validate");
+  let listener = &config.webrtc_turn_listeners[0];
+  assert_eq!(
+    listener.bind_udp_additional,
+    vec!["[::1]:0".parse().unwrap()]
+  );
+  assert_eq!(
+    listener.bind_tcp_additional,
+    vec!["[::1]:0".parse().unwrap()]
+  );
+  assert_eq!(
+    listener.bind_tls_additional,
+    vec!["[::1]:0".parse().unwrap()]
+  );
+}
+
+#[test]
+fn webrtc_turn_listeners_reject_wildcard_specific_udp_overlap() {
+  let temp_dir = common::TempDir::new("turn-udp-bind-overlap");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "turn-udp-bind-overlap");
+  let raw = format!(
+    r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-udp"
+
+[[turn_upstream_pools.servers]]
+origin = "turn://turn.internal.example:3478"
+
+[[webrtc_turn_listeners]]
+name = "turn-wildcard"
+bind_udp = "0.0.0.0:3478"
+udp_pool = "turn-udp"
+
+[[webrtc_turn_listeners]]
+name = "turn-specific"
+bind_udp = "127.0.0.1:3478"
+udp_pool = "turn-udp"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("wildcard and specific TURN UDP binds must overlap");
+  assert!(
+    error
+      .to_string()
+      .contains("overlapping WebRTC TURN UDP binds"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn webrtc_turn_listeners_reject_wildcard_tcp_specific_tls_overlap() {
+  let temp_dir = common::TempDir::new("turn-stream-bind-overlap");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "turn-stream-bind-overlap");
+  let raw = format!(
+    r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-tcp"
+[[turn_upstream_pools.servers]]
+origin = "turn+tcp://turn.internal.example:3478"
+
+[[turn_upstream_pools]]
+name = "turn-tls"
+[[turn_upstream_pools.servers]]
+origin = "turns://turn.internal.example:5349"
+
+[[webrtc_turn_listeners]]
+name = "turn-tcp-wildcard"
+bind_tcp = "0.0.0.0:5349"
+tcp_pool = "turn-tcp"
+
+[[webrtc_turn_listeners]]
+name = "turn-tls-specific"
+bind_tls = "127.0.0.1:5349"
+tls_pool = "turn-tls"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("wildcard TURN TCP and specific TURN TLS binds must overlap");
+  assert!(
+    error
+      .to_string()
+      .contains("overlapping WebRTC TURN TCP/TLS binds"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn webrtc_turn_credentials_reject_disallowed_rfc8265_code_points() {
+  let temp_dir = common::TempDir::new("turn-opaque-string-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "turn-opaque-string-invalid");
+  let raw = format!(
+    r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-udp"
+
+[[turn_upstream_pools.servers]]
+origin = "turn://turn.internal.example:3478"
+
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+mode = "proxy_pool"
+bind_udp = "127.0.0.1:0"
+realm = "example.test"
+udp_pool = "turn-udp"
+
+[webrtc_turn_listeners.auth]
+mode = "validate"
+
+[[webrtc_turn_listeners.auth.static_credentials]]
+username = "user"
+password = "bad\u0007password"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("disallowed OpaqueString code points must fail validation");
+  assert!(
+    error.to_string().contains("violates RFC 8265"),
+    "unexpected error: {error}"
+  );
 }
 
 #[test]
@@ -11556,6 +11698,69 @@ tls_pool = "plain-turn"
       .contains("requires TURN upstream pool plain-turn to use turns:// servers only"),
     "unexpected error: {error}"
   );
+}
+
+#[test]
+fn turns_upstream_server_accepts_per_server_tls_policy() {
+  let temp_dir = common::TempDir::new("turns-per-server-tls");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "turns-per-server-tls");
+  let raw = format!(
+    r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-tls"
+
+[[turn_upstream_pools.servers]]
+origin = "turns://turn.internal.example:5349"
+
+[turn_upstream_pools.servers.tls]
+server_name = "turn.internal.example"
+
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+bind_tls = "127.0.0.1:0"
+tls_pool = "turn-tls"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("per-server TURNS TLS should validate");
+}
+
+#[test]
+fn turn_upstream_server_rejects_tls_policy_for_non_turns_origin() {
+  let temp_dir = common::TempDir::new("turn-non-tls-policy");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "turn-non-tls-policy");
+  let raw = format!(
+    r#"
+{}
+
+[[turn_upstream_pools]]
+name = "turn-udp"
+
+[[turn_upstream_pools.servers]]
+origin = "turn://turn.internal.example:3478"
+
+[turn_upstream_pools.servers.tls]
+server_name = "turn.internal.example"
+
+[[webrtc_turn_listeners]]
+name = "turn-edge"
+bind_udp = "127.0.0.1:0"
+udp_pool = "turn-udp"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("non-TURNS TLS policy must fail");
+  assert!(error.to_string().contains("tls is only valid for turns://"));
 }
 
 #[test]

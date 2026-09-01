@@ -231,5 +231,18 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       },
       None,
     ),
+    docker_case(
+      "security",
+      "webrtc-turn-coturn-interop",
+      "coturn clients qualify OxiBelt edge and proxy TURN over UDP, TCP, TLS, IPv6, and RFC 6062",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        coturn: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
   ]
 }

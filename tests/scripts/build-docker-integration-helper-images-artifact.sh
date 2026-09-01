@@ -32,6 +32,7 @@ pq_probe_image="oxibelt/pq-probe:ci"
 protocol_probe_image="oxibelt/protocol-probe:ci"
 postgres_image="oxibelt/postgres:ci"
 redis_image="valkey/valkey:9-alpine"
+coturn_image="ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e"
 
 retry_command() {
   local attempts="$1"
@@ -72,7 +73,8 @@ for base_image in \
   rust:1.98.0-trixie \
   debian:trixie-slim \
   postgres:18-alpine \
-  "${redis_image}"; do
+  "${redis_image}" \
+  "${coturn_image}"; do
   retry_command 3 docker pull --platform "${platform}" "${base_image}"
 done
 
@@ -120,7 +122,8 @@ retry_command 3 docker save \
   "${pq_probe_image}" \
   "${protocol_probe_image}" \
   "${postgres_image}" \
-  "${redis_image}"
+  "${redis_image}" \
+  "${coturn_image}"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
@@ -133,6 +136,7 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "protocol_probe_image=${protocol_probe_image}"
     echo "postgres_image=${postgres_image}"
     echo "redis_image=${redis_image}"
+    echo "coturn_image=${coturn_image}"
   } >>"${GITHUB_OUTPUT}"
 fi
 

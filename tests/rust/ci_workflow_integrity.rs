@@ -6761,6 +6761,7 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
     "oxibelt/protocol-probe:ci",
     "oxibelt/postgres:ci",
     "valkey/valkey:9-alpine",
+    "ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e",
   ] {
     assert!(
       script.contains(image),
@@ -6802,6 +6803,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci",
     "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci",
     "OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine",
+    "OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e",
     "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
   ] {
     let expected_count = if value == "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci" {
@@ -7012,8 +7014,8 @@ fn ambiguous_framing_client_reads_an_exact_early_error_response() {
   );
   assert_eq!(
     script.matches("else\n    status=$?\n  fi").count(),
-    3,
-    "slow, split, and chunked body helpers should retain the real failed container status"
+    4,
+    "slow, split, chunked body, and TURN probe helpers should retain the real failed container status"
   );
   assert!(
     workflow.contains("python3 -m unittest tests/scripts/test-mock-upstream-client.py"),

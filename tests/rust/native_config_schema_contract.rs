@@ -334,6 +334,7 @@ fn upstream_tls_subject_alt_names_schema_is_typed_and_bounded() {
     "upstreams[].tls.subject_alt_names",
     "upstream_pools[].servers[].tls.subject_alt_names",
     "upstream_pools[].discovery[].tls.subject_alt_names",
+    "turn_upstream_pools[].servers[].tls.subject_alt_names",
   ] {
     let subject_alt_names = schema_node_for_metadata_path(&schema, path);
     assert_eq!(
@@ -367,6 +368,41 @@ fn upstream_tls_subject_alt_names_schema_is_typed_and_bounded() {
       "unexpected maximum length at {path}"
     );
   }
+}
+
+#[test]
+fn turn_schema_publishes_bounded_admission_and_password_algorithm_defaults() {
+  let schema = generate_native_config_schema().expect("native schema should generate");
+  let schema: serde_json::Value =
+    serde_json::from_str(&schema).expect("generated schema should be JSON");
+  let password_algorithms =
+    schema_node_for_metadata_path(&schema, "webrtc_turn_listeners[].auth.password_algorithms");
+  assert_eq!(password_algorithms["type"], "array");
+  assert_eq!(password_algorithms["minItems"], 1);
+  assert_eq!(password_algorithms["maxItems"], 2);
+  assert_eq!(password_algorithms["uniqueItems"], true);
+  assert_eq!(
+    password_algorithms["items"]["enum"],
+    serde_json::json!(["sha256", "md5"])
+  );
+  assert_eq!(
+    password_algorithms["default"],
+    serde_json::json!(["sha256", "md5"])
+  );
+  assert_eq!(
+    schema_node_for_metadata_path(
+      &schema,
+      "webrtc_turn_listeners[].limits.max_proxy_udp_sessions_per_listener"
+    )["default"],
+    4_096
+  );
+  assert_eq!(
+    schema_node_for_metadata_path(
+      &schema,
+      "webrtc_turn_listeners[].limits.max_pending_tcp_connections"
+    )["default"],
+    1_024
+  );
 }
 
 #[test]
@@ -419,6 +455,18 @@ fn sensitive_metadata_covers_runtime_confidentiality_boundaries() {
     (
       "webrtc_turn_listeners[0].auth.static_credentials[0].password_env",
       NativeConfigSecretClass::EnvironmentReference,
+    ),
+    (
+      "webrtc_turn_listeners[0].auth.nonce_secret_file",
+      NativeConfigSecretClass::FileReference,
+    ),
+    (
+      "webrtc_turn_listeners[0].auth.previous_nonce_secret_env",
+      NativeConfigSecretClass::EnvironmentReference,
+    ),
+    (
+      "webrtc_turn_listeners[0].auth.static_credentials[0].password_file",
+      NativeConfigSecretClass::FileReference,
     ),
   ] {
     assert_eq!(
@@ -492,8 +540,14 @@ fn generated_schema_preserves_metadata_through_array_items() {
     "runtime.hardening.filesystem_manifest.expected_writable_paths",
     "webrtc_turn_listeners[].auth.rest_shared_secret",
     "webrtc_turn_listeners[].auth.rest_shared_secret_env",
+    "webrtc_turn_listeners[].auth.rest_shared_secret_file",
+    "webrtc_turn_listeners[].auth.nonce_secret_env",
+    "webrtc_turn_listeners[].auth.nonce_secret_file",
+    "webrtc_turn_listeners[].auth.previous_nonce_secret_env",
+    "webrtc_turn_listeners[].auth.previous_nonce_secret_file",
     "webrtc_turn_listeners[].auth.static_credentials[].password",
     "webrtc_turn_listeners[].auth.static_credentials[].password_env",
+    "webrtc_turn_listeners[].auth.static_credentials[].password_file",
     "webrtc_turn_listeners[].tls.private_key",
     "tls.certificates[].ocsp.responder_url",
     "tls.certificates[].private_key",

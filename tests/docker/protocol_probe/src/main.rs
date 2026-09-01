@@ -2310,11 +2310,11 @@ where
 }
 
 async fn run_turn_client(args: TurnClientArgs) -> anyhow::Result<()> {
-  let request = turn_request(&args, None);
   if args.expect == TurnClientExpect::AllocateSuccess && args.transport == TurnTransport::Udp {
-    run_turn_udp_allocate_success(&args, &request, args.allocation_hold_ms).await?;
+    run_turn_udp_allocate_success(&args, args.allocation_hold_ms).await?;
     return print_turn_client_result(args.transport, args.expect);
   }
+  let request = turn_request(&args, None);
   let response = turn_round_trip(&args, &request).await?;
   match args.expect {
     TurnClientExpect::Echo => {
@@ -2379,7 +2379,6 @@ fn print_turn_client_result(
 
 async fn run_turn_udp_allocate_success(
   args: &TurnClientArgs,
-  request: &[u8],
   hold_ms: Option<u64>,
 ) -> anyhow::Result<()> {
   let remote = resolve_remote_addr(&args.host, args.port).await?;
@@ -2390,15 +2389,20 @@ async fn run_turn_udp_allocate_success(
     .connect(remote)
     .await
     .context("failed to connect TURN UDP client socket")?;
-  let challenge = turn_udp_round_trip_on_socket(&socket, request)
+  let challenge_request = turn_challenge_request();
+  let challenge = turn_udp_round_trip_on_socket(&socket, &challenge_request)
     .await?
     .ok_or_else(|| anyhow!("expected TURN nonce challenge"))?;
-  if !is_stun_response_for_request(&challenge, request, STUN_ALLOCATE_REQUEST | 0x0110) {
+  if !is_stun_response_for_request(
+    &challenge,
+    &challenge_request,
+    STUN_ALLOCATE_REQUEST | 0x0110,
+  ) {
     bail!("TURN edge allocation did not begin with an error challenge");
   }
   let nonce = stun_attr(&challenge, STUN_ATTR_NONCE)
     .ok_or_else(|| anyhow!("TURN nonce challenge omitted NONCE"))?;
-  let authenticated = turn_request(args, Some(nonce));
+  let authenticated = turn_request_with_auth(args, Some(nonce), args.auth, *b"oxibeltauth!");
   let response = turn_udp_round_trip_on_socket(&socket, &authenticated)
     .await?
     .ok_or_else(|| anyhow!("expected TURN Allocate success response"))?;
@@ -4849,9 +4853,33 @@ const STUN_ATTR_REALM: u16 = 0x0014;
 const STUN_ATTR_NONCE: u16 = 0x0015;
 const STUN_ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
 const STUN_ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
+#[cfg(test)]
+const STUN_ATTR_MESSAGE_INTEGRITY_SHA256: u16 = 0x001c;
+#[cfg(test)]
+const STUN_ATTR_PASSWORD_ALGORITHM: u16 = 0x001d;
+#[cfg(test)]
+const STUN_ATTR_USERHASH: u16 = 0x001e;
+#[cfg(test)]
+const STUN_ATTR_PASSWORD_ALGORITHMS: u16 = 0x8002;
+
+fn turn_challenge_request() -> Vec<u8> {
+  encode_stun_message(
+    STUN_ALLOCATE_REQUEST,
+    *b"oxibeltinit!",
+    &[(STUN_ATTR_REQUESTED_TRANSPORT, vec![17, 0, 0, 0])],
+  )
+}
 
 fn turn_request(args: &TurnClientArgs, nonce: Option<&[u8]>) -> Vec<u8> {
-  let transaction_id = *b"oxibeltprobe";
+  turn_request_with_auth(args, nonce, args.auth, *b"oxibeltprobe")
+}
+
+fn turn_request_with_auth(
+  args: &TurnClientArgs,
+  nonce: Option<&[u8]>,
+  auth: TurnClientAuth,
+  transaction_id: [u8; 12],
+) -> Vec<u8> {
   let mut attrs = vec![
     (STUN_ATTR_USERNAME, args.username.as_bytes().to_vec()),
     (STUN_ATTR_REALM, args.realm.as_bytes().to_vec()),
@@ -4860,7 +4888,7 @@ fn turn_request(args: &TurnClientArgs, nonce: Option<&[u8]>) -> Vec<u8> {
   if let Some(nonce) = nonce {
     attrs.push((STUN_ATTR_NONCE, nonce.to_vec()));
   }
-  let mut request = match args.auth {
+  let mut request = match auth {
     TurnClientAuth::Missing => encode_stun_message(STUN_ALLOCATE_REQUEST, transaction_id, &attrs),
     TurnClientAuth::Invalid => {
       attrs.push((STUN_ATTR_MESSAGE_INTEGRITY, vec![0u8; 20]));
@@ -5262,6 +5290,24 @@ mod tests {
           .expect("receive initial Allocate")
           .expect("receive initial Allocate datagram");
       assert!(first_len >= STUN_HEADER_LEN);
+      assert!(
+        stun_attr(&buffer[..first_len], STUN_ATTR_MESSAGE_INTEGRITY).is_none(),
+        "initial Allocate must be an unauthenticated challenge request"
+      );
+      for forbidden in [
+        STUN_ATTR_USERNAME,
+        STUN_ATTR_REALM,
+        STUN_ATTR_NONCE,
+        STUN_ATTR_MESSAGE_INTEGRITY_SHA256,
+        STUN_ATTR_PASSWORD_ALGORITHM,
+        STUN_ATTR_USERHASH,
+        STUN_ATTR_PASSWORD_ALGORITHMS,
+      ] {
+        assert!(
+          stun_attr(&buffer[..first_len], forbidden).is_none(),
+          "initial Allocate carried forbidden authentication attribute {forbidden:#06x}"
+        );
+      }
       let first_transaction_id: [u8; 12] = buffer[8..STUN_HEADER_LEN]
         .try_into()
         .expect("initial Allocate transaction ID");
@@ -5285,9 +5331,17 @@ mod tests {
         first_peer, second_peer,
         "allocation exchange must use one UDP socket"
       );
+      assert!(
+        stun_attr(&buffer[..second_len], STUN_ATTR_MESSAGE_INTEGRITY).is_some(),
+        "challenged Allocate must carry long-term MESSAGE-INTEGRITY"
+      );
       let second_transaction_id: [u8; 12] = buffer[8..STUN_HEADER_LEN]
         .try_into()
         .expect("authenticated Allocate transaction ID");
+      assert_ne!(
+        first_transaction_id, second_transaction_id,
+        "challenged Allocate must use a fresh transaction ID"
+      );
       let success = encode_stun_message(
         STUN_ALLOCATE_REQUEST | 0x0100,
         second_transaction_id,
@@ -5313,7 +5367,7 @@ mod tests {
       mutation: TurnClientMutation::None,
       allocation_hold_ms: Some(1),
     };
-    run_turn_udp_allocate_success(&args, &turn_request(&args, None), Some(1))
+    run_turn_udp_allocate_success(&args, Some(1))
       .await
       .expect("same-socket Allocate flow should succeed");
     server_task.await.expect("test TURN server should finish");

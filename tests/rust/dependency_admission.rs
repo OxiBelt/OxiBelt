@@ -540,6 +540,7 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
     category_names,
     BTreeSet::from([
       "compression",
+      "credential-internationalization",
       "cryptography",
       "database",
       "kubernetes",

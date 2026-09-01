@@ -59,12 +59,13 @@ fn exercise_generated_stun(data: &[u8]) {
 
 fn exercise_generated_channel_data(data: &[u8]) {
     let mut input = FuzzInput::new(data);
-    let channel = 0x4000 | (input.u16() & 0x3fff);
+    let channel = 0x4000 | (input.u16() & 0x0fff);
     let payload_len = input.usize(MAX_CHANNEL_PAYLOAD_BYTES + 1);
     let payload = input.bytes(payload_len);
 
-    let encoded = encode_channel_data(channel, &payload);
-    let _ = parse_channel_data(&encoded);
+    if let Ok(encoded) = encode_channel_data(channel, &payload) {
+        let _ = parse_channel_data(&encoded);
+    }
 }
 
 fn helper_attr_kinds() -> [u16; 12] {

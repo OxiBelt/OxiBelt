@@ -180,6 +180,45 @@ done
 assert_contains "${work_dir}/additional_l4_ports.yaml" "protocol: TCP"
 assert_contains "${work_dir}/additional_l4_ports.yaml" "protocol: UDP"
 
+render external_tcp_only_turn_edge \
+  --set turn.enabled=true \
+  --set turn.configMode=external \
+  --set turn.mode=edge_relay \
+  --set turn.control.udp.enabled=false \
+  --set turn.control.tcp.enabled=true \
+  --set turn.control.tls.enabled=false \
+  --set turn.relay.udp.enabled=false \
+  --set turn.relay.tcp.enabled=true \
+  --set turn.relay.tcp.start=49152 \
+  --set turn.relay.tcp.end=49152
+assert_contains "${work_dir}/external_tcp_only_turn_edge.yaml" "name: turn-tcp"
+assert_contains "${work_dir}/external_tcp_only_turn_edge.yaml" "name: turn-t49152"
+assert_contains "${work_dir}/external_tcp_only_turn_edge.yaml" "containerPort: 49152"
+assert_not_contains "${work_dir}/external_tcp_only_turn_edge.yaml" "name: turn-u49152"
+
+render generated_dual_stack_turn_edge \
+  --set replicaCount=1 \
+  --set turn.enabled=true \
+  --set turn.configMode=generated \
+  --set turn.mode=edge_relay \
+  --set turn.control.tcp.enabled=false \
+  --set turn.control.tls.enabled=false \
+  --set turn.relay.udp.enabled=true \
+  --set turn.relay.udp.start=49152 \
+  --set turn.relay.udp.end=49152 \
+  --set turn.edge.ipv4.publicIp=192.0.2.10 \
+  --set turn.edge.ipv4.relayBindIp=0.0.0.0 \
+  --set turn.edge.ipv6.publicIp=2001:db8::10 \
+  --set turn.edge.ipv6.relayBindIp=:: \
+  --set turn.auth.mode=enforce \
+  --set turn.auth.nonceSecretFile=turn/nonce \
+  --set-json 'turn.auth.staticCredentials=[{"username":"media","passwordFile":"turn/media-password"}]' \
+  --set-json 'turn.secretProjections=[{"name":"turn-auth","secretName":"turn-auth","items":[{"key":"nonce","path":"turn/nonce"},{"key":"password","path":"turn/media-password"}]}]' \
+  --set service.ipFamilyPolicy=RequireDualStack \
+  --set-json 'service.ipFamilies=["IPv4","IPv6"]'
+assert_contains "${work_dir}/generated_dual_stack_turn_edge.yaml" 'bind_udp = "0.0.0.0:3478"'
+assert_contains "${work_dir}/generated_dual_stack_turn_edge.yaml" 'bind_udp_additional = ["[::]:3478"]'
+
 expect_failure additional_port_privileged_schema \
   --set-json 'service.additionalPorts=[{"name":"bad-tcp","protocol":"TCP","port":9000,"targetPort":443}]'
 expect_failure_contains additional_port_privileged_helper \
@@ -197,6 +236,20 @@ render cilium_fqdn \
   --set-json 'networkPolicy.cilium.fqdnDestinations=[{"name":"ocsp","category":"revocation","matchNames":["ocsp.example.com"],"ports":[{"port":80,"protocol":"TCP"}]}]'
 assert_contains "${work_dir}/cilium_fqdn.yaml" "kind: CiliumNetworkPolicy"
 assert_contains "${work_dir}/cilium_fqdn.yaml" "k8s:app.kubernetes.io/name: oxibelt"
+
+render cilium_turn_target_ports \
+  --set networkPolicy.enabled=true \
+  --set networkPolicy.cilium.enabled=true \
+  --set networkPolicy.ingress.public.allowAll=true \
+  --set turn.enabled=true \
+  --set turn.control.udp.targetPort=13478 \
+  --set turn.control.tcp.targetPort=13479 \
+  --set turn.control.tls.targetPort=15349 \
+  --set-json 'networkPolicy.cilium.fqdnDestinations=[{"name":"ocsp","category":"revocation","matchNames":["ocsp.example.com"],"ports":[{"port":80,"protocol":"TCP"}]}]' \
+  --set-json 'networkPolicy.egress.destinations=[{"name":"turn-peers","category":"upstream","to":[{"ipBlock":{"cidr":"192.0.2.0/24"}}],"ports":[{"port":3478,"protocol":"UDP"}]}]'
+assert_contains "${work_dir}/cilium_turn_target_ports.yaml" 'port: "13478"'
+assert_contains "${work_dir}/cilium_turn_target_ports.yaml" 'port: "13479"'
+assert_contains "${work_dir}/cilium_turn_target_ports.yaml" 'port: "15349"'
 
 render cilium_fqdn_show_only \
   --set networkPolicy.enabled=true \

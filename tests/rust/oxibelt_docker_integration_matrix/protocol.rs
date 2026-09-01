@@ -39,10 +39,12 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     docker_case(
       "protocol-operations",
       "stream-listener",
-      "TCP stream listener proxies raw HTTP to a fixed target",
+      "TCP and UDP stream listeners proxy raw traffic to fixed targets",
       ExpectStart::Success,
       Needs {
         http_upstream: true,
+        protocol_probe: true,
+        turn_udp_upstream: true,
         ..Needs::default()
       },
       None,
