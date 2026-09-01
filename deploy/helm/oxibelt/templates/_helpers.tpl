@@ -196,8 +196,154 @@ reject_unknown_sni = true
 {{- define "oxibelt.generatedConfigContent" -}}
 {{- include "oxibelt.operationalProfileConfig" . -}}
 {{- tpl .Values.config.inline . -}}
+{{- include "oxibelt.turnConfig" . -}}
 {{- include "oxibelt.runtimeHardeningConfig" . -}}
 {{- include "oxibelt.operationalProfileWafConfig" . -}}
+{{- end -}}
+
+{{- define "oxibelt.turnConfig" -}}
+{{- include "oxibelt.validateTurn" . -}}
+{{- if and .Values.turn.enabled (eq .Values.turn.configMode "generated") }}
+{{- $turnIpFamilies := .Values.service.ipFamilies | default (list "IPv4") -}}
+{{- $turnPrimaryHost := "0.0.0.0" -}}
+{{- if eq (index $turnIpFamilies 0) "IPv6" -}}{{- $turnPrimaryHost = "[::]" -}}{{- end -}}
+{{- $turnAdditionalHost := "" -}}
+{{- if gt (len $turnIpFamilies) 1 -}}
+{{- $turnAdditionalHost = "0.0.0.0" -}}
+{{- if eq (index $turnIpFamilies 1) "IPv6" -}}{{- $turnAdditionalHost = "[::]" -}}{{- end -}}
+{{- end -}}
+
+[[webrtc_turn_listeners]]
+name = {{ .Values.turn.name | quote }}
+mode = {{ .Values.turn.mode | quote }}
+{{- if .Values.turn.control.udp.enabled }}
+bind_udp = {{ printf "%s:%d" $turnPrimaryHost (int .Values.turn.control.udp.targetPort) | quote }}
+{{- if $turnAdditionalHost }}
+bind_udp_additional = [{{ printf "%s:%d" $turnAdditionalHost (int .Values.turn.control.udp.targetPort) | quote }}]
+{{- end }}
+{{- end }}
+{{- if .Values.turn.control.tcp.enabled }}
+bind_tcp = {{ printf "%s:%d" $turnPrimaryHost (int .Values.turn.control.tcp.targetPort) | quote }}
+{{- if $turnAdditionalHost }}
+bind_tcp_additional = [{{ printf "%s:%d" $turnAdditionalHost (int .Values.turn.control.tcp.targetPort) | quote }}]
+{{- end }}
+{{- end }}
+{{- if .Values.turn.control.tls.enabled }}
+bind_tls = {{ printf "%s:%d" $turnPrimaryHost (int .Values.turn.control.tls.targetPort) | quote }}
+{{- if $turnAdditionalHost }}
+bind_tls_additional = [{{ printf "%s:%d" $turnAdditionalHost (int .Values.turn.control.tls.targetPort) | quote }}]
+{{- end }}
+{{- end }}
+idle_timeout_ms = {{ int .Values.turn.idleTimeoutMs }}
+realm = {{ .Values.turn.realm | quote }}
+{{- if eq .Values.turn.mode "proxy_pool" }}
+{{- if .Values.turn.control.udp.enabled }}
+udp_pool = {{ .Values.turn.proxy.udpPool.name | quote }}
+{{- end }}
+{{- if .Values.turn.control.tcp.enabled }}
+tcp_pool = {{ .Values.turn.proxy.tcpPool.name | quote }}
+{{- end }}
+{{- if .Values.turn.control.tls.enabled }}
+tls_pool = {{ .Values.turn.proxy.tlsPool.name | quote }}
+{{- end }}
+{{- end }}
+
+[webrtc_turn_listeners.auth]
+mode = {{ .Values.turn.auth.mode | quote }}
+nonce_ttl_seconds = {{ int .Values.turn.auth.nonceTtlSeconds }}
+password_algorithms = {{ .Values.turn.auth.passwordAlgorithms | toJson }}
+{{- if .Values.turn.auth.restSharedSecretFile }}
+rest_shared_secret_file = {{ .Values.turn.auth.restSharedSecretFile | quote }}
+{{- end }}
+{{- if .Values.turn.auth.nonceSecretFile }}
+nonce_secret_file = {{ .Values.turn.auth.nonceSecretFile | quote }}
+{{- end }}
+{{- if .Values.turn.auth.previousNonceSecretFile }}
+previous_nonce_secret_file = {{ .Values.turn.auth.previousNonceSecretFile | quote }}
+{{- end }}
+{{- range $credential := .Values.turn.auth.staticCredentials }}
+
+[[webrtc_turn_listeners.auth.static_credentials]]
+username = {{ $credential.username | quote }}
+password_file = {{ $credential.passwordFile | quote }}
+{{- end }}
+
+{{- if eq .Values.turn.mode "edge_relay" }}
+{{- range $family := list (dict "name" "ipv4" "value" .Values.turn.edge.ipv4) (dict "name" "ipv6" "value" .Values.turn.edge.ipv6) }}
+{{- if and $family.value.publicIp $family.value.relayBindIp }}
+[[webrtc_turn_listeners.relay_families]]
+family = {{ $family.name | quote }}
+public_ip = {{ $family.value.publicIp | quote }}
+relay_bind_ip = {{ $family.value.relayBindIp | quote }}
+[webrtc_turn_listeners.relay_families.relay_port_range]
+start = {{ int $.Values.turn.relay.udp.start }}
+end = {{ int $.Values.turn.relay.udp.end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.turn.enabled (eq .Values.turn.configMode "generated") (eq .Values.turn.mode "proxy_pool") }}
+{{- range $pool := list .Values.turn.proxy.udpPool .Values.turn.proxy.tcpPool .Values.turn.proxy.tlsPool }}
+{{- if $pool.servers }}
+
+[[turn_upstream_pools]]
+name = {{ $pool.name | quote }}
+{{- range $server := $pool.servers }}
+[[turn_upstream_pools.servers]]
+{{- if $server.id }}
+id = {{ $server.id | quote }}
+{{- end }}
+origin = {{ $server.origin | quote }}
+{{- if $server.weight }}
+weight = {{ int $server.weight }}
+{{- end }}
+{{- if $server.maxConns }}
+max_conns = {{ int $server.maxConns }}
+{{- end }}
+{{- if $server.backup }}
+backup = true
+{{- end }}
+{{- if $server.state }}
+state = {{ $server.state | quote }}
+{{- end }}
+{{- $tls := $server.tls | default (dict) }}
+{{- if $tls }}
+[turn_upstream_pools.servers.tls]
+{{- if $tls.serverName }}
+server_name = {{ $tls.serverName | quote }}
+{{- end }}
+{{- if $tls.trust }}
+trust = {{ $tls.trust | quote }}
+{{- end }}
+{{- if $tls.trustedCaCerts }}
+trusted_ca_certs = {{ $tls.trustedCaCerts | toJson }}
+trusted_ca_sha256 = {{ $tls.trustedCaSha256 | toJson }}
+{{- end }}
+{{- if $tls.clientIdentity }}
+[turn_upstream_pools.servers.tls.client_identity]
+cert_chain = {{ $tls.clientIdentity.certChain | quote }}
+private_key = {{ $tls.clientIdentity.privateKey | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+[turn_upstream_pools.health_check]
+enabled = false
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{- define "oxibelt.turnSecretReferencesDigest" -}}
+{{- $references := list -}}
+{{- range $projection := (.Values.turn.secretProjections | default (list)) -}}
+{{- $items := list -}}
+{{- range $item := $projection.items -}}
+{{- $items = append $items (dict "key" $item.key "path" $item.path) -}}
+{{- end -}}
+{{- $references = append $references (dict "name" $projection.name "secretName" $projection.secretName "items" $items) -}}
+{{- end -}}
+{{- printf "oxibelt-helm-turn-secret-references-v1\n%s" ($references | toJson) | sha256sum -}}
 {{- end -}}
 
 {{- define "oxibelt.runtimeHardeningConfig" -}}
@@ -903,6 +1049,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- $expectedCertMountPath := include "oxibelt.certMountPath" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- $hasUpstreamTlsSecretProjections := gt (len (.Values.upstreamTls.clientIdentitySecretProjections | default (list))) 0 -}}
+{{- $hasTurnSecretProjections := gt (len (.Values.turn.secretProjections | default (list))) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
 {{- if eq .Values.image.role "dataplane-strict" -}}
 {{- if or $admin.enabled $admin.service.enabled $admin.insecureDevelopmentMode.enabled $admin.tls.enabled $admin.mtls.enabled -}}
@@ -923,7 +1070,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if or (not (hasPrefix "/" $configMountPath)) (eq $configMountPath "/") -}}
 {{- fail "config.mountPath must be an absolute non-root directory" -}}
 {{- end -}}
-{{- if and (or .Values.tls.enabled (and $admin.enabled $admin.tls.enabled) $hasRedisSecretProjections $hasUpstreamTlsSecretProjections $hasQuicHostKey) (ne (trimSuffix "/" .Values.tls.mountPath) $expectedCertMountPath) -}}
+{{- if and (or .Values.tls.enabled (and $admin.enabled $admin.tls.enabled) $hasRedisSecretProjections $hasUpstreamTlsSecretProjections $hasTurnSecretProjections $hasQuicHostKey) (ne (trimSuffix "/" .Values.tls.mountPath) $expectedCertMountPath) -}}
 {{- fail "tls.mountPath must be the cert sibling of config.mountPath" -}}
 {{- end -}}
 {{- if and $admin.service.enabled (not $admin.enabled) -}}
@@ -1332,6 +1479,524 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if not (kindIs "slice" $ports) -}}
 {{- fail "service.additionalPorts must be an array" -}}
 {{- end -}}
+{{- include "oxibelt.validateAdditionalServicePortsBody" . -}}
+{{- end -}}
+
+{{- define "oxibelt.validateTurnControl" -}}
+{{- $control := .control -}}
+{{- $field := .field -}}
+{{- if not (kindIs "map" $control) -}}
+{{- fail (printf "%s must be an object" $field) -}}
+{{- end -}}
+{{- if or (not (hasKey $control "enabled")) (not (kindIs "bool" $control.enabled)) -}}
+{{- fail (printf "%s.enabled must be a boolean" $field) -}}
+{{- end -}}
+{{- $port := int ($control.port | default 0) -}}
+{{- $targetPort := int ($control.targetPort | default 0) -}}
+{{- if or (lt $port 1) (gt $port 65535) -}}
+{{- fail (printf "%s.port must be from 1 through 65535" $field) -}}
+{{- end -}}
+{{- if or (lt $targetPort 1024) (gt $targetPort 65535) -}}
+{{- fail (printf "%s.targetPort must be an unprivileged numeric port from 1024 through 65535" $field) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateTurnRelayRange" -}}
+{{- $range := .range -}}
+{{- $field := .field -}}
+{{- if not (kindIs "map" $range) -}}
+{{- fail (printf "%s must be an object" $field) -}}
+{{- end -}}
+{{- if or (not (hasKey $range "enabled")) (not (kindIs "bool" $range.enabled)) -}}
+{{- fail (printf "%s.enabled must be a boolean" $field) -}}
+{{- end -}}
+{{- $start := int ($range.start | default 0) -}}
+{{- $end := int ($range.end | default 0) -}}
+{{- if or (lt $start 1024) (gt $start 65535) (lt $end 1024) (gt $end 65535) (gt $start $end) -}}
+{{- fail (printf "%s.start and end must be unprivileged ports with start <= end" $field) -}}
+{{- end -}}
+{{- if and $range.enabled (gt (add (sub $end $start) 1) 256) -}}
+{{- fail (printf "%s may expand to at most 256 ports" $field) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateTurn" -}}
+{{- $turn := .Values.turn | default (dict) -}}
+{{- if not (kindIs "map" $turn) -}}
+{{- fail "turn must be an object" -}}
+{{- end -}}
+{{- $enabled := $turn.enabled | default false -}}
+{{- if not (kindIs "bool" $enabled) -}}
+{{- fail "turn.enabled must be a boolean" -}}
+{{- end -}}
+{{- $configMode := $turn.configMode | default "external" -}}
+{{- if not (has $configMode (list "external" "generated")) -}}
+{{- fail "turn.configMode must be external or generated" -}}
+{{- end -}}
+{{- $mode := $turn.mode | default "proxy_pool" -}}
+{{- if not (has $mode (list "proxy_pool" "edge_relay")) -}}
+{{- fail "turn.mode must be proxy_pool or edge_relay" -}}
+{{- end -}}
+{{- $name := $turn.name | default "" -}}
+{{- if or (not (kindIs "string" $name)) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $name)) (gt (len $name) 63) -}}
+{{- fail "turn.name must be a safe lower-case DNS label up to 63 characters" -}}
+{{- end -}}
+{{- $realm := $turn.realm | default "" -}}
+{{- if or (not (kindIs "string" $realm)) (not $realm) (gt (len $realm) 253) -}}
+{{- fail "turn.realm must be a nonempty string of at most 253 characters" -}}
+{{- end -}}
+{{- $idleTimeoutMs := int ($turn.idleTimeoutMs | default 0) -}}
+{{- if or (lt $idleTimeoutMs 1) (gt $idleTimeoutMs 86400000) -}}
+{{- fail "turn.idleTimeoutMs must be between 1 and 86400000" -}}
+{{- end -}}
+
+{{- $control := $turn.control | default (dict) -}}
+{{- if not (kindIs "map" $control) -}}
+{{- fail "turn.control must be an object" -}}
+{{- end -}}
+{{- range $transport := list "udp" "tcp" "tls" -}}
+{{- if not (hasKey $control $transport) -}}
+{{- fail (printf "turn.control.%s is required" $transport) -}}
+{{- end -}}
+{{- include "oxibelt.validateTurnControl" (dict "control" (index $control $transport) "field" (printf "turn.control.%s" $transport)) -}}
+{{- end -}}
+{{- $enabledControls := 0 -}}
+{{- range $transport := list "udp" "tcp" "tls" -}}
+{{- if (index $control $transport).enabled }}{{- $enabledControls = add $enabledControls 1 -}}{{- end -}}
+{{- end -}}
+{{- if and $enabled (eq $enabledControls 0) -}}
+{{- fail "turn must enable at least one UDP, TCP, or TLS control port" -}}
+{{- end -}}
+{{- if and $enabled (eq $configMode "generated") (index $control "tls").enabled (not .Values.tls.enabled) -}}
+{{- fail "generated TURN TLS control requires tls.enabled=true so the global projected certificate is available" -}}
+{{- end -}}
+
+{{- $relay := $turn.relay | default (dict) -}}
+{{- if not (kindIs "map" $relay) -}}
+{{- fail "turn.relay must be an object" -}}
+{{- end -}}
+{{- range $transport := list "udp" "tcp" -}}
+{{- if not (hasKey $relay $transport) -}}
+{{- fail (printf "turn.relay.%s is required" $transport) -}}
+{{- end -}}
+{{- include "oxibelt.validateTurnRelayRange" (dict "range" (index $relay $transport) "field" (printf "turn.relay.%s" $transport)) -}}
+{{- end -}}
+{{- $udpRelay := index $relay "udp" -}}
+{{- $tcpRelay := index $relay "tcp" -}}
+{{- $udpCount := 0 -}}
+{{- $tcpCount := 0 -}}
+{{- if $udpRelay.enabled }}{{- $udpCount = add (sub (int $udpRelay.end) (int $udpRelay.start)) 1 -}}{{- end -}}
+{{- if $tcpRelay.enabled }}{{- $tcpCount = add (sub (int $tcpRelay.end) (int $tcpRelay.start)) 1 -}}{{- end -}}
+{{- if gt (add $udpCount $tcpCount) 512 -}}
+{{- fail "turn UDP and TCP relay ranges may expand to at most 512 ports combined" -}}
+{{- end -}}
+
+{{- $edge := $turn.edge | default (dict) -}}
+{{- if not (kindIs "map" $edge) -}}
+{{- fail "turn.edge must be an object" -}}
+{{- end -}}
+{{- range $family := list "ipv4" "ipv6" -}}
+{{- if not (hasKey $edge $family) -}}
+{{- fail (printf "turn.edge.%s is required" $family) -}}
+{{- end -}}
+{{- $address := index $edge $family -}}
+{{- if not (kindIs "map" $address) -}}
+{{- fail (printf "turn.edge.%s must be an object" $family) -}}
+{{- end -}}
+{{- if or (not (hasKey $address "publicIp")) (not (hasKey $address "relayBindIp")) -}}
+{{- fail (printf "turn.edge.%s.publicIp and relayBindIp are required" $family) -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $address.publicIp)) (not (kindIs "string" $address.relayBindIp)) (gt (len $address.publicIp) 253) (gt (len $address.relayBindIp) 253) -}}
+{{- fail (printf "turn.edge.%s address fields must be strings of at most 253 characters" $family) -}}
+{{- end -}}
+{{- end -}}
+
+{{- $auth := $turn.auth | default (dict) -}}
+{{- if not (kindIs "map" $auth) -}}
+{{- fail "turn.auth must be an object" -}}
+{{- end -}}
+{{- $authMode := $auth.mode | default "pass_through" -}}
+{{- if not (has $authMode (list "pass_through" "validate" "enforce")) -}}
+{{- fail "turn.auth.mode must be pass_through, validate, or enforce" -}}
+{{- end -}}
+{{- $nonceTtlSeconds := int ($auth.nonceTtlSeconds | default 0) -}}
+{{- if or (lt $nonceTtlSeconds 1) (gt $nonceTtlSeconds 3600) -}}
+{{- fail "turn.auth.nonceTtlSeconds must be between 1 and 3600" -}}
+{{- end -}}
+{{- $restSharedSecretFile := $auth.restSharedSecretFile | default "" -}}
+{{- if or (not (kindIs "string" $restSharedSecretFile)) (and $restSharedSecretFile (not (regexMatch "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $restSharedSecretFile))) -}}
+{{- fail "turn.auth.restSharedSecretFile must be empty or a safe path beneath turn/" -}}
+{{- end -}}
+{{- $nonceSecretFile := $auth.nonceSecretFile | default "" -}}
+{{- if or (not (kindIs "string" $nonceSecretFile)) (and $nonceSecretFile (not (regexMatch "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $nonceSecretFile))) -}}
+{{- fail "turn.auth.nonceSecretFile must be empty or a safe path beneath turn/" -}}
+{{- end -}}
+{{- $previousNonceSecretFile := $auth.previousNonceSecretFile | default "" -}}
+{{- if or (not (kindIs "string" $previousNonceSecretFile)) (and $previousNonceSecretFile (not (regexMatch "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $previousNonceSecretFile))) -}}
+{{- fail "turn.auth.previousNonceSecretFile must be empty or a safe path beneath turn/" -}}
+{{- end -}}
+{{- if and $previousNonceSecretFile (not $nonceSecretFile) -}}
+{{- fail "turn.auth.previousNonceSecretFile requires turn.auth.nonceSecretFile" -}}
+{{- end -}}
+{{- $passwordAlgorithms := $auth.passwordAlgorithms | default (list) -}}
+{{- if or (not (kindIs "slice" $passwordAlgorithms)) (eq (len $passwordAlgorithms) 0) (gt (len $passwordAlgorithms) 2) -}}
+{{- fail "turn.auth.passwordAlgorithms must contain one or two algorithms" -}}
+{{- end -}}
+{{- $seenPasswordAlgorithms := dict -}}
+{{- range $algorithm := $passwordAlgorithms -}}
+{{- if or (not (kindIs "string" $algorithm)) (not (has $algorithm (list "sha256" "md5"))) -}}
+{{- fail "turn.auth.passwordAlgorithms must contain only sha256 or md5" -}}
+{{- end -}}
+{{- if hasKey $seenPasswordAlgorithms $algorithm -}}
+{{- fail "turn.auth.passwordAlgorithms must not contain duplicates" -}}
+{{- end -}}
+{{- $_ := set $seenPasswordAlgorithms $algorithm true -}}
+{{- end -}}
+{{- $credentials := $auth.staticCredentials | default (list) -}}
+{{- if not (kindIs "slice" $credentials) -}}
+{{- fail "turn.auth.staticCredentials must be an array" -}}
+{{- end -}}
+{{- $usernames := dict -}}
+{{- $hasCredentials := false -}}
+{{- range $index, $credential := $credentials -}}
+{{- $field := printf "turn.auth.staticCredentials[%d]" $index -}}
+{{- if not (kindIs "map" $credential) -}}
+{{- fail (printf "%s must be an object" $field) -}}
+{{- end -}}
+{{- $username := $credential.username | default "" -}}
+{{- if or (not (kindIs "string" $username)) (not $username) (gt (len $username) 128) -}}
+{{- fail (printf "%s.username must be a nonempty string of at most 128 characters" $field) -}}
+{{- end -}}
+{{- if hasKey $usernames $username -}}
+{{- fail "turn.auth.staticCredentials must not reuse a username" -}}
+{{- end -}}
+{{- $_ := set $usernames $username true -}}
+{{- if or (hasKey $credential "password") (hasKey $credential "passwordEnv") -}}
+{{- fail (printf "%s must not contain inline password or passwordEnv; use passwordFile and a projected Secret" $field) -}}
+{{- end -}}
+{{- $passwordFile := $credential.passwordFile | default "" -}}
+{{- if or (not (kindIs "string" $passwordFile)) (not (regexMatch "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $passwordFile)) -}}
+{{- fail (printf "%s.passwordFile must be a safe path beneath turn/" $field) -}}
+{{- end -}}
+{{- $hasCredentials = true -}}
+{{- end -}}
+{{- if and (has $authMode (list "validate" "enforce")) (not (or $hasCredentials $restSharedSecretFile)) -}}
+{{- fail "turn.auth.mode=validate or enforce requires staticCredentials or restSharedSecretFile" -}}
+{{- end -}}
+{{- if and $enabled (eq $configMode "generated") (has $authMode (list "validate" "enforce")) (not $nonceSecretFile) -}}
+{{- fail "generated TURN validate/enforce mode requires turn.auth.nonceSecretFile" -}}
+{{- end -}}
+
+{{- $projections := $turn.secretProjections | default (list) -}}
+{{- if not (kindIs "slice" $projections) -}}
+{{- fail "turn.secretProjections must be an array" -}}
+{{- end -}}
+{{- $projectionNames := dict -}}
+{{- $projectedPaths := dict -}}
+{{- range $index, $projection := $projections -}}
+{{- $field := printf "turn.secretProjections[%d]" $index -}}
+{{- if not (kindIs "map" $projection) -}}
+{{- fail (printf "%s must be an object" $field) -}}
+{{- end -}}
+{{- $projectionName := $projection.name | default "" -}}
+{{- if or (not (kindIs "string" $projectionName)) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $projectionName)) (gt (len $projectionName) 63) -}}
+{{- fail (printf "%s.name must be a safe lower-case DNS label up to 63 characters" $field) -}}
+{{- end -}}
+{{- if hasKey $projectionNames $projectionName -}}
+{{- fail "turn.secretProjections must not reuse a projection name" -}}
+{{- end -}}
+{{- $_ := set $projectionNames $projectionName true -}}
+{{- $secretName := $projection.secretName | default "" -}}
+{{- if or (not (kindIs "string" $secretName)) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?([.][a-z0-9]([a-z0-9-]*[a-z0-9])?)*$" $secretName)) (gt (len $secretName) 253) -}}
+{{- fail (printf "%s.secretName must be a safe Kubernetes Secret DNS name" $field) -}}
+{{- end -}}
+{{- $items := $projection.items | default (list) -}}
+{{- if or (not (kindIs "slice" $items)) (eq (len $items) 0) -}}
+{{- fail (printf "%s.items must contain at least one Secret key" $field) -}}
+{{- end -}}
+{{- $itemKeys := dict -}}
+{{- range $itemIndex, $item := $items -}}
+{{- $itemField := printf "%s.items[%d]" $field $itemIndex -}}
+{{- if not (kindIs "map" $item) -}}
+{{- fail (printf "%s must be an object" $itemField) -}}
+{{- end -}}
+{{- $key := $item.key | default "" -}}
+{{- if or (not (kindIs "string" $key)) (not (regexMatch "^[A-Za-z0-9._-]+$" $key)) (gt (len $key) 253) -}}
+{{- fail (printf "%s.key must be a safe Kubernetes Secret key" $itemField) -}}
+{{- end -}}
+{{- if hasKey $itemKeys $key -}}
+{{- fail (printf "%s.items must not reuse a Secret key" $field) -}}
+{{- end -}}
+{{- $_ := set $itemKeys $key true -}}
+{{- $path := $item.path | default "" -}}
+{{- if or (not (kindIs "string" $path)) (not (regexMatch "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $path)) -}}
+{{- fail (printf "%s.path must be a safe relative path beneath turn/" $itemField) -}}
+{{- end -}}
+{{- if hasKey $projectedPaths $path -}}
+{{- fail "turn.secretProjections must not reuse a projected path" -}}
+{{- end -}}
+{{- $_ := set $projectedPaths $path true -}}
+{{- end -}}
+{{- end -}}
+
+{{- if and $enabled (eq $configMode "generated") -}}
+{{- range $reference := list $restSharedSecretFile $nonceSecretFile $previousNonceSecretFile -}}
+{{- if and $reference (not (hasKey $projectedPaths $reference)) -}}
+{{- fail (printf "generated TURN auth file %s must be projected by turn.secretProjections" $reference) -}}
+{{- end -}}
+{{- end -}}
+{{- range $credential := $credentials -}}
+{{- if not (hasKey $projectedPaths $credential.passwordFile) -}}
+{{- fail (printf "generated TURN static credential passwordFile %s must be projected by turn.secretProjections" $credential.passwordFile) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- if $enabled -}}
+{{- if ne .Values.service.externalTrafficPolicy "Local" -}}
+{{- fail "turn.enabled requires service.externalTrafficPolicy=Local to preserve client address and port tuples" -}}
+{{- end -}}
+{{- $networkPolicy := .Values.networkPolicy | default (dict) -}}
+{{- if and (kindIs "map" $networkPolicy) $networkPolicy.enabled -}}
+{{- $ingress := $networkPolicy.ingress | default (dict) -}}
+{{- $public := $ingress.public | default (dict) -}}
+{{- if not (kindIs "map" $public) -}}
+{{- fail "turn.enabled with networkPolicy requires networkPolicy.ingress.public" -}}
+{{- end -}}
+{{- $allowAll := $public.allowAll | default false -}}
+{{- $from := $public.from | default (list) -}}
+{{- if and (not $allowAll) (eq (len $from) 0) -}}
+{{- fail "turn.enabled with networkPolicy requires public ingress allowAll=true or explicit public peers" -}}
+{{- end -}}
+{{- $egress := $networkPolicy.egress | default (dict) -}}
+{{- $destinations := $egress.destinations | default (list) -}}
+{{- if eq (len $destinations) 0 -}}
+{{- fail "turn.enabled with networkPolicy requires explicit egress destinations for relay or upstream peers" -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $configMode "generated" -}}
+{{- if or (not .Values.config.create) .Values.config.existingConfigMap -}}
+{{- fail "turn.configMode=generated requires config.create=true with no config.existingConfigMap" -}}
+{{- end -}}
+{{- $inlineConfig := tpl .Values.config.inline . -}}
+{{- if regexMatch "(?m)^[[:space:]]*\\[\\[?webrtc_turn_listeners([[:space:].\\]])" $inlineConfig -}}
+{{- fail "turn.configMode=generated owns webrtc_turn_listeners and rejects TURN sections in config.inline" -}}
+{{- end -}}
+{{- if regexMatch "(?m)^[[:space:]]*\\[\\[?turn_upstream_pools([[:space:].\\]])" $inlineConfig -}}
+{{- fail "turn.configMode=generated owns turn_upstream_pools and rejects TURN sections in config.inline" -}}
+{{- end -}}
+{{- end -}}
+{{- if and (eq $configMode "generated") (eq $mode "edge_relay") -}}
+{{- if ne .Values.workload.kind "Deployment" -}}
+{{- fail "generated edge_relay TURN requires workload.kind=Deployment" -}}
+{{- end -}}
+{{- if or (ne (int .Values.replicaCount) 1) .Values.autoscaling.enabled -}}
+{{- fail "generated edge_relay TURN requires replicaCount=1 with autoscaling.enabled=false" -}}
+{{- end -}}
+{{- if ne $authMode "enforce" -}}
+{{- fail "generated edge_relay TURN requires turn.auth.mode=enforce" -}}
+{{- end -}}
+{{- if not $udpRelay.enabled -}}
+{{- fail "generated edge_relay TURN requires turn.relay.udp.enabled=true for the current native relay configuration" -}}
+{{- end -}}
+{{- if and $tcpRelay.enabled (or (ne (int $tcpRelay.start) (int $udpRelay.start)) (ne (int $tcpRelay.end) (int $udpRelay.end))) -}}
+{{- fail "generated edge_relay TURN requires turn.relay.tcp to use the same range as turn.relay.udp; the native relay_port_range serves RFC6062 TCP and UDP allocations" -}}
+{{- end -}}
+{{- $familyCount := 0 -}}
+{{- range $familyName := list "ipv4" "ipv6" -}}
+{{- $family := index $edge $familyName -}}
+{{- if or (and $family.publicIp (not $family.relayBindIp)) (and $family.relayBindIp (not $family.publicIp)) -}}
+{{- fail "generated edge_relay TURN requires publicIp and relayBindIp together for each address family" -}}
+{{- end -}}
+{{- if $family.publicIp -}}
+{{- if regexMatch "[[:space:]]" $family.publicIp -}}{{- fail "generated edge_relay TURN addresses must not contain whitespace" -}}{{- end -}}
+{{- if eq $familyName "ipv4" -}}
+{{- if not (regexMatch "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$" $family.publicIp) -}}
+{{- fail "generated edge_relay TURN ipv4.publicIp must be a dotted IPv4 address" -}}
+{{- end -}}
+{{- if not (regexMatch "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$" $family.relayBindIp) -}}
+{{- fail "generated edge_relay TURN ipv4.relayBindIp must be a dotted IPv4 address" -}}
+{{- end -}}
+{{- else if not (contains ":" $family.publicIp) -}}
+{{- fail "generated edge_relay TURN ipv6.publicIp must be an IPv6 address" -}}
+{{- else if not (contains ":" $family.relayBindIp) -}}
+{{- fail "generated edge_relay TURN ipv6.relayBindIp must be an IPv6 address" -}}
+{{- end -}}
+{{- $familyCount = add $familyCount 1 -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $familyCount 0 -}}
+{{- fail "generated edge_relay TURN requires at least one explicit edge address family" -}}
+{{- end -}}
+{{- end -}}
+{{- if and (eq $configMode "generated") (eq $mode "proxy_pool") -}}
+{{- if or $udpRelay.enabled $tcpRelay.enabled -}}
+{{- fail "generated proxy_pool TURN does not own local relay ranges; disable turn.relay.udp/tcp or use edge_relay" -}}
+{{- end -}}
+{{- $pools := list (dict "name" "udp" "scheme" "turn" "value" $turn.proxy.udpPool) (dict "name" "tcp" "scheme" "turn+tcp" "value" $turn.proxy.tcpPool) (dict "name" "tls" "scheme" "turns" "value" $turn.proxy.tlsPool) -}}
+{{- $poolNames := dict -}}
+{{- range $pool := $pools -}}
+{{- $poolValue := $pool.value -}}
+{{- if not (kindIs "map" $poolValue) -}}
+{{- fail (printf "turn.proxy.%sPool must be an object" $pool.name) -}}
+{{- end -}}
+{{- $poolName := $poolValue.name | default "" -}}
+{{- if or (not (kindIs "string" $poolName)) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $poolName)) (gt (len $poolName) 63) -}}
+{{- fail (printf "turn.proxy.%sPool.name must be a safe lower-case DNS label up to 63 characters" $pool.name) -}}
+{{- end -}}
+{{- if hasKey $poolNames $poolName -}}
+{{- fail "generated TURN proxy pool names must be unique" -}}
+{{- end -}}
+{{- $_ := set $poolNames $poolName true -}}
+{{- $servers := $poolValue.servers | default (list) -}}
+{{- if not (kindIs "slice" $servers) -}}
+{{- fail (printf "turn.proxy.%sPool.servers must be an array" $pool.name) -}}
+{{- end -}}
+{{- if and (eq $pool.name "udp") (index $control "udp").enabled (eq (len $servers) 0) -}}
+{{- fail "generated TURN UDP control requires turn.proxy.udpPool.servers" -}}
+{{- end -}}
+{{- if and (eq $pool.name "tcp") (index $control "tcp").enabled (eq (len $servers) 0) -}}
+{{- fail "generated TURN TCP control requires turn.proxy.tcpPool.servers" -}}
+{{- end -}}
+{{- if and (eq $pool.name "tls") (index $control "tls").enabled (eq (len $servers) 0) -}}
+{{- fail "generated TURN TLS control requires turn.proxy.tlsPool.servers" -}}
+{{- end -}}
+{{- range $serverIndex, $server := $servers -}}
+{{- if not (kindIs "map" $server) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d] must be an object" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- $origin := $server.origin | default "" -}}
+{{- $originPattern := printf "^%s://[^/?#]+$" $pool.scheme -}}
+{{- if eq $pool.scheme "turn+tcp" }}{{- $originPattern = "^turn\\+tcp://[^/?#]+$" -}}{{- end -}}
+{{- if or (not (kindIs "string" $origin)) (not (regexMatch $originPattern $origin)) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].origin must use %s:// with a host and no path" $pool.name $serverIndex $pool.scheme) -}}
+{{- end -}}
+{{- $tls := $server.tls | default (dict) -}}
+{{- if not (kindIs "map" $tls) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls must be an object" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- if and (ne $pool.scheme "turns") (gt (len $tls) 0) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls is only valid for turns:// origins" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- if eq $pool.scheme "turns" -}}
+{{- $serverName := $tls.serverName | default "" -}}
+{{- if or (not (kindIs "string" $serverName)) (and $serverName (not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._:-]*$" $serverName))) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.serverName must be a safe DNS name or IP" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- $trust := $tls.trust | default "inherit" -}}
+{{- if not (has $trust (list "inherit" "system" "exclusive")) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.trust must be inherit, system, or exclusive" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- $caCerts := $tls.trustedCaCerts | default (list) -}}
+{{- $caDigests := $tls.trustedCaSha256 | default (list) -}}
+{{- if or (not (kindIs "slice" $caCerts)) (not (kindIs "slice" $caDigests)) (gt (len $caCerts) 5) (ne (len $caCerts) (len $caDigests)) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls trustedCaCerts and trustedCaSha256 must have matching lists of at most five entries" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- if and (eq $trust "exclusive") (eq (len $caCerts) 0) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.trustedCaCerts is required for exclusive trust" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- if and (eq $trust "system") (gt (len $caCerts) 0) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.trustedCaCerts is not allowed with system trust" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- range $caIndex, $caPath := $caCerts -}}
+{{- if or (not (kindIs "string" $caPath)) (not (regexMatch "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $caPath)) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.trustedCaCerts[%d] must be a safe path beneath turn/" $pool.name $serverIndex $caIndex) -}}
+{{- end -}}
+{{- if not (hasKey $projectedPaths $caPath) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.trustedCaCerts[%d] must be projected by turn.secretProjections" $pool.name $serverIndex $caIndex) -}}
+{{- end -}}
+{{- $digest := index $caDigests $caIndex -}}
+{{- if or (not (kindIs "string" $digest)) (not (regexMatch "^[0-9a-f]{64}$" $digest)) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.trustedCaSha256[%d] must be a lower-case 64-character SHA-256 digest" $pool.name $serverIndex $caIndex) -}}
+{{- end -}}
+{{- end -}}
+{{- $identity := $tls.clientIdentity | default (dict) -}}
+{{- if not (kindIs "map" $identity) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.clientIdentity must be an object" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- if gt (len $identity) 0 -}}
+{{- $certChain := $identity.certChain | default "" -}}
+{{- $privateKey := $identity.privateKey | default "" -}}
+{{- if or (not (regexMatch "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $certChain)) (not (regexMatch "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" $privateKey)) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.clientIdentity requires safe certChain and privateKey paths beneath turn/" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- if or (not (hasKey $projectedPaths $certChain)) (not (hasKey $projectedPaths $privateKey)) -}}
+{{- fail (printf "turn.proxy.%sPool.servers[%d].tls.clientIdentity files must be projected by turn.secretProjections" $pool.name $serverIndex) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- if $enabled -}}
+{{- $serviceSockets := dict -}}
+{{- $containerSockets := dict -}}
+{{- $portNames := dict -}}
+{{- range $name := list "metrics" "health" -}}{{- $_ := set $portNames $name true -}}{{- end -}}
+{{- if .Values.admin.enabled }}{{- $_ := set $portNames "admin" true -}}{{- end -}}
+{{- if .Values.service.ports.http.enabled }}
+{{- $_ := set $serviceSockets (printf "TCP/%d" (int .Values.service.ports.http.port)) true -}}
+{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.service.ports.http.targetPort)) true -}}
+{{- $_ := set $portNames "http" true -}}
+{{- end -}}
+{{- if .Values.service.ports.https.enabled }}
+{{- $_ := set $serviceSockets (printf "TCP/%d" (int .Values.service.ports.https.port)) true -}}
+{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.service.ports.https.targetPort)) true -}}
+{{- $_ := set $portNames "https" true -}}
+{{- end -}}
+{{- if .Values.service.ports.http3.enabled }}
+{{- $_ := set $serviceSockets (printf "UDP/%d" (int .Values.service.ports.http3.port)) true -}}
+{{- $_ := set $containerSockets (printf "UDP/%d" (int .Values.service.ports.http3.targetPort)) true -}}
+{{- $_ := set $portNames "http3" true -}}
+{{- end -}}
+{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.health.port)) true -}}
+{{- if .Values.metrics.enabled }}{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.metrics.service.port)) true -}}{{- end -}}
+{{- if .Values.admin.enabled }}{{- $_ := set $containerSockets (printf "TCP/%d" (int .Values.admin.service.port)) true -}}{{- end -}}
+{{- range $additional := (.Values.service.additionalPorts | default (list)) -}}
+{{- if kindIs "map" $additional -}}
+{{- $_ := set $portNames ($additional.name | default "") true -}}
+{{- $_ := set $serviceSockets (printf "%s/%d" $additional.protocol (int ($additional.port | default 0))) true -}}
+{{- $_ := set $containerSockets (printf "%s/%d" $additional.protocol (int ($additional.targetPort | default 0))) true -}}
+{{- end -}}
+{{- end -}}
+{{- $controls := list (dict "name" "turn-udp" "protocol" "UDP" "value" (index $control "udp")) (dict "name" "turn-tcp" "protocol" "TCP" "value" (index $control "tcp")) (dict "name" "turn-tls" "protocol" "TCP" "value" (index $control "tls")) -}}
+{{- range $entry := $controls -}}
+{{- if $entry.value.enabled -}}
+{{- if hasKey $portNames $entry.name -}}{{- fail (printf "TURN Service port name %q is already in use" $entry.name) -}}{{- end -}}
+{{- $_ := set $portNames $entry.name true -}}
+{{- $serviceSocket := printf "%s/%d" $entry.protocol (int $entry.value.port) -}}
+{{- if hasKey $serviceSockets $serviceSocket -}}{{- fail (printf "TURN control port reuses Service socket %s" $serviceSocket) -}}{{- end -}}
+{{- $_ := set $serviceSockets $serviceSocket true -}}
+{{- $containerSocket := printf "%s/%d" $entry.protocol (int $entry.value.targetPort) -}}
+{{- if hasKey $containerSockets $containerSocket -}}{{- fail (printf "TURN control port reuses container socket %s" $containerSocket) -}}{{- end -}}
+{{- $_ := set $containerSockets $containerSocket true -}}
+{{- end -}}
+{{- end -}}
+{{- $ranges := list (dict "prefix" "u" "protocol" "UDP" "value" $udpRelay) (dict "prefix" "t" "protocol" "TCP" "value" $tcpRelay) -}}
+{{- range $range := $ranges -}}
+{{- if $range.value.enabled -}}
+{{- range $port := untilStep (int $range.value.start) (int (add (int $range.value.end) 1)) 1 -}}
+{{- $portName := printf "turn-%s%d" $range.prefix $port -}}
+{{- if hasKey $portNames $portName -}}{{- fail (printf "TURN Service port name %q is already in use" $portName) -}}{{- end -}}
+{{- $_ := set $portNames $portName true -}}
+{{- $serviceSocket := printf "%s/%d" $range.protocol $port -}}
+{{- if hasKey $serviceSockets $serviceSocket -}}{{- fail (printf "TURN relay port reuses Service socket %s" $serviceSocket) -}}{{- end -}}
+{{- $_ := set $serviceSockets $serviceSocket true -}}
+{{- $containerSocket := printf "%s/%d" $range.protocol $port -}}
+{{- if hasKey $containerSockets $containerSocket -}}{{- fail (printf "TURN relay port reuses container socket %s" $containerSocket) -}}{{- end -}}
+{{- $_ := set $containerSockets $containerSocket true -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- define "oxibelt.validateAdditionalServicePortsBody" -}}
+{{- $ports := .Values.service.additionalPorts | default (list) -}}
+{{- if not (kindIs "slice" $ports) -}}
+{{- fail "service.additionalPorts must be an array" -}}
+{{- end -}}
 {{- if gt (len $ports) 32 -}}
 {{- fail "service.additionalPorts must contain at most 32 entries" -}}
 {{- end -}}
@@ -1438,7 +2103,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if and $public.allowAll (gt (len $public.from) 0) -}}
 {{- fail "networkPolicy.ingress.public.allowAll cannot be combined with networkPolicy.ingress.public.from" -}}
 {{- end -}}
-{{- $hasPublicListener := or .Values.service.ports.http.enabled .Values.service.ports.https.enabled .Values.service.ports.http3.enabled (gt (len (.Values.service.additionalPorts | default (list))) 0) -}}
+{{- $hasPublicListener := or .Values.service.ports.http.enabled .Values.service.ports.https.enabled .Values.service.ports.http3.enabled (gt (len (.Values.service.additionalPorts | default (list))) 0) .Values.turn.enabled -}}
 {{- if and (or $public.allowAll (gt (len $public.from) 0)) (not $hasPublicListener) -}}
 {{- fail "networkPolicy.ingress.public requires an enabled public listener" -}}
 {{- end -}}

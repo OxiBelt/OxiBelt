@@ -89,10 +89,16 @@ pub(crate) struct PendingListenerUpdate {
   #[cfg(feature = "admin-runtime")]
   admin_h3: Option<Option<admin_h3::BoundAdminHttp3Listener>>,
   streams: Option<listener_sets::PendingStreamListenerSetUpdate>,
-  turns: Option<Vec<BoundTurnListener>>,
+  turns: Option<PendingTurnListenerUpdate>,
   refresh_http3_config: bool,
   #[cfg(feature = "admin-runtime")]
   refresh_admin_h3_config: bool,
+}
+
+struct PendingTurnListenerUpdate {
+  replacements: Vec<BoundTurnListener>,
+  removed_names: Vec<String>,
+  tls_refreshes: Vec<(String, crate::tls::TurnTlsServerConfig)>,
 }
 
 #[cfg(test)]
@@ -278,36 +284,97 @@ impl ListenerSupervisor {
       snapshot.config.runtime.accept.accept_error_backoff_ms,
     )?;
 
-    let desired_turns = snapshot
-      .config
-      .webrtc_turn_listeners
-      .iter()
-      .map(|listener| (listener.clone(), tcp_options))
-      .collect::<Vec<_>>();
-    let current_turns = self
+    let mut replacements = Vec::new();
+    let mut tls_refreshes = Vec::new();
+    for listener in &snapshot.config.webrtc_turn_listeners {
+      let desired_key = crate::turn::TurnListenerKey::new(listener, tcp_options);
+      let current = self
+        .turns
+        .iter()
+        .find(|task| task.listener_key().name() == desired_key.name());
+      match current {
+        Some(task) if task.listener_key() == &desired_key => {
+          if listener.tls_binds().next().is_some() {
+            tls_refreshes.push((
+              listener.name.clone(),
+              crate::tls::build_turn_tls_server_config_with_resumption(
+                &snapshot.config.crypto,
+                &listener.tls,
+                &snapshot.config.tls,
+                Some(&snapshot.tls_resumption),
+              )?,
+            ));
+          }
+        }
+        Some(task) => {
+          if desired_key.socket_overlaps(task.listener_key()) {
+            bail!(
+              "full hot reload cannot safely replace WebRTC TURN listener {} while its TCP/UDP bind is unchanged or overlaps the active listener; use a process restart or rollout",
+              listener.name
+            );
+          }
+          if let Some(other) = self.turns.iter().find(|other| {
+            other.listener_key().name() != desired_key.name()
+              && desired_key.socket_overlaps(other.listener_key())
+          }) {
+            bail!(
+              "full hot reload cannot replace WebRTC TURN listener {} because its new bind overlaps active listener {}; use a process restart or rollout",
+              listener.name,
+              other.listener_key().name(),
+            );
+          }
+          replacements.push(BoundTurnListener::bind(
+            listener.clone(),
+            tcp_options,
+            Duration::from_millis(snapshot.config.runtime.accept.accept_error_backoff_ms),
+            &snapshot.config.crypto,
+            &snapshot.config.tls,
+            &snapshot.tls_resumption,
+          )?);
+        }
+        None => {
+          if let Some(other) = self
+            .turns
+            .iter()
+            .find(|other| desired_key.socket_overlaps(other.listener_key()))
+          {
+            bail!(
+              "full hot reload cannot add WebRTC TURN listener {} because its bind overlaps active listener {}; use a process restart or rollout",
+              listener.name,
+              other.listener_key().name(),
+            );
+          }
+          replacements.push(BoundTurnListener::bind(
+            listener.clone(),
+            tcp_options,
+            Duration::from_millis(snapshot.config.runtime.accept.accept_error_backoff_ms),
+            &snapshot.config.crypto,
+            &snapshot.config.tls,
+            &snapshot.tls_resumption,
+          )?);
+        }
+      }
+    }
+    let removed_names = self
       .turns
       .iter()
-      .map(|listener| {
-        let key = listener.listener_key();
-        (key.config.clone(), key.tcp_options)
+      .filter_map(|task| {
+        let name = task.listener_key().name();
+        (!snapshot
+          .config
+          .webrtc_turn_listeners
+          .iter()
+          .any(|listener| listener.name == name))
+        .then(|| name.to_owned())
       })
       .collect::<Vec<_>>();
-    let turns = if desired_turns != current_turns {
-      let mut bound = Vec::with_capacity(snapshot.config.webrtc_turn_listeners.len());
-      for listener in &snapshot.config.webrtc_turn_listeners {
-        bound.push(BoundTurnListener::bind(
-          listener.clone(),
-          tcp_options,
-          Duration::from_millis(snapshot.config.runtime.accept.accept_error_backoff_ms),
-          &snapshot.config.crypto,
-          &snapshot.config.tls,
-          &snapshot.tls_resumption,
-        )?);
-      }
-      Some(bound)
-    } else {
-      None
-    };
+    let turns =
+      (!replacements.is_empty() || !removed_names.is_empty() || !tls_refreshes.is_empty())
+        .then_some(PendingTurnListenerUpdate {
+          replacements,
+          removed_names,
+          tls_refreshes,
+        });
 
     Ok(PendingListenerUpdate {
       tcp,
@@ -421,14 +488,41 @@ impl ListenerSupervisor {
       );
     }
     if let Some(turns) = pending.turns {
-      let old = std::mem::take(&mut self.turns);
-      for task in old {
-        task.drain_background();
+      let mut old = std::mem::take(&mut self.turns);
+      let mut next = Vec::with_capacity(
+        old.len()
+          + turns
+            .replacements
+            .len()
+            .saturating_sub(turns.removed_names.len()),
+      );
+      for replacement in turns.replacements {
+        let replacement_name = replacement.key().name().to_owned();
+        if let Some(index) = old
+          .iter()
+          .position(|task| task.listener_key().name() == replacement_name)
+        {
+          old.remove(index).drain_background();
+        }
+        next.push(replacement.start(state.clone(), self.error_tx.clone()));
       }
-      self.turns = turns
-        .into_iter()
-        .map(|turn| turn.start(state.clone(), self.error_tx.clone()))
-        .collect();
+      for task in old {
+        if turns
+          .removed_names
+          .iter()
+          .any(|name| name == task.listener_key().name())
+        {
+          task.drain_background();
+        } else {
+          next.push(task);
+        }
+      }
+      for (name, config) in turns.tls_refreshes {
+        if let Some(task) = next.iter().find(|task| task.listener_key().name() == name) {
+          task.refresh_tls_config(config);
+        }
+      }
+      self.turns = next;
     }
   }
 

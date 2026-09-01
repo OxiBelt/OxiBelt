@@ -150,4 +150,36 @@ mod tests {
 
     assert!(socket.only_v6().expect("IPV6_V6ONLY should be readable"));
   }
+
+  #[tokio::test]
+  async fn paired_wildcard_families_can_share_a_tcp_port() {
+    let options = TcpListenOptions {
+      workers: 1,
+      reuse_port: false,
+      backlog: 16,
+    };
+    let ipv4 = bind_tcp_listeners(
+      "0.0.0.0:0".parse().expect("IPv4 wildcard"),
+      options,
+      "dual-stack test",
+    )
+    .expect("IPv4 listener should bind");
+    let port = ipv4[0].local_addr().expect("IPv4 local address").port();
+    let ipv6 = bind_tcp_listeners(
+      format!("[::]:{port}").parse().expect("IPv6 wildcard"),
+      options,
+      "dual-stack test",
+    )
+    .expect("IPv6-only listener should share the numeric port");
+
+    assert_eq!(
+      ipv6[0].local_addr().expect("IPv6 local address").port(),
+      port
+    );
+    assert!(
+      socket2::SockRef::from(&ipv6[0])
+        .only_v6()
+        .expect("IPV6_V6ONLY should be readable")
+    );
+  }
 }

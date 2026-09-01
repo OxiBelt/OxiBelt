@@ -19,6 +19,12 @@ impl TurnListenerTask {
     let _ = self.quiesce.send(true);
   }
 
+  pub(crate) fn refresh_tls_config(&self, config: crate::tls::TurnTlsServerConfig) {
+    if let Some(current) = &self.tls_config {
+      current.store(std::sync::Arc::new(config));
+    }
+  }
+
   pub(crate) fn drain_background(self) {
     drop(self.drain());
   }

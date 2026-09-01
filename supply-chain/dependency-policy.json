@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-08-31",
+  "reviewedOn": "2026-09-01",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,9 +17,9 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "e6cdf8cf2b3d911a49fbb79115713f5f2a53940987acae64ed39e2ef623b0a9f",
-      "exemptionInventorySha256": "7ed0a4e836e7b12ace5688787e22945947860927d6b1208f48d9e15da022cd81",
-      "exemptedPackageVersions": 445
+      "lockfileSha256": "510395dd6e68e51044208488371d8827738b6d9d5316f371e28b61f15821c87a",
+      "exemptionInventorySha256": "bd21e1575dce0d01e19bb0741a9e09da3f666de87814c5740a645fe920d5ee5a",
+      "exemptedPackageVersions": 456
     },
     "reviewTriggers": [
       "new direct dependency",
@@ -56,8 +56,9 @@
       "password-hash": ["0.5", "0.6"],
       "pem-rfc7468": ["0.7", "1"],
       "r-efi": ["5", "6"],
-      "rand": ["0.10", "0.8"],
-      "rand_core": ["0.10", "0.6"],
+      "rand": ["0.10", "0.8", "0.9"],
+      "rand_chacha": ["0.3", "0.9"],
+      "rand_core": ["0.10", "0.6", "0.9"],
       "serde-saphyr": ["0.0.29", "1"],
       "sha2": ["0.10", "0.11"],
       "shlex": ["1", "2"],
@@ -130,6 +131,17 @@
         "reviewBoundary": "untrusted-input handling, recursion and allocation bounds, ambiguity, and format compatibility"
       },
       {
+        "category": "credential-internationalization",
+        "packages": {
+          "precis-core": ["0.1.11"],
+          "precis-profiles": ["0.1.13"],
+          "precis-tools": ["0.1.9"],
+          "regex-lite": ["0.1.9"],
+          "ucd-parse": ["0.1.13"]
+        },
+        "reviewBoundary": "RFC 8264 and RFC 8265 conformance, bundled Unicode table generation, disallowed-code-point handling, normalization ambiguity, and build-time network isolation"
+      },
+      {
         "category": "compression",
         "packages": {
           "async-compression": ["0.4.43"],
@@ -198,8 +210,8 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:e6cdf8cf2b3d911a49fbb79115713f5f2a53940987acae64ed39e2ef623b0a9f",
-      "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it; any additional line fails the static admission test.",
+      "subject": "Cargo.lock@sha256:510395dd6e68e51044208488371d8827738b6d9d5316f371e28b61f15821c87a",
+      "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. The development-only proptest graph adds exact rand 0.9, rand_chacha 0.9, and rand_core 0.9 lines tracked by https://github.com/OxiBelt/OxiBelt/issues/172; any further line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
@@ -210,13 +222,134 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:e6cdf8cf2b3d911a49fbb79115713f5f2a53940987acae64ed39e2ef623b0a9f",
+      "subject": "Cargo.lock@sha256:510395dd6e68e51044208488371d8827738b6d9d5316f371e28b61f15821c87a",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
       "reviewedOn": "2026-08-31",
       "expiresOn": "2026-10-19"
+    },
+    {
+      "id": "rust-cargo-vet-proptest-1.11.0",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "proptest@1.11.0:safe-to-run",
+      "rationale": "OxiBelt uses proptest only for bounded TURN protocol and authentication property tests with default features disabled. Retain this exact development-only exemption while imported or local audit coverage is established.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-rand-0.9.5",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "rand@0.9.5:safe-to-run",
+      "rationale": "This exact rand release is reachable only through the development-only proptest graph. Retain the safe-to-run exemption while issue 172 tracks replacement by imported or local audit coverage.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-rand-chacha-0.9.0",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "rand_chacha@0.9.0:safe-to-run",
+      "rationale": "This exact rand_chacha release is reachable only through the development-only proptest graph. Retain the safe-to-run exemption while issue 172 tracks replacement by imported or local audit coverage.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-rand-core-0.9.5",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "rand_core@0.9.5:safe-to-run",
+      "rationale": "This exact rand_core release is reachable only through the development-only proptest graph. Retain the safe-to-run exemption while issue 172 tracks replacement by imported or local audit coverage.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-rand-xorshift-0.4.0",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "rand_xorshift@0.4.0:safe-to-run",
+      "rationale": "This exact rand_xorshift release is reachable only through the development-only proptest graph. Retain the safe-to-run exemption while issue 172 tracks replacement by imported or local audit coverage.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-unarray-0.1.4",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "unarray@0.1.4:safe-to-run",
+      "rationale": "This exact unarray release is reachable only through the development-only proptest graph. Retain the safe-to-run exemption while issue 172 tracks replacement by imported or local audit coverage.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-precis-core-0.1.11",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "precis-core@0.1.11:safe-to-deploy",
+      "rationale": "OxiBelt uses this safe Rust RFC 8264 implementation only through bounded TURN credential inputs. Its build script generates tables from checksum-bound crate resources, and the optional networking feature is disabled.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/173",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-precis-profiles-0.1.13",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "precis-profiles@0.1.13:safe-to-deploy",
+      "rationale": "OxiBelt uses OpaqueString enforcement for RFC 8489 TURN long-term keys and USERHASH. Inputs remain byte-bounded, invalid code points fail closed, and optional build-time networking is disabled.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/173",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-precis-tools-0.1.9",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "precis-tools@0.1.9:safe-to-deploy",
+      "rationale": "This build-only generator reads checksum-bound Unicode resources and writes generated Rust under Cargo OUT_DIR. Its optional reqwest-backed networking feature is disabled.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/173",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-regex-lite-0.1.9",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "regex-lite@0.1.9:safe-to-deploy",
+      "rationale": "This safe Rust parser is reachable only through build-time parsing of checksum-bound Unicode resources for RFC 8265 tables.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/173",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
+    },
+    {
+      "id": "rust-cargo-vet-ucd-parse-0.1.13",
+      "ecosystem": "rust",
+      "control": "cargo-vet",
+      "subject": "ucd-parse@0.1.13:safe-to-deploy",
+      "rationale": "This safe build-only parser consumes fixed crate-bundled Unicode data for RFC 8264 and RFC 8265 table generation without runtime or network authority.",
+      "owner": "@piquark6046",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/173",
+      "reviewedOn": "2026-09-01",
+      "expiresOn": "2026-11-29"
     },
     {
       "id": "rust-cargo-vet-kube-client-4.2.0",

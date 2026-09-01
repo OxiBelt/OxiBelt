@@ -123,6 +123,7 @@ use limits::{
   default_max_connections, default_max_connections_per_ip, default_max_requests_per_connection,
   default_max_webtransport_sessions_per_connection,
 };
+pub(crate) use listener::socket_addrs_overlap;
 pub use listener::{HttpListenerMode, ListenerConfig, ProxyProtocolConfig, ProxyProtocolVersion};
 use listener::{RawListenerConfig, validate_bind_list, validate_bind_lists_do_not_overlap};
 use loader::load_toml_with_includes_and_overrides;
@@ -179,7 +180,9 @@ pub(crate) use shared_state::{
   RedisPoolSettings, default_shared_state_namespace, validate_redis_connection_url,
 };
 pub use sni_forward::*;
-pub use source_paths::{ConfigSourcePaths, DownstreamTlsCertificateSourcePaths};
+pub use source_paths::{
+  ConfigSourcePaths, DownstreamTlsCertificateSourcePaths, TurnListenerTlsSourcePaths,
+};
 pub use static_files::*;
 pub use stream::*;
 pub use telemetry::*;

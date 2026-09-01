@@ -1,4 +1,5 @@
 {{- include "oxibelt.validateAdditionalServicePorts" . -}}
+{{- include "oxibelt.validateTurn" . -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -11,6 +12,13 @@ spec:
   type: {{ .Values.service.type }}
   {{- if and (ne .Values.service.type "ClusterIP") .Values.service.externalTrafficPolicy }}
   externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  {{- if .Values.service.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ .Values.service.ipFamilyPolicy }}
+  {{- end }}
+  {{- if .Values.service.ipFamilies }}
+  ipFamilies:
+{{ toYaml .Values.service.ipFamilies | indent 4 }}
   {{- end }}
   selector:
 {{ include "oxibelt.selectorLabels" . | indent 4 }}
@@ -38,4 +46,40 @@ spec:
     port: {{ $port.port }}
     targetPort: {{ $port.targetPort }}
     protocol: {{ $port.protocol }}
+  {{- end }}
+  {{- if .Values.turn.enabled }}
+  {{- if .Values.turn.control.udp.enabled }}
+  - name: turn-udp
+    port: {{ .Values.turn.control.udp.port }}
+    targetPort: {{ .Values.turn.control.udp.targetPort }}
+    protocol: UDP
+  {{- end }}
+  {{- if .Values.turn.control.tcp.enabled }}
+  - name: turn-tcp
+    port: {{ .Values.turn.control.tcp.port }}
+    targetPort: {{ .Values.turn.control.tcp.targetPort }}
+    protocol: TCP
+  {{- end }}
+  {{- if .Values.turn.control.tls.enabled }}
+  - name: turn-tls
+    port: {{ .Values.turn.control.tls.port }}
+    targetPort: {{ .Values.turn.control.tls.targetPort }}
+    protocol: TCP
+  {{- end }}
+  {{- if .Values.turn.relay.udp.enabled }}
+  {{- range $port := untilStep (int .Values.turn.relay.udp.start) (int (add (int .Values.turn.relay.udp.end) 1)) 1 }}
+  - name: {{ printf "turn-u%d" $port }}
+    port: {{ $port }}
+    targetPort: {{ $port }}
+    protocol: UDP
+  {{- end }}
+  {{- end }}
+  {{- if .Values.turn.relay.tcp.enabled }}
+  {{- range $port := untilStep (int .Values.turn.relay.tcp.start) (int (add (int .Values.turn.relay.tcp.end) 1)) 1 }}
+  - name: {{ printf "turn-t%d" $port }}
+    port: {{ $port }}
+    targetPort: {{ $port }}
+    protocol: TCP
+  {{- end }}
+  {{- end }}
   {{- end }}

@@ -722,6 +722,16 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
       Ok::<_, anyhow::Error>(certificate)
     })
     .collect::<anyhow::Result<Vec<_>>>()?;
+  if config.webrtc_turn_listeners.len() != config.source_paths.downstream_turn_listener_tls.len() {
+    anyhow::bail!("configured TURN listener TLS path metadata is incomplete");
+  }
+  for (listener, paths) in config
+    .webrtc_turn_listeners
+    .iter_mut()
+    .zip(config.source_paths.downstream_turn_listener_tls.iter())
+  {
+    listener.tls.reload_relative_paths(cert_dir, paths)?;
+  }
   config.tls = TlsConfig {
     server_names: old_tls.server_names,
     cert_chain: canonicalize_under_base("tls.cert_chain", cert_dir, cert_chain)?,

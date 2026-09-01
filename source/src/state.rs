@@ -449,7 +449,10 @@ impl AppSnapshot {
     .await;
     pools.publish_server_count_metrics();
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
-    let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
+    let turn_pools = TurnPoolState::new_with_previous(
+      &config.turn_upstream_pools,
+      previous.map(|snapshot| snapshot.turn_pools.as_ref()),
+    );
     let external_cache = crate::cache::ExternalCacheRuntime::new(&config, metrics.clone())
       .context("failed to build external cache handlers")?;
     let cache = ResponseCache::new_with_external_and_health(
@@ -867,7 +870,10 @@ impl AppSnapshot {
     .await;
     pools.publish_server_count_metrics();
     let stream_pools = StreamPoolState::new(&config.stream_upstream_pools);
-    let turn_pools = TurnPoolState::new(&config.turn_upstream_pools);
+    let turn_pools = TurnPoolState::new_with_previous(
+      &config.turn_upstream_pools,
+      Some(previous.turn_pools.as_ref()),
+    );
     let alt_svc_header_values = build_alt_svc_header_values(&config)
       .context("failed to build precomputed Alt-Svc header values")?;
     let static_files = StaticFilesRuntime::new_with_health(&config, runtime_health.clone())

@@ -276,6 +276,31 @@ Kubernetes representatives include `v1.34.11`, `v1.35.8`, `v1.36.4`, and
 These matrix changes require fresh evidence and do not themselves graduate a
 Kubernetes feature.
 
+Beta.2 also completes the native WebRTC fallback surface for deployments whose
+network path cannot establish direct UDP. Existing raw `[[stream_listeners]]`
+already provide generic direct UDP forwarding; TURN now qualifies UDP relay,
+TURN-over-TCP/TLS control transport, and RFC 6062 TCP relay data connections
+through OxiBelt edge and proxy modes. Existing TURN configuration remains
+valid. New deployments should provision a standard-base64 32-byte current
+nonce secret and may retain one previous secret during rotation, prefer
+`MESSAGE-INTEGRITY-SHA256` while retaining MD5-derived compatibility where
+required, and configure each `turns://` upstream's server trust and optional
+client identity explicitly. Secret files and TURNS trust/client-identity files
+must remain beneath the certificate root.
+
+The chart's `turn.enabled` default remains `false`. Generated proxy mode may
+run with multiple replicas; generated edge-relay mode requires one Deployment
+replica, `service.externalTrafficPolicy = "Local"`, explicit public/relay
+addresses and bounded UDP/TCP relay ranges, projected Secret files, and
+explicit NetworkPolicy destinations when policy is enabled. The same numeric
+relay range serves independent UDP and TCP sockets. Compatible full reloads
+retain unchanged listener allocations and stable TURN pool runtime. A changed
+listener can be drained and replaced during full reload only when its new bind
+set does not overlap any active TURN listener. Realm, authentication,
+relay-range, mode, or other state-affecting changes that retain an active bind
+fail closed and require a process restart or rollout. No TURN allocation or
+pending TCP connection is durable across process or Pod replacement.
+
 Validate every configuration that opts in before rollout, and keep the
 controller and data-plane images on the same exact candidate revision:
 
@@ -285,14 +310,16 @@ pnpm run release-contract:check
 ```
 
 Before rollback to beta.1 or `0.9.0`, remove every `[routes.bandwidth]`,
-`tls.client_identity`, and `actions.direct_response` table plus every Helm
-projection and Gateway `clientCertificateRef` that requires beta.2. Drain
-long-lived connections, then restore the retained prior controller and
-data-plane images together by immutable digest. No bandwidth or other durable state
-needs conversion; each process reconstructs its route-local budgets at
-startup. Remove projected or controller-derived Kubernetes Secrets only after
-no active or retained rollout references them. If an old client identity was
-compromised, revoke it at the upstream independently of rollback.
+`tls.client_identity`, `actions.direct_response`, TURN per-server `tls`, TURN
+file-secret, nonce-rotation, password-algorithm, and new TURN limit field plus
+every Helm projection, `turn` value, and Gateway `clientCertificateRef` that
+requires beta.2. Drain TURN allocations and RFC 6062 data connections as well
+as other long-lived connections, then restore the retained prior controller
+and data-plane images together by immutable digest. No bandwidth or TURN state
+needs conversion; each process reconstructs its route-local budgets and TURN
+runtime at startup. Remove projected or controller-derived Kubernetes Secrets
+only after no active or retained rollout references them. If an old client
+identity was compromised, revoke it at the upstream independently of rollback.
 
 ## Upgrade from 0.6.6 to the 0.8.1 line
 

@@ -52,6 +52,12 @@ pub(super) fn redact_effective_toml(value: &mut toml::Value) {
   {
     for listener in listeners {
       redact_toml_path(listener, &["auth", "rest_shared_secret"]);
+      redact_toml_path(listener, &["auth", "rest_shared_secret_env"]);
+      redact_toml_path(listener, &["auth", "rest_shared_secret_file"]);
+      redact_toml_path(listener, &["auth", "nonce_secret_env"]);
+      redact_toml_path(listener, &["auth", "nonce_secret_file"]);
+      redact_toml_path(listener, &["auth", "previous_nonce_secret_env"]);
+      redact_toml_path(listener, &["auth", "previous_nonce_secret_file"]);
       if let Some(static_credentials) = listener
         .get_mut("auth")
         .and_then(|auth| auth.get_mut("static_credentials"))
@@ -59,6 +65,8 @@ pub(super) fn redact_effective_toml(value: &mut toml::Value) {
       {
         for credential in static_credentials {
           redact_toml_path(credential, &["password"]);
+          redact_toml_path(credential, &["password_env"]);
+          redact_toml_path(credential, &["password_file"]);
         }
       }
     }
@@ -150,6 +158,60 @@ pub(super) fn redact_url_sensitive_parts(raw: &str) -> Option<String> {
   url.set_query(None);
   url.set_fragment(None);
   Some(url.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn turn_auth_secret_references_and_values_are_redacted() {
+    let mut value: toml::Value = toml::from_str(
+      r#"
+[[webrtc_turn_listeners]]
+[webrtc_turn_listeners.auth]
+rest_shared_secret = "literal"
+rest_shared_secret_env = "TURN_REST_SECRET"
+rest_shared_secret_file = "turn/rest"
+nonce_secret_env = "TURN_NONCE_CURRENT"
+nonce_secret_file = "turn/nonce-current"
+previous_nonce_secret_env = "TURN_NONCE_PREVIOUS"
+previous_nonce_secret_file = "turn/nonce-previous"
+[[webrtc_turn_listeners.auth.static_credentials]]
+username = "user"
+password = "password"
+password_env = "TURN_PASSWORD"
+password_file = "turn/password"
+"#,
+    )
+    .expect("TURN redaction fixture must parse");
+
+    redact_effective_toml(&mut value);
+    let auth = &value["webrtc_turn_listeners"][0]["auth"];
+    for field in [
+      "rest_shared_secret",
+      "rest_shared_secret_env",
+      "rest_shared_secret_file",
+      "nonce_secret_env",
+      "nonce_secret_file",
+      "previous_nonce_secret_env",
+      "previous_nonce_secret_file",
+    ] {
+      assert_eq!(
+        auth[field].as_str(),
+        Some(REDACTED_TOML_VALUE),
+        "{field} must be redacted"
+      );
+    }
+    let credential = &auth["static_credentials"][0];
+    for field in ["password", "password_env", "password_file"] {
+      assert_eq!(
+        credential[field].as_str(),
+        Some(REDACTED_TOML_VALUE),
+        "{field} must be redacted"
+      );
+    }
+  }
 }
 
 pub(super) fn set_toml_integer_path(

@@ -7,11 +7,13 @@
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
 {{- include "oxibelt.validateAdditionalServicePorts" . -}}
+{{- include "oxibelt.validateTurn" . -}}
 {{- include "oxibelt.validateRuntimeHardening" . -}}
 {{- include "oxibelt.validateOperationalProfileV2" . -}}
 {{- $hasRedisSecretProjections := gt (len .Values.sharedState.redisSecretProjections) 0 -}}
 {{- $hasUpstreamTlsSecretProjections := gt (len (.Values.upstreamTls.clientIdentitySecretProjections | default (list))) 0 -}}
 {{- $hasQuicHostKey := ne .Values.quic.hostKeySecretName "" -}}
+{{- $hasTurnSecretProjections := gt (len (.Values.turn.secretProjections | default (list))) 0 -}}
 {{- $hasKubernetesApiAccess := eq (include "oxibelt.kubernetesApiAccessEnabled" .) "true" -}}
 {{- $cacheVolumeEnabled := eq (include "oxibelt.cacheVolumeEnabled" .) "true" -}}
 {{- if eq .Values.workload.kind "DaemonSet" }}
@@ -54,6 +56,9 @@ spec:
         oxibelt.dev/feature-status: {{ index .Chart.Annotations "oxibelt.dev/feature-status" | quote }}
         oxibelt.dev/kubernetes-support-policy: {{ index .Chart.Annotations "oxibelt.dev/kubernetes-support-policy" | quote }}
         checksum/oxibelt-config: {{ include "oxibelt.configDigest" . | quote }}
+        {{- if $hasTurnSecretProjections }}
+        checksum/oxibelt-turn-secret-references: {{ include "oxibelt.turnSecretReferencesDigest" . | quote }}
+        {{- end }}
         {{- if .Values.oxirule.enabled }}
         checksum/oxibelt-oxirule: {{ include "oxibelt.oxiruleConfigMapDigest" . | quote }}
         {{- end }}
@@ -183,6 +188,37 @@ spec:
           containerPort: {{ $port.targetPort }}
           protocol: {{ $port.protocol }}
         {{- end }}
+        {{- if .Values.turn.enabled }}
+        {{- if .Values.turn.control.udp.enabled }}
+        - name: turn-udp
+          containerPort: {{ .Values.turn.control.udp.targetPort }}
+          protocol: UDP
+        {{- end }}
+        {{- if .Values.turn.control.tcp.enabled }}
+        - name: turn-tcp
+          containerPort: {{ .Values.turn.control.tcp.targetPort }}
+          protocol: TCP
+        {{- end }}
+        {{- if .Values.turn.control.tls.enabled }}
+        - name: turn-tls
+          containerPort: {{ .Values.turn.control.tls.targetPort }}
+          protocol: TCP
+        {{- end }}
+        {{- if .Values.turn.relay.udp.enabled }}
+        {{- range $port := untilStep (int .Values.turn.relay.udp.start) (int (add (int .Values.turn.relay.udp.end) 1)) 1 }}
+        - name: {{ printf "turn-u%d" $port }}
+          containerPort: {{ $port }}
+          protocol: UDP
+        {{- end }}
+        {{- end }}
+        {{- if .Values.turn.relay.tcp.enabled }}
+        {{- range $port := untilStep (int .Values.turn.relay.tcp.start) (int (add (int .Values.turn.relay.tcp.end) 1)) 1 }}
+        - name: {{ printf "turn-t%d" $port }}
+          containerPort: {{ $port }}
+          protocol: TCP
+        {{- end }}
+        {{- end }}
+        {{- end }}
         - name: metrics
           containerPort: {{ .Values.metrics.service.port }}
           protocol: TCP
@@ -219,7 +255,7 @@ spec:
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
           readOnly: true
         {{- end }}
-        {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasUpstreamTlsSecretProjections $hasQuicHostKey }}
+        {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasUpstreamTlsSecretProjections $hasQuicHostKey $hasTurnSecretProjections }}
         - name: tls
           mountPath: {{ include "oxibelt.certMountPath" . }}
           readOnly: true
@@ -259,7 +295,7 @@ spec:
           - key: gateway-config-directory
             path: {{ .Values.configRollout.managedConfigPath | quote }}
 {{ end }}
-      {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasUpstreamTlsSecretProjections $hasQuicHostKey }}
+      {{- if or .Values.tls.enabled (and .Values.admin.enabled .Values.admin.tls.enabled) $hasRedisSecretProjections $hasUpstreamTlsSecretProjections $hasQuicHostKey $hasTurnSecretProjections }}
       - name: tls
         projected:
           # Decimal 288 is POSIX mode 0440. Kubernetes applies the Pod fsGroup
@@ -309,6 +345,15 @@ spec:
               {{- range $item := $projection.items }}
               - key: {{ $item.key | quote }}
                 path: {{ printf "redis/%s/%s" $projection.name $item.path | quote }}
+              {{- end }}
+          {{- end }}
+          {{- range $projection := .Values.turn.secretProjections }}
+          - secret:
+              name: {{ required "turn.secretProjections[].secretName is required" $projection.secretName | quote }}
+              items:
+              {{- range $item := $projection.items }}
+              - key: {{ $item.key | quote }}
+                path: {{ $item.path | quote }}
               {{- end }}
           {{- end }}
       {{- end }}

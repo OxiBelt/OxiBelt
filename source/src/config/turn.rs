@@ -1,6 +1,7 @@
 //! TURN listener and pool configuration validation.
 //! TURN credentials and upstream references are checked before UDP/TCP listeners bind.
 
+mod auth;
 mod relay;
 
 use std::collections::{HashMap, HashSet};
@@ -20,17 +21,21 @@ use super::upstream_pool::{
   default_health_check_timeout_ms, default_health_check_unhealthy_threshold,
 };
 use super::{
-  Config, LoadBalancingAlgorithm, TlsServerResumptionConfig, UpstreamPoolServerState,
-  default_client_idle_timeout_ms, default_pool_server_weight, default_true,
-  resolve_existing_local_config_file_path_with_logical, turn_upstream_pool_server_id,
-  validate_runtime_identifier,
+  Config, LoadBalancingAlgorithm, TlsServerResumptionConfig, TurnListenerTlsSourcePaths,
+  UpstreamPoolServerState, UpstreamTlsConfig, default_client_idle_timeout_ms,
+  default_pool_server_weight, default_true, resolve_existing_local_config_file_path_with_logical,
+  turn_upstream_pool_server_id, validate_runtime_identifier,
 };
 
+use auth::validate_turn_opaque_string;
+pub use auth::{TurnAuthConfig, TurnAuthMode, TurnPasswordAlgorithm, TurnStaticCredentialConfig};
 use relay::resolve_relay_families;
 pub use relay::{
   TurnEdgeRelayLimitsConfig, TurnEdgeRelayPeerPolicyConfig, TurnRelayAddressFamily,
   TurnRelayFamilyConfig,
 };
+
+const MAX_TURN_ADDITIONAL_BINDS: usize = 7;
 
 impl Config {
   pub(super) fn validate_turn_forwarding(
@@ -77,6 +82,19 @@ impl Config {
           );
         }
         validate_turn_origin(&format!("TURN upstream pool {}", pool.name), &server.origin)?;
+        if server.origin.scheme() != "turns" && server.tls != UpstreamTlsConfig::default() {
+          bail!(
+            "TURN upstream pool {} server {} tls is only valid for turns:// origins",
+            pool.name,
+            server_id
+          );
+        }
+        if server.origin.scheme() == "turns" {
+          server.tls.validate(&format!(
+            "TURN upstream pool {} server {}",
+            pool.name, server_id
+          ))?;
+        }
         schemes.insert(turn_origin_scheme(server.origin.scheme()));
         if server.weight == 0 {
           bail!(
@@ -87,9 +105,13 @@ impl Config {
       }
       names.insert(pool.name.clone(), schemes);
       if pool.health_check.enabled {
-        if pool.health_check.interval_ms == 0 || pool.health_check.timeout_ms == 0 {
+        if pool.health_check.interval_ms == 0
+          || pool.health_check.timeout_ms == 0
+          || pool.health_check.connect_timeout_ms == 0
+          || pool.health_check.tls_handshake_timeout_ms == 0
+        {
           bail!(
-            "TURN upstream pool {} health_check interval and timeout must be greater than 0",
+            "TURN upstream pool {} health_check interval, timeout, connect_timeout_ms, and tls_handshake_timeout_ms must be greater than 0",
             pool.name
           );
         }
@@ -109,7 +131,7 @@ impl Config {
     turn_pools: &HashMap<String, HashSet<&'static str>>,
   ) -> anyhow::Result<()> {
     let mut names = HashSet::new();
-    let mut binds = HashSet::new();
+    let mut binds = Vec::<(&'static str, SocketAddr, String)>::new();
     for listener in &self.webrtc_turn_listeners {
       if listener.name.trim().is_empty() {
         bail!("WebRTC TURN listener name must not be empty");
@@ -117,25 +139,49 @@ impl Config {
       if !names.insert(listener.name.clone()) {
         bail!("duplicate WebRTC TURN listener name: {}", listener.name);
       }
-      if listener.bind_udp.is_none() && listener.bind_tcp.is_none() && listener.bind_tls.is_none() {
+      for (transport, count) in [
+        ("UDP", listener.bind_udp_additional.len()),
+        ("TCP", listener.bind_tcp_additional.len()),
+        ("TLS", listener.bind_tls_additional.len()),
+      ] {
+        if count > MAX_TURN_ADDITIONAL_BINDS {
+          bail!(
+            "WebRTC TURN listener {} {transport} permits at most {MAX_TURN_ADDITIONAL_BINDS} additional bind addresses",
+            listener.name
+          );
+        }
+      }
+      if listener.udp_binds().next().is_none()
+        && listener.tcp_binds().next().is_none()
+        && listener.tls_binds().next().is_none()
+      {
         bail!(
           "WebRTC TURN listener {} must configure at least one bind address",
           listener.name
         );
       }
-      for (transport, bind) in [
-        ("udp", listener.bind_udp),
-        ("tcp", listener.bind_tcp),
-        ("tls", listener.bind_tls),
+      for (transport, listener_binds) in [
+        ("udp", listener.udp_binds().collect::<Vec<_>>()),
+        ("tcp", listener.tcp_binds().collect::<Vec<_>>()),
+        ("tls", listener.tls_binds().collect::<Vec<_>>()),
       ] {
-        if let Some(bind) = bind {
-          if !binds.insert((transport, bind)) {
+        for bind in listener_binds {
+          let socket_transport = if transport == "udp" { "UDP" } else { "TCP/TLS" };
+          if let Some((_, existing_bind, existing_listener)) =
+            binds.iter().find(|(existing_transport, existing_bind, _)| {
+              *existing_transport == socket_transport
+                && super::socket_addrs_overlap(*existing_bind, bind)
+            })
+          {
             bail!(
-              "duplicate WebRTC TURN {transport} bind {} on listener {}",
+              "overlapping WebRTC TURN {socket_transport} binds {} on listener {} and {} on listener {}",
+              existing_bind,
+              existing_listener,
               bind,
               listener.name
             );
           }
+          binds.push((socket_transport, bind, listener.name.clone()));
           if self.rejects_privileged_data_plane_ports() && super::workers::is_privileged_bind(bind)
           {
             bail!(
@@ -152,7 +198,9 @@ impl Config {
           listener.name
         );
       }
+      validate_turn_opaque_string(&listener.name, "realm", &listener.realm, 763)?;
       listener.auth.validate(&listener.name)?;
+      listener.limits.validate(&listener.name)?;
       match listener.mode {
         WebRtcTurnListenerMode::ProxyPool => {
           if listener.stream_outbound_queue_capacity != DEFAULT_TURN_STREAM_OUTBOUND_QUEUE_CAPACITY
@@ -168,7 +216,7 @@ impl Config {
               listener.name
             );
           }
-          if listener.bind_udp.is_some() {
+          if listener.udp_binds().next().is_some() {
             validate_turn_listener_pool(
               &listener.name,
               "udp_pool",
@@ -177,7 +225,7 @@ impl Config {
               turn_pools,
             )?;
           }
-          if listener.bind_tcp.is_some() {
+          if listener.tcp_binds().next().is_some() {
             validate_turn_listener_pool(
               &listener.name,
               "tcp_pool",
@@ -186,7 +234,7 @@ impl Config {
               turn_pools,
             )?;
           }
-          if listener.bind_tls.is_some() {
+          if listener.tls_binds().next().is_some() {
             validate_turn_listener_pool(
               &listener.name,
               "tls_pool",
@@ -213,7 +261,6 @@ impl Config {
               listener.name
             );
           }
-          listener.limits.validate(&listener.name)?;
           if listener.relay_families.is_empty() {
             bail!(
               "WebRTC TURN listener {} edge_relay requires relay_families or legacy public_ip/relay_bind_ip/relay_port_range",
@@ -242,7 +289,7 @@ impl Config {
           }
         }
       }
-      if listener.bind_tls.is_none() && listener.tls.has_override() {
+      if listener.tls_binds().next().is_none() && listener.tls.has_override() {
         bail!(
           "WebRTC TURN listener {} tls override is only valid with bind_tls",
           listener.name
@@ -262,9 +309,15 @@ pub(super) struct RawWebRtcTurnListenerConfig {
   #[serde(default)]
   bind_udp: Option<SocketAddr>,
   #[serde(default)]
+  bind_udp_additional: Vec<SocketAddr>,
+  #[serde(default)]
   bind_tcp: Option<SocketAddr>,
   #[serde(default)]
+  bind_tcp_additional: Vec<SocketAddr>,
+  #[serde(default)]
   bind_tls: Option<SocketAddr>,
+  #[serde(default)]
+  bind_tls_additional: Vec<SocketAddr>,
   #[serde(default = "default_client_idle_timeout_ms")]
   idle_timeout_ms: u64,
   #[serde(default = "default_turn_realm")]
@@ -323,8 +376,11 @@ impl RawWebRtcTurnListenerConfig {
       name: self.name,
       mode: self.mode,
       bind_udp: self.bind_udp,
+      bind_udp_additional: self.bind_udp_additional,
       bind_tcp: self.bind_tcp,
+      bind_tcp_additional: self.bind_tcp_additional,
       bind_tls: self.bind_tls,
+      bind_tls_additional: self.bind_tls_additional,
       idle_timeout_ms: self.idle_timeout_ms,
       realm: self.realm,
       auth: self.auth,
@@ -351,9 +407,15 @@ pub struct WebRtcTurnListenerConfig {
   #[serde(default)]
   pub bind_udp: Option<SocketAddr>,
   #[serde(default)]
+  pub bind_udp_additional: Vec<SocketAddr>,
+  #[serde(default)]
   pub bind_tcp: Option<SocketAddr>,
   #[serde(default)]
+  pub bind_tcp_additional: Vec<SocketAddr>,
+  #[serde(default)]
   pub bind_tls: Option<SocketAddr>,
+  #[serde(default)]
+  pub bind_tls_additional: Vec<SocketAddr>,
   #[serde(default = "default_client_idle_timeout_ms")]
   pub idle_timeout_ms: u64,
   #[serde(default = "default_turn_realm")]
@@ -384,115 +446,35 @@ pub struct WebRtcTurnListenerConfig {
   pub tls: TurnListenerTlsConfig,
 }
 
+impl WebRtcTurnListenerConfig {
+  pub fn udp_binds(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+    self
+      .bind_udp
+      .into_iter()
+      .chain(self.bind_udp_additional.iter().copied())
+  }
+
+  pub fn tcp_binds(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+    self
+      .bind_tcp
+      .into_iter()
+      .chain(self.bind_tcp_additional.iter().copied())
+  }
+
+  pub fn tls_binds(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+    self
+      .bind_tls
+      .into_iter()
+      .chain(self.bind_tls_additional.iter().copied())
+  }
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WebRtcTurnListenerMode {
   #[default]
   ProxyPool,
   EdgeRelay,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct TurnAuthConfig {
-  #[serde(default)]
-  pub mode: TurnAuthMode,
-  #[serde(default)]
-  pub static_credentials: Vec<TurnStaticCredentialConfig>,
-  #[serde(default)]
-  pub rest_shared_secret: Option<String>,
-  #[serde(default)]
-  pub rest_shared_secret_env: Option<String>,
-  #[serde(default = "default_turn_nonce_ttl_seconds")]
-  pub nonce_ttl_seconds: u64,
-}
-
-impl Default for TurnAuthConfig {
-  fn default() -> Self {
-    Self {
-      mode: TurnAuthMode::PassThrough,
-      static_credentials: Vec::new(),
-      rest_shared_secret: None,
-      rest_shared_secret_env: None,
-      nonce_ttl_seconds: default_turn_nonce_ttl_seconds(),
-    }
-  }
-}
-
-impl TurnAuthConfig {
-  fn validate(&self, listener_name: &str) -> anyhow::Result<()> {
-    if self.nonce_ttl_seconds == 0 {
-      bail!(
-        "WebRTC TURN listener {} auth.nonce_ttl_seconds must be greater than 0",
-        listener_name
-      );
-    }
-    if self.rest_shared_secret.is_some() && self.rest_shared_secret_env.is_some() {
-      bail!(
-        "WebRTC TURN listener {} auth must not set both rest_shared_secret and rest_shared_secret_env",
-        listener_name
-      );
-    }
-    let has_static = !self.static_credentials.is_empty();
-    let has_rest = self.rest_shared_secret.is_some() || self.rest_shared_secret_env.is_some();
-    if matches!(self.mode, TurnAuthMode::Validate | TurnAuthMode::Enforce)
-      && !has_static
-      && !has_rest
-    {
-      bail!(
-        "WebRTC TURN listener {} auth.mode requires static_credentials or rest_shared_secret",
-        listener_name
-      );
-    }
-    let mut usernames = HashSet::new();
-    for credential in &self.static_credentials {
-      if credential.username.trim().is_empty() {
-        bail!(
-          "WebRTC TURN listener {} static credential username must not be empty",
-          listener_name
-        );
-      }
-      if !usernames.insert(credential.username.as_str()) {
-        bail!(
-          "WebRTC TURN listener {} has duplicate static credential username {}",
-          listener_name,
-          credential.username
-        );
-      }
-      if credential.password.is_some() && credential.password_env.is_some() {
-        bail!(
-          "WebRTC TURN listener {} static credential {} must not set both password and password_env",
-          listener_name,
-          credential.username
-        );
-      }
-      if credential.password.is_none() && credential.password_env.is_none() {
-        bail!(
-          "WebRTC TURN listener {} static credential {} requires password or password_env",
-          listener_name,
-          credential.username
-        );
-      }
-    }
-    Ok(())
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnAuthMode {
-  #[default]
-  PassThrough,
-  Validate,
-  Enforce,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct TurnStaticCredentialConfig {
-  pub username: String,
-  #[serde(default)]
-  pub password: Option<String>,
-  #[serde(default)]
-  pub password_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -549,8 +531,11 @@ impl TurnListenerTlsConfig {
     }
   }
 
-  pub(super) fn resolve_relative_paths(&mut self, cert_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut source_paths = Vec::new();
+  pub(super) fn resolve_relative_paths(
+    &mut self,
+    cert_dir: &Path,
+  ) -> anyhow::Result<TurnListenerTlsSourcePaths> {
+    let mut source_paths = TurnListenerTlsSourcePaths::default();
     self.cert_chain = self
       .cert_chain
       .take()
@@ -560,7 +545,7 @@ impl TurnListenerTlsConfig {
           cert_dir,
           &path,
         )?;
-        source_paths.push(logical);
+        source_paths.cert_chain = Some(logical);
         Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
@@ -573,12 +558,38 @@ impl TurnListenerTlsConfig {
           cert_dir,
           &path,
         )?;
-        source_paths.push(logical);
+        source_paths.private_key = Some(logical);
         Ok::<PathBuf, anyhow::Error>(resolved)
       })
       .transpose()?;
     Ok(source_paths)
   }
+
+  pub(crate) fn reload_relative_paths(
+    &mut self,
+    cert_dir: &Path,
+    source_paths: &TurnListenerTlsSourcePaths,
+  ) -> anyhow::Result<()> {
+    self.cert_chain = source_paths
+      .cert_chain
+      .as_ref()
+      .map(|path| reload_turn_tls_path("webrtc_turn_listeners.tls.cert_chain", cert_dir, path))
+      .transpose()?;
+    self.private_key = source_paths
+      .private_key
+      .as_ref()
+      .map(|path| reload_turn_tls_path("webrtc_turn_listeners.tls.private_key", cert_dir, path))
+      .transpose()?;
+    Ok(())
+  }
+}
+
+fn reload_turn_tls_path(field_name: &str, cert_dir: &Path, path: &Path) -> anyhow::Result<PathBuf> {
+  let relative = path
+    .strip_prefix(cert_dir)
+    .map_err(|_| anyhow!("{field_name} must stay within the configured directory"))?;
+  resolve_existing_local_config_file_path_with_logical(field_name, cert_dir, relative)
+    .map(|(resolved, _)| resolved)
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -607,6 +618,8 @@ pub struct TurnUpstreamPoolServerConfig {
   pub backup: bool,
   #[serde(default)]
   pub state: UpstreamPoolServerState,
+  #[serde(default)]
+  pub tls: UpstreamTlsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -617,6 +630,10 @@ pub struct TurnUpstreamPoolHealthCheckConfig {
   pub interval_ms: u64,
   #[serde(default = "default_health_check_timeout_ms")]
   pub timeout_ms: u64,
+  #[serde(default = "default_turn_connect_timeout_ms")]
+  pub connect_timeout_ms: u64,
+  #[serde(default = "default_turn_tls_handshake_timeout_ms")]
+  pub tls_handshake_timeout_ms: u64,
   #[serde(default = "default_health_check_healthy_threshold")]
   pub healthy_threshold: u32,
   #[serde(default = "default_health_check_unhealthy_threshold")]
@@ -629,6 +646,8 @@ impl Default for TurnUpstreamPoolHealthCheckConfig {
       enabled: true,
       interval_ms: default_health_check_interval_ms(),
       timeout_ms: default_health_check_timeout_ms(),
+      connect_timeout_ms: default_turn_connect_timeout_ms(),
+      tls_handshake_timeout_ms: default_turn_tls_handshake_timeout_ms(),
       healthy_threshold: default_health_check_healthy_threshold(),
       unhealthy_threshold: default_health_check_unhealthy_threshold(),
     }
@@ -684,6 +703,10 @@ fn default_turn_realm() -> String {
   "oxibelt".to_string()
 }
 
-fn default_turn_nonce_ttl_seconds() -> u64 {
-  600
+fn default_turn_connect_timeout_ms() -> u64 {
+  3_000
+}
+
+fn default_turn_tls_handshake_timeout_ms() -> u64 {
+  5_000
 }

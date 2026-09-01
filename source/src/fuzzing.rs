@@ -334,9 +334,10 @@ pub fn exercise_webrtc_turn(data: &[u8]) {
 
   let payload_len = input.usize(256);
   let payload = input.bytes(payload_len);
-  let channel = 0x4000 | (input.u16() & 0x3fff);
-  let channel_data = encode_channel_data(channel, &payload);
-  let _ = parse_channel_data(&channel_data);
+  let channel = 0x4000 | (input.u16() & 0x0fff);
+  if let Ok(channel_data) = encode_channel_data(channel, &payload) {
+    let _ = parse_channel_data(&channel_data);
+  }
 }
 
 fn exercise_turn_packet(packet: &[u8], auth: &TurnAuthConfig) {

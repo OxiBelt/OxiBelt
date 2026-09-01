@@ -4577,12 +4577,23 @@ id = "turn-tls-a"
 origin = "turns://turn-a.internal.example:5349"
 weight = 1
 
+[turn_upstream_pools.servers.tls]
+server_name = "turn-a.internal.example"
+trusted_ca_certs = ["turn-upstream-ca.pem"]
+
+[turn_upstream_pools.health_check]
+connect_timeout_ms = 3000
+tls_handshake_timeout_ms = 5000
+
 [[webrtc_turn_listeners]]
 name = "turn-edge"
 mode = "proxy_pool" # proxy_pool | edge_relay
 bind_udp = "0.0.0.0:3478"
+bind_udp_additional = ["[::]:3478"]
 bind_tcp = "0.0.0.0:3478"
+bind_tcp_additional = ["[::]:3478"]
 bind_tls = "0.0.0.0:5349"
+bind_tls_additional = ["[::]:5349"]
 realm = "example.test"
 udp_pool = "turn-udp"
 tcp_pool = "turn-tcp"
@@ -4592,9 +4603,14 @@ idle_timeout_ms = 75000
 [webrtc_turn_listeners.auth]
 mode = "validate" # pass_through | validate | enforce
 rest_shared_secret_env = "OXIBELT_TURN_REST_SECRET"
+password_algorithms = ["sha256", "md5"]
 ```
 
 `mode = "proxy_pool"` forwards TURN UDP, TCP, and TLS traffic to `[[turn_upstream_pools]]`. Upstream servers use `turn://`, `turn+tcp://`, or `turns://` origins and advertise their own relay addresses. TURN pools default to `power_of_two_choices` and support `power_of_two_choices`, `weighted_least_conn`, `rendezvous_hash`, and `rendezvous_ip_hash`; HTTP-only algorithms `ewma`, `least_time`, and `sticky_cookie` are rejected. Listener pool fields are transport-specific: `udp_pool` must reference `turn://` servers, `tcp_pool` must reference `turn+tcp://` servers, and `tls_pool` must reference `turns://` servers. `auth.mode = "validate"` checks authenticated TURN messages when credentials are present, but lets the upstream TURN server issue nonce challenges and remain authoritative.
+
+The singular `bind_udp`, `bind_tcp`, and `bind_tls` fields remain the primary compatible listener addresses. Their optional `*_additional` arrays bind the same logical listener, allocation state, authentication policy, and upstream pools on more addresses; use an IPv4 primary plus an IPv6 additional address for dual-stack control traffic. IPv6 sockets are explicitly IPv6-only so the paired wildcard binds cannot shadow each other.
+
+Each `turns://` server has an independent `[turn_upstream_pools.servers.tls]` policy with the same server-name, trust-root, subject-alternative-name, revocation, resumption, ECH, and optional client-identity controls as other upstream TLS clients. A TLS policy on `turn://` or `turn+tcp://` is rejected. `health_check.connect_timeout_ms` and `tls_handshake_timeout_ms` default to `3000` and `5000`; both forwarding and active health checks use the bounded per-pool timeouts. Stable pool server IDs and unchanged origins preserve health, load, and selection runtime across compatible full reloads.
 
 ```toml
 [[webrtc_turn_listeners]]
@@ -4626,6 +4642,8 @@ start = 49152
 end = 49200
 
 [webrtc_turn_listeners.limits]
+max_proxy_udp_sessions_per_listener = 4096
+max_pending_tcp_connections = 1024
 max_allocations_per_listener = 4096
 max_allocations_per_client = 2
 max_permissions_per_allocation = 256
@@ -4641,19 +4659,30 @@ allow_multicast_peers = false
 
 [webrtc_turn_listeners.auth]
 mode = "enforce"
+password_algorithms = ["sha256", "md5"]
+nonce_secret_file = "turn/nonce-current.b64"
+previous_nonce_secret_file = "turn/nonce-previous.b64"
 
 [[webrtc_turn_listeners.auth.static_credentials]]
 username = "media-user"
-password_env = "OXIBELT_TURN_MEDIA_PASSWORD"
+password_file = "turn/media-user-password"
 ```
 
 `mode = "edge_relay"` makes OxiBelt allocate UDP relay sockets and advertise one or more configured `relay_families`. This provides TURN relay infrastructure for ICE-based client-to-client WebRTC flows; the application still owns signaling, SDP exchange, and ICE candidate distribution. `family = "ipv4"` supports clients behind IPv4 NAT. `family = "ipv6"` supports IPv6 relay candidates, including deployments that need IPv6 NAT/NAT66 traversal. When a client sends TURN `REQUESTED-ADDRESS-FAMILY`, OxiBelt allocates the matching family. When a client sends `ADDITIONAL-ADDRESS-FAMILY = IPv6`, OxiBelt allocates both IPv4 and IPv6 relay sockets when both families are configured. If no family is requested, OxiBelt defaults to IPv4 and returns `440 Address Family not Supported` when IPv4 is unavailable.
 
 The legacy single-family `public_ip`, `relay_bind_ip`, and `[webrtc_turn_listeners.relay_port_range]` fields remain accepted when all three are set together. Do not mix the legacy fields with `[[webrtc_turn_listeners.relay_families]]`. Each relay family must use matching address families for `public_ip` and `relay_bind_ip`, and each port range must have positive `start <= end`.
 
-`edge_relay` requires enforced TURN authentication and rejects open relay configurations. `limits` bounds listener allocations, per-client allocations, per-allocation permissions, channel bindings, and allocation lifetime; defaults are shown in the example. Capacity exhaustion returns TURN errors such as `486 Allocation Quota Reached` or `508 Insufficient Capacity` without failing the listener. `peer_policy` is default-deny for private, loopback, link-local, unspecified, multicast, and broadcast peer addresses. IPv4 peers must use the IPv4 relay family; IPv4-mapped IPv6 peer addresses are rejected. Set `allow_private_peers = true` only for intentional private/VPC or lab relays, including private IPv6/ULA peers behind NAT66.
+`edge_relay` requires enforced TURN authentication and rejects open relay configurations. It implements UDP relay allocations and RFC 6062 TCP relay allocations over TURN/TCP or TURN/TLS control connections. TCP allocations use `CONNECT`, `CONNECTION-BIND`, `CONNECTION-ATTEMPT`, and bounded pending data connections; a TURN/UDP control request for a TCP relay is rejected. The configured relay port range is shared numerically by independent UDP sockets and TCP listeners. Incoming TCP peers require a live permission, and unbound pending connections expire after 30 seconds.
+
+`limits` bounds proxy UDP sessions, pending TCP data connections, listener allocations, per-client allocations, per-allocation permissions, channel bindings, and allocation lifetime; defaults are shown in the example. `max_proxy_udp_sessions_per_listener` applies to `proxy_pool`, while the remaining relay limits apply to `edge_relay`. Capacity exhaustion returns TURN errors such as `486 Allocation Quota Reached` or `508 Insufficient Capacity` without failing the listener. `peer_policy` is default-deny for private, loopback, link-local, unspecified, multicast, broadcast, carrier-grade NAT/shared, protocol-assignment, benchmark, current-network, and reserved peer addresses. IPv4 peers must use the IPv4 relay family; IPv4-mapped IPv6 peer addresses are rejected. Set `allow_private_peers = true` only for intentional private/VPC or lab relays, including private IPv6/ULA peers behind NAT66.
+
+Enforced authentication supports RFC 8489 `PASSWORD-ALGORITHMS`, `PASSWORD-ALGORITHM`, `USERHASH`, `MESSAGE-INTEGRITY-SHA256`, and compatible MD5-derived `MESSAGE-INTEGRITY`. Realm, username, password, and USERHASH derivation apply the RFC 8265 OpaqueString profile; disallowed code points fail closed, realms are bounded to 763 bytes, and usernames to 512 bytes. The default algorithm order is `["sha256", "md5"]`; the issued nonce binds that exact policy, realm, observed client socket, security-feature cookie, fresh random material, and issue time. `nonce_secret_file` or `nonce_secret_env` supplies the current standard-base64 32-byte nonce key, and the optional `previous_nonce_secret_*` source permits a bounded rotation overlap. Existing configurations without an explicit nonce key retain the legacy REST/static-credential fallback. REST secrets and static passwords accept exactly one literal, environment, or cert-root-relative file source; file contents and all source references are bounded and redacted. Authenticated success and error responses use the request's selected integrity algorithm, advertise OxiBelt through `SOFTWARE`, and later allocation requests must retain the allocating username. Per RFC 8489, method attributes after the first integrity attribute are ignored rather than acted on without integrity coverage.
 
 TCP and TLS edge-relay outbound queues are bounded per downstream connection by `stream_outbound_queue_capacity`; omitted configs use `32`, `"auto"` resolves conservatively from available parallelism with a `32..=64` clamp, and explicit values must be `1..=256`. Full queues fail closed by closing the affected TURN stream rather than buffering without bound. TURN over TLS reuses `[tls]` certificate material by default; set `[webrtc_turn_listeners.tls] cert_chain` plus exactly one of `private_key` or `remote_signer_key_id` to override it for a listener. `remote_signer_key_id` uses the global `[tls.remote_signer]` socket and token. TURN payloads are protocol-forwarded only; OxiRule/WAF inspection applies to signaling HTTP, not SRTP/media payloads.
+
+Full reload reconciles TURN listeners by `name`: unchanged listeners retain allocations, and listener-local or inherited TLS material/policy is refreshed for new handshakes without discarding relay state. A state-affecting listener change can be drained and replaced only when its new bind set does not overlap an active TURN listener. A realm, authentication, relay-range, mode, or other state change that retains an active bind fails closed and requires a process restart or rollout.
+
+The OxiBelt Helm chart exposes this surface under `turn`. It remains disabled by default. `configMode = "generated"` creates bounded proxy or singleton edge-relay configuration, explicit TCP/UDP/TLS Service ports and relay ranges, matching NetworkPolicy/Cilium rules, and read-only projected Secret files. `configMode = "external"` leaves TURN TOML under the existing operator-managed `config.inline` or `config.existingConfigMap` contract while managing only the requested exposure and projections. Edge-relay generation rejects replica counts other than one because allocations and pending RFC 6062 connections are process-local. Proxy mode supports normal highly available replicas. Existing chart rendering is unchanged while `turn.enabled = false`.
 
 Route-level WAF example:
 

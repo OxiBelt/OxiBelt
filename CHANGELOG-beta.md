@@ -49,13 +49,21 @@ for the governed entry format.
   a Gateway-controller `upstreamClientTls.sourceSecretAllowlist`. Both remain
   opt-in; omitted values grant no Secret access and preserve existing Pod and
   controller behavior.
+- Complete the native WebRTC fallback configuration with RFC 8489 SHA-256 and
+  compatible MD5 authentication, source-bound current/previous nonce secrets,
+  bounded secret-file sources, RFC 6062 TCP relay limits, and independent
+  per-server `turns://` TLS policies including optional client identity.
+- Add default-off Helm `turn` values for generated proxy or singleton edge
+  relay configuration, explicit UDP/TCP/TLS control and relay exposure,
+  projected Secret files, and matching network-policy rules. Omission preserves
+  prior chart rendering.
 
 ### Schema epochs
 
 - Keep the native configuration schema at epoch `1` while adding the optional
-  bandwidth, upstream-client-identity, and direct-response fields. Existing
-  epoch-1 configurations remain valid and retain their behavior without a
-  migration.
+  bandwidth, upstream-client-identity, direct-response, and TURN fields.
+  Existing epoch-1 configurations remain valid and retain their behavior
+  without a migration.
 - Extend the two Helm values schemas and Kubernetes feature-graduation policy
   for the opt-in Secret projections and refreshed immutable matrix inputs.
   These are deployment-contract additions, not durable schema migrations.
@@ -77,6 +85,10 @@ for the governed entry format.
 - Add supported native route bandwidth shaping and native upstream mTLS client
   authentication. Gateway and Helm delivery of client identities inherit those
   deployment surfaces' existing experimental and unvalidated lifecycle state.
+- Complete supported TURN edge relay over UDP and RFC 6062 TCP, transport-
+  matched TURN proxying over UDP/TCP/TLS, dual-stack relay allocation, and
+  coturn/client interoperability coverage. Generic raw UDP forwarding remains
+  available through existing `[[stream_listeners]]`.
 - Add a bounded direct-response route target and fail-closed Gateway behavior.
   Proven-safe HTTPRoute and GRPCRoute withdrawal publishes exact
   match-equivalent empty-body `503` tombstones; proven-safe TCPRoute and UDPRoute
@@ -103,6 +115,9 @@ for the governed entry format.
   the 30-image and two-chart release inventory. The Gateway controller and data
   plane must be deployed from the same exact candidate revision for the new
   client-identity and fail-closed rollout contracts.
+- Add a digest-pinned coturn image only to the reusable CI helper artifact; it
+  is not an OxiBelt release image or runtime dependency and does not change the
+  release inventory.
 - Refresh compatible Rust dependency graphs, probe lockfiles, cargo-vet and
   dependency-policy evidence, CI actions, builder/runtime image digests,
   Kubernetes node images, Kind, Helm 3, and the pinned fuzz nightly. Rebuild
@@ -114,6 +129,9 @@ for the governed entry format.
 - No durable database, object-store, shared-state, or on-disk migration is
   required. Bandwidth credits and queues are process-local and reconstructed
   from configuration.
+- TURN allocations, relay sockets, and pending RFC 6062 data connections remain
+  process-local. Compatible snapshot reloads preserve unchanged listeners and
+  stable pool runtime; process or Pod replacement starts with empty TURN state.
 - Helm-projected source Secrets, controller-derived target Secrets, immutable
   controller ConfigMaps, mounts, and rollout references are Kubernetes
   deployment state. Remove them only after the corresponding old data-plane
@@ -128,6 +146,9 @@ for the governed entry format.
   that rejected backend references produce a new denied revision, close the
   affected TCP/UDP listeners, do not expose broader HTTP/gRPC fallbacks, and
   recover only after authorization is restored.
+- Qualify raw UDP plus TURN edge/proxy UDP, TCP, TLS, IPv4, IPv6 relay, and RFC
+  6062 behavior with both OxiBelt protocol probes and the pinned coturn client;
+  run relay-only Chromium and Firefox data-channel coverage.
 - At minimum, run the governed ledger check and exact-range validation against
   both the preceding beta and stable source revisions:
 
@@ -141,10 +162,12 @@ pnpm run release-contract:check --change-base b1ca5aab407e8398792a2b11c8436b6ff7
 ### Rollback and irreversible steps
 
 - Before restoring `0.9.1-beta.1` or `0.9.0`, remove every
-  `[routes.bandwidth]`, `tls.client_identity`, and `actions.direct_response`
-  table plus every Helm projection and Gateway `clientCertificateRef` that
-  requires beta.2. Drain long-lived connections, then restore the retained
-  prior controller and data-plane images together by immutable digest.
+  `[routes.bandwidth]`, `tls.client_identity`, `actions.direct_response`, new
+  TURN TLS/auth/limit field, and generated Helm `turn` value plus every Helm
+  projection and Gateway `clientCertificateRef` that requires beta.2. Drain
+  TURN allocations and RFC 6062 data connections with other long-lived
+  connections, then restore the retained prior controller and data-plane
+  images together by immutable digest.
 - Remove controller-derived or projected Secrets only after no active or
   retained rollout references them. No durable state conversion is required
   and no beta.2 data migration is irreversible, but an upstream must revoke a
@@ -175,6 +198,13 @@ pnpm run release-contract:check --change-base b1ca5aab407e8398792a2b11c8436b6ff7
   client-auth resumption, and restrict Gateway Secret reads to exact
   operator-allowlisted names with any required cross-namespace
   `ReferenceGrant`.
+- Bind TURN nonces to the observed client tuple, realm, and advertised password
+  algorithms; reject ambiguous or unknown required attributes; integrity-sign
+  authenticated responses; confine and redact secret sources; bound proxy UDP
+  sessions and pending TCP connections; and require permissions before any
+  peer-to-client relay. Deny private and special-use relay peers by default,
+  including carrier-grade NAT/shared, protocol-assignment, benchmark,
+  current-network, and reserved ranges.
 - Publish fail-closed replacements only when translation proves the exact
   affected scope: HTTP/gRPC receives match-equivalent `503` tombstones and safe
   L4 failures remove the exact listener. Partial backend pools, orphaned

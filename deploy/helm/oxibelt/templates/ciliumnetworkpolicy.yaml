@@ -1,8 +1,31 @@
 {{- include "oxibelt.validateNetworkPolicy" . -}}
+{{- include "oxibelt.validateTurn" . -}}
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
 {{- if and .Values.networkPolicy.enabled .Values.networkPolicy.cilium.enabled }}
 {{- $cilium := .Values.networkPolicy.cilium -}}
+{{- $turnIngressPorts := list -}}
+{{- if and .Values.turn.enabled .Values.networkPolicy.ingress.public.allowAll -}}
+{{- if .Values.turn.control.udp.enabled -}}
+{{- $turnIngressPorts = append $turnIngressPorts (dict "port" (toString .Values.turn.control.udp.targetPort) "protocol" "UDP") -}}
+{{- end -}}
+{{- if .Values.turn.control.tcp.enabled -}}
+{{- $turnIngressPorts = append $turnIngressPorts (dict "port" (toString .Values.turn.control.tcp.targetPort) "protocol" "TCP") -}}
+{{- end -}}
+{{- if .Values.turn.control.tls.enabled -}}
+{{- $turnIngressPorts = append $turnIngressPorts (dict "port" (toString .Values.turn.control.tls.targetPort) "protocol" "TCP") -}}
+{{- end -}}
+{{- if .Values.turn.relay.udp.enabled -}}
+{{- range $port := untilStep (int .Values.turn.relay.udp.start) (int (add (int .Values.turn.relay.udp.end) 1)) 1 -}}
+{{- $turnIngressPorts = append $turnIngressPorts (dict "port" (toString $port) "protocol" "UDP") -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.turn.relay.tcp.enabled -}}
+{{- range $port := untilStep (int .Values.turn.relay.tcp.start) (int (add (int .Values.turn.relay.tcp.end) 1)) 1 -}}
+{{- $turnIngressPorts = append $turnIngressPorts (dict "port" (toString $port) "protocol" "TCP") -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -13,6 +36,14 @@ spec:
   endpointSelector:
     matchLabels:
 {{ include "oxibelt.ciliumSelectorLabels" . | indent 6 }}
+  {{- if gt (len $turnIngressPorts) 0 }}
+  # Cilium has no portable Kubernetes `endPort` equivalent here; the chart
+  # expands the same bounded TURN ranges into individual port rules.
+  ingress:
+  - toPorts:
+    - ports:
+{{ toYaml $turnIngressPorts | indent 8 }}
+  {{- end }}
   egress:
   # DNS proxy visibility is intentionally scoped to trusted configured DNS
   # endpoints. Exact FQDN connection rules below remain the egress authority.

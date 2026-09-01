@@ -444,7 +444,7 @@ fn allowlist_from_config(config: &Config) -> HashSet<AllowedBind> {
     }
   }
   for listener in &config.webrtc_turn_listeners {
-    if let Some(bind) = listener.bind_udp {
+    for bind in listener.udp_binds() {
       insert_udp(
         &mut allowlist,
         bind,
@@ -452,10 +452,10 @@ fn allowlist_from_config(config: &Config) -> HashSet<AllowedBind> {
         "TURN UDP",
       );
     }
-    if let Some(bind) = listener.bind_tcp {
+    for bind in listener.tcp_binds() {
       insert_tcp(&mut allowlist, bind, tcp_options, "TURN TCP");
     }
-    if let Some(bind) = listener.bind_tls {
+    for bind in listener.tls_binds() {
       insert_tcp(&mut allowlist, bind, tcp_options, "TURN TLS");
     }
   }

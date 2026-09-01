@@ -696,9 +696,9 @@ fn validate_stream_listener_bind_conflicts(
       }
       for turn in &config.webrtc_turn_listeners {
         conflicts.extend(
-          [turn.bind_tcp, turn.bind_tls]
-            .into_iter()
-            .flatten()
+          turn
+            .tcp_binds()
+            .chain(turn.tls_binds())
             .map(|bind| ("webrtc_turn_listeners TCP/TLS", bind)),
         );
       }
@@ -724,7 +724,7 @@ fn validate_stream_listener_bind_conflicts(
         config
           .webrtc_turn_listeners
           .iter()
-          .filter_map(|turn| turn.bind_udp)
+          .flat_map(|turn| turn.udp_binds())
           .map(|bind| ("webrtc_turn_listeners UDP", bind)),
       );
     }

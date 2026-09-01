@@ -1094,6 +1094,21 @@ criteria = "safe-to-deploy"
 version = "0.2.21"
 criteria = "safe-to-deploy"
 
+[[exemptions.precis-core]]
+version = "0.1.11"
+criteria = "safe-to-deploy"
+notes = "RFC 8264 tables and validation for TURN credential preparation; tracked by OxiBelt issue #173."
+
+[[exemptions.precis-profiles]]
+version = "0.1.13"
+criteria = "safe-to-deploy"
+notes = "RFC 8265 OpaqueString enforcement for TURN long-term credentials; tracked by OxiBelt issue #173."
+
+[[exemptions.precis-tools]]
+version = "0.1.9"
+criteria = "safe-to-deploy"
+notes = "Build-only generation from crate-bundled Unicode data with networking disabled; tracked by OxiBelt issue #173."
+
 [[exemptions.pretty_assertions]]
 version = "1.4.1"
 criteria = "safe-to-run"
@@ -1101,6 +1116,11 @@ criteria = "safe-to-run"
 [[exemptions.prettyplease]]
 version = "0.2.37"
 criteria = "safe-to-deploy"
+
+[[exemptions.proptest]]
+version = "1.11.0"
+criteria = "safe-to-run"
+notes = "Development-only TURN protocol property tests; tracked by OxiBelt issue #172."
 
 [[exemptions.quic-parser]]
 version = "0.1.5"
@@ -1135,8 +1155,23 @@ version = "0.8.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.rand]]
+version = "0.9.5"
+criteria = "safe-to-run"
+notes = "Development-only proptest dependency; tracked by OxiBelt issue #172."
+
+[[exemptions.rand]]
 version = "0.10.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.rand_chacha]]
+version = "0.9.0"
+criteria = "safe-to-run"
+notes = "Development-only proptest dependency; tracked by OxiBelt issue #172."
+
+[[exemptions.rand_core]]
+version = "0.9.5"
+criteria = "safe-to-run"
+notes = "Development-only proptest dependency; tracked by OxiBelt issue #172."
 
 [[exemptions.rand_core]]
 version = "0.10.1"
@@ -1145,6 +1180,11 @@ criteria = "safe-to-deploy"
 [[exemptions.rand_pcg]]
 version = "0.10.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.rand_xorshift]]
+version = "0.4.0"
+criteria = "safe-to-run"
+notes = "Development-only proptest dependency; tracked by OxiBelt issue #172."
 
 [[exemptions.redox_syscall]]
 version = "0.5.18"
@@ -1169,6 +1209,11 @@ criteria = "safe-to-deploy"
 [[exemptions.regex-automata]]
 version = "0.4.16"
 criteria = "safe-to-deploy"
+
+[[exemptions.regex-lite]]
+version = "0.1.9"
+criteria = "safe-to-deploy"
+notes = "Safe Rust parser used by the crate-bundled Unicode table build path; tracked by OxiBelt issue #173."
 
 [[exemptions.regex-syntax]]
 version = "0.8.11"
@@ -1510,9 +1555,19 @@ criteria = "safe-to-deploy"
 version = "1.20.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.ucd-parse]]
+version = "0.1.13"
+criteria = "safe-to-deploy"
+notes = "Build-only parser for crate-bundled Unicode data; tracked by OxiBelt issue #173."
+
 [[exemptions.ucd-trie]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
+
+[[exemptions.unarray]]
+version = "0.1.4"
+criteria = "safe-to-run"
+notes = "Development-only proptest dependency; tracked by OxiBelt issue #172."
 
 [[exemptions.unicode-general-category]]
 version = "1.1.0"

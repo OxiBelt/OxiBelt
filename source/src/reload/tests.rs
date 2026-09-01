@@ -28,6 +28,53 @@ fn fingerprint_changes_when_symlink_target_changes() {
 }
 
 #[test]
+fn turn_listener_tls_reloads_the_logical_projected_secret_paths() -> anyhow::Result<()> {
+  let temp = tempfile::tempdir()?;
+  let cert_dir = temp.path().join("certs");
+  let first = cert_dir.join("generation-a");
+  let second = cert_dir.join("generation-b");
+  fs::create_dir_all(&first)?;
+  fs::create_dir_all(&second)?;
+  for (directory, contents) in [
+    (&first, b"first".as_slice()),
+    (&second, b"second".as_slice()),
+  ] {
+    fs::write(directory.join("fullchain.pem"), contents)?;
+    fs::write(directory.join("privkey.pem"), contents)?;
+  }
+  let cert_link = cert_dir.join("tls.crt");
+  let key_link = cert_dir.join("tls.key");
+  std::os::unix::fs::symlink("generation-a/fullchain.pem", &cert_link)?;
+  std::os::unix::fs::symlink("generation-a/privkey.pem", &key_link)?;
+
+  let mut tls = crate::config::TurnListenerTlsConfig {
+    cert_chain: Some(cert_link.canonicalize()?),
+    private_key: Some(key_link.canonicalize()?),
+    ..Default::default()
+  };
+  let logical = crate::config::TurnListenerTlsSourcePaths {
+    cert_chain: Some(cert_link.clone()),
+    private_key: Some(key_link.clone()),
+  };
+
+  fs::remove_file(&cert_link)?;
+  fs::remove_file(&key_link)?;
+  std::os::unix::fs::symlink("generation-b/fullchain.pem", &cert_link)?;
+  std::os::unix::fs::symlink("generation-b/privkey.pem", &key_link)?;
+
+  tls.reload_relative_paths(&cert_dir, &logical)?;
+  assert_eq!(
+    tls.cert_chain,
+    Some(second.join("fullchain.pem").canonicalize()?)
+  );
+  assert_eq!(
+    tls.private_key,
+    Some(second.join("privkey.pem").canonicalize()?)
+  );
+  Ok(())
+}
+
+#[test]
 fn full_reload_rejects_runtime_worker_thread_resize() {
   let active = parse_worker_reload_config(2);
   let replacement = parse_worker_reload_config(3);

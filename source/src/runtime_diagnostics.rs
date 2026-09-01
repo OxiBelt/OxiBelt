@@ -512,7 +512,7 @@ fn load_tls_material_for_check(config: &Config) -> anyhow::Result<()> {
       .context("failed to build admin TLS config")?;
   }
   for listener in &config.webrtc_turn_listeners {
-    if listener.bind_tls.is_some() {
+    if listener.tls_binds().next().is_some() {
       oxibelt::tls::build_turn_server_config(&listener.tls, &config.tls)
         .with_context(|| format!("failed to build TURN TLS config for {}", listener.name))?;
     }
@@ -549,6 +549,20 @@ fn dry_run_listener_binds(config: &Config) -> anyhow::Result<()> {
         config.quic.socket.workers,
         config.quic.socket.reuse_port,
       )?;
+      checked += 1;
+    }
+  }
+  for listener in &config.webrtc_turn_listeners {
+    for bind in listener.tcp_binds().chain(listener.tls_binds()) {
+      dry_run_tcp_bind(
+        bind,
+        config.runtime.accept.workers,
+        config.runtime.accept.reuse_port,
+      )?;
+      checked += 1;
+    }
+    for bind in listener.udp_binds() {
+      dry_run_udp_bind(bind, 1, false)?;
       checked += 1;
     }
   }

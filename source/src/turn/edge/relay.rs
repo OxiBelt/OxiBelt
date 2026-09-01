@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 
 use crate::config::{TurnRelayAddressFamily, TurnRelayFamilyConfig, WebRtcTurnListenerConfig};
 
-use super::super::protocol::{encode_channel_data, encode_data_indication, encode_error};
-use super::{EdgeAllocation, EdgeClient, EdgeClientState, EdgeSender, EdgeState};
+use super::super::protocol::{encode_channel_data, encode_data_indication};
+use super::{EdgeAllocation, EdgeClient, EdgeClientState, EdgeRelay, EdgeSender, EdgeState};
 
 pub(super) fn stream_outbound_channel(
   config: &WebRtcTurnListenerConfig,
@@ -56,6 +56,9 @@ pub(super) fn spawn_peer_reader(
         let Some(allocation) = state.allocations.get_mut(&family) else {
           break;
         };
+        let EdgeRelay::Udp(_) = &allocation.relay else {
+          break;
+        };
         expire_allocation_state(allocation);
         if !allocation.permissions.contains_key(&peer.ip()) {
           continue;
@@ -65,7 +68,10 @@ pub(super) fn spawn_peer_reader(
           .iter()
           .find_map(|(channel, binding)| (binding.peer == peer).then_some(*channel));
         match channel {
-          Some(channel) => encode_channel_data(channel, &buffer[..len]),
+          Some(channel) => match encode_channel_data(channel, &buffer[..len]) {
+            Ok(frame) => frame,
+            Err(_) => continue,
+          },
           None => encode_data_indication(allocation.transaction_id, peer, &buffer[..len]),
         }
       };
@@ -102,7 +108,7 @@ pub(super) async fn send(sender: &EdgeSender, bytes: Vec<u8>) -> anyhow::Result<
 pub(super) fn bind_relay_socket(
   config: &TurnRelayFamilyConfig,
 ) -> anyhow::Result<std::net::UdpSocket> {
-  for port in config.relay_port_range.start..=config.relay_port_range.end {
+  for port in randomized_relay_ports(config)? {
     let bind = SocketAddr::new(config.relay_bind_ip, port);
     if let Ok(socket) = bind_udp_socket(bind) {
       return Ok(socket);
@@ -115,9 +121,31 @@ pub(super) fn bind_relay_socket(
   )
 }
 
-fn bind_udp_socket(bind: SocketAddr) -> anyhow::Result<std::net::UdpSocket> {
+pub(super) fn randomized_relay_ports(config: &TurnRelayFamilyConfig) -> anyhow::Result<Vec<u16>> {
+  if config.relay_port_range.start == 0
+    || config.relay_port_range.start > config.relay_port_range.end
+  {
+    bail!("invalid TURN relay port range");
+  }
+  let port_count = u32::from(config.relay_port_range.end)
+    .saturating_sub(u32::from(config.relay_port_range.start))
+    .saturating_add(1);
+  let mut random = [0u8; 8];
+  crate::crypto::random_fill(&mut random)
+    .map_err(|_| anyhow::anyhow!("failed to randomize TURN relay port selection"))?;
+  let start_offset = (u64::from_be_bytes(random) % u64::from(port_count)) as u32;
+  let mut ports = Vec::with_capacity(port_count as usize);
+  for attempt in 0..port_count {
+    let offset = (start_offset + attempt) % port_count;
+    let port = u16::try_from(u32::from(config.relay_port_range.start) + offset)
+      .map_err(|_| anyhow::anyhow!("invalid TURN relay port range"))?;
+    ports.push(port);
+  }
+  Ok(ports)
+}
+
+pub(super) fn bind_udp_socket(bind: SocketAddr) -> anyhow::Result<std::net::UdpSocket> {
   let socket = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))?;
-  socket.set_reuse_address(true)?;
   if bind.is_ipv6() {
     socket.set_only_v6(true)?;
   }
@@ -133,6 +161,22 @@ pub(super) fn expire_allocation_state(allocation: &mut EdgeAllocation) {
   allocation
     .channels
     .retain(|_, binding| binding.expires_at > now);
+  allocation
+    .pending_tcp
+    .retain(|_, pending| pending.expires_at > now);
+}
+
+pub(super) fn channel_binding_conflicts(
+  channels: &HashMap<u16, super::EdgeChannelBinding>,
+  channel: u16,
+  peer: SocketAddr,
+) -> bool {
+  channels
+    .get(&channel)
+    .is_some_and(|binding| binding.peer != peer)
+    || channels
+      .iter()
+      .any(|(bound_channel, binding)| *bound_channel != channel && binding.peer == peer)
 }
 
 pub(super) fn expire_client_state(state: &mut EdgeClientState) {
@@ -164,57 +208,71 @@ pub(super) fn remove_all_expired_client_state(clients: &mut HashMap<EdgeClient, 
   });
 }
 
-pub(super) async fn send_allocation_mismatch(
-  sender: &EdgeSender,
-  request_type: u16,
-  transaction_id: [u8; 12],
-) -> anyhow::Result<()> {
-  send(
-    sender,
-    encode_error(
-      request_type,
-      transaction_id,
-      437,
-      "Allocation Mismatch",
-      None,
-      None,
-    ),
-  )
-  .await
-}
-
-pub(super) async fn send_turn_error(
-  sender: &EdgeSender,
-  request_type: u16,
-  transaction_id: [u8; 12],
-  code: u16,
-  reason: &str,
-) -> anyhow::Result<()> {
-  send(
-    sender,
-    encode_error(request_type, transaction_id, code, reason, None, None),
-  )
-  .await
-}
-
 #[cfg(test)]
 mod tests {
   use std::time::Duration;
 
   use crate::config::{
-    TurnAuthConfig, TurnEdgeRelayLimitsConfig, TurnEdgeRelayPeerPolicyConfig,
-    TurnListenerTlsConfig, TurnRelayPortRange, WebRtcTurnListenerMode,
+    TurnAuthConfig, TurnAuthMode, TurnEdgeRelayLimitsConfig, TurnEdgeRelayPeerPolicyConfig,
+    TurnListenerTlsConfig, TurnPasswordAlgorithm, TurnRelayPortRange, TurnStaticCredentialConfig,
+    WebRtcTurnListenerMode,
   };
 
   use super::super::{EdgeChannelBinding, EdgeSender};
   use super::*;
 
+  fn test_authenticated_context() -> Arc<crate::turn::auth::AuthenticatedContext> {
+    use sha2::{Digest, Sha256};
+
+    let auth = TurnAuthConfig {
+      mode: TurnAuthMode::Enforce,
+      static_credentials: vec![TurnStaticCredentialConfig {
+        username: "test-user".to_string(),
+        password: Some("test-password".to_string()),
+        password_env: None,
+        password_file: None,
+      }],
+      password_algorithms: vec![TurnPasswordAlgorithm::Sha256],
+      ..TurnAuthConfig::default()
+    };
+    let key = Sha256::digest(b"test-user:example.test:test-password");
+    let password_algorithms = crate::turn::auth::password_algorithms_challenge_attribute(&auth);
+    let raw = crate::turn::protocol::with_message_integrity_sha256(
+      crate::turn::protocol::encode_message(
+        crate::turn::protocol::ALLOCATE_REQUEST,
+        [1; 12],
+        &[
+          (crate::turn::protocol::ATTR_USERNAME, b"test-user".to_vec()),
+          (crate::turn::protocol::ATTR_REALM, b"example.test".to_vec()),
+          password_algorithms,
+          (
+            crate::turn::protocol::ATTR_PASSWORD_ALGORITHM,
+            vec![0, 2, 0, 0],
+          ),
+        ],
+      ),
+      &key,
+    );
+    let message = crate::turn::protocol::parse_stun(&raw).expect("authenticated test message");
+    let crate::turn::auth::AuthenticatedContextDecision::Pass(context) =
+      crate::turn::auth::authenticated_context_for_source(&auth, "example.test", None, &message)
+        .expect("test authentication must be evaluated")
+    else {
+      panic!("test credentials must authenticate");
+    };
+    Arc::new(context)
+  }
+
   #[tokio::test]
   async fn allocation_state_expiry_removes_permissions_and_channels() {
     let now = Instant::now();
     let mut allocation = EdgeAllocation {
-      relay: Arc::new(bind_loopback_udp().await),
+      relay: EdgeRelay::Udp(Arc::new(bind_loopback_udp().await)),
+      relayed_addr: "127.0.0.1:49152".parse().expect("relayed address"),
       transaction_id: [7; 12],
+      request_digest: [0; 32],
+      reservation_token: None,
+      auth: test_authenticated_context(),
       permissions: HashMap::from([
         (
           "127.0.0.1".parse().expect("ip"),
@@ -241,6 +299,8 @@ mod tests {
           },
         ),
       ]),
+      pending_tcp: HashMap::new(),
+      active_tcp: HashMap::new(),
       expires_at: now + Duration::from_secs(600),
       _introspection_guard: crate::runtime_introspection::RuntimeIntrospectionState::new()
         .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
@@ -262,7 +322,10 @@ mod tests {
   async fn expired_udp_client_and_allocation_release_introspection_guards() {
     let runtime = crate::runtime_introspection::RuntimeIntrospectionState::new();
     runtime.set_enabled(true);
-    let client = EdgeClient::Udp("127.0.0.1:49152".parse().expect("socket addr"));
+    let client = EdgeClient::Udp {
+      peer: "127.0.0.1:49152".parse().expect("socket addr"),
+      local: "127.0.0.1:3478".parse().expect("listener addr"),
+    };
     let mut clients = HashMap::from([(
       client,
       EdgeClientState {
@@ -273,10 +336,16 @@ mod tests {
         allocations: HashMap::from([(
           TurnRelayAddressFamily::Ipv4,
           EdgeAllocation {
-            relay: Arc::new(bind_loopback_udp().await),
+            relay: EdgeRelay::Udp(Arc::new(bind_loopback_udp().await)),
+            relayed_addr: "127.0.0.1:49152".parse().expect("relayed address"),
             transaction_id: [3; 12],
+            request_digest: [0; 32],
+            reservation_token: None,
+            auth: test_authenticated_context(),
             permissions: HashMap::new(),
             channels: HashMap::new(),
+            pending_tcp: HashMap::new(),
+            active_tcp: HashMap::new(),
             expires_at: Instant::now() - Duration::from_secs(1),
             _introspection_guard: runtime
               .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
@@ -300,7 +369,10 @@ mod tests {
     runtime.set_enabled(true);
     let edge = EdgeState::new(runtime.clone());
     for port in [49152, 49153] {
-      let client = EdgeClient::Udp(SocketAddr::from(([127, 0, 0, 1], port)));
+      let client = EdgeClient::Udp {
+        peer: SocketAddr::from(([127, 0, 0, 1], port)),
+        local: "127.0.0.1:3478".parse().expect("listener addr"),
+      };
       edge.clients.lock().await.insert(
         client,
         EdgeClientState {
@@ -308,10 +380,16 @@ mod tests {
           allocations: HashMap::from([(
             TurnRelayAddressFamily::Ipv4,
             EdgeAllocation {
-              relay: Arc::new(bind_loopback_udp().await),
+              relay: EdgeRelay::Udp(Arc::new(bind_loopback_udp().await)),
+              relayed_addr: "127.0.0.1:49152".parse().expect("relayed address"),
               transaction_id: [5; 12],
+              request_digest: [0; 32],
+              reservation_token: None,
+              auth: test_authenticated_context(),
               permissions: HashMap::new(),
               channels: HashMap::new(),
+              pending_tcp: HashMap::new(),
+              active_tcp: HashMap::new(),
               expires_at: Instant::now() - Duration::from_millis(500),
               _introspection_guard: runtime
                 .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
@@ -353,7 +431,10 @@ mod tests {
     let second = EdgeState::new(runtime.clone());
 
     for (edge, port) in [(&first, 49152), (&second, 49153)] {
-      let client = EdgeClient::Udp(SocketAddr::from(([127, 0, 0, 1], port)));
+      let client = EdgeClient::Udp {
+        peer: SocketAddr::from(([127, 0, 0, 1], port)),
+        local: "127.0.0.1:3478".parse().expect("listener addr"),
+      };
       edge.clients.lock().await.insert(
         client,
         EdgeClientState {
@@ -361,10 +442,16 @@ mod tests {
           allocations: HashMap::from([(
             TurnRelayAddressFamily::Ipv4,
             EdgeAllocation {
-              relay: Arc::new(bind_loopback_udp().await),
+              relay: EdgeRelay::Udp(Arc::new(bind_loopback_udp().await)),
+              relayed_addr: "127.0.0.1:49152".parse().expect("relayed address"),
               transaction_id: [4; 12],
+              request_digest: [0; 32],
+              reservation_token: None,
+              auth: test_authenticated_context(),
               permissions: HashMap::new(),
               channels: HashMap::new(),
+              pending_tcp: HashMap::new(),
+              active_tcp: HashMap::new(),
               expires_at: Instant::now() + Duration::from_secs(60),
               _introspection_guard: runtime
                 .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
@@ -403,6 +490,7 @@ mod tests {
 
     super::super::serve_stream(
       Box::new(server),
+      "127.0.0.1:50000".parse().expect("peer"),
       stream_id,
       edge_relay_config_with_stream_queue_capacity(2),
       drain,
@@ -432,6 +520,7 @@ mod tests {
 
     super::super::serve_stream(
       Box::new(server),
+      "127.0.0.1:50001".parse().expect("peer"),
       stream_id,
       edge_relay_config_with_stream_queue_capacity(2),
       drain,
@@ -486,6 +575,70 @@ mod tests {
     Ok(())
   }
 
+  #[test]
+  fn relay_ports_are_exclusive_even_when_ranges_overlap() -> anyhow::Result<()> {
+    let first = bind_udp_socket("127.0.0.1:0".parse()?)?;
+    let port = first.local_addr()?.port();
+    let config = TurnRelayFamilyConfig {
+      family: TurnRelayAddressFamily::Ipv4,
+      public_ip: "127.0.0.1".parse()?,
+      relay_bind_ip: "127.0.0.1".parse()?,
+      relay_port_range: TurnRelayPortRange {
+        start: port,
+        end: port,
+      },
+    };
+
+    let error = bind_relay_socket(&config)
+      .expect_err("an allocated relay port must not be shared by another allocation");
+    assert!(
+      error
+        .to_string()
+        .contains("no available TURN relay UDP ports")
+    );
+    Ok(())
+  }
+
+  #[test]
+  fn channel_binding_rejects_channel_or_peer_aliases() {
+    let peer = "127.0.0.1:50000".parse().expect("peer");
+    let other = "127.0.0.1:50001".parse().expect("other peer");
+    let channels = HashMap::from([(
+      0x4000,
+      EdgeChannelBinding {
+        peer,
+        expires_at: Instant::now() + Duration::from_secs(60),
+      },
+    )]);
+
+    assert!(!channel_binding_conflicts(&channels, 0x4000, peer));
+    assert!(channel_binding_conflicts(&channels, 0x4000, other));
+    assert!(channel_binding_conflicts(&channels, 0x4001, peer));
+    assert!(!channel_binding_conflicts(&channels, 0x4001, other));
+  }
+
+  #[tokio::test]
+  async fn udp_client_identity_includes_receiving_listener_address() {
+    let edge = EdgeState::new(crate::runtime_introspection::RuntimeIntrospectionState::new());
+    let peer = "127.0.0.1:50000".parse().expect("peer");
+    let first_local = "127.0.0.1:3478".parse().expect("first listener");
+    let second_local = "127.0.0.1:3479".parse().expect("second listener");
+    edge.clients.lock().await.insert(
+      EdgeClient::Udp {
+        peer,
+        local: first_local,
+      },
+      EdgeClientState {
+        sender: EdgeSender::Stream(mpsc::channel(1).0),
+        allocations: HashMap::new(),
+        _udp_client_guard: None,
+      },
+    );
+
+    assert!(edge.has_udp_client(peer, first_local).await);
+    assert!(!edge.has_udp_client(peer, second_local).await);
+  }
+
   async fn bind_loopback_udp() -> UdpSocket {
     UdpSocket::bind("127.0.0.1:0")
       .await
@@ -498,16 +651,25 @@ mod tests {
     stream_id: u64,
   ) {
     edge.clients.lock().await.insert(
-      EdgeClient::Stream(stream_id),
+      EdgeClient::Stream {
+        id: stream_id,
+        peer: "127.0.0.1:50000".parse().expect("peer"),
+      },
       EdgeClientState {
         sender: EdgeSender::Stream(mpsc::channel(1).0),
         allocations: HashMap::from([(
           TurnRelayAddressFamily::Ipv4,
           EdgeAllocation {
-            relay: Arc::new(bind_loopback_udp().await),
+            relay: EdgeRelay::Udp(Arc::new(bind_loopback_udp().await)),
+            relayed_addr: "127.0.0.1:49152".parse().expect("relayed address"),
             transaction_id: [5; 12],
+            request_digest: [0; 32],
+            reservation_token: None,
+            auth: test_authenticated_context(),
             permissions: HashMap::new(),
             channels: HashMap::new(),
+            pending_tcp: HashMap::new(),
+            active_tcp: HashMap::new(),
             expires_at: Instant::now() + Duration::from_secs(60),
             _introspection_guard: runtime
               .guard(crate::runtime_introspection::RuntimeIntrospectionCounter::TurnAllocation),
@@ -526,8 +688,11 @@ mod tests {
       name: "edge-relay".to_string(),
       mode: WebRtcTurnListenerMode::EdgeRelay,
       bind_udp: None,
+      bind_udp_additional: Vec::new(),
       bind_tcp: Some("127.0.0.1:0".parse().expect("socket addr")),
+      bind_tcp_additional: Vec::new(),
       bind_tls: None,
+      bind_tls_additional: Vec::new(),
       idle_timeout_ms: 75_000,
       realm: "example.test".to_string(),
       auth: TurnAuthConfig::default(),

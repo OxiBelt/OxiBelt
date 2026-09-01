@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::config::{
   LoadBalancingAlgorithm, TurnUpstreamPoolConfig, TurnUpstreamPoolServerConfig,
-  UpstreamPoolServerState, turn_upstream_pool_server_id,
+  UpstreamPoolServerState, UpstreamTlsConfig, turn_upstream_pool_server_id,
 };
 
 pub struct TurnPoolState {
@@ -39,6 +39,9 @@ pub struct TurnPoolSelection {
   pub pool_name: String,
   pub server_id: String,
   pub origin: Url,
+  pub tls: UpstreamTlsConfig,
+  pub connect_timeout_ms: u64,
+  pub tls_handshake_timeout_ms: u64,
   server: Arc<TurnServerRuntime>,
 }
 
@@ -50,30 +53,52 @@ impl Drop for TurnPoolSelection {
 
 impl TurnPoolState {
   pub fn new(configs: &[TurnUpstreamPoolConfig]) -> Arc<Self> {
+    Self::new_with_previous(configs, None)
+  }
+
+  pub fn new_with_previous(
+    configs: &[TurnUpstreamPoolConfig],
+    previous: Option<&TurnPoolState>,
+  ) -> Arc<Self> {
     let pools = configs
       .iter()
       .map(|config| {
+        let previous_pool = previous.and_then(|state| state.pools.get(&config.name));
         let servers = config
           .servers
           .iter()
           .enumerate()
           .map(|(index, server)| {
-            Arc::new(TurnServerRuntime {
-              server_id: turn_upstream_pool_server_id(index, server),
-              origin: server.origin.clone(),
-              active: AtomicUsize::new(0),
-              healthy: AtomicBool::new(server.state == UpstreamPoolServerState::Ready),
-              consecutive_successes: AtomicU32::new(0),
-              consecutive_failures: AtomicU32::new(0),
-            })
+            let server_id = turn_upstream_pool_server_id(index, server);
+            previous_pool
+              .and_then(|pool| {
+                pool
+                  .servers
+                  .iter()
+                  .find(|runtime| runtime.server_id == server_id && runtime.origin == server.origin)
+              })
+              .cloned()
+              .unwrap_or_else(|| {
+                Arc::new(TurnServerRuntime {
+                  server_id,
+                  origin: server.origin.clone(),
+                  active: AtomicUsize::new(0),
+                  healthy: AtomicBool::new(server.state == UpstreamPoolServerState::Ready),
+                  consecutive_successes: AtomicU32::new(0),
+                  consecutive_failures: AtomicU32::new(0),
+                })
+              })
           })
           .collect();
+        let chooser = previous_pool
+          .map(|pool| pool.chooser.load(Ordering::Relaxed))
+          .unwrap_or(0x9e37_79b9);
         (
           config.name.clone(),
           Arc::new(TurnPoolRuntime {
             config: config.clone(),
             servers,
-            chooser: AtomicUsize::new(0x9e37_79b9),
+            chooser: AtomicUsize::new(chooser),
           }),
         )
       })
@@ -103,11 +128,15 @@ impl TurnPoolState {
     }
     .ok_or_else(|| anyhow::anyhow!("TURN upstream pool {pool_name} has no available servers"))?;
 
+    let tls = server_config(&pool, &server).tls.clone();
     server.active.fetch_add(1, Ordering::Relaxed);
     Ok(TurnPoolSelection {
       pool_name: pool_name.to_string(),
       server_id: server.server_id.clone(),
       origin: server.origin.clone(),
+      tls,
+      connect_timeout_ms: pool.config.health_check.connect_timeout_ms,
+      tls_handshake_timeout_ms: pool.config.health_check.tls_handshake_timeout_ms,
       server,
     })
   }
@@ -132,7 +161,9 @@ impl TurnPoolState {
     }
   }
 
-  pub fn health_targets(&self) -> Vec<(String, String, Url, u64, u64)> {
+  pub fn health_targets(
+    &self,
+  ) -> Vec<(String, String, Url, UpstreamTlsConfig, u64, u64, u64, u64)> {
     self
       .pools
       .values()
@@ -143,8 +174,11 @@ impl TurnPoolState {
             pool.config.name.clone(),
             server.server_id.clone(),
             server.origin.clone(),
+            server_config(pool, server).tls.clone(),
             pool.config.health_check.interval_ms,
             pool.config.health_check.timeout_ms,
+            pool.config.health_check.connect_timeout_ms,
+            pool.config.health_check.tls_handshake_timeout_ms,
           )
         })
       })
@@ -299,4 +333,75 @@ fn server_available(runtime: &TurnServerRuntime, config: &TurnUpstreamPoolServer
   matches!(config.state, UpstreamPoolServerState::Ready)
     && runtime.healthy.load(Ordering::Relaxed)
     && (config.max_conns == 0 || runtime.active.load(Ordering::Relaxed) < config.max_conns)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn pool(origin: &str) -> TurnUpstreamPoolConfig {
+    TurnUpstreamPoolConfig {
+      name: "turn".to_string(),
+      algorithm: LoadBalancingAlgorithm::PowerOfTwoChoices,
+      hash_key: None,
+      servers: vec![TurnUpstreamPoolServerConfig {
+        id: Some("stable".to_string()),
+        origin: Url::parse(origin).expect("test TURN URL"),
+        weight: 1,
+        max_conns: 0,
+        backup: false,
+        state: UpstreamPoolServerState::Ready,
+        tls: UpstreamTlsConfig::default(),
+      }],
+      health_check: crate::config::TurnUpstreamPoolHealthCheckConfig {
+        healthy_threshold: 1,
+        unhealthy_threshold: 1,
+        ..crate::config::TurnUpstreamPoolHealthCheckConfig::default()
+      },
+    }
+  }
+
+  #[test]
+  fn compatible_snapshot_reuses_turn_server_runtime_state() {
+    let config = pool("turn://127.0.0.1:3478");
+    let previous = TurnPoolState::new(std::slice::from_ref(&config));
+    previous.report_failure("turn", "stable");
+
+    let replacement =
+      TurnPoolState::new_with_previous(std::slice::from_ref(&config), Some(previous.as_ref()));
+
+    let old_server = &previous.pools["turn"].servers[0];
+    let replacement_server = &replacement.pools["turn"].servers[0];
+    assert!(Arc::ptr_eq(old_server, replacement_server));
+    assert!(
+      replacement
+        .select("turn", "127.0.0.1".parse().unwrap(), "client")
+        .is_err(),
+      "the failed health state must survive a compatible snapshot rebuild"
+    );
+  }
+
+  #[test]
+  fn changed_turn_server_origin_gets_fresh_runtime_state() {
+    let previous_config = pool("turn://127.0.0.1:3478");
+    let previous = TurnPoolState::new(std::slice::from_ref(&previous_config));
+    previous.report_failure("turn", "stable");
+
+    let replacement_config = pool("turn://127.0.0.1:3479");
+    let replacement = TurnPoolState::new_with_previous(
+      std::slice::from_ref(&replacement_config),
+      Some(previous.as_ref()),
+    );
+
+    assert!(!Arc::ptr_eq(
+      &previous.pools["turn"].servers[0],
+      &replacement.pools["turn"].servers[0]
+    ));
+    assert!(
+      replacement
+        .select("turn", "127.0.0.1".parse().unwrap(), "client")
+        .is_ok(),
+      "a new origin must not inherit a failed health state"
+    );
+  }
 }

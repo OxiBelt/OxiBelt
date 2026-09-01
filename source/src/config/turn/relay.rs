@@ -77,6 +77,10 @@ impl TurnRelayFamilyConfig {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct TurnEdgeRelayLimitsConfig {
+  #[serde(default = "default_turn_max_proxy_udp_sessions_per_listener")]
+  pub max_proxy_udp_sessions_per_listener: usize,
+  #[serde(default = "default_turn_max_pending_tcp_connections")]
+  pub max_pending_tcp_connections: usize,
   #[serde(default = "default_turn_max_allocations_per_listener")]
   pub max_allocations_per_listener: usize,
   #[serde(default = "default_turn_max_allocations_per_client")]
@@ -92,6 +96,8 @@ pub struct TurnEdgeRelayLimitsConfig {
 impl Default for TurnEdgeRelayLimitsConfig {
   fn default() -> Self {
     Self {
+      max_proxy_udp_sessions_per_listener: default_turn_max_proxy_udp_sessions_per_listener(),
+      max_pending_tcp_connections: default_turn_max_pending_tcp_connections(),
       max_allocations_per_listener: default_turn_max_allocations_per_listener(),
       max_allocations_per_client: default_turn_max_allocations_per_client(),
       max_permissions_per_allocation: default_turn_max_permissions_per_allocation(),
@@ -103,6 +109,18 @@ impl Default for TurnEdgeRelayLimitsConfig {
 
 impl TurnEdgeRelayLimitsConfig {
   pub(super) fn validate(&self, listener_name: &str) -> anyhow::Result<()> {
+    if self.max_proxy_udp_sessions_per_listener == 0 {
+      bail!(
+        "WebRTC TURN listener {} limits.max_proxy_udp_sessions_per_listener must be greater than 0",
+        listener_name
+      );
+    }
+    if self.max_pending_tcp_connections == 0 {
+      bail!(
+        "WebRTC TURN listener {} limits.max_pending_tcp_connections must be greater than 0",
+        listener_name
+      );
+    }
     if self.max_allocations_per_listener == 0 {
       bail!(
         "WebRTC TURN listener {} limits.max_allocations_per_listener must be greater than 0",
@@ -135,6 +153,14 @@ impl TurnEdgeRelayLimitsConfig {
     }
     Ok(())
   }
+}
+
+fn default_turn_max_proxy_udp_sessions_per_listener() -> usize {
+  4096
+}
+
+fn default_turn_max_pending_tcp_connections() -> usize {
+  1024
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

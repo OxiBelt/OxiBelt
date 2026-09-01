@@ -6,6 +6,7 @@ mod listener;
 mod pools;
 pub mod protocol;
 
+pub(crate) use listener::TurnListenerKey;
 pub use listener::{BoundTurnListener, TurnListenerTask};
 pub use pools::TurnPoolState;
 

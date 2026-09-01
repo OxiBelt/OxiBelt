@@ -193,6 +193,14 @@ service:
   type: LoadBalancer
   annotations: {}
   externalTrafficPolicy: Local
+  # Set these only when the cluster's Service implementation should receive
+  # an explicit IP-family policy. Empty values preserve Kubernetes defaults;
+  # RequireDualStack must name both IPv4 and IPv6 below.
+  ipFamilyPolicy: "" # "" | SingleStack | PreferDualStack | RequireDualStack
+  # Generated TURN listeners bind the first family here as their primary
+  # control address and, when present, the second through the native
+  # additional-bind fields. Empty retains the existing IPv4-only default.
+  ipFamilies: [] # IPv4 and/or IPv6, in the order requested by the cluster
   # Operator-owned TCP/UDP exposure for Gateway API stream listeners. The
   # controller validates listener attachment against these numeric ports but
   # never creates or patches Services. Names must be unique lower-case Service
@@ -219,6 +227,105 @@ service:
       enabled: true
       port: 443
       targetPort: 8443
+
+# TURN is deliberately exposure-only by default. `external` leaves the
+# native TOML authoritative and only adds Service/Pod ports plus optional
+# projected Secret files. `generated` owns one native
+# `webrtc_turn_listeners` block and rejects TURN blocks in config.inline.
+# Relay ranges are expanded into individual Service/Pod ports and are bounded
+# to 256 UDP and 256 TCP ports (512 total) by chart validation.
+turn:
+  enabled: false
+  configMode: external # external | generated
+  mode: proxy_pool # proxy_pool | edge_relay
+  name: turn
+  realm: oxibelt
+  idleTimeoutMs: 600000
+  control:
+    udp:
+      enabled: true
+      port: 3478
+      targetPort: 3478
+    tcp:
+      enabled: true
+      port: 3478
+      targetPort: 3478
+    tls:
+      enabled: true
+      port: 5349
+      targetPort: 5349
+  relay:
+    # In generated edge_relay mode the native relay_port_range is shared by
+    # RFC6062 TCP and UDP allocations, so enabled ranges must match exactly.
+    udp:
+      enabled: false
+      start: 49152
+      end: 49207
+    tcp:
+      enabled: false
+      start: 49152
+      end: 49207
+  # Native edge relay requires explicit public and relay-bind addresses. The
+  # chart never derives these from Service LoadBalancer status.
+  edge:
+    ipv4:
+      publicIp: ""
+      relayBindIp: ""
+    ipv6:
+      publicIp: ""
+      relayBindIp: ""
+  # Generated proxy_pool listeners use the current native upstream-pool
+  # structures. Servers are transport-specific TURN URLs and may carry the
+  # bounded per-server TURNS trust/mTLS policy below.
+  proxy:
+    udpPool:
+      name: turn-udp
+      servers: []
+    tcpPool:
+      name: turn-tcp
+      servers: []
+    tlsPool:
+      name: turn-tls
+      servers: []
+  auth:
+    mode: pass_through # pass_through | validate | enforce
+    nonceTtlSeconds: 600
+    # File-backed secrets are projected below and referenced relative to the
+    # chart's read-only certificate root. Inline passwords and environment
+    # variable values are intentionally not part of the Helm contract.
+    restSharedSecretFile: ""
+    nonceSecretFile: ""
+    previousNonceSecretFile: ""
+    passwordAlgorithms: [sha256, md5]
+    staticCredentials: []
+    # - username: example
+    #   passwordFile: turn/example-password
+  # Each item is projected from a Secret into the chart's read-only
+  # certificate root. Paths must be beneath `turn/` so generated native TOML
+  # cannot reach unrelated certificate or configuration material.
+  secretProjections: []
+  # - name: turn-auth
+  #   secretName: turn-auth
+  #   items:
+  #   - key: rest-shared-secret
+  #     path: turn/rest-shared-secret
+  #   - key: nonce-current
+  #     path: turn/nonce-current
+  #   - key: nonce-previous
+  #     path: turn/nonce-previous
+  # A generated `turns://` server may use:
+  # - origin: turns://turn.internal.example:5349
+  #   tls:
+  #     trust: exclusive # inherit | system | exclusive
+  #     trustedCaCerts: [turn/ca.pem]
+  #     trustedCaSha256: [<64 lowercase hex digest>]
+  #     clientIdentity:
+  #       certChain: turn/client.crt
+  #       privateKey: turn/client.key
+  # Generated mode intentionally exposes only server name, trust roots, and
+  # client identity. SubjectAltNames, resumption, ECH, revocation, and other
+  # native TLS leaves remain an external-config-only boundary.
+  # Generated TURN TLS control uses the chart's global `tls` certificate.
 
 admin:
   enabled: false

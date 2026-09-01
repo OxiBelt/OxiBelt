@@ -132,7 +132,7 @@ pub(super) fn validate_bind_list(field_name: &str, binds: &[SocketAddr]) -> anyh
   }
   for (index, bind) in binds.iter().enumerate() {
     for other in binds.iter().skip(index + 1) {
-      if binds_overlap(*bind, *other) {
+      if socket_addrs_overlap(*bind, *other) {
         bail!("{field_name} entries {bind} and {other} overlap");
       }
     }
@@ -148,7 +148,7 @@ pub(super) fn validate_bind_lists_do_not_overlap(
 ) -> anyhow::Result<()> {
   for left_bind in left {
     for right_bind in right {
-      if binds_overlap(*left_bind, *right_bind) {
+      if socket_addrs_overlap(*left_bind, *right_bind) {
         bail!("{left_name} entry {left_bind} overlaps {right_name} entry {right_bind}");
       }
     }
@@ -156,8 +156,10 @@ pub(super) fn validate_bind_lists_do_not_overlap(
   Ok(())
 }
 
-fn binds_overlap(left: SocketAddr, right: SocketAddr) -> bool {
-  left.port() == right.port()
+pub(crate) fn socket_addrs_overlap(left: SocketAddr, right: SocketAddr) -> bool {
+  left.port() != 0
+    && right.port() != 0
+    && left.port() == right.port()
     && same_ip_family(left.ip(), right.ip())
     && (left.ip() == right.ip() || left.ip().is_unspecified() || right.ip().is_unspecified())
 }

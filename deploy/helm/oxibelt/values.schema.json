@@ -160,6 +160,277 @@
         "targetPort": { "type": "integer", "minimum": 1024, "maximum": 65535 }
       }
     },
+    "turnControlPort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "port", "targetPort"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "targetPort": { "type": "integer", "minimum": 1024, "maximum": 65535 }
+      }
+    },
+    "turnRelayRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "start", "end"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "start": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+        "end": { "type": "integer", "minimum": 1024, "maximum": 65535 }
+      }
+    },
+    "turnEdgeAddress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publicIp", "relayBindIp"],
+      "properties": {
+        "publicIp": { "type": "string", "maxLength": 253 },
+        "relayBindIp": { "type": "string", "maxLength": 253 }
+      }
+    },
+    "turnServerTls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "serverName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9._:-]*$"
+        },
+        "trust": { "type": "string", "enum": ["inherit", "system", "exclusive"] },
+        "trustedCaCerts": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 253,
+            "pattern": "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+          }
+        },
+        "trustedCaSha256": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "clientIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["certChain", "privateKey"],
+          "properties": {
+            "certChain": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 253,
+              "pattern": "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+            },
+            "privateKey": {
+              "type": "string",
+              "minLength": 6,
+              "maxLength": 253,
+              "pattern": "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+            }
+          }
+        }
+      }
+    },
+    "turnProxyServer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        },
+        "origin": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 253,
+          "pattern": "^(turn|turn\\+tcp|turns)://[^/?#]+$"
+        },
+        "weight": { "type": "integer", "minimum": 1, "maximum": 999999999 },
+        "maxConns": { "type": "integer", "minimum": 0, "maximum": 999999999 },
+        "backup": { "type": "boolean" },
+        "state": { "type": "string", "enum": ["ready", "drain", "down", "maintenance"] },
+        "tls": { "$ref": "#/definitions/turnServerTls" }
+      }
+    },
+    "turnProxyPool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "servers"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        },
+        "servers": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/definitions/turnProxyServer" }
+        }
+      }
+    },
+    "turnCredential": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["username", "passwordFile"],
+      "properties": {
+        "username": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "passwordFile": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 253,
+          "pattern": "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+        }
+      }
+    },
+    "turnSecretProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "secretName", "items"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        },
+        "secretName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "path"],
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253,
+                "pattern": "^[A-Za-z0-9._-]+$"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 6,
+                "maxLength": 253,
+                "pattern": "^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "configMode", "mode", "name", "realm", "idleTimeoutMs", "control", "relay", "edge", "proxy", "auth", "secretProjections"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "configMode": { "type": "string", "enum": ["external", "generated"] },
+        "mode": { "type": "string", "enum": ["proxy_pool", "edge_relay"] },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        },
+        "realm": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "idleTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "control": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["udp", "tcp", "tls"],
+          "properties": {
+            "udp": { "$ref": "#/definitions/turnControlPort" },
+            "tcp": { "$ref": "#/definitions/turnControlPort" },
+            "tls": { "$ref": "#/definitions/turnControlPort" }
+          }
+        },
+        "relay": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["udp", "tcp"],
+          "properties": {
+            "udp": { "$ref": "#/definitions/turnRelayRange" },
+            "tcp": { "$ref": "#/definitions/turnRelayRange" }
+          }
+        },
+        "edge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ipv4", "ipv6"],
+          "properties": {
+            "ipv4": { "$ref": "#/definitions/turnEdgeAddress" },
+            "ipv6": { "$ref": "#/definitions/turnEdgeAddress" }
+          }
+        },
+        "proxy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["udpPool", "tcpPool", "tlsPool"],
+          "properties": {
+            "udpPool": { "$ref": "#/definitions/turnProxyPool" },
+            "tcpPool": { "$ref": "#/definitions/turnProxyPool" },
+            "tlsPool": { "$ref": "#/definitions/turnProxyPool" }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "nonceTtlSeconds", "restSharedSecretFile", "nonceSecretFile", "previousNonceSecretFile", "passwordAlgorithms", "staticCredentials"],
+          "properties": {
+            "mode": { "type": "string", "enum": ["pass_through", "validate", "enforce"] },
+            "nonceTtlSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+            "restSharedSecretFile": {
+              "type": "string",
+              "pattern": "^$|^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+            },
+            "nonceSecretFile": {
+              "type": "string",
+              "pattern": "^$|^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+            },
+            "previousNonceSecretFile": {
+              "type": "string",
+              "pattern": "^$|^turn/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+            },
+            "passwordAlgorithms": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": { "type": "string", "enum": ["sha256", "md5"] }
+            },
+            "staticCredentials": {
+              "type": "array",
+              "maxItems": 16,
+              "items": { "$ref": "#/definitions/turnCredential" }
+            }
+          }
+        },
+        "secretProjections": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/definitions/turnSecretProjection" }
+        }
+      }
+    },
     "writableVolume": {
       "type": "object",
       "additionalProperties": false,
@@ -353,6 +624,13 @@
         "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
         "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
         "externalTrafficPolicy": { "type": "string", "enum": ["", "Cluster", "Local"] },
+        "ipFamilyPolicy": { "type": "string", "enum": ["", "SingleStack", "PreferDualStack", "RequireDualStack"] },
+        "ipFamilies": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["IPv4", "IPv6"] }
+        },
         "additionalPorts": {
           "type": "array",
           "maxItems": 32,
@@ -360,6 +638,7 @@
         }
       }
     },
+    "turn": { "$ref": "#/definitions/turn" },
     "kubernetesDiscovery": {
       "type": "object",
       "additionalProperties": false,
@@ -1206,6 +1485,154 @@
             "required": ["existingConfigMap"],
             "properties": {
               "existingConfigMap": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["turn"],
+        "properties": {
+          "turn": {
+            "required": ["enabled", "configMode"],
+            "properties": {
+              "enabled": { "const": true },
+              "configMode": { "const": "generated" }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "config": {
+            "required": ["create"],
+            "properties": { "create": { "const": true } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["turn"],
+        "properties": {
+          "turn": {
+            "required": ["enabled", "configMode", "mode"],
+            "properties": {
+              "enabled": { "const": true },
+              "configMode": { "const": "generated" },
+              "mode": { "const": "edge_relay" }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "replicaCount": { "const": 1 },
+          "workload": {
+            "properties": { "kind": { "const": "Deployment" } }
+          },
+          "autoscaling": {
+            "properties": { "enabled": { "const": false } }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["turn"],
+        "properties": {
+          "turn": {
+            "required": ["enabled", "configMode", "mode"],
+            "properties": {
+              "enabled": { "const": true },
+              "configMode": { "const": "generated" },
+              "mode": { "const": "edge_relay" }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "turn": {
+            "properties": {
+              "relay": {
+                "required": ["udp"] ,
+                "properties": {
+                  "udp": {
+                    "required": ["enabled"],
+                    "properties": { "enabled": { "const": true } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["turn"],
+        "properties": {
+          "turn": {
+            "required": ["enabled"],
+            "properties": { "enabled": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "service": {
+            "properties": {
+              "externalTrafficPolicy": { "const": "Local" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["service"],
+        "properties": {
+          "service": {
+            "required": ["ipFamilyPolicy"],
+            "properties": { "ipFamilyPolicy": { "const": "RequireDualStack" } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "service": {
+            "required": ["ipFamilies"],
+            "properties": {
+              "ipFamilies": { "minItems": 2, "maxItems": 2 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["turn"],
+        "properties": {
+          "turn": {
+            "required": ["enabled", "configMode", "mode"],
+            "properties": {
+              "enabled": { "const": true },
+              "configMode": { "const": "generated" },
+              "mode": { "const": "edge_relay" }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "turn": {
+            "properties": {
+              "auth": {
+                "required": ["mode"],
+                "properties": { "mode": { "const": "enforce" } }
+              }
             }
           }
         }

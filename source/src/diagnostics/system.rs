@@ -275,12 +275,12 @@ fn low_port_binds(config: &Config) -> Vec<String> {
     );
   }
   for listener in &config.webrtc_turn_listeners {
-    for (field, bind) in [
-      ("bind_udp", listener.bind_udp),
-      ("bind_tcp", listener.bind_tcp),
-      ("bind_tls", listener.bind_tls),
+    for (field, listener_binds) in [
+      ("bind_udp", listener.udp_binds().collect::<Vec<_>>()),
+      ("bind_tcp", listener.tcp_binds().collect::<Vec<_>>()),
+      ("bind_tls", listener.tls_binds().collect::<Vec<_>>()),
     ] {
-      if let Some(bind) = bind {
+      for bind in listener_binds {
         push_low_port(
           &mut binds,
           &format!("webrtc_turn_listeners.{}.{}", listener.name, field),

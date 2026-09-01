@@ -118,7 +118,7 @@ fn diagnose_admin_tls(config: &Config, report: &mut DiagnosticReport) {
 
 fn diagnose_turn_tls(config: &Config, report: &mut DiagnosticReport) {
   for listener in &config.webrtc_turn_listeners {
-    if listener.bind_tls.is_none() {
+    if listener.tls_binds().next().is_none() {
       continue;
     }
     let cert_chain = listener

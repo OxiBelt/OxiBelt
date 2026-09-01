@@ -1,4 +1,5 @@
 {{- include "oxibelt.validateNetworkPolicy" . -}}
+{{- include "oxibelt.validateTurn" . -}}
 {{- include "oxibelt.validateOperationalProfile" . -}}
 {{- include "oxibelt.validateAdmin" . -}}
 {{- include "oxibelt.validateOperationalProfileV2" . -}}
@@ -21,6 +22,23 @@
 {{- end -}}
 {{- range $port := .Values.service.additionalPorts -}}
 {{- $publicPorts = append $publicPorts (dict "port" $port.name "protocol" $port.protocol) -}}
+{{- end -}}
+{{- if .Values.turn.enabled -}}
+{{- if .Values.turn.control.udp.enabled -}}
+{{- $publicPorts = append $publicPorts (dict "port" "turn-udp" "protocol" "UDP") -}}
+{{- end -}}
+{{- if .Values.turn.control.tcp.enabled -}}
+{{- $publicPorts = append $publicPorts (dict "port" "turn-tcp" "protocol" "TCP") -}}
+{{- end -}}
+{{- if .Values.turn.control.tls.enabled -}}
+{{- $publicPorts = append $publicPorts (dict "port" "turn-tls" "protocol" "TCP") -}}
+{{- end -}}
+{{- if .Values.turn.relay.udp.enabled -}}
+{{- $publicPorts = append $publicPorts (dict "port" (int .Values.turn.relay.udp.start) "endPort" (int .Values.turn.relay.udp.end) "protocol" "UDP") -}}
+{{- end -}}
+{{- if .Values.turn.relay.tcp.enabled -}}
+{{- $publicPorts = append $publicPorts (dict "port" (int .Values.turn.relay.tcp.start) "endPort" (int .Values.turn.relay.tcp.end) "protocol" "TCP") -}}
+{{- end -}}
 {{- end -}}
 {{- $publicIngress := list -}}
 {{- if and (gt (len $publicPorts) 0) (or $public.allowAll (gt (len $public.from) 0)) -}}

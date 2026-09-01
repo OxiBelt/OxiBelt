@@ -2,8 +2,7 @@
 //! Listener admission is separated from relay forwarding so auth and limits run first.
 
 use crate::config::{
-  CryptoConfig, TurnAuthMode, UpstreamEchConfig, UpstreamTlsResumptionConfig,
-  WebRtcTurnListenerConfig, WebRtcTurnListenerMode,
+  CryptoConfig, TurnAuthMode, UpstreamTlsConfig, WebRtcTurnListenerConfig, WebRtcTurnListenerMode,
 };
 use crate::lifecycle::{ConnectionDrain, TaskRegistry};
 use crate::listener_socket::{TcpListenOptions, bind_tcp_listeners};
@@ -13,12 +12,14 @@ use crate::server::BoundListener;
 use crate::state::{AppHandle, AppSnapshot};
 use crate::tls;
 use anyhow::{Context, bail};
+use arc_swap::ArcSwap;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -36,6 +37,8 @@ use super::edge::EdgeState;
 use super::pools::TurnPoolSelection;
 use super::protocol::*;
 
+static NEXT_TURN_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+
 pub struct TurnListenerTask {
   key: TurnListenerKey,
   bound_listeners: Vec<BoundListener>,
@@ -45,11 +48,12 @@ pub struct TurnListenerTask {
   graceful_timeout: Duration,
   tasks: Vec<JoinHandle<()>>,
   edge: EdgeState,
+  tls_config: Option<Arc<ArcSwap<tls::TurnTlsServerConfig>>>,
 }
 
 pub struct BoundTurnListener {
   config: WebRtcTurnListenerConfig,
-  udp: Option<std::net::UdpSocket>,
+  udp: Vec<std::net::UdpSocket>,
   tcp: Vec<TcpListener>,
   tls: Vec<TcpListener>,
   tcp_options: TcpListenOptions,
@@ -71,29 +75,45 @@ impl BoundTurnListener {
     tls_resumption: &TlsResumptionState,
   ) -> anyhow::Result<Self> {
     let udp = config
-      .bind_udp
-      .map(bind_udp_socket)
-      .transpose()
-      .with_context(|| format!("failed to bind WebRTC TURN UDP listener {}", config.name))?;
-    let tcp = match config.bind_tcp {
-      Some(bind) => bind_tcp_listeners(bind, tcp_options, "TURN TCP").with_context(|| {
-        format!(
-          "failed to bind WebRTC TURN TCP listener {} to {bind}",
-          config.name
-        )
-      })?,
-      None => Vec::new(),
-    };
-    let tls_listeners = match config.bind_tls {
-      Some(bind) => bind_tcp_listeners(bind, tcp_options, "TURN TLS").with_context(|| {
-        format!(
-          "failed to bind WebRTC TURN TLS listener {} to {bind}",
-          config.name
-        )
-      })?,
-      None => Vec::new(),
-    };
-    let tls_config = if config.bind_tls.is_some() {
+      .udp_binds()
+      .map(|bind| {
+        bind_udp_socket(bind).with_context(|| {
+          format!(
+            "failed to bind WebRTC TURN UDP listener {} to {bind}",
+            config.name
+          )
+        })
+      })
+      .collect::<anyhow::Result<Vec<_>>>()?;
+    let tcp = config
+      .tcp_binds()
+      .map(|bind| {
+        bind_tcp_listeners(bind, tcp_options, "TURN TCP").with_context(|| {
+          format!(
+            "failed to bind WebRTC TURN TCP listener {} to {bind}",
+            config.name
+          )
+        })
+      })
+      .collect::<anyhow::Result<Vec<_>>>()?
+      .into_iter()
+      .flatten()
+      .collect();
+    let tls_listeners = config
+      .tls_binds()
+      .map(|bind| {
+        bind_tcp_listeners(bind, tcp_options, "TURN TLS").with_context(|| {
+          format!(
+            "failed to bind WebRTC TURN TLS listener {} to {bind}",
+            config.name
+          )
+        })
+      })
+      .collect::<anyhow::Result<Vec<_>>>()?
+      .into_iter()
+      .flatten()
+      .collect();
+    let tls_config = if config.tls_binds().next().is_some() {
       Some(tls::build_turn_tls_server_config_with_resumption(
         crypto,
         &config.tls,
@@ -115,10 +135,7 @@ impl BoundTurnListener {
   }
 
   pub(crate) fn key(&self) -> TurnListenerKey {
-    TurnListenerKey {
-      config: self.config.clone(),
-      tcp_options: self.tcp_options,
-    }
+    TurnListenerKey::new(&self.config, self.tcp_options)
   }
 
   pub(crate) fn start(
@@ -138,9 +155,12 @@ impl BoundTurnListener {
     let (shutdown, shutdown_rx) = watch::channel(false);
     let edge = EdgeState::new(runtime_introspection);
     let key = self.key();
+    let tls_config = self
+      .tls_config
+      .map(|config| Arc::new(ArcSwap::from_pointee(config)));
     let connections = TaskRegistry::new(RuntimeTaskKind::TurnConnection, runtime_health);
     let mut tasks = Vec::new();
-    if let Some(udp) = self.udp {
+    for udp in self.udp {
       udp_task::spawn(
         &mut tasks,
         udp,
@@ -190,7 +210,7 @@ impl BoundTurnListener {
         connections.clone(),
         long_connection_close_delay,
         self.accept_error_backoff,
-        self.tls_config.clone(),
+        tls_config.clone(),
         edge.clone(),
       );
     }
@@ -204,14 +224,71 @@ impl BoundTurnListener {
       graceful_timeout,
       tasks,
       edge,
+      tls_config,
     }
   }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TurnListenerKey {
+  /// State-affecting listener configuration. TLS certificates and policy are
+  /// intentionally omitted because they are rebuilt into an ArcSwap for new
+  /// handshakes without invalidating relay allocations.
   pub(crate) config: WebRtcTurnListenerConfig,
   pub(crate) tcp_options: TcpListenOptions,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct TurnListenerSocketKey {
+  udp: Vec<SocketAddr>,
+  tcp: Vec<SocketAddr>,
+  tls: Vec<SocketAddr>,
+  tcp_options: TcpListenOptions,
+}
+
+impl TurnListenerKey {
+  pub(crate) fn new(config: &WebRtcTurnListenerConfig, tcp_options: TcpListenOptions) -> Self {
+    let mut config = config.clone();
+    config.tls = Default::default();
+    Self {
+      config,
+      tcp_options,
+    }
+  }
+
+  pub(crate) fn name(&self) -> &str {
+    &self.config.name
+  }
+
+  fn socket_key(&self) -> TurnListenerSocketKey {
+    TurnListenerSocketKey {
+      udp: self.config.udp_binds().collect(),
+      tcp: self.config.tcp_binds().collect(),
+      tls: self.config.tls_binds().collect(),
+      tcp_options: self.tcp_options,
+    }
+  }
+
+  pub(crate) fn socket_overlaps(&self, other: &Self) -> bool {
+    self.socket_key().overlaps(&other.socket_key())
+  }
+}
+
+impl TurnListenerSocketKey {
+  pub(crate) fn overlaps(&self, other: &Self) -> bool {
+    self.udp.iter().any(|bind| {
+      other
+        .udp
+        .iter()
+        .any(|other_bind| crate::config::socket_addrs_overlap(*bind, *other_bind))
+    }) || self.tcp.iter().chain(self.tls.iter()).any(|bind| {
+      other
+        .tcp
+        .iter()
+        .chain(other.tls.iter())
+        .any(|other_bind| crate::config::socket_addrs_overlap(*bind, *other_bind))
+    })
+  }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -228,7 +305,7 @@ fn spawn_tcp_acceptor(
   connections: TaskRegistry,
   long_connection_close_delay: Duration,
   accept_error_backoff: Duration,
-  tls_config: Option<tls::TurnTlsServerConfig>,
+  tls_config: Option<Arc<ArcSwap<tls::TurnTlsServerConfig>>>,
   edge: EdgeState,
 ) {
   tasks.push(tokio::spawn(async move {
@@ -236,7 +313,6 @@ fn spawn_tcp_acceptor(
       let bind = listener.local_addr().context("failed to read TURN bind")?;
       let transport = if is_tls { "tls" } else { "tcp" };
       info!(name = %config.name, bind = %bind, transport, worker = worker_index, "WebRTC TURN listener started");
-      let mut next_stream_id = worker_index as u64;
       loop {
         tokio::select! {
           biased;
@@ -286,8 +362,15 @@ fn spawn_tcp_acceptor(
             } else {
               conn_config.tcp_pool.clone()
             };
-            next_stream_id = next_stream_id.wrapping_add(1024);
-            let stream_id = next_stream_id;
+            let Some(stream_id) = next_turn_stream_id() else {
+              warn!(
+                name = %config.name,
+                transport,
+                error_class = "stream_identity_exhausted",
+                "TURN connection rejected"
+              );
+              continue;
+            };
             connections.spawn(async move {
               let _overload_connection = overload_connection;
               let _introspection_guard = introspection_guard;
@@ -296,12 +379,14 @@ fn spawn_tcp_acceptor(
                 if conn_tls_config.is_some() { "tls" } else { "tcp" },
                 "connection_started",
               );
+              let connection_name = conn_config.name.clone();
+              let connection_transport = if is_tls { "tls" } else { "tcp" };
               let result = if let Some(tls_config) = conn_tls_config {
                 let handshake_timeout = Duration::from_millis(conn_config.idle_timeout_ms);
                 let accept = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
                 match tokio::time::timeout(handshake_timeout, accept).await {
                   Ok(Ok(start)) => {
-                    let server_config = tls_config.select(&start.client_hello());
+                    let server_config = tls_config.load().select(&start.client_hello());
                     match tokio::time::timeout(handshake_timeout, start.into_stream(server_config)).await {
                       Ok(Ok(tls_stream)) => serve_turn_stream(Box::new(tls_stream), peer_addr, stream_id, stream_pool, conn_config, conn_state, connection_drain, conn_edge).await,
                       Ok(Err(error)) => Err(anyhow::anyhow!(error).context("TURN TLS handshake failed")),
@@ -314,8 +399,13 @@ fn spawn_tcp_acceptor(
               } else {
                 serve_turn_stream(Box::new(stream), peer_addr, stream_id, stream_pool, conn_config, conn_state, connection_drain, conn_edge).await
               };
-              if let Err(error) = result {
-                warn!(peer = %peer_addr, error = %error, "TURN connection failed");
+              if result.is_err() {
+                warn!(
+                  name = %connection_name,
+                  transport = connection_transport,
+                  error_class = "connection_processing_failed",
+                  "TURN connection failed"
+                );
               }
             });
           }
@@ -359,20 +449,33 @@ async fn serve_turn_udp(
         let quiescing = state.snapshot().lifecycle.is_shutdown_draining();
         let known_client = match config.mode {
           WebRtcTurnListenerMode::ProxyPool => sessions.contains_key(&client_addr),
-          WebRtcTurnListenerMode::EdgeRelay => edge.has_udp_client(client_addr).await,
+          WebRtcTurnListenerMode::EdgeRelay => edge.has_udp_client(client_addr, bind).await,
         };
         if !udp_client_admitted(quiescing, known_client) {
           continue;
         }
         state.snapshot().metrics.record_turn_event(&config.name, "udp", "datagram_received");
         let packet = &buffer[..len];
-        match config.mode {
+        let result = match config.mode {
           WebRtcTurnListenerMode::ProxyPool => {
-            proxy_udp_packet(&socket, &mut sessions, &config, &state, client_addr, packet).await?;
+            proxy_udp_packet(&socket, &mut sessions, &config, &state, client_addr, packet).await
           }
           WebRtcTurnListenerMode::EdgeRelay => {
-            super::edge::handle_udp_packet(socket.clone(), edge.clone(), &config, client_addr, packet).await?;
+            super::edge::handle_udp_packet(socket.clone(), edge.clone(), &config, client_addr, packet).await
           }
+        };
+        if result.is_err() {
+          state.snapshot().metrics.record_turn_event(
+            &config.name,
+            "udp",
+            "datagram_processing_failed",
+          );
+          warn!(
+            name = %config.name,
+            mode = ?config.mode,
+            error_class = "datagram_processing_failed",
+            "TURN UDP datagram rejected"
+          );
         }
       }
     }
@@ -387,8 +490,9 @@ struct UdpProxySession {
   upstream: Arc<UdpSocket>,
   upstream_task: JoinHandle<()>,
   _selection: TurnPoolSelection,
-  last_activity: Instant,
+  last_activity: Arc<Mutex<Instant>>,
   _introspection_guard: crate::runtime_introspection::RuntimeCounterGuard,
+  _overload_connection: crate::overload::WorkLease,
 }
 
 impl Drop for UdpProxySession {
@@ -409,7 +513,29 @@ async fn proxy_udp_packet(
     return Ok(());
   }
   expire_udp_sessions(sessions, Duration::from_millis(config.idle_timeout_ms));
+  if !sessions.contains_key(&client_addr)
+    && !proxy_udp_session_admitted(
+      sessions.len(),
+      config.limits.max_proxy_udp_sessions_per_listener,
+    )
+  {
+    state
+      .snapshot()
+      .metrics
+      .record_turn_event(&config.name, "udp", "session_capacity_rejected");
+    return Ok(());
+  }
   if let std::collections::hash_map::Entry::Vacant(entry) = sessions.entry(client_addr) {
+    let snapshot = state.snapshot();
+    let overload_connection = match snapshot.overload.try_admit_connection() {
+      Ok(lease) => lease,
+      Err(_) => {
+        snapshot
+          .metrics
+          .record_turn_event(&config.name, "udp", "session_admission_rejected");
+        return Ok(());
+      }
+    };
     let pool = config
       .udp_pool
       .as_deref()
@@ -419,11 +545,17 @@ async fn proxy_udp_packet(
         .snapshot()
         .turn_pools
         .select(pool, client_addr.ip(), &client_addr.to_string())?;
-    let upstream_addr = resolve_turn_origin(&selection.origin).await?;
+    let upstream_addr = resolve_turn_origin(
+      &selection.origin,
+      Duration::from_millis(selection.connect_timeout_ms),
+    )
+    .await?;
     let upstream = Arc::new(UdpSocket::bind(client_bind_addr(upstream_addr)).await?);
     upstream.connect(upstream_addr).await?;
     let upstream_reader = upstream.clone();
     let downstream_writer = downstream.clone();
+    let last_activity = Arc::new(Mutex::new(Instant::now()));
+    let upstream_activity = last_activity.clone();
     let upstream_task = tokio::spawn(async move {
       let mut buf = vec![0u8; 65_536];
       while let Ok(len) = upstream_reader.recv(&mut buf).await {
@@ -434,22 +566,29 @@ async fn proxy_udp_packet(
         {
           break;
         }
+        mark_udp_session_active(&upstream_activity);
       }
     });
     entry.insert(UdpProxySession {
       upstream,
       upstream_task,
       _selection: selection,
-      last_activity: Instant::now(),
+      last_activity,
       _introspection_guard: state
         .snapshot()
         .runtime_introspection
         .guard(RuntimeCounter::TurnUdpClient),
+      _overload_connection: overload_connection,
     });
   }
   if let Some(session) = sessions.get_mut(&client_addr) {
-    session.upstream.send(packet).await?;
-    session.last_activity = Instant::now();
+    if let Err(error) = session.upstream.send(packet).await {
+      sessions.remove(&client_addr);
+      return Err(error.into());
+    }
+    if let Some(session) = sessions.get_mut(&client_addr) {
+      mark_udp_session_active(&session.last_activity);
+    }
   }
   Ok(())
 }
@@ -470,7 +609,7 @@ async fn serve_turn_stream(
       serve_proxy_stream(downstream, peer_addr, stream_pool, config, state, drain).await
     }
     WebRtcTurnListenerMode::EdgeRelay => {
-      super::edge::serve_stream(downstream, stream_id, config, drain, edge).await
+      super::edge::serve_stream(downstream, peer_addr, stream_id, config, drain, edge).await
     }
   }
 }
@@ -500,7 +639,7 @@ async fn serve_proxy_stream(
       .turn_pools
       .select(pool, peer_addr.ip(), &peer_addr.to_string())?;
   let snapshot = state.snapshot();
-  let mut upstream = connect_turn_stream(&selection.origin, &snapshot).await?;
+  let mut upstream = connect_turn_stream(&selection, &snapshot).await?;
   upstream.write_all(&first).await?;
   copy_bidirectional_with_idle(
     downstream,
@@ -526,6 +665,9 @@ where
 }
 
 fn proxy_auth_allows(config: &WebRtcTurnListenerConfig, packet: &[u8]) -> anyhow::Result<bool> {
+  if !turn_datagram_consumes_exact_frame(packet) {
+    return Ok(false);
+  }
   if config.auth.mode == TurnAuthMode::PassThrough || !is_stun_message(packet) {
     return Ok(true);
   }
@@ -541,37 +683,93 @@ fn proxy_auth_allows(config: &WebRtcTurnListenerConfig, packet: &[u8]) -> anyhow
   }
 }
 
-async fn connect_turn_stream(origin: &Url, snapshot: &AppSnapshot) -> anyhow::Result<BoxedIo> {
-  let addr = resolve_turn_origin(origin).await?;
-  let tcp = tokio::time::timeout(Duration::from_millis(3_000), TcpStream::connect(addr))
+pub(super) fn turn_datagram_consumes_exact_frame(packet: &[u8]) -> bool {
+  if packet
+    .first()
+    .is_some_and(|byte| byte & 0b1100_0000 == 0b0100_0000)
+  {
+    let Ok(channel) = parse_channel_data(packet) else {
+      return false;
+    };
+    let unpadded_len = 4usize.saturating_add(channel.payload.len());
+    let padded_len = unpadded_len.saturating_add((4 - channel.payload.len() % 4) % 4);
+    return packet.len() == unpadded_len || packet.len() == padded_len;
+  }
+  if !is_stun_message(packet) {
+    return true;
+  }
+  parse_stun(packet).is_ok_and(|message| message.raw.len() == packet.len())
+}
+
+fn proxy_udp_session_admitted(active: usize, limit: usize) -> bool {
+  active < limit
+}
+
+fn next_turn_stream_id() -> Option<u64> {
+  NEXT_TURN_STREAM_ID
+    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    .ok()
+}
+
+async fn connect_turn_stream(
+  selection: &TurnPoolSelection,
+  snapshot: &AppSnapshot,
+) -> anyhow::Result<BoxedIo> {
+  connect_turn_stream_target(
+    &selection.origin,
+    &selection.tls,
+    Duration::from_millis(selection.connect_timeout_ms),
+    Duration::from_millis(selection.tls_handshake_timeout_ms),
+    &format!("turn:{}:{}", selection.pool_name, selection.server_id),
+    snapshot,
+  )
+  .await
+}
+
+async fn connect_turn_stream_target(
+  origin: &Url,
+  upstream_tls: &UpstreamTlsConfig,
+  connect_timeout: Duration,
+  tls_handshake_timeout: Duration,
+  upstream_name: &str,
+  snapshot: &AppSnapshot,
+) -> anyhow::Result<BoxedIo> {
+  let addr = resolve_turn_origin(origin, connect_timeout).await?;
+  let tcp = tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
     .await
     .context("TURN upstream connect timed out")??;
   if origin.scheme() != "turns" {
     return Ok(Box::new(tcp));
   }
-  let client_config = tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+  let revocation_policy = upstream_tls
+    .upstream_revocation
+    .clone()
+    .map(Arc::new)
+    .unwrap_or_else(|| snapshot.outbound_revocation.default_policy());
+  let client_config = tls::build_upstream_client_config_with_policy(
     &snapshot.config.crypto,
     &snapshot.config.proxy.trusted_ca_certs,
-    &UpstreamEchConfig::default(),
-    &UpstreamTlsResumptionConfig::default(),
+    upstream_tls,
     Some(&snapshot.tls_resumption),
-    "turn-upstream",
-    Some((
-      &snapshot.outbound_revocation,
-      snapshot.outbound_revocation.default_policy(),
-    )),
+    upstream_name,
+    Some((&snapshot.outbound_revocation, revocation_policy)),
   )?;
   let connector = TlsConnector::from(Arc::new(client_config));
-  let host = origin
-    .host_str()
-    .context("TURN upstream missing host")?
+  let host = upstream_tls
+    .server_name
+    .as_deref()
+    .or_else(|| origin.host_str())
+    .context("TURN upstream missing TLS server name")?
     .to_string();
   let server_name = rustls::pki_types::ServerName::try_from(host)
     .context("invalid TURN upstream TLS server name")?;
-  Ok(Box::new(connector.connect(server_name, tcp).await?))
+  let stream = tokio::time::timeout(tls_handshake_timeout, connector.connect(server_name, tcp))
+    .await
+    .context("TURN upstream TLS handshake timed out")??;
+  Ok(Box::new(stream))
 }
 
-async fn resolve_turn_origin(origin: &Url) -> anyhow::Result<SocketAddr> {
+async fn resolve_turn_origin(origin: &Url, timeout: Duration) -> anyhow::Result<SocketAddr> {
   let host = origin.host_str().context("TURN origin missing host")?;
   let port = origin.port().unwrap_or_else(|| {
     if origin.scheme() == "turns" {
@@ -581,7 +779,7 @@ async fn resolve_turn_origin(origin: &Url) -> anyhow::Result<SocketAddr> {
     }
   });
   let deadline = tokio::time::Instant::now()
-    .checked_add(Duration::from_secs(6))
+    .checked_add(timeout)
     .context("TURN origin DNS deadline overflowed")?;
   crate::upstream_resolution::resolve_socket_addrs(host, port, deadline)
     .await?
@@ -601,6 +799,9 @@ fn bind_udp_socket(bind: SocketAddr) -> anyhow::Result<std::net::UdpSocket> {
   }
   let socket = Socket::new(Domain::for_address(bind), Type::DGRAM, Some(Protocol::UDP))?;
   socket.set_reuse_address(true)?;
+  if bind.is_ipv6() {
+    socket.set_only_v6(true)?;
+  }
   socket.bind(&bind.into())?;
   let socket: std::net::UdpSocket = socket.into();
   socket.set_nonblocking(true)?;
@@ -619,13 +820,27 @@ fn expire_udp_sessions(
   idle_timeout: Duration,
 ) {
   let now = Instant::now();
-  sessions.retain(|_, session| now.duration_since(session.last_activity) < idle_timeout);
+  sessions.retain(|_, session| {
+    now.duration_since(udp_session_last_activity(&session.last_activity)) < idle_timeout
+  });
+}
+
+fn mark_udp_session_active(last_activity: &Arc<Mutex<Instant>>) {
+  *last_activity
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+}
+
+fn udp_session_last_activity(last_activity: &Arc<Mutex<Instant>>) -> Instant {
+  *last_activity
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
 mod tests;
 
-async fn copy_bidirectional_with_idle(
+pub(super) async fn copy_bidirectional_with_idle(
   left: BoxedIo,
   right: BoxedIo,
   idle_timeout: Duration,
@@ -636,15 +851,12 @@ async fn copy_bidirectional_with_idle(
   let (activity_tx, mut activity_rx) = mpsc::channel(16);
   let left_activity = activity_tx.clone();
   let mut left_to_right = tokio::spawn(async move {
-    tokio::io::copy(&mut left_read, &mut right_write).await?;
-    let _ = left_activity.try_send(());
-    anyhow::Ok(())
+    copy_with_activity(&mut left_read, &mut right_write, left_activity).await
   });
-  let mut right_to_left = tokio::spawn(async move {
-    tokio::io::copy(&mut right_read, &mut left_write).await?;
-    let _ = activity_tx.try_send(());
-    anyhow::Ok(())
-  });
+  let mut right_to_left =
+    tokio::spawn(
+      async move { copy_with_activity(&mut right_read, &mut left_write, activity_tx).await },
+    );
   let idle = tokio::time::sleep(idle_timeout);
   tokio::pin!(idle);
   let drain_close = drain.close_delay_elapsed();
@@ -679,6 +891,27 @@ async fn copy_bidirectional_with_idle(
   }
 }
 
+async fn copy_with_activity<R, W>(
+  reader: &mut R,
+  writer: &mut W,
+  activity: mpsc::Sender<()>,
+) -> anyhow::Result<()>
+where
+  R: AsyncRead + Unpin,
+  W: AsyncWrite + Unpin,
+{
+  let mut buffer = [0u8; 16 * 1024];
+  loop {
+    let read = reader.read(&mut buffer).await?;
+    if read == 0 {
+      writer.shutdown().await?;
+      return Ok(());
+    }
+    writer.write_all(&buffer[..read]).await?;
+    let _ = activity.try_send(());
+  }
+}
+
 fn spawn_health_task(state: AppHandle, mut shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
   tokio::spawn(async move {
     loop {
@@ -689,11 +922,30 @@ fn spawn_health_task(state: AppHandle, mut shutdown: watch::Receiver<bool>) -> J
       let targets = snapshot.turn_pools.health_targets();
       let sleep_duration = targets
         .iter()
-        .map(|(_, _, _, interval_ms, _)| Duration::from_millis(*interval_ms))
+        .map(|(_, _, _, _, interval_ms, _, _, _)| Duration::from_millis(*interval_ms))
         .min()
         .unwrap_or_else(|| Duration::from_secs(10));
-      for (pool, server, origin, _interval_ms, timeout_ms) in targets {
-        let result = turn_health_check(&origin, Duration::from_millis(timeout_ms), &snapshot).await;
+      for (
+        pool,
+        server,
+        origin,
+        upstream_tls,
+        _interval_ms,
+        timeout_ms,
+        connect_timeout_ms,
+        tls_handshake_timeout_ms,
+      ) in targets
+      {
+        let result = turn_health_check(
+          &origin,
+          &upstream_tls,
+          Duration::from_millis(timeout_ms),
+          Duration::from_millis(connect_timeout_ms),
+          Duration::from_millis(tls_handshake_timeout_ms),
+          &format!("turn-health:{pool}:{server}"),
+          &snapshot,
+        )
+        .await;
         let snapshot = state.snapshot();
         if result.is_ok() {
           snapshot.turn_pools.report_success(&pool, &server);
@@ -711,10 +963,14 @@ fn spawn_health_task(state: AppHandle, mut shutdown: watch::Receiver<bool>) -> J
 
 async fn turn_health_check(
   origin: &Url,
+  upstream_tls: &UpstreamTlsConfig,
   timeout: Duration,
+  connect_timeout: Duration,
+  tls_handshake_timeout: Duration,
+  upstream_name: &str,
   snapshot: &AppSnapshot,
 ) -> anyhow::Result<()> {
-  let addr = resolve_turn_origin(origin).await?;
+  let addr = resolve_turn_origin(origin, connect_timeout).await?;
   let txid = random_transaction_id()?;
   let request = encode_binding_request(txid);
   if origin.scheme() == "turn" {
@@ -729,7 +985,18 @@ async fn turn_health_check(
     bail!("unexpected STUN health response");
   }
   let mut stream: BoxedIo = if origin.scheme() == "turns" {
-    tokio::time::timeout(timeout, connect_turn_stream(origin, snapshot)).await??
+    tokio::time::timeout(
+      timeout,
+      connect_turn_stream_target(
+        origin,
+        upstream_tls,
+        connect_timeout,
+        tls_handshake_timeout,
+        upstream_name,
+        snapshot,
+      ),
+    )
+    .await??
   } else {
     Box::new(tokio::time::timeout(timeout, TcpStream::connect(addr)).await??)
   };

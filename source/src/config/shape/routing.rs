@@ -24,7 +24,10 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "websocket",
       "webtransport",
     ][..],
-    "upstreams.tls" | "upstream_pools.servers.tls" | "upstream_pools.discovery.tls" => &[
+    "upstreams.tls"
+    | "upstream_pools.servers.tls"
+    | "upstream_pools.discovery.tls"
+    | "turn_upstream_pools.servers.tls" => &[
       "ech",
       "client_identity",
       "resumption",
@@ -37,16 +40,20 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     ][..],
     "upstreams.tls.client_identity"
     | "upstream_pools.servers.tls.client_identity"
-    | "upstream_pools.discovery.tls.client_identity" => &["cert_chain", "private_key"][..],
-    "upstreams.tls.ech" | "upstream_pools.servers.tls.ech" | "upstream_pools.discovery.tls.ech" => {
-      &["config_list_file", "mode"][..]
-    }
+    | "upstream_pools.discovery.tls.client_identity"
+    | "turn_upstream_pools.servers.tls.client_identity" => &["cert_chain", "private_key"][..],
+    "upstreams.tls.ech"
+    | "upstream_pools.servers.tls.ech"
+    | "upstream_pools.discovery.tls.ech"
+    | "turn_upstream_pools.servers.tls.ech" => &["config_list_file", "mode"][..],
     "upstreams.tls.resumption"
     | "upstream_pools.servers.tls.resumption"
-    | "upstream_pools.discovery.tls.resumption" => &["mode", "session_cache_size", "tls12"][..],
+    | "upstream_pools.discovery.tls.resumption"
+    | "turn_upstream_pools.servers.tls.resumption" => &["mode", "session_cache_size", "tls12"][..],
     "upstreams.tls.subject_alt_names"
     | "upstream_pools.servers.tls.subject_alt_names"
-    | "upstream_pools.discovery.tls.subject_alt_names" => &["type", "value"][..],
+    | "upstream_pools.discovery.tls.subject_alt_names"
+    | "turn_upstream_pools.servers.tls.subject_alt_names" => &["type", "value"][..],
     "upstreams.tls.upstream_revocation" => outbound_revocation::OUTBOUND_REVOCATION_CONFIG_KEYS,
     "upstreams.tls.upstream_revocation.ocsp" => outbound_revocation::OUTBOUND_OCSP_CONFIG_KEYS,
     "upstreams.tls.upstream_revocation.crlite" => crlite::CRLITE_CONFIG_KEYS,
@@ -352,20 +359,31 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     }
     "turn_upstream_pools" => &["algorithm", "hash_key", "health_check", "name", "servers"][..],
     "turn_upstream_pools.health_check" => &[
+      "connect_timeout_ms",
       "enabled",
       "healthy_threshold",
       "interval_ms",
+      "tls_handshake_timeout_ms",
       "timeout_ms",
       "unhealthy_threshold",
     ][..],
-    "turn_upstream_pools.servers" => {
-      &["backup", "id", "max_conns", "origin", "state", "weight"][..]
-    }
+    "turn_upstream_pools.servers" => &[
+      "backup",
+      "id",
+      "max_conns",
+      "origin",
+      "state",
+      "tls",
+      "weight",
+    ][..],
     "webrtc_turn_listeners" => &[
       "auth",
       "bind_tcp",
+      "bind_tcp_additional",
       "bind_tls",
+      "bind_tls_additional",
       "bind_udp",
+      "bind_udp_additional",
       "idle_timeout_ms",
       "limits",
       "mode",
@@ -385,19 +403,27 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "webrtc_turn_listeners.auth" => &[
       "mode",
       "nonce_ttl_seconds",
+      "nonce_secret_env",
+      "nonce_secret_file",
+      "password_algorithms",
+      "previous_nonce_secret_env",
+      "previous_nonce_secret_file",
       "rest_shared_secret",
       "rest_shared_secret_env",
+      "rest_shared_secret_file",
       "static_credentials",
     ][..],
     "webrtc_turn_listeners.auth.static_credentials" => {
-      &["password", "password_env", "username"][..]
+      &["password", "password_env", "password_file", "username"][..]
     }
     "webrtc_turn_listeners.limits" => &[
       "max_allocation_lifetime_seconds",
       "max_allocations_per_client",
       "max_allocations_per_listener",
       "max_channels_per_allocation",
+      "max_pending_tcp_connections",
       "max_permissions_per_allocation",
+      "max_proxy_udp_sessions_per_listener",
     ][..],
     "webrtc_turn_listeners.peer_policy" => &[
       "allow_link_local_peers",
@@ -443,4 +469,33 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     _ => return None,
   };
   Some(keys)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn turn_auth_admission_and_per_server_tls_shapes_are_strictly_admitted() {
+    assert!(
+      allowed_keys("webrtc_turn_listeners.auth")
+        .expect("TURN auth shape")
+        .contains(&"nonce_secret_file")
+    );
+    assert!(
+      allowed_keys("webrtc_turn_listeners.limits")
+        .expect("TURN limits shape")
+        .contains(&"max_proxy_udp_sessions_per_listener")
+    );
+    assert!(
+      allowed_keys("turn_upstream_pools.servers")
+        .expect("TURN upstream server shape")
+        .contains(&"tls")
+    );
+    assert!(
+      allowed_keys("turn_upstream_pools.servers.tls.client_identity")
+        .expect("TURN upstream identity shape")
+        .contains(&"private_key")
+    );
+  }
 }

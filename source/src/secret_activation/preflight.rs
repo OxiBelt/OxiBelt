@@ -43,7 +43,7 @@ pub(super) fn preflight_certificate_material(config: &Config) -> Result<(), Secr
     }
   }
   for listener in &config.webrtc_turn_listeners {
-    if listener.bind_tls.is_some() {
+    if listener.tls_binds().next().is_some() {
       let private_key = if listener.tls.remote_signer_key_id.is_some()
         || (listener.tls.private_key.is_none() && config.tls.remote_signer.enabled)
       {

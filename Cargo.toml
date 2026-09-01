@@ -62,6 +62,8 @@ openssl-sys = { version = "0.9.117", features = ["vendored"] }
 openssl-probe = "0.2.1"
 object_store = { version = "=0.14.1", default-features = false, features = ["aws", "fs"] }
 pretty_assertions = "1.4.1"
+precis-profiles = { version = "0.1.13", default-features = false }
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
 rustix = { version = "1.1.4", features = ["net", "process", "std"] }
 sequoia-openpgp = { version = "=2.4.1", default-features = false, features = ["crypto-openssl"] }

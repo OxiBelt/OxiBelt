@@ -281,11 +281,31 @@ impl Config {
       }
       pool.resolve_health_check_paths(&path_roots.cert_dir, &mut self.source_paths)?;
     }
+    for pool in &mut self.turn_upstream_pools {
+      for server in &mut pool.servers {
+        let tls = &mut server.tls;
+        for path in tls.resolve_relative_paths(&path_roots.cert_dir)? {
+          self.source_paths.remember_runtime_file(path);
+        }
+      }
+    }
+    self.source_paths.downstream_turn_listener_tls.clear();
     for listener in &mut self.webrtc_turn_listeners {
-      for path in listener.tls.resolve_relative_paths(&path_roots.cert_dir)? {
+      for path in listener.auth.resolve_relative_paths(&path_roots.cert_dir)? {
+        self.source_paths.remember_runtime_file(path);
+      }
+      let tls_paths = listener.tls.resolve_relative_paths(&path_roots.cert_dir)?;
+      for path in [tls_paths.cert_chain.clone(), tls_paths.private_key.clone()]
+        .into_iter()
+        .flatten()
+      {
         self.source_paths.remember_runtime_file(path.clone());
         self.source_paths.remember_downstream_tls_file(path);
       }
+      self
+        .source_paths
+        .downstream_turn_listener_tls
+        .push(tls_paths);
     }
     for path in self
       .admin

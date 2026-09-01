@@ -202,12 +202,36 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     NativeConfigSecretClass::EnvironmentReference,
   ),
   secret(
+    "webrtc_turn_listeners[].auth.rest_shared_secret_file",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
+    "webrtc_turn_listeners[].auth.nonce_secret_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "webrtc_turn_listeners[].auth.nonce_secret_file",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
+    "webrtc_turn_listeners[].auth.previous_nonce_secret_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "webrtc_turn_listeners[].auth.previous_nonce_secret_file",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
     "webrtc_turn_listeners[].auth.static_credentials[].password",
     NativeConfigSecretClass::Literal,
   ),
   secret(
     "webrtc_turn_listeners[].auth.static_credentials[].password_env",
     NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "webrtc_turn_listeners[].auth.static_credentials[].password_file",
+    NativeConfigSecretClass::FileReference,
   ),
   secret(
     "webrtc_turn_listeners[].tls.private_key",
@@ -251,6 +275,10 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
   ),
   secret(
     "upstream_pools[].servers[].tls.client_identity.private_key",
+    NativeConfigSecretClass::FileReference,
+  ),
+  secret(
+    "turn_upstream_pools[].servers[].tls.client_identity.private_key",
     NativeConfigSecretClass::FileReference,
   ),
   secret(
@@ -728,6 +756,15 @@ fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
   if is_subject_alt_names_path(shape_path) {
     object.insert("maxItems".to_string(), json!(5));
   }
+  if matches!(
+    shape_path,
+    "webrtc_turn_listeners.bind_udp_additional"
+      | "webrtc_turn_listeners.bind_tcp_additional"
+      | "webrtc_turn_listeners.bind_tls_additional"
+  ) {
+    object.insert("maxItems".to_string(), json!(7));
+    object.insert("uniqueItems".to_string(), json!(true));
+  }
   if shape_path == "upstream_pools.discovery" {
     object.insert("maxItems".to_string(), json!(64));
   }
@@ -746,6 +783,32 @@ fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
 
 #[cfg(feature = "config-tooling")]
 fn scalar_schema(path: &str) -> Value {
+  if path == "webrtc_turn_listeners.realm" {
+    return json!({"type": "string", "minLength": 1, "maxLength": 763});
+  }
+  if path == "webrtc_turn_listeners.auth.static_credentials.username" {
+    return json!({"type": "string", "minLength": 1, "maxLength": 512});
+  }
+  if path == "webrtc_turn_listeners.auth.static_credentials.password" {
+    return json!({"type": "string", "minLength": 1, "maxLength": 4_096});
+  }
+  if matches!(
+    path,
+    "webrtc_turn_listeners.bind_udp_additional"
+      | "webrtc_turn_listeners.bind_tcp_additional"
+      | "webrtc_turn_listeners.bind_tls_additional"
+  ) {
+    return json!({"type": "string"});
+  }
+  if path == "webrtc_turn_listeners.auth.password_algorithms" {
+    return json!({
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {"type": "string", "enum": ["sha256", "md5"]}
+    });
+  }
   if path == "upstreams.svcb_allowed_ports" {
     return json!({
       "type": "array",
@@ -853,6 +916,7 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     "tls.ct.log_list.refresh_interval_seconds" => (3_600, 604_800),
     "certificate_transparency.logs.gateway.cache_max_bytes" => (1, 64 * 1024 * 1024),
     "certificate_transparency.logs.gateway.cache_max_entries" => (1, 100_000),
+    "webrtc_turn_listeners.auth.nonce_ttl_seconds" => (1, 3_600),
     _ => return None,
   };
   Some(range)
@@ -888,6 +952,7 @@ fn is_array_path(path: &str) -> bool {
     "tls.certificates",
     "turn_upstream_pools",
     "turn_upstream_pools.servers",
+    "turn_upstream_pools.servers.tls.subject_alt_names",
     "upstream_pools",
     "upstream_pools.discovery",
     "upstream_pools.discovery.tls.subject_alt_names",
@@ -897,6 +962,9 @@ fn is_array_path(path: &str) -> bool {
     "upstreams.tls.subject_alt_names",
     "webrtc_turn_listeners",
     "webrtc_turn_listeners.auth.static_credentials",
+    "webrtc_turn_listeners.bind_udp_additional",
+    "webrtc_turn_listeners.bind_tcp_additional",
+    "webrtc_turn_listeners.bind_tls_additional",
     "webrtc_turn_listeners.relay_families",
   ];
   ARRAYS.contains(&path)
@@ -1022,6 +1090,9 @@ fn string_path(path: &str) -> bool {
       | "upstream_pools.servers.tls.client_identity.cert_chain"
       | "upstream_pools.servers.tls.client_identity.private_key"
       | "upstream_pools.servers.tls.subject_alt_names.value"
+      | "turn_upstream_pools.servers.tls.client_identity.cert_chain"
+      | "turn_upstream_pools.servers.tls.client_identity.private_key"
+      | "turn_upstream_pools.servers.tls.subject_alt_names.value"
       | "upstreams.tls.client_identity.cert_chain"
       | "upstreams.tls.client_identity.private_key"
       | "upstreams.tls.subject_alt_names.value"
@@ -1034,6 +1105,7 @@ fn is_subject_alt_names_path(path: &str) -> bool {
     path,
     "upstream_pools.discovery.tls.subject_alt_names"
       | "upstream_pools.servers.tls.subject_alt_names"
+      | "turn_upstream_pools.servers.tls.subject_alt_names"
       | "upstreams.tls.subject_alt_names"
   )
 }
@@ -1044,6 +1116,7 @@ fn is_subject_alt_name_value_path(path: &str) -> bool {
     path,
     "upstream_pools.discovery.tls.subject_alt_names.value"
       | "upstream_pools.servers.tls.subject_alt_names.value"
+      | "turn_upstream_pools.servers.tls.subject_alt_names.value"
       | "upstreams.tls.subject_alt_names.value"
   )
 }
@@ -1054,6 +1127,7 @@ fn is_upstream_client_identity_path(path: &str) -> bool {
     path,
     "upstream_pools.discovery.tls.client_identity"
       | "upstream_pools.servers.tls.client_identity"
+      | "turn_upstream_pools.servers.tls.client_identity"
       | "upstreams.tls.client_identity"
   )
 }
@@ -1183,6 +1257,10 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
       "upstream_pools.servers.tls.subject_alt_names.type",
       vec!["dns", "uri"],
     ),
+    (
+      "turn_upstream_pools.servers.tls.subject_alt_names.type",
+      vec!["dns", "uri"],
+    ),
     ("upstreams.tls.subject_alt_names.type", vec!["dns", "uri"]),
     (
       "upstream_pools.algorithm",
@@ -1274,6 +1352,12 @@ fn default_value(path: &str) -> Option<Value> {
     "sni_forward.quic_initial_reassembly.max_total_buffered_bytes" => json!(4_194_304),
     "sni_forward.quic_initial_reassembly.timeout_ms" => json!(10_000),
     "stream_listeners.udp_flow_state" => json!("local"),
+    "turn_upstream_pools.health_check.connect_timeout_ms" => json!(3_000),
+    "turn_upstream_pools.health_check.tls_handshake_timeout_ms" => json!(5_000),
+    "webrtc_turn_listeners.auth.nonce_ttl_seconds" => json!(600),
+    "webrtc_turn_listeners.auth.password_algorithms" => json!(["sha256", "md5"]),
+    "webrtc_turn_listeners.limits.max_pending_tcp_connections" => json!(1_024),
+    "webrtc_turn_listeners.limits.max_proxy_udp_sessions_per_listener" => json!(4_096),
     "upstream_pools.discovery.weight_multiplier" => json!(1),
     "quic.upstream.resolution.address_family_stagger_ms" => json!(250),
     "quic.upstream.resolution.cooldown_base_ms" => json!(1_000),
@@ -1312,6 +1396,8 @@ fn path_kind(path: &str) -> Option<&'static str> {
         | "upstream_pools.servers.tls.client_identity.private_key"
         | "upstream_pools.discovery.tls.client_identity.cert_chain"
         | "upstream_pools.discovery.tls.client_identity.private_key"
+        | "turn_upstream_pools.servers.tls.client_identity.cert_chain"
+        | "turn_upstream_pools.servers.tls.client_identity.private_key"
     )
     || path.ends_with(".trusted_ca_certs")
     || path.starts_with("certificate_transparency.logs.")
