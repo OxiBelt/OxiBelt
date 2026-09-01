@@ -271,8 +271,8 @@ WebSocket upgrades require an exclusively `websocket` offer and response; and
 shaped HTTP/2 and HTTP/3 request bodies retain `413 Payload Too Large`
 classification. The locked Rust/probe graphs, supply-chain evidence, CI
 actions, builder/runtime image digests, and fuzz nightly are refreshed. The
-Kubernetes representatives advance to `v1.34.11`, `v1.35.8`, and `v1.36.4`,
-Kind advances to `v0.33.0`, and the Helm matrix uses `3.21.4` and `4.2.4`.
+Kubernetes representatives include `v1.34.11`, `v1.35.8`, `v1.36.4`, and
+`v1.37.0`, Kind uses `v0.33.0`, and the Helm matrix uses `3.21.4` and `4.2.4`.
 These matrix changes require fresh evidence and do not themselves graduate a
 Kubernetes feature.
 

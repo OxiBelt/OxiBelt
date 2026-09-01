@@ -184,7 +184,15 @@ if helm template oxibelt "${chart_dir}" --kube-version 1.33.0 \
   die "kubernetes_immutable unexpectedly rendered for Kubernetes 1.33"
 fi
 assert_contains "${work_dir}/unsupported-kubernetes.log" \
-  "configRollout.mode=kubernetes_immutable requires Kubernetes >=1.34.0 and <1.37.0"
+  "configRollout.mode=kubernetes_immutable requires Kubernetes >=1.34.0 and <1.38.0"
+
+if helm template oxibelt "${chart_dir}" --kube-version 1.38.0 \
+  --set-string configRollout.mode=kubernetes_immutable \
+  >"${work_dir}/unsupported-newer-kubernetes.log" 2>&1; then
+  die "kubernetes_immutable unexpectedly rendered for Kubernetes 1.38"
+fi
+assert_contains "${work_dir}/unsupported-newer-kubernetes.log" \
+  "configRollout.mode=kubernetes_immutable requires Kubernetes >=1.34.0 and <1.38.0"
 
 helm template oxibelt "${chart_dir}" --kube-version 1.31.14 \
   --set-string configRollout.mode=helm_immutable \

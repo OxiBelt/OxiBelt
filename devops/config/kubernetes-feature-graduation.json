@@ -6,7 +6,7 @@
   "evidenceSchema": "devops/config/kubernetes-feature-graduation-evidence.schema.json",
   "supportContract": {
     "kubernetes": {
-      "range": ">=1.34.0-0 <1.37.0-0",
+      "range": ">=1.34.0-0 <1.38.0-0",
       "minors": [
         {
           "minor": "1.34",
@@ -22,6 +22,11 @@
           "minor": "1.36",
           "ciVersion": "v1.36.4",
           "kindNodeImage": "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed"
+        },
+        {
+          "minor": "1.37",
+          "ciVersion": "v1.37.0",
+          "kindNodeImage": "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
         }
       ]
     },

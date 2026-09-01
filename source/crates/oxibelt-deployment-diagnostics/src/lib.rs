@@ -34,7 +34,7 @@ const HELM_TIMEOUT: Duration = Duration::from_secs(30);
 const KUBERNETES_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const KUBERNETES_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SUPPORTED_KUBERNETES_MIN_MINOR: u32 = 34;
-const SUPPORTED_KUBERNETES_MAX_MINOR: u32 = 36;
+const SUPPORTED_KUBERNETES_MAX_MINOR: u32 = 37;
 const REQUIRED_GATEWAY_API_V1_RESOURCES: &[&str] = &[
   "backendtlspolicies",
   "gatewayclasses",
@@ -246,7 +246,7 @@ async fn diagnose_kubernetes_server(client: &Client, report: &mut DiagnosticRepo
       "kubernetes",
       "kubernetes://version",
       "Kubernetes API server version could not be read",
-      "Grant read-only access to the non-resource /version endpoint and verify Kubernetes 1.34 through 1.36.",
+      "Grant read-only access to the non-resource /version endpoint and verify Kubernetes 1.34 through 1.37.",
     ),
   }
 }

@@ -84,9 +84,9 @@ for the governed entry format.
   all-or-nothing. Ambiguous translation failures and TLSRoute failures preserve
   the last good revision because omission could expose another route or SNI
   rule.
-- Refresh the Kubernetes `1.34`-`1.36` representatives to `v1.34.11`,
-  `v1.35.8`, and `v1.36.4`, Kind to `v0.33.0`, and the Helm 3 lane to
-  `3.21.4` while retaining Helm `4.2.4`. These are fresh graduation evidence
+- Extend the Kubernetes `1.34`-`1.37` representatives with `v1.37.0` while
+  retaining the reviewed `v1.34.11`, `v1.35.8`, and `v1.36.4` rows, Kind
+  `v0.33.0`, and Helm `3.21.4`/`4.2.4`. These are fresh graduation evidence
   inputs and do not themselves promote any Kubernetes feature.
 
 ### Rulepack compatibility
@@ -124,7 +124,7 @@ for the governed entry format.
 
 - Validate the exact beta.2 source revision with fresh Rust, TypeScript,
   configuration/schema, rootless image, Helm, Gateway-controller, and
-  Kubernetes `1.34`-`1.36` evidence. The immutable rollout checks must prove
+  Kubernetes `1.34`-`1.37` evidence. The immutable rollout checks must prove
   that rejected backend references produce a new denied revision, close the
   affected TCP/UDP listeners, do not expose broader HTTP/gRPC fallbacks, and
   recover only after authorization is restored.

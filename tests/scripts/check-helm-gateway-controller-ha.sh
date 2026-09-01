@@ -263,8 +263,16 @@ if helm template controller-unsupported "${chart_dir}" --namespace control \
   --kube-version 1.33.0 >"${work_dir}/unsupported-kubernetes.log" 2>&1; then
   die "controller chart unexpectedly rendered for Kubernetes 1.33"
 fi
-grep -F -- "chart requires kubeVersion: >=1.34.0-0 <1.37.0-0" \
+grep -F -- "chart requires kubeVersion: >=1.34.0-0 <1.38.0-0" \
   "${work_dir}/unsupported-kubernetes.log" >/dev/null \
   || die "unsupported Kubernetes render did not report the chart support window"
+
+if helm template controller-unsupported-newer "${chart_dir}" --namespace control \
+  --kube-version 1.38.0 >"${work_dir}/unsupported-newer-kubernetes.log" 2>&1; then
+  die "controller chart unexpectedly rendered for Kubernetes 1.38"
+fi
+grep -F -- "chart requires kubeVersion: >=1.34.0-0 <1.38.0-0" \
+  "${work_dir}/unsupported-newer-kubernetes.log" >/dev/null \
+  || die "newer unsupported Kubernetes render did not report the chart support window"
 
 echo "Gateway controller HA Helm checks passed."

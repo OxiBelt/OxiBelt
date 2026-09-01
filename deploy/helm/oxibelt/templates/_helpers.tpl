@@ -663,8 +663,8 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if and (eq $version 1) (not (semverCompare ">=1.31.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
 {{- fail "operationalProfile edge-secure-medium requires Kubernetes 1.31 or later" -}}
 {{- end -}}
-{{- if and (eq $version 2) (not (semverCompare ">=1.34.0-0 <1.37.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
-{{- fail "OBP106-KUBERNETES-VERSION: operationalProfile edge-secure-medium v2 requires Kubernetes >=1.34.0 and <1.37.0" -}}
+{{- if and (eq $version 2) (not (semverCompare ">=1.34.0-0 <1.38.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
+{{- fail "OBP106-KUBERNETES-VERSION: operationalProfile edge-secure-medium v2 requires Kubernetes >=1.34.0 and <1.38.0" -}}
 {{- end -}}
 {{- if not .Values.tls.enabled -}}
 {{- fail "operationalProfile edge-secure-medium requires tls.enabled=true" -}}
@@ -749,8 +749,8 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if not (has $mode (list "helm_immutable" "kubernetes_immutable")) -}}
 {{- fail "configRollout.mode must be helm_immutable or kubernetes_immutable" -}}
 {{- end -}}
-{{- if and (eq $mode "kubernetes_immutable") (not (semverCompare ">=1.34.0-0 <1.37.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
-{{- fail "configRollout.mode=kubernetes_immutable requires Kubernetes >=1.34.0 and <1.37.0; see docs/KubernetesSupport.md" -}}
+{{- if and (eq $mode "kubernetes_immutable") (not (semverCompare ">=1.34.0-0 <1.38.0-0" (trimPrefix "v" .Capabilities.KubeVersion.Version))) -}}
+{{- fail "configRollout.mode=kubernetes_immutable requires Kubernetes >=1.34.0 and <1.38.0; see docs/KubernetesSupport.md" -}}
 {{- end -}}
 {{- $path := .Values.configRollout.managedConfigPath -}}
 {{- if hasPrefix "/" $path -}}

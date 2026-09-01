@@ -11,14 +11,14 @@ The Gateway controller remains a Gateway API controller. It is not an Ingress co
 
 Both charts and the controller integration are currently `experimental`.
 [KubernetesSupport.md](KubernetesSupport.md) defines the machine-enforced
-graduation target and mandatory evidence. Its Kubernetes `1.34`–`1.36` matrix
+graduation target and mandatory evidence. Its Kubernetes `1.34`–`1.37` matrix
 does not turn Helm rendering, API-server dry-run, or one successful rollout
 into a supported-production claim.
 
 ## Graduation compatibility and support metadata
 
 The controller and `kubernetes_immutable` data-plane pairing targets Kubernetes
-`>=1.34.0-0 <1.37.0-0`, Helm `3.21.4` and `4.2.4`, and the operator-installed
+`>=1.34.0-0 <1.38.0-0`, Helm `3.21.4` and `4.2.4`, and the operator-installed
 Gateway API `v1.6.1` standard CRD bundle. The charts do not install, convert,
 downgrade, or delete Gateway API CRDs. Install and establish the pinned CRDs
 before the controller, then install or upgrade the data plane.

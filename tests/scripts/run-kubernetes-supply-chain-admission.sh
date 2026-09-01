@@ -507,14 +507,15 @@ fi
 case "${kind_node_image}" in
   kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d|\
   kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0|\
-  kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed)
+  kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed|\
+  kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5)
     ;;
   *)
     die "unapproved Kind node image: ${kind_node_image}"
     ;;
 esac
-[[ "${minikube_kubernetes_version}" =~ ^v1\.(34|35|36)\.[0-9]+$ ]] \
-  || die "Minikube Kubernetes version must be within the supported 1.34-1.36 range"
+[[ "${minikube_kubernetes_version}" =~ ^v1\.(34|35|36|37)\.[0-9]+$ ]] \
+  || die "Minikube Kubernetes version must be within the supported 1.34-1.37 range"
 
 for command in awk base64 cargo cat cp curl cut date dirname docker flock git grep head helm jq kubectl mktemp openssl python3 sed sha256sum stat tar tr uname; do
   require_command "${command}"

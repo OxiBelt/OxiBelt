@@ -12,7 +12,7 @@ The controller, Gateway API translations, and Helm chart are currently
 The version, conformance, architecture, failure-recovery, and promotion
 requirements are defined in the
 [Kubernetes support and graduation contract](KubernetesSupport.md). Its
-Kubernetes `1.34`–`1.36`, Helm `3.21.4`/`4.2.4`, and Gateway API `v1.6.1`
+Kubernetes `1.34`–`1.37`, Helm `3.21.4`/`4.2.4`, and Gateway API `v1.6.1`
 matrix is a graduation target, not a supported-production claim.
 The data-plane chart and controller chart are documented together in
 [KubernetesDeployment.md](KubernetesDeployment.md).

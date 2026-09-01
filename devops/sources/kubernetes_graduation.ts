@@ -823,7 +823,7 @@ function ValidatePolicySemantics(
   AssertExactSet(
     'Kubernetes support minors',
     Policy.supportContract.kubernetes.minors.map(Minor => Minor.minor),
-    ['1.34', '1.35', '1.36']
+    ['1.34', '1.35', '1.36', '1.37']
   )
   const HelmCompatibilityVersions = [...Policy.supportContract.helm.versions].sort()
   const AcceptedHelmCompatibilityVersions = [

@@ -162,9 +162,18 @@ fn diagnoses_unsupported_kubernetes_minors_and_missing_gateway_apis() {
 }
 
 #[test]
+fn diagnoses_kubernetes_minors_above_the_qualified_range() {
+  let mut report = DiagnosticReport::new();
+  diagnose_server_version(&mut report, "v1.38.0", "1", "38");
+  let report = report.finish();
+
+  assert!(has_code(&report, "K8S-006"), "{:#?}", report.findings);
+}
+
+#[test]
 fn accepts_qualified_kubernetes_minors_and_complete_gateway_api_v1() {
   let mut report = DiagnosticReport::new();
-  diagnose_server_version(&mut report, "v1.36.4", "1", "36+");
+  diagnose_server_version(&mut report, "v1.37.0", "1", "37+");
   let served = super::REQUIRED_GATEWAY_API_V1_RESOURCES
     .iter()
     .map(|resource| (*resource).to_string())

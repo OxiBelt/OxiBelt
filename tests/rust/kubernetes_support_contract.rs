@@ -101,7 +101,7 @@ fn graduation_registry_covers_the_complete_support_contract() {
   assert_eq!(policy["targetVersion"], "0.8.1");
   assert_eq!(
     policy["supportContract"]["kubernetes"]["range"],
-    ">=1.34.0-0 <1.37.0-0"
+    ">=1.34.0-0 <1.38.0-0"
   );
   assert_eq!(
     strings(&policy["supportContract"]["helm"]["versions"]),
@@ -159,6 +159,11 @@ fn graduation_registry_covers_the_complete_support_contract() {
         "1.36",
         "v1.36.4",
         "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed"
+      ),
+      (
+        "1.37",
+        "v1.37.0",
+        "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
       ),
     ]
   );
@@ -330,7 +335,7 @@ fn charts_workflows_and_harnesses_expose_the_same_experimental_policy() {
     assert!(chart.contains("oxibelt.dev/feature-status: experimental"));
     assert!(chart.contains("oxibelt.dev/kubernetes-support-policy: \"1\""));
   }
-  assert!(controller_chart.contains("kubeVersion: \">=1.34.0-0 <1.37.0-0\""));
+  assert!(controller_chart.contains("kubeVersion: \">=1.34.0-0 <1.38.0-0\""));
 
   let controller_deployment =
     read_repo("deploy/helm/oxibelt-gateway-controller/templates/deployment.yaml");
@@ -365,6 +370,7 @@ fn charts_workflows_and_harnesses_expose_the_same_experimental_policy() {
     "v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d",
     "v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0",
     "v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+    "v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5",
   ] {
     assert!(
       workflow.contains(expected),

@@ -2137,6 +2137,9 @@ jobs:
           - kubernetes: v1.36.4
             kubectl: v1.36.4
             node_image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+          - kubernetes: v1.37.0
+            kubectl: v1.37.0
+            node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 
     steps:
       - name: Checkout
@@ -2456,6 +2459,10 @@ jobs:
             kube_version: 1.36.4
             kubectl: v1.36.4
             node_image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+          - kubernetes: v1.37.0
+            kube_version: 1.37.0
+            kubectl: v1.37.0
+            node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 
     steps:
       - name: Checkout
