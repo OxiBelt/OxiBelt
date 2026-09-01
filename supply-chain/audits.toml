@@ -757,6 +757,12 @@ criteria = "safe-to-deploy"
 delta = "0.1.46 -> 0.1.47"
 notes = "Reviewed the complete checksum-matched 0.1.46-to-0.1.47 source delta; the only runtime change implements normalized Karatsuba u128 square root with bounded intermediates and a checked correction step that preserves floor-square-root semantics. The crate adds no unsafe, build script, or external capability."
 
+[[audits.object_store]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.14.1"
+notes = "Reviewed the complete checksum-matched 0.14.1 source with OxiBelt's default-features-disabled aws and fs selection. The package has no build script; the selected S3 path builds signed requests, credentials, retry behavior, conditional writes, and endpoint URLs through its reqwest/rustls client, while local storage remains confined to the configured root. The crate-owned unsafe selected surface is limited to cfg-specific Windows local-file cleanup and is excluded from Linux release builds. OxiBelt's CT adapter further requires HTTPS in production, performs create-only and versioned conditional writes, constrains relative object keys, verifies readback, and redacts provider errors and credentials."
+
 [[audits.online-dsl-forge]]
 who = "OpenAI Codex <codex@openai.com>"
 criteria = "safe-to-deploy"

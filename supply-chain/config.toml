@@ -970,10 +970,6 @@ criteria = "safe-to-deploy"
 version = "1.17.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.object_store]]
-version = "0.14.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.once_cell]]
 version = "1.21.4"
 criteria = "safe-to-deploy"

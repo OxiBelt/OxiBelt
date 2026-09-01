@@ -2079,6 +2079,42 @@ jobs:
           OXIBELT_REQUIRE_ADMIN_AUDIT_ANCHOR_POSTGRES_TESTS: "1"
         run: tests/scripts/run-admin-audit-anchor-postgres.sh
 
+  ct-object-store-minio:
+    name: CT object-store TLS MinIO admission
+    runs-on: ubuntu-26.04
+    needs:
+      - test
+      - rust-advisory-checks
+    permissions:
+      contents: read
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal
+          rustup default 1.98.0
+
+      - name: Run CT object-store TLS MinIO admission
+        env:
+          OXIBELT_CT_OBJECT_STORE_ALLOW_HOSTED_DOCKER: "1"
+        run: >-
+          tests/scripts/run-ct-object-store-minio.sh
+          --receipt-output "${RUNNER_TEMP}/ct-object-store-minio-receipt.json"
+
+      - name: Upload CT object-store MinIO evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: ct-object-store-minio-evidence
+          path: ${{ runner.temp }}/ct-object-store-minio-receipt.json
+          if-no-files-found: error
+          retention-days: 0
+
   kubernetes-immutable-rollout:
     name: Kubernetes ${{ matrix.kubernetes }} immutable Gateway rollout
     runs-on: ubuntu-26.04
@@ -3267,6 +3303,7 @@ jobs:
       - admin-mutation-postgres
       - admin-operation-postgres
       - admin-audit-anchor-postgres
+      - ct-object-store-minio
       - kubernetes-immutable-rollout
       - kubernetes-strict-hardening
       - kubernetes-supply-chain-admission

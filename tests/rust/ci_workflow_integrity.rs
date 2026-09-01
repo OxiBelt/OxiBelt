@@ -111,6 +111,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "admin-mutation-postgres",
   "admin-operation-postgres",
   "admin-audit-anchor-postgres",
+  "ct-object-store-minio",
   "kubernetes-immutable-rollout",
   "kubernetes-strict-hardening",
   "kubernetes-supply-chain-admission",
@@ -6598,6 +6599,128 @@ exit 1
     assert!(
       !stderr.contains("NESTED_SUBSTITUTION_EXECUTED"),
       "{kind} extractor must reject the payload before Bash arithmetic can execute it"
+    );
+  }
+}
+
+#[test]
+fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("ct-object-store-minio")
+    .expect("workflow should define the CT object-store MinIO admission job");
+  let job_text = workflow_job_text(&workflow, "ct-object-store-minio");
+  let script = fs::read_to_string(repo_root().join("tests/scripts/run-ct-object-store-minio.sh"))
+    .expect("CT object-store MinIO harness should be readable");
+  let dockerfile =
+    fs::read_to_string(repo_root().join("tests/docker/ct_object_store_minio/Dockerfile"))
+      .expect("CT object-store MinIO Dockerfile should be readable");
+  let object_store = fs::read_to_string(repo_root().join("source/src/ct_runtime/object_store.rs"))
+    .expect("CT object-store adapter should be readable");
+
+  assert_eq!(
+    job.needs,
+    vec!["test".to_owned(), "rust-advisory-checks".to_owned()],
+    "CT object-store integration should wait for Rust tests and advisory admission"
+  );
+  for expected in [
+    "name: CT object-store TLS MinIO admission",
+    "runs-on: ubuntu-26.04",
+    "timeout-minutes: 45",
+    "OXIBELT_CT_OBJECT_STORE_ALLOW_HOSTED_DOCKER: \"1\"",
+    "tests/scripts/run-ct-object-store-minio.sh",
+    "--receipt-output \"${RUNNER_TEMP}/ct-object-store-minio-receipt.json\"",
+    "name: ct-object-store-minio-evidence",
+    "if-no-files-found: error",
+    "retention-days: 0",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "CT object-store MinIO job should contain {expected}"
+    );
+  }
+
+  for expected in [
+    "RELEASE.2025-10-15T17-29-55Z",
+    "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a",
+    "45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841",
+    "golang:1.24.8-alpine3.22@sha256:3d78beb141d98f42337f1252ecf2a5f20374109929a4c3f6817f9e4179cc0ae5",
+    "alpine:3.22.2@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412",
+  ] {
+    assert!(
+      script.contains(expected),
+      "MinIO harness should pin {expected}"
+    );
+    assert!(
+      dockerfile.contains(expected),
+      "MinIO Dockerfile should pin {expected}"
+    );
+  }
+  assert!(script.contains(
+    "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
+  ));
+  for expected in [
+    "name=rootless",
+    "${GITHUB_ACTIONS:-}",
+    "${RUNNER_ENVIRONMENT:-}",
+    "github-hosted",
+    "hosted CT object-store evidence requires a clean exact-revision checkout",
+    "worktreeState: $worktree_state",
+    "mc_run mb --with-lock",
+    "mc_run retention set --default compliance 1d",
+    "and .ObjectLock.validity == \"1DAYS\"",
+    "s3:DeleteObjectVersion",
+    "ct-delete-denial-${run_id}",
+    "require_workload_access_denied \"object deletion\"",
+    "\"object-version deletion\"",
+    "((status == 1))",
+    "AccessDenied",
+    "MinIO became unavailable during delete-denial probes",
+    ".versionID == $version",
+    "minio_tls_publishes_with_test_root_certificate",
+    "ClientOptions::with_root_certificate",
+  ] {
+    assert!(
+      script.contains(expected),
+      "CT object-store MinIO harness should contain {expected}"
+    );
+  }
+  for forbidden in [
+    "docker-rootful",
+    "docker system prune",
+    "docker container prune",
+    "docker network prune",
+    "--privileged",
+    "--network host",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "CT object-store MinIO harness must not contain {forbidden}"
+    );
+  }
+  for expected in [
+    "command -v wget",
+    "test -s /etc/ssl/certs/ca-certificates.crt",
+  ] {
+    assert!(
+      dockerfile.contains(expected),
+      "CT MinIO image should use only pinned-image tools: {expected}"
+    );
+  }
+  for forbidden in ["apk add", "apt-get", "dnf install", "curl --"] {
+    assert!(
+      !dockerfile.contains(forbidden),
+      "CT MinIO image must not resolve mutable package inputs: {forbidden}"
+    );
+  }
+  for expected in [
+    "MinIO must preserve create-only immutable object semantics",
+    "MinIO must reject a stale checkpoint version",
+  ] {
+    assert!(
+      object_store.contains(expected),
+      "CT MinIO adapter test should contain {expected}"
     );
   }
 }

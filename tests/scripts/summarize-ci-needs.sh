@@ -37,6 +37,7 @@ required_jobs=(
   admin-mutation-postgres
   admin-operation-postgres
   admin-audit-anchor-postgres
+  ct-object-store-minio
   kubernetes-immutable-rollout
   kubernetes-strict-hardening
   kubernetes-supply-chain-admission

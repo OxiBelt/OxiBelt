@@ -18,8 +18,8 @@
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
       "lockfileSha256": "e6cdf8cf2b3d911a49fbb79115713f5f2a53940987acae64ed39e2ef623b0a9f",
-      "exemptionInventorySha256": "41e3230f9b4d3429cc63c5dd2364042eb7c963db31a03d3282c547da6c0faed3",
-      "exemptedPackageVersions": 446
+      "exemptionInventorySha256": "7ed0a4e836e7b12ace5688787e22945947860927d6b1208f48d9e15da022cd81",
+      "exemptedPackageVersions": 445
     },
     "reviewTriggers": [
       "new direct dependency",

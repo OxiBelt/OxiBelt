@@ -1,5 +1,6 @@
 //! Immutable CT object publication with conditional writes and readback verification.
 
+use std::fmt;
 use std::path::Path as FsPath;
 use std::sync::Arc;
 
@@ -8,12 +9,14 @@ use bytes::Bytes;
 use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion};
+use object_store::{
+  ClientOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion,
+};
 use sha2::{Digest as _, Sha256};
 
 const MAX_CT_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct S3ObjectStoreConfig {
   pub bucket: String,
   pub region: String,
@@ -23,6 +26,28 @@ pub struct S3ObjectStoreConfig {
   pub session_token: Option<String>,
   pub virtual_hosted_style: bool,
   pub allow_http_for_local_development: bool,
+}
+
+impl fmt::Debug for S3ObjectStoreConfig {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter
+      .debug_struct("S3ObjectStoreConfig")
+      .field("bucket", &self.bucket)
+      .field("region", &self.region)
+      .field("endpoint", &redacted_presence(&self.endpoint))
+      .field("access_key_id", &redacted_presence(&self.access_key_id))
+      .field(
+        "secret_access_key",
+        &redacted_presence(&self.secret_access_key),
+      )
+      .field("session_token", &redacted_presence(&self.session_token))
+      .field("virtual_hosted_style", &self.virtual_hosted_style)
+      .field(
+        "allow_http_for_local_development",
+        &self.allow_http_for_local_development,
+      )
+      .finish()
+  }
 }
 
 #[derive(Clone, Debug)]
@@ -45,6 +70,34 @@ impl CtObjectPublisher {
     prefix: &str,
     production: bool,
   ) -> anyhow::Result<Self> {
+    Self::from_config_with_client_options(config, prefix, production, None)
+  }
+
+  #[cfg(test)]
+  pub fn from_config_with_test_root_certificate(
+    config: &CtObjectStoreConfig,
+    prefix: &str,
+    production: bool,
+    certificate: object_store::Certificate,
+  ) -> anyhow::Result<Self> {
+    Self::from_config_with_client_options(
+      config,
+      prefix,
+      production,
+      Some(
+        ClientOptions::new()
+          .with_root_certificate(certificate)
+          .with_no_system_certificates(true),
+      ),
+    )
+  }
+
+  fn from_config_with_client_options(
+    config: &CtObjectStoreConfig,
+    prefix: &str,
+    production: bool,
+    client_options: Option<ClientOptions>,
+  ) -> anyhow::Result<Self> {
     let prefix = parse_relative_path(prefix, "CT object prefix")?;
     let (store, local_filesystem): (Arc<dyn ObjectStore>, bool) = match config {
       CtObjectStoreConfig::S3(config) => {
@@ -53,6 +106,13 @@ impl CtObjectPublisher {
         }
         if production && config.allow_http_for_local_development {
           bail!("production CT object storage cannot allow plaintext HTTP");
+        }
+        if production
+          && config.endpoint.as_deref().is_some_and(
+            |endpoint| !matches!(url::Url::parse(endpoint), Ok(url) if url.scheme() == "https"),
+          )
+        {
+          bail!("production CT object storage endpoint must use HTTPS");
         }
         let mut builder = AmazonS3Builder::new()
           .with_bucket_name(&config.bucket)
@@ -71,11 +131,14 @@ impl CtObjectPublisher {
         if let Some(session_token) = &config.session_token {
           builder = builder.with_token(session_token);
         }
+        if let Some(client_options) = client_options {
+          builder = builder.with_client_options(client_options);
+        }
         (
           Arc::new(
             builder
               .build()
-              .context("failed to build CT S3 object store")?,
+              .map_err(|_| anyhow::anyhow!("failed to build CT S3 object store"))?,
           ),
           false,
         )
@@ -135,7 +198,7 @@ impl CtObjectPublisher {
           bail!("CT immutable object path already contains different bytes");
         }
       }
-      Err(error) => return Err(error).context("failed to create immutable CT object"),
+      Err(error) => return Err(object_store_error("create immutable object", error)),
     }
     self.verify_readback(&path, &bytes).await
   }
@@ -152,7 +215,7 @@ impl CtObjectPublisher {
         .store
         .put(&path, PutPayload::from(bytes.clone()))
         .await
-        .context("failed to publish local CT checkpoint")?;
+        .map_err(|error| object_store_error("publish local checkpoint", error))?;
       self.verify_readback(&path, &bytes).await?;
       return Ok(result.into());
     }
@@ -175,7 +238,7 @@ impl CtObjectPublisher {
           .store
           .head(&path)
           .await
-          .context("failed to inspect existing local CT checkpoint")?;
+          .map_err(|error| object_store_error("inspect local checkpoint", error))?;
         self
           .store
           .put_opts(
@@ -190,13 +253,18 @@ impl CtObjectPublisher {
             },
           )
           .await
-          .context("failed to replace existing local CT checkpoint")?
+          .map_err(|error| object_store_error("replace local checkpoint", error))?
       }
       Err(object_store::Error::AlreadyExists { .. })
       | Err(object_store::Error::Precondition { .. }) => {
         return self.recover_matching_checkpoint(&path, &bytes).await;
       }
-      Err(error) => return Err(error).context("failed to conditionally publish CT checkpoint"),
+      Err(error) => {
+        return Err(object_store_error(
+          "conditionally publish checkpoint",
+          error,
+        ));
+      }
     };
     if self.production && result.version.is_none() {
       bail!("production CT object store did not return a checkpoint version");
@@ -214,13 +282,13 @@ impl CtObjectPublisher {
       .store
       .head(path)
       .await
-      .context("failed to inspect checkpoint after conditional-write conflict")?;
+      .map_err(|error| object_store_error("inspect checkpoint conflict", error))?;
     let actual = self.read_exact(path).await?;
     let after = self
       .store
       .head(path)
       .await
-      .context("failed to recheck checkpoint after conditional-write conflict")?;
+      .map_err(|error| object_store_error("recheck checkpoint conflict", error))?;
     if before.e_tag != after.e_tag || before.version != after.version {
       bail!("CT checkpoint changed while recovering a conditional-write conflict");
     }
@@ -242,13 +310,13 @@ impl CtObjectPublisher {
       .store
       .head(&path)
       .await
-      .context("failed to inspect current CT checkpoint")?;
+      .map_err(|error| object_store_error("inspect checkpoint", error))?;
     let bytes = self.read_exact(&path).await?;
     let after = self
       .store
       .head(&path)
       .await
-      .context("failed to recheck current CT checkpoint")?;
+      .map_err(|error| object_store_error("recheck checkpoint", error))?;
     if before.e_tag != after.e_tag || before.version != after.version {
       bail!("CT checkpoint changed while taking a reconciliation snapshot");
     }
@@ -302,13 +370,13 @@ impl CtObjectPublisher {
           .store
           .head(&path)
           .await
-          .context("failed to inspect CT capability object")?;
+          .map_err(|error| object_store_error("inspect capability object", error))?;
         UpdateVersion {
           e_tag: meta.e_tag,
           version: meta.version,
         }
       }
-      Err(error) => return Err(error).context("CT object store create-only probe failed"),
+      Err(error) => return Err(object_store_error("create capability object", error)),
     };
     if self.production && version.version.is_none() {
       bail!("production CT object store capability probe did not observe versioning");
@@ -325,7 +393,7 @@ impl CtObjectPublisher {
         },
       )
       .await
-      .context("CT object store conditional-update probe failed")?;
+      .map_err(|error| object_store_error("conditionally update capability object", error))?;
     if self.production && update.version.is_none() {
       bail!("production CT object store update probe did not observe versioning");
     }
@@ -342,11 +410,11 @@ impl CtObjectPublisher {
       .store
       .get(path)
       .await
-      .context("failed to read CT object")?;
+      .map_err(|error| object_store_error("read object", error))?;
     let bytes = result
       .bytes()
       .await
-      .context("failed to collect CT object bytes")?;
+      .map_err(|_| anyhow::anyhow!("CT object store collect object bytes failed"))?;
     validate_object_bytes(&bytes)?;
     Ok(bytes)
   }
@@ -363,7 +431,13 @@ impl CtObjectPublisher {
 }
 
 fn parse_relative_path(value: &str, label: &str) -> anyhow::Result<Path> {
-  if value.is_empty() || value.len() > 1024 || FsPath::new(value).is_absolute() {
+  if value.is_empty()
+    || value.len() > 1024
+    || FsPath::new(value).is_absolute()
+    || value
+      .split('/')
+      .any(|component| component.is_empty() || matches!(component, "." | ".."))
+  {
     bail!("{label} must be a bounded relative path");
   }
   Path::parse(value).with_context(|| format!("{label} is invalid"))
@@ -376,8 +450,89 @@ fn validate_object_bytes(bytes: &Bytes) -> anyhow::Result<()> {
   Ok(())
 }
 
+fn redacted_presence(value: &Option<String>) -> &'static str {
+  if value.is_some() {
+    "<redacted>"
+  } else {
+    "<unset>"
+  }
+}
+
+fn object_store_error(operation: &'static str, error: object_store::Error) -> anyhow::Error {
+  let class = match error {
+    object_store::Error::AlreadyExists { .. } => "already-exists",
+    object_store::Error::InvalidPath { .. } => "invalid-path",
+    object_store::Error::NotFound { .. } => "not-found",
+    object_store::Error::NotImplemented { .. } => "not-implemented",
+    object_store::Error::NotModified { .. } => "not-modified",
+    object_store::Error::NotSupported { .. } => "not-supported",
+    object_store::Error::PermissionDenied { .. } => "permission-denied",
+    object_store::Error::Precondition { .. } => "precondition",
+    object_store::Error::Unauthenticated { .. } => "unauthenticated",
+    object_store::Error::UnknownConfigurationKey { .. } => "configuration",
+    object_store::Error::Generic { source, .. } => provider_error_class(source.as_ref()),
+    _ => "unknown",
+  };
+  anyhow::anyhow!("CT object store {operation} failed ({class})")
+}
+
+fn provider_error_class(source: &(dyn std::error::Error + 'static)) -> &'static str {
+  let mut current = Some(source);
+  while let Some(error) = current {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.contains("not valid for name") || message.contains("certnotvalidforname") {
+      return "transport-tls-name";
+    }
+    if message.contains("unknown issuer") || message.contains("unknownissuer") {
+      return "transport-tls-issuer";
+    }
+    if message.contains("ca used as end entity") || message.contains("causedasendentity") {
+      return "transport-tls-ca-role";
+    }
+    if message.contains("bad encoding") || message.contains("badencoding") {
+      return "transport-tls-encoding";
+    }
+    if message.contains("not valid yet") {
+      return "transport-tls-not-yet-valid";
+    }
+    if message.contains("expired") {
+      return "transport-tls-expired";
+    }
+    if message.contains("certificate") || message.contains("tls") {
+      return "transport-tls";
+    }
+    if message.contains("proxy") {
+      return "transport-proxy";
+    }
+    if message.contains("timed out") || message.contains("timeout") {
+      return "transport-timeout";
+    }
+    if message.contains("connect") || message.contains("dns") {
+      return "transport-connect";
+    }
+    if message.contains("invalidaccesskeyid")
+      || message.contains("signaturedoesnotmatch")
+      || message.contains("accessdenied")
+      || message.contains("status 401")
+      || message.contains("status 403")
+    {
+      return "authentication";
+    }
+    if message.contains("nosuchbucket") || message.contains("status 404") {
+      return "bucket-not-found";
+    }
+    if message.contains("status 5") {
+      return "service";
+    }
+    current = error.source();
+  }
+  "provider"
+}
+
 #[cfg(test)]
 mod tests {
+  use std::io;
+
   use object_store::memory::InMemory;
 
   use super::*;
@@ -456,6 +611,166 @@ mod tests {
     assert_eq!(
       publisher.read("checkpoint").await.unwrap(),
       Bytes::from_static(b"second")
+    );
+  }
+
+  #[test]
+  fn s3_config_debug_redacts_credentials() {
+    let config = S3ObjectStoreConfig {
+      bucket: "ct-bucket".into(),
+      region: "us-east-1".into(),
+      endpoint: Some("https://object.example.test".into()),
+      access_key_id: Some("access-key-must-not-appear".into()),
+      secret_access_key: Some("secret-must-not-appear".into()),
+      session_token: Some("session-token-must-not-appear".into()),
+      virtual_hosted_style: false,
+      allow_http_for_local_development: false,
+    };
+
+    let rendered = format!("{config:?}");
+    assert!(rendered.contains("<redacted>"));
+    assert!(!rendered.contains("object.example.test"));
+    assert!(!rendered.contains("access-key-must-not-appear"));
+    assert!(!rendered.contains("secret-must-not-appear"));
+    assert!(!rendered.contains("session-token-must-not-appear"));
+  }
+
+  #[test]
+  fn object_store_failures_do_not_expose_provider_context() {
+    let error = object_store_error(
+      "read object",
+      object_store::Error::Generic {
+        store: "S3",
+        source: Box::new(io::Error::other("secret-must-not-appear")),
+      },
+    );
+    assert_eq!(
+      error.to_string(),
+      "CT object store read object failed (provider)"
+    );
+    assert!(!error.to_string().contains("secret-must-not-appear"));
+  }
+
+  #[test]
+  fn ct_object_paths_reject_absolute_and_traversal_forms() {
+    for value in [
+      "/absolute",
+      "../escape",
+      "prefix/../escape",
+      "prefix//child",
+    ] {
+      assert!(
+        parse_relative_path(value, "CT object path").is_err(),
+        "{value}"
+      );
+    }
+    assert_eq!(
+      parse_relative_path(".capabilities/log_1", "CT object path").unwrap(),
+      Path::from(".capabilities/log_1")
+    );
+  }
+
+  #[test]
+  fn production_rejects_local_and_plaintext_object_storage() {
+    let local = CtObjectStoreConfig::Local {
+      root: tempfile::tempdir().unwrap().path().to_path_buf(),
+    };
+    assert!(CtObjectPublisher::from_config(&local, "log", true).is_err());
+
+    let mut plaintext = S3ObjectStoreConfig {
+      bucket: "ct-bucket".into(),
+      region: "us-east-1".into(),
+      endpoint: Some("http://127.0.0.1:9000".into()),
+      access_key_id: None,
+      secret_access_key: None,
+      session_token: None,
+      virtual_hosted_style: false,
+      allow_http_for_local_development: false,
+    };
+    assert!(
+      CtObjectPublisher::from_config(&CtObjectStoreConfig::S3(plaintext.clone()), "log", true)
+        .is_err()
+    );
+    plaintext.allow_http_for_local_development = true;
+    assert!(
+      CtObjectPublisher::from_config(&CtObjectStoreConfig::S3(plaintext), "log", true).is_err()
+    );
+  }
+
+  #[tokio::test]
+  async fn minio_tls_publishes_with_test_root_certificate() {
+    let endpoint = match std::env::var("OXIBELT_TEST_CT_MINIO_ENDPOINT") {
+      Ok(endpoint) => endpoint,
+      Err(_) => return,
+    };
+    let bucket = std::env::var("OXIBELT_TEST_CT_MINIO_BUCKET")
+      .expect("MinIO test bucket must be supplied with the endpoint");
+    let access_key_id = std::env::var("OXIBELT_TEST_CT_MINIO_ACCESS_KEY_ID")
+      .expect("MinIO test access key must be supplied with the endpoint");
+    let secret_access_key = std::env::var("OXIBELT_TEST_CT_MINIO_SECRET_ACCESS_KEY")
+      .expect("MinIO test secret key must be supplied with the endpoint");
+    let ca_path = std::env::var("OXIBELT_TEST_CT_MINIO_CA_PEM")
+      .expect("MinIO test CA path must be supplied with the endpoint");
+    let certificate = object_store::Certificate::from_pem(
+      &std::fs::read(ca_path).expect("MinIO test CA must be readable"),
+    )
+    .expect("MinIO test CA must be a PEM certificate");
+    let config = CtObjectStoreConfig::S3(S3ObjectStoreConfig {
+      bucket,
+      region: "us-east-1".into(),
+      endpoint: Some(endpoint),
+      access_key_id: Some(access_key_id),
+      secret_access_key: Some(secret_access_key),
+      session_token: None,
+      virtual_hosted_style: false,
+      allow_http_for_local_development: false,
+    });
+    let publisher = CtObjectPublisher::from_config_with_test_root_certificate(
+      &config,
+      "integration",
+      true,
+      certificate,
+    )
+    .expect("MinIO TLS configuration must build");
+
+    publisher.probe_capabilities("minio-tls").await.unwrap();
+    publisher
+      .put_immutable("tiles/0/0", Bytes::from_static(b"immutable tile"))
+      .await
+      .unwrap();
+    publisher
+      .put_immutable("tiles/0/0", Bytes::from_static(b"immutable tile"))
+      .await
+      .unwrap();
+    let immutable_conflict = publisher
+      .put_immutable("tiles/0/0", Bytes::from_static(b"different tile"))
+      .await
+      .expect_err("MinIO must preserve create-only immutable object semantics");
+    assert!(
+      immutable_conflict
+        .to_string()
+        .contains("already contains different bytes")
+    );
+    let first = publisher
+      .publish_checkpoint(Bytes::from_static(b"checkpoint one"), None)
+      .await
+      .unwrap();
+    publisher
+      .publish_checkpoint(Bytes::from_static(b"checkpoint two"), Some(first.clone()))
+      .await
+      .unwrap();
+    let stale_checkpoint = publisher
+      .publish_checkpoint(Bytes::from_static(b"checkpoint three"), Some(first))
+      .await
+      .expect_err("MinIO must reject a stale checkpoint version");
+    assert!(
+      stale_checkpoint
+        .to_string()
+        .contains("conditional-write conflict contains different bytes")
+    );
+    assert_eq!(
+      publisher.read("checkpoint").await.unwrap(),
+      Bytes::from_static(b"checkpoint two")
     );
   }
 }
