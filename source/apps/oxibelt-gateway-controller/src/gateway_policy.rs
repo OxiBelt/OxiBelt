@@ -17,7 +17,6 @@ enum NamespacePolicy {
   All,
   Same,
   Selector(LabelSelector),
-  Unsupported(String),
 }
 
 #[derive(Debug, Clone)]
@@ -83,30 +82,48 @@ pub fn namespace_labels(objects: &[KubernetesObject]) -> HashMap<String, BTreeMa
     .collect()
 }
 
-pub fn parse_listener_policy(listener: &Value) -> ListenerPolicy {
-  let allowed_routes = listener.get("allowedRoutes");
-  let namespaces = allowed_routes
-    .and_then(|allowed_routes| allowed_routes.get("namespaces"))
-    .map(parse_namespace_policy)
-    .unwrap_or(NamespacePolicy::Same);
-  let kinds = allowed_routes
-    .and_then(|allowed_routes| allowed_routes.get("kinds"))
-    .and_then(Value::as_array)
-    .map(|kinds| {
-      kinds
-        .iter()
-        .filter_map(|kind| {
-          Some(RouteGroupKind {
-            group: string_at(kind, &["group"])
-              .unwrap_or(GATEWAY_GROUP)
-              .to_string(),
-            kind: string_at(kind, &["kind"])?.to_string(),
-          })
+pub fn parse_listener_policy(listener: &Value) -> Result<ListenerPolicy, String> {
+  let Some(allowed_routes) = listener.get("allowedRoutes") else {
+    return Ok(ListenerPolicy {
+      namespaces: NamespacePolicy::Same,
+      kinds: Vec::new(),
+    });
+  };
+  let allowed_routes = allowed_routes
+    .as_object()
+    .ok_or_else(|| "allowedRoutes must be an object".to_string())?;
+  let namespaces = match allowed_routes.get("namespaces") {
+    Some(namespaces) => parse_namespace_policy(namespaces)?,
+    None => NamespacePolicy::Same,
+  };
+  let kinds = match allowed_routes.get("kinds") {
+    Some(kinds) => kinds
+      .as_array()
+      .ok_or_else(|| "allowedRoutes.kinds must be an array".to_string())?
+      .iter()
+      .map(|kind| {
+        let kind = kind
+          .as_object()
+          .ok_or_else(|| "allowedRoutes.kinds items must be objects".to_string())?;
+        let group = match kind.get("group") {
+          Some(group) => group
+            .as_str()
+            .ok_or_else(|| "allowedRoutes.kinds group must be a string".to_string())?,
+          None => GATEWAY_GROUP,
+        };
+        let kind = kind
+          .get("kind")
+          .and_then(Value::as_str)
+          .ok_or_else(|| "allowedRoutes.kinds kind must be a string".to_string())?;
+        Ok(RouteGroupKind {
+          group: group.to_string(),
+          kind: kind.to_string(),
         })
-        .collect()
-    })
-    .unwrap_or_default();
-  ListenerPolicy { namespaces, kinds }
+      })
+      .collect::<Result<Vec<_>, String>>()?,
+    None => Vec::new(),
+  };
+  Ok(ListenerPolicy { namespaces, kinds })
 }
 
 pub fn listener_default_route_kinds(
@@ -155,9 +172,6 @@ pub fn listener_allows_route(
         Err(error) => RoutePolicyDecision::Invalid(error),
       }
     }
-    NamespacePolicy::Unsupported(value) => RoutePolicyDecision::Invalid(format!(
-      "unsupported allowedRoutes.namespaces.from value {value}"
-    )),
   }
 }
 
@@ -299,16 +313,27 @@ impl LabelRequirement {
   }
 }
 
-fn parse_namespace_policy(value: &Value) -> NamespacePolicy {
-  match string_at(value, &["from"]).unwrap_or("Same") {
-    "All" => NamespacePolicy::All,
-    "Same" => NamespacePolicy::Same,
+fn parse_namespace_policy(value: &Value) -> Result<NamespacePolicy, String> {
+  let value = value
+    .as_object()
+    .ok_or_else(|| "allowedRoutes.namespaces must be an object".to_string())?;
+  let from = match value.get("from") {
+    Some(from) => from
+      .as_str()
+      .ok_or_else(|| "allowedRoutes.namespaces.from must be a string".to_string())?,
+    None => "Same",
+  };
+  match from {
+    "All" => Ok(NamespacePolicy::All),
+    "Same" => Ok(NamespacePolicy::Same),
     "Selector" => match value.get("selector").map(parse_label_selector) {
-      Some(Ok(selector)) => NamespacePolicy::Selector(selector),
-      Some(Err(error)) => NamespacePolicy::Unsupported(error),
-      None => NamespacePolicy::Unsupported("Selector without selector".to_string()),
+      Some(Ok(selector)) => Ok(NamespacePolicy::Selector(selector)),
+      Some(Err(error)) => Err(error),
+      None => Err("allowedRoutes.namespaces Selector requires selector".to_string()),
     },
-    other => NamespacePolicy::Unsupported(other.to_string()),
+    other => Err(format!(
+      "unsupported allowedRoutes.namespaces.from value {other}"
+    )),
   }
 }
 
@@ -358,8 +383,10 @@ fn parse_label_requirement(value: &Value) -> Result<LabelRequirement, String> {
   };
   let values = value
     .get("values")
-    .and_then(Value::as_array)
     .map(|values| {
+      let values = values
+        .as_array()
+        .ok_or_else(|| format!("selector requirement {key} values must be an array"))?;
       values
         .iter()
         .map(|value| {
@@ -372,6 +399,19 @@ fn parse_label_requirement(value: &Value) -> Result<LabelRequirement, String> {
     })
     .transpose()?
     .unwrap_or_default();
+  match operator {
+    LabelOperator::In | LabelOperator::NotIn if values.is_empty() => {
+      return Err(format!(
+        "selector requirement {key} uses In or NotIn without values"
+      ));
+    }
+    LabelOperator::Exists | LabelOperator::DoesNotExist if !values.is_empty() => {
+      return Err(format!(
+        "selector requirement {key} uses Exists or DoesNotExist with values"
+      ));
+    }
+    _ => {}
+  }
   Ok(LabelRequirement {
     key: key.to_string(),
     operator,

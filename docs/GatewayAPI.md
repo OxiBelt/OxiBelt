@@ -80,14 +80,21 @@ token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 `tls.mode = "Passthrough"`. It generates `[[sni_forward.rules]]` with
 `protocols = ["tcp_tls"]`. The base OxiBelt config must enable
 `[sni_forward]`; the generated include does not set operator-owned scalar
-fields such as `enabled`.
+fields such as `enabled`. A blocking TLSRoute translation failure preserves
+the last good artifact because an SNI rule cannot be replaced safely without
+risking fallback to another wildcard, local, or default TLS handler.
 
 `TCPRoute` and `UDPRoute` attach only to same-protocol listeners and generate
 deterministic `[[stream_listeners]]` and `[[stream_upstream_pools]]` entries.
 Each supported route has one rule and core Service backend references. Service
 port protocol, parent `sectionName`/port, `allowedRoutes`, and cross-namespace
 `ReferenceGrant` authorization must all agree. An invalid route contributes no
-stream TOML; the controller never weakens it into a direct target.
+stream TOML; the controller never weakens it into a direct target. When an
+otherwise exact route loses a Service, referenced port, protocol match,
+ReferenceGrant, enabled UDP flow-state mode, or status-Service listener
+mapping, the controller publishes removal of that route's stream listener and
+pool. Malformed or ambiguous route and operator configuration preserves the
+last good artifact.
 
 Raw TCP and UDP payloads bypass the HTTP router and HTTP WAF. Operators must
 expose each listener explicitly through the data-plane chart's
@@ -98,7 +105,8 @@ does not create or patch Services.
 When multiple TCPRoutes or UDPRoutes attach to the same listener, all attached
 routes receive status, but only the oldest `creationTimestamp` is translated.
 Ties are resolved by namespace/name. An invalid winner does not cause fallback
-to a newer route.
+to a newer route. Duplicate process binds remove every colliding listener while
+leaving unrelated listeners programmed.
 
 ## BackendTLSPolicy Mapping
 
@@ -146,18 +154,25 @@ default `tls.crt` and `tls.key` fields or two explicit data keys from a
 oversized, mismatched, encrypted, expired, or not-yet-valid identity material
 before publishing a rollout.
 
-If the effective client identity is invalid or unresolved, the controller does
-not omit the affected HTTPRoute or GRPCRoute and expose a broader matching
-route. It first validates that every affected match and all unrelated route
-semantics can be reconstructed, then replaces those matches with equivalent
-terminal empty-body `503` routes. These tombstones retain the generated route
-name, listener/route hostname intersection, path, method, exact header/query or
-gRPC method match, priority, and order, while omitting backends, client
-identity, filters, mirrors, external auth, route policy, and WAF effects. Any
-malformed match or unrelated translation error preserves the last good rollout
-instead of publishing a partial tombstone set. Tombstone artifacts require
-exact controller/data-plane compatibility; rolling-upgrade compatibility
-preserves the last good artifact.
+For HTTPRoute and GRPCRoute, an exact, well-formed match is not omitted when a
+referenced Service, port, ReferenceGrant, mirror, external-auth backend,
+BackendTLSPolicy, OxiBeltRoutePolicy, or effective client identity becomes
+invalid or unresolved. Omitting it could expose a broader matching route.
+Instead, after proving the dependency target and every affected match, the
+controller replaces the match with an equivalent terminal empty-body `503`
+route. ClusterDNS and EndpointSlice backend pools are both all-or-nothing, so
+one failed weighted backend cannot leave a partial pool.
+
+These fail-closed routes retain the generated route name, listener/route
+hostname intersection, path, method, exact header/query or gRPC method match,
+priority, and order, while omitting backends, client identity, filters,
+mirrors, external auth, route policy, and WAF effects. A generated tombstone
+name collision with any distinct normal or fail-closed route, a malformed
+match or reference, an unknown policy target, or another ambiguous translation
+error preserves the last good rollout instead of publishing a partial
+tombstone set. Fail-closed direct responses require exact
+controller/data-plane compatibility; rolling-upgrade compatibility preserves
+the last good artifact.
 
 The controller resolves each admitted source by an exact-name GET and runs a
 bounded, field-selected exact-name watch to wake reconciliation after Secret
@@ -331,7 +346,8 @@ not applicable to `GRPCRoute`.
 
 Cross-namespace `Service` references require a `ReferenceGrant` in the target
 namespace. Without the grant, the controller emits a blocking diagnostic and
-does not apply the generated config.
+publishes only the proven fail-closed route or stream withdrawal described
+above; an ambiguous reference preserves the last good artifact.
 
 Gateway listener `allowedRoutes` is enforced for `HTTPRoute`, `GRPCRoute`,
 `TLSRoute`, `TCPRoute`, and `UDPRoute`
@@ -528,8 +544,9 @@ At reconcile time the controller:
 1. Polls Gateway API resources and Services from the Kubernetes API.
 2. Renders and validates deterministic TOML plus any referenced public CA
    assets with ownership/source comments. Resource-invalid fragments are
-   omitted or replaced by match-equivalent explicit terminal rejection; snapshot, authorization,
-   artifact, or final validation failures stop publication.
+   omitted, withdrawn, or replaced by match-equivalent explicit terminal
+   rejection only when that fail-closed result is complete; snapshot,
+   authorization, artifact, or final validation failures stop publication.
 3. Computes the raw SHA-256 of the exact TOML bytes and a tagged full-artifact
    digest, then creates or reuses an immutable ConfigMap named
    `<prefix>-<deployment-or-daemonset>-<target-name>-<full-64-hex-artifact-digest>`.
@@ -542,6 +559,15 @@ At reconcile time the controller:
 6. Waits for observed generation, availability, and every Ready Pod proven to
    be owned by the selected workload before checking its revision/digest proof
    and reporting `Programmed=True` and committing.
+
+Before the final status commit, legacy reconciliation re-reads the full source
+snapshot and requires the original source digest, publishability, compatibility
+mode, TOML, public assets, client identities, and exact-data-plane requirement
+to remain identical. Replicated targets repeat the digest and translation
+against each target-local fresh snapshot, and require the TOML, public assets,
+client identities, compatibility mode, and exact-data-plane requirement to
+remain identical before attaching a proof. A freshness failure clears the proof
+and cannot report stale `Programmed=True`.
 
 The rollout phases are `Generated`, `Validated`, `CanaryApplying`,
 `CanaryHealthy`, `Expanding`, `FullyApplied`, and `Committed`. Any rejection,

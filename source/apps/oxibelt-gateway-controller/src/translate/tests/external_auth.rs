@@ -144,7 +144,7 @@ fn client_identity_tombstone_discards_every_route_filter_and_auth_side_effect() 
 
   assert_eq!(
     rendered.disposition,
-    TranslationDisposition::ClientIdentityDeprogram
+    TranslationDisposition::FailClosedDeprogram
   );
   assert!(
     rendered
@@ -167,4 +167,42 @@ fn client_identity_tombstone_discards_every_route_filter_and_auth_side_effect() 
     );
   }
   generated_toml_validates(&rendered.toml);
+}
+
+#[test]
+fn lost_mirror_or_external_auth_service_emits_a_side_effect_free_tombstone() {
+  for (service, port) in [("mirror", 8081), ("auth", 9000)] {
+    let service_object = format!(
+      "---\napiVersion: v1\nkind: Service\nmetadata:\n  name: {service}\n  namespace: default\nspec:\n  ports:\n  - port: {port}\n"
+    );
+    let raw = HTTP_FILTER_FIXTURE.replace(&service_object, "");
+    assert_ne!(raw, HTTP_FILTER_FIXTURE, "fixture must contain {service}");
+    let rendered = translate_objects(&objects(&raw), &args()).expect("translate lost dependency");
+
+    assert_eq!(
+      rendered.disposition,
+      TranslationDisposition::FailClosedDeprogram
+    );
+    assert!(has_error_containing(
+      &rendered,
+      &format!("backend Service default/{service} was not found")
+    ));
+    assert!(rendered.toml.contains("status = 503"));
+    for absent in [
+      "[[upstream_pools]]",
+      "[[external_auth]]",
+      "[routes.actions.request_headers]",
+      "[routes.actions.response_headers]",
+      "[routes.actions.cors]",
+      "[[routes.actions.request_mirrors]]",
+      "external_auth =",
+      "upstream_pool =",
+    ] {
+      assert!(
+        !rendered.toml.contains(absent),
+        "{service} tombstone retained side effect {absent}"
+      );
+    }
+    generated_toml_validates(&rendered.toml);
+  }
 }

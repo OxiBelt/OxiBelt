@@ -1,4 +1,4 @@
-use super::{RenderedConfig, args, objects, translate_objects};
+use super::{RenderedConfig, TranslationDisposition, args, objects, translate_objects};
 use crate::cli::SharedArgs;
 use crate::model::DiagnosticCode;
 
@@ -80,7 +80,7 @@ fn assert_route_conditions(
 }
 
 #[test]
-fn missing_reference_grants_preserve_route_acceptance_without_emitting_config() {
+fn missing_reference_grants_fail_closed_without_partial_backend_pools() {
   let raw = format!(
     r#"{GATEWAY_AND_STATUS_SERVICE}
 ---
@@ -140,7 +140,18 @@ spec:
     assert_eq!(diagnostics[0].code, DiagnosticCode::RefNotPermitted);
     assert!(diagnostics[0].message.contains("requires ReferenceGrant"));
   }
-  assert!(!rendered.toml.contains("[[routes]]"));
+  assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::FailClosedDeprogram
+  );
+  assert_eq!(rendered.toml.matches("[[routes]]").count(), 2);
+  assert_eq!(
+    rendered
+      .toml
+      .matches("[routes.actions.direct_response]\nstatus = 503")
+      .count(),
+    2
+  );
   assert!(!rendered.toml.contains("[[upstream_pools]]"));
   assert!(!rendered.toml.contains("[[stream_listeners]]"));
   assert!(!rendered.toml.contains("[[stream_upstream_pools]]"));
@@ -222,7 +233,7 @@ spec:
     (
       "GRPCRoute",
       "grpc",
-      "rule.backendRefs has no usable nonzero Service backend",
+      "backendRef is not an exact Kubernetes Service reference: name is required",
     ),
     (
       "TCPRoute",
@@ -242,6 +253,10 @@ spec:
   }
   assert!(!rendered.toml.contains("[[routes]]"));
   assert!(!rendered.toml.contains("[[stream_listeners]]"));
+  assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::PreserveLastGood
+  );
 
   let mut endpoint_args = backend_diagnostic_args();
   endpoint_args.backend_resolution = crate::cli::BackendResolution::EndpointSliceWatch;
@@ -252,7 +267,7 @@ spec:
   assert_eq!(diagnostics[0].code, DiagnosticCode::InvalidResource);
   assert_eq!(
     diagnostics[0].message,
-    "rule.backendRefs has no usable nonzero Service backend"
+    "backendRef is not an exact Kubernetes Service reference: name is required"
   );
   assert!(!endpoint_rendered.toml.contains("[[routes]]"));
   assert!(!endpoint_rendered.toml.contains("[[upstream_pools]]"));

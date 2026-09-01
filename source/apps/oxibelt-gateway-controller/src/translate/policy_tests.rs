@@ -184,6 +184,32 @@ fn allowed_routes_kinds_can_exclude_http_route() {
 }
 
 #[test]
+fn malformed_gateway_listener_authorization_preserves_last_good() {
+  let malformed_allowed_routes = cross_namespace_http_fixture(
+    r#"
+    allowedRoutes:
+      namespaces:
+        from: All
+      kinds:
+      - group: 7
+        kind: HTTPRoute
+"#,
+  );
+  let malformed_port = cross_namespace_http_fixture("").replace("    port: 80", "    port: http");
+
+  for raw in [malformed_allowed_routes, malformed_port] {
+    let rendered = translate_objects(&objects(&raw), &args()).expect("translate malformed Gateway");
+
+    assert_eq!(
+      rendered.disposition,
+      super::super::TranslationDisposition::PreserveLastGood
+    );
+    assert!(!rendered.disposition.is_publishable());
+    assert!(has_error_containing(&rendered, "invalid Gateway"));
+  }
+}
+
+#[test]
 fn reference_grant_to_name_limits_cross_namespace_service() {
   let rendered = translate_objects(&objects(REFERENCE_GRANT_TO_NAME_LIMITS_SERVICE), &args())
     .expect("translate");

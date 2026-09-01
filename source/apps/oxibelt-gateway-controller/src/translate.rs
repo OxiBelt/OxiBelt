@@ -52,13 +52,13 @@ pub struct RenderedConfig {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum TranslationDisposition {
   Clean,
-  ClientIdentityDeprogram,
+  FailClosedDeprogram,
   PreserveLastGood,
 }
 
 impl TranslationDisposition {
   pub const fn is_publishable(self) -> bool {
-    matches!(self, Self::Clean | Self::ClientIdentityDeprogram)
+    matches!(self, Self::Clean | Self::FailClosedDeprogram)
   }
 }
 
@@ -143,7 +143,7 @@ struct TranslationState {
   gateway_classes: HashSet<String>,
   gateways: HashMap<ObjectKey, GatewayInfo>,
   reference_grants: Vec<ReferenceGrantInfo>,
-  route_policies: BTreeMap<ObjectKey, route_policy::RoutePolicy>,
+  route_policies: BTreeMap<ObjectKey, route_policy::RoutePolicyDecision>,
   request_mirror_max_body_bytes: usize,
   external_auth_max_body_bytes: usize,
   external_auth_allowed_content_types: HashSet<String>,
@@ -161,7 +161,33 @@ struct TranslationState {
   client_identity_materials: BTreeMap<String, ClientIdentityMaterial>,
   assets: BTreeMap<String, RenderedAsset>,
   diagnostics: Vec<Diagnostic>,
-  client_identity_deprogram_diagnostics: HashSet<usize>,
+  fail_closed_deprogram_diagnostics: HashSet<usize>,
+}
+
+#[derive(Debug, Clone)]
+enum TranslationFailure {
+  FailClosedDeprogram { covered_diagnostics: Vec<usize> },
+  PreserveLastGood,
+}
+
+impl TranslationFailure {
+  fn fail_closed(diagnostic: usize) -> Self {
+    Self::FailClosedDeprogram {
+      covered_diagnostics: vec![diagnostic],
+    }
+  }
+
+  fn with_covered_diagnostics(mut self, diagnostics: impl IntoIterator<Item = usize>) -> Self {
+    if let Self::FailClosedDeprogram {
+      covered_diagnostics,
+    } = &mut self
+    {
+      covered_diagnostics.extend(diagnostics);
+      covered_diagnostics.sort_unstable();
+      covered_diagnostics.dedup();
+    }
+    self
+  }
 }
 
 #[derive(Clone)]
@@ -220,13 +246,14 @@ pub fn translate_objects(
       .any(|(offset, diagnostic)| {
         diagnostic.severity == super::model::DiagnosticSeverity::Error
           && !state
-            .client_identity_deprogram_diagnostics
+            .fail_closed_deprogram_diagnostics
             .contains(&(diagnostic_start + offset))
       })
     {
       state.restore_generated(checkpoint);
     }
   }
+  state.retain_reachable_backend_tls_assets();
   let requires_exact_data_plane = state.requires_exact_data_plane();
   let toml = render::render_toml(&state, args);
   let assets = state.assets.values().cloned().collect::<Vec<_>>();
@@ -266,9 +293,9 @@ pub fn translate_objects(
     indices
       if indices
         .iter()
-        .all(|index| state.client_identity_deprogram_diagnostics.contains(index)) =>
+        .all(|index| state.fail_closed_deprogram_diagnostics.contains(index)) =>
     {
-      TranslationDisposition::ClientIdentityDeprogram
+      TranslationDisposition::FailClosedDeprogram
     }
     _ => TranslationDisposition::PreserveLastGood,
   };
@@ -300,39 +327,100 @@ impl TranslationState {
         .any(|route| route.direct_response_status.is_some())
   }
 
-  fn push_client_identity_tombstone(&mut self, mut route: GeneratedRoute) {
+  fn push_fail_closed_tombstone(&mut self, mut route: GeneratedRoute) -> bool {
     route.direct_response_status = Some(503);
-    if let Some(existing_index) = self.routes.iter().position(|existing| {
-      existing.name == route.name && existing.direct_response_status == Some(503)
-    }) {
-      if self.routes[existing_index].has_same_client_identity_tombstone_match(&route) {
+    if let Some(existing_index) = self
+      .routes
+      .iter()
+      .position(|existing| existing.name == route.name)
+    {
+      if self.routes[existing_index].direct_response_status == Some(503)
+        && self.routes[existing_index].has_same_fail_closed_tombstone_match(&route)
+      {
         let existing = &mut self.routes[existing_index];
         existing.hosts.extend(route.hosts);
         existing.hosts.sort();
         existing.hosts.dedup();
+        true
       } else {
         self.diagnostics.push(Diagnostic::error(
           route.source,
           format!(
-            "generated client-identity tombstone name `{}` collides with a distinct route match",
+            "generated fail-closed tombstone name `{}` collides with a distinct route",
             route.name
           ),
         ));
+        false
       }
     } else {
       self.routes.push(route);
+      true
     }
   }
 
-  fn push_client_identity_deprogram_error(
+  fn complete_fail_closed_tombstone(
+    &mut self,
+    checkpoint: GeneratedCheckpoint,
+    route: GeneratedRoute,
+    failure: TranslationFailure,
+  ) -> bool {
+    let TranslationFailure::FailClosedDeprogram {
+      covered_diagnostics,
+    } = failure
+    else {
+      return false;
+    };
+    self.restore_generated(checkpoint);
+    if !self.push_fail_closed_tombstone(route) {
+      return false;
+    }
+    self
+      .fail_closed_deprogram_diagnostics
+      .extend(covered_diagnostics);
+    true
+  }
+
+  fn complete_fail_closed_deprogram(&mut self, failure: TranslationFailure) -> bool {
+    let TranslationFailure::FailClosedDeprogram {
+      covered_diagnostics,
+    } = failure
+    else {
+      return false;
+    };
+    self
+      .fail_closed_deprogram_diagnostics
+      .extend(covered_diagnostics);
+    true
+  }
+
+  fn push_fail_closed_deprogram_error(
     &mut self,
     object: impl Into<String>,
     message: impl Into<String>,
   ) {
     self
-      .client_identity_deprogram_diagnostics
+      .fail_closed_deprogram_diagnostics
       .insert(self.diagnostics.len());
     self.diagnostics.push(Diagnostic::error(object, message));
+  }
+
+  fn fail_closed_error(
+    &mut self,
+    object: impl Into<String>,
+    message: impl Into<String>,
+  ) -> TranslationFailure {
+    let diagnostic = self.diagnostics.len();
+    self.diagnostics.push(Diagnostic::error(object, message));
+    TranslationFailure::fail_closed(diagnostic)
+  }
+
+  fn preserve_last_good_error(
+    &mut self,
+    object: impl Into<String>,
+    message: impl Into<String>,
+  ) -> TranslationFailure {
+    self.diagnostics.push(Diagnostic::error(object, message));
+    TranslationFailure::PreserveLastGood
   }
 
   fn generated_checkpoint(&self) -> GeneratedCheckpoint {
@@ -386,11 +474,18 @@ impl TranslationState {
       }
     }
     for object in objects {
-      if object.kind == "Gateway"
-        && let Some(mut gateway) = parse_gateway(object, &self.gateway_classes)
-      {
-        gateway.client_identity = self.resolve_gateway_client_identity(object, objects, args);
-        self.gateways.insert(object.key(), gateway);
+      if object.kind == "Gateway" {
+        match parse_gateway(object, &self.gateway_classes) {
+          Ok(Some(mut gateway)) => {
+            gateway.client_identity = self.resolve_gateway_client_identity(object, objects, args);
+            self.gateways.insert(object.key(), gateway);
+          }
+          Ok(None) => {}
+          Err(error) => self.diagnostics.push(Diagnostic::error(
+            model_object_ref(object),
+            format!("invalid Gateway: {error:#}"),
+          )),
+        }
       }
     }
     Ok(())
@@ -406,7 +501,7 @@ impl TranslationState {
       Ok(None) => return GatewayClientIdentityDecision::None,
       Ok(Some(reference)) => reference,
       Err(message) => {
-        self.push_client_identity_deprogram_error(
+        self.push_fail_closed_deprogram_error(
           model_object_ref(gateway),
           format!("invalid Gateway backend clientCertificateRef: {message}"),
         );
@@ -416,7 +511,7 @@ impl TranslationState {
     let allowlist =
       upstream_client_tls::allowlist_by_source(&args.upstream_client_tls_source_secrets);
     let Some(allowlist_entry) = allowlist.get(&reference).copied() else {
-      self.push_client_identity_deprogram_error(
+      self.push_fail_closed_deprogram_error(
         model_object_ref(gateway),
         format!(
           "Gateway backend clientCertificateRef to Secret {}/{} is not permitted by the operator source Secret allowlist",
@@ -435,7 +530,7 @@ impl TranslationState {
         &reference.name,
       )
     {
-      self.push_client_identity_deprogram_error(
+      self.push_fail_closed_deprogram_error(
         model_object_ref(gateway),
         format!(
           "cross-namespace Gateway backend clientCertificateRef to Secret {}/{} requires ReferenceGrant",
@@ -448,7 +543,7 @@ impl TranslationState {
       .iter()
       .find(|object| object.kind == "Secret" && object.key() == reference)
     else {
-      self.push_client_identity_deprogram_error(
+      self.push_fail_closed_deprogram_error(
         model_object_ref(gateway),
         format!(
           "referenced client certificate Secret {}/{} was not found",
@@ -460,7 +555,7 @@ impl TranslationState {
     let material = match upstream_client_tls::validate_source_secret(secret, allowlist_entry) {
       Ok(material) => material,
       Err(error) => {
-        self.push_client_identity_deprogram_error(model_object_ref(gateway), error.to_string());
+        self.push_fail_closed_deprogram_error(model_object_ref(gateway), error.to_string());
         return GatewayClientIdentityDecision::Invalid;
       }
     };
@@ -486,7 +581,7 @@ impl TranslationState {
         GatewayClientIdentityDecision::Invalid
       )
     }) {
-      self.push_client_identity_deprogram_error(
+      self.push_fail_closed_deprogram_error(
         model_object_ref(route),
         "Gateway backend clientCertificateRef is invalid or unresolved",
       );
@@ -503,7 +598,7 @@ impl TranslationState {
       })
       .collect::<std::collections::BTreeSet<_>>();
     if identities.len() > 1 {
-      self.push_client_identity_deprogram_error(
+      self.push_fail_closed_deprogram_error(
         model_object_ref(route),
         "route attachment conflict: Gateways select different backend client identities for the same consolidated upstream",
       );
@@ -729,7 +824,7 @@ impl TranslationState {
           RoutePolicyDecision::Allowed => {}
           RoutePolicyDecision::Denied => continue,
           RoutePolicyDecision::Invalid(error) => {
-            self.diagnostics.push(Diagnostic::warning(
+            self.diagnostics.push(Diagnostic::error(
               model_object_ref(route),
               format!(
                 "route is not permitted by Gateway/{}/{} listener allowedRoutes: {error}",
@@ -800,43 +895,137 @@ fn parse_service(object: &KubernetesObject) -> anyhow::Result<ServiceInfo> {
 fn parse_gateway(
   object: &KubernetesObject,
   accepted_classes: &HashSet<String>,
-) -> Option<GatewayInfo> {
-  let class = string_at(&object.spec, &["gatewayClassName"])?;
+) -> anyhow::Result<Option<GatewayInfo>> {
+  let Some(class) = string_at(&object.spec, &["gatewayClassName"]) else {
+    return Ok(None);
+  };
   if !accepted_classes.contains(class) {
-    return None;
+    return Ok(None);
   }
-  let listeners = object
+  let raw_listeners = object
     .spec
     .get("listeners")
     .and_then(Value::as_array)
-    .cloned()
-    .unwrap_or_default()
-    .into_iter()
-    .filter_map(|listener| {
-      let protocol = string_at(&listener, &["protocol"])?.to_string();
-      let port = u16_at(&listener, &["port"])?;
-      Some(ListenerInfo {
-        name: string_at(&listener, &["name"]).map(str::to_string),
-        port,
-        protocol,
-        hostname: string_at(&listener, &["hostname"]).map(str::to_string),
-        tls_mode: string_at(&listener, &["tls", "mode"]).map(str::to_string),
-        allowed_routes: gateway_policy::parse_listener_policy(&listener),
-      })
-    })
-    .collect();
-  Some(GatewayInfo {
+    .ok_or_else(|| anyhow::anyhow!("spec.listeners must be an array"))?;
+  let mut listeners = Vec::with_capacity(raw_listeners.len());
+  for (index, listener) in raw_listeners.iter().enumerate() {
+    let listener = listener
+      .as_object()
+      .ok_or_else(|| anyhow::anyhow!("spec.listeners[{index}] must be an object"))?;
+    let name = listener
+      .get("name")
+      .and_then(Value::as_str)
+      .ok_or_else(|| anyhow::anyhow!("spec.listeners[{index}].name must be a string"))?;
+    let protocol = listener
+      .get("protocol")
+      .and_then(Value::as_str)
+      .ok_or_else(|| anyhow::anyhow!("spec.listeners[{index}].protocol must be a string"))?;
+    let port = listener
+      .get("port")
+      .and_then(Value::as_u64)
+      .and_then(|port| u16::try_from(port).ok())
+      .ok_or_else(|| {
+        anyhow::anyhow!("spec.listeners[{index}].port must be a valid TCP/UDP port")
+      })?;
+    let hostname = match listener.get("hostname") {
+      Some(hostname) => Some(
+        hostname
+          .as_str()
+          .ok_or_else(|| anyhow::anyhow!("spec.listeners[{index}].hostname must be a string"))?
+          .to_string(),
+      ),
+      None => None,
+    };
+    let tls_mode = match listener.get("tls") {
+      Some(tls) => {
+        let tls = tls
+          .as_object()
+          .ok_or_else(|| anyhow::anyhow!("spec.listeners[{index}].tls must be an object"))?;
+        match tls.get("mode") {
+          Some(mode) => Some(
+            mode
+              .as_str()
+              .ok_or_else(|| anyhow::anyhow!("spec.listeners[{index}].tls.mode must be a string"))?
+              .to_string(),
+          ),
+          None => None,
+        }
+      }
+      None => None,
+    };
+    let listener_value = Value::Object(listener.clone());
+    let allowed_routes = gateway_policy::parse_listener_policy(&listener_value)
+      .map_err(|error| anyhow::anyhow!("spec.listeners[{index}].{error}"))?;
+    listeners.push(ListenerInfo {
+      name: Some(name.to_string()),
+      port,
+      protocol: protocol.to_string(),
+      hostname,
+      tls_mode,
+      allowed_routes,
+    });
+  }
+  Ok(Some(GatewayInfo {
     namespace: object.namespace().to_string(),
     name: object.name().to_string(),
     listeners,
     client_identity: GatewayClientIdentityDecision::None,
-  })
+  }))
 }
 
 fn backend_ref_is_service(backend: &Value) -> bool {
   let group = string_at(backend, &["group"]).unwrap_or("");
   let kind = string_at(backend, &["kind"]).unwrap_or("Service");
   group.is_empty() && kind == "Service"
+}
+
+fn exact_service_backend_ref(
+  backend: &Value,
+  default_namespace: &str,
+) -> Result<(String, String), String> {
+  if let Some(field) = unsupported_field(
+    backend,
+    &["group", "kind", "name", "namespace", "port", "weight"],
+  ) {
+    return Err(format!("field {field} is unsupported"));
+  }
+  let string_field = |field: &str| -> Result<Option<&str>, String> {
+    match backend.get(field) {
+      None => Ok(None),
+      Some(value) => value
+        .as_str()
+        .map(Some)
+        .ok_or_else(|| format!("{field} must be a string")),
+    }
+  };
+  if !string_field("group")?.unwrap_or("").is_empty() {
+    return Err("group must select the Kubernetes core API".to_string());
+  }
+  if string_field("kind")?.unwrap_or("Service") != "Service" {
+    return Err("kind must be Service".to_string());
+  }
+  let name = string_field("name")?.ok_or_else(|| "name is required".to_string())?;
+  super::rollout::validate_kubernetes_dns_subdomain("backendRef.name", name)
+    .map_err(|error| error.to_string())?;
+  let namespace = string_field("namespace")?.unwrap_or(default_namespace);
+  super::rollout::validate_kubernetes_dns_label("backendRef.namespace", namespace)
+    .map_err(|error| error.to_string())?;
+  match backend.get("port") {
+    Some(value)
+      if value
+        .as_u64()
+        .is_some_and(|port| (1..=u16::MAX as u64).contains(&port)) => {}
+    Some(value) if value.as_str().is_some() => {
+      super::rollout::validate_kubernetes_dns_label(
+        "backendRef.port",
+        value.as_str().unwrap_or_default(),
+      )
+      .map_err(|error| error.to_string())?;
+    }
+    Some(_) => return Err("port must be an integer from 1 to 65535 or a DNS label".to_string()),
+    None => return Err("port is required".to_string()),
+  }
+  Ok((namespace.to_string(), name.to_string()))
 }
 
 fn parent_ref_is_gateway(parent: &Value) -> bool {

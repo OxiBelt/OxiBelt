@@ -48,7 +48,7 @@ struct ListenerSummary {
   hostname: Option<String>,
   port: Option<u16>,
   tls_mode: Option<String>,
-  allowed_routes: ListenerPolicy,
+  allowed_routes: Option<ListenerPolicy>,
 }
 
 pub fn print_diagnostics(diagnostics: &[Diagnostic]) {
@@ -354,7 +354,7 @@ fn listener_status(
 ) -> Value {
   let supported_kinds = listener_supported_kinds(listener);
   let conflicted = conflicts.contains(&listener.name);
-  let accepted = !supported_kinds.is_empty() && !conflicted;
+  let accepted = !supported_kinds.is_empty() && !conflicted && listener.allowed_routes.is_some();
   let programmed = rollout_status.programmed(accepted);
   let supported_kinds = supported_kinds
     .iter()
@@ -373,11 +373,21 @@ fn listener_status(
       condition(
         "Accepted",
         bool_status(accepted),
-        if accepted { "Accepted" } else if conflicted { "Conflicted" } else { "UnsupportedProtocol" },
+        if accepted {
+          "Accepted"
+        } else if conflicted {
+          "Conflicted"
+        } else if listener.allowed_routes.is_none() {
+          "InvalidAllowedRoutes"
+        } else {
+          "UnsupportedProtocol"
+        },
         if accepted {
           "Listener is supported by OxiBelt"
         } else if conflicted {
           "Listener conflicts with another listener on hostname, port, and protocol"
+        } else if listener.allowed_routes.is_none() {
+          "Listener allowedRoutes is malformed"
         } else {
           "Listener protocol is not supported by OxiBelt Gateway API controller v1"
         },
@@ -639,7 +649,7 @@ fn gateway_summaries(
           hostname: string_at(&listener, &["hostname"]).map(str::to_string),
           port: u16_at(&listener, &["port"]),
           tls_mode: string_at(&listener, &["tls", "mode"]).map(str::to_string),
-          allowed_routes: gateway_policy::parse_listener_policy(&listener),
+          allowed_routes: gateway_policy::parse_listener_policy(&listener).ok(),
         })
       })
       .collect();

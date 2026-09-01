@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -28,6 +28,25 @@ use super::status;
 use super::target_topology::{TargetOutcome, TargetSet, objects_for_target};
 use super::translate;
 use super::upstream_client_tls;
+
+#[derive(Clone, Eq, PartialEq)]
+struct TargetRolloutInputs {
+  toml: String,
+  assets: Vec<translate::RenderedAsset>,
+  client_identities: Vec<upstream_client_tls::ClientIdentityMaterial>,
+  requires_exact_data_plane: bool,
+}
+
+impl From<&translate::RenderedConfig> for TargetRolloutInputs {
+  fn from(rendered: &translate::RenderedConfig) -> Self {
+    Self {
+      toml: rendered.toml.clone(),
+      assets: rendered.assets.clone(),
+      client_identities: rendered.client_identities.clone(),
+      requires_exact_data_plane: rendered.requires_exact_data_plane,
+    }
+  }
+}
 
 const DEFAULT_SERVICE_ACCOUNT_TOKEN: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 const DEFAULT_SERVICE_ACCOUNT_CA: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
@@ -783,10 +802,12 @@ async fn reconcile_once(
   compatibility: &CompatibilityPolicy,
 ) -> anyhow::Result<RolloutStatus> {
   let objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
+  let initial_source_snapshot_digest = source_snapshot_digest(&objects);
   let target_set = TargetSet::from_objects(&objects, args, &shared.controller_name)?;
   let rendered = translate::translate_objects(&objects, shared)?;
   status::print_diagnostics(&rendered.diagnostics);
   let mut target_outcomes = Vec::new();
+  let mut target_rollout_inputs = BTreeMap::new();
   let rollout_status = if shared.dry_run {
     info!("dry-run enabled; immutable ConfigMap rollout was not applied");
     if let TargetSet::StaticReplicated(targets) = &target_set {
@@ -874,7 +895,7 @@ async fn reconcile_once(
         }
       }
       TargetSet::StaticReplicated(targets) => {
-        target_outcomes =
+        (target_outcomes, target_rollout_inputs) =
           reconcile_static_targets(kubernetes, shared, compatibility, &objects, targets).await;
         summarize_target_outcomes(targets.len(), &target_outcomes)
       }
@@ -889,10 +910,21 @@ async fn reconcile_once(
   } else {
     let fresh_objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
     let fresh_rendered = translate::translate_objects(&fresh_objects, shared)?;
+    let digest = source_snapshot_digest(&fresh_objects);
     if rollout_status.phase.is_committed()
-      && (fresh_rendered.toml != rendered.toml || fresh_rendered.assets != rendered.assets)
+      && matches!(target_set, TargetSet::Legacy(_))
+      && (!legacy_rollout_inputs_are_fresh(
+        &initial_source_snapshot_digest,
+        &rendered,
+        &digest,
+        &fresh_rendered,
+      ) || compatibility
+        .validate_generated_capabilities(fresh_rendered.requires_exact_data_plane)
+        .is_err())
     {
-      bail!("Gateway API resources changed before status commit; refusing stale Programmed=True");
+      bail!(
+        "Gateway API resources or rollout inputs changed before status commit; refusing stale Programmed=True"
+      );
     }
     if matches!(target_set, TargetSet::StaticReplicated(_))
       && TargetSet::from_objects(&fresh_objects, args, &shared.controller_name)? != target_set
@@ -901,7 +933,6 @@ async fn reconcile_once(
         "data-plane target policy changed before status commit; refusing stale Programmed=True"
       );
     }
-    let digest = source_snapshot_digest(&fresh_objects);
     (fresh_objects, fresh_rendered.diagnostics, digest)
   };
   let mut rollout_status = rollout_status;
@@ -935,6 +966,27 @@ async fn reconcile_once(
       let fresh_digest = source_snapshot_digest(&fresh_target_objects);
       if fresh_digest != outcome.source_snapshot_digest {
         outcome.failure_reason = Some("TargetSourceChanged");
+        if let Some(rollout) = &mut outcome.rollout {
+          rollout.proof = None;
+        }
+        continue;
+      }
+      let fresh_inputs = translate::translate_objects(&fresh_target_objects, shared)
+        .ok()
+        .filter(|rendered| {
+          rendered.disposition.is_publishable()
+            && compatibility
+              .validate_generated_capabilities(rendered.requires_exact_data_plane)
+              .is_ok()
+        })
+        .map(|rendered| TargetRolloutInputs::from(&rendered));
+      let inputs_are_fresh = target_rollout_inputs
+        .get(&outcome.target.identity())
+        .zip(fresh_inputs.as_ref())
+        .is_some_and(|(initial, fresh)| initial == fresh);
+      if !inputs_are_fresh {
+        outcome.translation_succeeded = false;
+        outcome.failure_reason = Some("TranslationFailed");
         if let Some(rollout) = &mut outcome.rollout {
           rollout.proof = None;
         }
@@ -997,6 +1049,20 @@ async fn reconcile_once(
   Ok(rollout_status)
 }
 
+fn legacy_rollout_inputs_are_fresh(
+  initial_source_snapshot_digest: &str,
+  initial: &translate::RenderedConfig,
+  fresh_source_snapshot_digest: &str,
+  fresh: &translate::RenderedConfig,
+) -> bool {
+  fresh_source_snapshot_digest == initial_source_snapshot_digest
+    && fresh.disposition.is_publishable()
+    && fresh.toml == initial.toml
+    && fresh.assets == initial.assets
+    && fresh.client_identities == initial.client_identities
+    && fresh.requires_exact_data_plane == initial.requires_exact_data_plane
+}
+
 fn summarize_target_outcomes(assigned: usize, outcomes: &[TargetOutcome]) -> RolloutStatus {
   let active = outcomes
     .iter()
@@ -1021,8 +1087,9 @@ async fn reconcile_static_targets(
   compatibility: &CompatibilityPolicy,
   objects: &[KubernetesObject],
   targets: &[super::target_topology::PlannedTarget],
-) -> Vec<TargetOutcome> {
+) -> (Vec<TargetOutcome>, BTreeMap<String, TargetRolloutInputs>) {
   let mut outcomes = Vec::with_capacity(targets.len());
+  let mut rollout_inputs = BTreeMap::new();
   // v1alpha1 intentionally reconciles targets sequentially. This is a global
   // concurrency bound of one and prevents one target failure from cancelling
   // or mutating any other target's durable workload-annotation state.
@@ -1046,6 +1113,7 @@ async fn reconcile_static_targets(
         continue;
       }
     };
+    rollout_inputs.insert(target.identity(), TargetRolloutInputs::from(&rendered));
     let attempted = async {
       compatibility.validate_generated_capabilities(rendered.requires_exact_data_plane)?;
       kubernetes
@@ -1102,7 +1170,7 @@ async fn reconcile_static_targets(
       }
     }
   }
-  outcomes
+  (outcomes, rollout_inputs)
 }
 
 async fn apply_status_patches(

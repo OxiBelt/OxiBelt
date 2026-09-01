@@ -158,6 +158,10 @@ spec:
     diagnostic.object == "TCPRoute/default/valid-younger"
       && diagnostic.message.contains("Accepted but not Programmed")
   }));
+  pretty_assertions::assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::PreserveLastGood
+  );
 }
 
 #[test]
@@ -212,6 +216,10 @@ spec:
       && diagnostic.severity == crate::model::DiagnosticSeverity::Error
       && diagnostic.message == crate::translate::UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC
   }));
+  pretty_assertions::assert_eq!(
+    disabled.disposition,
+    TranslationDisposition::FailClosedDeprogram
+  );
   generated_toml_validates(&disabled.toml);
 
   args.udp_flow_state = crate::cli::UdpFlowState::SharedRequired;
@@ -304,4 +312,213 @@ spec:
       .any(|diagnostic| { diagnostic.message.contains("duplicate process bind") })
   );
   generated_toml_parses(&rendered.toml);
+}
+
+#[test]
+fn duplicate_tcp_binds_deprogram_only_the_colliding_listeners() {
+  let raw = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: oxibelt}
+spec: {controllerName: oxibelt.dev/gateway-controller}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: edge, namespace: default}
+spec:
+  gatewayClassName: oxibelt
+  listeners:
+  - {name: first, protocol: TCP, port: 9000}
+  - {name: second, protocol: TCP, port: 9001}
+  - {name: independent, protocol: TCP, port: 9002}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: edge, namespace: default}
+spec:
+  ports:
+  - {name: first, protocol: TCP, port: 9000, targetPort: 19000}
+  - {name: second, protocol: TCP, port: 9001, targetPort: 19000}
+  - {name: independent, protocol: TCP, port: 9002, targetPort: 19002}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: app, namespace: default}
+spec:
+  ports:
+  - {protocol: TCP, port: 7000}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata: {name: first, namespace: default}
+spec:
+  parentRefs: [{name: edge, sectionName: first}]
+  rules: [{backendRefs: [{name: app, port: 7000}]}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata: {name: second, namespace: default}
+spec:
+  parentRefs: [{name: edge, sectionName: second}]
+  rules: [{backendRefs: [{name: app, port: 7000}]}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata: {name: independent, namespace: default}
+spec:
+  parentRefs: [{name: edge, sectionName: independent}]
+  rules: [{backendRefs: [{name: app, port: 7000}]}]
+"#;
+  let mut args = args();
+  args.status_service = Some("default/edge".to_string());
+  let rendered = translate_objects(&objects(raw), &args).expect("translate duplicate binds");
+
+  pretty_assertions::assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::FailClosedDeprogram
+  );
+  pretty_assertions::assert_eq!(rendered.toml.matches("[[stream_listeners]]").count(), 1);
+  assert!(!rendered.toml.contains("bind = \"0.0.0.0:19000\""));
+  assert!(rendered.toml.contains("bind = \"0.0.0.0:19002\""));
+  pretty_assertions::assert_eq!(
+    rendered
+      .diagnostics
+      .iter()
+      .filter(|diagnostic| diagnostic.message.contains("duplicate process bind"))
+      .count(),
+    2
+  );
+  generated_toml_parses(&rendered.toml);
+}
+
+#[test]
+fn invalid_listener_still_reserves_its_known_process_bind() {
+  let raw = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: oxibelt}
+spec: {controllerName: oxibelt.dev/gateway-controller}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: edge, namespace: default}
+spec:
+  gatewayClassName: oxibelt
+  listeners:
+  - {name: invalid, protocol: TCP, port: 9000}
+  - {name: colliding, protocol: TCP, port: 9001}
+  - {name: independent, protocol: TCP, port: 9002}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: edge, namespace: default}
+spec:
+  ports:
+  - {name: invalid, protocol: TCP, port: 9000, targetPort: 19000}
+  - {name: colliding, protocol: TCP, port: 9001, targetPort: 19000}
+  - {name: independent, protocol: TCP, port: 9002, targetPort: 19002}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: app, namespace: default}
+spec:
+  ports: [{protocol: TCP, port: 7000}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata: {name: invalid, namespace: default}
+spec:
+  parentRefs: [{name: edge, sectionName: invalid}]
+  rules: [{backendRefs: [{name: missing, port: 7000}]}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata: {name: colliding, namespace: default}
+spec:
+  parentRefs: [{name: edge, sectionName: colliding}]
+  rules: [{backendRefs: [{name: app, port: 7000}]}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata: {name: independent, namespace: default}
+spec:
+  parentRefs: [{name: edge, sectionName: independent}]
+  rules: [{backendRefs: [{name: app, port: 7000}]}]
+"#;
+  let mut args = args();
+  args.status_service = Some("default/edge".to_string());
+  let rendered = translate_objects(&objects(raw), &args).expect("translate reserved bind");
+
+  pretty_assertions::assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::FailClosedDeprogram
+  );
+  pretty_assertions::assert_eq!(rendered.toml.matches("[[stream_listeners]]").count(), 1);
+  assert!(!rendered.toml.contains("bind = \"0.0.0.0:19000\""));
+  assert!(rendered.toml.contains("bind = \"0.0.0.0:19002\""));
+  assert!(rendered.diagnostics.iter().any(|diagnostic| {
+    diagnostic
+      .message
+      .contains("backend Service default/missing was not found")
+  }));
+  pretty_assertions::assert_eq!(
+    rendered
+      .diagnostics
+      .iter()
+      .filter(|diagnostic| diagnostic.message.contains("duplicate process bind"))
+      .count(),
+    2
+  );
+  generated_toml_parses(&rendered.toml);
+}
+
+#[test]
+fn withdrawn_status_service_mapping_deprograms_the_selected_listener() {
+  let raw = r#"
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata: {name: oxibelt}
+spec: {controllerName: oxibelt.dev/gateway-controller}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: edge, namespace: default}
+spec:
+  gatewayClassName: oxibelt
+  listeners: [{name: tcp, protocol: TCP, port: 9000}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: edge, namespace: default}
+spec:
+  ports: [{name: other, protocol: TCP, port: 9001, targetPort: 19001}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: app, namespace: default}
+spec:
+  ports: [{protocol: TCP, port: 7000}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata: {name: app, namespace: default}
+spec:
+  parentRefs: [{name: edge, sectionName: tcp}]
+  rules: [{backendRefs: [{name: app, port: 7000}]}]
+"#;
+  let mut args = args();
+  args.status_service = Some("default/edge".to_string());
+  let rendered = translate_objects(&objects(raw), &args).expect("translate withdrawn mapping");
+
+  pretty_assertions::assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::FailClosedDeprogram
+  );
+  assert!(!rendered.toml.contains("[[stream_listeners]]"));
+  assert!(!rendered.toml.contains("[[stream_upstream_pools]]"));
+  assert!(rendered.diagnostics.iter().any(|diagnostic| {
+    diagnostic
+      .message
+      .contains("does not expose TCP port 9000 for Gateway listener tcp")
+  }));
 }

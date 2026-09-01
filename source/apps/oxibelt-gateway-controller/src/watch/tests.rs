@@ -33,12 +33,89 @@ fn watch_namespace_must_be_a_kubernetes_dns_label() {
 }
 
 #[test]
-fn rollout_targets_publish_only_clean_or_client_identity_deprogram_translations() {
+fn rollout_targets_publish_only_clean_or_fail_closed_deprogram_translations() {
   use crate::translate::TranslationDisposition;
 
   assert!(TranslationDisposition::Clean.is_publishable());
-  assert!(TranslationDisposition::ClientIdentityDeprogram.is_publishable());
+  assert!(TranslationDisposition::FailClosedDeprogram.is_publishable());
   assert!(!TranslationDisposition::PreserveLastGood.is_publishable());
+}
+
+#[test]
+fn legacy_final_freshness_binds_source_publishability_and_rollout_inputs() {
+  let initial = translate::translate_objects(&[], &shared_args()).expect("translate empty input");
+  assert!(legacy_rollout_inputs_are_fresh(
+    "source-a", &initial, "source-a", &initial,
+  ));
+  assert!(!legacy_rollout_inputs_are_fresh(
+    "source-a", &initial, "source-b", &initial,
+  ));
+
+  let mut unpublishable = initial.clone();
+  unpublishable.disposition = translate::TranslationDisposition::PreserveLastGood;
+  assert!(!legacy_rollout_inputs_are_fresh(
+    "source-a",
+    &initial,
+    "source-a",
+    &unpublishable,
+  ));
+
+  let mut changed_toml = initial.clone();
+  changed_toml.toml.push_str("# changed\n");
+  assert!(!legacy_rollout_inputs_are_fresh(
+    "source-a",
+    &initial,
+    "source-a",
+    &changed_toml,
+  ));
+
+  let mut changed_capability = initial.clone();
+  changed_capability.requires_exact_data_plane = !initial.requires_exact_data_plane;
+  assert!(!legacy_rollout_inputs_are_fresh(
+    "source-a",
+    &initial,
+    "source-a",
+    &changed_capability,
+  ));
+}
+
+#[test]
+fn static_final_freshness_binds_every_rendered_rollout_input() {
+  let initial = translate::translate_objects(&[], &shared_args()).expect("translate empty input");
+  let initial_inputs = TargetRolloutInputs::from(&initial);
+  assert!(initial_inputs == TargetRolloutInputs::from(&initial));
+
+  let mut changed_toml = initial.clone();
+  changed_toml.toml.push_str("# changed\n");
+  assert!(initial_inputs != TargetRolloutInputs::from(&changed_toml));
+
+  let mut changed_assets = initial.clone();
+  changed_assets.assets.push(translate::RenderedAsset {
+    data_key: "asset".to_string(),
+    managed_path: "gateway-api-ca/asset.pem".to_string(),
+    content: "changed".to_string(),
+  });
+  assert!(initial_inputs != TargetRolloutInputs::from(&changed_assets));
+
+  let mut changed_identities = initial.clone();
+  changed_identities
+    .client_identities
+    .push(upstream_client_tls::ClientIdentityMaterial {
+      derived_secret_name: "identity".to_string(),
+      source: crate::model::ObjectKey {
+        namespace: "default".to_string(),
+        name: "source".to_string(),
+      },
+      source_uid: "uid".to_string(),
+      source_resource_version: "1".to_string(),
+      certificate_data: "certificate".to_string(),
+      private_key_data: "private-key".to_string(),
+    });
+  assert!(initial_inputs != TargetRolloutInputs::from(&changed_identities));
+
+  let mut changed_capability = initial;
+  changed_capability.requires_exact_data_plane = !changed_capability.requires_exact_data_plane;
+  assert!(initial_inputs != TargetRolloutInputs::from(&changed_capability));
 }
 
 #[tokio::test]
@@ -437,7 +514,12 @@ async fn oversized_backend_tls_config_map_is_policy_local() {
     rendered.diagnostics
   );
   assert!(rendered.toml.contains("safe.example.test"));
-  assert!(!rendered.toml.contains("attacked.example.test"));
+  assert!(rendered.toml.contains("attacked.example.test"));
+  assert!(rendered.toml.contains("status = 503"));
+  assert_eq!(
+    rendered.disposition,
+    crate::translate::TranslationDisposition::FailClosedDeprogram
+  );
   assert!(rendered.assets.is_empty());
 }
 
@@ -481,7 +563,12 @@ async fn invalid_backend_tls_config_map_name_is_policy_local_without_an_api_get(
       .any(|diagnostic| diagnostic.message.contains("referenced ConfigMap"))
   );
   assert!(rendered.toml.contains("safe.example.test"));
-  assert!(!rendered.toml.contains("attacked.example.test"));
+  assert!(rendered.toml.contains("attacked.example.test"));
+  assert!(rendered.toml.contains("status = 503"));
+  assert_eq!(
+    rendered.disposition,
+    crate::translate::TranslationDisposition::FailClosedDeprogram
+  );
 }
 
 #[tokio::test]

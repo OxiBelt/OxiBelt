@@ -6,8 +6,8 @@ use super::super::cli::{SharedArgs, UdpFlowState};
 use super::super::model::{Diagnostic, KubernetesObject, ObjectKey, object_ref};
 use super::{
   GeneratedStreamListener, GeneratedStreamPool, GeneratedStreamServer, RouteAttachment,
-  ServiceTargetPort, TranslationState, UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC, backend_ref_is_service,
-  backend_service_port, sanitize_name, string_at, u32_at, unsupported_field,
+  ServiceTargetPort, TranslationFailure, TranslationState, UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC,
+  backend_service_port, exact_service_backend_ref, sanitize_name, unsupported_field,
 };
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -49,14 +49,19 @@ impl TranslationState {
         ));
         continue;
       }
-      let servers = self.l4_backend_servers(route, network);
+      let mut failures = Vec::new();
+      let servers = match self.l4_backend_servers(route, network) {
+        Ok(servers) => Some(servers),
+        Err(failure) => {
+          failures.push(failure);
+          None
+        }
+      };
       if route.kind == "UDPRoute" && args.udp_flow_state == UdpFlowState::Disabled {
-        self.diagnostics.push(Diagnostic::error(
-          object_ref(route),
-          UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC,
-        ));
-        continue;
+        failures
+          .push(self.fail_closed_error(object_ref(route), UDP_FLOW_STATE_REQUIRED_DIAGNOSTIC));
       }
+      let mut route_candidates = Vec::new();
       for attachment in attachments {
         let listener_name = attachment
           .listener
@@ -77,8 +82,14 @@ impl TranslationState {
         )) {
           continue;
         }
-        let bind_port = self.status_service_target_port(route, &attachment, args);
-        candidates.push(Candidate {
+        let bind_port = match self.status_service_target_port(route, &attachment, args) {
+          Ok(bind_port) => Some(bind_port),
+          Err(failure) => {
+            failures.push(failure);
+            None
+          }
+        };
+        route_candidates.push(Candidate {
           route: route.clone(),
           attachment,
           key,
@@ -86,6 +97,20 @@ impl TranslationState {
           servers: servers.clone(),
         });
       }
+      if !failures.is_empty() {
+        for candidate in &mut route_candidates {
+          candidate.servers = None;
+        }
+        let all_fail_closed = failures
+          .iter()
+          .all(|failure| matches!(failure, TranslationFailure::FailClosedDeprogram { .. }));
+        if all_fail_closed {
+          for failure in failures {
+            self.complete_fail_closed_deprogram(failure);
+          }
+        }
+      }
+      candidates.extend(route_candidates);
     }
 
     let mut by_listener = BTreeMap::<ListenerKey, Vec<Candidate>>::new();
@@ -120,7 +145,7 @@ impl TranslationState {
 
     let mut by_bind = BTreeMap::<(String, String), Vec<Candidate>>::new();
     for winner in winners {
-      let (Some(bind_port), Some(_)) = (winner.bind_port, winner.servers.as_ref()) else {
+      let Some(bind_port) = winner.bind_port else {
         continue;
       };
       let bind = format!("{}:{bind_port}", args.l4_bind_address);
@@ -132,16 +157,19 @@ impl TranslationState {
     for ((_, bind), bound) in by_bind {
       if bound.len() != 1 {
         for candidate in bound {
-          self.diagnostics.push(Diagnostic::error(
+          let failure = self.fail_closed_error(
             object_ref(&candidate.route),
             format!(
               "Gateway listener maps to duplicate process bind {bind}; each TCP/UDP listener needs a distinct status Service targetPort"
             ),
-          ));
+          );
+          self.complete_fail_closed_deprogram(failure);
         }
         continue;
       }
-      if let Some(candidate) = bound.into_iter().next() {
+      if let Some(candidate) = bound.into_iter().next()
+        && candidate.servers.is_some()
+      {
         self.install_l4_candidate(candidate, bind);
       }
     }
@@ -151,118 +179,104 @@ impl TranslationState {
     &mut self,
     route: &KubernetesObject,
     network: &str,
-  ) -> Option<Vec<GeneratedStreamServer>> {
+  ) -> Result<Vec<GeneratedStreamServer>, TranslationFailure> {
     if let Some(field) = unsupported_field(&route.spec, &["parentRefs", "rules"]) {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         format!("{} spec.{field} is unsupported", route.kind),
       ));
-      return None;
     }
     let Some(rules) = route.spec.get("rules").and_then(Value::as_array) else {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         format!("{} spec.rules is required", route.kind),
       ));
-      return None;
     };
     if rules.len() != 1 {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         format!("{} supports exactly one rule", route.kind),
       ));
-      return None;
     }
     let rule = &rules[0];
     if let Some(field) = unsupported_field(rule, &["backendRefs", "filters"]) {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         format!("{} rule.{field} is unsupported", route.kind),
       ));
-      return None;
     }
     if rule
       .get("filters")
       .and_then(Value::as_array)
       .is_some_and(|filters| !filters.is_empty())
     {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         format!("{} filters are unsupported", route.kind),
       ));
-      return None;
     }
     let Some(backends) = rule.get("backendRefs").and_then(Value::as_array) else {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         format!("{} rule.backendRefs is required", route.kind),
       ));
-      return None;
     };
-    let diagnostics_before_backend_resolution = self.diagnostics.len();
     let mut servers = Vec::new();
     for (index, backend) in backends.iter().enumerate() {
-      if let Some(field) = unsupported_field(
-        backend,
-        &["group", "kind", "name", "namespace", "port", "weight"],
-      ) {
-        self.diagnostics.push(Diagnostic::error(
-          object_ref(route),
-          format!("{} backendRef.{field} is unsupported", route.kind),
-        ));
-        continue;
-      }
-      let weight = u32_at(backend, &["weight"]).unwrap_or(1);
+      let weight = match backend.get("weight") {
+        None => 1,
+        Some(value) => match value.as_u64().and_then(|weight| u32::try_from(weight).ok()) {
+          Some(weight) if weight <= 1_000_000 => weight,
+          _ => {
+            return Err(self.preserve_last_good_error(
+              object_ref(route),
+              format!(
+                "{} backendRef.weight must be an unsigned integer no greater than 1000000",
+                route.kind
+              ),
+            ));
+          }
+        },
+      };
       if weight == 0 {
         continue;
       }
-      if !backend_ref_is_service(backend) {
-        self.diagnostics.push(Diagnostic::error(
-          object_ref(route),
-          format!(
-            "{} only supports Kubernetes Service backendRefs",
-            route.kind
-          ),
-        ));
-        continue;
-      }
-      let Some(name) = string_at(backend, &["name"]) else {
-        self.diagnostics.push(Diagnostic::error(
-          object_ref(route),
-          format!("{} backendRef.name is required", route.kind),
-        ));
-        continue;
-      };
-      let namespace = string_at(backend, &["namespace"]).unwrap_or(route.namespace());
+      let (namespace, name) =
+        exact_service_backend_ref(backend, route.namespace()).map_err(|error| {
+          self.preserve_last_good_error(
+            object_ref(route),
+            format!(
+              "{} backendRef is not an exact Kubernetes Service reference: {error}",
+              route.kind
+            ),
+          )
+        })?;
       if namespace != route.namespace()
-        && !self.reference_allowed(route, &route.kind, namespace, "Service", name)
+        && !self.reference_allowed(route, &route.kind, &namespace, "Service", &name)
       {
-        self.diagnostics.push(Diagnostic::error(
+        return Err(self.fail_closed_error(
           object_ref(route),
           format!("cross-namespace backendRef to {namespace}/{name} requires ReferenceGrant"),
         ));
-        continue;
       }
       let key = ObjectKey {
-        namespace: namespace.to_string(),
-        name: name.to_string(),
+        namespace: namespace.clone(),
+        name: name.clone(),
       };
       let Some(service) = self.services.get(&key) else {
-        self.diagnostics.push(Diagnostic::error(
+        return Err(self.fail_closed_error(
           object_ref(route),
           format!("backend Service {namespace}/{name} was not found in input snapshot"),
         ));
-        continue;
       };
       let Some(service_port) = backend_service_port(backend, service) else {
-        self.diagnostics.push(Diagnostic::error(
+        return Err(self.fail_closed_error(
           object_ref(route),
           format!("backend Service {namespace}/{name} does not expose the referenced port"),
         ));
-        continue;
       };
       if service_port.protocol.to_ascii_lowercase() != network {
-        self.diagnostics.push(Diagnostic::error(
+        return Err(self.fail_closed_error(
           object_ref(route),
           format!(
             "backend Service {namespace}/{name} port {} uses protocol {}, not {}",
@@ -271,7 +285,6 @@ impl TranslationState {
             network.to_ascii_uppercase(),
           ),
         ));
-        continue;
       }
       servers.push(GeneratedStreamServer {
         id: sanitize_name(&format!(
@@ -285,20 +298,16 @@ impl TranslationState {
         weight,
       });
     }
-    if self.diagnostics.len() != diagnostics_before_backend_resolution {
-      return None;
-    }
     if servers.is_empty() {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         format!(
           "{} must have at least one valid nonzero backendRef",
           route.kind
         ),
       ));
-      return None;
     }
-    Some(servers)
+    Ok(servers)
   }
 
   fn status_service_target_port(
@@ -306,44 +315,45 @@ impl TranslationState {
     route: &KubernetesObject,
     attachment: &RouteAttachment,
     args: &SharedArgs,
-  ) -> Option<u16> {
+  ) -> Result<u16, TranslationFailure> {
     let Some(raw_ref) = args.status_service.as_deref() else {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         "TCPRoute/UDPRoute requires --status-service namespace/name for external-port mapping",
       ));
-      return None;
     };
     let Some((namespace, name)) = raw_ref.split_once('/') else {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         "--status-service must use namespace/name syntax",
       ));
-      return None;
     };
-    if namespace.is_empty() || name.is_empty() || name.contains('/') {
-      self.diagnostics.push(Diagnostic::error(
+    if name.contains('/')
+      || super::super::rollout::validate_kubernetes_dns_label("status Service namespace", namespace)
+        .is_err()
+      || super::super::rollout::validate_kubernetes_dns_subdomain("status Service name", name)
+        .is_err()
+    {
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         "--status-service must use namespace/name syntax",
       ));
-      return None;
     }
     let key = ObjectKey {
       namespace: namespace.to_string(),
       name: name.to_string(),
     };
     let Some(service) = self.services.get(&key) else {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.fail_closed_error(
         object_ref(route),
         format!("status Service {raw_ref} was not found in input snapshot"),
       ));
-      return None;
     };
     let mut ports = service.ports.iter().filter(|port| {
       port.port == attachment.listener.port && port.protocol == attachment.listener.protocol
     });
     let Some(port) = ports.next() else {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.fail_closed_error(
         object_ref(route),
         format!(
           "status Service {raw_ref} does not expose {} port {} for Gateway listener {}",
@@ -352,39 +362,35 @@ impl TranslationState {
           attachment.listener.name.as_deref().unwrap_or("<unnamed>"),
         ),
       ));
-      return None;
     };
     if ports.next().is_some() {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         format!("status Service {raw_ref} has ambiguous duplicate port mappings"),
       ));
-      return None;
     }
     let target = match port.target_port {
       Some(ServiceTargetPort::Number(target)) => target,
       None => port.port,
       Some(ServiceTargetPort::Name) => {
-        self.diagnostics.push(Diagnostic::error(
+        return Err(self.preserve_last_good_error(
           object_ref(route),
           format!(
             "status Service {raw_ref} port {} must use a numeric targetPort",
             port.port
           ),
         ));
-        return None;
       }
     };
     if target < 1024 {
-      self.diagnostics.push(Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         object_ref(route),
         format!(
           "status Service {raw_ref} targetPort {target} must be unprivileged (1024 or higher)"
         ),
       ));
-      return None;
     }
-    Some(target)
+    Ok(target)
   }
 
   fn install_l4_candidate(&mut self, candidate: Candidate, bind: String) {

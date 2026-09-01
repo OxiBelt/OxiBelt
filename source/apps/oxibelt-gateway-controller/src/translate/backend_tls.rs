@@ -17,6 +17,8 @@ struct ParsedPolicy {
   object: KubernetesObject,
   target: ObjectKey,
   tls: Option<GeneratedBackendTls>,
+  target_is_exact: bool,
+  diagnostic_indices: Vec<usize>,
 }
 
 impl TranslationState {
@@ -31,9 +33,25 @@ impl TranslationState {
       .iter()
       .filter(|object| object.kind == "BackendTLSPolicy")
     {
-      let Some(parsed) = self.parse_backend_tls_policy(policy, &config_maps) else {
-        continue;
+      let diagnostic_start = self.diagnostics.len();
+      let target_is_exact = exact_backend_tls_target(policy);
+      let mut parsed = match self.parse_backend_tls_policy(policy, &config_maps) {
+        Some(parsed) => parsed,
+        None => {
+          let Some(target) = target_is_exact.clone() else {
+            continue;
+          };
+          ParsedPolicy {
+            object: policy.clone(),
+            target,
+            tls: None,
+            target_is_exact: true,
+            diagnostic_indices: Vec::new(),
+          }
+        }
       };
+      parsed.target_is_exact = target_is_exact.as_ref() == Some(&parsed.target);
+      parsed.diagnostic_indices = (diagnostic_start..self.diagnostics.len()).collect();
       by_target
         .entry(parsed.target.clone())
         .or_default()
@@ -45,7 +63,13 @@ impl TranslationState {
         policy_precedence(&left.object).cmp(&policy_precedence(&right.object))
       });
       if policies.len() > 1 {
+        let all_targets_are_exact = policies.iter().all(|policy| policy.target_is_exact);
+        let mut covered_diagnostics = policies
+          .iter()
+          .flat_map(|policy| policy.diagnostic_indices.iter().copied())
+          .collect::<Vec<_>>();
         for policy in policies {
+          let diagnostic = self.diagnostics.len();
           self.diagnostics.push(Diagnostic::error(
             object_ref(&policy.object),
             format!(
@@ -53,17 +77,33 @@ impl TranslationState {
               target.namespace, target.name
             ),
           ));
+          covered_diagnostics.push(diagnostic);
         }
-        self.backend_tls.insert(target, BackendTlsDecision::Invalid);
+        self.backend_tls.insert(
+          target,
+          BackendTlsDecision::Invalid {
+            covered_diagnostics: if all_targets_are_exact {
+              covered_diagnostics
+            } else {
+              Vec::new()
+            },
+          },
+        );
         continue;
       }
       if let Some(policy) = policies.pop() {
         self.backend_tls.insert(
           target,
-          policy
-            .tls
-            .map(BackendTlsDecision::Valid)
-            .unwrap_or(BackendTlsDecision::Invalid),
+          match policy.tls {
+            Some(tls) => BackendTlsDecision::Valid(tls),
+            None => BackendTlsDecision::Invalid {
+              covered_diagnostics: if policy.target_is_exact {
+                policy.diagnostic_indices
+              } else {
+                Vec::new()
+              },
+            },
+          },
         );
       }
     }
@@ -72,7 +112,7 @@ impl TranslationState {
       .values()
       .filter_map(|decision| match decision {
         BackendTlsDecision::Valid(tls) => Some(tls.trusted_ca_certs.iter()),
-        BackendTlsDecision::Invalid => None,
+        BackendTlsDecision::Invalid { .. } => None,
       })
       .flatten()
       .cloned()
@@ -86,21 +126,59 @@ impl TranslationState {
     &mut self,
     route: &KubernetesObject,
     service: &ObjectKey,
-  ) -> Result<Option<GeneratedBackendTls>, ()> {
+  ) -> Result<Option<GeneratedBackendTls>, super::TranslationFailure> {
     match self.backend_tls.get(service).cloned() {
       None => Ok(None),
       Some(BackendTlsDecision::Valid(tls)) => Ok(Some(tls)),
-      Some(BackendTlsDecision::Invalid) => {
-        self.diagnostics.push(Diagnostic::error(
+      Some(BackendTlsDecision::Invalid {
+        covered_diagnostics,
+      }) => {
+        let failure = self.fail_closed_error(
           object_ref(route),
           format!(
             "backend Service {}/{} has an invalid or conflicted BackendTLSPolicy",
             service.namespace, service.name
           ),
-        ));
-        Err(())
+        );
+        if covered_diagnostics.is_empty() {
+          Err(super::TranslationFailure::PreserveLastGood)
+        } else {
+          Err(failure.with_covered_diagnostics(covered_diagnostics))
+        }
       }
     }
+  }
+
+  pub(super) fn backend_tls_covered_diagnostics(&self, service: &ObjectKey) -> Vec<usize> {
+    match self.backend_tls.get(service) {
+      Some(BackendTlsDecision::Invalid {
+        covered_diagnostics,
+      }) => covered_diagnostics.clone(),
+      Some(BackendTlsDecision::Valid(_)) | None => Vec::new(),
+    }
+  }
+
+  pub(super) fn retain_reachable_backend_tls_assets(&mut self) {
+    let referenced_assets = self
+      .pools
+      .values()
+      .flat_map(|pool| {
+        pool
+          .servers
+          .iter()
+          .filter_map(|server| server.tls.as_ref())
+          .chain(
+            pool
+              .discoveries
+              .iter()
+              .filter_map(|discovery| discovery.tls.as_ref()),
+          )
+      })
+      .flat_map(|tls| tls.trusted_ca_certs.iter().cloned())
+      .collect::<std::collections::HashSet<_>>();
+    self
+      .assets
+      .retain(|managed_path, _| referenced_assets.contains(managed_path));
   }
 
   fn parse_backend_tls_policy(
@@ -126,8 +204,28 @@ impl TranslationState {
       return None;
     }
     let target_ref = &target_refs[0];
-    let group = string_at(target_ref, &["group"]).unwrap_or("");
-    let kind = string_at(target_ref, &["kind"]).unwrap_or("Service");
+    let group = match target_ref.get("group") {
+      Some(group) => match group.as_str() {
+        Some(group) => group,
+        None => {
+          self.policy_error(policy, "targetRef.group must be a string");
+          valid = false;
+          ""
+        }
+      },
+      None => "",
+    };
+    let kind = match target_ref.get("kind") {
+      Some(kind) => match kind.as_str() {
+        Some(kind) => kind,
+        None => {
+          self.policy_error(policy, "targetRef.kind must be a string");
+          valid = false;
+          "Service"
+        }
+      },
+      None => "Service",
+    };
     let Some(name) = string_at(target_ref, &["name"]) else {
       self.policy_error(policy, "targetRef.name is required");
       return None;
@@ -173,6 +271,8 @@ impl TranslationState {
         object: policy.clone(),
         target,
         tls: None,
+        target_is_exact: false,
+        diagnostic_indices: Vec::new(),
       });
     };
     if unsupported_field(
@@ -206,6 +306,8 @@ impl TranslationState {
         object: policy.clone(),
         target,
         tls: None,
+        target_is_exact: false,
+        diagnostic_indices: Vec::new(),
       });
     };
     if !valid_precise_hostname(hostname) {
@@ -267,6 +369,8 @@ impl TranslationState {
       object: policy.clone(),
       target,
       tls: valid.then_some(tls).flatten(),
+      target_is_exact: false,
+      diagnostic_indices: Vec::new(),
     })
   }
 
@@ -386,6 +490,36 @@ impl TranslationState {
       .diagnostics
       .push(Diagnostic::error(object_ref(policy), message));
   }
+}
+
+fn exact_backend_tls_target(policy: &KubernetesObject) -> Option<ObjectKey> {
+  let target_refs = policy.spec.get("targetRefs")?.as_array()?;
+  let [target_ref] = target_refs.as_slice() else {
+    return None;
+  };
+  let group = match target_ref.get("group") {
+    Some(group) => group.as_str()?,
+    None => "",
+  };
+  let kind = match target_ref.get("kind") {
+    Some(kind) => kind.as_str()?,
+    None => "Service",
+  };
+  if unsupported_field(target_ref, &["group", "kind", "name", "sectionName"]).is_some()
+    || !group.is_empty()
+    || kind != "Service"
+    || target_ref
+      .get("sectionName")
+      .is_some_and(|value| !value.is_null())
+  {
+    return None;
+  }
+  let name = string_at(target_ref, &["name"])?;
+  super::super::rollout::validate_kubernetes_dns_subdomain("BackendTLSPolicy target", name).ok()?;
+  Some(ObjectKey {
+    namespace: policy.namespace().to_string(),
+    name: name.to_string(),
+  })
 }
 
 fn policy_precedence(policy: &KubernetesObject) -> (&str, &str, &str) {

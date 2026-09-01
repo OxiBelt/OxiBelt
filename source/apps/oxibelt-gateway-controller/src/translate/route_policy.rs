@@ -27,30 +27,57 @@ pub(super) struct RoutePolicy {
   upstream_request_timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub(super) enum RoutePolicyDecision {
+  Valid(Box<RoutePolicy>),
+  InvalidTargetKnown {
+    target_kind: String,
+    target_name: String,
+    diagnostic_indices: Vec<usize>,
+  },
+  InvalidTargetUnknown,
+}
+
+pub(super) struct RoutePolicyApplyError {
+  pub(super) message: String,
+  pub(super) covered_diagnostics: Option<Vec<usize>>,
+}
+
 pub(super) fn index_route_policies(
   objects: &[KubernetesObject],
   args: &SharedArgs,
   diagnostics: &mut Vec<Diagnostic>,
-) -> BTreeMap<ObjectKey, RoutePolicy> {
+) -> BTreeMap<ObjectKey, RoutePolicyDecision> {
   let mut policies = BTreeMap::new();
   for object in objects
     .iter()
     .filter(|object| object.kind == ROUTE_POLICY_KIND)
   {
-    match parse_route_policy(object, args) {
-      Ok(policy) => {
-        let key = object.key();
-        if policies.insert(key, policy).is_some() {
-          diagnostics.push(Diagnostic::error(
-            object_ref(object),
-            "duplicate OxiBeltRoutePolicy identity in input snapshot",
-          ));
+    let decision = match parse_route_policy(object, args) {
+      Ok(policy) => RoutePolicyDecision::Valid(Box::new(policy)),
+      Err(error) => {
+        let diagnostic = diagnostics.len();
+        diagnostics.push(Diagnostic::error(
+          object_ref(object),
+          format!("invalid OxiBeltRoutePolicy: {error:#}"),
+        ));
+        match exact_route_policy_target(object) {
+          Some((target_kind, target_name)) => RoutePolicyDecision::InvalidTargetKnown {
+            target_kind,
+            target_name,
+            diagnostic_indices: vec![diagnostic],
+          },
+          None => RoutePolicyDecision::InvalidTargetUnknown,
         }
       }
-      Err(error) => diagnostics.push(Diagnostic::error(
+    };
+    let key = object.key();
+    if policies.insert(key.clone(), decision).is_some() {
+      diagnostics.push(Diagnostic::error(
         object_ref(object),
-        format!("invalid OxiBeltRoutePolicy: {error:#}"),
-      )),
+        "duplicate OxiBeltRoutePolicy identity in input snapshot",
+      ));
+      policies.insert(key, RoutePolicyDecision::InvalidTargetUnknown);
     }
   }
   policies
@@ -77,36 +104,72 @@ pub(super) fn parse_route_policy_ref(filter: &Value) -> anyhow::Result<ParsedRou
 }
 
 pub(super) fn apply_route_policy(
-  policies: &BTreeMap<ObjectKey, RoutePolicy>,
+  policies: &BTreeMap<ObjectKey, RoutePolicyDecision>,
   reference: &ParsedRoutePolicyRef,
   source_route: &KubernetesObject,
   generated: &mut GeneratedRoute,
-) -> anyhow::Result<()> {
+) -> Result<(), RoutePolicyApplyError> {
   let key = ObjectKey {
     namespace: source_route.namespace().to_string(),
     name: reference.name.clone(),
   };
-  let policy = policies.get(&key).with_context(|| {
-    format!(
-      "OxiBeltRoutePolicy {}/{} was not found in the input snapshot",
-      key.namespace, key.name
-    )
-  })?;
+  let Some(decision) = policies.get(&key) else {
+    return Err(RoutePolicyApplyError {
+      message: format!(
+        "OxiBeltRoutePolicy {}/{} was not found in the input snapshot",
+        key.namespace, key.name
+      ),
+      covered_diagnostics: Some(Vec::new()),
+    });
+  };
+  let policy = match decision {
+    RoutePolicyDecision::Valid(policy) => policy,
+    RoutePolicyDecision::InvalidTargetKnown {
+      target_kind,
+      target_name,
+      diagnostic_indices,
+    } if target_kind == &source_route.kind && target_name == source_route.name() => {
+      return Err(RoutePolicyApplyError {
+        message: format!(
+          "OxiBeltRoutePolicy {}/{} is invalid for {}/{}",
+          key.namespace,
+          key.name,
+          source_route.kind,
+          source_route.name()
+        ),
+        covered_diagnostics: Some(diagnostic_indices.clone()),
+      });
+    }
+    RoutePolicyDecision::InvalidTargetKnown { .. } | RoutePolicyDecision::InvalidTargetUnknown => {
+      return Err(RoutePolicyApplyError {
+        message: format!(
+          "OxiBeltRoutePolicy {}/{} is invalid with an ambiguous target",
+          key.namespace, key.name
+        ),
+        covered_diagnostics: None,
+      });
+    }
+  };
   if policy.object.api_version != ROUTE_POLICY_API_VERSION {
-    bail!(
-      "OxiBeltRoutePolicy {}/{} must use {ROUTE_POLICY_API_VERSION}",
-      key.namespace,
-      key.name
-    );
+    return Err(RoutePolicyApplyError {
+      message: format!(
+        "OxiBeltRoutePolicy {}/{} must use {ROUTE_POLICY_API_VERSION}",
+        key.namespace, key.name
+      ),
+      covered_diagnostics: Some(Vec::new()),
+    });
   }
   if policy.target_kind != source_route.kind || policy.target_name != source_route.name() {
-    bail!(
-      "OxiBeltRoutePolicy {}/{} targetRef does not select {}/{}",
-      key.namespace,
-      key.name,
-      source_route.kind,
-      source_route.name()
-    );
+    return Err(RoutePolicyApplyError {
+      message: format!(
+        "OxiBeltRoutePolicy {}/{} targetRef does not select {}/{}",
+        key.namespace,
+        key.name,
+        source_route.kind,
+        source_route.name()
+      ),
+      covered_diagnostics: Some(Vec::new()),
+    });
   }
 
   generated.policy_source = Some(format!(
@@ -118,6 +181,25 @@ pub(super) fn apply_route_policy(
   generated.max_request_body_bytes = policy.max_request_body_bytes;
   generated.upstream_request_timeout_ms = policy.upstream_request_timeout_ms;
   Ok(())
+}
+
+fn exact_route_policy_target(object: &KubernetesObject) -> Option<(String, String)> {
+  let target = object.spec.get("targetRef")?;
+  if unsupported_field(target, &["group", "kind", "name", "sectionName"]).is_some()
+    || string_at(target, &["group"]) != Some("gateway.networking.k8s.io")
+    || target
+      .get("sectionName")
+      .is_some_and(|value| !value.is_null())
+  {
+    return None;
+  }
+  let kind = string_at(target, &["kind"])?;
+  if !matches!(kind, "HTTPRoute" | "GRPCRoute") {
+    return None;
+  }
+  let name = string_at(target, &["name"])?;
+  validate_dns_subdomain("spec.targetRef.name", name).ok()?;
+  Some((kind.to_string(), name.to_string()))
 }
 
 fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::Result<RoutePolicy> {

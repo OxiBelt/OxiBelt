@@ -70,9 +70,9 @@ impl TranslationState {
           }) else {
             continue;
           };
-          let tombstone_checkpoint = tombstone.then(|| self.generated_checkpoint());
-          let tombstone_route = tombstone.then(|| generated.clone());
-          if !self.apply_parsed_route_filters(
+          let tombstone_checkpoint = self.generated_checkpoint();
+          let tombstone_route = generated.clone();
+          if let Err(failure) = self.apply_parsed_route_filters(
             route,
             "GRPCRoute",
             &mut generated,
@@ -80,9 +80,10 @@ impl TranslationState {
             &source,
             client_identity.as_identity(),
           ) {
+            self.complete_fail_closed_tombstone(tombstone_checkpoint, tombstone_route, failure);
             continue;
           }
-          if let Some(pool) = self.backend_pool(
+          let pool = match self.backend_pool(
             route,
             "GRPCRoute",
             rule.get("backendRefs").and_then(Value::as_array),
@@ -90,16 +91,19 @@ impl TranslationState {
             &source,
             client_identity.as_identity(),
           ) {
-            if let (Some(checkpoint), Some(route)) = (tombstone_checkpoint, tombstone_route) {
-              self.restore_generated(checkpoint);
-              self.push_client_identity_tombstone(route);
+            Ok(pool) => pool,
+            Err(failure) => {
+              self.complete_fail_closed_tombstone(tombstone_checkpoint, tombstone_route, failure);
               continue;
             }
-            generated.upstream_pool = Some(pool.name.clone());
-            self.pools.insert(pool.name.clone(), pool);
-          } else {
+          };
+          if tombstone {
+            self.restore_generated(tombstone_checkpoint);
+            self.push_fail_closed_tombstone(tombstone_route);
             continue;
           }
+          generated.upstream_pool = Some(pool.name.clone());
+          self.pools.insert(pool.name.clone(), pool);
           self.routes.push(generated);
         }
       }

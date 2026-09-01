@@ -4,7 +4,7 @@ use serde_json::Value;
 use super::{
   GeneratedClientIdentity, GeneratedExternalAuth, GeneratedKubernetesDiscovery, GeneratedPool,
   GeneratedRoute, GeneratedServer, NamedExactMatch, ObjectKey, TranslationState, backend_port,
-  backend_ref_is_service, backend_service_port, endpoint_slice_discovery_port,
+  backend_service_port, endpoint_slice_discovery_port, exact_service_backend_ref,
   filters::ParsedRouteFilters, filters::parse_route_filters, intersect_hosts, sanitize_name,
   string_at,
 };
@@ -73,10 +73,10 @@ impl TranslationState {
           else {
             continue;
           };
-          let tombstone_checkpoint = tombstone.then(|| self.generated_checkpoint());
-          let tombstone_route = tombstone.then(|| generated.clone());
+          let tombstone_checkpoint = self.generated_checkpoint();
+          let tombstone_route = generated.clone();
 
-          if !self.apply_parsed_route_filters(
+          if let Err(failure) = self.apply_parsed_route_filters(
             route,
             "HTTPRoute",
             &mut generated,
@@ -84,6 +84,7 @@ impl TranslationState {
             &source,
             client_identity.as_identity(),
           ) {
+            self.complete_fail_closed_tombstone(tombstone_checkpoint, tombstone_route, failure);
             continue;
           }
           if generated.redirect.is_some()
@@ -99,27 +100,31 @@ impl TranslationState {
             continue;
           }
           if generated.redirect.is_some() {
-            if let (Some(checkpoint), Some(route)) = (tombstone_checkpoint, tombstone_route) {
-              self.restore_generated(checkpoint);
-              self.push_client_identity_tombstone(route);
+            if tombstone {
+              self.restore_generated(tombstone_checkpoint);
+              self.push_fail_closed_tombstone(tombstone_route);
             } else {
               self.routes.push(generated);
             }
             continue;
           }
-          let Some(pool) = self.backend_pool(
+          let pool = match self.backend_pool(
             route,
             "HTTPRoute",
             rule.get("backendRefs").and_then(Value::as_array),
             &generated.name,
             &source,
             client_identity.as_identity(),
-          ) else {
-            continue;
+          ) {
+            Ok(pool) => pool,
+            Err(failure) => {
+              self.complete_fail_closed_tombstone(tombstone_checkpoint, tombstone_route, failure);
+              continue;
+            }
           };
-          if let (Some(checkpoint), Some(route)) = (tombstone_checkpoint, tombstone_route) {
-            self.restore_generated(checkpoint);
-            self.push_client_identity_tombstone(route);
+          if tombstone {
+            self.restore_generated(tombstone_checkpoint);
+            self.push_fail_closed_tombstone(tombstone_route);
             continue;
           }
           generated.upstream_pool = Some(pool.name.clone());
@@ -138,24 +143,22 @@ impl TranslationState {
     route_name: &str,
     source: &str,
     client_identity: Option<&GeneratedClientIdentity>,
-  ) -> Option<GeneratedPool> {
+  ) -> Result<GeneratedPool, super::TranslationFailure> {
     let Some(backend_refs) = backend_refs else {
-      self.diagnostics.push(crate::model::Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         model_object_ref(route),
         "rule.backendRefs is required unless the route redirects",
       ));
-      return None;
     };
     let mut nonzero_backends = Vec::new();
     for (index, backend) in backend_refs.iter().enumerate() {
       let weight = match gateway_backend_weight(backend) {
         Ok(weight) => weight,
         Err(message) => {
-          self.diagnostics.push(crate::model::Diagnostic::error(
+          return Err(self.preserve_last_good_error(
             model_object_ref(route),
             format!("rule.backendRefs[{index}].weight {message}"),
           ));
-          return None;
         }
       };
       if weight > 0 {
@@ -163,35 +166,25 @@ impl TranslationState {
       }
     }
     if nonzero_backends.is_empty() {
-      self.diagnostics.push(crate::model::Diagnostic::error(
+      return Err(self.preserve_last_good_error(
         model_object_ref(route),
         "rule.backendRefs has no usable nonzero Service backend",
       ));
-      return None;
     }
-    let diagnostics_before_backend_resolution = self.diagnostics.len();
     if self.backend_resolution == BackendResolution::EndpointSliceWatch {
       let mut discoveries = Vec::with_capacity(nonzero_backends.len());
       for (index, backend, weight) in nonzero_backends {
-        let Some(discovery) = self.backend_discovery(
+        let discovery = self.backend_discovery(
           route,
           from_kind,
           (backend, index, weight),
           route_name,
           client_identity,
-        ) else {
-          if self.diagnostics.len() == diagnostics_before_backend_resolution {
-            self.diagnostics.push(crate::model::Diagnostic::error(
-              model_object_ref(route),
-              "rule.backendRefs has no usable nonzero Service backend",
-            ));
-          }
-          return None;
-        };
+        )?;
         discoveries.push(discovery);
       }
       let name = sanitize_name(&format!("{route_name}-pool"));
-      return Some(GeneratedPool {
+      return Ok(GeneratedPool {
         source: source.to_string(),
         name,
         servers: Vec::new(),
@@ -201,24 +194,12 @@ impl TranslationState {
 
     let mut servers = Vec::new();
     for (index, backend, weight) in nonzero_backends {
-      let Some(server) =
-        self.backend_server(route, from_kind, backend, index, weight, client_identity)
-      else {
-        continue;
-      };
+      let server =
+        self.backend_server(route, from_kind, backend, index, weight, client_identity)?;
       servers.push(server);
     }
-    if servers.is_empty() {
-      if self.diagnostics.len() == diagnostics_before_backend_resolution {
-        self.diagnostics.push(crate::model::Diagnostic::error(
-          model_object_ref(route),
-          "rule.backendRefs has no usable nonzero Service backend",
-        ));
-      }
-      return None;
-    }
     let name = sanitize_name(&format!("{route_name}-pool"));
-    Some(GeneratedPool {
+    Ok(GeneratedPool {
       source: source.to_string(),
       name,
       servers,
@@ -234,44 +215,41 @@ impl TranslationState {
     index: usize,
     weight: u32,
     client_identity: Option<&GeneratedClientIdentity>,
-  ) -> Option<GeneratedServer> {
-    if !backend_ref_is_service(backend) {
-      self.diagnostics.push(crate::model::Diagnostic::error(
-        model_object_ref(route),
-        "only Kubernetes Service backendRefs are supported",
-      ));
-      return None;
-    }
-    let name = string_at(backend, &["name"])?;
-    let namespace = string_at(backend, &["namespace"]).unwrap_or(route.namespace());
+  ) -> Result<GeneratedServer, super::TranslationFailure> {
+    let (namespace, name) =
+      exact_service_backend_ref(backend, route.namespace()).map_err(|error| {
+        self.preserve_last_good_error(
+          model_object_ref(route),
+          format!("backendRef is not an exact Kubernetes Service reference: {error}"),
+        )
+      })?;
     if namespace != route.namespace()
-      && !self.reference_allowed(route, from_kind, namespace, "Service", name)
+      && !self.reference_allowed(route, from_kind, &namespace, "Service", &name)
     {
-      self.diagnostics.push(crate::model::Diagnostic::error(
+      return Err(self.fail_closed_error(
         model_object_ref(route),
         format!("cross-namespace backendRef to {namespace}/{name} requires ReferenceGrant"),
       ));
-      return None;
     }
     let key = ObjectKey {
-      namespace: namespace.to_string(),
-      name: name.to_string(),
+      namespace: namespace.clone(),
+      name: name.clone(),
     };
     let Some(service) = self.services.get(&key).cloned() else {
-      self.diagnostics.push(crate::model::Diagnostic::error(
+      let failure = self.fail_closed_error(
         model_object_ref(route),
         format!("backend Service {namespace}/{name} was not found in input snapshot"),
-      ));
-      return None;
+      );
+      return Err(failure.with_covered_diagnostics(self.backend_tls_covered_diagnostics(&key)));
     };
     let Some(port) = backend_port(backend, &service) else {
-      self.diagnostics.push(crate::model::Diagnostic::error(
+      let failure = self.fail_closed_error(
         model_object_ref(route),
         format!("backend Service {namespace}/{name} does not expose the referenced port"),
-      ));
-      return None;
+      );
+      return Err(failure.with_covered_diagnostics(self.backend_tls_covered_diagnostics(&key)));
     };
-    let mut tls = self.backend_tls_for_service(route, &key).ok()?;
+    let mut tls = self.backend_tls_for_service(route, &key)?;
     if let (Some(tls), Some(client_identity)) = (&mut tls, client_identity) {
       tls.client_identity = Some(client_identity.clone());
     }
@@ -284,7 +262,7 @@ impl TranslationState {
       "{}://{}.{}.svc.cluster.local:{}",
       scheme, service.name, service.namespace, port
     );
-    Some(GeneratedServer {
+    Ok(GeneratedServer {
       id: sanitize_name(&format!("{namespace}-{name}-{port}-{index}")),
       origin,
       weight,
@@ -299,59 +277,56 @@ impl TranslationState {
     backend: (&Value, usize, u32),
     route_name: &str,
     client_identity: Option<&GeneratedClientIdentity>,
-  ) -> Option<GeneratedKubernetesDiscovery> {
+  ) -> Result<GeneratedKubernetesDiscovery, super::TranslationFailure> {
     let (backend, index, weight) = backend;
-    if !backend_ref_is_service(backend) {
-      self.diagnostics.push(crate::model::Diagnostic::error(
-        model_object_ref(route),
-        "only Kubernetes Service backendRefs are supported",
-      ));
-      return None;
-    }
-    let name = string_at(backend, &["name"])?;
-    let namespace = string_at(backend, &["namespace"]).unwrap_or(route.namespace());
+    let (namespace, name) =
+      exact_service_backend_ref(backend, route.namespace()).map_err(|error| {
+        self.preserve_last_good_error(
+          model_object_ref(route),
+          format!("backendRef is not an exact Kubernetes Service reference: {error}"),
+        )
+      })?;
     if namespace != route.namespace()
-      && !self.reference_allowed(route, from_kind, namespace, "Service", name)
+      && !self.reference_allowed(route, from_kind, &namespace, "Service", &name)
     {
-      self.diagnostics.push(crate::model::Diagnostic::error(
+      return Err(self.fail_closed_error(
         model_object_ref(route),
         format!("cross-namespace backendRef to {namespace}/{name} requires ReferenceGrant"),
       ));
-      return None;
     }
     let key = ObjectKey {
-      namespace: namespace.to_string(),
-      name: name.to_string(),
+      namespace: namespace.clone(),
+      name: name.clone(),
     };
     let Some(service) = self.services.get(&key).cloned() else {
-      self.diagnostics.push(crate::model::Diagnostic::error(
+      let failure = self.fail_closed_error(
         model_object_ref(route),
         format!("backend Service {namespace}/{name} was not found in input snapshot"),
-      ));
-      return None;
+      );
+      return Err(failure.with_covered_diagnostics(self.backend_tls_covered_diagnostics(&key)));
     };
     let Some(service_port) = backend_service_port(backend, &service) else {
-      self.diagnostics.push(crate::model::Diagnostic::error(
+      let failure = self.fail_closed_error(
         model_object_ref(route),
         format!("backend Service {namespace}/{name} does not expose the referenced port"),
-      ));
-      return None;
+      );
+      return Err(failure.with_covered_diagnostics(self.backend_tls_covered_diagnostics(&key)));
     };
     let port = match endpoint_slice_discovery_port(service_port) {
       Ok(port) => port,
       Err(message) => {
-        self.diagnostics.push(crate::model::Diagnostic::error(
+        let failure = self.fail_closed_error(
           model_object_ref(route),
           format!("backend Service {namespace}/{name} {message}"),
-        ));
-        return None;
+        );
+        return Err(failure.with_covered_diagnostics(self.backend_tls_covered_diagnostics(&key)));
       }
     };
-    let mut tls = self.backend_tls_for_service(route, &key).ok()?;
+    let mut tls = self.backend_tls_for_service(route, &key)?;
     if let (Some(tls), Some(client_identity)) = (&mut tls, client_identity) {
       tls.client_identity = Some(client_identity.clone());
     }
-    Some(GeneratedKubernetesDiscovery {
+    Ok(GeneratedKubernetesDiscovery {
       id: sanitize_name(&format!("{route_name}-backend-{index}-{namespace}-{name}")),
       weight_multiplier: weight,
       endpoint: "https://kubernetes.default.svc".to_string(),
@@ -375,16 +350,22 @@ impl TranslationState {
     filters: ParsedRouteFilters,
     source: &str,
     client_identity: Option<&GeneratedClientIdentity>,
-  ) -> bool {
+  ) -> Result<(), super::TranslationFailure> {
     if let Some(policy_ref) = filters.route_policy.as_ref()
       && let Err(error) =
         super::route_policy::apply_route_policy(&self.route_policies, policy_ref, route, generated)
     {
+      let diagnostic = self.diagnostics.len();
       self.diagnostics.push(crate::model::Diagnostic::error(
         model_object_ref(route),
-        error.to_string(),
+        error.message,
       ));
-      return false;
+      return Err(match error.covered_diagnostics {
+        Some(covered) => {
+          super::TranslationFailure::fail_closed(diagnostic).with_covered_diagnostics(covered)
+        }
+        None => super::TranslationFailure::PreserveLastGood,
+      });
     }
     generated.request_headers = filters.request_headers;
     generated.response_headers = filters.response_headers;
@@ -394,16 +375,14 @@ impl TranslationState {
     for (index, mirror) in filters.request_mirrors.into_iter().enumerate() {
       let backend_refs = vec![mirror.backend_ref];
       let route_name = sanitize_name(&format!("{}-mirror-{index}", generated.name));
-      let Some(pool) = self.backend_pool(
+      let pool = self.backend_pool(
         route,
         from_kind,
         Some(&backend_refs),
         &route_name,
         source,
         client_identity,
-      ) else {
-        return false;
-      };
+      )?;
       let mut action = mirror.action;
       action.max_body_bytes = self.request_mirror_max_body_bytes;
       action.upstream_pool = pool.name.clone();
@@ -414,25 +393,14 @@ impl TranslationState {
       let auth = match self.authorized_external_auth(auth) {
         Ok(auth) => auth,
         Err(error) => {
-          self.diagnostics.push(crate::model::Diagnostic::error(
-            model_object_ref(route),
-            error.to_string(),
-          ));
-          return false;
+          return Err(self.preserve_last_good_error(model_object_ref(route), error.to_string()));
         }
       };
-      let Some(server) = self.backend_server(route, from_kind, &auth.backend_ref, 0, 1, None)
-      else {
-        return false;
-      };
+      let server = self.backend_server(route, from_kind, &auth.backend_ref, 0, 1, None)?;
       let endpoint = match external_auth_endpoint(&server.origin, auth.path_prefix.as_deref()) {
         Ok(endpoint) => endpoint,
         Err(error) => {
-          self.diagnostics.push(crate::model::Diagnostic::error(
-            model_object_ref(route),
-            error.to_string(),
-          ));
-          return false;
+          return Err(self.preserve_last_good_error(model_object_ref(route), error.to_string()));
         }
       };
       let name = sanitize_name(&format!("{}-ext-auth", generated.name));
@@ -461,7 +429,7 @@ impl TranslationState {
       );
       generated.external_auth = Some(name);
     }
-    true
+    Ok(())
   }
 
   fn authorized_external_auth(

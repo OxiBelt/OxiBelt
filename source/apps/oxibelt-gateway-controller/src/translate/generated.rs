@@ -78,7 +78,7 @@ pub(super) enum GeneratedBackendTlsSubjectAltName {
 #[derive(Debug, Clone)]
 pub(super) enum BackendTlsDecision {
   Valid(GeneratedBackendTls),
-  Invalid,
+  Invalid { covered_diagnostics: Vec<usize> },
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +137,7 @@ pub(super) struct NamedExactMatch {
 }
 
 impl GeneratedRoute {
-  pub(super) fn has_same_client_identity_tombstone_match(&self, other: &Self) -> bool {
+  pub(super) fn has_same_fail_closed_tombstone_match(&self, other: &Self) -> bool {
     route_source_identity(&self.source) == route_source_identity(&other.source)
       && self.name == other.name
       && self.path_prefix == other.path_prefix

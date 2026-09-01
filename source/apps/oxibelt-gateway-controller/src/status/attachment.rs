@@ -74,19 +74,21 @@ pub(super) fn route_has_matching_listener(
       "TCPRoute" => listener.protocol == "TCP",
       "UDPRoute" => listener.protocol == "UDP",
       _ => false,
-    }) && matches!(
-      gateway_policy::listener_allows_route(
-        &listener.allowed_routes,
-        route,
-        parent
-          .get("namespace")
-          .and_then(Value::as_str)
-          .unwrap_or(route.namespace()),
-        &listener.protocol,
-        listener.tls_mode.as_deref(),
-        namespace_labels,
-      ),
-      RoutePolicyDecision::Allowed
-    )
+    }) && listener.allowed_routes.as_ref().is_some_and(|policy| {
+      matches!(
+        gateway_policy::listener_allows_route(
+          policy,
+          route,
+          parent
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or(route.namespace()),
+          &listener.protocol,
+          listener.tls_mode.as_deref(),
+          namespace_labels,
+        ),
+        RoutePolicyDecision::Allowed
+      )
+    })
   })
 }
