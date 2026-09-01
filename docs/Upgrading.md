@@ -70,7 +70,9 @@ be used as a supported production upgrade source or target.
 | `0.8.1-beta.9` | `0.8.1` | Stable candidate | The stable source is exactly one documentation-only commit after the qualified beta.9 revision. This exact transition has no additional calendar delay, but stable publication cannot predate beta publication or verifier completion and remains subject to every stable-only release and alias gate. |
 | `0.8.1` | `0.9.0-beta.1` | Published, superseded | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). The immutable prerelease is published; use the published `0.9.0` stable release for the completed line unless a release-specific recovery procedure requires the beta. CT-disabled epoch-1 configurations need no native migration. |
 | `0.9.0-beta.1` | `0.9.0` | Published, qualified | The published stable release completed its own successful independent qualification. Its alias-promotion workflow did not complete the mutation step, so deploy only immutable `0.9.0` references; do not infer that mutable aliases identify this release. Later rerun failures are not reusable qualification evidence for this or another release and do not replace the successful exact-release qualification record. |
-| `0.9.0` | `0.9.1-beta.1` | Release candidate | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). This candidate hardens release-qualification registry descriptor readback and replaces yanked transitive `chacha20 0.10.1` with compatible `0.10.2`; configuration, schema, Admin, rulepack, image-role, and storage contracts are unchanged. |
+| `0.9.0` | `0.9.1-beta.1` | Published, qualified | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). The immutable beta.1 release and its exact-revision qualification remain attributable history, but its artifacts, receipts, and soak cannot qualify beta.2. |
+| `0.9.0` | `0.9.1-beta.2` | Candidate, not qualified | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). The source/configuration transition is supported after removing unsupported old-binary fields during rollback, but beta.2 needs its own signed tag, release, artifacts, qualification, and soak before deployment. |
+| `0.9.1-beta.1` | `0.9.1-beta.2` | Candidate, not qualified | Beta.2 adds bandwidth, upstream client identities, fail-closed Gateway deprogramming, security repairs, and refreshed dependency and Kubernetes inputs. Do not relabel or reuse beta.1 artifacts or evidence. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -202,44 +204,95 @@ conversion. A descriptor read that exhausts its bounded retry budget, or any
 valid descriptor mismatch, must remain a failed qualification result; neither
 a later rerun failure nor a rerun for another release is reusable evidence.
 
-Post-`0.9.1-beta.1` development adds optional per-route native bandwidth
-limits under `[routes.bandwidth]`. Existing routes remain unlimited without
-the table, and each omitted direction remains unlimited. The two positive
-byte-per-second fields are process-local runtime policy and do not change
-persisted state, Admin wire formats, Gateway API or Helm policy, or native
-configuration schema epoch `1`. WebSockets without stream WAF retain their
-prior frame-size and extension behavior through a constant-memory wire-frame
-adapter. It excludes framing and control frames from accounting and rechecks
-live policy within each payload in bounded 16 KiB chunks, including for
-sessions that began unlimited. Validate a configuration that opts in before
-rollout:
+`0.9.1-beta.2` is the next governed candidate for the complete development
+lineage after beta.1. This guide and its beta changelog entry do not tag,
+publish, qualify, or soak beta.2. The exact candidate revision must pass fresh
+release validation, build its own immutable artifacts, complete automatic
+independent qualification, and satisfy the required soak. No beta.1 binary,
+image, chart, scan, attestation, receipt, or elapsed soak time is reusable for
+beta.2.
 
-```sh
-oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
-```
+Beta.2 adds optional per-route native bandwidth limits under
+`[routes.bandwidth]`. Existing routes remain unlimited without the table, and
+each omitted direction remains unlimited. The two positive byte-per-second
+fields are process-local runtime policy and do not change persisted state,
+Admin wire formats, Gateway API or Helm policy, or native configuration schema
+epoch `1`. WebSockets without stream WAF retain their prior frame-size and
+extension behavior through a constant-memory wire-frame adapter. It excludes
+framing and control frames from accounting and rechecks live policy within
+each payload in bounded 16 KiB chunks, including for sessions that began
+unlimited.
 
-For rollback to a binary without this option, remove every
-`[routes.bandwidth]` table before restoring the old binary. No bandwidth state
-needs migration or recovery; each process reconstructs its route-local budgets
-from configuration at startup.
+Beta.2 also adds terminal empty-body `[routes.actions.direct_response]` error
+targets. The status must be in `400` through `599`; the action cannot be
+combined with another route target or request-processing action. Although the
+field is valid native epoch-1 configuration, its principal controller use is
+an exact match-equivalent `503` tombstone that prevents a rejected HTTPRoute or
+GRPCRoute from falling through to a broader route.
 
-Post-`0.9.1-beta.1` development also adds optional upstream client identities
-under `[upstreams.tls.client_identity]` and the equivalent pool-server or
-discovery TLS table. Existing configurations retain their prior no-client-
-certificate behavior. Before rollout, mount each certificate chain and
-unencrypted matching private key beneath the certificate root, validate the
-complete configuration, and confirm that the upstream still passes its normal
+Optional upstream client identities are available under
+`[upstreams.tls.client_identity]` and the equivalent pool-server or discovery
+TLS table. Existing configurations retain their prior no-client-certificate
+behavior. Before rollout, mount each certificate chain and unencrypted
+matching private key beneath the certificate root, validate the complete
+configuration, and confirm that the upstream still passes its normal
 server-certificate policy. Client-identity connections do not use outbound TLS
 resumption; established long-lived connections may retain the previous
 identity while a successful full reload drains them. Immediate compromise
 response therefore requires the upstream server to revoke or reject the old
 certificate.
 
-To roll back to a binary without upstream client identities, first remove each
-`tls.client_identity` table and any Gateway or Helm references that require it,
-then restore the prior binary and configuration together. Projected or
-controller-derived Kubernetes Secrets must be removed separately after no
-active or retained rollout references them.
+The OxiBelt chart can project explicitly selected upstream client-identity
+Secret keys through `upstreamTls.clientIdentitySecretProjections`. The Gateway
+controller can consume one `Gateway.spec.tls.backend.clientCertificateRef`
+only when its exact source Secret is listed in
+`upstreamClientTls.sourceSecretAllowlist` and any required cross-namespace
+`ReferenceGrant` exists. Omission grants no Secret access. The controller
+validates a bounded chain/key pair, creates a content-addressed
+target-namespace Secret, and keeps secret bytes out of generated ConfigMaps, status,
+diagnostics, and digests.
+
+Gateway translation remains fail closed without treating every diagnostic as
+safe to publish. When an HTTPRoute or GRPCRoute backend, mirror, external-auth
+backend, or uniquely targeted policy becomes unusable and translation proves
+the complete affected match, the controller emits an exact empty-body `503`
+tombstone. When a proven-safe TCPRoute or UDPRoute backend becomes unusable,
+it removes only that route's exact listener. Backend pools are all-or-nothing:
+one invalid member cannot leave a partial pool or orphaned authentication,
+asset, filter, or policy output. Ambiguous parsing, matching, targeting,
+compatibility, and mixed failures preserve the last good revision. TLSRoute
+failures also preserve the last good revision because removing one SNI rule
+could expose a wildcard, local, or default route.
+
+The same lineage tightens request handling without adding OxiRule or CRS
+syntax. Brotli body inspection rejects incomplete, trailing, no-progress, and
+Large Window streams; route prefix matching requires a segment boundary;
+WebSocket upgrades require an exclusively `websocket` offer and response; and
+shaped HTTP/2 and HTTP/3 request bodies retain `413 Payload Too Large`
+classification. The locked Rust/probe graphs, supply-chain evidence, CI
+actions, builder/runtime image digests, and fuzz nightly are refreshed. The
+Kubernetes representatives advance to `v1.34.11`, `v1.35.8`, and `v1.36.4`,
+Kind advances to `v0.33.0`, and the Helm matrix uses `3.21.4` and `4.2.4`.
+These matrix changes require fresh evidence and do not themselves graduate a
+Kubernetes feature.
+
+Validate every configuration that opts in before rollout, and keep the
+controller and data-plane images on the same exact candidate revision:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+pnpm run release-contract:check
+```
+
+Before rollback to beta.1 or `0.9.0`, remove every `[routes.bandwidth]`,
+`tls.client_identity`, and `actions.direct_response` table plus every Helm
+projection and Gateway `clientCertificateRef` that requires beta.2. Drain
+long-lived connections, then restore the retained prior controller and
+data-plane images together by immutable digest. No bandwidth or other durable state
+needs conversion; each process reconstructs its route-local budgets at
+startup. Remove projected or controller-derived Kubernetes Secrets only after
+no active or retained rollout references them. If an old client identity was
+compromised, revoke it at the upstream independently of rollback.
 
 ## Upgrade from 0.6.6 to the 0.8.1 line
 

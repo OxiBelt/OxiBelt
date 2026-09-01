@@ -15,6 +15,173 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.9.1-beta.2] - 2026-08-31
+
+> Candidate ledger for the complete development lineage after
+> `0.9.1-beta.1`. This entry records intended compatibility and validation
+> requirements only: beta.2 is not tagged, published, qualified, or soaked by
+> this documentation change. Its exact revision must produce fresh release and
+> independent-qualification evidence; no beta.1 artifact or receipt is
+> reusable.
+
+- Changes since: `0.9.1-beta.1`
+- Supported upgrade sources: `0.9.1-beta.1`, `0.9.0`
+- Upgrade guide: [Upgrade from 0.9.0 to the 0.9.1 line](docs/Upgrading.md#upgrade-from-090-to-the-091-line)
+
+### Configuration
+
+- Add optional per-route `[routes.bandwidth]` upload and download
+  byte-per-second limits. Omission preserves unlimited traffic, each direction is
+  independent, and budgets are shared only within one process. Accounting is
+  payload-only and applies across HTTP, CONNECT, WebSocket, and WebTransport
+  without charging protocol framing or control frames.
+- Add optional HTTPS upstream client identities for direct upstreams, pool
+  members, and discovery templates. Each identity requires a cert-root-relative
+  certificate chain and matching unencrypted private key and never relaxes
+  ordinary upstream server authentication. Client-identity connections disable
+  outbound TLS resumption and the persistent client-config cache.
+- Add bounded empty-body `actions.direct_response` error targets with status
+  codes from `400` through `599`. A direct response is terminal and cannot be
+  combined with another route target or request-processing action. The Gateway
+  controller uses match-equivalent `503` targets when an HTTP or gRPC route can
+  be deprogrammed safely.
+- Add Helm values for explicit upstream client-identity Secret projections and
+  a Gateway-controller `upstreamClientTls.sourceSecretAllowlist`. Both remain
+  opt-in; omitted values grant no Secret access and preserve existing Pod and
+  controller behavior.
+
+### Schema epochs
+
+- Keep the native configuration schema at epoch `1` while adding the optional
+  bandwidth, upstream-client-identity, and direct-response fields. Existing
+  epoch-1 configurations remain valid and retain their behavior without a
+  migration.
+- Extend the two Helm values schemas and Kubernetes feature-graduation policy
+  for the opt-in Secret projections and refreshed immutable matrix inputs.
+  These are deployment-contract additions, not durable schema migrations.
+
+### Deprecations and removals
+
+- No configuration key, API, executable, image role, rule syntax, or supported
+  upgrade source is deprecated or removed.
+
+### Admin API
+
+- No Admin API endpoint, authentication, authorization, request, response, or
+  persisted Admin contract changes. Existing diagnostics can report effective
+  upstream client-identity state without exposing certificates, private keys,
+  Secret contents, or paths outside the existing bounded model.
+
+### Feature lifecycle
+
+- Add supported native route bandwidth shaping and native upstream mTLS client
+  authentication. Gateway and Helm delivery of client identities inherit those
+  deployment surfaces' existing experimental and unvalidated lifecycle state.
+- Add a bounded direct-response route target and fail-closed Gateway behavior.
+  Proven-safe HTTPRoute and GRPCRoute withdrawal publishes exact
+  match-equivalent empty-body `503` tombstones; proven-safe TCPRoute and UDPRoute
+  withdrawal removes only the affected listener. Backend pools are emitted
+  all-or-nothing. Ambiguous translation failures and TLSRoute failures preserve
+  the last good revision because omission could expose another route or SNI
+  rule.
+- Refresh the Kubernetes `1.34`-`1.36` representatives to `v1.34.11`,
+  `v1.35.8`, and `v1.36.4`, Kind to `v0.33.0`, and the Helm 3 lane to
+  `3.21.4` while retaining Helm `4.2.4`. These are fresh graduation evidence
+  inputs and do not themselves promote any Kubernetes feature.
+
+### Rulepack compatibility
+
+- No OxiRule, CRS, rulepack schema, phase, action, matching, or normalization
+  syntax changes. Strict Brotli decoding changes only how encoded bodies reach
+  the existing WAF inspection pipeline: incomplete, trailing, no-progress, and
+  Large Window streams are rejected rather than accepted or decoded with an
+  unbounded memory requirement.
+
+### Executables and images
+
+- Preserve executable names, package ownership, image roles, chart names, and
+  the 30-image and two-chart release inventory. The Gateway controller and data
+  plane must be deployed from the same exact candidate revision for the new
+  client-identity and fail-closed rollout contracts.
+- Refresh compatible Rust dependency graphs, probe lockfiles, cargo-vet and
+  dependency-policy evidence, CI actions, builder/runtime image digests,
+  Kubernetes node images, Kind, Helm 3, and the pinned fuzz nightly. Rebuild
+  every immutable image and chart from beta.2; do not relabel or combine beta.1
+  artifacts with the refreshed graph.
+
+### Storage and state
+
+- No durable database, object-store, shared-state, or on-disk migration is
+  required. Bandwidth credits and queues are process-local and reconstructed
+  from configuration.
+- Helm-projected source Secrets, controller-derived target Secrets, immutable
+  controller ConfigMaps, mounts, and rollout references are Kubernetes
+  deployment state. Remove them only after the corresponding old data-plane
+  revision has drained; they do not introduce a native or database schema
+  epoch.
+
+### Upgrade validation
+
+- Validate the exact beta.2 source revision with fresh Rust, TypeScript,
+  configuration/schema, rootless image, Helm, Gateway-controller, and
+  Kubernetes `1.34`-`1.36` evidence. The immutable rollout checks must prove
+  that rejected backend references produce a new denied revision, close the
+  affected TCP/UDP listeners, do not expose broader HTTP/gRPC fallbacks, and
+  recover only after authorization is restored.
+- At minimum, run the governed ledger check and exact-range validation against
+  both the preceding beta and stable source revisions:
+
+```sh
+beta_2_revision="$(git rev-parse HEAD)"
+pnpm run release-contract:check
+pnpm run release-contract:check --change-base b984df25cfc69dd12669317500389082a392d9b2 --change-head "${beta_2_revision}"
+pnpm run release-contract:check --change-base b1ca5aab407e8398792a2b11c8436b6ff78ed193 --change-head "${beta_2_revision}"
+```
+
+### Rollback and irreversible steps
+
+- Before restoring `0.9.1-beta.1` or `0.9.0`, remove every
+  `[routes.bandwidth]`, `tls.client_identity`, and `actions.direct_response`
+  table plus every Helm projection and Gateway `clientCertificateRef` that
+  requires beta.2. Drain long-lived connections, then restore the retained
+  prior controller and data-plane images together by immutable digest.
+- Remove controller-derived or projected Secrets only after no active or
+  retained rollout references them. No durable state conversion is required
+  and no beta.2 data migration is irreversible, but an upstream must revoke a
+  compromised old client certificate because already-established connections
+  can retain it until drain.
+
+### Known issues
+
+- Beta.2 is only a candidate described by this ledger until its signed tag,
+  person-reviewed prerelease, exact-version artifacts, complete automatic
+  qualification, and required soak all succeed. Beta.1 artifacts, scans,
+  attestations, chart receipts, rebuild receipts, and soak time cannot qualify
+  beta.2.
+- Route bandwidth is process-local, so replicas enforce independent budgets.
+  Ambiguous Gateway translation errors and TLSRoute failures deliberately keep
+  the last good revision; operators must resolve the reported condition rather
+  than treating status rejection alone as proof that an old TLS route stopped
+  serving.
+
+### Security
+
+- Reject Brotli Large Window, incomplete, trailing, and no-progress encodings;
+  enforce segment-boundary route-prefix matching; require an exclusively
+  `websocket` Upgrade offer and response; and preserve `413 Payload Too Large`
+  classification through shaped HTTP/2 and HTTP/3 request bodies.
+- Validate upstream client certificate chains and matching keys before
+  activation, keep upstream server authentication mandatory, disable
+  client-auth resumption, and restrict Gateway Secret reads to exact
+  operator-allowlisted names with any required cross-namespace
+  `ReferenceGrant`.
+- Publish fail-closed replacements only when translation proves the exact
+  affected scope: HTTP/gRPC receives match-equivalent `503` tombstones and safe
+  L4 failures remove the exact listener. Partial backend pools, orphaned
+  authentication or policy artifacts, unrelated listener removal, and
+  diagnostic-code-only safety decisions are forbidden; every ambiguous or
+  mixed failure preserves the last good revision.
+
 ## [0.9.1-beta.1] - 2026-08-28
 
 > Release-candidate ledger for the release-qualification registry readback
