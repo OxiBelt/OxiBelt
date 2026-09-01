@@ -434,10 +434,12 @@ fn turn_auth(mode: TurnAuthMode, nonce_ttl_seconds: u64) -> TurnAuthConfig {
       username: TURN_USER.to_string(),
       password: Some(TURN_PASSWORD.to_string()),
       password_env: None,
+      password_file: None,
     }],
     rest_shared_secret: Some("fuzz-rest-secret".to_string()),
     rest_shared_secret_env: None,
     nonce_ttl_seconds,
+    ..TurnAuthConfig::default()
   }
 }
 
