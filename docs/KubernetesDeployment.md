@@ -32,6 +32,11 @@ running-Pod version boundary. Normal pairing is exact. A declared
 preceding minor version until an RFC3339 deadline no more than 24 hours away; see
 [the skew contract](KubernetesSupport.md#controller-and-data-plane-skew).
 
+`oxibeltctl doctor --kubernetes` requires a direct, certificate-verified API
+server connection. It rejects kubeconfig or `HTTPS_PROXY`/`https_proxy` proxy
+routing, `insecure-skip-tls-verify`, and `exec` or `auth-provider` credentials
+before constructing the Kubernetes client.
+
 Graduation also requires IPv4 single-stack cluster evidence on Calico and
 Cilium, `restricted` Pod Security admission, multi-node failure tests, and
 native `linux/amd64`, `linux/arm64`, and `linux/riscv64` Kubernetes runs. Other

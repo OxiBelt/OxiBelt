@@ -223,7 +223,7 @@
       "ecosystem": "rust",
       "control": "cargo-vet",
       "subject": "kube-client@4.2.0:safe-to-deploy",
-      "rationale": "Whole-crate certification remains withheld because the optional HTTPS proxy connector can reuse cluster TLS roots and identity. OxiBelt does not enable kube-client's HTTP or SOCKS proxy features; deployment diagnostics rejects command-based kubeconfig credentials and performs read-only API calls, while otherwise honoring operator-selected kubeconfig TLS settings.",
+      "rationale": "Whole-crate certification remains withheld because the optional HTTPS proxy connector can reuse cluster TLS roots and identity. OxiBelt keeps kube-client's HTTP and SOCKS proxy features disabled and seals its client construction behind a tested direct-transport adapter that rejects loaded proxy settings and disabled certificate verification before client creation.",
       "owner": "@piquark6046",
       "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/120",
       "reviewedOn": "2026-07-31",

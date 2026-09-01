@@ -4,6 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const CARGO_VET_BOOTSTRAP_EXEMPTIONS_PATH: &str = "supply-chain/cargo-vet-bootstrap-exemptions.txt";
+const CARGO_VET_BOOTSTRAP_EXEMPTIONS_SHA256: &str =
+  "ead1d1105d6a4c791bcd7c0893466a6329ec29d7757c6226648158354d45b033";
+
 fn repo_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
     .parent()
@@ -41,6 +45,181 @@ fn string_array<'a>(value: &'a toml::Value, description: &str) -> Vec<&'a str> {
 fn sha256_hex(contents: &[u8]) -> String {
   let digest = Sha256::digest(contents);
   digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn exact_cargo_vet_subject(package: &str, version: &str, criteria: &str) -> String {
+  assert!(
+    !package.is_empty() && !package.contains('@') && !package.contains(':'),
+    "cargo-vet subject has invalid package: {package}"
+  );
+  assert!(
+    !version.is_empty() && !version.contains('@') && !version.contains(':'),
+    "cargo-vet subject has invalid version: {version}"
+  );
+  assert!(
+    matches!(criteria, "safe-to-deploy" | "safe-to-run"),
+    "cargo-vet subject has invalid criteria: {criteria}"
+  );
+  format!("{package}@{version}:{criteria}")
+}
+
+fn cargo_vet_exemption_subjects(vet_config: &toml::Value) -> BTreeSet<String> {
+  let mut subjects = BTreeSet::new();
+  for (package, entries) in vet_config["exemptions"]
+    .as_table()
+    .expect("cargo-vet exemptions must be a table")
+  {
+    for entry in entries
+      .as_array()
+      .expect("cargo-vet exemption entries must be arrays")
+    {
+      let version = entry["version"]
+        .as_str()
+        .unwrap_or_else(|| panic!("cargo-vet exemption {package} requires a version"));
+      let criteria = entry["criteria"]
+        .as_str()
+        .unwrap_or_else(|| panic!("cargo-vet exemption {package}@{version} requires criteria"));
+      let subject = exact_cargo_vet_subject(package, version, criteria);
+      assert!(
+        subjects.insert(subject.clone()),
+        "duplicate cargo-vet exemption subject: {subject}"
+      );
+    }
+  }
+  subjects
+}
+
+fn cargo_vet_bootstrap_exemption_subjects() -> BTreeSet<String> {
+  let inventory = read(CARGO_VET_BOOTSTRAP_EXEMPTIONS_PATH);
+  assert_eq!(
+    sha256_hex(inventory.as_bytes()),
+    CARGO_VET_BOOTSTRAP_EXEMPTIONS_SHA256,
+    "cargo-vet bootstrap exemption inventory changed"
+  );
+
+  let mut subjects = BTreeSet::new();
+  let mut previous = None;
+  for (index, subject) in inventory.lines().enumerate() {
+    assert_eq!(
+      subject.trim(),
+      subject,
+      "cargo-vet bootstrap exemption line {} has surrounding whitespace",
+      index + 1
+    );
+    let (package_version, criteria) = subject.rsplit_once(':').unwrap_or_else(|| {
+      panic!(
+        "cargo-vet bootstrap exemption line {} needs criteria",
+        index + 1
+      )
+    });
+    let (package, version) = package_version.rsplit_once('@').unwrap_or_else(|| {
+      panic!(
+        "cargo-vet bootstrap exemption line {} needs package@version",
+        index + 1
+      )
+    });
+    assert_eq!(
+      exact_cargo_vet_subject(package, version, criteria),
+      subject,
+      "cargo-vet bootstrap exemption line {} is not exact",
+      index + 1
+    );
+    if let Some(previous) = previous {
+      assert!(
+        previous < subject,
+        "cargo-vet bootstrap exemption inventory must be strictly sorted"
+      );
+    }
+    assert!(
+      subjects.insert(subject.to_owned()),
+      "duplicate cargo-vet bootstrap exemption subject: {subject}"
+    );
+    previous = Some(subject);
+  }
+  assert_eq!(
+    subjects.len(),
+    443,
+    "cargo-vet bootstrap exemption inventory must remain independently frozen"
+  );
+  subjects
+}
+
+fn current_unix_day() -> i64 {
+  SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .expect("system time must be after Unix epoch")
+    .as_secs() as i64
+    / 86_400
+}
+
+fn active_non_bootstrap_cargo_vet_exception_subjects(
+  policy: &serde_json::Value,
+) -> BTreeSet<String> {
+  let today = current_unix_day();
+  let mut subjects = BTreeSet::new();
+  for exception in policy["exceptions"]
+    .as_array()
+    .expect("exceptions must be an array")
+    .iter()
+    .filter(|exception| {
+      exception["ecosystem"] == "rust"
+        && exception["control"] == "cargo-vet"
+        && exception["bootstrap"].as_bool() != Some(true)
+    })
+  {
+    let id = exception["id"]
+      .as_str()
+      .expect("cargo-vet exception requires an id");
+    let subject = exception["subject"]
+      .as_str()
+      .expect("cargo-vet exception requires an exact subject");
+    let (package_version, criteria) = subject
+      .rsplit_once(':')
+      .expect("cargo-vet exception subject must end in criteria");
+    let (package, version) = package_version
+      .rsplit_once('@')
+      .expect("cargo-vet exception subject must identify package@version");
+    assert_eq!(
+      exact_cargo_vet_subject(package, version, criteria),
+      subject,
+      "cargo-vet exception {id} must use an exact subject"
+    );
+    let expires = parse_date(
+      exception["expiresOn"]
+        .as_str()
+        .expect("cargo-vet exception requires expiresOn"),
+    );
+    assert!(expires >= today, "cargo-vet exception {id} is expired");
+    assert!(
+      subjects.insert(subject.to_owned()),
+      "duplicate active cargo-vet exception subject: {subject}"
+    );
+  }
+  subjects
+}
+
+fn cargo_vet_subject_mapping_errors(
+  current_exemptions: &BTreeSet<String>,
+  bootstrap_exemptions: &BTreeSet<String>,
+  active_exceptions: &BTreeSet<String>,
+) -> Vec<String> {
+  let mut errors = current_exemptions
+    .difference(bootstrap_exemptions)
+    .filter(|subject| !active_exceptions.contains(*subject))
+    .map(|subject| {
+      format!(
+        "cargo-vet exemption {subject} is outside the frozen bootstrap inventory and requires exactly one active non-bootstrap exception"
+      )
+    })
+    .collect::<Vec<_>>();
+  errors.extend(
+    active_exceptions
+      .difference(current_exemptions)
+      .map(|subject| {
+        format!("cargo-vet exception {subject} must match an exact config.toml exemption")
+      }),
+  );
+  errors
 }
 
 fn compatibility_line(version: &str) -> String {
@@ -400,6 +579,25 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
 }
 
 #[test]
+fn kubernetes_client_features_exclude_proxy_transports() {
+  let root = toml_document("Cargo.toml");
+  let kube = &root["workspace"]["dependencies"]["kube"];
+  assert_eq!(kube["default-features"].as_bool(), Some(false));
+  let features = kube["features"]
+    .as_array()
+    .expect("workspace kube features must be an array")
+    .iter()
+    .map(|feature| feature.as_str().expect("kube feature must be a string"))
+    .collect::<BTreeSet<_>>();
+  assert_eq!(
+    features,
+    BTreeSet::from(["aws-lc-rs", "client", "runtime", "rustls-tls"])
+  );
+  assert!(!features.contains("http-proxy"));
+  assert!(!features.contains("socks5"));
+}
+
+#[test]
 fn cargo_vet_imports_and_bootstrap_inventory_are_locked() {
   let policy = json_policy();
   let vet_policy = &policy["rust"]["cargoVet"];
@@ -417,19 +615,9 @@ fn cargo_vet_imports_and_bootstrap_inventory_are_locked() {
     );
   }
 
-  let exemption_count = vet_config["exemptions"]
-    .as_table()
-    .expect("cargo-vet exemptions must be a table")
-    .values()
-    .map(|entries| {
-      entries
-        .as_array()
-        .expect("cargo-vet exemption entries must be arrays")
-        .len()
-    })
-    .sum::<usize>();
+  let current_exemptions = cargo_vet_exemption_subjects(&vet_config);
   assert_eq!(
-    exemption_count as u64,
+    current_exemptions.len() as u64,
     vet_policy["exemptedPackageVersions"]
       .as_u64()
       .expect("exemptedPackageVersions must be an integer")
@@ -474,9 +662,69 @@ fn cargo_vet_imports_and_bootstrap_inventory_are_locked() {
     );
   }
 
+  let bootstrap_exemptions = cargo_vet_bootstrap_exemption_subjects();
+  let active_exceptions = active_non_bootstrap_cargo_vet_exception_subjects(&policy);
+  let mapping_errors = cargo_vet_subject_mapping_errors(
+    &current_exemptions,
+    &bootstrap_exemptions,
+    &active_exceptions,
+  );
+  assert!(
+    mapping_errors.is_empty(),
+    "cargo-vet exemption/exception mapping violations:\n{}",
+    mapping_errors.join("\n")
+  );
+
   let imports_lock = read("supply-chain/imports.lock");
   assert!(imports_lock.contains("[[audits.google."));
   assert!(imports_lock.contains("[[audits.mozilla."));
+}
+
+#[test]
+fn cargo_vet_rejects_unmapped_subjects_in_both_directions() {
+  let bootstrap_exemptions = BTreeSet::from(["existing@1.0.0:safe-to-deploy".to_owned()]);
+  let mut current_exemptions = BTreeSet::from([
+    "existing@1.0.0:safe-to-deploy".to_owned(),
+    "new-package@2.0.0:safe-to-deploy".to_owned(),
+  ]);
+  let mut active_exceptions = BTreeSet::new();
+
+  assert_eq!(
+    cargo_vet_subject_mapping_errors(
+      &current_exemptions,
+      &bootstrap_exemptions,
+      &active_exceptions,
+    ),
+    vec![
+      "cargo-vet exemption new-package@2.0.0:safe-to-deploy is outside the frozen bootstrap inventory and requires exactly one active non-bootstrap exception"
+        .to_owned()
+    ]
+  );
+
+  active_exceptions.insert("new-package@2.0.0:safe-to-deploy".to_owned());
+  assert!(
+    cargo_vet_subject_mapping_errors(
+      &current_exemptions,
+      &bootstrap_exemptions,
+      &active_exceptions,
+    )
+    .is_empty(),
+    "the exact active exception must preserve a legitimate post-bootstrap exemption"
+  );
+
+  current_exemptions.remove("new-package@2.0.0:safe-to-deploy");
+  assert_eq!(
+    cargo_vet_subject_mapping_errors(
+      &current_exemptions,
+      &bootstrap_exemptions,
+      &active_exceptions,
+    ),
+    vec![
+      "cargo-vet exception new-package@2.0.0:safe-to-deploy must match an exact config.toml exemption"
+        .to_owned()
+    ],
+    "a stale active exception must not outlive its exact Cargo-vet exemption"
+  );
 }
 
 #[test]
