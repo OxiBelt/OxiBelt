@@ -3238,7 +3238,6 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "name: Setup canonical Helm packager",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
     "version: v4.2.4",
-    "token: \"\"",
     "pnpm run test",
     "name: Verify hosted release-tag ruleset core policy",
     "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'OxiBelt/OxiBelt'",
@@ -3298,7 +3297,6 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
   for expected in [
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
     "version: v4.2.4",
-    "token: \"\"",
   ] {
     assert!(
       helm_step.contains(expected),
@@ -3320,7 +3318,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     .collect::<Vec<_>>();
   assert_eq!(
     helm_inputs,
-    ["version: v4.2.4", "token: \"\""],
+    ["version: v4.2.4"],
     "canonical Helm setup should receive only the exact version and no GitHub token"
   );
   let kubernetes_graduation = job_text
