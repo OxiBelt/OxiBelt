@@ -2596,7 +2596,7 @@ jobs:
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
           OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
-          OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e
+          OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
@@ -2671,7 +2671,7 @@ jobs:
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
           OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
-          OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e
+          OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: timeout --kill-after=60s 20m tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
@@ -2746,7 +2746,7 @@ jobs:
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
           OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
-          OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e
+          OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
@@ -2821,7 +2821,7 @@ jobs:
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
           OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
-          OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e
+          OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
@@ -2896,7 +2896,7 @@ jobs:
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
           OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
-          OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e
+          OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
@@ -2971,7 +2971,7 @@ jobs:
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
           OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
-          OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e
+          OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
@@ -3046,7 +3046,7 @@ jobs:
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
           OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
-          OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e
+          OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"
@@ -3121,7 +3121,7 @@ jobs:
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
           OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
-          OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e
+          OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
         run: tests/scripts/run-proxy-integration-matrix.sh "${{ matrix.category }}" "${{ matrix.case }}"

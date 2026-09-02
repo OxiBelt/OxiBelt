@@ -32,7 +32,8 @@ pq_probe_image="oxibelt/pq-probe:ci"
 protocol_probe_image="oxibelt/protocol-probe:ci"
 postgres_image="oxibelt/postgres:ci"
 redis_image="valkey/valkey:9-alpine"
-coturn_image="ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e"
+coturn_source_image="ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e"
+coturn_image="oxibelt/coturn:ci"
 
 retry_command() {
   local attempts="$1"
@@ -74,9 +75,11 @@ for base_image in \
   debian:trixie-slim \
   postgres:18-alpine \
   "${redis_image}" \
-  "${coturn_image}"; do
+  "${coturn_source_image}"; do
   retry_command 3 docker pull --platform "${platform}" "${base_image}"
 done
+
+docker tag "${coturn_source_image}" "${coturn_image}"
 
 build_helper_image \
   "${mock_upstream_image}" \

@@ -6791,6 +6791,7 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
     "oxibelt/postgres:ci",
     "valkey/valkey:9-alpine",
     "ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e",
+    "oxibelt/coturn:ci",
   ] {
     assert!(
       script.contains(image),
@@ -6802,6 +6803,16 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
       && script.contains("retry_command 3 docker buildx build")
       && script.contains("retry_command 3 docker save"),
     "helper image build script should retry Docker Hub pulls, builds, and image save"
+  );
+  let coturn_tag = script
+    .find("docker tag \"${coturn_source_image}\" \"${coturn_image}\"")
+    .expect("helper image build should tag the digest-pinned coturn source");
+  let image_save = script
+    .find("retry_command 3 docker save")
+    .expect("helper image build should save the helper images");
+  assert!(
+    coturn_tag < image_save,
+    "coturn should receive its stable local artifact tag before docker save"
   );
 }
 
@@ -6832,7 +6843,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci",
     "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci",
     "OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine",
-    "OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e",
+    "OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci",
     "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
   ] {
     let expected_count = if value == "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci" {
@@ -6853,6 +6864,12 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
       "each Docker integration job should pass {value}"
     );
   }
+  assert!(
+    !workflow.contains(
+      "OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e"
+    ),
+    "Docker integration jobs should consume coturn through its artifact-preserved local tag"
+  );
 }
 
 #[test]
