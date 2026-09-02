@@ -205,7 +205,7 @@ pub(super) fn udp_allocate_options(
   message: &StunMessage<'_>,
 ) -> Result<UdpAllocateOptions, TurnRequestError> {
   let dont_fragment = match singleton_attr(message, ATTR_DONT_FRAGMENT)? {
-    Some(value) if value.is_empty() => true,
+    Some([]) => true,
     Some(_) => return Err(TurnRequestError::bad_request()),
     None => false,
   };

@@ -1,6 +1,6 @@
 //! RFC 6062 TURN TCP allocation and data-connection lifecycle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,13 +19,17 @@ pub(super) struct PendingTcpConnection {
   pub(super) expires_at: Instant,
 }
 
+pub(super) struct BoundTcpConnection {
+  pub(super) peer: TcpStream,
+  pub(super) owner: EdgeClient,
+  pub(super) family: TurnRelayAddressFamily,
+  pub(super) connection_id: u32,
+}
+
 pub(super) enum ConnectionBindOutcome {
   Bound {
-    stream: TcpStream,
+    connection: BoundTcpConnection,
     response: Vec<u8>,
-    owner: EdgeClient,
-    family: TurnRelayAddressFamily,
-    connection_id: u32,
   },
   Rejected(Vec<u8>),
 }
@@ -225,20 +229,22 @@ pub(super) async fn handle_connection_bind(
     let mut found = None;
     for (owner, state) in clients.iter_mut() {
       for (family, allocation) in &mut state.allocations {
-        if !allocation.pending_tcp.contains_key(&connection_id) {
+        let Entry::Occupied(entry) = allocation.pending_tcp.entry(connection_id) else {
           continue;
-        }
+        };
         if !allocation.auth.has_same_credentials(&request_auth) {
           found = Some(Err(EdgeRequestFailure::Turn(441, "Wrong Credentials")));
         } else {
-          let pending = allocation
-            .pending_tcp
-            .remove(&connection_id)
-            .expect("pending connection checked above");
+          let pending = entry.remove();
           found = Some(match pending.stream {
             Some(stream) => {
               allocation.active_tcp.insert(connection_id, pending.peer);
-              Ok((stream, *owner, *family, connection_id))
+              Ok(BoundTcpConnection {
+                peer: stream,
+                owner: *owner,
+                family: *family,
+                connection_id,
+              })
             }
             None => Err(EdgeRequestFailure::Turn(
               447,
@@ -255,17 +261,14 @@ pub(super) async fn handle_connection_bind(
     found.unwrap_or(Err(EdgeRequestFailure::Turn(400, "Bad Request")))
   };
   match bound {
-    Ok((stream, owner, family, connection_id)) => Ok(ConnectionBindOutcome::Bound {
-      stream,
+    Ok(connection) => Ok(ConnectionBindOutcome::Bound {
+      connection,
       response: encode_authenticated_success(
         &request_auth,
         CONNECTION_BIND_REQUEST,
         message.transaction_id,
         &[],
       ),
-      owner,
-      family,
-      connection_id,
     }),
     Err(failure) => {
       let (code, reason) = match failure {
@@ -365,14 +368,17 @@ pub(super) fn spawn_tcp_peer_acceptor(
 
 pub(super) async fn relay_bound_tcp_connection(
   downstream: BoxedIo,
-  peer: TcpStream,
   edge: EdgeState,
-  owner: EdgeClient,
-  family: TurnRelayAddressFamily,
-  connection_id: u32,
+  connection: BoundTcpConnection,
   drain: ConnectionDrain,
   idle_timeout: Duration,
 ) -> anyhow::Result<()> {
+  let BoundTcpConnection {
+    peer,
+    owner,
+    family,
+    connection_id,
+  } = connection;
   let relay = super::super::listener::copy_bidirectional_with_idle(
     downstream,
     Box::new(peer),
@@ -511,7 +517,21 @@ async fn connect_from_relay(
 
 #[cfg(test)]
 pub(super) mod tests {
+  use std::net::Ipv4Addr;
+
   use super::*;
+
+  use sha2::{Digest, Sha256};
+
+  use crate::config::{
+    TurnAuthConfig, TurnAuthMode, TurnEdgeRelayLimitsConfig, TurnEdgeRelayPeerPolicyConfig,
+    TurnListenerTlsConfig, TurnPasswordAlgorithm, TurnRelayFamilyConfig, TurnRelayPortRange,
+    TurnStaticCredentialConfig, WebRtcTurnListenerMode,
+  };
+
+  const TEST_USERNAME: &str = "test-user";
+  const TEST_PASSWORD: &str = "test-password";
+  const TEST_REALM: &str = "example.test";
 
   pub(in crate::turn::edge) fn test_authenticated_context() -> Arc<AuthenticatedContext> {
     test_authenticated_context_with_password("test-password")
@@ -520,16 +540,10 @@ pub(super) mod tests {
   pub(in crate::turn::edge) fn test_authenticated_context_with_password(
     password: &str,
   ) -> Arc<AuthenticatedContext> {
-    use sha2::{Digest, Sha256};
-
-    use crate::config::{
-      TurnAuthConfig, TurnAuthMode, TurnPasswordAlgorithm, TurnStaticCredentialConfig,
-    };
-
     let auth = TurnAuthConfig {
       mode: TurnAuthMode::Enforce,
       static_credentials: vec![TurnStaticCredentialConfig {
-        username: "test-user".to_string(),
+        username: TEST_USERNAME.to_string(),
         password: Some(password.to_string()),
         password_env: None,
         password_file: None,
@@ -537,15 +551,15 @@ pub(super) mod tests {
       password_algorithms: vec![TurnPasswordAlgorithm::Sha256],
       ..TurnAuthConfig::default()
     };
-    let key = Sha256::digest(format!("test-user:example.test:{password}").as_bytes());
+    let key = Sha256::digest(format!("{TEST_USERNAME}:{TEST_REALM}:{password}").as_bytes());
     let password_algorithms = crate::turn::auth::password_algorithms_challenge_attribute(&auth);
     let raw = crate::turn::protocol::with_message_integrity_sha256(
       encode_message(
         ALLOCATE_REQUEST,
         [1; 12],
         &[
-          (ATTR_USERNAME, b"test-user".to_vec()),
-          (ATTR_REALM, b"example.test".to_vec()),
+          (ATTR_USERNAME, TEST_USERNAME.as_bytes().to_vec()),
+          (ATTR_REALM, TEST_REALM.as_bytes().to_vec()),
           password_algorithms,
           (ATTR_PASSWORD_ALGORITHM, vec![0, 2, 0, 0]),
         ],
@@ -554,7 +568,7 @@ pub(super) mod tests {
     );
     let message = parse_stun(&raw).expect("authenticated test message");
     let AuthenticatedContextDecision::Pass(context) =
-      auth::authenticated_context_for_source(&auth, "example.test", None, &message)
+      auth::authenticated_context_for_source(&auth, TEST_REALM, None, &message)
         .expect("test authentication must be evaluated")
     else {
       panic!("test credentials must authenticate");
@@ -562,10 +576,121 @@ pub(super) mod tests {
     Arc::new(context)
   }
 
+  fn connection_bind_config() -> WebRtcTurnListenerConfig {
+    WebRtcTurnListenerConfig {
+      name: "tcp-bind-test".to_string(),
+      mode: WebRtcTurnListenerMode::EdgeRelay,
+      bind_udp: None,
+      bind_udp_additional: Vec::new(),
+      bind_tcp: Some(SocketAddr::from(([127, 0, 0, 1], 3478))),
+      bind_tcp_additional: Vec::new(),
+      bind_tls: None,
+      bind_tls_additional: Vec::new(),
+      idle_timeout_ms: 75_000,
+      realm: TEST_REALM.to_string(),
+      auth: TurnAuthConfig {
+        mode: TurnAuthMode::Enforce,
+        static_credentials: vec![TurnStaticCredentialConfig {
+          username: TEST_USERNAME.to_string(),
+          password: Some(TEST_PASSWORD.to_string()),
+          password_env: None,
+          password_file: None,
+        }],
+        password_algorithms: vec![TurnPasswordAlgorithm::Sha256],
+        ..TurnAuthConfig::default()
+      },
+      udp_pool: None,
+      tcp_pool: None,
+      tls_pool: None,
+      public_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+      relay_bind_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+      relay_port_range: Some(TurnRelayPortRange {
+        start: 49_152,
+        end: 49_160,
+      }),
+      relay_families: vec![TurnRelayFamilyConfig {
+        family: TurnRelayAddressFamily::Ipv4,
+        public_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        relay_bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        relay_port_range: TurnRelayPortRange {
+          start: 49_152,
+          end: 49_160,
+        },
+      }],
+      limits: TurnEdgeRelayLimitsConfig::default(),
+      peer_policy: TurnEdgeRelayPeerPolicyConfig::default(),
+      stream_outbound_queue_capacity: 32,
+      tls: TurnListenerTlsConfig::default(),
+    }
+  }
+
+  fn authenticated_connection_bind(
+    config: &WebRtcTurnListenerConfig,
+    client: EdgeClient,
+    connection_id: u32,
+  ) -> Vec<u8> {
+    let nonce = auth::create_nonce_for_source(
+      &config.realm,
+      NonceSourceBinding::from_peer(client.peer()),
+      &config.auth,
+    )
+    .expect("connection-bind nonce");
+    let attrs = vec![
+      (ATTR_CONNECTION_ID, connection_id.to_be_bytes().to_vec()),
+      (ATTR_USERNAME, TEST_USERNAME.as_bytes().to_vec()),
+      (ATTR_REALM, config.realm.as_bytes().to_vec()),
+      (ATTR_NONCE, nonce.into_bytes()),
+      auth::password_algorithms_challenge_attribute(&config.auth),
+      (
+        ATTR_PASSWORD_ALGORITHM,
+        encode_password_algorithm(PASSWORD_ALGORITHM_SHA256),
+      ),
+    ];
+    let key =
+      Sha256::digest(format!("{TEST_USERNAME}:{}:{TEST_PASSWORD}", config.realm).as_bytes());
+    with_message_integrity_sha256(
+      encode_message(CONNECTION_BIND_REQUEST, [9; 12], &attrs),
+      &key,
+    )
+  }
+
+  fn response_error_code(response: &[u8]) -> u16 {
+    let message = parse_stun(response).expect("STUN response");
+    let value = attr_bytes(&message, ATTR_ERROR_CODE).expect("ERROR-CODE");
+    u16::from(value[2]) * 100 + u16::from(value[3])
+  }
+
+  async fn connected_tcp_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("bind peer listener");
+    let peer_addr = listener.local_addr().expect("peer listener address");
+    let first = TcpStream::connect(peer_addr)
+      .await
+      .expect("connect peer stream");
+    let (second, _) = listener.accept().await.expect("accept peer stream");
+    (first, second)
+  }
+
   async fn edge_with_tcp_allocation(
     expires_at: Instant,
     pending_tcp: HashMap<u32, PendingTcpConnection>,
     active_tcp: HashMap<u32, SocketAddr>,
+  ) -> (EdgeState, EdgeClient) {
+    edge_with_tcp_allocation_auth(
+      expires_at,
+      pending_tcp,
+      active_tcp,
+      test_authenticated_context(),
+    )
+    .await
+  }
+
+  async fn edge_with_tcp_allocation_auth(
+    expires_at: Instant,
+    pending_tcp: HashMap<u32, PendingTcpConnection>,
+    active_tcp: HashMap<u32, SocketAddr>,
+    allocation_auth: Arc<AuthenticatedContext>,
   ) -> (EdgeState, EdgeClient) {
     let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind TCP relay");
     let std_listener_addr = std_listener.local_addr().expect("TCP relay address");
@@ -593,7 +718,7 @@ pub(super) mod tests {
             transaction_id: [2; 12],
             request_digest: [0; 32],
             reservation_token: None,
-            auth: test_authenticated_context(),
+            auth: allocation_auth,
             permissions: HashMap::new(),
             channels: HashMap::new(),
             pending_tcp,
@@ -606,6 +731,125 @@ pub(super) mod tests {
       },
     );
     (edge, client)
+  }
+
+  #[tokio::test]
+  async fn connection_bind_wrong_credentials_preserves_pending_connection() {
+    let connection_id = 41;
+    let (pending_stream, _peer_guard) = connected_tcp_pair().await;
+    let pending_peer = pending_stream.peer_addr().expect("pending peer address");
+    let (edge, _) = edge_with_tcp_allocation_auth(
+      Instant::now() + Duration::from_secs(60),
+      HashMap::from([(
+        connection_id,
+        PendingTcpConnection {
+          stream: Some(pending_stream),
+          peer: pending_peer,
+          expires_at: Instant::now() + PENDING_LIFETIME,
+        },
+      )]),
+      HashMap::new(),
+      test_authenticated_context_with_password("different-password"),
+    )
+    .await;
+    let config = connection_bind_config();
+    let client = EdgeClient::Stream {
+      id: 8,
+      peer: SocketAddr::from(([127, 0, 0, 1], 50_001)),
+    };
+    let request = authenticated_connection_bind(&config, client, connection_id);
+
+    let ConnectionBindOutcome::Rejected(response) =
+      handle_connection_bind(&edge, &config, client, &request)
+        .await
+        .expect("connection bind must be evaluated")
+    else {
+      panic!("wrong credentials must reject connection binding");
+    };
+    assert_eq!(response_error_code(&response), 441);
+    let clients = edge.clients.lock().await;
+    let allocation = clients
+      .values()
+      .flat_map(|state| state.allocations.values())
+      .next()
+      .expect("allocation remains");
+    assert!(allocation.pending_tcp.contains_key(&connection_id));
+    assert!(!allocation.active_tcp.contains_key(&connection_id));
+  }
+
+  #[tokio::test]
+  async fn connection_bind_matching_credentials_consumes_only_target_pending_connection() {
+    let connection_id = 42;
+    let untouched_connection_id = 43;
+    let (pending_stream, _peer_guard) = connected_tcp_pair().await;
+    let pending_peer = pending_stream.peer_addr().expect("pending peer address");
+    let (edge, owner) = edge_with_tcp_allocation(
+      Instant::now() + Duration::from_secs(60),
+      HashMap::from([
+        (
+          connection_id,
+          PendingTcpConnection {
+            stream: Some(pending_stream),
+            peer: pending_peer,
+            expires_at: Instant::now() + PENDING_LIFETIME,
+          },
+        ),
+        (
+          untouched_connection_id,
+          PendingTcpConnection {
+            stream: None,
+            peer: SocketAddr::from(([127, 0, 0, 1], 51_043)),
+            expires_at: Instant::now() + PENDING_LIFETIME,
+          },
+        ),
+      ]),
+      HashMap::new(),
+    )
+    .await;
+    let config = connection_bind_config();
+    let client = EdgeClient::Stream {
+      id: 9,
+      peer: SocketAddr::from(([127, 0, 0, 1], 50_002)),
+    };
+    let request = authenticated_connection_bind(&config, client, connection_id);
+
+    let ConnectionBindOutcome::Bound {
+      connection,
+      response,
+    } = handle_connection_bind(&edge, &config, client, &request)
+      .await
+      .expect("connection bind must be evaluated")
+    else {
+      panic!("matching credentials must bind the pending connection");
+    };
+    assert_eq!(
+      parse_stun(&response)
+        .expect("success response")
+        .message_type,
+      success_type(CONNECTION_BIND_REQUEST)
+    );
+    assert_eq!(connection.owner, owner);
+    assert_eq!(connection.family, TurnRelayAddressFamily::Ipv4);
+    assert_eq!(connection.connection_id, connection_id);
+    {
+      let clients = edge.clients.lock().await;
+      let allocation = clients
+        .get(&owner)
+        .and_then(|state| state.allocations.get(&TurnRelayAddressFamily::Ipv4))
+        .expect("allocation remains");
+      assert!(!allocation.pending_tcp.contains_key(&connection_id));
+      assert!(
+        allocation
+          .pending_tcp
+          .contains_key(&untouched_connection_id)
+      );
+      assert_eq!(
+        allocation.active_tcp.get(&connection_id),
+        Some(&pending_peer)
+      );
+    }
+    drop(connection.peer);
+    release_active_connection(&edge, owner, TurnRelayAddressFamily::Ipv4, connection_id).await;
   }
 
   #[tokio::test]

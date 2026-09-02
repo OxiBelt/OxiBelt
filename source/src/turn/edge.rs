@@ -204,12 +204,18 @@ pub(super) async fn serve_stream(
           let frame = frame?;
           if parse_stun(&frame).is_ok_and(|message| message.message_type == CONNECTION_BIND_REQUEST) {
             match handle_connection_bind(&edge, &config, client, &frame).await? {
-                    ConnectionBindOutcome::Bound { stream, response, owner, family, connection_id } => {
+                    ConnectionBindOutcome::Bound { connection, response } => {
                         if let Err(error) = writer.write_all(&response).await {
-                            release_active_connection(&edge, owner, family, connection_id).await;
+                            release_active_connection(
+                              &edge,
+                              connection.owner,
+                              connection.family,
+                              connection.connection_id,
+                            )
+                            .await;
                             return Err(error.into());
                         }
-                        break anyhow::Ok(Some((stream, owner, family, connection_id)));
+                        break anyhow::Ok(Some(connection));
               }
               ConnectionBindOutcome::Rejected(response) => {
                 writer.write_all(&response).await?;
@@ -231,15 +237,12 @@ pub(super) async fn serve_stream(
     }
   }?;
   edge.remove_client(client).await;
-  if let Some((peer, owner, family, connection_id)) = bound_peer {
+  if let Some(connection) = bound_peer {
     let downstream = reader.unsplit(writer);
     relay_bound_tcp_connection(
       downstream,
-      peer,
       edge,
-      owner,
-      family,
-      connection_id,
+      connection,
       drain,
       Duration::from_millis(config.idle_timeout_ms),
     )

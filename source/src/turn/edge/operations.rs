@@ -195,7 +195,7 @@ pub(super) async fn process_frame(
         match options.relay {
           UdpRelayRequest::Reservation(token) => match claim_udp_relay(token)? {
             Some(claim) => {
-              let family = claim.family();
+              let family = claim.family()?;
               claimed_udp = Some(claim);
               Ok(vec![family])
             }

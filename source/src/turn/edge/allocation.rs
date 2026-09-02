@@ -25,7 +25,7 @@ impl PreparedEdgeRelay {
         relayed_addr,
       }),
       Self::Udp(relay) => Ok(FinalizedEdgeRelay::Udp(relay.finalize()?)),
-      Self::ClaimedUdp(relay) => Ok(FinalizedEdgeRelay::Udp(relay.into_finalized())),
+      Self::ClaimedUdp(relay) => Ok(FinalizedEdgeRelay::Udp(relay.into_finalized()?)),
     }
   }
 }

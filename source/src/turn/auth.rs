@@ -468,7 +468,7 @@ fn advertised_password_algorithms(auth: &TurnAuthConfig) -> String {
 
 #[cfg(feature = "fuzzing")]
 fn legacy_source_binding() -> NonceSourceBinding {
-  NonceSourceBinding::from_peer("0.0.0.0:0".parse().expect("fixed socket address"))
+  NonceSourceBinding::from_peer(SocketAddr::from(([0, 0, 0, 0], 0)))
 }
 
 fn turn_password_algorithm_from_wire(value: u16) -> Option<TurnPasswordAlgorithm> {

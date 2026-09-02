@@ -221,10 +221,8 @@ pub fn validate_attribute_ordering(message: &StunMessage<'_>) -> anyhow::Result<
         }
         legacy_seen = true;
       }
-      ATTR_FINGERPRINT => {
-        if attr.value.len() != 4 || index + 1 != message.attrs.len() {
-          bail!("STUN FINGERPRINT must be the final attribute");
-        }
+      ATTR_FINGERPRINT if attr.value.len() != 4 || index + 1 != message.attrs.len() => {
+        bail!("STUN FINGERPRINT must be the final attribute");
       }
       _ => {}
     }

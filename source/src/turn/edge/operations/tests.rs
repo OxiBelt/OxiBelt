@@ -112,7 +112,7 @@ fn available_pair_config() -> WebRtcTurnListenerConfig {
   for _ in 0..128 {
     let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe");
     let port = probe.local_addr().expect("probe address").port();
-    let even = if port % 2 == 0 {
+    let even = if port.is_multiple_of(2) {
       port
     } else {
       port.saturating_sub(1)

@@ -148,6 +148,24 @@ fn fingerprint_finalizer_follows_response_integrity() {
 }
 
 #[test]
+fn malformed_or_non_final_fingerprint_is_rejected() {
+  let invalid_length = encode_message(BINDING_REQUEST, [10; 12], &[(ATTR_FINGERPRINT, vec![0; 3])]);
+  let parsed = parse_stun(&invalid_length).expect("invalid-length frame remains structural");
+  assert!(validate_attribute_ordering(&parsed).is_err());
+
+  let non_final = encode_message(
+    BINDING_REQUEST,
+    [11; 12],
+    &[
+      (ATTR_FINGERPRINT, vec![0; 4]),
+      (ATTR_DATA, b"after-fingerprint".to_vec()),
+    ],
+  );
+  let parsed = parse_stun(&non_final).expect("non-final fingerprint frame remains structural");
+  assert!(validate_attribute_ordering(&parsed).is_err());
+}
+
+#[test]
 fn duplicate_singleton_security_attributes_are_rejected() {
   let encoded = encode_message(
     BINDING_REQUEST,

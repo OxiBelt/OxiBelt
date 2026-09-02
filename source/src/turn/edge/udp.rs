@@ -1,11 +1,11 @@
 //! RFC 8656 UDP relay-port selection and short-lived reservation tokens.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 
 use crate::config::{TurnRelayAddressFamily, TurnRelayFamilyConfig};
 
@@ -128,28 +128,32 @@ pub(super) struct ClaimedUdpRelay {
 }
 
 impl ClaimedUdpRelay {
-  pub(super) fn family(&self) -> TurnRelayAddressFamily {
+  pub(super) fn family(&self) -> anyhow::Result<TurnRelayAddressFamily> {
     self
       .reservation
       .as_ref()
-      .expect("claimed TURN UDP reservation must be present")
-      .family
+      .map(|reservation| reservation.family)
+      .context("claimed TURN UDP reservation is unavailable")
   }
 
-  pub(super) fn into_finalized(mut self) -> FinalizedUdpRelay {
+  pub(super) fn into_finalized(mut self) -> anyhow::Result<FinalizedUdpRelay> {
     let reservation = self
       .reservation
       .take()
-      .expect("claimed TURN UDP reservation must be present");
-    if let Ok(mut reservations) = reservations().lock() {
-      reservations.remove(&self.token);
+      .context("claimed TURN UDP reservation is unavailable")?;
+    let mut reservations = reservations()
+      .lock()
+      .map_err(|_| anyhow::anyhow!("TURN UDP relay reservation state unavailable"))?;
+    if !matches!(reservations.get(&self.token), Some(None)) {
+      bail!("claimed TURN UDP reservation ownership is unavailable");
     }
-    FinalizedUdpRelay {
+    reservations.remove(&self.token);
+    Ok(FinalizedUdpRelay {
       socket: reservation.socket,
       family: reservation.family,
       relayed_addr: reservation.relayed_addr,
       issued: None,
-    }
+    })
   }
 }
 
@@ -280,15 +284,11 @@ fn issue_reservation(reservation: UdpRelayReservation) -> anyhow::Result<IssuedU
       let mut candidate = [0u8; 8];
       crate::crypto::random_fill(&mut candidate)
         .map_err(|_| anyhow::anyhow!("failed to generate TURN UDP reservation token"))?;
-      if !reservations.contains_key(&candidate) {
-        reservations.insert(
-          candidate,
-          Some(
-            reservation
-              .take()
-              .expect("TURN UDP reservation inserted only once"),
-          ),
-        );
+      if let Entry::Vacant(entry) = reservations.entry(candidate) {
+        let reservation = reservation
+          .take()
+          .context("TURN UDP reservation ownership is unavailable")?;
+        entry.insert(Some(reservation));
         selected = Some(candidate);
         break;
       }
@@ -340,7 +340,7 @@ mod tests {
     for _ in 0..128 {
       let probe = UdpSocket::bind("127.0.0.1:0").expect("probe UDP port");
       let port = probe.local_addr().expect("probe address").port();
-      let even = if port % 2 == 0 {
+      let even = if port.is_multiple_of(2) {
         port
       } else {
         port.saturating_sub(1)
@@ -364,6 +364,21 @@ mod tests {
     assert_eq!(prepared.family, TurnRelayAddressFamily::Ipv4);
   }
 
+  #[test]
+  fn empty_claimed_reservation_fails_closed_without_panicking() {
+    let claim = ClaimedUdpRelay {
+      token: [0; 8],
+      reservation: None,
+    };
+    assert!(claim.family().is_err());
+
+    let claim = ClaimedUdpRelay {
+      token: [0; 8],
+      reservation: None,
+    };
+    assert!(claim.into_finalized().is_err());
+  }
+
   #[tokio::test]
   async fn adjacent_reservation_is_single_use_and_claim_rollback_is_safe() {
     let prepared = prepare_available_pair(true);
@@ -378,7 +393,10 @@ mod tests {
     let claim = claim_udp_relay(token)
       .expect("claim reservation")
       .expect("reservation must exist");
-    assert_eq!(claim.family(), TurnRelayAddressFamily::Ipv4);
+    assert_eq!(
+      claim.family().expect("claimed family"),
+      TurnRelayAddressFamily::Ipv4
+    );
     assert!(
       claim_udp_relay(token)
         .expect("second claim lookup")
@@ -390,7 +408,9 @@ mod tests {
     let claim = claim_udp_relay(token)
       .expect("reclaim reservation")
       .expect("failed allocation must restore its claim");
-    let finalized = claim.into_finalized();
+    let finalized = claim
+      .into_finalized()
+      .expect("finalize claimed reservation");
     assert_eq!(finalized.relayed_addr.port(), allocation_port + 1);
     let (_reserved, _, _, replacement) = finalized
       .into_install_ready()
@@ -419,5 +439,27 @@ mod tests {
         .expires_at = Instant::now() - Duration::from_millis(1);
     }
     assert!(claim_udp_relay(token).expect("expired lookup").is_none());
+  }
+
+  #[tokio::test]
+  async fn claimed_reservation_requires_registry_ownership_to_finalize() {
+    let finalized = prepare_available_pair(true)
+      .finalize()
+      .expect("issue reservation");
+    let (_allocation, _, _, token) = finalized
+      .into_install_ready()
+      .expect("prepare allocation")
+      .into_parts();
+    let token = token.expect("reservation token");
+    let claim = claim_udp_relay(token)
+      .expect("claim reservation")
+      .expect("reservation must exist");
+    reservations()
+      .lock()
+      .expect("reservation state")
+      .remove(&token);
+
+    assert!(claim.into_finalized().is_err());
+    assert!(claim_udp_relay(token).expect("missing lookup").is_none());
   }
 }

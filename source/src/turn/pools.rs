@@ -18,6 +18,8 @@ pub struct TurnPoolState {
   pools: HashMap<String, Arc<TurnPoolRuntime>>,
 }
 
+type TurnHealthTarget = (String, String, Url, UpstreamTlsConfig, u64, u64, u64, u64);
+
 #[derive(Debug)]
 struct TurnPoolRuntime {
   config: TurnUpstreamPoolConfig,
@@ -161,9 +163,7 @@ impl TurnPoolState {
     }
   }
 
-  pub fn health_targets(
-    &self,
-  ) -> Vec<(String, String, Url, UpstreamTlsConfig, u64, u64, u64, u64)> {
+  pub fn health_targets(&self) -> Vec<TurnHealthTarget> {
     self
       .pools
       .values()
