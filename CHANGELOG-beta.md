@@ -53,6 +53,11 @@ for the governed entry format.
   compatible MD5 authentication, source-bound current/previous nonce secrets,
   bounded secret-file sources, RFC 6062 TCP relay limits, and independent
   per-server `turns://` TLS policies including optional client identity.
+- Preserve native configuration syntax, defaults, validation, schema epoch `1`,
+  effective-TOML output and secret redaction, and TURN authentication and secret
+  handling while placing the existing redaction test module after its production
+  helpers for Rust lint compatibility. Existing configurations require no
+  migration or operator action.
 - Add default-off Helm `turn` values for generated proxy or singleton edge
   relay configuration, explicit UDP/TCP/TLS control and relay exposure,
   projected Secret files, and matching network-policy rules. Omission preserves
