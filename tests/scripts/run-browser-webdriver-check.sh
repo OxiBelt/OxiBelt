@@ -321,6 +321,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+webrtc_turn_scenario=false
+if [[ "${scenario}" == "webrtc-turn" ]]; then
+  webrtc_turn_scenario=true
+fi
+
 case "${browser}" in
   chromium)
     browser_binary="$(
@@ -333,7 +338,10 @@ case "${browser}" in
     driver_port="${DRIVER_PORT:-9515}"
     driver_log="${work_dir}/chromedriver.log"
     capabilities="$(
-      jq -n --arg binary "${browser_binary}" '{
+      jq -n \
+        --arg binary "${browser_binary}" \
+        --argjson webrtc_turn_scenario "${webrtc_turn_scenario}" \
+        '{
         capabilities: {
           alwaysMatch: {
             browserName: "chrome",
@@ -341,11 +349,15 @@ case "${browser}" in
             pageLoadStrategy: "none",
             "goog:chromeOptions": {
               binary: $binary,
-              args: [
-                "--headless=new",
-                "--no-sandbox",
-                "--disable-dev-shm-usage"
-              ]
+              args: ([
+                  "--headless=new",
+                  "--no-sandbox",
+                  "--disable-dev-shm-usage"
+                ] + if $webrtc_turn_scenario then
+                  ["--allow-loopback-in-peer-connection"]
+                else
+                  []
+                end)
             }
           }
         }
@@ -358,7 +370,10 @@ case "${browser}" in
     driver_port="${DRIVER_PORT:-4444}"
     driver_log="${work_dir}/geckodriver.log"
     capabilities="$(
-      jq -n --arg binary "${browser_binary}" '{
+      jq -n \
+        --arg binary "${browser_binary}" \
+        --argjson webrtc_turn_scenario "${webrtc_turn_scenario}" \
+        '{
         capabilities: {
           alwaysMatch: {
             browserName: "firefox",
@@ -369,9 +384,13 @@ case "${browser}" in
               args: [
                 "-headless"
               ],
-              prefs: {
-                "devtools.jsonview.enabled": false
-              }
+              prefs: ({
+                  "devtools.jsonview.enabled": false
+                } + if $webrtc_turn_scenario then
+                  {"media.peerconnection.ice.loopback": true}
+                else
+                  {}
+                end)
             }
           }
         }
@@ -851,27 +870,66 @@ PY
            const left = new RTCPeerConnection(configuration);
            const right = new RTCPeerConnection(configuration);
            const relayCandidates = {left: 0, right: 0, familyMatches: 0};
+           const diagnostics = {
+             iceCandidateErrors: [],
+             candidateSummaries: {left: [], right: []}
+           };
            let received = null;
            let opened = false;
            const close = () => { left.close(); right.close(); };
+           const recordCandidate = (side, candidate) => {
+             if (diagnostics.candidateSummaries[side].length >= 32) return;
+             const fields = candidate.candidate.split(' ');
+             const address = candidate.address || fields[4] || '';
+             diagnostics.candidateSummaries[side].push({
+               type: candidate.type || 'unknown',
+               protocol: candidate.protocol || fields[2] || 'unknown',
+               addressFamily: address === '' ? 'unknown' : (address.includes(':') ? 'ipv6' : 'ipv4')
+             });
+           };
+           const recordCandidateError = (side, errorCode, errorText, errorUrl) => {
+             if (diagnostics.iceCandidateErrors.length >= 16) return;
+             diagnostics.iceCandidateErrors.push({
+               side,
+               errorCode,
+               errorText,
+               url: errorUrl
+             });
+           };
+           left.onicecandidateerror = (event) => {
+             recordCandidateError('left', event.errorCode || null, event.errorText || '', event.url || '');
+           };
+           right.onicecandidateerror = (event) => {
+             recordCandidateError('right', event.errorCode || null, event.errorText || '', event.url || '');
+           };
            left.onicecandidate = async (event) => {
              if (event.candidate) {
+               recordCandidate('left', event.candidate);
                if (event.candidate.type === 'relay' || event.candidate.candidate.includes(' typ relay ')) {
                  relayCandidates.left += 1;
                  const address = event.candidate.address || event.candidate.candidate.split(' ')[4] || '';
                  if ((family === 'ipv6') === address.includes(':')) relayCandidates.familyMatches += 1;
                }
-               await right.addIceCandidate(event.candidate);
+               try {
+                 await right.addIceCandidate(event.candidate);
+               } catch (_) {
+                 recordCandidateError('right', null, 'addIceCandidate failed', url);
+               }
              }
            };
            right.onicecandidate = async (event) => {
              if (event.candidate) {
+               recordCandidate('right', event.candidate);
                if (event.candidate.type === 'relay' || event.candidate.candidate.includes(' typ relay ')) {
                  relayCandidates.right += 1;
                  const address = event.candidate.address || event.candidate.candidate.split(' ')[4] || '';
                  if ((family === 'ipv6') === address.includes(':')) relayCandidates.familyMatches += 1;
                }
-               await left.addIceCandidate(event.candidate);
+               try {
+                 await left.addIceCandidate(event.candidate);
+               } catch (_) {
+                 recordCandidateError('left', null, 'addIceCandidate failed', url);
+               }
              }
            };
            right.ondatachannel = (event) => {
@@ -884,10 +942,27 @@ PY
            await right.setLocalDescription(await right.createAnswer());
            await left.setRemoteDescription(right.localDescription);
            const deadline = Date.now() + 20000;
+           while (Date.now() < deadline && (left.iceGatheringState !== 'complete' || right.iceGatheringState !== 'complete')) {
+             await new Promise((resolve) => setTimeout(resolve, 100));
+           }
            while (Date.now() < deadline && received !== 'relayed-through-oxibelt') {
              await new Promise((resolve) => setTimeout(resolve, 100));
            }
-           const result = {url, family, opened, received, relayCandidates};
+           const states = {
+             left: {
+               iceGatheringState: left.iceGatheringState,
+               iceConnectionState: left.iceConnectionState,
+               connectionState: left.connectionState,
+               signalingState: left.signalingState
+             },
+             right: {
+               iceGatheringState: right.iceGatheringState,
+               iceConnectionState: right.iceConnectionState,
+               connectionState: right.connectionState,
+               signalingState: right.signalingState
+             }
+           };
+           const result = {url, family, opened, received, relayCandidates, states, diagnostics};
            close();
            if (!opened || received !== 'relayed-through-oxibelt' || relayCandidates.left < 1 || relayCandidates.right < 1 || relayCandidates.familyMatches < 2) {
              throw new Error('relay-only data channel did not complete: ' + JSON.stringify(result));

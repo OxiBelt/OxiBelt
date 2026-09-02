@@ -605,6 +605,11 @@ fn docker_integration_helper_build_script_text() -> String {
   .expect("Docker integration helper image build script should be readable")
 }
 
+fn browser_webdriver_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-browser-webdriver-check.sh"))
+    .expect("browser WebDriver check script should be readable")
+}
+
 fn docker_pull_retry_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/retry-docker-pull.sh"))
     .expect("Docker pull retry script should be readable")
@@ -613,6 +618,32 @@ fn docker_pull_retry_script_text() -> String {
 fn docker_integration_matrix_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-proxy-integration-matrix.sh"))
     .expect("Docker integration matrix script should be readable")
+}
+
+#[test]
+fn browser_webdriver_turn_loopback_contract_is_explicit_and_relay_only() {
+  let script = browser_webdriver_script_text();
+
+  for expected in [
+    "if $webrtc_turn_scenario then\n                  [\"--allow-loopback-in-peer-connection\"]",
+    "if $webrtc_turn_scenario then\n                  {\"media.peerconnection.ice.loopback\": true}",
+    "iceTransportPolicy: 'relay'",
+    "turn:127.0.0.1:${turn_udp_port}?transport=udp",
+    "turn:127.0.0.1:${turn_tcp_port}?transport=tcp",
+    "turns:127.0.0.1:${turn_tls_port}?transport=tcp",
+    "turn:[::1]:${turn_v6_udp_port}?transport=udp",
+    "turn:[::1]:${turn_v6_tcp_port}?transport=tcp",
+    "turns:[::1]:${turn_v6_tls_port}?transport=tcp",
+    "left.iceGatheringState !== 'complete' || right.iceGatheringState !== 'complete'",
+    "iceCandidateErrors: []",
+    "candidateSummaries: {left: [], right: []}",
+    "addressFamily: address === '' ? 'unknown'",
+  ] {
+    assert!(
+      script.contains(expected),
+      "browser WebDriver TURN coverage should preserve {expected}"
+    );
+  }
 }
 
 fn admin_mutation_postgres_script_text() -> String {
