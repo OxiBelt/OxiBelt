@@ -630,10 +630,13 @@ fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
     "iceTransportPolicy: 'relay'",
     "turn:127.0.0.1:${turn_udp_port}?transport=udp",
     "turn:127.0.0.1:${turn_tcp_port}?transport=tcp",
-    "turns:127.0.0.1:${turn_tls_port}?transport=tcp",
+    "turn_tls_url=\"turns:127.0.0.1:${turn_tls_port}?transport=tcp\"",
     "turn:[::1]:${turn_v6_udp_port}?transport=udp",
     "turn:[::1]:${turn_v6_tcp_port}?transport=tcp",
-    "turns:[::1]:${turn_v6_tls_port}?transport=tcp",
+    "turn_v6_tls_url=\"turns:[::1]:${turn_v6_tls_port}?transport=tcp\"",
+    "if [[ \"${browser}\" == \"firefox\" ]]; then\n  turn_tls_url=\"turns:localhost:${turn_tls_port}?transport=tcp\"\n  turn_v6_tls_url=\"turns:localhost:${turn_v6_tls_port}?transport=tcp\"\nfi",
+    "{url: '${turn_tls_url}', controlFamily: 'ipv4', relayFamily: 'ipv4'}",
+    "{url: '${turn_v6_tls_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}",
     "docker network create \\\n      --ipv6",
     "--network \"${proxy_network}\"",
     "name = \"browser-turn-control-v6\"",
@@ -659,6 +662,7 @@ fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
 
   for expected in [
     "/CN=OxiBelt WebDriver Test CA",
+    "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1",
     "extendedKeyUsage=serverAuth",
     "certutil -N --empty-password",
     "certutil -A",
@@ -679,6 +683,16 @@ fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
     !script.contains("docker cp \"${cert_dir}/.\""),
     "the ephemeral CA private key should not be copied into the runtime container"
   );
+
+  for forbidden in [
+    "media.peerconnection.turn.disable_certificate_verification",
+    "security.enterprise_roots.enabled",
+  ] {
+    assert!(
+      !script.contains(forbidden),
+      "Firefox WebDriver TURN TLS coverage must not enable {forbidden}"
+    );
+  }
 }
 
 fn admin_mutation_postgres_script_text() -> String {

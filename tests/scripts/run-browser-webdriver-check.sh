@@ -372,6 +372,15 @@ if [[ "${scenario}" == "webrtc-turn" ]]; then
   webrtc_turn_scenario=true
 fi
 
+turn_tls_url="turns:127.0.0.1:${turn_tls_port}?transport=tcp"
+turn_v6_tls_url="turns:[::1]:${turn_v6_tls_port}?transport=tcp"
+# Firefox rejects IP-literal TURNS endpoints before TLS (Bugzilla 2019255).
+# The family-specific ports keep each localhost case bound to its intended listener.
+if [[ "${browser}" == "firefox" ]]; then
+  turn_tls_url="turns:localhost:${turn_tls_port}?transport=tcp"
+  turn_v6_tls_url="turns:localhost:${turn_v6_tls_port}?transport=tcp"
+fi
+
 case "${browser}" in
   chromium)
     browser_binary="$(
@@ -934,10 +943,10 @@ PY
          const cases = [
            {url: 'turn:127.0.0.1:${turn_udp_port}?transport=udp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
            {url: 'turn:127.0.0.1:${turn_tcp_port}?transport=tcp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
-           {url: 'turns:127.0.0.1:${turn_tls_port}?transport=tcp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
+           {url: '${turn_tls_url}', controlFamily: 'ipv4', relayFamily: 'ipv4'},
            {url: 'turn:[::1]:${turn_v6_udp_port}?transport=udp', controlFamily: 'ipv6', relayFamily: 'ipv4'},
            {url: 'turn:[::1]:${turn_v6_tcp_port}?transport=tcp', controlFamily: 'ipv6', relayFamily: 'ipv4'},
-           {url: 'turns:[::1]:${turn_v6_tls_port}?transport=tcp', controlFamily: 'ipv6', relayFamily: 'ipv4'}
+           {url: '${turn_v6_tls_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}
          ];
          const run = async (testCase) => {
            const {url, controlFamily, relayFamily} = testCase;
