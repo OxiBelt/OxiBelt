@@ -8,7 +8,7 @@ run_case_checks() {
   assert_socket_fd_count "${baseline}" "baseline"
 
   assert_udp_round_trip
-  start_udp_session_load 32 "session-load" load_container load_pid load_log
+  start_udp_session_load 32 load_container load_pid load_log
   after_create="${baseline}"
   for _ in $(seq 1 40); do
     after_create="$(proxy_socket_fd_count)"
@@ -95,7 +95,9 @@ assert_udp_round_trip() {
     -c '
 import socket
 
-payload = b"roundtrip"
+# A zero-attribute STUN Binding request exercises the UDP session path without
+# being rejected as malformed TURN ChannelData.
+payload = bytes.fromhex("000100002112a442") + b"roundtrip-01"
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.settimeout(5)
 sock.sendto(payload, ("proxy", 3478))
@@ -111,8 +113,8 @@ if data != payload:
 }
 
 start_udp_session_load() {
-  local count="$1" payload="$2"
-  local -n container_ref="$3" pid_ref="$4" log_ref="$5"
+  local count="$1"
+  local -n container_ref="$2" pid_ref="$3" log_ref="$4"
 
   container_ref="oxibelt-turn-udp-load-${run_id}-${RANDOM}"
   log_ref="${work_dir}/${container_ref}.log"
@@ -128,7 +130,7 @@ import sys
 import time
 
 count = int(sys.argv[1])
-payload = sys.argv[2].encode("utf-8")
+stun_header = bytes.fromhex("000100002112a442")
 sockets = []
 for _ in range(count):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -138,9 +140,10 @@ for _ in range(count):
 deadline = time.monotonic() + 3
 while time.monotonic() < deadline:
     for index, sock in enumerate(sockets):
-        sock.sendto(payload + b":" + str(index).encode("ascii"), ("proxy", 3478))
+        transaction_id = index.to_bytes(12, byteorder="big")
+        sock.sendto(stun_header + transaction_id, ("proxy", 3478))
     time.sleep(0.1)
-' "${count}" "${payload}" >/dev/null
+' "${count}" >/dev/null
   docker start -a "${container_ref}" >"${log_ref}" 2>&1 &
   pid_ref="$!"
 }
