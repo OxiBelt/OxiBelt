@@ -79,6 +79,47 @@ find_first_command() {
   return 0
 }
 
+generate_test_ca() {
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+    -days 1 \
+    -subj "/CN=OxiBelt WebDriver Test CA" \
+    -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -keyout "${cert_dir}/ca-key.pem" \
+    -out "${cert_dir}/ca.pem" >/dev/null 2>&1
+  chmod 600 "${cert_dir}/ca-key.pem"
+  chmod 644 "${cert_dir}/ca.pem"
+}
+
+generate_server_certificate() {
+  openssl req -newkey rsa:2048 -sha256 -nodes \
+    -subj "/CN=localhost" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1" \
+    -addext "basicConstraints=critical,CA:FALSE" \
+    -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+    -addext "extendedKeyUsage=serverAuth" \
+    -keyout "${cert_dir}/privkey.pem" \
+    -out "${cert_dir}/localhost.csr" >/dev/null 2>&1
+  openssl x509 -req -sha256 \
+    -days 1 \
+    -in "${cert_dir}/localhost.csr" \
+    -CA "${cert_dir}/ca.pem" \
+    -CAkey "${cert_dir}/ca-key.pem" \
+    -CAcreateserial \
+    -copy_extensions copy \
+    -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
+  chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
+}
+
+copy_server_tls_to_container() {
+  docker cp \
+    "${cert_dir}/fullchain.pem" \
+    "${proxy_container}:/etc/oxibelt/cert/fullchain.pem"
+  docker cp \
+    "${cert_dir}/privkey.pem" \
+    "${proxy_container}:/etc/oxibelt/cert/privkey.pem"
+}
+
 show_log() {
   local label="$1"
   local path="$2"
@@ -257,7 +298,7 @@ delete_webdriver_session() {
 reload_proxy() {
   if [[ -n "${proxy_container}" ]]; then
     docker cp "${config_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
-    docker cp "${cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
+    copy_server_tls_to_container
     docker kill --signal HUP "${proxy_container}" >/dev/null
   else
     kill -HUP "${proxy_pid}"
@@ -374,33 +415,6 @@ case "${browser}" in
     driver_binary="$(find_first_command "${DRIVER_COMMAND:-geckodriver}" geckodriver)"
     driver_port="${DRIVER_PORT:-4444}"
     driver_log="${work_dir}/geckodriver.log"
-    capabilities="$(
-      jq -n \
-        --arg binary "${browser_binary}" \
-        --argjson webrtc_turn_scenario "${webrtc_turn_scenario}" \
-        '{
-        capabilities: {
-          alwaysMatch: {
-            browserName: "firefox",
-            acceptInsecureCerts: true,
-            pageLoadStrategy: "none",
-            "moz:firefoxOptions": {
-              binary: $binary,
-              args: [
-                "-headless"
-              ],
-              prefs: ({
-                  "devtools.jsonview.enabled": false
-                } + if $webrtc_turn_scenario then
-                  {"media.peerconnection.ice.loopback": true}
-                else
-                  {}
-                end)
-            }
-          }
-        }
-      }'
-    )"
     ;;
 esac
 
@@ -421,13 +435,68 @@ mkdir -p "${config_dir}" "${cert_dir}"
 "${browser_binary}" --version
 "${driver_binary}" --version
 
-openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
-  -days 1 \
-  -subj "/CN=localhost" \
-  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1" \
-  -keyout "${cert_dir}/privkey.pem" \
-  -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
-chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
+generate_test_ca
+generate_server_certificate
+
+if [[ "${browser}" == "firefox" ]]; then
+  firefox_profile=""
+  if [[ "${scenario}" == "webrtc-turn" ]]; then
+    for required_command in certutil zip base64; do
+      if ! command -v "${required_command}" >/dev/null 2>&1; then
+        echo "${required_command} is required for the Firefox WebRTC TURN trust profile." >&2
+        exit 1
+      fi
+    done
+
+    firefox_profile_dir="${work_dir}/firefox-profile"
+    mkdir -p "${firefox_profile_dir}"
+    certutil -N --empty-password -d "sql:${firefox_profile_dir}"
+    certutil -A \
+      -d "sql:${firefox_profile_dir}" \
+      -n "OxiBelt WebDriver Test CA" \
+      -t "C,," \
+      -i "${cert_dir}/ca.pem"
+    firefox_profile="$(
+      (
+        cd -- "${firefox_profile_dir}"
+        zip -q -r - .
+      ) | base64 -w 0
+    )"
+  fi
+
+  capabilities="$(
+    jq -n \
+      --arg binary "${browser_binary}" \
+      --arg profile "${firefox_profile}" \
+      --argjson webrtc_turn_scenario "${webrtc_turn_scenario}" \
+      '{
+      capabilities: {
+        alwaysMatch: {
+          browserName: "firefox",
+          acceptInsecureCerts: (if $webrtc_turn_scenario then false else true end),
+          pageLoadStrategy: "none",
+          "moz:firefoxOptions": ({
+            binary: $binary,
+            args: [
+              "-headless"
+            ],
+            prefs: ({
+                "devtools.jsonview.enabled": false
+              } + if $webrtc_turn_scenario then
+                {"media.peerconnection.ice.loopback": true}
+              else
+                {}
+              end)
+          } + if $webrtc_turn_scenario then
+            {profile: $profile}
+          else
+            {}
+          end)
+        }
+      }
+    }'
+  )"
+fi
 
 if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   if ! command -v docker >/dev/null 2>&1; then
@@ -702,7 +771,7 @@ if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   fi
   docker create "${docker_create_args[@]}" "${OXIBELT_DOCKER_IMAGE}" >/dev/null
   docker cp "${config_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
-  docker cp "${cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
+  copy_server_tls_to_container
   docker start "${proxy_container}" >/dev/null
 else
   host_triple="$(rustc -Vv | sed -n 's/^host: //p')"
@@ -843,13 +912,7 @@ text = path.read_text()
 text = text.replace('when = "false"', "when = \"Request.Http.Path.endsWith('/hot-reload')\"")
 path.write_text(text)
 PY
-    openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
-      -days 1 \
-      -subj "/CN=localhost" \
-      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1" \
-      -keyout "${cert_dir}/privkey.pem" \
-      -out "${cert_dir}/fullchain.pem" >/dev/null 2>&1
-    chmod 644 "${cert_dir}/privkey.pem" "${cert_dir}/fullchain.pem"
+    generate_server_certificate
     reload_proxy
     wait_for_hot_reload_applied "${reload_applied_count}"
 

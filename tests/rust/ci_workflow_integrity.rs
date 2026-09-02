@@ -626,7 +626,7 @@ fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
 
   for expected in [
     "if $webrtc_turn_scenario then\n                  [\"--allow-loopback-in-peer-connection\"]",
-    "if $webrtc_turn_scenario then\n                  {\"media.peerconnection.ice.loopback\": true}",
+    "if $webrtc_turn_scenario then\n                {\"media.peerconnection.ice.loopback\": true}",
     "iceTransportPolicy: 'relay'",
     "turn:127.0.0.1:${turn_udp_port}?transport=udp",
     "turn:127.0.0.1:${turn_tcp_port}?transport=tcp",
@@ -651,6 +651,34 @@ fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
       "browser WebDriver TURN coverage should preserve {expected}"
     );
   }
+}
+
+#[test]
+fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
+  let script = browser_webdriver_script_text();
+
+  for expected in [
+    "/CN=OxiBelt WebDriver Test CA",
+    "extendedKeyUsage=serverAuth",
+    "certutil -N --empty-password",
+    "certutil -A",
+    "-t \"C,,\"",
+    "zip -q -r - .",
+    "--arg profile \"${firefox_profile}\"",
+    "{profile: $profile}",
+    "acceptInsecureCerts: (if $webrtc_turn_scenario then false else true end)",
+    "copy_server_tls_to_container",
+  ] {
+    assert!(
+      script.contains(expected),
+      "Firefox WebDriver TURN TLS coverage should preserve {expected}"
+    );
+  }
+
+  assert!(
+    !script.contains("docker cp \"${cert_dir}/.\""),
+    "the ephemeral CA private key should not be copied into the runtime container"
+  );
 }
 
 fn admin_mutation_postgres_script_text() -> String {
