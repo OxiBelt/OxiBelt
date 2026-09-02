@@ -160,6 +160,46 @@ pub(super) fn redact_url_sensitive_parts(raw: &str) -> Option<String> {
   Some(url.to_string())
 }
 
+pub(super) fn set_toml_integer_path(
+  value: &mut toml::Value,
+  path: &[&str],
+  resolved: usize,
+) -> anyhow::Result<()> {
+  let resolved = i64::try_from(resolved).context("resolved worker count is too large")?;
+  set_toml_value_path(value, path, toml::Value::Integer(resolved))
+}
+
+pub(super) fn set_toml_float_path(
+  value: &mut toml::Value,
+  path: &[&str],
+  resolved: f64,
+) -> anyhow::Result<()> {
+  set_toml_value_path(value, path, toml::Value::Float(resolved))
+}
+
+pub(super) fn set_toml_value_path(
+  value: &mut toml::Value,
+  path: &[&str],
+  resolved: toml::Value,
+) -> anyhow::Result<()> {
+  let Some((leaf, parents)) = path.split_last() else {
+    return Ok(());
+  };
+  let mut current = value
+    .as_table_mut()
+    .ok_or_else(|| anyhow!("effective TOML root must be a table"))?;
+  for key in parents {
+    let entry = current
+      .entry((*key).to_string())
+      .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    current = entry
+      .as_table_mut()
+      .ok_or_else(|| anyhow!("effective TOML path {} must be a table", parents.join(".")))?;
+  }
+  current.insert((*leaf).to_string(), resolved);
+  Ok(())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -212,44 +252,4 @@ password_file = "turn/password"
       );
     }
   }
-}
-
-pub(super) fn set_toml_integer_path(
-  value: &mut toml::Value,
-  path: &[&str],
-  resolved: usize,
-) -> anyhow::Result<()> {
-  let resolved = i64::try_from(resolved).context("resolved worker count is too large")?;
-  set_toml_value_path(value, path, toml::Value::Integer(resolved))
-}
-
-pub(super) fn set_toml_float_path(
-  value: &mut toml::Value,
-  path: &[&str],
-  resolved: f64,
-) -> anyhow::Result<()> {
-  set_toml_value_path(value, path, toml::Value::Float(resolved))
-}
-
-pub(super) fn set_toml_value_path(
-  value: &mut toml::Value,
-  path: &[&str],
-  resolved: toml::Value,
-) -> anyhow::Result<()> {
-  let Some((leaf, parents)) = path.split_last() else {
-    return Ok(());
-  };
-  let mut current = value
-    .as_table_mut()
-    .ok_or_else(|| anyhow!("effective TOML root must be a table"))?;
-  for key in parents {
-    let entry = current
-      .entry((*key).to_string())
-      .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    current = entry
-      .as_table_mut()
-      .ok_or_else(|| anyhow!("effective TOML path {} must be a table", parents.join(".")))?;
-  }
-  current.insert((*leaf).to_string(), resolved);
-  Ok(())
 }
