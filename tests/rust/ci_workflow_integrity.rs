@@ -621,7 +621,7 @@ fn docker_integration_matrix_script_text() -> String {
 }
 
 #[test]
-fn browser_webdriver_turn_loopback_contract_is_explicit_and_relay_only() {
+fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
   let script = browser_webdriver_script_text();
 
   for expected in [
@@ -634,6 +634,13 @@ fn browser_webdriver_turn_loopback_contract_is_explicit_and_relay_only() {
     "turn:[::1]:${turn_v6_udp_port}?transport=udp",
     "turn:[::1]:${turn_v6_tcp_port}?transport=tcp",
     "turns:[::1]:${turn_v6_tls_port}?transport=tcp",
+    "docker network create \\\n      --ipv6",
+    "--network \"${proxy_network}\"",
+    "name = \"browser-turn-control-v6\"",
+    "family = \"ipv4\"\npublic_ip = \"127.0.0.1\"\nrelay_bind_ip = \"${turn_v6_relay_bind_addr}\"",
+    "-p \"127.0.0.1:${turn_v6_relay_start}-${turn_v6_relay_end}:${turn_v6_relay_start}-${turn_v6_relay_end}/udp\"",
+    "{url: 'turn:[::1]:${turn_v6_udp_port}?transport=udp', controlFamily: 'ipv6', relayFamily: 'ipv4'}",
+    "expectedFamilyMatches",
     "left.iceGatheringState !== 'complete' || right.iceGatheringState !== 'complete'",
     "iceCandidateErrors: []",
     "candidateSummaries: {left: [], right: []}",

@@ -48,6 +48,7 @@ driver_base_url=""
 upstream_pid=""
 proxy_pid=""
 proxy_container=""
+proxy_network=""
 driver_pid=""
 
 if [[ -n "${CHROMEWEBDRIVER:-}" ]]; then
@@ -317,6 +318,10 @@ cleanup() {
     docker rm -f "${proxy_container}" >/dev/null 2>&1 || true
   fi
 
+  if [[ -n "${proxy_network}" ]]; then
+    docker network rm "${proxy_network}" >/dev/null 2>&1 || true
+  fi
+
   rm -rf "${work_dir}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -433,6 +438,7 @@ if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   proxy_bind_addr="0.0.0.0"
   turn_bind_addr="0.0.0.0"
   turn_v6_bind_addr="::"
+  turn_v6_relay_bind_addr="0.0.0.0"
   proxy_origin_host="host.docker.internal"
   cert_chain="fullchain.pem"
   private_key="privkey.pem"
@@ -440,6 +446,7 @@ else
   proxy_bind_addr="127.0.0.1"
   turn_bind_addr="127.0.0.1"
   turn_v6_bind_addr="::1"
+  turn_v6_relay_bind_addr="127.0.0.1"
   proxy_origin_host="127.0.0.1"
   cert_chain="fullchain.pem"
   private_key="privkey.pem"
@@ -621,7 +628,7 @@ username = "browser-turn-user"
 password = "browser-turn-password"
 
 [[webrtc_turn_listeners]]
-name = "browser-turn-edge-v6"
+name = "browser-turn-control-v6"
 mode = "edge_relay"
 bind_udp = "[${turn_v6_bind_addr}]:${turn_v6_udp_port}"
 bind_tcp = "[${turn_v6_bind_addr}]:${turn_v6_tcp_port}"
@@ -630,9 +637,9 @@ realm = "turn.localhost"
 idle_timeout_ms = 30000
 
 [[webrtc_turn_listeners.relay_families]]
-family = "ipv6"
-public_ip = "::1"
-relay_bind_ip = "${turn_v6_bind_addr}"
+family = "ipv4"
+public_ip = "127.0.0.1"
+relay_bind_ip = "${turn_v6_relay_bind_addr}"
 
 [webrtc_turn_listeners.relay_families.relay_port_range]
 start = ${turn_v6_relay_start}
@@ -668,6 +675,13 @@ fi
 
 if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   proxy_container="oxibelt-browser-proxy-${browser}-$(date +%s)-$$"
+  if [[ "${scenario}" == "webrtc-turn" ]]; then
+    proxy_network="oxibelt-browser-turn-${browser}-$(date +%s)-$$"
+    docker network create \
+      --ipv6 \
+      --label "com.oxibelt.test.browser-webdriver=true" \
+      "${proxy_network}" >/dev/null
+  fi
   docker_create_args=(
     --name "${proxy_container}" \
     --add-host host.docker.internal:host-gateway \
@@ -675,6 +689,7 @@ if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   )
   if [[ "${scenario}" == "webrtc-turn" ]]; then
     docker_create_args+=(
+      --network "${proxy_network}"
       -p "127.0.0.1:${turn_udp_port}:${turn_udp_port}/udp"
       -p "127.0.0.1:${turn_tcp_port}:${turn_tcp_port}/tcp"
       -p "127.0.0.1:${turn_tls_port}:${turn_tls_port}/tcp"
@@ -682,7 +697,7 @@ if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
       -p "[::1]:${turn_v6_udp_port}:${turn_v6_udp_port}/udp"
       -p "[::1]:${turn_v6_tcp_port}:${turn_v6_tcp_port}/tcp"
       -p "[::1]:${turn_v6_tls_port}:${turn_v6_tls_port}/tcp"
-      -p "[::1]:${turn_v6_relay_start}-${turn_v6_relay_end}:${turn_v6_relay_start}-${turn_v6_relay_end}/udp"
+      -p "127.0.0.1:${turn_v6_relay_start}-${turn_v6_relay_end}:${turn_v6_relay_start}-${turn_v6_relay_end}/udp"
     )
   fi
   docker create "${docker_create_args[@]}" "${OXIBELT_DOCKER_IMAGE}" >/dev/null
@@ -854,22 +869,22 @@ PY
       webdriver_execute_async \
         "const done = arguments[arguments.length - 1];
          const cases = [
-           {url: 'turn:127.0.0.1:${turn_udp_port}?transport=udp', family: 'ipv4'},
-           {url: 'turn:127.0.0.1:${turn_tcp_port}?transport=tcp', family: 'ipv4'},
-           {url: 'turns:127.0.0.1:${turn_tls_port}?transport=tcp', family: 'ipv4'},
-           {url: 'turn:[::1]:${turn_v6_udp_port}?transport=udp', family: 'ipv6'},
-           {url: 'turn:[::1]:${turn_v6_tcp_port}?transport=tcp', family: 'ipv6'},
-           {url: 'turns:[::1]:${turn_v6_tls_port}?transport=tcp', family: 'ipv6'}
+           {url: 'turn:127.0.0.1:${turn_udp_port}?transport=udp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
+           {url: 'turn:127.0.0.1:${turn_tcp_port}?transport=tcp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
+           {url: 'turns:127.0.0.1:${turn_tls_port}?transport=tcp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
+           {url: 'turn:[::1]:${turn_v6_udp_port}?transport=udp', controlFamily: 'ipv6', relayFamily: 'ipv4'},
+           {url: 'turn:[::1]:${turn_v6_tcp_port}?transport=tcp', controlFamily: 'ipv6', relayFamily: 'ipv4'},
+           {url: 'turns:[::1]:${turn_v6_tls_port}?transport=tcp', controlFamily: 'ipv6', relayFamily: 'ipv4'}
          ];
          const run = async (testCase) => {
-           const {url, family} = testCase;
+           const {url, controlFamily, relayFamily} = testCase;
            const configuration = {
              iceServers: [{urls: [url], username: 'browser-turn-user', credential: 'browser-turn-password'}],
              iceTransportPolicy: 'relay'
            };
            const left = new RTCPeerConnection(configuration);
            const right = new RTCPeerConnection(configuration);
-           const relayCandidates = {left: 0, right: 0, familyMatches: 0};
+           const relayCandidates = {left: 0, right: 0, expectedFamilyMatches: 0};
            const diagnostics = {
              iceCandidateErrors: [],
              candidateSummaries: {left: [], right: []}
@@ -908,7 +923,7 @@ PY
                if (event.candidate.type === 'relay' || event.candidate.candidate.includes(' typ relay ')) {
                  relayCandidates.left += 1;
                  const address = event.candidate.address || event.candidate.candidate.split(' ')[4] || '';
-                 if ((family === 'ipv6') === address.includes(':')) relayCandidates.familyMatches += 1;
+                 if ((relayFamily === 'ipv6') === address.includes(':')) relayCandidates.expectedFamilyMatches += 1;
                }
                try {
                  await right.addIceCandidate(event.candidate);
@@ -923,7 +938,7 @@ PY
                if (event.candidate.type === 'relay' || event.candidate.candidate.includes(' typ relay ')) {
                  relayCandidates.right += 1;
                  const address = event.candidate.address || event.candidate.candidate.split(' ')[4] || '';
-                 if ((family === 'ipv6') === address.includes(':')) relayCandidates.familyMatches += 1;
+                 if ((relayFamily === 'ipv6') === address.includes(':')) relayCandidates.expectedFamilyMatches += 1;
                }
                try {
                  await left.addIceCandidate(event.candidate);
@@ -962,9 +977,9 @@ PY
                signalingState: right.signalingState
              }
            };
-           const result = {url, family, opened, received, relayCandidates, states, diagnostics};
+           const result = {url, controlFamily, relayFamily, opened, received, relayCandidates, states, diagnostics};
            close();
-           if (!opened || received !== 'relayed-through-oxibelt' || relayCandidates.left < 1 || relayCandidates.right < 1 || relayCandidates.familyMatches < 2) {
+           if (!opened || received !== 'relayed-through-oxibelt' || relayCandidates.left < 1 || relayCandidates.right < 1 || relayCandidates.expectedFamilyMatches < 2) {
              throw new Error('relay-only data channel did not complete: ' + JSON.stringify(result));
            }
            return result;
@@ -982,16 +997,18 @@ PY
     if ! jq -e \
       '.ok == true
         and (.results | length) == 6
+        and ([.results[].controlFamily] | sort) == ["ipv4", "ipv4", "ipv4", "ipv6", "ipv6", "ipv6"]
         and all(.results[]; .opened == true
           and .received == "relayed-through-oxibelt"
+          and .relayFamily == "ipv4"
           and .relayCandidates.left > 0
           and .relayCandidates.right > 0
-          and .relayCandidates.familyMatches > 1)' <<<"${turn_result}" >/dev/null; then
-      echo "Expected ${browser} to establish dual-stack relay-only data channels over TURN UDP, TCP, and TLS:" >&2
+          and .relayCandidates.expectedFamilyMatches > 1)' <<<"${turn_result}" >/dev/null; then
+      echo "Expected ${browser} to establish IPv4 relay-only data channels over IPv4 and IPv6 TURN control endpoints:" >&2
       echo "${turn_result}" >&2
       show_diagnostics
       exit 1
     fi
-    echo "${browser} WebDriver relayed dual-stack WebRTC data over OxiBelt TURN UDP, TCP, and TLS."
+    echo "${browser} WebDriver relayed WebRTC data over IPv4 and IPv6 OxiBelt TURN control endpoints."
     ;;
 esac

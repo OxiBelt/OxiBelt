@@ -814,7 +814,7 @@ fn browser_scenarios() -> Vec<BrowserScenario> {
     },
     BrowserScenario {
       name: "webrtc-turn",
-      description: "relay-only WebRTC data channels use OxiBelt TURN UDP, TCP, and TLS",
+      description: "relay-only WebRTC data channels use IPv4 and IPv6 OxiBelt TURN control endpoints",
     },
   ]
 }
