@@ -719,6 +719,50 @@ fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
   }
 }
 
+#[test]
+fn browser_webdriver_firefox_turn_diagnostics_are_bounded_and_failure_only() {
+  let script = browser_webdriver_script_text();
+
+  for expected in [
+    "firefox_turn_log_prefix=\"${work_dir}/firefox-turn\"",
+    "if [[ \"${browser}\" == \"firefox\" && \"${scenario}\" == \"webrtc-turn\" ]]; then",
+    "MOZ_LOG=\"timestamp,sync,rotate:10,nsHostResolver:5,mtransport:5,nicer:5\"",
+    "MOZ_LOG_FILE=\"${firefox_turn_log_prefix}\"",
+    "-name 'firefox-turn-main*.moz_log*'",
+    "sed 's/browser-turn-password/[REDACTED]/g'",
+  ] {
+    assert!(
+      script.contains(expected),
+      "Firefox TURN diagnostics should preserve {expected}"
+    );
+  }
+
+  let diagnostics_start = script
+    .find("show_diagnostics() {")
+    .expect("the diagnostics helper should exist");
+  let diagnostics_end = script[diagnostics_start..]
+    .find("\n}\n\nfail_with_diagnostics()")
+    .map(|offset| diagnostics_start + offset)
+    .expect("the diagnostics helper should have a bounded body");
+  let diagnostics = &script[diagnostics_start..diagnostics_end];
+
+  assert!(
+    diagnostics.contains("${OXIBELT_TEST_ARTIFACT_DIR}"),
+    "Firefox TURN logs should only be copied by the failure diagnostics helper"
+  );
+  for forbidden in [
+    "${firefox_profile_dir}",
+    "${cert_dir}/ca-key.pem",
+    "${cert_dir}/privkey.pem",
+    "find \"${work_dir}\" -type f",
+  ] {
+    assert!(
+      !diagnostics.contains(forbidden),
+      "Firefox TURN diagnostics must not collect {forbidden}"
+    );
+  }
+}
+
 fn admin_mutation_postgres_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-admin-mutation-postgres.sh"))
     .expect("Admin mutation PostgreSQL script should be readable")

@@ -65,6 +65,7 @@ config_dir="${work_dir}/config"
 cert_dir="${work_dir}/cert"
 upstream_log="${work_dir}/mock-upstream.log"
 proxy_log="${work_dir}/oxibelt.log"
+firefox_turn_log_prefix="${work_dir}/firefox-turn"
 
 find_first_command() {
   local candidate=""
@@ -145,6 +146,21 @@ show_diagnostics() {
     cp "${proxy_log}" "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.log" 2>/dev/null || true
     cp "${driver_log:-}" "${OXIBELT_TEST_ARTIFACT_DIR}/webdriver.log" 2>/dev/null || true
     cp "${config_dir}/oxibelt.toml" "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.toml" 2>/dev/null || true
+
+    if [[ "${browser}" == "firefox" && "${scenario}" == "webrtc-turn" ]]; then
+      while IFS= read -r -d '' firefox_turn_log; do
+        firefox_turn_log_name="$(basename -- "${firefox_turn_log}")"
+        sed 's/browser-turn-password/[REDACTED]/g' \
+          "${firefox_turn_log}" \
+          >"${OXIBELT_TEST_ARTIFACT_DIR}/${firefox_turn_log_name}"
+      done < <(
+        find "${work_dir}" \
+          -maxdepth 1 \
+          -type f \
+          -name 'firefox-turn-main*.moz_log*' \
+          -print0
+      )
+    fi
   fi
 }
 
@@ -822,7 +838,13 @@ case "${browser}" in
     "${driver_binary}" --port="${driver_port}" >"${driver_log}" 2>&1 &
     ;;
   firefox)
-    "${driver_binary}" --port "${driver_port}" >"${driver_log}" 2>&1 &
+    if [[ "${scenario}" == "webrtc-turn" ]]; then
+      MOZ_LOG="timestamp,sync,rotate:10,nsHostResolver:5,mtransport:5,nicer:5" \
+        MOZ_LOG_FILE="${firefox_turn_log_prefix}" \
+        "${driver_binary}" --port "${driver_port}" >"${driver_log}" 2>&1 &
+    else
+      "${driver_binary}" --port "${driver_port}" >"${driver_log}" 2>&1 &
+    fi
     ;;
 esac
 driver_pid="$!"
