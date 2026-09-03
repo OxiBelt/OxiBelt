@@ -626,7 +626,7 @@ fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
 
   for expected in [
     "if $webrtc_turn_scenario then\n                  [\"--allow-loopback-in-peer-connection\"]",
-    "if $webrtc_turn_scenario then\n                {\"media.peerconnection.ice.loopback\": true}",
+    "if $webrtc_turn_scenario then\n                {\n                  \"media.peerconnection.ice.loopback\": true,\n                  \"network.dns.forceResolve\": \"::1\"\n                }",
     "iceTransportPolicy: 'relay'",
     "turn:127.0.0.1:${turn_udp_port}?transport=udp",
     "turn:127.0.0.1:${turn_tcp_port}?transport=tcp",
@@ -634,14 +634,12 @@ fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
     "turn_v6_udp_url=\"turn:[::1]:${turn_v6_udp_port}?transport=udp\"",
     "turn_v6_tcp_url=\"turn:[::1]:${turn_v6_tcp_port}?transport=tcp\"",
     "turn_v6_tls_url=\"turns:[::1]:${turn_v6_tls_port}?transport=tcp\"",
-    "if [[ \"${browser}\" == \"firefox\" ]]; then\n  turn_tls_url=\"turns:localhost:${turn_tls_port}?transport=tcp\"\n  turn_v6_udp_url=\"turn:ip6-localhost:${turn_v6_udp_port}?transport=udp\"\n  turn_v6_tcp_url=\"turn:ip6-localhost:${turn_v6_tcp_port}?transport=tcp\"\n  turn_v6_tls_url=\"turns:ip6-localhost:${turn_v6_tls_port}?transport=tcp\"\nfi",
+    "if [[ \"${browser}\" == \"firefox\" ]]; then\n  turn_tls_url=\"turns:localhost:${turn_tls_port}?transport=tcp\"\n  turn_v6_udp_url=\"turn:turn-v6.oxibelt.invalid:${turn_v6_udp_port}?transport=udp\"\n  turn_v6_tcp_url=\"turn:turn-v6.oxibelt.invalid:${turn_v6_tcp_port}?transport=tcp\"\n  turn_v6_tls_url=\"turns:turn-v6.oxibelt.invalid:${turn_v6_tls_port}?transport=tcp\"\nfi",
     "{url: '${turn_tls_url}', controlFamily: 'ipv4', relayFamily: 'ipv4'}",
     "{url: '${turn_v6_udp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}",
     "{url: '${turn_v6_tcp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}",
     "{url: '${turn_v6_tls_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}",
-    "for required_command in certutil zip base64 getent; do",
-    "getent ahostsv6 ip6-localhost",
-    "$1 == \"::1\" { found = 1; next }",
+    "for required_command in certutil zip base64; do",
     "docker network create \\\n      --ipv6",
     "--network \"${proxy_network}\"",
     "name = \"browser-turn-control-v6\"",
@@ -673,6 +671,13 @@ fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
       "the dedicated IPv6 TURN control port should have exactly one host publication: {publication}"
     );
   }
+
+  for forbidden in ["ip6-localhost", "getent ahostsv6"] {
+    assert!(
+      !script.contains(forbidden),
+      "Firefox WebDriver TURN coverage must not depend on the host resolver alias {forbidden}"
+    );
+  }
 }
 
 #[test]
@@ -681,7 +686,7 @@ fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
 
   for expected in [
     "/CN=OxiBelt WebDriver Test CA",
-    "subjectAltName=DNS:localhost,DNS:ip6-localhost,IP:127.0.0.1,IP:::1",
+    "subjectAltName=DNS:localhost,DNS:turn-v6.oxibelt.invalid,IP:127.0.0.1,IP:::1",
     "extendedKeyUsage=serverAuth",
     "certutil -N --empty-password",
     "certutil -A",
