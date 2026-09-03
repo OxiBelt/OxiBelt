@@ -21,8 +21,8 @@ minio_source_release="RELEASE.2025-10-15T17-29-55Z"
 minio_source_version="2025-10-15T17:29:55Z"
 minio_source_commit="9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a"
 minio_source_sha256="45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841"
-minio_builder_image="golang:1.24.8-alpine3.22@sha256:3d78beb141d98f42337f1252ecf2a5f20374109929a4c3f6817f9e4179cc0ae5"
-minio_runtime_image="alpine:3.22.2@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412"
+minio_builder_image="golang:1.26.4-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56"
+minio_runtime_image="alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 mc_image="quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
 
 die() {
