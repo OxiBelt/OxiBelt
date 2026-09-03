@@ -22,7 +22,7 @@ anyhow = "1.0.104"
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 bytes = "1.12.1"
 brotli = "8.0.4"
-flate2 = "=1.1.9"
+flate2 = "=1.1.10"
 futures-util = "0.3.34"
 h3 = "0.0.8"
 h3-quinn = { version = "0.0.10", default-features = false, features = ["datagram"] }

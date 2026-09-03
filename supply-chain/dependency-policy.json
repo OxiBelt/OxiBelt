@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-09-01",
+  "reviewedOn": "2026-09-03",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "510395dd6e68e51044208488371d8827738b6d9d5316f371e28b61f15821c87a",
+      "lockfileSha256": "13abc720f2886f0b168833250c7e767832b4f0c85590eaed314c2dc368450ffb",
       "exemptionInventorySha256": "bd21e1575dce0d01e19bb0741a9e09da3f666de87814c5740a645fe920d5ee5a",
       "exemptedPackageVersions": 456
     },
@@ -77,9 +77,9 @@
         "packages": {
           "aes-gcm": ["0.11.1"],
           "argon2": ["0.6.0"],
-          "aws-lc-fips-sys": ["0.14.1"],
-          "aws-lc-rs": ["1.18.0"],
-          "aws-lc-sys": ["0.44.0"],
+          "aws-lc-fips-sys": ["0.14.2"],
+          "aws-lc-rs": ["1.18.1"],
+          "aws-lc-sys": ["0.45.0"],
           "chacha20poly1305": ["0.11.0"],
           "hkdf": ["0.13.0"],
           "hmac": ["0.13.0"],
@@ -104,14 +104,14 @@
           "hyper": ["1.11.1"],
           "hyper-rustls": ["0.27.9"],
           "hyper-util": ["0.1.20"],
-          "kio": ["0.5.6"],
+          "kio": ["0.5.7"],
           "quinn": ["0.11.11"],
           "quinn-proto": ["0.11.17"],
           "quinn-udp": ["0.5.15"],
           "rustls": ["0.23.43"],
           "rustls-pki-types": ["1.15.1"],
           "rustls-webpki": ["0.103.15"],
-          "web-transport-proto": ["0.6.0"],
+          "web-transport-proto": ["0.6.2"],
           "web-transport-quinn": ["0.12.1"],
           "web-transport-trait": ["0.4.0"]
         },
@@ -120,12 +120,12 @@
       {
         "category": "parsing-serialization",
         "packages": {
-          "jsonschema": ["0.52.1"],
+          "jsonschema": ["0.53.0"],
           "online-dsl-forge": ["0.3.3"],
           "serde": ["1.0.229"],
           "serde-saphyr": ["0.0.29", "1.2.0"],
           "serde_json": ["1.0.151"],
-          "toml": ["1.1.4+spec-1.1.0"],
+          "toml": ["1.1.5+spec-1.1.0"],
           "toml_edit": ["0.25.13+spec-1.1.0"]
         },
         "reviewBoundary": "untrusted-input handling, recursion and allocation bounds, ambiguity, and format compatibility"
@@ -144,9 +144,11 @@
       {
         "category": "compression",
         "packages": {
-          "async-compression": ["0.4.43"],
+          "async-compression": ["0.4.44"],
           "brotli": ["8.0.4"],
-          "flate2": ["1.1.9"],
+          "flate2": ["1.1.10"],
+          "miniz_oxide": ["0.9.1"],
+          "zlib-rs": ["0.6.7"],
           "zstd": ["0.13.3"]
         },
         "reviewBoundary": "decompression limits, native-code boundaries, memory use, and malformed-stream behavior"
@@ -210,24 +212,24 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:510395dd6e68e51044208488371d8827738b6d9d5316f371e28b61f15821c87a",
+      "subject": "Cargo.lock@sha256:13abc720f2886f0b168833250c7e767832b4f0c85590eaed314c2dc368450ffb",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. The development-only proptest graph adds exact rand 0.9, rand_chacha 0.9, and rand_core 0.9 lines tracked by https://github.com/OxiBelt/OxiBelt/issues/172; any further line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-31",
+      "reviewedOn": "2026-09-03",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:510395dd6e68e51044208488371d8827738b6d9d5316f371e28b61f15821c87a",
+      "subject": "Cargo.lock@sha256:13abc720f2886f0b168833250c7e767832b4f0c85590eaed314c2dc368450ffb",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-31",
+      "reviewedOn": "2026-09-03",
       "expiresOn": "2026-10-19"
     },
     {
