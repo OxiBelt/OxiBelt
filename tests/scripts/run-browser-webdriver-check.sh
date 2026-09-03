@@ -94,7 +94,7 @@ generate_test_ca() {
 generate_server_certificate() {
   openssl req -newkey rsa:2048 -sha256 -nodes \
     -subj "/CN=localhost" \
-    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1" \
+    -addext "subjectAltName=DNS:localhost,DNS:ip6-localhost,IP:127.0.0.1,IP:::1" \
     -addext "basicConstraints=critical,CA:FALSE" \
     -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
     -addext "extendedKeyUsage=serverAuth" \
@@ -373,12 +373,17 @@ if [[ "${scenario}" == "webrtc-turn" ]]; then
 fi
 
 turn_tls_url="turns:127.0.0.1:${turn_tls_port}?transport=tcp"
+turn_v6_udp_url="turn:[::1]:${turn_v6_udp_port}?transport=udp"
+turn_v6_tcp_url="turn:[::1]:${turn_v6_tcp_port}?transport=tcp"
 turn_v6_tls_url="turns:[::1]:${turn_v6_tls_port}?transport=tcp"
-# Firefox rejects IP-literal TURNS endpoints before TLS (Bugzilla 2019255).
-# The family-specific ports keep each localhost case bound to its intended listener.
+# Firefox rejects IP-literal TURNS endpoints before TLS (Bugzilla 2019255) and
+# prefers IPv4 for localhost (Bugzilla 2020530). The IPv6-only alias and
+# family-specific ports keep each case bound to its intended listener.
 if [[ "${browser}" == "firefox" ]]; then
   turn_tls_url="turns:localhost:${turn_tls_port}?transport=tcp"
-  turn_v6_tls_url="turns:localhost:${turn_v6_tls_port}?transport=tcp"
+  turn_v6_udp_url="turn:ip6-localhost:${turn_v6_udp_port}?transport=udp"
+  turn_v6_tcp_url="turn:ip6-localhost:${turn_v6_tcp_port}?transport=tcp"
+  turn_v6_tls_url="turns:ip6-localhost:${turn_v6_tls_port}?transport=tcp"
 fi
 
 case "${browser}" in
@@ -450,12 +455,21 @@ generate_server_certificate
 if [[ "${browser}" == "firefox" ]]; then
   firefox_profile=""
   if [[ "${scenario}" == "webrtc-turn" ]]; then
-    for required_command in certutil zip base64; do
+    for required_command in certutil zip base64 getent; do
       if ! command -v "${required_command}" >/dev/null 2>&1; then
         echo "${required_command} is required for the Firefox WebRTC TURN trust profile." >&2
         exit 1
       fi
     done
+
+    if ! getent ahostsv6 ip6-localhost | awk '
+      $1 == "::1" { found = 1; next }
+      NF > 0 { unexpected = 1 }
+      END { exit !(found && !unexpected) }
+    '; then
+      echo "ip6-localhost must resolve exclusively to ::1 for Firefox WebRTC TURN coverage." >&2
+      exit 1
+    fi
 
     firefox_profile_dir="${work_dir}/firefox-profile"
     mkdir -p "${firefox_profile_dir}"
@@ -944,8 +958,8 @@ PY
            {url: 'turn:127.0.0.1:${turn_udp_port}?transport=udp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
            {url: 'turn:127.0.0.1:${turn_tcp_port}?transport=tcp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
            {url: '${turn_tls_url}', controlFamily: 'ipv4', relayFamily: 'ipv4'},
-           {url: 'turn:[::1]:${turn_v6_udp_port}?transport=udp', controlFamily: 'ipv6', relayFamily: 'ipv4'},
-           {url: 'turn:[::1]:${turn_v6_tcp_port}?transport=tcp', controlFamily: 'ipv6', relayFamily: 'ipv4'},
+           {url: '${turn_v6_udp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'},
+           {url: '${turn_v6_tcp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'},
            {url: '${turn_v6_tls_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}
          ];
          const run = async (testCase) => {
