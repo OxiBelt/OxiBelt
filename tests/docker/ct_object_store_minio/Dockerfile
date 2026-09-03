@@ -1,6 +1,6 @@
 # The MinIO source archive, compiler image, and runtime image are all pinned
 # so the CT object-store transport fixture is reproducible and reviewable.
-FROM golang:1.24.8-alpine3.22@sha256:3d78beb141d98f42337f1252ecf2a5f20374109929a4c3f6817f9e4179cc0ae5 AS build
+FROM golang:1.26.4-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56 AS build
 
 ARG MINIO_SOURCE_RELEASE=RELEASE.2025-10-15T17-29-55Z
 ARG MINIO_SOURCE_VERSION=2025-10-15T17:29:55Z
