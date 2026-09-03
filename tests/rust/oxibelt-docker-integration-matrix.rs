@@ -410,12 +410,21 @@ fn print_browser_matrix() -> Result<()> {
         print!(",");
       }
       first = false;
+      let description = match (browser, scenario.name) {
+        ("chromium", "webrtc-turn") => {
+          "relay-only WebRTC data channels use IPv4 and IPv6 OxiBelt TURN control endpoints"
+        }
+        ("firefox", "webrtc-turn") => {
+          "relay-only WebRTC data channels use IPv4 OxiBelt TURN control endpoints"
+        }
+        _ => scenario.description,
+      };
       print!(
         "{{\"browser\":\"{}\",\"category\":\"webdriver\",\"case\":\"{}\",\"name\":\"{}\",\"description\":\"{}\"}}",
         browser,
         json_escape(scenario.name),
         json_escape(&format!("{browser}/{}", scenario.name)),
-        json_escape(scenario.description)
+        json_escape(description)
       );
     }
   }
@@ -814,7 +823,7 @@ fn browser_scenarios() -> Vec<BrowserScenario> {
     },
     BrowserScenario {
       name: "webrtc-turn",
-      description: "relay-only WebRTC data channels use IPv4 and IPv6 OxiBelt TURN control endpoints",
+      description: "relay-only WebRTC data channels use OxiBelt TURN control endpoints",
     },
   ]
 }

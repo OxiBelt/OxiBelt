@@ -129,6 +129,8 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "docker-security-fuzz-smoke",
   "remote-signer-dos-docker",
   "browser-webdriver",
+  "firefox-webdriver-helper-image",
+  "firefox-webrtc-turn-isolated",
 ];
 
 const BENCHMARK_ONLY_JOBS: &[&str] = &[
@@ -610,6 +612,23 @@ fn browser_webdriver_script_text() -> String {
     .expect("browser WebDriver check script should be readable")
 }
 
+fn firefox_webdriver_helper_dockerfile_text() -> String {
+  fs::read_to_string(repo_root().join("tests/docker/firefox_webdriver/Dockerfile"))
+    .expect("Firefox WebDriver helper Dockerfile should be readable")
+}
+
+fn firefox_webdriver_helper_build_script_text() -> String {
+  fs::read_to_string(
+    repo_root().join("tests/scripts/build-firefox-webdriver-helper-image-artifact.sh"),
+  )
+  .expect("Firefox WebDriver helper image build script should be readable")
+}
+
+fn docker_integration_matrix_binary_text() -> String {
+  fs::read_to_string(repo_root().join("tests/rust/oxibelt-docker-integration-matrix.rs"))
+    .expect("Docker integration matrix binary should be readable")
+}
+
 fn docker_pull_retry_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/retry-docker-pull.sh"))
     .expect("Docker pull retry script should be readable")
@@ -626,7 +645,19 @@ fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
 
   for expected in [
     "if $webrtc_turn_scenario then\n                  [\"--allow-loopback-in-peer-connection\"]",
-    "if $webrtc_turn_scenario then\n                {\n                  \"media.peerconnection.ice.loopback\": true,\n                  \"network.dns.forceResolve\": \"::1\"\n                }",
+    "execution_mode=\"${3:-native}\"",
+    "case \"${execution_mode}\" in",
+    "native|isolated",
+    "isolated_firefox_turn=false",
+    "turn_case_count=6",
+    "if [[ \"${browser}\" == \"firefox\" && \"${execution_mode}\" == \"native\" ]]; then\n  turn_tls_url=\"turns:localhost:${turn_tls_port}?transport=tcp\"\n  turn_case_count=3\nelif [[ \"${isolated_firefox_turn}\" == \"true\" ]]; then",
+    "turn_udp_url=\"turn:turn-v4.oxibelt.test:${turn_udp_port}?transport=udp\"",
+    "turn_tcp_url=\"turn:turn-v4.oxibelt.test:${turn_tcp_port}?transport=tcp\"",
+    "turn_tls_url=\"turns:turn-v4.oxibelt.test:${turn_tls_port}?transport=tcp\"",
+    "turn_v6_udp_url=\"turn:turn-v6.oxibelt.test:${turn_v6_udp_port}?transport=udp\"",
+    "turn_v6_tcp_url=\"turn:turn-v6.oxibelt.test:${turn_v6_tcp_port}?transport=tcp\"",
+    "turn_v6_tls_url=\"turns:turn-v6.oxibelt.test:${turn_v6_tls_port}?transport=tcp\"",
+    "turn_untrusted_tls_url=\"turns:turn-v6-untrusted.oxibelt.test:${turn_v6_tls_port}?transport=tcp\"",
     "iceTransportPolicy: 'relay'",
     "turn:127.0.0.1:${turn_udp_port}?transport=udp",
     "turn:127.0.0.1:${turn_tcp_port}?transport=tcp",
@@ -634,16 +665,25 @@ fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
     "turn_v6_udp_url=\"turn:[::1]:${turn_v6_udp_port}?transport=udp\"",
     "turn_v6_tcp_url=\"turn:[::1]:${turn_v6_tcp_port}?transport=tcp\"",
     "turn_v6_tls_url=\"turns:[::1]:${turn_v6_tls_port}?transport=tcp\"",
-    "if [[ \"${browser}\" == \"firefox\" ]]; then\n  turn_tls_url=\"turns:localhost:${turn_tls_port}?transport=tcp\"\n  turn_v6_udp_url=\"turn:turn-v6.oxibelt.invalid:${turn_v6_udp_port}?transport=udp\"\n  turn_v6_tcp_url=\"turn:turn-v6.oxibelt.invalid:${turn_v6_tcp_port}?transport=tcp\"\n  turn_v6_tls_url=\"turns:turn-v6.oxibelt.invalid:${turn_v6_tls_port}?transport=tcp\"\nfi",
     "{url: '${turn_tls_url}', controlFamily: 'ipv4', relayFamily: 'ipv4'}",
     "{url: '${turn_v6_udp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}",
     "{url: '${turn_v6_tcp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}",
     "{url: '${turn_v6_tls_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}",
+    "if [[ \"${turn_case_count}\" == \"6\" ]]; then",
+    "--argjson expected_count \"${turn_case_count}\"",
+    "--argjson require_negative_tls \"${isolated_firefox_turn}\"",
     "for required_command in certutil zip base64; do",
-    "docker network create \\\n      --ipv6",
+    "docker network create \\\n    --internal \\\n    --ipv6",
     "--network \"${proxy_network}\"",
+    "--network-alias browser-upstream.oxibelt.test",
+    "proxy_origin_host=\"browser-upstream.oxibelt.test\"",
+    "--cap-drop ALL",
+    "--security-opt no-new-privileges",
+    "--read-only",
+    "webdriver_curl()",
+    "docker exec \"${driver_container}\" curl \"$@\"",
     "name = \"browser-turn-control-v6\"",
-    "family = \"ipv4\"\npublic_ip = \"127.0.0.1\"\nrelay_bind_ip = \"${turn_v6_relay_bind_addr}\"",
+    "family = \"ipv4\"\npublic_ip = \"${turn_relay_public_ip}\"\nrelay_bind_ip = \"${turn_v6_relay_bind_addr}\"",
     "-p \"127.0.0.1:${turn_v6_relay_start}-${turn_v6_relay_end}:${turn_v6_relay_start}-${turn_v6_relay_end}/udp\"",
     "-p \"[::1]:${turn_v6_udp_port}:${turn_v6_udp_port}/udp\"",
     "-p \"[::1]:${turn_v6_tcp_port}:${turn_v6_tcp_port}/tcp\"",
@@ -672,10 +712,32 @@ fn browser_webdriver_turn_control_contract_is_explicit_and_relay_only() {
     );
   }
 
-  for forbidden in ["ip6-localhost", "getent ahostsv6"] {
+  for forbidden in [
+    "network.dns.forceResolve",
+    "turn-v6.oxibelt.invalid",
+    "ip6-localhost",
+    "getent ahostsv6",
+  ] {
     assert!(
       !script.contains(forbidden),
       "Firefox WebDriver TURN coverage must not depend on the host resolver alias {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn browser_webdriver_matrix_describes_native_turn_coverage_exactly() {
+  let matrix = docker_integration_matrix_binary_text();
+
+  for expected in [
+    "(\"chromium\", \"webrtc-turn\")",
+    "relay-only WebRTC data channels use IPv4 and IPv6 OxiBelt TURN control endpoints",
+    "(\"firefox\", \"webrtc-turn\")",
+    "relay-only WebRTC data channels use IPv4 OxiBelt TURN control endpoints",
+  ] {
+    assert!(
+      matrix.contains(expected),
+      "browser matrix should preserve the split native TURN description {expected}"
     );
   }
 }
@@ -686,12 +748,15 @@ fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
 
   for expected in [
     "/CN=OxiBelt WebDriver Test CA",
-    "subjectAltName=DNS:localhost,DNS:turn-v6.oxibelt.invalid,IP:127.0.0.1,IP:::1",
+    "subjectAltName=DNS:localhost,DNS:proxy.oxibelt.test,DNS:turn-v4.oxibelt.test,DNS:turn-v6.oxibelt.test,IP:127.0.0.1,IP:::1",
     "extendedKeyUsage=serverAuth",
-    "certutil -N --empty-password",
+    "firefox_webdriver_image=\"${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:154.0-geckodriver-0.37.1}\"",
+    "certutil -N --empty-password -d sql:/tmp/firefox-profile",
     "certutil -A",
     "-t \"C,,\"",
     "zip -q -r - .",
+    "docker exec -i \"${profile_container}\"",
+    "cat > /tmp/ca.pem",
     "--arg profile \"${firefox_profile}\"",
     "{profile: $profile}",
     "acceptInsecureCerts: (if $webrtc_turn_scenario then false else true end)",
@@ -704,7 +769,9 @@ fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
   }
 
   assert!(
-    !script.contains("docker cp \"${cert_dir}/.\""),
+    !script.contains("docker cp \"${cert_dir}/.\"")
+      && !script.contains("docker cp \"${cert_dir}/ca-key.pem\"")
+      && !script.contains("docker cp \"${cert_dir}/privkey.pem\""),
     "the ephemeral CA private key should not be copied into the runtime container"
   );
 
@@ -724,12 +791,24 @@ fn browser_webdriver_firefox_turn_diagnostics_are_bounded_and_failure_only() {
   let script = browser_webdriver_script_text();
 
   for expected in [
-    "firefox_turn_log_prefix=\"${work_dir}/firefox-turn\"",
+    "firefox_turn_log_dir=\"${work_dir}/firefox-turn-logs\"",
+    "firefox_turn_log_prefix=\"${firefox_turn_log_dir}/firefox-turn\"",
+    "diagnostic_log_limit_bytes=$((2 * 1024 * 1024))",
+    "firefox_turn_log_limit_bytes=$((10 * 1024 * 1024))",
     "if [[ \"${browser}\" == \"firefox\" && \"${scenario}\" == \"webrtc-turn\" ]]; then",
-    "MOZ_LOG=\"timestamp,sync,rotate:10,nsHostResolver:5,mtransport:5,nicer:5\"",
-    "MOZ_LOG_FILE=\"${firefox_turn_log_prefix}\"",
-    "-name 'firefox-turn-main*.moz_log*'",
+    "-e \"MOZ_LOG=timestamp,sync,rotate:10,nsHostResolver:5,mtransport:5,nicer:5\"",
+    "-e \"MOZ_LOG_FILE=${firefox_turn_browser_log_prefix}\"",
+    "MOZ_LOG_FILE=\"${firefox_turn_browser_log_prefix}\"",
+    "docker exec \"${driver_container}\" /bin/sh -c",
+    "cat -- \"${firefox_log}\"",
+    "find \"${firefox_turn_log_dir}\"",
+    "-name 'firefox-turn*'",
+    "head -c \"${firefox_turn_log_limit_bytes}\"",
+    ">\"${OXIBELT_TEST_ARTIFACT_DIR}/firefox-turn.moz_log\"",
     "sed 's/browser-turn-password/[REDACTED]/g'",
+    "copy_redacted_artifact",
+    "docker logs --tail 20000 \"${container}\"",
+    "tail -c \"${diagnostic_log_limit_bytes}\"",
   ] {
     assert!(
       script.contains(expected),
@@ -750,6 +829,18 @@ fn browser_webdriver_firefox_turn_diagnostics_are_bounded_and_failure_only() {
     diagnostics.contains("${OXIBELT_TEST_ARTIFACT_DIR}"),
     "Firefox TURN logs should only be copied by the failure diagnostics helper"
   );
+  assert_eq!(
+    diagnostics.matches("copy_redacted_artifact").count(),
+    4,
+    "every ordinary Firefox TURN diagnostic should pass through credential redaction"
+  );
+  assert_eq!(
+    diagnostics
+      .matches("${OXIBELT_TEST_ARTIFACT_DIR}/firefox-turn.moz_log")
+      .count(),
+    1,
+    "Firefox TURN diagnostics should publish one bounded combined log"
+  );
   for forbidden in [
     "${firefox_profile_dir}",
     "${cert_dir}/ca-key.pem",
@@ -761,6 +852,147 @@ fn browser_webdriver_firefox_turn_diagnostics_are_bounded_and_failure_only() {
       "Firefox TURN diagnostics must not collect {forbidden}"
     );
   }
+}
+
+#[test]
+fn firefox_webdriver_helper_image_is_pinned_nonroot_and_nss_ready() {
+  let dockerfile = firefox_webdriver_helper_dockerfile_text();
+  let build_script = firefox_webdriver_helper_build_script_text();
+
+  for expected in [
+    "FROM ${DEBIAN_IMAGE} AS fetch",
+    "docker.io/library/debian:trixie-slim@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f",
+    "ARG FIREFOX_VERSION=154.0",
+    "ARG FIREFOX_SHA256=7665cd49ab13417270748325838e565136adbc76d41bbd76fb24d15a0cc7792b",
+    "ARG GECKODRIVER_VERSION=0.37.1",
+    "ARG GECKODRIVER_SHA256=e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e",
+    "https://archive.mozilla.org/pub/firefox/releases/${FIREFOX_VERSION}/linux-x86_64/en-US/firefox-${FIREFOX_VERSION}.tar.xz",
+    "https://github.com/mozilla/geckodriver/releases/download/v${GECKODRIVER_VERSION}/geckodriver-v${GECKODRIVER_VERSION}-linux64.tar.gz",
+    "libnss3-tools",
+    "zip",
+    "curl",
+    "groupadd --gid 10001 webdriver",
+    "useradd --uid 10001 --gid 10001",
+    "USER 10001:10001",
+    "ENTRYPOINT [\"/usr/local/bin/geckodriver\"]",
+    "CMD [\"--host\", \"127.0.0.1\", \"--port\", \"4444\"]",
+  ] {
+    assert!(
+      dockerfile.contains(expected),
+      "Firefox WebDriver helper image should preserve {expected}"
+    );
+  }
+  assert_eq!(
+    dockerfile.matches("sha256sum --check --strict").count(),
+    2,
+    "Firefox and geckodriver archives must each be checksum verified"
+  );
+  for expected in [
+    "firefox_version=\"154.0\"",
+    "firefox_sha256=\"7665cd49ab13417270748325838e565136adbc76d41bbd76fb24d15a0cc7792b\"",
+    "geckodriver_version=\"0.37.1\"",
+    "geckodriver_sha256=\"e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e\"",
+    "retry_command 3 docker pull --platform \"${platform}\" \"${base_image}\"",
+    "--build-arg \"FIREFOX_VERSION=${firefox_version}\"",
+    "--build-arg \"GECKODRIVER_VERSION=${geckodriver_version}\"",
+    "docker run --rm \\\n  --network none \\\n  --cap-drop ALL \\\n  --security-opt no-new-privileges \\\n  --read-only",
+    "command -v curl",
+    "retry_command 3 docker save --output \"${image_tar}\" \"${firefox_image}\"",
+  ] {
+    assert!(
+      build_script.contains(expected),
+      "Firefox WebDriver helper image build should preserve {expected}"
+    );
+  }
+  assert!(
+    !dockerfile.contains("USER root") && !dockerfile.contains("--privileged"),
+    "Firefox WebDriver helper image must remain nonroot and unprivileged"
+  );
+}
+
+#[test]
+fn firefox_webdriver_turn_jobs_are_required_and_use_exact_artifacts() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let helper = jobs
+    .get("firefox-webdriver-helper-image")
+    .expect("workflow should define the Firefox WebDriver helper image job");
+  let isolated = jobs
+    .get("firefox-webrtc-turn-isolated")
+    .expect("workflow should define the isolated Firefox WebRTC TURN job");
+
+  assert_eq!(
+    helper.needs,
+    expected_needs(PRIMARY_RUST_GATE_NEEDS),
+    "Firefox WebDriver helper image should follow the normal test gates"
+  );
+  assert_eq!(
+    isolated.needs,
+    expected_needs(&[
+      "generate-test-matrices",
+      "docker-alpine-musl-image-amd64",
+      "docker-integration-helper-images",
+      "firefox-webdriver-helper-image",
+    ]),
+    "isolated Firefox WebRTC TURN should wait for the exact-revision matrix, OxiBelt image, mock-upstream helper, and Firefox helper images"
+  );
+
+  let helper_text = workflow_job_text(&workflow, "firefox-webdriver-helper-image");
+  for expected in [
+    "runs-on: ubuntu-26.04",
+    "ref: ${{ github.sha }}",
+    "tests/scripts/retry-docker-pull.sh \"${OXIBELT_BUILDKIT_IMAGE}\"",
+    "tests/scripts/build-firefox-webdriver-helper-image-artifact.sh \\",
+    "\"linux/amd64\"",
+    "${RUNNER_TEMP}/oxibelt-firefox-webdriver",
+    "name: oxibelt-firefox-webdriver-helper-image",
+    "oxibelt-firefox-webdriver-image.tar",
+    "if-no-files-found: error",
+    "retention-days: 0",
+  ] {
+    assert!(
+      helper_text.contains(expected),
+      "Firefox WebDriver helper image job should preserve {expected}"
+    );
+  }
+
+  let isolated_text = workflow_job_text(&workflow, "firefox-webrtc-turn-isolated");
+  for expected in [
+    "ref: ${{ github.sha }}",
+    "name: ${{ steps.select-amd64-image.outputs.artifact_name }}",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}\"",
+    "name: oxibelt-docker-integration-helper-images",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar\"",
+    "name: oxibelt-firefox-webdriver-helper-image",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-firefox-webdriver/oxibelt-firefox-webdriver-image.tar\"",
+    "OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}",
+    "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
+    "OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:154.0-geckodriver-0.37.1",
+    "run: tests/scripts/run-browser-webdriver-check.sh firefox webrtc-turn isolated",
+    "if: failure()",
+    "name: oxibelt-browser-firefox-webrtc-turn-isolated-diagnostics",
+    "retention-days: 1",
+  ] {
+    assert!(
+      isolated_text.contains(expected),
+      "isolated Firefox WebRTC TURN job should preserve {expected}"
+    );
+  }
+  assert!(
+    !isolated_text.contains("docker pull"),
+    "isolated Firefox WebRTC TURN should load the first-party helper artifact instead of pulling an image"
+  );
+  assert!(
+    !workflow_job_text(&workflow, "browser-webdriver").contains("OXIBELT_FIREFOX_WEBDRIVER_IMAGE"),
+    "native browser matrix should not depend on the isolated Firefox helper image"
+  );
+  assert_eq!(
+    workflow
+      .matches("tests/scripts/build-firefox-webdriver-helper-image-artifact.sh")
+      .count(),
+    1,
+    "the Firefox WebDriver helper image should be built exactly once"
+  );
 }
 
 fn admin_mutation_postgres_script_text() -> String {
@@ -6941,15 +7173,15 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     workflow
       .matches("name: Download Docker integration helper image artifact")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3,
-    "each Docker integration/security-fuzz job plus all three Admin PostgreSQL durability jobs should download the helper image artifact"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 4,
+    "each Docker integration/security-fuzz job, all three Admin PostgreSQL durability jobs, and isolated Firefox should download the helper image artifact"
   );
   assert_eq!(
     workflow
       .matches("name: Load Docker integration helper images")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT,
-    "each Docker integration/security-fuzz job should load the helper image tar"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 1,
+    "each Docker integration/security-fuzz job and isolated Firefox should load the helper image tar"
   );
   for value in [
     "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
@@ -6965,10 +7197,11 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
   ] {
     let expected_count = if value == "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci" {
       DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3
+    } else if value == "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci" {
+      DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 1
     } else if matches!(
       value,
-      "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci"
-        | "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci"
+      "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci"
         | "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\""
     ) {
       DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT
@@ -11114,7 +11347,7 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let setup_count = workflow.matches(setup_marker).count();
 
   assert_eq!(
-    setup_count, 10,
+    setup_count, 11,
     "workflow should keep pre-pull coverage aligned with every Buildx setup"
   );
   assert_eq!(

@@ -1970,6 +1970,49 @@ jobs:
           path: ${{ runner.temp }}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar
           retention-days: 0
 
+  firefox-webdriver-helper-image:
+    name: Firefox WebDriver helper image
+    runs-on: ubuntu-26.04
+    needs:
+      - test
+      - rust-advisory-checks
+      - node-dependency-admission
+      - check-riscv64-cross
+      - fuzz-smoke
+      - unsafe-validation
+    permissions:
+      contents: read
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Pre-pull Docker BuildKit image
+        run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
+        with:
+          version: v0.36.1
+          driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
+
+      - name: Build Firefox WebDriver helper image artifact
+        run: |
+          tests/scripts/build-firefox-webdriver-helper-image-artifact.sh \
+            "linux/amd64" \
+            "${RUNNER_TEMP}/oxibelt-firefox-webdriver"
+
+      - name: Upload Firefox WebDriver helper image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-firefox-webdriver-helper-image
+          path: ${{ runner.temp }}/oxibelt-firefox-webdriver/oxibelt-firefox-webdriver-image.tar
+          if-no-files-found: error
+          retention-days: 0
+
   admin-mutation-postgres:
     name: Admin mutation PostgreSQL durability
     runs-on: ubuntu-26.04
@@ -3291,6 +3334,75 @@ jobs:
           if-no-files-found: ignore
           retention-days: 0
 
+  firefox-webrtc-turn-isolated:
+    name: Firefox WebRTC TURN (isolated)
+    runs-on: ubuntu-26.04
+    needs:
+      - generate-test-matrices
+      - docker-alpine-musl-image-amd64
+      - docker-integration-helper-images
+      - firefox-webdriver-helper-image
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Select AMD64 Docker image artifact
+        id: select-amd64-image
+        run: tests/scripts/select-amd64-docker-image-artifact.sh auto
+
+      - name: Download AMD64 Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image
+
+      - name: Load OxiBelt Docker image
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
+
+      - name: Download Docker integration helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-docker-integration-helper-images
+          path: ${{ runner.temp }}/oxibelt-integration-helper-images
+
+      - name: Load Docker integration helper images
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
+
+      - name: Download Firefox WebDriver helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-firefox-webdriver-helper-image
+          path: ${{ runner.temp }}/oxibelt-firefox-webdriver
+
+      - name: Load Firefox WebDriver helper image
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-firefox-webdriver/oxibelt-firefox-webdriver-image.tar"
+
+      - name: Run isolated Firefox WebRTC TURN check
+        env:
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:154.0-geckodriver-0.37.1
+          OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-browser-logs/firefox-webrtc-turn-isolated
+        run: tests/scripts/run-browser-webdriver-check.sh firefox webrtc-turn isolated
+
+      - name: Upload isolated Firefox WebDriver diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-browser-firefox-webrtc-turn-isolated-diagnostics
+          path: ${{ runner.temp }}/oxibelt-browser-logs/firefox-webrtc-turn-isolated
+          if-no-files-found: ignore
+          retention-days: 1
+
   pr-non-benchmark-summary:
     name: ${{ github.event_name == 'pull_request' && 'PR non-benchmark summary' || 'Non-benchmark validation summary' }}
     runs-on: ubuntu-26.04
@@ -3335,6 +3447,8 @@ jobs:
       - docker-security-fuzz-smoke
       - remote-signer-dos-docker
       - browser-webdriver
+      - firefox-webdriver-helper-image
+      - firefox-webrtc-turn-isolated
     if: ${{ always() && github.actor != 'dependabot[bot]' }}
     permissions:
       contents: read

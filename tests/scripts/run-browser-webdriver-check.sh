@@ -2,11 +2,12 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <chromium|firefox> [basic-navigation|waf-request|waf-response|person-proof|hot-reload|webrtc-turn]" >&2
+  echo "usage: $0 <chromium|firefox> [basic-navigation|waf-request|waf-response|person-proof|hot-reload|webrtc-turn] [native|isolated]" >&2
 }
 
 browser="${1:-}"
 scenario="${2:-person-proof}"
+execution_mode="${3:-native}"
 if [[ -z "${browser}" ]]; then
   usage
   exit 2
@@ -28,6 +29,20 @@ case "${scenario}" in
     ;;
 esac
 
+case "${execution_mode}" in
+  native|isolated) ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+
+if [[ "${execution_mode}" == "isolated" \
+  && ("${browser}" != "firefox" || "${scenario}" != "webrtc-turn") ]]; then
+  echo "The isolated mode is only supported for the Firefox WebRTC TURN scenario." >&2
+  exit 2
+fi
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 runner_temp="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
@@ -46,9 +61,15 @@ turn_v6_relay_end="${OXIBELT_BROWSER_TURN_V6_RELAY_END:-25031}"
 session_id=""
 driver_base_url=""
 upstream_pid=""
+upstream_container=""
 proxy_pid=""
 proxy_container=""
 proxy_network=""
+proxy_egress_network=""
+proxy_internal_ipv4=""
+proxy_internal_ipv6=""
+driver_container=""
+profile_container=""
 driver_pid=""
 
 if [[ -n "${CHROMEWEBDRIVER:-}" ]]; then
@@ -65,7 +86,10 @@ config_dir="${work_dir}/config"
 cert_dir="${work_dir}/cert"
 upstream_log="${work_dir}/mock-upstream.log"
 proxy_log="${work_dir}/oxibelt.log"
-firefox_turn_log_prefix="${work_dir}/firefox-turn"
+firefox_turn_log_dir="${work_dir}/firefox-turn-logs"
+firefox_turn_log_prefix="${firefox_turn_log_dir}/firefox-turn"
+diagnostic_log_limit_bytes=$((2 * 1024 * 1024))
+firefox_turn_log_limit_bytes=$((10 * 1024 * 1024))
 
 find_first_command() {
   local candidate=""
@@ -95,7 +119,7 @@ generate_test_ca() {
 generate_server_certificate() {
   openssl req -newkey rsa:2048 -sha256 -nodes \
     -subj "/CN=localhost" \
-    -addext "subjectAltName=DNS:localhost,DNS:turn-v6.oxibelt.invalid,IP:127.0.0.1,IP:::1" \
+    -addext "subjectAltName=DNS:localhost,DNS:proxy.oxibelt.test,DNS:turn-v4.oxibelt.test,DNS:turn-v6.oxibelt.test,IP:127.0.0.1,IP:::1" \
     -addext "basicConstraints=critical,CA:FALSE" \
     -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
     -addext "extendedKeyUsage=serverAuth" \
@@ -127,13 +151,50 @@ show_log() {
 
   if [[ -s "${path}" ]]; then
     echo "${label}:" >&2
-    cat "${path}" >&2
+    tail -c "${diagnostic_log_limit_bytes}" "${path}" \
+      | sed 's/browser-turn-password/[REDACTED]/g' >&2
+  fi
+}
+
+capture_docker_log() {
+  local container="$1"
+  local destination_path="$2"
+
+  {
+    docker logs --tail 20000 "${container}" 2>&1 || true
+  } | tail -c "${diagnostic_log_limit_bytes}" >"${destination_path}"
+}
+
+copy_redacted_artifact() {
+  local source_path="$1"
+  local destination_path="$2"
+
+  if [[ -f "${source_path}" ]]; then
+    tail -c "${diagnostic_log_limit_bytes}" "${source_path}" \
+      | sed 's/browser-turn-password/[REDACTED]/g' \
+        >"${destination_path}" 2>/dev/null || true
   fi
 }
 
 show_diagnostics() {
+  if [[ -n "${upstream_container}" ]]; then
+    capture_docker_log "${upstream_container}" "${upstream_log}"
+  fi
   if [[ -n "${proxy_container}" ]]; then
-    docker logs "${proxy_container}" >"${proxy_log}" 2>&1 || true
+    capture_docker_log "${proxy_container}" "${proxy_log}"
+  fi
+  if [[ -n "${driver_container}" ]]; then
+    capture_docker_log "${driver_container}" "${driver_log}"
+    if [[ "${browser}" == "firefox" && "${scenario}" == "webrtc-turn" ]]; then
+      mkdir -p "${firefox_turn_log_dir}"
+      docker exec "${driver_container}" /bin/sh -c '
+        for firefox_log in /tmp/oxibelt-firefox-logs/firefox-turn*; do
+          if [ -f "${firefox_log}" ]; then
+            cat -- "${firefox_log}"
+          fi
+        done
+      ' >"${firefox_turn_log_dir}/firefox-turn-container.moz_log" 2>/dev/null || true
+    fi
   fi
 
   show_log "Mock upstream log" "${upstream_log}"
@@ -142,24 +203,38 @@ show_diagnostics() {
 
   if [[ -n "${OXIBELT_TEST_ARTIFACT_DIR:-}" ]]; then
     mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
-    cp "${upstream_log}" "${OXIBELT_TEST_ARTIFACT_DIR}/mock-upstream.log" 2>/dev/null || true
-    cp "${proxy_log}" "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.log" 2>/dev/null || true
-    cp "${driver_log:-}" "${OXIBELT_TEST_ARTIFACT_DIR}/webdriver.log" 2>/dev/null || true
-    cp "${config_dir}/oxibelt.toml" "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.toml" 2>/dev/null || true
+    copy_redacted_artifact \
+      "${upstream_log}" \
+      "${OXIBELT_TEST_ARTIFACT_DIR}/mock-upstream.log"
+    copy_redacted_artifact \
+      "${proxy_log}" \
+      "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.log"
+    copy_redacted_artifact \
+      "${driver_log:-}" \
+      "${OXIBELT_TEST_ARTIFACT_DIR}/webdriver.log"
+    copy_redacted_artifact \
+      "${config_dir}/oxibelt.toml" \
+      "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.toml"
 
     if [[ "${browser}" == "firefox" && "${scenario}" == "webrtc-turn" ]]; then
+      firefox_turn_log_combined="$(mktemp "${work_dir}/firefox-turn-combined.XXXXXX")"
       while IFS= read -r -d '' firefox_turn_log; do
-        firefox_turn_log_name="$(basename -- "${firefox_turn_log}")"
         sed 's/browser-turn-password/[REDACTED]/g' \
-          "${firefox_turn_log}" \
-          >"${OXIBELT_TEST_ARTIFACT_DIR}/${firefox_turn_log_name}"
+          "${firefox_turn_log}" >>"${firefox_turn_log_combined}"
       done < <(
-        find "${work_dir}" \
+        find "${firefox_turn_log_dir}" \
           -maxdepth 1 \
           -type f \
-          -name 'firefox-turn-main*.moz_log*' \
-          -print0
+          -name 'firefox-turn*' \
+          -print0 \
+          | sort -z
       )
+      if [[ -s "${firefox_turn_log_combined}" ]]; then
+        head -c "${firefox_turn_log_limit_bytes}" \
+          "${firefox_turn_log_combined}" \
+          >"${OXIBELT_TEST_ARTIFACT_DIR}/firefox-turn.moz_log"
+      fi
+      rm -f "${firefox_turn_log_combined}"
     fi
   fi
 }
@@ -170,10 +245,18 @@ fail_with_diagnostics() {
   exit 1
 }
 
+webdriver_curl() {
+  if [[ "${isolated_firefox_turn:-false}" == "true" ]]; then
+    docker exec "${driver_container}" curl "$@"
+  else
+    curl "$@"
+  fi
+}
+
 webdriver_navigate() {
   local url="$1"
 
-  curl --silent --show-error --fail-with-body \
+  webdriver_curl --silent --show-error --fail-with-body \
     --header "Content-Type: application/json" \
     --request POST \
     --data "$(jq -n --arg url "${url}" '{url: $url}')" \
@@ -183,7 +266,7 @@ webdriver_navigate() {
 webdriver_execute_sync() {
   local script="$1"
 
-  curl --silent --show-error --fail-with-body \
+  webdriver_curl --silent --show-error --fail-with-body \
     --header "Content-Type: application/json" \
     --request POST \
     --data "$(jq -n --arg script "${script}" '{script: $script, args: []}')" \
@@ -193,7 +276,7 @@ webdriver_execute_sync() {
 webdriver_execute_async() {
   local script="$1"
 
-  curl --silent --show-error --fail-with-body \
+  webdriver_curl --silent --show-error --fail-with-body \
     --header "Content-Type: application/json" \
     --request POST \
     --data "$(jq -n --arg script "${script}" '{script: $script, args: []}')" \
@@ -203,7 +286,7 @@ webdriver_execute_async() {
 webdriver_set_script_timeout() {
   local timeout_ms="$1"
 
-  curl --silent --show-error --fail-with-body \
+  webdriver_curl --silent --show-error --fail-with-body \
     --header "Content-Type: application/json" \
     --request POST \
     --data "$(jq -n --argjson timeout_ms "${timeout_ms}" '{script: $timeout_ms}')" \
@@ -247,12 +330,13 @@ wait_for_upstream_json() {
     if body_text="$(webdriver_body_text 2>/dev/null)"; then
       if jq -e \
         --arg expected_path "${expected_path}" \
+        --arg expected_host "${browser_origin_host}" \
         '.upstream == "browser-upstream"
           and .scheme == "http"
           and .method == "GET"
           and .path == $expected_path
           and .headers["x-forwarded-proto"] == "https"
-          and .headers["x-forwarded-host"] == "localhost"' <<<"${body_text}" >/dev/null 2>&1; then
+          and .headers["x-forwarded-host"] == $expected_host' <<<"${body_text}" >/dev/null 2>&1; then
         echo "${body_text}"
         return 0
       fi
@@ -272,7 +356,7 @@ wait_for_upstream_json() {
 webdriver_cookie() {
   local name="$1"
 
-  curl --silent --show-error --fail-with-body \
+  webdriver_curl --silent --show-error --fail-with-body \
     "${driver_base_url}/session/${session_id}/cookie/${name}"
 }
 
@@ -280,7 +364,7 @@ create_webdriver_session() {
   local session_response=""
 
   if ! session_response="$(
-    curl --silent --show-error --fail-with-body \
+    webdriver_curl --silent --show-error --fail-with-body \
       --header "Content-Type: application/json" \
       --request POST \
       --data "${capabilities}" \
@@ -305,7 +389,7 @@ create_webdriver_session() {
 
 delete_webdriver_session() {
   if [[ -n "${session_id}" && -n "${driver_base_url}" ]]; then
-    curl --silent --show-error --fail-with-body \
+    webdriver_curl --silent --show-error --fail-with-body \
       --request DELETE "${driver_base_url}/session/${session_id}" >/dev/null || true
     session_id=""
   fi
@@ -323,7 +407,20 @@ reload_proxy() {
 
 refresh_proxy_log() {
   if [[ -n "${proxy_container}" ]]; then
-    docker logs "${proxy_container}" >"${proxy_log}" 2>&1 || true
+    capture_docker_log "${proxy_container}" "${proxy_log}"
+  fi
+}
+
+proxy_is_ready() {
+  if [[ "${isolated_firefox_turn:-false}" == "true" ]]; then
+    docker exec "${proxy_container}" \
+      wget --quiet --no-check-certificate \
+      --header "Host: localhost" \
+      --output-document /dev/null \
+      "https://127.0.0.1:${proxy_port}/app/preflight"
+  else
+    curl --silent --fail --insecure \
+      "https://localhost:${proxy_port}/app/preflight" >/dev/null
   fi
 }
 
@@ -371,37 +468,71 @@ cleanup() {
     wait "${driver_pid}" >/dev/null 2>&1 || true
   fi
 
+  if [[ -n "${driver_container}" ]]; then
+    docker rm -f "${driver_container}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${profile_container}" ]]; then
+    docker rm -f "${profile_container}" >/dev/null 2>&1 || true
+  fi
+
   if [[ -n "${proxy_container}" ]]; then
     docker rm -f "${proxy_container}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${upstream_container}" ]]; then
+    docker rm -f "${upstream_container}" >/dev/null 2>&1 || true
   fi
 
   if [[ -n "${proxy_network}" ]]; then
     docker network rm "${proxy_network}" >/dev/null 2>&1 || true
   fi
 
+  if [[ -n "${proxy_egress_network}" ]]; then
+    docker network rm "${proxy_egress_network}" >/dev/null 2>&1 || true
+  fi
+
   rm -rf "${work_dir}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 webrtc_turn_scenario=false
 if [[ "${scenario}" == "webrtc-turn" ]]; then
   webrtc_turn_scenario=true
 fi
 
+isolated_firefox_turn=false
+if [[ "${execution_mode}" == "isolated" ]]; then
+  isolated_firefox_turn=true
+fi
+
+browser_origin_host="localhost"
+turn_udp_url="turn:127.0.0.1:${turn_udp_port}?transport=udp"
+turn_tcp_url="turn:127.0.0.1:${turn_tcp_port}?transport=tcp"
 turn_tls_url="turns:127.0.0.1:${turn_tls_port}?transport=tcp"
 turn_v6_udp_url="turn:[::1]:${turn_v6_udp_port}?transport=udp"
 turn_v6_tcp_url="turn:[::1]:${turn_v6_tcp_port}?transport=tcp"
 turn_v6_tls_url="turns:[::1]:${turn_v6_tls_port}?transport=tcp"
-# Firefox rejects IP-literal TURNS endpoints before TLS (Bugzilla 2019255),
-# while its ICE resolver performs its own family-specific DNS lookups. Resolve
-# this reserved name inside the disposable Firefox profile so TLS still sees a
-# hostname and the IPv6-only ports prove the intended control family.
-if [[ "${browser}" == "firefox" ]]; then
+turn_case_count=6
+turn_untrusted_tls_url=""
+if [[ "${browser}" == "firefox" && "${execution_mode}" == "native" ]]; then
   turn_tls_url="turns:localhost:${turn_tls_port}?transport=tcp"
-  turn_v6_udp_url="turn:turn-v6.oxibelt.invalid:${turn_v6_udp_port}?transport=udp"
-  turn_v6_tcp_url="turn:turn-v6.oxibelt.invalid:${turn_v6_tcp_port}?transport=tcp"
-  turn_v6_tls_url="turns:turn-v6.oxibelt.invalid:${turn_v6_tls_port}?transport=tcp"
+  turn_case_count=3
+elif [[ "${isolated_firefox_turn}" == "true" ]]; then
+  browser_origin_host="proxy.oxibelt.test"
+  turn_udp_url="turn:turn-v4.oxibelt.test:${turn_udp_port}?transport=udp"
+  turn_tcp_url="turn:turn-v4.oxibelt.test:${turn_tcp_port}?transport=tcp"
+  turn_tls_url="turns:turn-v4.oxibelt.test:${turn_tls_port}?transport=tcp"
+  turn_v6_udp_url="turn:turn-v6.oxibelt.test:${turn_v6_udp_port}?transport=udp"
+  turn_v6_tcp_url="turn:turn-v6.oxibelt.test:${turn_v6_tcp_port}?transport=tcp"
+  turn_v6_tls_url="turns:turn-v6.oxibelt.test:${turn_v6_tls_port}?transport=tcp"
+  turn_untrusted_tls_url="turns:turn-v6-untrusted.oxibelt.test:${turn_v6_tls_port}?transport=tcp"
 fi
+
+firefox_webdriver_image="${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:154.0-geckodriver-0.37.1}"
+mock_upstream_image="${OXIBELT_MOCK_UPSTREAM_IMAGE:-oxibelt/mock-upstream:ci}"
 
 case "${browser}" in
   chromium)
@@ -442,29 +573,38 @@ case "${browser}" in
     )"
     ;;
   firefox)
-    browser_binary="$(find_first_command "${BROWSER_COMMAND:-firefox}" firefox)"
-    driver_binary="$(find_first_command "${DRIVER_COMMAND:-geckodriver}" geckodriver)"
+    if [[ "${isolated_firefox_turn}" == "true" ]]; then
+      browser_binary="/opt/firefox/firefox"
+      driver_binary="/usr/local/bin/geckodriver"
+    else
+      browser_binary="$(find_first_command "${BROWSER_COMMAND:-firefox}" firefox)"
+      driver_binary="$(find_first_command "${DRIVER_COMMAND:-geckodriver}" geckodriver)"
+    fi
     driver_port="${DRIVER_PORT:-4444}"
     driver_log="${work_dir}/geckodriver.log"
     ;;
 esac
 
-if [[ -z "${browser_binary}" ]]; then
+if [[ "${isolated_firefox_turn}" != "true" && -z "${browser_binary}" ]]; then
   echo "Unable to find ${browser} browser binary." >&2
   exit 1
 fi
 
-if [[ -z "${driver_binary}" ]]; then
+if [[ "${isolated_firefox_turn}" != "true" && -z "${driver_binary}" ]]; then
   echo "Unable to find ${browser} WebDriver binary." >&2
   exit 1
 fi
 
-driver_base_url="http://127.0.0.1:${driver_port}"
+if [[ "${isolated_firefox_turn}" != "true" ]]; then
+  driver_base_url="http://127.0.0.1:${driver_port}"
+fi
 
-mkdir -p "${config_dir}" "${cert_dir}"
+mkdir -p "${config_dir}" "${cert_dir}" "${firefox_turn_log_dir}"
 
-"${browser_binary}" --version
-"${driver_binary}" --version
+if [[ "${isolated_firefox_turn}" != "true" ]]; then
+  "${browser_binary}" --version
+  "${driver_binary}" --version
+fi
 
 generate_test_ca
 generate_server_certificate
@@ -472,29 +612,79 @@ generate_server_certificate
 if [[ "${browser}" == "firefox" ]]; then
   firefox_profile=""
   if [[ "${scenario}" == "webrtc-turn" ]]; then
-    for required_command in certutil zip base64; do
-      if ! command -v "${required_command}" >/dev/null 2>&1; then
-        echo "${required_command} is required for the Firefox WebRTC TURN trust profile." >&2
+    if [[ "${isolated_firefox_turn}" == "true" ]]; then
+      if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
+        echo "OXIBELT_DOCKER_IMAGE is required for isolated Firefox TURN coverage." >&2
         exit 1
       fi
-    done
+      if ! command -v docker >/dev/null 2>&1; then
+        echo "Docker is required for isolated Firefox TURN coverage." >&2
+        exit 1
+      fi
+      if ! docker image inspect "${firefox_webdriver_image}" >/dev/null 2>&1; then
+        echo "Expected preloaded Firefox WebDriver image was not found: ${firefox_webdriver_image}" >&2
+        exit 1
+      fi
 
-    firefox_profile_dir="${work_dir}/firefox-profile"
-    mkdir -p "${firefox_profile_dir}"
-    certutil -N --empty-password -d "sql:${firefox_profile_dir}"
-    certutil -A \
-      -d "sql:${firefox_profile_dir}" \
-      -n "OxiBelt WebDriver Test CA" \
-      -t "C,," \
-      -i "${cert_dir}/ca.pem"
-    firefox_profile="$(
-      (
-        cd -- "${firefox_profile_dir}"
-        zip -q -r - .
-      ) | base64 -w 0
-    )"
+      profile_container="oxibelt-firefox-profile-$(date +%s)-$$"
+      docker create \
+        --name "${profile_container}" \
+        --network none \
+        --cap-drop ALL \
+        --security-opt no-new-privileges \
+        --read-only \
+        --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m,uid=10001,gid=10001,mode=1777 \
+        --entrypoint /bin/sh \
+        "${firefox_webdriver_image}" \
+        -c 'trap "exit 0" TERM INT; while :; do sleep 3600; done' >/dev/null
+      docker start "${profile_container}" >/dev/null
+      docker exec -i "${profile_container}" \
+        /bin/sh -c 'umask 077; cat > /tmp/ca.pem' <"${cert_dir}/ca.pem"
+      docker exec "${profile_container}" mkdir -p /tmp/firefox-profile
+      docker exec "${profile_container}" \
+        certutil -N --empty-password -d sql:/tmp/firefox-profile
+      docker exec "${profile_container}" \
+        certutil -A \
+        -d sql:/tmp/firefox-profile \
+        -n "OxiBelt WebDriver Test CA" \
+        -t "C,," \
+        -i /tmp/ca.pem
+      firefox_profile="$(
+        docker exec "${profile_container}" \
+          /bin/sh -c 'cd /tmp/firefox-profile && zip -q -r - .' \
+          | base64 -w 0
+      )"
+      docker rm -f "${profile_container}" >/dev/null
+      profile_container=""
+    else
+      for required_command in certutil zip base64; do
+        if ! command -v "${required_command}" >/dev/null 2>&1; then
+          echo "${required_command} is required for the Firefox WebRTC TURN trust profile." >&2
+          exit 1
+        fi
+      done
+
+      firefox_profile_dir="${work_dir}/firefox-profile"
+      mkdir -p "${firefox_profile_dir}"
+      certutil -N --empty-password -d "sql:${firefox_profile_dir}"
+      certutil -A \
+        -d "sql:${firefox_profile_dir}" \
+        -n "OxiBelt WebDriver Test CA" \
+        -t "C,," \
+        -i "${cert_dir}/ca.pem"
+      firefox_profile="$(
+        (
+          cd -- "${firefox_profile_dir}"
+          zip -q -r - .
+        ) | base64 -w 0
+      )"
+    fi
   fi
 
+  firefox_turn_browser_log_prefix="${firefox_turn_log_prefix}"
+  if [[ "${isolated_firefox_turn}" == "true" ]]; then
+    firefox_turn_browser_log_prefix="/tmp/oxibelt-firefox-logs/firefox-turn"
+  fi
   capabilities="$(
     jq -n \
       --arg binary "${browser_binary}" \
@@ -515,8 +705,7 @@ if [[ "${browser}" == "firefox" ]]; then
               "devtools.jsonview.enabled": false
               } + if $webrtc_turn_scenario then
                 {
-                  "media.peerconnection.ice.loopback": true,
-                  "network.dns.forceResolve": "::1"
+                  "media.peerconnection.ice.loopback": true
                 }
               else
                 {}
@@ -553,6 +742,72 @@ else
   proxy_origin_host="127.0.0.1"
   cert_chain="fullchain.pem"
   private_key="privkey.pem"
+fi
+
+turn_relay_public_ip="127.0.0.1"
+if [[ "${isolated_firefox_turn}" == "true" ]]; then
+  proxy_container="oxibelt-browser-proxy-firefox-isolated-$(date +%s)-$$"
+  proxy_network="oxibelt-browser-turn-internal-$(date +%s)-$$"
+  proxy_egress_network="oxibelt-browser-turn-egress-$(date +%s)-$$"
+
+  docker network create \
+    --internal \
+    --label "com.oxibelt.test.browser-webdriver=true" \
+    "${proxy_egress_network}" >/dev/null
+  if ! docker image inspect "${mock_upstream_image}" >/dev/null 2>&1; then
+    echo "Expected preloaded mock-upstream image was not found: ${mock_upstream_image}" >&2
+    exit 1
+  fi
+  upstream_container="oxibelt-browser-upstream-firefox-isolated-$(date +%s)-$$"
+  docker create \
+    --name "${upstream_container}" \
+    --network "${proxy_egress_network}" \
+    --network-alias browser-upstream.oxibelt.test \
+    --label "com.oxibelt.test.browser-webdriver=true" \
+    --cap-drop ALL \
+    --security-opt no-new-privileges \
+    --read-only \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
+    -e "LISTEN_PORT=${upstream_port}" \
+    -e UPSTREAM_NAME=browser-upstream \
+    "${mock_upstream_image}" >/dev/null
+  docker start "${upstream_container}" >/dev/null
+  proxy_origin_host="browser-upstream.oxibelt.test"
+  docker network create \
+    --internal \
+    --ipv6 \
+    --label "com.oxibelt.test.browser-webdriver=true" \
+    "${proxy_network}" >/dev/null
+  mapfile -t proxy_internal_addresses < <(
+    docker network inspect "${proxy_network}" \
+      | python3 -c '
+import ipaddress
+import json
+import sys
+
+networks = [ipaddress.ip_network(item["Subnet"]) for item in json.load(sys.stdin)[0]["IPAM"]["Config"]]
+for version in (4, 6):
+    network = next(network for network in networks if network.version == version)
+    print(network.network_address + 10)
+'
+  )
+  proxy_internal_ipv4="${proxy_internal_addresses[0]:-}"
+  proxy_internal_ipv6="${proxy_internal_addresses[1]:-}"
+  if [[ -z "${proxy_internal_ipv4}" || -z "${proxy_internal_ipv6}" ]]; then
+    echo "Unable to reserve dual-stack proxy addresses on ${proxy_network}." >&2
+    exit 1
+  fi
+  docker create \
+    --name "${proxy_container}" \
+    --network "${proxy_egress_network}" \
+    --label "com.oxibelt.test.browser-webdriver=true" \
+    "${OXIBELT_DOCKER_IMAGE}" >/dev/null
+  docker network connect \
+    --ip "${proxy_internal_ipv4}" \
+    --ip6 "${proxy_internal_ipv6}" \
+    "${proxy_network}" \
+    "${proxy_container}"
+  turn_relay_public_ip="${proxy_internal_ipv4}"
 fi
 
 hot_reload_mode="off"
@@ -687,13 +942,13 @@ mode = "disabled"
 
 [[routes]]
 name = "person-proof-api-route"
-hosts = ["localhost"]
+hosts = ["localhost", "proxy.oxibelt.test"]
 path_prefix = "/.oxibelt"
 upstream = "browser-upstream"
 
 [[routes]]
 name = "browser-route"
-hosts = ["localhost"]
+hosts = ["localhost", "proxy.oxibelt.test"]
 path_prefix = "/app"
 upstream = "browser-upstream"
 EOF
@@ -712,7 +967,7 @@ idle_timeout_ms = 30000
 
 [[webrtc_turn_listeners.relay_families]]
 family = "ipv4"
-public_ip = "127.0.0.1"
+public_ip = "${turn_relay_public_ip}"
 relay_bind_ip = "${turn_bind_addr}"
 
 [webrtc_turn_listeners.relay_families.relay_port_range]
@@ -721,6 +976,7 @@ end = ${turn_relay_end}
 
 [webrtc_turn_listeners.peer_policy]
 allow_loopback_peers = true
+allow_private_peers = true
 
 [webrtc_turn_listeners.auth]
 mode = "enforce"
@@ -741,7 +997,7 @@ idle_timeout_ms = 30000
 
 [[webrtc_turn_listeners.relay_families]]
 family = "ipv4"
-public_ip = "127.0.0.1"
+public_ip = "${turn_relay_public_ip}"
 relay_bind_ip = "${turn_v6_relay_bind_addr}"
 
 [webrtc_turn_listeners.relay_families.relay_port_range]
@@ -750,6 +1006,7 @@ end = ${turn_v6_relay_end}
 
 [webrtc_turn_listeners.peer_policy]
 allow_loopback_peers = true
+allow_private_peers = true
 
 [webrtc_turn_listeners.auth]
 mode = "enforce"
@@ -761,49 +1018,53 @@ password = "browser-turn-password"
 EOF
 fi
 
-LISTEN_PORT="${upstream_port}" \
-  UPSTREAM_NAME="browser-upstream" \
-  python3 "${repo_root}/tests/docker/mock_upstream/server.py" >"${upstream_log}" 2>&1 &
-upstream_pid="$!"
+if [[ "${isolated_firefox_turn}" != "true" ]]; then
+  LISTEN_PORT="${upstream_port}" \
+    UPSTREAM_NAME="browser-upstream" \
+    python3 "${repo_root}/tests/docker/mock_upstream/server.py" >"${upstream_log}" 2>&1 &
+  upstream_pid="$!"
 
-for _ in {1..30}; do
-  if curl --silent --fail "http://127.0.0.1:${upstream_port}/ready" >/dev/null; then
-    break
+  for _ in {1..30}; do
+    if curl --silent --fail "http://127.0.0.1:${upstream_port}/ready" >/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if ! curl --silent --fail "http://127.0.0.1:${upstream_port}/ready" >/dev/null; then
+    fail_with_diagnostics "Mock upstream did not become ready."
   fi
-  sleep 1
-done
-if ! curl --silent --fail "http://127.0.0.1:${upstream_port}/ready" >/dev/null; then
-  fail_with_diagnostics "Mock upstream did not become ready."
 fi
 
 if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
-  proxy_container="oxibelt-browser-proxy-${browser}-$(date +%s)-$$"
-  if [[ "${scenario}" == "webrtc-turn" ]]; then
-    proxy_network="oxibelt-browser-turn-${browser}-$(date +%s)-$$"
-    docker network create \
-      --ipv6 \
-      --label "com.oxibelt.test.browser-webdriver=true" \
-      "${proxy_network}" >/dev/null
-  fi
-  docker_create_args=(
-    --name "${proxy_container}" \
-    --add-host host.docker.internal:host-gateway \
-    -p "127.0.0.1:${proxy_port}:${proxy_port}"
-  )
-  if [[ "${scenario}" == "webrtc-turn" ]]; then
-    docker_create_args+=(
-      --network "${proxy_network}"
-      -p "127.0.0.1:${turn_udp_port}:${turn_udp_port}/udp"
-      -p "127.0.0.1:${turn_tcp_port}:${turn_tcp_port}/tcp"
-      -p "127.0.0.1:${turn_tls_port}:${turn_tls_port}/tcp"
-      -p "127.0.0.1:${turn_relay_start}-${turn_relay_end}:${turn_relay_start}-${turn_relay_end}/udp"
-      -p "[::1]:${turn_v6_udp_port}:${turn_v6_udp_port}/udp"
-      -p "[::1]:${turn_v6_tcp_port}:${turn_v6_tcp_port}/tcp"
-      -p "[::1]:${turn_v6_tls_port}:${turn_v6_tls_port}/tcp"
-      -p "127.0.0.1:${turn_v6_relay_start}-${turn_v6_relay_end}:${turn_v6_relay_start}-${turn_v6_relay_end}/udp"
+  if [[ -z "${proxy_container}" ]]; then
+    proxy_container="oxibelt-browser-proxy-${browser}-$(date +%s)-$$"
+    if [[ "${scenario}" == "webrtc-turn" ]]; then
+      proxy_network="oxibelt-browser-turn-${browser}-$(date +%s)-$$"
+      docker network create \
+        --ipv6 \
+        --label "com.oxibelt.test.browser-webdriver=true" \
+        "${proxy_network}" >/dev/null
+    fi
+    docker_create_args=(
+      --name "${proxy_container}" \
+      --add-host host.docker.internal:host-gateway \
+      -p "127.0.0.1:${proxy_port}:${proxy_port}"
     )
+    if [[ "${scenario}" == "webrtc-turn" ]]; then
+      docker_create_args+=(
+        --network "${proxy_network}"
+        -p "127.0.0.1:${turn_udp_port}:${turn_udp_port}/udp"
+        -p "127.0.0.1:${turn_tcp_port}:${turn_tcp_port}/tcp"
+        -p "127.0.0.1:${turn_tls_port}:${turn_tls_port}/tcp"
+        -p "127.0.0.1:${turn_relay_start}-${turn_relay_end}:${turn_relay_start}-${turn_relay_end}/udp"
+        -p "[::1]:${turn_v6_udp_port}:${turn_v6_udp_port}/udp"
+        -p "[::1]:${turn_v6_tcp_port}:${turn_v6_tcp_port}/tcp"
+        -p "[::1]:${turn_v6_tls_port}:${turn_v6_tls_port}/tcp"
+        -p "127.0.0.1:${turn_v6_relay_start}-${turn_v6_relay_end}:${turn_v6_relay_start}-${turn_v6_relay_end}/udp"
+      )
+    fi
+    docker create "${docker_create_args[@]}" "${OXIBELT_DOCKER_IMAGE}" >/dev/null
   fi
-  docker create "${docker_create_args[@]}" "${OXIBELT_DOCKER_IMAGE}" >/dev/null
   docker cp "${config_dir}/oxibelt.toml" "${proxy_container}:/etc/oxibelt/config/oxibelt.toml"
   copy_server_tls_to_container
   docker start "${proxy_container}" >/dev/null
@@ -821,14 +1082,14 @@ else
 fi
 
 for _ in {1..30}; do
-  if curl --silent --fail --insecure "https://localhost:${proxy_port}/app/preflight" >/dev/null; then
+  if proxy_is_ready; then
     break
   fi
   sleep 1
 done
-if ! curl --silent --fail --insecure "https://localhost:${proxy_port}/app/preflight" >/dev/null; then
+if ! proxy_is_ready; then
   if [[ -n "${proxy_container}" ]]; then
-    docker logs "${proxy_container}" >"${proxy_log}" 2>&1 || true
+    capture_docker_log "${proxy_container}" "${proxy_log}"
   fi
   fail_with_diagnostics "OxiBelt proxy did not become ready."
 fi
@@ -838,24 +1099,53 @@ case "${browser}" in
     "${driver_binary}" --port="${driver_port}" >"${driver_log}" 2>&1 &
     ;;
   firefox)
-    if [[ "${scenario}" == "webrtc-turn" ]]; then
-      MOZ_LOG="timestamp,sync,rotate:10,nsHostResolver:5,mtransport:5,nicer:5" \
-        MOZ_LOG_FILE="${firefox_turn_log_prefix}" \
-        "${driver_binary}" --port "${driver_port}" >"${driver_log}" 2>&1 &
+    if [[ "${isolated_firefox_turn}" == "true" ]]; then
+      driver_container="oxibelt-firefox-webdriver-$(date +%s)-$$"
+      docker create \
+        --name "${driver_container}" \
+        --network "${proxy_network}" \
+        --add-host "proxy.oxibelt.test=${proxy_internal_ipv4}" \
+        --add-host "turn-v4.oxibelt.test=${proxy_internal_ipv4}" \
+        --add-host "turn-v6.oxibelt.test=${proxy_internal_ipv6}" \
+        --add-host "turn-v6-untrusted.oxibelt.test=${proxy_internal_ipv6}" \
+        --label "com.oxibelt.test.browser-webdriver=true" \
+        --cap-drop ALL \
+        --security-opt no-new-privileges \
+        --read-only \
+        --tmpfs /tmp:rw,nosuid,nodev,noexec,size=512m,uid=10001,gid=10001,mode=1777 \
+        --tmpfs /tmp/oxibelt-firefox-logs:rw,nosuid,nodev,noexec,size=64m,uid=10001,gid=10001,mode=0700 \
+        --tmpfs /home/webdriver:rw,nosuid,nodev,noexec,size=128m,uid=10001,gid=10001,mode=0700 \
+        --shm-size 256m \
+        -e "MOZ_LOG=timestamp,sync,rotate:10,nsHostResolver:5,mtransport:5,nicer:5" \
+        -e "MOZ_LOG_FILE=${firefox_turn_browser_log_prefix}" \
+        "${firefox_webdriver_image}" >/dev/null
+      docker start "${driver_container}" >/dev/null
+      driver_base_url="http://127.0.0.1:${driver_port}"
+      docker exec "${driver_container}" "${browser_binary}" --version
+      docker exec "${driver_container}" "${driver_binary}" --version
     else
-      "${driver_binary}" --port "${driver_port}" >"${driver_log}" 2>&1 &
+      if [[ "${scenario}" == "webrtc-turn" ]]; then
+        MOZ_LOG="timestamp,sync,rotate:10,nsHostResolver:5,mtransport:5,nicer:5" \
+          MOZ_LOG_FILE="${firefox_turn_browser_log_prefix}" \
+          "${driver_binary}" --port "${driver_port}" >"${driver_log}" 2>&1 &
+      else
+        "${driver_binary}" --port "${driver_port}" >"${driver_log}" 2>&1 &
+      fi
+      driver_pid="$!"
     fi
     ;;
 esac
-driver_pid="$!"
+if [[ "${browser}" == "chromium" ]]; then
+  driver_pid="$!"
+fi
 
 for _ in {1..30}; do
-  if curl --silent --fail "${driver_base_url}/status" >/dev/null; then
+  if webdriver_curl --silent --fail "${driver_base_url}/status" >/dev/null; then
     break
   fi
   sleep 1
 done
-if ! curl --silent --show-error --fail-with-body "${driver_base_url}/status" >/dev/null; then
+if ! webdriver_curl --silent --show-error --fail-with-body "${driver_base_url}/status" >/dev/null; then
   fail_with_diagnostics "${driver_binary} did not become ready."
 fi
 
@@ -963,21 +1253,26 @@ PY
     echo "${browser} WebDriver observed hot-reloaded config and TLS material."
     ;;
   webrtc-turn)
-    test_url="https://localhost:${proxy_port}/app/webrtc-turn?browser=${browser}"
+    test_url="https://${browser_origin_host}:${proxy_port}/app/webrtc-turn?browser=${browser}"
     webdriver_navigate "${test_url}"
     wait_for_upstream_json "/origin/app/webrtc-turn?browser=${browser}" "WebRTC TURN bootstrap" >/dev/null
-    webdriver_set_script_timeout 150000
+    webdriver_set_script_timeout 180000
+
+    turn_cases_js="
+           {url: '${turn_udp_url}', controlFamily: 'ipv4', relayFamily: 'ipv4'},
+           {url: '${turn_tcp_url}', controlFamily: 'ipv4', relayFamily: 'ipv4'},
+           {url: '${turn_tls_url}', controlFamily: 'ipv4', relayFamily: 'ipv4'}"
+    if [[ "${turn_case_count}" == "6" ]]; then
+      turn_cases_js+=",
+           {url: '${turn_v6_udp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'},
+           {url: '${turn_v6_tcp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'},
+           {url: '${turn_v6_tls_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}"
+    fi
 
     turn_result="$(
       webdriver_execute_async \
         "const done = arguments[arguments.length - 1];
-         const cases = [
-           {url: 'turn:127.0.0.1:${turn_udp_port}?transport=udp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
-           {url: 'turn:127.0.0.1:${turn_tcp_port}?transport=tcp', controlFamily: 'ipv4', relayFamily: 'ipv4'},
-           {url: '${turn_tls_url}', controlFamily: 'ipv4', relayFamily: 'ipv4'},
-           {url: '${turn_v6_udp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'},
-           {url: '${turn_v6_tcp_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'},
-           {url: '${turn_v6_tls_url}', controlFamily: 'ipv6', relayFamily: 'ipv4'}
+         const cases = [${turn_cases_js}
          ];
          const run = async (testCase) => {
            const {url, controlFamily, relayFamily} = testCase;
@@ -1087,31 +1382,77 @@ PY
            }
            return result;
          };
+         const runRejectedTls = async (url) => {
+           const peer = new RTCPeerConnection({
+             iceServers: [{urls: [url], username: 'browser-turn-user', credential: 'browser-turn-password'}],
+             iceTransportPolicy: 'relay'
+           });
+           let relayCandidates = 0;
+           const iceCandidateErrors = [];
+           peer.onicecandidate = (event) => {
+             if (event.candidate && (event.candidate.type === 'relay' || event.candidate.candidate.includes(' typ relay '))) {
+               relayCandidates += 1;
+             }
+           };
+           peer.onicecandidateerror = (event) => {
+             if (iceCandidateErrors.length < 16) {
+               iceCandidateErrors.push({
+                 errorCode: event.errorCode || null,
+                 errorText: event.errorText || '',
+                 url: event.url || ''
+               });
+             }
+           };
+           peer.createDataChannel('oxibelt-turn-untrusted');
+           await peer.setLocalDescription(await peer.createOffer());
+           const deadline = Date.now() + 20000;
+           while (Date.now() < deadline && peer.iceGatheringState !== 'complete') {
+             await new Promise((resolve) => setTimeout(resolve, 100));
+           }
+           const result = {url, relayCandidates, iceCandidateErrors};
+           peer.close();
+           if (relayCandidates !== 0 || iceCandidateErrors.length < 1) {
+             throw new Error('untrusted TURN TLS hostname was not rejected: ' + JSON.stringify(result));
+           }
+           return result;
+         };
          (async () => {
            try {
              const results = [];
              for (const testCase of cases) results.push(await run(testCase));
-             done({ok: true, results});
+             const rejectedTlsUrl = '${turn_untrusted_tls_url}';
+             const negativeTls = rejectedTlsUrl === '' ? null : await runRejectedTls(rejectedTlsUrl);
+             done({ok: true, results, negativeTls});
            } catch (error) {
              done({ok: false, error: String(error)});
            }
          })();"
     )"
     if ! jq -e \
+      --argjson expected_count "${turn_case_count}" \
+      --argjson require_negative_tls "${isolated_firefox_turn}" \
       '.ok == true
-        and (.results | length) == 6
-        and ([.results[].controlFamily] | sort) == ["ipv4", "ipv4", "ipv4", "ipv6", "ipv6", "ipv6"]
+        and (.results | length) == $expected_count
+        and ([.results[] | select(.controlFamily == "ipv4")] | length) == 3
+        and ([.results[] | select(.controlFamily == "ipv6")] | length) == ($expected_count - 3)
         and all(.results[]; .opened == true
           and .received == "relayed-through-oxibelt"
           and .relayFamily == "ipv4"
           and .relayCandidates.left > 0
           and .relayCandidates.right > 0
-          and .relayCandidates.expectedFamilyMatches > 1)' <<<"${turn_result}" >/dev/null; then
-      echo "Expected ${browser} to establish IPv4 relay-only data channels over IPv4 and IPv6 TURN control endpoints:" >&2
+          and .relayCandidates.expectedFamilyMatches > 1)
+        and (if $require_negative_tls then
+          .negativeTls != null
+            and .negativeTls.relayCandidates == 0
+            and (.negativeTls.iceCandidateErrors | length) > 0
+        else
+          .negativeTls == null
+        end)' <<<"${turn_result}" >/dev/null; then
+      echo "Expected ${browser} to establish ${turn_case_count} IPv4 relay-only TURN data channels with strict TLS verification:" >&2
       echo "${turn_result}" >&2
       show_diagnostics
       exit 1
     fi
-    echo "${browser} WebDriver relayed WebRTC data over IPv4 and IPv6 OxiBelt TURN control endpoints."
+    echo "${browser} WebDriver passed ${turn_case_count} relay-only OxiBelt TURN controls with strict TLS verification."
     ;;
 esac

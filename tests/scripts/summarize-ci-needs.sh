@@ -55,6 +55,8 @@ required_jobs=(
   docker-security-fuzz-smoke
   remote-signer-dos-docker
   browser-webdriver
+  firefox-webdriver-helper-image
+  firefox-webrtc-turn-isolated
 )
 
 if [[ ! -f "${needs_json}" ]]; then
