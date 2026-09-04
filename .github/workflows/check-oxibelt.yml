@@ -260,6 +260,7 @@ jobs:
   node-dependency-admission:
     name: Node dependency admission
     runs-on: ubuntu-26.04
+    timeout-minutes: 12
     if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
@@ -307,9 +308,7 @@ jobs:
           ].join('\n')
           writeFileSync(process.argv[2], workspace, { mode: 0o600 })
           NODE
-          set +e
-          pnpm --dir "${audit_root}" audit --audit-level low --json >"${AUDIT_REPORT}"
-          set -e
+          tests/scripts/run-pnpm-audit-with-retry.sh "${audit_root}" "${AUDIT_REPORT}"
           pnpm run dependency-admission \
             --license-report-path "${LICENSE_REPORT}" \
             --audit-report-path "${AUDIT_REPORT}"

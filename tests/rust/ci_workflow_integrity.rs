@@ -634,6 +634,11 @@ fn docker_pull_retry_script_text() -> String {
     .expect("Docker pull retry script should be readable")
 }
 
+fn pnpm_audit_retry_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-pnpm-audit-with-retry.sh"))
+    .expect("pnpm audit retry script should be readable")
+}
+
 fn docker_integration_matrix_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-proxy-integration-matrix.sh"))
     .expect("Docker integration matrix script should be readable")
@@ -3544,6 +3549,7 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
 #[test]
 fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
   let workflow = workflow_text();
+  let retry_script = pnpm_audit_retry_script_text();
   let jobs = parse_jobs(&workflow);
   let job = jobs
     .get("node-dependency-admission")
@@ -3556,6 +3562,7 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
   );
   for expected in [
     "name: Node dependency admission",
+    "timeout-minutes: 12",
     "contents: read",
     "corepack install",
     "pnpm install --frozen-lockfile --ignore-scripts",
@@ -3563,7 +3570,7 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
     "--license-report-path \"${LICENSE_REPORT}\" \\",
     "--audit-report-path \"${AUDIT_REPORT}\"",
     "pnpm licenses list --json --long",
-    "pnpm --dir \"${audit_root}\" audit --audit-level low --json",
+    "tests/scripts/run-pnpm-audit-with-retry.sh \"${audit_root}\" \"${AUDIT_REPORT}\"",
     "'  ignoreGhsas: []'",
     "pnpm audit signatures",
     "pnpm sbom --sbom-format cyclonedx --lockfile-only",
@@ -3582,6 +3589,8 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
     "dependency-graph/snapshots",
     "gh api",
     "continue-on-error",
+    "--ignore ",
+    "--ignore-unfixable",
     "--ignore-registry-errors",
     "|| true",
     "pnpm run dependency-admission -- \\",
@@ -3598,17 +3607,152 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
     .filter(|line| !line.is_empty())
     .collect::<Vec<_>>();
   let audit_sequence = [
-    "set +e",
-    "pnpm --dir \"${audit_root}\" audit --audit-level low --json >\"${AUDIT_REPORT}\"",
-    "set -e",
+    "tests/scripts/run-pnpm-audit-with-retry.sh \"${audit_root}\" \"${AUDIT_REPORT}\"",
     "pnpm run dependency-admission \\",
   ];
   assert!(
     command_lines
       .windows(audit_sequence.len())
       .any(|window| window == audit_sequence),
-    "Node dependency admission should capture pnpm audit output and immediately restore fail-fast behavior before validation"
+    "Node dependency admission should immediately validate the retry helper's captured report"
   );
+
+  for expected in [
+    "max_attempts=2",
+    "attempt_timeout_seconds=270",
+    "kill_after_seconds=5",
+    "retry_delay_seconds=5",
+    "max_report_bytes=$((10 * 1024 * 1024))",
+    "timeout --signal=TERM --kill-after=\"${kill_after_seconds}s\" \"${attempt_timeout_seconds}s\"",
+    "pnpm --dir \"${audit_root}\" audit --audit-level low --json",
+    "(has(\"error\") | not)",
+    "(.advisories | type == \"object\")",
+    "(.metadata | type == \"object\")",
+    "if report_is_complete \"${attempt_report}\"; then",
+    "if ((attempt == max_attempts)) || report_is_oversized \"${attempt_report}\"; then",
+  ] {
+    assert!(
+      retry_script.contains(expected),
+      "pnpm audit retry helper should preserve bounded fail-closed behavior: missing {expected}"
+    );
+  }
+  for forbidden in [
+    "--ignore ",
+    "--ignore-unfixable",
+    "--ignore-registry-errors",
+    "continue-on-error",
+    "|| true",
+  ] {
+    assert!(
+      !retry_script.contains(forbidden),
+      "pnpm audit retry helper must not contain bypass {forbidden}"
+    );
+  }
+}
+
+#[test]
+fn pnpm_audit_retry_retries_only_incomplete_reports() {
+  let repo = repo_root();
+  let retry_script = repo.join("tests/scripts/run-pnpm-audit-with-retry.sh");
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-pnpm-audit-retry-")
+    .tempdir()
+    .expect("temporary directory should be creatable");
+  let bin_dir = temp_dir.path().join("bin");
+  let audit_root = temp_dir.path().join("audit-root");
+  fs::create_dir_all(&audit_root).expect("audit root should be creatable");
+  write_executable(
+    &bin_dir.join("sleep"),
+    "#!/usr/bin/env bash\nprintf 'fake sleep: %s\\n' \"$*\" >&2\nexit 0\n",
+  );
+  write_executable(
+    &bin_dir.join("pnpm"),
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == "--dir ${FAKE_AUDIT_ROOT} audit --audit-level low --json" ]]
+attempt=0
+if [[ -f "${FAKE_ATTEMPT_FILE}" ]]; then
+  attempt="$(<"${FAKE_ATTEMPT_FILE}")"
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "${attempt}" >"${FAKE_ATTEMPT_FILE}"
+case "${FAKE_SCENARIO}:${attempt}" in
+  clean-first:*|error-then-clean:2|malformed-then-clean:2|timeout-then-clean:2)
+    printf '%s\n' '{"advisories":{},"metadata":{"vulnerabilities":{}}}'
+    exit 0
+    ;;
+  complete-timeout-first:*)
+    printf '%s\n' '{"advisories":{},"metadata":{"vulnerabilities":{}}}'
+    exit 124
+    ;;
+  advisory-first:*)
+    printf '%s\n' '{"advisories":{"1":{"github_advisory_id":"GHSA-2345-6789-cfgh"}},"metadata":{"vulnerabilities":{"high":1}}}'
+    exit 1
+    ;;
+  error-then-clean:*|error-twice:*)
+    printf '%s\n' '{"error":{"code":23,"message":"The operation was aborted due to timeout"}}'
+    exit 1
+    ;;
+  malformed-then-clean:*)
+    printf '%s\n' '{not-json'
+    exit 1
+    ;;
+  timeout-then-clean:*)
+    exit 124
+    ;;
+  *)
+    printf 'unexpected fake pnpm scenario: %s attempt %s\n' "${FAKE_SCENARIO}" "${attempt}" >&2
+    exit 70
+    ;;
+esac
+"#,
+  );
+  let original_path = std::env::var_os("PATH").unwrap_or_default();
+  let shimmed_path = format!("{}:{}", bin_dir.display(), original_path.to_string_lossy());
+
+  let cases = [
+    ("clean-first", 1, "\"advisories\":{}"),
+    ("advisory-first", 1, "GHSA-2345-6789-cfgh"),
+    ("complete-timeout-first", 1, "\"advisories\":{}"),
+    ("error-then-clean", 2, "\"advisories\":{}"),
+    ("malformed-then-clean", 2, "\"advisories\":{}"),
+    ("timeout-then-clean", 2, "\"advisories\":{}"),
+    ("error-twice", 2, "\"error\""),
+  ];
+
+  for (scenario, expected_attempts, expected_report_fragment) in cases {
+    let attempt_file = temp_dir.path().join(format!("{scenario}-attempt"));
+    let report_file = temp_dir.path().join(format!("{scenario}-report.json"));
+    let output = Command::new("bash")
+      .arg(&retry_script)
+      .arg(&audit_root)
+      .arg(&report_file)
+      .current_dir(&repo)
+      .env("PATH", &shimmed_path)
+      .env("FAKE_AUDIT_ROOT", &audit_root)
+      .env("FAKE_ATTEMPT_FILE", &attempt_file)
+      .env("FAKE_SCENARIO", scenario)
+      .output()
+      .unwrap_or_else(|error| panic!("pnpm audit retry case {scenario} should execute: {error}"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+      output.status.success(),
+      "pnpm audit retry case {scenario} should leave final admission to the validator: stderr={stderr}"
+    );
+    assert_eq!(
+      fs::read_to_string(&attempt_file)
+        .expect("fake pnpm should record its attempt count")
+        .trim(),
+      expected_attempts.to_string(),
+      "pnpm audit retry case {scenario} should use the expected attempt count"
+    );
+    let report =
+      fs::read_to_string(&report_file).expect("retry helper should retain a final report");
+    assert!(
+      report.contains(expected_report_fragment),
+      "pnpm audit retry case {scenario} should retain the expected final report: {report}"
+    );
+  }
 }
 
 #[test]
