@@ -301,6 +301,20 @@ relay-range, mode, or other state-affecting changes that retain an active bind
 fail closed and require a process restart or rollout. No TURN allocation or
 pending TCP connection is durable across process or Pod replacement.
 
+Production CT startup in beta.2 requires HTTPS S3-compatible versioned object
+storage. Its admission probe must observe create-only writes, conditional
+replacement, version identifiers, and checksum-stable readback; local storage
+and plaintext HTTP remain development-only. Object-store credentials and
+provider errors stay redacted. This enforcement introduces no data migration,
+and CT remains disabled by default, experimental, and unvalidated.
+
+Before running `oxibeltctl doctor --kubernetes`, provide a direct,
+certificate-verified API-server transport. The diagnostic rejects kubeconfig
+`proxy-url`, `HTTPS_PROXY`/`https_proxy`, `insecure-skip-tls-verify`, and
+`exec` or `auth-provider` credentials before constructing its client. Replace
+those modes with trusted CA data and bounded static credentials for the
+diagnostic; this does not change the cluster workload's ordinary credentials.
+
 Validate every configuration that opts in before rollout, and keep the
 controller and data-plane images on the same exact candidate revision:
 

@@ -15,7 +15,7 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
-## [0.9.1-beta.2] - 2026-08-31
+## [0.9.1-beta.2] - 2026-09-04
 
 > Candidate ledger for the complete development lineage after
 > `0.9.1-beta.1`. This entry records intended compatibility and validation
@@ -134,6 +134,11 @@ for the governed entry format.
 - No durable database, object-store, shared-state, or on-disk migration is
   required. Bandwidth credits and queues are process-local and reconstructed
   from configuration.
+- Production CT startup now rejects local or plaintext object storage and
+  requires HTTPS S3-compatible versioned storage whose capability probe proves
+  create-only writes, conditional replacement, version reporting, and checksum
+  readback. Object-store credentials and provider errors remain redacted. This
+  adds no migration, and CT remains default-off, experimental, and unvalidated.
 - TURN allocations, relay sockets, and pending RFC 6062 data connections remain
   process-local. Compatible snapshot reloads preserve unchanged listeners and
   stable pool runtime; process or Pod replacement starts with empty TURN state.
@@ -154,6 +159,12 @@ for the governed entry format.
 - Qualify raw UDP plus TURN edge/proxy UDP, TCP, TLS, IPv4, IPv6 relay, and RFC
   6062 behavior with both OxiBelt protocol probes and the pinned coturn client;
   run relay-only Chromium and Firefox data-channel coverage.
+- Run `oxibeltctl doctor --kubernetes` only with a direct,
+  certificate-verified API-server transport. It rejects kubeconfig
+  `proxy-url`, `HTTPS_PROXY`/`https_proxy`, `insecure-skip-tls-verify`, and
+  `exec` or `auth-provider` credentials before constructing the Kubernetes
+  client; replace those modes with bounded static credentials and trusted CA
+  data before using the diagnostic.
 - At minimum, run the governed ledger check and exact-range validation against
   both the preceding beta and stable source revisions:
 
