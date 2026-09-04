@@ -481,6 +481,7 @@ mod tests {
     let edge = EdgeState::new(runtime.clone());
     let stream_id = 17;
     insert_stream_allocation(&edge, &runtime, stream_id).await;
+    let observer = edge.clone();
     let (client, server) = tokio::io::duplex(64);
     drop(client);
     let (_listener_tx, listener_rx) = tokio::sync::watch::channel(false);
@@ -499,6 +500,7 @@ mod tests {
     .await
     .expect_err("closed stream should fail frame parsing");
 
+    assert!(observer.clients.lock().await.is_empty());
     assert_eq!(runtime.connections().turn.allocations_active, 0);
   }
 

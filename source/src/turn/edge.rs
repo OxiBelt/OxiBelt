@@ -195,7 +195,7 @@ pub(super) async fn serve_stream(
   };
   let idle = tokio::time::sleep(Duration::from_millis(config.idle_timeout_ms));
   tokio::pin!(idle);
-  let bound_peer = {
+  let bound_peer = async {
     let drain_close = drain.close_delay_elapsed();
     tokio::pin!(drain_close);
     loop {
@@ -235,8 +235,10 @@ pub(super) async fn serve_stream(
         _ = &mut drain_close => break Ok(None),
       }
     }
-  }?;
+  }
+  .await;
   edge.remove_client(client).await;
+  let bound_peer = bound_peer?;
   if let Some(connection) = bound_peer {
     let downstream = reader.unsplit(writer);
     relay_bound_tcp_connection(

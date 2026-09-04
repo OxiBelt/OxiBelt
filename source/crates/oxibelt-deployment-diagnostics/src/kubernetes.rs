@@ -16,6 +16,11 @@ impl TryFrom<Config> for DirectKubernetesConfig {
   type Error = anyhow::Error;
 
   fn try_from(mut config: Config) -> Result<Self, Self::Error> {
+    if config.cluster_url.scheme_str() != Some("https") {
+      bail!(
+        "Kubernetes doctor requires an HTTPS API-server URL; cleartext and non-HTTPS schemes are not permitted"
+      );
+    }
     if config.proxy_url.is_some() {
       bail!(
         "Kubernetes doctor requires a direct API-server connection; proxy-url, HTTPS_PROXY, and https_proxy are not permitted"
@@ -57,6 +62,23 @@ mod tests {
         .parse()
         .expect("Kubernetes API URI"),
     )
+  }
+
+  #[test]
+  fn rejects_cleartext_api_server_before_client_construction() {
+    let config = Config::new(
+      "http://kubernetes.example.test:8080"
+        .parse()
+        .expect("Kubernetes API URI"),
+    );
+
+    let error = DirectKubernetesConfig::try_from(config)
+      .err()
+      .expect("cleartext Kubernetes API transport must be rejected");
+    assert!(
+      error.to_string().contains("requires an HTTPS"),
+      "unexpected error: {error:#}"
+    );
   }
 
   #[test]
@@ -140,6 +162,30 @@ mod tests {
       .err()
       .expect("insecure kubeconfig TLS must be rejected");
     assert!(error.to_string().contains("requires verified"));
+  }
+
+  #[tokio::test]
+  async fn rejects_cleartext_kubeconfig_api_server() {
+    let cleartext = serde_json::from_value::<Kubeconfig>(serde_json::json!({
+      "clusters": [{
+        "name": "cluster",
+        "cluster": {"server": "http://kubernetes.example.test:8080"}
+      }],
+      "contexts": [{
+        "name": "context",
+        "context": {"cluster": "cluster"}
+      }],
+      "current-context": "context"
+    }))
+    .expect("cleartext Kubeconfig fixture");
+    let cleartext = Config::from_custom_kubeconfig(cleartext, &KubeConfigOptions::default())
+      .await
+      .expect("cleartext Kubernetes configuration");
+
+    let error = DirectKubernetesConfig::try_from(cleartext)
+      .err()
+      .expect("cleartext kubeconfig API transport must be rejected");
+    assert!(error.to_string().contains("requires an HTTPS"));
   }
 
   #[test]

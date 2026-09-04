@@ -78,6 +78,7 @@ pub(super) fn redact_effective_toml(value: &mut toml::Value) {
   {
     for upstream in upstreams {
       redact_toml_url_sensitive_parts(upstream, &["origin"]);
+      redact_toml_path(upstream, &["tls", "client_identity", "private_key"]);
     }
   }
   if let Some(pools) = value
@@ -88,6 +89,15 @@ pub(super) fn redact_effective_toml(value: &mut toml::Value) {
       if let Some(servers) = pool.get_mut("servers").and_then(toml::Value::as_array_mut) {
         for server in servers {
           redact_toml_url_sensitive_parts(server, &["origin"]);
+          redact_toml_path(server, &["tls", "client_identity", "private_key"]);
+        }
+      }
+      if let Some(discoveries) = pool
+        .get_mut("discovery")
+        .and_then(toml::Value::as_array_mut)
+      {
+        for discovery in discoveries {
+          redact_toml_path(discovery, &["tls", "client_identity", "private_key"]);
         }
       }
     }
@@ -100,6 +110,18 @@ pub(super) fn redact_effective_toml(value: &mut toml::Value) {
       if let Some(servers) = pool.get_mut("servers").and_then(toml::Value::as_array_mut) {
         for server in servers {
           redact_toml_url_sensitive_parts(server, &["origin"]);
+        }
+      }
+    }
+  }
+  if let Some(pools) = value
+    .get_mut("turn_upstream_pools")
+    .and_then(toml::Value::as_array_mut)
+  {
+    for pool in pools {
+      if let Some(servers) = pool.get_mut("servers").and_then(toml::Value::as_array_mut) {
+        for server in servers {
+          redact_toml_path(server, &["tls", "client_identity", "private_key"]);
         }
       }
     }
@@ -250,6 +272,53 @@ password_file = "turn/password"
         Some(REDACTED_TOML_VALUE),
         "{field} must be redacted"
       );
+    }
+  }
+
+  #[test]
+  fn upstream_client_identity_private_key_paths_are_redacted() {
+    let mut value: toml::Value = toml::from_str(
+      r#"
+[[upstreams]]
+origin = "https://direct.example.test"
+[upstreams.tls.client_identity]
+cert_chain = "upstream/direct.crt"
+private_key = "upstream/direct.key"
+
+[[upstream_pools]]
+name = "pool"
+[[upstream_pools.servers]]
+origin = "https://server.example.test"
+[upstream_pools.servers.tls.client_identity]
+cert_chain = "upstream/server.crt"
+private_key = "upstream/server.key"
+
+[[upstream_pools.discovery]]
+provider = "dns"
+[upstream_pools.discovery.tls.client_identity]
+cert_chain = "upstream/discovery.crt"
+private_key = "upstream/discovery.key"
+
+[[turn_upstream_pools]]
+name = "turn"
+[[turn_upstream_pools.servers]]
+origin = "turns:turn.example.test:5349"
+[turn_upstream_pools.servers.tls.client_identity]
+cert_chain = "upstream/turn.crt"
+private_key = "upstream/turn.key"
+"#,
+    )
+    .expect("upstream client-identity redaction fixture must parse");
+
+    redact_effective_toml(&mut value);
+    for identity in [
+      &value["upstreams"][0]["tls"]["client_identity"],
+      &value["upstream_pools"][0]["servers"][0]["tls"]["client_identity"],
+      &value["upstream_pools"][0]["discovery"][0]["tls"]["client_identity"],
+      &value["turn_upstream_pools"][0]["servers"][0]["tls"]["client_identity"],
+    ] {
+      assert_eq!(identity["private_key"].as_str(), Some(REDACTED_TOML_VALUE));
+      assert_ne!(identity["cert_chain"].as_str(), Some(REDACTED_TOML_VALUE));
     }
   }
 }
