@@ -7072,6 +7072,12 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
     "github-hosted",
     "hosted CT object-store evidence requires a clean exact-revision checkout",
     "worktreeState: $worktree_state",
+    "mc_timeout_seconds=30",
+    "timeout --signal=TERM --kill-after=2s \"${mc_timeout_seconds}s\" docker run",
+    "[[ \"${operation}\" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || operation=\"unknown\"",
+    "if ((status == 124 || status == 137)); then",
+    "mc operation %s exceeded the %ss timeout bound (status %d)",
+    "CT workload ${label} exceeded the ${mc_timeout_seconds}s client timeout bound",
     "mc_run mb --with-lock",
     "mc_run retention set --default compliance 1d",
     "and .ObjectLock.validity == \"1DAYS\"",
@@ -7091,6 +7097,13 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
       "CT object-store MinIO harness should contain {expected}"
     );
   }
+  assert_eq!(
+    script
+      .matches("mc_workload_run cp /workload-policy.json \"${delete_probe_object}\"")
+      .count(),
+    1,
+    "CT workload upload should remain single-attempt because retrying a timed-out versioned write could duplicate it"
+  );
   for forbidden in [
     "docker-rootful",
     "docker system prune",

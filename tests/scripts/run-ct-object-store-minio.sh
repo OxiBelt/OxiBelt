@@ -24,6 +24,7 @@ minio_source_sha256="45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8e
 minio_builder_image="golang:1.26.4-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56"
 minio_runtime_image="alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 mc_image="quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
+mc_timeout_seconds=30
 
 die() {
   echo "CT object-store MinIO check: $*" >&2
@@ -195,8 +196,10 @@ mc_run_as() {
   local username="$2"
   local password="$3"
   shift 3
+  local operation="${1:-unknown}"
   local status=0
   local -a policy_mount=()
+  [[ "${operation}" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || operation="unknown"
   if [[ -n "${docker_workload_policy_file:-}" ]]; then
     policy_mount=(
       --mount "type=bind,src=${docker_workload_policy_file},dst=/workload-policy.json,readonly"
@@ -204,13 +207,17 @@ mc_run_as() {
   fi
   mc_sequence=$((mc_sequence + 1))
   mc_container="oxibelt-ct-mc-${run_id}-${mc_sequence}"
-  timeout --signal=TERM --kill-after=2s 5s docker run \
+  timeout --signal=TERM --kill-after=2s "${mc_timeout_seconds}s" docker run \
     --name "${mc_container}" --label "${test_label}" --rm \
     --network "${network_name}" \
     --mount "type=bind,src=${docker_work_dir}/mc-ca,dst=/root/.mc/certs/CAs,readonly" \
     "${policy_mount[@]}" \
     --env "MC_HOST_${alias}=https://${username}:${password}@minio:9000" \
     "${mc_image}" "$@" || status=$?
+  if ((status == 124 || status == 137)); then
+    printf 'CT object-store MinIO check: mc operation %s exceeded the %ss timeout bound (status %d)\n' \
+      "${operation}" "${mc_timeout_seconds}" "${status}" >&2
+  fi
   if ((status != 0)); then
     docker rm --force "${mc_container}" >/dev/null 2>&1 || true
   fi
@@ -359,6 +366,9 @@ require_workload_access_denied() {
     die "CT workload identity unexpectedly completed ${label}"
   else
     status=$?
+  fi
+  if ((status == 124 || status == 137)); then
+    die "CT workload ${label} exceeded the ${mc_timeout_seconds}s client timeout bound"
   fi
   ((status == 1)) || die "CT workload ${label} returned an unexpected client status"
   jq -es '
