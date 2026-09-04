@@ -87,6 +87,8 @@ const RequiredWorkspaceSettings = new Map<string, string>([
   ['minimumReleaseAge', '1440']
 ])
 const MaxReportBytes = 10 * 1024 * 1024
+const MaxAuditErrorCodeCharacters = 64
+const MaxAuditErrorMessageCharacters = 512
 const MaxExceptionDays = 90
 
 function IsRecord(Value: unknown): Value is JsonRecord {
@@ -95,6 +97,38 @@ function IsRecord(Value: unknown): Value is JsonRecord {
 
 function FormatError(ErrorValue: unknown): string {
   return ErrorValue instanceof Error ? ErrorValue.message : String(ErrorValue)
+}
+
+function BoundedInlineText(Value: string, MaxCharacters: number): string {
+  const Sanitized = Value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+  const Characters = [...Sanitized]
+  if (Characters.length <= MaxCharacters) {
+    return Sanitized
+  }
+
+  return `${Characters.slice(0, MaxCharacters - 3).join('')}...`
+}
+
+function RejectAuditErrorEnvelope(ErrorValue: unknown): never {
+  if (!IsRecord(ErrorValue)) {
+    throw new Error('pnpm audit report contains a malformed error envelope')
+  }
+  const Code = ErrorValue.code
+  const Message = ErrorValue.message
+  if (
+    !((typeof Code === 'string' && Code.trim().length > 0) || (typeof Code === 'number' && Number.isFinite(Code))) ||
+    typeof Message !== 'string' ||
+    Message.trim().length === 0
+  ) {
+    throw new Error('pnpm audit report contains a malformed error envelope')
+  }
+  const SafeCode = BoundedInlineText(String(Code), MaxAuditErrorCodeCharacters)
+  const SafeMessage = BoundedInlineText(Message, MaxAuditErrorMessageCharacters)
+  if (SafeCode.trim().length === 0 || SafeMessage.trim().length === 0) {
+    throw new Error('pnpm audit report contains a malformed error envelope')
+  }
+
+  throw new Error(`pnpm audit command returned an error report (code ${SafeCode}): ${SafeMessage}`)
 }
 
 function ReadBoundedFile(FilePath: string, Label: string): string {
@@ -698,6 +732,9 @@ function ValidateLicenseReport(FilePath: string, Policy: NodePolicy): number {
 
 function ValidateAuditReport(FilePath: string, Policy: NodePolicy): void {
   const Parsed = ParseJson(ReadBoundedFile(FilePath, 'pnpm audit report'), 'pnpm audit report')
+  if (IsRecord(Parsed) && Object.hasOwn(Parsed, 'error')) {
+    RejectAuditErrorEnvelope(Parsed.error)
+  }
   if (!IsRecord(Parsed) || !IsRecord(Parsed.advisories) || !IsRecord(Parsed.metadata)) {
     throw new Error('pnpm audit report must contain advisories and metadata objects')
   }

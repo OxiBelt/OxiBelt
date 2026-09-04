@@ -3582,6 +3582,8 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
     "dependency-graph/snapshots",
     "gh api",
     "continue-on-error",
+    "--ignore-registry-errors",
+    "|| true",
     "pnpm run dependency-admission -- \\",
   ] {
     assert!(
@@ -3589,6 +3591,24 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
       "pull-request Node admission must not contain {forbidden}"
     );
   }
+
+  let command_lines = job_text
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+    .collect::<Vec<_>>();
+  let audit_sequence = [
+    "set +e",
+    "pnpm --dir \"${audit_root}\" audit --audit-level low --json >\"${AUDIT_REPORT}\"",
+    "set -e",
+    "pnpm run dependency-admission \\",
+  ];
+  assert!(
+    command_lines
+      .windows(audit_sequence.len())
+      .any(|window| window == audit_sequence),
+    "Node dependency admission should capture pnpm audit output and immediately restore fail-fast behavior before validation"
+  );
 }
 
 #[test]

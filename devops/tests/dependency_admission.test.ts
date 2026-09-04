@@ -202,6 +202,97 @@ test('rejects disallowed licenses and unadmitted advisories', async TestContext 
   })
 })
 
+test('rejects pnpm audit error envelopes with bounded diagnostics', async TestContext => {
+  await TestContext.test('numeric timeout code', NumericContext => {
+    const FixtureValue = CreateFixture()
+    NumericContext.after(() => Cleanup(FixtureValue))
+    WriteJson(FixtureValue.auditReportPath, {
+      error: { code: 23, message: 'The operation was aborted due to timeout', details: 'must-not-be-rendered' }
+    })
+
+    Assert.throws(
+      () => Validate(FixtureValue),
+      ErrorValue =>
+        ErrorValue instanceof Error &&
+        ErrorValue.message ===
+          'pnpm audit command returned an error report (code 23): The operation was aborted due to timeout'
+    )
+  })
+  await TestContext.test('string error code', StringContext => {
+    const FixtureValue = CreateFixture()
+    StringContext.after(() => Cleanup(FixtureValue))
+    WriteJson(FixtureValue.auditReportPath, {
+      error: { code: 'ERR_PNPM_AUDIT_BAD_RESPONSE', message: 'Registry response was unavailable' }
+    })
+
+    Assert.throws(
+      () => Validate(FixtureValue),
+      ErrorValue =>
+        ErrorValue instanceof Error &&
+        ErrorValue.message ===
+          'pnpm audit command returned an error report (code ERR_PNPM_AUDIT_BAD_RESPONSE): Registry response was unavailable'
+    )
+  })
+  await TestContext.test('malformed envelope', MalformedContext => {
+    const FixtureValue = CreateFixture()
+    MalformedContext.after(() => Cleanup(FixtureValue))
+    WriteJson(FixtureValue.auditReportPath, {
+      error: { code: { secret: 'must-not-be-rendered' }, message: 'also-must-not-be-rendered' }
+    })
+
+    Assert.throws(
+      () => Validate(FixtureValue),
+      ErrorValue =>
+        ErrorValue instanceof Error &&
+        ErrorValue.message === 'pnpm audit report contains a malformed error envelope' &&
+        !ErrorValue.message.includes('must-not-be-rendered')
+    )
+  })
+  await TestContext.test('error envelope takes precedence over success fields', MixedContext => {
+    const FixtureValue = CreateFixture()
+    MixedContext.after(() => Cleanup(FixtureValue))
+    WriteJson(FixtureValue.auditReportPath, {
+      error: { code: 23, message: 'timeout', details: 'must-not-be-rendered' },
+      advisories: {},
+      metadata: { vulnerabilities: {} }
+    })
+
+    Assert.throws(
+      () => Validate(FixtureValue),
+      ErrorValue =>
+        ErrorValue instanceof Error && ErrorValue.message === 'pnpm audit command returned an error report (code 23): timeout'
+    )
+  })
+  await TestContext.test('diagnostics are single-line and truncated', BoundedContext => {
+    const FixtureValue = CreateFixture()
+    BoundedContext.after(() => Cleanup(FixtureValue))
+    WriteJson(FixtureValue.auditReportPath, {
+      error: {
+        code: `CODE\n${'C'.repeat(80)}`,
+        message: `first\r\nsecond\tthird\u2028fourth\u2029${'M'.repeat(600)}`
+      }
+    })
+
+    let ErrorValue: unknown
+    Assert.throws(() => Validate(FixtureValue), Candidate => {
+      ErrorValue = Candidate
+      return true
+    })
+    Assert.ok(ErrorValue instanceof Error)
+    Assert.equal(ErrorValue.message.includes('\n'), false)
+    Assert.equal(ErrorValue.message.includes('\r'), false)
+    Assert.equal(ErrorValue.message.includes('\t'), false)
+    Assert.equal(ErrorValue.message.includes('\u2028'), false)
+    Assert.equal(ErrorValue.message.includes('\u2029'), false)
+    const Match = ErrorValue.message.match(/^pnpm audit command returned an error report \(code (.*)\): (.*)$/)
+    Assert.ok(Match !== null)
+    Assert.equal([...Match[1]].length, 64)
+    Assert.equal([...Match[2]].length, 512)
+    Assert.match(Match[1], /\.\.\.$/)
+    Assert.match(Match[2], /\.\.\.$/)
+  })
+})
+
 test('accepts an active audit exception with an exact report and workspace match', TestContext => {
   const FixtureValue = CreateFixture()
   TestContext.after(() => Cleanup(FixtureValue))
