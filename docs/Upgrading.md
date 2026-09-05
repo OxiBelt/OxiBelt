@@ -71,8 +71,10 @@ be used as a supported production upgrade source or target.
 | `0.8.1` | `0.9.0-beta.1` | Published, superseded | Follow [Upgrade from 0.8.1 to the 0.9.0 line](#upgrade-from-081-to-the-090-line). The immutable prerelease is published; use the published `0.9.0` stable release for the completed line unless a release-specific recovery procedure requires the beta. CT-disabled epoch-1 configurations need no native migration. |
 | `0.9.0-beta.1` | `0.9.0` | Published, qualified | The published stable release completed its own successful independent qualification. Its alias-promotion workflow did not complete the mutation step, so deploy only immutable `0.9.0` references; do not infer that mutable aliases identify this release. Later rerun failures are not reusable qualification evidence for this or another release and do not replace the successful exact-release qualification record. |
 | `0.9.0` | `0.9.1-beta.1` | Published, qualified | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). The immutable beta.1 release and its exact-revision qualification remain attributable history, but its artifacts, receipts, and soak cannot qualify beta.2. |
-| `0.9.0` | `0.9.1-beta.2` | Candidate, not qualified | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). The source/configuration transition is supported after removing unsupported old-binary fields during rollback, but beta.2 needs its own signed tag, release, artifacts, qualification, and soak before deployment. |
-| `0.9.1-beta.1` | `0.9.1-beta.2` | Candidate, not qualified | Beta.2 adds bandwidth, upstream client identities, fail-closed Gateway deprogramming, security repairs, and refreshed dependency and Kubernetes inputs. Do not relabel or reuse beta.1 artifacts or evidence. |
+| `0.9.0` | `0.9.1-beta.2` | Published, qualified | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). Beta.2 has its own exact-version artifacts and complete automatic qualification; its required 24-hour interval must elapse before stable publication. Remove unsupported old-binary fields before rollback. |
+| `0.9.1-beta.1` | `0.9.1-beta.2` | Published, qualified | Beta.2 adds bandwidth, upstream client identities, fail-closed Gateway deprogramming, security repairs, and refreshed dependency and Kubernetes inputs. Its exact-revision qualification is independent of beta.1 artifacts and evidence. |
+| `0.9.0` | `0.9.1` | Stable candidate | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). The stable ledger is cumulative from `0.9.0`; use newly qualified stable artifacts only after person-reviewed publication and every stable release gate succeeds. |
+| `0.9.1-beta.2` | `0.9.1` | Stable candidate | Exactly one documentation-only commit carries forward beta.2 without runtime, configuration, or state migration changes. The draft may be prepared during the 24-hour soak after beta.2's successful automatic qualification, but stable publication must wait at least 24 hours from the later of beta publication and successful automatic verifier completion. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -180,6 +182,17 @@ reuse a log identity to conceal a failed deployment.
 
 ## Upgrade from 0.9.0 to the 0.9.1 line
 
+`0.9.1` is the stable candidate carrying forward the published and independently
+qualified `0.9.1-beta.2` revision in exactly one documentation-only commit.
+Its supported upgrade sources are `0.9.0` and `0.9.1-beta.2`. The stable
+draft does not establish stable publication, artifact qualification, or alias
+promotion. Stable publication must occur at least 24 hours after the later
+of beta.2 publication and successful automatic verifier completion; stable
+then needs its own 30-image and two-chart qualification before mutable aliases
+can move. Use immutable release references and keep controller and data-plane
+revisions aligned. CT and Kubernetes feature lifecycle classifications remain
+unchanged by stable versioning.
+
 `0.9.1-beta.1` contains the release-qualification registry readback hardening
 from `ece4a69c` and a compatible transitive dependency patch. The verifier
 applies a bounded retry budget to descriptor inspection failures and malformed
@@ -191,8 +204,9 @@ accidental SSE4.1 intrinsic from its SSE2 backend. Configuration, schema, Admin
 API, rulepack, image-role, package/chart-sentinel, and storage contracts remain
 unchanged.
 
-No migration or configuration edit is required. Verify the candidate ledger
-before release governance evaluates the exact revision:
+The beta.1-only changes require no migration or configuration edit. The
+additional beta.2 changes carried into stable are described below. Verify the
+candidate ledger before release governance evaluates the exact revision:
 
 ```sh
 pnpm run release-contract:check
@@ -204,13 +218,14 @@ conversion. A descriptor read that exhausts its bounded retry budget, or any
 valid descriptor mismatch, must remain a failed qualification result; neither
 a later rerun failure nor a rerun for another release is reusable evidence.
 
-`0.9.1-beta.2` is the next governed candidate for the complete development
-lineage after beta.1. This guide and its beta changelog entry do not tag,
-publish, qualify, or soak beta.2. The exact candidate revision must pass fresh
-release validation, build its own immutable artifacts, complete automatic
-independent qualification, and satisfy the required soak. No beta.1 binary,
-image, chart, scan, attestation, receipt, or elapsed soak time is reusable for
-beta.2.
+`0.9.1-beta.2` is published and has completed its own automatic independent
+qualification for the development lineage after beta.1. Its immutable
+artifacts and exact-revision receipts establish the beta qualification;
+beta.1 artifacts and elapsed soak time cannot substitute for them. The
+24-hour stable-publication interval starts at the later of beta.2 publication
+and successful verifier completion. The stable candidate preserves all beta.2
+runtime behavior described below and requires fresh exact-stable-version
+artifacts and qualification after publication.
 
 Beta.2 adds optional per-route native bandwidth limits under
 `[routes.bandwidth]`. Existing routes remain unlimited without the table, and
@@ -308,12 +323,18 @@ and plaintext HTTP remain development-only. Object-store credentials and
 provider errors stay redacted. This enforcement introduces no data migration,
 and CT remains disabled by default, experimental, and unvalidated.
 
-Before running `oxibeltctl doctor --kubernetes`, provide a direct,
-certificate-verified API-server transport. The diagnostic rejects kubeconfig
-`proxy-url`, `HTTPS_PROXY`/`https_proxy`, `insecure-skip-tls-verify`, and
-`exec` or `auth-provider` credentials before constructing its client. Replace
+Before running `oxibeltctl doctor --kubernetes`, provide a direct HTTPS,
+certificate-verified API-server transport. The diagnostic rejects non-HTTPS
+API-server URLs, kubeconfig `proxy-url`, `HTTPS_PROXY`/`https_proxy`,
+`insecure-skip-tls-verify`, and `exec` or `auth-provider` credentials before
+constructing its client. Replace
 those modes with trusted CA data and bounded static credentials for the
 diagnostic; this does not change the cluster workload's ordinary credentials.
+
+Effective configuration output redacts `tls.client_identity.private_key`
+paths for direct HTTP upstreams, pool servers, discovery templates, and TURN
+upstream servers. TURN stream errors release the client's allocation state
+before propagating the failure, including when the listener remains active.
 
 Validate every configuration that opts in before rollout, and keep the
 controller and data-plane images on the same exact candidate revision:
@@ -323,7 +344,13 @@ oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
 pnpm run release-contract:check
 ```
 
-Before rollback to beta.1 or `0.9.0`, remove every `[routes.bandwidth]`,
+Rollback from the stable candidate to `0.9.1-beta.2` requires no configuration
+or durable-state conversion: restore the retained beta.2 controller and
+data-plane images together by immutable digest and drain long-lived sessions
+during replacement. Process-local TURN allocations and bandwidth budgets are
+recreated after process or Pod replacement.
+
+Before rollback to `0.9.0`, or recovery to beta.1, remove every `[routes.bandwidth]`,
 `tls.client_identity`, `actions.direct_response`, TURN per-server `tls`, TURN
 file-secret, nonce-rotation, password-algorithm, and new TURN limit field plus
 every Helm projection, `turn` value, and Gateway `clientCertificateRef` that

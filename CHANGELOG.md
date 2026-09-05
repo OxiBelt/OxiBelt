@@ -12,6 +12,283 @@ entries. See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.9.1] - 2026-09-05
+
+> Stable candidate for the cumulative `0.9.0` to `0.9.1` development
+> lineage, based on the published and independently qualified
+> `0.9.1-beta.2` source. This entry is prepared for the required one-commit
+> documentation-only transition and does
+> not claim stable publication, stable qualification, mutable-alias promotion,
+> or stable artifact availability. Stable draft preparation may occur during
+> the beta.2 soak after terminal exact-revision beta qualification and exact
+> stable-source CI succeed. The 24-hour eligibility interval and person review
+> gate stable publication; the stable release's own 30-image and two-chart
+> qualification gates mutable-alias promotion.
+
+- Changes since: `0.9.0`
+- Supported upgrade sources: `0.9.0`, `0.9.1-beta.2`
+- Upgrade guide: [Upgrade from 0.9.0 to the 0.9.1 line](docs/Upgrading.md#upgrade-from-090-to-the-091-line)
+
+### Configuration
+
+- Add optional per-route `[routes.bandwidth]` upload and download
+  byte-per-second limits. Omitting the table preserves unlimited traffic, each
+  direction is independent, and budgets are shared only within one process.
+  Accounting is payload-only across HTTP, CONNECT, WebSocket, and WebTransport;
+  protocol framing and control frames are not charged. WebSockets without
+  stream WAF retain their prior frame-size and extension behavior through the
+  constant-memory wire-frame adapter, and live policy is rechecked in bounded
+  16 KiB payload chunks, including for sessions that began unlimited.
+- Add optional HTTPS upstream client identities for direct upstreams, pool
+  members, and discovery templates. Each identity requires a certificate-root-
+  relative chain and a matching unencrypted private key; ordinary upstream
+  server authentication remains mandatory. Client-identity connections disable
+  outbound TLS resumption and the persistent client-configuration cache, while
+  established long-lived connections may retain the previous identity until
+  drain.
+- Add bounded empty-body `[routes.actions.direct_response]` error targets with
+  status codes from `400` through `599`. A direct response is terminal and
+  cannot be combined with another route target or request-processing action.
+  The Gateway controller uses match-equivalent `503` targets when an HTTP or
+  gRPC route can be deprogrammed safely.
+- Add opt-in Helm upstream client-identity Secret projections through
+  `upstreamTls.clientIdentitySecretProjections` and the Gateway-controller
+  `upstreamClientTls.sourceSecretAllowlist`. Omitted values grant no Secret
+  access and preserve existing Pod and controller behavior. A bounded valid
+  chain/key pair is required before a content-addressed target-namespace Secret
+  is created.
+- Complete the native WebRTC fallback configuration with RFC 8489 SHA-256 and
+  compatible MD5 authentication, source-bound current and previous nonce
+  secrets, bounded secret-file sources, RFC 6062 TCP relay limits, and
+  independent per-server `turns://` TLS policies including optional client
+  identity.
+- Add default-off Helm `turn` values for generated proxy or singleton edge
+  relay configuration, explicit UDP/TCP/TLS control and relay exposure,
+  projected Secret files, and matching network-policy rules. Omission preserves
+  prior chart rendering. Generated proxy mode may use multiple replicas;
+  generated edge-relay mode requires one Deployment replica,
+  `service.externalTrafficPolicy = "Local"`, explicit public and relay
+  addresses, and bounded UDP/TCP relay ranges. Preserve native syntax,
+  defaults, validation, reload behavior, schema epoch `1`, effective-TOML
+  output, and secret redaction. Omission of the new optional route, upstream,
+  direct-response, and TURN fields preserves the corresponding prior behavior
+  and requires no native migration. Production CT storage and Kubernetes doctor
+  admission remain subject to the tightened checks documented below. Effective
+  configuration redacts `tls.client_identity.private_key` paths in direct HTTP,
+  pool-member, discovery, and TURN upstream shapes.
+
+### Schema epochs
+
+- Keep the native configuration schema at epoch `1` while adding the optional
+  bandwidth, upstream-client-identity, direct-response, and TURN fields.
+  Existing epoch-1 configurations remain valid and retain their behavior
+  without a migration. The beta.1 dependency and qualification changes add no
+  native or durable schema epoch.
+- Extend the two Helm values schemas and Kubernetes feature-graduation policy
+  for opt-in Secret projections and refreshed immutable matrix inputs. These
+  are deployment-contract additions, not native, database, or on-disk schema
+  migrations.
+
+### Deprecations and removals
+
+- No configuration key, API, executable, image role, rule syntax, or supported
+  upgrade source is deprecated or removed.
+
+### Admin API
+
+- No Admin API endpoint, authentication, authorization, request, response, or
+  persisted Admin contract changes. Existing bounded diagnostics may report
+  effective upstream client-identity state without exposing certificates,
+  private keys, Secret contents, or sensitive paths.
+- `oxibeltctl doctor --kubernetes` requires a direct, certificate-verified
+  HTTPS API-server transport. It rejects kubeconfig `proxy-url`,
+  `HTTPS_PROXY`/`https_proxy`, `insecure-skip-tls-verify`, and `exec` or
+  `auth-provider` credentials before constructing its client.
+
+### Feature lifecycle
+
+- Preserve every existing feature lifecycle and release-policy gate. The
+  qualification verifier applies bounded retries to registry descriptor
+  inspection failures and malformed responses before sealing a result, while
+  valid descriptor or child-manifest mismatches fail immediately. The runtime
+  graph replaces yanked `chacha20 0.10.1` with compatible `0.10.2` without
+  changing enabled features.
+- Extend the repository-only PascalCase declaration policy to class accessors
+  and methods, abstract methods, and interface methods. Constructors and
+  computed members remain exempt; this contributor-tooling policy changes no
+  shipped runtime, configuration, API, rulepack, image, chart, or storage
+  behavior.
+- Add supported native route bandwidth shaping and native upstream mTLS client
+  authentication. Gateway and Helm delivery of client identities retain their
+  existing experimental and unvalidated lifecycle state.
+- Complete supported TURN edge relay over UDP and RFC 6062 TCP,
+  transport-matched TURN proxying over UDP/TCP/TLS, dual-stack relay
+  allocation, and coturn/client interoperability coverage. Generic raw UDP
+  forwarding remains available through existing `[[stream_listeners]]`.
+- Add bounded direct-response routing and fail-closed Gateway behavior.
+  Proven-safe HTTPRoute and GRPCRoute withdrawal publishes exact
+  match-equivalent empty-body `503` tombstones; proven-safe TCPRoute and
+  UDPRoute withdrawal removes only the affected listener. Backend pools are
+  all-or-nothing. Ambiguous translation failures and TLSRoute failures preserve
+  the last good revision because omission could expose another route or SNI
+  rule.
+- Extend the Kubernetes `1.34`-`1.37` representatives with `v1.37.0` while
+  retaining `v1.34.11`, `v1.35.8`, and `v1.36.4`, Kind `v0.33.0`, and Helm
+  `3.21.4`/`4.2.4`. These are fresh graduation-evidence inputs and do not
+  themselves promote a Kubernetes feature. Native Certificate Transparency and
+  its `oxibelt-ct` chart remain disabled by default, experimental, and
+  unvalidated.
+
+### Rulepack compatibility
+
+- Change no OxiRule, CRS, rulepack schema, phase, action, matching, or
+  normalization syntax. Strict Brotli decoding changes only how encoded bodies
+  reach the existing WAF inspection pipeline: incomplete, trailing,
+  no-progress, and Large Window streams are rejected rather than accepted or
+  decoded with an unbounded memory requirement.
+
+### Executables and images
+
+- Preserve executable names, package ownership, image roles, chart names, and
+  the 30-image and two-chart release inventory. The Gateway controller and data
+  plane must be deployed from the same exact candidate revision for the
+  client-identity and fail-closed rollout contracts.
+- Preserve the compatible `chacha20 0.10.2` patch in official binaries and
+  images. Valid registry descriptor or child-manifest mismatches fail closed;
+  malformed or unavailable descriptor reads may retry only within the bounded
+  qualification budget and must report expected-versus-actual inventories.
+- Refresh compatible Rust dependency graphs, standalone probe lockfiles,
+  cargo-vet and dependency-policy evidence, CI actions, builder/runtime image
+  digests, Kubernetes node images, Kind, Helm 3, Helm 4, and the pinned fuzz
+  nightly. The digest-pinned coturn image is a reusable CI helper only, not an
+  OxiBelt release image or runtime dependency. Stable artifacts must be rebuilt
+  from the exact stable candidate. Do not relabel beta artifacts or substitute
+  beta receipts for stable evidence; bind the successful beta.2 aggregate
+  separately as the required predecessor qualification.
+
+### Storage and state
+
+- No durable database, object-store, shared-state, or on-disk migration is
+  required for the 0.9.1 changes. Bandwidth credits and queues are process-local
+  and reconstructed from configuration.
+- Production CT startup rejects local or plaintext object storage and requires
+  HTTPS S3-compatible versioned storage whose capability probe proves create-only
+  writes, conditional replacement, version reporting, and checksum-stable
+  readback. Credentials and provider errors remain redacted; this adds no
+  migration, and CT remains default-off, experimental, and unvalidated.
+- TURN allocations, relay sockets, and pending RFC 6062 data connections remain
+  process-local. Compatible full reloads preserve unchanged listeners and
+  stable pool runtime; process or Pod replacement starts with empty TURN state.
+  Client allocation state is released before stream failures propagate.
+- Helm-projected source Secrets, controller-derived target Secrets, immutable
+  controller ConfigMaps, mounts, and rollout references are Kubernetes
+  deployment state. Remove them only after the corresponding old data-plane
+  revision has drained; they do not introduce a native or database schema
+  epoch.
+
+### Upgrade validation
+
+- Validate the exact candidate revision with fresh Rust, TypeScript,
+  configuration/schema, rootless image, Helm, Gateway-controller, and
+  Kubernetes `1.34`-`1.37` evidence. Qualify raw UDP and TURN edge/proxy UDP,
+  TCP, TLS, IPv4, IPv6 relay, and RFC 6062 behavior with OxiBelt probes and
+  the pinned coturn client, and run relay-only Chromium and Firefox data-channel
+  coverage. Keep CT disabled until its separate production-support evidence is
+  complete.
+- Before preparing the stable draft during the beta.2 soak, require terminal
+  beta.2 exact-revision qualification and exact stable-source CI, including the
+  release-contract, ancestry, documentation-only-delta, source, configuration,
+  schema, Helm, Gateway-controller, and Kubernetes checks. Stable artifact
+  production and its receipts are not draft prerequisites. The beta.2 24-hour
+  eligibility interval and person review gate stable publication; the stable
+  release's own 30-image and two-chart qualification is the later mutable-alias
+  gate.
+- Validate the exact stable source and both compatibility ranges with full
+  immutable revisions:
+
+```sh
+stable_revision="$(git rev-parse HEAD)"
+beta_2_revision="cc33b2a08d988bd3f3ad65c60a0c9a0961968627"
+stable_base_revision="b1ca5aab407e8398792a2b11c8436b6ff78ed193"
+git merge-base --is-ancestor "${stable_base_revision}" "${stable_revision}"
+git merge-base --is-ancestor "${beta_2_revision}" "${stable_revision}"
+pnpm run release-contract:check
+pnpm run release-contract:check --change-base "${beta_2_revision}" --change-head "${stable_revision}"
+pnpm run release-contract:check --change-base "${stable_base_revision}" --change-head "${stable_revision}"
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+```
+
+### Rollback and irreversible steps
+
+- Rolling back `0.9.1` to the same-source `0.9.1-beta.2` requires no field
+  removal or state conversion. Drain affected long-lived connections as needed,
+  then restore the retained beta.2 controller and data-plane images together by
+  immutable digest; keep their matching configuration and release records.
+- Rolling back to `0.9.0` requires removing every beta.2-only
+  `[routes.bandwidth]`, `tls.client_identity`, and
+  `actions.direct_response` field, new TURN TLS/auth/limit or file-secret
+  field, generated Helm `turn` value, Secret projection, and Gateway
+  `clientCertificateRef` that the older binary cannot consume. Drain TURN
+  allocations and RFC 6062 data connections as well as other long-lived
+  connections, then restore the retained `0.9.0` controller and data-plane
+  images together by immutable digest. Remove projected or controller-derived
+  Secrets only after no active or retained rollout references them.
+- No durable state conversion is required. Drain ephemeral TURN allocations and
+  RFC 6062 data connections before rollback, and revoke a compromised old
+  client identity at the upstream.
+
+### Known issues
+
+- Stable publication, stable artifact qualification, and mutable-alias
+  promotion remain separate pending steps. The beta.2 qualification interval
+  and person review must precede publication; stable then requires its own
+  exact-version artifacts and qualification before mutable aliases move.
+- Native Certificate Transparency remains disabled by default,
+  experimental, and unvalidated. Versioning and release qualification do not
+  constitute CT production support; the experimental chart is not part of the
+  official release chart inventory.
+- Route bandwidth is process-local, so replicas enforce independent budgets.
+  Ambiguous Gateway translation errors and TLSRoute failures deliberately keep
+  the last good revision; operators must resolve the reported condition rather
+  than treating status rejection alone as proof that an old TLS route stopped
+  serving.
+- Registry inspection failures and descriptor-malformation faults can still
+  prevent qualification after bounded retries. Valid inventory mismatches
+  remain fail-closed by design, and no failed or partial beta.2 evidence is
+  reusable for stable publication.
+
+### Security
+
+- Keep qualification sealing fail closed: descriptor inspection failures and
+  malformed responses may retry only within the bounded budget, while valid
+  digest and child-manifest mismatches fail immediately with actionable exact-
+  inventory diagnostics. Retain approved registries, lockfile checksums,
+  cargo-vet evidence, vulnerability policy, SBOM, provenance, and attestation
+  gates for every exact image subject.
+- Reject Brotli Large Window, incomplete, trailing, and no-progress encodings;
+  enforce segment-boundary route-prefix matching; require an exclusively
+  `websocket` Upgrade offer and response; and preserve `413 Payload Too Large`
+  classification through shaped HTTP/2 and HTTP/3 request bodies.
+- Validate upstream client certificate chains and matching keys before
+  activation, keep upstream server authentication mandatory, disable
+  client-auth resumption, redact private-key paths from every supported HTTP
+  and TURN upstream shape, and restrict Gateway Secret reads to exact
+  operator-allowlisted names with any required cross-namespace `ReferenceGrant`.
+- Require direct HTTPS Kubernetes doctor transport with trusted CA data and
+  bounded static credentials; reject proxy, cleartext, insecure TLS, `exec`,
+  and `auth-provider` modes before client construction.
+- Bind TURN nonces to the observed client tuple, realm, and advertised password
+  algorithms; reject ambiguous or unknown required attributes; integrity-sign
+  authenticated responses; confine and redact secret sources; bound proxy UDP
+  sessions and pending TCP connections; require permissions before peer-to-
+  client relay; and deny private and special-use relay peers by default.
+- Publish fail-closed Gateway replacements only when translation proves the
+  exact affected scope: HTTP/gRPC route withdrawal publishes match-equivalent
+  `503` tombstones, and safe L4 failures remove the exact listener. Partial
+  backend pools, orphaned authentication or policy artifacts, unrelated
+  listener removal, and diagnostic-code-only safety decisions are forbidden;
+  ambiguous or mixed failures preserve the last good revision.
+
 ## [0.9.0] - 2026-08-27
 
 > Stable carry-forward of the person-reviewed `0.9.0-beta.1` source in exactly
