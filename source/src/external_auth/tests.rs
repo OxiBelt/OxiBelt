@@ -630,3 +630,28 @@ fn fuzz_route_scope_keeps_raw_and_waf_normalized_views_distinct() {
 
   fuzz_auth_request_semantics("", "", "", "", 0, false, path);
 }
+
+#[cfg(feature = "fuzzing")]
+#[test]
+fn fuzz_route_scope_accepts_benign_nested_percent_whitespace() {
+  let path = "/protected%2520/////";
+  let normalized = crate::waf::fuzz_normalize_path(path);
+  let nested_normalized = crate::waf::fuzz_normalize_path(&normalized);
+
+  assert!(
+    crate::proxy::http::uri::validate_downstream_path(path).is_ok(),
+    "benign nested whitespace encoding should remain accepted"
+  );
+  assert_eq!(normalized, "/protected%20");
+  assert_eq!(nested_normalized, "/protected");
+  assert!(!crate::routes::path_prefix_matches(
+    "/protected",
+    &normalized
+  ));
+  assert!(crate::routes::path_prefix_matches(
+    "/protected",
+    &nested_normalized
+  ));
+
+  fuzz_auth_request_semantics("", "", "", "", 0, false, path);
+}

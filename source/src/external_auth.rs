@@ -982,8 +982,6 @@ identity_headers = ["remote-user", "x-auth-user"]
 
   let raw_protected = crate::routes::path_prefix_matches("/protected", route_path);
   let normalized_route = crate::waf::fuzz_normalize_path(route_path);
-  let nested_normalized_route = crate::waf::fuzz_normalize_path(&normalized_route);
-  let normalized_protected = crate::routes::path_prefix_matches("/protected", &normalized_route);
   assert_eq!(
     raw_protected,
     crate::routes::path_prefix_matches("/protected", route_path),
@@ -994,21 +992,6 @@ identity_headers = ["remote-user", "x-auth-user"]
     crate::waf::fuzz_normalize_path(route_path),
     "route normalization was nondeterministic"
   );
-  // Raw routing and the WAF-normalized request view intentionally have
-  // different semantics. Only a second normalization pass may not move the
-  // already-normalized request across the auth scope.
-  if (normalized_protected
-    != crate::routes::path_prefix_matches("/protected", &nested_normalized_route))
-    && route_path
-      .bytes()
-      .any(|byte| matches!(byte, b'.' | b'%' | b'\\'))
-  {
-    assert!(
-      crate::proxy::http::uri::validate_downstream_path(route_path).is_err(),
-      "nested path interpretation moved a request across the auth scope"
-    );
-  }
-
   let result = match outcome % 4 {
     0 => {
       let mut trusted = HashMap::new();

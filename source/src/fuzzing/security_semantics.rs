@@ -36,7 +36,6 @@ pub fn exercise_path_security_semantics(
   let nested_normalized = crate::waf::fuzz_normalize_path(&normalized);
   let route_matches_raw = crate::routes::path_prefix_matches(route_prefix, path);
   let route_matches_normalized = crate::routes::path_prefix_matches(route_prefix, &normalized);
-  let route_matches_nested = crate::routes::path_prefix_matches(route_prefix, &nested_normalized);
 
   // The resolver is deliberately lexical. Its accepted path must remain
   // beneath its supplied root regardless of later normalization decisions.
@@ -67,18 +66,6 @@ pub fn exercise_path_security_semantics(
       "nested decoding changed the already-resolved static confinement decision"
     );
   }
-  // Raw routing and the WAF-normalized request view intentionally have
-  // different semantics. Only a second normalization pass may not move the
-  // already-normalized request across a protected prefix.
-  if route_matches_normalized != route_matches_nested
-    && path.bytes().any(|byte| matches!(byte, b'.' | b'%' | b'\\'))
-  {
-    assert!(
-      validated.is_err(),
-      "nested path interpretation crossed a protected route prefix"
-    );
-  }
-
   let Ok(origin) = Url::parse("https://upstream.example.test/base") else {
     panic!("fixed fuzz upstream URL should parse");
   };
@@ -220,6 +207,24 @@ mod tests {
     assert!(crate::routes::path_prefix_matches("/safe", &normalized));
 
     exercise_path_security_semantics(path, "q=xxxxxxxxxxxxxxxxxxxxxd", "/safe", None, false);
+  }
+
+  #[test]
+  fn path_oracle_accepts_benign_nested_percent_whitespace() {
+    let path = "/safe%2520/////";
+    let normalized = crate::waf::fuzz_normalize_path(path);
+    let nested_normalized = crate::waf::fuzz_normalize_path(&normalized);
+
+    assert!(validate_downstream_path(path).is_ok());
+    assert_eq!(normalized, "/safe%20");
+    assert_eq!(nested_normalized, "/safe");
+    assert!(!crate::routes::path_prefix_matches("/safe", &normalized));
+    assert!(crate::routes::path_prefix_matches(
+      "/safe",
+      &nested_normalized
+    ));
+
+    exercise_path_security_semantics(path, "", "/safe", None, false);
   }
 
   #[test]

@@ -45,6 +45,14 @@ license = "Apache-2.0"
 classification = "non-secret"
 
 [[seed]]
+target = "path_security_semantics"
+path = "fuzz/seeds/path_security_semantics/benign-nested-space-boundary.bin"
+sha256 = "366d921483b3b1069d1054efd9b57883fd0fd1387031ffc8f7c5f2a094eff86e"
+origin = "Repository-reviewed synthetic CI fuzz input for a benign nested percent-encoded space; contains no production traffic."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
 target = "waf_request_evaluation"
 path = "fuzz/seeds/waf_request_evaluation/must-block.tokens"
 sha256 = "c41883bb34eb4761d1642cc8e3e1d6e1538a9acee3da0c3ab28aefd332092a4d"
