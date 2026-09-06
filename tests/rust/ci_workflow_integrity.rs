@@ -9886,7 +9886,17 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   let gate = workflow_job_text(&workflow, "release-vulnerability-gate");
   for expected in [
     "if: ${{ always() && needs.prepare-release.result == 'success' }}",
-    "pattern: trivy-release-${{ github.run_id }}-*",
+    "Select latest digest-bound vulnerability scan evidence per subject",
+    "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0",
+    "github.rest.actions.listWorkflowRunArtifacts",
+    "release image plan must contain exactly 30 scan subjects",
+    "scan evidence for ${suffix} is missing or ambiguous at its newest available attempt",
+    "scan evidence for ${suffix} is invalid at its newest available attempt",
+    "scan evidence for ${suffix} has a future attempt",
+    "const attempt = candidates === undefined ? undefined : Math.max(...candidates.keys())",
+    "if (matches.length !== 1)",
+    "artifact-ids: ${{ steps.scan-artifacts.outputs.artifact_ids }}",
+    "digest-mismatch: error",
     "merge-multiple: false",
     "find \"${SCAN_ROOT}\" -mindepth 1 -maxdepth 1 -print0",
     "image_vulnerability_policy.mjs\" evaluate",
@@ -9916,12 +9926,32 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
       .unwrap()
       < gate.find("Enforce vulnerability gate result").unwrap()
   );
+  assert!(
+    gate.find("Download release metadata").unwrap()
+      < gate
+        .find("Select latest digest-bound vulnerability scan evidence per subject")
+        .unwrap()
+      && gate
+        .find("Select latest digest-bound vulnerability scan evidence per subject")
+        .unwrap()
+        < gate
+          .find("Download selected digest-bound vulnerability scan evidence")
+          .unwrap()
+      && gate
+        .find("Download selected digest-bound vulnerability scan evidence")
+        .unwrap()
+        < gate
+          .find("Evaluate complete release image vulnerability matrix")
+          .unwrap(),
+    "the gate must resolve exact complete-attempt artifact IDs after metadata and before evaluation"
+  );
   for forbidden in [
     "packages:",
     "attestations:",
     "id-token:",
     "actions/checkout",
     "docker login",
+    "pattern: trivy-release-${{ github.run_id }}-*",
     "pattern: trivy-release-${{ github.run_id }}-${{ github.run_attempt }}-*",
     "merge-multiple: true",
     "--scan-contract",
@@ -10012,6 +10042,221 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
         .count(),
     8
   );
+}
+
+#[test]
+fn release_vulnerability_gate_selects_highest_exact_evidence_per_subject() {
+  let workflow = release_workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("release workflow should parse as YAML");
+  let selector = parsed["jobs"]["release-vulnerability-gate"]["steps"]
+    .as_array()
+    .expect("release vulnerability gate should have steps")
+    .iter()
+    .find(|step| step["id"] == "scan-artifacts")
+    .expect("release vulnerability gate should select exact scan artifacts")["with"]["script"]
+    .as_str()
+    .expect("scan artifact selector should be a GitHub script");
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-release-scan-artifact-selector-")
+    .tempdir()
+    .expect("selector fixture directory should be creatable");
+  let plan_path = temp_dir.path().join("image-plan.json");
+  let harness_path = temp_dir.path().join("selector.cjs");
+  let run_id = 34007195853_u64;
+  let subjects = OXIBELT_IMAGE_ROLES
+    .iter()
+    .flat_map(|(_, prefix)| {
+      OXIBELT_IMAGE_ARTIFACTS
+        .iter()
+        .map(move |(architecture, _, _, _)| format!("{prefix}-alpine-musl-{architecture}-image"))
+    })
+    .collect::<Vec<_>>();
+  let plan = serde_json::json!({
+    "artifacts": subjects
+      .iter()
+      .map(|artifact_name| {
+        let architecture = artifact_name
+          .strip_suffix("-image")
+          .and_then(|name| name.rsplit_once("-alpine-musl-"))
+          .map(|(_, architecture)| architecture)
+          .expect("fixture image artifact should expose an architecture");
+        serde_json::json!({
+          "artifactName": artifact_name,
+          "artifactArch": architecture,
+        })
+      })
+      .collect::<Vec<_>>(),
+  });
+  fs::write(
+    &plan_path,
+    serde_json::to_vec(&plan).expect("fixture image plan should serialize"),
+  )
+  .expect("fixture image plan should write");
+  fs::write(
+    &harness_path,
+    format!(
+      r#"const outputs = {{}}
+let failure = null
+const core = {{
+  setOutput(name, value) {{ outputs[name] = String(value) }},
+  setFailed(message) {{ failure ??= String(message) }}
+}}
+const github = {{
+  paginate: async () => JSON.parse(process.env.ARTIFACTS),
+  rest: {{ actions: {{ listWorkflowRunArtifacts: () => {{}} }} }}
+}}
+const context = {{
+  runId: Number(process.env.RUN_ID),
+  runAttempt: Number(process.env.RUN_ATTEMPT),
+  repo: {{ owner: 'OxiBelt', repo: 'OxiBelt' }}
+}}
+async function invoke() {{
+  try {{
+    await (async () => {{
+{selector}
+    }})()
+  }} catch (error) {{
+    failure ??= `selector threw: ${{error instanceof Error ? error.message : String(error)}}`
+  }}
+  process.stdout.write(JSON.stringify({{ failure, outputs }}))
+}}
+invoke()
+"#
+    ),
+  )
+  .expect("selector harness should write");
+  let complete_attempt = |attempt: u64, id_base: u64| {
+    subjects
+      .iter()
+      .enumerate()
+      .map(|(index, artifact_name)| {
+        let (prefix, architecture) = artifact_name
+          .strip_suffix("-image")
+          .and_then(|name| name.rsplit_once("-alpine-musl-"))
+          .expect("fixture image artifact should expose a prefix and architecture");
+        serde_json::json!({
+          "id": id_base + index as u64,
+          "name": format!("trivy-release-{run_id}-{attempt}-{prefix}-{architecture}"),
+          "digest": format!("sha256:{}", "a".repeat(64)),
+          "size_in_bytes": 1024,
+          "expired": false,
+        })
+      })
+      .collect::<Vec<_>>()
+  };
+  let invoke = |attempt: u64, artifacts: &[serde_json::Value]| {
+    let output = Command::new("node")
+      .arg(&harness_path)
+      .env(
+        "ARTIFACTS",
+        serde_json::to_string(artifacts).expect("artifacts should serialize"),
+      )
+      .env("IMAGE_PLAN", &plan_path)
+      .env("RUN_ID", run_id.to_string())
+      .env("RUN_ATTEMPT", attempt.to_string())
+      .output()
+      .expect("Node should execute the release scan selector harness");
+    assert!(
+      output.status.success(),
+      "selector harness should run:\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+      .expect("selector harness should emit JSON")
+  };
+  let selected_ids = |output: &serde_json::Value| {
+    assert_eq!(output["failure"], serde_json::Value::Null, "{output}");
+    output["outputs"]["artifact_ids"]
+      .as_str()
+      .expect("selector should emit exact artifact IDs")
+      .split(',')
+      .map(|value| value.parse::<u64>().expect("artifact ID should be numeric"))
+      .collect::<BTreeSet<_>>()
+  };
+
+  let mut current_attempt = complete_attempt(2, 2_000);
+  let mut partial_prior_attempt = complete_attempt(1, 1_000);
+  partial_prior_attempt.pop();
+  current_attempt.extend(partial_prior_attempt);
+  assert_eq!(
+    selected_ids(&invoke(2, &current_attempt)),
+    (2_000..2_030).collect(),
+    "a complete current attempt must supersede partial prior evidence"
+  );
+
+  let mut mixed_attempts = complete_attempt(2, 2_000);
+  mixed_attempts.extend(complete_attempt(3, 3_000).into_iter().take(1));
+  assert_eq!(
+    selected_ids(&invoke(3, &mixed_attempts)),
+    std::iter::once(3_000).chain(2_001..2_030).collect(),
+    "a failed-job rerun must select each subject's highest available attempt"
+  );
+
+  let mut duplicate_newest = complete_attempt(2, 2_000);
+  let newest = complete_attempt(3, 3_000);
+  duplicate_newest.extend(newest.iter().cloned());
+  duplicate_newest.push(newest[0].clone());
+  let duplicate_output = invoke(3, &duplicate_newest);
+  assert!(
+    duplicate_output["failure"]
+      .as_str()
+      .is_some_and(|failure| failure.contains("missing or ambiguous")),
+    "a duplicate newest subject artifact must fail closed rather than fall back: {duplicate_output}"
+  );
+
+  let mut invalid_newest = complete_attempt(2, 2_000);
+  let mut expired = complete_attempt(3, 3_000).remove(0);
+  expired["expired"] = serde_json::Value::Bool(true);
+  invalid_newest.push(expired);
+  let invalid_output = invoke(3, &invalid_newest);
+  assert!(
+    invalid_output["failure"]
+      .as_str()
+      .is_some_and(|failure| failure.contains("invalid at its newest available attempt")),
+    "an invalid newest subject artifact must fail closed rather than fall back: {invalid_output}"
+  );
+
+  let mut future_attempt = complete_attempt(2, 2_000);
+  future_attempt.extend(complete_attempt(4, 4_000));
+  let future_output = invoke(3, &future_attempt);
+  assert!(
+    future_output["failure"]
+      .as_str()
+      .is_some_and(|failure| failure.contains("has a future attempt")),
+    "a matching future subject artifact must fail closed: {future_output}"
+  );
+
+  let mut unsafe_attempt = complete_attempt(2, 2_000);
+  let mut malformed = complete_attempt(3, 3_000).remove(0);
+  malformed["name"] = serde_json::Value::String(format!(
+    "trivy-release-{run_id}-9007199254740992-oxibelt-amd64v2"
+  ));
+  unsafe_attempt.push(malformed);
+  let unsafe_output = invoke(3, &unsafe_attempt);
+  assert!(
+    unsafe_output["failure"]
+      .as_str()
+      .is_some_and(|failure| failure.contains("has an invalid attempt")),
+    "an unsafe parsed attempt must fail closed: {unsafe_output}"
+  );
+
+  for invalid_attempt in ["0", "nonnumeric"] {
+    let mut malformed_attempt = complete_attempt(2, 2_000);
+    let mut malformed = complete_attempt(3, 3_000).remove(0);
+    malformed["name"] = serde_json::Value::String(format!(
+      "trivy-release-{run_id}-{invalid_attempt}-oxibelt-amd64v2"
+    ));
+    malformed_attempt.push(malformed);
+    let malformed_output = invoke(3, &malformed_attempt);
+    assert!(
+      malformed_output["failure"]
+        .as_str()
+        .is_some_and(|failure| failure.contains("has an invalid attempt")),
+      "a {invalid_attempt:?} matching subject attempt must fail closed: {malformed_output}"
+    );
+  }
 }
 
 #[test]

@@ -625,6 +625,9 @@ manifest digest. Publication must later resolve to that exact manifest digest.
 Raw scan artifacts remain immutable and attempt-qualified. On a failed-job
 rerun, the global gate selects each subject's highest available evidence
 attempt from the same release run that is no newer than the current attempt.
+It derives the exact 30 expected names from the validated image plan, paginates
+same-run artifact metadata, and downloads only the resolved artifact IDs with
+artifact-digest enforcement.
 The selected artifact name, contract attempt, and subject must agree exactly;
 a malformed or incomplete newest artifact fails closed without falling back
 to older evidence. Missing, duplicate, future-attempt, wrong-run,

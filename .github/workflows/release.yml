@@ -1148,11 +1148,112 @@ jobs:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
 
-      - name: Download all digest-bound vulnerability scan evidence
+      - name: Select latest digest-bound vulnerability scan evidence per subject
+        id: scan-artifacts
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          IMAGE_PLAN: ${{ runner.temp }}/oxibelt-release-metadata/image-plan.json
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs')
+            const runId = Number(context.runId)
+            const currentAttempt = Number(context.runAttempt)
+            if (!Number.isSafeInteger(runId) || runId < 1 ||
+                !Number.isSafeInteger(currentAttempt) || currentAttempt < 1) {
+              core.setFailed('release vulnerability gate has an invalid run identity')
+              return
+            }
+            const plan = JSON.parse(fs.readFileSync(process.env.IMAGE_PLAN, 'utf8'))
+            if (!Array.isArray(plan?.artifacts) || plan.artifacts.length !== 30) {
+              core.setFailed('release image plan must contain exactly 30 scan subjects')
+              return
+            }
+            const expectedNames = new Set()
+            for (const artifact of plan.artifacts) {
+              if (artifact === null || typeof artifact !== 'object' ||
+                  typeof artifact.artifactName !== 'string' ||
+                  typeof artifact.artifactArch !== 'string') {
+                core.setFailed('release image plan contains an invalid scan subject')
+                return
+              }
+              const match = artifact.artifactName.match(/^(.+)-alpine-musl-([a-z0-9]+)-image$/)
+              if (match === null || match[2] !== artifact.artifactArch) {
+                core.setFailed('release image plan scan artifact naming is invalid')
+                return
+              }
+              const suffix = `${match[1]}-${artifact.artifactArch}`
+              if (expectedNames.has(suffix)) {
+                core.setFailed('release image plan contains duplicate scan subjects')
+                return
+              }
+              expectedNames.add(suffix)
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...context.repo,
+              run_id: runId,
+              per_page: 100
+            })
+            const bySubject = new Map()
+            for (const artifact of artifacts) {
+              const prefix = `trivy-release-${runId}-`
+              if (typeof artifact.name !== 'string' || !artifact.name.startsWith(prefix)) continue
+              const subjects = [...expectedNames].filter(suffix => artifact.name.endsWith(`-${suffix}`))
+              if (subjects.length === 0) continue
+              if (subjects.length !== 1) {
+                core.setFailed(`scan evidence artifact ${artifact.name} matches multiple subjects`)
+                return
+              }
+              const suffix = subjects[0]
+              const attemptText = artifact.name.slice(prefix.length, -suffix.length - 1)
+              if (!/^[1-9][0-9]*$/.test(attemptText)) {
+                core.setFailed(`scan evidence for ${suffix} has an invalid attempt`)
+                return
+              }
+              const attempt = Number(attemptText)
+              if (!Number.isSafeInteger(attempt) || attempt < 1) {
+                core.setFailed(`scan evidence for ${suffix} has an invalid attempt`)
+                return
+              }
+              if (attempt > currentAttempt) {
+                core.setFailed(`scan evidence for ${suffix} has a future attempt`)
+                return
+              }
+              const candidates = bySubject.get(suffix) ?? new Map()
+              const matching = candidates.get(attempt) ?? []
+              matching.push(artifact)
+              candidates.set(attempt, matching)
+              bySubject.set(suffix, candidates)
+            }
+            const selected = []
+            for (const suffix of expectedNames) {
+              const candidates = bySubject.get(suffix)
+              const attempt = candidates === undefined ? undefined : Math.max(...candidates.keys())
+              const matches = attempt === undefined ? [] : candidates.get(attempt) ?? []
+              if (matches.length !== 1) {
+                core.setFailed(`scan evidence for ${suffix} is missing or ambiguous at its newest available attempt`)
+                return
+              }
+              const artifact = matches[0]
+              if (artifact.expired || !Number.isSafeInteger(artifact.id) || artifact.id < 1 ||
+                  !/^sha256:[0-9a-f]{64}$/.test(artifact.digest ?? '') ||
+                  !Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes < 1 ||
+                  artifact.size_in_bytes > 16777216) {
+                core.setFailed(`scan evidence for ${suffix} is invalid at its newest available attempt`)
+                return
+              }
+              selected.push(artifact)
+            }
+            core.setOutput('artifact_ids', selected.map(artifact => artifact.id).join(','))
+
+      - name: Download selected digest-bound vulnerability scan evidence
+        if: steps.scan-artifacts.outcome == 'success'
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
         with:
-          pattern: trivy-release-${{ github.run_id }}-*
+          artifact-ids: ${{ steps.scan-artifacts.outputs.artifact_ids }}
+          digest-mismatch: error
           path: ${{ runner.temp }}/oxibelt-vulnerability-scans
           merge-multiple: false
 
