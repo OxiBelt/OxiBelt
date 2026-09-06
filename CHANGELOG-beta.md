@@ -15,6 +15,133 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.9.2-beta.1] - 2026-09-06
+
+> Release candidate for repeatable, attempt-qualified release evidence after
+> the immutable `0.9.1` workflow accumulated distinct signed rebuild
+> predicates across complete reruns. Runtime and public compatibility
+> contracts are unchanged. This entry does not claim publication,
+> qualification, soak completion, or artifact availability; the exact beta
+> revision must produce fresh evidence.
+
+- Changes since: `0.9.1`
+- Supported upgrade sources: `0.9.1`
+- Upgrade guide: [Upgrade from 0.9.1 to the 0.9.2 line](docs/Upgrading.md#upgrade-from-091-to-the-092-line)
+
+### Configuration
+
+- No runtime configuration key, default, validation, reload behavior, or
+  effective-configuration output changes. Existing `0.9.1` configurations
+  retain their behavior.
+
+### Schema epochs
+
+- No native, database, Helm, Admin, or other persisted-state schema epoch
+  changes.
+
+### Deprecations and removals
+
+- No configuration key, protocol, executable, image role, rule syntax, or
+  supported upgrade source is deprecated or removed.
+
+### Admin API
+
+- No Admin API endpoint, authentication, authorization, request, response,
+  audit, or observability contract changes.
+
+### Feature lifecycle
+
+- No feature is introduced, graduated, deprecated, or removed. Existing
+  native, Gateway, Helm, and Certificate Transparency lifecycle
+  classifications are unchanged.
+
+### Rulepack compatibility
+
+- No OxiRule, CRS, rulepack schema, phase, action, matching, normalization, or
+  signature contract changes.
+
+### Executables and images
+
+- Preserve every `0.9.1` executable name, package owner, image role, chart
+  name, target architecture, and 30-image/two-chart release inventory.
+- Emit all 30 platform and 18 index alias mappings independently in the
+  qualification record, including both stable Alpine index aliases, and
+  reject duplicate, collapsed, missing, or surplus mappings.
+- Resolve the newest same-run vulnerability artifact for each exact release
+  subject through the paginated Actions API, enforce its GitHub archive
+  digest and attempt identity, and reject missing, ambiguous, malformed,
+  expired, future-attempt, or oversized evidence without fallback.
+- Scope rebuild-predicate readback to the current signed GitHub run-attempt
+  invocation and the exact locally produced recipe. Historical attempts are
+  not selected; a missing recipe, malformed invocation, alias ambiguity, or
+  conflicting current-attempt predicate fails closed.
+
+### Storage and state
+
+- No database, object-store, filesystem, shared-state, or process-state
+  migration is required. Release artifacts, attestations, vulnerability
+  decisions, qualification records, and mutable aliases remain external
+  supply-chain state and are never rewritten to repair an earlier release.
+
+### Upgrade validation
+
+- Validate the exact beta revision through the canonical non-benchmark graph,
+  build and scan all 30 platform images, publish both official charts, verify
+  all platform and index attestations, and require a fresh automatic
+  independent-rebuild qualification before starting the 24-hour stable
+  eligibility interval.
+- Exercise complete reruns after prior signed predicates exist and verify that
+  historical attempt records are ignored only after current-attempt identity,
+  signer, source, hosted-runner, timestamp, subject, and recipe equality are
+  proven. A failed-jobs-only rerun must not reuse an earlier attempt's
+  attestation.
+- At minimum, run the governed ledger and exact stable-to-beta range checks:
+
+```sh
+beta_1_revision="$(git rev-parse HEAD)"
+pnpm run release-contract:check
+pnpm run release-contract:check \
+  --change-base 167743bda51fe467ad72cb865dd0b15d2096edaf \
+  --change-head "${beta_1_revision}"
+```
+
+### Rollback and irreversible steps
+
+- Roll back by restoring the retained `0.9.1` controller and data-plane
+  images together by immutable digest and validating the unchanged
+  configuration. No configuration edit, schema down-migration, or durable
+  state conversion is required.
+- Published tags, attestations, artifacts, qualification records, and trusted
+  timestamps are immutable or attributable external history. Do not delete,
+  move, relabel, overwrite, or reuse beta or `0.9.1` evidence to conceal a
+  failed attempt; advance to another governed version when a cut cannot be
+  qualified.
+
+### Known issues
+
+- Beta.1 is only a candidate until its signed tag, person-reviewed
+  prerelease, exact-version artifacts, complete automatic qualification, and
+  required 24-hour eligibility interval all succeed. The `0.9.1` producer
+  attempt that exposed conflicting rebuild predicates produced no aggregate
+  qualification and cannot qualify this beta.
+- Rebuild readback deliberately requires attestations from the current
+  complete workflow attempt. If a post-attestation job needs recovery, rerun
+  the complete workflow rather than failed jobs only.
+
+### Security
+
+- Preserve exact subject, digest, signer workflow, source repository, tag,
+  source revision, GitHub-hosted runner, trusted timestamp, and current
+  run-attempt checks before selecting a rebuild predicate. Conflicting
+  current-attempt values and casing aliases fail closed.
+- Keep stable and beta image publication blocked for every `CRITICAL` finding
+  and every `HIGH` finding with a fixed version. Artifact selection changes do
+  not suppress Trivy findings, weaken thresholds, or broaden exceptions.
+- Align fuzz path and external-auth scope assertions with production's raw
+  routing path and single-pass WAF view while retaining traversal, static-root
+  confinement, rewrite, credential, and determinism coverage. Benign nested
+  percent-encoded whitespace remains accepted as in production.
+
 ## [0.9.1-beta.2] - 2026-09-04
 
 > Candidate ledger for the complete development lineage after

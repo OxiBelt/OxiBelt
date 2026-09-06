@@ -75,6 +75,7 @@ be used as a supported production upgrade source or target.
 | `0.9.1-beta.1` | `0.9.1-beta.2` | Published, qualified | Beta.2 adds bandwidth, upstream client identities, fail-closed Gateway deprogramming, security repairs, and refreshed dependency and Kubernetes inputs. Its exact-revision qualification is independent of beta.1 artifacts and evidence. |
 | `0.9.0` | `0.9.1` | Stable candidate | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). The stable ledger is cumulative from `0.9.0`; use newly qualified stable artifacts only after person-reviewed publication and every stable release gate succeeds. |
 | `0.9.1-beta.2` | `0.9.1` | Stable candidate | Exactly one documentation-only commit carries forward beta.2 without runtime, configuration, or state migration changes. The draft may be prepared during the 24-hour soak after beta.2's successful automatic qualification, but stable publication must wait at least 24 hours from the later of beta publication and successful automatic verifier completion. |
+| `0.9.1` | `0.9.2-beta.1` | Release candidate | Follow [Upgrade from 0.9.1 to the 0.9.2 line](#upgrade-from-091-to-the-092-line). Runtime compatibility is unchanged, but beta.1 must produce fresh attempt-qualified image, chart, vulnerability, attestation, and independent-rebuild evidence. The incomplete `0.9.1` rerun evidence is not reusable. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -361,6 +362,50 @@ needs conversion; each process reconstructs its route-local budgets and TURN
 runtime at startup. Remove projected or controller-derived Kubernetes Secrets
 only after no active or retained rollout references them. If an old client
 identity was compromised, revoke it at the upstream independently of rollback.
+
+## Upgrade from 0.9.1 to the 0.9.2 line
+
+`0.9.2-beta.1` carries only release-evidence and fuzz-harness corrections
+after `0.9.1`. It does not change native configuration syntax or defaults,
+schema epoch `1`, Admin APIs, rulepack formats, executable or image roles,
+Helm values, Kubernetes behavior, or persisted state. Existing `0.9.1`
+configurations remain valid without migration, and controller and data-plane
+roles must continue to use one exact candidate revision.
+
+The beta release workflow emits every declared stable alias as an independent
+qualification mapping, selects the newest non-future vulnerability artifact
+for each exact subject through the Actions API, and downloads only those
+resolved artifact IDs with archive-digest enforcement. Rebuild readback
+selects only an exact recipe signed for the current GitHub run attempt. It
+ignores authenticated historical-attempt recipes but rejects missing,
+malformed, ambiguous, mismatched, or conflicting current-attempt evidence.
+A failed-jobs-only rerun cannot reuse an earlier attempt's attestation; use a
+complete rerun when attestation readback needs recovery.
+
+The immutable `0.9.1` release remains attributable history. Its later complete
+producer attempt passed the 30-image vulnerability decision but failed before
+index publication because previous and current signed rebuild predicates had
+different SBOM hashes for the same platform subjects. It produced no aggregate
+qualification. Do not delete, replace, reinterpret, or reuse those artifacts,
+attestations, vulnerability receipts, or elapsed time for beta.1.
+
+Before rollout, require a person-reviewed prerelease and the beta's own
+successful 30-image and two-chart automatic qualification. The normal stable
+transition may begin only after at least 24 hours from the later of beta
+publication and successful verifier completion. Validate the unchanged
+configuration and release contract:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+pnpm run release-contract:check
+```
+
+Rollback requires no configuration edit or data conversion. Restore retained
+`0.9.1` controller and data-plane images together by immutable digest, drain
+long-lived sessions through the normal deployment procedure, and retain every
+beta artifact and signed record as release history. A failed beta cut is
+irreversible as a tag and version identity; repair it by advancing to another
+governed version rather than moving or deleting the published tag.
 
 ## Upgrade from 0.6.6 to the 0.8.1 line
 
