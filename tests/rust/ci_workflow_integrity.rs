@@ -10609,6 +10609,19 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
       "release workflows should not retain {removed}"
     );
   }
+  for (readback_workflow, expected_recipe) in [
+    (&arch_workflow, "${REBUILD_RECIPE}"),
+    (&workflow, "${INDEX_REBUILD}"),
+  ] {
+    assert!(
+      readback_workflow.contains("rebuild_recipe.mjs\" extract-expected")
+        && readback_workflow.contains(&format!("--expected-predicate \"{expected_recipe}\""))
+        && readback_workflow.contains(
+          "--expected-run-invocation-uri \"https://github.com/OxiBelt/OxiBelt/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}\""
+        ),
+      "release attestation readback must select only the exact current recipe and run attempt"
+    );
+  }
 }
 
 #[test]

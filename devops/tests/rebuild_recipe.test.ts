@@ -4,6 +4,7 @@ import { BuildImageReleasePlan, ParseReleaseTag } from '../sources/docker_image_
 import {
   BuildIndexRebuildRecipe,
   BuildPlatformRebuildRecipe,
+  ExtractExpectedVerifiedPredicate,
   ExtractVerifiedPredicate,
   RebuildPredicateSha256,
   RebuildPredicateType
@@ -176,7 +177,7 @@ test('index recipe binds ordered platform subjects and recipe hashes', () => {
   )
 })
 
-test('predicate extraction requires one exact GitHub identity and rejects conflicts', () => {
+test('default predicate extraction requires one exact GitHub identity and rejects conflicts', () => {
   const Predicate = BuildPlatformRebuildRecipe(PlatformFixture())
   const Identity = {
     subjectName: 'ghcr.io/oxibelt/oxibelt',
@@ -211,4 +212,79 @@ test('predicate extraction requires one exact GitHub identity and rejects confli
   Assert.deepEqual(ExtractVerifiedPredicate([Result(Predicate), Result(Predicate)], Identity), Predicate)
   Assert.throws(() => ExtractVerifiedPredicate([Result(Predicate), Result({ different: true })], Identity), /conflicting/)
   Assert.throws(() => ExtractVerifiedPredicate([Result(Predicate)], { ...Identity, sourceRef: 'refs/heads/main' }), /no verified/)
+})
+
+test('expected predicate extraction tolerates signed historical predicates only when the current recipe is verified', () => {
+  const Predicate = BuildPlatformRebuildRecipe(PlatformFixture())
+  const Historical = { ...Predicate, output: { historical: true } }
+  const Invocation = 'https://github.com/OxiBelt/OxiBelt/actions/runs/123456789/attempts/2'
+  const HistoricalInvocation = 'https://github.com/OxiBelt/OxiBelt/actions/runs/123456789/attempts/1'
+  const Identity = {
+    subjectName: 'ghcr.io/oxibelt/oxibelt',
+    subjectDigest: Digest('3'),
+    signerWorkflow: 'https://github.com/OxiBelt/OxiBelt/.github/workflows/release-image-arch.yml@refs/tags/1.2.3',
+    sourceRepository: 'OxiBelt/OxiBelt',
+    sourceRef: 'refs/tags/1.2.3',
+    sourceRevision: Revision,
+    predicateType: RebuildPredicateType
+  }
+  const Result = (Value: unknown, RunInvocationUri = Invocation): Record<string, unknown> => ({
+    verificationResult: {
+      signature: {
+        certificate: {
+          subjectAlternativeName: Identity.signerWorkflow,
+          sourceRepositoryURI: 'https://github.com/OxiBelt/OxiBelt',
+          sourceRepositoryRef: Identity.sourceRef,
+          sourceRepositoryDigest: Revision,
+          buildSignerDigest: Revision,
+          runnerEnvironment: 'github-hosted',
+          runInvocationURI: RunInvocationUri
+        }
+      },
+      verifiedTimestamps: [{}],
+      statement: {
+        subject: [{ name: Identity.subjectName, digest: { sha256: Identity.subjectDigest.slice(7) } }],
+        predicateType: RebuildPredicateType,
+        predicate: Value
+      }
+    }
+  })
+
+  Assert.deepEqual(
+    ExtractExpectedVerifiedPredicate(
+      [Result(Historical, HistoricalInvocation), Result(Predicate)],
+      Identity,
+      Predicate,
+      Invocation
+    ),
+    Predicate
+  )
+  Assert.deepEqual(
+    ExtractExpectedVerifiedPredicate([Result(Predicate), Result(Predicate)], Identity, Predicate, Invocation),
+    Predicate
+  )
+  Assert.throws(
+    () => ExtractExpectedVerifiedPredicate([Result(Historical)], Identity, Predicate, Invocation),
+    /expected predicate/
+  )
+  Assert.throws(
+    () => ExtractExpectedVerifiedPredicate([Result(Predicate, HistoricalInvocation)], Identity, Predicate, Invocation),
+    /expected run invocation/
+  )
+  Assert.throws(
+    () => ExtractExpectedVerifiedPredicate([Result(Predicate, 'not-a-run-invocation-uri')], Identity, Predicate, Invocation),
+    /malformed run invocation/
+  )
+  const ConflictingAlias = Result(Predicate)
+  const Certificate = (((ConflictingAlias.verificationResult as Record<string, unknown>).signature as Record<string, unknown>)
+    .certificate as Record<string, unknown>)
+  Certificate.RunInvocationURI = HistoricalInvocation
+  Assert.throws(
+    () => ExtractExpectedVerifiedPredicate([ConflictingAlias], Identity, Predicate, Invocation),
+    /conflicting run invocation URI aliases/
+  )
+  Assert.throws(
+    () => ExtractExpectedVerifiedPredicate([Result(Predicate), Result(Historical)], Identity, Predicate, Invocation),
+    /conflicting/
+  )
 })

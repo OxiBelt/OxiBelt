@@ -864,8 +864,10 @@ jobs:
             node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/release_sbom.mjs" "${args[@]}"
           done
 
-          node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/rebuild_recipe.mjs" extract \
+          node "${RUNNER_TEMP}/oxibelt-release-metadata/helper/rebuild_recipe.mjs" extract-expected \
             --attestations "${RUNNER_TEMP}/platform-rebuild.json" \
+            --expected-predicate "${REBUILD_RECIPE}" \
+            --expected-run-invocation-uri "https://github.com/OxiBelt/OxiBelt/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}" \
             --subject-name "${OXIBELT_GHCR_IMAGE}" \
             --subject-digest "${DIGEST}" \
             --signer-workflow "${expected_signer}" \

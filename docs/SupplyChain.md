@@ -282,6 +282,18 @@ Attestation generation is safely repeatable, so the API can return duplicate
 valid records as well as historical records. Verification must examine all
 results and select an exact match. A trusted timestamp proves when a particular
 bundle was witnessed; it is not a release-freshness or anti-rollback policy.
+Platform and index readback normally reject conflicting verified rebuild
+predicates for one subject. A release rerun instead supplies both its exact
+current rebuild recipe and its exact GitHub run-attempt invocation URI to an
+explicit expected-predicate selector. It considers only cryptographically
+verified predicates from that invocation, requires their canonical recipe to
+equal the current recipe, and rejects conflicts within the invocation; signed
+historical-attempt predicates are not selected. A missing, malformed, or
+mismatched current invocation or predicate remains a gate error, and this mode
+does not relax the default conflict-rejecting extractor.
+A failed-jobs-only rerun cannot reuse an earlier attempt's attestation through
+this selector; rerun the complete workflow when new attestation readback is
+required.
 
 ## Generate a deployment admission bundle
 

@@ -37,7 +37,7 @@ export type PredicateIdentity = {
 }
 
 type CliParameters = {
-  mode: 'platform' | 'index' | 'extract' | 'digest'
+  mode: 'platform' | 'index' | 'extract' | 'extract-expected' | 'digest'
   values: Map<string, string[]>
 }
 const Digest = /^sha256:[0-9a-f]{64}$/
@@ -330,7 +330,29 @@ function CertificateValue(Certificate: JsonRecord, Names: string[], Description:
   throw new Error(`verification certificate is missing ${Description}`)
 }
 
+function CertificateRunInvocationUri(Certificate: JsonRecord): string {
+  const Values = ['runInvocationURI', 'RunInvocationURI']
+    .map(Name => Certificate[Name])
+    .filter((Value): Value is string => typeof Value === 'string' && Value !== '')
+  if (Values.length === 0) {
+    throw new Error('verification certificate is missing run invocation URI')
+  }
+  if (new Set(Values).size !== 1) {
+    throw new Error('verification certificate has conflicting run invocation URI aliases')
+  }
+  return Values[0]
+}
+
 function MatchingPredicate(Value: unknown, Identity: PredicateIdentity): unknown | undefined {
+  return MatchingAttestation(Value, Identity)?.predicate
+}
+
+type MatchingAttestation = {
+  certificate: JsonRecord
+  predicate: unknown
+}
+
+function MatchingAttestation(Value: unknown, Identity: PredicateIdentity): MatchingAttestation | undefined {
   try {
     const Result = RecordValue(Value, 'attestation result')
     const Verification = RecordValue(Result.verificationResult, 'verificationResult')
@@ -351,7 +373,7 @@ function MatchingPredicate(Value: unknown, Identity: PredicateIdentity): unknown
     const Subject = RecordValue(Subjects[0], 'attestation subject')
     const SubjectDigest = RecordValue(Subject.digest, 'attestation subject digest')
     if (Subject.name !== Identity.subjectName || SubjectDigest.sha256 !== Identity.subjectDigest.slice('sha256:'.length)) return undefined
-    return Statement.predicate
+    return { certificate: Certificate, predicate: Statement.predicate }
   } catch {
     return undefined
   }
@@ -375,6 +397,49 @@ export function ExtractVerifiedPredicate(Value: unknown, Identity: PredicateIden
   return Matches[0]
 }
 
+export function ExtractExpectedVerifiedPredicate(
+  Value: unknown,
+  Identity: PredicateIdentity,
+  ExpectedPredicate: unknown,
+  ExpectedRunInvocationUri: string
+): unknown {
+  DigestValue(Identity.subjectDigest, 'subject digest')
+  if (!Revision.test(Identity.sourceRevision)) {
+    throw new Error('source revision must be a full lowercase Git commit')
+  }
+  AssertSize(ExpectedPredicate)
+  const Expected = CanonicalText(ExpectedPredicate)
+  const InvocationPrefix = `https://github.com/${Identity.sourceRepository}/actions/runs/`
+  if (!ExpectedRunInvocationUri.startsWith(InvocationPrefix)
+    || !/^[1-9][0-9]*\/attempts\/[1-9][0-9]*$/.test(ExpectedRunInvocationUri.slice(InvocationPrefix.length))) {
+    throw new Error('expected run invocation URI must be a canonical GitHub run attempt URI')
+  }
+  const CurrentMatches = ArrayValue(Value, 'gh attestation verify JSON')
+    .map(Item => MatchingAttestation(Item, Identity))
+    .filter(Item => Item !== undefined)
+    .filter(Item => {
+      const InvocationUri = CertificateRunInvocationUri(Item.certificate)
+      if (!InvocationUri.startsWith(InvocationPrefix)
+        || !/^[1-9][0-9]*\/attempts\/[1-9][0-9]*$/.test(InvocationUri.slice(InvocationPrefix.length))) {
+        throw new Error('verification certificate has a malformed run invocation URI')
+      }
+      return InvocationUri === ExpectedRunInvocationUri
+    })
+    .map(Item => Item.predicate)
+  if (CurrentMatches.length === 0) {
+    throw new Error('no verified attestation exactly matches the expected run invocation')
+  }
+  const CanonicalMatches = new Set(CurrentMatches.map(CanonicalText))
+  if (CanonicalMatches.size !== 1) {
+    throw new Error('verified current-run attestations contain conflicting predicates for one subject')
+  }
+  const ExactMatches = CurrentMatches.filter(Item => CanonicalText(Item) === Expected)
+  if (ExactMatches.length === 0) {
+    throw new Error('no verified attestation exactly matches the expected predicate')
+  }
+  return ExactMatches[0]
+}
+
 function ReadJson(Path: string): unknown {
   const Stat = Fs.statSync(Path)
   if (!Stat.isFile() || Stat.size > MaximumPredicateBytes) {
@@ -385,8 +450,8 @@ function ReadJson(Path: string): unknown {
 
 function ParseCli(Argv: string[]): CliParameters {
   const Mode = Argv[2]
-  if (Mode !== 'platform' && Mode !== 'index' && Mode !== 'extract' && Mode !== 'digest') {
-    throw new Error('first argument must be platform, index, extract, or digest')
+  if (Mode !== 'platform' && Mode !== 'index' && Mode !== 'extract' && Mode !== 'extract-expected' && Mode !== 'digest') {
+    throw new Error('first argument must be platform, index, extract, extract-expected, or digest')
   }
   const Values = new Map<string, string[]>()
   for (let Index = 3; Index < Argv.length; Index += 2) {
@@ -446,18 +511,25 @@ function RunCli(): void {
       role: CliValue(Parameters, '--role')
     }))
   } else {
-    WriteOutput(Output, ExtractVerifiedPredicate(
-      ReadJson(CliValue(Parameters, '--attestations')),
-      {
-        subjectName: CliValue(Parameters, '--subject-name'),
-        subjectDigest: CliValue(Parameters, '--subject-digest'),
-        signerWorkflow: CliValue(Parameters, '--signer-workflow'),
-        sourceRepository: CliValue(Parameters, '--source-repository'),
-        sourceRef: CliValue(Parameters, '--source-ref'),
-        sourceRevision: CliValue(Parameters, '--source-revision'),
-        predicateType: CliValue(Parameters, '--predicate-type')
-      }
-    ))
+    const Attestations = ReadJson(CliValue(Parameters, '--attestations'))
+    const Identity = {
+      subjectName: CliValue(Parameters, '--subject-name'),
+      subjectDigest: CliValue(Parameters, '--subject-digest'),
+      signerWorkflow: CliValue(Parameters, '--signer-workflow'),
+      sourceRepository: CliValue(Parameters, '--source-repository'),
+      sourceRef: CliValue(Parameters, '--source-ref'),
+      sourceRevision: CliValue(Parameters, '--source-revision'),
+      predicateType: CliValue(Parameters, '--predicate-type')
+    }
+    WriteOutput(Output, Parameters.mode === 'extract-expected'
+      ? ExtractExpectedVerifiedPredicate(
+        Attestations,
+        Identity,
+        ReadJson(CliValue(Parameters, '--expected-predicate')),
+        CliValue(Parameters, '--expected-run-invocation-uri')
+      )
+      : ExtractVerifiedPredicate(Attestations, Identity)
+    )
   }
 }
 
