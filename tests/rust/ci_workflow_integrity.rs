@@ -11199,6 +11199,154 @@ fn stable_alias_promotion_classifies_beta_qualifications_before_promotion() {
 }
 
 #[test]
+fn release_qualification_emits_each_index_alias_individually() {
+  let verifier = release_rebuild_verification_workflow_text();
+  for expected in [
+    "$manifest.aliasGhcrTags[] as $alias",
+    "release plan role must define exactly three unique index aliases",
+    "platform_alias_count",
+    "index_alias_count",
+    "expected 30 platform, 18 index, and 48 unique total",
+  ] {
+    assert!(
+      verifier.contains(expected),
+      "release qualification must retain exact index alias assembly: {expected}"
+    );
+  }
+  assert!(
+    !verifier.contains(
+      "[.canonicalGhcrTag, (if .canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end), .aliasGhcrTags[]] | @tsv"
+    ),
+    "release qualification must not collapse multiple aliases into a TSV field"
+  );
+
+  let plan = tempfile::NamedTempFile::new().expect("index alias fixture should be creatable");
+  let image = "ghcr.io/oxibelt/oxibelt";
+  let release_tag = format!("{image}:5.2.0");
+  let alpine_tag = format!("{image}:5.2.0-alpine-musl");
+  let fixture = serde_json::json!({
+    "manifests": [
+      {
+        "canonicalGhcrTag": release_tag,
+        "aliasGhcrTags": [format!("{image}:latest")]
+      },
+      {
+        "canonicalGhcrTag": alpine_tag,
+        "aliasGhcrTags": [
+          format!("{image}:5-alpine-musl"),
+          format!("{image}:alpine-musl")
+        ]
+      }
+    ]
+  });
+  fs::write(
+    plan.path(),
+    serde_json::to_vec(&fixture).expect("index alias fixture should serialize"),
+  )
+  .expect("index alias fixture should be writable");
+
+  let projection = r#"
+    [
+      .manifests[] |
+      select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
+      . as $manifest |
+      (if $manifest.canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end) as $digest |
+      $manifest.aliasGhcrTags[] as $alias |
+      {alias: $alias, sourceTag: $manifest.canonicalGhcrTag, sourceDigest: $digest, kind: "index"}
+    ] |
+    if length == 3 and ([.[].alias] | unique | length == 3) then .
+    else error("release plan role must define exactly three unique index aliases")
+    end
+  "#;
+  let output = Command::new("jq")
+    .args([
+      "-ce",
+      "--arg",
+      "release_tag",
+      &release_tag,
+      "--arg",
+      "release_digest",
+      "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "--arg",
+      "alpine_tag",
+      &alpine_tag,
+      "--arg",
+      "alpine_digest",
+      "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      projection,
+    ])
+    .arg(plan.path())
+    .output()
+    .expect("index alias projection should execute");
+  assert!(
+    output.status.success(),
+    "two-alias Alpine index fixture should produce three mappings: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let aliases: Vec<serde_json::Value> =
+    serde_json::from_slice(&output.stdout).expect("index alias projection should return JSON");
+  assert_eq!(aliases.len(), 3);
+  let expected_aliases = BTreeSet::from([
+    format!("{image}:latest"),
+    format!("{image}:5-alpine-musl"),
+    format!("{image}:alpine-musl"),
+  ]);
+  assert_eq!(
+    aliases
+      .iter()
+      .map(|entry| {
+        entry["alias"]
+          .as_str()
+          .expect("alias should be a string")
+          .to_owned()
+      })
+      .collect::<BTreeSet<_>>(),
+    expected_aliases
+  );
+
+  let legacy_projection = r#"
+    .manifests[] |
+    select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
+    [.canonicalGhcrTag, (if .canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end), .aliasGhcrTags[]] | @tsv
+  "#;
+  let legacy = Command::new("jq")
+    .args([
+      "-r",
+      "--arg",
+      "release_tag",
+      &release_tag,
+      "--arg",
+      "release_digest",
+      "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "--arg",
+      "alpine_tag",
+      &alpine_tag,
+      "--arg",
+      "alpine_digest",
+      "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      legacy_projection,
+    ])
+    .arg(plan.path())
+    .output()
+    .expect("legacy TSV projection should execute");
+  assert!(legacy.status.success());
+  let legacy_tsv = String::from_utf8(legacy.stdout).expect("legacy TSV projection should be UTF-8");
+  let alpine_tsv = legacy_tsv
+    .lines()
+    .find(|line| line.starts_with(&alpine_tag))
+    .expect("legacy TSV projection should include the Alpine index");
+  assert_eq!(alpine_tsv.split('\t').count(), 4);
+  assert!(
+    alpine_tsv
+      .splitn(3, '\t')
+      .nth(2)
+      .expect("legacy alias field should exist")
+      .contains('\t'),
+    "the old three-variable shell read would have combined the two Alpine aliases"
+  );
+}
+
+#[test]
 fn stable_alias_promotion_binds_indexes_to_independent_platform_receipts() {
   let verifier = release_rebuild_verification_workflow_text();
   let promotion = stable_alias_promotion_workflow_text();

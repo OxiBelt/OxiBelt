@@ -981,14 +981,41 @@ jobs:
                 "${image}" "${release_digest}" "${alpine_digest}" "${release_children}" "${alpine_children}" >&2
               exit 1
             fi
-            while IFS=$'\t' read -r source digest alias; do
-              [[ -n "${alias}" ]] || continue
-              aliases_json="$(jq -c --arg alias "${alias}" --arg source "${source}" --arg digest "${digest}" '. + [{alias: $alias, sourceTag: $source, sourceDigest: $digest, kind: "index"}]' <<<"${aliases_json}")"
-            done < <(jq -r --arg release_tag "${release_tag}" --arg release_digest "${release_digest}" --arg alpine_tag "${alpine_tag}" --arg alpine_digest "${alpine_digest}" '
-              .manifests[] | select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
-              [.canonicalGhcrTag, (if .canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end), .aliasGhcrTags[]] | @tsv
-            ' "${INDEPENDENT_IMAGE_PLAN}")
+            role_index_aliases="$(jq -ce --arg release_tag "${release_tag}" --arg release_digest "${release_digest}" --arg alpine_tag "${alpine_tag}" --arg alpine_digest "${alpine_digest}" '
+              [
+                .manifests[] |
+                select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
+                . as $manifest |
+                (if $manifest.canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end) as $digest |
+                $manifest.aliasGhcrTags[] as $alias |
+                {alias: $alias, sourceTag: $manifest.canonicalGhcrTag, sourceDigest: $digest, kind: "index"}
+              ] |
+              if length == 3
+                and ([.[].alias] | unique | length == 3)
+                and (all(.[]; (.alias | type == "string" and length > 0)
+                  and (.sourceTag == $release_tag or .sourceTag == $alpine_tag)
+                  and (.sourceDigest == $release_digest or .sourceDigest == $alpine_digest)
+                  and .kind == "index"))
+              then .
+              else error("release plan role must define exactly three unique index aliases")
+              end
+            ' "${INDEPENDENT_IMAGE_PLAN}")" || {
+              printf 'release qualification index aliases are incomplete or duplicated for %s\n' "${image}" >&2
+              exit 1
+            }
+            while IFS= read -r index_alias; do
+              aliases_json="$(jq -cn --argjson current "${aliases_json}" --argjson index_alias "${index_alias}" '$current + [$index_alias]')"
+            done < <(jq -c '.[]' <<<"${role_index_aliases}")
           done
+          platform_alias_count="$(jq '[.[] | select(.kind == "platform")] | length' <<<"${aliases_json}")"
+          index_alias_count="$(jq '[.[] | select(.kind == "index")] | length' <<<"${aliases_json}")"
+          unique_alias_count="$(jq '[.[].alias] | unique | length' <<<"${aliases_json}")"
+          total_alias_count="$(jq 'length' <<<"${aliases_json}")"
+          if [[ "${platform_alias_count}" -ne 30 || "${index_alias_count}" -ne 18 || "${unique_alias_count}" -ne 48 || "${total_alias_count}" -ne 48 ]]; then
+            printf 'release qualification aliases are incomplete or duplicated: expected 30 platform, 18 index, and 48 unique total; found %s platform, %s index, %s unique, and %s total\n' \
+              "${platform_alias_count}" "${index_alias_count}" "${unique_alias_count}" "${total_alias_count}" >&2
+            exit 1
+          fi
           if ! jq -e '
             length == 12 and ([.[].canonicalTag] | unique | length == 12)
             and all(.[]; (.children | length == 3)
