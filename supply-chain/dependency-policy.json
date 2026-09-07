@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-09-03",
+  "reviewedOn": "2026-09-07",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "13abc720f2886f0b168833250c7e767832b4f0c85590eaed314c2dc368450ffb",
+      "lockfileSha256": "9c710c9b948879e5c06084a4622cdb90868006e476bb4b7458f45d7493bd71f0",
       "exemptionInventorySha256": "bd21e1575dce0d01e19bb0741a9e09da3f666de87814c5740a645fe920d5ee5a",
       "exemptedPackageVersions": 456
     },
@@ -108,7 +108,7 @@
           "quinn": ["0.11.11"],
           "quinn-proto": ["0.11.17"],
           "quinn-udp": ["0.5.15"],
-          "rustls": ["0.23.43"],
+          "rustls": ["0.23.44"],
           "rustls-pki-types": ["1.15.1"],
           "rustls-webpki": ["0.103.15"],
           "web-transport-proto": ["0.6.2"],
@@ -212,7 +212,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:13abc720f2886f0b168833250c7e767832b4f0c85590eaed314c2dc368450ffb",
+      "subject": "Cargo.lock@sha256:9c710c9b948879e5c06084a4622cdb90868006e476bb4b7458f45d7493bd71f0",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. The development-only proptest graph adds exact rand 0.9, rand_chacha 0.9, and rand_core 0.9 lines tracked by https://github.com/OxiBelt/OxiBelt/issues/172; any further line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -224,7 +224,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:13abc720f2886f0b168833250c7e767832b4f0c85590eaed314c2dc368450ffb",
+      "subject": "Cargo.lock@sha256:9c710c9b948879e5c06084a4622cdb90868006e476bb4b7458f45d7493bd71f0",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
