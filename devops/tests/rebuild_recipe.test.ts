@@ -5,6 +5,7 @@ import {
   BuildIndexRebuildRecipe,
   BuildPlatformRebuildRecipe,
   ExtractExpectedVerifiedPredicate,
+  ExtractRunVerifiedPredicate,
   ExtractVerifiedPredicate,
   RebuildPredicateSha256,
   RebuildPredicateType
@@ -214,7 +215,7 @@ test('default predicate extraction requires one exact GitHub identity and reject
   Assert.throws(() => ExtractVerifiedPredicate([Result(Predicate)], { ...Identity, sourceRef: 'refs/heads/main' }), /no verified/)
 })
 
-test('expected predicate extraction tolerates signed historical predicates only when the current recipe is verified', () => {
+test('ExtractRunVerifiedPredicate selects only one canonical exact-run identity', () => {
   const Predicate = BuildPlatformRebuildRecipe(PlatformFixture())
   const Historical = { ...Predicate, output: { historical: true } }
   const Invocation = 'https://github.com/OxiBelt/OxiBelt/actions/runs/123456789/attempts/2'
@@ -260,6 +261,50 @@ test('expected predicate extraction tolerates signed historical predicates only 
     Predicate
   )
   Assert.deepEqual(
+    ExtractRunVerifiedPredicate([Result(Historical, HistoricalInvocation), Result(Predicate)], Identity, Invocation),
+    Predicate
+  )
+  Assert.deepEqual(
+    ExtractRunVerifiedPredicate([Result(Predicate), Result(Predicate)], Identity, Invocation),
+    Predicate
+  )
+  Assert.throws(
+    () => ExtractRunVerifiedPredicate([Result(Historical, HistoricalInvocation)], Identity, Invocation),
+    /expected run invocation/
+  )
+  for (const MalformedExpected of [
+    'https://github.com/Other/OxiBelt/actions/runs/123456789/attempts/2',
+    'https://github.com/OxiBelt/OxiBelt/actions/runs/0/attempts/2',
+    'https://github.com/OxiBelt/OxiBelt/actions/runs/01/attempts/2',
+    'https://github.com/OxiBelt/OxiBelt/actions/runs/123456789/attempts/02',
+    `${Invocation}/suffix`,
+    `${Invocation}\n`
+  ]) {
+    Assert.throws(
+      () => ExtractRunVerifiedPredicate([Result(Predicate)], Identity, MalformedExpected),
+      /canonical GitHub run attempt/
+    )
+  }
+  for (const MalformedCertificate of [
+    'https://github.com/Other/OxiBelt/actions/runs/123456789/attempts/2',
+    'https://github.com/OxiBelt/OxiBelt/actions/runs/0/attempts/2',
+    'https://github.com/OxiBelt/OxiBelt/actions/runs/01/attempts/2',
+    'https://github.com/OxiBelt/OxiBelt/actions/runs/123456789/attempts/02',
+    `${Invocation}/suffix`,
+    `${Invocation}\n`
+  ]) {
+    Assert.throws(
+      () => ExtractRunVerifiedPredicate([Result(Predicate, MalformedCertificate)], Identity, Invocation),
+      /malformed run invocation/
+    )
+  }
+  const CapitalizedAlias = Result(Predicate)
+  const CapitalizedCertificate = (((CapitalizedAlias.verificationResult as Record<string, unknown>).signature as Record<string, unknown>)
+    .certificate as Record<string, unknown>)
+  delete CapitalizedCertificate.runInvocationURI
+  CapitalizedCertificate.RunInvocationURI = Invocation
+  Assert.deepEqual(ExtractRunVerifiedPredicate([CapitalizedAlias], Identity, Invocation), Predicate)
+  Assert.deepEqual(
     ExtractExpectedVerifiedPredicate([Result(Predicate), Result(Predicate)], Identity, Predicate, Invocation),
     Predicate
   )
@@ -275,6 +320,13 @@ test('expected predicate extraction tolerates signed historical predicates only 
     () => ExtractExpectedVerifiedPredicate([Result(Predicate, 'not-a-run-invocation-uri')], Identity, Predicate, Invocation),
     /malformed run invocation/
   )
+  const MissingInvocation = Result(Predicate)
+  delete ((((MissingInvocation.verificationResult as Record<string, unknown>).signature as Record<string, unknown>)
+    .certificate as Record<string, unknown>)).runInvocationURI
+  Assert.throws(
+    () => ExtractRunVerifiedPredicate([Result(Predicate), MissingInvocation], Identity, Invocation),
+    /missing run invocation URI/
+  )
   const ConflictingAlias = Result(Predicate)
   const Certificate = (((ConflictingAlias.verificationResult as Record<string, unknown>).signature as Record<string, unknown>)
     .certificate as Record<string, unknown>)
@@ -287,4 +339,40 @@ test('expected predicate extraction tolerates signed historical predicates only 
     () => ExtractExpectedVerifiedPredicate([Result(Predicate), Result(Historical)], Identity, Predicate, Invocation),
     /conflicting/
   )
+  Assert.throws(
+    () => ExtractRunVerifiedPredicate([Result(Predicate), Result(Historical)], Identity, Invocation),
+    /conflicting/
+  )
+  Assert.throws(
+    () => ExtractRunVerifiedPredicate([Result(Predicate), ConflictingAlias], Identity, Invocation),
+    /conflicting run invocation URI aliases/
+  )
+  const Mutations: Array<(Result: Record<string, unknown>) => void> = [
+    ResultValue => { CertificateValue(ResultValue).subjectAlternativeName = `${Identity.signerWorkflow}/other` },
+    ResultValue => { CertificateValue(ResultValue).sourceRepositoryURI = 'https://github.com/Other/OxiBelt' },
+    ResultValue => { CertificateValue(ResultValue).sourceRepositoryRef = 'refs/heads/main' },
+    ResultValue => { CertificateValue(ResultValue).sourceRepositoryDigest = 'b'.repeat(40) },
+    ResultValue => { CertificateValue(ResultValue).buildSignerDigest = 'b'.repeat(40) },
+    ResultValue => { CertificateValue(ResultValue).runnerEnvironment = 'self-hosted' },
+    ResultValue => { StatementValue(ResultValue).subject = [{ name: `${Identity.subjectName}/other`, digest: { sha256: Identity.subjectDigest.slice(7) } }] },
+    ResultValue => { StatementValue(ResultValue).subject = [{ name: Identity.subjectName, digest: { sha256: 'b'.repeat(64) } }] },
+    ResultValue => { StatementValue(ResultValue).predicateType = 'https://example.invalid/other' }
+  ]
+  for (const Mutate of Mutations) {
+    const Mutated = Result(Predicate)
+    Mutate(Mutated)
+    Assert.throws(
+      () => ExtractRunVerifiedPredicate([Mutated], Identity, Invocation),
+      /expected run invocation/
+    )
+  }
 })
+
+function CertificateValue(Result: Record<string, unknown>): Record<string, unknown> {
+  return (((Result.verificationResult as Record<string, unknown>).signature as Record<string, unknown>)
+    .certificate as Record<string, unknown>)
+}
+
+function StatementValue(Result: Record<string, unknown>): Record<string, unknown> {
+  return (Result.verificationResult as Record<string, unknown>).statement as Record<string, unknown>
+}

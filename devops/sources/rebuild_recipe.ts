@@ -37,7 +37,7 @@ export type PredicateIdentity = {
 }
 
 type CliParameters = {
-  mode: 'platform' | 'index' | 'extract' | 'extract-expected' | 'digest'
+  mode: 'platform' | 'index' | 'extract' | 'extract-expected' | 'extract-run' | 'digest'
   values: Map<string, string[]>
 }
 const Digest = /^sha256:[0-9a-f]{64}$/
@@ -403,26 +403,43 @@ export function ExtractExpectedVerifiedPredicate(
   ExpectedPredicate: unknown,
   ExpectedRunInvocationUri: string
 ): unknown {
+  AssertSize(ExpectedPredicate)
+  const Expected = CanonicalText(ExpectedPredicate)
+  const Actual = ExtractRunVerifiedPredicate(Value, Identity, ExpectedRunInvocationUri)
+  if (CanonicalText(Actual) !== Expected) {
+    throw new Error('no verified attestation exactly matches the expected predicate')
+  }
+  return Actual
+}
+
+function AssertRunInvocationUri(Identity: PredicateIdentity, Value: string, Description: string): void {
+  const InvocationPrefix = `https://github.com/${Identity.sourceRepository}/actions/runs/`
+  const Suffix = Value.slice(InvocationPrefix.length)
+  const Attempt = /^[1-9][0-9]*\/attempts\/[1-9][0-9]*$/.exec(Suffix)
+  if (!Value.startsWith(InvocationPrefix) || Attempt === null || Attempt[0] !== Suffix) {
+    if (Description === 'verification certificate run invocation URI') {
+      throw new Error('verification certificate has a malformed run invocation URI')
+    }
+    throw new Error(`${Description} must be a canonical GitHub run attempt URI`)
+  }
+}
+
+export function ExtractRunVerifiedPredicate(
+  Value: unknown,
+  Identity: PredicateIdentity,
+  ExpectedRunInvocationUri: string
+): unknown {
   DigestValue(Identity.subjectDigest, 'subject digest')
   if (!Revision.test(Identity.sourceRevision)) {
     throw new Error('source revision must be a full lowercase Git commit')
   }
-  AssertSize(ExpectedPredicate)
-  const Expected = CanonicalText(ExpectedPredicate)
-  const InvocationPrefix = `https://github.com/${Identity.sourceRepository}/actions/runs/`
-  if (!ExpectedRunInvocationUri.startsWith(InvocationPrefix)
-    || !/^[1-9][0-9]*\/attempts\/[1-9][0-9]*$/.test(ExpectedRunInvocationUri.slice(InvocationPrefix.length))) {
-    throw new Error('expected run invocation URI must be a canonical GitHub run attempt URI')
-  }
+  AssertRunInvocationUri(Identity, ExpectedRunInvocationUri, 'expected run invocation URI')
   const CurrentMatches = ArrayValue(Value, 'gh attestation verify JSON')
     .map(Item => MatchingAttestation(Item, Identity))
     .filter(Item => Item !== undefined)
     .filter(Item => {
       const InvocationUri = CertificateRunInvocationUri(Item.certificate)
-      if (!InvocationUri.startsWith(InvocationPrefix)
-        || !/^[1-9][0-9]*\/attempts\/[1-9][0-9]*$/.test(InvocationUri.slice(InvocationPrefix.length))) {
-        throw new Error('verification certificate has a malformed run invocation URI')
-      }
+      AssertRunInvocationUri(Identity, InvocationUri, 'verification certificate run invocation URI')
       return InvocationUri === ExpectedRunInvocationUri
     })
     .map(Item => Item.predicate)
@@ -433,11 +450,7 @@ export function ExtractExpectedVerifiedPredicate(
   if (CanonicalMatches.size !== 1) {
     throw new Error('verified current-run attestations contain conflicting predicates for one subject')
   }
-  const ExactMatches = CurrentMatches.filter(Item => CanonicalText(Item) === Expected)
-  if (ExactMatches.length === 0) {
-    throw new Error('no verified attestation exactly matches the expected predicate')
-  }
-  return ExactMatches[0]
+  return CurrentMatches[0]
 }
 
 function ReadJson(Path: string): unknown {
@@ -450,8 +463,8 @@ function ReadJson(Path: string): unknown {
 
 function ParseCli(Argv: string[]): CliParameters {
   const Mode = Argv[2]
-  if (Mode !== 'platform' && Mode !== 'index' && Mode !== 'extract' && Mode !== 'extract-expected' && Mode !== 'digest') {
-    throw new Error('first argument must be platform, index, extract, extract-expected, or digest')
+  if (Mode !== 'platform' && Mode !== 'index' && Mode !== 'extract' && Mode !== 'extract-expected' && Mode !== 'extract-run' && Mode !== 'digest') {
+    throw new Error('first argument must be platform, index, extract, extract-expected, extract-run, or digest')
   }
   const Values = new Map<string, string[]>()
   for (let Index = 3; Index < Argv.length; Index += 2) {
@@ -521,15 +534,22 @@ function RunCli(): void {
       sourceRevision: CliValue(Parameters, '--source-revision'),
       predicateType: CliValue(Parameters, '--predicate-type')
     }
-    WriteOutput(Output, Parameters.mode === 'extract-expected'
-      ? ExtractExpectedVerifiedPredicate(
+    if (Parameters.mode === 'extract-expected') {
+      WriteOutput(Output, ExtractExpectedVerifiedPredicate(
         Attestations,
         Identity,
         ReadJson(CliValue(Parameters, '--expected-predicate')),
         CliValue(Parameters, '--expected-run-invocation-uri')
-      )
-      : ExtractVerifiedPredicate(Attestations, Identity)
-    )
+      ))
+    } else if (Parameters.mode === 'extract-run') {
+      WriteOutput(Output, ExtractRunVerifiedPredicate(
+        Attestations,
+        Identity,
+        CliValue(Parameters, '--expected-run-invocation-uri')
+      ))
+    } else {
+      WriteOutput(Output, ExtractVerifiedPredicate(Attestations, Identity))
+    }
   }
 }
 

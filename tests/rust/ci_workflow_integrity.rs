@@ -10625,6 +10625,71 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
 }
 
 #[test]
+fn independent_rebuild_binds_selected_producer_attestations_without_changing_receipts() {
+  let workflow = release_rebuild_verification_workflow_text();
+  let script = release_rebuild_verification_script_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("independent rebuild workflow should parse");
+  for name in ["producer_run_id", "producer_run_attempt"] {
+    let input = &parsed["on"]["workflow_dispatch"]["inputs"][name];
+    assert_eq!(input["type"], "string");
+    assert_eq!(input["required"], false);
+  }
+  let jobs = &parsed["jobs"];
+  assert_eq!(
+    jobs["resolve"]["outputs"]["producer_run_invocation_uri"],
+    "${{ steps.plan.outputs.producer_run_invocation_uri }}"
+  );
+  let steps = jobs["verify"]["steps"].as_array().unwrap();
+  let rebuild = steps
+    .iter()
+    .find(|step| step["name"] == "Rebuild from fresh source and compare")
+    .unwrap();
+  assert_eq!(
+    rebuild["env"]["PRODUCER_RUN_INVOCATION_URI"],
+    "${{ needs.resolve.outputs.producer_run_invocation_uri }}"
+  );
+  assert!(rebuild["run"].as_str().unwrap().contains(
+    "producer_arguments=(--producer-run-invocation-uri \"${PRODUCER_RUN_INVOCATION_URI}\")"
+  ));
+  for expected in [
+    "WORKFLOW_RUN_JSON: ${{ toJSON(github.event.workflow_run) }}",
+    "node --import tsx devops/sources/rebuild_producer.ts",
+    "actions/runs/${MANUAL_PRODUCER_RUN_ID}/attempts/${MANUAL_PRODUCER_RUN_ATTEMPT}",
+    "automatic rebuild verification requires an authenticated producer invocation",
+  ] {
+    assert!(workflow.contains(expected), "missing {expected}");
+  }
+  for expected in [
+    "producer_attestation_args=()",
+    "extraction_mode=extract",
+    "extraction_mode=extract-run",
+    "producer_attestation_args=(--expected-run-invocation-uri \"${producer_run_invocation_uri}\")",
+    "--workflow-path .github/workflows/release.yml \\\n  \"${producer_attestation_args[@]}\"",
+    "rebuild_recipe.ts\" \"${extraction_mode}\"",
+    "'.output.sbomSha256 == $digest'",
+    "selected SBOM digest does not match the platform rebuild recipe",
+  ] {
+    assert!(script.contains(expected), "missing {expected}");
+  }
+  assert!(
+    script.find("'.output.sbomSha256 == $digest'").unwrap()
+      < script.find("docker pull --platform").unwrap(),
+    "selected SBOM must be recipe-bound before pulling or rebuilding"
+  );
+  let receipt = script
+    .split_once("bound_receipt=\"${temporary}/bound-rebuild-receipt.json\"")
+    .unwrap()
+    .1;
+  assert!(receipt.contains("recipeSha256: $recipe_sha256"));
+  assert!(receipt.contains("runAttempt: $run_attempt"));
+  assert!(
+    !receipt.contains("producer_run") && !receipt.contains("producerAttestation"),
+    "strict schema-v1 receipt consumers must retain the existing receipt shape"
+  );
+}
+
+#[test]
 fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() {
   let workflow = release_rebuild_verification_workflow_text();
   let script = release_rebuild_verification_script_text();

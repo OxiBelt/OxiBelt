@@ -7,7 +7,8 @@ usage: verify-release-rebuild.sh \
   --image <ghcr.io/oxibelt/repository> --digest <sha256:...> \
   --revision <40-hex> --release-ref <refs/tags/X.Y.Z...> \
   --verifier-sha <40-hex> \
-  --role <role> --artifact-arch <arch> --output <receipt.json>
+  --role <role> --artifact-arch <arch> --output <receipt.json> \
+  [--producer-run-invocation-uri <https://github.com/OxiBelt/OxiBelt/actions/runs/ID/attempts/N>]
 
 Requires authenticated `gh`, rootless `docker`, Buildx, Trivy, Node, pnpm,
 Git, jq, readelf, and Python 3. The script never uses `docker-rootful`.
@@ -22,6 +23,8 @@ verifier_sha=""
 role=""
 artifact_arch=""
 output=""
+producer_run_invocation_uri=""
+producer_invocation_supplied=false
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -33,6 +36,15 @@ while [[ "$#" -gt 0 ]]; do
     --role) role="${2:-}"; shift 2 ;;
     --artifact-arch) artifact_arch="${2:-}"; shift 2 ;;
     --output) output="${2:-}"; shift 2 ;;
+    --producer-run-invocation-uri)
+      if [[ "${producer_invocation_supplied}" == "true" || "$#" -lt 2 ]]; then
+        usage
+        exit 2
+      fi
+      producer_invocation_supplied=true
+      producer_run_invocation_uri="$2"
+      shift 2
+      ;;
     *) usage; exit 2 ;;
   esac
 done
@@ -44,6 +56,17 @@ if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]] ||
    [[ -z "${output}" ]]; then
   usage
   exit 2
+fi
+
+producer_attestation_args=()
+extraction_mode=extract
+if [[ "${producer_invocation_supplied}" == "true" ]]; then
+  if [[ ! "${producer_run_invocation_uri}" =~ ^https://github\.com/OxiBelt/OxiBelt/actions/runs/[1-9][0-9]*/attempts/[1-9][0-9]*$ ]]; then
+    echo "producer invocation must be an exact canonical GitHub run attempt URI" >&2
+    exit 2
+  fi
+  producer_attestation_args=(--expected-run-invocation-uri "${producer_run_invocation_uri}")
+  extraction_mode=extract-run
 fi
 
 case "${role}" in
@@ -143,13 +166,14 @@ node --import tsx "${repo_root}/devops/sources/release_sbom.ts" verify \
   --source-repository OxiBelt/OxiBelt \
   --source-ref "${release_ref}" \
   --source-revision "${revision}" \
-  --workflow-path .github/workflows/release.yml
+  --workflow-path .github/workflows/release.yml \
+  "${producer_attestation_args[@]}"
 
 extract_predicate() {
   local attestations="$1"
   local predicate_type="$2"
   local destination="$3"
-  node --import tsx "${repo_root}/devops/sources/rebuild_recipe.ts" extract \
+  node --import tsx "${repo_root}/devops/sources/rebuild_recipe.ts" "${extraction_mode}" \
     --attestations "${attestations}" \
     --subject-name "${image}" \
     --subject-digest "${digest}" \
@@ -158,13 +182,24 @@ extract_predicate() {
     --source-ref "${release_ref}" \
     --source-revision "${revision}" \
     --predicate-type "${predicate_type}" \
-    --output "${destination}"
+    --output "${destination}" \
+    "${producer_attestation_args[@]}"
 }
 
 extract_predicate "${temporary}/recipe-attestations.json" \
   https://oxibelt.dev/attestations/rebuild/v1 "${temporary}/recipe.json"
 extract_predicate "${temporary}/sbom-attestations.json" \
   https://cyclonedx.org/bom "${published_sbom}"
+published_sbom_sha256="$(
+  node --import tsx "${repo_root}/devops/sources/rebuild_recipe.ts" digest \
+    --input "${published_sbom}"
+)"
+if [[ ! "${published_sbom_sha256}" =~ ^sha256:[0-9a-f]{64}$ ]] ||
+   ! jq -e --arg digest "${published_sbom_sha256}" \
+     '.output.sbomSha256 == $digest' "${temporary}/recipe.json" >/dev/null; then
+  echo "selected SBOM digest does not match the platform rebuild recipe" >&2
+  exit 1
+fi
 recipe_sha256="$(
   node --import tsx "${repo_root}/devops/sources/rebuild_recipe.ts" digest \
     --input "${temporary}/recipe.json"

@@ -150,7 +150,10 @@ function VerificationResult(Options: VerificationOptions, Predicate?: unknown): 
           sourceRepositoryRef: Options.sourceRef,
           sourceRepositoryDigest: Options.sourceRevision,
           buildSignerDigest: Options.sourceRevision,
-          runnerEnvironment: 'github-hosted'
+          runnerEnvironment: 'github-hosted',
+          ...(Options.expectedRunInvocationUri === undefined
+            ? {}
+            : { runInvocationURI: Options.expectedRunInvocationUri })
         }
       },
       verifiedTimestamps: [{ type: 'rekor', uri: 'https://rekor.sigstore.dev', timestamp: '2026-07-16T00:00:00Z' }],
@@ -556,6 +559,38 @@ test('verification accepts only an exact canonical CycloneDX predicate', () => {
     () => VerifyAttestations([VerificationResult({ ...Policy, expectedSbom: Changed }, ExpectedSbom)], { ...Policy, expectedSbom: Changed }),
     /no verified attestation exactly matches/
   )
+})
+
+test('verification selects one canonical GitHub run attempt when requested', () => {
+  const Invocation = 'https://github.com/OxiBelt/OxiBelt/actions/runs/123456789/attempts/2'
+  const HistoricalInvocation = 'https://github.com/OxiBelt/OxiBelt/actions/runs/123456789/attempts/1'
+  const Policy = { ...VerificationPolicy(), expectedRunInvocationUri: Invocation }
+  const Historical = VerificationResult({ ...Policy, expectedRunInvocationUri: HistoricalInvocation })
+  VerifyAttestations([Historical, VerificationResult(Policy), VerificationResult(Policy)], Policy)
+  Assert.throws(
+    () => VerifyAttestations([Historical], Policy),
+    /no verified attestation exactly matches/
+  )
+  Assert.throws(
+    () => VerifyAttestations([VerificationResult({ ...Policy, expectedRunInvocationUri: 'https://github.com/OxiBelt/OxiBelt/actions/runs/01/attempts/2' })], Policy),
+    /malformed run invocation/
+  )
+  Assert.throws(
+    () => VerifyAttestations([VerificationResult(Policy)], { ...Policy, expectedRunInvocationUri: `${Invocation}\n` }),
+    /canonical GitHub run attempt/
+  )
+  Assert.throws(
+    () => VerifyAttestations([VerificationResult({ ...Policy, expectedRunInvocationUri: `${Invocation}\n` })], Policy),
+    /malformed run invocation/
+  )
+  const Missing = VerificationResult(Policy)
+  delete Certificate(Missing).runInvocationURI
+  Assert.throws(
+    () => VerifyAttestations([VerificationResult(Policy), Missing], Policy), /missing run invocation URI/)
+  const Aliases = VerificationResult(Policy)
+  Certificate(Aliases).RunInvocationURI = HistoricalInvocation
+  Assert.throws(
+    () => VerifyAttestations([Aliases], Policy), /conflicting run invocation URI aliases/)
 })
 
 test('verification rejects wrong signer, source, subject, provenance, predicate, and missing timestamp', () => {

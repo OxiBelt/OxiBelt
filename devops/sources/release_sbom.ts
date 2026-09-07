@@ -32,6 +32,7 @@ export type VerificationOptions = {
   sourceRevision: string
   workflowPath: string
   expectedSbom?: unknown
+  expectedRunInvocationUri?: string
 }
 
 type CliParameters = {
@@ -759,6 +760,33 @@ function CertificateValue(Certificate: JsonRecord, Names: string[], Description:
   throw new Error(`verification certificate is missing ${Description}`)
 }
 
+class RunInvocationUriError extends Error {}
+
+function CertificateRunInvocationUri(Certificate: JsonRecord): string {
+  const Values = ['runInvocationURI', 'RunInvocationURI']
+    .map(Name => Certificate[Name])
+    .filter((Value): Value is string => typeof Value === 'string' && Value !== '')
+  if (Values.length === 0) {
+    throw new RunInvocationUriError('verification certificate is missing run invocation URI')
+  }
+  if (new Set(Values).size !== 1) {
+    throw new RunInvocationUriError('verification certificate has conflicting run invocation URI aliases')
+  }
+  return Values[0]
+}
+
+function AssertRunInvocationUri(Options: VerificationOptions, Value: string, Description: string): void {
+  const Prefix = `https://github.com/${Options.sourceRepository}/actions/runs/`
+  const Suffix = Value.slice(Prefix.length)
+  const Attempt = /^[1-9][0-9]*\/attempts\/[1-9][0-9]*$/.exec(Suffix)
+  if (!Value.startsWith(Prefix) || Attempt === null || Attempt[0] !== Suffix) {
+    if (Description === 'verification certificate run invocation URI') {
+      throw new RunInvocationUriError('verification certificate has a malformed run invocation URI')
+    }
+    throw new RunInvocationUriError(`${Description} must be a canonical GitHub run attempt URI`)
+  }
+}
+
 function CanonicalJson(Value: unknown): unknown {
   if (Array.isArray(Value)) {
     return Value.map(CanonicalJson)
@@ -821,6 +849,13 @@ function AttestationMatches(Value: unknown, Options: VerificationOptions): boole
     if (SubjectDigest.sha256 !== Options.subjectDigest.slice('sha256:'.length)) {
       return false
     }
+    if (Options.expectedRunInvocationUri !== undefined) {
+      const InvocationUri = CertificateRunInvocationUri(Certificate)
+      AssertRunInvocationUri(Options, InvocationUri, 'verification certificate run invocation URI')
+      if (InvocationUri !== Options.expectedRunInvocationUri) {
+        return false
+      }
+    }
     if (Options.expectedSbom !== undefined) {
       return ExactJson(Statement.predicate, Options.expectedSbom)
     }
@@ -858,18 +893,26 @@ function AttestationMatches(Value: unknown, Options: VerificationOptions): boole
     const RunDetails = RecordValue(Predicate.runDetails, 'provenance runDetails')
     const Builder = RecordValue(RunDetails.builder, 'provenance runDetails.builder')
     return Builder.id === Options.signerWorkflow
-  } catch {
+  } catch (ErrorValue) {
+    if (ErrorValue instanceof RunInvocationUriError) {
+      throw ErrorValue
+    }
     return false
   }
 }
 
 export function VerifyAttestations(Value: unknown, Options: VerificationOptions): void {
   ParseDigest(Options.subjectDigest, 'verified subject digest')
+  if (Options.expectedRunInvocationUri !== undefined) {
+    AssertRunInvocationUri(Options, Options.expectedRunInvocationUri, 'expected run invocation URI')
+  }
   const Results = ArrayValue(Value, 'gh attestation verify JSON')
   if (Results.length === 0) {
     throw new Error('gh attestation verify returned no verified attestations')
   }
-  if (!Results.some(Result => AttestationMatches(Result, Options))) {
+  // Evaluate every result before accepting one: a malformed invocation URI on
+  // another otherwise matching identity must not be hidden by an earlier match.
+  if (!Results.map(Result => AttestationMatches(Result, Options)).some(Boolean)) {
     throw new Error('no verified attestation exactly matches the expected subject, signer, source, timestamp, and predicate')
   }
 }
@@ -951,7 +994,7 @@ function RunCli(): void {
     }))
     return
   }
-  AssertKnownOptions(Parameters, ['--attestations', '--expected-sbom', '--subject-name', '--subject-digest', '--signer-workflow', '--source-repository', '--source-ref', '--source-revision', '--workflow-path'])
+  AssertKnownOptions(Parameters, ['--attestations', '--expected-sbom', '--expected-run-invocation-uri', '--subject-name', '--subject-digest', '--signer-workflow', '--source-repository', '--source-ref', '--source-revision', '--workflow-path'])
   const ExpectedSbomPath = OptionalCliValue(Parameters, '--expected-sbom')
   VerifyAttestations(ReadJson(CliValue(Parameters, '--attestations'), 'gh attestation verify JSON'), {
     subjectName: CliValue(Parameters, '--subject-name'),
@@ -961,7 +1004,8 @@ function RunCli(): void {
     sourceRef: CliValue(Parameters, '--source-ref'),
     sourceRevision: CliValue(Parameters, '--source-revision'),
     workflowPath: CliValue(Parameters, '--workflow-path'),
-    expectedSbom: ExpectedSbomPath === undefined ? undefined : ReadJson(ExpectedSbomPath, 'expected CycloneDX SBOM', MaximumAttestationBytes)
+    expectedSbom: ExpectedSbomPath === undefined ? undefined : ReadJson(ExpectedSbomPath, 'expected CycloneDX SBOM', MaximumAttestationBytes),
+    expectedRunInvocationUri: OptionalCliValue(Parameters, '--expected-run-invocation-uri')
   })
 }
 

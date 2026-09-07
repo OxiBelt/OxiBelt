@@ -295,6 +295,26 @@ A failed-jobs-only rerun cannot reuse an earlier attempt's attestation through
 this selector; rerun the complete workflow when new attestation readback is
 required.
 
+Independent image verification selects provenance, rebuild recipes, and
+CycloneDX SBOMs from the exact producer run attempt that triggered the
+automatic verifier. Distinct historical predicates for the same image digest
+do not conflict with that selection. Conflicts within the selected attempt,
+missing evidence, and malformed or ambiguous certificate invocation identities
+remain errors. Before rebuilding, the selected SBOM's canonical SHA-256 must
+match the selected recipe's `output.sbomSha256`.
+
+For manual image verification, optionally supply both `producer_run_id` and
+`producer_run_attempt`. They must identify one successfully completed attempt
+of the canonical release workflow for the requested tag and source revision;
+the verifier queries that exact attempt, including an explicitly selected
+historical attempt, without choosing the latest run. Supported producers are
+stable/beta release publication, build-tag pushes, and manual release
+publication from the exact tag. Omitting both inputs retains the default
+conflict-rejecting extraction. Supplying only one, invalid values, or
+mismatched producer metadata fails verification. Manual selection does not
+seal release qualification. Image receipt schemas and their recipe-hash
+binding remain unchanged.
+
 ## Generate a deployment admission bundle
 
 `oxibeltctl supply-chain admission-bundle` verifies a canonical

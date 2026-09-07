@@ -31,6 +31,14 @@ on:
           - amd64v4
           - arm64
           - riscv64
+      producer_run_id:
+        description: Optional exact successful release producer workflow run ID; requires producer_run_attempt
+        required: false
+        type: string
+      producer_run_attempt:
+        description: Optional exact successful release producer workflow attempt; requires producer_run_id
+        required: false
+        type: string
 
 permissions:
   actions: read
@@ -58,6 +66,7 @@ jobs:
       verifier_sha: ${{ steps.plan.outputs.verifier_sha }}
       producer_run_id: ${{ steps.plan.outputs.producer_run_id }}
       producer_run_attempt: ${{ steps.plan.outputs.producer_run_attempt }}
+      producer_run_invocation_uri: ${{ steps.plan.outputs.producer_run_invocation_uri }}
 
     steps:
       - name: Checkout approved verifier
@@ -94,11 +103,15 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           MANUAL_ARCH: ${{ inputs.artifact_arch }}
+          MANUAL_PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+          MANUAL_PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
           MANUAL_ROLE: ${{ inputs.image_role }}
           MANUAL_TAG: ${{ inputs.release_tag }}
           APPROVED_VERIFIER_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
           WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_RUN_JSON: ${{ toJSON(github.event.workflow_run) }}
         run: |
           set -euo pipefail
 
@@ -118,12 +131,8 @@ jobs:
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             release_tag="${MANUAL_TAG}"
             automatic=false
-            producer_run_id=0
-            producer_run_attempt=0
           else
             automatic=true
-            producer_run_id="${{ github.event.workflow_run.id }}"
-            producer_run_attempt="${{ github.event.workflow_run.run_attempt }}"
             release_tag="${WORKFLOW_RUN_HEAD_BRANCH}"
             if [[ ! "${release_tag}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
               mapfile -t matching_tags < <(
@@ -150,6 +159,43 @@ jobs:
           fi
           if [[ "${EVENT_NAME}" != "workflow_dispatch" && "${revision}" != "${WORKFLOW_RUN_HEAD_SHA}" ]]; then
             echo "release workflow completed for ${WORKFLOW_RUN_HEAD_SHA}, not ${revision}" >&2
+            exit 1
+          fi
+
+          producer_metadata="${RUNNER_TEMP}/producer-workflow-run.json"
+          producer_arguments=(
+            resolve
+            --event-name "${EVENT_NAME}"
+            --release-tag "${release_tag}"
+            --revision "${revision}"
+          )
+          if [[ -n "${MANUAL_PRODUCER_RUN_ID}" || -n "${MANUAL_PRODUCER_RUN_ATTEMPT}" ]]; then
+            for producer_input in "${MANUAL_PRODUCER_RUN_ID}" "${MANUAL_PRODUCER_RUN_ATTEMPT}"; do
+              if [[ -z "${producer_input}" || "${producer_input}" == *$'\n'* || "${producer_input}" == *$'\r'* ||
+                    ! "${producer_input}" =~ ^[1-9][0-9]*$ || "${#producer_input}" -gt 16 ||
+                    ( "${#producer_input}" -eq 16 && "${producer_input}" -gt 9007199254740991 ) ]]; then
+                echo "manual producer run ID and attempt must be canonical positive decimal safe integers" >&2
+                exit 1
+              fi
+            done
+            producer_arguments+=(
+              --manual-producer-run-id "${MANUAL_PRODUCER_RUN_ID}"
+              --manual-producer-run-attempt "${MANUAL_PRODUCER_RUN_ATTEMPT}"
+            )
+            gh api --method GET \
+              "/repos/OxiBelt/OxiBelt/actions/runs/${MANUAL_PRODUCER_RUN_ID}/attempts/${MANUAL_PRODUCER_RUN_ATTEMPT}" \
+              >"${producer_metadata}"
+            producer_arguments+=(--producer-run "${producer_metadata}")
+          elif [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            printf '%s' "${WORKFLOW_RUN_JSON}" >"${producer_metadata}"
+            producer_arguments+=(--producer-run "${producer_metadata}")
+          fi
+          producer_selection="$(node --import tsx devops/sources/rebuild_producer.ts "${producer_arguments[@]}")"
+          producer_run_id="$(jq -er '.producerRunId | select(type == "number" and . >= 0)' <<<"${producer_selection}")"
+          producer_run_attempt="$(jq -er '.producerRunAttempt | select(type == "number" and . >= 0)' <<<"${producer_selection}")"
+          producer_run_invocation_uri="$(jq -r '.producerRunInvocationUri // ""' <<<"${producer_selection}")"
+          if [[ "${automatic}" == "true" && -z "${producer_run_invocation_uri}" ]]; then
+            echo "automatic rebuild verification requires an authenticated producer invocation" >&2
             exit 1
           fi
 
@@ -227,6 +273,7 @@ jobs:
             echo "verifier_sha=${verifier_sha}"
             echo "producer_run_id=${producer_run_id}"
             echo "producer_run_attempt=${producer_run_attempt}"
+            echo "producer_run_invocation_uri=${producer_run_invocation_uri}"
           } >>"${GITHUB_OUTPUT}"
 
       - name: Upload independently derived image plan
@@ -349,8 +396,13 @@ jobs:
           VERIFIER_SHA: ${{ needs.resolve.outputs.verifier_sha }}
           ROLE: ${{ matrix.role }}
           ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
+          PRODUCER_RUN_INVOCATION_URI: ${{ needs.resolve.outputs.producer_run_invocation_uri }}
         run: |
           set -euo pipefail
+          producer_arguments=()
+          if [[ -n "${PRODUCER_RUN_INVOCATION_URI}" ]]; then
+            producer_arguments=(--producer-run-invocation-uri "${PRODUCER_RUN_INVOCATION_URI}")
+          fi
           tests/scripts/verify-release-rebuild.sh \
             --image "${IMAGE}" \
             --digest "${PUBLISHED_DIGEST}" \
@@ -359,7 +411,8 @@ jobs:
             --verifier-sha "${VERIFIER_SHA}" \
             --role "${ROLE}" \
             --artifact-arch "${ARTIFACT_ARCH}" \
-            --output "${OUTPUT}"
+            --output "${OUTPUT}" \
+            "${producer_arguments[@]}"
 
       - name: Upload independent rebuild receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
