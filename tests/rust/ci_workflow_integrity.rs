@@ -43,7 +43,7 @@ const DOCKER_INTEGRATION_JOBS: &[&str] = &[
 ];
 const DOCKER_SECURITY_FUZZ_JOB_COUNT: usize = 1;
 const KIND_ACTION_RETRY_PIN: &str =
-  "helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165";
+  "helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0";
 const KIND_ACTION_V1_14_0_SHA: &str = "ef37e7f390d99f746eb8b610417061a60e82a6cc";
 
 const OXIBELT_IMAGE_ARTIFACTS: &[(&str, &str, &str, &str)] = &[
@@ -7827,7 +7827,7 @@ fn qemu_runtime_emulation_is_confined_to_the_release_smoke_job() {
     }
   }
   for expected in [
-    "docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0",
+    "docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0",
     "docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0",
     "platforms: riscv64",
     "reset: false",

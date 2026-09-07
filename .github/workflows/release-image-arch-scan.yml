@@ -134,7 +134,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -909,7 +909,7 @@ jobs:
 
       - name: Setup pinned RISC-V runtime emulation
         id: qemu
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
         with:
           # tonistiigi/binfmt source revision e29e7d72c9672c8c8bf846655ab149b50e1a62bd
           image: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0

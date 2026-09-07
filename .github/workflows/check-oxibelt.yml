@@ -973,7 +973,7 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         if: matrix.target == 'riscv64gc-unknown-linux-musl'
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Cargo check for RISC-V musl target
@@ -1155,7 +1155,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1215,7 +1215,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
@@ -1292,7 +1292,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build comparator Docker image artifact
@@ -1332,7 +1332,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build performance probe Docker image artifact
@@ -1370,7 +1370,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build external benchmark Docker image artifact
@@ -1418,7 +1418,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1464,7 +1464,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1537,7 +1537,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
@@ -1953,7 +1953,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker integration helper image artifact
@@ -1995,7 +1995,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.36.1
+          version: v0.37.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Firefox WebDriver helper image artifact
@@ -2215,7 +2215,7 @@ jobs:
         run: tests/scripts/check-helm-gateway-controller-ha.sh
 
       - name: Install Kind and kubectl
-        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           version: v0.33.0
           kubectl_version: ${{ matrix.kubectl }}
@@ -2273,7 +2273,7 @@ jobs:
           tests/scripts/check-helm-edge-secure-medium-v2.sh
 
       - name: Install Kind and kubectl
-        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           version: v0.33.0
           kubectl_version: v1.34.11
@@ -2322,7 +2322,7 @@ jobs:
           version: v3.21.4
 
       - name: Install Kind and kubectl
-        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           version: v0.33.0
           kubectl_version: v1.34.11
@@ -2388,7 +2388,7 @@ jobs:
         run: tests/scripts/check-helm-autoscaling.sh
 
       - name: Install Kind and kubectl
-        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           version: v0.33.0
           kubectl_version: v1.34.11
@@ -2449,7 +2449,7 @@ jobs:
         run: tests/scripts/check-helm-network-policy.sh
 
       - name: Install kubectl
-        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           version: v0.33.0
           kubectl_version: v1.34.11
@@ -2530,7 +2530,7 @@ jobs:
           tests/scripts/check-helm-image-digest.sh
 
       - name: Install current Kind and kubectl
-        uses: helm/kind-action@7a97ed793754775518f9db3a8151ee7461dc9c31 # upstream PR #165
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           version: v0.33.0
           kubectl_version: ${{ matrix.kubectl }}
