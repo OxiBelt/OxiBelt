@@ -15,6 +15,143 @@ See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.9.2-beta.2] - 2026-09-07
+
+> Release candidate for the `0.9.2` line after `0.9.2-beta.1`. This entry
+> records no runtime, configuration, schema, Admin API, rulepack, or feature
+> changes. It records Rust dependency-lock refreshes within the Rust `1.98`
+> toolchain contract and release-evidence fixes. The Node `24`/pnpm graph is
+> unchanged. `0.9.2-beta.1`
+> was published but remained unqualified: its qualification encountered the
+> stable-only alias seal and then distinct historical producer predicates made
+> its evidence nonreusable. This entry does not claim beta.2 publication,
+> qualification, soak completion, or artifact availability; the exact beta.2
+> revision must produce fresh evidence.
+
+- Changes since: `0.9.2-beta.1`
+- Supported upgrade sources: `0.9.2-beta.1`, `0.9.1`
+- Upgrade guide: [Upgrade from 0.9.1 to the 0.9.2 line](docs/Upgrading.md#upgrade-from-091-to-the-092-line)
+
+### Configuration
+
+- No runtime configuration key, default, validation, reload behavior, or
+  effective-configuration output changes. Existing `0.9.1` and beta.1
+  configurations retain their behavior.
+
+### Schema epochs
+
+- No native, database, Helm, Admin, or other persisted-state schema epoch
+  changes.
+
+### Deprecations and removals
+
+- No configuration key, protocol, executable, image role, rule syntax, or
+  supported upgrade source is deprecated or removed.
+
+### Admin API
+
+- No Admin API endpoint, authentication, authorization, request, response,
+  audit, or observability contract changes.
+
+### Feature lifecycle
+
+- No feature is introduced, graduated, deprecated, or removed. Existing
+  native, Gateway, Helm, and Certificate Transparency lifecycle
+  classifications are unchanged.
+
+### Rulepack compatibility
+
+- No OxiRule, CRS, rulepack schema, phase, action, matching, normalization, or
+  signature contract changes.
+
+### Executables and images
+
+- Preserve executable names, package ownership, image roles, chart names,
+  target architectures, and the release inventory. No runtime image or
+  executable-role behavior changes.
+- Refresh the tracked Rust dependency locks within the Rust `1.98` toolchain
+  contract, including compatible `rustls`, `tinyvec`, `fancy-regex`, and
+  `zstd` family updates. Keep the Node `24`/pnpm dependency graph unchanged.
+  These dependency metadata updates do not change the runtime, configuration,
+  schema, API, rulepack, or feature contracts.
+- Advance the pinned Buildx CLI to `0.37.0`, `docker/setup-qemu-action` to
+  `v4.3.0`, and `helm/kind-action` to the `v1.15.0` release that contains the
+  retained cluster-creation retry fix. Keep Rust at `1.98.0` because the
+  matching official `rust:1.98.1-trixie` builder image is not available, and
+  keep the existing Gateway API, Minikube, Firefox, and benchmark-fixture
+  compatibility lanes for their dedicated qualification matrices.
+- Keep beta qualification aliases empty; mutable stable aliases remain a
+  stable-only operation. Bind provenance, SBOM, and rebuild recipes to the
+  exact producer run attempt and reject a missing, conflicting, or mismatched
+  attempt.
+- Beta.2 requires fresh exact-revision evidence for 30 platform images, 2
+  official Helm charts, 12 release manifests, zero aliases, vulnerability
+  decisions, provenance, SBOMs, and artifact attestations, followed by a
+  complete independent verifier. Beta.1 artifacts and receipts cannot be
+  combined with this candidate.
+
+### Storage and state
+
+- No database, object-store, filesystem, shared-state, or process-state
+  migration is required. Release artifacts, attestations, vulnerability
+  decisions, qualification records, and mutable aliases remain external
+  supply-chain state and are never rewritten to repair beta.1.
+
+### Upgrade validation
+
+- Validate the exact beta.2 revision through the canonical non-benchmark graph
+  and require fresh exact-revision evidence for all 30 platform images, both
+  official charts, all 12 manifests, zero aliases, vulnerability decisions,
+  provenance, SBOMs, and attestations. Complete the independent verifier
+  before the normal 24-hour stable eligibility interval can begin.
+- Verify that the independent verifier selects provenance, SBOMs, and rebuild
+  recipes only from the exact producer run attempt, requires the selected
+  SBOM hash to match the recipe, and rejects historical-attempt reuse. A
+  failed-jobs-only rerun cannot supply qualification evidence; rerun the
+  complete verifier when recovery is required.
+- At minimum, run the governed ledger check and exact beta.1-to-beta.2 range
+  validation:
+
+```sh
+beta_1_revision="3614f3e96a3f4638c9d8252bd8958f6a0d99ed6a"
+beta_2_revision="$(git rev-parse HEAD)"
+pnpm run release-contract:check
+pnpm run release-contract:check \
+  --change-base "${beta_1_revision}" \
+  --change-head "${beta_2_revision}"
+```
+
+### Rollback and irreversible steps
+
+- Roll back to `0.9.1` by restoring the retained controller and data-plane
+  images together by immutable digest and validating the unchanged
+  configuration. No configuration edit, schema down-migration, or durable
+  state conversion is required.
+- Published tags, artifacts, attestations, qualification records, and trusted
+  timestamps are immutable or attributable external history. Do not delete,
+  move, relabel, overwrite, or reuse beta.1 evidence after a failed beta.2
+  cut; advance to another governed version.
+
+### Known issues
+
+- `0.9.2-beta.1` was published but unqualified after the stable-only alias
+  seal and distinct historical producer predicates. Its artifacts, receipts,
+  attestations, vulnerability decisions, SBOMs, and elapsed time are not
+  reusable for beta.2 or stable qualification.
+- Beta.2 remains a candidate until person-reviewed publication, fresh exact
+  30-image, two-chart, 12-manifest, zero-alias, vulnerability, provenance,
+  SBOM, attestation, and complete-verifier evidence all succeed.
+
+### Security
+
+- Preserve exact subject, digest, signer workflow, source repository, tag,
+  source revision, hosted runner, trusted timestamp, producer run attempt, and
+  recipe/SBOM binding before selecting any release evidence. Conflicting or
+  historical-attempt predicates fail closed.
+- Keep publication and qualification blocked for every `CRITICAL` finding and
+  every `HIGH` finding with a fixed version. Empty beta aliases do not weaken
+  vulnerability, provenance, SBOM, or attestation requirements.
+
 ## [0.9.2-beta.1] - 2026-09-06
 
 > Release candidate for repeatable, attempt-qualified release evidence after
