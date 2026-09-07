@@ -981,23 +981,33 @@ jobs:
                 "${image}" "${release_digest}" "${alpine_digest}" "${release_children}" "${alpine_children}" >&2
               exit 1
             fi
-            role_index_aliases="$(jq -ce --arg release_tag "${release_tag}" --arg release_digest "${release_digest}" --arg alpine_tag "${alpine_tag}" --arg alpine_digest "${alpine_digest}" '
-              [
-                .manifests[] |
-                select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
-                . as $manifest |
-                (if $manifest.canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end) as $digest |
-                $manifest.aliasGhcrTags[] as $alias |
-                {alias: $alias, sourceTag: $manifest.canonicalGhcrTag, sourceDigest: $digest, kind: "index"}
-              ] |
-              if length == 3
-                and ([.[].alias] | unique | length == 3)
-                and (all(.[]; (.alias | type == "string" and length > 0)
-                  and (.sourceTag == $release_tag or .sourceTag == $alpine_tag)
-                  and (.sourceDigest == $release_digest or .sourceDigest == $alpine_digest)
-                  and .kind == "index"))
-              then .
-              else error("release plan role must define exactly three unique index aliases")
+            role_index_aliases="$(jq -ce --arg expected_kind "${expected_kind}" --arg release_tag "${release_tag}" --arg release_digest "${release_digest}" --arg alpine_tag "${alpine_tag}" --arg alpine_digest "${alpine_digest}" '
+              if $expected_kind == "beta" then
+                [
+                  .manifests[] |
+                  select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
+                  .aliasGhcrTags[]
+                ] |
+                if length == 0 then []
+                else error("beta release plan must not define index aliases") end
+              else
+                [
+                  .manifests[] |
+                  select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
+                  . as $manifest |
+                  (if $manifest.canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end) as $digest |
+                  $manifest.aliasGhcrTags[] as $alias |
+                  {alias: $alias, sourceTag: $manifest.canonicalGhcrTag, sourceDigest: $digest, kind: "index"}
+                ] |
+                if length == 3
+                  and ([.[].alias] | unique | length == 3)
+                  and (all(.[]; (.alias | type == "string" and length > 0)
+                    and (.sourceTag == $release_tag or .sourceTag == $alpine_tag)
+                    and (.sourceDigest == $release_digest or .sourceDigest == $alpine_digest)
+                    and .kind == "index"))
+                then .
+                else error("release plan role must define exactly three unique index aliases")
+                end
               end
             ' "${INDEPENDENT_IMAGE_PLAN}")" || {
               printf 'release qualification index aliases are incomplete or duplicated for %s\n' "${image}" >&2
@@ -1011,8 +1021,14 @@ jobs:
           index_alias_count="$(jq '[.[] | select(.kind == "index")] | length' <<<"${aliases_json}")"
           unique_alias_count="$(jq '[.[].alias] | unique | length' <<<"${aliases_json}")"
           total_alias_count="$(jq 'length' <<<"${aliases_json}")"
-          if [[ "${platform_alias_count}" -ne 30 || "${index_alias_count}" -ne 18 || "${unique_alias_count}" -ne 48 || "${total_alias_count}" -ne 48 ]]; then
-            printf 'release qualification aliases are incomplete or duplicated: expected 30 platform, 18 index, and 48 unique total; found %s platform, %s index, %s unique, and %s total\n' \
+          if [[ "${expected_kind}" == stable ]]; then
+            if [[ "${platform_alias_count}" -ne 30 || "${index_alias_count}" -ne 18 || "${unique_alias_count}" -ne 48 || "${total_alias_count}" -ne 48 ]]; then
+              printf 'stable release qualification aliases are incomplete or duplicated: expected 30 platform, 18 index, and 48 unique total; found %s platform, %s index, %s unique, and %s total\n' \
+                "${platform_alias_count}" "${index_alias_count}" "${unique_alias_count}" "${total_alias_count}" >&2
+              exit 1
+            fi
+          elif [[ "${platform_alias_count}" -ne 0 || "${index_alias_count}" -ne 0 || "${unique_alias_count}" -ne 0 || "${total_alias_count}" -ne 0 ]]; then
+            printf 'beta release qualification must not contain mutable aliases; found %s platform, %s index, %s unique, and %s total\n' \
               "${platform_alias_count}" "${index_alias_count}" "${unique_alias_count}" "${total_alias_count}" >&2
             exit 1
           fi

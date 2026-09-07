@@ -11460,11 +11460,14 @@ fn stable_alias_promotion_classifies_beta_qualifications_before_promotion() {
 fn release_qualification_emits_each_index_alias_individually() {
   let verifier = release_rebuild_verification_workflow_text();
   for expected in [
+    "--arg expected_kind \"${expected_kind}\"",
+    "beta release plan must not define index aliases",
     "$manifest.aliasGhcrTags[] as $alias",
     "release plan role must define exactly three unique index aliases",
     "platform_alias_count",
     "index_alias_count",
     "expected 30 platform, 18 index, and 48 unique total",
+    "beta release qualification must not contain mutable aliases",
   ] {
     assert!(
       verifier.contains(expected),
@@ -11504,38 +11507,54 @@ fn release_qualification_emits_each_index_alias_individually() {
   .expect("index alias fixture should be writable");
 
   let projection = r#"
-    [
-      .manifests[] |
-      select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
-      . as $manifest |
-      (if $manifest.canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end) as $digest |
-      $manifest.aliasGhcrTags[] as $alias |
-      {alias: $alias, sourceTag: $manifest.canonicalGhcrTag, sourceDigest: $digest, kind: "index"}
-    ] |
-    if length == 3 and ([.[].alias] | unique | length == 3) then .
-    else error("release plan role must define exactly three unique index aliases")
+    if $expected_kind == "beta" then
+      [
+        .manifests[] |
+        select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
+        .aliasGhcrTags[]
+      ] |
+      if length == 0 then []
+      else error("beta release plan must not define index aliases") end
+    else
+      [
+        .manifests[] |
+        select(.canonicalGhcrTag == $release_tag or .canonicalGhcrTag == $alpine_tag) |
+        . as $manifest |
+        (if $manifest.canonicalGhcrTag == $release_tag then $release_digest else $alpine_digest end) as $digest |
+        $manifest.aliasGhcrTags[] as $alias |
+        {alias: $alias, sourceTag: $manifest.canonicalGhcrTag, sourceDigest: $digest, kind: "index"}
+      ] |
+      if length == 3 and ([.[].alias] | unique | length == 3) then .
+      else error("release plan role must define exactly three unique index aliases")
+      end
     end
   "#;
-  let output = Command::new("jq")
-    .args([
-      "-ce",
-      "--arg",
-      "release_tag",
-      &release_tag,
-      "--arg",
-      "release_digest",
-      "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-      "--arg",
-      "alpine_tag",
-      &alpine_tag,
-      "--arg",
-      "alpine_digest",
-      "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-      projection,
-    ])
-    .arg(plan.path())
-    .output()
-    .expect("index alias projection should execute");
+  let run_projection = |plan_path: &Path, expected_kind: &str| {
+    Command::new("jq")
+      .args([
+        "-ce",
+        "--arg",
+        "expected_kind",
+        expected_kind,
+        "--arg",
+        "release_tag",
+        &release_tag,
+        "--arg",
+        "release_digest",
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "--arg",
+        "alpine_tag",
+        &alpine_tag,
+        "--arg",
+        "alpine_digest",
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        projection,
+      ])
+      .arg(plan_path)
+      .output()
+      .expect("index alias projection should execute")
+  };
+  let output = run_projection(plan.path(), "stable");
   assert!(
     output.status.success(),
     "two-alias Alpine index fixture should produce three mappings: {}",
@@ -11560,6 +11579,41 @@ fn release_qualification_emits_each_index_alias_individually() {
       })
       .collect::<BTreeSet<_>>(),
     expected_aliases
+  );
+
+  let beta_plan =
+    tempfile::NamedTempFile::new().expect("beta index alias fixture should be creatable");
+  let beta_fixture = serde_json::json!({
+    "manifests": [
+      {
+        "canonicalGhcrTag": release_tag,
+        "aliasGhcrTags": []
+      },
+      {
+        "canonicalGhcrTag": alpine_tag,
+        "aliasGhcrTags": []
+      }
+    ]
+  });
+  fs::write(
+    beta_plan.path(),
+    serde_json::to_vec(&beta_fixture).expect("beta index alias fixture should serialize"),
+  )
+  .expect("beta index alias fixture should be writable");
+  let beta_output = run_projection(beta_plan.path(), "beta");
+  assert!(
+    beta_output.status.success(),
+    "beta index alias projection should accept an empty inventory: {}",
+    String::from_utf8_lossy(&beta_output.stderr)
+  );
+  let beta_aliases: Vec<serde_json::Value> = serde_json::from_slice(&beta_output.stdout)
+    .expect("beta index alias projection should return JSON");
+  assert!(beta_aliases.is_empty());
+
+  let beta_with_stable_aliases = run_projection(plan.path(), "beta");
+  assert!(
+    !beta_with_stable_aliases.status.success(),
+    "beta index alias projection must reject stable mutable aliases"
   );
 
   let legacy_projection = r#"
