@@ -75,9 +75,11 @@ be used as a supported production upgrade source or target.
 | `0.9.1-beta.1` | `0.9.1-beta.2` | Published, qualified | Beta.2 adds bandwidth, upstream client identities, fail-closed Gateway deprogramming, security repairs, and refreshed dependency and Kubernetes inputs. Its exact-revision qualification is independent of beta.1 artifacts and evidence. |
 | `0.9.0` | `0.9.1` | Stable candidate | Follow [Upgrade from 0.9.0 to the 0.9.1 line](#upgrade-from-090-to-the-091-line). The stable ledger is cumulative from `0.9.0`; use newly qualified stable artifacts only after person-reviewed publication and every stable release gate succeeds. |
 | `0.9.1-beta.2` | `0.9.1` | Stable candidate | Exactly one documentation-only commit carries forward beta.2 without runtime, configuration, or state migration changes. The draft may be prepared during the 24-hour soak after beta.2's successful automatic qualification, but stable publication must wait at least 24 hours from the later of beta publication and successful automatic verifier completion. |
-| `0.9.1` | `0.9.2-beta.1` | Release candidate | Follow [Upgrade from 0.9.1 to the 0.9.2 line](#upgrade-from-091-to-the-092-line). Runtime compatibility is unchanged, but beta.1 must produce fresh attempt-qualified image, chart, vulnerability, attestation, and independent-rebuild evidence. The incomplete `0.9.1` rerun evidence is not reusable. |
-| `0.9.1` | `0.9.2-beta.2` | Release candidate | Follow [Upgrade from 0.9.1 to the 0.9.2 line](#upgrade-from-091-to-the-092-line). Runtime, configuration, schema, Admin API, rulepack, and feature contracts are unchanged. Beta.2 requires fresh 30-image, two-chart, 12-manifest, zero-alias, vulnerability, provenance, SBOM, attestation, and complete-verifier evidence. |
-| `0.9.2-beta.1` | `0.9.2-beta.2` | Recovery source only | Beta.1 was published but unqualified after the stable-only alias seal and distinct historical producer predicates. Its artifacts and evidence are not reusable; use it only as a recovery source while beta.2 produces fresh exact-revision evidence. |
+| `0.9.1` | `0.9.2-beta.1` | Published, not qualified | Runtime compatibility is unchanged, but beta.1's stable-only alias seal and distinct historical producer predicates prevented qualification. Preserve its immutable history; its artifacts and elapsed time cannot qualify beta.2 or stable. |
+| `0.9.1` | `0.9.2-beta.2` | Published, qualified | Follow [Upgrade from 0.9.1 to the 0.9.2 line](#upgrade-from-091-to-the-092-line). Runtime, configuration, schema, Admin API, rulepack, and feature contracts are unchanged. Beta.2 has its own successful automatic qualification with 30 image receipts, two chart receipts, 12 manifests, and zero aliases. |
+| `0.9.2-beta.1` | `0.9.2-beta.2` | Recovery source only | Beta.1 was published but unqualified. Its artifacts and evidence are not reusable; beta.2's completed qualification uses fresh exact-revision evidence. No configuration or state migration is needed for recovery. |
+| `0.9.1` | `0.9.2` | Stable candidate | Follow [Upgrade from 0.9.1 to the 0.9.2 line](#upgrade-from-091-to-the-092-line). The stable ledger is cumulative from `0.9.1`; deployment requires person-reviewed publication and newly qualified stable artifacts. No configuration, schema, or state migration is required. |
+| `0.9.2-beta.2` | `0.9.2` | Stable candidate | Exactly one documentation-only commit follows the qualified beta.2 revision. Draft preparation may occur during soak; stable publication requires at least 24 hours from the later of beta publication and successful automatic verifier completion. Stable's own qualification must pass before mutable aliases move. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -367,13 +369,15 @@ identity was compromised, revoke it at the upstream independently of rollback.
 
 ## Upgrade from 0.9.1 to the 0.9.2 line
 
-`0.9.2-beta.2` is the current release candidate after `0.9.2-beta.1`. It
-carries no runtime, configuration, schema, Admin API, rulepack, or feature
-changes. Existing `0.9.1` and beta.1 configurations remain valid without
-migration, and controller and data-plane roles must continue to use one exact
-candidate revision. The tracked Rust dependency locks are refreshed within the
-Rust `1.98` toolchain contract. The Node `24`/pnpm dependency graph remains
-unchanged.
+`0.9.2` is the stable candidate based on the published and independently
+qualified `0.9.2-beta.2` source. Its supported upgrade sources are `0.9.1`
+and `0.9.2-beta.2`. The stable source is exactly one documentation-only
+commit after beta.2, with no runtime, configuration, schema, Admin API,
+rulepack, or feature contract changes. Existing configurations remain valid
+without migration, and controller and data-plane roles must continue to use
+one exact release revision. The cumulative release refreshes Rust dependency
+locks within the Rust `1.98` toolchain contract and retains the Node
+`24`/pnpm graph.
 
 `0.9.2-beta.1` was published but remained unqualified. Its qualification
 encountered the stable-only alias seal, then distinct historical producer
@@ -382,33 +386,45 @@ release history, but do not reuse its artifacts, attestations, vulnerability
 decisions, SBOMs, rebuild recipes, receipts, or elapsed time for beta.2 or
 stable qualification.
 
-Beta.2 keeps qualification aliases empty; stable aliases are a stable-only
-operation. Its independent verifier binds provenance, SBOMs, and rebuild
+Beta.2 completed automatic independent qualification with 30 image receipts,
+two chart receipts, 12 manifests, and zero aliases. Its verifier binds
+provenance, SBOMs, and rebuild
 recipes to the exact producer run attempt, requires the selected SBOM hash to
 match the recipe, and rejects missing, malformed, conflicting, mismatched, or
 historical-attempt evidence. A failed-jobs-only rerun cannot reuse an earlier
 attempt's attestation; rerun the complete verifier when recovery is required.
 
-Before rollout, require person-reviewed publication and fresh exact-revision
-evidence for 30 platform images, 2 official Helm charts, 12 release manifests,
-zero aliases, vulnerability decisions, provenance, SBOMs, and attestations,
-followed by a complete independent verifier. The normal stable transition may
-begin only after at least 24 hours from the later of beta publication and
-successful verifier completion. Validate the unchanged configuration and
-release contract:
+An unpublished stable draft may be prepared during the beta soak. Stable
+publication requires person review and at least 24 hours from the later of
+beta publication and successful automatic verifier completion. Reauthenticate
+the exact beta release, verifier attempt, and sealed aggregate at the
+publication boundary. A later accepted verifier run can change that boundary;
+elapsed time alone does not authorize publication.
+
+Before stable rollout, require fresh stable-revision evidence for all 30
+platform images, both official Helm charts, all 12 release manifests,
+vulnerability decisions, provenance, SBOMs, and attestations, followed by a
+complete independent verifier. Stable qualification binds beta.2's aggregate
+as soak evidence and records all 48 stable alias mappings; beta artifacts and
+receipts cannot substitute for stable artifacts or receipts. The governed
+alias workflow may move those aliases only after stable qualification passes.
+Use approved immutable digests for deployment. Validate the unchanged
+configuration and release contract:
 
 ```sh
 oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
 pnpm run release-contract:check
 ```
 
-Rollback requires no configuration edit or data conversion. Restore retained
-`0.9.1` controller and data-plane images together by immutable digest, drain
-long-lived sessions through the normal deployment procedure, and retain every
-beta artifact and signed record as release history. A failed beta cut is
-irreversible as a tag and version identity; repair it by advancing to another
-governed version rather than moving or deleting the published tag. Beta.1
-evidence remains attributable history and cannot qualify beta.2.
+Rollback from `0.9.2` requires no configuration edit or data conversion.
+Restore retained, previously approved `0.9.1` controller and data-plane images
+together by immutable digest and drain long-lived sessions through the normal
+deployment procedure. A rollout from beta.2 also needs no migration, but beta
+artifacts do not provide a supported stable fallback. Retain every artifact
+and signed record as release history. A published tag and version identity
+are irreversible; repair a failed cut by advancing to another governed version
+rather than moving or deleting its tag. Beta.1 evidence remains attributable
+history and cannot qualify beta.2 or stable.
 
 ## Upgrade from 0.6.6 to the 0.8.1 line
 

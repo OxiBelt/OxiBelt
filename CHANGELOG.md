@@ -12,6 +12,155 @@ entries. See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.9.2] - 2026-09-08
+
+> Stable candidate for the cumulative `0.9.1` to `0.9.2` development
+> lineage, based on the published and independently qualified
+> `0.9.2-beta.2` source. Exactly one documentation-only commit prepares
+> this transition. Draft preparation may occur during the beta soak; stable
+> publication requires person review and at least 24 hours from the later of
+> beta publication and successful automatic verifier completion. This entry
+> does not claim stable publication, stable artifact availability, stable
+> qualification, or mutable-alias promotion.
+
+- Changes since: `0.9.1`
+- Supported upgrade sources: `0.9.1`, `0.9.2-beta.2`
+- Upgrade guide: [Upgrade from 0.9.1 to the 0.9.2 line](docs/Upgrading.md#upgrade-from-091-to-the-092-line)
+
+### Configuration
+
+- No runtime configuration key, default, validation, reload behavior, or
+  effective-configuration output changes. Existing `0.9.1` and
+  `0.9.2-beta.2` configurations retain their behavior without migration.
+
+### Schema epochs
+
+- No native, database, Helm, Admin, or other persisted-state schema epoch
+  changes.
+
+### Deprecations and removals
+
+- No configuration key, protocol, executable, image role, rule syntax, or
+  supported upgrade source is deprecated or removed.
+
+### Admin API
+
+- No Admin API endpoint, authentication, authorization, request, response,
+  audit, or observability contract changes.
+
+### Feature lifecycle
+
+- No feature is introduced, graduated, deprecated, or removed. Existing
+  native, Gateway, Helm, and Certificate Transparency lifecycle
+  classifications are unchanged.
+
+### Rulepack compatibility
+
+- No OxiRule, CRS, rulepack schema, phase, action, matching, normalization, or
+  signature contract changes. Correct fuzz path and external-auth scope
+  assertions to reflect production's raw routing path and single-pass WAF
+  view, while retaining traversal, static-root confinement, rewrite,
+  credential, and determinism coverage.
+
+### Executables and images
+
+- Preserve executable names, package ownership, image roles, chart names,
+  target architectures, and the 30-platform-image/two-chart release inventory.
+  There are no runtime image or executable-role behavior changes.
+- Refresh the tracked Rust dependency locks within the Rust `1.98` toolchain
+  contract, including compatible `rustls`, `tinyvec`, `fancy-regex`, and
+  `zstd` family updates. Keep the Node `24`/pnpm graph unchanged.
+- Advance the pinned Buildx CLI to `0.37.0`, `docker/setup-qemu-action` to
+  `v4.3.0`, and `helm/kind-action` to `v1.15.0` with its retained
+  cluster-creation retry fix. Retain Rust `1.98.0` and the existing Gateway
+  API, Minikube, Firefox, and benchmark-fixture compatibility lanes.
+- Resolve vulnerability artifacts through the paginated Actions API and bind
+  each selected archive to its exact subject, producer run attempt, and
+  archive digest. Reject missing, ambiguous, malformed, expired,
+  future-attempt, or oversized evidence without fallback.
+- Bind provenance, SBOMs, and rebuild recipes to the exact producer run
+  attempt. Require the selected SBOM hash to match the recipe and reject
+  missing or conflicting current-attempt evidence. Historical attempts cannot
+  substitute for the selected invocation.
+- Keep beta qualification aliases empty. Stable qualification records all
+  48 alias mappings independently: 30 platform mappings and 18 index mappings,
+  including both stable Alpine index aliases. Alias promotion remains a
+  separate operation after stable's own complete qualification.
+
+### Storage and state
+
+- No database, object-store, filesystem, shared-state, or process-state
+  migration is required. Release artifacts, attestations, vulnerability
+  decisions, qualification records, and mutable aliases remain external
+  supply-chain state; a new release does not rewrite earlier release history.
+
+### Upgrade validation
+
+- Require the stable revision's canonical non-benchmark validation and
+  release-contract checks. Verify that its parent is exactly
+  `0.9.2-beta.2` and that the complete beta-to-stable delta changes only
+  `CHANGELOG.md` and `docs/Upgrading.md`.
+- Before publication, reauthenticate beta.2's exact published release,
+  successful automatic verifier attempt, and sealed 30-image, two-chart,
+  12-manifest, zero-alias aggregate. At least 24 hours must have elapsed from
+  the later of beta publication and successful verifier completion.
+- After person-reviewed publication, require fresh stable-revision image,
+  chart, manifest, vulnerability, provenance, SBOM, attestation, and complete
+  independent-verifier evidence. Beta.2's aggregate supplies the stable soak
+  binding; its artifacts and receipts cannot replace stable's own evidence.
+  Only then may the governed workflow promote the 48 stable aliases.
+- Validate the unchanged configuration and both supported-source ranges:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+stable_revision="$(git rev-parse 'refs/tags/0.9.2^{commit}')"
+pnpm run release-contract:check
+pnpm run release-contract:check \
+  --change-base 167743bda51fe467ad72cb865dd0b15d2096edaf \
+  --change-head "${stable_revision}"
+pnpm run release-contract:check \
+  --change-base ed19e61fa7ce49ac0218987ec269d4e9aad611a1 \
+  --change-head "${stable_revision}"
+```
+
+### Rollback and irreversible steps
+
+- Roll back to retained, previously approved `0.9.1` controller and data-plane
+  images together by immutable digest, validate the unchanged configuration,
+  and drain long-lived sessions through the normal deployment procedure.
+  Rollback from `0.9.2` requires no configuration edit, schema down-migration,
+  or durable state conversion. A source rollout from beta.2 also needs no
+  migration, but its prerelease artifacts are not a supported stable fallback.
+- Published tags, artifacts, attestations, qualification records, and trusted
+  timestamps are immutable or attributable history. Do not move, delete,
+  relabel, overwrite, or reuse earlier evidence to conceal a failed cut;
+  advance to another governed release version.
+
+### Known issues
+
+- `0.9.2-beta.1` was published but unqualified after the stable-only alias seal
+  and distinct historical producer predicates. Its artifacts, receipts,
+  attestations, vulnerability decisions, SBOMs, and elapsed time cannot
+  qualify beta.2 or stable.
+- Rebuild readback requires the selected complete workflow attempt. Recovery
+  after attestations exist requires a complete workflow rerun; failed-jobs-only
+  reruns cannot combine receipts or reuse another attempt's attestations.
+
+### Security
+
+- Preserve exact subject, digest, signer workflow, source repository, tag,
+  source revision, hosted runner, trusted timestamp, producer run attempt, and
+  recipe/SBOM binding before selecting release evidence. Reject conflicting
+  current-attempt predicates and conflicting `runInvocationURI`/
+  `RunInvocationURI` aliases without weakening the global attestation conflict
+  checks.
+- Keep stable and beta image publication blocked for every `CRITICAL` finding
+  and every `HIGH` finding with a fixed version. Artifact-selection repairs
+  do not suppress Trivy findings, weaken thresholds, or broaden exceptions.
+- Preserve the documented routing, WAF, external-auth, TLS, configuration,
+  credential, and resource-control contracts. Beta.2-to-stable changes only
+  release and upgrade documentation.
+
 ## [0.9.1] - 2026-09-05
 
 > Stable candidate for the cumulative `0.9.0` to `0.9.1` development
