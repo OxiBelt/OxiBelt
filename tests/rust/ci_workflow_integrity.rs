@@ -11186,8 +11186,8 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
       .count(),
     2
   );
-  assert!(verifier.contains(": 24 * 60 * 60 * 1000"));
-  assert_eq!(promotion.matches(": 24 * 60 * 60 * 1000").count(), 2);
+  assert_eq!(verifier.matches(": 6 * 60 * 60 * 1000").count(), 1);
+  assert_eq!(promotion.matches(": 6 * 60 * 60 * 1000").count(), 2);
   assert_eq!(
     verifier
       .matches("betaRelease.target_commitish !== betaTag.object.sha")
@@ -11222,68 +11222,293 @@ fn stable_alias_promotion_requires_complete_beta_soak_and_privilege_separation()
     2,
     "both read-only validation and promotion reauthentication must reject every waiver pair except 0.9.0 from beta.1"
   );
+  assert_eq!(
+    verifier
+      .matches("0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver")
+      .count(),
+    1,
+    "the verifier must retain the historical beta-gate waiver identifier"
+  );
+  assert_eq!(
+    promotion
+      .matches("waiver.policyId !== '0.9.0-beta.1-to-0.9.0-predecessor-gate-waiver'")
+      .count(),
+    2,
+    "both stable-alias authorization passes must retain the historical beta-gate waiver identifier"
+  );
 
-  const DAY_MS: i64 = 24 * 60 * 60 * 1000;
-  let required_delay = |stable: &str, beta: &str| {
-    if stable == "0.8.1" && beta == "0.8.1-beta.9" {
-      0
+  let step_script = |workflow: &serde_json::Value, job: &str, step_name: &str| {
+    workflow["jobs"][job]["steps"]
+      .as_array()
+      .expect("workflow job should define steps")
+      .iter()
+      .find(|step| step["name"] == step_name)
+      .unwrap_or_else(|| panic!("workflow job {job} should define step {step_name}"))["with"]["script"]
+      .as_str()
+      .expect("GitHub Script step should define JavaScript")
+      .to_owned()
+  };
+  let source_block = |script: &str, start: &str, end: &str, include_end: bool, label: &str| {
+    let start = script
+      .find(start)
+      .unwrap_or_else(|| panic!("{label} should contain its timing calculation"));
+    let script = &script[start..];
+    let end_marker = script
+      .find(end)
+      .unwrap_or_else(|| panic!("{label} should contain its complete failure predicate"));
+    script[..if include_end {
+      end_marker + end.len()
     } else {
-      DAY_MS
+      end_marker
+    }]
+      .to_owned()
+  };
+  let verifier_parsed: serde_json::Value =
+    serde_saphyr::from_str(&verifier).expect("release verifier workflow should parse");
+  let verifier_timing = source_block(
+    &step_script(
+      &verifier_parsed,
+      "release-qualification",
+      "Authenticate immutable producer, tag, and release identity",
+    ),
+    "const soakStart =",
+    "betaQualification =",
+    false,
+    "verifier stable qualification",
+  );
+  let reauthentication_timing = source_block(
+    &step_script(
+      &parsed,
+      "validate",
+      "Reauthenticate release, producer, and verifier identities",
+    ),
+    "const soakStart =",
+    "if (waiver === null)",
+    false,
+    "stable-alias read-only reauthentication",
+  );
+  let promotion_timing = source_block(
+    &step_script(
+      &parsed,
+      "promote",
+      "Reauthenticate latest stable release immediately before mutation",
+    ),
+    "const soakStart =",
+    "core.setFailed('promotion identity changed after read-only validation')\n}",
+    true,
+    "stable-alias pre-mutation reauthentication",
+  );
+  let timing_blocks = serde_json::json!({
+    "verifier": verifier_timing,
+    "read_only_reauthentication": reauthentication_timing,
+    "pre_mutation_reauthentication": promotion_timing,
+  });
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-stable-qualification-delay-")
+    .tempdir()
+    .expect("stable qualification delay fixture directory should be creatable");
+  let harness_path = temp_dir.path().join("stable-qualification-delay.cjs");
+  let harness = r#";(async () => {
+const blocks = JSON.parse(process.env.TIMING_BLOCKS)
+const fixture = JSON.parse(process.env.FIXTURE)
+const sha = 'a'.repeat(40)
+const tagSha = 'b'.repeat(40)
+const version = fixture.version ?? '0.9.2'
+const betaVersion = fixture.betaVersion ?? `${version}-beta.2`
+const beta = {
+  version: betaVersion, ref: `refs/tags/${betaVersion}`, tagObjectSha: tagSha, commit: sha,
+  releaseId: 2, publishedAt: fixture.betaPublishedAt, verifierRunId: 3, verifierRunAttempt: 1,
+  verifierWorkflowSha: sha, verifierCompletedAt: fixture.verifierCompletedAt, artifactId: 4,
+  artifactName: `release-qualification-${sha}`, aggregateSha256: 'c'.repeat(64),
+}
+const q = {
+  version, ref: `refs/tags/${version}`, tagObjectSha: tagSha, commit: sha, releaseId: 1,
+  publishedAt: fixture.stablePublishedAt, betaQualification: beta,
+  producer: {workflowPath: '.github/workflows/release.yml', runId: 5, runAttempt: 1, conclusion: 'success'},
+  verifier: {workflowPath: '.github/workflows/verify-release-rebuild.yml', runId: 6, runAttempt: 1, conclusion: 'success'},
+  promotionValidation: {workflowPath: '.github/workflows/promote-stable-aliases.yml'},
+}
+const waiver = null
+const betaRelease = {id: beta.releaseId, tag_name: beta.version, target_commitish: beta.commit, draft: false, prerelease: true, published_at: beta.publishedAt}
+const release = {id: q.releaseId, draft: false, prerelease: false, target_commitish: q.commit, published_at: q.publishedAt}
+const accepted = {run: {id: beta.verifierRunId, run_attempt: beta.verifierRunAttempt, head_sha: beta.verifierWorkflowSha, updated_at: beta.verifierCompletedAt}}
+const ref = {object: {sha: q.tagObjectSha}}
+const tag = {object: {sha: q.commit}}
+const betaRef = {object: {sha: beta.tagObjectSha}}
+const betaTag = {object: {sha: beta.commit}}
+const latest = {id: q.releaseId}
+const producer = {path: q.producer.workflowPath, run_attempt: q.producer.runAttempt, conclusion: q.producer.conclusion}
+const verifier = {path: q.verifier.workflowPath, run_attempt: q.verifier.runAttempt, conclusion: q.verifier.conclusion}
+const betaRun = {path: '.github/workflows/verify-release-rebuild.yml', event: 'workflow_run', status: 'completed', conclusion: 'success', run_attempt: beta.verifierRunAttempt, head_sha: beta.verifierWorkflowSha, updated_at: beta.verifierCompletedAt}
+const betaVerifier = betaRun
+const betaArtifact = [{id: beta.artifactId, name: beta.artifactName, expired: false}]
+const validBetas = [betaRelease]
+const result = {}
+for (const [name, source] of Object.entries(blocks)) {
+  let failure = null
+  const core = {setFailed(message) { failure ??= String(message) }, setOutput() {}}
+  let betaQualification = null
+  try {
+    await (async () => { eval(source) })()
+  } catch (error) {
+    failure ??= error instanceof Error ? error.message : String(error)
+  }
+  result[name] = {failure, betaQualification}
+}
+process.stdout.write(JSON.stringify(result))
+})().catch((error) => {
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`)
+  process.exitCode = 1
+})
+"#;
+  fs::write(&harness_path, harness).expect("stable qualification delay harness should be writable");
+  let invoke = |fixture: serde_json::Value| {
+    let output = Command::new("node")
+      .arg(&harness_path)
+      .env(
+        "TIMING_BLOCKS",
+        serde_json::to_string(&timing_blocks).expect("timing blocks should serialize"),
+      )
+      .env(
+        "FIXTURE",
+        serde_json::to_string(&fixture).expect("delay fixture should serialize"),
+      )
+      .output()
+      .expect("Node should execute the stable qualification delay harness");
+    assert!(
+      output.status.success(),
+      "stable qualification delay harness should run:\nstdout:\n{}\nstderr:\n{}",
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+      .expect("stable qualification delay harness should emit JSON")
+  };
+  let assert_accepted = |label: &str, fixture: serde_json::Value| {
+    let result = invoke(fixture);
+    for (block, outcome) in result
+      .as_object()
+      .expect("harness result should be an object")
+    {
+      assert_eq!(
+        outcome["failure"],
+        serde_json::Value::Null,
+        "{label} must pass the {block} workflow timing predicate: {outcome}"
+      );
     }
   };
-  let permits_publication = |stable: &str,
-                             beta: &str,
-                             stable_ms: Option<i64>,
-                             beta_ms: Option<i64>,
-                             verifier_ms: Option<i64>| {
-    let (Some(stable_ms), Some(beta_ms), Some(verifier_ms)) = (stable_ms, beta_ms, verifier_ms)
-    else {
-      return false;
-    };
-    stable_ms - beta_ms.max(verifier_ms) >= required_delay(stable, beta)
+  let assert_rejected = |label: &str, fixture: serde_json::Value| {
+    let result = invoke(fixture);
+    for (block, outcome) in result
+      .as_object()
+      .expect("harness result should be an object")
+    {
+      let expected_failure = match block.as_str() {
+        "verifier" => {
+          "stable publication occurred before the beta qualification completed its required delay"
+        }
+        "read_only_reauthentication" => {
+          "beta qualification API identity or completed required delay changed"
+        }
+        "pre_mutation_reauthentication" => "promotion identity changed after read-only validation",
+        _ => panic!("unexpected workflow timing block {block}"),
+      };
+      assert_eq!(
+        outcome["failure"],
+        serde_json::Value::String(expected_failure.to_owned()),
+        "{label} must fail at the {block} workflow timing predicate: {outcome}"
+      );
+    }
   };
 
-  assert!(permits_publication(
-    "0.8.1",
-    "0.8.1-beta.9",
-    Some(2_000),
-    Some(1_000),
-    Some(2_000)
-  ));
-  assert!(!permits_publication(
-    "0.8.1",
-    "0.8.1-beta.9",
-    Some(1_999),
-    Some(1_000),
-    Some(2_000)
-  ));
-  for (stable, beta) in [
+  assert_accepted(
+    "the recorded 0.9.2 release timestamps",
+    serde_json::json!({
+      "betaPublishedAt": "2026-09-07T12:59:45Z",
+      "verifierCompletedAt": "2026-09-07T14:21:33Z",
+      "stablePublishedAt": "2026-09-08T03:51:30Z",
+    }),
+  );
+  for (label, beta_published_at, verifier_completed_at) in [
+    (
+      "beta publication is later",
+      "2026-09-07T02:00:00.000Z",
+      "2026-09-07T00:00:00.000Z",
+    ),
+    (
+      "verifier completion is later",
+      "2026-09-07T00:00:00.000Z",
+      "2026-09-07T02:00:00.000Z",
+    ),
+  ] {
+    assert_accepted(
+      label,
+      serde_json::json!({
+        "betaPublishedAt": beta_published_at,
+        "verifierCompletedAt": verifier_completed_at,
+        "stablePublishedAt": "2026-09-07T08:00:00.000Z",
+      }),
+    );
+    assert_rejected(
+      &format!("a delay one millisecond before six hours when {label}"),
+      serde_json::json!({
+        "betaPublishedAt": beta_published_at,
+        "verifierCompletedAt": verifier_completed_at,
+        "stablePublishedAt": "2026-09-07T07:59:59.999Z",
+      }),
+    );
+  }
+  for field in [
+    "betaPublishedAt",
+    "verifierCompletedAt",
+    "stablePublishedAt",
+  ] {
+    let mut fixture = serde_json::json!({
+      "betaPublishedAt": "2026-09-07T00:00:00Z",
+      "verifierCompletedAt": "2026-09-07T02:00:00Z",
+      "stablePublishedAt": "2026-09-07T08:00:00Z",
+    });
+    fixture[field] = serde_json::json!("invalid");
+    assert_rejected(&format!("an invalid {field}"), fixture.clone());
+    fixture.as_object_mut().unwrap().remove(field);
+    assert_rejected(&format!("a missing {field}"), fixture);
+  }
+  assert_accepted(
+    "the exact 0.8.1-beta.9 zero-delay exception",
+    serde_json::json!({
+      "version": "0.8.1",
+      "betaVersion": "0.8.1-beta.9",
+      "betaPublishedAt": "2026-09-07T02:00:00Z",
+      "verifierCompletedAt": "2026-09-07T02:00:00Z",
+      "stablePublishedAt": "2026-09-07T02:00:00Z",
+    }),
+  );
+  for (version, beta_version) in [
     ("0.8.1", "0.8.1-beta.8"),
     ("0.8.1", "0.8.1-beta.10"),
     ("0.8.2", "0.8.1-beta.9"),
   ] {
-    assert!(!permits_publication(
-      stable,
-      beta,
-      Some(2_000),
-      Some(1_000),
-      Some(2_000)
-    ));
-    assert!(permits_publication(
-      stable,
-      beta,
-      Some(2_000 + DAY_MS),
-      Some(1_000),
-      Some(2_000)
-    ));
+    let mut fixture = serde_json::json!({
+      "version": version,
+      "betaVersion": beta_version,
+      "betaPublishedAt": "2026-09-07T02:00:00Z",
+      "verifierCompletedAt": "2026-09-07T02:00:00Z",
+      "stablePublishedAt": "2026-09-07T02:00:00Z",
+    });
+    assert_rejected("a nonmatching zero-delay exception", fixture.clone());
+    fixture["stablePublishedAt"] = serde_json::json!("2026-09-07T08:00:00Z");
+    assert_accepted("the normal delay for a nonmatching exception", fixture);
   }
-  assert!(!permits_publication(
-    "0.8.1",
-    "0.8.1-beta.9",
-    None,
-    Some(1_000),
-    Some(2_000)
-  ));
+  assert_rejected(
+    "the zero-delay exception before beta qualification completion",
+    serde_json::json!({
+      "version": "0.8.1",
+      "betaVersion": "0.8.1-beta.9",
+      "betaPublishedAt": "2026-09-07T02:00:00.000Z",
+      "verifierCompletedAt": "2026-09-07T02:00:00.000Z",
+      "stablePublishedAt": "2026-09-07T01:59:59.999Z",
+    }),
+  );
 }
 
 #[test]

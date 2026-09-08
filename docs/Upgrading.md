@@ -17,12 +17,23 @@ OxiBelt supports one stable step at a time:
   target when its stable changelog entry says so;
 - for the exact `0.9.0-beta.1` to `0.9.0` transition only, beta publication is
   still required but the stable release may waive the beta's independent
-  qualification and 24-hour eligibility interval; stable still requires all
+  qualification and eligibility interval; stable still requires all
   normal exact artifact gates and its own automatic 30-image and two-chart
   qualification before mutable aliases move;
 - skipped stable versions, arbitrary downgrade paths, and cross-version
   controller/data-plane skew are unsupported unless an exact release entry
   explicitly adds and validates that path.
+
+The current stable-release policy requires at least six hours between the
+later of beta publication and successful automatic beta verifier completion
+and stable publication. It applies to all stable releases evaluated by the
+current verifier, including already-published releases, while retaining the
+exact historical release exceptions documented in
+[Supply-chain verification](SupplyChain.md#independent-rebuild-verification).
+Version-specific 24-hour statements below and in the release ledgers record
+the policy at the time those entries were prepared; the current six-hour
+policy governs qualification and alias promotion. Historical waiver receipt
+identifiers, including `24-hour-delay`, remain unchanged.
 
 Tags of the form `X.Y.Z-build.<sha8>` are development artifacts. They have no
 upgrade compatibility promise, changelog entry, or GitHub Release and must not

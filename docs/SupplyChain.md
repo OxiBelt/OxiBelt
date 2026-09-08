@@ -530,25 +530,29 @@ mutable aliases. For a stable
 qualification, the producer's exact release-contract receipt must name the
 sole latest same-target beta; that beta's exact aggregate bytes, tag, release,
 automatic verifier run, artifact identity, and SHA-256 are bound into the
-stable qualification. Stable publication must occur at least 24 hours after
+stable qualification. Stable publication must occur at least six hours after
 both beta publication and completion of the beta qualification. The exact
 `0.9.0-beta.1` to `0.9.0` transition has a one-time predecessor-gate waiver.
 For that pair, the stable qualification records the immutable published beta
 tag and release identity in an explicit waiver in place of the beta aggregate
 binding; `0.9.0-beta.1` must still be published, but stable publication need
-not wait for its independent qualification or the 24-hour eligibility
-interval. The stable release must still satisfy every normal exact artifact,
-provenance, vulnerability, attestation, and release gate and must complete
-its own automatic qualification with all 30 image receipts and both chart
+not wait for its independent qualification or the eligibility interval. Its
+historical `24-hour-delay` waiver identifier remains unchanged. The stable
+release must still satisfy every normal exact artifact, provenance,
+vulnerability, attestation, and release gate and must complete its own
+automatic qualification with all 30 image receipts and both chart
 receipts. Mutable aliases remain unavailable until that stable qualification
 succeeds.
 The historical exact `0.8.1-beta.9` to `0.8.1` transition remains a separate
 one-release zero-delay exception: publication may proceed immediately after
 complete qualification, but never before beta publication or verifier
-completion. Every other transition keeps the 24-hour requirement and requires
-the beta qualification. The verifier
-derives every plan field and the complete stable alias inventory with its
-approved release-planning code; producer image-plan metadata is not a
+completion. Every other transition requires six hours and the beta
+qualification. The current policy also applies when re-evaluating an
+already-published stable release. Historical version-specific release notes
+retain their original 24-hour policy; they do not override the current
+verifier's six-hour requirement. The verifier derives every plan field and
+the complete stable alias inventory with its approved release-planning code;
+producer image-plan metadata is not a
 qualification input.
 
 The release producer writes only immutable versioned image and chart tags.

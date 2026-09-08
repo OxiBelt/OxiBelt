@@ -117,12 +117,16 @@ that beta, and the complete beta-to-stable delta must contain only
 dependency, workflow, Helm, controller, packaging, or other tracked change
 requires the next beta and a restarted qualification soak. Publish stable only
 after the latest beta's automatic 30-image and two-chart qualification has
-remained eligible for at least 24 hours. The exact `0.9.0-beta.1` to `0.9.0`
-transition has a one-time exception: `0.9.0-beta.1` must be published, but
-stable publication need not wait for that beta's independent qualification or
-24-hour eligibility interval. Stable must still pass every normal exact
-artifact and release gate and its own automatic 30-image and two-chart
-qualification before mutable aliases can move. The historical exact
+remained eligible for at least six hours, measured from the later of beta
+publication and successful automatic verifier completion. This policy also
+applies when the current verifier evaluates an already-published stable
+release; historical release notes retain the policy recorded at their cut.
+The exact `0.9.0-beta.1` to `0.9.0` transition has a one-time exception:
+`0.9.0-beta.1` must be published, but stable publication need not wait for
+that beta's independent qualification or eligibility interval. Its historical
+`24-hour-delay` waiver identifier is unchanged. Stable must still pass every
+normal exact artifact and release gate and its own automatic 30-image and
+two-chart qualification before mutable aliases can move. The historical exact
 `0.8.1-beta.9` to `0.8.1` transition remains a separate one-release exception
 with no additional calendar delay after complete automatic qualification;
 stable publication still had to follow beta publication and verifier

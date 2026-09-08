@@ -336,7 +336,7 @@ jobs:
             const soakStart = waiver === null ? Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt)) : Date.parse(beta.publishedAt)
             const requiredStableQualificationDelayMs = waiver !== null || (q.version === '0.8.1' && beta.version === '0.8.1-beta.9')
               ? 0
-              : 24 * 60 * 60 * 1000
+              : 6 * 60 * 60 * 1000
             const stablePublicationDelayMs = Date.parse(q.publishedAt) - soakStart
             if (betaRef.object.sha !== beta.tagObjectSha || betaTag?.object?.sha !== beta.commit ||
                 betaRelease.id !== beta.releaseId || betaRelease.tag_name !== beta.version || betaRelease.target_commitish !== beta.commit || validBetas[0]?.id !== beta.releaseId || betaRelease.draft || !betaRelease.prerelease ||
@@ -693,7 +693,7 @@ jobs:
             const soakStart = waiver === null ? Math.max(Date.parse(beta.publishedAt), Date.parse(beta.verifierCompletedAt)) : Date.parse(beta.publishedAt)
             const requiredStableQualificationDelayMs = waiver !== null || (q.version === '0.8.1' && beta.version === '0.8.1-beta.9')
               ? 0
-              : 24 * 60 * 60 * 1000
+              : 6 * 60 * 60 * 1000
             const stablePublicationDelayMs = Date.parse(q.publishedAt) - soakStart
             if (ref.object.sha !== q.tagObjectSha || tag?.object?.sha !== q.commit || release.id !== q.releaseId ||
                 release.id !== latest.id || release.draft || release.prerelease || release.target_commitish !== q.commit || release.published_at !== q.publishedAt ||
