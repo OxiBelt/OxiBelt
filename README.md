@@ -410,7 +410,7 @@ tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,ngi
 ```
 
 `tests/scripts/run-proxy-integration.sh` generates fresh TLS material for each run and cleans up test resources. The Docker matrix also covers reload behavior and browser-visible behavior where applicable.
-`tests/scripts/run-proxy-performance.sh` runs Docker-network performance smoke, benchmark, or soak profiles and writes `summary.md`, `results.json`, per-container logs, generated configs, and sampled Docker stats. See [docs/Performance.md](docs/Performance.md) for profile details and result interpretation.
+`tests/scripts/run-proxy-performance.sh` runs local Docker-network performance smoke, benchmark, or soak profiles and writes `summary.md`, `results.json`, per-container logs, generated configs, and sampled Docker stats. Benchmark-only stress is local coverage; `check-oxibelt` does not run it. See [docs/Performance.md](docs/Performance.md) for profile details and result interpretation.
 
 Release builds use thin LTO, one codegen unit, and stripped debuginfo. `panic = "abort"` is intentionally not enabled.
 

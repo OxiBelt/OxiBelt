@@ -165,12 +165,6 @@ const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
 ];
 const DEPENDABOT_ACTOR_CONDITION: &str = "github.actor != 'dependabot[bot]'";
 
-const PERFORMANCE_WORKFLOW_EVENT_CONDITION: &str =
-  "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
-const PERFORMANCE_WORKFLOW_JOB_IF: &str =
-  "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'";
-const PERFORMANCE_WORKFLOW_SUMMARY_IF: &str = "if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}";
-
 fn expected_needs(job_ids: &[&str]) -> Vec<String> {
   job_ids.iter().map(|job_id| (*job_id).to_owned()).collect()
 }
@@ -7767,7 +7761,8 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
     "RISC-V Docker image builds should still wait for normal test gates"
   );
   assert!(
-    !riscv64_job.contains(PERFORMANCE_WORKFLOW_JOB_IF),
+    !riscv64_job
+      .contains("if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"),
     "RISC-V Docker image artifact should run on push, pull request, scheduled, and manual workflows"
   );
   assert!(
@@ -8383,12 +8378,6 @@ fn pr_non_benchmark_summary_is_exact_fail_closed_and_pr_concurrent() {
     assert!(
       !summary.needs.contains(&job_id.to_owned()),
       "terminal non-benchmark summary must not depend on {job_id}"
-    );
-  }
-  for job_id in BENCHMARK_ONLY_JOBS {
-    assert!(
-      has_transitive_need(&jobs, job_id, "pr-non-benchmark-summary"),
-      "scheduled/manual benchmark job {job_id} should wait for the same-run non-benchmark summary"
     );
   }
   for forbidden in [".outputs", "eval", "source ", "contents: write"] {
@@ -12274,7 +12263,7 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let setup_count = workflow.matches(setup_marker).count();
 
   assert_eq!(
-    setup_count, 11,
+    setup_count, 8,
     "workflow should keep pre-pull coverage aligned with every Buildx setup"
   );
   assert_eq!(
@@ -12509,85 +12498,12 @@ fn docker_retry_helpers_preserve_failed_command_status() {
 }
 
 #[test]
-fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
-  let workflow = workflow_text();
-  let jobs = parse_jobs(&workflow);
-  let comparator_job = jobs
-    .get("docker-alpine-comparator-musl-image-amd64")
-    .expect("workflow should define the AMD64 comparator image job");
+fn local_amd64_comparator_images_preserve_cpu_targets_and_hardening() {
   let script = comparator_build_script_text();
   let nginx_dockerfile = comparator_dockerfile_text("nginx");
   let caddy_dockerfile = comparator_dockerfile_text("caddy");
   let openresty_dockerfile = comparator_dockerfile_text("openresty");
 
-  assert_eq!(
-    comparator_job.needs,
-    expected_needs(&["pr-non-benchmark-summary"]),
-    "comparator image builds should wait for complete non-benchmark validation"
-  );
-  assert!(
-        workflow.contains("name: Docker comparator image (Alpine musl, amd64, ${{ matrix.comparator }}, ${{ matrix.target_cpu }})"),
-        "comparator image job should expose the comparator and target CPU in the job name"
-    );
-  for (comparator, target_cpu, artifact_name, image_tar) in [
-    (
-      "nginx",
-      "x86-64-v2",
-      "oxibelt-performance-nginx-x86-64-v2-image",
-      "oxibelt-performance-nginx-x86-64-v2.tar",
-    ),
-    (
-      "nginx",
-      "x86-64-v3",
-      "oxibelt-performance-nginx-x86-64-v3-image",
-      "oxibelt-performance-nginx-x86-64-v3.tar",
-    ),
-    (
-      "caddy",
-      "x86-64-v2",
-      "oxibelt-performance-caddy-x86-64-v2-image",
-      "oxibelt-performance-caddy-x86-64-v2.tar",
-    ),
-    (
-      "caddy",
-      "x86-64-v3",
-      "oxibelt-performance-caddy-x86-64-v3-image",
-      "oxibelt-performance-caddy-x86-64-v3.tar",
-    ),
-    (
-      "openresty",
-      "x86-64-v2",
-      "oxibelt-performance-openresty-x86-64-v2-image",
-      "oxibelt-performance-openresty-x86-64-v2.tar",
-    ),
-    (
-      "openresty",
-      "x86-64-v3",
-      "oxibelt-performance-openresty-x86-64-v3-image",
-      "oxibelt-performance-openresty-x86-64-v3.tar",
-    ),
-  ] {
-    assert!(
-      workflow.contains(&format!("comparator: {comparator}")),
-      "comparator image matrix should include {comparator}"
-    );
-    assert!(
-      workflow.contains(&format!("target_cpu: {target_cpu}")),
-      "comparator image matrix should include {target_cpu}"
-    );
-    assert!(
-      workflow.contains(&format!("artifact_name: {artifact_name}")),
-      "comparator image matrix should upload {artifact_name}"
-    );
-    assert!(
-      workflow.contains(&format!("image_tar: {image_tar}")),
-      "comparator image matrix should name {image_tar}"
-    );
-  }
-  assert!(
-    workflow.contains("tests/scripts/build-performance-comparator-image-artifact.sh"),
-    "workflow should use the comparator image artifact builder"
-  );
   assert!(
     script.contains("image_tag=\"oxibelt/performance-${comparator}:alpine-${target_cpu}\"")
       && script.contains(
@@ -12657,29 +12573,9 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
 }
 
 #[test]
-fn docker_performance_probe_image_job_builds_reusable_artifact() {
-  let workflow = workflow_text();
-  let jobs = parse_jobs(&workflow);
-  let probe_job = jobs
-    .get("docker-performance-probe-image")
-    .expect("workflow should define the performance probe image job");
+fn local_performance_probe_builder_preserves_artifact_and_retry_contract() {
   let script = performance_probe_build_script_text();
 
-  assert_eq!(
-    probe_job.needs,
-    expected_needs(&["pr-non-benchmark-summary"]),
-    "performance probe image builds should wait for complete non-benchmark validation"
-  );
-  assert!(
-    workflow.contains("name: Docker performance probe image"),
-    "probe image job should have a clear display name"
-  );
-  assert!(
-    workflow.contains("tests/scripts/build-performance-probe-image-artifact.sh")
-      && workflow.contains("name: oxibelt-performance-probe-image")
-      && workflow.contains("oxibelt-performance-probe.tar"),
-    "probe image job should build and upload a reusable tar artifact"
-  );
   assert!(
     script.contains("image_tag=\"oxibelt/perf-probe:ci\"")
       && script.contains("image_tar=\"${output_dir%/}/oxibelt-performance-probe.tar\""),
@@ -12693,30 +12589,10 @@ fn docker_performance_probe_image_job_builds_reusable_artifact() {
 }
 
 #[test]
-fn docker_external_benchmark_image_job_builds_reusable_artifact() {
-  let workflow = workflow_text();
-  let jobs = parse_jobs(&workflow);
-  let external_job = jobs
-    .get("docker-external-benchmark-image")
-    .expect("workflow should define the external benchmark image job");
+fn local_external_benchmark_builder_preserves_artifact_and_tool_integrity() {
   let script = external_benchmark_build_script_text();
   let dockerfile = external_benchmark_dockerfile_text();
 
-  assert_eq!(
-    external_job.needs,
-    expected_needs(&["pr-non-benchmark-summary"]),
-    "external benchmark image builds should wait for complete non-benchmark validation"
-  );
-  assert!(
-    workflow.contains("name: Docker external benchmark image"),
-    "external benchmark image job should have a clear display name"
-  );
-  assert!(
-    workflow.contains("tests/scripts/build-external-benchmark-image-artifact.sh")
-      && workflow.contains("name: oxibelt-external-benchmark-image")
-      && workflow.contains("oxibelt-external-benchmark-image.tar"),
-    "external benchmark image job should build and upload a reusable tar artifact"
-  );
   assert!(
     script.contains("image_tag=\"oxibelt/external-benchmarks:ci\"")
       && script.contains("image_tar=\"${output_dir%/}/oxibelt-external-benchmark-image.tar\""),
@@ -12850,869 +12726,102 @@ fn performance_summary_input_helper_copies_only_aggregate_inputs() {
 }
 
 #[test]
-fn docker_performance_jobs_are_scheduled_and_manual_only() {
-  let workflow = workflow_text();
-
-  assert!(
-    workflow.contains("push:")
-      && workflow.contains("pull_request:")
-      && workflow.contains("schedule:")
-      && workflow.contains("cron: \"0 0 * * *\"")
-      && workflow.contains("workflow_dispatch:"),
-    "normal CI should keep push and pull request triggers while performance jobs use cron/manual gates"
-  );
-  assert!(
-    PERFORMANCE_WORKFLOW_JOB_IF.contains(PERFORMANCE_WORKFLOW_EVENT_CONDITION)
-      && PERFORMANCE_WORKFLOW_SUMMARY_IF.contains(PERFORMANCE_WORKFLOW_EVENT_CONDITION),
-    "performance workflow assertions should use the shared schedule/manual condition"
-  );
-
-  for job_id in [
-    "docker-alpine-comparator-musl-image-amd64",
-    "docker-performance-probe-image",
-    "docker-external-benchmark-image",
-    "docker-performance",
-  ] {
-    let job = workflow_job_text(&workflow, job_id);
-    assert!(
-      job.contains(PERFORMANCE_WORKFLOW_JOB_IF),
-      "{job_id} should run only on scheduled or manual workflows"
-    );
-  }
-
-  let summary_job = workflow_job_text(&workflow, "docker-performance-summary");
-  assert!(
-    summary_job.contains(PERFORMANCE_WORKFLOW_SUMMARY_IF),
-    "docker-performance-summary should preserve always() semantics only on scheduled or manual workflows"
-  );
-
-  for job_id in [
-    "docker-alpine-musl-image-amd64",
-    "docker-integration-proxy",
-    "docker-alpine-musl-image-riscv64",
-  ] {
-    let job = workflow_job_text(&workflow, job_id);
-    assert!(
-      !job.contains(PERFORMANCE_WORKFLOW_JOB_IF),
-      "{job_id} should keep running on push and pull request workflows"
-    );
-  }
-}
-
-#[test]
-fn docker_performance_job_uses_sharded_repeated_sampling() {
-  let workflow = workflow_text();
-  let jobs = parse_jobs(&workflow);
-  let performance_job = workflow
-    .split_once("  docker-performance:\n")
-    .and_then(|(_, rest)| rest.split_once("\n  docker-performance-summary:"))
-    .map(|(job, _)| job)
-    .expect("workflow should contain docker-performance before its summary job");
-  let summary_input_prepare_step = performance_job
-    .split_once("      - name: Prepare Docker performance summary input artifact")
-    .and_then(|(_, rest)| {
-      rest.split_once("\n      - name: Upload Docker performance summary input artifact")
-    })
-    .map(|(step, _)| step)
-    .expect("docker-performance should prepare summary input before upload");
-  let (_, after_selection_parallel_marker) = performance_job
-    .split_once("      - parallel:\n")
-    .expect("docker-performance should start artifact setup with a parallel group");
-  let (artifact_selection_parallel_group, after_download_parallel_marker) =
-    after_selection_parallel_marker
-      .split_once("\n      - parallel:\n")
-      .expect("docker-performance should have a second parallel group for artifact downloads");
-  let (artifact_download_parallel_group, _) = after_download_parallel_marker
-    .split_once("\n      - name: Load AMD64 v2 OxiBelt Docker image")
-    .expect("docker-performance should load Docker images after parallel artifact downloads");
-  let artifact_selection_parallel_start = performance_job
-    .find("      - parallel:\n")
-    .expect("docker-performance should define artifact selection parallel group");
-  let artifact_download_parallel_start = performance_job
-    .find("\n      - parallel:\n          - name: Download AMD64 v2 Docker image artifact")
-    .expect("docker-performance should define artifact download parallel group");
-  let artifact_load_start = performance_job
-    .find("\n      - name: Load AMD64 v2 OxiBelt Docker image")
-    .expect("docker-performance should load Docker images after artifact downloads");
-
-  assert!(
-    workflow.contains("performance_iterations:"),
-    "workflow_dispatch should expose the Docker performance iteration count"
-  );
-  assert!(
-    workflow.contains("performance_h2_profile:"),
-    "workflow_dispatch should expose the opt-in H2 profiling toggle"
-  );
-  assert!(
-    workflow.contains("performance_profile_label:")
-      && workflow.contains("- oxibelt-h1-keepalive")
-      && workflow.contains("- oxibelt-h2")
-      && workflow.contains("- oxibelt-h3"),
-    "workflow_dispatch should expose exact H1/H2/H3 profiling labels"
-  );
-  assert!(
-        workflow.contains("PERFORMANCE_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_iterations'] || '5' }}"),
-        "docker-performance should default to five iterations outside manual dispatch"
-    );
-  assert!(
-        workflow.contains("PERFORMANCE_H2_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_h2_profile'] || false }}"),
-        "docker-performance should keep H2 profiling disabled outside explicit manual dispatch"
-    );
-  assert!(
-        workflow.contains("PERFORMANCE_PROFILE_LABEL: ${{ github.event_name == 'workflow_dispatch' && inputs['performance_profile_label'] || 'none' }}"),
-        "docker-performance should keep exact profiling labels disabled outside manual dispatch"
-    );
-  let legacy_apt_flamegraph_packages = [
-    "linux-tools-common",
-    "linux-tools-generic",
-    "zstd",
-    "flamegraph",
-    "heaptrack",
-  ]
-  .join(" ");
-  assert!(
-    workflow.contains("name: Install Linux perf and heap tooling for performance profiling")
-      && workflow.contains("linux-tools-common")
-      && workflow.contains("linux-tools-generic")
-      && workflow.contains("heaptrack")
-      && workflow.contains("zstd")
-      && workflow.contains("41fee1f99f9276008b7cd112fca19dc3ea84ac32")
-      && workflow.contains("088f82e6848a4f12a56e1e8e8170ee6761fccf12e5615cd64630f6b087c99ea7")
-      && workflow.contains("74faa47a29d8df07cb06731dfd8bb94dc4c165b9d811ac6b4c9449eea2ac25d8")
-      && workflow.contains("/usr/local/bin/flamegraph.pl")
-      && workflow.contains("/usr/local/bin/stackcollapse-perf.pl")
-      && workflow.contains("sha256sum --check --status")
-      && !workflow.contains(&legacy_apt_flamegraph_packages)
-      && workflow.contains("sudo sysctl kernel.perf_event_paranoid=-1"),
-    "performance profiling should prepare host perf, compression, verified FlameGraph scripts, and heap tooling"
-  );
-  assert!(
-    performance_job.contains("selected_profile_label=\"${PERFORMANCE_PROFILE_LABEL}\"")
-      && performance_job.contains("selected_profile_label=\"oxibelt-h2\"")
-      && performance_job.contains("none|oxibelt-h1-keepalive|oxibelt-h2|oxibelt-h3")
-      && performance_job.contains("OXIBELT_PERF_PROFILE_LABEL=\"${selected_profile_label}\"")
-      && performance_job.contains(r#"&& "${target_cpu}" == "x86-64-v3""#)
-      && performance_job.contains(r#"&& "${iteration}" == "1""#),
-    "profiling env should be scoped to one exact first x86-64-v3 smoke sample"
-  );
-  assert!(
-    performance_job.contains("diagnostic_profile_env=()")
-      && performance_job.contains(r#"if [[ "${PERFORMANCE_PROFILE}" == "smoke" ]]; then"#)
-      && performance_job.contains("OXIBELT_PERF_DIAGNOSTIC_PROFILES=1")
-      && performance_job.contains("OXIBELT_PERF_DIAGNOSTIC_PROFILE_MODE=cpu-memory")
-      && performance_job.contains("OXIBELT_PERF_DIAGNOSTIC_FREQUENCY=49")
-      && performance_job
-        .contains("OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\""),
-    "smoke performance runs should enable diagnostic CPU and memory profiling artifacts separately from primary rows"
-  );
-  assert!(
-    !workflow.contains("background:")
-      && !workflow.contains("wait:")
-      && !workflow.contains("wait-all:")
-      && !workflow.contains("cancel:"),
-    "workflow should keep service lifecycle step-control primitives out of CI gates"
-  );
-  assert!(
-    workflow.contains("timeout-minutes: 360"),
-    "docker-performance should allow repeated smoke and benchmark samples"
-  );
-
-  assert!(
-    workflow.contains("serving_type:"),
-    "docker-performance should define a serving-type matrix axis"
-  );
-  for shard in 1..=20 {
-    assert!(
-      workflow.contains(&format!("          - {shard}")),
-      "docker-performance should include shard {shard}"
-    );
-  }
-  for serving_type in [
-    "reverse-proxy",
-    "static-files",
-    "oxibelt-features",
-    "oxibelt-soak-stress",
-    "accept-multipliers",
-    "remote-signer",
-    "runtime-direct-h1",
-    "metrics-mode",
-  ] {
-    assert!(
-      workflow.contains(&format!("          - {serving_type}")),
-      "docker-performance should include serving type {serving_type}"
-    );
-  }
-
-  assert!(
-    workflow.contains("PERFORMANCE_SHARD: ${{ matrix.shard }}"),
-    "docker-performance should expose the current shard to the run loop"
-  );
-  assert!(
-    workflow.contains("PERFORMANCE_SERVING_TYPE: ${{ matrix.serving_type }}"),
-    "docker-performance should expose the current serving type to the run loop"
-  );
-  assert!(
-    workflow.contains("OXIBELT_PERF_REGRESSION_GATE_MODE: warn"),
-    "docker-performance should defer noisy per-iteration regression gates to the summary job"
-  );
-  assert!(
-    workflow.contains("performance_accepted_regression_reason"),
-    "workflow_dispatch should expose an explicit accepted-regression reason input"
-  );
-  assert!(
-    jobs
-      .get("docker-performance")
-      .expect("workflow should define docker-performance")
-      .needs
-      .contains(&"docker-alpine-comparator-musl-image-amd64".to_owned()),
-    "docker-performance should wait for target-specific comparator images"
-  );
-  assert!(
-    jobs
-      .get("docker-performance")
-      .expect("workflow should define docker-performance")
-      .needs
-      .contains(&"docker-performance-probe-image".to_owned()),
-    "docker-performance should wait for the reusable probe image"
-  );
-  assert!(
-    jobs
-      .get("docker-performance")
-      .expect("workflow should define docker-performance")
-      .needs
-      .contains(&"docker-external-benchmark-image".to_owned()),
-    "docker-performance should wait for the reusable external benchmark image"
-  );
-  let performance_needs = &jobs
-    .get("docker-performance")
-    .expect("workflow should define docker-performance")
-    .needs;
-  for job_id in DOCKER_INTEGRATION_JOBS {
-    assert!(
-      performance_needs
-        .iter()
-        .any(|need| need.as_str() == *job_id),
-      "docker-performance should wait for {job_id}"
-    );
-  }
-  for target_cpu in ["x86-64-v2", "x86-64-v3"] {
-    assert!(
-      performance_job.contains(&format!(
-        "tests/scripts/select-amd64-docker-image-artifact.sh {target_cpu} --allow-unsupported"
-      )),
-      "docker-performance should select the {target_cpu} artifact with unsupported-runner handling"
-    );
-  }
-  assert_eq!(
-    performance_job.matches("      - parallel:\n").count(),
-    2,
-    "docker-performance should use focused parallel groups for selection and download setup"
-  );
-  assert!(
-    artifact_selection_parallel_start < artifact_download_parallel_start
-      && artifact_download_parallel_start < artifact_load_start,
-    "docker-performance should use selection outputs only after the selection parallel group completes"
-  );
-  assert!(
-    !artifact_selection_parallel_group.contains("steps.select-amd64-")
-      && artifact_download_parallel_group.contains("steps.select-amd64-v2.outputs.supported")
-      && artifact_download_parallel_group.contains("steps.select-amd64-v2.outputs.artifact_name")
-      && artifact_download_parallel_group.contains("steps.select-amd64-v3.outputs.supported")
-      && artifact_download_parallel_group.contains("steps.select-amd64-v3.outputs.artifact_name"),
-    "download steps should consume selection outputs only in the later parallel group"
-  );
-  assert!(
-    artifact_selection_parallel_group.contains("name: Select AMD64 v2 Docker image artifact")
-      && artifact_selection_parallel_group.contains(
-        "tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v2 --allow-unsupported"
-      )
-      && artifact_selection_parallel_group.contains("name: Select AMD64 v3 Docker image artifact")
-      && artifact_selection_parallel_group.contains(
-        "tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3 --allow-unsupported"
-      ),
-    "docker-performance should select independent AMD64 artifacts in one parallel group"
-  );
-  assert_eq!(
-    artifact_download_parallel_group
-      .matches("uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1")
-      .count(),
-    10,
-    "docker-performance should keep exactly ten artifact downloads in the parallel group"
-  );
-  for expected in [
-    "name: Download AMD64 v2 Docker image artifact",
-    "name: Download AMD64 v3 Docker image artifact",
-    "name: Download AMD64 v2 nginx comparator image artifact",
-    "name: Download AMD64 v2 Caddy comparator image artifact",
-    "name: Download AMD64 v2 OpenResty comparator image artifact",
-    "name: Download AMD64 v3 nginx comparator image artifact",
-    "name: Download AMD64 v3 Caddy comparator image artifact",
-    "name: Download AMD64 v3 OpenResty comparator image artifact",
-    "name: Download performance probe image artifact",
-    "name: Download external benchmark image artifact",
-  ] {
-    assert!(
-      artifact_download_parallel_group.contains(expected),
-      "docker-performance should keep {expected} inside the artifact download parallel group"
-    );
-  }
-  assert!(
-    !performance_job.contains("x86-64-v4"),
-    "docker-performance should not include x86-64-v4 in its benchmark target set"
-  );
-  assert!(
-    workflow.contains("unsupported-cpu.json"),
-    "docker-performance should upload unsupported CPU markers instead of benchmark rows"
-  );
-  for target_cpu in ["v2", "v3"] {
-    assert!(
-      performance_job.contains(&format!(
-        "steps.select-amd64-{target_cpu}.outputs.supported == 'true'"
-      )),
-      "docker-performance should only download and load supported AMD64 {target_cpu} artifacts"
-    );
-  }
-  assert!(
-    performance_job.contains("for target_cpu in x86-64-v2 x86-64-v3; do"),
-    "docker-performance should run each supported AMD64 ISA target in the same matrix job"
-  );
-  assert!(
-    performance_job.contains("OXIBELT_AMD64_TARGET_CPU=\"${target_cpu}\""),
-    "docker-performance should record each AMD64 target CPU in per-run summaries"
-  );
-  for (comparator, target_cpu) in [
-    ("nginx", "x86-64-v2"),
-    ("caddy", "x86-64-v2"),
-    ("openresty", "x86-64-v2"),
-    ("nginx", "x86-64-v3"),
-    ("caddy", "x86-64-v3"),
-    ("openresty", "x86-64-v3"),
-  ] {
-    assert!(
-      performance_job.contains(&format!(
-        "oxibelt-performance-{comparator}-{target_cpu}-image"
-      )),
-      "docker-performance should download the {comparator} {target_cpu} comparator artifact"
-    );
-    assert!(
-      performance_job.contains(&format!(
-        "oxibelt/performance-{comparator}:alpine-{target_cpu}"
-      )),
-      "docker-performance should pass the {comparator} {target_cpu} image tag"
-    );
-  }
-  assert!(
-    performance_job.contains("OXIBELT_NGINX_IMAGE=\"${nginx_image_tag}\"")
-      && performance_job.contains("OXIBELT_CADDY_IMAGE=\"${caddy_image_tag}\"")
-      && performance_job.contains("OXIBELT_OPENRESTY_IMAGE=\"${openresty_image_tag}\"")
-      && performance_job.contains("OXIBELT_PERF_PROBE_IMAGE=oxibelt/perf-probe:ci")
-      && performance_job
-        .contains("OXIBELT_EXTERNAL_BENCHMARK_IMAGE=oxibelt/external-benchmarks:ci")
-      && performance_job.contains(
-        "OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=\"${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}\""
-      )
-      && performance_job
-        .contains("OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\"")
-      && performance_job.contains("OXIBELT_NGINX_H3_MODE=required")
-      && performance_job.contains("--comparators oxibelt,nginx,caddy,openresty")
-      && performance_job.contains("unset OXIBELT_ACTIONS_VARS_JSON")
-      && performance_job.contains("env -u OXIBELT_ACTIONS_VARS_JSON"),
-    "docker-performance should compare target-specific images, reuse probe and external images, pass diagnostic gate mode, require nginx HTTP/3 in CI, include OpenResty, and keep the full vars JSON out of repository scripts"
-  );
-  assert!(
-        performance_job.contains("name: Download performance probe image artifact")
-            && performance_job.contains("docker load --input \"${RUNNER_TEMP}/oxibelt-performance-probe-image/oxibelt-performance-probe.tar\""),
-        "docker-performance should download and load the prebuilt probe image before iterations"
-    );
-  assert!(
-        performance_job.contains("name: Download external benchmark image artifact")
-            && performance_job.contains("docker load --input \"${RUNNER_TEMP}/oxibelt-external-benchmark-image/oxibelt-external-benchmark-image.tar\""),
-        "docker-performance should download and load the prebuilt external benchmark image before iterations"
-    );
-  assert!(
-    workflow.contains("seq 1 \"${PERFORMANCE_ITERATIONS}\""),
-    "docker-performance should loop over the configured iteration count"
-  );
-  assert!(
-    workflow.contains("failed_iterations=()"),
-    "docker-performance should aggregate failed iterations instead of stopping early"
-  );
-  assert!(
-    workflow.contains("|| status=$?"),
-    "docker-performance should record iteration failures and continue the shard"
-  );
-  assert!(
-    workflow.contains("failed_iterations+=(\"${target_cpu}:${iteration}:${status}\")"),
-    "docker-performance should keep a shard-local list of failed target iterations"
-  );
-  assert!(
-    workflow.contains("if (( ${#failed_iterations[@]} > 0 )); then"),
-    "docker-performance should summarize failed iterations after all configured iterations have run"
-  );
-  assert!(
-    workflow.contains("run_dir=\"${target_artifact_dir}/run-${iteration}\"")
-      && workflow.contains("OXIBELT_TEST_ARTIFACT_DIR=\"${run_dir}\""),
-    "docker-performance should isolate artifacts by serving type, shard, target CPU, and iteration"
-  );
-  assert!(
-    workflow.contains("iteration-status.json")
-      && workflow.contains("schema_version: 1")
-      && workflow.contains("target_cpu: $target_cpu")
-      && workflow.contains("exit_code: $exit_code")
-      && workflow.contains("diagnostic_warnings: $diagnostic_warnings"),
-    "docker-performance should capture per-iteration status without relying on job-level failure"
-  );
-  assert!(
-    workflow.contains("diagnostic_warning_count=0")
-      && workflow.contains("diagnostic_warning_count=\"$(jq '[.[] | select((.diagnostic // false) == true and (.diagnostic_status // \"\") != \"pass\")] | length'")
-      && workflow.contains("iteration_status=\"diagnostic_warning\"")
-      && workflow.contains("completed with ${diagnostic_warning_count} diagnostic performance warning(s)"),
-    "docker-performance should distinguish non-blocking diagnostic warnings from primary iteration failures"
-  );
-  assert!(
-    workflow.contains("::warning title=Docker performance iteration failed::")
-      && workflow.contains("Docker performance recorded %d failed iteration(s)")
-      && !workflow.contains("Docker performance failed in %d iteration(s)"),
-    "docker-performance matrix shards should warn about failed iterations and leave pass/fail ownership to the summary job"
-  );
-  assert!(
-        workflow.contains(
-            "oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-${{ matrix.serving_type }}-shard-${{ matrix.shard }}"
-        ),
-        "docker-performance raw artifact names should include the serving type and shard"
-    );
-  assert!(
-        workflow.contains("path: ${{ runner.temp }}/oxibelt-performance/${{ matrix.serving_type }}/shard-${{ matrix.shard }}"),
-        "docker-performance should upload one grouped raw artifact per serving type and shard"
-    );
-  assert!(
-        summary_input_prepare_step.contains("PERFORMANCE_SHARD: ${{ matrix.shard }}")
-            && summary_input_prepare_step
-                .contains("tests/scripts/copy-performance-summary-input-artifacts.sh")
-            && summary_input_prepare_step.contains("raw_artifact_name=\"oxibelt-docker-performance-${PERFORMANCE_PROFILE}-${PERFORMANCE_SERVING_TYPE}-shard-${PERFORMANCE_SHARD}\"")
-            && summary_input_prepare_step
-                .contains("\"${RUNNER_TEMP}/oxibelt-performance-summary-input/${raw_artifact_name}\""),
-        "docker-performance should prepare a slim summary input tree with the raw artifact directory shape"
-    );
-  assert!(
-        workflow.contains("name: oxibelt-docker-performance-summary-input-${{ env.PERFORMANCE_PROFILE }}-${{ matrix.serving_type }}-shard-${{ matrix.shard }}")
-            && workflow.contains("path: ${{ runner.temp }}/oxibelt-performance-summary-input"),
-        "docker-performance should upload a separate summary input artifact for aggregation"
-    );
-  assert!(
-    workflow.contains("--serving-type \"${PERFORMANCE_SERVING_TYPE}\""),
-    "docker-performance should pass the serving-type matrix value into the performance script"
-  );
-}
-
-#[test]
-fn docker_performance_summary_aggregates_uploaded_artifacts() {
-  let workflow = workflow_text();
-  let summary_job = workflow
-    .split_once("  docker-performance-summary:\n")
-    .and_then(|(_, rest)| rest.split_once("\n  docker-aggressive-long-run:"))
-    .map(|(job, _)| job)
-    .expect("workflow should contain docker-performance-summary before aggressive long-run");
-  let jobs = parse_jobs(&workflow);
-  let summary = jobs
-    .get("docker-performance-summary")
-    .expect("workflow should define docker-performance-summary");
-
-  assert_eq!(
-    summary.needs,
-    vec!["docker-performance".to_owned()],
-    "docker-performance-summary should run after the performance matrix"
-  );
-  assert!(
-    workflow.contains("name: Docker performance summary"),
-    "summary job should have a clear display name"
-  );
-  assert!(
-    summary_job.contains(PERFORMANCE_WORKFLOW_SUMMARY_IF),
-    "summary job should run even when performance matrix entries fail on scheduled or manual workflows"
-  );
-  assert!(
-    summary_job.contains(
-      "pattern: oxibelt-docker-performance-summary-input-${{ env.PERFORMANCE_PROFILE }}-*"
-    ) && summary_job.contains("merge-multiple: true")
-      && !summary_job
-        .contains("pattern: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-*"),
-    "summary job should download only slim summary input artifacts and merge their preserved raw artifact directories"
-  );
-  assert!(
-        summary_job.contains(
-            "NEEDS_DOCKER_PERFORMANCE_RESULT: ${{ needs.docker-performance.result }}"
-        ) && summary_job.contains("no Docker performance summary input artifacts were downloaded because docker-performance was skipped; skipping aggregation and regression gates")
-            && summary_job.contains("no Docker performance summary input artifacts were downloaded after docker-performance result")
-            && summary_job.contains("steps.performance-artifacts.outputs.found == 'true'")
-            && summary_job.contains(
-                "if: always() && steps.performance-artifacts.outputs.found == 'true'"
-            ),
-        "summary job should skip aggregation only when docker-performance was skipped and keep missing inputs failing otherwise"
-    );
-  assert!(
-    workflow.contains("actions: read"),
-    "summary job should have permission to inspect prior workflow artifacts"
-  );
-  assert!(
-    workflow.contains("name: Download previous Docker performance comparison"),
-    "summary job should look for the previous successful branch comparison artifact"
-  );
-  assert!(
-    workflow.contains("baseline_report=${comparison_dir}/performance-comparison.json"),
-    "summary job should expose the downloaded baseline report path"
-  );
-  assert!(
-    workflow.contains("baseline_context=${baseline_dir}/baseline-context.json")
-      && workflow.contains("same_branch:${CURRENT_REF_NAME}")
-      && workflow.contains("base_branch:${PR_BASE_REF}")
-      && workflow.contains("default_branch:${DEFAULT_BRANCH}"),
-    "summary job should record the selected baseline source and fallback order"
-  );
-  assert!(
-    workflow
-      .contains("cargo run --quiet --locked -p oxibelt --bin oxibelt-performance-aggregate --"),
-    "summary job should run the Rust aggregate binary"
-  );
-  assert!(
-    workflow.contains("--input-dir \"${RUNNER_TEMP}/oxibelt-performance-artifacts\""),
-    "summary job should pass the downloaded artifact directory"
-  );
-  assert!(
-    workflow.contains("--output-dir \"${RUNNER_TEMP}/oxibelt-performance-comparison\""),
-    "summary job should pass the comparison output directory"
-  );
-  assert!(
-    workflow.contains("--expected-shards 20"),
-    "summary job should expect the expanded 20-shard performance matrix"
-  );
-  assert!(
-    summary_job.contains("--expected-target-cpus x86-64-v2,x86-64-v3"),
-    "summary job should expect the benchmarked AMD64 target CPUs"
-  );
-  assert!(
-    !summary_job.contains("--expected-target-cpus x86-64-v2,x86-64-v3,x86-64-v4"),
-    "summary job should not require x86-64-v4 benchmark artifacts"
-  );
-  assert!(
-    workflow.contains("--baseline-report \"${BASELINE_REPORT}\""),
-    "summary job should pass the previous report to the aggregate binary when available"
-  );
-  assert!(
-    workflow.contains("--baseline-context \"${BASELINE_CONTEXT}\""),
-    "summary job should pass baseline selection metadata to the aggregate binary"
-  );
-  assert!(
-        summary_job.contains("PERFORMANCE_ACCEPTED_REGRESSION_REASON:")
-            && summary_job
-                .contains("inputs['performance_accepted_regression_reason']")
-            && summary_job
-                .contains("aggregate_args+=(--accepted-regression-reason \"${PERFORMANCE_ACCEPTED_REGRESSION_REASON}\")"),
-        "summary job should pass explicit accepted-regression reasons to the aggregate binary"
-    );
-  assert!(
-    workflow.contains("name: Evaluate Docker performance regression gates"),
-    "summary job should evaluate median regression gates after aggregation"
-  );
-  assert!(
-    workflow.contains("gate_status=\"$(jq -r '.regression_gates.status // \"unknown\"'"),
-    "summary job should read the regression gate status from the comparison JSON"
-  );
-  assert!(
-        workflow.contains("OXIBELT_ACTIONS_VARS_JSON: ${{ toJSON(vars) }}")
-            && workflow.contains("actions_var_or_default()")
-            && workflow.contains("OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=\"$(actions_var_or_default OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE warn)\"")
-            && !workflow.contains("vars['OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE']")
-            && workflow.matches("unset OXIBELT_ACTIONS_VARS_JSON").count() >= 2
-            && workflow.contains("external_diagnostic_count=\"$(jq -r '[.external_benchmarks[]? | select((.classification // \"\") == \"benchmark_infrastructure_diagnostic\")")
-            && workflow.contains("::warning title=External benchmark diagnostic::")
-            && workflow.contains("external_failure_count=\"$(jq -r '[.external_benchmarks[]? | select((.classification // \"\") != \"benchmark_infrastructure_diagnostic\") | (.fail_count // 0)] | add // 0'")
-            && workflow.contains("::warning title=External benchmark validation::")
-            && workflow.contains("::error title=External benchmark validation gate::")
-            && workflow.contains("if [[ \"${OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE}\" == \"fail\" ]]; then"),
-        "summary job should split cross-comparator external diagnostics from real external benchmark failures"
-    );
-  assert!(
-        workflow.contains("OXIBELT_PERF_DIAGNOSTIC_GATE_MODE=\"$(actions_var_or_default OXIBELT_PERF_DIAGNOSTIC_GATE_MODE warn)\"")
-            && !workflow.contains("vars['OXIBELT_PERF_DIAGNOSTIC_GATE_MODE']")
-            && summary_job.contains("unset OXIBELT_ACTIONS_VARS_JSON")
-            && workflow.contains("profile_environment_count=\"$(jq -r '[.profiling[]? | select((.classification // \"\") == \"profiling_environment_unavailable\")")
-            && workflow.contains("profiling unavailable in the current environment for ${profile_environment_count} comparator group(s): perf record failed with status 255")
-            && workflow.contains("profile_failure_count=\"$(jq -r '[.profiling[]? | select((.classification // \"\") != \"profiling_environment_unavailable\") | (.fail_count // 0)] | add // 0'")
-            && workflow.contains("::warning title=Docker performance diagnostic profiling::Docker performance diagnostic profiling reported ${profile_failure_count} unavailable sample(s); see performance-comparison.md")
-            && workflow.contains("::error title=Docker performance diagnostic profiling gate::")
-            && workflow.contains("if [[ \"${OXIBELT_PERF_DIAGNOSTIC_GATE_MODE}\" == \"fail\" ]]; then")
-            && !workflow.contains(".profiling[]? | select((.fail_count // 0) > 0) | \"::warning title=Docker performance diagnostic profiling::\" + .comparator"),
-        "summary job should split profiling environment diagnostics from real diagnostic profiling failures"
-    );
-  assert!(
-        workflow.contains("missing_expected_count=\"$(jq -r '(.artifact_discovery.missing_expected_paths // []) | length'")
-            && workflow.contains("::warning title=Docker performance missing expected result::")
-            && workflow.contains("sample quorum decides whether this blocks"),
-        "summary job should keep missing expected paths as warning evidence and let quorum decide whether they block"
-    );
-  assert!(
-    workflow.contains("quorum_status=\"$(jq -r '.quorum.status // \"unknown\"'")
-      && workflow.contains("::error title=Docker performance insufficient evidence::")
-      && workflow.contains("Docker performance sample quorum failed with status"),
-    "summary job should fail on insufficient evidence reported by sample quorum"
-  );
-  assert!(
-    summary_job.contains("runtime_direct_h1_gate_errors=\"$(jq -c '")
-      && summary_job.contains("if .profile == \"benchmark\" then")
-      && summary_job.contains("def runtime_direct_h1_key:")
-      && summary_job.contains("\"h1|h1|compio\"")
-      && summary_job.contains("\"h2|h2|compio\"")
-      && summary_job.contains("\"h3|h3|compio\"")
-      && summary_job.contains("\"post-1k-json-h2|h2|tokio_hyper\"")
-      && summary_job.contains("\"chunked-post-16k-h1|h1|tokio_hyper\"")
-      && summary_job.contains("(.runtime_direct_h1_comparisons // null) as $actual")
-      && summary_job.contains("if ($actual | type) != \"array\" then")
-      && summary_job.contains("if ($matches | length) == 0 then")
-      && summary_job.contains("elif ($matches | length) > 1 then")
-      && summary_job.contains("elif ($matches[0].status // \"unknown\") != \"pass\" then")
-      && summary_job.contains("runtime_direct_h1_comparisons contains an unexpected row")
-      && summary_job.contains("::error title=Runtime direct-H1 acceptance gate::")
-      && summary_job.contains(
-        "Runtime direct-H1 benchmark acceptance gate reported ${runtime_direct_h1_failure_count} invalid comparison row condition(s)"
-      )
-      && summary_job.contains("if (( runtime_direct_h1_failure_count > 0 )); then")
-      && !summary_job.contains(".runtime_direct_h1_comparisons[]?"),
-    "summary job should require exactly the five passing runtime direct-H1 benchmark comparisons without gating other profiles"
-  );
-  assert!(
-    workflow.contains(".artifact_discovery.unsupported_cpu.count // 0"),
-    "summary job should surface unsupported AMD64 v3 benchmark runner counts"
-  );
-  assert!(
-    workflow.contains("Docker performance produced no results.json files"),
-    "summary job should fail when every benchmark runner produced only unsupported CPU markers"
-  );
-  assert!(
-    workflow.contains("Docker performance regression gates failed with status"),
-    "summary job should fail when median regression gates report violations"
-  );
-  assert!(
-        workflow.contains("cat \"${RUNNER_TEMP}/oxibelt-performance-comparison/performance-comparison.md\" >> \"${GITHUB_STEP_SUMMARY}\""),
-        "summary job should append the markdown comparison to the run summary"
-    );
-  assert!(
-    workflow.contains("performance-delta.md"),
-    "summary job should append and upload the baseline delta report when it is produced"
-  );
-  assert!(
-    workflow.contains("name: oxibelt-docker-performance-${{ env.PERFORMANCE_PROFILE }}-comparison"),
-    "summary job should upload a profile-scoped comparison artifact"
-  );
-}
-
-#[test]
-fn runtime_direct_h1_workflow_gate_requires_the_exact_benchmark_evidence_set() {
-  let workflow = workflow_text();
-  let parsed: serde_json::Value =
-    serde_saphyr::from_str(&workflow).expect("check workflow should parse as YAML");
-  let gate_script = parsed
-    .pointer("/jobs/docker-performance-summary/steps")
-    .and_then(serde_json::Value::as_array)
-    .and_then(|steps| {
-      steps.iter().find_map(|step| {
-        (step.get("name").and_then(serde_json::Value::as_str)
-          == Some("Evaluate Docker performance regression gates"))
-        .then(|| step.get("run").and_then(serde_json::Value::as_str))
-        .flatten()
-      })
-    })
-    .expect("Docker performance summary should expose its regression-gate script");
-  let temp_dir = tempfile::Builder::new()
-    .prefix("oxibelt-runtime-direct-h1-gate-")
-    .tempdir()
-    .expect("runtime direct-H1 gate temp directory should be creatable");
-  let report_dir = temp_dir.path().join("oxibelt-performance-comparison");
-  fs::create_dir_all(&report_dir).expect("performance report directory should be creatable");
-  let report_path = report_dir.join("performance-comparison.json");
-
-  let passing_rows = serde_json::json!([
-    {
-      "workload": "h1",
-      "protocol": "h1",
-      "expected_experiment_backend": "compio",
-      "status": "pass"
-    },
-    {
-      "workload": "h2",
-      "protocol": "h2",
-      "expected_experiment_backend": "compio",
-      "status": "pass"
-    },
-    {
-      "workload": "h3",
-      "protocol": "h3",
-      "expected_experiment_backend": "compio",
-      "status": "pass"
-    },
-    {
-      "workload": "post-1k-json-h2",
-      "protocol": "h2",
-      "expected_experiment_backend": "tokio_hyper",
-      "status": "pass"
-    },
-    {
-      "workload": "chunked-post-16k-h1",
-      "protocol": "h1",
-      "expected_experiment_backend": "tokio_hyper",
-      "status": "pass"
+fn workflows_leave_benchmark_execution_and_gates_to_local_tools() {
+  let workflow_dir = repo_root().join(".github/workflows");
+  for entry in fs::read_dir(workflow_dir).expect("workflow directory should be readable") {
+    let path = entry.expect("workflow entry should be readable").path();
+    if !matches!(
+      path.extension().and_then(|ext| ext.to_str()),
+      Some("yml" | "yaml")
+    ) {
+      continue;
     }
-  ]);
-  let run_case = |profile: &str, rows: serde_json::Value| {
-    let report = serde_json::json!({
-      "profile": profile,
-      "artifact_discovery": {
-        "results_files": 1,
-        "unsupported_cpu": {"count": 0},
-        "missing_expected_paths": []
-      },
-      "quorum": {"status": "pass", "violations": []},
-      "runtime_direct_h1_comparisons": rows,
-      "external_benchmarks": [],
-      "profiling": [],
-      "regression_gates": {"status": "pass", "violations": []}
-    });
-    fs::write(
-      &report_path,
-      serde_json::to_vec(&report).expect("performance report fixture should serialize"),
-    )
-    .expect("performance report fixture should be writable");
-    Command::new("bash")
-      .arg("-e")
-      .arg("-u")
-      .arg("-o")
-      .arg("pipefail")
-      .arg("-c")
-      .arg(gate_script)
-      .current_dir(repo_root())
-      .env("RUNNER_TEMP", temp_dir.path())
-      .env("OXIBELT_ACTIONS_VARS_JSON", "{}")
-      .output()
-      .expect("runtime direct-H1 workflow gate should execute")
-  };
+    let text = fs::read_to_string(&path).expect("workflow should be readable");
+    let parsed: serde_json::Value =
+      serde_saphyr::from_str(&text).expect("workflow should parse as YAML");
+    let jobs = parsed["jobs"]
+      .as_object()
+      .expect("workflow should contain jobs");
+    for job_id in BENCHMARK_ONLY_JOBS {
+      assert!(
+        !jobs.contains_key(*job_id),
+        "{} must not define {job_id}",
+        path.display()
+      );
+    }
+    if let Some(inputs) = parsed
+      .pointer("/on/workflow_dispatch/inputs")
+      .and_then(|v| v.as_object())
+    {
+      for name in inputs.keys() {
+        assert!(
+          !name.starts_with("performance_") && !name.starts_with("aggressive_long_run"),
+          "{} must not expose benchmark input {name}",
+          path.display()
+        );
+      }
+    }
+    for forbidden in [
+      "run-proxy-performance.sh",
+      "run-simd-microbench.sh",
+      "check-proxy-performance-h3-gate.sh",
+      "check-performance-aggregate-incomplete-gate.sh",
+      "build-performance-comparator-image-artifact.sh",
+      "build-performance-probe-image-artifact.sh",
+      "build-external-benchmark-image-artifact.sh",
+      "copy-performance-summary-input-artifacts.sh",
+      "oxibelt-performance-aggregate",
+      "oxibelt-docker-performance-",
+      "OXIBELT_PERF_",
+      "cargo bench",
+      "perf record",
+    ] {
+      assert!(
+        !text.contains(forbidden),
+        "{} must not invoke or configure {forbidden}",
+        path.display()
+      );
+    }
+    for (job_id, job) in jobs {
+      let needs = match &job["needs"] {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::String(need) => vec![need.as_str()],
+        serde_json::Value::Array(needs) => needs
+          .iter()
+          .map(|need| need.as_str().expect("dependency should be a job ID"))
+          .collect(),
+        _ => panic!("{job_id} has invalid dependencies"),
+      };
+      for need in needs {
+        assert!(
+          jobs.contains_key(need),
+          "{} job {job_id} depends on missing job {need}",
+          path.display()
+        );
+      }
+    }
+  }
 
-  let passing = run_case("benchmark", passing_rows.clone());
-  assert!(
-    passing.status.success(),
-    "the exact five passing benchmark rows should pass: {}",
-    String::from_utf8_lossy(&passing.stderr)
-  );
-
-  let absent = run_case("benchmark", serde_json::json!([]));
-  assert!(
-    !absent.status.success(),
-    "an empty runtime direct-H1 benchmark comparison set must fail closed"
-  );
-  assert!(
-    String::from_utf8_lossy(&absent.stderr)
-      .contains("reported 5 invalid comparison row condition(s)"),
-    "the empty-set failure should report every missing required tuple"
-  );
-
-  let mut duplicate = passing_rows.clone();
-  duplicate
-    .as_array_mut()
-    .expect("passing rows should be an array")
-    .push(passing_rows[0].clone());
-  let duplicate_output = run_case("benchmark", duplicate);
-  assert!(
-    !duplicate_output.status.success(),
-    "a duplicate required benchmark tuple must fail closed"
-  );
-
-  let mut non_pass = passing_rows.clone();
-  non_pass[0]["status"] = serde_json::json!("missing_evidence");
-  let non_pass_output = run_case("benchmark", non_pass);
-  assert!(
-    !non_pass_output.status.success(),
-    "a required non-pass benchmark tuple must fail closed"
-  );
-
-  let smoke = run_case("smoke", serde_json::json!([]));
-  assert!(
-    smoke.status.success(),
-    "non-benchmark profiles should remain outside the dedicated runtime direct-H1 gate: {}",
-    String::from_utf8_lossy(&smoke.stderr)
-  );
-}
-
-#[test]
-fn docker_aggressive_long_run_is_scheduled_and_manual_only() {
-  let workflow = workflow_text();
-  let jobs = parse_jobs(&workflow);
-  let long_run = jobs
-    .get("docker-aggressive-long-run")
-    .expect("workflow should define docker-aggressive-long-run");
-
-  assert!(
-    workflow.contains("schedule:") && workflow.contains("cron: \"0 0 * * *\""),
-    "workflow should schedule the aggressive long-run at 00:00 UTC"
-  );
-  for input in [
-    "aggressive_long_run:",
-    "aggressive_long_run_seconds:",
-    "aggressive_long_run_concurrency:",
-  ] {
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow_text()).expect("check workflow should parse as YAML");
+  for trigger in ["push", "pull_request", "schedule", "workflow_dispatch"] {
     assert!(
-      workflow.contains(input),
-      "workflow_dispatch should expose {input}"
+      parsed["on"].get(trigger).is_some(),
+      "normal validation should retain {trigger}"
     );
   }
   assert_eq!(
-    long_run.needs,
-    vec!["docker-performance".to_owned()],
-    "aggressive long-run should start after the Docker performance matrix"
+    parsed["on"]["schedule"],
+    serde_json::json!([{ "cron": "0 0 * * *" }])
   );
-  assert!(
-        workflow.contains("if: needs.docker-performance.result == 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run']))"),
-        "aggressive long-run should run only after successful Docker performance on schedule or explicit manual dispatch"
-    );
-  assert!(
-    workflow.contains("timeout-minutes: 360"),
-    "aggressive long-run should fit within GitHub-hosted runner limits"
-  );
-  assert!(
-        workflow.contains("AGGRESSIVE_LONG_RUN_SECONDS: ${{ github.event_name == 'workflow_dispatch' && inputs['aggressive_long_run_seconds'] || '18000' }}"),
-        "aggressive long-run should default to a five-hour scheduled soak"
-    );
-  assert!(
-    workflow.contains("OXIBELT_PERF_OXIBELT_AGGRESSIVE_SCENARIO: baseline-aggressive-long-run"),
-    "aggressive long-run should use the connect-stable OxiBelt fixture"
-  );
-  assert!(
-    workflow.contains("tests/scripts/select-amd64-docker-image-artifact.sh x86-64-v3"),
-    "aggressive long-run should force the x86-64-v3 image artifact"
-  );
-  assert!(
-    workflow.contains("manually rerun this job to get a different runner"),
-    "aggressive long-run should fail loudly and ask for a rerun when v3 is unavailable"
-  );
-  assert!(
-    workflow
-      .contains("OXIBELT_AMD64_TARGET_CPU: ${{ steps.select-amd64-image.outputs.target_cpu }}"),
-    "aggressive long-run should record the AMD64 target CPU in its summary"
-  );
-  assert!(
-    workflow.contains("--serving-type oxibelt-aggressive-long-run"),
-    "aggressive long-run should call the dedicated performance serving type"
-  );
-  assert!(
-    workflow.contains(
-      "cat \"${RUNNER_TEMP}/oxibelt-aggressive-long-run/summary.md\" >> \"${GITHUB_STEP_SUMMARY}\""
-    ),
-    "aggressive long-run should append its run summary to the GitHub step summary"
-  );
-  assert!(
-    workflow.contains("name: oxibelt-docker-aggressive-long-run-${{ github.run_id }}"),
-    "aggressive long-run should upload a dedicated artifact"
-  );
-  assert!(
-    !workflow.contains("          - oxibelt-aggressive-long-run"),
-    "aggressive long-run should not be part of the default docker-performance matrix"
+  assert_eq!(
+    parsed["on"]["workflow_dispatch"]["inputs"]
+      .as_object()
+      .expect("manual inputs should remain")
+      .keys()
+      .map(String::as_str)
+      .collect::<Vec<_>>(),
+    vec!["submit_dependency_snapshots"],
+    "manual validation should retain only the existing dependency snapshot opt-in"
   );
 }

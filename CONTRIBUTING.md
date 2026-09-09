@@ -81,6 +81,10 @@ Performance-related changes may also need:
 tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,nginx,caddy
 ```
 
+Performance, profiling, baseline comparison, and long-load coverage run locally;
+see [Performance](docs/Performance.md) for profiles, outputs, and threshold
+interpretation.
+
 If a command must be run from `source/`, say so explicitly in the command block
 or pull request notes.
 
@@ -434,11 +438,11 @@ validation graph without path-based skipping. The stable
 `PR non-benchmark summary` check observes every required Rust, security,
 container, Kubernetes, integration, signer, and browser job and fails when a
 dependency fails, is cancelled, or is unexpectedly skipped. Comparative
-performance, profiling, baseline, and long-load jobs remain scheduled or
-manually dispatched and start only after the same workflow run passes the
-non-benchmark summary. Pull-request image scans may generate and upload local
-dependency snapshot artifacts, but only a trusted default-branch push,
-schedule, or explicitly opted-in manual run may submit them to GitHub.
+performance, profiling, baseline, and long-load coverage is local-only; it is
+not scheduled or dispatched from `check-oxibelt`. Pull-request image scans may
+generate and upload local dependency snapshot artifacts, but only a trusted
+default-branch push, schedule, or explicitly opted-in manual run may submit
+them to GitHub.
 
 Release-like tags are governed by the tracked
 `devops/config/github-release-tag-ruleset.json` policy. Tag creation requires
@@ -458,8 +462,8 @@ queries the newest attempt of the canonical default-branch `Check OxiBelt`
 push for that exact commit. It accepts only the single successful terminal
 summary and its GitHub Actions check identity; failed, cancelled, skipped,
 missing, duplicate, stale, or mismatched evidence blocks release metadata,
-image publication, attestations, manifests, and alias promotion. Benchmark
-jobs and dependency-snapshot submission remain outside the release
+image publication, attestations, manifests, and alias promotion. Local benchmark
+evidence and dependency-snapshot submission remain outside the release
 prerequisite.
 
 If TypeScript DevOps tooling is added, CI should run its typecheck, lint, and
