@@ -760,6 +760,33 @@ mixing dependency generations.
    configuration revision, and a representative request before completing the
    rollout. Run any additional commands in the target release entry.
 
+### Current development dependency refresh
+
+Development after the `0.9.2` source cut refreshes the locked Rust and pnpm
+dependency graphs, including `oxibeltctl`'s `der` dependency from `0.8.1` to
+`0.8.2`, the hash-pinned pnpm toolchain to `11.26.0`, and oxlint to `1.82.0`.
+This refresh preserves executable names, command-line contracts, image roles,
+and the native configuration schema; it requires no configuration or
+persisted-state migration. Build each target from its complete source revision
+and lockfiles, and retain the previous complete immutable artifacts for
+rollback. These development changes do not amend the historical `0.9.2`
+release entry or establish a new supported release target.
+
+The Gateway API graduation target advances from `v1.6.1` to `v1.6.2`, standard
+channel, with required resources still served as `v1`. Before rolling out a
+controller built from this development revision, verify the standard CRD
+bundle against the SHA-256 pinned in the
+[graduation registry](../devops/config/kubernetes-feature-graduation.json),
+then apply it and wait for the CRDs to become established. Gateway API CRDs
+remain operator-owned. Upgrade the controller before its selected data plane;
+roll back the data plane before the controller, and never downgrade or delete
+the CRDs as an implicit Helm rollback. The integration remains `experimental`,
+with the same Kubernetes `1.34`–`1.37` and Helm `3.21.4`/`4.2.4` graduation
+targets described in [KubernetesSupport.md](KubernetesSupport.md).
+
+The NGINX `1.31.5` update applies only to the benchmark comparator image. It
+does not change an OxiBelt release-image role or require an operator migration.
+
 ### AWS-LC feature selection for mutation signing
 
 Builds of `oxibeltctl` with `mutation-pqc` use the stable ML-DSA signature APIs
