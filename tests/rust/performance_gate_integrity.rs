@@ -1857,6 +1857,13 @@ fn pool_concurrency_serving_type_runs_controlled_diagnostic_matrix() {
   let experiment_function =
     extract_bash_function(&script, "run_pool_concurrency_experiments_group");
 
+  assert!(
+    script.contains(
+      "oxibelt_baseline_scenario=\"${OXIBELT_PERF_OXIBELT_BASELINE_SCENARIO:-baseline-pool-512}\""
+    ),
+    "ordinary performance runs should use the 512-connection benchmark fixture"
+  );
+
   for expected in [
     "OXIBELT_PERF_POOL_CAPS",
     "OXIBELT_PERF_POOL_CONCURRENCY_PRESETS",
