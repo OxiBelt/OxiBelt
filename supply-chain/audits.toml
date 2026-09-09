@@ -547,6 +547,12 @@ criteria = "safe-to-deploy"
 delta = "0.4.13 -> 0.4.14"
 notes = "Reviewed the complete checksum-matched 0.4.13-to-0.4.14 source delta; it only adds compile-time Streamlined NTRU Prime size aliases and their ArraySize implementations, with no runtime code, unsafe change, build script, or external side effect."
 
+[[audits.hybrid-array]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.4.14 -> 0.4.15"
+notes = "Reviewed the checksum-matched production delta: the only functional change adds the U513 ArraySize mapping. Runtime layout, unsafe implementations, features, licenses, and build-time capabilities are unchanged."
+
 [[audits.hyper]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -570,6 +576,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "2.14.1 -> 2.14.2"
 notes = "Reviewed the complete checksum-matched collection delta. Macro hygiene prevents an internal capacity constant from shadowing caller names and empty const initialization is additive; hash-table indexing, allocation, and unsafe boundaries are unchanged."
+
+[[audits.io-uring]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.7.14 -> 0.7.15"
+notes = "Reviewed the checksum-matched source delta and selected Compio call boundary. CQ eventfd controls atomically change only the documented flag, optional write-stream fields default to zero, and submission acquires shared flags and requests GETEVENTS for deferred task work without bypassing SQPOLL wake-up ordering. Existing kernel-buffer ownership, error propagation, build script, and licenses are preserved."
 
 [[audits.ipnet]]
 who = "OpenAI Codex"
@@ -823,6 +835,12 @@ criteria = "safe-to-deploy"
 delta = "0.5.6 -> 0.5.7"
 notes = "Reviewed the checksum-matched waiter delta. It changes wake-registration bookkeeping and benchmarks while retaining weak-waker reclamation and wake-after-lock-release behavior; no unsafe code, build script, filesystem, network, or process capability is added."
 
+[[audits.kio]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.5.7 -> 0.5.8"
+notes = "Reviewed the checksum-matched production delta. The new heap-size estimator is compile-time metadata unused by OxiBelt; waiter capacity, synchronization, ownership, and allocation behavior are unchanged. Added allocation and footprint checks are test-only, and no unsafe code, build script, or external capability is added."
+
 [[audits.kube]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -1063,6 +1081,24 @@ criteria = "safe-to-deploy"
 delta = "0.2.7 -> 0.2.8"
 notes = "Reviewed the complete checksum-matched portability delta. Arc::map reuses allocations only under the existing ownership guards, ThreadSanitizer handling is tightened, and the Rust 1.36 minimum remains below OxiBelt's Rust 1.98 floor."
 
+[[audits.precis-core]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.1.11 -> 0.2.0"
+notes = "Reviewed the checksum-matched source delta, context bounds, and bundled Unicode table generation with networking disabled. Internal API and character-indexing changes preserve the bounded OpaqueString boundary used by TURN. Differential evaluation of 4,448,274 synthetic inputs against the prior profiles/core graph produced identical acceptance and normalized output; 88 focused TURN tests passed. No unsafe or FFI capability is added; MIT OR Apache-2.0 licensing is unchanged."
+
+[[audits.precis-profiles]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.1.13 -> 0.1.14"
+notes = "Reviewed the checksum-matched profile, mapping, LazyLock, and Unicode 17 data delta with optional networking disabled. OxiBelt uses only byte-bounded OpaqueString enforcement for TURN credentials, realms, USERHASH, and long-term keys. All 4,448,274 differential scalar/context/boundary records matched the prior graph byte-for-byte, and 88 TURN tests passed. Other profiles are outside the selected OxiBelt path; no unsafe or FFI capability is added."
+
+[[audits.precis-tools]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.1.9 -> 0.1.10"
+notes = "Reviewed the checksum-matched generator delta. Invalid code points are skipped instead of panicking, LazyLock replaces lazy_static, and generated tables remain derived from checksum-bound packaged Unicode resources under Cargo OUT_DIR. Optional networking is disabled, no unsafe or FFI code or build script is added, and the production build plus OpaqueString differential corpus passed."
+
 [[audits.proc-macro2]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -1152,6 +1188,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.4.16 -> 0.4.18"
 notes = "Reviewed the complete checksum-matched 0.4.16-to-0.4.18 source delta; meta-regex cache pools gain an explicit capacity with a positive minimum and an available-parallelism default, and cloned regexes preserve that setting. Existing UnsafeCell ownership, thread-ID exclusivity, Send and Sync invariants, search engines, and input bounds are unchanged, and the crate adds no build script or external side effects."
+
+[[audits.reqwest]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.13.4 -> 0.13.5"
+notes = "Reviewed the checksum-matched production delta and the selected object_store client boundary. Pinned read deadlines reset after successful frames, DNS errors retain typed sources, and proxy headers come only from the first matching proxy used by the connector. Rustls trust and connector policy are unchanged; new TLS-version metadata and HTTP/1 header-limit setters do not alter defaults. Blocking, cookie, Hickory, and WASM changes are outside the selected feature set. The base64 edge reuses the already admitted 0.23.1 line; build and license policy are unchanged."
 
 [[audits.rustls]]
 who = "OpenAI Codex"
@@ -1465,6 +1507,12 @@ criteria = "safe-to-deploy"
 delta = "0.8.55 -> 0.8.56"
 notes = "Reviewed the complete checksum-matched 0.8.55-to-0.8.56 source delta. Runtime representation, alignment, initialization, pointer, and SIMD logic is unchanged; the only production edit removes a verification-only cfg from an alloc import and advances the separately audited derive dependency. No build script or external side effect is added."
 
+[[audits.zerocopy]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.8.56 -> 0.8.57"
+notes = "Reviewed the checksum-matched source delta and independently checked the try_transmute ownership proof. Equal-size CastSizedExact preserves live initialized source bytes, destination validity is checked before an unaligned read, ManuallyDrop prevents duplicate ownership on success, and failure returns the original source including bytes that would be destination padding. Build-script changes only declare a test cfg; selected SIMD behavior and licensing are unchanged."
+
 [[audits.zerocopy-derive]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -1476,6 +1524,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.8.55 -> 0.8.56"
 notes = "Reviewed the complete checksum-matched 0.8.55-to-0.8.56 proc-macro delta. The crate attribute now accepts validated absolute, crate-relative, self-relative, and super-relative module paths, rejects malformed keyword placement, and absolutizes only external paths; generated layout and conversion proofs are otherwise unchanged. The macro contains no unsafe code or external side effects."
+
+[[audits.zerocopy-derive]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.8.56 -> 0.8.57"
+notes = "Reviewed the checksum-matched proc-macro delta. KnownLayout pointer metadata dispatch is fully trait-qualified to avoid inherent-method shadowing; the remaining emitted-code changes suppress generated debug lints without changing layout or validity conditions. Added hygiene tests cover ambiguous associated paths; no build script, unsafe code, or external I/O is added."
 
 [[audits.zlib-rs]]
 who = "OpenAI Codex"

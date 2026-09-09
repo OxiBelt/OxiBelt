@@ -27,7 +27,7 @@ clap.workspace = true
 crc32fast.workspace = true
 flate2.workspace = true
 getrandom.workspace = true
-der = "0.8.1"
+der = "0.8.2"
 http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["server"] }

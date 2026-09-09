@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-09-07",
+  "reviewedOn": "2026-09-09",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "9c710c9b948879e5c06084a4622cdb90868006e476bb4b7458f45d7493bd71f0",
+      "lockfileSha256": "462b48abc9c1d35035229397f59aa6347222c69af6e63cb77ff1cb4e14134a5c",
       "exemptionInventorySha256": "bd21e1575dce0d01e19bb0741a9e09da3f666de87814c5740a645fe920d5ee5a",
       "exemptedPackageVersions": 456
     },
@@ -104,7 +104,7 @@
           "hyper": ["1.11.1"],
           "hyper-rustls": ["0.27.9"],
           "hyper-util": ["0.1.20"],
-          "kio": ["0.5.7"],
+          "kio": ["0.5.8"],
           "quinn": ["0.11.11"],
           "quinn-proto": ["0.11.17"],
           "quinn-udp": ["0.5.15"],
@@ -133,9 +133,9 @@
       {
         "category": "credential-internationalization",
         "packages": {
-          "precis-core": ["0.1.11"],
-          "precis-profiles": ["0.1.13"],
-          "precis-tools": ["0.1.9"],
+          "precis-core": ["0.2.0"],
+          "precis-profiles": ["0.1.14"],
+          "precis-tools": ["0.1.10"],
           "regex-lite": ["0.1.9"],
           "ucd-parse": ["0.1.13"]
         },
@@ -212,24 +212,24 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:9c710c9b948879e5c06084a4622cdb90868006e476bb4b7458f45d7493bd71f0",
+      "subject": "Cargo.lock@sha256:462b48abc9c1d35035229397f59aa6347222c69af6e63cb77ff1cb4e14134a5c",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. The development-only proptest graph adds exact rand 0.9, rand_chacha 0.9, and rand_core 0.9 lines tracked by https://github.com/OxiBelt/OxiBelt/issues/172; any further line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-09-03",
+      "reviewedOn": "2026-09-09",
       "expiresOn": "2026-10-19"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:9c710c9b948879e5c06084a4622cdb90868006e476bb4b7458f45d7493bd71f0",
+      "subject": "Cargo.lock@sha256:462b48abc9c1d35035229397f59aa6347222c69af6e63cb77ff1cb4e14134a5c",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-09-03",
+      "reviewedOn": "2026-09-09",
       "expiresOn": "2026-10-19"
     },
     {

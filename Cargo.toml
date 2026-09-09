@@ -35,7 +35,7 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-aws-lc-rs = { version = "1.18.0", default-features = false }
+aws-lc-rs = { version = "1.18.1", default-features = false }
 bytes = "1.12.1"
 clap = { version = "4.6.6", features = ["derive"] }
 crc32fast = "1.5.1"
@@ -62,9 +62,9 @@ openssl-sys = { version = "0.9.117", features = ["vendored"] }
 openssl-probe = "0.2.1"
 object_store = { version = "=0.14.1", default-features = false, features = ["aws", "fs"] }
 pretty_assertions = "1.4.1"
-precis-profiles = { version = "0.1.13", default-features = false }
+precis-profiles = { version = "0.1.14", default-features = false }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
-rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
+rustls = { version = "0.23.44", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
 rustix = { version = "1.1.4", features = ["net", "process", "std"] }
 sequoia-openpgp = { version = "=2.4.1", default-features = false, features = ["crypto-openssl"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -74,8 +74,8 @@ sha2 = "0.11.0"
 strsim = "0.11.1"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
-toml = "1.1.4"
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
+toml = "1.1.5"
 toml_edit = "0.25.13"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std"] }
