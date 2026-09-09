@@ -213,6 +213,113 @@ For schema `32`, the H2C and TLS-H2 diagnostics retain the one-slot direct-H2 ca
 
 Upstream-H1 remains the comparison for the separate promotion evidence introduced in schema `24`. A single local matched contention run is falsification evidence, not an enablement decision. Keep direct-H2 guarded, default-disabled, and at its existing slot cap unless repeated representative H2/H3 runs show durable throughput and tail-latency gains with a materially useful hit rate and no semantic or resource regression.
 
+## Local Campaigns
+
+`tests/scripts/run-local-performance-campaign.sh` runs the five acceptance
+groups as a serialized local campaign: `reverse-proxy`, `static-files`,
+`oxibelt-features`, `remote-signer`, and `oxibelt-soak-stress`. It wraps the
+existing runner without changing its duration, warmup, concurrency, or soak
+defaults. Common reverse-proxy and static-file runs always use OxiBelt, nginx,
+Caddy, and OpenResty; the other three groups use only OxiBelt.
+
+The campaign requires a JSON image manifest. It does not build images during
+measurement. The prebuilt aggregate executable is also required before a
+`benchmark`, `aggregate`, or `all` phase; use `--aggregate-bin` or
+`OXIBELT_PERF_AGGREGATE_COMMAND` to select it.
+
+```json
+{
+  "schema_version": 1,
+  "common": {
+    "perf_probe_image": "oxibelt/perf-probe:campaign",
+    "external_benchmark_image": "oxibelt/external-benchmarks:campaign"
+  },
+  "targets": {
+    "x86-64-v2": {
+      "oxibelt_image": "oxibelt:alpine-musl-amd64v2",
+      "keysigner_image": "oxibelt-keysigner:alpine-musl-amd64v2",
+      "oxibelt_contract": "images/oxibelt-alpine-musl-amd64v2-artifact-contract.json",
+      "keysigner_contract": "images/oxibelt-keysigner-alpine-musl-amd64v2-artifact-contract.json",
+      "nginx_image": "oxibelt/performance-nginx:alpine-x86-64-v2",
+      "caddy_image": "oxibelt/performance-caddy:alpine-x86-64-v2",
+      "openresty_image": "oxibelt/performance-openresty:alpine-x86-64-v2"
+    },
+    "x86-64-v3": {
+      "oxibelt_image": "oxibelt:alpine-musl-amd64",
+      "keysigner_image": "oxibelt-keysigner:alpine-musl-amd64",
+      "oxibelt_contract": "images/oxibelt-alpine-musl-amd64-artifact-contract.json",
+      "keysigner_contract": "images/oxibelt-keysigner-alpine-musl-amd64-artifact-contract.json",
+      "nginx_image": "oxibelt/performance-nginx:alpine-x86-64-v3",
+      "caddy_image": "oxibelt/performance-caddy:alpine-x86-64-v3",
+      "openresty_image": "oxibelt/performance-openresty:alpine-x86-64-v3"
+    }
+  }
+}
+```
+
+Before collection, the wrapper resolves every reference through the selected
+`OXIBELT_DOCKER_COMMAND` and records image IDs, repository digests, labels, and
+creation metadata in `resolved-inputs.json`. Image references are resolved to
+their local image IDs before they reach the existing runner. It requires Linux
+AMD64 images, the expected comparator/target labels, and OxiBelt plus
+keysigner revision labels matching the clean `--source-root` commit. Each
+OxiBelt and keysigner entry also names its schema-3 artifact contract; paths
+are relative to the image manifest unless absolute. The contract must bind the
+same clean revision and source tree, role, target CPU, and local image
+identity. Classic Docker stores a config digest as the image ID. Docker's
+containerd image store can instead expose an OCI manifest digest as the image
+ID; the wrapper accepts that form only when the recorded OCI manifest
+descriptor has the exact media type and digest bound by both contract digest
+fields. The inspected descriptor, complete contract document, and contract
+SHA-256 are retained in the resolved inputs. Before aggregation, the wrapper
+rechecks the recorded source checkout plus the SHA-256 of the wrapper, runner,
+and aggregate executable.
+
+Run the full campaign with its immutable source checkout and explicit images:
+
+```sh
+tests/scripts/run-local-performance-campaign.sh \
+  --phase all \
+  --source-root /path/to/clean/OxiBelt \
+  --inputs /path/to/performance-images.json \
+  --aggregate-bin /path/to/oxibelt-performance-aggregate \
+  --campaign-dir /tmp/oxibelt-performance-campaign
+```
+
+`smoke` runs one iteration per target and group. `benchmark` runs five isolated
+iterations per target and group. `all` performs both phases, then aggregates
+the complete benchmark campaign twice: once with `x86-64-v2` primary and once
+with `x86-64-v3` primary. Both reports use `--expected-runs 5` and
+`--expected-shards 1`; the wrapper requires schema `33`, passing quorum,
+passing regression gates, and inactive accepted-regression state. A supplied
+baseline report must meet the same conditions, so a failed or accepted report
+cannot become a passing baseline. A two-target campaign requires a prior
+campaign root with both target-primary reports; a single report is accepted
+only when its primary target matches the campaign being aggregated.
+
+The campaign fixes the runner's primary regression gate to `fail` and requires
+nginx HTTP/3. It retains the runner's default warning-only external benchmark
+classification: external h2load, oha, and wrk evidence is recorded separately
+from primary rows and does not turn an optional client-environment issue into a
+passing or failing primary comparison.
+
+For local smoke troubleshooting, limit a collection phase with repeated
+`--target-cpu` and `--group` arguments. Partial benchmark collections are
+diagnostic only and are never marked as acceptance campaigns. The wrapper
+checks every planned benchmark `results.json` before aggregation. Unplanned
+experiment paths remain the aggregate's advisory missing-path evidence. Each
+attempt has a fresh directory and failed attempts, logs, and status records are
+retained. The wrapper creates and requires an owned, non-symlinked mode-`0700`
+campaign root so copied TLS material remains private. Re-run work only in an
+explicit new `--campaign-dir`. After each attempt it removes only generated
+private-key, QUIC-host-key, and keysigner-token files from copied TLS paths;
+`restricted-receipt.json` retains their SHA-256 and byte counts while other
+configs and logs remain available for diagnosis.
+
+Raw result trees use the aggregate-recognized layout
+`<campaign>/benchmark-input/oxibelt-docker-performance-benchmark-<group>-shard-1/<target>/run-<N>/`.
+The campaign manifest, resolved inputs, and reports stay at the campaign root.
+
 ## Artifacts
 
 The runner writes:
@@ -281,7 +388,7 @@ The report displays both percent and multiplier forms, such as `90.0% of nginx` 
 
 The accept multiplier comparison report keeps `oxibelt-accept-0_5-*` and `oxibelt-accept-1_0-*` rows out of the nginx/Caddy/OpenResty tables and compares them as OxiBelt-only pairs. A lower accept multiplier can improve steady-state rows by reducing accept-loop and `SO_REUSEPORT` contention, while `accept = 1.0` can recover throughput for handshake-heavy workloads that create new TCP/TLS connections continuously. Treat this as a profile tradeoff: use the default `0.5` baseline for steady-state comparisons, and use the `baseline-accept-1` fixture or `OXIBELT_PERF_OXIBELT_HANDSHAKE_SCENARIO` for handshake-heavy investigations.
 
-nginx, Caddy, and OpenResty are measured as common reverse-proxy, cold TLS handshake, and static-file baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, TLS resumption diagnostics, remote signer IPC signing overhead, and stress scenarios is measured separately. These OxiBelt-only scenarios are not mixed into comparator ratios because they do not measure the same behavior. nginx HTTP/3 is included when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped in local `auto` mode. If `OXIBELT_NGINX_H3_MODE=required`, missing nginx HTTP/3 module support or a failed functional QUIC probe fails the run. Caddy is configured with its documented `h1 h2 h3` server protocol support and is treated as a mandatory HTTP/3 comparator. OpenResty records HTTP/3 rows as skipped because the pinned OpenResty image does not expose the nginx QUIC module in this harness; supported OpenResty H1/H2, cold TLS handshake, and static-file probe failures remain strict primary comparator failures.
+nginx, Caddy, and OpenResty are measured as common reverse-proxy, cold TLS handshake, and static-file baselines only. OxiBelt-only behavior such as WAF, CRS compatibility, cache policy, TLS resumption diagnostics, remote signer IPC signing overhead, and stress scenarios is measured separately. These OxiBelt-only scenarios are not mixed into comparator ratios because they do not measure the same behavior. nginx HTTP/3 is included when the selected image reports `--with-http_v3_module`; otherwise the HTTP/3 comparator row is recorded as skipped in local `auto` mode. If `OXIBELT_NGINX_H3_MODE=required`, missing nginx HTTP/3 module support or a failed functional QUIC probe fails the run. Caddy is configured with its documented `h1 h2 h3` server protocol support and is treated as a mandatory HTTP/3 comparator. OpenResty is also a mandatory HTTP/3 comparator in this harness; its H3 probe failures fail the run like its supported H1/H2, cold TLS handshake, and static-file probe failures.
 
 The performance fixtures raise generic connection and per-connection request caps so benchmark and soak profiles measure proxy throughput instead of exercising OxiBelt's or nginx's default limit-enforcement safeguards. Release builds use thin LTO, one codegen unit, and stripped debuginfo; `panic = "abort"` is intentionally not set so postmortem behavior stays conservative.
 
