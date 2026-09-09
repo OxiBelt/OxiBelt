@@ -19,7 +19,7 @@ into a supported-production claim.
 
 The controller and `kubernetes_immutable` data-plane pairing targets Kubernetes
 `>=1.34.0-0 <1.38.0-0`, Helm `3.21.4` and `4.2.4`, and the operator-installed
-Gateway API `v1.6.1` standard CRD bundle. The charts do not install, convert,
+Gateway API `v1.6.2` standard CRD bundle. The charts do not install, convert,
 downgrade, or delete Gateway API CRDs. Install and establish the pinned CRDs
 before the controller, then install or upgrade the data plane.
 

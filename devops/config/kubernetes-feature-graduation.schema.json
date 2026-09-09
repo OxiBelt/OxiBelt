@@ -138,7 +138,7 @@
           "properties": {
             "version": {
               "type": "string",
-              "const": "v1.6.1"
+              "const": "v1.6.2"
             },
             "channel": {
               "type": "string",
@@ -150,7 +150,7 @@
             },
             "standardInstallUrl": {
               "type": "string",
-              "const": "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml"
+              "const": "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml"
             },
             "standardInstallSha256": {
               "type": "string",

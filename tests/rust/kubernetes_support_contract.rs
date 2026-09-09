@@ -107,10 +107,10 @@ fn graduation_registry_covers_the_complete_support_contract() {
     strings(&policy["supportContract"]["helm"]["versions"]),
     BTreeSet::from(["3.21.4", "4.2.4"])
   );
-  assert_eq!(policy["supportContract"]["gatewayApi"]["version"], "v1.6.1");
+  assert_eq!(policy["supportContract"]["gatewayApi"]["version"], "v1.6.2");
   assert_eq!(
     policy["supportContract"]["gatewayApi"]["standardInstallSha256"],
-    "24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73"
+    "faede450fa178126aba41337737b97d351ebe87d93c910237ce1e072d1ca40d9"
   );
   assert_eq!(
     policy["supportContract"]["controllerDataPlaneSkew"]["defaultMode"],

@@ -38,11 +38,11 @@
       "upgradeCompatibility": "clean-install-upgrade-rollback-uninstall"
     },
     "gatewayApi": {
-      "version": "v1.6.1",
+      "version": "v1.6.2",
       "channel": "standard",
       "servedVersion": "v1",
-      "standardInstallUrl": "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.1/standard-install.yaml",
-      "standardInstallSha256": "24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73"
+      "standardInstallUrl": "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.2/standard-install.yaml",
+      "standardInstallSha256": "faede450fa178126aba41337737b97d351ebe87d93c910237ce1e072d1ca40d9"
     },
     "crdLifecycle": {
       "owner": "operator",

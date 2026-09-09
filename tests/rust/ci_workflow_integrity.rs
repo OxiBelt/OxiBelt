@@ -4077,9 +4077,9 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
   }
 
   for expected in [
-    "gateway_api_version=\"v1.6.1\"",
+    "gateway_api_version=\"v1.6.2\"",
     "gateway_api_url=\"https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml\"",
-    "gateway_api_sha256=\"24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73\"",
+    "gateway_api_sha256=\"faede450fa178126aba41337737b97d351ebe87d93c910237ce1e072d1ca40d9\"",
     "kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d",
     "kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0",
     "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
@@ -12596,11 +12596,11 @@ fn amd64_comparator_image_job_builds_cpu_level_artifacts() {
     "comparator build script should produce deterministic tags and tar names"
   );
   assert!(
-    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.4")
+    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.5")
       && nginx_dockerfile.contains(
-        "ARG NGINX_SHA256=e6f20b644a17a643f059ae6467a1971fe2811587d025e071068753a1f1e3b3c3"
+        "ARG NGINX_SHA256=e951607d534836624bd36b6b45a71dbfb055237deae3738da6bbf3270dada279"
       )
-      && script.contains("--build-arg \"NGINX_VERSION=1.31.4\"")
+      && script.contains("--build-arg \"NGINX_VERSION=1.31.5\"")
       && nginx_dockerfile.contains("ARG NGINX_RUNTIME_IMAGE=alpine:3.24")
       && nginx_dockerfile.contains("FROM alpine:3.24 AS builder")
       && nginx_dockerfile.contains("sha256sum -c -")

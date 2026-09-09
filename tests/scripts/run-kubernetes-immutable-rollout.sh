@@ -9,9 +9,9 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
-gateway_api_version="v1.6.1"
+gateway_api_version="v1.6.2"
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
-gateway_api_sha256="24d931f22abd8e40c973264319ead7cfa09d0fb7716b7ab1ee2ff174cb063a73"
+gateway_api_sha256="faede450fa178126aba41337737b97d351ebe87d93c910237ce1e072d1ca40d9"
 redis_source_image="valkey/valkey:9-alpine@sha256:7bf043f6ff25ea50b557e2f6da8f76fce62775d766d943f076d1e66838099315"
 redis_source_digest="${redis_source_image##*@sha256:}"
 redis_kind_image=""

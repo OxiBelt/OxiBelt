@@ -34,7 +34,7 @@ end-of-life minor is not automatic.
 
 ### Gateway API and CRDs
 
-The target is Gateway API `v1.6.1`, standard channel, with the pinned
+The target is Gateway API `v1.6.2`, standard channel, with the pinned
 `standard-install.yaml` SHA-256 in the registry and required resources served
 as `v1`. Gateway API CRDs are operator-owned:
 

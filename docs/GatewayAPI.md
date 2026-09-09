@@ -12,7 +12,7 @@ The controller, Gateway API translations, and Helm chart are currently
 The version, conformance, architecture, failure-recovery, and promotion
 requirements are defined in the
 [Kubernetes support and graduation contract](KubernetesSupport.md). Its
-Kubernetes `1.34`–`1.37`, Helm `3.21.4`/`4.2.4`, and Gateway API `v1.6.1`
+Kubernetes `1.34`–`1.37`, Helm `3.21.4`/`4.2.4`, and Gateway API `v1.6.2`
 matrix is a graduation target, not a supported-production claim.
 The data-plane chart and controller chart are documented together in
 [KubernetesDeployment.md](KubernetesDeployment.md).
@@ -127,7 +127,7 @@ content digest into rollout proof. Multiple references are checked for
 duplicates and merged by content-addressed path, so reference or watch order
 cannot alter the trust bundle or artifact digest.
 
-`validation.subjectAltNames` accepts one to five exact Gateway API v1.6.1
+`validation.subjectAltNames` accepts one to five exact Gateway API v1.6.2
 `Hostname` or `URI` entries. Hostnames must be lowercase DNS names without
 wildcards or IP literals; URIs must be exact absolute ASCII URIs. The configured
 `hostname` remains TLS SNI. When an explicit SAN list is present, it is not an
@@ -144,7 +144,7 @@ A `ReferenceGrant` cannot make an otherwise invalid cross-namespace policy CA
 reference valid.
 
 Upstream client authentication is independent from this policy. Gateway API
-v1.6.1 supplies it through the selected Gateway's
+v1.6.2 supplies it through the selected Gateway's
 `spec.tls.backend.clientCertificateRef`, which must name a core Secret that the
 operator admitted in `upstreamClientTls.sourceSecretAllowlist`. Same-namespace
 references need no grant; cross-namespace references also require an exact

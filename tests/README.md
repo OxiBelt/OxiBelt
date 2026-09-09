@@ -49,7 +49,7 @@ After the image artifacts are built in non-release CI, Trivy scans all 30 role/a
 Every ordinary pull request exposes the stable `PR non-benchmark summary` check. It depends on all 39 required aggregate jobs and uploads schema-versioned JSON plus Markdown; any failure, cancellation, unexpected skip, or topology mismatch fails the check. The summary helper is loaded from the pull request's immutable base revision instead of the pull request worktree. Required-job inventory changes therefore need a compatibility-first helper that accepts the old and new inventories, followed by the workflow update and a strict-helper cleanup; otherwise the intermediate base-branch run fails closed. Superseded runs are cancelled only within the same pull request. Comparator, performance-probe, external-benchmark, Docker performance, performance summary, and aggressive long-run jobs remain schedule/manual-only and wait for a successful same-run non-benchmark summary.
 Kubernetes/controller and Helm features remain experimental. Their graduation
 registry targets Kubernetes `1.34`–`1.37`, Helm `3.21.4` and `4.2.4`, Gateway
-API `v1.6.1`, Calico/Cilium IPv4 policy, restricted Pod Security, and native
+API `v1.6.2`, Calico/Cilium IPv4 policy, restricted Pod Security, and native
 AMD64/ARM64/RISC-V evidence. The exact representative Kind images, mandatory
 gates, blockers, and PR/nightly/release-candidate/stable cadences are generated
 into [`docs/KubernetesSupport.md`](../docs/KubernetesSupport.md). Static chart
