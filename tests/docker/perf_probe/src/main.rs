@@ -1311,6 +1311,10 @@ async fn h1c_connection_loop(
 
   while Instant::now() < deadline {
     let started = Instant::now();
+    sender
+      .ready()
+      .await
+      .context("cleartext HTTP/1.1 client connection was not ready")?;
     let response = sender
       .send_request(request(args, Version::HTTP_11, load_request_body(args))?)
       .await
@@ -1357,6 +1361,10 @@ async fn h1_connection_loop(
 
   while Instant::now() < deadline {
     let started = Instant::now();
+    sender
+      .ready()
+      .await
+      .context("HTTP/1.1 client connection was not ready")?;
     let response = sender
       .send_request(request(args, Version::HTTP_11, load_request_body(args))?)
       .await

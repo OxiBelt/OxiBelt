@@ -3633,8 +3633,8 @@ start_oxibelt() {
     docker cp "${tls_dir}/." "${container}:/etc/oxibelt/cert"
   fi
   docker cp "${static_dir}/." "${container}:/etc/oxibelt/static"
-  if [[ -d "${fixture_dir}/oxirule" ]]; then
-    docker cp "${fixture_dir}/oxirule/." "${container}:/etc/oxibelt/oxirule"
+  if [[ -d "${configs_dir}/oxibelt-${scenario}/oxirule" ]]; then
+    docker cp "${configs_dir}/oxibelt-${scenario}/oxirule/." "${container}:/etc/oxibelt/oxirule"
   fi
   docker start "${container}" >/dev/null
   active_proxy_container="${container}"
