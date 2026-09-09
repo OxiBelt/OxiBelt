@@ -423,8 +423,18 @@ if [[ -z "${docker_command}" ]]; then
   exit 2
 fi
 
+readonly container_nofile_limit=262144
+
 docker() {
-  command "${docker_command}" "$@"
+  case "${1:-}" in
+    run|create)
+      command "${docker_command}" "$1" \
+        --ulimit "nofile=${container_nofile_limit}:${container_nofile_limit}" "${@:2}"
+      ;;
+    *)
+      command "${docker_command}" "$@"
+      ;;
+  esac
 }
 
 cleanup() {
@@ -3729,7 +3739,16 @@ start_openresty() {
 }
 
 detect_nginx_h3() {
-  if docker run --rm "${nginx_image}" nginx -V 2>&1 | grep -F -- '--with-http_v3_module' >/dev/null; then
+  local nginx_version_output status
+  if nginx_version_output="$(docker run --rm "${nginx_image}" nginx -V 2>&1)"; then
+    :
+  else
+    status=$?
+    printf 'nginx -V output for %s:\n%s\n' "${nginx_image}" "${nginx_version_output}" >&2
+    fail_with_diagnostics "failed to inspect nginx HTTP/3 support for image ${nginx_image}: docker run nginx -V exited ${status}"
+  fi
+
+  if grep -F -- '--with-http_v3_module' <<<"${nginx_version_output}" >/dev/null; then
     nginx_h3_supported=1
   else
     nginx_h3_supported=0
@@ -4095,8 +4114,7 @@ run_oxibelt_soak_and_stress() {
 
 run_manual_soak_presets() {
   local presets="${OXIBELT_PERF_SOAK_CONCURRENCY_PRESETS:-10000,50000,100000}"
-  local fd_limit
-  fd_limit="$(ulimit -n || echo 1024)"
+  local fd_limit="${container_nofile_limit}"
   IFS=',' read -r -a preset_values <<<"${presets}"
   start_oxibelt "${oxibelt_baseline_scenario}" oxibelt
   local preset

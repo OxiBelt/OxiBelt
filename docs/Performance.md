@@ -13,6 +13,12 @@ tests/scripts/run-proxy-performance.sh --profile smoke --comparators oxibelt,ngi
 The runner normally invokes `docker`. Set the existing `OXIBELT_DOCKER_COMMAND`
 override when the local Docker-compatible command needs to differ.
 
+Every container that the runner creates uses a fixed `nofile` limit of
+`262144:262144`. This keeps proxy, upstream, probe, external-validation, and
+manual-soak container limits comparable without changing host daemon or kernel
+settings. Docker reports the affected command as a failure when its host or
+daemon cannot apply that limit.
+
 Safe SIMD-backed byte-kernel changes also have an ignored Rust 1.97
 microbenchmark. It compares single-byte `memchr` and iterator searches,
 precompiled `memmem::Finder` searches, separate Aho-Corasick construction and

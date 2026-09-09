@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -72,6 +73,107 @@ fn extract_bash_function(script: &str, function_name: &str) -> String {
 struct HarnessRun {
   output: Output,
   events: String,
+}
+
+struct DockerWrapperRun {
+  output: Output,
+  arguments: Vec<String>,
+}
+
+fn docker_wrapper_harness(arguments: &[&str], exit_code: u8) -> DockerWrapperRun {
+  let script = performance_script_text();
+  let container_nofile_limit_declaration = script
+    .lines()
+    .find(|line| line.starts_with("readonly container_nofile_limit="))
+    .expect("performance script should declare its fixed container nofile limit");
+  let function = extract_bash_function(&script, "docker");
+  let temp_dir = HarnessTempDir::new("oxibelt-performance-docker-wrapper-");
+  let harness_path = temp_dir.join("harness.sh");
+  let docker_path = temp_dir.join("docker-stub");
+  let arguments_path = temp_dir.join("arguments.bin");
+
+  fs::write(
+    &docker_path,
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\0' "$@" >"${DOCKER_ARGUMENTS_FILE:?}"
+exit "${DOCKER_EXIT_CODE:?}"
+"#,
+  )
+  .expect("Docker stub should be writable");
+  fs::set_permissions(&docker_path, fs::Permissions::from_mode(0o700))
+    .expect("Docker stub should be executable");
+  fs::write(
+    &harness_path,
+    format!(
+      "#!/usr/bin/env bash\nset -u\n{container_nofile_limit_declaration}\ndocker_command=\"${{DOCKER_COMMAND:?}}\"\n{function}\ndocker \"$@\"\n"
+    ),
+  )
+  .expect("Docker wrapper harness should be writable");
+
+  let output = Command::new("bash")
+    .arg(&harness_path)
+    .args(arguments)
+    .env("DOCKER_COMMAND", &docker_path)
+    .env("DOCKER_ARGUMENTS_FILE", &arguments_path)
+    .env("DOCKER_EXIT_CODE", exit_code.to_string())
+    .output()
+    .expect("Docker wrapper harness should execute");
+  let arguments =
+    String::from_utf8(fs::read(&arguments_path).expect("Docker stub should record arguments"))
+      .expect("Docker arguments should be UTF-8")
+      .split_terminator('\0')
+      .map(str::to_owned)
+      .collect();
+
+  DockerWrapperRun { output, arguments }
+}
+
+fn detect_nginx_h3_harness(docker_status: u8, nginx_version_output: &str) -> HarnessRun {
+  let function = extract_bash_function(&performance_script_text(), "detect_nginx_h3");
+  let temp_dir = HarnessTempDir::new("oxibelt-performance-nginx-h3-detect-");
+  let harness_path = temp_dir.join("harness.sh");
+  let events_path = temp_dir.join("events.log");
+  fs::write(
+    &harness_path,
+    format!(
+      r#"#!/usr/bin/env bash
+set -euo pipefail
+
+events="${{EVENTS_FILE:?}}"
+nginx_image="nginx:performance-test"
+nginx_h3_supported=0
+
+docker() {{
+  printf '%s\n' "${{NGINX_VERSION_OUTPUT:?}}"
+  return "${{DOCKER_STATUS:?}}"
+}}
+
+fail_with_diagnostics() {{
+  printf 'FAIL %s\n' "$1" >>"${{events}}"
+  echo "$1" >&2
+  exit 1
+}}
+
+{function}
+
+detect_nginx_h3
+printf 'SUPPORTED %s\n' "${{nginx_h3_supported}}" >>"${{events}}"
+"#
+    ),
+  )
+  .expect("nginx H3 detection harness should be writable");
+
+  let output = Command::new("bash")
+    .arg(&harness_path)
+    .env("DOCKER_STATUS", docker_status.to_string())
+    .env("EVENTS_FILE", &events_path)
+    .env("NGINX_VERSION_OUTPUT", nginx_version_output)
+    .output()
+    .expect("nginx H3 detection harness should execute");
+  let events = fs::read_to_string(&events_path).unwrap_or_default();
+
+  HarnessRun { output, events }
 }
 
 fn run_common_loads_harness(h3_mode: &str, probe_result: &str) -> HarnessRun {
@@ -962,6 +1064,100 @@ assert_resource_drift aggressive-before aggressive-after
 "#
   );
   fs::write(path, harness).expect("Bash harness should be writable");
+}
+
+#[test]
+fn docker_wrapper_applies_fixed_nofile_only_to_container_creation_and_preserves_failures() {
+  let expected_limit = ["--ulimit", "nofile=262144:262144"];
+  let run = docker_wrapper_harness(
+    &[
+      "run",
+      "--name",
+      "proxy with spaces",
+      "image:fixed",
+      "serve arg",
+      "",
+    ],
+    0,
+  );
+  assert!(run.output.status.success(), "docker run should succeed");
+  assert_eq!(
+    run.arguments,
+    vec![
+      "run",
+      expected_limit[0],
+      expected_limit[1],
+      "--name",
+      "proxy with spaces",
+      "image:fixed",
+      "serve arg",
+      "",
+    ]
+  );
+
+  let create = docker_wrapper_harness(&["create", "--label", "suite value", "image:fixed", ""], 0);
+  assert!(
+    create.output.status.success(),
+    "docker create should succeed"
+  );
+  assert_eq!(
+    create.arguments,
+    vec![
+      "create",
+      expected_limit[0],
+      expected_limit[1],
+      "--label",
+      "suite value",
+      "image:fixed",
+      "",
+    ]
+  );
+
+  let inspect = docker_wrapper_harness(&["image", "inspect", "image with spaces"], 0);
+  assert!(
+    inspect.output.status.success(),
+    "docker image inspect should succeed"
+  );
+  assert_eq!(
+    inspect.arguments,
+    vec!["image", "inspect", "image with spaces"]
+  );
+
+  let failed_run = docker_wrapper_harness(&["run", "image:fixed"], 47);
+  assert_eq!(failed_run.output.status.code(), Some(47));
+  assert_eq!(
+    failed_run.arguments,
+    vec!["run", expected_limit[0], expected_limit[1], "image:fixed"]
+  );
+}
+
+#[test]
+fn nginx_h3_detection_rejects_docker_failure_but_allows_an_unsupported_image() {
+  let unsupported = detect_nginx_h3_harness(0, "nginx version: nginx/1.29.0");
+  assert!(
+    unsupported.output.status.success(),
+    "an image without the HTTP/3 module should remain an auto-mode capability result"
+  );
+  assert_eq!(unsupported.events, "SUPPORTED 0\n");
+
+  let failed = detect_nginx_h3_harness(42, "Docker daemon unavailable");
+  assert!(
+    !failed.output.status.success(),
+    "a failed docker run nginx -V command must not become an unsupported-module result"
+  );
+  assert!(
+    String::from_utf8_lossy(&failed.output.stderr)
+      .contains("failed to inspect nginx HTTP/3 support for image nginx:performance-test"),
+    "Docker capability inspection failure should identify the image"
+  );
+  assert!(
+    String::from_utf8_lossy(&failed.output.stderr).contains("Docker daemon unavailable"),
+    "Docker capability inspection failure should retain Docker output"
+  );
+  assert!(
+    failed.events.contains("docker run nginx -V exited 42"),
+    "Docker capability inspection failure should retain its exit status"
+  );
 }
 
 #[test]
