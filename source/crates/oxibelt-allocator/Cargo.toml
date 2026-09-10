@@ -1,0 +1,17 @@
+[package]
+name = "oxibelt-allocator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+native-mimalloc = ["dep:cc"]
+
+[build-dependencies]
+cc = { version = "=1.4.5", optional = true }
+
+[lints]
+workspace = true

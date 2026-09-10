@@ -101,6 +101,17 @@ global primitive choice. A conflicting request fails before listener
 publication with a fixed stage and reason; matching crypto claims are
 idempotent.
 
+The nondefault `allocator-mimalloc-experiment` Cargo feature selects secure
+mimalloc through OxiBelt's private binding for the integrated `oxibelt`
+executable on 64-bit x86 Linux GNU and musl targets. The library does not
+install a global allocator when that feature is enabled. Its hidden
+binary-startup marker records the executable's ownership assertion; it does
+not initialize an allocator or inspect the embedding host's allocator. The
+integrated executable records that assertion before startup and reports its
+allocator as `Applied` / `AppliedByOxibelt`. Library callers retain their
+allocator ownership, and the strict data-plane executable keeps the system
+allocator. Process-global hook selection does not change allocator selection.
+
 Landlock is irreversible and applies per thread and descendants. Embedded
 startup rejects applying configured Landlock even through `ApplySelected`
 because a pre-existing Tokio runtime cannot prove that every caller-owned

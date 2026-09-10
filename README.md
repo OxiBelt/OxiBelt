@@ -429,5 +429,10 @@ sticky-cookie upstream pools, and opt-in downstream embedded-SCT verification ar
 matrix and [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work)
 for the design rationale behind reserved work.
 
+## Third-Party Notices
+
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for licenses and
+attribution covering source incorporated from other projects.
+
 ## Disclaimer
 This project is developed with some LLM Agents or LLM assistances like ChatGPT Codex. This can introduce security issues, unintended behavior, or inaccuracies. However, all code changes are reviewed or approved by people to mitigate potential risks and many GitHub Action workflows are in place to enforce code quality and security checks.

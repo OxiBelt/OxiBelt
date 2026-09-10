@@ -5,6 +5,23 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Optional allocator builds
+
+The nondefault `allocator-mimalloc-experiment` Cargo feature enables secure
+mimalloc through OxiBelt's repository-owned binding only for the integrated
+`oxibelt` executable on 64-bit x86 Linux GNU and musl targets. It adds no
+configuration field, schema migration or persistent state format. Default
+builds, standard Docker images, the strict data-plane executable and library
+allocator ownership remain unchanged. Enabling the feature on an unsupported
+target fails compilation.
+
+Qualify the exact optional build, including memory retention, before deployment;
+performance evidence for one allocator does not qualify the other. To roll back
+allocator selection, rebuild the same source without the feature and restart
+with that verified binary or image. Existing configuration and persistent state
+need no allocator-specific conversion. See [Performance](Performance.md#optional-allocator-evaluation)
+for build commands and evidence requirements.
+
 ## Supported upgrade policy
 
 OxiBelt supports one stable step at a time:

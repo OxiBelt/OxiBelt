@@ -6,6 +6,7 @@ members = [
   "source/apps/oxibelt-keysigner",
   "source/apps/oxibelt-netport-switcher",
   "source/apps/oxibeltctl",
+  "source/crates/oxibelt-allocator",
   "source/crates/oxibelt-build-identity",
   "source/crates/oxibelt-control-http",
   "source/crates/oxibelt-control-protocol",
@@ -53,6 +54,7 @@ k8s-openapi = { version = "0.28.0", features = ["v1_35"] }
 kube = { version = "4.2.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
 libc = "0.2.189"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "net", "process", "signal", "socket", "zerocopy"] }
+oxibelt-allocator = { path = "source/crates/oxibelt-allocator", default-features = false }
 oxibelt = { path = "source", default-features = false }
 oxibelt-build-identity = { path = "source/crates/oxibelt-build-identity" }
 oxibelt-control-http = { path = "source/crates/oxibelt-control-http" }

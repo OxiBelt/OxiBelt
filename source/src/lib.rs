@@ -15,6 +15,19 @@ compile_error!("oxibelt-proxy intentionally targets Linux only.");
 )))]
 compile_error!("oxibelt-proxy supports only x86_64, aarch64, and riscv64.");
 
+#[cfg(all(
+  feature = "allocator-mimalloc-experiment",
+  not(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_pointer_width = "64",
+    any(target_env = "gnu", target_env = "musl")
+  ))
+))]
+compile_error!(
+  "allocator-mimalloc-experiment supports only 64-bit x86 Linux GNU and musl targets."
+);
+
 pub mod access_log;
 pub mod activation_plan;
 #[cfg(feature = "admin-runtime")]
@@ -96,6 +109,10 @@ pub use process_globals::{
   ProcessGlobalHooks, ProcessGlobalReason, ProcessGlobalReport, ProcessGlobalSelection,
   ProcessPolicy, RuntimePolicy,
 };
+
+#[cfg(feature = "allocator-mimalloc-experiment")]
+#[doc(hidden)]
+pub use process_globals::mark_binary_allocator_mimalloc_experiment;
 
 #[cfg(test)]
 mod simd_bench;

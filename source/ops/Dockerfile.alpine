@@ -96,6 +96,7 @@ COPY source/apps/oxibelt-gateway-controller ./source/apps/oxibelt-gateway-contro
 COPY source/apps/oxibelt-keysigner ./source/apps/oxibelt-keysigner
 COPY source/apps/oxibelt-netport-switcher ./source/apps/oxibelt-netport-switcher
 COPY source/apps/oxibeltctl ./source/apps/oxibeltctl
+COPY source/crates/oxibelt-allocator ./source/crates/oxibelt-allocator
 COPY source/crates/oxibelt-build-identity ./source/crates/oxibelt-build-identity
 COPY source/crates/oxibelt-control-http ./source/crates/oxibelt-control-http
 COPY source/crates/oxibelt-control-protocol ./source/crates/oxibelt-control-protocol

@@ -1,5 +1,49 @@
 use super::*;
 
+#[cfg(not(feature = "allocator-mimalloc-experiment"))]
+#[test]
+fn binary_without_allocator_feature_reports_no_allocator_override() {
+  assert_eq!(
+    oxibelt::ProcessGlobalReport::for_hooks(oxibelt::ProcessGlobalHooks::CallerManaged).allocator,
+    oxibelt::ProcessGlobalHookReport::new(
+      oxibelt::ProcessGlobalHookStatus::NotConfigured,
+      oxibelt::ProcessGlobalReason::NotUsedByOxibelt,
+    ),
+  );
+}
+
+#[cfg(oxibelt_strict_artifact)]
+#[test]
+fn strict_binary_does_not_enable_the_integrated_allocator_feature() {
+  assert_eq!(
+    oxibelt::ProcessGlobalReport::for_hooks(oxibelt::ProcessGlobalHooks::ApplySelected(
+      oxibelt::ProcessGlobalSelection::all(),
+    ))
+    .allocator
+    .reason,
+    oxibelt::ProcessGlobalReason::NotUsedByOxibelt,
+  );
+}
+
+#[cfg(feature = "allocator-mimalloc-experiment")]
+#[test]
+fn experimental_binary_reports_its_allocator_ownership() {
+  oxibelt::mark_binary_allocator_mimalloc_experiment();
+  for hooks in [
+    oxibelt::ProcessGlobalHooks::CallerManaged,
+    oxibelt::ProcessGlobalHooks::VerifyOnly,
+    oxibelt::ProcessGlobalHooks::ApplySelected(oxibelt::ProcessGlobalSelection::all()),
+  ] {
+    assert_eq!(
+      oxibelt::ProcessGlobalReport::for_hooks(hooks).allocator,
+      oxibelt::ProcessGlobalHookReport::new(
+        oxibelt::ProcessGlobalHookStatus::Applied,
+        oxibelt::ProcessGlobalReason::AppliedByOxibelt,
+      ),
+    );
+  }
+}
+
 #[test]
 fn version_flag_reports_canonical_build_identity() {
   let error =

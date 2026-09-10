@@ -6,10 +6,40 @@
 //! currently install.
 
 use std::fmt;
+#[cfg(feature = "allocator-mimalloc-experiment")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 
 use crate::config::Config;
+
+#[cfg(feature = "allocator-mimalloc-experiment")]
+static BINARY_ALLOCATOR_MIMALLOC_EXPERIMENT: AtomicBool = AtomicBool::new(false);
+
+/// Records the binary's assertion that its experimental global allocator is selected.
+///
+/// This metadata-only function does not initialize or install an allocator. The
+/// experimental binary calls it before startup; enabling the library feature alone
+/// leaves allocator ownership and reporting unchanged for embedding applications.
+#[cfg(feature = "allocator-mimalloc-experiment")]
+#[doc(hidden)]
+pub fn mark_binary_allocator_mimalloc_experiment() {
+  BINARY_ALLOCATOR_MIMALLOC_EXPERIMENT.store(true, Ordering::Relaxed);
+}
+
+fn allocator_report() -> ProcessGlobalHookReport {
+  #[cfg(feature = "allocator-mimalloc-experiment")]
+  if BINARY_ALLOCATOR_MIMALLOC_EXPERIMENT.load(Ordering::Relaxed) {
+    return ProcessGlobalHookReport::new(
+      ProcessGlobalHookStatus::Applied,
+      ProcessGlobalReason::AppliedByOxibelt,
+    );
+  }
+  ProcessGlobalHookReport::new(
+    ProcessGlobalHookStatus::NotConfigured,
+    ProcessGlobalReason::NotUsedByOxibelt,
+  )
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -225,7 +255,7 @@ impl ProcessGlobalReport {
       landlock: report_for(ProcessGlobalHook::Landlock),
       environment: not_used,
       panic_hook: not_used,
-      allocator: not_used,
+      allocator: allocator_report(),
       profiler: not_used,
       background_threads: ProcessGlobalHookReport::new(
         ProcessGlobalHookStatus::NotConfigured,
@@ -466,6 +496,23 @@ mod tests {
       ProcessPolicy::Standalone.global_hooks(),
       ProcessGlobalHooks::ApplySelected(ProcessGlobalSelection::all())
     );
+  }
+
+  #[test]
+  fn library_feature_does_not_assert_binary_allocator_ownership() {
+    for hooks in [
+      ProcessGlobalHooks::CallerManaged,
+      ProcessGlobalHooks::VerifyOnly,
+      ProcessGlobalHooks::ApplySelected(ProcessGlobalSelection::all()),
+    ] {
+      assert_eq!(
+        ProcessGlobalReport::for_hooks(hooks).allocator,
+        ProcessGlobalHookReport::new(
+          ProcessGlobalHookStatus::NotConfigured,
+          ProcessGlobalReason::NotUsedByOxibelt,
+        ),
+      );
+    }
   }
 
   #[test]
