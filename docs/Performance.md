@@ -54,6 +54,11 @@ OpenResty H3 probe failures fail closed instead of being recorded as skipped.
 Malformed, zero-request, DNS, connect, or TLS failures in supported OpenResty
 rows fail the iteration like nginx and Caddy rows.
 
+Tokio/Hyper Direct H1 pool misses share DNS refreshes and cached endpoints
+within each pool, governed by the existing `[proxy.upstream_resolution]`
+TTL policy. Replacing an HTTP upstream pool resets its resolver state. Cached
+endpoints are not shared between distinct pool instances.
+
 The shared `perf-probe upstream` fixtures explicitly request a TCP listen
 backlog of 4096 for H1, H2C, and TLS H2, allowing multiplexed loads to open
 upstream connections before the fixture accepts them. The effective queue is

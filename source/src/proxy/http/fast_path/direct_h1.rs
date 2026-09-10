@@ -4,7 +4,7 @@
 #[cfg(target_os = "linux")]
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -36,7 +36,10 @@ use crate::pools::circuit_pool_for_upstream;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{BoxError, ProxyBody};
 use crate::proxy::http::headers::is_upgrade_request;
-use crate::upstream_resolution::{CandidateSchedulerConfig, ResolutionPolicy};
+use crate::upstream_resolution::{
+  CandidateSchedulerConfig, ResolutionError, ResolutionOrigin, ResolutionPolicy,
+  SharedEndpointResolver,
+};
 
 use super::request_body::FastPathRequestBodyMode;
 use super::stage_timing as timing;
@@ -135,6 +138,7 @@ struct DirectH1Pool {
   circuit_breakers: Option<Arc<CircuitBreakerRuntime>>,
   circuit_pool: Option<Arc<str>>,
   resolution_policy: ResolutionPolicy,
+  resolver: OnceLock<Result<SharedEndpointResolver, ResolutionError>>,
   scheduler_policy: CandidateSchedulerConfig,
 }
 
@@ -205,8 +209,30 @@ impl DirectH1Pool {
       circuit_breakers,
       circuit_pool,
       resolution_policy,
+      resolver: OnceLock::new(),
       scheduler_policy,
     }))
+  }
+
+  fn resolver(&self) -> Result<&SharedEndpointResolver, ResolutionError> {
+    // Keep origin validation lazy, as it was when every connect constructed a
+    // resolver. Only synchronous construction is shared here; DNS I/O and its
+    // deadline/cancellation handling remain owned by SharedEndpointResolver.
+    self
+      .resolver
+      .get_or_init(|| {
+        let origin = ResolutionOrigin::new(
+          &self.origin.host,
+          self.origin.port,
+          format!("direct-h1:{}:{}", self.origin.host, self.origin.port),
+        )?;
+        Ok(SharedEndpointResolver::system(
+          origin,
+          self.resolution_policy,
+        ))
+      })
+      .as_ref()
+      .map_err(Clone::clone)
   }
 
   fn compio_connect_backoff_active(&self) -> bool {
@@ -834,17 +860,16 @@ async fn connect_sender_inner(
   let admission = pool.circuit_breakers.clone().map(|runtime| {
     crate::upstream_resolution::ConnectionAdmissionContext::new(runtime, pool.circuit_pool.clone())
   });
-  let (stream, remote_addr) = crate::upstream_resolution::connect_tcp_happy_eyeballs_admitted(
-    pool.origin.host.as_ref(),
-    pool.origin.port,
-    &format!("direct-h1:{}:{}", pool.origin.host, pool.origin.port),
-    pool.resolution_policy,
-    pool.scheduler_policy,
-    deadline,
-    admission,
-  )
-  .await
-  .with_context(|| {
+  let connected = async {
+    crate::upstream_resolution::connect_tcp_happy_eyeballs_with_resolver_admitted(
+      pool.resolver()?,
+      pool.scheduler_policy,
+      deadline,
+      admission,
+    )
+    .await
+  };
+  let (stream, remote_addr) = connected.await.with_context(|| {
     format!(
       "failed to connect direct H1 upstream {}:{}",
       pool.origin.host, pool.origin.port

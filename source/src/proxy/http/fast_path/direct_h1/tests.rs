@@ -113,6 +113,52 @@ fn direct_h1_pools_share_process_connection_admission() {
 }
 
 #[test]
+fn resolver_origin_validation_remains_lazy_and_typed() {
+  let pool = DirectH1Pool::new(&upstream("http://backend.internal:0"))
+    .expect("pool construction must retain deferred resolver validation");
+  assert!(pool.resolver.get().is_none());
+  for _ in 0..2 {
+    let error = pool
+      .resolver()
+      .err()
+      .expect("zero port must fail when resolving");
+    assert_eq!(
+      error.class(),
+      crate::upstream_resolution::ResolutionErrorClass::InvalidInput
+    );
+    assert_eq!(
+      error.to_string(),
+      "upstream resolution port must be greater than zero"
+    );
+  }
+}
+
+#[tokio::test]
+async fn resolver_cache_is_shared_within_a_pool_and_replaced_with_the_pool() {
+  let upstream = upstream("http://127.0.0.1:18080");
+  let first = Arc::new(DirectH1Pool::new(&upstream).unwrap());
+  let same_pool = Arc::clone(&first);
+  let replacement = DirectH1Pool::new(&upstream).unwrap();
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+  let first_result = first.resolver().unwrap().resolve(deadline).await.unwrap();
+  let same_result = same_pool
+    .resolver()
+    .unwrap()
+    .resolve(deadline)
+    .await
+    .unwrap();
+  let replacement_result = replacement
+    .resolver()
+    .unwrap()
+    .resolve(deadline)
+    .await
+    .unwrap();
+  assert!(Arc::ptr_eq(&first_result, &same_result));
+  assert!(!Arc::ptr_eq(&first_result, &replacement_result));
+  assert_eq!(first_result.endpoints(), replacement_result.endpoints());
+}
+
+#[test]
 fn guard_accepts_direct_empty_http11_get_to_plain_h1_upstream() {
   let upstream = upstream("http://backend.internal:18080");
   let request = Request::builder()

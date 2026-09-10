@@ -146,8 +146,24 @@ pub(crate) async fn connect_tcp_happy_eyeballs_admitted(
   deadline: Instant,
   admission: Option<ConnectionAdmissionContext>,
 ) -> anyhow::Result<(ConnectionAdmitted<TcpStream>, SocketAddr)> {
-  let candidates =
-    resolve_tcp_candidates(host, port, discovery_id, resolution_policy, deadline).await?;
+  let origin = ResolutionOrigin::new(host, port, Arc::<str>::from(discovery_id.to_owned()))?;
+  let resolver = EndpointResolver::system(origin, resolution_policy);
+  connect_tcp_happy_eyeballs_with_resolver_admitted(
+    &resolver,
+    scheduler_config,
+    deadline,
+    admission,
+  )
+  .await
+}
+
+pub(crate) async fn connect_tcp_happy_eyeballs_with_resolver_admitted<B: super::ResolverBackend>(
+  resolver: &EndpointResolver<B>,
+  scheduler_config: CandidateSchedulerConfig,
+  deadline: Instant,
+  admission: Option<ConnectionAdmissionContext>,
+) -> anyhow::Result<(ConnectionAdmitted<TcpStream>, SocketAddr)> {
+  let candidates = resolve_tcp_candidates(resolver, deadline).await?;
   let (sender, mut updates) = watch::channel(candidates);
   drop(sender);
 
@@ -485,15 +501,10 @@ fn spawn_http_svcb_candidate_producer<B: super::ResolverBackend>(
   });
 }
 
-pub(crate) async fn resolve_tcp_candidates(
-  host: &str,
-  port: u16,
-  discovery_id: &str,
-  resolution_policy: ResolutionPolicy,
+async fn resolve_tcp_candidates<B: super::ResolverBackend>(
+  resolver: &EndpointResolver<B>,
   deadline: Instant,
 ) -> anyhow::Result<Arc<[HappyEyeballsCandidate<SocketAddr>]>> {
-  let origin = ResolutionOrigin::new(host, port, Arc::<str>::from(discovery_id.to_string()))?;
-  let resolver = EndpointResolver::system(origin, resolution_policy);
   let resolved = resolver.resolve(deadline).await?;
   if resolved.valid_until() <= Instant::now() {
     anyhow::bail!("upstream endpoint set expired before TCP connection selection");
@@ -691,6 +702,10 @@ fn candidate_race_error(error: CandidateRaceError<anyhow::Error>) -> anyhow::Err
     } => anyhow::anyhow!("upstream TCP candidates were exhausted"),
   }
 }
+
+#[cfg(test)]
+#[path = "tcp/reuse_tests.rs"]
+mod reuse_tests;
 
 #[cfg(test)]
 #[path = "tcp/provenance_tests.rs"]
