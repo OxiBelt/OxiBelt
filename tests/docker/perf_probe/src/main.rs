@@ -279,6 +279,16 @@ impl SharedStats {
   }
 
   fn record_response(&self, status: u16, elapsed: Duration, expect_status: u16) {
+    self.record_load_response(status, elapsed, expect_status, true);
+  }
+
+  fn record_load_response(
+    &self,
+    status: u16,
+    elapsed: Duration,
+    expect_status: u16,
+    record_latency: bool,
+  ) {
     let mut inner = self
       .inner
       .lock()
@@ -292,8 +302,10 @@ impl SharedStats {
         format!("unexpected status {status}, expected {expect_status}"),
       );
     }
-    let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
-    let _ = inner.latency.record(micros.max(1));
+    if record_latency {
+      let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+      let _ = inner.latency.record(micros.max(1));
+    }
   }
 
   fn record_handshake_success(&self, elapsed: Duration, observation: HandshakeObservation) {
@@ -1116,14 +1128,14 @@ fn status_from_path(path: &str) -> Option<StatusCode> {
 }
 
 async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
-  let warmup_requests = if args.warmup > Duration::ZERO {
+  let warmup = if args.warmup > Duration::ZERO {
     run_load_phase(args.clone(), args.warmup, false)
       .await?
       .snapshot()
-      .requests
   } else {
-    0
+    SharedStats::new()?.snapshot()
   };
+  let warmup_requests = warmup.requests;
   let stats = run_load_phase(args.clone(), args.duration, true).await?;
   let snapshot = stats.snapshot();
   let total_requests_including_warmup = warmup_requests.saturating_add(snapshot.requests);
@@ -1145,7 +1157,11 @@ async fn run_load(args: LoadArgs) -> anyhow::Result<()> {
       "chunked_request_body": args.chunked_request_body,
       "requests": snapshot.requests,
       "warmup_requests": warmup_requests,
+      "warmup_errors": warmup.errors,
+      "warmup_statuses": status_json(warmup.statuses),
+      "warmup_error_samples": warmup.error_samples,
       "total_requests_including_warmup": total_requests_including_warmup,
+      "total_errors_including_warmup": warmup.errors.saturating_add(snapshot.errors),
       "errors": snapshot.errors,
       "rps": rate(snapshot.requests, elapsed),
       "p50_ms": snapshot.p50_ms,
@@ -1245,10 +1261,6 @@ async fn h1_load_worker(
   }
 }
 
-fn worker_error_is_in_window(record: bool, deadline: Instant) -> bool {
-  record && Instant::now() < deadline
-}
-
 fn record_worker_error(
   protocol: &str,
   error: &anyhow::Error,
@@ -1258,12 +1270,10 @@ fn record_worker_error(
 ) -> bool {
   let message = format!("{error:#}");
   let before_deadline = Instant::now() < deadline;
-  if worker_error_is_in_window(record, deadline) {
+  if before_deadline {
     stats.record_error_sample(message.clone());
-    eprintln!("{protocol} worker reconnecting after error: {message}");
-    true
-  } else if before_deadline {
-    eprintln!("{protocol} worker reconnecting after unrecorded error: {message}");
+    let phase = if record { "measured" } else { "warmup" };
+    eprintln!("{protocol} worker reconnecting after {phase} error: {message}");
     true
   } else {
     eprintln!("{protocol} worker stopped after phase-boundary error: {message}");
@@ -1325,9 +1335,7 @@ async fn h1c_connection_loop(
       .collect()
       .await
       .context("failed to read cleartext HTTP/1.1 response body")?;
-    if record {
-      stats.record_response(status, started.elapsed(), args.expect_status);
-    }
+    stats.record_load_response(status, started.elapsed(), args.expect_status, record);
   }
 
   drop(sender);
@@ -1375,9 +1383,7 @@ async fn h1_connection_loop(
       .collect()
       .await
       .context("failed to read HTTP/1.1 response body")?;
-    if record {
-      stats.record_response(status, started.elapsed(), args.expect_status);
-    }
+    stats.record_load_response(status, started.elapsed(), args.expect_status, record);
   }
 
   drop(sender);
@@ -1441,9 +1447,7 @@ async fn h2_connection_loop(
       .collect()
       .await
       .context("failed to read HTTP/2 response body")?;
-    if record {
-      stats.record_response(status, started.elapsed(), args.expect_status);
-    }
+    stats.record_load_response(status, started.elapsed(), args.expect_status, record);
   }
 
   drop(sender);
@@ -1499,9 +1503,7 @@ async fn h2_multiplexed_connection_loop(
       break;
     };
     let (status, elapsed) = result?;
-    if record {
-      stats.record_response(status, elapsed, args.expect_status);
-    }
+    stats.record_load_response(status, elapsed, args.expect_status, record);
 
     if Instant::now() >= deadline && responses.is_empty() {
       break;
@@ -1600,13 +1602,12 @@ async fn h3_connection_loop(
       .recv_trailers()
       .await
       .context("failed to read HTTP/3 response trailers")?;
-    if record {
-      stats.record_response(
-        response.status().as_u16(),
-        started.elapsed(),
-        args.expect_status,
-      );
-    }
+    stats.record_load_response(
+      response.status().as_u16(),
+      started.elapsed(),
+      args.expect_status,
+      record,
+    );
   }
 
   close_connection.close(0u32.into(), b"perf-probe complete");
@@ -1688,9 +1689,7 @@ async fn h3_multiplexed_connection_loop(
         break;
       };
       let (status, elapsed) = result?;
-      if record {
-        stats.record_response(status, elapsed, args.expect_status);
-      }
+      stats.record_load_response(status, elapsed, args.expect_status, record);
     }
     Ok(())
   }
@@ -3215,6 +3214,112 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn warmup_load_counts_responses_and_errors_without_latency_samples() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+      let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("local upstream should bind");
+      let port = listener
+        .local_addr()
+        .expect("listener should have a port")
+        .port();
+      let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        for _ in 0..2 {
+          let (stream, _) = listener.accept().await.expect("phase should connect");
+          connections.spawn(async move {
+            let service = service_fn(|_request: Request<Incoming>| async {
+              Ok::<_, Infallible>(
+                Response::builder()
+                  .status(StatusCode::SERVICE_UNAVAILABLE)
+                  .body(Full::new(Bytes::from_static(b"fixture")))
+                  .expect("fixture response should build"),
+              )
+            });
+            hyper::server::conn::http1::Builder::new()
+              .serve_connection(TokioIo::new(stream), service)
+              .await
+              .expect("phase connection should close cleanly");
+          });
+        }
+        while let Some(result) = connections.join_next().await {
+          result.expect("connection task should finish");
+        }
+      });
+      let port = port.to_string();
+      let mut args = parse_load_args(
+        [
+          "--protocol",
+          "h1c",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          &port,
+          "--server-name",
+          "localhost",
+          "--authority",
+          "localhost",
+          "--path",
+          "/",
+          "--ca-cert",
+          "unused-for-h1c",
+          "--duration-seconds",
+          "1",
+          "--warmup-seconds",
+          "1",
+          "--concurrency",
+          "1",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+      )
+      .expect("local load arguments should parse");
+
+      let warmup = run_load_phase(args.clone(), Duration::from_millis(150), false)
+        .await
+        .expect("warmup should complete");
+      let warmup_snapshot = warmup.snapshot();
+      assert!(warmup_snapshot.requests > 0);
+      assert_eq!(warmup_snapshot.errors, warmup_snapshot.requests);
+      assert_eq!(
+        warmup_snapshot.statuses.get(&503),
+        Some(&warmup_snapshot.requests)
+      );
+      assert!(!warmup_snapshot.error_samples.is_empty());
+      assert_eq!(
+        warmup
+          .inner
+          .lock()
+          .expect("stats lock should work")
+          .latency
+          .len(),
+        0
+      );
+
+      args.expect_status = 503;
+      let measured = run_load_phase(args, Duration::from_millis(150), true)
+        .await
+        .expect("measured phase should complete");
+      let measured_snapshot = measured.snapshot();
+      assert!(measured_snapshot.requests > 0);
+      assert_eq!(measured_snapshot.errors, 0);
+      assert_eq!(
+        measured
+          .inner
+          .lock()
+          .expect("stats lock should work")
+          .latency
+          .len(),
+        measured_snapshot.requests,
+      );
+      assert_eq!(warmup.snapshot().requests, warmup_snapshot.requests);
+      server.await.expect("upstream should finish both phases");
+    })
+    .await
+    .expect("local phase accounting check should finish within its deadline");
+  }
+
   #[test]
   fn handshake_args_parse_resumption_observation_options() {
     let args = parse_handshake_args(
@@ -4234,7 +4339,7 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"static_files\",protocol=\"
       &stats,
       false
     ));
-    assert_eq!(stats.snapshot().errors, 0);
+    assert_eq!(stats.snapshot().errors, 1);
 
     assert!(record_worker_error(
       "h1",
@@ -4244,7 +4349,10 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"static_files\",protocol=\"
       true
     ));
     let snapshot = stats.snapshot();
-    assert_eq!(snapshot.errors, 1);
-    assert_eq!(snapshot.error_samples, vec!["connection reset by peer"]);
+    assert_eq!(snapshot.errors, 2);
+    assert_eq!(
+      snapshot.error_samples,
+      vec!["connection reset by peer", "connection reset by peer"],
+    );
   }
 }

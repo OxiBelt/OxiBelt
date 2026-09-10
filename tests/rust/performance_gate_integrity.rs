@@ -3957,9 +3957,10 @@ fn perf_probe_reports_every_request_inside_the_process_cpu_window() {
   let source = perf_probe_source_text();
 
   assert!(
-    source.contains("let warmup_requests = if args.warmup > Duration::ZERO")
-      && source.contains("let total_requests_including_warmup =")
+    source.contains("let total_requests_including_warmup =")
       && source.contains("\"warmup_requests\": warmup_requests")
+      && source.contains("\"warmup_errors\": warmup.errors")
+      && source.contains("\"total_errors_including_warmup\":")
       && source.contains("\"total_requests_including_warmup\": total_requests_including_warmup"),
     "perf-probe should expose exact warmup and measured request counts so process CPU/request does not divide a warmup-inclusive CPU window by measured requests alone"
   );
