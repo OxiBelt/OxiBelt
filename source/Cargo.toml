@@ -26,7 +26,7 @@ argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "pa
 async-compression = { version = "=0.4.44", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
-brotli = "8.0.4"
+brotli = "9.0.0"
 bytes = "1.12.1"
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.6", features = ["derive"] }
