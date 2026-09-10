@@ -8,7 +8,7 @@ repository's Apache-2.0 license.
 
 The optional allocator experiment vendors Microsoft mimalloc 3.3.2 native
 source, with two later upstream fixes, under
-`source/third_party/mimalloc-3.3.2+oxibelt.1`. It is Copyright (c) 2019
+`source/third_party/mimalloc-3.3.2+oxibelt.1`. It is Copyright (c) 2018-2025
 Microsoft Corporation, Daan Leijen, and licensed under the MIT License. The
 complete license is retained at
 `source/third_party/mimalloc-3.3.2+oxibelt.1/LICENSE`.
