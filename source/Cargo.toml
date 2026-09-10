@@ -91,7 +91,7 @@ x509-cert = "0.3.0"
 # Keep this alias isolated to the OCSP implementation until those crates converge.
 x509-cert-v2 = { package = "x509-cert", version = "0.2.5" }
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
-zstd = "0.13.3"
+zstd = "0.14.0"
 zeroize = "1.9.0"
 compio = { version = "0.19.2", default-features = false, features = ["bytes", "io-uring", "polling", "runtime", "time"] }
 compio-driver = { version = "0.12.5", default-features = false, features = ["io-uring", "polling"] }
