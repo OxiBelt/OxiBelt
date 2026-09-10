@@ -25,7 +25,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, HandshakeKind, RootCertStore, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{lookup_host, TcpListener, TcpStream};
+use tokio::net::{lookup_host, TcpListener, TcpSocket, TcpStream};
 use tokio::time::Instant;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -34,6 +34,9 @@ const MAX_ERROR_SAMPLES: usize = 8;
 const REMOTE_ADDR_RESOLVE_ATTEMPTS: usize = 10;
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TCP_NODELAY: bool = true;
+// Multiplexed downstream loads can open many upstream connections before the
+// fixture's accept loop runs. Do not inherit a dependency's small default queue.
+const UPSTREAM_LISTEN_BACKLOG: u32 = 4096;
 const MAX_BENCHMARK_HEADER_COUNT: usize = 64;
 const MAX_BENCHMARK_HEADER_VALUE_BYTES: usize = 1024;
 const MAX_BENCHMARK_HEADER_TOTAL_BYTES: usize = 32 * 1024;
@@ -855,9 +858,22 @@ fn json_payload(size: usize) -> Bytes {
   Bytes::from(body)
 }
 
+fn bind_upstream_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
+  let socket = if addr.is_ipv4() {
+    TcpSocket::new_v4()?
+  } else {
+    TcpSocket::new_v6()?
+  };
+  // Match Mio's bind behavior: allow address reuse except on Windows, where it
+  // could allow another listener to bind an actively used address.
+  #[cfg(not(windows))]
+  socket.set_reuseaddr(true)?;
+  socket.bind(addr)?;
+  socket.listen(UPSTREAM_LISTEN_BACKLOG)
+}
+
 async fn serve_upstream(args: UpstreamArgs) -> anyhow::Result<()> {
-  let listener = TcpListener::bind(args.listen)
-    .await
+  let listener = bind_upstream_listener(args.listen)
     .with_context(|| format!("failed to bind upstream to {}", args.listen))?;
   let name = Arc::<str>::from(args.name);
   let tls_acceptor = match args.protocol {
@@ -3179,6 +3195,95 @@ fn handshake_kind_json(counts: HandshakeKindCounts) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  async fn check_upstream_listener(addr: SocketAddr) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+      let listener = bind_upstream_listener(addr).expect("upstream should bind");
+      let local_addr = listener
+        .local_addr()
+        .expect("listener should have an address");
+      assert_eq!(local_addr.ip(), addr.ip());
+      let mut client = TcpStream::connect(local_addr)
+        .await
+        .expect("client should connect");
+      let (mut server, _) = listener.accept().await.expect("upstream should accept");
+      client
+        .write_all(b"fixture")
+        .await
+        .expect("client should write");
+      let mut bytes = [0; 7];
+      server
+        .read_exact(&mut bytes)
+        .await
+        .expect("upstream should read");
+      assert_eq!(&bytes, b"fixture");
+    })
+    .await
+    .expect("listener exchange should finish");
+  }
+
+  #[tokio::test]
+  async fn upstream_listener_accepts_ipv4() {
+    check_upstream_listener("127.0.0.1:0".parse().unwrap()).await;
+  }
+
+  #[tokio::test]
+  async fn upstream_listener_accepts_ipv6_when_available() {
+    let addr = "[::1]:0".parse().unwrap();
+    match std::net::TcpListener::bind(addr) {
+      Ok(listener) => drop(listener),
+      Err(error) => {
+        eprintln!("IPv6 loopback listener unavailable; skipping: {error}");
+        return;
+      }
+    }
+    check_upstream_listener(addr).await;
+  }
+
+  #[cfg(target_os = "linux")]
+  #[tokio::test]
+  async fn upstream_listener_queues_connection_burst_before_accept() {
+    const CONNECTIONS: usize = 256;
+    let somaxconn: usize = fs::read_to_string("/proc/sys/net/core/somaxconn")
+      .expect("Linux listen queue cap should be readable")
+      .trim()
+      .parse()
+      .expect("Linux listen queue cap should be numeric");
+    if somaxconn < CONNECTIONS {
+      eprintln!("kernel caps the listen queue at {somaxconn}; skipping burst test");
+      return;
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+      let listener =
+        bind_upstream_listener("127.0.0.1:0".parse().unwrap()).expect("upstream should bind");
+      let addr = listener
+        .local_addr()
+        .expect("listener should have an address");
+      // Model a cold upstream pool: all connections must complete before the
+      // accept loop runs. The previous 128-entry queue cannot hold this burst.
+      let mut clients =
+        futures_util::future::try_join_all((0..CONNECTIONS).map(|_| TcpStream::connect(addr)))
+          .await
+          .expect("the entire opening burst should connect");
+      for client in &mut clients {
+        client.write_all(b"x").await.expect("client should write");
+      }
+      for _ in 0..CONNECTIONS {
+        let (mut server, _) = listener
+          .accept()
+          .await
+          .expect("queued connection should accept");
+        let mut byte = [0];
+        server
+          .read_exact(&mut byte)
+          .await
+          .expect("queued connection should remain usable");
+        assert_eq!(byte, *b"x");
+      }
+    })
+    .await
+    .expect("opening burst should queue without waiting for accept");
+  }
 
   #[test]
   fn sampled_error_messages_are_bounded() {

@@ -54,6 +54,14 @@ OpenResty H3 probe failures fail closed instead of being recorded as skipped.
 Malformed, zero-request, DNS, connect, or TLS failures in supported OpenResty
 rows fail the iteration like nginx and Caddy rows.
 
+The shared `perf-probe upstream` fixtures explicitly request a TCP listen
+backlog of 4096 for H1, H2C, and TLS H2, allowing multiplexed loads to open
+upstream connections before the fixture accepts them. The effective queue is
+still limited by the operating system (on Linux, `net.core.somaxconn`); the
+probe does not change host settings. Use the same probe image for matched
+comparisons, and check upstream listen-overflow counters when diagnosing
+connection failures during warmup or measurement.
+
 Profiles:
 
 - `smoke`: short HTTP/1.1 keep-alive, HTTP/2, mandatory OxiBelt/Caddy/OpenResty HTTP/3, optional nginx HTTP/3 where available, OxiBelt bodyful reverse-proxy gates, cold TLS handshake comparison, and a short OxiBelt soak.
