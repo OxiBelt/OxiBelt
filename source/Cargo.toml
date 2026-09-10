@@ -23,7 +23,7 @@ aws-lc-rs = { version = "1.18.1", default-features = false }
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
 # Async-compression 0.4.45 requires Zstd 0.14; retain this release with the
 # locked compression-codecs 0.4.39 until the direct Zstd migration is admitted.
-async-compression = { version = "=0.4.44", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
+async-compression = { version = "=0.4.45", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 brotli = "8.0.4"
