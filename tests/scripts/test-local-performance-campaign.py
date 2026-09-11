@@ -51,8 +51,10 @@ class LocalPerformanceCampaignTests(unittest.TestCase):
         self.inputs = self.root / "images.json"
         self.aggregate = self.bin / "aggregate"
         self.docker = self.bin / "docker"
+        self.timeout = self.bin / "timeout"
         self.runner_record = self.root / "runner-record.jsonl"
         self.aggregate_record = self.root / "aggregate-record.jsonl"
+        self.timeout_record = self.root / "timeout-record.jsonl"
 
         write_executable(
             scripts / "run-proxy-performance.sh",
@@ -61,6 +63,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 args = sys.argv[1:]
 profile = args[args.index("--profile") + 1]
@@ -108,6 +111,14 @@ artifact.mkdir(parents=True, exist_ok=True)
 (artifact / "configs" / "oxibelt-fixture" / "cert").mkdir(parents=True, exist_ok=True)
 (artifact / "configs" / "oxibelt-fixture" / "cert" / "privkey.pem").write_text("private fixture key\n", encoding="utf-8")
 (artifact / "configs" / "oxibelt-fixture" / "cert" / "keysigner-token.b64").write_text("private fixture key\n", encoding="utf-8")
+profile_sleep_variable = f"FAKE_{profile.upper()}_RUNNER_SLEEP_SECONDS"
+time.sleep(
+    float(
+        os.environ.get(
+            profile_sleep_variable, os.environ.get("FAKE_RUNNER_SLEEP_SECONDS", "0")
+        )
+    )
+)
 result_profile = os.environ.get("FAKE_RESULT_PROFILE", profile)
 (artifact / "results.json").write_text(json.dumps([{
     "label": "fixture",
@@ -153,6 +164,7 @@ sys.exit(int(os.environ.get("FAKE_RUNNER_EXIT", "0")))
 
         write_executable(self.docker, self._docker_fixture())
         write_executable(self.aggregate, self._aggregate_fixture())
+        write_executable(self.timeout, self._timeout_fixture())
         self.inputs.write_text(json.dumps(self._input_manifest(), indent=2), encoding="utf-8")
 
     def tearDown(self) -> None:
@@ -164,9 +176,11 @@ import hashlib
 import json
 import os
 import sys
+import time
 
 if sys.argv[1:3] != ["image", "inspect"] or len(sys.argv) != 4:
     raise SystemExit("fixture docker only supports image inspect")
+time.sleep(float(os.environ.get("FAKE_DOCKER_SLEEP_SECONDS", "0")))
 reference = sys.argv[3]
 config_digest = "sha256:" + hashlib.sha256(reference.encode()).hexdigest()
 manifest_digest = "sha256:" + hashlib.sha256(
@@ -222,6 +236,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 args = sys.argv[1:]
 def value(flag):
@@ -241,6 +256,7 @@ record_path = os.environ.get("FAKE_AGGREGATE_RECORD")
 if record_path:
     with pathlib.Path(record_path).open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(record) + "\n")
+time.sleep(float(os.environ.get("FAKE_AGGREGATE_SLEEP_SECONDS", "0")))
 
 mode = os.environ.get("FAKE_AGGREGATE_MODE", "pass")
 report = output / "performance-comparison.json"
@@ -279,6 +295,41 @@ elif mode == "missing-violations":
     payload["regression_gates"].pop("violations")
 report.write_text(json.dumps(payload), encoding="utf-8")
 (output / "performance-comparison.md").write_text("fixture\n", encoding="utf-8")
+'''
+
+    @staticmethod
+    def _timeout_fixture() -> str:
+        return r'''#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+index = 0
+while index < len(args) and args[index].startswith("-"):
+    index += 1
+if index + 1 >= len(args):
+    raise SystemExit("fixture timeout could not locate duration and command")
+duration = args[index]
+command = args[index + 1]
+record_path = os.environ.get("FAKE_TIMEOUT_RECORD")
+if record_path:
+    with pathlib.Path(record_path).open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({
+            "args": args,
+            "duration": duration,
+            "command": command,
+        }) + "\n")
+force = os.environ.get("FAKE_TIMEOUT_FORCE", "")
+command_name = pathlib.Path(command).name
+if force == "all" or (force == "input" and command_name == "docker") or (
+    force == "runner" and command_name == "run-proxy-performance.sh"
+) or (
+    force == "aggregate" and command_name == "aggregate"
+):
+    args[index] = os.environ.get("FAKE_TIMEOUT_SECONDS", "0.1s")
+os.execv("/usr/bin/timeout", ["timeout", *args])
 '''
 
     def _input_manifest(self) -> dict[str, object]:
@@ -488,8 +539,10 @@ report.write_text(json.dumps(payload), encoding="utf-8")
                 "OXIBELT_DOCKER_COMMAND": str(self.docker),
                 "FAKE_RUNNER_RECORD": str(self.runner_record),
                 "FAKE_AGGREGATE_RECORD": str(self.aggregate_record),
+                "FAKE_TIMEOUT_RECORD": str(self.timeout_record),
                 "FAKE_SOURCE_REVISION": self.revision,
                 "XDG_RUNTIME_DIR": str(self.runtime),
+                "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
             }
         )
         if env:
@@ -517,6 +570,33 @@ report.write_text(json.dumps(payload), encoding="utf-8")
             check=False,
             preexec_fn=(lambda: os.umask(caller_umask)) if caller_umask is not None else None,
         )
+
+    def replace_fixed_campaign_timeout(self, variable: str, seconds: int) -> None:
+        """Shorten one fixed deadline in the isolated committed fixture checkout."""
+        wrapper = self.source / "tests" / "scripts" / SCRIPT.name
+        prefix = f"readonly {variable}="
+        lines = wrapper.read_text(encoding="utf-8").splitlines()
+        matches = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+        self.assertEqual(len(matches), 1, prefix)
+        lines[matches[0]] = f"{prefix}{seconds}"
+        wrapper.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.source), "add", str(wrapper)], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.source), "commit", "--amend", "-qm", "fixture"],
+            check=True,
+        )
+        self.revision = subprocess.check_output(
+            ["git", "-C", str(self.source), "rev-parse", "HEAD"], text=True
+        ).strip()
+        self.tree = subprocess.check_output(
+            ["git", "-C", str(self.source), "rev-parse", "HEAD^{tree}"], text=True
+        ).strip()
+        write_executable(self.docker, self._docker_fixture())
+        for contract_path in sorted((self.root / "contracts").glob("*.json")):
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract["revision"] = self.revision
+            contract["source_tree"] = self.tree
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
 
     def seed_full_benchmark(
         self,
@@ -685,6 +765,30 @@ report.write_text(json.dumps(payload), encoding="utf-8")
         self.assertTrue(all(value.startswith("sha256:") for value in images.values()))
         self.assertNotIn("oxibelt:v2", images.values())
         self.assertNotIn("nginx:x86-64-v2", images.values())
+
+    def test_input_image_timeout_is_reported_distinctly(self) -> None:
+        campaign = self.root / "input-timeout"
+        result = self.invoke(
+            "smoke",
+            campaign,
+            "--target-cpu",
+            "x86-64-v2",
+            "--group",
+            "reverse-proxy",
+            env={
+                "FAKE_TIMEOUT_FORCE": "input",
+                "FAKE_DOCKER_SLEEP_SECONDS": "5",
+            },
+        )
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertIn("inspection timed out", result.stderr)
+        self.assertFalse((campaign / "campaign-manifest.json").exists())
+        self.assertFalse(self.runner_record.exists())
+        timeout_record = json.loads(
+            self.timeout_record.read_text(encoding="utf-8").strip()
+        )
+        self.assertEqual(timeout_record["duration"], "60s")
+        self.assertEqual(pathlib.Path(timeout_record["command"]).name, "docker")
 
     def test_classic_config_id_image_store_remains_supported(self) -> None:
         campaign = self.root / "classic-image-store"
@@ -1055,6 +1159,95 @@ report.write_text(json.dumps(payload), encoding="utf-8")
         self.assertEqual(attempts[0]["exit_code"], 23)
         self.assertEqual(attempts[0]["status"], "fail")
 
+    def test_smoke_timeout_is_recorded_and_stops_the_phase(self) -> None:
+        campaign = self.root / "smoke-timeout"
+        result = self.invoke(
+            "smoke",
+            campaign,
+            "--target-cpu",
+            "x86-64-v2",
+            env={
+                "FAKE_TIMEOUT_FORCE": "runner",
+                "FAKE_RUNNER_SLEEP_SECONDS": "5",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            len(self.runner_record.read_text(encoding="utf-8").splitlines()), 1
+        )
+
+        manifest = json.loads(
+            (campaign / "campaign-manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(manifest["planned"]["smoke"]), len(GROUPS))
+        self.assertEqual(len(manifest["attempts"]), 1)
+        self.assertEqual(
+            manifest["policy"]["timeout_seconds"],
+            {
+                "attempt": {"smoke": 1500, "benchmark": 3600},
+                "aggregate": 900,
+                "input_inspect": 60,
+                "campaign": {"smoke": 7200, "benchmark": 72000, "all": 75600},
+                "kill_after": 120,
+            },
+        )
+        attempt = manifest["attempts"][0]
+        self.assertEqual(attempt["runner_exit_code"], 124)
+        self.assertEqual(attempt["status"], "timeout")
+        self.assertTrue(attempt["timed_out"])
+        self.assertEqual(attempt["timeout_scope"], "attempt")
+        self.assertEqual(attempt["timeout_limit_seconds"], 1500)
+        self.assertEqual(attempt["timeout_seconds"], 1500)
+        receipt = campaign / attempt["restricted_receipt"]
+        receipt_payload = json.loads(receipt.read_text())
+        self.assertEqual(receipt_payload["status"], "removed")
+        self.assertEqual(len(receipt_payload["removed"]), 4)
+
+        all_timeout_records = [
+            json.loads(line)
+            for line in self.timeout_record.read_text(encoding="utf-8").splitlines()
+        ]
+        timeout_records = [
+            record
+            for record in all_timeout_records
+            if pathlib.Path(record["command"]).name == "run-proxy-performance.sh"
+        ]
+        self.assertEqual(len(timeout_records), 1)
+        self.assertEqual(timeout_records[0]["duration"], "1500s")
+        self.assertEqual(
+            pathlib.Path(timeout_records[0]["command"]).name,
+            "run-proxy-performance.sh",
+        )
+        self.assertIn("--signal=TERM", timeout_records[0]["args"])
+        self.assertIn("--kill-after=120s", timeout_records[0]["args"])
+
+    def test_successful_smoke_attempt_uses_the_fixed_deadline(self) -> None:
+        campaign = self.root / "smoke-deadline"
+        result = self.invoke(
+            "smoke",
+            campaign,
+            "--target-cpu",
+            "x86-64-v2",
+            "--group",
+            "reverse-proxy",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        timeout_record = next(
+            record
+            for record in (
+                json.loads(line)
+                for line in self.timeout_record.read_text(encoding="utf-8").splitlines()
+            )
+            if pathlib.Path(record["command"]).name == "run-proxy-performance.sh"
+        )
+        self.assertEqual(timeout_record["duration"], "1500s")
+        attempt = json.loads(
+            (campaign / "campaign-manifest.json").read_text(encoding="utf-8")
+        )["attempts"][0]
+        self.assertFalse(attempt["timed_out"])
+        self.assertIsNone(attempt["timeout_scope"])
+        self.assertEqual(attempt["status"], "pass")
+
     def test_all_stops_after_smoke_failure_without_benchmark_launch(self) -> None:
         campaign = self.root / "all-smoke-failure"
         result = self.invoke(
@@ -1072,6 +1265,35 @@ report.write_text(json.dumps(payload), encoding="utf-8")
             for line in self.runner_record.read_text(encoding="utf-8").splitlines()
         ]
         self.assertEqual([record["profile"] for record in records], ["smoke"])
+
+    def test_all_campaign_deadline_stops_collection_before_aggregate(self) -> None:
+        self.replace_fixed_campaign_timeout("all_campaign_timeout_seconds", 5)
+        campaign = self.root / "all-campaign-timeout"
+        result = self.invoke(
+            "all",
+            campaign,
+            "--target-cpu",
+            "x86-64-v2",
+            "--group",
+            "reverse-proxy",
+            env={"FAKE_BENCHMARK_RUNNER_SLEEP_SECONDS": "10"},
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        manifest = json.loads(
+            (campaign / "campaign-manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(
+            [entry["profile"] for entry in manifest["attempts"]],
+            ["smoke", "benchmark"],
+        )
+        benchmark = manifest["attempts"][1]
+        self.assertEqual(benchmark["status"], "timeout")
+        self.assertTrue(benchmark["timed_out"])
+        self.assertEqual(benchmark["timeout_scope"], "campaign")
+        self.assertLessEqual(benchmark["timeout_seconds"], 5)
+        self.assertEqual(manifest["aggregates"], [])
+        self.assertFalse(self.aggregate_record.exists())
 
     def test_generated_private_keys_are_removed_and_keep_artifacts_is_forced_off(
         self,
@@ -1119,6 +1341,34 @@ report.write_text(json.dumps(payload), encoding="utf-8")
             (campaign / "campaign-manifest.json").read_text(encoding="utf-8")
         )
         self.assertTrue(all(record["exit_code"] != 0 for record in manifest["aggregates"]))
+
+    def test_aggregate_timeout_is_retained_and_fails_closed(self) -> None:
+        campaign = self.seed_full_benchmark(campaign=self.root / "aggregate-timeout")
+        result = self.invoke(
+            "aggregate",
+            campaign,
+            env={
+                "FAKE_TIMEOUT_FORCE": "aggregate",
+                "FAKE_AGGREGATE_SLEEP_SECONDS": "5",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            len(self.aggregate_record.read_text(encoding="utf-8").splitlines()),
+            len(TARGETS),
+        )
+        manifest = json.loads(
+            (campaign / "campaign-manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["status"], "aggregate-failed")
+        self.assertEqual(len(manifest["aggregates"]), len(TARGETS))
+        for aggregate in manifest["aggregates"]:
+            self.assertEqual(aggregate["command_exit_code"], 124)
+            self.assertEqual(aggregate["exit_code"], 124)
+            self.assertEqual(aggregate["status"], "timeout")
+            self.assertTrue(aggregate["timed_out"])
+            self.assertEqual(aggregate["timeout_scope"], "aggregate")
+            self.assertEqual(aggregate["timeout_seconds"], 900)
 
 
 if __name__ == "__main__":
