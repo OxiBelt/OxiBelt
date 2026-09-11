@@ -1132,6 +1132,61 @@ fn docker_wrapper_applies_fixed_nofile_only_to_container_creation_and_preserves_
 }
 
 #[test]
+fn measured_proxies_pin_source_port_reuse_and_stage_tls_idempotently() {
+  let script = performance_script_text();
+  assert!(
+    script.contains(r#"readonly proxy_ipv4_local_port_range="1024 65535""#)
+      && script.contains("readonly proxy_tcp_tw_reuse=1")
+      && script
+        .contains(r#"--sysctl "net.ipv4.ip_local_port_range=${proxy_ipv4_local_port_range}""#)
+      && script.contains(r#"--sysctl "net.ipv4.tcp_tw_reuse=${proxy_tcp_tw_reuse}""#),
+    "the benchmark should pin a wide ephemeral-port range and TCP TIME-WAIT reuse"
+  );
+
+  for function_name in [
+    "start_oxibelt",
+    "start_nginx",
+    "start_caddy",
+    "start_openresty",
+  ] {
+    let function = extract_bash_function(&script, function_name);
+    assert!(
+      function.contains(r#""${proxy_network_sysctls[@]}""#),
+      "{function_name} should apply the fixed proxy network sysctls"
+    );
+  }
+
+  for (function_name, comparator) in [
+    ("start_nginx", "nginx"),
+    ("start_caddy", "caddy"),
+    ("start_openresty", "openresty"),
+  ] {
+    let function = extract_bash_function(&script, function_name);
+    assert!(
+      function.contains(&format!(r#"mkdir -p "${{configs_dir}}/{comparator}/cert""#))
+        && function.contains(&format!(
+          r#"cp -R "${{tls_dir}}/." "${{configs_dir}}/{comparator}/cert""#
+        )),
+      "{function_name} should copy TLS contents into an existing cert directory"
+    );
+    assert!(
+      !function.contains(&format!(
+        r#"cp -R "${{tls_dir}}" "${{configs_dir}}/{comparator}/cert""#
+      )),
+      "{function_name} must not nest the TLS directory on repeated startup"
+    );
+  }
+
+  let append_result = extract_bash_function(&script, "append_result");
+  assert!(
+    append_result.contains("proxy_network_sysctls:")
+      && append_result.contains("ipv4_local_port_range: $proxy_ipv4_local_port_range")
+      && append_result.contains("tcp_tw_reuse: $proxy_tcp_tw_reuse"),
+    "each result should record the fixed proxy network sysctls"
+  );
+}
+
+#[test]
 fn nginx_h3_detection_rejects_docker_failure_but_allows_an_unsupported_image() {
   let unsupported = detect_nginx_h3_harness(0, "nginx version: nginx/1.29.0");
   assert!(

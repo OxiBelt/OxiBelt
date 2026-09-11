@@ -424,6 +424,12 @@ if [[ -z "${docker_command}" ]]; then
 fi
 
 readonly container_nofile_limit=262144
+readonly proxy_ipv4_local_port_range="1024 65535"
+readonly proxy_tcp_tw_reuse=1
+readonly -a proxy_network_sysctls=(
+  --sysctl "net.ipv4.ip_local_port_range=${proxy_ipv4_local_port_range}"
+  --sysctl "net.ipv4.tcp_tw_reuse=${proxy_tcp_tw_reuse}"
+)
 
 docker() {
   case "${1:-}" in
@@ -1518,6 +1524,8 @@ append_result() {
     --arg profile "${profile}" \
     --arg serving_type "${serving_type}" \
     --arg oxibelt_build_mode "${oxibelt_build_mode}" \
+    --arg proxy_ipv4_local_port_range "${proxy_ipv4_local_port_range}" \
+    --argjson proxy_tcp_tw_reuse "${proxy_tcp_tw_reuse}" \
     --argjson perf_probe_image "${perf_probe_identity}" \
     --argjson oxibelt_image "${oxibelt_identity}" \
     --argjson nginx_image "${nginx_identity}" \
@@ -1532,6 +1540,10 @@ append_result() {
         profile: $profile,
         serving_type: $serving_type,
         oxibelt_build_mode: $oxibelt_build_mode,
+        proxy_network_sysctls: {
+          ipv4_local_port_range: $proxy_ipv4_local_port_range,
+          tcp_tw_reuse: $proxy_tcp_tw_reuse
+        },
         images: {
           perf_probe: $perf_probe_image,
           oxibelt: $oxibelt_image,
@@ -3626,6 +3638,7 @@ start_oxibelt() {
   fi
 
   docker create \
+    "${proxy_network_sysctls[@]}" \
     --name "${container}" \
     --label "${test_label}" \
     --network "${network_name}" \
@@ -3662,11 +3675,12 @@ start_nginx() {
   if [[ "${nginx_h3_supported}" == "1" ]]; then
     config="nginx-h3.conf"
   fi
-  mkdir -p "${configs_dir}/nginx"
+  mkdir -p "${configs_dir}/nginx/cert"
   cp "${fixture_root}/nginx/${config}" "${configs_dir}/nginx/nginx.conf"
-  cp -R "${tls_dir}" "${configs_dir}/nginx/cert"
+  cp -R "${tls_dir}/." "${configs_dir}/nginx/cert"
 
   docker create \
+    "${proxy_network_sysctls[@]}" \
     --name "${container}" \
     --label "${test_label}" \
     --network "${network_name}" \
@@ -3688,11 +3702,12 @@ start_nginx() {
 start_caddy() {
   local container="caddy-perf-${run_id}"
   stop_active_proxy
-  mkdir -p "${configs_dir}/caddy"
+  mkdir -p "${configs_dir}/caddy/cert"
   cp "${fixture_root}/caddy/Caddyfile" "${configs_dir}/caddy/Caddyfile"
-  cp -R "${tls_dir}" "${configs_dir}/caddy/cert"
+  cp -R "${tls_dir}/." "${configs_dir}/caddy/cert"
 
   docker create \
+    "${proxy_network_sysctls[@]}" \
     --name "${container}" \
     --label "${test_label}" \
     --network "${network_name}" \
@@ -3714,11 +3729,12 @@ start_caddy() {
 start_openresty() {
   local container="openresty-perf-${run_id}"
   stop_active_proxy
-  mkdir -p "${configs_dir}/openresty"
+  mkdir -p "${configs_dir}/openresty/cert"
   cp "${fixture_root}/openresty/default.conf" "${configs_dir}/openresty/default.conf"
-  cp -R "${tls_dir}" "${configs_dir}/openresty/cert"
+  cp -R "${tls_dir}/." "${configs_dir}/openresty/cert"
 
   docker create \
+    "${proxy_network_sysctls[@]}" \
     --name "${container}" \
     --label "${test_label}" \
     --network "${network_name}" \
@@ -4793,6 +4809,8 @@ cat >"${summary_md}" <<EOF
 - Pool experiment caps: \`${pool_experiment_caps}\`
 - Pool experiment concurrency presets: \`${pool_experiment_concurrency_presets}\`
 - Docker command: \`${docker_command}\`
+- Proxy IPv4 local port range: \`${proxy_ipv4_local_port_range}\`
+- Proxy TCP TIME-WAIT reuse: \`${proxy_tcp_tw_reuse}\`
 - Source SHA: \`${source_sha}\`
 - Source dirty: \`${source_dirty}\`
 - Source architecture: \`${source_architecture}\`
