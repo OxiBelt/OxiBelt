@@ -55,6 +55,9 @@ RUNTIME_WORKSPACE_PACKAGES = frozenset(
         "oxibelt-control-protocol",
     }
 )
+COMPATIBILITY_DATA_PLANE_WORKSPACE_PACKAGES = RUNTIME_WORKSPACE_PACKAGES | {
+    "oxibelt-allocator"
+}
 STRICT_WORKSPACE_PACKAGES = RUNTIME_WORKSPACE_PACKAGES | {
     "oxibelt-dataplane-strict"
 }
@@ -90,9 +93,18 @@ POLICIES = (
         label="compatibility data plane (default features)",
         package="oxibelt",
         feature_arguments=(),
-        allowed_workspace_packages=RUNTIME_WORKSPACE_PACKAGES,
+        allowed_workspace_packages=COMPATIBILITY_DATA_PLANE_WORKSPACE_PACKAGES,
         expected_features=(
-            ("oxibelt", frozenset({"admin-runtime", "default"})),
+            (
+                "oxibelt",
+                frozenset(
+                    {
+                        "admin-runtime",
+                        "allocator-mimalloc-experiment",
+                        "default",
+                    }
+                ),
+            ),
         ),
         forbidden_packages=DATA_PLANE_FORBIDDEN_PACKAGES,
         forbidden_package_prefixes=DATA_PLANE_FORBIDDEN_PREFIXES,
@@ -101,13 +113,14 @@ POLICIES = (
         label="compatibility data plane (all features)",
         package="oxibelt",
         feature_arguments=("--all-features",),
-        allowed_workspace_packages=RUNTIME_WORKSPACE_PACKAGES,
+        allowed_workspace_packages=COMPATIBILITY_DATA_PLANE_WORKSPACE_PACKAGES,
         expected_features=(
             (
                 "oxibelt",
                 frozenset(
                     {
                         "admin-runtime",
+                        "allocator-mimalloc-experiment",
                         "config-tooling",
                         "crypto-ring",
                         "default",
