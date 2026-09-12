@@ -20,17 +20,17 @@ OPENAPI_PATH = PurePosixPath("source/assets/admin-openapi.json")
 # Keep repo-authored README.OXIBELT.md and future Markdown under normal checks.
 UPSTREAM_MARKDOWN_EXEMPTIONS = frozenset(
     {
-        PurePosixPath("source/third_party/mimalloc-3.3.2+oxibelt.1/SECURITY.md"),
+        PurePosixPath("source/third_party/mimalloc-3.5.1/SECURITY.md"),
         PurePosixPath(
-            "source/third_party/mimalloc-3.3.2+oxibelt.1/contrib/docker/readme.md"
+            "source/third_party/mimalloc-3.5.1/contrib/docker/readme.md"
         ),
         PurePosixPath(
-            "source/third_party/mimalloc-3.3.2+oxibelt.1/contrib/vcpkg/readme.md"
+            "source/third_party/mimalloc-3.5.1/contrib/vcpkg/readme.md"
         ),
-        PurePosixPath("source/third_party/mimalloc-3.3.2+oxibelt.1/readme.md"),
-        PurePosixPath("source/third_party/mimalloc-3.3.2+oxibelt.1/src/prim/readme.md"),
+        PurePosixPath("source/third_party/mimalloc-3.5.1/readme.md"),
+        PurePosixPath("source/third_party/mimalloc-3.5.1/src/prim/readme.md"),
         PurePosixPath(
-            "source/third_party/mimalloc-3.3.2+oxibelt.1/src/prim/windows/readme.md"
+            "source/third_party/mimalloc-3.5.1/src/prim/windows/readme.md"
         ),
     }
 )

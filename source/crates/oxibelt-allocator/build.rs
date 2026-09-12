@@ -227,7 +227,7 @@ fn compile_mimalloc() {
   reject_native_configuration_overrides();
 
   let manifest_dir = PathBuf::from(required_env("CARGO_MANIFEST_DIR"));
-  let native_root = manifest_dir.join("../../third_party/mimalloc-3.3.2+oxibelt.1");
+  let native_root = manifest_dir.join("../../third_party/mimalloc-3.5.1");
   println!("cargo:rerun-if-changed={}", native_root.display());
 
   let mut build = cc::Build::new();

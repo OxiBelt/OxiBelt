@@ -22,6 +22,13 @@ alongside the directly selected Brotli 9; the dependency policy records both
 compatibility lines. Other upstream constraints may likewise retain older
 transitive versions without changing the supported upgrade contract.
 
+The vendored mimalloc 3.5.1 source is a local update candidate. Its provenance
+and bounded functional/sanitizer evidence do not constitute independent native
+safety review or performance and memory qualification; those remain pending
+under [the allocator admission tracker](https://github.com/OxiBelt/OxiBelt/issues/183).
+Do not treat this maintenance work as deployment qualification. The allocator
+selection and rollback procedure below remain applicable.
+
 ## Optional allocator builds
 
 The `allocator-mimalloc-experiment` Cargo feature is part of the default feature

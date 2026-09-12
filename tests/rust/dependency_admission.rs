@@ -1136,7 +1136,7 @@ fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
     "target_arch == \"x86_64\"",
     "target_pointer_width == \"64\"",
     "matches!(target_env.as_str(), \"gnu\" | \"musl\")",
-    "third_party/mimalloc-3.3.2+oxibelt.1",
+    "third_party/mimalloc-3.5.1",
     "src/static.c",
     "build.define(\"MI_SECURE\", \"4\")",
     "build.define(\"MI_DEBUG\", \"0\")",
@@ -1194,7 +1194,7 @@ fn allocator_native_archive_rejects_transient_override_injection() {
   let shadow_source = temporary.path().join("shadow/src");
   fs::create_dir_all(&shadow_source).expect("create shadow source directory");
   let native_source = repo_root()
-    .join("source/third_party/mimalloc-3.3.2+oxibelt.1/src/static.c")
+    .join("source/third_party/mimalloc-3.5.1/src/static.c")
     .canonicalize()
     .expect("canonical native translation unit");
   let native_source = native_source
@@ -1245,18 +1245,16 @@ fn allocator_native_archive_rejects_transient_override_injection() {
 
 #[test]
 fn allocator_native_source_is_byte_locked_and_governed() {
-  const NATIVE_PATH: &str = "source/third_party/mimalloc-3.3.2+oxibelt.1";
-  const UPSTREAM_MANIFEST: &str =
-    "source/third_party/mimalloc-3.3.2+oxibelt.1/UPSTREAM-MANIFEST.sha256";
-  const NATIVE_MANIFEST: &str =
-    "source/third_party/mimalloc-3.3.2+oxibelt.1/NATIVE-MANIFEST.sha256";
-  const PROVENANCE: &str = "source/third_party/mimalloc-3.3.2+oxibelt.1/SOURCE-PROVENANCE.json";
-  const README: &str = "source/third_party/mimalloc-3.3.2+oxibelt.1/README.OXIBELT.md";
+  const NATIVE_PATH: &str = "source/third_party/mimalloc-3.5.1";
+  const UPSTREAM_MANIFEST: &str = "source/third_party/mimalloc-3.5.1/UPSTREAM-MANIFEST.sha256";
+  const NATIVE_MANIFEST: &str = "source/third_party/mimalloc-3.5.1/NATIVE-MANIFEST.sha256";
+  const PROVENANCE: &str = "source/third_party/mimalloc-3.5.1/SOURCE-PROVENANCE.json";
+  const README: &str = "source/third_party/mimalloc-3.5.1/README.OXIBELT.md";
   const BINDING: &str = "source/crates/oxibelt-allocator/src/lib.rs";
 
   assert_eq!(
     read(".gitattributes"),
-    "source/third_party/mimalloc-3.3.2+oxibelt.1/** -whitespace\n",
+    "source/third_party/mimalloc-3.5.1/** -whitespace\n",
     "vendored upstream whitespace policy changed"
   );
 
@@ -1267,31 +1265,37 @@ fn allocator_native_source_is_byte_locked_and_governed() {
   assert_eq!(native_sources.len(), 1, "native source inventory changed");
   let native = &native_sources[0];
   assert_eq!(native["id"], "mimalloc");
-  assert_eq!(native["version"], "3.3.2+oxibelt.1");
+  assert_eq!(native["version"], "3.5.1");
   assert_eq!(native["path"], NATIVE_PATH);
   assert_eq!(
     native["upstreamRepository"],
     "https://github.com/microsoft/mimalloc"
   );
-  assert_eq!(native["upstreamVersion"], "3.3.2");
+  assert_eq!(native["upstreamVersion"], "3.5.1");
   assert_eq!(
     native["upstreamRevision"],
-    "30b2d9d89099bee08e9f67a1ffb3e12e7ba45227"
+    "34fbd7e7cd4627424490afe19b20f8066bfc537d"
   );
-  assert_eq!(native["acquisition"]["package"], "libmimalloc-sys");
-  assert_eq!(native["acquisition"]["version"], "0.1.49");
   assert_eq!(
-    native["acquisition"]["crateSha256"],
-    "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+    native["acquisition"]["method"],
+    "git archive from the exact upstream annotated tag"
   );
+  assert_eq!(native["acquisition"]["tag"], "v3.5.1");
+  assert_eq!(
+    native["acquisition"]["tagObject"],
+    "8e05dab9b9e38aa92ab6a6e137baefeaa9e45e40"
+  );
+  assert_eq!(native["acquisition"]["tagSignature"], "absent");
   assert_eq!(native["acquisition"]["dependency"], false);
   assert_eq!(
-    native["appliedUpstreamCommits"],
-    serde_json::json!([
-      "acea8bcb71d3f35666e32b3b3d78544496200d7c",
-      "f2dc730bad28899a675672846bfe551e91a23493"
-    ])
+    native["sourceScope"],
+    "67 upstream source files plus 4 OxiBelt metadata files (71 total); exact unsigned tag and no patches; independent safety review and performance qualification deferred"
   );
+  assert_eq!(native["patches"], serde_json::json!([]));
+  assert_eq!(native["provenanceReviewedOn"], "2026-09-12");
+  assert_eq!(native["independentNativeSafetyReview"], "deferred");
+  assert_eq!(native["performanceQualification"], "deferred");
+  assert!(native.get("reviewedOn").is_none());
   assert_eq!(native["license"], "MIT");
   assert_eq!(native["secureLevel"], 4);
   assert_eq!(native["allocatorOverride"], false);
@@ -1322,7 +1326,7 @@ fn allocator_native_source_is_byte_locked_and_governed() {
 
   let vendor_root = repo_root().join(NATIVE_PATH);
   let files = hash_regular_tree(&vendor_root);
-  assert_eq!(files.len(), 69, "governed native source file set changed");
+  assert_eq!(files.len(), 71, "governed native source file set changed");
   assert_eq!(
     sha256_hex(&fs::read(repo_root().join(UPSTREAM_MANIFEST)).unwrap()),
     native["upstreamManifestSha256"]
@@ -1346,8 +1350,8 @@ fn allocator_native_source_is_byte_locked_and_governed() {
 
   let upstream = checksum_manifest(UPSTREAM_MANIFEST);
   let selected = checksum_manifest(NATIVE_MANIFEST);
-  assert_eq!(upstream.len(), 65, "upstream native manifest changed");
-  assert_eq!(selected.len(), 65, "selected native manifest changed");
+  assert_eq!(upstream.len(), 67, "upstream native manifest changed");
+  assert_eq!(selected.len(), 67, "selected native manifest changed");
   assert_eq!(
     upstream.keys().collect::<Vec<_>>(),
     selected.keys().collect::<Vec<_>>(),
@@ -1376,25 +1380,46 @@ fn allocator_native_source_is_byte_locked_and_governed() {
     .filter(|(path, checksum)| selected.get(*path) != Some(*checksum))
     .map(|(path, _)| path.as_str())
     .collect::<BTreeSet<_>>();
-  assert_eq!(
-    changed,
-    BTreeSet::from(["src/libc.c", "src/prim/unix/prim.c"]),
-    "native source differs from upstream in unreviewed files"
+  assert!(
+    changed.is_empty(),
+    "native source must match the upstream tag exactly"
   );
 
   let provenance: serde_json::Value =
     serde_json::from_str(&read(PROVENANCE)).expect("source provenance must be valid JSON");
   assert_eq!(provenance["schemaVersion"], 1);
   assert_eq!(provenance["component"]["path"], NATIVE_PATH);
+  assert_eq!(provenance["component"]["version"], native["version"]);
+  assert_eq!(
+    provenance["upstream"]["repository"],
+    native["upstreamRepository"]
+  );
+  assert_eq!(provenance["upstream"]["tag"], native["acquisition"]["tag"]);
+  assert_eq!(
+    provenance["upstream"]["tagObject"],
+    native["acquisition"]["tagObject"]
+  );
+  assert_eq!(
+    provenance["upstream"]["tagSignature"],
+    native["acquisition"]["tagSignature"]
+  );
   assert_eq!(
     provenance["upstream"]["revision"],
     native["upstreamRevision"]
   );
   assert_eq!(
-    provenance["acquisition"]["crateSha256"],
-    native["acquisition"]["crateSha256"]
+    provenance["acquisition"]["method"],
+    native["acquisition"]["method"]
   );
   assert_eq!(provenance["acquisition"]["dependency"], false);
+  assert_eq!(native["patches"], serde_json::json!([]));
+  assert!(
+    provenance["patches"]
+      .as_array()
+      .expect("source provenance patches must be an array")
+      .is_empty(),
+    "unreviewed native patches must not be introduced"
+  );
   assert_eq!(
     provenance["manifests"]["upstream"]["sha256"],
     native["upstreamManifestSha256"]
@@ -1407,17 +1432,6 @@ fn allocator_native_source_is_byte_locked_and_governed() {
     provenance["rustBinding"]["path"],
     native["rustBinding"]["path"]
   );
-  for patch in provenance["patches"]
-    .as_array()
-    .expect("source provenance patches must be an array")
-  {
-    let path = patch["path"].as_str().expect("patch path must be a string");
-    assert_eq!(
-      selected.get(path).map(String::as_str),
-      patch["patchedSha256"].as_str(),
-      "patched source digest is stale for {path}"
-    );
-  }
   for (path, checksum) in native["licenseFiles"]
     .as_object()
     .expect("native license files must be an object")

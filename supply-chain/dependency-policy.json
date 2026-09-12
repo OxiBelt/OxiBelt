@@ -78,30 +78,30 @@
     "nativeSources": [
       {
         "id": "mimalloc",
-        "version": "3.3.2+oxibelt.1",
-        "path": "source/third_party/mimalloc-3.3.2+oxibelt.1",
+        "version": "3.5.1",
+        "path": "source/third_party/mimalloc-3.5.1",
         "upstreamRepository": "https://github.com/microsoft/mimalloc",
-        "upstreamVersion": "3.3.2",
-        "upstreamRevision": "30b2d9d89099bee08e9f67a1ffb3e12e7ba45227",
-        "sourceScope": "65-file native v3 payload verified against upstream",
+        "upstreamVersion": "3.5.1",
+        "upstreamRevision": "34fbd7e7cd4627424490afe19b20f8066bfc537d",
+        "sourceScope": "67 upstream source files plus 4 OxiBelt metadata files (71 total); exact unsigned tag and no patches; independent safety review and performance qualification deferred",
         "acquisition": {
-          "package": "libmimalloc-sys",
-          "version": "0.1.49",
-          "subdirectory": "c_src/mimalloc/v3",
-          "crateSha256": "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9",
+          "method": "git archive from the exact upstream annotated tag",
+          "tag": "v3.5.1",
+          "tagObject": "8e05dab9b9e38aa92ab6a6e137baefeaa9e45e40",
+          "tagSignature": "absent",
           "dependency": false
         },
-        "appliedUpstreamCommits": [
-          "acea8bcb71d3f35666e32b3b3d78544496200d7c",
-          "f2dc730bad28899a675672846bfe551e91a23493"
-        ],
-        "upstreamManifestSha256": "47e1a4270b9a09f0340f3914a5dc5973c3d9c8dfc330d4b9a6e893def5f6c773",
-        "nativeManifestSha256": "565d2d47b0702ca323d32755207897e74e66cabb7210ec158200b5a389056216",
-        "sourceProvenanceSha256": "a2443e89d675cff86af18f74d215462bf753fbaafd9b4b6a9034bb3c504c5bfa",
-        "readmeSha256": "e3be64c89946865b5390a01667ae9bd822c85058cb38bc4d951d09b054deee15",
+        "patches": [],
+        "provenanceReviewedOn": "2026-09-12",
+        "independentNativeSafetyReview": "deferred",
+        "performanceQualification": "deferred",
+        "upstreamManifestSha256": "aef881255bc0e810379341d201702314d21f605b32e684f64f90fbfc86183b8d",
+        "nativeManifestSha256": "aef881255bc0e810379341d201702314d21f605b32e684f64f90fbfc86183b8d",
+        "sourceProvenanceSha256": "958f0fd6420dea25b3a505ffb8c8dfa72c4aabd3260b7c47da6509691affaa3e",
+        "readmeSha256": "b42d8423dd00970fcf3178ff728b35b4c2201c4875499aca84b60c3fe86e2a65",
         "buildIntegration": {
           "path": "source/crates/oxibelt-allocator/build.rs",
-          "sha256": "16ffef79eee5347ada080eb7d42d10928ca96cf5580b114ca5aa6343261e61d0"
+          "sha256": "2c93618fb679c994e8801649d5ffbaebe53d3ed80f3d6a53badb8e7a04f5da72"
         },
         "rustBinding": {
           "package": "oxibelt-allocator",
@@ -125,7 +125,6 @@
         "upstreamUpdateCriteria": "At every Microsoft mimalloc release and at least once per review interval, review the selected native source, preserve the private binding and secure build contract, remove superseded backports, and rerun dependency admission plus allocator qualification before updating.",
         "unmaintainableAction": "If a required native update cannot satisfy source, license, ownership, unsafe-code, or allocator qualification review, remove the optional allocator feature before that update.",
         "owner": "@piquark6046",
-        "reviewedOn": "2026-09-10",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/183"
       }
     ],
