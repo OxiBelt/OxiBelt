@@ -21,7 +21,7 @@ undocumented_unsafe_blocks = "deny"
 anyhow = "1.0.104"
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 bytes = "1.12.1"
-brotli = "8.0.4"
+brotli = "9.0.0"
 flate2 = "=1.1.10"
 futures-util = "0.3.34"
 h3 = "0.0.8"
@@ -41,4 +41,4 @@ tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-
 tokio-rustls = { version = "0.26.5", default-features = false, features = ["aws-lc-rs", "logging", "tls12"] }
 url = "2.5.8"
 web-transport-quinn = { version = "0.12.1", default-features = false, features = ["aws-lc-rs"] }
-zstd = "0.13.3"
+zstd = "0.14.0"

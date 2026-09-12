@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-09-10",
+  "reviewedOn": "2026-09-12",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "484491bb604db555cedb5e7499399934bc75ca5646983204a93489e615473621",
+      "lockfileSha256": "03f564e19bf58d9c89787c94fe1c734a05442b9df07e18bbfc97ec15a672e824",
       "exemptionInventorySha256": "bd21e1575dce0d01e19bb0741a9e09da3f666de87814c5740a645fe920d5ee5a",
       "exemptedPackageVersions": 456
     },
@@ -31,6 +31,8 @@
     ],
     "duplicateCompatibilityBaseline": {
       "aes": ["0.8", "0.9"],
+      "alloc-no-stdlib": ["2", "3"],
+      "alloc-stdlib": ["0.2", "0.3"],
       "annotate-snippets": ["0.11", "0.12"],
       "argon2": ["0.5", "0.6"],
       "base64": ["0.22", "0.23"],
@@ -39,6 +41,8 @@
       "bitflags": ["1", "2"],
       "blake2": ["0.10", "0.11"],
       "block-buffer": ["0.10", "0.12"],
+      "brotli": ["8", "9"],
+      "brotli-decompressor": ["5", "6"],
       "cipher": ["0.4", "0.5"],
       "const-oid": ["0.10", "0.9"],
       "cpufeatures": ["0.2", "0.3"],
@@ -180,13 +184,13 @@
       {
         "category": "parsing-serialization",
         "packages": {
-          "jsonschema": ["0.53.0"],
+          "jsonschema": ["0.56.0"],
           "online-dsl-forge": ["0.3.3"],
           "serde": ["1.0.229"],
           "serde-saphyr": ["0.0.29", "1.2.0"],
           "serde_json": ["1.0.151"],
-          "toml": ["1.1.5+spec-1.1.0"],
-          "toml_edit": ["0.25.13+spec-1.1.0"]
+          "toml": ["1.1.6+spec-1.1.0"],
+          "toml_edit": ["0.25.15+spec-1.1.0"]
         },
         "reviewBoundary": "untrusted-input handling, recursion and allocation bounds, ambiguity, and format compatibility"
       },
@@ -204,12 +208,12 @@
       {
         "category": "compression",
         "packages": {
-          "async-compression": ["0.4.44"],
-          "brotli": ["8.0.4"],
+          "async-compression": ["0.4.46"],
+          "brotli": ["8.0.4", "9.0.0"],
           "flate2": ["1.1.10"],
           "miniz_oxide": ["0.9.1"],
           "zlib-rs": ["0.6.7"],
-          "zstd": ["0.13.3"]
+          "zstd": ["0.14.0"]
         },
         "reviewBoundary": "decompression limits, native-code boundaries, memory use, and malformed-stream behavior"
       },
@@ -272,7 +276,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:484491bb604db555cedb5e7499399934bc75ca5646983204a93489e615473621",
+      "subject": "Cargo.lock@sha256:03f564e19bf58d9c89787c94fe1c734a05442b9df07e18bbfc97ec15a672e824",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. The development-only proptest graph adds exact rand 0.9, rand_chacha 0.9, and rand_core 0.9 lines tracked by https://github.com/OxiBelt/OxiBelt/issues/172; any further line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -284,7 +288,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:484491bb604db555cedb5e7499399934bc75ca5646983204a93489e615473621",
+      "subject": "Cargo.lock@sha256:03f564e19bf58d9c89787c94fe1c734a05442b9df07e18bbfc97ec15a672e824",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,

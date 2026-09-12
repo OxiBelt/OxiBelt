@@ -22,12 +22,10 @@ aho-corasick = "1.1.5"
 arc-swap = "1.9.2"
 aws-lc-rs = { version = "1.18.1", default-features = false }
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
-# Async-compression 0.4.45 requires Zstd 0.14; retain this release with the
-# locked compression-codecs 0.4.39 until the direct Zstd migration is admitted.
-async-compression = { version = "=0.4.44", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
+async-compression = { version = "=0.4.46", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
-brotli = "8.0.4"
+brotli = "9.0.0"
 bytes = "1.12.1"
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.6", features = ["derive"] }
@@ -78,7 +76,7 @@ tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.5", default-features = false, features = ["aws-lc-rs", "early-data", "logging", "tls12"] }
 tokio-util = { version = "0.7.19", features = ["io"] }
-toml = "1.1.5"
+toml = "1.1.6"
 tower-service = "0.3.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std"] }
@@ -92,7 +90,7 @@ x509-cert = "0.3.0"
 # Keep this alias isolated to the OCSP implementation until those crates converge.
 x509-cert-v2 = { package = "x509-cert", version = "0.2.5" }
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
-zstd = "0.13.3"
+zstd = "0.14.0"
 zeroize = "1.9.0"
 compio = { version = "0.19.2", default-features = false, features = ["bytes", "io-uring", "polling", "runtime", "time"] }
 compio-driver = { version = "0.12.5", default-features = false, features = ["io-uring", "polling"] }
