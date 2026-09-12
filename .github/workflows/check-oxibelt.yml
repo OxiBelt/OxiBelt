@@ -166,10 +166,45 @@ jobs:
             run: tests/scripts/check-tests-rustfmt.sh
 
       - name: Cargo clippy
+        if: matrix.runner == 'ubuntu-26.04'
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
+      - name: ARM Cargo clippy
+        if: matrix.runner == 'ubuntu-26.04-arm'
+        run: cargo clippy --all-targets --locked --features oxibelt/admin-runtime,oxibelt/config-tooling,oxibelt/crypto-ring,oxibelt/fuzzing,oxibelt/mutation-pqc,oxibelt-gateway-controller/fuzzing,oxibelt-keysigner/crypto-ring,oxibelt-netport-switcher/crypto-ring,oxibeltctl/cli,oxibeltctl/crypto-ring,oxibeltctl/fuzzing,oxibeltctl/mutation-pqc -- -D warnings
+
       - name: Cargo test
+        if: matrix.runner == 'ubuntu-26.04'
         run: cargo test --all-features --locked
+
+      - name: ARM Cargo test
+        if: matrix.runner == 'ubuntu-26.04-arm'
+        run: cargo test --locked --features oxibelt/admin-runtime,oxibelt/config-tooling,oxibelt/crypto-ring,oxibelt/fuzzing,oxibelt/mutation-pqc,oxibelt-gateway-controller/fuzzing,oxibelt-keysigner/crypto-ring,oxibelt-netport-switcher/crypto-ring,oxibeltctl/cli,oxibeltctl/crypto-ring,oxibeltctl/fuzzing,oxibeltctl/mutation-pqc
+
+      - name: ARM rejects unsupported allocator experiment
+        if: matrix.runner == 'ubuntu-26.04-arm'
+        run: |
+          set -euo pipefail
+          log="$(mktemp)"
+          cleanup() {
+            rm -f -- "${log}"
+          }
+          trap cleanup EXIT
+
+          if cargo check -p oxibelt --lib --no-default-features --locked \
+            --features allocator-mimalloc-experiment >"${log}" 2>&1; then
+            status=0
+          else
+            status=$?
+          fi
+          if (( status != 101 )); then
+            cat "${log}" >&2
+            echo "expected unsupported allocator feature check to fail with status 101, got ${status}" >&2
+            exit 1
+          fi
+          grep -F -- \
+            "allocator-mimalloc-experiment supports only 64-bit x86 Linux GNU and musl targets" \
+            "${log}"
 
       - name: Loom concurrency models
         if: matrix.runner == 'ubuntu-26.04'

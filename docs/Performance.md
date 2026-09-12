@@ -15,6 +15,9 @@ Linux GNU and musl targets; selecting it on another target fails compilation.
 Default builds and the standard Docker build retain the system allocator. The
 strict data-plane executable and embedding hosts do not acquire an allocator
 override from this feature.
+CI retains full-feature validation on x86_64. ARM validates every other
+default-member feature and separately proves that this unsupported allocator
+experiment is rejected.
 
 ```sh
 cargo build --locked --release -p oxibelt --bin oxibelt --features allocator-mimalloc-experiment

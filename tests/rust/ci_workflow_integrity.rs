@@ -164,6 +164,21 @@ const CHECK_WORKFLOW_ENTRY_JOBS: &[&str] = &[
   "check-riscv64-cross",
 ];
 const DEPENDABOT_ACTOR_CONDITION: &str = "github.actor != 'dependabot[bot]'";
+const ARM_CI_SAFE_FEATURES: &[&str] = &[
+  "oxibelt/admin-runtime",
+  "oxibelt/config-tooling",
+  "oxibelt/crypto-ring",
+  "oxibelt/fuzzing",
+  "oxibelt/mutation-pqc",
+  "oxibelt-gateway-controller/fuzzing",
+  "oxibelt-keysigner/crypto-ring",
+  "oxibelt-netport-switcher/crypto-ring",
+  "oxibeltctl/cli",
+  "oxibeltctl/crypto-ring",
+  "oxibeltctl/fuzzing",
+  "oxibeltctl/mutation-pqc",
+];
+const ARM_CI_UNSUPPORTED_FEATURES: &[&str] = &["oxibelt/allocator-mimalloc-experiment"];
 
 fn expected_needs(job_ids: &[&str]) -> Vec<String> {
   job_ids.iter().map(|job_id| (*job_id).to_owned()).collect()
@@ -1096,6 +1111,73 @@ fn workspace_members() -> Vec<String> {
         .to_owned()
     })
     .collect()
+}
+
+fn workspace_default_member_feature_inventory() -> BTreeSet<String> {
+  let output = Command::new(env!("CARGO"))
+    .current_dir(repo_root())
+    .args([
+      "metadata",
+      "--no-deps",
+      "--format-version=1",
+      "--locked",
+      "--offline",
+    ])
+    .output()
+    .expect("Cargo metadata should run");
+  assert!(
+    output.status.success(),
+    "Cargo metadata should inspect the locked offline workspace:\nstdout:\n{}\nstderr:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  let metadata: serde_json::Value =
+    serde_json::from_slice(&output.stdout).expect("Cargo metadata should emit JSON");
+  let default_members = metadata["workspace_default_members"]
+    .as_array()
+    .expect("Cargo metadata should identify workspace default members")
+    .iter()
+    .map(|member| {
+      member
+        .as_str()
+        .expect("workspace default member IDs should be strings")
+        .to_owned()
+    })
+    .collect::<BTreeSet<_>>();
+  let packages = metadata["packages"]
+    .as_array()
+    .expect("Cargo metadata should list workspace packages");
+  let mut observed_default_members = BTreeSet::new();
+  let mut features = BTreeSet::new();
+
+  for package in packages {
+    let package_id = package["id"]
+      .as_str()
+      .expect("Cargo metadata package IDs should be strings");
+    if !default_members.contains(package_id) {
+      continue;
+    }
+    observed_default_members.insert(package_id.to_owned());
+    let package_name = package["name"]
+      .as_str()
+      .expect("Cargo metadata package names should be strings");
+    let package_features = package["features"]
+      .as_object()
+      .expect("Cargo metadata package features should be an object");
+    features.extend(
+      package_features
+        .keys()
+        .filter(|feature| feature.as_str() != "default")
+        .map(|feature| format!("{package_name}/{feature}")),
+    );
+  }
+
+  assert_eq!(
+    observed_default_members, default_members,
+    "Cargo metadata must include every default workspace member"
+  );
+  features
 }
 
 fn parse_jobs(workflow: &str) -> BTreeMap<String, Job> {
@@ -3340,6 +3422,139 @@ fn test_job_runs_independent_format_checks_in_parallel() {
   assert!(
     install_rust < format_parallel && format_parallel < cargo_clippy && cargo_clippy < cargo_test,
     "test job should install Rust, run parallel format checks, then run clippy and tests sequentially"
+  );
+}
+
+#[test]
+fn test_job_scopes_allocator_experiment_to_x86_and_covers_arm_features() {
+  let workflow = workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check-oxibelt workflow should parse as YAML");
+  let steps = parsed["jobs"]["test"]["steps"]
+    .as_array()
+    .expect("test job should define steps");
+  let arm_features = ARM_CI_SAFE_FEATURES
+    .iter()
+    .map(|feature| (*feature).to_owned())
+    .collect::<BTreeSet<_>>();
+  let arm_feature_arguments = ARM_CI_SAFE_FEATURES.join(",");
+
+  let x86_clippy = "cargo clippy --all-targets --all-features --locked -- -D warnings";
+  let arm_clippy = format!(
+    "cargo clippy --all-targets --locked --features {arm_feature_arguments} -- -D warnings"
+  );
+  let x86_test = "cargo test --all-features --locked";
+  let arm_test = format!("cargo test --locked --features {arm_feature_arguments}");
+  let exact_step = |name: &str, condition: &str, run: &str| {
+    let matching_steps = steps
+      .iter()
+      .filter(|step| step["name"].as_str() == Some(name))
+      .collect::<Vec<_>>();
+    assert_eq!(
+      matching_steps.len(),
+      1,
+      "test job should contain exactly one {name} step"
+    );
+    let step = matching_steps[0];
+    assert_eq!(
+      step["if"].as_str(),
+      Some(condition),
+      "{name} should run only on its intended architecture"
+    );
+    assert_eq!(
+      step["run"].as_str(),
+      Some(run),
+      "{name} command must remain exact"
+    );
+  };
+  for (name, condition, run) in [
+    (
+      "Cargo clippy",
+      "matrix.runner == 'ubuntu-26.04'",
+      x86_clippy,
+    ),
+    (
+      "ARM Cargo clippy",
+      "matrix.runner == 'ubuntu-26.04-arm'",
+      arm_clippy.as_str(),
+    ),
+    ("Cargo test", "matrix.runner == 'ubuntu-26.04'", x86_test),
+    (
+      "ARM Cargo test",
+      "matrix.runner == 'ubuntu-26.04-arm'",
+      arm_test.as_str(),
+    ),
+  ] {
+    exact_step(name, condition, run);
+  }
+  let allocator_guard = steps
+    .iter()
+    .filter(|step| step["name"].as_str() == Some("ARM rejects unsupported allocator experiment"))
+    .collect::<Vec<_>>();
+  assert_eq!(
+    allocator_guard.len(),
+    1,
+    "test job should retain one ARM allocator rejection proof"
+  );
+  let allocator_guard = allocator_guard[0];
+  assert_eq!(
+    allocator_guard["if"].as_str(),
+    Some("matrix.runner == 'ubuntu-26.04-arm'"),
+    "allocator rejection proof should run only on ARM"
+  );
+  let allocator_guard_run = allocator_guard["run"]
+    .as_str()
+    .expect("allocator rejection proof should be a shell step");
+  for expected in [
+    "trap cleanup EXIT",
+    "rm -f -- \"${log}\"",
+    "cargo check -p oxibelt --lib --no-default-features --locked \\",
+    "--features allocator-mimalloc-experiment >\"${log}\" 2>&1; then",
+    "if (( status != 101 )); then",
+    "allocator-mimalloc-experiment supports only 64-bit x86 Linux GNU and musl targets",
+  ] {
+    assert!(
+      allocator_guard_run.contains(expected),
+      "ARM allocator rejection proof should contain {expected}"
+    );
+  }
+
+  let step_position = |name: &str| {
+    steps
+      .iter()
+      .position(|step| step["name"].as_str() == Some(name))
+      .unwrap_or_else(|| panic!("test job should define {name}"))
+  };
+  let format_parallel = steps
+    .iter()
+    .position(|step| step.get("parallel").is_some())
+    .expect("test job should define a format parallel group");
+  let x86_clippy_position = step_position("Cargo clippy");
+  let arm_clippy_position = step_position("ARM Cargo clippy");
+  let x86_test_position = step_position("Cargo test");
+  let arm_test_position = step_position("ARM Cargo test");
+  let allocator_guard_position = step_position("ARM rejects unsupported allocator experiment");
+  let loom_position = step_position("Loom concurrency models");
+  assert!(
+    format_parallel < x86_clippy_position
+      && x86_clippy_position < arm_clippy_position
+      && arm_clippy_position < x86_test_position
+      && x86_test_position < arm_test_position
+      && arm_test_position < allocator_guard_position
+      && allocator_guard_position < loom_position,
+    "test job should format first, run architecture-specific checks, prove the ARM rejection, then run x86 Loom models"
+  );
+
+  let mut expected_features = arm_features;
+  expected_features.extend(
+    ARM_CI_UNSUPPORTED_FEATURES
+      .iter()
+      .map(|feature| (*feature).to_owned()),
+  );
+  assert_eq!(
+    workspace_default_member_feature_inventory(),
+    expected_features,
+    "the ARM feature inventory must cover every default-member feature except the reviewed x86-only allocator experiment"
   );
 }
 
