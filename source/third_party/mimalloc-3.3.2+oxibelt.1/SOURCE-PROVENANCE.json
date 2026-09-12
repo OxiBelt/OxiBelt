@@ -49,7 +49,7 @@
   },
   "buildIntegration": {
     "path": "source/crates/oxibelt-allocator/build.rs",
-    "sha256": "5fa4dc19a26abd7144184baf261722ae653064151743639b62a17c490946595d"
+    "sha256": "16ffef79eee5347ada080eb7d42d10928ca96cf5580b114ca5aa6343261e61d0"
   },
   "rustBinding": {
     "package": "oxibelt-allocator",

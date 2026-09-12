@@ -7,20 +7,23 @@ use std::thread;
 
 #[cfg(all(
   feature = "allocator-mimalloc-experiment",
-  not(all(
-    target_os = "linux",
-    target_arch = "x86_64",
-    target_pointer_width = "64",
-    any(target_env = "gnu", target_env = "musl")
-  ))
+  target_os = "linux",
+  target_arch = "x86_64",
+  target_pointer_width = "64",
+  any(target_env = "gnu", target_env = "musl")
 ))]
-compile_error!(
-  "allocator-mimalloc-experiment supports only 64-bit x86 Linux GNU and musl targets."
-);
-
-#[cfg(feature = "allocator-mimalloc-experiment")]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: oxibelt_allocator::Mimalloc = oxibelt_allocator::Mimalloc;
+
+#[cfg(not(all(
+  feature = "allocator-mimalloc-experiment",
+  target_os = "linux",
+  target_arch = "x86_64",
+  target_pointer_width = "64",
+  any(target_env = "gnu", target_env = "musl")
+)))]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: std::alloc::System = std::alloc::System;
 
 const THREADS: usize = 8;
 const ITERATIONS: usize = 1_000;
@@ -132,7 +135,13 @@ fn main() {
     .count();
   assert_eq!(failures, 0, "allocator contract diagnostic worker failed");
 
-  let variant = if cfg!(feature = "allocator-mimalloc-experiment") {
+  let variant = if cfg!(all(
+    feature = "allocator-mimalloc-experiment",
+    target_os = "linux",
+    target_arch = "x86_64",
+    target_pointer_width = "64",
+    any(target_env = "gnu", target_env = "musl")
+  )) {
     "mimalloc-secure"
   } else {
     "system"

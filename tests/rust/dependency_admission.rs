@@ -952,7 +952,7 @@ fn cargo_lock_uses_only_the_approved_registry() {
 }
 
 #[test]
-fn allocator_binding_requires_explicit_secure_opt_in() {
+fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
   let runtime = toml_document("source/Cargo.toml");
   let features = runtime["features"].as_table().expect("runtime features");
   assert_eq!(
@@ -960,10 +960,10 @@ fn allocator_binding_requires_explicit_secure_opt_in() {
       &features["allocator-mimalloc-experiment"],
       "allocator feature"
     ),
-    vec!["dep:oxibelt-allocator", "oxibelt-allocator/native-mimalloc"]
+    vec!["dep:oxibelt-allocator"]
   );
   for (name, value) in features {
-    if name != "allocator-mimalloc-experiment" {
+    if name != "allocator-mimalloc-experiment" && name != "default" {
       assert!(
         string_array(value, "runtime feature").iter().all(|entry| {
           *entry != "allocator-mimalloc-experiment"
@@ -974,23 +974,11 @@ fn allocator_binding_requires_explicit_secure_opt_in() {
       );
     }
   }
-  let mut pending = vec!["default"];
-  let mut visited = BTreeSet::new();
-  while let Some(feature) = pending.pop() {
-    assert_ne!(
-      feature, "allocator-mimalloc-experiment",
-      "allocator entered default feature closure"
-    );
-    assert_ne!(
-      feature, "dep:oxibelt-allocator",
-      "allocator crate entered default feature closure"
-    );
-    if visited.insert(feature)
-      && let Some(children) = features.get(feature)
-    {
-      pending.extend(string_array(children, "runtime feature"));
-    }
-  }
+  assert_eq!(
+    string_array(&features["default"], "runtime default features"),
+    vec!["admin-runtime", "allocator-mimalloc-experiment"],
+    "default integrated builds must select the architecture-gated allocator"
+  );
 
   let allocator = toml_document("source/crates/oxibelt-allocator/Cargo.toml");
   assert!(
@@ -1010,9 +998,32 @@ fn allocator_binding_requires_explicit_secure_opt_in() {
   let cc = &allocator["build-dependencies"]["cc"];
   assert_eq!(cc["version"].as_str(), Some("=1.4.5"));
   assert_eq!(cc["optional"].as_bool(), Some(true));
-  let source_allocator = &runtime["dependencies"]["oxibelt-allocator"];
+  assert!(
+    runtime["dependencies"].get("oxibelt-allocator").is_none(),
+    "the native allocator must not be an unconditional dependency"
+  );
+  let allocator_target = "cfg(all(target_os = \"linux\", target_arch = \"x86_64\", target_pointer_width = \"64\", any(target_env = \"gnu\", target_env = \"musl\")))";
+  let targets = runtime["target"]
+    .as_table()
+    .expect("runtime target dependencies");
+  let allocator_targets = targets
+    .iter()
+    .filter(|(_, target)| {
+      target
+        .get("dependencies")
+        .and_then(|deps| deps.get("oxibelt-allocator"))
+        .is_some()
+    })
+    .map(|(name, _)| name.as_str())
+    .collect::<Vec<_>>();
+  assert_eq!(allocator_targets, vec![allocator_target]);
+  let source_allocator = &targets[allocator_target]["dependencies"]["oxibelt-allocator"];
   assert_eq!(source_allocator["workspace"].as_bool(), Some(true));
   assert_eq!(source_allocator["optional"].as_bool(), Some(true));
+  assert_eq!(
+    string_array(&source_allocator["features"], "native target feature"),
+    vec!["native-mimalloc"]
+  );
 
   for manifest in ["Cargo.toml", "source/Cargo.toml"] {
     let text = read(manifest);

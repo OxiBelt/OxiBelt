@@ -8,8 +8,8 @@ publish.workspace = true
 autobins = false
 
 [features]
-default = ["admin-runtime"]
-allocator-mimalloc-experiment = ["dep:oxibelt-allocator", "oxibelt-allocator/native-mimalloc"]
+default = ["admin-runtime", "allocator-mimalloc-experiment"]
+allocator-mimalloc-experiment = ["dep:oxibelt-allocator"]
 admin-runtime = []
 config-tooling = ["dep:jsonschema"]
 crypto-ring = ["rustls/ring"]
@@ -99,9 +99,11 @@ compio-driver = { version = "0.12.5", default-features = false, features = ["io-
 crc32fast = "1.5.1"
 memchr = "2.8.3"
 online-dsl-forge = "0.3.3"
-oxibelt-allocator = { workspace = true, optional = true }
 oxibelt-build-identity.workspace = true
 oxibelt-control-protocol.workspace = true
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_pointer_width = "64", any(target_env = "gnu", target_env = "musl")))'.dependencies]
+oxibelt-allocator = { workspace = true, optional = true, features = ["native-mimalloc"] }
 
 [target.'cfg(all(target_arch = "riscv64", target_os = "linux", target_env = "musl"))'.dependencies]
 aws-lc-rs = { version = "1.18.1", default-features = false, features = ["bindgen"] }

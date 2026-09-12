@@ -1,8 +1,14 @@
 use super::*;
 
-#[cfg(not(feature = "allocator-mimalloc-experiment"))]
+#[cfg(not(all(
+  feature = "allocator-mimalloc-experiment",
+  target_os = "linux",
+  target_arch = "x86_64",
+  target_pointer_width = "64",
+  any(target_env = "gnu", target_env = "musl")
+)))]
 #[test]
-fn binary_without_allocator_feature_reports_no_allocator_override() {
+fn binary_with_system_allocator_reports_no_allocator_override() {
   assert_eq!(
     oxibelt::ProcessGlobalReport::for_hooks(oxibelt::ProcessGlobalHooks::CallerManaged).allocator,
     oxibelt::ProcessGlobalHookReport::new(
@@ -25,9 +31,15 @@ fn strict_binary_does_not_enable_the_integrated_allocator_feature() {
   );
 }
 
-#[cfg(feature = "allocator-mimalloc-experiment")]
+#[cfg(all(
+  feature = "allocator-mimalloc-experiment",
+  target_os = "linux",
+  target_arch = "x86_64",
+  target_pointer_width = "64",
+  any(target_env = "gnu", target_env = "musl")
+))]
 #[test]
-fn experimental_binary_reports_its_allocator_ownership() {
+fn mimalloc_binary_reports_its_allocator_ownership() {
   oxibelt::mark_binary_allocator_mimalloc_experiment();
   for hooks in [
     oxibelt::ProcessGlobalHooks::CallerManaged,

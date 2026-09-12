@@ -20,7 +20,8 @@
 //!   Native code must not unwind across the C ABI. It owns its internal synchronization and
 //!   process-wide allocator state; no Rust references or file descriptors cross this boundary.
 //! - Build integration must provide the reviewed secure native implementation with matching
-//!   declarations, without C malloc/free overrides. Platform support is intentionally narrow.
+//!   declarations, without C malloc/free overrides. Other targets compile an empty bridge
+//!   and no native allocator, leaving executable allocator selection to the caller.
 
 // Adapted from the mimalloc and libmimalloc-sys Rust bindings:
 // Copyright 2019 Octavian Oncescu
@@ -47,26 +48,17 @@
   reason = "the private GlobalAlloc adapter must call the governed native allocator through its C ABI"
 )]
 #![deny(unsafe_op_in_unsafe_fn)]
-
-#[cfg(all(
+#![cfg(all(
   feature = "native-mimalloc",
-  not(all(
-    target_os = "linux",
-    target_arch = "x86_64",
-    target_pointer_width = "64",
-    any(target_env = "gnu", target_env = "musl")
-  ))
+  target_os = "linux",
+  target_arch = "x86_64",
+  target_pointer_width = "64",
+  any(target_env = "gnu", target_env = "musl")
 ))]
-compile_error!(
-  "allocator-mimalloc-experiment supports only 64-bit x86 Linux GNU and musl targets."
-);
 
-#[cfg(feature = "native-mimalloc")]
 use core::alloc::{GlobalAlloc, Layout};
-#[cfg(feature = "native-mimalloc")]
 use core::ffi::c_void;
 
-#[cfg(feature = "native-mimalloc")]
 // SAFETY: These declarations match the governed mimalloc header on the supported C ABI.
 unsafe extern "C" {
   fn mi_malloc_aligned(size: usize, alignment: usize) -> *mut c_void;
@@ -76,10 +68,8 @@ unsafe extern "C" {
 }
 
 /// Stateless adapter from Rust's global-allocation contract to governed mimalloc.
-#[cfg(feature = "native-mimalloc")]
 pub struct Mimalloc;
 
-#[cfg(feature = "native-mimalloc")]
 // SAFETY: The native functions satisfy GlobalAlloc's allocation, alignment, zeroing, failure,
 // and cross-thread ownership contracts. This stateless bridge preserves their pointers and
 // size arguments and performs no operation that can recurse into allocation or unwind.
@@ -114,7 +104,7 @@ unsafe impl GlobalAlloc for Mimalloc {
   }
 }
 
-#[cfg(all(test, feature = "native-mimalloc"))]
+#[cfg(test)]
 mod tests {
   use super::*;
 

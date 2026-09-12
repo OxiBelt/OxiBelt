@@ -4,7 +4,7 @@ OxiBelt denies first-party Rust unsafe code by default. The policy covers the
 main package and all of its targets, the fuzz crate, the focused unsafe-code
 harness, and the standalone Rust probe workspaces under `tests/docker/`.
 
-The optional allocator experiment keeps its Rust bridge in the first-party
+The allocator implementation keeps its Rust bridge in the first-party
 unsafe-code boundary. Its native mimalloc payload contains no Rust source and
 is separately byte-locked: dependency admission rejects a changed native file
 inventory, symlinks, extra files, stale provenance, or an unreviewed hash.
@@ -65,8 +65,8 @@ test, Miri, sanitizer, and fuzz results. A new allowlist entry is accepted only
 when existing locked safe libraries cannot represent the required operation;
 using an available safe wrapper is the default.
 
-For the allocator experiment, the registry wrapper cannot select OxiBelt's
-byte-locked native tree without restoring the removed `mimalloc` and
+For `allocator-mimalloc-experiment`, the registry wrapper cannot select
+OxiBelt's byte-locked native tree without restoring the removed `mimalloc` and
 `libmimalloc-sys` dependency boundary. The repository-owned bridge contains
 only the four C functions required by `GlobalAlloc`, stays private to the
 integrated binary and checker, and does not expose the native API to callers.

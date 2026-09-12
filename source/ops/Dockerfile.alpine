@@ -186,7 +186,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=oxibelt-rust-target-${OXIBELT_RUST_CACHE_ID},target=/repo/target,sharing=locked \
     . /tmp/oxibelt-build-env && \
     test "${OXIBELT_BUILD_RUST_TARGET}" = "riscv64gc-unknown-linux-musl" && \
-    cargo check --all-targets --locked --target "${OXIBELT_BUILD_RUST_TARGET}"
+    cargo check --all-targets --all-features --locked --target "${OXIBELT_BUILD_RUST_TARGET}" && \
+    cargo check -p oxibelt --lib --no-default-features --features admin-runtime,allocator-mimalloc-experiment --locked --target "${OXIBELT_BUILD_RUST_TARGET}" && \
+    cargo check -p oxibelt-allocator --all-features --locked --target "${OXIBELT_BUILD_RUST_TARGET}"
 
 FROM builder AS controller-builder
 

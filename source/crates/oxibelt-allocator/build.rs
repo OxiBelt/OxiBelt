@@ -215,13 +215,15 @@ fn compile_mimalloc() {
   let target_arch = required_env("CARGO_CFG_TARGET_ARCH");
   let target_pointer_width = required_env("CARGO_CFG_TARGET_POINTER_WIDTH");
   let target_env = required_env("CARGO_CFG_TARGET_ENV");
-  assert!(
-    target_os == "linux"
-      && target_arch == "x86_64"
-      && target_pointer_width == "64"
-      && matches!(target_env.as_str(), "gnu" | "musl"),
-    "allocator-mimalloc-experiment supports only 64-bit x86 Linux GNU and musl targets"
-  );
+  // Build scripts run on HOST; these values describe the executable's TARGET.
+  // Direct workspace/all-feature builds must also skip native work on other CPUs.
+  if !(target_os == "linux"
+    && target_arch == "x86_64"
+    && target_pointer_width == "64"
+    && matches!(target_env.as_str(), "gnu" | "musl"))
+  {
+    return;
+  }
   reject_native_configuration_overrides();
 
   let manifest_dir = PathBuf::from(required_env("CARGO_MANIFEST_DIR"));
