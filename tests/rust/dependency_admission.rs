@@ -1136,15 +1136,99 @@ fn allocator_binding_requires_explicit_secure_opt_in() {
     "\"--CONFIG\"",
     "\"-SPECS\"",
     "normalized.contains(\"TLS-MODEL\")",
+    "OXIBELT_MIMALLOC_TRANSLATION_UNIT",
+    "#if !defined(MI_SECURE) || MI_SECURE != 4",
+    "#if !defined(MI_DEBUG) || MI_DEBUG != 0",
+    "build.file(write_guarded_translation_unit())",
     "build.compile(\"oxibelt_mimalloc\")",
+    "audit_native_archive()",
+    "Command::new(\"nm\")",
+    "REQUIRED_PRIVATE_ALLOCATOR_SYMBOLS",
+    "FORBIDDEN_PROCESS_ALLOCATOR_SYMBOLS",
     "normalized.contains(\"MI_\")",
   ] {
     assert!(build.contains(required), "build script lost {required}");
   }
+  let translation_unit_include = build
+    .find("#include \"src/static.c\"")
+    .expect("the guarded translation unit must include the reviewed native source");
+  let override_guards = build
+    .match_indices("#if defined(MI_MALLOC_OVERRIDE)")
+    .map(|(index, _)| index)
+    .collect::<Vec<_>>();
+  assert_eq!(
+    override_guards.len(),
+    2,
+    "the guarded translation unit must check allocator override state before and after the native source"
+  );
+  assert!(
+    override_guards[0] < translation_unit_include && translation_unit_include < override_guards[1],
+    "the native source must remain enclosed by allocator override guards"
+  );
   assert!(
     !build.contains("build.define(\"MI_MALLOC_OVERRIDE\"")
       && !build.contains("build.define(\"MI_OVERRIDE\""),
     "the native build must not override the process C allocator"
+  );
+}
+
+#[cfg(all(
+  target_os = "linux",
+  target_arch = "x86_64",
+  any(target_env = "gnu", target_env = "musl")
+))]
+#[test]
+fn allocator_native_archive_rejects_transient_override_injection() {
+  let temporary = tempfile::tempdir().expect("temporary allocator build root");
+  let shadow_source = temporary.path().join("shadow/src");
+  fs::create_dir_all(&shadow_source).expect("create shadow source directory");
+  let native_source = repo_root()
+    .join("source/third_party/mimalloc-3.3.2+oxibelt.1/src/static.c")
+    .canonicalize()
+    .expect("canonical native translation unit");
+  let native_source = native_source
+    .to_str()
+    .expect("native source path must be valid UTF-8")
+    .replace('"', "\\\"");
+  fs::write(
+    shadow_source.join("static.c"),
+    format!(
+      "#define MI_MALLOC_OVERRIDE\n#include \"{native_source}\"\n#undef MI_MALLOC_OVERRIDE\n"
+    ),
+  )
+  .expect("write shadow translation unit");
+
+  let output = std::process::Command::new(env!("CARGO"))
+    .current_dir(repo_root())
+    .env("CARGO_TARGET_DIR", temporary.path().join("target"))
+    .env(
+      "CC",
+      format!("cc -I{}", temporary.path().join("shadow").display()),
+    )
+    .args([
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "oxibelt-allocator",
+      "--features",
+      "native-mimalloc",
+    ])
+    .output()
+    .expect("run adversarial allocator build");
+  let diagnostics = format!(
+    "{}\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    !output.status.success(),
+    "transient allocator override injection unexpectedly built successfully"
+  );
+  assert!(
+    diagnostics
+      .contains("native allocator archive must not define process allocator symbol `malloc`"),
+    "adversarial build failed without the archive-symbol rejection: {diagnostics}"
   );
 }
 

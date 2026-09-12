@@ -93,11 +93,11 @@
         ],
         "upstreamManifestSha256": "47e1a4270b9a09f0340f3914a5dc5973c3d9c8dfc330d4b9a6e893def5f6c773",
         "nativeManifestSha256": "565d2d47b0702ca323d32755207897e74e66cabb7210ec158200b5a389056216",
-        "sourceProvenanceSha256": "09eda8aba80b4c9bab9282d44d2356f76d1ca2b158358b2b5e32419b5615ee9e",
+        "sourceProvenanceSha256": "07e07e3597b89404e6b6886a994ef931fe2c076130ecfe7cea300e2a2e4cf552",
         "readmeSha256": "e3be64c89946865b5390a01667ae9bd822c85058cb38bc4d951d09b054deee15",
         "buildIntegration": {
           "path": "source/crates/oxibelt-allocator/build.rs",
-          "sha256": "862cfdf8887d3e2c80c12edfb8842fe591b55e014ac83e85a3be20ab30884aa4"
+          "sha256": "5fa4dc19a26abd7144184baf261722ae653064151743639b62a17c490946595d"
         },
         "rustBinding": {
           "package": "oxibelt-allocator",
