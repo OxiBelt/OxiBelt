@@ -171,6 +171,34 @@ jobs:
       - name: Cargo test
         run: cargo test --all-features --locked
 
+      - name: Allocator crate all-feature check
+        run: cargo check -p oxibelt-allocator --all-features --locked
+
+      - name: Allocator checker selection
+        run: |
+          set -euo pipefail
+          case "${{ matrix.runner }}" in
+            ubuntu-26.04) default_variant="mimalloc-secure" ;;
+            ubuntu-26.04-arm) default_variant="system" ;;
+            *) echo "unsupported allocator-check runner: ${{ matrix.runner }}" >&2; exit 1 ;;
+          esac
+          check_variant() {
+            local expected="$1"
+            shift
+            cargo run --locked -p oxibelt --bin oxibelt-allocator-check "$@" \
+              | jq -e --arg expected "${expected}" '
+                  .allocator_variant == $expected and
+                  .checks.alignment_4096 == "PASS" and
+                  .checks.zero_initialization == "PASS" and
+                  .checks.growth_preserves_data == "PASS" and
+                  .checks.cross_thread_transfer_reallocation_drop == "PASS"
+                ' >/dev/null
+          }
+          check_variant "${default_variant}"
+          check_variant system --no-default-features --features admin-runtime
+          check_variant "${default_variant}" --no-default-features --features admin-runtime,allocator-mimalloc-experiment
+          check_variant "${default_variant}" --all-features
+
       - name: Loom concurrency models
         if: matrix.runner == 'ubuntu-26.04'
         run: cargo test --all-features --locked loom_ -- --ignored --test-threads=1
@@ -914,7 +942,9 @@ jobs:
           CXX_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-g++
           BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr/riscv64-linux-gnu
         run: |
-          cargo check --all-targets --locked --target ${{ matrix.target }}
+          cargo check --all-targets --all-features --locked --target ${{ matrix.target }}
+          cargo check -p oxibelt --lib --no-default-features --features admin-runtime,allocator-mimalloc-experiment --locked --target ${{ matrix.target }}
+          cargo check -p oxibelt-allocator --all-features --locked --target ${{ matrix.target }}
 
       - name: Pre-pull Docker BuildKit image
         if: matrix.target == 'riscv64gc-unknown-linux-musl'

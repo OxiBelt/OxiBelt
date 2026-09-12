@@ -22,6 +22,11 @@ fn performance_script_text() -> String {
   fs::read_to_string(performance_script_path()).expect("performance script should be readable")
 }
 
+fn local_performance_campaign_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/run-local-performance-campaign.sh"))
+    .expect("local performance campaign script should be readable")
+}
+
 fn perf_probe_source_text() -> String {
   fs::read_to_string(repo_root().join("tests/docker/perf_probe/src/main.rs"))
     .expect("perf probe source should be readable")
@@ -782,6 +787,7 @@ fn write_probe_json_fallback_harness(
   events_path: &Path,
   json_path: &Path,
 ) {
+  let docker_command_path = events_path.with_extension("docker");
   let harness = format!(
     r#"#!/usr/bin/env bash
 set -euo pipefail
@@ -792,12 +798,24 @@ network_name=perf-net
 perf_probe_image=perf-probe
 tls_dir="{tls_dir}"
 probe_logs_dir="{probe_logs_dir}"
+docker_wait_timeout_grace_seconds=30
+docker_wait_kill_after_seconds=10
+docker_cleanup_timeout_seconds=3
+docker_log_timeout_seconds=2
+docker_command="{docker_command_path}"
 active_proxy_container=""
 active_proxy_alias=""
 active_proxy_ip=""
 
 mkdir -p "${{tls_dir}}" "${{probe_logs_dir}}"
 printf 'cert\n' >"${{tls_dir}}/fullchain.pem"
+cat >"${{docker_command}}" <<'DOCKER_COMMAND'
+#!/usr/bin/env bash
+if [[ "$1" == "logs" ]]; then
+  printf '%s\n' '{{"type":"load","label":"ready-oxibelt","requests":1,"rps":1,"errors":0}}'
+fi
+DOCKER_COMMAND
+chmod +x "${{docker_command}}"
 
 docker() {{
   printf 'DOCKER %s\n' "$*" >>"{events_path}"
@@ -827,6 +845,7 @@ run_probe_json load --label ready-oxibelt >"{json_path}"
     tls_dir = tls_dir.display(),
     probe_logs_dir = probe_logs_dir.display(),
     events_path = events_path.display(),
+    docker_command_path = docker_command_path.display(),
     json_path = json_path.display(),
   );
   fs::write(path, harness).expect("Bash harness should be writable");
@@ -1128,6 +1147,61 @@ fn docker_wrapper_applies_fixed_nofile_only_to_container_creation_and_preserves_
   assert_eq!(
     failed_run.arguments,
     vec!["run", expected_limit[0], expected_limit[1], "image:fixed"]
+  );
+}
+
+#[test]
+fn measured_proxies_pin_source_port_reuse_and_stage_tls_idempotently() {
+  let script = performance_script_text();
+  assert!(
+    script.contains(r#"readonly proxy_ipv4_local_port_range="1024 65535""#)
+      && script.contains("readonly proxy_tcp_tw_reuse=1")
+      && script
+        .contains(r#"--sysctl "net.ipv4.ip_local_port_range=${proxy_ipv4_local_port_range}""#)
+      && script.contains(r#"--sysctl "net.ipv4.tcp_tw_reuse=${proxy_tcp_tw_reuse}""#),
+    "the benchmark should pin a wide ephemeral-port range and TCP TIME-WAIT reuse"
+  );
+
+  for function_name in [
+    "start_oxibelt",
+    "start_nginx",
+    "start_caddy",
+    "start_openresty",
+  ] {
+    let function = extract_bash_function(&script, function_name);
+    assert!(
+      function.contains(r#""${proxy_network_sysctls[@]}""#),
+      "{function_name} should apply the fixed proxy network sysctls"
+    );
+  }
+
+  for (function_name, comparator) in [
+    ("start_nginx", "nginx"),
+    ("start_caddy", "caddy"),
+    ("start_openresty", "openresty"),
+  ] {
+    let function = extract_bash_function(&script, function_name);
+    assert!(
+      function.contains(&format!(r#"mkdir -p "${{configs_dir}}/{comparator}/cert""#))
+        && function.contains(&format!(
+          r#"cp -R "${{tls_dir}}/." "${{configs_dir}}/{comparator}/cert""#
+        )),
+      "{function_name} should copy TLS contents into an existing cert directory"
+    );
+    assert!(
+      !function.contains(&format!(
+        r#"cp -R "${{tls_dir}}" "${{configs_dir}}/{comparator}/cert""#
+      )),
+      "{function_name} must not nest the TLS directory on repeated startup"
+    );
+  }
+
+  let append_result = extract_bash_function(&script, "append_result");
+  assert!(
+    append_result.contains("proxy_network_sysctls:")
+      && append_result.contains("ipv4_local_port_range: $proxy_ipv4_local_port_range")
+      && append_result.contains("tcp_tw_reuse: $proxy_tcp_tw_reuse"),
+    "each result should record the fixed proxy network sysctls"
   );
 }
 
@@ -3237,14 +3311,22 @@ fn performance_probe_image_override_skips_local_probe_build() {
   );
   assert!(
     script.contains("if [[ \"${remove_perf_probe_image}\" == \"1\" ]]; then")
-      && script.contains("docker rmi -f \"${perf_probe_image}\""),
+      && script.contains(
+        "run_docker_with_timeout \"${docker_cleanup_timeout_seconds}\" rmi -f \"${perf_probe_image}\""
+      ),
     "performance harness should not delete externally provided probe images"
   );
 }
 
 #[test]
 fn run_probe_json_uses_container_logs_when_attach_output_is_blank() {
-  let function = extract_bash_function(&performance_script_text(), "run_probe_json");
+  let script = performance_script_text();
+  let function = format!(
+    "{}\n\n{}\n\n{}",
+    extract_bash_function(&script, "probe_timeout_seconds_for_args"),
+    extract_bash_function(&script, "run_docker_with_timeout"),
+    extract_bash_function(&script, "run_probe_json")
+  );
   let temp_dir = HarnessTempDir::new("oxibelt-probe-json-fallback-");
   let harness_path = temp_dir.join("harness.sh");
   let tls_dir = temp_dir.join("tls");
@@ -3286,6 +3368,334 @@ fn run_probe_json_uses_container_logs_when_attach_output_is_blank() {
   assert!(
     probe_log.contains(r#""requests":1"#),
     "probe log should include the fallback container logs: {probe_log}"
+  );
+}
+
+#[test]
+fn blocking_performance_container_waits_have_fixed_deadlines() {
+  let script = performance_script_text();
+  let timeout_helper = extract_bash_function(&script, "run_docker_with_timeout");
+  let probe_timeout = extract_bash_function(&script, "probe_timeout_seconds_for_args");
+  let run_probe = extract_bash_function(&script, "run_probe_json");
+  let run_external = extract_bash_function(&script, "run_external_container");
+  let start_upstreams = extract_bash_function(&script, "start_perf_upstreams");
+  let stop_proxy = extract_bash_function(&script, "stop_active_proxy");
+  let start_oxibelt = extract_bash_function(&script, "start_oxibelt");
+  let start_nginx = extract_bash_function(&script, "start_nginx");
+  let start_caddy = extract_bash_function(&script, "start_caddy");
+  let start_openresty = extract_bash_function(&script, "start_openresty");
+  let cleanup = extract_bash_function(&script, "cleanup");
+  let collect_logs = extract_bash_function(&script, "collect_logs");
+  let signal_handler = extract_bash_function(&script, "handle_runner_signal");
+  let exit_handler = extract_bash_function(&script, "finalize_and_cleanup");
+
+  assert!(
+    script.contains("readonly docker_wait_timeout_grace_seconds=30")
+      && script.contains("readonly docker_wait_kill_after_seconds=2")
+      && script.contains("readonly docker_cleanup_timeout_seconds=3")
+      && script.contains("readonly docker_log_timeout_seconds=2")
+      && script.contains("require_tool timeout"),
+    "the performance runner should require fixed Docker wait deadlines"
+  );
+  assert!(
+    timeout_helper.contains("timeout --signal=TERM")
+      && timeout_helper.contains("--kill-after=\"${docker_wait_kill_after_seconds}s\"")
+      && timeout_helper.contains("\"${docker_command}\" \"$@\""),
+    "the Docker deadline helper should terminate the selected Docker client"
+  );
+  assert!(
+    probe_timeout.contains("--duration-seconds")
+      && probe_timeout.contains("--warmup-seconds")
+      && probe_timeout.contains("docker_wait_timeout_grace_seconds"),
+    "probe deadlines should include the requested work and fixed cleanup grace"
+  );
+  assert!(
+    run_probe.contains("run_docker_with_timeout \"${probe_timeout_seconds}\" start -a")
+      && run_probe.contains("run_docker_with_timeout \"${docker_log_timeout_seconds}\" logs")
+      && run_probe.contains("run_docker_with_timeout \"${docker_cleanup_timeout_seconds}\" rm -f"),
+    "perf-probe execution, diagnostic collection, and removal must have deadlines"
+  );
+  assert!(
+    run_external.contains("run_docker_with_timeout \"${docker_wait_timeout_grace_seconds}\" start")
+      && run_external.contains("run_docker_with_timeout \"${external_timeout_seconds}\" wait")
+      && run_external.contains("run_docker_with_timeout \"${docker_log_timeout_seconds}\" logs")
+      && run_external
+        .contains("run_docker_with_timeout \"${docker_cleanup_timeout_seconds}\" rm -f"),
+    "external benchmark startup, waits, diagnostic collection, and removal must have deadlines"
+  );
+  assert!(
+    start_oxibelt
+      .contains("run_docker_with_timeout \"${docker_wait_timeout_grace_seconds}\" start -a")
+      && start_oxibelt
+        .contains("run_docker_with_timeout \"${docker_wait_timeout_grace_seconds}\" start"),
+    "OxiBelt and remote-signer startup must have deadlines"
+  );
+  for (name, function) in [
+    ("upstream", start_upstreams),
+    ("nginx", start_nginx),
+    ("Caddy", start_caddy),
+    ("OpenResty", start_openresty),
+  ] {
+    assert!(
+      function.contains("run_docker_with_timeout \"${docker_wait_timeout_grace_seconds}\" start"),
+      "{name} startup must have a deadline"
+    );
+  }
+  assert!(
+    stop_proxy.contains("run_docker_with_timeout \"${docker_log_timeout_seconds}\" logs")
+      && stop_proxy.contains("run_docker_with_timeout \"${docker_cleanup_timeout_seconds}\" rm -f")
+      && stop_proxy
+        .contains("run_docker_with_timeout \"${docker_cleanup_timeout_seconds}\" volume rm"),
+    "proxy transition logging and cleanup must have deadlines"
+  );
+  assert!(
+    cleanup.contains("run_docker_with_timeout \"${docker_cleanup_timeout_seconds}\"")
+      && collect_logs.contains("run_docker_with_timeout \"${docker_log_timeout_seconds}\" logs"),
+    "timeout cleanup and final container-log collection must themselves be bounded"
+  );
+  assert!(
+    signal_handler.contains("termination.json")
+      && exit_handler.contains("finalize_results || true\n    copy_artifacts || true")
+      && exit_handler.contains("collect_logs || true\n    copy_artifacts || true")
+      && script.contains("trap finalize_and_cleanup EXIT")
+      && script.contains("trap 'handle_runner_signal TERM' TERM"),
+    "signals should preserve partial artifacts before bounded Docker cleanup"
+  );
+}
+
+#[test]
+fn performance_docker_deadline_terminates_a_stalled_client() {
+  let helper = extract_bash_function(&performance_script_text(), "run_docker_with_timeout");
+  let temp_dir = HarnessTempDir::new("oxibelt-performance-docker-timeout-");
+  let harness_path = temp_dir.join("harness.sh");
+  let docker_path = temp_dir.join("docker-stub");
+  let receipt_path = temp_dir.join("docker-called");
+
+  fs::write(
+    &docker_path,
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >"${DOCKER_CALLED_RECEIPT:?}"
+sleep 30
+"#,
+  )
+  .expect("Docker stub should be writable");
+  fs::set_permissions(&docker_path, fs::Permissions::from_mode(0o700))
+    .expect("Docker stub should be executable");
+  fs::write(
+    &harness_path,
+    format!(
+      r#"#!/usr/bin/env bash
+set -u
+docker_command="{docker_path}"
+docker_wait_kill_after_seconds=1
+{helper}
+set +e
+run_docker_with_timeout 1 logs stalled
+status=$?
+set -e
+printf '%s\n' "$status"
+"#,
+      docker_path = docker_path.display(),
+    ),
+  )
+  .expect("Docker timeout harness should be writable");
+
+  let output = Command::new("timeout")
+    .args(["5s", "bash"])
+    .arg(&harness_path)
+    .env("DOCKER_CALLED_RECEIPT", &receipt_path)
+    .output()
+    .expect("Docker timeout harness should execute");
+  assert!(
+    output.status.success(),
+    "the inner Docker deadline should fire before the test backstop: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "124");
+  assert_eq!(
+    fs::read_to_string(receipt_path).expect("Docker invocation receipt should exist"),
+    "logs stalled\n"
+  );
+}
+
+#[test]
+fn performance_runner_signal_preserves_partial_artifacts_before_cleanup() {
+  let script = performance_script_text();
+  let functions = format!(
+    "{}\n\n{}\n\n{}\n\n{}",
+    extract_bash_function(&script, "copy_artifacts"),
+    extract_bash_function(&script, "finalize_results"),
+    extract_bash_function(&script, "handle_runner_signal"),
+    extract_bash_function(&script, "finalize_and_cleanup")
+  );
+  let temp_dir = HarnessTempDir::new("oxibelt-performance-signal-");
+  let harness_path = temp_dir.join("harness.sh");
+  let work_dir = temp_dir.join("work");
+  let artifact_dir = temp_dir.join("artifacts");
+  let cleanup_receipt = temp_dir.join("cleanup.txt");
+  let harness = format!(
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+
+work_dir="{work_dir}"
+OXIBELT_TEST_ARTIFACT_DIR="{artifact_dir}"
+cleanup_receipt="{cleanup_receipt}"
+logs_dir="${{work_dir}}/logs"
+results_jsonl="${{work_dir}}/results.jsonl"
+results_json="${{work_dir}}/results.json"
+external_results_jsonl="${{work_dir}}/external-results.jsonl"
+external_results_json="${{work_dir}}/external-results.json"
+profile_results_jsonl="${{work_dir}}/profile-results.jsonl"
+profile_results_json="${{work_dir}}/profile-results.json"
+summary_md="${{work_dir}}/summary.md"
+artifacts_copied=0
+results_finalized=0
+
+mkdir -p "${{work_dir}}"
+printf '%s\n' '{{"label":"partial"}}' >"${{results_jsonl}}"
+: >"${{external_results_jsonl}}"
+: >"${{profile_results_jsonl}}"
+printf '# Partial run\n' >"${{summary_md}}"
+
+collect_logs() {{
+  mkdir -p "${{logs_dir}}"
+  printf 'partial container log\n' >"${{logs_dir}}/partial.log"
+}}
+
+cleanup() {{
+  printf 'cleanup-ran\n' >"${{cleanup_receipt}}"
+}}
+
+{functions}
+
+trap finalize_and_cleanup EXIT
+trap 'handle_runner_signal INT' INT
+trap 'handle_runner_signal TERM' TERM
+kill -TERM $$
+"#,
+    work_dir = work_dir.display(),
+    artifact_dir = artifact_dir.display(),
+    cleanup_receipt = cleanup_receipt.display(),
+  );
+  fs::write(&harness_path, harness).expect("signal harness should be writable");
+
+  let output = Command::new("bash")
+    .arg(&harness_path)
+    .output()
+    .expect("signal harness should execute");
+  assert_eq!(
+    output.status.code(),
+    Some(143),
+    "TERM should remain visible to the supervising timeout"
+  );
+  assert!(artifact_dir.join("termination.json").is_file());
+  assert!(artifact_dir.join("results.json").is_file());
+  assert!(artifact_dir.join("logs/partial.log").is_file());
+  assert_eq!(
+    fs::read_to_string(cleanup_receipt).expect("cleanup receipt should exist"),
+    "cleanup-ran\n"
+  );
+}
+
+#[test]
+fn local_performance_campaign_has_bounded_fail_closed_execution() {
+  let script = local_performance_campaign_script_text();
+  let image_identity = extract_bash_function(&script, "image_identity");
+  let timeout_budget = extract_bash_function(&script, "timeout_budget_for");
+  let run_attempt = extract_bash_function(&script, "run_attempt");
+  let collect = extract_bash_function(&script, "run_collection_phase");
+  let aggregate = extract_bash_function(&script, "aggregate_campaign");
+
+  for policy in [
+    "readonly smoke_attempt_timeout_seconds=1500",
+    "readonly benchmark_attempt_timeout_seconds=3600",
+    "readonly aggregate_timeout_seconds=900",
+    "readonly input_inspect_timeout_seconds=60",
+    "readonly smoke_campaign_timeout_seconds=7200",
+    "readonly benchmark_campaign_timeout_seconds=72000",
+    "readonly all_campaign_timeout_seconds=75600",
+    "readonly timeout_kill_after_seconds=120",
+  ] {
+    assert!(
+      script.contains(policy),
+      "missing fixed campaign policy: {policy}"
+    );
+  }
+  assert!(
+    script.contains("for required_command in git jq flock sha256sum stat awk find timeout"),
+    "the campaign should require the deadline utility"
+  );
+  assert!(
+    timeout_budget.contains("SECONDS - campaign_started_seconds")
+      && timeout_budget.contains("scope=campaign"),
+    "each command deadline should be capped by the remaining campaign budget"
+  );
+  assert!(
+    image_identity.contains("timeout_budget_for \"${input_inspect_timeout_seconds}\" input")
+      && image_identity.contains("timeout --signal=TERM"),
+    "image inspection should be bounded before collection starts"
+  );
+  assert!(
+    run_attempt.contains("timeout --signal=TERM")
+      && run_attempt.contains("--kill-after=\"${timeout_kill_after_seconds}s\"")
+      && run_attempt.contains("timed_out: ($timed_out == 1)")
+      && run_attempt.contains("elif $timed_out == 1 then \"timeout\""),
+    "attempt deadlines should fail closed and persist timeout evidence"
+  );
+  assert!(
+    collect.contains(
+      "if [[ \"${profile}\" == \"smoke\" || \"${last_attempt_timeout_scope}\" == \"campaign\" ]]"
+    ),
+    "smoke failures and exhausted campaign budgets should stop collection"
+  );
+  assert!(
+    aggregate.contains("timeout --signal=TERM")
+      && aggregate.contains("timed_out=1")
+      && aggregate.contains("status: (")
+      && aggregate.contains("then \"timeout\""),
+    "aggregate deadlines should fail closed and persist timeout evidence"
+  );
+}
+
+#[test]
+fn local_campaign_deadline_clamps_commands_and_reports_exhaustion() {
+  let function = extract_bash_function(
+    &local_performance_campaign_script_text(),
+    "timeout_budget_for",
+  );
+  let harness = format!(
+    r#"#!/usr/bin/env bash
+set -u
+
+{function}
+
+campaign_timeout_seconds=150
+campaign_started_seconds=100
+SECONDS=200
+timeout_budget_for 100 attempt
+SECONDS=300
+set +e
+expired="$(timeout_budget_for 100 attempt)"
+status=$?
+set -e
+printf '%s|%s\n' "$expired" "$status"
+"#
+  );
+  let output = Command::new("bash")
+    .arg("-c")
+    .arg(harness)
+    .output()
+    .expect("campaign timeout-budget harness should run");
+  assert!(
+    output.status.success(),
+    "campaign timeout-budget harness failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.lines().collect::<Vec<_>>(),
+    ["50\tcampaign\t50", "0\tcampaign\t0|124"]
   );
 }
 
@@ -3408,7 +3818,9 @@ fn external_benchmark_layer_keeps_primary_results_separate() {
             && script.contains("all|reverse-proxy) return 0")
             && script.contains("if [[ -n \"${OXIBELT_EXTERNAL_BENCHMARK_IMAGE:-}\" ]]; then\n    return 0\n  fi")
             && script.contains("if [[ \"${remove_external_benchmark_image}\" == \"1\" ]]; then")
-            && script.contains("docker rmi -f \"${external_benchmark_image}\""),
+            && script.contains(
+                "run_docker_with_timeout \"${docker_cleanup_timeout_seconds}\" rmi -f \"${external_benchmark_image}\""
+            ),
         "external benchmark image overrides should skip local builds and avoid deleting provided images"
     );
   assert!(

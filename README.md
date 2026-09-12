@@ -236,6 +236,23 @@ docker build --pull --target dataplane-strict -t oxibelt-dataplane-strict -f sou
 docker build --pull --target controller -t oxibelt-gateway-controller -f source/ops/Dockerfile.alpine .
 ```
 
+The standard compatibility `oxibelt` and `dataplane` image targets inherit the
+package's default Cargo features. On `x86_64` Linux GNU and musl builds, the
+integrated `oxibelt` executable uses secure mimalloc by default. Supported
+ARM64 and RISC-V builds use `std::alloc::System`, even when
+`allocator-mimalloc-experiment` or `--all-features` is selected. The strict
+data-plane executable keeps `std::alloc::System`, and library embedding leaves
+allocator ownership with the host. To build the integrated executable without
+the allocator feature, use:
+
+```sh
+cargo build --locked --release -p oxibelt --bin oxibelt --no-default-features --features admin-runtime
+```
+
+See [Performance](docs/Performance.md#optional-allocator-evaluation) for
+allocator comparison requirements and [Embedding](docs/Embedding.md) for
+process ownership.
+
 The build regenerates and validates `ui/person-proof` for both data-plane
 artifacts. The compatibility `oxibelt` binary additionally validates and embeds
 the Admin OpenAPI input; `oxibelt-dataplane-strict` does not compile or embed
@@ -428,6 +445,11 @@ sticky-cookie upstream pools, and opt-in downstream embedded-SCT verification ar
 [docs/FeatureStatus.md](docs/FeatureStatus.md) for the canonical lifecycle
 matrix and [docs/Specification.md](docs/Specification.md#non-goals-and-reserved-work)
 for the design rationale behind reserved work.
+
+## Third-Party Notices
+
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for licenses and
+attribution covering source incorporated from other projects.
 
 ## Disclaimer
 This project is developed with some LLM Agents or LLM assistances like ChatGPT Codex. This can introduce security issues, unintended behavior, or inaccuracies. However, all code changes are reviewed or approved by people to mitigate potential risks and many GitHub Action workflows are in place to enforce code quality and security checks.

@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 
@@ -156,6 +158,81 @@ class MarkdownContractTests(unittest.TestCase):
         self.assertTrue(any("undefined Markdown reference" in message for message in messages))
         self.assertTrue(any("unsafe link scheme" in message for message in messages))
         self.assertTrue(any("malformed percent encoding" in message for message in messages))
+
+    def test_skips_only_exact_imported_mimalloc_markdown_paths(self) -> None:
+        vendor_root = "source/third_party/mimalloc-3.3.2+oxibelt.1"
+        imported = f"{vendor_root}/contrib/vcpkg/readme.md"
+        self.write(imported, "[omitted upstream file](../../test/CMakeLists.txt)\n")
+        self.write(
+            f"{vendor_root}/README.OXIBELT.md",
+            "[missing project link](missing.md)\n",
+        )
+        self.write(
+            f"{vendor_root}/maintainer-notes.md",
+            "[missing new vendor-tree link](missing.md)\n",
+        )
+        self.write("docs/first-party.md", "[missing documentation link](missing.md)\n")
+
+        messages = self.messages()
+
+        self.assertFalse(any(message.startswith(f"{imported}:") for message in messages))
+        for scanned_path in (
+            f"{vendor_root}/README.OXIBELT.md",
+            f"{vendor_root}/maintainer-notes.md",
+            "docs/first-party.md",
+        ):
+            self.assertTrue(
+                any(message.startswith(f"{scanned_path}:") for message in messages),
+                f"expected broken link in {scanned_path} to be checked",
+            )
+
+    def test_reports_only_the_markdown_files_it_scans(self) -> None:
+        self.write("README.md", "# Repository README\n")
+        self.write(
+            "source/third_party/mimalloc-3.3.2+oxibelt.1/readme.md",
+            "[omitted upstream file](bin)\n",
+        )
+        self.write(
+            "source/third_party/mimalloc-3.3.2+oxibelt.1/maintainer-notes.md",
+            "# Maintainer notes\n",
+        )
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            result = CHECKER.main(["--repo-root", str(self.root)])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue(), "validated 2 of 3 tracked Markdown files\n")
+
+    def test_first_party_links_to_exempt_vendor_markdown_still_validate_targets(self) -> None:
+        vendor_root = "source/third_party/mimalloc-3.3.2+oxibelt.1"
+        tracked_vendor_markdown = f"{vendor_root}/readme.md"
+        untracked_vendor_markdown = f"{vendor_root}/SECURITY.md"
+        self.write(tracked_vendor_markdown, "## ETW\n")
+        self.write(
+            untracked_vendor_markdown,
+            "## Untracked vendor target\n",
+            track=False,
+        )
+        first_party_source = "docs/vendor-links.md"
+        self.write(
+            first_party_source,
+            "\n".join(
+                [
+                    "[valid anchor](../source/third_party/mimalloc-3.3.2+oxibelt.1/readme.md#etw)",
+                    "[missing anchor](../source/third_party/mimalloc-3.3.2+oxibelt.1/readme.md#missing)",
+                    "[untracked target](../source/third_party/mimalloc-3.3.2+oxibelt.1/SECURITY.md#untracked-vendor-target)",
+                ]
+            )
+            + "\n",
+        )
+
+        messages = self.messages()
+
+        self.assertEqual(len(messages), 2)
+        self.assertTrue(any("anchor does not exist" in message for message in messages))
+        self.assertTrue(any("target is not tracked" in message for message in messages))
+        self.assertTrue(all(message.startswith(f"{first_party_source}:") for message in messages))
 
 
 if __name__ == "__main__":

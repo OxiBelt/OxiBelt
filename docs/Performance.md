@@ -4,6 +4,57 @@ OxiBelt includes a local Docker-based performance harness for repeatable proxy s
 
 ## Running Locally
 
+### Optional allocator evaluation
+
+The `allocator-mimalloc-experiment` Cargo feature is part of the package's
+default feature set. For the integrated `oxibelt` executable, this selects
+secure mimalloc on `x86_64` Linux GNU and musl targets. The private Rust
+`GlobalAlloc` bridge compiles OxiBelt's byte-locked Microsoft mimalloc source
+from `source/third_party/`; the workspace has no `mimalloc` or
+`libmimalloc-sys` Cargo dependency. Supported ARM64 and
+RISC-V builds explicitly select Rust's `std::alloc::System`, including builds
+with this feature or `--all-features` enabled. The strict data-plane executable
+keeps `std::alloc::System`; the library does not install a global allocator,
+and embedding hosts retain allocator ownership. The standard compatibility
+`oxibelt` and `dataplane` Docker targets inherit the package defaults.
+
+Build both variants from the same source revision and retain their binaries
+separately for comparison. The package defaults select mimalloc on supported
+`x86_64` Linux targets:
+
+```sh
+cargo build --locked --release -p oxibelt --bin oxibelt
+```
+
+To build the `System`-allocator baseline, disable default features while
+retaining the Admin runtime:
+
+```sh
+cargo build --locked --release -p oxibelt --bin oxibelt --no-default-features --features admin-runtime
+```
+
+The allocator contract checker can be run with:
+
+```sh
+cargo run --locked --release -p oxibelt --bin oxibelt-allocator-check --features allocator-mimalloc-experiment
+```
+
+The checker is test support for alignment, initialized contents, growth and
+cross-thread ownership; its duration is not a performance result. Full-feature
+CI checks the x86_64 mimalloc variant and verifies the positive `System`
+fallback in ARM64 builds; RISC-V GNU and musl cross-checks also cover explicit
+allocator selection and all-feature fallback. Qualification must identify the exact source
+revision, owned binding hash, native source manifest, selected feature graph,
+native secure mode and target flags, binary hash and image digest. Source
+revision alone does not distinguish allocator variants. Compare throughput and
+tail latency together with CPU use, retained memory and correctness before
+selecting an allocator for a deployment. Allocator selection is a build-time
+choice, not a TOML option or runtime failover. See
+[Embedding](Embedding.md#process-global-hooks) for process ownership and
+startup reporting.
+
+### Docker harness
+
 Build or provide an OxiBelt image, then run:
 
 ```sh
@@ -316,6 +367,27 @@ cannot become a passing baseline. A two-target campaign requires a prior
 campaign root with both target-primary reports; a single report is accepted
 only when its primary target matches the campaign being aggregated.
 
+The wrapper applies fixed execution ceilings without reducing a workload's
+duration, warmup, concurrency, or sample count. Each smoke command receives a
+25-minute deadline, each benchmark command receives 60 minutes, and each
+aggregate command receives 15 minutes. Input image inspection has a 60-second
+deadline. Collection commands share a two-hour budget for `smoke`, a 20-hour
+budget for `benchmark`, and a 21-hour budget for the complete `all` gate; work
+that starts near a campaign deadline receives only the remaining time. The
+`all` budget includes its aggregate invocations. Smoke stops on its first
+failed or timed-out attempt.
+Benchmark collection retains a failed or timed-out attempt and continues to
+collect independent samples while time remains, then stops when the campaign
+deadline is exhausted. These timing limits are part of the fixed campaign
+policy and cannot be overridden through inherited environment variables.
+The hour-long benchmark attempt ceiling leaves setup and teardown headroom
+beyond the longest group's configured load and warmup time. Reaching a
+deadline is a failed qualification attempt; it does not by itself classify a
+product performance regression. After a deadline, the supervised command gets
+up to two minutes to preserve partial artifacts and remove labeled Docker
+resources before it is killed. Manifest bookkeeping follows, so the displayed
+deadline is a command budget rather than an exact wall-clock duration.
+
 The campaign fixes the runner's primary regression gate to `fail` and requires
 nginx HTTP/3. It retains the runner's default warning-only external benchmark
 classification: external h2load, oha, and wrk evidence is recorded separately
@@ -334,6 +406,15 @@ explicit new `--campaign-dir`. After each attempt it removes only generated
 private-key, QUIC-host-key, and keysigner-token files from copied TLS paths;
 `restricted-receipt.json` retains their SHA-256 and byte counts while other
 configs and logs remain available for diagnosis.
+
+Every attempt record includes its fixed limit, effective remaining-time limit,
+elapsed duration, termination grace, and a `timed_out` flag. A timeout is
+recorded with `status: "timeout"`, fails the gate closed, and still runs the
+restricted-file cleanup. Aggregate records retain the same timeout evidence.
+Within an attempt, attached perf-probe runs and external benchmark container
+waits use workload duration plus warmup and a fixed 30-second grace, followed
+by labeled container cleanup if the Docker client does not return. The outer
+attempt deadline remains the cleanup backstop if the daemon itself is stalled.
 
 Raw result trees use the aggregate-recognized layout
 `<campaign>/benchmark-input/oxibelt-docker-performance-benchmark-<group>-shard-1/<target>/run-<N>/`.

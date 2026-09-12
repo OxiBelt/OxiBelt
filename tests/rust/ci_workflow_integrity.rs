@@ -3344,6 +3344,118 @@ fn test_job_runs_independent_format_checks_in_parallel() {
 }
 
 #[test]
+fn test_job_validates_allocator_selection_on_every_supported_runner() {
+  let workflow = workflow_text();
+  let parsed: serde_json::Value =
+    serde_saphyr::from_str(&workflow).expect("check-oxibelt workflow should parse as YAML");
+  let steps = parsed["jobs"]["test"]["steps"]
+    .as_array()
+    .expect("test job should define steps");
+
+  let exact_step = |name: &str, run: &str| {
+    let matching_steps = steps
+      .iter()
+      .filter(|step| step["name"].as_str() == Some(name))
+      .collect::<Vec<_>>();
+    assert_eq!(
+      matching_steps.len(),
+      1,
+      "test job should contain exactly one {name} step"
+    );
+    let step = matching_steps[0];
+    assert_eq!(
+      step["run"].as_str(),
+      Some(run),
+      "{name} command must remain exact"
+    );
+    assert!(
+      step.get("if").is_none(),
+      "{name} must validate the full feature graph on every test runner"
+    );
+  };
+  exact_step(
+    "Cargo clippy",
+    "cargo clippy --all-targets --all-features --locked -- -D warnings",
+  );
+  exact_step("Cargo test", "cargo test --all-features --locked");
+  exact_step(
+    "Allocator crate all-feature check",
+    "cargo check -p oxibelt-allocator --all-features --locked",
+  );
+
+  for obsolete in [
+    "ARM Cargo clippy",
+    "ARM Cargo test",
+    "ARM rejects unsupported allocator experiment",
+  ] {
+    assert!(
+      !steps
+        .iter()
+        .any(|step| step["name"].as_str() == Some(obsolete)),
+      "test job must not retain the obsolete architecture-specific {obsolete} step"
+    );
+  }
+
+  let allocator_checker = steps
+    .iter()
+    .filter(|step| step["name"].as_str() == Some("Allocator checker selection"))
+    .collect::<Vec<_>>();
+  assert_eq!(
+    allocator_checker.len(),
+    1,
+    "test job should retain one allocator selection proof"
+  );
+  let allocator_checker = allocator_checker[0];
+  assert!(
+    allocator_checker.get("if").is_none(),
+    "allocator selection proof must run on AMD64 and ARM"
+  );
+  let allocator_checker_run = allocator_checker["run"]
+    .as_str()
+    .expect("allocator selection proof should be a shell step");
+  for expected in [
+    "ubuntu-26.04) default_variant=\"mimalloc-secure\"",
+    "ubuntu-26.04-arm) default_variant=\"system\"",
+    "cargo run --locked -p oxibelt --bin oxibelt-allocator-check \"$@\"",
+    "check_variant \"${default_variant}\"",
+    "check_variant system --no-default-features --features admin-runtime",
+    "check_variant \"${default_variant}\" --no-default-features --features admin-runtime,allocator-mimalloc-experiment",
+    "check_variant \"${default_variant}\" --all-features",
+    ".allocator_variant == $expected",
+    ".checks.cross_thread_transfer_reallocation_drop == \"PASS\"",
+  ] {
+    assert!(
+      allocator_checker_run.contains(expected),
+      "allocator selection proof should contain {expected}"
+    );
+  }
+
+  let step_position = |name: &str| {
+    steps
+      .iter()
+      .position(|step| step["name"].as_str() == Some(name))
+      .unwrap_or_else(|| panic!("test job should define {name}"))
+  };
+  let format_parallel = steps
+    .iter()
+    .position(|step| step.get("parallel").is_some())
+    .expect("test job should define a format parallel group");
+  let clippy_position = step_position("Cargo clippy");
+  let test_position = step_position("Cargo test");
+  let allocator_crate_check_position = step_position("Allocator crate all-feature check");
+  let allocator_checker_position = step_position("Allocator checker selection");
+  let loom_position = step_position("Loom concurrency models");
+  assert!(
+    format_parallel < clippy_position
+      && clippy_position < test_position
+      && test_position < allocator_crate_check_position
+      && allocator_crate_check_position < allocator_checker_position
+      && allocator_checker_position < loom_position,
+    "test job should format first, validate all features, prove allocator selection, then run x86 Loom models"
+  );
+}
+
+#[test]
 fn test_job_fetches_locked_cargo_graph_before_build_checks() {
   let workflow = workflow_text();
   let test_job = workflow_job_text(&workflow, "test");
@@ -7708,7 +7820,7 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
     .find(regression_fixture_copy)
     .expect("RISC-V musl check stage should copy fuzz regression fixtures");
   let cargo_check_position = riscv64_check_stage
-    .find("cargo check --all-targets --locked")
+    .find("cargo check --all-targets --all-features --locked")
     .expect("RISC-V musl check stage should compile all targets");
 
   assert!(
@@ -7738,7 +7850,9 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
   );
   for expected in [
     "Cargo check for RISC-V GNU target",
-    "cargo check --all-targets --locked --target ${{ matrix.target }}",
+    "cargo check --all-targets --all-features --locked --target ${{ matrix.target }}",
+    "cargo check -p oxibelt --lib --no-default-features --features admin-runtime,allocator-mimalloc-experiment --locked --target ${{ matrix.target }}",
+    "cargo check -p oxibelt-allocator --all-features --locked --target ${{ matrix.target }}",
     "BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr/riscv64-linux-gnu",
     "Cargo check for RISC-V musl target",
     "--platform linux/riscv64",
@@ -7749,6 +7863,16 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
     assert!(
       cross_job_text.contains(expected),
       "RISC-V cross-check job should preserve {expected}"
+    );
+  }
+  for expected in [
+    "cargo check --all-targets --all-features --locked",
+    "cargo check -p oxibelt --lib --no-default-features --features admin-runtime,allocator-mimalloc-experiment --locked",
+    "cargo check -p oxibelt-allocator --all-features --locked",
+  ] {
+    assert!(
+      riscv64_check_stage.contains(expected),
+      "RISC-V musl must verify allocator fallback with {expected}"
     );
   }
   assert!(

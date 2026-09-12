@@ -53,6 +53,13 @@ const CargoPackages: CargoPackagePolicy[] = [
     versionSource: 'workspace'
   },
   {
+    name: 'oxibelt-allocator',
+    manifestPath: 'source/crates/oxibelt-allocator/Cargo.toml',
+    lockfilePath: 'Cargo.lock',
+    releaseRewrite: true,
+    versionSource: 'workspace'
+  },
+  {
     name: 'oxibelt-build-identity',
     manifestPath: 'source/crates/oxibelt-build-identity/Cargo.toml',
     lockfilePath: 'Cargo.lock',

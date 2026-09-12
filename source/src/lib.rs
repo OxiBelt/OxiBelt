@@ -97,6 +97,16 @@ pub use process_globals::{
   ProcessPolicy, RuntimePolicy,
 };
 
+#[cfg(all(
+  feature = "allocator-mimalloc-experiment",
+  target_os = "linux",
+  target_arch = "x86_64",
+  target_pointer_width = "64",
+  any(target_env = "gnu", target_env = "musl")
+))]
+#[doc(hidden)]
+pub use process_globals::mark_binary_allocator_mimalloc_experiment;
+
 #[cfg(test)]
 mod simd_bench;
 

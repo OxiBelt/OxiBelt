@@ -7,6 +7,7 @@ use std::str::FromStr;
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 
 const UNSAFE_ALLOWLIST: &[&str] = &[
+  "source/crates/oxibelt-allocator/src/lib.rs",
   "source/src/hardening/syscalls.rs",
   "source/src/tcp_hop/syscalls.rs",
 ];

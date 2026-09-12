@@ -197,6 +197,8 @@ nginx_h3_mode_override="${OXIBELT_NGINX_H3_MODE:-auto}"
 remove_perf_probe_image=0
 remove_external_benchmark_image=0
 remove_oxibelt_image=0
+artifacts_copied=0
+results_finalized=0
 active_proxy_container=""
 active_proxy_alias=""
 active_proxy_ip=""
@@ -424,6 +426,16 @@ if [[ -z "${docker_command}" ]]; then
 fi
 
 readonly container_nofile_limit=262144
+readonly proxy_ipv4_local_port_range="1024 65535"
+readonly proxy_tcp_tw_reuse=1
+readonly docker_wait_timeout_grace_seconds=30
+readonly docker_wait_kill_after_seconds=2
+readonly docker_cleanup_timeout_seconds=3
+readonly docker_log_timeout_seconds=2
+readonly -a proxy_network_sysctls=(
+  --sysctl "net.ipv4.ip_local_port_range=${proxy_ipv4_local_port_range}"
+  --sysctl "net.ipv4.tcp_tw_reuse=${proxy_tcp_tw_reuse}"
+)
 
 docker() {
   case "${1:-}" in
@@ -437,18 +449,36 @@ docker() {
   esac
 }
 
+run_docker_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+  timeout --signal=TERM --kill-after="${docker_wait_kill_after_seconds}s" "${timeout_seconds}s" \
+    "${docker_command}" "$@"
+}
+
 cleanup() {
-  docker ps -aq --filter "label=${test_label}" | xargs -r "${docker_command}" rm -f >/dev/null 2>&1 || true
-  docker network rm "${network_name}" >/dev/null 2>&1 || true
-  docker volume ls -q --filter "label=${test_label}" | xargs -r "${docker_command}" volume rm >/dev/null 2>&1 || true
+  local -a cleanup_containers=() cleanup_volumes=()
+  mapfile -t cleanup_containers < <(
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" ps -aq --filter "label=${test_label}" 2>/dev/null || true
+  )
+  if (( ${#cleanup_containers[@]} > 0 )); then
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" rm -f "${cleanup_containers[@]}" >/dev/null 2>&1 || true
+  fi
+  run_docker_with_timeout "${docker_cleanup_timeout_seconds}" network rm "${network_name}" >/dev/null 2>&1 || true
+  mapfile -t cleanup_volumes < <(
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" volume ls -q --filter "label=${test_label}" 2>/dev/null || true
+  )
+  if (( ${#cleanup_volumes[@]} > 0 )); then
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" volume rm "${cleanup_volumes[@]}" >/dev/null 2>&1 || true
+  fi
   if [[ "${remove_perf_probe_image}" == "1" ]]; then
-    docker rmi -f "${perf_probe_image}" >/dev/null 2>&1 || true
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" rmi -f "${perf_probe_image}" >/dev/null 2>&1 || true
   fi
   if [[ "${remove_external_benchmark_image}" == "1" ]]; then
-    docker rmi -f "${external_benchmark_image}" >/dev/null 2>&1 || true
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" rmi -f "${external_benchmark_image}" >/dev/null 2>&1 || true
   fi
   if [[ "${remove_oxibelt_image}" == "1" ]]; then
-    docker rmi -f "${oxibelt_image}" >/dev/null 2>&1 || true
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" rmi -f "${oxibelt_image}" >/dev/null 2>&1 || true
   fi
   if [[ "${KEEP_TEST_ARTIFACTS:-0}" != "1" ]]; then
     rm -rf "${work_dir}" >/dev/null 2>&1 || true
@@ -473,6 +503,7 @@ require_tool() {
 require_tool "${docker_command}"
 require_tool jq
 require_tool openssl
+require_tool timeout
 if [[ -n "${profile_label}" ]]; then
   require_tool perf
   if [[ ! "${profile_frequency}" =~ ^[1-9][0-9]*$ ]]; then
@@ -584,7 +615,9 @@ generate_static_files() {
 copy_artifacts() {
   if [[ -n "${OXIBELT_TEST_ARTIFACT_DIR:-}" ]]; then
     mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
-    cp -R "${work_dir}/." "${OXIBELT_TEST_ARTIFACT_DIR}/" 2>/dev/null || true
+    if cp -R "${work_dir}/." "${OXIBELT_TEST_ARTIFACT_DIR}/" 2>/dev/null; then
+      artifacts_copied=1
+    fi
   fi
 }
 
@@ -759,10 +792,16 @@ append_profile_result() {
 collect_logs() {
   mkdir -p "${logs_dir}"
   local container
-  while read -r container; do
+  local -a containers=()
+  mapfile -t containers < <(
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" ps -a \
+      --filter "label=${test_label}" --format '{{.Names}}' 2>/dev/null || true
+  )
+  for container in "${containers[@]}"; do
     [[ -z "${container}" ]] && continue
-    docker logs "${container}" >"${logs_dir}/${container}.log" 2>&1 || true
-  done < <(docker ps -a --filter "label=${test_label}" --format '{{.Names}}')
+    run_docker_with_timeout "${docker_log_timeout_seconds}" logs "${container}" \
+      >"${logs_dir}/${container}.log" 2>&1 || true
+  done
 }
 
 diagnostic_host_pids_csv() {
@@ -1370,9 +1409,26 @@ run_profiled_probe_json() {
   printf '%s\n' "${json}"
 }
 
+probe_timeout_seconds_for_args() {
+  local duration=0 warmup=0 previous_arg="" arg
+  for arg in "$@"; do
+    case "${previous_arg}" in
+      --duration-seconds) duration="${arg}" ;;
+      --warmup-seconds) warmup="${arg}" ;;
+    esac
+    previous_arg="${arg}"
+  done
+  if [[ ! "${duration}" =~ ^(0|[1-9][0-9]*)$ || ! "${warmup}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo "performance probe duration and warmup must be non-negative integers" >&2
+    return 2
+  fi
+  printf '%s\n' "$((duration + warmup + docker_wait_timeout_grace_seconds))"
+}
+
 run_probe_json() {
   local probe_container="oxibelt-perf-probe-${run_id}-${RANDOM}"
-  local output container_logs selected_output status json probe_label probe_host previous_arg probe_log_name probe_log_path arg
+  local output container_logs selected_output status json probe_label probe_host previous_arg probe_log_name probe_log_path arg probe_timeout_seconds
+  local container_logs_status=0 container_remove_status=0
   local -a active_proxy_host_args=()
   probe_label="probe"
   probe_host=""
@@ -1396,6 +1452,7 @@ run_probe_json() {
   fi
   probe_log_name="${probe_label//[^A-Za-z0-9_.-]/_}"
   probe_log_path="${probe_logs_dir}/${probe_log_name}.log"
+  probe_timeout_seconds="$(probe_timeout_seconds_for_args "$@")" || return $?
   docker create \
     --name "${probe_container}" \
     --label "${test_label}" \
@@ -1406,8 +1463,8 @@ run_probe_json() {
   docker cp "${tls_dir}/fullchain.pem" "${probe_container}:/tls/proxy-ca.pem"
 
   status=0
-  output="$(docker start -a "${probe_container}" 2>&1)" || status=$?
-  container_logs="$(docker logs "${probe_container}" 2>&1 || true)"
+  output="$(run_docker_with_timeout "${probe_timeout_seconds}" start -a "${probe_container}" 2>&1)" || status=$?
+  container_logs="$(run_docker_with_timeout "${docker_log_timeout_seconds}" logs "${probe_container}" 2>&1)" || container_logs_status=$?
   selected_output="${output}"
   if [[ "${status}" == "0" ]]; then
     json="$(printf '%s\n' "${selected_output}" | tail -n 1)"
@@ -1421,12 +1478,18 @@ run_probe_json() {
     printf ' %q' "$@"
     printf '\n\n'
     printf 'Exit status: %s\n\n' "${status}"
+    printf 'Timeout seconds: %s\n\n' "${probe_timeout_seconds}"
+    printf 'Container log status: %s\n\n' "${container_logs_status}"
     printf 'Attached output:\n'
     printf '%s\n' "${output}"
     printf '\nContainer logs:\n'
     printf '%s\n' "${container_logs}"
   } >"${probe_log_path}"
-  docker rm -f "${probe_container}" >/dev/null 2>&1 || true
+  run_docker_with_timeout "${docker_cleanup_timeout_seconds}" rm -f "${probe_container}" \
+    >/dev/null 2>&1 || container_remove_status=$?
+  if [[ "${container_remove_status}" != 0 ]]; then
+    printf '\nContainer removal status: %s\n' "${container_remove_status}" >>"${probe_log_path}"
+  fi
   if [[ "${status}" != "0" ]]; then
     if [[ -n "${output}" ]]; then
       echo "${output}" >&2
@@ -1479,7 +1542,7 @@ start_perf_upstreams() {
     --cert /tls/fullchain.pem \
     --key /tls/privkey.pem >/dev/null
   docker cp "${tls_dir}/." "${h2_container}:/tls"
-  docker start "${h2_container}" >/dev/null
+  run_docker_with_timeout "${docker_wait_timeout_grace_seconds}" start "${h2_container}" >/dev/null
 }
 
 image_identity_json() {
@@ -1518,6 +1581,8 @@ append_result() {
     --arg profile "${profile}" \
     --arg serving_type "${serving_type}" \
     --arg oxibelt_build_mode "${oxibelt_build_mode}" \
+    --arg proxy_ipv4_local_port_range "${proxy_ipv4_local_port_range}" \
+    --argjson proxy_tcp_tw_reuse "${proxy_tcp_tw_reuse}" \
     --argjson perf_probe_image "${perf_probe_identity}" \
     --argjson oxibelt_image "${oxibelt_identity}" \
     --argjson nginx_image "${nginx_identity}" \
@@ -1532,6 +1597,10 @@ append_result() {
         profile: $profile,
         serving_type: $serving_type,
         oxibelt_build_mode: $oxibelt_build_mode,
+        proxy_network_sysctls: {
+          ipv4_local_port_range: $proxy_ipv4_local_port_range,
+          tcp_tw_reuse: $proxy_tcp_tw_reuse
+        },
         images: {
           perf_probe: $perf_probe_image,
           oxibelt: $oxibelt_image,
@@ -2046,7 +2115,9 @@ run_external_container() {
   local output_path="$1"
   local command="$2"
   local container="oxibelt-external-benchmark-${run_id}-${RANDOM}"
-  local output status start_output wait_output
+  local output status start_output wait_output container_logs
+  local container_logs_status=0 container_remove_status=0
+  local external_timeout_seconds="$((duration_seconds + warmup_seconds + docker_wait_timeout_grace_seconds))"
   docker create \
     --name "${container}" \
     --label "${test_label}" \
@@ -2056,23 +2127,38 @@ run_external_container() {
   docker cp "${tls_dir}/fullchain.pem" "${container}:/tls/proxy-ca.pem"
 
   status=0
-  start_output="$(docker start "${container}" 2>&1 >/dev/null)" || status=$?
+  start_output="$(
+    run_docker_with_timeout "${docker_wait_timeout_grace_seconds}" start "${container}" 2>&1 >/dev/null
+  )" || status=$?
   if [[ "${status}" != "0" ]]; then
     output="${start_output}"
   else
-    wait_output="$(docker wait "${container}" 2>&1)" || status=$?
+    wait_output="$(run_docker_with_timeout "${external_timeout_seconds}" wait "${container}" 2>&1)" || status=$?
     if [[ "${status}" != "0" ]]; then
       output="${wait_output}"
     elif [[ "${wait_output}" =~ ^[0-9]+$ ]]; then
       status="${wait_output}"
-      output="$(docker logs "${container}" 2>&1 || true)"
+      output=""
     else
       status=1
       output="${wait_output}"
     fi
   fi
+  container_logs="$(run_docker_with_timeout "${docker_log_timeout_seconds}" logs "${container}" 2>&1)" || container_logs_status=$?
+  if [[ "${status}" == 0 ]]; then
+    output="${container_logs}"
+  elif [[ -n "${container_logs}" ]]; then
+    output="${output}"$'\nContainer logs:\n'"${container_logs}"
+  fi
+  if [[ "${container_logs_status}" != 0 ]]; then
+    output="${output}"$'\nContainer log status: '"${container_logs_status}"
+  fi
   printf '%s\n' "${output}" >"${output_path}"
-  docker rm -f "${container}" >/dev/null 2>&1 || true
+  run_docker_with_timeout "${docker_cleanup_timeout_seconds}" rm -f "${container}" \
+    >/dev/null 2>&1 || container_remove_status=$?
+  if [[ "${container_remove_status}" != 0 ]]; then
+    printf 'Container removal status: %s\n' "${container_remove_status}" >>"${output_path}"
+  fi
   return "${status}"
 }
 
@@ -3347,23 +3433,29 @@ refresh_active_proxy_ip() {
 
 stop_active_proxy() {
   if [[ -n "${active_proxy_container}" ]]; then
-    docker logs "${active_proxy_container}" >"${logs_dir}/${active_proxy_container}.log" 2>&1 || true
-    docker rm -f "${active_proxy_container}" >/dev/null 2>&1 || true
+    run_docker_with_timeout "${docker_log_timeout_seconds}" logs "${active_proxy_container}" \
+      >"${logs_dir}/${active_proxy_container}.log" 2>&1 || true
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" rm -f "${active_proxy_container}" \
+      >/dev/null 2>&1 || true
     active_proxy_container=""
     active_proxy_alias=""
     active_proxy_ip=""
   fi
   if [[ -n "${active_remote_signer_container}" ]]; then
-    docker logs "${active_remote_signer_container}" >"${logs_dir}/${active_remote_signer_container}.log" 2>&1 || true
-    docker rm -f "${active_remote_signer_container}" >/dev/null 2>&1 || true
+    run_docker_with_timeout "${docker_log_timeout_seconds}" logs "${active_remote_signer_container}" \
+      >"${logs_dir}/${active_remote_signer_container}.log" 2>&1 || true
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" rm -f "${active_remote_signer_container}" \
+      >/dev/null 2>&1 || true
     active_remote_signer_container=""
   fi
   if [[ -n "${active_remote_signer_volume}" ]]; then
-    docker volume rm "${active_remote_signer_volume}" >/dev/null 2>&1 || true
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" volume rm "${active_remote_signer_volume}" \
+      >/dev/null 2>&1 || true
     active_remote_signer_volume=""
   fi
   if [[ -n "${active_remote_signer_cert_volume}" ]]; then
-    docker volume rm "${active_remote_signer_cert_volume}" >/dev/null 2>&1 || true
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" volume rm "${active_remote_signer_cert_volume}" \
+      >/dev/null 2>&1 || true
     active_remote_signer_cert_volume=""
   fi
 }
@@ -3568,8 +3660,8 @@ start_oxibelt() {
       -c 'chown 10002:10002 /cert /cert/privkey.pem /cert/keysigner-token.b64 && chmod 0550 /cert && chmod 0400 /cert/privkey.pem /cert/keysigner-token.b64' >/dev/null
     docker cp "${tls_dir}/privkey.pem" "${remote_signer_cert_seed_container}:/cert/privkey.pem"
     docker cp "${configs_dir}/oxibelt-${scenario}/cert/keysigner-token.b64" "${remote_signer_cert_seed_container}:/cert/keysigner-token.b64"
-    docker start -a "${remote_signer_cert_seed_container}" >/dev/null
-    docker rm "${remote_signer_cert_seed_container}" >/dev/null
+    run_docker_with_timeout "${docker_wait_timeout_grace_seconds}" start -a "${remote_signer_cert_seed_container}" >/dev/null
+    run_docker_with_timeout "${docker_cleanup_timeout_seconds}" rm "${remote_signer_cert_seed_container}" >/dev/null
     docker run --rm \
       --label "${test_label}" \
       --user 0:0 \
@@ -3597,7 +3689,7 @@ start_oxibelt() {
       --allow-peer-uid 10001 \
       --max-connections 1024 \
       --io-timeout-ms 5000 >/dev/null
-    docker start "${remote_signer_container}" >/dev/null
+    run_docker_with_timeout "${docker_wait_timeout_grace_seconds}" start "${remote_signer_container}" >/dev/null
     active_remote_signer_container="${remote_signer_container}"
     active_remote_signer_volume="${remote_signer_volume}"
     active_remote_signer_cert_volume="${remote_signer_cert_volume}"
@@ -3626,6 +3718,7 @@ start_oxibelt() {
   fi
 
   docker create \
+    "${proxy_network_sysctls[@]}" \
     --name "${container}" \
     --label "${test_label}" \
     --network "${network_name}" \
@@ -3646,7 +3739,7 @@ start_oxibelt() {
   if [[ -d "${configs_dir}/oxibelt-${scenario}/oxirule" ]]; then
     docker cp "${configs_dir}/oxibelt-${scenario}/oxirule/." "${container}:/etc/oxibelt/oxirule"
   fi
-  docker start "${container}" >/dev/null
+  run_docker_with_timeout "${docker_wait_timeout_grace_seconds}" start "${container}" >/dev/null
   active_proxy_container="${container}"
   active_proxy_alias="${alias_name}"
   refresh_active_proxy_ip || true
@@ -3662,11 +3755,12 @@ start_nginx() {
   if [[ "${nginx_h3_supported}" == "1" ]]; then
     config="nginx-h3.conf"
   fi
-  mkdir -p "${configs_dir}/nginx"
+  mkdir -p "${configs_dir}/nginx/cert"
   cp "${fixture_root}/nginx/${config}" "${configs_dir}/nginx/nginx.conf"
-  cp -R "${tls_dir}" "${configs_dir}/nginx/cert"
+  cp -R "${tls_dir}/." "${configs_dir}/nginx/cert"
 
   docker create \
+    "${proxy_network_sysctls[@]}" \
     --name "${container}" \
     --label "${test_label}" \
     --network "${network_name}" \
@@ -3676,7 +3770,7 @@ start_nginx() {
   docker cp "${tls_dir}/fullchain.pem" "${container}:/etc/nginx/fullchain.pem"
   docker cp "${tls_dir}/privkey.pem" "${container}:/etc/nginx/privkey.pem"
   docker cp "${static_dir}/." "${container}:/srv/static"
-  docker start "${container}" >/dev/null
+  run_docker_with_timeout "${docker_wait_timeout_grace_seconds}" start "${container}" >/dev/null
   active_proxy_container="${container}"
   active_proxy_alias="nginx"
   refresh_active_proxy_ip || true
@@ -3688,11 +3782,12 @@ start_nginx() {
 start_caddy() {
   local container="caddy-perf-${run_id}"
   stop_active_proxy
-  mkdir -p "${configs_dir}/caddy"
+  mkdir -p "${configs_dir}/caddy/cert"
   cp "${fixture_root}/caddy/Caddyfile" "${configs_dir}/caddy/Caddyfile"
-  cp -R "${tls_dir}" "${configs_dir}/caddy/cert"
+  cp -R "${tls_dir}/." "${configs_dir}/caddy/cert"
 
   docker create \
+    "${proxy_network_sysctls[@]}" \
     --name "${container}" \
     --label "${test_label}" \
     --network "${network_name}" \
@@ -3702,7 +3797,7 @@ start_caddy() {
   docker cp "${tls_dir}/fullchain.pem" "${container}:/etc/caddy/fullchain.pem"
   docker cp "${tls_dir}/privkey.pem" "${container}:/etc/caddy/privkey.pem"
   docker cp "${static_dir}/." "${container}:/srv/static"
-  docker start "${container}" >/dev/null
+  run_docker_with_timeout "${docker_wait_timeout_grace_seconds}" start "${container}" >/dev/null
   active_proxy_container="${container}"
   active_proxy_alias="caddy"
   refresh_active_proxy_ip || true
@@ -3714,11 +3809,12 @@ start_caddy() {
 start_openresty() {
   local container="openresty-perf-${run_id}"
   stop_active_proxy
-  mkdir -p "${configs_dir}/openresty"
+  mkdir -p "${configs_dir}/openresty/cert"
   cp "${fixture_root}/openresty/default.conf" "${configs_dir}/openresty/default.conf"
-  cp -R "${tls_dir}" "${configs_dir}/openresty/cert"
+  cp -R "${tls_dir}/." "${configs_dir}/openresty/cert"
 
   docker create \
+    "${proxy_network_sysctls[@]}" \
     --name "${container}" \
     --label "${test_label}" \
     --network "${network_name}" \
@@ -3728,7 +3824,7 @@ start_openresty() {
   docker cp "${tls_dir}/fullchain.pem" "${container}:/etc/nginx/fullchain.pem"
   docker cp "${tls_dir}/privkey.pem" "${container}:/etc/nginx/privkey.pem"
   docker cp "${static_dir}/." "${container}:/srv/static"
-  docker start "${container}" >/dev/null
+  run_docker_with_timeout "${docker_wait_timeout_grace_seconds}" start "${container}" >/dev/null
   active_proxy_container="${container}"
   active_proxy_alias="openresty"
   refresh_active_proxy_ip || true
@@ -4743,6 +4839,10 @@ run_all_serving_types() {
 }
 
 finalize_results() {
+  if [[ "${results_finalized}" == 1 ]]; then
+    return
+  fi
+  results_finalized=1
   if [[ -s "${results_jsonl}" ]]; then
     jq -s '.' "${results_jsonl}" >"${results_json}"
   else
@@ -4777,6 +4877,39 @@ finalize_results() {
   } >>"${summary_md}"
 }
 
+handle_runner_signal() {
+  local signal="$1" exit_status
+  case "${signal}" in
+    INT) exit_status=130 ;;
+    TERM) exit_status=143 ;;
+    *) exit_status=1 ;;
+  esac
+  trap - INT TERM
+  printf '{"schema_version":1,"status":"interrupted","signal":"%s"}\n' "${signal}" \
+    >"${work_dir}/termination.json"
+  if [[ -f "${summary_md}" ]]; then
+    printf '\nRunner interrupted by %s; partial artifacts follow.\n' "\`${signal}\`" >>"${summary_md}"
+  fi
+  exit "${exit_status}"
+}
+
+finalize_and_cleanup() {
+  local exit_status=$?
+  trap - EXIT INT TERM
+  if [[ "${exit_status}" != 0 && "${artifacts_copied}" != 1 ]]; then
+    finalize_results || true
+    copy_artifacts || true
+    collect_logs || true
+    copy_artifacts || true
+  fi
+  cleanup
+  exit "${exit_status}"
+}
+
+trap finalize_and_cleanup EXIT
+trap 'handle_runner_signal INT' INT
+trap 'handle_runner_signal TERM' TERM
+
 generate_tls
 generate_static_files
 
@@ -4793,6 +4926,8 @@ cat >"${summary_md}" <<EOF
 - Pool experiment caps: \`${pool_experiment_caps}\`
 - Pool experiment concurrency presets: \`${pool_experiment_concurrency_presets}\`
 - Docker command: \`${docker_command}\`
+- Proxy IPv4 local port range: \`${proxy_ipv4_local_port_range}\`
+- Proxy TCP TIME-WAIT reuse: \`${proxy_tcp_tw_reuse}\`
 - Source SHA: \`${source_sha}\`
 - Source dirty: \`${source_dirty}\`
 - Source architecture: \`${source_architecture}\`

@@ -3196,6 +3196,7 @@ dependencies = [
  "object_store",
  "online-dsl-forge",
  "openssl-probe",
+ "oxibelt-allocator",
  "oxibelt-build-identity",
  "oxibelt-control-protocol",
  "precis-profiles",
@@ -3235,6 +3236,13 @@ dependencies = [
  "x509-ocsp",
  "zeroize",
  "zstd",
+]
+
+[[package]]
+name = "oxibelt-allocator"
+version = "0.0.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

@@ -58,6 +58,18 @@ runner=""
 aggregate_bin="${OXIBELT_PERF_AGGREGATE_COMMAND:-}"
 docker_command="${OXIBELT_DOCKER_COMMAND:-docker}"
 
+# These ceilings bound orchestration failures without shortening any measured
+# workload. They are intentionally fixed so two campaign manifests describe
+# the same admission policy.
+readonly smoke_attempt_timeout_seconds=1500
+readonly benchmark_attempt_timeout_seconds=3600
+readonly aggregate_timeout_seconds=900
+readonly input_inspect_timeout_seconds=60
+readonly smoke_campaign_timeout_seconds=7200
+readonly benchmark_campaign_timeout_seconds=72000
+readonly all_campaign_timeout_seconds=75600
+readonly timeout_kill_after_seconds=120
+
 phase=""
 inputs_file=""
 campaign_dir=""
@@ -151,7 +163,7 @@ require_command() {
   }
 }
 
-for required_command in git jq flock sha256sum stat awk find "${docker_command}"; do
+for required_command in git jq flock sha256sum stat awk find timeout "${docker_command}"; do
   require_command "${required_command}"
 done
 
@@ -267,6 +279,15 @@ if ! flock -n 8; then
   exit 75
 fi
 
+case "${phase}" in
+  smoke) campaign_timeout_seconds="${smoke_campaign_timeout_seconds}" ;;
+  benchmark) campaign_timeout_seconds="${benchmark_campaign_timeout_seconds}" ;;
+  all) campaign_timeout_seconds="${all_campaign_timeout_seconds}" ;;
+  aggregate) campaign_timeout_seconds=0 ;;
+esac
+readonly campaign_timeout_seconds
+readonly campaign_started_seconds="${SECONDS}"
+
 source_revision="$(git -C "${source_root}" rev-parse HEAD)"
 source_tree="$(git -C "${source_root}" rev-parse 'HEAD^{tree}')"
 if ! git -C "${source_root}" diff --quiet --ignore-submodules -- ||
@@ -287,8 +308,17 @@ write_json_atomically() {
 
 image_identity() {
   local reference="$1"
-  "${docker_command}" image inspect "${reference}" 2>/dev/null |
-    jq -ce --arg reference "${reference}" '
+  local budget_status=0 inspect_status=0 inspect_output
+  local budget_record effective_timeout_seconds timeout_scope campaign_remaining_seconds
+  budget_record="$(timeout_budget_for "${input_inspect_timeout_seconds}" input)" || budget_status=$?
+  [[ "${budget_status}" == 0 ]] || return "${budget_status}"
+  IFS=$'\t' read -r effective_timeout_seconds timeout_scope campaign_remaining_seconds <<<"${budget_record}"
+  inspect_output="$(
+    timeout --signal=TERM --kill-after="${timeout_kill_after_seconds}s" "${effective_timeout_seconds}s" \
+      "${docker_command}" image inspect "${reference}" 2>/dev/null
+  )" || inspect_status=$?
+  [[ "${inspect_status}" == 0 ]] || return "${inspect_status}"
+  jq -ce --arg reference "${reference}" '
       .[0] | {
         reference: $reference,
         image_id: .Id,
@@ -301,11 +331,11 @@ image_identity() {
       }
       | select(.image_id | type == "string" and startswith("sha256:"))
       | select(.os == "linux" and .architecture == "amd64")
-    '
+    ' <<<"${inspect_output}"
 }
 
 resolve_inputs() {
-  local target key reference identity contract_reference contract_path contract_json contract_sha256 contract_role
+  local target key reference identity identity_status contract_reference contract_path contract_json contract_sha256 contract_role
   jq -e '
     . as $inputs |
     $inputs.schema_version == 1 and
@@ -324,6 +354,7 @@ resolve_inputs() {
 
   local resolved="${campaign_dir}/resolved-inputs.json"
   local tooling="${campaign_dir}/tooling-identity.json"
+  local raw_resolved raw_status=0
   jq -n \
     --arg wrapper "${script_dir}/$(basename -- "${BASH_SOURCE[0]}")" \
     --arg wrapper_sha256 "$(sha256sum "${script_dir}/$(basename -- "${BASH_SOURCE[0]}")" | awk '{print $1}')" \
@@ -333,15 +364,22 @@ resolve_inputs() {
     --arg aggregate_sha256 "$(if [[ -f "${aggregate_bin}" ]]; then sha256sum "${aggregate_bin}" | awk '{print $1}'; else echo unavailable; fi)" \
     '{wrapper: {path: $wrapper, sha256: $wrapper_sha256}, runner: {path: $runner, sha256: $runner_sha256}, aggregate: {path: $aggregate_bin, sha256: $aggregate_sha256}}' \
     | write_json_atomically "${tooling}"
-  {
+  raw_resolved="$(mktemp "${campaign_dir}/.resolved-inputs.XXXXXX.json")"
+  (
     printf '{"schema_version":1,"source":{"revision":"%s","tree":"%s"},"common":{' \
       "${source_revision}" "${source_tree}"
     for key in perf_probe_image external_benchmark_image; do
       reference="$(jq -r --arg key "${key}" '.common[$key]' "${inputs_file}")"
-      identity="$(image_identity "${reference}")" || {
+      identity_status=0
+      identity="$(image_identity "${reference}")" || identity_status=$?
+      if [[ "${identity_status}" != 0 ]]; then
+        if [[ "${identity_status}" == 124 || "${identity_status}" == 137 ]]; then
+          echo "inspection timed out for required common image ${key}: ${reference}" >&2
+          exit "${identity_status}"
+        fi
         echo "cannot inspect required common image ${key}: ${reference}" >&2
         exit 69
-      }
+      fi
       printf '%s"%s":%s' "${common_separator:-}" "${key}" "${identity}"
       common_separator=,
     done
@@ -352,10 +390,16 @@ resolve_inputs() {
       local key_separator=""
       for key in oxibelt_image keysigner_image nginx_image caddy_image openresty_image; do
         reference="$(jq -r --arg target "${target}" --arg key "${key}" '.targets[$target][$key]' "${inputs_file}")"
-        identity="$(image_identity "${reference}")" || {
+        identity_status=0
+        identity="$(image_identity "${reference}")" || identity_status=$?
+        if [[ "${identity_status}" != 0 ]]; then
+          if [[ "${identity_status}" == 124 || "${identity_status}" == 137 ]]; then
+            echo "inspection timed out for required ${target} image ${key}: ${reference}" >&2
+            exit "${identity_status}"
+          fi
           echo "cannot inspect required ${target} image ${key}: ${reference}" >&2
           exit 69
-        }
+        fi
         case "${key}" in
           oxibelt_image|keysigner_image)
             jq -e --arg revision "${source_revision}" \
@@ -438,7 +482,15 @@ resolve_inputs() {
       target_separator=,
     done
     printf '}}\n'
-  } | jq -S . | write_json_atomically "${resolved}"
+  ) >"${raw_resolved}" || raw_status=$?
+  if [[ "${raw_status}" != 0 ]]; then
+    rm -f -- "${raw_resolved}"
+    return "${raw_status}"
+  fi
+
+  jq -S . "${raw_resolved}" | write_json_atomically "${resolved}" || raw_status=$?
+  rm -f -- "${raw_resolved}"
+  return "${raw_status}"
 }
 
 initialize_campaign() {
@@ -484,6 +536,14 @@ initialize_campaign() {
     --arg campaign_id "$(basename -- "${campaign_dir}")" \
     --arg revision "${source_revision}" \
     --arg tree "${source_tree}" \
+    --argjson smoke_attempt_timeout_seconds "${smoke_attempt_timeout_seconds}" \
+    --argjson benchmark_attempt_timeout_seconds "${benchmark_attempt_timeout_seconds}" \
+    --argjson aggregate_timeout_seconds "${aggregate_timeout_seconds}" \
+    --argjson input_inspect_timeout_seconds "${input_inspect_timeout_seconds}" \
+    --argjson smoke_campaign_timeout_seconds "${smoke_campaign_timeout_seconds}" \
+    --argjson benchmark_campaign_timeout_seconds "${benchmark_campaign_timeout_seconds}" \
+    --argjson all_campaign_timeout_seconds "${all_campaign_timeout_seconds}" \
+    --argjson timeout_kill_after_seconds "${timeout_kill_after_seconds}" \
     --slurpfile inputs "${campaign_dir}/resolved-inputs.json" \
     --slurpfile tooling "${campaign_dir}/tooling-identity.json" '
       {
@@ -500,7 +560,21 @@ initialize_campaign() {
           expected_shards: 1,
           nginx_h3_mode: "required",
           runner_regression_gate_mode: "fail",
-          external_benchmark_gate_mode: "warn"
+          external_benchmark_gate_mode: "warn",
+          timeout_seconds: {
+            attempt: {
+              smoke: $smoke_attempt_timeout_seconds,
+              benchmark: $benchmark_attempt_timeout_seconds
+            },
+            aggregate: $aggregate_timeout_seconds,
+            input_inspect: $input_inspect_timeout_seconds,
+            campaign: {
+              smoke: $smoke_campaign_timeout_seconds,
+              benchmark: $benchmark_campaign_timeout_seconds,
+              all: $all_campaign_timeout_seconds
+            },
+            kill_after: $timeout_kill_after_seconds
+          }
         },
         planned: {smoke: [], benchmark: []},
         attempts: [],
@@ -655,14 +729,46 @@ cleanup_attempt_secrets() {
   return "${cleanup_status}"
 }
 
+timeout_budget_for() {
+  local requested_seconds="$1" default_scope="$2"
+  local elapsed_seconds remaining_seconds effective_seconds scope
+  effective_seconds="${requested_seconds}"
+  remaining_seconds=-1
+  scope="${default_scope}"
+  if (( campaign_timeout_seconds > 0 )); then
+    elapsed_seconds=$((SECONDS - campaign_started_seconds))
+    remaining_seconds=$((campaign_timeout_seconds - elapsed_seconds))
+    if (( remaining_seconds <= 0 )); then
+      printf '0\tcampaign\t0\n'
+      return 124
+    fi
+    if (( remaining_seconds < effective_seconds )); then
+      effective_seconds="${remaining_seconds}"
+      scope=campaign
+    fi
+  fi
+  printf '%s\t%s\t%s\n' "${effective_seconds}" "${scope}" "${remaining_seconds}"
+}
+
+last_attempt_timeout_scope=""
+
 run_attempt() {
   local profile="$1" target="$2" group="$3" iteration="$4"
   local artifact_dir="${campaign_dir}/${profile}-input/oxibelt-docker-performance-${profile}-${group}-shard-1/${target}/run-${iteration}"
   local record="${artifact_dir}/campaign-attempt.json"
   local inputs="${campaign_dir}/resolved-inputs.json"
-  local status=0 runner_status=0 cleanup_status=0
-  local started_at
+  local status=0 runner_status=0 cleanup_status=0 budget_status=0 timed_out=0
+  local started_at started_seconds duration_seconds timeout_limit_seconds
+  local budget_record effective_timeout_seconds timeout_scope campaign_remaining_seconds
   started_at="$(utc_now)"
+  started_seconds="${SECONDS}"
+  last_attempt_timeout_scope=""
+
+  case "${profile}" in
+    smoke) timeout_limit_seconds="${smoke_attempt_timeout_seconds}" ;;
+    benchmark) timeout_limit_seconds="${benchmark_attempt_timeout_seconds}" ;;
+    *) echo "unsupported timeout profile: ${profile}" >&2; return 64 ;;
+  esac
 
   if [[ -e "${artifact_dir}" || -L "${artifact_dir}" ]]; then
     echo "attempt already exists (${artifact_dir}); rerun in an explicit new campaign" >&2
@@ -670,41 +776,71 @@ run_attempt() {
   fi
   mkdir -p "${artifact_dir}"
 
-  OXIBELT_DOCKER_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].oxibelt_image.image_id' "${inputs}")" \
-  OXIBELT_KEYSIGNER_DOCKER_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].keysigner_image.image_id' "${inputs}")" \
-  OXIBELT_NGINX_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].nginx_image.image_id' "${inputs}")" \
-  OXIBELT_CADDY_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].caddy_image.image_id' "${inputs}")" \
-  OXIBELT_OPENRESTY_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].openresty_image.image_id' "${inputs}")" \
-  OXIBELT_PERF_PROBE_IMAGE="$(jq -r '.common.perf_probe_image.image_id' "${inputs}")" \
-  OXIBELT_EXTERNAL_BENCHMARK_IMAGE="$(jq -r '.common.external_benchmark_image.image_id' "${inputs}")" \
-  OXIBELT_AMD64_TARGET_CPU="${target}" \
-  OXIBELT_TEST_ARTIFACT_DIR="${artifact_dir}" \
-  OXIBELT_PERF_REGRESSION_GATE_MODE=fail \
-  OXIBELT_NGINX_H3_MODE=required \
-  OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=warn \
-  KEEP_TEST_ARTIFACTS=0 \
-    "${runner}" --profile "${profile}" --serving-type "${group}" \
-      --comparators "$(comparators_for_group "${group}")" \
-      </dev/null >"${artifact_dir}/runner.log" 2>&1 || runner_status=$?
+  budget_record="$(timeout_budget_for "${timeout_limit_seconds}" attempt)" || budget_status=$?
+  IFS=$'\t' read -r effective_timeout_seconds timeout_scope campaign_remaining_seconds <<<"${budget_record}"
+  if [[ "${budget_status}" != 0 ]]; then
+    runner_status=124
+    printf 'Campaign timeout exhausted before this attempt could start.\n' >"${artifact_dir}/runner.log"
+  else
+    OXIBELT_DOCKER_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].oxibelt_image.image_id' "${inputs}")" \
+    OXIBELT_KEYSIGNER_DOCKER_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].keysigner_image.image_id' "${inputs}")" \
+    OXIBELT_NGINX_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].nginx_image.image_id' "${inputs}")" \
+    OXIBELT_CADDY_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].caddy_image.image_id' "${inputs}")" \
+    OXIBELT_OPENRESTY_IMAGE="$(jq -r --arg target "${target}" '.targets[$target].openresty_image.image_id' "${inputs}")" \
+    OXIBELT_PERF_PROBE_IMAGE="$(jq -r '.common.perf_probe_image.image_id' "${inputs}")" \
+    OXIBELT_EXTERNAL_BENCHMARK_IMAGE="$(jq -r '.common.external_benchmark_image.image_id' "${inputs}")" \
+    OXIBELT_AMD64_TARGET_CPU="${target}" \
+    OXIBELT_TEST_ARTIFACT_DIR="${artifact_dir}" \
+    OXIBELT_PERF_REGRESSION_GATE_MODE=fail \
+    OXIBELT_NGINX_H3_MODE=required \
+    OXIBELT_EXTERNAL_BENCHMARK_GATE_MODE=warn \
+    KEEP_TEST_ARTIFACTS=0 \
+      timeout --signal=TERM --kill-after="${timeout_kill_after_seconds}s" "${effective_timeout_seconds}s" \
+        "${runner}" --profile "${profile}" --serving-type "${group}" \
+        --comparators "$(comparators_for_group "${group}")" \
+        </dev/null >"${artifact_dir}/runner.log" 2>&1 || runner_status=$?
+  fi
   cleanup_attempt_secrets "${artifact_dir}" || cleanup_status=$?
+  if [[ "${runner_status}" == 124 || "${runner_status}" == 137 ]]; then
+    timed_out=1
+    last_attempt_timeout_scope="${timeout_scope}"
+  fi
   status="${runner_status}"
   if [[ "${status}" == 0 && "${cleanup_status}" != 0 ]]; then
     status="${cleanup_status}"
   fi
+  duration_seconds=$((SECONDS - started_seconds))
 
   jq -n \
     --arg profile "${profile}" --arg target_cpu "${target}" --arg group "${group}" \
     --arg artifact_dir "${artifact_dir#"${campaign_dir}"/}" --arg started_at "${started_at}" \
     --arg receipt "${artifact_dir#"${campaign_dir}"/}/restricted-receipt.json" \
-    --arg finished_at "$(utc_now)" --argjson iteration "${iteration}" --argjson exit_code "${status}" \
-    --argjson runner_exit_code "${runner_status}" --argjson cleanup_exit_code "${cleanup_status}" '
+    --arg finished_at "$(utc_now)" --arg timeout_scope "${timeout_scope}" \
+    --arg campaign_remaining_seconds_at_start "${campaign_remaining_seconds}" \
+    --argjson iteration "${iteration}" --argjson exit_code "${status}" \
+    --argjson runner_exit_code "${runner_status}" --argjson cleanup_exit_code "${cleanup_status}" \
+    --argjson timeout_limit_seconds "${timeout_limit_seconds}" \
+    --argjson timeout_seconds "${effective_timeout_seconds}" \
+    --argjson timeout_kill_after_seconds "${timeout_kill_after_seconds}" \
+    --argjson duration_seconds "${duration_seconds}" --argjson timed_out "${timed_out}" '
       {
         profile: $profile, target_cpu: $target_cpu, group: $group,
         iteration: $iteration, artifact_dir: $artifact_dir,
         started_at: $started_at, finished_at: $finished_at, exit_code: $exit_code,
         runner_exit_code: $runner_exit_code, cleanup_exit_code: $cleanup_exit_code,
+        duration_seconds: $duration_seconds,
+        timeout_limit_seconds: $timeout_limit_seconds,
+        timeout_seconds: $timeout_seconds,
+        timeout_kill_after_seconds: $timeout_kill_after_seconds,
+        campaign_remaining_seconds_at_start: (
+          if $campaign_remaining_seconds_at_start == "-1" then null
+          else ($campaign_remaining_seconds_at_start | tonumber)
+          end
+        ),
+        timed_out: ($timed_out == 1),
+        timeout_scope: (if $timed_out == 1 then $timeout_scope else null end),
         restricted_receipt: $receipt,
-        status: (if $exit_code == 0 then "pass" else "fail" end)
+        status: (if $exit_code == 0 then "pass" elif $timed_out == 1 then "timeout" else "fail" end)
       }
     ' | write_json_atomically "${record}"
   append_manifest_attempt "${record}"
@@ -713,14 +849,22 @@ run_attempt() {
 
 run_collection_phase() {
   local profile="$1" iteration_count="$2" already_declared="${3:-0}" failures=0
-  local target group iteration
+  local target group iteration attempt_status
   if [[ "${already_declared}" != 1 ]]; then
     declare_collection_plan "${profile}" "${iteration_count}" || return $?
   fi
   for target in "${selected_targets[@]}"; do
     for group in "${selected_groups[@]}"; do
       for ((iteration = 1; iteration <= iteration_count; iteration++)); do
-        run_attempt "${profile}" "${target}" "${group}" "${iteration}" || failures=1
+        attempt_status=0
+        run_attempt "${profile}" "${target}" "${group}" "${iteration}" || attempt_status=$?
+        if [[ "${attempt_status}" != 0 ]]; then
+          failures=1
+          if [[ "${profile}" == "smoke" || "${last_attempt_timeout_scope}" == "campaign" ]]; then
+            set_manifest_status "collection-failed"
+            return 1
+          fi
+        fi
       done
     done
   done
@@ -810,8 +954,10 @@ require_intended_benchmark_paths() {
 }
 
 aggregate_campaign() {
-  local primary_target report_dir report_json aggregate_status=0 overall_status=0 baseline_for_primary
-  local expected_targets_csv full_campaign=0 reports_root
+  local primary_target report_dir report_json aggregate_status=0 aggregate_command_status=0
+  local overall_status=0 baseline_for_primary expected_targets_csv full_campaign=0 reports_root
+  local budget_status budget_record effective_timeout_seconds timeout_scope
+  local campaign_remaining_seconds timed_out aggregate_started_seconds aggregate_duration_seconds
   verify_manifest_source_identity || return $?
   verify_recorded_tooling_identity || return $?
   require_intended_benchmark_paths || return $?
@@ -865,11 +1011,29 @@ aggregate_campaign() {
     if [[ -n "${baseline_for_primary}" ]]; then
       aggregate_args+=(--baseline-report "${baseline_for_primary}")
     fi
+    budget_status=0
+    budget_record="$(timeout_budget_for "${aggregate_timeout_seconds}" aggregate)" || budget_status=$?
+    IFS=$'\t' read -r effective_timeout_seconds timeout_scope campaign_remaining_seconds <<<"${budget_record}"
+    aggregate_started_seconds="${SECONDS}"
+    aggregate_command_status=0
     aggregate_status=0
-    "${aggregate_args[@]}" </dev/null >"${report_dir}/aggregate.log" 2>&1 || aggregate_status=$?
+    timed_out=0
+    if [[ "${budget_status}" != 0 ]]; then
+      aggregate_command_status=124
+      printf 'Campaign timeout exhausted before this aggregate could start.\n' >"${report_dir}/aggregate.log"
+    else
+      timeout --signal=TERM --kill-after="${timeout_kill_after_seconds}s" "${effective_timeout_seconds}s" \
+        "${aggregate_args[@]}" </dev/null >"${report_dir}/aggregate.log" 2>&1 || aggregate_command_status=$?
+    fi
+    aggregate_status="${aggregate_command_status}"
+    if [[ "${aggregate_command_status}" == 124 || "${aggregate_command_status}" == 137 ]]; then
+      timed_out=1
+    fi
     if [[ "${aggregate_status}" != 0 || ! -f "${report_json}" ]] || ! jq -e '.schema_version == 33' "${report_json}" >/dev/null; then
       echo "aggregate gate failed for ${primary_target}; see ${report_dir}/aggregate.log" >&2
-      aggregate_status=1
+      if [[ "${aggregate_status}" == 0 ]]; then
+        aggregate_status=1
+      fi
       overall_status=1
     elif [[ "${full_campaign}" == 1 ]] && ! jq -e --arg primary_target "${primary_target}" '
       .profile == "benchmark" and
@@ -884,16 +1048,50 @@ aggregate_campaign() {
       aggregate_status=1
       overall_status=1
     fi
+    aggregate_duration_seconds=$((SECONDS - aggregate_started_seconds))
     local aggregate_record="${report_dir}/campaign-aggregate.json"
     jq -n --arg primary_target "${primary_target}" --arg report_dir "${report_dir#"${campaign_dir}"/}" \
-      --arg finished_at "$(utc_now)" --argjson exit_code "${aggregate_status}" \
-      --argjson full_campaign "${full_campaign}" \
-      '{primary_target: $primary_target, report_dir: $report_dir, finished_at: $finished_at, exit_code: $exit_code, status: (if $full_campaign == 0 then "diagnostic" elif $exit_code == 0 then "pass" else "fail" end)}' \
+      --arg finished_at "$(utc_now)" --arg timeout_scope "${timeout_scope}" \
+      --arg campaign_remaining_seconds_at_start "${campaign_remaining_seconds}" \
+      --argjson exit_code "${aggregate_status}" --argjson command_exit_code "${aggregate_command_status}" \
+      --argjson full_campaign "${full_campaign}" --argjson timed_out "${timed_out}" \
+      --argjson duration_seconds "${aggregate_duration_seconds}" \
+      --argjson timeout_seconds "${effective_timeout_seconds}" \
+      --argjson timeout_limit_seconds "${aggregate_timeout_seconds}" \
+      --argjson timeout_kill_after_seconds "${timeout_kill_after_seconds}" '
+      {
+        primary_target: $primary_target,
+        report_dir: $report_dir,
+        finished_at: $finished_at,
+        exit_code: $exit_code,
+        command_exit_code: $command_exit_code,
+        duration_seconds: $duration_seconds,
+        timeout_limit_seconds: $timeout_limit_seconds,
+        timeout_seconds: $timeout_seconds,
+        timeout_kill_after_seconds: $timeout_kill_after_seconds,
+        campaign_remaining_seconds_at_start: (
+          if $campaign_remaining_seconds_at_start == "-1" then null
+          else ($campaign_remaining_seconds_at_start | tonumber)
+          end
+        ),
+        timed_out: ($timed_out == 1),
+        timeout_scope: (if $timed_out == 1 then $timeout_scope else null end),
+        status: (
+          if $timed_out == 1 then "timeout"
+          elif $full_campaign == 0 then "diagnostic"
+          elif $exit_code == 0 then "pass"
+          else "fail"
+          end
+        )
+      }' \
       | write_json_atomically "${aggregate_record}"
     local temporary
     temporary="$(mktemp "${manifest}.tmp.XXXXXX")"
     jq --slurpfile record "${aggregate_record}" '.aggregates += $record' "${manifest}" >"${temporary}"
     mv -- "${temporary}" "${manifest}"
+    if [[ "${timed_out}" == 1 && "${timeout_scope}" == "campaign" ]]; then
+      break
+    fi
   done
   if [[ "${full_campaign}" == 0 ]]; then
     set_manifest_status "diagnostic"

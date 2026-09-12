@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "component": {
+    "name": "mimalloc",
+    "version": "3.3.2+oxibelt.1",
+    "path": "source/third_party/mimalloc-3.3.2+oxibelt.1"
+  },
+  "upstream": {
+    "repository": "https://github.com/microsoft/mimalloc",
+    "version": "3.3.2",
+    "revision": "30b2d9d89099bee08e9f67a1ffb3e12e7ba45227"
+  },
+  "acquisition": {
+    "registry": "https://crates.io",
+    "package": "libmimalloc-sys",
+    "version": "0.1.49",
+    "crateSha256": "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9",
+    "wrapperRevision": "abcd2be6171e89190f8087fcaccf001d8bd5bc96",
+    "subdirectory": "c_src/mimalloc/v3",
+    "dependency": false
+  },
+  "patches": [
+    {
+      "repository": "https://github.com/microsoft/mimalloc",
+      "commit": "acea8bcb71d3f35666e32b3b3d78544496200d7c",
+      "path": "src/libc.c",
+      "purpose": "Bound the length before dereferencing the input",
+      "patchedSha256": "9f44ebc2b8ab2205fcb24e0ea495eb7da74658209fb730ca2fa15d44ce278715"
+    },
+    {
+      "repository": "https://github.com/microsoft/mimalloc",
+      "commit": "f2dc730bad28899a675672846bfe551e91a23493",
+      "path": "src/prim/unix/prim.c",
+      "purpose": "Restrict transparent-huge-page parsing to bytes read",
+      "patchedSha256": "ba5e550d9247072b264062ac08fd05ea42baaf7a8fa600949aedcc4404e28f96"
+    }
+  ],
+  "selectedBuild": {
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl"
+    ],
+    "pointerWidth": 64,
+    "translationUnit": "src/static.c",
+    "secureLevel": 4,
+    "debugLevel": 0,
+    "allocatorOverride": false,
+    "archive": "oxibelt_mimalloc"
+  },
+  "buildIntegration": {
+    "path": "source/crates/oxibelt-allocator/build.rs",
+    "sha256": "16ffef79eee5347ada080eb7d42d10928ca96cf5580b114ca5aa6343261e61d0"
+  },
+  "rustBinding": {
+    "package": "oxibelt-allocator",
+    "path": "source/crates/oxibelt-allocator/src/lib.rs",
+    "rawVisibility": "private",
+    "adapterVisibility": "public-safe-type",
+    "ffiFunctions": [
+      "mi_malloc_aligned",
+      "mi_zalloc_aligned",
+      "mi_realloc_aligned",
+      "mi_free"
+    ],
+    "derivedFrom": "https://github.com/purpleprotocol/mimalloc_rust",
+    "license": "MIT"
+  },
+  "manifests": {
+    "upstream": {
+      "path": "UPSTREAM-MANIFEST.sha256",
+      "entries": 65,
+      "sha256": "47e1a4270b9a09f0340f3914a5dc5973c3d9c8dfc330d4b9a6e893def5f6c773"
+    },
+    "native": {
+      "path": "NATIVE-MANIFEST.sha256",
+      "entries": 65,
+      "sha256": "565d2d47b0702ca323d32755207897e74e66cabb7210ec158200b5a389056216"
+    }
+  },
+  "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/183"
+}
