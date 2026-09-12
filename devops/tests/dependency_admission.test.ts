@@ -14,6 +14,9 @@ type Fixture = {
 }
 
 const PackageManager = 'pnpm@11.21.0+sha512.521705bce689924eac72f5a3587122f362689ef6571e55ba80076fd637c11132ecffada26fad4ea79c485bfddbfd3d5a2a5b05805a77e893de71ec8a6cca3bb1'
+const Pnpm12PackageManager =
+  'pnpm@12.4.1+sha512.2e81e399d73fe8390dab25e06aa788ab7a5908248d2f5a370f82b481147a6a7a367bf8048f9a6fdb6460f21a66f0542dedb8b94ca2c8723596741920b1656d4c'
+const Pnpm12Integrity = 'sha512-LoHjmdc/6DkNqyXgaqeIq3pZCCSNL1o3D4K0gRR6ano2e/gEj5pv22Rg8hpm8FQt7bi5TKLIcjWWdBkgsWVtTA=='
 const Integrity = `sha512-${Buffer.alloc(64, 7).toString('base64')}`
 
 function WriteJson(FilePath: string, Value: unknown): void {
@@ -128,6 +131,81 @@ function Validate(FixtureValue: Fixture): ReturnType<typeof ValidateDependencyAd
   })
 }
 
+function UsePnpm12Lockfile(FixtureValue: Fixture): void {
+  const ManifestPath = Path.join(FixtureValue.root, 'package.json')
+  const Manifest = JSON.parse(Fs.readFileSync(ManifestPath, 'utf8')) as { packageManager: string }
+  Manifest.packageManager = Pnpm12PackageManager
+  WriteJson(ManifestPath, Manifest)
+  Fs.writeFileSync(
+    Path.join(FixtureValue.root, 'pnpm-lock.yaml'),
+    `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    configDependencies: {}
+    packageManagerDependencies:
+      pnpm:
+        specifier: 12.4.1
+        version: 12.4.1
+
+packages:
+
+  pnpm@12.4.1:
+    resolution: {integrity: ${Pnpm12Integrity}}
+
+  '@pnpm/exe.linux-x64@12.4.1':
+    resolution: {integrity: ${Integrity}}
+    cpu: [x64]
+    os: [linux]
+
+snapshots:
+
+  pnpm@12.4.1:
+    optionalDependencies:
+      '@pnpm/exe.linux-x64': 12.4.1
+
+  '@pnpm/exe.linux-x64@12.4.1':
+    optional: true
+
+---
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      alpha:
+        specifier: 1.2.3
+        version: 1.2.3
+    devDependencies:
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+
+  packages: {}
+
+packages:
+
+  alpha@1.2.3:
+    resolution: {integrity: ${Integrity}}
+
+  esbuild@0.28.2:
+    resolution: {integrity: ${Integrity}}
+
+snapshots:
+
+  alpha@1.2.3: {}
+
+  esbuild@0.28.2: {}
+`
+  )
+}
+
 test('accepts exact manifests, integrity-only lock entries, policy-bound scripts, and clean reports', TestContext => {
   const FixtureValue = CreateFixture()
   TestContext.after(() => Cleanup(FixtureValue))
@@ -137,6 +215,113 @@ test('accepts exact manifests, integrity-only lock entries, policy-bound scripts
     lockedPackages: 2,
     lifecycleScripts: 1,
     licenses: 1
+  })
+})
+
+test('validates pnpm 12 managed tool dependencies across both lockfile documents', TestContext => {
+  const FixtureValue = CreateFixture()
+  TestContext.after(() => Cleanup(FixtureValue))
+  UsePnpm12Lockfile(FixtureValue)
+
+  Assert.equal(Validate(FixtureValue).lockedPackages, 4)
+})
+
+test('rejects pnpm 12 lockfile tool integrity and package-manager pin drift', async TestContext => {
+  await TestContext.test('package manager integrity', IntegrityContext => {
+    const FixtureValue = CreateFixture()
+    IntegrityContext.after(() => Cleanup(FixtureValue))
+    UsePnpm12Lockfile(FixtureValue)
+    const LockPath = Path.join(FixtureValue.root, 'pnpm-lock.yaml')
+    const Lock = Fs.readFileSync(LockPath, 'utf8').replace(Pnpm12Integrity, Integrity)
+    Fs.writeFileSync(LockPath, Lock)
+
+    Assert.throws(() => Validate(FixtureValue), /does not match package[.]json packageManager SHA-512/)
+  })
+
+  await TestContext.test('managed package version', VersionContext => {
+    const FixtureValue = CreateFixture()
+    VersionContext.after(() => Cleanup(FixtureValue))
+    UsePnpm12Lockfile(FixtureValue)
+    const LockPath = Path.join(FixtureValue.root, 'pnpm-lock.yaml')
+    const Lock = Fs.readFileSync(LockPath, 'utf8').replace(
+      'specifier: 12.4.1\n        version: 12.4.1',
+      'specifier: 12.4.0\n        version: 12.4.0'
+    )
+    Fs.writeFileSync(LockPath, Lock)
+
+    Assert.throws(() => Validate(FixtureValue), /packageManagerDependencies must pin pnpm to 12[.]4[.]1/)
+  })
+
+  await TestContext.test('platform executable integrity node', ExecutableContext => {
+    const FixtureValue = CreateFixture()
+    ExecutableContext.after(() => Cleanup(FixtureValue))
+    UsePnpm12Lockfile(FixtureValue)
+    const LockPath = Path.join(FixtureValue.root, 'pnpm-lock.yaml')
+    const Lock = Fs.readFileSync(LockPath, 'utf8').replace(
+      `  '@pnpm/exe.linux-x64@12.4.1':\n    resolution: {integrity: ${Integrity}}`,
+      "  '@pnpm/exe.linux-x64@12.4.1':\n    resolution: {tarball: https://registry.npmjs.org/@pnpm/exe.linux-x64/-/exe.tgz}"
+    )
+    Fs.writeFileSync(LockPath, Lock)
+
+    Assert.throws(() => Validate(FixtureValue), /non-registry or non-integrity resolution/)
+  })
+})
+
+test('rejects duplicate package identities within each pnpm 12 lockfile document', async TestContext => {
+  await TestContext.test('managed tools document', ToolContext => {
+    const FixtureValue = CreateFixture()
+    ToolContext.after(() => Cleanup(FixtureValue))
+    UsePnpm12Lockfile(FixtureValue)
+    const LockPath = Path.join(FixtureValue.root, 'pnpm-lock.yaml')
+    const Lock = Fs.readFileSync(LockPath, 'utf8')
+    const Entry = `  pnpm@12.4.1:\n    resolution: {integrity: ${Pnpm12Integrity}}`
+    Fs.writeFileSync(LockPath, Lock.replace(Entry, `${Entry}\n\n${Entry}`))
+
+    Assert.throws(() => Validate(FixtureValue), /repeats package pnpm@12[.]4[.]1 in one document/)
+  })
+
+  await TestContext.test('workspace dependency document', WorkspaceContext => {
+    const FixtureValue = CreateFixture()
+    WorkspaceContext.after(() => Cleanup(FixtureValue))
+    UsePnpm12Lockfile(FixtureValue)
+    const LockPath = Path.join(FixtureValue.root, 'pnpm-lock.yaml')
+    const Lock = Fs.readFileSync(LockPath, 'utf8')
+    const Entry = `  alpha@1.2.3:\n    resolution: {integrity: ${Integrity}}`
+    Fs.writeFileSync(LockPath, Lock.replace(Entry, `${Entry}\n\n${Entry}`))
+
+    Assert.throws(() => Validate(FixtureValue), /repeats package alpha@1[.]2[.]3 in one document/)
+  })
+})
+
+test('allows a tool package in both pnpm 12 documents only with identical integrity', async TestContext => {
+  await TestContext.test('identical integrity', IntegrityContext => {
+    const FixtureValue = CreateFixture()
+    IntegrityContext.after(() => Cleanup(FixtureValue))
+    UsePnpm12Lockfile(FixtureValue)
+    const LockPath = Path.join(FixtureValue.root, 'pnpm-lock.yaml')
+    const Lock = Fs.readFileSync(LockPath, 'utf8')
+    const Entry = `  alpha@1.2.3:\n    resolution: {integrity: ${Integrity}}`
+    Fs.writeFileSync(
+      LockPath,
+      Lock.replace(Entry, `${Entry}\n\n  pnpm@12.4.1:\n    resolution: {integrity: ${Pnpm12Integrity}}`)
+    )
+
+    Assert.equal(Validate(FixtureValue).lockedPackages, 4)
+  })
+
+  await TestContext.test('conflicting integrity', ConflictContext => {
+    const FixtureValue = CreateFixture()
+    ConflictContext.after(() => Cleanup(FixtureValue))
+    UsePnpm12Lockfile(FixtureValue)
+    const LockPath = Path.join(FixtureValue.root, 'pnpm-lock.yaml')
+    const Lock = Fs.readFileSync(LockPath, 'utf8')
+    const Entry = `  alpha@1.2.3:\n    resolution: {integrity: ${Integrity}}`
+    Fs.writeFileSync(
+      LockPath,
+      Lock.replace(Entry, `${Entry}\n\n  pnpm@12.4.1:\n    resolution: {integrity: ${Integrity}}`)
+    )
+
+    Assert.throws(() => Validate(FixtureValue), /has conflicting integrity across documents/)
   })
 })
 

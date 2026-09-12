@@ -64,6 +64,16 @@ type LockDependency = {
   specifier: string
   version: string
 }
+
+type PackageManagerPin = {
+  version: string
+  integrity: string
+}
+
+type LockImporters = {
+  dependencies: Map<string, Map<string, LockDependency>>
+  packageManagerDependencies: Map<string, Map<string, LockDependency>>
+}
 /* oxlint-enable oxibelt/pascal-case */
 
 const DependencyFields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'] as const
@@ -389,77 +399,126 @@ function ParseYamlScalar(Value: string, Label: string): string {
   return Value
 }
 
-function ParseLockImporters(Content: string): Map<string, Map<string, LockDependency>> {
-  const Lines = Content.split(/\r?\n/)
-  const Start = Lines.indexOf('importers:')
-  const End = Lines.indexOf('packages:')
-  if (Start < 0 || End <= Start) {
-    throw new Error('pnpm-lock.yaml must contain importers before packages')
+function SplitLockfileDocuments(Content: string): string[][] {
+  const Documents = Content.split(/^---[ \t]*\r?$/m)
+    .map(Document => Document.trim())
+    .filter(Document => Document !== '')
+  if (Documents.length === 0 || Documents.length > 2) {
+    throw new Error('pnpm-lock.yaml must contain one or two supported YAML documents')
   }
+
+  return Documents.map(Document => Document.split(/\r?\n/))
+}
+
+function ParseLockImporters(Content: string): LockImporters {
   const Importers = new Map<string, Map<string, LockDependency>>()
-  let Importer: string | undefined
-  let DependencyGroup: string | undefined
-  let DependencyName: string | undefined
-  let Specifier: string | undefined
-  let Version: string | undefined
+  const PackageManagerDependencies = new Map<string, Map<string, LockDependency>>()
+  for (const Lines of SplitLockfileDocuments(Content)) {
+    const Start = Lines.indexOf('importers:')
+    const End = Lines.indexOf('packages:')
+    if (Start < 0 || End <= Start) {
+      throw new Error('pnpm-lock.yaml must contain importers before packages in every document')
+    }
+    const DocumentImporters = new Map<string, Map<string, LockDependency>>()
+    const DocumentPackageManagerDependencies = new Map<string, Map<string, LockDependency>>()
+    let Importer: string | undefined
+    let DependencyGroup: string | undefined
+    let DependencyName: string | undefined
+    let Specifier: string | undefined
+    let Version: string | undefined
 
-  const FinishDependency = (): void => {
-    if (DependencyName === undefined) {
-      return
+    const FinishDependency = (): void => {
+      if (DependencyName === undefined) {
+        return
+      }
+      if (Importer === undefined || DependencyGroup === undefined || Specifier === undefined || Version === undefined) {
+        throw new Error(`pnpm-lock.yaml importer dependency ${DependencyName} is incomplete`)
+      }
+      const Groups = DependencyGroup === 'packageManagerDependencies' ? DocumentPackageManagerDependencies : DocumentImporters
+      const Dependencies = Groups.get(Importer)
+      if (Dependencies === undefined || Dependencies.has(DependencyName)) {
+        throw new Error(`pnpm-lock.yaml importer ${Importer} repeats dependency ${DependencyName}`)
+      }
+      Dependencies.set(DependencyName, { specifier: Specifier, version: Version })
+      DependencyName = undefined
+      Specifier = undefined
+      Version = undefined
     }
-    if (Importer === undefined || DependencyGroup === undefined || Specifier === undefined || Version === undefined) {
-      throw new Error(`pnpm-lock.yaml importer dependency ${DependencyName} is incomplete`)
+
+    for (const Line of Lines.slice(Start + 1, End)) {
+      const ConfigDependenciesMatch = /^ {4}configDependencies:(.*)$/.exec(Line)
+      if (ConfigDependenciesMatch !== null) {
+        FinishDependency()
+        if (Importer !== '.' || ConfigDependenciesMatch[1].trim() !== '{}') {
+          throw new Error('pnpm-lock.yaml root configDependencies must be empty')
+        }
+        continue
+      }
+      const ImporterMatch = /^ {2}([^ ].*?):(?: \{\})?$/.exec(Line)
+      if (ImporterMatch !== null) {
+        FinishDependency()
+        Importer = ParseYamlScalar(ImporterMatch[1], 'pnpm-lock.yaml importer')
+        if (DocumentImporters.has(Importer) || DocumentPackageManagerDependencies.has(Importer)) {
+          throw new Error(`pnpm-lock.yaml repeats importer ${Importer} in one document`)
+        }
+        DocumentImporters.set(Importer, new Map())
+        DocumentPackageManagerDependencies.set(Importer, new Map())
+        DependencyGroup = undefined
+        continue
+      }
+      const GroupMatch = /^ {4}(dependencies|devDependencies|optionalDependencies|peerDependencies|packageManagerDependencies):$/.exec(Line)
+      if (GroupMatch !== null) {
+        FinishDependency()
+        DependencyGroup = GroupMatch[1]
+        continue
+      }
+      const DependencyMatch = /^ {6}([^ ].*):$/.exec(Line)
+      if (DependencyMatch !== null) {
+        FinishDependency()
+        if (Importer === undefined || DependencyGroup === undefined) {
+          throw new Error('pnpm-lock.yaml dependency appears outside an importer dependency group')
+        }
+        DependencyName = ParseYamlScalar(DependencyMatch[1], 'pnpm-lock.yaml dependency name')
+        continue
+      }
+      const SpecifierMatch = /^ {8}specifier: (.+)$/.exec(Line)
+      if (SpecifierMatch !== null) {
+        Specifier = ParseYamlScalar(SpecifierMatch[1], 'pnpm-lock.yaml specifier')
+        continue
+      }
+      const VersionMatch = /^ {8}version: (.+)$/.exec(Line)
+      if (VersionMatch !== null) {
+        Version = ParseYamlScalar(VersionMatch[1], 'pnpm-lock.yaml version')
+      }
     }
-    const Dependencies = Importers.get(Importer)
-    if (Dependencies === undefined || Dependencies.has(DependencyName)) {
-      throw new Error(`pnpm-lock.yaml importer ${Importer} repeats dependency ${DependencyName}`)
+    FinishDependency()
+
+    for (const [ImporterPath, Dependencies] of DocumentImporters) {
+      const Existing = Importers.get(ImporterPath) ?? new Map<string, LockDependency>()
+      for (const [Name, Dependency] of Dependencies) {
+        if (Existing.has(Name)) {
+          throw new Error(`pnpm-lock.yaml importer ${ImporterPath} repeats dependency ${Name} across documents`)
+        }
+        Existing.set(Name, Dependency)
+      }
+      Importers.set(ImporterPath, Existing)
     }
-    Dependencies.set(DependencyName, { specifier: Specifier, version: Version })
-    DependencyName = undefined
-    Specifier = undefined
-    Version = undefined
+    for (const [ImporterPath, Dependencies] of DocumentPackageManagerDependencies) {
+      if (Dependencies.size === 0) {
+        continue
+      }
+      const Existing = PackageManagerDependencies.get(ImporterPath) ?? new Map<string, LockDependency>()
+      for (const [Name, Dependency] of Dependencies) {
+        if (Existing.has(Name)) {
+          throw new Error(`pnpm-lock.yaml importer ${ImporterPath} repeats package-manager dependency ${Name}`)
+        }
+        Existing.set(Name, Dependency)
+      }
+      PackageManagerDependencies.set(ImporterPath, Existing)
+    }
   }
 
-  for (const Line of Lines.slice(Start + 1, End)) {
-    const ImporterMatch = /^ {2}([^ ].*?):(?: \{\})?$/.exec(Line)
-    if (ImporterMatch !== null) {
-      FinishDependency()
-      Importer = ParseYamlScalar(ImporterMatch[1], 'pnpm-lock.yaml importer')
-      if (Importers.has(Importer)) {
-        throw new Error(`pnpm-lock.yaml repeats importer ${Importer}`)
-      }
-      Importers.set(Importer, new Map())
-      DependencyGroup = undefined
-      continue
-    }
-    const GroupMatch = /^ {4}(dependencies|devDependencies|optionalDependencies|peerDependencies):$/.exec(Line)
-    if (GroupMatch !== null) {
-      FinishDependency()
-      DependencyGroup = GroupMatch[1]
-      continue
-    }
-    const DependencyMatch = /^ {6}([^ ].*):$/.exec(Line)
-    if (DependencyMatch !== null) {
-      FinishDependency()
-      if (Importer === undefined || DependencyGroup === undefined) {
-        throw new Error('pnpm-lock.yaml dependency appears outside an importer dependency group')
-      }
-      DependencyName = ParseYamlScalar(DependencyMatch[1], 'pnpm-lock.yaml dependency name')
-      continue
-    }
-    const SpecifierMatch = /^ {8}specifier: (.+)$/.exec(Line)
-    if (SpecifierMatch !== null) {
-      Specifier = ParseYamlScalar(SpecifierMatch[1], 'pnpm-lock.yaml specifier')
-      continue
-    }
-    const VersionMatch = /^ {8}version: (.+)$/.exec(Line)
-    if (VersionMatch !== null) {
-      Version = ParseYamlScalar(VersionMatch[1], 'pnpm-lock.yaml version')
-    }
-  }
-  FinishDependency()
-
-  return Importers
+  return { dependencies: Importers, packageManagerDependencies: PackageManagerDependencies }
 }
 
 function ValidateManifestSpecifiers(Manifests: ManifestData[]): Set<string> {
@@ -479,8 +538,9 @@ function ValidateManifestSpecifiers(Manifests: ManifestData[]): Set<string> {
   return WorkspaceNames
 }
 
-function ValidateLockImporters(Content: string, Manifests: ManifestData[]): void {
-  const Importers = ParseLockImporters(Content)
+function ValidateLockImporters(Content: string, Manifests: ManifestData[], PackageManager: PackageManagerPin): void {
+  const ParsedImporters = ParseLockImporters(Content)
+  const Importers = ParsedImporters.dependencies
   if (Importers.size !== Manifests.length) {
     throw new Error(`pnpm-lock.yaml has ${Importers.size} importers but ${Manifests.length} package manifests were discovered`)
   }
@@ -502,64 +562,107 @@ function ValidateLockImporters(Content: string, Manifests: ManifestData[]): void
       }
     }
   }
+
+  const ManagedImporters = ParsedImporters.packageManagerDependencies
+  const RequiresManagedPackageManager = Semver.major(PackageManager.version) >= 12
+  if (RequiresManagedPackageManager || ManagedImporters.size > 0) {
+    if (ManagedImporters.size !== 1 || !ManagedImporters.has('.')) {
+      throw new Error('pnpm-lock.yaml packageManagerDependencies must exist only in the root importer')
+    }
+    const Dependencies = ManagedImporters.get('.')
+    const Pnpm = Dependencies?.get('pnpm')
+    if (
+      Dependencies === undefined ||
+      Dependencies.size !== 1 ||
+      Pnpm === undefined ||
+      Pnpm.specifier !== PackageManager.version ||
+      Pnpm.version !== PackageManager.version
+    ) {
+      throw new Error(`pnpm-lock.yaml root packageManagerDependencies must pin pnpm to ${PackageManager.version}`)
+    }
+  }
 }
 
-function ValidateLockPackages(Content: string): Set<string> {
-  const Lines = Content.split(/\r?\n/)
-  const Start = Lines.indexOf('packages:')
-  const End = Lines.indexOf('snapshots:')
-  if (Start < 0 || End <= Start) {
-    throw new Error('pnpm-lock.yaml must contain packages before snapshots')
-  }
+function ValidateLockPackages(Content: string, PackageManager: PackageManagerPin): Set<string> {
   const Packages = new Set<string>()
-  let PackageIdentity: string | undefined
-  let ResolutionCount = 0
+  const PackageIntegrity = new Map<string, string>()
 
-  const FinishPackage = (): void => {
-    if (PackageIdentity === undefined) {
-      return
+  for (const Lines of SplitLockfileDocuments(Content)) {
+    const Start = Lines.indexOf('packages:')
+    const End = Lines.indexOf('snapshots:')
+    if (Start < 0 || End <= Start) {
+      throw new Error('pnpm-lock.yaml must contain packages before snapshots in every document')
     }
-    if (ResolutionCount !== 1) {
-      throw new Error(`pnpm-lock.yaml package ${PackageIdentity} must contain exactly one integrity-only resolution`)
-    }
-  }
+    const DocumentPackages = new Set<string>()
+    let PackageIdentity: string | undefined
+    let ResolutionCount = 0
+    let ResolutionDigest: string | undefined
 
-  for (const Line of Lines.slice(Start + 1, End)) {
-    const Header = /^ {2}([^ ].*):$/.exec(Line)
-    if (Header !== null) {
-      FinishPackage()
-      PackageIdentity = ParseYamlScalar(Header[1], 'pnpm-lock.yaml package identity')
-      const VersionSeparator = PackageIdentity.lastIndexOf('@')
-      const PackageName = PackageIdentity.slice(0, VersionSeparator)
-      const Version = PackageIdentity.slice(VersionSeparator + 1)
-      if (PackageName === '' || Semver.valid(Version) === null) {
-        throw new Error(`pnpm-lock.yaml package is not an exact registry identity: ${PackageIdentity}`)
-      }
-      if (Packages.has(PackageIdentity)) {
-        throw new Error(`pnpm-lock.yaml repeats package ${PackageIdentity}`)
-      }
-      Packages.add(PackageIdentity)
-      ResolutionCount = 0
-      continue
-    }
-    const Resolution = /^ {4}resolution: \{integrity: (sha512-[A-Za-z0-9+/]+={0,2})\}$/.exec(Line)
-    if (Resolution !== null) {
+    const FinishPackage = (): void => {
       if (PackageIdentity === undefined) {
-        throw new Error('pnpm-lock.yaml resolution appears before a package')
+        return
       }
-      const Encoded = Resolution[1].slice('sha512-'.length)
-      const Digest = Buffer.from(Encoded, 'base64')
-      if (Digest.length !== 64 || Digest.toString('base64') !== Encoded) {
-        throw new Error(`pnpm-lock.yaml package ${PackageIdentity} has a malformed SHA-512 integrity`)
+      if (ResolutionCount !== 1 || ResolutionDigest === undefined) {
+        throw new Error(`pnpm-lock.yaml package ${PackageIdentity} must contain exactly one integrity-only resolution`)
       }
-      ResolutionCount += 1
-    } else if (/^ {4}resolution:/.test(Line)) {
-      throw new Error(`pnpm-lock.yaml package ${PackageIdentity ?? '<unknown>'} has a non-registry or non-integrity resolution`)
+      const ExistingDigest = PackageIntegrity.get(PackageIdentity)
+      if (ExistingDigest !== undefined && ExistingDigest !== ResolutionDigest) {
+        throw new Error(`pnpm-lock.yaml package ${PackageIdentity} has conflicting integrity across documents`)
+      }
+      PackageIntegrity.set(PackageIdentity, ResolutionDigest)
+      Packages.add(PackageIdentity)
     }
+
+    for (const Line of Lines.slice(Start + 1, End)) {
+      const Header = /^ {2}([^ ].*):$/.exec(Line)
+      if (Header !== null) {
+        FinishPackage()
+        PackageIdentity = ParseYamlScalar(Header[1], 'pnpm-lock.yaml package identity')
+        const VersionSeparator = PackageIdentity.lastIndexOf('@')
+        const PackageName = PackageIdentity.slice(0, VersionSeparator)
+        const Version = PackageIdentity.slice(VersionSeparator + 1)
+        if (PackageName === '' || Semver.valid(Version) === null) {
+          throw new Error(`pnpm-lock.yaml package is not an exact registry identity: ${PackageIdentity}`)
+        }
+        if (DocumentPackages.has(PackageIdentity)) {
+          throw new Error(`pnpm-lock.yaml repeats package ${PackageIdentity} in one document`)
+        }
+        DocumentPackages.add(PackageIdentity)
+        ResolutionCount = 0
+        ResolutionDigest = undefined
+        continue
+      }
+      const Resolution = /^ {4}resolution: \{integrity: (sha512-[A-Za-z0-9+/]+={0,2})\}$/.exec(Line)
+      if (Resolution !== null) {
+        if (PackageIdentity === undefined) {
+          throw new Error('pnpm-lock.yaml resolution appears before a package')
+        }
+        const Encoded = Resolution[1].slice('sha512-'.length)
+        const Digest = Buffer.from(Encoded, 'base64')
+        if (Digest.length !== 64 || Digest.toString('base64') !== Encoded) {
+          throw new Error(`pnpm-lock.yaml package ${PackageIdentity} has a malformed SHA-512 integrity`)
+        }
+        ResolutionDigest = Digest.toString('hex')
+        ResolutionCount += 1
+      } else if (/^ {4}resolution:/.test(Line)) {
+        throw new Error(`pnpm-lock.yaml package ${PackageIdentity ?? '<unknown>'} has a non-registry or non-integrity resolution`)
+      }
+    }
+    FinishPackage()
   }
-  FinishPackage()
   if (Packages.size === 0) {
     throw new Error('pnpm-lock.yaml packages section must not be empty')
+  }
+
+  if (Semver.major(PackageManager.version) >= 12) {
+    const Identity = `pnpm@${PackageManager.version}`
+    const Integrity = PackageIntegrity.get(Identity)
+    if (Integrity === undefined) {
+      throw new Error(`pnpm-lock.yaml is missing managed package manager ${Identity}`)
+    }
+    if (Integrity !== PackageManager.integrity) {
+      throw new Error(`pnpm-lock.yaml package ${Identity} integrity does not match package.json packageManager SHA-512`)
+    }
   }
 
   return Packages
@@ -690,11 +793,14 @@ function ValidateWorkspaceConfig(Content: string, RootManifest: JsonRecord, Poli
   }
 }
 
-function ValidatePackageManager(RootManifest: JsonRecord): void {
+function ValidatePackageManager(RootManifest: JsonRecord): PackageManagerPin {
   const PackageManager = RootManifest.packageManager
-  if (typeof PackageManager !== 'string' || !/^pnpm@\d+\.\d+\.\d+\+sha512[.][a-f0-9]{128}$/.test(PackageManager)) {
+  const Match = typeof PackageManager === 'string' ? /^pnpm@(\d+\.\d+\.\d+)\+sha512[.]([a-f0-9]{128})$/.exec(PackageManager) : null
+  if (Match === null) {
     throw new Error('root package.json packageManager must pin pnpm to an exact version and SHA-512 integrity')
   }
+
+  return { version: Match[1], integrity: Match[2] }
 }
 
 function LicenseIdentifiers(Expression: string): string[] {
@@ -783,7 +889,7 @@ export function ValidateDependencyAdmission(Options: DependencyAdmissionOptions)
   if (Fs.existsSync(Path.join(Workspace, 'npm-workspace.yaml'))) {
     throw new Error('stale npm-workspace.yaml is forbidden; package.json and pnpm-workspace.yaml are authoritative')
   }
-  ValidatePackageManager(RootManifestValue)
+  const PackageManager = ValidatePackageManager(RootManifestValue)
   const PolicyPath = ResolveWorkspaceFile(Workspace, Options.policyPath, 'dependency policy')
   const Policy = ValidateNodePolicy(ParseJson(ReadBoundedFile(PolicyPath, 'dependency policy'), PolicyPath), Options.now ?? new Date())
   const Manifests = ExpandWorkspaceManifests(Workspace, RootManifestValue)
@@ -792,8 +898,8 @@ export function ValidateDependencyAdmission(Options: DependencyAdmissionOptions)
   ValidateWorkspaceConfig(ReadBoundedFile(WorkspaceConfigPath, 'pnpm workspace configuration'), RootManifestValue, Policy)
   const LockfilePath = ResolveWorkspaceFile(Workspace, 'pnpm-lock.yaml', 'pnpm lockfile')
   const Lockfile = ReadBoundedFile(LockfilePath, 'pnpm lockfile')
-  ValidateLockImporters(Lockfile, Manifests)
-  const LockedPackages = ValidateLockPackages(Lockfile)
+  ValidateLockImporters(Lockfile, Manifests, PackageManager)
+  const LockedPackages = ValidateLockPackages(Lockfile, PackageManager)
   for (const Lifecycle of Policy.lifecycleScripts) {
     if (!LockedPackages.has(`${Lifecycle.package}@${Lifecycle.version}`)) {
       throw new Error(`node.lifecycleScripts admits package absent from pnpm-lock.yaml: ${Lifecycle.package}@${Lifecycle.version}`)
