@@ -1316,7 +1316,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   }
 
   for expected in [
-    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:737ba17e6a2ffe14475b59861cd69f3d7152c29c75140bdbf6750befcfda7e6c\"",
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf\"",
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",
@@ -9853,7 +9853,7 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     "Checkout release revision",
     "Validate immutable release checkout",
     "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
-    "version: v29.7.2",
+    "version: v29.8.0",
     "rootless: true",
     "daemon-config: |",
     "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",
@@ -11011,7 +11011,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "runs-on: ${{ matrix.runner }}",
     "persist-credentials: false",
     "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
-    "version: v29.7.2",
+    "version: v29.8.0",
     "rootless: true",
     "daemon-config: |",
     "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",

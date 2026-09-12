@@ -317,7 +317,7 @@ jobs:
       - name: Start isolated rootless Docker
         uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
         with:
-          version: v29.7.2
+          version: v29.8.0
           rootless: true
           set-host: true
           # Hosted runners do not delegate systemd cgroup scopes to rootless Docker.
@@ -348,7 +348,7 @@ jobs:
       - name: Setup pinned Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Setup pinned Trivy
@@ -778,7 +778,7 @@ jobs:
       - name: Start isolated rootless Docker for registry readback
         uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
         with:
-          version: v29.7.2
+          version: v29.8.0
           rootless: true
           set-host: true
           daemon-config: |
@@ -787,7 +787,7 @@ jobs:
       - name: Setup pinned Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Validate receipt inventory and snapshot immutable subjects

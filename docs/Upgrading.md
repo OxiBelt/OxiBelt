@@ -14,6 +14,11 @@ second lockfile document. Install with the frozen lockfile and run dependency
 admission before building. The supported Helm clients are 3.22.0 and 4.3.0;
 the Kubernetes and Gateway API support ranges are unchanged.
 
+Image tooling selects Docker 29.8.0 and Buildx 0.37.1. Rust builders use the
+digest-verified Debian Trixie variant of Rust 1.98.1, and UI builders retain
+Node 24 with its refreshed Alpine image digest. Rebuild from the complete
+revision and its pinned inputs rather than mixing builder generations.
+
 The refresh does not require configuration or persistent-state conversion.
 JSON Schema validation retains the selected Draft 7 configuration and disabled
 remote-resolution defaults. Compression updates retain OxiBelt's decoded-body

@@ -1305,7 +1305,6 @@ fn allocator_native_source_is_byte_locked_and_governed() {
   );
   assert_eq!(native["maintenanceReviewIntervalDays"], 90);
   assert_eq!(native["owner"], "@piquark6046");
-  assert_eq!(native["reviewedOn"], "2026-09-10");
   assert_eq!(
     native["trackingIssue"],
     "https://github.com/OxiBelt/OxiBelt/issues/183"

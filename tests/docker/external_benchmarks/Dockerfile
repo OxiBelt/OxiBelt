@@ -1,4 +1,4 @@
-FROM rust:1.98.1-trixie@sha256:737ba17e6a2ffe14475b59861cd69f3d7152c29c75140bdbf6750befcfda7e6c AS oha-builder
+FROM rust:1.98.1-trixie@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf AS oha-builder
 
 ARG OHA_VERSION=1.16.0
 

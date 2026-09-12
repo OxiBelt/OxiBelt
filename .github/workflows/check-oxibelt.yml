@@ -954,7 +954,7 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         if: matrix.target == 'riscv64gc-unknown-linux-musl'
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Cargo check for RISC-V musl target
@@ -1136,7 +1136,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1196,7 +1196,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
@@ -1256,7 +1256,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1302,7 +1302,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1375,7 +1375,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
@@ -1478,8 +1478,8 @@ jobs:
             --expected-source-dirty "clean" \
             --expected-build-kind "git_development" \
             --expected-created "$(jq -r '.created' "${contract}")" \
-            --rust-builder-image "rust:1.98.1-trixie@sha256:737ba17e6a2ffe14475b59861cd69f3d7152c29c75140bdbf6750befcfda7e6c" \
-            --node-builder-image "node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf" \
+            --rust-builder-image "rust:1.98.1-trixie@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf" \
+            --node-builder-image "node:24-alpine3.24@sha256:50c8e8ca1d27439048670df5883f32d57cf81cff6233222c893fd0d9884cbd81" \
             --runtime-image "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b" \
             --repo-root "${GITHUB_WORKSPACE}"
 
@@ -1791,7 +1791,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker integration helper image artifact
@@ -1833,7 +1833,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Firefox WebDriver helper image artifact

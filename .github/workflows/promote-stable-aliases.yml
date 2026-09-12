@@ -495,7 +495,7 @@ jobs:
         if: steps.eligibility.outputs.eligible == 'true'
         uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
         with:
-          version: v29.7.2
+          version: v29.8.0
           rootless: true
           set-host: true
           daemon-config: |
@@ -505,7 +505,7 @@ jobs:
         if: steps.eligibility.outputs.eligible == 'true'
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Install pinned ORAS acquisition client
@@ -626,7 +626,7 @@ jobs:
       - name: Setup pinned Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
         with:
-          version: v0.37.0
+          version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Reauthenticate latest stable release immediately before mutation

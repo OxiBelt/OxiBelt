@@ -35,7 +35,7 @@ function Environment(): Record<string, unknown> {
     cargo: 'cargo 1.98.1',
     node: 'v24.13.0',
     pnpm: '11.20.0',
-    buildx: 'github.com/docker/buildx v0.37.0',
+    buildx: 'github.com/docker/buildx v0.37.1',
     buildkit: 'moby/buildkit@sha256:' + '1'.repeat(64),
     trivy: '0.69.3',
     cc: 'gcc 14.2.0',
