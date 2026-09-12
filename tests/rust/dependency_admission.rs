@@ -1243,6 +1243,54 @@ fn allocator_native_archive_rejects_transient_override_injection() {
   );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn allocator_sanitizer_runner_rejects_glibc_compiler_for_musl_evidence() {
+  let temporary = tempfile::tempdir().expect("temporary allocator sanitizer evidence root");
+  let output = std::process::Command::new("bash")
+    .current_dir(repo_root())
+    .arg(repo_root().join("tests/scripts/run-allocator-sanitizers.sh"))
+    .args([
+      "--target",
+      "musl",
+      "--sanitizer",
+      "address-undefined",
+      "--evidence-dir",
+    ])
+    .arg(temporary.path())
+    .env("OXIBELT_ALLOCATOR_SANITIZER_CC", "cc")
+    .output()
+    .expect("run allocator sanitizer target mismatch regression");
+  let diagnostics = format!(
+    "{}\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    !output.status.success(),
+    "glibc compiler unexpectedly produced accepted musl evidence"
+  );
+  assert!(
+    diagnostics.contains("expected the matching x86-64 musl loader"),
+    "sanitizer runner failed without the libc mismatch rejection: {diagnostics}"
+  );
+  assert!(
+    temporary
+      .path()
+      .join("compiler-target-elf-header.txt")
+      .is_file()
+      && temporary
+        .path()
+        .join("compiler-target-program-headers.txt")
+        .is_file(),
+    "target mismatch evidence must retain the inspected ELF identity"
+  );
+  assert!(
+    !temporary.path().join("rustup-targets.txt").exists(),
+    "compiler target mismatch must fail before inspecting the Rust target"
+  );
+}
+
 #[test]
 fn allocator_native_source_is_byte_locked_and_governed() {
   const NATIVE_PATH: &str = "source/third_party/mimalloc-3.5.1";

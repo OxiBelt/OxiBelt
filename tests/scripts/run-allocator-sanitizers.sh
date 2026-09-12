@@ -10,9 +10,9 @@ usage() {
 Usage: tests/scripts/run-allocator-sanitizers.sh --target gnu|musl --sanitizer address-undefined|thread [--evidence-dir DIR] [--rust-checker]
 
 The archive and C harness use the matching Rust target triple and selected C
-compiler. The script requires the Rust target and a runnable compiler sanitizer
-runtime. GNU supports ASan+UBSan and TSan. Musl supports ASan+UBSan only when
-its compiler supplies those runtimes; TSan is rejected for musl.
+compiler. The script requires readelf, the Rust target, and a runnable compiler
+sanitizer runtime. GNU supports ASan+UBSan and TSan. Musl supports ASan+UBSan
+only when its compiler supplies those runtimes; TSan is rejected for musl.
 EOF
 }
 
@@ -47,9 +47,7 @@ case "$sanitizer" in
   *) usage >&2; exit 2 ;;
 esac
 command -v "$compiler" >/dev/null || { printf 'required compiler not found: %s\n' "$compiler" >&2; exit 1; }
-command -v rustup >/dev/null || { printf '%s\n' 'rustup is required to verify the selected Rust target.' >&2; exit 1; }
-command -v rustc >/dev/null || { printf '%s\n' 'rustc is required to verify the selected target runtime.' >&2; exit 1; }
-command -v cargo >/dev/null || { printf '%s\n' 'cargo is required to build the native archive.' >&2; exit 1; }
+command -v readelf >/dev/null || { printf '%s\n' 'readelf is required to verify the selected compiler target.' >&2; exit 1; }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 if [ -z "$evidence_dir" ]; then evidence_dir="$(mktemp -d "${TMPDIR:-/tmp}/oxibelt-allocator-sanitizer.XXXXXX")"; else mkdir -p "$evidence_dir"; fi
@@ -57,6 +55,48 @@ target_dir="$(mktemp -d "${TMPDIR:-/tmp}/oxibelt-allocator-target.XXXXXX")"
 cleanup() { rm -rf "$target_dir"; }
 trap cleanup EXIT
 target_key="${target_triple//-/_}"
+
+# Inspect a binary emitted by the selected compiler instead of trusting
+# -dumpmachine: musl-gcc commonly reports a GNU-style compiler triple while
+# linking against musl. This probe fails before Cargo can create mislabeled
+# sanitizer evidence with the wrong architecture or libc.
+cat > "$evidence_dir/compiler-target-probe.c" <<'EOF'
+int main(void) { return 0; }
+EOF
+if ! "$compiler" -std=c11 "$evidence_dir/compiler-target-probe.c" \
+  -o "$evidence_dir/compiler-target-probe" \
+  > "$evidence_dir/compiler-target-build.stdout" 2> "$evidence_dir/compiler-target-build.stderr"; then
+  printf 'selected compiler cannot link a target identity probe for %s.\n' "$target_triple" >&2
+  exit 1
+fi
+if ! LC_ALL=C readelf --file-header --wide "$evidence_dir/compiler-target-probe" \
+  > "$evidence_dir/compiler-target-elf-header.txt"; then
+  printf 'selected compiler did not emit a readable ELF target probe for %s.\n' "$target_triple" >&2
+  exit 1
+fi
+if ! grep -Eq '^[[:space:]]*Class:[[:space:]]*ELF64$' "$evidence_dir/compiler-target-elf-header.txt" \
+  || ! grep -Eq '^[[:space:]]*Machine:[[:space:]]*Advanced Micro Devices X86-64$' "$evidence_dir/compiler-target-elf-header.txt"; then
+  printf 'selected compiler did not emit an x86-64 ELF64 target probe for %s.\n' "$target_triple" >&2
+  exit 1
+fi
+if ! LC_ALL=C readelf --program-headers --wide "$evidence_dir/compiler-target-probe" \
+  > "$evidence_dir/compiler-target-program-headers.txt"; then
+  printf 'selected compiler target probe has unreadable program headers for %s.\n' "$target_triple" >&2
+  exit 1
+fi
+compiler_interpreter="$(sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p' "$evidence_dir/compiler-target-program-headers.txt")"
+case "$target_kind:$compiler_interpreter" in
+  gnu:*/ld-linux-x86-64.so.2|musl:*/ld-musl-x86_64.so.1) ;;
+  *)
+    printf 'selected compiler emitted interpreter "%s" for "%s"; expected the matching x86-64 %s loader.\n' \
+      "${compiler_interpreter:-none}" "$target_triple" "$target_kind" >&2
+    exit 1
+    ;;
+esac
+
+command -v rustup >/dev/null || { printf '%s\n' 'rustup is required to verify the selected Rust target.' >&2; exit 1; }
+command -v rustc >/dev/null || { printf '%s\n' 'rustc is required to verify the selected target runtime.' >&2; exit 1; }
+command -v cargo >/dev/null || { printf '%s\n' 'cargo is required to build the native archive.' >&2; exit 1; }
 if ! rustup target list --installed > "$evidence_dir/rustup-targets.txt"; then
   printf '%s\n' 'failed to inspect installed Rust targets.' >&2
   exit 1
@@ -74,9 +114,9 @@ if compiler_triple="$("$compiler" -dumpmachine 2>/dev/null)"; then :; else compi
 compiler_version="$("$compiler" --version | head -n 1)"
 rustc_version="$(rustc --version)"
 commit="$(git -C "$repo_root" rev-parse HEAD)"
-printf 'target_kind=%s\ntarget_triple=%s\nsanitizer=%s\ncompiler=%s\ncompiler_version=%s\ncompiler_triple=%s\nrustc=%s\nrust_target_libdir=%s\ncommit=%s\n' \
+printf 'target_kind=%s\ntarget_triple=%s\nsanitizer=%s\ncompiler=%s\ncompiler_version=%s\ncompiler_triple=%s\ncompiler_elf_class=ELF64\ncompiler_elf_machine=x86-64\ncompiler_interpreter=%s\nrustc=%s\nrust_target_libdir=%s\ncommit=%s\n' \
   "$target_kind" "$target_triple" "$sanitizer" "$compiler" "$compiler_version" "$compiler_triple" \
-  "$rustc_version" "$target_libdir" "$commit" > "$evidence_dir/invocation.txt"
+  "$compiler_interpreter" "$rustc_version" "$target_libdir" "$commit" > "$evidence_dir/invocation.txt"
 
 # CFLAGS instruments the governed C archive. The harness below is separately
 # compiled and linked with the same selected target compiler and flags, so
