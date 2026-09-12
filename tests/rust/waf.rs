@@ -3499,6 +3499,11 @@ fn contains_pattern_set_scan_preserves_config_order_with_automaton() {
 enabled = true
 mode = "enforcing"
 
+# Allow scheduler headroom while checking match ordering.
+[waf.limits]
+max_rule_runtime_ms = 500
+max_total_waf_runtime_ms = 1000
+
 [[waf.pattern_sets]]
 name = "request-secrets"
 kind = "contains"
@@ -3532,7 +3537,8 @@ status = 409
 
   assert_eq!(
     decision.terminal.as_ref().map(|terminal| terminal.status),
-    Some(StatusCode::CONFLICT)
+    Some(StatusCode::CONFLICT),
+    "unexpected pattern-order decision: {decision:?}"
   );
 }
 
@@ -6105,6 +6111,11 @@ enabled = true
 mode = "enforcing"
 fail_policy = "closed"
 
+# Allow scheduler headroom while checking log contents.
+[waf.limits]
+max_rule_runtime_ms = 500
+max_total_waf_runtime_ms = 1000
+
 [[waf.rules]]
 name = "json-access"
 phase = "response"
@@ -6190,6 +6201,10 @@ value = "Response.Upstream.FirstByteTimeMs"
     upstream_error: None,
   });
 
+  assert!(
+    response_decision.terminal.is_none(),
+    "unexpected access-log terminal decision: {response_decision:?}"
+  );
   assert_eq!(response_decision.access_logs.len(), 1);
   let line = response_decision.access_logs[0].to_json_line();
   assert!(line.contains("\"scope\":\"waf\""));
