@@ -161,36 +161,48 @@ pub(super) fn diagnose_ops_listeners(config: &Config, report: &mut DiagnosticRep
 }
 
 pub(super) fn diagnose_real_ip(config: &Config, report: &mut DiagnosticReport) {
-  if !config.proxy.real_ip.enabled {
+  diagnose_real_ip_policy(&config.proxy.real_ip, "proxy.real_ip", report);
+  for (index, rule) in config.proxy.real_ip.rules.iter().enumerate() {
+    let policy = rule.policy();
+    diagnose_real_ip_policy(&policy, &format!("proxy.real_ip.rules[{index}]"), report);
+  }
+}
+
+fn diagnose_real_ip_policy(
+  policy: &crate::config::RealIpConfig,
+  target: &str,
+  report: &mut DiagnosticReport,
+) {
+  if !policy.enabled {
     return;
   }
-  if config.proxy.real_ip.trusted_proxies.is_empty() {
+  if policy.trusted_proxies.is_empty() {
     report.push(
       DiagnosticSeverity::Error,
       "real_ip.no_trusted_proxies",
       "identity",
-      "proxy.real_ip.trusted_proxies",
+      format!("{target}.trusted_proxies"),
       "real IP processing is enabled without trusted proxy CIDRs",
       "Set explicit trusted proxy CIDRs for the load balancers allowed to provide forwarded client IP metadata.",
     );
   }
-  if !config.proxy.real_ip.fail_on_untrusted_forwarded_headers {
+  if !policy.fail_on_untrusted_forwarded_headers {
     report.push(
       DiagnosticSeverity::Warning,
       "real_ip.untrusted_forwarded_headers_allowed",
       "identity",
-      "proxy.real_ip.fail_on_untrusted_forwarded_headers",
+      format!("{target}.fail_on_untrusted_forwarded_headers"),
       "untrusted forwarded client IP headers are ignored instead of rejected",
       "Set fail_on_untrusted_forwarded_headers = true to make spoofing attempts visible and fail closed.",
     );
   }
-  for cidr in &config.proxy.real_ip.trusted_proxies {
+  for cidr in &policy.trusted_proxies {
     if cidr_is_any(cidr) {
       report.push(
         DiagnosticSeverity::Error,
         "real_ip.trusts_everywhere",
         "identity",
-        format!("proxy.real_ip.trusted_proxies[{cidr}]"),
+        format!("{target}.trusted_proxies[{cidr}]"),
         "real IP trusts all source addresses",
         "Replace all-address CIDRs with the exact load balancer or CDN proxy ranges.",
       );
@@ -199,7 +211,7 @@ pub(super) fn diagnose_real_ip(config: &Config, report: &mut DiagnosticReport) {
         DiagnosticSeverity::Warning,
         "real_ip.broad_trusted_proxy",
         "identity",
-        format!("proxy.real_ip.trusted_proxies[{cidr}]"),
+        format!("{target}.trusted_proxies[{cidr}]"),
         "real IP trusted proxy CIDR is broad",
         "Prefer the narrowest CIDR ranges that cover only your trusted proxy infrastructure.",
       );

@@ -102,6 +102,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("timeouts", "route-upstream-read-timeout"),
   ("timeouts", "route-upstream-send-timeout"),
   ("proxy-identity", "real-ip-waf"),
+  ("proxy-identity", "real-ip-host-sni"),
   ("proxy-identity", "connection-limit-first-request-real-ip"),
   ("proxy-identity", "connection-limit-per-request-real-ip"),
   (

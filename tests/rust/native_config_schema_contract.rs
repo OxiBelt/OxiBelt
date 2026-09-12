@@ -141,6 +141,69 @@ fn direct_response_schema_requires_a_bounded_error_status() {
 }
 
 #[test]
+fn real_ip_rule_schema_is_typed_strict_and_full_reload() {
+  let schema: serde_json::Value =
+    serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))
+      .expect("generated native schema should be JSON");
+  let real_ip = schema_node_for_metadata_path(&schema, "proxy.real_ip");
+  assert_eq!(real_ip["additionalProperties"], false);
+  assert_eq!(real_ip["x-oxibelt-config-activation"], "full_reload");
+
+  let rules = schema_node_for_metadata_path(&schema, "proxy.real_ip.rules");
+  assert_eq!(rules["type"], "array");
+  assert_eq!(rules["items"]["additionalProperties"], false);
+  assert_eq!(rules["items"]["required"], serde_json::json!(["name"]));
+  for path in [
+    "proxy.real_ip.trusted_proxies",
+    "proxy.real_ip.rules[].hosts",
+    "proxy.real_ip.rules[].server_names",
+    "proxy.real_ip.rules[].trusted_proxies",
+  ] {
+    let field = schema_node_for_metadata_path(&schema, path);
+    assert_eq!(field["type"], "array", "unexpected type at {path}");
+    assert_eq!(
+      field["items"]["type"], "string",
+      "unexpected item type at {path}"
+    );
+  }
+  for path in [
+    "proxy.real_ip.rules[].enabled",
+    "proxy.real_ip.rules[].recursive",
+    "proxy.real_ip.rules[].fail_on_untrusted_forwarded_headers",
+    "proxy.real_ip.recursive",
+    "proxy.real_ip.fail_on_untrusted_forwarded_headers",
+  ] {
+    assert_eq!(
+      schema_node_for_metadata_path(&schema, path)["type"],
+      "boolean",
+      "unexpected type at {path}"
+    );
+  }
+  assert_eq!(
+    schema_node_for_metadata_path(&schema, "proxy.real_ip.rules[].header")["enum"],
+    serde_json::json!([
+      "x-forwarded-for",
+      "x-real-ip",
+      "forwarded",
+      "cf-connecting-ip"
+    ])
+  );
+  assert_eq!(
+    schema_node_for_metadata_path(&schema, "proxy.real_ip.header")["enum"],
+    serde_json::json!([
+      "x-forwarded-for",
+      "x-real-ip",
+      "forwarded",
+      "cf-connecting-ip"
+    ])
+  );
+  assert_eq!(
+    native_config_field_metadata("proxy.real_ip.rules[0].trusted_proxies").config_activation,
+    NativeConfigActivation::FullReload
+  );
+}
+
+#[test]
 fn certificate_transparency_schema_publishes_epoch_one_defaults_and_reload_boundaries() {
   let schema: serde_json::Value =
     serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))

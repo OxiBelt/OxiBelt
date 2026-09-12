@@ -3,6 +3,36 @@ use http::{HeaderMap, Request};
 use super::*;
 
 #[test]
+fn forwarded_header_cache_accounts_for_enabled_scoped_real_ip() {
+  let peer = "192.0.2.1:1234".parse().unwrap();
+  let mut config: RealIpConfig = toml::from_str(
+    r#"
+[[rules]]
+name = "tenant"
+hosts = ["api.test"]
+enabled = true
+trusted_proxies = ["192.0.2.0/24"]
+"#,
+  )
+  .unwrap();
+  assert!(!config.enabled);
+  assert!(
+    build_forwarded_header_cache(peer, "https", &ForwardedHeadersConfig::default(), &config)
+      .is_none()
+  );
+  let direct = ForwardedHeadersConfig {
+    client_ip_source: ForwardedClientIpSource::DirectPeer,
+    ..ForwardedHeadersConfig::default()
+  };
+  assert!(build_forwarded_header_cache(peer, "https", &direct, &config).is_some());
+  config.rules[0].enabled = false;
+  assert!(
+    build_forwarded_header_cache(peer, "https", &ForwardedHeadersConfig::default(), &config)
+      .is_some()
+  );
+}
+
+#[test]
 fn authority_host_consistency_rejects_absolute_form_mismatch() {
   let request = Request::builder()
     .uri("http://absolute.example/path")

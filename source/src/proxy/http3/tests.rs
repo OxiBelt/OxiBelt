@@ -255,14 +255,21 @@ fn assert_h3_inline_route_would_match_without_prevalidation(
   request: &Request<()>,
   context: &H3DownstreamRequestContext,
 ) {
-  let client_addr = crate::identity::resolve_client_addr(
-    request.headers(),
-    context.peer_addr,
-    &context.state.config.proxy.real_ip,
-  )
-  .expect("test request should resolve client identity");
   let host_snapshot = http_proxy::headers::extract_host_snapshot(request);
   let host = host_snapshot.as_str();
+  let client_addr = context
+    .state
+    .resolve_client_addr(
+      request.headers(),
+      context.peer_addr,
+      host,
+      context
+        .tls_metadata
+        .sni
+        .as_deref()
+        .filter(|_| context.tls_metadata.enabled),
+    )
+    .expect("test request should resolve client identity");
   let path = request.uri().path();
   let resolved = context
     .state

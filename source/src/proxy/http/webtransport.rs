@@ -98,10 +98,11 @@ pub(crate) async fn prepare_webtransport(
   };
   let received_at_unix_ms = crate::waf::current_unix_ms();
   let mut tags: Option<HashMap<String, String>> = None;
-  let client_addr = match crate::identity::resolve_client_addr(
+  let client_addr = match state.resolve_client_addr(
     &request_headers,
     peer_addr,
-    &state.config.proxy.real_ip,
+    &host,
+    tls.sni.as_deref().filter(|_| tls.enabled),
   ) {
     Ok(addr) => addr,
     Err(error) => {

@@ -42,6 +42,7 @@ impl AppSnapshot {
       effective_direct_h1_io: previous.effective_direct_h1_io,
       route_table: previous.route_table.clone(),
       sni_forward: previous.sni_forward.clone(),
+      real_ip_policy_selector: previous.real_ip_policy_selector.clone(),
       upstreams: previous.upstreams.clone(),
       upstream_uri_parts: previous.upstream_uri_parts.clone(),
       upstream_uri_parts_by_index: previous.upstream_uri_parts_by_index.clone(),

@@ -264,9 +264,10 @@ async fn execute_cache_warm_plan(
         continue;
       }
     };
-    ensure_cache_warm_policy_is_current(&state.snapshot(), &item, peer_addr)?;
+    let snapshot = state.snapshot();
+    ensure_cache_warm_policy_is_current(&snapshot, &item, peer_addr)?;
     match http::warm_cache_request(
-      state.clone(),
+      snapshot,
       peer_addr,
       &item.scheme,
       &item.host,
@@ -430,6 +431,61 @@ mod tests {
     };
 
     assert_eq!(error.status(), StatusCode::FORBIDDEN);
+  }
+
+  #[tokio::test]
+  async fn cache_warm_scoped_real_ip_uses_target_sni_only_for_https() {
+    let temp_dir = common::TempDir::new("cache-warm-scoped-real-ip");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "cache-warm-scoped-real-ip");
+    let mut config = cache_warm_real_ip_config(&cert_path, &key_path);
+    config.proxy.real_ip = toml::from_str(
+      r#"
+[[rules]]
+name = "target-sni"
+server_names = ["example.com"]
+enabled = true
+trusted_proxies = ["127.0.0.1/32"]
+"#,
+    )
+    .expect("scoped policy");
+    let state = cache_warm_state_from_config(config).await;
+    let snapshot = state.snapshot();
+    let actor = scoped_actor();
+    let context = IpmRequestContext::default();
+    let authorization = AdminAuthorization::new(&actor, &snapshot.ipm, &context);
+    for (scheme, host, denied) in [
+      ("https", "example.com", true),
+      ("https", "example.com:8443", true),
+      ("http", "example.com", false),
+    ] {
+      let result = prepare_cache_warm_plan(
+        AdminCacheWarmRequest {
+          items: vec![AdminCacheWarmItem {
+            policy: None,
+            method: None,
+            scheme: scheme.to_string(),
+            host: host.to_string(),
+            uri: "/cached".to_string(),
+            headers: HashMap::from([("X-Forwarded-For".to_string(), "203.0.113.9".to_string())]),
+          }],
+        },
+        &state,
+        &authorization,
+        "127.0.0.1:12345".parse().unwrap(),
+      );
+      if denied {
+        assert_eq!(
+          result
+            .err()
+            .expect("HTTPS target policy needs separate authority")
+            .status(),
+          StatusCode::FORBIDDEN
+        );
+      } else {
+        assert!(result.is_ok(), "plaintext warm must not match SNI rules");
+      }
+    }
   }
 
   #[tokio::test]

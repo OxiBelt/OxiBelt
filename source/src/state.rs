@@ -84,6 +84,7 @@ pub struct AppSnapshot {
   pub(crate) effective_direct_h1_io: RuntimeDirectH1IoMode,
   pub route_table: RouteTable,
   pub(crate) sni_forward: SniForwardTable,
+  pub(crate) real_ip_policy_selector: crate::identity::RealIpPolicySelector,
   pub upstreams: Vec<UpstreamConfig>,
   pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
   pub(crate) upstream_uri_parts_by_index: Vec<UpstreamUriParts>,
@@ -163,6 +164,22 @@ fn effective_access_log_config(
 }
 
 impl AppSnapshot {
+  pub(crate) fn resolve_client_addr(
+    &self,
+    headers: &http::HeaderMap,
+    peer_addr: std::net::SocketAddr,
+    host: &str,
+    sni: Option<&str>,
+  ) -> anyhow::Result<std::net::SocketAddr> {
+    self.real_ip_policy_selector.resolve_client_addr(
+      headers,
+      peer_addr,
+      host,
+      sni,
+      &self.config.proxy.real_ip,
+    )
+  }
+
   pub(crate) fn admitted_reload_hardening(
     &self,
     candidate: &Config,
@@ -638,6 +655,8 @@ impl AppSnapshot {
     );
     let sni_forward =
       SniForwardTable::new(&config).context("failed to build SNI forwarding table")?;
+    let real_ip_policy_selector = crate::identity::RealIpPolicySelector::new(&config.proxy.real_ip)
+      .context("failed to compile Real-IP policies")?;
     let access_logs = AccessLogSinks::new(access_log_runtime.clone(), AccessLogSource::Waf);
     let system_access_log = SystemAccessLog::new(
       &config.logging.access_log,
@@ -700,6 +719,7 @@ impl AppSnapshot {
       effective_direct_h1_io,
       route_table,
       sni_forward,
+      real_ip_policy_selector,
       upstreams,
       upstream_uri_parts,
       upstream_uri_parts_by_index,
@@ -778,6 +798,8 @@ impl AppSnapshot {
       RouteTable::new_with_waf_and_previous(&config, &previous.waf, Some(&previous.route_table));
     let sni_forward =
       SniForwardTable::new(&config).context("failed to build SNI forwarding table")?;
+    let real_ip_policy_selector = crate::identity::RealIpPolicySelector::new(&config.proxy.real_ip)
+      .context("failed to compile Real-IP policies")?;
     let (upstream_uri_parts, upstream_uri_parts_by_index) = build_upstream_uri_parts(&upstreams)?;
     let circuit_breakers = previous.circuit_breakers.clone();
     circuit_breakers.configure(&config);
@@ -942,6 +964,7 @@ impl AppSnapshot {
       effective_direct_h1_io,
       route_table,
       sni_forward,
+      real_ip_policy_selector,
       upstreams,
       upstream_uri_parts,
       upstream_uri_parts_by_index,

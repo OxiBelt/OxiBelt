@@ -412,6 +412,18 @@ header = "x-forwarded-for"
 recursive = true
 fail_on_untrusted_forwarded_headers = false
 
+# Optional ordered selector policies. A matching disabled policy deliberately
+# keeps the direct peer identity; do not use an empty selector as a fallback.
+# [[proxy.real_ip.rules]]
+# name = "public-edge"
+# hosts = ["api.example.com", "*.api.example.com"]
+# server_names = ["api.example.com"]
+# enabled = true
+# trusted_proxies = ["10.20.0.0/16", "2001:db8:20::/48"]
+# header = "x-forwarded-for"
+# recursive = true
+# fail_on_untrusted_forwarded_headers = true
+
 [proxy.auto_upgrade]
 enabled = true
 max_http_version = "h2"

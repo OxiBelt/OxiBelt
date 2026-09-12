@@ -57,6 +57,7 @@ mod provenance;
 mod quic;
 mod quic_workers;
 mod rate_limit;
+mod real_ip;
 mod redaction;
 mod retry;
 mod rollout_identity;
@@ -149,6 +150,10 @@ pub(crate) use quic::RawQuicTransportConfig;
 pub use quic::*;
 pub use quic_workers::*;
 pub use rate_limit::*;
+pub use real_ip::RealIpRuleConfig;
+pub(crate) use real_ip::{
+  normalize_real_ip_host_selector, normalize_real_ip_server_name_selector, validate_real_ip_rules,
+};
 use redaction::{
   redact_effective_toml, set_toml_float_path, set_toml_integer_path, set_toml_value_path,
 };

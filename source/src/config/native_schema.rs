@@ -348,6 +348,8 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
   ),
   full_reload("proxy.upstream_resolution"),
   full_reload("proxy.upstream_resolution.*"),
+  full_reload("proxy.real_ip"),
+  full_reload("proxy.real_ip.*"),
   full_reload("upstreams[].happy_eyeballs_mode"),
   full_reload("upstreams[].svcb_allowed_ports"),
   full_reload("routes[].upstream_http_version_mode"),
@@ -696,6 +698,11 @@ fn object_schema(shape_path: &str, metadata_path: &str) -> Value {
   {
     object.insert("required".to_string(), json!(["status"]));
   }
+  if shape_path == "proxy.real_ip.rules"
+    && let Some(object) = schema.as_object_mut()
+  {
+    object.insert("required".to_string(), json!(["name"]));
+  }
   schema
 }
 
@@ -943,6 +950,7 @@ fn is_array_path(path: &str) -> bool {
     "rate_limits",
     "routes",
     "routes.actions.request_mirrors",
+    "proxy.real_ip.rules",
     "security.header_policies",
     "sni_forward.rules",
     "stream_listeners",
@@ -972,6 +980,16 @@ fn is_array_path(path: &str) -> bool {
 
 #[cfg(feature = "config-tooling")]
 fn boolean_path(path: &str) -> bool {
+  if matches!(
+    path,
+    "proxy.real_ip.recursive"
+      | "proxy.real_ip.fail_on_untrusted_forwarded_headers"
+      | "proxy.real_ip.rules.enabled"
+      | "proxy.real_ip.rules.recursive"
+      | "proxy.real_ip.rules.fail_on_untrusted_forwarded_headers"
+  ) {
+    return true;
+  }
   path.rsplit('.').next().is_some_and(|name| {
     name == "enabled"
       || name == "reuse_port"
@@ -1042,6 +1060,10 @@ fn string_array_path(path: &str) -> bool {
     "external_auth.allowed_content_types"
       | "runtime.hardening.filesystem_manifest.expected_writable_paths"
       | "certificate_transparency.logs.signed_root.trusted_ed25519_keys"
+      | "proxy.real_ip.trusted_proxies"
+      | "proxy.real_ip.rules.hosts"
+      | "proxy.real_ip.rules.server_names"
+      | "proxy.real_ip.rules.trusted_proxies"
   ) {
     return true;
   }
@@ -1083,6 +1105,7 @@ fn string_path(path: &str) -> bool {
       | "certificate_transparency.logs.gateway.origin_url"
       | "certificate_transparency.logs.gateway.static_origin_url"
       | "routes.ct_log"
+      | "proxy.real_ip.rules.name"
       | "upstream_pools.discovery.id"
       | "upstream_pools.discovery.tls.client_identity.cert_chain"
       | "upstream_pools.discovery.tls.client_identity.private_key"
@@ -1207,6 +1230,24 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
     (
       "proxy.upstream_resolution.happy_eyeballs.pref64",
       vec!["auto", "disabled"],
+    ),
+    (
+      "proxy.real_ip.header",
+      vec![
+        "x-forwarded-for",
+        "x-real-ip",
+        "forwarded",
+        "cf-connecting-ip",
+      ],
+    ),
+    (
+      "proxy.real_ip.rules.header",
+      vec![
+        "x-forwarded-for",
+        "x-real-ip",
+        "forwarded",
+        "cf-connecting-ip",
+      ],
     ),
     (
       "upstreams.happy_eyeballs_mode",
@@ -1339,6 +1380,12 @@ fn default_value(path: &str) -> Option<Value> {
     "proxy.upstream_resolution.happy_eyeballs.last_resort_local_synthesis_delay_ms" => json!(2_000),
     "proxy.upstream_resolution.happy_eyeballs.svcb"
     | "proxy.upstream_resolution.happy_eyeballs.pref64" => json!("auto"),
+    "proxy.real_ip.enabled" | "proxy.real_ip.rules.enabled" => json!(false),
+    "proxy.real_ip.header" | "proxy.real_ip.rules.header" => json!("x-forwarded-for"),
+    "proxy.real_ip.recursive" | "proxy.real_ip.rules.recursive" => json!(true),
+    "proxy.real_ip.fail_on_untrusted_forwarded_headers"
+    | "proxy.real_ip.rules.fail_on_untrusted_forwarded_headers" => json!(false),
+    "proxy.real_ip.trusted_proxies" | "proxy.real_ip.rules.trusted_proxies" => json!([]),
     "upstreams.happy_eyeballs_mode" => json!("inherit"),
     "upstreams.svcb_allowed_ports" => json!([]),
     "routes.upstream_http_version_mode" => json!("exact"),

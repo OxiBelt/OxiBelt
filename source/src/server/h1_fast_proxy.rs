@@ -370,10 +370,11 @@ fn prepare_fast_proxy_request<'a>(
     return None;
   }
 
-  let client_addr = match crate::identity::resolve_client_addr(
+  let client_addr = match snapshot.resolve_client_addr(
     request.headers(),
     peer_addr,
-    &snapshot.config.proxy.real_ip,
+    &host,
+    tls.sni.as_deref().filter(|_| tls.enabled),
   ) {
     Ok(addr) => addr,
     Err(error) => {
@@ -727,3 +728,6 @@ fn trailer_name_allowed(name: &HeaderName) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod real_ip_tests;

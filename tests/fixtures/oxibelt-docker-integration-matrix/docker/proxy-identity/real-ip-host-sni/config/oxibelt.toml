@@ -1,0 +1,118 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = []
+
+# The matrix creates an isolated Docker bridge. These private ranges keep the
+# fixture scoped to local proxy peers rather than trusting public sources.
+[proxy.real_ip]
+enabled = false
+trusted_proxies = []
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = false
+
+[proxy.forwarded_headers]
+mode = "overwrite"
+client_ip_source = "resolved"
+
+[[proxy.real_ip.rules]]
+name = "disabled-first-match"
+hosts = ["disabled.identity.test"]
+enabled = false
+trusted_proxies = []
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = false
+
+[[proxy.real_ip.rules]]
+name = "host-only"
+hosts = ["host.identity.test"]
+enabled = true
+trusted_proxies = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = true
+
+[[proxy.real_ip.rules]]
+name = "combined"
+hosts = ["combined.identity.test"]
+server_names = ["example.test"]
+enabled = true
+trusted_proxies = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = true
+
+[[proxy.real_ip.rules]]
+name = "sni-only"
+server_names = ["example.test"]
+enabled = true
+trusted_proxies = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = true
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h2"
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "block-selected-forwarded-client"
+phase = "request"
+priority = 10
+when = "Request.Client.Ip.inCidr('203.0.113.0/24')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 451
+body = "selected forwarded identity blocked"
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[routes]]
+name = "identity-routes"
+hosts = ["host.identity.test", "sni.identity.test", "combined.identity.test", "disabled.identity.test", "fallback.identity.test"]
+path_prefix = "/"
+upstream = "http-upstream"

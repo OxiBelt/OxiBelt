@@ -543,22 +543,43 @@ fn validate_proxy_and_identity(config: &Config) -> anyhow::Result<()> {
   if config.proxy.http.trailers != TrailerMode::Drop {
     bail!("edge-secure-medium v1 requires proxy.http.trailers = \"drop\"");
   }
-  if config.proxy.real_ip.enabled {
-    validate_trusted_cidrs(
-      "proxy.real_ip.trusted_proxies",
-      &config.proxy.real_ip.trusted_proxies,
+  validate_real_ip_policy_for_profile(
+    "proxy.real_ip",
+    config.proxy.real_ip.enabled,
+    &config.proxy.real_ip.trusted_proxies,
+    config.proxy.real_ip.fail_on_untrusted_forwarded_headers,
+  )?;
+  for (index, rule) in config.proxy.real_ip.rules.iter().enumerate() {
+    validate_real_ip_policy_for_profile(
+      &format!("proxy.real_ip.rules[{index}]"),
+      rule.enabled,
+      &rule.trusted_proxies,
+      rule.fail_on_untrusted_forwarded_headers,
     )?;
-    if !config.proxy.real_ip.fail_on_untrusted_forwarded_headers {
-      bail!(
-        "edge-secure-medium v1 requires rejecting untrusted forwarded headers when Real-IP is enabled"
-      );
-    }
   }
   if config.listeners.proxy_protocol.enabled {
     validate_trusted_cidrs(
       "listeners.proxy_protocol.trusted_sources",
       &config.listeners.proxy_protocol.trusted_sources,
     )?;
+  }
+  Ok(())
+}
+
+fn validate_real_ip_policy_for_profile(
+  field: &str,
+  enabled: bool,
+  trusted_proxies: &[String],
+  fail_on_untrusted_forwarded_headers: bool,
+) -> anyhow::Result<()> {
+  if !enabled {
+    return Ok(());
+  }
+  validate_trusted_cidrs(&format!("{field}.trusted_proxies"), trusted_proxies)?;
+  if !fail_on_untrusted_forwarded_headers {
+    bail!(
+      "edge-secure-medium v1 requires {field}.fail_on_untrusted_forwarded_headers = true when Real-IP is enabled"
+    );
   }
   Ok(())
 }

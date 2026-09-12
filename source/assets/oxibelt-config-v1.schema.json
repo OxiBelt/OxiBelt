@@ -13897,6 +13897,7 @@
           "description": "OxiBelt native field `proxy.real_ip`. Production Rust validation is authoritative.",
           "properties": {
             "enabled": {
+              "default": false,
               "description": "OxiBelt native field `proxy.real_ip.enabled`. Production Rust validation is authoritative.",
               "type": "boolean",
               "x-oxibelt-config-activation": "full_reload",
@@ -13905,108 +13906,146 @@
               "x-oxibelt-secret-class": "none"
             },
             "fail_on_untrusted_forwarded_headers": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "array"
-                },
-                {
-                  "type": "object"
-                }
-              ],
+              "default": false,
               "description": "OxiBelt native field `proxy.real_ip.fail_on_untrusted_forwarded_headers`. Production Rust validation is authoritative.",
+              "type": "boolean",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             },
             "header": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "array"
-                },
-                {
-                  "type": "object"
-                }
-              ],
+              "default": "x-forwarded-for",
               "description": "OxiBelt native field `proxy.real_ip.header`. Production Rust validation is authoritative.",
+              "enum": [
+                "x-forwarded-for",
+                "x-real-ip",
+                "forwarded",
+                "cf-connecting-ip"
+              ],
+              "type": "string",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             },
             "recursive": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "array"
-                },
-                {
-                  "type": "object"
-                }
-              ],
+              "default": true,
               "description": "OxiBelt native field `proxy.real_ip.recursive`. Production Rust validation is authoritative.",
+              "type": "boolean",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "rules": {
+              "description": "OxiBelt native field `proxy.real_ip.rules`. Production Rust validation is authoritative.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "default": false,
+                    "description": "OxiBelt native field `proxy.real_ip.rules[].enabled`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "fail_on_untrusted_forwarded_headers": {
+                    "default": false,
+                    "description": "OxiBelt native field `proxy.real_ip.rules[].fail_on_untrusted_forwarded_headers`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "header": {
+                    "default": "x-forwarded-for",
+                    "description": "OxiBelt native field `proxy.real_ip.rules[].header`. Production Rust validation is authoritative.",
+                    "enum": [
+                      "x-forwarded-for",
+                      "x-real-ip",
+                      "forwarded",
+                      "cf-connecting-ip"
+                    ],
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "hosts": {
+                    "description": "OxiBelt native field `proxy.real_ip.rules[].hosts`. Production Rust validation is authoritative.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "name": {
+                    "description": "OxiBelt native field `proxy.real_ip.rules[].name`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "recursive": {
+                    "default": true,
+                    "description": "OxiBelt native field `proxy.real_ip.rules[].recursive`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "server_names": {
+                    "description": "OxiBelt native field `proxy.real_ip.rules[].server_names`. Production Rust validation is authoritative.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "trusted_proxies": {
+                    "default": [],
+                    "description": "OxiBelt native field `proxy.real_ip.rules[].trusted_proxies`. Production Rust validation is authoritative.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              },
+              "type": "array",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             },
             "trusted_proxies": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "array"
-                },
-                {
-                  "type": "object"
-                }
-              ],
+              "default": [],
               "description": "OxiBelt native field `proxy.real_ip.trusted_proxies`. Production Rust validation is authoritative.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",

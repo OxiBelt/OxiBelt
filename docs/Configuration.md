@@ -1231,6 +1231,17 @@ header = "x-forwarded-for" # x-forwarded-for | x-real-ip | forwarded | cf-connec
 recursive = true
 fail_on_untrusted_forwarded_headers = false
 
+# Optional ordered policies, selected from the received Host and downstream TLS SNI.
+[[proxy.real_ip.rules]]
+name = "public-api-edge"
+hosts = ["api.example.com", "*.api.example.com"]
+server_names = ["api.example.com"]
+enabled = true
+trusted_proxies = ["10.20.0.0/16", "2001:db8:20::/48"]
+header = "x-forwarded-for"
+recursive = true
+fail_on_untrusted_forwarded_headers = true
+
 [proxy.auto_upgrade]
 enabled = true
 max_http_version = "h2" # h1 | h2 | h3
@@ -1307,6 +1318,10 @@ mode = "legacy_plain" # legacy_plain | plain | json
 ```
 
 `trusted_ca_certs` adds upstream TLS trust roots from the cert directory. `forwarded_headers.mode = "overwrite"` replaces inbound forwarding metadata; `append` preserves and extends the inbound `X-Forwarded-For` chain. `forwarded_headers.client_ip_source = "resolved"` emits the same trusted client IP used by WAF, rate limiting, external auth, and Real-IP-aware connection limits; set it to `"direct_peer"` only for legacy upstreams that expect the immediate peer address. `X-Forwarded-Port` is derived from the downstream request authority, or the scheme default when no port is present. `real_ip` resolves the client IP only when the direct peer is trusted; that identity is used by rate limiting and WAF evaluation, by forwarded headers when `client_ip_source = "resolved"`, and by connection limits when `limits.connection_limit_identity` selects a Real-IP mode.
+
+`[[proxy.real_ip.rules]]` selects a complete Real-IP policy per request. Every rule needs a unique `name` and at least one nonempty selector list: `hosts`, `server_names`, or both. Values within one list are alternatives; when both lists are present, both conditions must match. Rules are evaluated in declaration order and the first matching rule wins, including an `enabled = false` rule. Overlapping selectors are allowed. If no rule matches, OxiBelt uses the global `[proxy.real_ip]` table; disabling that table does not disable an enabled matching rule. Rules do not inherit global fields. Each rule has the same five policy fields and defaults as the global table: `enabled = false`, `trusted_proxies = []`, `header = "x-forwarded-for"`, `recursive = true`, and `fail_on_untrusted_forwarded_headers = false`.
+
+`hosts` matches the received, validated request authority and never a forwarded host header. Host matching ignores an authority port, ASCII case, and a terminal dot; exact IP-literal hosts are valid selectors. `server_names` matches downstream TLS SNI only, with ASCII-case and terminal-dot normalization; plaintext requests and TLS requests without SNI do not satisfy it. Synthetic Admin cache-warm targets supply SNI only for HTTPS targets. The exact name and `*.suffix` forms are supported for both selectors. A wildcard matches one or more labels below its suffix and does not match the apex. Real-IP selection does not alter Host route matching or downstream TLS policy validation. First-request connection-limit identity remains bound from that request, while other consumers resolve their Real-IP policy for each request. A full configuration reload applies the new policy only to new snapshots; connections already using a snapshot retain that snapshot for their lifetime.
 
 `generic_http_upgrade` and `connect_tunneling` enable the global capability only. Individual routes must also opt in with `generic_http_upgrade = true` or `connect_tunneling = true`. CONNECT tunnels are not open-proxy tunnels; OxiBelt connects only to the selected route upstream origin. `proxy.grpc_web.enabled` enables the global gRPC-Web transformer, and each route must also set `grpc_web = true`.
 

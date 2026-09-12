@@ -399,6 +399,8 @@ pub struct RealIpConfig {
   pub recursive: bool,
   #[serde(default)]
   pub fail_on_untrusted_forwarded_headers: bool,
+  #[serde(default)]
+  pub rules: Vec<RealIpRuleConfig>,
 }
 
 impl Default for RealIpConfig {
@@ -409,6 +411,7 @@ impl Default for RealIpConfig {
       header: RealIpHeader::XForwardedFor,
       recursive: true,
       fail_on_untrusted_forwarded_headers: false,
+      rules: Vec::new(),
     }
   }
 }

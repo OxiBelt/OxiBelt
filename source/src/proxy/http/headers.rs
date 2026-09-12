@@ -65,7 +65,9 @@ pub(crate) fn build_forwarded_header_cache(
   if forwarded_headers.mode != ForwardedHeaderMode::Overwrite {
     return None;
   }
-  if real_ip.enabled && forwarded_headers.client_ip_source != ForwardedClientIpSource::DirectPeer {
+  if (real_ip.enabled || real_ip.rules.iter().any(|rule| rule.enabled))
+    && forwarded_headers.client_ip_source != ForwardedClientIpSource::DirectPeer
+  {
     return None;
   }
   Some(ForwardedHeaderCache {

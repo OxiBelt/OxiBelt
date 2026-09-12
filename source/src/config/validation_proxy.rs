@@ -108,10 +108,8 @@ impl Config {
       }
     }
     self.validate_buffering()?;
-    for cidr in &self.proxy.real_ip.trusted_proxies {
-      crate::identity::Cidr::parse(cidr)
-        .with_context(|| format!("invalid proxy.real_ip.trusted_proxies entry {cidr}"))?;
-    }
+    validate_real_ip_policy_cidrs("proxy.real_ip", &self.proxy.real_ip)?;
+    validate_real_ip_rules(&self.proxy.real_ip)?;
     Ok(())
   }
 
@@ -471,4 +469,16 @@ impl Config {
     }
     Ok(())
   }
+}
+
+fn validate_real_ip_policy_cidrs(field: &str, policy: &RealIpConfig) -> anyhow::Result<()> {
+  for cidr in &policy.trusted_proxies {
+    crate::identity::Cidr::parse(cidr)
+      .with_context(|| format!("invalid {field}.trusted_proxies entry {cidr}"))?;
+  }
+  for (index, rule) in policy.rules.iter().enumerate() {
+    let rule_policy = rule.policy();
+    validate_real_ip_policy_cidrs(&format!("{field}.rules[{index}]"), &rule_policy)?;
+  }
+  Ok(())
 }

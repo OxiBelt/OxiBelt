@@ -122,3 +122,43 @@ connection_url = "redis://redis.example.test:6379/0"
     report.findings
   );
 }
+
+#[test]
+fn real_ip_diagnostics_cover_scoped_rules_when_global_policy_is_disabled() {
+  let temp_dir = common::TempDir::new("diagnostics-real-ip-rules");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "diagnostics-real-ip-rules");
+  let raw = format!(
+    r#"{}
+
+[[proxy.real_ip.rules]]
+name = "public-edge"
+hosts = ["api.example.test"]
+enabled = true
+trusted_proxies = ["0.0.0.0/0"]
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("scoped Real-IP config should parse");
+  assert!(!config.proxy.real_ip.enabled);
+
+  let mut report = DiagnosticReport::new();
+  checks::diagnose_real_ip(&config, &mut report);
+  let report = report.finish();
+  assert!(
+    report.findings.iter().any(|finding| {
+      finding.id == "real_ip.untrusted_forwarded_headers_allowed"
+        && finding.target == "proxy.real_ip.rules[0].fail_on_untrusted_forwarded_headers"
+    }),
+    "missing scoped fail-closed diagnostic: {:#?}",
+    report.findings
+  );
+  assert!(
+    report.findings.iter().any(|finding| {
+      finding.id == "real_ip.trusts_everywhere"
+        && finding.target == "proxy.real_ip.rules[0].trusted_proxies[0.0.0.0/0]"
+    }),
+    "missing scoped trusted-CIDR diagnostic: {:#?}",
+    report.findings
+  );
+}

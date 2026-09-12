@@ -84,7 +84,7 @@ pub(crate) mod webtransport;
 #[cfg(feature = "admin-runtime")]
 pub(crate) mod warm;
 #[cfg(feature = "admin-runtime")]
-pub(crate) use warm::warm_cache_request;
+pub(crate) use warm::{cache_warm_tls_metadata, warm_cache_request};
 
 pub(crate) use self::access_log::SystemAccessLogContext;
 #[cfg(test)]
@@ -241,10 +241,11 @@ where
     .get::<DownstreamListenerBind>()
     .map(|bind| bind.0);
   let tags: Option<HashMap<String, String>> = None;
-  let client_addr = match crate::identity::resolve_client_addr(
+  let client_addr = match state.resolve_client_addr(
     request.headers(),
     peer_addr,
-    &state.config.proxy.real_ip,
+    host,
+    tls.sni.as_deref().filter(|_| tls.enabled),
   ) {
     Ok(addr) => addr,
     Err(error) => {
@@ -555,3 +556,9 @@ mod early_data_rate_limit_tests;
 mod tests;
 #[cfg(test)]
 mod webtransport_tests;
+
+#[cfg(test)]
+mod real_ip_tests;
+
+#[cfg(test)]
+mod real_ip_connection_tests;

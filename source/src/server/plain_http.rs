@@ -419,11 +419,7 @@ async fn eligible_static_plan(
     .map_or((request.target.as_str(), None), |(path, query)| {
       (path, Some(query))
     });
-  let client_addr = match crate::identity::resolve_client_addr(
-    &request.headers,
-    peer_addr,
-    &snapshot.config.proxy.real_ip,
-  ) {
+  let client_addr = match snapshot.resolve_client_addr(&request.headers, peer_addr, &host, None) {
     Ok(addr) => addr,
     Err(error) => {
       warn!(error = %error, peer = %peer_addr, "rejected untrusted real IP metadata");

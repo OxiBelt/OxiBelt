@@ -571,16 +571,21 @@ fn h3_inline_fast_path_candidate(
   {
     return false;
   }
-  let client_addr = match crate::identity::resolve_client_addr(
+  let host_snapshot = http_proxy::headers::extract_host_snapshot(request);
+  let host = host_snapshot.as_str();
+  let client_addr = match context.state.resolve_client_addr(
     request.headers(),
     context.peer_addr,
-    &context.state.config.proxy.real_ip,
+    host,
+    context
+      .tls_metadata
+      .sni
+      .as_deref()
+      .filter(|_| context.tls_metadata.enabled),
   ) {
     Ok(client_addr) => client_addr,
     Err(_) => return false,
   };
-  let host_snapshot = http_proxy::headers::extract_host_snapshot(request);
-  let host = host_snapshot.as_str();
   let resolved = context
     .state
     .route_table
@@ -730,3 +735,6 @@ fn downstream_h3_accept_message_is_normal_close(message: &str) -> bool {
   .iter()
   .any(|needle| message.contains(needle))
 }
+
+#[cfg(test)]
+mod real_ip_tests;

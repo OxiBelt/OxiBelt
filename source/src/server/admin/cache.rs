@@ -72,17 +72,15 @@ fn effective_warm_policy(
     ::http::header::HOST,
     HeaderValue::from_str(host).map_err(|_| "invalid warm host")?,
   );
-  let client_addr = crate::identity::resolve_client_addr(
-    &request_headers,
-    peer_addr,
-    &snapshot.config.proxy.real_ip,
-  )
-  .map_err(|_| "invalid real IP metadata")?;
-  let tls = crate::waf::WafTlsMetadata {
-    enabled: scheme == "https",
-    sni: Some(host.to_string()),
-    ..crate::waf::WafTlsMetadata::default()
-  };
+  let tls = crate::proxy::http::cache_warm_tls_metadata(scheme, host);
+  let client_addr = snapshot
+    .resolve_client_addr(
+      &request_headers,
+      peer_addr,
+      &normalize_host(host),
+      tls.sni.as_deref().filter(|_| tls.enabled),
+    )
+    .map_err(|_| "invalid real IP metadata")?;
   Ok(
     snapshot
       .route_table

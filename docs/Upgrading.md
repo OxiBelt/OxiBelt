@@ -32,6 +32,30 @@ allocator-specific conversion. See
 [Performance](Performance.md#optional-allocator-evaluation) for build commands
 and evidence requirements.
 
+## Host/SNI Real-IP policies
+
+`[[proxy.real_ip.rules]]` assigns a complete Real-IP policy to a received Host
+authority, downstream TLS SNI, or their conjunction. Rules do not inherit any
+field from global `[proxy.real_ip]`: set all five policy fields for every rule
+that is intended to resolve forwarded identity. An earlier overlap, including
+an `enabled = false` rule, intentionally wins and prevents global fallback; a
+disabled global policy does not turn off an enabled matching rule.
+
+Before enabling rules, inventory received authorities, TLS SNI names, and exact
+proxy CIDRs at each edge. Validate the staged configuration before a full
+reload:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+```
+
+To roll back to a binary that does not recognize selector policies, remove all
+`[[proxy.real_ip.rules]]` tables, retain the desired global `[proxy.real_ip]`
+policy, validate that configuration with the target binary, and then perform a
+full reload or replace the process. Existing connections keep their loaded
+snapshot, so drain them before treating the rollback identity policy as fully
+active. Selector rules do not replace Host routing or TLS policy checks.
+
 ## Supported upgrade policy
 
 OxiBelt supports one stable step at a time:

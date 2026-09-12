@@ -115,6 +115,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "proxy-identity",
+      "real-ip-host-sni",
+      "ordered Host and downstream-SNI Real-IP policies select forwarded identities for WAF",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "proxy-identity",
       "connection-limit-first-request-real-ip",
       "first-request Real-IP connection limits use trusted forwarded client IPs",
       ExpectStart::Success,

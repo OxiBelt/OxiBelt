@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use crate::lifecycle::ConnectionDrain;
 use crate::routes::{RouteMatchContext, RouteRequestProtocol};
-use crate::state::AppHandle;
+use crate::state::AppSnapshot;
 use crate::waf::{WafProtocol, WafTlsMetadata, WafTransportMetadataInput, WafTransportNetwork};
 
 use super::{full_body, handle_inner};
@@ -22,8 +22,22 @@ pub(crate) struct CacheWarmResult {
   pub(crate) result: &'static str,
 }
 
+pub(crate) fn cache_warm_tls_metadata(scheme: &str, host: &str) -> WafTlsMetadata {
+  WafTlsMetadata {
+    enabled: scheme == "https",
+    // HTTPS target ports belong to HTTP authority, never to TLS SNI. Preserve
+    // descriptive plaintext metadata; identity selection checks `enabled`.
+    sni: Some(if scheme == "https" {
+      crate::routes::normalize_host(host)
+    } else {
+      host.to_string()
+    }),
+    ..WafTlsMetadata::default()
+  }
+}
+
 pub(crate) async fn warm_cache_request(
-  state: AppHandle,
+  snapshot: Arc<AppSnapshot>,
   peer_addr: std::net::SocketAddr,
   scheme: &str,
   host: &str,
@@ -56,12 +70,15 @@ pub(crate) async fn warm_cache_request(
   let _ = listener_tx.send(false);
   let _ = lifecycle_tx.send(false);
   let drain = ConnectionDrain::new(listener_rx, lifecycle_rx, Duration::ZERO);
-  let tls = Arc::new(WafTlsMetadata {
-    enabled: scheme == "https",
-    sni: Some(host.to_string()),
-    ..WafTlsMetadata::default()
-  });
-  let snapshot = state.snapshot();
+  let tls = Arc::new(cache_warm_tls_metadata(scheme, host));
+  super::headers::validate_authority_host_consistency(&request)
+    .map_err(|_| anyhow::anyhow!("ambiguous warm host metadata"))?;
+  let client_addr = snapshot.resolve_client_addr(
+    request.headers(),
+    peer_addr,
+    &crate::routes::normalize_host(host),
+    tls.sni.as_deref().filter(|_| tls.enabled),
+  )?;
   let response = handle_inner(
     request,
     peer_addr,
@@ -87,7 +104,7 @@ pub(crate) async fn warm_cache_request(
       method: Some(&method),
       headers: Some(&headers),
       query: uri.query(),
-      source_ip: Some(peer_addr.ip()),
+      source_ip: Some(client_addr.ip()),
       protocol: Some(RouteRequestProtocol::Http1),
       tls: Some(tls.as_ref()),
     },

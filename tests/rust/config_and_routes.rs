@@ -461,6 +461,196 @@ trusted_sources = ["192.0.2.0/24", "2001:db8:1::/48"]
 }
 
 #[test]
+fn real_ip_rules_validate_scoped_selectors_and_independent_policy_defaults() {
+  let temp_dir = common::TempDir::new("real-ip-rules");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "real-ip-rules");
+  let raw = format!(
+    r#"{}
+
+[[proxy.real_ip.rules]]
+name = "public-edge"
+hosts = ["Api.Example.Test.", "*.edge.example.test", "[2001:db8::1]"]
+server_names = ["Api.Example.Test.", "*.tls.example.test"]
+enabled = true
+trusted_proxies = ["192.0.2.0/24"]
+header = "forwarded"
+recursive = false
+fail_on_untrusted_forwarded_headers = true
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("scoped real-IP config should parse");
+  config
+    .validate()
+    .expect("scoped real-IP config should validate");
+  assert!(!config.proxy.real_ip.enabled);
+  assert_eq!(config.proxy.real_ip.rules.len(), 1);
+  let rule = &config.proxy.real_ip.rules[0];
+  assert!(rule.enabled);
+  assert_eq!(rule.trusted_proxies, ["192.0.2.0/24"]);
+  assert_eq!(rule.header.header_name(), "forwarded");
+  assert!(!rule.recursive);
+  assert!(rule.fail_on_untrusted_forwarded_headers);
+}
+
+#[test]
+fn real_ip_rules_reject_invalid_selectors_names_and_cidrs() {
+  let temp_dir = common::TempDir::new("real-ip-rule-validation");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "real-ip-rule-validation");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let cases = [
+    (
+      r#"
+[[proxy.real_ip.rules]]
+name = "missing-selector"
+"#,
+      "must set at least one host or server_names selector",
+    ),
+    (
+      r#"
+[[proxy.real_ip.rules]]
+name = "bare-wildcard"
+hosts = ["*"]
+"#,
+      "bare wildcard",
+    ),
+    (
+      r#"
+[[proxy.real_ip.rules]]
+name = "invalid/name"
+hosts = ["api.example.test"]
+"#,
+      "must contain only ASCII letters",
+    ),
+    (
+      r#"
+[[proxy.real_ip.rules]]
+name = "duplicate-host"
+hosts = ["Api.Example.Test.", "api.example.test"]
+"#,
+      "duplicate selector",
+    ),
+    (
+      r#"
+[[proxy.real_ip.rules]]
+name = "sni-ip"
+server_names = ["192.0.2.10"]
+"#,
+      "must be a DNS name",
+    ),
+    (
+      r#"
+[[proxy.real_ip.rules]]
+name = "invalid-cidr"
+hosts = ["api.example.test"]
+trusted_proxies = ["not-a-cidr"]
+"#,
+      "invalid proxy.real_ip.rules[0].trusted_proxies",
+    ),
+    (
+      r#"
+[[proxy.real_ip.rules]]
+name = "duplicate-name"
+hosts = ["api.example.test"]
+
+[[proxy.real_ip.rules]]
+name = "duplicate-name"
+hosts = ["admin.example.test"]
+"#,
+      "duplicate Real-IP rule name",
+    ),
+  ];
+
+  for (fragment, expected) in cases {
+    let config: Config = toml::from_str(&format!("{base}\n{fragment}"))
+      .expect("invalid semantic fixture should parse before validation");
+    let error = config
+      .validate()
+      .expect_err("invalid Real-IP rule must fail");
+    assert!(
+      format!("{error:#}").contains(expected),
+      "expected {expected:?} in {error:#}"
+    );
+  }
+
+  let explicit_empty = format!(
+    r#"{base}
+[[proxy.real_ip.rules]]
+name = "empty-hosts"
+hosts = []
+server_names = ["api.example.test"]
+"#
+  );
+  let error = toml::from_str::<Config>(&explicit_empty)
+    .expect_err("explicitly empty selector lists must fail during deserialization");
+  assert!(
+    error
+      .to_string()
+      .contains("selector lists must not be explicitly empty"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn real_ip_rule_shape_rejects_unknown_nested_fields() {
+  let temp_dir = common::TempDir::new("real-ip-rule-shape");
+  let config_path = write_loadable_config(&temp_dir, "real-ip-rule-shape", |raw| {
+    format!(
+      r#"{raw}
+[[proxy.real_ip.rules]]
+name = "public-edge"
+hosts = ["api.example.test"]
+unexpected = true
+"#
+    )
+  });
+
+  let error = Config::load(&config_path).expect_err("unknown Real-IP rule field should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("configuration contains unknown field(s): proxy.real_ip.rules.unexpected"),
+    "unexpected error: {error:#}"
+  );
+}
+
+#[test]
+fn edge_secure_medium_profile_checks_scoped_real_ip_rules_when_global_policy_is_disabled() {
+  let temp_dir = common::TempDir::new("real-ip-rule-profile");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "real-ip-rule-profile");
+  let raw = format!(
+    r#"{}
+[[proxy.real_ip.rules]]
+name = "public-edge"
+hosts = ["api.example.test"]
+enabled = true
+trusted_proxies = ["0.0.0.0/0"]
+fail_on_untrusted_forwarded_headers = true
+"#,
+    edge_secure_medium_config_toml(&cert_path, &key_path)
+  );
+
+  let config: Config = toml::from_str(&raw).expect("profile fixture should parse");
+  assert!(!config.proxy.real_ip.enabled);
+  let error = config
+    .validate()
+    .expect_err("profile must validate enabled scoped Real-IP policy");
+  assert!(
+    error
+      .to_string()
+      .contains("proxy.real_ip.rules[0].trusted_proxies"),
+    "unexpected error: {error}"
+  );
+  assert!(
+    error.to_string().contains("forbids all-address trust"),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
 fn edge_secure_medium_profile_allows_monitor_rollout_and_tighter_limits() {
   let temp_dir = common::TempDir::new("edge-secure-medium-monitor");
   let (cert_path, key_path) =

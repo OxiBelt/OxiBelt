@@ -8,6 +8,9 @@ use http::HeaderMap;
 
 use crate::config::{RealIpConfig, RealIpHeader};
 
+mod real_ip;
+pub(crate) use real_ip::RealIpPolicySelector;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Cidr {
   network: IpAddr,

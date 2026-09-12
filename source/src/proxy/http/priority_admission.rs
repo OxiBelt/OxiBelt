@@ -49,13 +49,16 @@ pub(super) fn classify<B>(
   if validate_downstream_path(path).is_err() {
     return PriorityAdmission::default();
   }
-  let Ok(client_addr) =
-    crate::identity::resolve_client_addr(request.headers(), peer_addr, &state.config.proxy.real_ip)
-  else {
-    return PriorityAdmission::default();
-  };
   let host_snapshot = extract_host_snapshot(request);
   let host = host_snapshot.as_str();
+  let Ok(client_addr) = state.resolve_client_addr(
+    request.headers(),
+    peer_addr,
+    host,
+    tls.sni.as_deref().filter(|_| tls.enabled),
+  ) else {
+    return PriorityAdmission::default();
+  };
   let request_version = request.version();
   let resolved = state
     .route_table
