@@ -16,6 +16,24 @@ from urllib.parse import unquote, urlsplit
 
 
 OPENAPI_PATH = PurePosixPath("source/assets/admin-openapi.json")
+# These upstream docs link to files omitted from the selected native payload.
+# Keep repo-authored README.OXIBELT.md and future Markdown under normal checks.
+UPSTREAM_MARKDOWN_EXEMPTIONS = frozenset(
+    {
+        PurePosixPath("source/third_party/mimalloc-3.3.2+oxibelt.1/SECURITY.md"),
+        PurePosixPath(
+            "source/third_party/mimalloc-3.3.2+oxibelt.1/contrib/docker/readme.md"
+        ),
+        PurePosixPath(
+            "source/third_party/mimalloc-3.3.2+oxibelt.1/contrib/vcpkg/readme.md"
+        ),
+        PurePosixPath("source/third_party/mimalloc-3.3.2+oxibelt.1/readme.md"),
+        PurePosixPath("source/third_party/mimalloc-3.3.2+oxibelt.1/src/prim/readme.md"),
+        PurePosixPath(
+            "source/third_party/mimalloc-3.3.2+oxibelt.1/src/prim/windows/readme.md"
+        ),
+    }
+)
 HTTP_METHODS = {"delete", "get", "head", "options", "patch", "post", "put"}
 FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 INLINE_CODE_RE = re.compile(r"(`+)(.+?)\1")
@@ -67,6 +85,16 @@ def _tracked_files(repo_root: Path) -> set[PurePosixPath]:
         for value in result.stdout.split(b"\0")
         if value
     }
+
+
+def _markdown_files_to_scan(tracked: set[PurePosixPath]) -> tuple[PurePosixPath, ...]:
+    return tuple(
+        sorted(
+            path
+            for path in tracked
+            if path.suffix.lower() == ".md" and path not in UPSTREAM_MARKDOWN_EXEMPTIONS
+        )
+    )
 
 
 def _read_text(path: Path) -> str:
@@ -347,7 +375,7 @@ def scan_repository(repo_root: Path) -> list[Diagnostic]:
 
     diagnostics: list[Diagnostic] = []
     anchor_cache: dict[PurePosixPath, set[str]] = {}
-    for source in sorted(path for path in tracked if path.suffix.lower() == ".md"):
+    for source in _markdown_files_to_scan(tracked):
         try:
             diagnostics.extend(
                 _scan_markdown(
@@ -374,9 +402,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         diagnostics = scan_repository(args.repo_root)
-        markdown_count = sum(
-            path.suffix.lower() == ".md" for path in _tracked_files(args.repo_root.resolve())
-        )
+        tracked = _tracked_files(args.repo_root.resolve())
+        markdown_count = len(_markdown_files_to_scan(tracked))
+        tracked_markdown_count = sum(path.suffix.lower() == ".md" for path in tracked)
     except (OSError, subprocess.CalledProcessError) as error:
         print(f"documentation contract check could not start: {error}", file=sys.stderr)
         return 2
@@ -388,7 +416,9 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"validated {markdown_count} tracked Markdown files")
+    print(
+        f"validated {markdown_count} of {tracked_markdown_count} tracked Markdown files"
+    )
     return 0
 
 
