@@ -806,7 +806,7 @@ jobs:
             cc_identity="Alpine 3.24 build-base musl toolchain"
           fi
           jq -n \
-            --arg rustc "rustc 1.98.0 via ${rust_builder}" \
+            --arg rustc "rustc 1.98.1 via ${rust_builder}" \
             --arg cargo "cargo from ${rust_builder}" \
             --arg node "${node_builder}" \
             --arg pnpm "pnpm ${pnpm_version}" \

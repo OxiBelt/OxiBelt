@@ -1,4 +1,4 @@
-ARG DEBIAN_IMAGE=docker.io/library/debian:trixie-slim@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f
+ARG DEBIAN_IMAGE=docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
 FROM ${DEBIAN_IMAGE} AS fetch
 

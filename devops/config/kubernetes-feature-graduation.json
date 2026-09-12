@@ -32,8 +32,8 @@
     },
     "helm": {
       "versions": [
-        "3.21.4",
-        "4.2.4"
+        "3.22.0",
+        "4.3.0"
       ],
       "upgradeCompatibility": "clean-install-upgrade-rollback-uninstall"
     },

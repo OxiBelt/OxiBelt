@@ -1,4 +1,4 @@
-FROM rust:1.98.0-trixie AS oha-builder
+FROM rust:1.98.1-trixie@sha256:737ba17e6a2ffe14475b59861cd69f3d7152c29c75140bdbf6750befcfda7e6c AS oha-builder
 
 ARG OHA_VERSION=1.16.0
 
@@ -8,7 +8,7 @@ RUN apt-get update && \
 
 RUN cargo install oha --version "${OHA_VERSION}" --locked
 
-FROM debian:trixie AS wrk-builder
+FROM debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1 AS wrk-builder
 
 ARG WRK_VERSION=4.2.0
 ARG WRK_COMMIT=a211dd5a7050b1f9e8a9870b95513060e72ac4a0
@@ -25,7 +25,7 @@ RUN curl -fsSL "https://codeload.github.com/wg/wrk/tar.gz/${WRK_COMMIT}" -o wrk.
     mv "wrk-${WRK_COMMIT}" "wrk-${WRK_VERSION}" && \
     make -C "wrk-${WRK_VERSION}" -j"$(nproc)"
 
-FROM debian:trixie AS h2load-builder
+FROM debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1 AS h2load-builder
 
 ARG NGHTTP2_VERSION=1.70.0
 ARG NGHTTP2_SHA256=e05cb1388eaca3830aded4ccf20044b6e1ac1a61411dcca11b0437c4285c8bc2
@@ -78,7 +78,7 @@ RUN curl -fsSL "https://github.com/nghttp2/nghttp2/releases/download/v${NGHTTP2_
     make -j"$(nproc)" && \
     make install
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates libev4 libssl3 zlib1g && \

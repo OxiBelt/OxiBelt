@@ -5,6 +5,23 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Dependency maintenance
+
+The September 2026 dependency refresh uses Rust 1.98.1 and pnpm 12.4.1 while
+retaining Rust's 1.98 minimum and Node 24 LTS. Use the package manager and its
+integrity pin from `package.json`; pnpm 12 records its managed packages in a
+second lockfile document. Install with the frozen lockfile and run dependency
+admission before building. The supported Helm clients are 3.22.0 and 4.3.0;
+the Kubernetes and Gateway API support ranges are unchanged.
+
+The refresh does not require configuration or persistent-state conversion.
+JSON Schema validation retains the selected Draft 7 configuration and disabled
+remote-resolution defaults. Compression updates retain OxiBelt's decoded-body
+limits and malformed-stream checks. An async codec still requires Brotli 8
+alongside the directly selected Brotli 9; the dependency policy records both
+compatibility lines. Other upstream constraints may likewise retain older
+transitive versions without changing the supported upgrade contract.
+
 ## Optional allocator builds
 
 The `allocator-mimalloc-experiment` Cargo feature is part of the default feature
@@ -832,8 +849,8 @@ then apply it and wait for the CRDs to become established. Gateway API CRDs
 remain operator-owned. Upgrade the controller before its selected data plane;
 roll back the data plane before the controller, and never downgrade or delete
 the CRDs as an implicit Helm rollback. The integration remains `experimental`,
-with the same Kubernetes `1.34`–`1.37` and Helm `3.21.4`/`4.2.4` graduation
-targets described in [KubernetesSupport.md](KubernetesSupport.md).
+with the same Kubernetes `1.34`–`1.37` graduation range and the current Helm
+`3.22.0`/`4.3.0` targets described in [KubernetesSupport.md](KubernetesSupport.md).
 
 The NGINX `1.31.5` update applies only to the benchmark comparator image. It
 does not change an OxiBelt release-image role or require an operator migration.

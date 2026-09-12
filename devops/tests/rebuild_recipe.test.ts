@@ -31,8 +31,8 @@ function Plan(): ReturnType<typeof BuildImageReleasePlan> {
 function Environment(): Record<string, unknown> {
   return {
     schemaVersion: 1,
-    rustc: 'rustc 1.98.0',
-    cargo: 'cargo 1.98.0',
+    rustc: 'rustc 1.98.1',
+    cargo: 'cargo 1.98.1',
     node: 'v24.13.0',
     pnpm: '11.20.0',
     buildx: 'github.com/docker/buildx v0.37.0',

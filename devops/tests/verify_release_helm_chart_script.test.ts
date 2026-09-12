@@ -51,7 +51,7 @@ test('read-only Helm OCI verifier accepts injected consumption tools and rejects
     const WrongPolicy = WriteManifestVariant('wrong-policy', Helm4ManifestText.replace('"oxibelt.dev/feature-status":"experimental"', '"oxibelt.dev/feature-status":"stable"'))
     WriteExecutable(Path.join(Bin, 'helm'), `
 [[ -z "\${COMMAND_LOG:-}" ]] || printf 'helm:%s\\n' "$*" >>"\${COMMAND_LOG}"
-if [[ "$1 $2" == "version --short" ]]; then echo v3.21.4; exit 0; fi
+if [[ "$1 $2" == "version --short" ]]; then echo v3.22.0; exit 0; fi
 case "$1" in
   show) [[ "$2" == chart && "$3" == */oxibelt-1.2.3.tgz ]] || exit 8; if [[ "\${APP_VERSION_QUOTED:-}" == 1 ]]; then app_version='"1.2.3"'; else app_version='1.2.3'; fi; printf 'apiVersion: v2\\nname: oxibelt\\nversion: 1.2.3\\nappVersion: %s\\nannotations:\\n  oxibelt.dev/feature-status: experimental\\n  oxibelt.dev/kubernetes-support-policy: "1"\\n' "$app_version" ;;
   lint|template) : ;;
@@ -126,7 +126,7 @@ fi`)
     Assert.match(Commands, /helm:install .*--dry-run=client/)
     Assert.doesNotMatch(Commands, /helm:pull/)
     Assert.throws(() => RunScript(Arguments(Directory), Environment), /work directory must be empty/)
-    Assert.throws(() => RunScript(['--mode', 'rebuild', ...Arguments(RebuildWork).slice(2), '--workspace-path', Directory, '--release-ref', 'refs/tags/1.2.3', '--revision', 'a'.repeat(40)], Environment), /byte rebuild requires Helm v4\.2\.4/)
+    Assert.throws(() => RunScript(['--mode', 'rebuild', ...Arguments(RebuildWork).slice(2), '--workspace-path', Directory, '--release-ref', 'refs/tags/1.2.3', '--revision', 'a'.repeat(40)], Environment), /byte rebuild requires Helm v4\.3\.0/)
     for (const [Name, Expected] of [['extra', /unexpected JSON keys/], ['duplicate', /duplicate JSON key/], ['size', /exact raw manifest bytes/], ['digest', /exact raw manifest bytes/]] as const) {
       const BadDescriptorWork = Path.join(Directory, `bad-descriptor-${Name}-work`); Fs.mkdirSync(BadDescriptorWork)
       Assert.throws(() => RunScript(Arguments(BadDescriptorWork), { ...Environment, BAD_DESCRIPTOR: Name }), Expected)

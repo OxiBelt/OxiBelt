@@ -763,7 +763,7 @@ jobs:
       - name: Setup canonical Helm packager
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       - name: Enable hash-pinned pnpm
         run: |
@@ -839,7 +839,7 @@ jobs:
       - name: Setup canonical Helm publisher
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       - name: Install pinned ORAS acquisition client
         env:
@@ -939,7 +939,7 @@ jobs:
       - name: Setup canonical Helm rebuild packager
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       - name: Enable hash-pinned pnpm and install dependencies
         run: |

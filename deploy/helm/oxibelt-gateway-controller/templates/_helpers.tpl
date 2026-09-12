@@ -60,8 +60,8 @@ oxibelt.dev/kubernetes-support-policy: {{ index .Chart.Annotations "oxibelt.dev/
 
 {{- define "oxibelt-gateway-controller.validateSecurity" -}}
 {{- $helmVersion := .Capabilities.HelmVersion.Version -}}
-{{- if not (or (semverCompare "=3.21.4" $helmVersion) (semverCompare "=4.2.4" $helmVersion)) -}}
-{{- fail (printf "OxiBelt Kubernetes qualification requires Helm 3.21.4 or 4.2.4, found %s; see docs/KubernetesSupport.md" $helmVersion) -}}
+{{- if not (or (semverCompare "=3.22.0" $helmVersion) (semverCompare "=4.3.0" $helmVersion)) -}}
+{{- fail (printf "OxiBelt Kubernetes qualification requires Helm 3.22.0 or 4.3.0, found %s; see docs/KubernetesSupport.md" $helmVersion) -}}
 {{- end -}}
 {{- if not (kindIs "bool" .Values.serviceAccount.automountServiceAccountToken) -}}
 {{- fail "serviceAccount.automountServiceAccountToken must be a boolean" -}}

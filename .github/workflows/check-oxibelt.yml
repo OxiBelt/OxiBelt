@@ -61,8 +61,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Test Rust boundary tooling
         env:
@@ -138,7 +138,7 @@ jobs:
       fail-fast: false
       matrix:
         rust_version:
-          - 1.98.0
+          - 1.98.1
         runner:
           - ubuntu-26.04
           - ubuntu-26.04-arm
@@ -218,8 +218,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Install pinned Rust dependency tools
         run: |
@@ -354,7 +354,7 @@ jobs:
       - name: Setup canonical Helm packager
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       - name: Test DevOps tooling
         run: pnpm run test
@@ -851,12 +851,12 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Install pinned mewt
         run: |
-          cargo +1.98.0 install mewt --version 4.0.0 --locked
+          cargo +1.98.1 install mewt --version 4.0.0 --locked
           test "$(mewt --version)" = "mewt 4.0.0"
 
       - name: Run mutation campaign
@@ -900,7 +900,7 @@ jobs:
       fail-fast: false
       matrix:
         rust_version:
-          - 1.98.0
+          - 1.98.1
         target:
           - riscv64gc-unknown-linux-gnu
           - riscv64gc-unknown-linux-musl
@@ -1001,8 +1001,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Generate matrices
         id: matrices
@@ -1082,8 +1082,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Install native build dependencies
         run: |
@@ -1478,7 +1478,7 @@ jobs:
             --expected-source-dirty "clean" \
             --expected-build-kind "git_development" \
             --expected-created "$(jq -r '.created' "${contract}")" \
-            --rust-builder-image "rust:1.98.0-trixie@sha256:271849e998ffce5776454bbf98c5dc21baafc854ff8e566197908d3aca9a81e8" \
+            --rust-builder-image "rust:1.98.1-trixie@sha256:737ba17e6a2ffe14475b59861cd69f3d7152c29c75140bdbf6750befcfda7e6c" \
             --node-builder-image "node:24-alpine3.24@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf" \
             --runtime-image "alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b" \
             --repo-root "${GITHUB_WORKSPACE}"
@@ -1868,8 +1868,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Download Docker integration helper image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -1904,8 +1904,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Download Docker integration helper image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -1940,8 +1940,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Download Docker integration helper image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -1976,8 +1976,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Run CT object-store TLS MinIO admission
         env:
@@ -2029,7 +2029,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.21.4
+          version: v3.22.0
 
       - name: Validate Helm Admin configuration
         run: tests/scripts/check-helm-admin-config.sh
@@ -2103,7 +2103,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.21.4
+          version: v3.22.0
 
       - name: Validate strict hardening templates
         run: |
@@ -2151,13 +2151,13 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.21.4
+          version: v3.22.0
 
       - name: Install Kind and kubectl
         uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
@@ -2217,7 +2217,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.21.4
+          version: v3.22.0
 
       - name: Validate Helm Pod distribution and lifecycle
         run: tests/scripts/check-helm-pod-lifecycle.sh
@@ -2281,7 +2281,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.21.4
+          version: v3.22.0
 
       - name: Validate Helm NetworkPolicy configuration
         run: tests/scripts/check-helm-network-policy.sh
@@ -2295,8 +2295,8 @@ jobs:
 
       - name: Install Minikube
         env:
-          MINIKUBE_VERSION: v1.38.1
-          MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e
+          MINIKUBE_VERSION: v1.39.0
+          MINIKUBE_SHA256: b738496da01be06bbaf80c688f57ce25acd3849fbb518155f3a88e03ef555aa4
         run: |
           minikube_dir="${RUNNER_TEMP}/minikube"
           mkdir -p "${minikube_dir}/bin"
@@ -2313,7 +2313,7 @@ jobs:
         run: tests/scripts/run-kubernetes-network-policy.sh --cni "${{ matrix.cni }}"
 
   kubernetes-current-compatibility:
-    name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.2.4 compatibility
+    name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.3.0 compatibility
     runs-on: ubuntu-26.04
     needs:
       - test
@@ -2352,7 +2352,7 @@ jobs:
       - name: Set up current Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       - name: Validate Helm 4 configuration
         run: |
@@ -2438,8 +2438,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2475,7 +2475,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
+          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2513,8 +2513,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2550,7 +2550,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
+          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2588,8 +2588,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2625,7 +2625,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
+          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2663,8 +2663,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2700,7 +2700,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
+          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2738,8 +2738,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2775,7 +2775,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
+          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2813,8 +2813,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2850,7 +2850,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
+          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2888,8 +2888,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2925,7 +2925,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
+          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2963,8 +2963,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -3000,7 +3000,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine
+          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -3039,8 +3039,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.0 --profile minimal
-          rustup default 1.98.0
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image

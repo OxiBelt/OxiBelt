@@ -860,7 +860,7 @@ fn firefox_webdriver_helper_image_is_pinned_nonroot_and_nss_ready() {
 
   for expected in [
     "FROM ${DEBIAN_IMAGE} AS fetch",
-    "docker.io/library/debian:trixie-slim@sha256:abc9cb88a5587630d7f915f47b23b0668fe250fbfc6457aa4d52b534c1bbf73f",
+    "docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132",
     "ARG FIREFOX_VERSION=154.0",
     "ARG FIREFOX_SHA256=7665cd49ab13417270748325838e565136adbc76d41bbd76fb24d15a0cc7792b",
     "ARG GECKODRIVER_VERSION=0.37.1",
@@ -1283,7 +1283,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
     .expect("oxibeltctl Cargo.toml should be readable");
 
   for expected in [
-    "ARG RUST_BUILDER_IMAGE=rust:1.98.0-trixie",
+    "ARG RUST_BUILDER_IMAGE=rust:1.98.1-trixie",
     "ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24",
     "ARG OXIBELT_RUST_BUILDER_STAGE=builder-native",
     "ARG OXIBELT_RISCV64_TOOLCHAIN_PLATFORM=linux/amd64",
@@ -1316,7 +1316,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   }
 
   for expected in [
-    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:271849e998ffce5776454bbf98c5dc21baafc854ff8e566197908d3aca9a81e8\"",
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:737ba17e6a2ffe14475b59861cd69f3d7152c29c75140bdbf6750befcfda7e6c\"",
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",
@@ -1531,7 +1531,7 @@ fn python_docker_helpers_track_the_supported_alpine_base() {
     let contents = fs::read_to_string(repo_root().join(dockerfile))
       .unwrap_or_else(|error| panic!("{dockerfile} should be readable: {error}"));
     assert!(
-      contents.starts_with("FROM python:3.14-alpine3.24\n"),
+      contents.starts_with("FROM python:3.14-alpine3.24@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc\n"),
       "{dockerfile} should use the supported Python 3.14 and Alpine 3.24 base"
     );
   }
@@ -1827,7 +1827,7 @@ fn source_structure_job_stays_independent() {
 
   let rust_install = exact_step(
     "Install Rust toolchain",
-    "rustup toolchain install 1.98.0 --profile minimal\nrustup default 1.98.0\n",
+    "rustup toolchain install 1.98.1 --profile minimal\nrustup default 1.98.1\n",
   );
   let boundary_unit_tests = exact_step(
     "Test Rust boundary tooling",
@@ -3181,7 +3181,7 @@ fn admin_audit_anchor_postgres_harness_is_dual_database_bounded_and_rootless() {
 
   for expected in [
     "set -euo pipefail",
-    "postgres:18-alpine",
+    "postgres:18.6-alpine3.24@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
     "local_container=",
     "authority_container=",
     "docker_publish_args=(--publish 127.0.0.1::5432)",
@@ -3596,8 +3596,8 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
     "runs-on: ubuntu-26.04",
     "contents: read",
     "name: Install Rust toolchain",
-    "rustup toolchain install 1.98.0 --profile minimal",
-    "rustup default 1.98.0",
+    "rustup toolchain install 1.98.1 --profile minimal",
+    "rustup default 1.98.1",
     "name: Install pinned Rust dependency tools",
     "cargo install cargo-audit --version 0.22.2 --locked",
     "cargo install cargo-deny --version 0.20.2 --locked",
@@ -3887,7 +3887,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "pnpm run typecheck",
     "name: Setup canonical Helm packager",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v4.2.4",
+    "version: v4.3.0",
     "pnpm run test",
     "name: Verify hosted release-tag ruleset core policy",
     "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'OxiBelt/OxiBelt'",
@@ -3946,7 +3946,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
   );
   for expected in [
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v4.2.4",
+    "version: v4.3.0",
   ] {
     assert!(
       helm_step.contains(expected),
@@ -3968,7 +3968,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     .collect::<Vec<_>>();
   assert_eq!(
     helm_inputs,
-    ["version: v4.2.4"],
+    ["version: v4.3.0"],
     "canonical Helm setup should receive only the exact version and no GitHub token"
   );
   let kubernetes_graduation = job_text
@@ -3999,9 +3999,9 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "TypeScript release tooling should install the canonical Helm packager exactly once"
   );
   assert_eq!(
-    job_text.matches("version: v4.2.4").count(),
+    job_text.matches("version: v4.3.0").count(),
     1,
-    "TypeScript release tooling should declare Helm 4.2.4 exactly once"
+    "TypeScript release tooling should declare Helm 4.3.0 exactly once"
   );
   for forbidden in [
     "contents: write",
@@ -4146,7 +4146,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "kubernetes: v1.37.0",
     "kubectl: v1.37.0",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v3.21.4",
+    "version: v3.22.0",
     "name: Validate Helm Admin configuration",
     "tests/scripts/check-helm-admin-config.sh",
     "name: Validate Helm base configuration",
@@ -4202,7 +4202,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "kind load docker-image",
     "gateway-api-l4-values.yaml",
     "registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66",
-    "redis_source_image=\"valkey/valkey:9-alpine@sha256:7bf043f6ff25ea50b557e2f6da8f76fce62775d766d943f076d1e66838099315\"",
+    "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b\"",
     "redis_source_digest=\"${redis_source_image##*@sha256:}\"",
     "redis_kind_image=\"docker.io/oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}\"",
     "redis_kind_image_created=0",
@@ -4610,8 +4610,8 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
     "name: Kubernetes supply-chain admission",
     "actions: read",
     "contents: read",
-    "rustup toolchain install 1.98.0 --profile minimal",
-    "version: v3.21.4",
+    "rustup toolchain install 1.98.1 --profile minimal",
+    "version: v3.22.0",
     "version: v0.33.0",
     "kubectl_version: v1.34.11",
     "name: oxibelt-dataplane-strict-alpine-musl-amd64-image",
@@ -5988,7 +5988,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "contents: read",
     "timeout-minutes: 35",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v3.21.4",
+    "version: v3.22.0",
     "name: Validate Helm Pod distribution and lifecycle",
     "tests/scripts/check-helm-pod-lifecycle.sh",
     "name: Validate Helm autoscaling configuration",
@@ -6141,15 +6141,15 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "timeout-minutes: 35",
     "cni: [calico, cilium]",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v3.21.4",
+    "version: v3.22.0",
     "name: Validate Helm NetworkPolicy configuration",
     "tests/scripts/check-helm-network-policy.sh",
     KIND_ACTION_RETRY_PIN,
     "version: v0.33.0",
     "kubectl_version: v1.34.11",
     "install_only: true",
-    "MINIKUBE_VERSION: v1.38.1",
-    "MINIKUBE_SHA256: 099477eaf248bcb5bcea8ce78a2898e93ac01461c35189da1848c3de82ecd22e",
+    "MINIKUBE_VERSION: v1.39.0",
+    "MINIKUBE_SHA256: b738496da01be06bbaf80c688f57ce25acd3849fbb518155f3a88e03ef555aa4",
     "curl --fail --location --retry 3 --retry-all-errors --retry-delay 2",
     "sha256sum --check --status",
     "tests/scripts/run-kubernetes-network-policy.sh --cni \"${{ matrix.cni }}\"",
@@ -6200,7 +6200,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "--pull=never",
     "registry.k8s.io/e2e-test-images/agnhost:2.61@sha256:",
     "quay.io/cilium/alpine-curl:v1.10.0@sha256:",
-    "registry.k8s.io/coredns/coredns:v1.14.6@sha256:",
+    "registry.k8s.io/coredns/coredns:v1.14.7@sha256:7efd3c635b03efd68c4e8398fc45f0d993d0e9ab016f72c1cefb0fd6d01aa286",
     "minikube delete --profile \"${profile_name}\"",
   ] {
     assert!(
@@ -6307,7 +6307,7 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
     "current Kubernetes compatibility should wait for all primary dependency gates"
   );
   for expected in [
-    "name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.2.4 compatibility",
+    "name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.3.0 compatibility",
     "runs-on: ubuntu-26.04",
     "contents: read",
     "timeout-minutes: 15",
@@ -6325,7 +6325,7 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
     "kube_version: 1.37.0",
     "kubectl: v1.37.0",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v4.2.4",
+    "version: v4.3.0",
     "tests/scripts/check-helm-admin-config.sh",
     "tests/scripts/check-helm-base-config.sh",
     "tests/scripts/check-helm-edge-secure-medium-profile.sh",
@@ -7300,7 +7300,7 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
     "RELEASE.2025-10-15T17-29-55Z",
     "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a",
     "45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841",
-    "golang:1.26.4-alpine3.22@sha256:727cfc3c40be55cd1bc9a4a059406b28a059857e3be752aa9d09531e12c20c56",
+    "golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125",
     "alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
   ] {
     assert!(
@@ -7421,7 +7421,7 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
     "oxibelt/pq-probe:ci",
     "oxibelt/protocol-probe:ci",
     "oxibelt/postgres:ci",
-    "valkey/valkey:9-alpine",
+    "valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b",
     "ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e",
     "oxibelt/coturn:ci",
   ] {
@@ -7474,7 +7474,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     "OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci",
     "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci",
     "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci",
-    "OXIBELT_REDIS_IMAGE: valkey/valkey:9-alpine",
+    "OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b",
     "OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci",
     "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
   ] {
@@ -8566,9 +8566,9 @@ fn mutation_testing_is_pinned_bounded_and_fail_closed() {
     "timeout-minutes: 120",
     "permissions:\n      contents: read",
     "persist-credentials: false",
-    "rustup toolchain install 1.98.0 --profile minimal",
-    "rustup default 1.98.0",
-    "cargo +1.98.0 install mewt --version 4.0.0 --locked",
+    "rustup toolchain install 1.98.1 --profile minimal",
+    "rustup default 1.98.1",
+    "cargo +1.98.1 install mewt --version 4.0.0 --locked",
     "tests/scripts/run-mutation-testing.sh",
     "if-no-files-found: warn",
   ] {

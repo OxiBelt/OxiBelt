@@ -12,7 +12,7 @@ import { ParseReleaseRef, ParseReleaseTag } from './docker_image_release.js'
 
 export const HelmChartReleasePlanSchemaVersion = 1
 export const HelmChartReleasePlanFilename = 'helm-chart-release-plan.json'
-export const CanonicalHelmPackagerVersion = 'v4.2.4'
+export const CanonicalHelmPackagerVersion = 'v4.3.0'
 export const MaximumGitChartFiles = 256
 export const MaximumGitChartFileBytes = 1024 * 1024
 export const MaximumGitChartBytes = 8 * 1024 * 1024
@@ -28,7 +28,7 @@ const FullRevision = /^[0-9a-f]{40}$/
 const Semver = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$/
 const Repository = 'OxiBelt/OxiBelt'
 const CanonicalOrigin = /^(?:https:\/\/github[.]com\/OxiBelt\/OxiBelt(?:[.]git)?|git@github[.]com:OxiBelt\/OxiBelt(?:[.]git)?|ssh:\/\/git@github[.]com\/OxiBelt\/OxiBelt(?:[.]git)?)$/
-const SupportedHelmVersion = /^v4[.]2[.]4(?:\+[0-9A-Za-z.-]+)?$/
+const SupportedHelmVersion = /^v4[.]3[.]0(?:\+[0-9A-Za-z.-]+)?$/
 
 type ChartSpec = {
   directory: string

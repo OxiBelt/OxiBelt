@@ -190,7 +190,7 @@ substituted registry evidence.
 
 The release workflow uses this helper to publish exactly the two versioned
 chart tags, build the bounded receipt, reproduce both packages with Helm
-v4.2.4, and attest the schema-v3 predicate through GitHub's attestation API.
+v4.3.0, and attest the schema-v3 predicate through GitHub's attestation API.
 The `github-workflow-authentication-required` receipt value remains a policy
 marker rather than proof by itself. Consumers must verify the exact GitHub
 repository, signer workflow, source ref and revision, subject digest,

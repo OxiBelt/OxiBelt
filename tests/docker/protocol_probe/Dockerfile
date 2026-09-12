@@ -1,4 +1,4 @@
-FROM rust:1.98.0-trixie AS builder
+FROM rust:1.98.1-trixie@sha256:737ba17e6a2ffe14475b59861cd69f3d7152c29c75140bdbf6750befcfda7e6c AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential clang cmake perl pkg-config && \
@@ -10,7 +10,7 @@ COPY Cargo.lock /src/Cargo.lock
 COPY src /src/src
 RUN cargo build --release --locked
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \

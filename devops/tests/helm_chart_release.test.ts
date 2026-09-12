@@ -102,13 +102,13 @@ function CloneWithOrigin(Origin: string): string {
   return Directory
 }
 
-test('accepts only Helm 4.2.4 as the canonical chart packager', () => {
-  Assert.equal(CanonicalHelmPackagerVersion, 'v4.2.4')
-  Assert.equal(IsSupportedHelmPackagerVersion('v4.2.4'), true)
-  Assert.equal(IsSupportedHelmPackagerVersion('v4.2.4+g0123456'), true)
-  Assert.equal(IsSupportedHelmPackagerVersion('v3.21.4'), false)
-  Assert.equal(IsSupportedHelmPackagerVersion('v4.2.3'), false)
-  Assert.equal(IsSupportedHelmPackagerVersion('v4.2.5'), false)
+test('accepts only Helm 4.3.0 as the canonical chart packager', () => {
+  Assert.equal(CanonicalHelmPackagerVersion, 'v4.3.0')
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.0'), true)
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.0+g0123456'), true)
+  Assert.equal(IsSupportedHelmPackagerVersion('v3.22.0'), false)
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.2.4'), false)
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.1'), false)
 })
 
 test('prepares an exact-ref, canonical plan and deterministic transformed archives without touching chart sources', () => {

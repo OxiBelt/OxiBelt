@@ -457,7 +457,7 @@ jobs:
       - name: Setup canonical Helm rebuild packager
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       - name: Enable hash-pinned pnpm and install verifier dependencies
         run: |
@@ -522,7 +522,7 @@ jobs:
             and .predicateType == "https://oxibelt.dev/attestations/helm-chart-rebuild/v3"
             and .receipt.source == {ref: $ref, revision: $revision, commitEpoch: .receipt.source.commitEpoch, releaseVersion: $version}
             and .comparison.exactPackageBytes == true
-            and .comparison.deterministicPackager == "v4.2.4"
+            and .comparison.deterministicPackager == "v4.3.0"
           ' "${predicate}" >/dev/null
           ORAS_BIN="${ORAS_BIN}" HELM_CHART_RELEASE_HELPER="$(pwd)/devops/sources/helm_chart_release.ts" \
             tests/scripts/verify-release-helm-chart.sh \
