@@ -166,9 +166,11 @@ static void *shared[THREADS];
 static pthread_barrier_t barrier;
 static atomic_int failed;
 
-static void mark_failed(void) {
+static void mark_failed(size_t line) {
+  fprintf(stderr, "allocator native sanitizer harness failed at line %zu\n", line);
   atomic_store_explicit(&failed, 1, memory_order_relaxed);
 }
+#define MARK_FAILED() mark_failed(__LINE__)
 
 static void wait_for_all(void) {
   int status = pthread_barrier_wait(&barrier);
@@ -179,10 +181,10 @@ static void *worker(void *arg) {
   uintptr_t id = (uintptr_t)arg;
   for (size_t it = 0; it < ITERATIONS; it++) {
     unsigned char *owned = mi_zalloc_aligned(BYTES, 4096);
-    if (!owned || ((uintptr_t)owned % 4096)) mark_failed();
+    if (!owned || ((uintptr_t)owned % 4096)) MARK_FAILED();
     if (owned) {
       for (size_t i = 0; i < BYTES; i++) {
-        if (owned[i] != 0) mark_failed();
+        if (owned[i] != 0) MARK_FAILED();
         owned[i] = (unsigned char)(id + i);
       }
     }
@@ -191,16 +193,16 @@ static void *worker(void *arg) {
 
     unsigned char *foreign = shared[(id + THREADS - 1) % THREADS];
     if (!foreign) {
-      mark_failed();
+      MARK_FAILED();
     } else {
       unsigned char *grown = mi_realloc_aligned(foreign, BYTES * 2, 4096);
       if (!grown) {
-        mark_failed();
+        MARK_FAILED();
         mi_free(foreign);
       } else {
         uintptr_t foreign_id = (id + THREADS - 1) % THREADS;
         for (size_t i = 0; i < BYTES; i++) {
-          if (grown[i] != (unsigned char)(foreign_id + i)) mark_failed();
+          if (grown[i] != (unsigned char)(foreign_id + i)) MARK_FAILED();
         }
         mi_free(grown);
       }
@@ -213,13 +215,16 @@ static void *worker(void *arg) {
 
 int main(void) {
   pthread_t threads[THREADS];
+  unsigned char *exact = mi_malloc(17);
+  if (!exact || mi_usable_size(exact) != 17) MARK_FAILED();
+  mi_free(exact);
   if (pthread_barrier_init(&barrier, NULL, THREADS) != 0) return 1;
   for (uintptr_t i = 0; i < THREADS; i++) {
     if (pthread_create(&threads[i], NULL, worker, (void *)i) != 0) abort();
   }
   for (size_t i = 0; i < THREADS; i++) {
     void *result = NULL;
-    if (pthread_join(threads[i], &result) != 0 || result != NULL) mark_failed();
+    if (pthread_join(threads[i], &result) != 0 || result != NULL) MARK_FAILED();
   }
   pthread_barrier_destroy(&barrier);
   if (atomic_load_explicit(&failed, memory_order_relaxed)) {
@@ -230,7 +235,7 @@ int main(void) {
   return 0;
 }
 EOF
-"$compiler" -std=c11 -D_XOPEN_SOURCE=700 -Wall -Wextra -Werror -I "$repo_root/source/third_party/mimalloc-3.5.1/include" -fsanitize="$native_sanitizers" -fno-omit-frame-pointer "$evidence_dir/allocator-stress.c" "$archive" -pthread -o "$evidence_dir/allocator-stress"
+"$compiler" -std=c11 -D_XOPEN_SOURCE=700 -Wall -Wextra -Werror -I "$repo_root/source/third_party/mimalloc-3.5.2/include" -fsanitize="$native_sanitizers" -fno-omit-frame-pointer "$evidence_dir/allocator-stress.c" "$archive" -pthread -o "$evidence_dir/allocator-stress"
 ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1}" UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}" TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:second_deadlock_stack=1}" timeout 60s "$evidence_dir/allocator-stress" > "$evidence_dir/harness.stdout" 2> "$evidence_dir/harness.stderr"
 
 # This optional result is deliberately separate: it checks the Rust binding but

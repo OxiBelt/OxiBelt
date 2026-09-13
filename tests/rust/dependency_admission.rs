@@ -1136,21 +1136,30 @@ fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
     "target_arch == \"x86_64\"",
     "target_pointer_width == \"64\"",
     "matches!(target_env.as_str(), \"gnu\" | \"musl\")",
-    "third_party/mimalloc-3.5.1",
+    "third_party/mimalloc-3.5.2",
     "src/static.c",
     "build.define(\"MI_SECURE\", \"4\")",
     "build.define(\"MI_DEBUG\", \"0\")",
+    "build.define(\"MI_PADDING\", \"1\")",
+    "build.define(\"MI_STATS\", \"1\")",
+    "build.define(\"MI_PROFILE\", \"1\")",
     "build.flag(\"-ftls-model=initial-exec\")",
     "format!(\"{build_kind}_CFLAGS\")",
+    "format!(\"{build_kind}_CC\")",
     "CC_SHELL_ESCAPED_FLAGS",
     "changes_preprocessor_input",
     "\"--CONFIG\"",
+    "\"-IQUOTE\"",
     "\"-SPECS\"",
     "normalized.contains(\"TLS-MODEL\")",
-    "OXIBELT_MIMALLOC_TRANSLATION_UNIT",
+    "OXIBELT_MIMALLOC_CONFIGURATION_GUARDS",
     "#if !defined(MI_SECURE) || MI_SECURE != 4",
     "#if !defined(MI_DEBUG) || MI_DEBUG != 0",
-    "build.file(write_guarded_translation_unit())",
+    "#if !defined(MI_PADDING) || MI_PADDING != 1",
+    "#if !defined(MI_STATS) || MI_STATS != 1",
+    "#if !defined(MI_PROFILE) || MI_PROFILE != 1",
+    ".canonicalize()",
+    "build.file(write_guarded_translation_unit(&native_root))",
     "build.compile(\"oxibelt_mimalloc\")",
     "audit_native_archive()",
     "Command::new(\"nm\")",
@@ -1161,20 +1170,21 @@ fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
     assert!(build.contains(required), "build script lost {required}");
   }
   let translation_unit_include = build
-    .find("#include \"src/static.c\"")
-    .expect("the guarded translation unit must include the reviewed native source");
-  let override_guards = build
-    .match_indices("#if defined(MI_MALLOC_OVERRIDE)")
+    .find("include.as_str()")
+    .expect("the guarded translation unit must insert the canonical reviewed native source");
+  let configuration_guards = build
+    .match_indices("OXIBELT_MIMALLOC_CONFIGURATION_GUARDS")
     .map(|(index, _)| index)
     .collect::<Vec<_>>();
   assert_eq!(
-    override_guards.len(),
-    2,
-    "the guarded translation unit must check allocator override state before and after the native source"
+    configuration_guards.len(),
+    3,
+    "the guarded translation unit must inject its configuration checks before and after the native source"
   );
   assert!(
-    override_guards[0] < translation_unit_include && translation_unit_include < override_guards[1],
-    "the native source must remain enclosed by allocator override guards"
+    configuration_guards[1] < translation_unit_include
+      && translation_unit_include < configuration_guards[2],
+    "the canonical native source must remain enclosed by configuration guards"
   );
   assert!(
     !build.contains("build.define(\"MI_MALLOC_OVERRIDE\"")
@@ -1189,23 +1199,13 @@ fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
   any(target_env = "gnu", target_env = "musl")
 ))]
 #[test]
-fn allocator_native_archive_rejects_transient_override_injection() {
+fn allocator_native_build_uses_canonical_translation_unit() {
   let temporary = tempfile::tempdir().expect("temporary allocator build root");
   let shadow_source = temporary.path().join("shadow/src");
   fs::create_dir_all(&shadow_source).expect("create shadow source directory");
-  let native_source = repo_root()
-    .join("source/third_party/mimalloc-3.5.1/src/static.c")
-    .canonicalize()
-    .expect("canonical native translation unit");
-  let native_source = native_source
-    .to_str()
-    .expect("native source path must be valid UTF-8")
-    .replace('"', "\\\"");
   fs::write(
     shadow_source.join("static.c"),
-    format!(
-      "#define MI_MALLOC_OVERRIDE\n#include \"{native_source}\"\n#undef MI_MALLOC_OVERRIDE\n"
-    ),
+    "#error shadow translation unit must not replace the reviewed native source\n",
   )
   .expect("write shadow translation unit");
 
@@ -1233,13 +1233,96 @@ fn allocator_native_archive_rejects_transient_override_injection() {
     String::from_utf8_lossy(&output.stderr)
   );
   assert!(
-    !output.status.success(),
-    "transient allocator override injection unexpectedly built successfully"
+    output.status.success(),
+    "shadow translation unit displaced the canonical source or the audited build failed: {diagnostics}"
+  );
+}
+
+#[cfg(all(
+  target_os = "linux",
+  target_arch = "x86_64",
+  any(target_env = "gnu", target_env = "musl")
+))]
+#[test]
+fn allocator_native_build_rejects_unreviewed_header_search() {
+  let temporary = tempfile::tempdir().expect("temporary allocator build root");
+  let shadow_include = temporary.path().join("shadow");
+  fs::create_dir_all(&shadow_include).expect("create shadow include directory");
+  fs::write(
+    shadow_include.join("mimalloc.h"),
+    "#error unreviewed header must not replace the reviewed native header\n",
+  )
+  .expect("write shadow header");
+
+  let output = std::process::Command::new(env!("CARGO"))
+    .current_dir(repo_root())
+    .env("CARGO_TARGET_DIR", temporary.path().join("target"))
+    .env("CC", format!("cc -iquote{}", shadow_include.display()))
+    .args([
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "oxibelt-allocator",
+      "--features",
+      "native-mimalloc",
+    ])
+    .output()
+    .expect("run adversarial allocator build");
+  let diagnostics = format!(
+    "{}\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
   );
   assert!(
-    diagnostics
-      .contains("native allocator archive must not define process allocator symbol `malloc`"),
-    "adversarial build failed without the archive-symbol rejection: {diagnostics}"
+    !output.status.success(),
+    "unreviewed header search path unexpectedly built successfully"
+  );
+  assert!(
+    diagnostics.contains("CC must not override or inject mimalloc configuration"),
+    "adversarial build failed without the header-search rejection: {diagnostics}"
+  );
+  assert!(
+    !diagnostics.contains("unreviewed header must not replace"),
+    "the compiler consumed the unreviewed sentinel header before rejecting the build"
+  );
+}
+
+#[cfg(all(
+  target_os = "linux",
+  target_arch = "x86_64",
+  any(target_env = "gnu", target_env = "musl")
+))]
+#[test]
+fn allocator_native_build_rejects_padding_configuration_override() {
+  let temporary = tempfile::tempdir().expect("temporary allocator build root");
+  let output = std::process::Command::new(env!("CARGO"))
+    .current_dir(repo_root())
+    .env("CARGO_TARGET_DIR", temporary.path().join("target"))
+    .env("CFLAGS", "-DMI_PADDING=0")
+    .args([
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "oxibelt-allocator",
+      "--features",
+      "native-mimalloc",
+    ])
+    .output()
+    .expect("run adversarial allocator build");
+  let diagnostics = format!(
+    "{}\n{}",
+    String::from_utf8_lossy(&output.stdout),
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    !output.status.success(),
+    "padding configuration override unexpectedly built successfully"
+  );
+  assert!(
+    diagnostics.contains("CFLAGS must not override or inject mimalloc configuration"),
+    "adversarial build failed without the configuration rejection: {diagnostics}"
   );
 }
 
@@ -1293,16 +1376,16 @@ fn allocator_sanitizer_runner_rejects_glibc_compiler_for_musl_evidence() {
 
 #[test]
 fn allocator_native_source_is_byte_locked_and_governed() {
-  const NATIVE_PATH: &str = "source/third_party/mimalloc-3.5.1";
-  const UPSTREAM_MANIFEST: &str = "source/third_party/mimalloc-3.5.1/UPSTREAM-MANIFEST.sha256";
-  const NATIVE_MANIFEST: &str = "source/third_party/mimalloc-3.5.1/NATIVE-MANIFEST.sha256";
-  const PROVENANCE: &str = "source/third_party/mimalloc-3.5.1/SOURCE-PROVENANCE.json";
-  const README: &str = "source/third_party/mimalloc-3.5.1/README.OXIBELT.md";
+  const NATIVE_PATH: &str = "source/third_party/mimalloc-3.5.2";
+  const UPSTREAM_MANIFEST: &str = "source/third_party/mimalloc-3.5.2/UPSTREAM-MANIFEST.sha256";
+  const NATIVE_MANIFEST: &str = "source/third_party/mimalloc-3.5.2/NATIVE-MANIFEST.sha256";
+  const PROVENANCE: &str = "source/third_party/mimalloc-3.5.2/SOURCE-PROVENANCE.json";
+  const README: &str = "source/third_party/mimalloc-3.5.2/README.OXIBELT.md";
   const BINDING: &str = "source/crates/oxibelt-allocator/src/lib.rs";
 
   assert_eq!(
     read(".gitattributes"),
-    "source/third_party/mimalloc-3.5.1/** -whitespace\n",
+    "source/third_party/mimalloc-3.5.2/** -whitespace\n",
     "vendored upstream whitespace policy changed"
   );
 
@@ -1313,39 +1396,43 @@ fn allocator_native_source_is_byte_locked_and_governed() {
   assert_eq!(native_sources.len(), 1, "native source inventory changed");
   let native = &native_sources[0];
   assert_eq!(native["id"], "mimalloc");
-  assert_eq!(native["version"], "3.5.1");
+  assert_eq!(native["version"], "3.5.2");
   assert_eq!(native["path"], NATIVE_PATH);
   assert_eq!(
     native["upstreamRepository"],
     "https://github.com/microsoft/mimalloc"
   );
-  assert_eq!(native["upstreamVersion"], "3.5.1");
+  assert_eq!(native["upstreamVersion"], "3.5.2");
   assert_eq!(
     native["upstreamRevision"],
-    "34fbd7e7cd4627424490afe19b20f8066bfc537d"
+    "636510a36ab743f76a582067142f29d15b024c90"
   );
   assert_eq!(
     native["acquisition"]["method"],
     "git archive from the exact upstream annotated tag"
   );
-  assert_eq!(native["acquisition"]["tag"], "v3.5.1");
+  assert_eq!(native["acquisition"]["tag"], "v3.5.2");
   assert_eq!(
     native["acquisition"]["tagObject"],
-    "8e05dab9b9e38aa92ab6a6e137baefeaa9e45e40"
+    "4e3a61669be12515da74a0208d4f58bd920931ab"
   );
   assert_eq!(native["acquisition"]["tagSignature"], "absent");
   assert_eq!(native["acquisition"]["dependency"], false);
   assert_eq!(
     native["sourceScope"],
-    "67 upstream source files plus 4 OxiBelt metadata files (71 total); exact unsigned tag and no patches; independent safety review and performance qualification deferred"
+    "70 upstream source files plus 4 OxiBelt metadata files (74 total); exact unsigned tag and no patches; scoped native security review completed; performance qualification deferred"
   );
   assert_eq!(native["patches"], serde_json::json!([]));
-  assert_eq!(native["provenanceReviewedOn"], "2026-09-12");
-  assert_eq!(native["independentNativeSafetyReview"], "deferred");
+  assert_eq!(native["provenanceReviewedOn"], "2026-09-13");
+  assert_eq!(native["independentNativeSafetyReview"], "scoped-2026-09-13");
   assert_eq!(native["performanceQualification"], "deferred");
   assert!(native.get("reviewedOn").is_none());
   assert_eq!(native["license"], "MIT");
   assert_eq!(native["secureLevel"], 4);
+  assert_eq!(native["debugLevel"], 0);
+  assert_eq!(native["padding"], true);
+  assert_eq!(native["statsLevel"], 1);
+  assert_eq!(native["profileLevel"], 1);
   assert_eq!(native["allocatorOverride"], false);
   assert_eq!(
     native["targets"],
@@ -1373,7 +1460,7 @@ fn allocator_native_source_is_byte_locked_and_governed() {
 
   let vendor_root = repo_root().join(NATIVE_PATH);
   let files = hash_regular_tree(&vendor_root);
-  assert_eq!(files.len(), 71, "governed native source file set changed");
+  assert_eq!(files.len(), 74, "governed native source file set changed");
   assert_eq!(
     sha256_hex(&fs::read(repo_root().join(UPSTREAM_MANIFEST)).unwrap()),
     native["upstreamManifestSha256"]
@@ -1397,8 +1484,8 @@ fn allocator_native_source_is_byte_locked_and_governed() {
 
   let upstream = checksum_manifest(UPSTREAM_MANIFEST);
   let selected = checksum_manifest(NATIVE_MANIFEST);
-  assert_eq!(upstream.len(), 67, "upstream native manifest changed");
-  assert_eq!(selected.len(), 67, "selected native manifest changed");
+  assert_eq!(upstream.len(), 70, "upstream native manifest changed");
+  assert_eq!(selected.len(), 70, "selected native manifest changed");
   assert_eq!(
     upstream.keys().collect::<Vec<_>>(),
     selected.keys().collect::<Vec<_>>(),
@@ -1459,6 +1546,12 @@ fn allocator_native_source_is_byte_locked_and_governed() {
     native["acquisition"]["method"]
   );
   assert_eq!(provenance["acquisition"]["dependency"], false);
+  assert_eq!(provenance["selectedBuild"]["secureLevel"], 4);
+  assert_eq!(provenance["selectedBuild"]["debugLevel"], 0);
+  assert_eq!(provenance["selectedBuild"]["padding"], true);
+  assert_eq!(provenance["selectedBuild"]["statsLevel"], 1);
+  assert_eq!(provenance["selectedBuild"]["profileLevel"], 1);
+  assert_eq!(provenance["selectedBuild"]["allocatorOverride"], false);
   assert_eq!(native["patches"], serde_json::json!([]));
   assert!(
     provenance["patches"]

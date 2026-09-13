@@ -78,30 +78,30 @@
     "nativeSources": [
       {
         "id": "mimalloc",
-        "version": "3.5.1",
-        "path": "source/third_party/mimalloc-3.5.1",
+        "version": "3.5.2",
+        "path": "source/third_party/mimalloc-3.5.2",
         "upstreamRepository": "https://github.com/microsoft/mimalloc",
-        "upstreamVersion": "3.5.1",
-        "upstreamRevision": "34fbd7e7cd4627424490afe19b20f8066bfc537d",
-        "sourceScope": "67 upstream source files plus 4 OxiBelt metadata files (71 total); exact unsigned tag and no patches; independent safety review and performance qualification deferred",
+        "upstreamVersion": "3.5.2",
+        "upstreamRevision": "636510a36ab743f76a582067142f29d15b024c90",
+        "sourceScope": "70 upstream source files plus 4 OxiBelt metadata files (74 total); exact unsigned tag and no patches; scoped native security review completed; performance qualification deferred",
         "acquisition": {
           "method": "git archive from the exact upstream annotated tag",
-          "tag": "v3.5.1",
-          "tagObject": "8e05dab9b9e38aa92ab6a6e137baefeaa9e45e40",
+          "tag": "v3.5.2",
+          "tagObject": "4e3a61669be12515da74a0208d4f58bd920931ab",
           "tagSignature": "absent",
           "dependency": false
         },
         "patches": [],
-        "provenanceReviewedOn": "2026-09-12",
-        "independentNativeSafetyReview": "deferred",
+        "provenanceReviewedOn": "2026-09-13",
+        "independentNativeSafetyReview": "scoped-2026-09-13",
         "performanceQualification": "deferred",
-        "upstreamManifestSha256": "aef881255bc0e810379341d201702314d21f605b32e684f64f90fbfc86183b8d",
-        "nativeManifestSha256": "aef881255bc0e810379341d201702314d21f605b32e684f64f90fbfc86183b8d",
-        "sourceProvenanceSha256": "958f0fd6420dea25b3a505ffb8c8dfa72c4aabd3260b7c47da6509691affaa3e",
-        "readmeSha256": "b42d8423dd00970fcf3178ff728b35b4c2201c4875499aca84b60c3fe86e2a65",
+        "upstreamManifestSha256": "c66333ca3228ba54326e8400d01faecb4e8655c1e109ab455edcf553445dd111",
+        "nativeManifestSha256": "c66333ca3228ba54326e8400d01faecb4e8655c1e109ab455edcf553445dd111",
+        "sourceProvenanceSha256": "1309be6775a372ef1d99bb42ef69b2bdfeb96524de73223fcd90422818d89a4d",
+        "readmeSha256": "76dc3c3402df8315a97a10e23b70cc0daaf261dc94330a830d6f18cc2bd3bc0b",
         "buildIntegration": {
           "path": "source/crates/oxibelt-allocator/build.rs",
-          "sha256": "2c93618fb679c994e8801649d5ffbaebe53d3ed80f3d6a53badb8e7a04f5da72"
+          "sha256": "01a6df92d836846401548183f74f4e4d5c592ee38e7a9787e5a897e7e6311511"
         },
         "rustBinding": {
           "package": "oxibelt-allocator",
@@ -120,6 +120,10 @@
           "x86_64-unknown-linux-musl"
         ],
         "secureLevel": 4,
+        "debugLevel": 0,
+        "padding": true,
+        "statsLevel": 1,
+        "profileLevel": 1,
         "allocatorOverride": false,
         "maintenanceReviewIntervalDays": 90,
         "upstreamUpdateCriteria": "At every Microsoft mimalloc release and at least once per review interval, review the selected native source, preserve the private binding and secure build contract, remove superseded backports, and rerun dependency admission plus allocator qualification before updating.",

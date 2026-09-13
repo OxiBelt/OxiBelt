@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "component": {
+    "name": "mimalloc",
+    "version": "3.5.2",
+    "path": "source/third_party/mimalloc-3.5.2"
+  },
+  "upstream": {
+    "repository": "https://github.com/microsoft/mimalloc",
+    "tag": "v3.5.2",
+    "tagObject": "4e3a61669be12515da74a0208d4f58bd920931ab",
+    "tagSignature": "absent",
+    "revision": "636510a36ab743f76a582067142f29d15b024c90"
+  },
+  "acquisition": {
+    "method": "git archive from the exact upstream annotated tag",
+    "dependency": false
+  },
+  "patches": [],
+  "selectedBuild": {
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl"
+    ],
+    "pointerWidth": 64,
+    "translationUnit": "src/static.c",
+    "secureLevel": 4,
+    "debugLevel": 0,
+    "padding": true,
+    "statsLevel": 1,
+    "profileLevel": 1,
+    "allocatorOverride": false,
+    "archive": "oxibelt_mimalloc"
+  },
+  "buildIntegration": {
+    "path": "source/crates/oxibelt-allocator/build.rs",
+    "sha256": "01a6df92d836846401548183f74f4e4d5c592ee38e7a9787e5a897e7e6311511"
+  },
+  "rustBinding": {
+    "package": "oxibelt-allocator",
+    "path": "source/crates/oxibelt-allocator/src/lib.rs",
+    "rawVisibility": "private",
+    "adapterVisibility": "public-safe-type",
+    "ffiFunctions": [
+      "mi_malloc_aligned",
+      "mi_zalloc_aligned",
+      "mi_realloc_aligned",
+      "mi_free"
+    ],
+    "derivedFrom": "https://github.com/purpleprotocol/mimalloc_rust",
+    "license": "MIT"
+  },
+  "manifests": {
+    "upstream": {
+      "path": "UPSTREAM-MANIFEST.sha256",
+      "entries": 70,
+      "sha256": "c66333ca3228ba54326e8400d01faecb4e8655c1e109ab455edcf553445dd111"
+    },
+    "native": {
+      "path": "NATIVE-MANIFEST.sha256",
+      "entries": 70,
+      "sha256": "c66333ca3228ba54326e8400d01faecb4e8655c1e109ab455edcf553445dd111"
+    }
+  },
+  "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/183"
+}

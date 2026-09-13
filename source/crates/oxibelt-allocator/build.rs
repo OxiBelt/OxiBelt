@@ -1,5 +1,5 @@
 #[cfg(feature = "native-mimalloc")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "native-mimalloc")]
 use std::{env, fs, process::Command};
 
@@ -65,7 +65,7 @@ const FORBIDDEN_PROCESS_ALLOCATOR_SYMBOLS: &[&str] = &[
 ];
 
 #[cfg(feature = "native-mimalloc")]
-const OXIBELT_MIMALLOC_TRANSLATION_UNIT: &str = r#"#if defined(MI_MALLOC_OVERRIDE)
+const OXIBELT_MIMALLOC_CONFIGURATION_GUARDS: &str = r#"#if defined(MI_MALLOC_OVERRIDE)
 #error "OxiBelt's private mimalloc binding must not override the process C allocator"
 #endif
 #if !defined(MI_SECURE) || MI_SECURE != 4
@@ -74,17 +74,14 @@ const OXIBELT_MIMALLOC_TRANSLATION_UNIT: &str = r#"#if defined(MI_MALLOC_OVERRID
 #if !defined(MI_DEBUG) || MI_DEBUG != 0
 #error "OxiBelt's private mimalloc binding requires MI_DEBUG=0"
 #endif
-
-#include "src/static.c"
-
-#if defined(MI_MALLOC_OVERRIDE)
-#error "OxiBelt's private mimalloc binding must not override the process C allocator"
+#if !defined(MI_PADDING) || MI_PADDING != 1
+#error "OxiBelt's private mimalloc binding requires MI_PADDING=1"
 #endif
-#if !defined(MI_SECURE) || MI_SECURE != 4
-#error "OxiBelt's private mimalloc binding requires MI_SECURE=4"
+#if !defined(MI_STATS) || MI_STATS != 1
+#error "OxiBelt's private mimalloc binding requires MI_STATS=1"
 #endif
-#if !defined(MI_DEBUG) || MI_DEBUG != 0
-#error "OxiBelt's private mimalloc binding requires MI_DEBUG=0"
+#if !defined(MI_PROFILE) || MI_PROFILE != 1
+#error "OxiBelt's private mimalloc binding requires MI_PROFILE=1"
 #endif
 "#;
 
@@ -104,17 +101,23 @@ fn reject_native_configuration_overrides() {
   let host = required_env("HOST");
   let target_normalized = target.replace(['-', '.'], "_");
   let build_kind = if target == host { "HOST" } else { "TARGET" };
-  let names = [
+  let flag_names = [
     format!("CFLAGS_{target}"),
     format!("CFLAGS_{target_normalized}"),
     format!("{build_kind}_CFLAGS"),
     "CFLAGS".to_owned(),
   ];
+  let compiler_names = [
+    format!("CC_{target}"),
+    format!("CC_{target_normalized}"),
+    format!("{build_kind}_CC"),
+    "CC".to_owned(),
+  ];
   println!("cargo:rerun-if-env-changed=CC_SHELL_ESCAPED_FLAGS");
   let shell_escaped_flags = env::var_os("CC_SHELL_ESCAPED_FLAGS")
     .is_some_and(|value| !matches!(value.to_str(), Some("" | "0" | "false" | "no")));
 
-  for name in names {
+  for name in flag_names.into_iter().chain(compiler_names) {
     println!("cargo:rerun-if-env-changed={name}");
     let Some(value) = env::var_os(&name) else {
       continue;
@@ -137,6 +140,7 @@ fn reject_native_configuration_overrides() {
         "-INCLUDE",
         "--INCLUDE",
         "-IMACROS",
+        "-IQUOTE",
         "-WP,",
         "-XPREPROCESSOR",
         "-UNDEF",
@@ -162,9 +166,25 @@ fn reject_native_configuration_overrides() {
 }
 
 #[cfg(feature = "native-mimalloc")]
-fn write_guarded_translation_unit() -> PathBuf {
+fn write_guarded_translation_unit(native_root: &Path) -> PathBuf {
+  let native_source = native_root
+    .join("src/static.c")
+    .canonicalize()
+    .unwrap_or_else(|error| panic!("failed to resolve canonical mimalloc source: {error}"));
+  let native_source = native_source
+    .to_str()
+    .unwrap_or_else(|| panic!("{} must be valid UTF-8", native_source.display()))
+    .replace('\\', "\\\\")
+    .replace('"', "\\\"");
+  let include = format!("#include \"{native_source}\"");
+  let source = [
+    OXIBELT_MIMALLOC_CONFIGURATION_GUARDS,
+    include.as_str(),
+    OXIBELT_MIMALLOC_CONFIGURATION_GUARDS,
+  ]
+  .join("\n\n");
   let path = PathBuf::from(required_env("OUT_DIR")).join("oxibelt-mimalloc.c");
-  fs::write(&path, OXIBELT_MIMALLOC_TRANSLATION_UNIT)
+  fs::write(&path, source)
     .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
   path
 }
@@ -227,19 +247,22 @@ fn compile_mimalloc() {
   reject_native_configuration_overrides();
 
   let manifest_dir = PathBuf::from(required_env("CARGO_MANIFEST_DIR"));
-  let native_root = manifest_dir.join("../../third_party/mimalloc-3.5.1");
+  let native_root = manifest_dir.join("../../third_party/mimalloc-3.5.2");
   println!("cargo:rerun-if-changed={}", native_root.display());
 
   let mut build = cc::Build::new();
   build.include(&native_root);
   build.include(native_root.join("include"));
   build.include(native_root.join("src"));
-  build.file(write_guarded_translation_unit());
+  build.file(write_guarded_translation_unit(&native_root));
   build.flag("-Wno-error=date-time");
   build.flag("-ftls-model=initial-exec");
   build.flag("-mno-omit-leaf-frame-pointer");
   build.define("MI_SECURE", "4");
   build.define("MI_DEBUG", "0");
+  build.define("MI_PADDING", "1");
+  build.define("MI_STATS", "1");
+  build.define("MI_PROFILE", "1");
   if required_env("DEBUG") == "false" {
     build.define("MI_BUILD_RELEASE", None);
     build.define("NDEBUG", None);

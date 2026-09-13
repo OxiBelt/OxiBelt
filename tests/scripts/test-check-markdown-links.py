@@ -160,7 +160,7 @@ class MarkdownContractTests(unittest.TestCase):
         self.assertTrue(any("malformed percent encoding" in message for message in messages))
 
     def test_skips_only_exact_imported_mimalloc_markdown_paths(self) -> None:
-        vendor_root = "source/third_party/mimalloc-3.5.1"
+        vendor_root = "source/third_party/mimalloc-3.5.2"
         imported = f"{vendor_root}/contrib/vcpkg/readme.md"
         self.write(imported, "[omitted upstream file](../../test/CMakeLists.txt)\n")
         self.write(
@@ -189,11 +189,11 @@ class MarkdownContractTests(unittest.TestCase):
     def test_reports_only_the_markdown_files_it_scans(self) -> None:
         self.write("README.md", "# Repository README\n")
         self.write(
-            "source/third_party/mimalloc-3.5.1/readme.md",
+            "source/third_party/mimalloc-3.5.2/readme.md",
             "[omitted upstream file](bin)\n",
         )
         self.write(
-            "source/third_party/mimalloc-3.5.1/maintainer-notes.md",
+            "source/third_party/mimalloc-3.5.2/maintainer-notes.md",
             "# Maintainer notes\n",
         )
         output = io.StringIO()
@@ -205,7 +205,7 @@ class MarkdownContractTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "validated 2 of 3 tracked Markdown files\n")
 
     def test_first_party_links_to_exempt_vendor_markdown_still_validate_targets(self) -> None:
-        vendor_root = "source/third_party/mimalloc-3.5.1"
+        vendor_root = "source/third_party/mimalloc-3.5.2"
         tracked_vendor_markdown = f"{vendor_root}/readme.md"
         untracked_vendor_markdown = f"{vendor_root}/SECURITY.md"
         self.write(tracked_vendor_markdown, "## ETW\n")
@@ -219,9 +219,9 @@ class MarkdownContractTests(unittest.TestCase):
             first_party_source,
             "\n".join(
                 [
-                    "[valid anchor](../source/third_party/mimalloc-3.5.1/readme.md#etw)",
-                    "[missing anchor](../source/third_party/mimalloc-3.5.1/readme.md#missing)",
-                    "[untracked target](../source/third_party/mimalloc-3.5.1/SECURITY.md#untracked-vendor-target)",
+                    "[valid anchor](../source/third_party/mimalloc-3.5.2/readme.md#etw)",
+                    "[missing anchor](../source/third_party/mimalloc-3.5.2/readme.md#missing)",
+                    "[untracked target](../source/third_party/mimalloc-3.5.2/SECURITY.md#untracked-vendor-target)",
                 ]
             )
             + "\n",

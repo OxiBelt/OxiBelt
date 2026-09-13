@@ -6,11 +6,11 @@ repository's Apache-2.0 license.
 
 ## Microsoft mimalloc
 
-The optional allocator experiment vendors Microsoft mimalloc 3.5.1 native
-source under `source/third_party/mimalloc-3.5.1`. It is Copyright (c)
+The optional allocator experiment vendors Microsoft mimalloc 3.5.2 native
+source under `source/third_party/mimalloc-3.5.2`. It is Copyright (c)
 2018-2026 Microsoft Corporation, Daan Leijen, and licensed under the MIT
 License. The complete license is retained at
-`source/third_party/mimalloc-3.5.1/LICENSE`.
+`source/third_party/mimalloc-3.5.2/LICENSE`.
 
 ## purpleprotocol/mimalloc_rust
 
