@@ -109,7 +109,7 @@ pub(super) fn parse_route_policy_ref(filter: &Value) -> anyhow::Result<ParsedRou
 
 pub(super) fn forwarding_headers(
   policies: &BTreeMap<ObjectKey, RoutePolicyDecision>,
-) -> HashSet<String> {
+) -> oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet {
   let mut headers = policies
     .values()
     .filter_map(|decision| match decision {
@@ -123,7 +123,7 @@ pub(super) fn forwarding_headers(
     headers.insert("client-cert".to_string());
     headers.insert("client-cert-chain".to_string());
   }
-  headers
+  oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet::new(headers.iter().map(String::as_str))
 }
 
 pub(super) fn apply_route_policy(
@@ -398,7 +398,10 @@ fn parse_client_certificate_forwarding(
   if oxibelt_control_protocol::is_reserved_client_certificate_forwarding_header(&header) {
     bail!("spec.clientCertificateForwarding.header {header} is reserved");
   }
-  if header == "client-cert-chain" {
+  if oxibelt_control_protocol::hyphen_underscore_header_names_equivalent(
+    &header,
+    "client-cert-chain",
+  ) {
     bail!("spec.clientCertificateForwarding.header client-cert-chain is forbidden");
   }
   let format = match value.get("format") {
@@ -412,7 +415,9 @@ fn parse_client_certificate_forwarding(
     "rfc9440" => ClientCertificateForwardFormat::Rfc9440,
     _ => bail!("spec.clientCertificateForwarding.format must be url_encoded_pem or rfc9440"),
   };
-  if header == "client-cert" && format != ClientCertificateForwardFormat::Rfc9440 {
+  if oxibelt_control_protocol::hyphen_underscore_header_names_equivalent(&header, "client-cert")
+    && format != ClientCertificateForwardFormat::Rfc9440
+  {
     bail!("spec.clientCertificateForwarding.header client-cert requires format rfc9440");
   }
   Ok(ClientCertificateForwarding { header, format })

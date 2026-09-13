@@ -1447,7 +1447,8 @@ protocol_probe_client() {
   local authority="$2"
   local path="$3"
   local expect_status="$4"
-  protocol_probe_client_with_sni_and_ca "${protocol}" "proxy" "${authority}" "${path}" "${expect_status}" "${cert_dir}/fullchain.pem"
+  shift 4
+  protocol_probe_client_with_sni_and_ca "${protocol}" "proxy" "${authority}" "${path}" "${expect_status}" "${cert_dir}/fullchain.pem" "$@"
 }
 
 protocol_probe_client_with_client_identity() {
@@ -1455,13 +1456,15 @@ protocol_probe_client_with_client_identity() {
   local authority="$2"
   local path="$3"
   local expect_status="$4"
+  shift 4
   protocol_probe_client_with_explicit_identity \
     "${protocol}" \
     "${authority}" \
     "${path}" \
     "${expect_status}" \
     "${client_tls_dir}/client.pem" \
-    "${client_tls_dir}/client.key"
+    "${client_tls_dir}/client.key" \
+    "$@"
 }
 
 protocol_probe_client_with_explicit_identity() {
@@ -1519,9 +1522,18 @@ protocol_probe_client_with_explicit_identity() {
 protocol_probe_http1_client_with_client_identity() {
   local authority="$1"
   local path="$2"
-  local request_base64
+  shift 2
+  local request_base64 header
   local client_container output status
-  request_base64="$(printf 'GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n' "${path}" "${authority}" | base64 -w 0)"
+  request_base64="$(
+    {
+      printf 'GET %s HTTP/1.1\r\nHost: %s\r\n' "${path}" "${authority}"
+      for header in "$@"; do
+        printf '%s\r\n' "${header}"
+      done
+      printf 'Connection: close\r\nContent-Length: 0\r\n\r\n'
+    } | base64 -w 0
+  )"
   client_container="$(unique_docker_container_name "oxibelt-client-certificate-http1")"
   docker create \
     --name "${client_container}" \
@@ -1717,6 +1729,8 @@ protocol_probe_websocket_client_with_client_identity() {
   local authority="$1"
   local path="$2"
   local payload="$3"
+  shift 3
+  local header_args=("$@")
   local output=""
   local status=0
   local client_container=""
@@ -1738,7 +1752,8 @@ protocol_probe_websocket_client_with_client_identity() {
       --client-cert /tmp/client.pem \
       --client-key /tmp/client.key \
       --payload "${payload}" \
-      --expect-status 101 >/dev/null
+      --expect-status 101 \
+      "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
     docker cp "${client_tls_dir}/client.pem" "${client_container}:/tmp/client.pem"
     docker cp "${client_tls_dir}/client.key" "${client_container}:/tmp/client.key"
@@ -2244,6 +2259,8 @@ protocol_probe_webtransport_multiplex() {
 protocol_probe_webtransport_multiplex_with_client_identity() {
   local authority="$1"
   local path="$2"
+  shift 2
+  local header_args=("$@")
   local output=""
   local status=0
   local client_container=""
@@ -2265,7 +2282,8 @@ protocol_probe_webtransport_multiplex_with_client_identity() {
       --client-cert /tmp/client.pem \
       --client-key /tmp/client.key \
       --sessions 1 \
-      --expect-statuses 200 >/dev/null
+      --expect-statuses 200 \
+      "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
     docker cp "${client_tls_dir}/client.pem" "${client_container}:/tmp/client.pem"
     docker cp "${client_tls_dir}/client.key" "${client_container}:/tmp/client.key"

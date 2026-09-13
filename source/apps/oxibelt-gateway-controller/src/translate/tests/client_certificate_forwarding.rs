@@ -146,7 +146,29 @@ fn client_certificate_forwarding_requires_operator_admission_and_safe_header_syn
     "client-cert requires format rfc9440"
   ));
 
-  for header in ["Accept-Encoding", "early-data", "traceparent", "priority"] {
+  let client_cert_alias = translate_objects(
+    &objects(&format!(
+      "{route}{}",
+      policy("HTTPRoute", "app", "    header: client_cert")
+    )),
+    &args(),
+  )
+  .expect("translate incompatible client_cert policy");
+  assert!(has_error_containing(
+    &client_cert_alias,
+    "client-cert requires format rfc9440"
+  ));
+
+  for header in [
+    "Accept-Encoding",
+    "accept_encoding",
+    "x_forwarded_for",
+    "grpc_timeout",
+    "sec_websocket_key",
+    "early-data",
+    "traceparent",
+    "priority",
+  ] {
     let reserved = translate_objects(
       &objects(&format!(
         "{route}{}",
@@ -169,7 +191,7 @@ fn client_certificate_forwarding_requires_operator_admission_and_safe_header_syn
 fn forwarding_headers_are_reserved_across_route_filters_and_external_auth() {
   let route = HTTP_FIXTURE.replace(
     "  - matches:\n",
-    "  - filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: client-cert\n    - type: RequestHeaderModifier\n      requestHeaderModifier:\n        remove: [x-verified-client-cert]\n    matches:\n",
+    "  - filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: client-cert\n    - type: RequestHeaderModifier\n      requestHeaderModifier:\n        remove: [x_verified_client_cert]\n    matches:\n",
   );
   let raw = format!(
     "{route}{}",
@@ -181,7 +203,7 @@ fn forwarding_headers_are_reserved_across_route_filters_and_external_auth() {
   let rendered = translate_objects(&objects(&raw), &policy_args).expect("translate conflict");
   assert!(has_error_containing(
     &rendered,
-    "cannot mutate or expose client certificate forwarding header x-verified-client-cert"
+    "cannot mutate or expose client certificate forwarding header x_verified_client_cert"
   ));
   assert!(rendered.disposition.is_publishable());
 }
@@ -230,10 +252,10 @@ fn rfc9440_names_are_reserved_across_routes_and_external_auth() {
   let forwarding = HTTP_FIXTURE.replace("  - matches:\n", extension_ref());
   let conflicting_route = HTTP_FILTER_FIXTURE
     .replace("name: app\n", "name: auth-app\n")
-    .replace("    filters:\n", "    filters:\n    - type: RequestHeaderModifier\n      requestHeaderModifier:\n        set:\n        - name: Client-Cert\n          value: forged\n");
+    .replace("    filters:\n", "    filters:\n    - type: RequestHeaderModifier\n      requestHeaderModifier:\n        set:\n        - name: Client_Cert\n          value: forged\n");
   let external_auth_conflict = HTTP_FILTER_FIXTURE
     .replace("name: app\n", "name: external-auth-app\n")
-    .replace("- authorization", "- client-cert");
+    .replace("- authorization", "- client_cert");
   let raw = format!(
     "{forwarding}{}\n---\n{conflicting_route}\n---\n{external_auth_conflict}",
     policy("HTTPRoute", "app", "    header: x-verified-client-cert")
@@ -243,7 +265,7 @@ fn rfc9440_names_are_reserved_across_routes_and_external_auth() {
     vec!["x-verified-client-cert".to_string()];
   policy_args
     .external_auth_allowed_request_headers
-    .push("client-cert".to_string());
+    .push("client_cert".to_string());
   let rendered = translate_objects(&objects(&raw), &policy_args).expect("translate conflicts");
   assert_eq!(
     rendered
@@ -252,7 +274,7 @@ fn rfc9440_names_are_reserved_across_routes_and_external_auth() {
       .filter(|diagnostic| {
         diagnostic
           .message
-          .contains("cannot mutate or expose client certificate forwarding header client-cert")
+          .contains("cannot mutate or expose client certificate forwarding header client_cert")
       })
       .count(),
     2

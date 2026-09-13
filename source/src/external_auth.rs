@@ -1042,7 +1042,11 @@ identity_headers = ["remote-user", "x-auth-user"]
     trailers.insert(http::header::COOKIE, value.clone());
     trailers.insert(HeaderName::from_static("x-forwarded-user"), value);
   }
-  sanitize_request_trailers_for_upstream(&mut trailers, &provider.identity_headers);
+  sanitize_request_trailers_for_upstream(
+    &mut trailers,
+    &provider.identity_headers,
+    &oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet::default(),
+  );
   assert!(
     trailers.get(http::header::AUTHORIZATION).is_none()
       && trailers.get(http::header::COOKIE).is_none()

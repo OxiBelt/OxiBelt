@@ -10,6 +10,7 @@ use http::header::{
   PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use http::uri::Authority;
+use oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet;
 
 use crate::config::{
   ForwardedClientIpSource, ForwardedHeaderMode, ForwardedHeadersConfig, RealIpConfig,
@@ -246,6 +247,7 @@ fn remove_inbound_forwarded_headers(headers: &mut HeaderMap) {
 pub(crate) fn sanitize_request_trailers_for_upstream(
   trailers: &mut HeaderMap,
   identity_headers: &[HeaderName],
+  client_certificate_headers: &HyphenUnderscoreHeaderNameSet,
 ) {
   strip_hop_by_hop_headers(trailers);
   remove_inbound_forwarded_headers(trailers);
@@ -267,6 +269,20 @@ pub(crate) fn sanitize_request_trailers_for_upstream(
   trailers.remove("x-forwarded-user");
   for name in identity_headers {
     trailers.remove(name);
+  }
+  strip_hyphen_underscore_header_aliases(trailers, client_certificate_headers);
+}
+
+pub(crate) fn strip_hyphen_underscore_header_aliases(
+  headers: &mut HeaderMap,
+  aliases: &HyphenUnderscoreHeaderNameSet,
+) {
+  while let Some(name) = headers
+    .keys()
+    .find(|name| aliases.contains(name.as_str()))
+    .cloned()
+  {
+    headers.remove(name);
   }
 }
 

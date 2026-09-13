@@ -212,7 +212,11 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   identity_headers.extend(state.client_certificate_forwarding_headers.iter().cloned());
   let outbound = outbound.map(|body| {
     let body = filter_trailers(body, state.config.proxy.http.trailers, native_grpc_request);
-    semantics::sanitize_upstream_request_trailers(body, identity_headers)
+    semantics::sanitize_upstream_request_trailers(
+      body,
+      identity_headers,
+      state.client_certificate_forwarding_header_aliases.clone(),
+    )
   });
   let mut outbound = if upstream_version == HttpVersion::H3 {
     outbound

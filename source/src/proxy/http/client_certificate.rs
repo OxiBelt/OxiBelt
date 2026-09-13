@@ -85,9 +85,10 @@ fn capture_error_status(error: ForwardedClientCertificateCaptureError) -> Status
 }
 
 pub(crate) fn strip_reserved(headers: &mut HeaderMap, state: &AppSnapshot) {
-  for name in state.client_certificate_forwarding_headers.iter() {
-    headers.remove(name);
-  }
+  super::headers::strip_hyphen_underscore_header_aliases(
+    headers,
+    &state.client_certificate_forwarding_header_aliases,
+  );
 }
 
 pub(crate) fn apply_upstream<B>(
@@ -125,9 +126,8 @@ pub(crate) fn finalize_response<B>(response: &mut Response<B>, enabled: bool, st
     value.to_str().ok().is_some_and(|value| {
       value.split(',').any(|token| {
         state
-          .client_certificate_forwarding_headers
-          .iter()
-          .any(|name| name.as_str().eq_ignore_ascii_case(token.trim()))
+          .client_certificate_forwarding_header_aliases
+          .contains(token.trim())
       })
     })
   });

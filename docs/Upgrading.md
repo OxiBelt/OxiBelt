@@ -11,8 +11,9 @@ commands, known issues, and rollback constraints that supplement this guide.
 their behavior. Before enabling it, configure downstream `tls.client_auth`,
 choose a header trusted only from OxiBelt, and review all routes and external-auth
 policies for use of that name. Enabling any route reserves every configured name
-and `Client-Cert`/`Client-Cert-Chain` snapshot-wide, including routes where the
-feature is disabled. Conflicting configured mutations are rejected.
+and `Client-Cert`/`Client-Cert-Chain` snapshot-wide, including ASCII case and
+`-`/`_` aliases and routes where the feature is disabled. Conflicting configured
+mutations under any alias are rejected.
 
 Certificate-aware cache entries use a separate internal key namespace; no
 cache migration is required, and logical purge partitions remain unchanged.

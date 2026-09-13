@@ -152,13 +152,19 @@ impl ReloadManager {
     );
     let alt_svc_header_values = crate::state::build_alt_svc_header_values(&config)
       .context("failed to build precomputed Alt-Svc header values")?;
+    let client_certificate_forwarding_headers = config.client_certificate_forwarding_headers();
+    let client_certificate_forwarding_header_aliases =
+      crate::state::build_client_certificate_forwarding_header_aliases(
+        &client_certificate_forwarding_headers,
+      );
     let snapshot = AppSnapshot {
       runtime_topology: active.runtime_topology.clone(),
       hardening,
       route_table,
       sni_forward: active.sni_forward.clone(),
       real_ip_policy_selector: active.real_ip_policy_selector.clone(),
-      client_certificate_forwarding_headers: config.client_certificate_forwarding_headers(),
+      client_certificate_forwarding_headers,
+      client_certificate_forwarding_header_aliases,
       upstreams: active.upstreams.clone(),
       upstream_uri_parts: active.upstream_uri_parts.clone(),
       upstream_uri_parts_by_index: active.upstream_uri_parts_by_index.clone(),
@@ -353,13 +359,19 @@ impl ReloadManager {
     );
     let alt_svc_header_values = crate::state::build_alt_svc_header_values(&config)
       .context("failed to build precomputed Alt-Svc header values")?;
+    let client_certificate_forwarding_headers = config.client_certificate_forwarding_headers();
+    let client_certificate_forwarding_header_aliases =
+      crate::state::build_client_certificate_forwarding_header_aliases(
+        &client_certificate_forwarding_headers,
+      );
     let snapshot = AppSnapshot {
       runtime_topology: active.runtime_topology.clone(),
       hardening,
       route_table: active.route_table.clone(),
       sni_forward: active.sni_forward.clone(),
       real_ip_policy_selector: active.real_ip_policy_selector.clone(),
-      client_certificate_forwarding_headers: config.client_certificate_forwarding_headers(),
+      client_certificate_forwarding_headers,
+      client_certificate_forwarding_header_aliases,
       upstreams: active.upstreams.clone(),
       upstream_uri_parts: active.upstream_uri_parts.clone(),
       upstream_uri_parts_by_index: active.upstream_uri_parts_by_index.clone(),

@@ -17665,6 +17665,9 @@ header = "x-client-certificate""#,
     "set = [{ name = \"x-client-certificate\", value = \"spoofed\" }]",
     "add = [{ name = \"x-client-certificate\", value = \"spoofed\" }]",
     "remove = [\"x-client-certificate\"]",
+    "set = [{ name = \"x_client_certificate\", value = \"spoofed\" }]",
+    "add = [{ name = \"x-client_certificate\", value = \"spoofed\" }]",
+    "remove = [\"x_client-certificate\"]",
   ] {
     let raw = format!(
       r#"{base}
@@ -17686,7 +17689,7 @@ upstream = "app"
     assert!(
       error
         .to_string()
-        .contains("cannot mutate client certificate forwarding header x-client-certificate"),
+        .contains("cannot mutate client certificate forwarding header"),
       "unexpected error: {error:#}"
     );
   }
@@ -17710,6 +17713,8 @@ header = "x-client-certificate""#,
   for setting in [
     "forward_headers = [\"x-client-certificate\"]",
     "identity_headers = [\"x-client-certificate\"]",
+    "forward_headers = [\"x_client_certificate\"]",
+    "identity_headers = [\"x-client_certificate\"]",
   ] {
     let raw = format!(
       r#"{base}

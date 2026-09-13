@@ -4288,10 +4288,12 @@ Base64. The name `client-cert` requires `rfc9440`; `client-cert-chain` is never
 accepted as a forwarding target. No chain or private key is forwarded.
 
 When any route enables forwarding, all configured target names plus `Client-Cert`
-and `Client-Cert-Chain` are reserved throughout that configuration snapshot.
-Client-supplied values are removed before routing and external authorization,
-including on routes without forwarding. Conflicting route request-header actions
-and external-auth forwarding or identity-header configuration are rejected.
+and `Client-Cert-Chain`, including names that differ only by ASCII case or by
+interchanging `-` and `_`, are reserved throughout that configuration snapshot.
+Client-supplied values under any such alias are removed before routing and
+external authorization, including on routes without forwarding. Conflicting
+route request-header actions and external-auth forwarding or identity-header
+configuration under any alias are rejected.
 Generated values are added after request mutations, only to the selected
 application upstream, not external-auth or mirror requests. Request trailers
 cannot supply these fields. Upstreams must only trust this identity on connections

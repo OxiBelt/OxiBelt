@@ -79,9 +79,15 @@ impl Config {
     self.shared_state.validate()?;
     self.validate_external_auth()?;
     let client_certificate_forwarding_headers = self.client_certificate_forwarding_headers();
+    let client_certificate_forwarding_header_aliases =
+      oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet::new(
+        client_certificate_forwarding_headers
+          .iter()
+          .map(HeaderName::as_str),
+      );
     validate_external_auth_client_certificate_forwarding_conflicts(
       &self.external_auth,
-      &client_certificate_forwarding_headers,
+      &client_certificate_forwarding_header_aliases,
     )?;
     self.validate_mitigation_database()?;
 
@@ -304,7 +310,7 @@ impl Config {
       route_actions::validate_route_actions_config(route)?;
       validate_route_client_certificate_forwarding_header_conflicts(
         route,
-        &client_certificate_forwarding_headers,
+        &client_certificate_forwarding_header_aliases,
       )?;
       route_static_files::validate_route_static_files_config(&route.name, &route.static_files)?;
       let target_count = usize::from(route.upstream.is_some())
@@ -675,7 +681,7 @@ impl Config {
 
 fn validate_route_client_certificate_forwarding_header_conflicts(
   route: &RouteConfig,
-  forwarding_headers: &[HeaderName],
+  forwarding_headers: &oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet,
 ) -> anyhow::Result<()> {
   if forwarding_headers.is_empty() {
     return Ok(());
@@ -703,7 +709,7 @@ fn validate_route_client_certificate_forwarding_header_conflicts(
         .map(String::as_str),
     )
     .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
-    .find(|name| forwarding_headers.contains(name));
+    .find(|name| forwarding_headers.contains(name.as_str()));
   if let Some(name) = conflicts {
     bail!(
       "route {} actions.request_headers cannot mutate client certificate forwarding header {name}",
@@ -715,7 +721,7 @@ fn validate_route_client_certificate_forwarding_header_conflicts(
 
 fn validate_external_auth_client_certificate_forwarding_conflicts(
   external_auth: &[ExternalAuthConfig],
-  forwarding_headers: &[HeaderName],
+  forwarding_headers: &oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet,
 ) -> anyhow::Result<()> {
   if forwarding_headers.is_empty() {
     return Ok(());
@@ -726,7 +732,7 @@ fn validate_external_auth_client_certificate_forwarding_conflicts(
       .iter()
       .chain(&auth.identity_headers)
       .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
-      .find(|name| forwarding_headers.contains(name));
+      .find(|name| forwarding_headers.contains(name.as_str()));
     if let Some(name) = conflict {
       bail!(
         "external_auth {} cannot use client certificate forwarding header {name}",

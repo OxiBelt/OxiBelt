@@ -62,13 +62,16 @@ pub(super) fn validate_client_certificate_forwarding(
       route.name
     );
   }
-  if name == "client-cert-chain" {
+  if oxibelt_control_protocol::hyphen_underscore_header_names_equivalent(&name, "client-cert-chain")
+  {
     bail!(
       "route {} {field_name} cannot use client-cert-chain",
       route.name
     );
   }
-  if name == "client-cert" && forwarding.format != ClientCertificateForwardingFormat::Rfc9440 {
+  if oxibelt_control_protocol::hyphen_underscore_header_names_equivalent(&name, "client-cert")
+    && forwarding.format != ClientCertificateForwardingFormat::Rfc9440
+  {
     bail!(
       "route {} {field_name} client-cert requires format rfc9440",
       route.name
@@ -131,17 +134,26 @@ mod tests {
 
     for header in [
       "client-cert-chain",
+      "client_cert_chain",
       "forwarded",
+      "x_forwarded_for",
       "authorization",
       "accept-encoding",
+      "accept_encoding",
       "early-data",
       "traceparent",
       "tracestate",
       "priority",
+      "grpc_timeout",
+      "sec_websocket_key",
     ] {
       let route = route(header, Some("rfc9440"));
       assert!(validate_client_certificate_forwarding(&route, 128).is_err());
     }
+
+    let client_cert = route("client_cert", Some("rfc9440"));
+    validate_client_certificate_forwarding(&client_cert, 128)
+      .expect("client_cert alias should require and accept RFC 9440");
 
     let route = route("x-long", None);
     assert!(validate_client_certificate_forwarding(&route, 5).is_err());

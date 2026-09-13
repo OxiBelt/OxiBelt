@@ -418,6 +418,7 @@ struct WebSocketClientArgs {
   server_name: String,
   authority: String,
   path: String,
+  headers: HeaderMap,
   ca_cert: String,
   client_identity: Option<ClientIdentity>,
   payload: Vec<u8>,
@@ -596,6 +597,7 @@ fn usage() {
   eprintln!(
     "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status> [--client-cert <pem> --client-key <pem>]\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected|allocate-success (UDP only)> [--mutation <name>] [--ca-cert <pem>] [--allocation-hold-ms <1..10000>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--client-cert <pem> --client-key <pem>] [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-base64 <base64>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--h2-eager-body] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64> [--client-cert <pem> --client-key <pem>]\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n> [--client-cert <pem> --client-key <pem>] [--expect-upstream-header-value <name:value>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--client-cert <pem> --client-key <pem>] [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
+  eprintln!("websocket-client also accepts repeated --header <name:value> options");
 }
 
 fn parse_h2_upstream_args(
@@ -766,6 +768,7 @@ fn parse_websocket_client_args(
   let mut server_name = None;
   let mut authority = None;
   let mut path = None;
+  let mut headers = HeaderMap::new();
   let mut ca_cert = None;
   let mut client_cert = None;
   let mut client_key = None;
@@ -782,6 +785,7 @@ fn parse_websocket_client_args(
       "--server-name" => server_name = Some(value),
       "--authority" => authority = Some(value),
       "--path" => path = Some(validate_origin_form_path(&value)?),
+      "--header" => insert_header(&mut headers, &value)?,
       "--ca-cert" => ca_cert = Some(value),
       "--client-cert" => client_cert = Some(value),
       "--client-key" => client_key = Some(value),
@@ -800,6 +804,7 @@ fn parse_websocket_client_args(
     authority: authority.unwrap_or_else(|| server_name.clone()),
     server_name,
     path: path.ok_or_else(|| anyhow!("--path is required"))?,
+    headers,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
     client_identity: client_identity(client_cert, client_key)?,
     payload: payload.ok_or_else(|| anyhow!("--payload is required"))?,
@@ -2368,10 +2373,20 @@ async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
     .await
     .context("failed to establish WebSocket downstream TLS")?;
   let key = base64::engine::general_purpose::STANDARD.encode(b"oxibelt-probe-key");
-  let request = format!(
-    "GET {} HTTP/1.1\r\nhost: {}\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-key: {}\r\nsec-websocket-version: 13\r\n\r\n",
+  let mut request = format!(
+    "GET {} HTTP/1.1\r\nhost: {}\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-key: {}\r\nsec-websocket-version: 13\r\n",
     args.path, args.authority, key
   );
+  for (name, value) in &args.headers {
+    let value = value
+      .to_str()
+      .with_context(|| format!("WebSocket request header {name} is not visible ASCII"))?;
+    request.push_str(name.as_str());
+    request.push_str(": ");
+    request.push_str(value);
+    request.push_str("\r\n");
+  }
+  request.push_str("\r\n");
   stream
     .write_all(request.as_bytes())
     .await

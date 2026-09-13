@@ -86,6 +86,8 @@ pub struct AppSnapshot {
   pub(crate) sni_forward: SniForwardTable,
   pub(crate) real_ip_policy_selector: crate::identity::RealIpPolicySelector,
   pub(crate) client_certificate_forwarding_headers: Arc<[http::HeaderName]>,
+  pub(crate) client_certificate_forwarding_header_aliases:
+    oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet,
   pub upstreams: Vec<UpstreamConfig>,
   pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
   pub(crate) upstream_uri_parts_by_index: Vec<UpstreamUriParts>,
@@ -667,6 +669,8 @@ impl AppSnapshot {
     .await
     .context("failed to build system access log")?;
     let client_certificate_forwarding_headers = config.client_certificate_forwarding_headers();
+    let client_certificate_forwarding_header_aliases =
+      build_client_certificate_forwarding_header_aliases(&client_certificate_forwarding_headers);
     let request_path_features = RequestPathFeaturePlan::new(
       &config,
       cache.enabled(),
@@ -784,6 +788,7 @@ impl AppSnapshot {
       access_logs,
       system_access_log,
       client_certificate_forwarding_headers,
+      client_certificate_forwarding_header_aliases,
       request_path_features,
       alt_svc_header_values,
       http1_upgrades_possible,
@@ -944,6 +949,8 @@ impl AppSnapshot {
       Some(previous),
     )?;
     let client_certificate_forwarding_headers = config.client_certificate_forwarding_headers();
+    let client_certificate_forwarding_header_aliases =
+      build_client_certificate_forwarding_header_aliases(&client_certificate_forwarding_headers);
     let request_path_features = RequestPathFeaturePlan::new(
       &config,
       previous.cache.enabled(),
@@ -1031,6 +1038,7 @@ impl AppSnapshot {
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
       client_certificate_forwarding_headers,
+      client_certificate_forwarding_header_aliases,
       request_path_features,
       alt_svc_header_values,
       http1_upgrades_possible,
@@ -1055,6 +1063,14 @@ impl AppSnapshot {
     .context("failed to restage direct HTTP/2 pools for snapshot publication")?;
     Ok(())
   }
+}
+
+pub(crate) fn build_client_certificate_forwarding_header_aliases(
+  headers: &[http::HeaderName],
+) -> oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet {
+  oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet::new(
+    headers.iter().map(http::HeaderName::as_str),
+  )
 }
 
 #[cfg(test)]

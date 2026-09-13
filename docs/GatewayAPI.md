@@ -304,9 +304,11 @@ listed in the controller's repeated
 `--client-certificate-forward-allowed-header` option (the Helm value is
 `routePolicy.allowedClientCertificateForwardHeaders`). The default allowlist is
 empty. Framing, hop-by-hop, proxy identity, `Authorization`, cookie, and
-authentication-response names are reserved; `client-cert-chain` is forbidden.
-The standard `client-cert` name requires `format: rfc9440`; all other admitted
-names may select `url_encoded_pem` (the default) or `rfc9440`. The controller
+authentication-response names are reserved; their ASCII case and `-`/`_`
+aliases are reserved too. `client-cert-chain` and its aliases are forbidden.
+The standard `client-cert` name and its aliases require `format: rfc9440`; all
+other admitted names may select `url_encoded_pem` (the default) or `rfc9440`.
+The controller
 emits the native `routes.client_certificate_forwarding` fragment, but the base
 OxiBelt configuration remains the sole owner of downstream
 `tls.client_auth` optional/required verification. No verified leaf, including
@@ -317,9 +319,10 @@ The policy cannot contain raw TOML, listener/Admin fields, filesystem paths,
 trust roots, Secrets, credentials, or another route's settings. Unknown fields,
 a missing or mismatched target, more than one policy filter on a rule, over-cap
 values, or an unadmitted forwarding header reject the affected rule
-transactionally. A header named by any valid forwarding policy is reserved
-snapshot-wide: request header modifiers and ExternalAuth forwarding/identity
-lists cannot mutate or expose it. Operator caps and allowlists are the upper
+transactionally. A header named by any valid forwarding policy and every ASCII
+case or `-`/`_` alias is reserved snapshot-wide: request header modifiers and
+ExternalAuth forwarding/identity lists cannot mutate or expose it. Operator caps
+and allowlists are the upper
 authority; the route policy may only choose admitted bounded values. Standard
 route filters remain independently validated and cannot weaken those controls.
 Policy status publishes `Accepted`, `ResolvedRefs`, `Conflicted`, and

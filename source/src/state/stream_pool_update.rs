@@ -44,6 +44,9 @@ impl AppSnapshot {
       sni_forward: previous.sni_forward.clone(),
       real_ip_policy_selector: previous.real_ip_policy_selector.clone(),
       client_certificate_forwarding_headers: previous.client_certificate_forwarding_headers.clone(),
+      client_certificate_forwarding_header_aliases: previous
+        .client_certificate_forwarding_header_aliases
+        .clone(),
       upstreams: previous.upstreams.clone(),
       upstream_uri_parts: previous.upstream_uri_parts.clone(),
       upstream_uri_parts_by_index: previous.upstream_uri_parts_by_index.clone(),

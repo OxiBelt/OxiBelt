@@ -152,7 +152,8 @@ struct TranslationState {
   external_auth_allowed_terminal_headers: HashSet<String>,
   external_auth_allow_credentials: bool,
   client_certificate_forward_allowed_headers: HashSet<String>,
-  client_certificate_forward_reserved_headers: HashSet<String>,
+  client_certificate_forward_reserved_headers:
+    oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet,
   pools: BTreeMap<String, GeneratedPool>,
   external_auth: BTreeMap<String, GeneratedExternalAuth>,
   routes: Vec<GeneratedRoute>,

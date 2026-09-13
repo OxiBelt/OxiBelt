@@ -584,9 +584,14 @@ pub(super) async fn handle_upgrade_request(
     return Some(route_security.text(status, "client certificate forwarding failed"));
   }
   let reserved_headers = state.client_certificate_forwarding_headers.to_vec();
+  let reserved_header_aliases = state.client_certificate_forwarding_header_aliases.clone();
   let outbound = outbound.map(|body| {
     body::with_backpressure_send_timeout(
-      semantics::sanitize_upstream_request_trailers(body, reserved_headers),
+      semantics::sanitize_upstream_request_trailers(
+        body,
+        reserved_headers,
+        reserved_header_aliases,
+      ),
       timeouts.upstream_send,
       BodyTimeoutKind::UpstreamRequestSend,
     )

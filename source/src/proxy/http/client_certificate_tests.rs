@@ -43,8 +43,12 @@ async fn send(
     .header("accept-encoding", "gzip")
     .header("x-client-cert", "spoof-one")
     .header("X-Client-Cert", "spoof-two")
+    .header("x_client_cert", "spoof-alias")
     .header("client-cert", "spoof-standard")
+    .header("client_cert", "spoof-standard-alias")
     .header("client-cert-chain", "spoof-chain")
+    .header("client_cert_chain", "spoof-chain-alias")
+    .header("x-benign_name", "kept")
     .body(
       Full::new(Bytes::new()).map_err(|never| -> super::super::body::BoxError { match never {} }),
     )
@@ -98,9 +102,16 @@ async fn client_certificate_cache_separates_verified_absent_and_disabled_routes(
         let service = service_fn(move |request: Request<hyper::body::Incoming>| {
           let sender = sender.clone();
           async move {
-            let protected = ["x-client-cert", "client-cert", "client-cert-chain"]
-              .iter()
-              .any(|name| request.headers().contains_key(*name));
+            let protected = [
+              "x-client-cert",
+              "x_client_cert",
+              "client-cert",
+              "client_cert",
+              "client-cert-chain",
+              "client_cert_chain",
+            ]
+            .iter()
+            .any(|name| request.headers().contains_key(*name));
             sender.send(protected).unwrap();
             Ok::<_, Infallible>(Response::new(Full::new(Bytes::new())))
           }
@@ -124,7 +135,14 @@ async fn client_certificate_cache_separates_verified_absent_and_disabled_routes(
           let calls = calls.clone();
           async move {
             if request.uri().path() == "/authorize" {
-              for name in ["x-client-cert", "client-cert", "client-cert-chain"] {
+              for name in [
+                "x-client-cert",
+                "x_client_cert",
+                "client-cert",
+                "client_cert",
+                "client-cert-chain",
+                "client_cert_chain",
+              ] {
                 assert!(
                   !request.headers().contains_key(name),
                   "certificate leaked to external authorization"
@@ -145,8 +163,12 @@ async fn client_certificate_cache_separates_verified_absent_and_disabled_routes(
             let payload = serde_json::json!({
               "certificate": certificate,
               "certificate_count": request.headers().get_all("x-client-cert").iter().count(),
+              "certificate_alias": request.headers().contains_key("x_client_cert"),
               "standard": request.headers().contains_key("client-cert"),
+              "standard_alias": request.headers().contains_key("client_cert"),
               "chain": request.headers().contains_key("client-cert-chain"),
+              "chain_alias": request.headers().contains_key("client_cert_chain"),
+              "benign": request.headers().get("x-benign_name").map(|value| value.to_str().unwrap()),
               "accept_encoding": request.headers().get("accept-encoding").map(|value| value.to_str().unwrap()),
             });
             Ok::<_, Infallible>(
@@ -216,7 +238,11 @@ async fn client_certificate_cache_separates_verified_absent_and_disabled_routes(
         serde_json::to_value(&expected).unwrap()
       );
       assert_eq!(payload["standard"], false);
+      assert_eq!(payload["standard_alias"], false);
       assert_eq!(payload["chain"], false);
+      assert_eq!(payload["chain_alias"], false);
+      assert_eq!(payload["certificate_alias"], false);
+      assert_eq!(payload["benign"], "kept");
       assert_eq!(payload["certificate_count"], usize::from(client.is_some()));
       if client.is_some() {
         assert!(!headers.contains_key("content-encoding"));
@@ -232,7 +258,10 @@ async fn client_certificate_cache_separates_verified_absent_and_disabled_routes(
   let (_, payload) = send(state, Some(client_a), "/disabled").await;
   assert_eq!(payload["certificate"], serde_json::Value::Null);
   assert_eq!(payload["standard"], false);
+  assert_eq!(payload["standard_alias"], false);
   assert_eq!(payload["chain"], false);
+  assert_eq!(payload["chain_alias"], false);
+  assert_eq!(payload["certificate_alias"], false);
   for _ in 0..7 {
     assert!(
       !tokio::time::timeout(Duration::from_secs(5), mirrored.recv())
@@ -318,7 +347,16 @@ async fn client_certificate_reserved_headers_mutations_trailers_and_delivery() {
   let expected = prepared.value.clone().unwrap();
   request.extensions_mut().insert(prepared);
   // Simulate mutations after ingress sanitization. Only the verified projection wins.
-  for name in ["x-client-cert", "client-cert", "client-cert-chain"] {
+  for name in [
+    "x-client-cert",
+    "x_client-cert",
+    "x-client_cert",
+    "x_client_cert",
+    "client-cert",
+    "client_cert",
+    "client-cert-chain",
+    "client_cert_chain",
+  ] {
     request
       .headers_mut()
       .append(name, HeaderValue::from_static("forged"));
@@ -328,13 +366,19 @@ async fn client_certificate_reserved_headers_mutations_trailers_and_delivery() {
   assert!(request.headers()["x-client-cert"].is_sensitive());
   assert!(!request.headers().contains_key("client-cert"));
   assert!(!request.headers().contains_key("client-cert-chain"));
+  assert!(!request.headers().contains_key("x_client_cert"));
+  assert!(!request.headers().contains_key("client_cert"));
+  assert!(!request.headers().contains_key("client_cert_chain"));
 
   let (sender, body) = super::super::body::channel_body(2);
   let mut trailers = HeaderMap::new();
   for name in [
     "x-client-cert",
+    "x_client_cert",
     "client-cert",
+    "client_cert",
     "client-cert-chain",
+    "client_cert_chain",
     "x-checksum",
   ] {
     trailers.insert(name, HeaderValue::from_static("trailer-value"));
@@ -347,6 +391,7 @@ async fn client_certificate_reserved_headers_mutations_trailers_and_delivery() {
   let body = super::super::semantics::sanitize_upstream_request_trailers(
     body,
     state.client_certificate_forwarding_headers.to_vec(),
+    state.client_certificate_forwarding_header_aliases.clone(),
   );
   let collected = body.collect().await.unwrap();
   let trailers = collected.trailers().unwrap();
@@ -363,7 +408,7 @@ async fn client_certificate_reserved_headers_mutations_trailers_and_delivery() {
     let mut response = Response::builder()
       .status(status)
       .header(CACHE_CONTROL, "public, max-age=60")
-      .header(VARY, "Accept-Language, X-Client-Cert")
+      .header(VARY, "Accept-Language, X_Client_Cert")
       .body(())
       .unwrap();
     finalize_response(&mut response, true, &state);
@@ -376,4 +421,46 @@ async fn client_certificate_reserved_headers_mutations_trailers_and_delivery() {
     .unwrap();
   finalize_response(&mut response, false, &state);
   assert_eq!(response.headers()[CACHE_CONTROL], "public");
+}
+
+#[tokio::test]
+async fn underscore_certificate_target_owns_hyphenated_aliases() {
+  let temporary = common::TempDir::new("underscore-certificate-forwarding-target");
+  let (cert, key) = common::create_self_signed_cert(temporary.path(), "client");
+  let mut config: Config = toml::from_str(&common::minimal_config_toml(&cert, &key)).unwrap();
+  config.routes[0].client_certificate_forwarding =
+    Some(crate::config::ClientCertificateForwardingConfig {
+      header: "x_client_cert".into(),
+      format: ClientCertificateForwardingFormat::Rfc9440,
+    });
+  config.validate().unwrap();
+  let state = AppSnapshot::new(config).await.unwrap();
+
+  for forwarded in [Some(certificate(&cert)), None] {
+    let mut request = Request::new(());
+    if let Some(forwarded) = forwarded {
+      request.extensions_mut().insert(forwarded);
+    }
+    let prepared = PreparedCertificateForwarding::prepare(&request, &state.config.routes[0])
+      .unwrap()
+      .unwrap();
+    let expected = prepared.value.clone();
+    request.extensions_mut().insert(prepared);
+    request
+      .headers_mut()
+      .insert("x-client-cert", HeaderValue::from_static("forged-hyphen"));
+    request.headers_mut().insert(
+      "x_client_cert",
+      HeaderValue::from_static("forged-underscore"),
+    );
+    request
+      .headers_mut()
+      .insert("x-benign_name", HeaderValue::from_static("kept"));
+
+    apply_upstream(&mut request, &state).unwrap();
+
+    assert_eq!(request.headers().get("x_client_cert"), expected.as_ref());
+    assert!(!request.headers().contains_key("x-client-cert"));
+    assert_eq!(request.headers()["x-benign_name"], "kept");
+  }
 }

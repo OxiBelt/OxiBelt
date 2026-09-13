@@ -1,5 +1,4 @@
-//! HTTP semantic helpers shared across success and error paths.
-//! Trailer, expectation, and error-response handling stays centralized to avoid protocol drift.
+//! HTTP semantic helpers centralize trailer, expectation, and error-response handling.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -11,6 +10,7 @@ use http::header::{CONTENT_TYPE, EXPECT, HeaderMap, HeaderName, HeaderValue, LIN
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, SizeHint};
+use oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet;
 
 use crate::config::{
   Config, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, GrpcRetryMode, PriorityMode,
@@ -256,6 +256,7 @@ pub(super) fn filter_trailers(
 pub(super) fn sanitize_upstream_request_trailers(
   body: ProxyBody,
   identity_headers: Vec<HeaderName>,
+  client_certificate_headers: HyphenUnderscoreHeaderNameSet,
 ) -> ProxyBody {
   if body.is_end_stream() {
     return body;
@@ -263,6 +264,7 @@ pub(super) fn sanitize_upstream_request_trailers(
   SanitizeRequestTrailersBody {
     body,
     identity_headers,
+    client_certificate_headers,
   }
   .boxed()
 }
@@ -365,6 +367,7 @@ struct DropTrailersBody {
 struct SanitizeRequestTrailersBody {
   body: ProxyBody,
   identity_headers: Vec<HeaderName>,
+  client_certificate_headers: HyphenUnderscoreHeaderNameSet,
 }
 
 impl Body for SanitizeRequestTrailersBody {
@@ -378,7 +381,11 @@ impl Body for SanitizeRequestTrailersBody {
     match Pin::new(&mut self.body).poll_frame(cx) {
       Poll::Ready(Some(Ok(frame))) => match frame.into_trailers() {
         Ok(mut trailers) => {
-          sanitize_request_trailers_for_upstream(&mut trailers, &self.identity_headers);
+          sanitize_request_trailers_for_upstream(
+            &mut trailers,
+            &self.identity_headers,
+            &self.client_certificate_headers,
+          );
           Poll::Ready(Some(Ok(Frame::trailers(trailers))))
         }
         Err(frame) => Poll::Ready(Some(Ok(frame))),
@@ -640,7 +647,11 @@ mod tests {
     drop(sender);
 
     let body = filter_trailers(body, TrailerMode::Pass, false);
-    let body = sanitize_upstream_request_trailers(body, vec![custom_identity.clone()]);
+    let body = sanitize_upstream_request_trailers(
+      body,
+      vec![custom_identity.clone()],
+      HyphenUnderscoreHeaderNameSet::default(),
+    );
     let collected = body.collect().await.expect("body should collect");
     let trailers = collected.trailers().expect("benign trailers should remain");
     assert_eq!(trailers["x-request-checksum"], "ok");
