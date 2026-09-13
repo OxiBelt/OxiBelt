@@ -16,6 +16,8 @@ mod common {
 
 #[path = "tests/backend_diagnostics.rs"]
 mod backend_diagnostic_tests;
+#[path = "tests/client_certificate_forwarding.rs"]
+mod client_certificate_forwarding_tests;
 #[path = "tests/external_auth.rs"]
 mod external_auth_tests;
 #[path = "fixtures.rs"]
@@ -61,6 +63,7 @@ fn args() -> SharedArgs {
     external_auth_allow_credentials: true,
     route_policy_max_request_body_bytes: 10_485_760,
     route_policy_max_timeout_ms: 30_000,
+    client_certificate_forward_allowed_headers: Vec::new(),
     upstream_client_tls_source_secrets: Vec::new(),
     dry_run: false,
     health_bind: None,

@@ -351,9 +351,22 @@ impl TranslationState {
     source: &str,
     client_identity: Option<&GeneratedClientIdentity>,
   ) -> Result<(), super::TranslationFailure> {
+    if let Err(error) = self.validate_client_certificate_forwarding_filter_conflicts(&filters) {
+      let diagnostic = self.diagnostics.len();
+      self.diagnostics.push(crate::model::Diagnostic::error(
+        model_object_ref(route),
+        error.to_string(),
+      ));
+      return Err(super::TranslationFailure::fail_closed(diagnostic));
+    }
     if let Some(policy_ref) = filters.route_policy.as_ref()
-      && let Err(error) =
-        super::route_policy::apply_route_policy(&self.route_policies, policy_ref, route, generated)
+      && let Err(error) = super::route_policy::apply_route_policy(
+        &self.route_policies,
+        policy_ref,
+        route,
+        generated,
+        &self.client_certificate_forward_allowed_headers,
+      )
     {
       let diagnostic = self.diagnostics.len();
       self.diagnostics.push(crate::model::Diagnostic::error(
@@ -366,6 +379,19 @@ impl TranslationState {
         }
         None => super::TranslationFailure::PreserveLastGood,
       });
+    }
+    if filters.redirect.is_some() && filters.route_policy.is_some() {
+      let message = if generated.client_certificate_forwarding.is_some() {
+        "RequestRedirect cannot be combined with client certificate forwarding"
+      } else {
+        "RequestRedirect cannot be combined with OxiBeltRoutePolicy"
+      };
+      let diagnostic = self.diagnostics.len();
+      self.diagnostics.push(crate::model::Diagnostic::error(
+        model_object_ref(route),
+        message,
+      ));
+      return Err(super::TranslationFailure::fail_closed(diagnostic));
     }
     generated.request_headers = filters.request_headers;
     generated.response_headers = filters.response_headers;
@@ -428,6 +454,37 @@ impl TranslationState {
         },
       );
       generated.external_auth = Some(name);
+    }
+    Ok(())
+  }
+
+  fn validate_client_certificate_forwarding_filter_conflicts(
+    &self,
+    filters: &ParsedRouteFilters,
+  ) -> anyhow::Result<()> {
+    let mut touched = filters
+      .request_headers
+      .set
+      .iter()
+      .chain(&filters.request_headers.add)
+      .map(|header| header.name.as_str())
+      .chain(filters.request_headers.remove.iter().map(String::as_str))
+      .collect::<Vec<_>>();
+    if let Some(auth) = &filters.external_auth {
+      touched.extend(auth.forward_headers.iter().map(String::as_str));
+      touched.extend(auth.identity_headers.iter().map(String::as_str));
+      touched.extend(auth.terminal_response_headers.iter().map(String::as_str));
+    }
+    for header in touched {
+      let normalized = oxibelt_control_protocol::normalize_route_action_header_name(header)?;
+      if self
+        .client_certificate_forward_reserved_headers
+        .contains(&normalized)
+      {
+        anyhow::bail!(
+          "Gateway filter cannot mutate or expose client certificate forwarding header {normalized}"
+        );
+      }
     }
     Ok(())
   }
@@ -631,6 +688,7 @@ fn http_match_route(
       waf_request_rule_groups: Vec::new(),
       max_request_body_bytes: None,
       upstream_request_timeout_ms: None,
+      client_certificate_forwarding: None,
     },
     filters,
   ))

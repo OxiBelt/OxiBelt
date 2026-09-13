@@ -157,6 +157,7 @@ fn grpc_match_route(
       waf_request_rule_groups: Vec::new(),
       max_request_body_bytes: None,
       upstream_request_timeout_ms: None,
+      client_certificate_forwarding: None,
     },
     filters,
   ))

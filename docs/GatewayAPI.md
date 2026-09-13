@@ -295,16 +295,33 @@ GRPCRoute. The initial bounded fields are:
 - `limits.maxRequestBodyBytes`, capped by the operator and 100 MiB schema
   maximum; and
 - `timeouts.upstreamRequestMilliseconds`, capped by the operator and 300-second
-  schema maximum.
+  schema maximum; and
+- `clientCertificateForwarding`, which projects only the downstream TLS-verified
+  client leaf to one operator-admitted backend request header.
+
+`clientCertificateForwarding.header` is a valid HTTP field name and must be
+listed in the controller's repeated
+`--client-certificate-forward-allowed-header` option (the Helm value is
+`routePolicy.allowedClientCertificateForwardHeaders`). The default allowlist is
+empty. Framing, hop-by-hop, proxy identity, `Authorization`, cookie, and
+authentication-response names are reserved; `client-cert-chain` is forbidden.
+The standard `client-cert` name requires `format: rfc9440`; all other admitted
+names may select `url_encoded_pem` (the default) or `rfc9440`. The controller
+emits the native `routes.client_certificate_forwarding` fragment, but the base
+OxiBelt configuration remains the sole owner of downstream
+`tls.client_auth` optional/required verification. No verified leaf, including
+plaintext or an absent optional client certificate, causes the runtime to strip
+the configured header and proxy normally.
 
 The policy cannot contain raw TOML, listener/Admin fields, filesystem paths,
-trust roots, arbitrary headers, Secrets, credentials, or another route's
-settings. Unknown fields, a missing or mismatched target, more than one policy
-filter on a rule, and over-cap values reject the affected rule transactionally.
-Operator caps are the upper authority; the route policy may only choose a
-bounded value at or below them. Standard route filters remain independently
-validated and cannot weaken those caps.
-
+trust roots, Secrets, credentials, or another route's settings. Unknown fields,
+a missing or mismatched target, more than one policy filter on a rule, over-cap
+values, or an unadmitted forwarding header reject the affected rule
+transactionally. A header named by any valid forwarding policy is reserved
+snapshot-wide: request header modifiers and ExternalAuth forwarding/identity
+lists cannot mutate or expose it. Operator caps and allowlists are the upper
+authority; the route policy may only choose admitted bounded values. Standard
+route filters remain independently validated and cannot weaken those controls.
 Policy status publishes `Accepted`, `ResolvedRefs`, `Conflicted`, and
 `Programmed` conditions plus the lowercase immutable artifact-bundle digest
 only after rollout proof and only when the target route and policy fragment
@@ -337,7 +354,7 @@ not applicable to `GRPCRoute`.
 | `HTTPRoute` `URLRewrite` and `RequestRedirect` | Experimental/partial | Exact hostname/path rewrite and structured scheme/hostname/port/path/status redirect; incompatible combinations are rejected. |
 | `HTTPRoute` header modifiers, CORS, `RequestMirror` | Experimental/partial | Mapped to native route actions; mirror bodies are opt-in, bounded, and best-effort. |
 | `HTTPRoute`/`GRPCRoute` HTTP `ExternalAuth` | Experimental/partial | HTTP only, explicit operator/route header and media-type allowlists, bounded body forwarding. |
-| `HTTPRoute`/`GRPCRoute` OxiBelt `ExtensionRef` | Experimental | Same-namespace v1alpha1 WAF group, body-limit, and timeout subset only. |
+| `HTTPRoute`/`GRPCRoute` OxiBelt `ExtensionRef` | Experimental | Same-namespace v1alpha1 WAF group, body-limit, timeout, and operator-admitted verified-client-leaf forwarding subset. |
 | `GRPCRoute` service/method/header matches | Partial | Exact service+method and service-only matches only. |
 | `TLSRoute` passthrough | Partial | Requires `tls.mode = Passthrough`; emits `sni_forward` rules. |
 | `TCPRoute` | Experimental | One rule, weighted core Service backends, deterministic listener winner, and explicit operator-owned port exposure. |

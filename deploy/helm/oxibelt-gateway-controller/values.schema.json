@@ -128,10 +128,16 @@
     "routePolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["maxRequestBodyBytes", "maxTimeoutMs"],
+      "required": ["maxRequestBodyBytes", "maxTimeoutMs", "allowedClientCertificateForwardHeaders"],
       "properties": {
         "maxRequestBodyBytes": { "type": "integer", "minimum": 1, "maximum": 104857600 },
-        "maxTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 300000 }
+        "maxTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 300000 },
+        "allowedClientCertificateForwardHeaders": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9!#$%&'*+.^_`|~-]+$" }
+        }
       }
     },
     "compatibility": {

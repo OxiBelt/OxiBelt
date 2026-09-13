@@ -78,6 +78,8 @@ pub struct SharedArgs {
   pub route_policy_max_request_body_bytes: u64,
   #[arg(long, global = true, default_value_t = 30_000)]
   pub route_policy_max_timeout_ms: u64,
+  #[arg(long = "client-certificate-forward-allowed-header", global = true)]
+  pub client_certificate_forward_allowed_headers: Vec<String>,
   #[arg(long = "upstream-client-tls-source-secret", global = true)]
   pub upstream_client_tls_source_secrets: Vec<SourceSecretAllowlistEntry>,
   #[arg(long, global = true)]
@@ -127,6 +129,11 @@ impl SharedArgs {
     if self.route_policy_max_timeout_ms == 0 || self.route_policy_max_timeout_ms > 300_000 {
       bail!("route-policy-max-timeout-ms must be between 1 and 300000");
     }
+    validate_header_allowlist(
+      "client-certificate-forward-allowed-header",
+      &self.client_certificate_forward_allowed_headers,
+      ExternalAuthHeaderScope::ProtectedRequest,
+    )?;
     if self.upstream_client_tls_source_secrets.len() > MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS {
       bail!(
         "upstream-client-tls-source-secret may be repeated at most {MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS} times"

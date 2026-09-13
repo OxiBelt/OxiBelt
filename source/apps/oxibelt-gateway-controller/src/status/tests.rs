@@ -28,6 +28,7 @@ fn args() -> SharedArgs {
     external_auth_allow_credentials: false,
     route_policy_max_request_body_bytes: 10_485_760,
     route_policy_max_timeout_ms: 30_000,
+    client_certificate_forward_allowed_headers: Vec::new(),
     upstream_client_tls_source_secrets: Vec::new(),
     dry_run: false,
     health_bind: None,
@@ -746,4 +747,30 @@ spec:
     policy.status["conditions"][3]["reason"],
     "TranslationOmitted"
   );
+}
+
+#[test]
+fn route_policy_status_projects_unadmitted_client_certificate_header() {
+  let policy = object(
+    r#"
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltRoutePolicy
+metadata: {name: client-cert, namespace: default, generation: 4}
+spec:
+  targetRef: {group: gateway.networking.k8s.io, kind: HTTPRoute, name: app}
+  clientCertificateForwarding: {header: x-verified-client-cert}
+"#,
+  );
+  let diagnostics = vec![Diagnostic::error(
+    "OxiBeltRoutePolicy/default/client-cert",
+    "invalid OxiBeltRoutePolicy: spec.clientCertificateForwarding.header x-verified-client-cert is not admitted by operator policy",
+  )];
+  let patches = build_status_patches(&[policy], &args(), &diagnostics, &committed_rollout());
+  let policy = patches
+    .iter()
+    .find(|patch| patch.resource == "oxibeltroutepolicies")
+    .expect("route policy status patch");
+  assert_eq!(policy.status["conditions"][0]["status"], CONDITION_FALSE);
+  assert_eq!(policy.status["conditions"][0]["reason"], "NotPermitted");
+  assert_eq!(policy.status["conditions"][3]["status"], CONDITION_FALSE);
 }

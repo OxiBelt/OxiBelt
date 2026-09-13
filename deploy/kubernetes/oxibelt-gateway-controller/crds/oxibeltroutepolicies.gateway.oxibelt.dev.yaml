@@ -102,8 +102,24 @@ spec:
                     format: int64
                     minimum: 1
                     maximum: 300000
+              clientCertificateForwarding:
+                type: object
+                required:
+                - header
+                properties:
+                  header:
+                    type: string
+                    minLength: 1
+                    maxLength: 255
+                    pattern: ^[!#$%&'*+.^_`|~0-9A-Za-z-]+$
+                  format:
+                    type: string
+                    default: url_encoded_pem
+                    enum:
+                    - url_encoded_pem
+                    - rfc9440
             x-kubernetes-validations:
-            - rule: has(self.waf) || has(self.limits) || has(self.timeouts)
+            - rule: has(self.waf) || has(self.limits) || has(self.timeouts) || has(self.clientCertificateForwarding)
               message: at least one bounded route policy field is required
           status:
             type: object

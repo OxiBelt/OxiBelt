@@ -22,6 +22,28 @@ pub(super) struct GeneratedRoute {
   pub(super) waf_request_rule_groups: Vec<String>,
   pub(super) max_request_body_bytes: Option<u64>,
   pub(super) upstream_request_timeout_ms: Option<u64>,
+  pub(super) client_certificate_forwarding: Option<ClientCertificateForwarding>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(super) struct ClientCertificateForwarding {
+  pub(super) header: String,
+  pub(super) format: ClientCertificateForwardFormat,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum ClientCertificateForwardFormat {
+  UrlEncodedPem,
+  Rfc9440,
+}
+
+impl ClientCertificateForwardFormat {
+  pub(super) const fn as_str(self) -> &'static str {
+    match self {
+      Self::UrlEncodedPem => "url_encoded_pem",
+      Self::Rfc9440 => "rfc9440",
+    }
+  }
 }
 
 #[derive(Debug, Clone)]

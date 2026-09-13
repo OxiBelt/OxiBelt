@@ -66,6 +66,9 @@ filters:
 routePolicy:
   maxRequestBodyBytes: 10485760
   maxTimeoutMs: 30000
+  # Certificate projection stays disabled until the data-plane operator admits
+  # each destination header. Route authors cannot select arbitrary headers.
+  allowedClientCertificateForwardHeaders: []
 
 # Normal reconciliation requires the selected data-plane workload to carry
 # `oxibelt.dev/effective-version` equal to the controller build version.

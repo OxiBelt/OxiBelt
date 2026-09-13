@@ -168,6 +168,7 @@ pub enum DiagnosticCode {
   IncompatibleFilters,
   InvalidResource,
   InvalidClientCertificateRef,
+  NotPermitted,
   NotProgrammed,
   RefNotPermitted,
   RequiresExactDataPlane,
@@ -182,6 +183,7 @@ impl DiagnosticCode {
       Self::IncompatibleFilters => "IncompatibleFilters",
       Self::InvalidResource => "InvalidResource",
       Self::InvalidClientCertificateRef => "InvalidClientCertificateRef",
+      Self::NotPermitted => "NotPermitted",
       Self::NotProgrammed => "NotProgrammed",
       Self::RefNotPermitted => "RefNotPermitted",
       Self::RequiresExactDataPlane => "RequiresExactDataPlane",
@@ -221,7 +223,12 @@ impl Diagnostic {
 }
 
 fn diagnostic_code(message: &str) -> DiagnosticCode {
-  if message.contains("operator source Secret allowlist")
+  if message.contains("not admitted by operator policy")
+    || message.contains("header client-cert-chain is forbidden")
+    || message.contains("header ") && message.contains(" is reserved")
+  {
+    DiagnosticCode::NotPermitted
+  } else if message.contains("operator source Secret allowlist")
     || message.contains("ReferenceGrant")
     || message.contains("was not found")
     || message.contains("does not expose")

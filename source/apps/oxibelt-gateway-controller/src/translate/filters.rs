@@ -121,8 +121,7 @@ pub(super) fn parse_route_filters(
       || !parsed.response_headers.is_empty()
       || parsed.cors.is_some()
       || !parsed.request_mirrors.is_empty()
-      || parsed.external_auth.is_some()
-      || parsed.route_policy.is_some())
+      || parsed.external_auth.is_some())
   {
     bail!("RequestRedirect cannot be combined with other route filters");
   }

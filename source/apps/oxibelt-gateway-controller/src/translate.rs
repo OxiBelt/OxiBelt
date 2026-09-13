@@ -151,6 +151,8 @@ struct TranslationState {
   external_auth_allowed_identity_headers: HashSet<String>,
   external_auth_allowed_terminal_headers: HashSet<String>,
   external_auth_allow_credentials: bool,
+  client_certificate_forward_allowed_headers: HashSet<String>,
+  client_certificate_forward_reserved_headers: HashSet<String>,
   pools: BTreeMap<String, GeneratedPool>,
   external_auth: BTreeMap<String, GeneratedExternalAuth>,
   routes: Vec<GeneratedRoute>,
@@ -224,10 +226,15 @@ pub fn translate_objects(
       &args.external_auth_allowed_terminal_headers,
     ),
     external_auth_allow_credentials: args.external_auth_allow_credentials,
+    client_certificate_forward_allowed_headers: normalized_policy_values(
+      &args.client_certificate_forward_allowed_headers,
+    ),
     ..Default::default()
   };
   state.index_supporting_objects(objects, args)?;
   state.route_policies = route_policy::index_route_policies(objects, args, &mut state.diagnostics);
+  state.client_certificate_forward_reserved_headers =
+    route_policy::forwarding_headers(&state.route_policies);
   state.index_backend_tls(objects);
   state.translate_l4_routes(objects, args);
   for object in objects {
