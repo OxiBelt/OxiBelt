@@ -31,7 +31,8 @@ mock_nomad_image="oxibelt/mock-nomad:ci"
 pq_probe_image="oxibelt/pq-probe:ci"
 protocol_probe_image="oxibelt/protocol-probe:ci"
 postgres_image="oxibelt/postgres:ci"
-redis_image="valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b"
+redis_source_image="valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b"
+redis_image="oxibelt/valkey:ci"
 coturn_source_image="ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e"
 coturn_image="oxibelt/coturn:ci"
 
@@ -74,11 +75,12 @@ for base_image in \
   rust:1.98.1-trixie@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf \
   debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 \
   postgres:18.6-alpine3.24@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2 \
-  "${redis_image}" \
+  "${redis_source_image}" \
   "${coturn_source_image}"; do
   retry_command 3 docker pull --platform "${platform}" "${base_image}"
 done
 
+docker tag "${redis_source_image}" "${redis_image}"
 docker tag "${coturn_source_image}" "${coturn_image}"
 
 build_helper_image \

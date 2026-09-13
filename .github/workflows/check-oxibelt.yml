@@ -2475,7 +2475,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
+          OXIBELT_REDIS_IMAGE: oxibelt/valkey:ci
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2550,7 +2550,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
+          OXIBELT_REDIS_IMAGE: oxibelt/valkey:ci
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2625,7 +2625,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
+          OXIBELT_REDIS_IMAGE: oxibelt/valkey:ci
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2700,7 +2700,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
+          OXIBELT_REDIS_IMAGE: oxibelt/valkey:ci
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2775,7 +2775,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
+          OXIBELT_REDIS_IMAGE: oxibelt/valkey:ci
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2850,7 +2850,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
+          OXIBELT_REDIS_IMAGE: oxibelt/valkey:ci
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2925,7 +2925,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
+          OXIBELT_REDIS_IMAGE: oxibelt/valkey:ci
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -3000,7 +3000,7 @@ jobs:
           OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
           OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci
-          OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b
+          OXIBELT_REDIS_IMAGE: oxibelt/valkey:ci
           OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci
           OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: "1"
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}

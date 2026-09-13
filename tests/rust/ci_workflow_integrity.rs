@@ -7421,7 +7421,8 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
     "oxibelt/pq-probe:ci",
     "oxibelt/protocol-probe:ci",
     "oxibelt/postgres:ci",
-    "valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b",
+    "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b\"",
+    "redis_image=\"oxibelt/valkey:ci\"",
     "ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e",
     "oxibelt/coturn:ci",
   ] {
@@ -7445,6 +7446,13 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
   assert!(
     coturn_tag < image_save,
     "coturn should receive its stable local artifact tag before docker save"
+  );
+  let redis_tag = script
+    .find("docker tag \"${redis_source_image}\" \"${redis_image}\"")
+    .expect("helper image build should tag the digest-pinned Valkey source");
+  assert!(
+    redis_tag < image_save,
+    "Valkey should receive its stable local artifact tag before docker save"
   );
 }
 
@@ -7474,7 +7482,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     "OXIBELT_PQ_PROBE_IMAGE: oxibelt/pq-probe:ci",
     "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci",
     "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci",
-    "OXIBELT_REDIS_IMAGE: valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b",
+    "OXIBELT_REDIS_IMAGE: oxibelt/valkey:ci",
     "OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci",
     "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
   ] {
@@ -7503,6 +7511,144 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     ),
     "Docker integration jobs should consume coturn through its artifact-preserved local tag"
   );
+}
+
+#[test]
+fn docker_integration_helper_valkey_alias_is_saved_and_fail_closed() {
+  let repo = repo_root();
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-helper-valkey-")
+    .tempdir()
+    .expect("temporary directory should be creatable");
+  let bin_dir = temp_dir.path().join("bin");
+  let docker_log = temp_dir.path().join("docker.log");
+  write_executable(
+    &bin_dir.join("docker"),
+    r##"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${STUB_DOCKER_LOG}"
+if [[ "${STUB_DOCKER_FAILURE:-}" == "$1" ]]; then
+  case "$1" in
+    pull) exit 42 ;;
+    tag) exit 43 ;;
+    save) exit 44 ;;
+  esac
+fi
+if [[ "$1" == "save" ]]; then
+  shift
+  while (($#)); do
+    if [[ "$1" == "--output" ]]; then
+      touch "$2"
+      break
+    fi
+    shift
+  done
+fi
+"##,
+  );
+  write_executable(&bin_dir.join("sleep"), "#!/usr/bin/env bash\nexit 0\n");
+  let original_path = std::env::var_os("PATH").unwrap_or_default();
+  let shimmed_path = format!("{}:{}", bin_dir.display(), original_path.to_string_lossy());
+  let script = repo.join("tests/scripts/build-docker-integration-helper-images-artifact.sh");
+
+  let run = |label: &str| {
+    let output_dir = temp_dir.path().join(format!("{label}-output"));
+    let output_file = temp_dir.path().join(format!("{label}-github-output"));
+    let output = Command::new("bash")
+      .arg(&script)
+      .arg("linux/amd64")
+      .arg(&output_dir)
+      .current_dir(&repo)
+      .env("PATH", &shimmed_path)
+      .env("STUB_DOCKER_LOG", &docker_log)
+      .env("GITHUB_OUTPUT", &output_file)
+      .env_remove("STUB_DOCKER_FAILURE")
+      .output()
+      .unwrap_or_else(|error| panic!("{label} helper producer should execute: {error}"));
+    (output, output_dir, output_file)
+  };
+
+  let (success, output_dir, output_file) = run("success");
+  assert!(
+    success.status.success(),
+    "stubbed helper producer should succeed: {}",
+    String::from_utf8_lossy(&success.stderr)
+  );
+  let log = fs::read_to_string(&docker_log).expect("stubbed Docker calls should be recorded");
+  let redis_source = "valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b";
+  let redis_tag = "tag valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b oxibelt/valkey:ci";
+  let save = "save --output";
+  let redis_pull = format!("pull --platform linux/amd64 {redis_source}");
+  assert!(log.contains(&redis_pull));
+  assert!(log.contains(redis_tag));
+  assert!(
+    log
+      .find(&redis_pull)
+      .expect("Valkey pull should be recorded")
+      < log.find(redis_tag).expect("Valkey tag should be recorded"),
+    "Valkey must be pulled through its reviewed digest before receiving a local alias"
+  );
+  assert!(
+    log.find(redis_tag).expect("Valkey tag should be recorded")
+      < log.find(save).expect("image save should be recorded"),
+    "Valkey must receive its local alias before the artifact is saved"
+  );
+  let save_line = log
+    .lines()
+    .find(|line| line.starts_with(save))
+    .expect("image save should be recorded");
+  assert!(
+    save_line.contains("oxibelt/valkey:ci"),
+    "helper artifact should save the Valkey local alias: {save_line}"
+  );
+  assert!(
+    !save_line.contains(redis_source),
+    "helper artifact must not save the transport-unstable Valkey source reference: {save_line}"
+  );
+  assert!(
+    output_dir
+      .join("oxibelt-docker-integration-helper-images.tar")
+      .is_file()
+  );
+  assert!(
+    fs::read_to_string(&output_file)
+      .expect("successful helper producer should publish outputs")
+      .contains("redis_image=oxibelt/valkey:ci\n")
+  );
+
+  for (label, failure, expected_status) in [
+    ("pull-failure", "pull", 42),
+    ("tag-failure", "tag", 43),
+    ("save-failure", "save", 44),
+  ] {
+    fs::remove_file(&docker_log).ok();
+    let output_dir = temp_dir.path().join(format!("{label}-output"));
+    let output_file = temp_dir.path().join(format!("{label}-github-output"));
+    let failed = Command::new("bash")
+      .arg(&script)
+      .arg("linux/amd64")
+      .arg(&output_dir)
+      .current_dir(&repo)
+      .env("PATH", &shimmed_path)
+      .env("STUB_DOCKER_LOG", &docker_log)
+      .env("STUB_DOCKER_FAILURE", failure)
+      .env("GITHUB_OUTPUT", &output_file)
+      .output()
+      .unwrap_or_else(|error| panic!("{label} helper producer should execute: {error}"));
+    assert_eq!(failed.status.code(), Some(expected_status));
+    let failed_log =
+      fs::read_to_string(&docker_log).expect("failed Docker calls should be recorded");
+    if failure != "save" {
+      assert!(
+        !failed_log.contains("save --output"),
+        "{label} must not save an artifact after its failed producer step"
+      );
+    }
+    assert!(
+      !output_file.exists(),
+      "{label} must not publish outputs after its failed producer step"
+    );
+  }
 }
 
 #[test]
