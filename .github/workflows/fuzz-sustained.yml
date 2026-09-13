@@ -52,6 +52,7 @@ jobs:
           - path_security_semantics
           - waf_request_evaluation
           - auth_request_semantics
+          - proxy_protocol_tls
 
     steps:
       - name: Checkout

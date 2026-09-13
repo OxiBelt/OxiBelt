@@ -322,3 +322,15 @@ dictionary = "fuzz/dictionaries/tls.dict"
 coverage_landmarks = ["source/src/tls/downstream_ct/der.rs:extract_embedded_sct_material", "source/src/tls/downstream_ct/mod.rs:split_sct_list", "source/src/tls/downstream_ct/log_list.rs:parse_log_list", "source/src/tls/downstream_ct/policy.rs:evaluate"]
 regression_path = "tests/fixtures/fuzz-regressions/downstream_ct"
 leak_policy = "enabled"
+
+[[target]]
+name = "proxy_protocol_tls"
+owner = "PROXY protocol and TLS metadata maintainers"
+max_input_bytes = 65536
+input_contract = "Untrusted bytes select a PROXY v2 command and address family followed by a bounded address payload and optional SSL TLVs."
+invariants = ["v2 address and TLV framing never panic or read beyond input", "malformed, duplicate, or oversized SSL assertions fail closed", "accepted metadata preserves the original source and destination pair"]
+unsupported_states = ["live sockets or trusted-peer admission", "TLS handshakes, certificate files, and configuration publication"]
+seed_dir = "fuzz/seeds/proxy_protocol_tls"
+coverage_landmarks = ["source/src/proxy_protocol.rs:parse_v2_payload", "source/src/proxy_protocol.rs:decode_ssl_tlv"]
+regression_path = "tests/fixtures/fuzz-regressions/proxy_protocol_tls"
+leak_policy = "enabled"

@@ -21,6 +21,7 @@ const EXPECTED_TARGETS: &[&str] = &[
   "native_config",
   "oxirule_expression",
   "path_security_semantics",
+  "proxy_protocol_tls",
   "syscall_boundaries",
   "tls_certificate_metadata",
   "tls_client_hello",

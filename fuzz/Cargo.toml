@@ -183,3 +183,10 @@ path = "fuzz_targets/downstream_ct.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "proxy_protocol_tls"
+path = "fuzz_targets/proxy_protocol_tls.rs"
+test = false
+doc = false
+bench = false

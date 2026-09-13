@@ -52,6 +52,7 @@ matrices, and this metadata from drifting apart.
 | `path_security_semantics` | Structured URI forms, route prefixes, rewrites, static lexical resolution, and WAF path views; rejected paths cannot become accepted at a later modeled stage | Filesystem access, static-file opening, network I/O |
 | `waf_request_evaluation` | Bounded request metadata and bodies against a fixed in-memory security ruleset; decoder or policy failure cannot silently become allow | Filesystem-backed rules, external functions, network and storage |
 | `auth_request_semantics` | Bounded headers, bearer parsing, route scope, backend outcome, fail policy, trusted identity replacement, and trailer sanitization; explicit denial never opens | External-auth network calls, credentials, live upstream forwarding |
+| `proxy_protocol_tls` | PROXY v2 address framing and nested SSL-TLV metadata; malformed lengths, duplicate assertions, and invalid certificate metadata fail closed | Live sockets, trusted-peer admission, TLS handshakes, and certificate files |
 
 Normalization targets assert deterministic parsing, bounded output, canonical
 forms where the owning API defines one, and non-mutation of source inputs.

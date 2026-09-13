@@ -5,6 +5,14 @@ version = 1
 # to publish. Hashes make review-time replacement explicit.
 
 [[seed]]
+target = "proxy_protocol_tls"
+path = "fuzz/seeds/proxy_protocol_tls/ipv4-pair.bin"
+sha256 = "2ca5f5cb98ff08f5d6a50783e0983ace618a98fe06dff6d8a303261466f53e02"
+origin = "Repository-authored PROXY v2 IPv4 address pair with a trailing malformed-TLV boundary."
+license = "Apache-2.0"
+classification = "non-secret"
+
+[[seed]]
 target = "turn_protocol"
 path = "fuzz/seeds/turn_protocol/binding-request.tokens"
 sha256 = "3b00b9a8f782f8193cdfb1446be5d1456dedbaf9d92836df0dbd5dcc778eff22"
