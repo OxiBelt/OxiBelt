@@ -29,6 +29,7 @@ fn upstream(name: &str) -> UpstreamConfig {
     webrtc: true,
     webtransport: true,
     proxy_protocol_egress: ProxyProtocolEgressMode::Off,
+    proxy_protocol_tls: None,
     tls: Default::default(),
     extra_trusted_ca_certs: Vec::new(),
   }

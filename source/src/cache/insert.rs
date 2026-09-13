@@ -42,6 +42,7 @@ impl ResponseCache {
         ctx.uri,
         ctx.request_headers,
         ctx.certificate_identity,
+        ctx.proxy_protocol_identity,
       )?
       .fill_key;
     let decision = self.begin_fill_decision(ctx)?;
@@ -98,6 +99,7 @@ impl ResponseCache {
         ctx.uri,
         ctx.request_headers,
         ctx.certificate_identity,
+        ctx.proxy_protocol_identity,
       )
       .map(|operation| operation.fill_key)
     else {
@@ -370,6 +372,7 @@ impl ResponseCache {
       ctx.uri,
       ctx.request_headers,
       ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
     ) else {
       return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
     };

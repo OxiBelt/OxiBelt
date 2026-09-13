@@ -67,6 +67,7 @@ fn external_memory_hit_is_promoted_after_validation() {
   let uri = "/asset.css".parse::<Uri>().expect("uri should parse");
   let request_headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: None,
     scheme: "https",
     host: "example.test",
@@ -84,6 +85,7 @@ fn external_memory_hit_is_promoted_after_validation() {
       ctx.uri,
       ctx.request_headers,
       ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
     )
     .expect("operation context should build");
 
@@ -113,6 +115,7 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
   let uri = "/asset.css".parse::<Uri>().expect("uri should parse");
   let request_headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: None,
     scheme: "https",
     host: "example.test",
@@ -130,6 +133,7 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
       ctx.uri,
       ctx.request_headers,
       ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
     )
     .expect("operation context should build");
 
@@ -150,6 +154,7 @@ fn external_mismatched_uri_is_safe_miss() {
   let uri = "/asset.css".parse::<Uri>().expect("uri should parse");
   let request_headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: None,
     scheme: "https",
     host: "example.test",
@@ -167,6 +172,7 @@ fn external_mismatched_uri_is_safe_miss() {
       ctx.uri,
       ctx.request_headers,
       ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
     )
     .expect("operation context should build");
 
@@ -191,6 +197,7 @@ fn external_sensitive_vary_is_safe_miss() {
   let mut request_headers = HeaderMap::new();
   request_headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
   let ctx = CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: None,
     scheme: "https",
     host: "example.test",
@@ -208,6 +215,7 @@ fn external_sensitive_vary_is_safe_miss() {
       ctx.uri,
       ctx.request_headers,
       ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
     )
     .expect("operation context should build");
 

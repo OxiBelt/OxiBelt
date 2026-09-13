@@ -22,6 +22,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
           host: "example.test",
@@ -41,6 +42,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
     (&french_request, b"bonjour".as_slice()),
   ] {
     match cache.lookup(CacheLookupContext {
+      proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
       host: "example.test",
@@ -61,6 +63,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -97,6 +100,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
           host: "example.test",
@@ -113,6 +117,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -137,6 +142,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -178,6 +184,7 @@ fn vary_variant_count_updates_after_eviction() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -197,6 +204,7 @@ fn vary_variant_count_updates_after_eviction() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -216,6 +224,7 @@ fn vary_variant_count_updates_after_eviction() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -229,6 +238,7 @@ fn vary_variant_count_updates_after_eviction() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -265,6 +275,7 @@ fn response_head_decision_rejects_uncacheable_or_unadmitted_heads() {
   let uri = "/asset/app.css".parse::<Uri>().unwrap();
   let request_headers = HeaderMap::new();
   let ctx = CacheInsertContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",

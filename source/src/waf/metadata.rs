@@ -72,4 +72,6 @@ pub struct WafTransportMetadataInput<'a> {
   pub tcp_rtt_ms: Option<u64>,
   pub udp_datagram_size: Option<usize>,
   pub udp_connection_id: Option<&'a str>,
+  /// Trusted PROXY-protocol evidence. This remains distinct from local TLS state.
+  pub proxy_protocol: Option<&'a crate::proxy_protocol::ProxyProtocolMetadata>,
 }

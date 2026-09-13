@@ -852,9 +852,17 @@ http3 = false
 enabled = false
 version = "any" # v1 | v2 | any
 trusted_sources = []
+tls_tlvs = false # accepts PROXY v2 SSL TLVs only
+
+# Independent opt-in for the plaintext HTTP listener.
+[listeners.http_proxy_protocol]
+enabled = false
+version = "any" # v1 | v2 | any
+trusted_sources = []
+tls_tlvs = false
 ```
 
-At least one downstream HTTP version must be enabled. HTTP/1.1 and HTTP/2 listen on TCP for every `https_binds` address. HTTP/3 listens on UDP for every `https_binds` address. `http_binds` controls the optional plain HTTP listener when `http_mode` is not `off`. Legacy scalar `https_bind` and `http_bind` remain accepted as one-address compatibility aliases, but they must not be mixed with `https_binds` or `http_binds` respectively. IPv6 listener sockets are IPv6-only; configure both `0.0.0.0:443` and `[::]:443` when you want explicit IPv4 and IPv6 exposure. Adding wildcard binds such as `0.0.0.0` or `[::]` exposes all interfaces for that IP family. PROXY protocol is accepted only from configured trusted sources. When HTTP/3 Alt-Svc is enabled without `quic.alt_svc.port_overrides`, all HTTPS bind entries must use the same port because OxiBelt advertises one inferred Alt-Svc port.
+At least one downstream HTTP version must be enabled. HTTP/1.1 and HTTP/2 listen on TCP for every `https_binds` address. HTTP/3 listens on UDP for every `https_binds` address. `http_binds` controls the optional plain HTTP listener when `http_mode` is not `off`. Legacy scalar `https_bind` and `http_bind` remain accepted as one-address compatibility aliases, but they must not be mixed with `https_binds` or `http_binds` respectively. IPv6 listener sockets are IPv6-only; configure both `0.0.0.0:443` and `[::]:443` when you want explicit IPv4 and IPv6 exposure. Adding wildcard binds such as `0.0.0.0` or `[::]` exposes all interfaces for that IP family. `listeners.proxy_protocol` remains the HTTPS TCP intake; `listeners.http_proxy_protocol` is a separate, default-off plaintext HTTP intake and requires an active HTTP listener. PROXY protocol is accepted only from configured trusted sources. `tls_tlvs` requires an enabled `v2` or `any` intake and admits the standard PROXY v2 SSL TLV (`0x20`) and its `0x21` through `0x28` subtypes, with bounded DER certificate material where supplied. Received transport metadata is untrusted unless the direct peer is in the configured concrete CIDR list, and it never changes local `Request.Tls`, downstream TLS authentication, or client-certificate authorization. When HTTP/3 Alt-Svc is enabled without `quic.alt_svc.port_overrides`, all HTTPS bind entries must use the same port because OxiBelt advertises one inferred Alt-Svc port.
 
 ```toml
 [tls]
@@ -1196,11 +1204,16 @@ protocols = ["tcp_tls", "quic"]
 connect_timeout_ms = 3000
 idle_timeout_ms = 75000
 tcp_proxy_protocol_egress = "off"
+
+# Only TCP TLS rules may relay received PROXY v2 TLS metadata.
+# [sni_forward.rules.tcp_proxy_protocol_tls]
+# source = "received_proxy"
+# client_certificate = false
 ```
 
 Matching order is explicit `[[sni_forward.rules]]` first, then local `[[routes]].hosts`, then `sni_forward.default_target` when configured. A route host of `"*"` is not treated as a defined SNI name. Missing, malformed, or unparseable SNI fails closed when SNI forwarding is enabled. Exact SNI patterns and leftmost wildcard patterns such as `"*.example.com"` are accepted; duplicate rule names or duplicate SNI patterns across forwarding rules are rejected.
 
-For TCP TLS, OxiBelt peeks at a bounded ClientHello before `rustls` accepts the connection. Forwarded sessions are raw TCP tunnels, and the original ClientHello remains unread by OxiBelt because `peek` does not consume bytes. Local SNI matches continue through the normal HTTP/1.1 and HTTP/2 TLS termination path. Forwarded TCP sessions count against the same global connection limit as local TLS; when `limits.connection_limit_identity` uses a Real-IP mode, they also acquire the normal per-IP and named connection leases for the post-PROXY-protocol peer address because no HTTP request headers are available before forwarding.
+For TCP TLS, OxiBelt peeks at a bounded ClientHello before `rustls` accepts the connection. Forwarded sessions are raw TCP tunnels, and the original ClientHello remains unread by OxiBelt because `peek` does not consume bytes. Local SNI matches continue through the normal HTTP/1.1 and HTTP/2 TLS termination path. `tcp_proxy_protocol_tls` requires TCP `v2` egress, `source = "received_proxy"`, and `protocols = ["tcp_tls"]`; it never applies to QUIC. It relays selected received TLS metadata with the SNI-forwarded TCP connection and retains original source/destination context. Forwarded TCP sessions count against the same global connection limit as local TLS; when `limits.connection_limit_identity` uses a Real-IP mode, they also acquire the normal per-IP and named connection leases for the post-PROXY-protocol peer address because no HTTP request headers are available before forwarding.
 
 `client_hello_parse_methods` controls TCP TLS SNI inspection. The default is `["single_record"]`, which parses only a complete ClientHello contained in one TLS handshake record. Add `tls_record_reassembly` to accept a ClientHello split across consecutive TLS handshake records, for example `["single_record", "tls_record_reassembly"]`, when compatibility with DPI-bypass client fragmentation tools is required.
 
@@ -3970,6 +3983,11 @@ webrtc = true
 webtransport = true
 proxy_protocol_egress = "off" # off | v1 | v2
 
+# Optional TLS metadata in a PROXY v2 preface for this named upstream.
+# [upstreams.proxy_protocol_tls]
+# source = "local_tls" # local_tls | received_proxy
+# client_certificate = false
+
 [upstreams.tls.ech]
 mode = "disabled" # disabled | grease | config_list
 # config_list_file = "app.echconfiglist"
@@ -3996,6 +4014,8 @@ mode = "disabled" # disabled | enforce | managed
 ```
 
 Upstream origins must use `http://` or `https://`. `max_http_version = "h3"` requires an `https://` origin. ECH `config_list_file` is required only with `mode = "config_list"` and is invalid for other modes. `[upstreams.tls.client_identity]` is valid only for HTTPS and requires both a nonempty PEM certificate chain and one matching unencrypted PEM private key beneath the certificate root. OxiBelt rejects malformed, mismatched, expired, or not-yet-valid material before accepting the runtime snapshot, presents the configured chain only when the authenticated upstream requests a client certificate, and never weakens ordinary CA, hostname/SNI, explicit SAN, ECH, or revocation verification. An enabled client identity disables upstream TLS resumption and the process-lifetime client-config cache so rotated private keys are not retained there. Upstream TLS resumption otherwise controls OxiBelt's client-side cache only; the upstream server still chooses whether its own tickets are stateful or stateless. When the effective outbound upstream revocation policy is enabled, OxiBelt also disables upstream client-side resumption so every new upstream TLS connection reaches certificate and revocation verification. `proxy_protocol_egress` writes a PROXY protocol header to TCP-based upstream connections and is rejected with HTTP/3 upstream selection. `[upstreams.tls.upstream_revocation]` overrides the global runtime outbound revocation policy for that direct upstream; use `mode = "disabled"` in both nested tables to opt one upstream out of a global policy.
+
+`[upstreams.proxy_protocol_tls]` is available only on a named `[[upstreams]]` entry, requires `proxy_protocol_egress = "v2"`, and is unavailable to upstream pools and HTTP/3 backends. HTTP/1.1, HTTP/2, and HTTP/3 downstream clients can use it with TCP backends. `source = "local_tls"` serializes the local downstream TLS result; a full authenticated TCP handshake uses both `CERT_CONN` and `CERT_SESS`, while resumed TCP TLS uses `CERT_SESS` only. Authenticated HTTP/3 uses `CERT_SESS` only because the QUIC API does not prove a certificate was sent in the current handshake. `source = "received_proxy"` relays selected trusted PROXY v2 TLS metadata and preserves the selected original source/destination context. A missing source or a mismatch between its source IP and effective Real-IP returns `502` before cache lookup, backend dialing, or request forwarding; neither source falls back to the other. The standard binary preface is written before backend TLS, so that preface itself is plaintext. Optional DER is bounded and is never written to access logs, OxiRule fields, metrics, or traces. Internal cache keys partition by the selected metadata, original address pair, source, and emission policy; downstream responses carry `Cache-Control: no-store`. Certificate-identity TLVs suppress upstream compression negotiation and local response compression. Synthetic cache warming is unsupported. Existing configurations remain unchanged while this table is absent.
 
 `request_timeout_ms` is the compatibility upper bound for sending a request and receiving response headers. `first_byte_timeout_ms` separately controls the response-header/first-byte wait and is capped by `request_timeout_ms` when both are configured. The guarded direct-H1 transports keep that response-head deadline active across any accepted informational responses until the final response head arrives. `read_timeout_ms` is an upstream response body idle timeout: progress resets the idle window while fixed-length data, chunk metadata and data, trailers, close-delimited bodies, SSE, and long downloads remain streaming. It is not a total response-body deadline. `send_timeout_ms` controls upstream request body send backpressure.
 

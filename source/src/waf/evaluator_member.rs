@@ -234,6 +234,13 @@ pub(super) fn eval_member(
     (ObjectRef::Request, "Body") => Ok(Value::Object(ObjectRef::RequestBody)),
     (ObjectRef::Request, "Tags") => Ok(Value::Object(ObjectRef::RequestTags)),
     (ObjectRef::Request, "Tls") => Ok(Value::Object(ObjectRef::RequestTls)),
+    (ObjectRef::Request, "ProxyProtocol") => {
+      Ok(if ctx.request.transport_metadata.proxy_protocol.is_some() {
+        Value::Object(ObjectRef::RequestProxyProtocol)
+      } else {
+        Value::Null
+      })
+    }
     (ObjectRef::Request, "TokenBindings") => Ok(Value::Object(ObjectRef::RequestTokenBindings)),
     (ObjectRef::RequestClient, "Kind") => Ok(Value::String(
       if ctx.person_proof.state == PersonProofState::Valid {
@@ -472,8 +479,15 @@ pub(super) fn eval_member(
         .unwrap_or(Value::Null),
     ),
     (ObjectRef::RequestTls, field) => object_model::eval_request_tls_member(ctx, field),
+    (ObjectRef::RequestProxyProtocol, field) => {
+      object_model::eval_request_proxy_protocol_member(ctx, field)
+    }
+    (ObjectRef::RequestProxyProtocolSsl, field) => {
+      object_model::eval_request_proxy_protocol_ssl_member(ctx, field)
+    }
     (
       ObjectRef::ClientCertificate
+      | ObjectRef::ProxyProtocolClientCertificate
       | ObjectRef::ResponseServerCertificate
       | ObjectRef::StreamServerCertificate,
       field,

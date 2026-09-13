@@ -27,6 +27,8 @@ pub(super) struct RawListenerConfig {
   http3: bool,
   #[serde(default)]
   proxy_protocol: ProxyProtocolConfig,
+  #[serde(default)]
+  http_proxy_protocol: ProxyProtocolConfig,
 }
 
 impl RawListenerConfig {
@@ -55,6 +57,7 @@ impl RawListenerConfig {
       http2: self.http2,
       http3: self.http3,
       proxy_protocol: self.proxy_protocol,
+      http_proxy_protocol: self.http_proxy_protocol,
     })
   }
 }
@@ -86,6 +89,7 @@ pub struct ListenerConfig {
   pub http2: bool,
   pub http3: bool,
   pub proxy_protocol: ProxyProtocolConfig,
+  pub http_proxy_protocol: ProxyProtocolConfig,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -105,6 +109,8 @@ pub struct ProxyProtocolConfig {
   pub version: ProxyProtocolVersion,
   #[serde(default)]
   pub trusted_sources: Vec<String>,
+  #[serde(default)]
+  pub tls_tlvs: bool,
 }
 
 impl Default for ProxyProtocolConfig {
@@ -113,6 +119,7 @@ impl Default for ProxyProtocolConfig {
       enabled: false,
       version: ProxyProtocolVersion::Any,
       trusted_sources: Vec::new(),
+      tls_tlvs: false,
     }
   }
 }

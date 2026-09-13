@@ -3,11 +3,12 @@ mod common;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
-use oxibelt::config::Config;
+use oxibelt::config::{Config, ProxyProtocolVersion};
 use oxibelt::dynamic_policy::DynamicPolicyContext;
+use oxibelt::proxy_protocol::{ProxyProtocolMetadata, decode_ssl_tlv};
 use oxibelt::waf::metadata::WafClientCertificateMetadata;
 use oxibelt::waf::{
   BodyNeed, HeaderMutation, OxiRuleAnalyzeRequest, OxiRuleCandidate, OxiRuleDevtoolsCheckRequest,
@@ -12021,6 +12022,179 @@ fn evaluate_simple_request(engine: &WafEngine, path: &str) -> oxibelt::waf::Requ
   ))
 }
 
+#[test]
+fn proxy_protocol_object_is_nullable_and_exposes_only_trusted_ssl_metadata() {
+  let engine = compile_waf_fragment(
+    "waf-proxy-protocol-object",
+    r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "proxy-protocol-metadata"
+phase = "request"
+priority = 1
+when = "Request.ProxyProtocol != null && Request.ProxyProtocol.Ssl != null && Request.ProxyProtocol.Version == 'v2' && Request.ProxyProtocol.Ssl.ClientTls == true && Request.ProxyProtocol.Ssl.VerifyCode == 0 && Request.ProxyProtocol.Ssl.ClientCertificateConnection == true && Request.ProxyProtocol.Ssl.ClientCertificateSession == true && Request.ProxyProtocol.Ssl.ClientCertificateVerified == true && Request.ProxyProtocol.Ssl.Version == 'TLSv1.3' && Request.ProxyProtocol.Ssl.CommonName == 'client.example' && Request.ProxyProtocol.Ssl.CipherSuite == 'TLS_AES_128_GCM_SHA256' && Request.ProxyProtocol.Ssl.CertificateSignatureAlgorithm == 'rsa_pss_rsae_sha256' && Request.ProxyProtocol.Ssl.CertificateKeyAlgorithm == 'rsa' && Request.ProxyProtocol.Ssl.KeyExchangeGroup == 'x25519' && Request.ProxyProtocol.Ssl.SignatureScheme == 'rsa_pss_rsae_sha256'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+body = "trusted proxy protocol metadata matched"
+"#,
+  );
+  let headers = HeaderMap::new();
+  let tags = HashMap::new();
+  let method = Method::GET;
+  let uri: Uri = "/".parse().unwrap();
+
+  let without_metadata = engine.evaluate_request(request_input(
+    &method,
+    &uri,
+    &headers,
+    &tags,
+    "203.0.113.10:49152".parse().unwrap(),
+  ));
+  assert!(without_metadata.terminal.is_none());
+
+  let metadata = proxy_protocol_metadata(0x07, 0, None);
+  let mut request = request_input(
+    &method,
+    &uri,
+    &headers,
+    &tags,
+    "203.0.113.10:49152".parse().unwrap(),
+  );
+  request.transport_metadata.proxy_protocol = Some(&metadata);
+  let matched = engine.evaluate_request(request);
+  assert_eq!(
+    matched.terminal.expect("metadata rule should match").status,
+    418
+  );
+}
+
+#[test]
+fn proxy_protocol_zero_verify_without_certificate_flags_is_not_verified() {
+  let engine = compile_waf_fragment(
+    "waf-proxy-protocol-verify-flags",
+    r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "incorrectly-verified"
+phase = "request"
+priority = 1
+when = "Request.ProxyProtocol.Ssl.VerifyCode == 0 && Request.ProxyProtocol.Ssl.ClientCertificateVerified == true"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 418
+body = "must not assert certificate verification"
+"#,
+  );
+  let headers = HeaderMap::new();
+  let tags = HashMap::new();
+  let method = Method::GET;
+  let uri: Uri = "/".parse().unwrap();
+  let metadata = proxy_protocol_metadata(0x01, 0, None);
+  let mut request = request_input(
+    &method,
+    &uri,
+    &headers,
+    &tags,
+    "203.0.113.10:49152".parse().unwrap(),
+  );
+  request.transport_metadata.proxy_protocol = Some(&metadata);
+  assert!(engine.evaluate_request(request).terminal.is_none());
+}
+
+#[test]
+fn proxy_protocol_access_log_object_redacts_identity_until_explicitly_selected() {
+  let temp_dir = common::TempDir::new("waf-proxy-protocol-access-log");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "waf-proxy-protocol-access-log");
+  let raw = format!(
+    "{}\n{}",
+    common::minimal_config_toml(&cert_path, &key_path),
+    r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "proxy-protocol-log"
+phase = "response"
+priority = 1
+when = "true"
+
+[[waf.rules.actions]]
+type = "emit_access_log"
+
+[[waf.rules.actions.fields]]
+name = "proxy_protocol"
+value = "Request.ProxyProtocol"
+
+[[waf.rules.actions.fields]]
+name = "common_name"
+value = "Request.ProxyProtocol.Ssl.CommonName"
+
+[[waf.rules.actions.fields]]
+name = "certificate_fingerprint"
+value = "Request.ProxyProtocol.Ssl.ClientCertificate.FingerprintSha256"
+"#,
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let engine = WafEngine::new(&config).expect("WAF should compile");
+  let certificate_der = certificate_der(&cert_path);
+  let metadata = proxy_protocol_metadata(0x07, 0, Some(&certificate_der));
+  let headers = HeaderMap::new();
+  let tags = HashMap::new();
+  let method = Method::GET;
+  let uri: Uri = "/".parse().unwrap();
+  let mut request = request_input(
+    &method,
+    &uri,
+    &headers,
+    &tags,
+    "203.0.113.10:49152".parse().unwrap(),
+  );
+  request.transport_metadata.proxy_protocol = Some(&metadata);
+  let response = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
+    request,
+    response_id: "proxy-protocol-response",
+    received_at_unix_ms: 1_700_000_000_001,
+    version: http::Version::HTTP_11,
+    status: StatusCode::OK,
+    headers: &headers,
+    body: None,
+    upstream_name: "app",
+    upstream_pool: None,
+    upstream_scheme: "https",
+    upstream_connect_time_ms: None,
+    upstream_first_byte_time_ms: None,
+    upstream_error: None,
+  });
+  let line = response.access_logs[0].to_json_line();
+  let value: serde_json::Value = serde_json::from_str(&line).expect("access log should be JSON");
+  let fields = value.as_object().expect("access log should be an object");
+  let object = fields["proxy_protocol"]
+    .as_object()
+    .expect("object field should be projected");
+  let ssl = object["ssl"]
+    .as_object()
+    .expect("SSL object should be projected");
+  assert!(ssl.get("commonname").is_none());
+  assert!(ssl.get("clientcertificate").is_none());
+  assert_eq!(fields["common_name"], "client.example");
+  assert!(
+    fields["certificate_fingerprint"]
+      .as_str()
+      .is_some_and(|value| !value.is_empty())
+  );
+  assert!(!line.contains("-----BEGIN CERTIFICATE-----"));
+}
+
 fn only_rule_hit(engine: &WafEngine) -> oxibelt::waf::WafRuleHitSnapshot {
   let snapshots = engine.rule_hit_snapshots();
   assert_eq!(snapshots.len(), 1);
@@ -12187,6 +12361,62 @@ fn request_input_with_protocol_and_network<'a>(
     tags,
     dynamic_policy: test_dynamic_policy(),
   }
+}
+
+fn proxy_protocol_metadata(
+  client_flags: u8,
+  verify_code: u32,
+  certificate_der: Option<&[u8]>,
+) -> ProxyProtocolMetadata {
+  let mut ssl_tlv = Vec::from(client_flags.to_be_bytes());
+  ssl_tlv.extend_from_slice(&verify_code.to_be_bytes());
+  for (kind, value) in [
+    (0x21, b"TLSv1.3".as_slice()),
+    (0x22, b"client.example".as_slice()),
+    (0x23, b"TLS_AES_128_GCM_SHA256".as_slice()),
+    (0x24, b"rsa_pss_rsae_sha256".as_slice()),
+    (0x25, b"rsa".as_slice()),
+    (0x26, b"x25519".as_slice()),
+    (0x27, b"rsa_pss_rsae_sha256".as_slice()),
+  ] {
+    append_proxy_protocol_tlv(&mut ssl_tlv, kind, value);
+  }
+  if let Some(certificate_der) = certificate_der {
+    append_proxy_protocol_tlv(&mut ssl_tlv, 0x28, certificate_der);
+  }
+  ProxyProtocolMetadata {
+    version: ProxyProtocolVersion::V2,
+    source: "203.0.113.10:49152".parse().unwrap(),
+    destination: Some("192.0.2.10:443".parse().unwrap()),
+    ssl: Some(Arc::new(
+      decode_ssl_tlv(&ssl_tlv).expect("test SSL TLV should decode"),
+    )),
+  }
+}
+
+fn append_proxy_protocol_tlv(output: &mut Vec<u8>, kind: u8, value: &[u8]) {
+  output.push(kind);
+  output.extend_from_slice(
+    &u16::try_from(value.len())
+      .expect("test TLV length should fit")
+      .to_be_bytes(),
+  );
+  output.extend_from_slice(value);
+}
+
+fn certificate_der(certificate: &std::path::Path) -> Vec<u8> {
+  let output = std::process::Command::new("openssl")
+    .args(["x509", "-in"])
+    .arg(certificate)
+    .args(["-outform", "der"])
+    .output()
+    .expect("openssl should convert the test certificate to DER");
+  assert!(
+    output.status.success(),
+    "openssl DER conversion failed: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  output.stdout
 }
 
 fn websocket_stream_input<'a>(

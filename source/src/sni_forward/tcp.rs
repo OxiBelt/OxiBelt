@@ -33,18 +33,22 @@ pub(crate) async fn local_stream_or_forwarded(
   peer_addr: SocketAddr,
   snapshot: Arc<AppSnapshot>,
   drain: ConnectionDrain,
+  received_proxy: Option<Arc<crate::proxy_protocol::ProxyProtocolMetadata>>,
 ) -> anyhow::Result<Option<TcpStream>> {
-  match classify_and_maybe_forward(stream, peer_addr, snapshot, drain).await? {
+  match classify_and_maybe_forward_with_metadata(stream, peer_addr, snapshot, drain, received_proxy)
+    .await?
+  {
     TcpSniForwardResult::Local(stream) => Ok(Some(stream)),
     TcpSniForwardResult::Forwarded => Ok(None),
   }
 }
 
-pub(crate) async fn classify_and_maybe_forward(
+async fn classify_and_maybe_forward_with_metadata(
   stream: TcpStream,
   peer_addr: SocketAddr,
   snapshot: Arc<AppSnapshot>,
   drain: ConnectionDrain,
+  received_proxy: Option<Arc<crate::proxy_protocol::ProxyProtocolMetadata>>,
 ) -> anyhow::Result<TcpSniForwardResult> {
   if !snapshot.sni_forward.is_enabled() {
     return Ok(TcpSniForwardResult::Local(stream));
@@ -98,7 +102,16 @@ pub(crate) async fn classify_and_maybe_forward(
       snapshot
         .metrics
         .record_sni_forward_decision("tcp_tls", "forward", &rule.name, &rule.target);
-      forward_tcp(stream, peer_addr, sni.as_deref(), snapshot, rule, drain).await?;
+      forward_tcp(
+        stream,
+        peer_addr,
+        sni.as_deref(),
+        snapshot,
+        rule,
+        drain,
+        received_proxy,
+      )
+      .await?;
       Ok(TcpSniForwardResult::Forwarded)
     }
   }
@@ -153,7 +166,22 @@ async fn forward_tcp(
   snapshot: Arc<AppSnapshot>,
   rule: Arc<SniForwardRule>,
   drain: ConnectionDrain,
+  received_proxy: Option<Arc<crate::proxy_protocol::ProxyProtocolMetadata>>,
 ) -> anyhow::Result<()> {
+  let prepared = rule
+    .tcp_proxy_protocol_tls
+    .as_ref()
+    .map(|policy| {
+      crate::proxy_protocol_egress::tls::PreparedTlsHeader::prepare(
+        policy,
+        &crate::proxy_protocol_egress::tls::ConnectionTlsEvidence {
+          received: received_proxy,
+          ..Default::default()
+        },
+        peer_addr,
+      )
+    })
+    .transpose()?;
   let started = TelemetryRuntime::start();
   let (host, port) = parse_stream_target(&rule.target)
     .with_context(|| format!("invalid SNI forwarding target {}", rule.target))?;
@@ -163,13 +191,21 @@ async fn forward_tcp(
     .context("SNI forwarding TCP connect timed out")?
     .with_context(|| format!("failed to connect SNI forwarding target {}", rule.target))?;
 
-  proxy_protocol_egress::write_header(
-    &mut upstream,
-    rule.tcp_proxy_protocol_egress,
-    peer_addr,
-    remote_addr,
-  )
+  tokio::time::timeout(rule.connect_timeout, async {
+    if let Some(prepared) = prepared {
+      upstream.write_all(prepared.bytes()).await
+    } else {
+      proxy_protocol_egress::write_header(
+        &mut upstream,
+        rule.tcp_proxy_protocol_egress,
+        peer_addr,
+        remote_addr,
+      )
+      .await
+    }
+  })
   .await
+  .context("SNI forwarding PROXY header timed out")?
   .context("failed to write SNI forwarding PROXY protocol egress header")?;
 
   info!(

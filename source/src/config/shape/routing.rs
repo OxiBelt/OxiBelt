@@ -16,6 +16,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "pool_max_idle_per_host",
       "preserve_host",
       "proxy_protocol_egress",
+      "proxy_protocol_tls",
       "read_timeout_ms",
       "request_timeout_ms",
       "send_timeout_ms",
@@ -24,6 +25,9 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "websocket",
       "webtransport",
     ][..],
+    "upstreams.proxy_protocol_tls" | "sni_forward.rules.tcp_proxy_protocol_tls" => {
+      &["client_certificate", "source"][..]
+    }
     "upstreams.tls"
     | "upstream_pools.servers.tls"
     | "upstream_pools.discovery.tls"

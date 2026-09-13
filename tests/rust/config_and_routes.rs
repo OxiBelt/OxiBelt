@@ -23,14 +23,14 @@ use oxibelt::config::{
   ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode,
   IpmPolicyEffect, KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm,
   MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityClass, PriorityMode,
-  PriorityRejectionPolicy, ProxyProtocolEgressMode, ProxyProtocolVersion, QuicZeroRttMode,
-  RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeArtifact, RuntimeMainRuntimeMode,
-  RuntimeOverrides, SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
-  StaticFilesSendfileMode, StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite,
-  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
-  TlsServerResumptionMode, TlsVersion, TrailerMode, UdpFlowState, UpstreamDiscoveryProvider,
-  UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
-  resolve_auto_worker_count,
+  PriorityRejectionPolicy, ProxyProtocolEgressMode, ProxyProtocolTlsSource, ProxyProtocolVersion,
+  QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeArtifact,
+  RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
+  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
+  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
+  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
+  TrailerMode, UdpFlowState, UpstreamDiscoveryProvider, UpstreamEchMode,
+  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
 };
 use oxibelt::hardening::RequiredHardeningFailurePolicy;
 use oxibelt::quic::load_host_key;
@@ -2252,7 +2252,11 @@ target = "127.0.0.1:9443"
 protocols = ["tcp_tls"]
 connect_timeout_ms = 1000
 idle_timeout_ms = 30000
-tcp_proxy_protocol_egress = "v1"
+tcp_proxy_protocol_egress = "v2"
+
+[sni_forward.rules.tcp_proxy_protocol_tls]
+source = "received_proxy"
+client_certificate = true
 "#;
 
   let config: Config = toml::from_str(&raw).expect("config should parse");
@@ -2309,6 +2313,86 @@ tcp_proxy_protocol_egress = "v1"
     config.sni_forward.rules[0].protocols,
     vec![SniForwardProtocol::TcpTls]
   );
+  assert_eq!(
+    config.sni_forward.rules[0]
+      .tcp_proxy_protocol_tls
+      .as_ref()
+      .unwrap()
+      .source,
+    ProxyProtocolTlsSource::ReceivedProxy
+  );
+}
+
+#[test]
+fn sni_forward_proxy_protocol_tls_rejects_non_tcp_v2_or_local_sources() {
+  let temp_dir = common::TempDir::new("sni-forward-proxy-protocol-tls-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "sni-forward-proxy-protocol-tls-invalid");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for (suffix, expected) in [
+    (
+      r#"
+[sni_forward]
+enabled = true
+
+[[sni_forward.rules]]
+name = "relay"
+server_names = ["relay.example.com"]
+target = "127.0.0.1:9443"
+protocols = ["tcp_tls"]
+tcp_proxy_protocol_egress = "v1"
+
+[sni_forward.rules.tcp_proxy_protocol_tls]
+source = "received_proxy"
+"#,
+      "requires tcp_proxy_protocol_egress = \"v2\"",
+    ),
+    (
+      r#"
+[sni_forward]
+enabled = true
+
+[[sni_forward.rules]]
+name = "relay"
+server_names = ["relay.example.com"]
+target = "127.0.0.1:9443"
+protocols = ["tcp_tls"]
+tcp_proxy_protocol_egress = "v2"
+
+[sni_forward.rules.tcp_proxy_protocol_tls]
+source = "local_tls"
+"#,
+      "source must be \"received_proxy\"",
+    ),
+    (
+      r#"
+[sni_forward]
+enabled = true
+
+[[sni_forward.rules]]
+name = "relay"
+server_names = ["relay.example.com"]
+target = "127.0.0.1:9443"
+protocols = ["tcp_tls", "quic"]
+tcp_proxy_protocol_egress = "v2"
+
+[sni_forward.rules.tcp_proxy_protocol_tls]
+source = "received_proxy"
+"#,
+      "requires protocols = [\"tcp_tls\"]",
+    ),
+  ] {
+    let config: Config =
+      toml::from_str(&(base.clone() + suffix)).expect("invalid SNI relay config should parse");
+    let error = config
+      .validate()
+      .expect_err("invalid SNI relay config should fail");
+    assert!(
+      error.to_string().contains(expected),
+      "unexpected error: {error:#}"
+    );
+  }
 }
 
 #[test]
@@ -4882,6 +4966,103 @@ version = "{raw_version}"
     let config: Config = toml::from_str(&raw).expect("config should parse");
     config.validate().expect("config should validate");
     assert_eq!(config.listeners.proxy_protocol.version, expected);
+  }
+}
+
+#[test]
+fn proxy_protocol_tls_metadata_requires_safe_intakes_and_v2_egress() {
+  let temp_dir = common::TempDir::new("proxy-protocol-tls-metadata");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "proxy-protocol-tls-metadata");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let valid_base = base.replace(
+    "http3 = false",
+    "http_bind = \"127.0.0.1:8080\"\nhttp_mode = \"proxy\"\nhttp3 = false",
+  );
+  let valid = format!(
+    r#"{valid_base}
+
+[listeners.proxy_protocol]
+enabled = true
+version = "v2"
+trusted_sources = ["192.0.2.0/24"]
+tls_tlvs = true
+
+[listeners.http_proxy_protocol]
+enabled = true
+version = "any"
+trusted_sources = ["2001:db8::/48"]
+tls_tlvs = true
+
+[[upstreams]]
+name = "tls-relay"
+origin = "https://tls-relay.internal.example"
+proxy_protocol_egress = "v2"
+
+[upstreams.proxy_protocol_tls]
+source = "local_tls"
+client_certificate = true
+"#
+  );
+  let config: Config = toml::from_str(&valid).expect("TLS metadata config should parse");
+  config
+    .validate()
+    .expect("TLS metadata config should validate");
+  assert!(config.listeners.proxy_protocol.tls_tlvs);
+  assert!(config.listeners.http_proxy_protocol.tls_tlvs);
+  assert_eq!(
+    config.upstreams[1]
+      .proxy_protocol_tls
+      .as_ref()
+      .unwrap()
+      .source,
+    ProxyProtocolTlsSource::LocalTls
+  );
+
+  for (fragment, expected) in [
+    (
+      r#"[listeners.proxy_protocol]
+tls_tlvs = true
+"#,
+      "tls_tlvs requires listeners.proxy_protocol.enabled",
+    ),
+    (
+      r#"[listeners.proxy_protocol]
+enabled = true
+version = "v1"
+tls_tlvs = true
+"#,
+      "tls_tlvs requires listeners.proxy_protocol.version",
+    ),
+    (
+      r#"[listeners.http_proxy_protocol]
+enabled = true
+trusted_sources = ["192.0.2.0/24"]
+"#,
+      "requires an active plaintext HTTP listener",
+    ),
+    (
+      r#"[[upstreams]]
+name = "tls-relay"
+origin = "https://tls-relay.internal.example"
+proxy_protocol_egress = "v1"
+
+[upstreams.proxy_protocol_tls]
+source = "local_tls"
+"#,
+      "requires proxy_protocol_egress = \"v2\"",
+    ),
+  ] {
+    let config: Config = toml::from_str(&format!("{base}\n{fragment}"))
+      .expect("invalid TLS metadata config should parse");
+    let error = config
+      .validate()
+      .expect_err("invalid TLS metadata should fail");
+    assert!(
+      error.to_string().contains(expected),
+      "unexpected error: {error:#}"
+    );
   }
 }
 

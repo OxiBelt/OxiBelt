@@ -563,6 +563,12 @@ fn validate_proxy_and_identity(config: &Config) -> anyhow::Result<()> {
       &config.listeners.proxy_protocol.trusted_sources,
     )?;
   }
+  if config.listeners.http_proxy_protocol.enabled {
+    validate_trusted_cidrs(
+      "listeners.http_proxy_protocol.trusted_sources",
+      &config.listeners.http_proxy_protocol.trusted_sources,
+    )?;
+  }
   Ok(())
 }
 

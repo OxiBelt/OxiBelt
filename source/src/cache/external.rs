@@ -31,6 +31,7 @@ impl ResponseCache {
       ctx.uri,
       ctx.request_headers,
       ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
     )?;
     let handler = operation.policy.external_handler.as_deref()?;
     let request = ExternalCacheLookupRequest::new(

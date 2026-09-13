@@ -24,6 +24,7 @@ struct SystemAccessLogRequest {
 }
 
 pub(crate) struct SystemAccessLogContext<'a> {
+  pub(super) proxy_tls_enabled: bool,
   request_id: Option<String>,
   response_id: Option<String>,
   transaction_id: Option<String>,
@@ -76,6 +77,7 @@ impl<'a> SystemAccessLogContext<'a> {
     });
 
     Self {
+      proxy_tls_enabled: false,
       request_id: None,
       response_id: None,
       transaction_id: None,

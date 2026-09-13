@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Response<ProxyBody> {
   let UpstreamContext {
-    request,
+    mut request,
     state,
     resolved,
     host,
@@ -65,6 +65,10 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   let pool_retry_cookie = selected
     .pool_name()
     .and_then(|_| pool_cookie_header.cloned());
+  access_log.proxy_tls_enabled = upstream.proxy_protocol_tls.is_some();
+  if let Err(status) = proxy_tls::prepare(&mut request, upstream, client_addr) {
+    return route_security.text(status, "PROXY TLS metadata is unavailable or inconsistent");
+  }
   if let Some(pool_name) = selected.pool_name() {
     if response_waf_enabled {
       access_log.upstream_pool = Some(pool_name.to_string());
@@ -236,6 +240,8 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     return route_security.text(status, "client certificate forwarding failed");
   }
   let certificate_identity = client_certificate::cache_identity(&outbound).cloned();
+  proxy_tls::apply_upstream(&mut outbound);
+  let proxy_protocol_identity = proxy_tls::cache_identity(&outbound).cloned();
   request_mirror::spawn_request_mirrors(
     state.clone(),
     resolved.route,
@@ -251,6 +257,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   let mut _cache_fill_guard = None;
   let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
   let initial_cache_lookup = crate::cache::CacheLookupContext {
+    proxy_protocol_identity: proxy_protocol_identity.as_ref(),
     certificate_identity: certificate_identity.as_ref(),
     policy_name: resolved.route.cache.as_deref(),
     scheme: downstream_scheme,
@@ -304,6 +311,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
       let Some(permit) = state
         .cache
         .begin_fill_decision_async(crate::cache::CacheLookupContext {
+          proxy_protocol_identity: proxy_protocol_identity.as_ref(),
           certificate_identity: certificate_identity.as_ref(),
           policy_name: resolved.route.cache.as_deref(),
           scheme: downstream_scheme,
@@ -323,6 +331,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           if let Some(lookup) = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              proxy_protocol_identity: proxy_protocol_identity.as_ref(),
               certificate_identity: certificate_identity.as_ref(),
               policy_name: resolved.route.cache.as_deref(),
               scheme: downstream_scheme,
@@ -389,6 +398,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           if let Some(lookup) = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              proxy_protocol_identity: proxy_protocol_identity.as_ref(),
               certificate_identity: certificate_identity.as_ref(),
               policy_name: resolved.route.cache.as_deref(),
               scheme: downstream_scheme,
@@ -499,6 +509,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     native_grpc_request,
     request_headers,
     certificate_identity,
+    proxy_protocol_identity,
     stale_on_error,
     revalidation_entry,
     cache_store_allowed,

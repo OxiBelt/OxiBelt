@@ -86,6 +86,7 @@ pub(super) async fn serve_webtransport_connection(
   peer_addr: SocketAddr,
   udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
+  proxy_tls_evidence: Option<crate::proxy_protocol_egress::tls::ConnectionTlsEvidence>,
   forwarded_client_certificate: Option<crate::tls::ForwardedClientCertificate>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: Arc<AppSnapshot>,
@@ -109,6 +110,7 @@ pub(super) async fn serve_webtransport_connection(
     peer_addr,
     udp_connection_id.clone(),
     tls_metadata.clone(),
+    proxy_tls_evidence.clone(),
     forwarded_client_certificate.clone(),
     connection_limit_context.clone(),
     state.clone(),
@@ -187,6 +189,7 @@ pub(super) async fn serve_webtransport_connection(
               peer_addr,
               udp_connection_id.clone(),
               tls_metadata.clone(),
+              proxy_tls_evidence.clone(),
               forwarded_client_certificate.clone(),
               connection_limit_context.clone(),
               state.clone(),
@@ -284,6 +287,7 @@ async fn handle_downstream_request(
   peer_addr: SocketAddr,
   udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
+  proxy_tls_evidence: Option<crate::proxy_protocol_egress::tls::ConnectionTlsEvidence>,
   forwarded_client_certificate: Option<crate::tls::ForwardedClientCertificate>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: Arc<AppSnapshot>,
@@ -333,6 +337,7 @@ async fn handle_downstream_request(
     }
 
     let context = H3DownstreamRequestContext {
+      proxy_tls_evidence,
       peer_addr,
       udp_connection_id,
       tls_metadata,

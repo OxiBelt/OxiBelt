@@ -67,6 +67,14 @@ pub(super) async fn handle_connect_request(
   };
   let upstream = selected.upstream.clone();
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, &upstream);
+  access_log.proxy_tls_enabled = upstream.proxy_protocol_tls.is_some();
+  if let Err(status) = proxy_tls::prepare(&mut request, &upstream, client_addr) {
+    return route_security.text(status, "PROXY TLS metadata is unavailable or inconsistent");
+  }
+  let prepared_tls = request
+    .extensions()
+    .get::<crate::proxy_protocol_egress::tls::PreparedTlsHeader>()
+    .cloned();
   access_log.set_upstream(&upstream.name, upstream.origin.scheme());
   let selected_pool_name = selected.pool_name().map(Arc::<str>::from);
   if let Some(pool_name) = selected_pool_name.as_deref() {
@@ -97,6 +105,7 @@ pub(super) async fn handle_connect_request(
           client_addr,
           timeouts,
           connection_admission,
+          prepared_tls,
         )
         .await?;
         copy_bidirectional_with_idle_and_bandwidth(
@@ -132,6 +141,7 @@ pub(super) async fn handle_connect_request(
     client_addr,
     timeouts,
     connection_admission,
+    prepared_tls,
   )
   .await
   {
@@ -442,19 +452,24 @@ pub(super) async fn dial_tunnel_upstream(
   client_addr: std::net::SocketAddr,
   timeouts: EffectiveTimeouts,
   admission: crate::upstream_resolution::ConnectionAdmissionContext,
+  prepared_tls: Option<crate::proxy_protocol_egress::tls::PreparedTlsHeader>,
 ) -> anyhow::Result<crate::upstream_resolution::ConnectionAdmitted<TcpStream>> {
   let (mut stream, remote_addr, connect_deadline) =
     connect_upstream_tcp(upstream, resolution_config, timeouts, admission).await?;
   crate::tcp_socket::enable_tcp_nodelay(stream.get_ref(), remote_addr, "upstream tunnel");
-  tokio::time::timeout_at(
-    connect_deadline,
-    crate::proxy_protocol_egress::write_header(
-      &mut stream,
-      upstream.proxy_protocol_egress,
-      client_addr,
-      remote_addr,
-    ),
-  )
+  tokio::time::timeout_at(connect_deadline, async {
+    if let Some(prepared_tls) = prepared_tls {
+      tokio::io::AsyncWriteExt::write_all(&mut stream, prepared_tls.bytes()).await
+    } else {
+      crate::proxy_protocol_egress::write_header(
+        &mut stream,
+        upstream.proxy_protocol_egress,
+        client_addr,
+        remote_addr,
+      )
+      .await
+    }
+  })
   .await
   .context("upstream tunnel PROXY protocol egress header timed out")?
   .context("failed to write upstream PROXY protocol egress header")?;
@@ -516,10 +531,12 @@ pub(super) async fn handle_upgrade_request(
   if let Some(pool_name) = selected.pool_name() {
     access_log.set_upstream_pool(pool_name);
   }
+  let selected_pool_name = selected.pool_name().map(Arc::<str>::from);
   let sticky_cookie = selected.sticky_cookie();
   let pool_selection = selected.into_pool_selection();
   access_log.set_upstream(&upstream.name, upstream.origin.scheme());
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
+  access_log.proxy_tls_enabled = upstream.proxy_protocol_tls.is_some();
 
   if websocket_upgrade && !upstream.websocket {
     return Some(route_security.text(
@@ -580,9 +597,13 @@ pub(super) async fn handle_upgrade_request(
     .telemetry
     .inject_trace_context(&mut parts.headers, trace_context);
   let mut outbound = Request::from_parts(parts, body);
+  if let Err(status) = proxy_tls::prepare(&mut outbound, upstream, client_addr) {
+    return Some(route_security.text(status, "PROXY TLS metadata is unavailable or inconsistent"));
+  }
   if let Err(status) = client_certificate::apply_upstream(&mut outbound, state) {
     return Some(route_security.text(status, "client certificate forwarding failed"));
   }
+  proxy_tls::apply_upstream(&mut outbound);
   let reserved_headers = state.client_certificate_forwarding_headers.to_vec();
   let reserved_header_aliases = state.client_certificate_forwarding_header_aliases.clone();
   let outbound = outbound.map(|body| {
@@ -596,16 +617,43 @@ pub(super) async fn handle_upgrade_request(
       BodyTimeoutKind::UpstreamRequestSend,
     )
   });
-  let Some(client) =
-    state
-      .clients
-      .for_upstream_version(&upstream.name, upstream.origin.scheme(), HttpVersion::H1)
-  else {
-    return Some(route_security.text(StatusCode::BAD_GATEWAY, "upstream client is not configured"));
-  };
   let upstream_started_at = Instant::now();
+  let client = if upstream.proxy_protocol_tls.is_some() {
+    None
+  } else {
+    let Some(client) =
+      state
+        .clients
+        .for_upstream_version(&upstream.name, upstream.origin.scheme(), HttpVersion::H1)
+    else {
+      return Some(
+        route_security.text(StatusCode::BAD_GATEWAY, "upstream client is not configured"),
+      );
+    };
+    Some(client)
+  };
+  let upstream_request = async {
+    if upstream.proxy_protocol_tls.is_some() {
+      tcp_exchange::send_one_shot_with_proxy_protocol(
+        outbound,
+        upstream,
+        state,
+        selected_pool_name.as_deref(),
+        HttpVersion::H1,
+        client_addr,
+        timeouts,
+      )
+      .await
+    } else {
+      client
+        .context("upstream upgrade client is unavailable")?
+        .request(outbound)
+        .await
+        .map_err(anyhow::Error::from)
+    }
+  };
   let mut upstream_response =
-    match tokio::time::timeout(timeouts.upstream_first_byte, client.request(outbound)).await {
+    match tokio::time::timeout(timeouts.upstream_first_byte, upstream_request).await {
       Ok(Ok(response)) => {
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         response

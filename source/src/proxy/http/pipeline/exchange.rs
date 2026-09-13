@@ -42,12 +42,14 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     native_grpc_request,
     request_headers,
     certificate_identity,
+    proxy_protocol_identity,
     stale_on_error,
     revalidation_entry,
     cache_store_allowed,
     cache_fill_guard,
   } = context;
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
+  let proxy_tls_certificate = proxy_tls::has_certificate_identity(&outbound);
   let request_body = captured_body.as_ref().map(waf_body_input);
   let mut _cache_fill_guard = cache_fill_guard;
   let stale_if_error_response = |entry| {
@@ -435,6 +437,7 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
         .cache
         .update_from_not_modified_async(
           crate::cache::CacheInsertContext {
+            proxy_protocol_identity: proxy_protocol_identity.as_ref(),
             certificate_identity: certificate_identity.as_ref(),
             policy_name: resolved.route.cache.as_deref(),
             scheme: downstream_scheme,
@@ -470,9 +473,10 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
       request_version,
       listener_bind,
     );
-    let response = if certificate_identity
-      .as_ref()
-      .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
+    let response = if proxy_tls_certificate
+      || certificate_identity
+        .as_ref()
+        .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
     {
       response
     } else {
@@ -659,6 +663,7 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     &request_headers,
     Some(resolved.route),
     certificate_identity.as_ref(),
+    proxy_protocol_identity.as_ref(),
     cache_store_allowed,
     _cache_fill_guard.take(),
     Some(&applied_route_security_headers),
@@ -673,9 +678,10 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     request_version,
     listener_bind,
   );
-  let response = if certificate_identity
-    .as_ref()
-    .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
+  let response = if proxy_tls_certificate
+    || certificate_identity
+      .as_ref()
+      .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
   {
     response
   } else {

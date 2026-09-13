@@ -159,6 +159,10 @@ name = "tls_client_roots"
 path = "../tests/rust/tls_client_roots.rs"
 
 [[test]]
+name = "proxy_protocol_tls_integration"
+path = "../tests/rust/proxy_protocol_tls_integration.rs"
+
+[[test]]
 name = "stream_listener_limits"
 path = "../tests/rust/stream_listener_limits.rs"
 

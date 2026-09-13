@@ -10,6 +10,7 @@ async fn fill_permit_coalesces_followers_until_leader_drops() {
   let uri = "/asset/app.css?v=1".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -54,6 +55,7 @@ async fn fill_waiter_times_out_without_leader_drop() {
   let uri = "/asset/app.css?v=1".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -102,6 +104,7 @@ fn certificate_identity_uses_a_separate_fill_lock() {
   )
   .unwrap();
   let context = |identity| CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -131,6 +134,7 @@ fn not_stored_fill_suppression_skips_short_lived_locks() {
   let uri = "/asset/no-store.css".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let insert_ctx = CacheInsertContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -140,6 +144,7 @@ fn not_stored_fill_suppression_skips_short_lived_locks() {
     certificate_identity: None,
   };
   let lookup_ctx = CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -178,6 +183,7 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
   let uri = "/asset/no-store.css".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let insert_ctx = CacheInsertContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -187,6 +193,7 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
     certificate_identity: None,
   };
   let lookup_ctx = CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",

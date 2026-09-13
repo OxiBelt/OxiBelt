@@ -16,6 +16,14 @@ pub(crate) fn plain_proxy_fast_path_decision<B>(
   state: &AppSnapshot,
   resolved: &ResolvedRoute<'_>,
 ) -> Result<(), PlainProxyFastPathMissReason> {
+  if state
+    .config
+    .upstreams
+    .iter()
+    .any(|upstream| upstream.proxy_protocol_tls.is_some())
+  {
+    return Err(PlainProxyFastPathMissReason::UnsupportedRoute);
+  }
   // Certificate header ownership is snapshot-wide. Use the complete pipeline for
   // its final mutation/trailer scrub, even on routes which do not emit a leaf.
   if !state.client_certificate_forwarding_headers.is_empty() {

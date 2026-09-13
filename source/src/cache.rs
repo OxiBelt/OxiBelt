@@ -41,6 +41,8 @@ mod key;
 mod lookup;
 mod metadata;
 mod policy;
+mod proxy_protocol_identity;
+pub use proxy_protocol_identity::CacheProxyProtocolIdentity;
 mod purge;
 mod range;
 mod recovery;
@@ -260,6 +262,7 @@ pub(crate) enum CachePreparedInsertDecision {
 
 #[derive(Debug, Clone)]
 pub struct CacheInsertContext<'a> {
+  pub proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
   pub policy_name: Option<&'a str>,
   pub scheme: &'a str,
   pub host: &'a str,
@@ -272,6 +275,7 @@ pub struct CacheInsertContext<'a> {
 
 #[derive(Debug, Clone)]
 pub struct CacheLookupContext<'a> {
+  pub proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
   pub policy_name: Option<&'a str>,
   pub scheme: &'a str,
   pub host: &'a str,
@@ -473,3 +477,7 @@ impl Drop for ResponseCache {
 #[cfg(test)]
 #[path = "cache/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cache/tests_proxy_protocol.rs"]
+mod tests_proxy_protocol;

@@ -9,6 +9,10 @@ use crate::config::ProxyProtocolEgressMode;
 
 const V2_SIGNATURE: &[u8; 12] = b"\r\n\r\n\0\r\nQUIT\n";
 
+pub(crate) mod tls;
+#[cfg(test)]
+mod tls_tests;
+
 pub async fn write_header<W>(
   writer: &mut W,
   mode: ProxyProtocolEgressMode,

@@ -7,8 +7,16 @@ pub(super) fn eval_certificate_member(
   field: &str,
   ctx: &EvalContext<'_>,
 ) -> anyhow::Result<Value> {
+  let proxy_certificate = ctx
+    .request
+    .transport_metadata
+    .proxy_protocol
+    .and_then(|metadata| metadata.ssl.as_deref())
+    .and_then(|ssl| ssl.client_certificate_metadata())
+    .cloned();
   let certificate = match object {
     ObjectRef::ClientCertificate => ctx.request.tls.client_certificate_details.as_deref(),
+    ObjectRef::ProxyProtocolClientCertificate => proxy_certificate.as_deref(),
     ObjectRef::ResponseServerCertificate => {
       ctx.response.and_then(|value| value.upstream_certificate)
     }

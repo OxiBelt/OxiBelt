@@ -24,7 +24,8 @@ pub(super) fn handle_cache_lookup_result(
   record_events: bool,
 ) -> Option<Response<ProxyBody>> {
   let certificate_authenticated = client_certificate::cache_identity(outbound)
-    .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated);
+    .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
+    || proxy_tls::has_certificate_identity(outbound);
   match lookup {
     crate::cache::CacheLookup::Fresh(entry) => {
       if cache_entry_blocked_by_waf_body_transform(state.as_ref(), resolved, &entry) {
@@ -238,6 +239,7 @@ pub(super) async fn maybe_cache_response(
     request_headers,
     route,
     None,
+    None,
     true,
     None,
     None,
@@ -257,6 +259,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   request_headers: &HeaderMap,
   route: Option<&RouteConfig>,
   certificate_identity: Option<&crate::cache::CacheCertificateIdentity>,
+  proxy_protocol_identity: Option<&crate::cache::CacheProxyProtocolIdentity>,
   allow_store: bool,
   mut cache_fill_guard: Option<crate::cache::CacheFillGuard>,
   applied_route_security_headers: Option<&AppliedRouteSecurityHeaders>,
@@ -286,6 +289,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   }
   let content_length = cache_streaming::exact_response_content_length(&cache_headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
+    proxy_protocol_identity,
     certificate_identity,
     policy_name: route_cache,
     scheme,
@@ -359,6 +363,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
         request_headers,
         route,
         certificate_identity,
+        proxy_protocol_identity,
         parts,
         body,
         prepared,

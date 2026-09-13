@@ -26,6 +26,7 @@ pub(crate) struct SniForwardRule {
   pub(crate) connect_timeout: Duration,
   pub(crate) idle_timeout: Duration,
   pub(crate) tcp_proxy_protocol_egress: ProxyProtocolEgressMode,
+  pub(crate) tcp_proxy_protocol_tls: Option<crate::config::ProxyProtocolTlsConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ impl SniForwardTable {
         connect_timeout: Duration::from_millis(3_000),
         idle_timeout: Duration::from_millis(config.sni_forward.idle_timeout_ms),
         tcp_proxy_protocol_egress: ProxyProtocolEgressMode::Off,
+        tcp_proxy_protocol_tls: None,
       })
     });
     let mut table = Self {
@@ -68,6 +70,7 @@ impl SniForwardTable {
         connect_timeout: Duration::from_millis(rule.connect_timeout_ms),
         idle_timeout: Duration::from_millis(rule.idle_timeout_ms),
         tcp_proxy_protocol_egress: rule.tcp_proxy_protocol_egress,
+        tcp_proxy_protocol_tls: rule.tcp_proxy_protocol_tls.clone(),
       });
       for pattern in &rule.server_names {
         if rule.protocols.contains(&SniForwardProtocol::TcpTls) {

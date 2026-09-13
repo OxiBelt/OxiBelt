@@ -23,6 +23,9 @@ use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::fast_path::stage_timing as timing;
 use crate::proxy::http::response::{is_silent_close_response, text_response};
+use crate::proxy_protocol_egress::tls::{
+  ConnectionTlsEvidence, local_capture_needed, local_certificate_capture_needed,
+};
 use crate::routes::{RouteMatchContext, RouteRequestProtocol};
 use crate::runtime_introspection::RuntimeIntrospectionCounter as RuntimeCounter;
 use crate::state::AppSnapshot;
@@ -68,6 +71,7 @@ pub(super) struct H3DownstreamRequestContext {
   peer_addr: SocketAddr,
   udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
+  proxy_tls_evidence: Option<ConnectionTlsEvidence>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: Arc<AppSnapshot>,
   drain: ConnectionDrain,
@@ -75,6 +79,7 @@ pub(super) struct H3DownstreamRequestContext {
 
 pub(crate) async fn handle_downstream_connection(
   connection: h3_quinn::quinn::Connection,
+  listener_bind: SocketAddr,
   snapshot: Arc<AppSnapshot>,
   mut shutdown: tokio::sync::watch::Receiver<bool>,
   mut data_plane_drain: tokio::sync::watch::Receiver<bool>,
@@ -114,6 +119,7 @@ pub(crate) async fn handle_downstream_connection(
     .max_webtransport_sessions_per_connection;
   let max_field_section_size = h3_field_section_size(snapshot.config.limits.max_total_header_bytes);
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
+  let proxy_tls_evidence = downstream_proxy_tls_evidence(&connection, listener_bind, &snapshot);
   // The connection pins this snapshot; do not capture certificate DER when no route in it can use it.
   let forwarded_client_certificate = (!snapshot.client_certificate_forwarding_headers.is_empty())
     .then(|| downstream_quic_forwarded_client_certificate(&connection))
@@ -132,6 +138,7 @@ pub(crate) async fn handle_downstream_connection(
     peer_addr,
     udp_connection_id: udp_connection_id.clone(),
     tls_metadata: tls_metadata.clone(),
+    proxy_tls_evidence: proxy_tls_evidence.clone(),
     connection_limit_context: connection_limit_context.clone(),
     state: snapshot.clone(),
     drain: drain.clone(),
@@ -296,6 +303,7 @@ pub(crate) async fn handle_downstream_connection(
         peer_addr,
         udp_connection_id.clone(),
         tls_metadata,
+        proxy_tls_evidence,
         forwarded_client_certificate,
         connection_limit_context.clone(),
         snapshot,
@@ -557,6 +565,18 @@ fn h3_inline_fast_path_candidate(
   request: &Request<()>,
   context: &H3DownstreamRequestContext,
 ) -> bool {
+  // The H3 inline path does not own the explicit TCP upstream transport. Keep
+  // it out of TLS-TLV egress routes until that transport can consume the
+  // connection-owned evidence without an extension boundary.
+  if context
+    .state
+    .config
+    .upstreams
+    .iter()
+    .any(|upstream| upstream.proxy_protocol_tls.is_some())
+  {
+    return false;
+  }
   if !context.state.config.proxy.http3.inline_bodyless_fast_path {
     return false;
   }
@@ -626,6 +646,45 @@ fn h3_inline_fast_path_candidate(
     .is_ok()
 }
 
+fn downstream_proxy_tls_evidence(
+  connection: &h3_quinn::quinn::Connection,
+  listener_bind: SocketAddr,
+  snapshot: &AppSnapshot,
+) -> Option<ConnectionTlsEvidence> {
+  if !local_capture_needed(&snapshot.config) {
+    return None;
+  }
+  let mut evidence = ConnectionTlsEvidence::default();
+  let destination = connection
+    .local_ip()
+    .or_else(|| (!listener_bind.ip().is_unspecified()).then_some(listener_bind.ip()));
+  let Some(destination) = destination.map(|ip| SocketAddr::new(ip, listener_bind.port())) else {
+    evidence.local_capture_failed = true;
+    return Some(evidence);
+  };
+  let certificates = connection.peer_identity().and_then(|identity| {
+    identity
+      .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+      .ok()
+  });
+  let certificates = certificates
+    .as_deref()
+    .map(Vec::as_slice)
+    .unwrap_or_default();
+  match crate::tls::proxy_protocol_metadata::capture_authenticated_session(
+    connection.remote_address(),
+    destination,
+    "TLSv1.3",
+    certificates,
+    false,
+    local_certificate_capture_needed(&snapshot.config),
+  ) {
+    Ok(local) => evidence.local = Some(local),
+    Err(_) => evidence.local_capture_failed = true,
+  }
+  Some(evidence)
+}
+
 async fn handle_h3_request(
   request: Request<()>,
   stream: H3RequestStream,
@@ -649,13 +708,16 @@ async fn handle_h3_request(
 }
 
 async fn handle_prepared_h3_request(
-  request: Request<ProxyBody>,
+  mut request: Request<ProxyBody>,
   send_stream: H3RequestSendStream,
   context: H3DownstreamRequestContext,
 ) -> anyhow::Result<StatusCode> {
   let state = context.state.clone();
   let metric_protocol = timing::protocol(::http::Version::HTTP_3);
   let timing_enabled = state.request_path_features.stage_timing_metrics;
+  if let Some(evidence) = &context.proxy_tls_evidence {
+    request.extensions_mut().insert(evidence.clone());
+  }
   let response = http_proxy::handle_http3(
     request,
     context.peer_addr,

@@ -60,6 +60,7 @@ mod overload;
 pub(crate) mod person_proof;
 mod pipeline;
 mod priority_admission;
+mod proxy_tls;
 pub(crate) mod request;
 pub(crate) mod request_framing;
 mod request_mirror;
@@ -559,6 +560,7 @@ where
   }
   .await;
   client_certificate::finalize_response(&mut response, certificate_forwarding_enabled, state);
+  proxy_tls::finalize_response(&mut response, access_log.proxy_tls_enabled);
   response
 }
 

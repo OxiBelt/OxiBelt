@@ -1195,6 +1195,7 @@ request_timeout_ms = 1
       http2: false,
       http3: false,
       proxy_protocol: ProxyProtocolConfig::default(),
+      http_proxy_protocol: ProxyProtocolConfig::default(),
     }
   }
 

@@ -40,6 +40,7 @@ pub(super) async fn wait_for_shared_fill(
   revalidation_entry: &mut Option<CacheEntry>,
 ) -> Option<Response<ProxyBody>> {
   let certificate_identity = super::client_certificate::cache_identity(outbound).cloned();
+  let proxy_protocol_identity = super::proxy_tls::cache_identity(outbound).cloned();
   state.metrics.record_cache_fill_lock_conflict();
   record_route_cache_event(state, resolved.route, "miss", "shared_lock_conflict");
   let started = Instant::now();
@@ -58,6 +59,7 @@ pub(super) async fn wait_for_shared_fill(
     let Some(lookup) = state
       .cache
       .lookup_async(CacheLookupContext {
+        proxy_protocol_identity: proxy_protocol_identity.as_ref(),
         certificate_identity: certificate_identity.as_ref(),
         policy_name: resolved.route.cache.as_deref(),
         scheme: downstream_scheme,

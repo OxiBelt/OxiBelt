@@ -54,6 +54,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -72,6 +73,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
   );
 
   match cache.lookup(CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -105,6 +107,7 @@ fn cache_key_explain_includes_partition_and_variant() {
 
   let explain = cache.explain_key(
     CacheLookupContext {
+      proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
       host: "example.test",
@@ -142,6 +145,7 @@ fn cache_key_explain_reports_vary_rejection_reason() {
 
   let explain = cache.explain_key(
     CacheLookupContext {
+      proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
       host: "example.test",
@@ -180,6 +184,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -199,6 +204,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -231,6 +237,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -254,6 +261,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -285,6 +293,7 @@ fn cookie_requests_bypass_cache_by_default() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -304,6 +313,7 @@ fn cookie_requests_bypass_cache_by_default() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -329,6 +339,7 @@ fn named_policy_can_define_negative_cache_defaults() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("negative"),
         scheme: "https",
         host: "example.test",
@@ -347,6 +358,7 @@ fn named_policy_can_define_negative_cache_defaults() {
   );
   assert!(matches!(
     cache.lookup(CacheLookupContext {
+      proxy_protocol_identity: None,
       policy_name: Some("negative"),
       scheme: "https",
       host: "example.test",
@@ -405,6 +417,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
           host: "example.test",
@@ -420,6 +433,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
   }
 
   match cache.lookup(CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -461,6 +475,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -484,6 +499,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -523,6 +539,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
           host: "example.test",
@@ -539,6 +556,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
 
   assert_eq!(cache.purge_tag("default", "css", None, None), 1);
   let first = CacheLookupContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -548,6 +566,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
     certificate_identity: None,
   };
   let second = CacheLookupContext {
+    proxy_protocol_identity: None,
     uri: &second_uri,
     ..first.clone()
   };
@@ -569,6 +588,7 @@ fn admission_min_hits_rejects_until_threshold() {
   let uri = "/asset/app.css".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let ctx = CacheInsertContext {
+    proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",
@@ -589,6 +609,7 @@ fn admission_min_hits_rejects_until_threshold() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -649,6 +670,7 @@ fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
           host: "example.test",

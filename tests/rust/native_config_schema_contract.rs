@@ -204,6 +204,41 @@ fn real_ip_rule_schema_is_typed_strict_and_full_reload() {
 }
 
 #[test]
+fn proxy_protocol_tls_schema_is_typed_strict_and_requires_a_source() {
+  let schema: serde_json::Value =
+    serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))
+      .expect("generated native schema should be JSON");
+
+  for path in [
+    "listeners.proxy_protocol.tls_tlvs",
+    "listeners.http_proxy_protocol.tls_tlvs",
+    "upstreams[].proxy_protocol_tls.client_certificate",
+    "sni_forward.rules[].tcp_proxy_protocol_tls.client_certificate",
+  ] {
+    let field = schema_node_for_metadata_path(&schema, path);
+    assert_eq!(field["type"], "boolean", "unexpected type at {path}");
+    assert_eq!(field["default"], false, "unexpected default at {path}");
+  }
+
+  for path in [
+    "upstreams[].proxy_protocol_tls",
+    "sni_forward.rules[].tcp_proxy_protocol_tls",
+  ] {
+    let table = schema_node_for_metadata_path(&schema, path);
+    assert_eq!(
+      table["additionalProperties"], false,
+      "unexpected shape at {path}"
+    );
+    assert_eq!(table["required"], serde_json::json!(["source"]));
+    assert_eq!(
+      table["properties"]["source"]["enum"],
+      serde_json::json!(["local_tls", "received_proxy"]),
+      "unexpected source enum at {path}"
+    );
+  }
+}
+
+#[test]
 fn certificate_transparency_schema_publishes_epoch_one_defaults_and_reload_boundaries() {
   let schema: serde_json::Value =
     serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))

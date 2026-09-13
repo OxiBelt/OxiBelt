@@ -7,8 +7,8 @@ use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use super::{
-  Config, ProxyProtocolEgressMode, default_client_idle_timeout_ms, default_connect_timeout_ms,
-  parse_stream_target,
+  Config, ProxyProtocolEgressMode, ProxyProtocolTlsConfig, ProxyProtocolTlsSource,
+  default_client_idle_timeout_ms, default_connect_timeout_ms, parse_stream_target,
 };
 
 const DEFAULT_CLIENT_HELLO_MAX_BYTES: usize = 64 * 1024;
@@ -47,6 +47,7 @@ pub(super) const SNI_FORWARD_RULE_KEYS: &[&str] = &[
   "server_names",
   "target",
   "tcp_proxy_protocol_egress",
+  "tcp_proxy_protocol_tls",
 ];
 
 impl Config {
@@ -248,6 +249,8 @@ pub struct SniForwardRuleConfig {
   pub idle_timeout_ms: u64,
   #[serde(default)]
   pub tcp_proxy_protocol_egress: ProxyProtocolEgressMode,
+  #[serde(default)]
+  pub tcp_proxy_protocol_tls: Option<ProxyProtocolTlsConfig>,
 }
 
 impl SniForwardRuleConfig {
@@ -279,6 +282,28 @@ impl SniForwardRuleConfig {
         "sni_forward rule {} timeout values must be greater than 0",
         self.name
       );
+    }
+    if let Some(tls) = &self.tcp_proxy_protocol_tls {
+      if self.tcp_proxy_protocol_egress != ProxyProtocolEgressMode::V2 {
+        bail!(
+          "sni_forward rule {} tcp_proxy_protocol_tls requires tcp_proxy_protocol_egress = \"v2\"",
+          self.name
+        );
+      }
+      if tls.source != ProxyProtocolTlsSource::ReceivedProxy {
+        bail!(
+          "sni_forward rule {} tcp_proxy_protocol_tls.source must be \"received_proxy\"",
+          self.name
+        );
+      }
+      if !self.protocols.contains(&SniForwardProtocol::TcpTls)
+        || self.protocols.contains(&SniForwardProtocol::Quic)
+      {
+        bail!(
+          "sni_forward rule {} tcp_proxy_protocol_tls requires protocols = [\"tcp_tls\"]",
+          self.name
+        );
+      }
     }
     validate_sni_forward_target(
       &format!("sni_forward rule {} target", self.name),

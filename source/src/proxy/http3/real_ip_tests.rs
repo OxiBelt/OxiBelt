@@ -53,6 +53,7 @@ fail_on_untrusted_forwarded_headers = true
   let (_listener_tx, listener_rx) = watch::channel(false);
   let (_lifecycle_tx, lifecycle_rx) = watch::channel(false);
   let context = H3DownstreamRequestContext {
+    proxy_tls_evidence: None,
     peer_addr: "10.0.0.7:443".parse().unwrap(),
     udp_connection_id: Arc::from("h3-scoped-real-ip"),
     tls_metadata: Arc::new(WafTlsMetadata {

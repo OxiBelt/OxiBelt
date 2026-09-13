@@ -60,6 +60,7 @@ pub(super) fn spawn_background_refresh(
     let Some(fill_permit) = state
       .cache
       .begin_fill_async(crate::cache::CacheLookupContext {
+        proxy_protocol_identity: None,
         certificate_identity: certificate_identity.as_ref(),
         policy_name: route_cache.as_deref(),
         scheme,
@@ -145,6 +146,7 @@ async fn background_refresh(
       .cache
       .update_from_not_modified_async(
         crate::cache::CacheInsertContext {
+          proxy_protocol_identity: None,
           certificate_identity: certificate_identity.as_ref(),
           policy_name: route_cache.as_deref(),
           scheme,
@@ -191,6 +193,7 @@ async fn background_refresh(
     .cache
     .insert_async(
       crate::cache::CacheInsertContext {
+        proxy_protocol_identity: None,
         certificate_identity: certificate_identity.as_ref(),
         policy_name: route_cache.as_deref(),
         scheme,

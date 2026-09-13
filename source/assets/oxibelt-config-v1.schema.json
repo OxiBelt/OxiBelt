@@ -11015,6 +11015,58 @@
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
         },
+        "http_proxy_protocol": {
+          "additionalProperties": false,
+          "description": "OxiBelt native field `listeners.http_proxy_protocol`. Production Rust validation is authoritative.",
+          "properties": {
+            "enabled": {
+              "description": "OxiBelt native field `listeners.http_proxy_protocol.enabled`. Production Rust validation is authoritative.",
+              "type": "boolean",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "tls_tlvs": {
+              "default": false,
+              "description": "OxiBelt native field `listeners.http_proxy_protocol.tls_tlvs`. Production Rust validation is authoritative.",
+              "type": "boolean",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "trusted_sources": {
+              "description": "OxiBelt native field `listeners.http_proxy_protocol.trusted_sources`. Production Rust validation is authoritative.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "version": {
+              "description": "OxiBelt native field `listeners.http_proxy_protocol.version`. Production Rust validation is authoritative.",
+              "enum": [
+                "any",
+                "v1",
+                "v2"
+              ],
+              "type": "string",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            }
+          },
+          "type": "object",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
         "https_bind": {
           "anyOf": [
             {
@@ -11059,6 +11111,15 @@
           "properties": {
             "enabled": {
               "description": "OxiBelt native field `listeners.proxy_protocol.enabled`. Production Rust validation is authoritative.",
+              "type": "boolean",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "tls_tlvs": {
+              "default": false,
+              "description": "OxiBelt native field `listeners.proxy_protocol.tls_tlvs`. Production Rust validation is authoritative.",
               "type": "boolean",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
@@ -23898,6 +23959,41 @@
                 "x-oxibelt-introduced-epoch": 1,
                 "x-oxibelt-reference-activation": "none",
                 "x-oxibelt-secret-class": "none"
+              },
+              "tcp_proxy_protocol_tls": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `sni_forward.rules[].tcp_proxy_protocol_tls`. Production Rust validation is authoritative.",
+                "properties": {
+                  "client_certificate": {
+                    "default": false,
+                    "description": "OxiBelt native field `sni_forward.rules[].tcp_proxy_protocol_tls.client_certificate`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "source": {
+                    "description": "OxiBelt native field `sni_forward.rules[].tcp_proxy_protocol_tls.source`. Production Rust validation is authoritative.",
+                    "enum": [
+                      "local_tls",
+                      "received_proxy"
+                    ],
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "required": [
+                  "source"
+                ],
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
               }
             },
             "type": "object"
@@ -30389,6 +30485,41 @@
               }
             ],
             "description": "OxiBelt native field `upstreams[].proxy_protocol_egress`. Production Rust validation is authoritative.",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "proxy_protocol_tls": {
+            "additionalProperties": false,
+            "description": "OxiBelt native field `upstreams[].proxy_protocol_tls`. Production Rust validation is authoritative.",
+            "properties": {
+              "client_certificate": {
+                "default": false,
+                "description": "OxiBelt native field `upstreams[].proxy_protocol_tls.client_certificate`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "source": {
+                "description": "OxiBelt native field `upstreams[].proxy_protocol_tls.source`. Production Rust validation is authoritative.",
+                "enum": [
+                  "local_tls",
+                  "received_proxy"
+                ],
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "required": [
+              "source"
+            ],
+            "type": "object",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
             "x-oxibelt-reference-activation": "none",

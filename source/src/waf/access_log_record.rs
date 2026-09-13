@@ -291,6 +291,24 @@ impl AccessLogJsonValue {
         ],
         ctx,
       ),
+      ObjectRef::RequestProxyProtocol => object_members_json(object, &["Version", "Ssl"], ctx),
+      ObjectRef::RequestProxyProtocolSsl => object_members_json(
+        object,
+        &[
+          "ClientTls",
+          "VerifyCode",
+          "ClientCertificateConnection",
+          "ClientCertificateSession",
+          "ClientCertificateVerified",
+          "Version",
+          "CipherSuite",
+          "CertificateSignatureAlgorithm",
+          "CertificateKeyAlgorithm",
+          "KeyExchangeGroup",
+          "SignatureScheme",
+        ],
+        ctx,
+      ),
       ObjectRef::RequestBody | ObjectRef::ResponseBody => {
         object_members_json(object, &["Size", "IsTruncated", "Text"], ctx)
       }
@@ -359,6 +377,7 @@ impl AccessLogJsonValue {
       ),
       ObjectRef::ResponseUpstreamError => object_members_json(object, &["Code", "Message"], ctx),
       ObjectRef::ClientCertificate
+      | ObjectRef::ProxyProtocolClientCertificate
       | ObjectRef::ResponseServerCertificate
       | ObjectRef::StreamServerCertificate => object_members_json(
         object,

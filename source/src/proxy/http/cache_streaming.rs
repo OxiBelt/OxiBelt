@@ -63,6 +63,7 @@ pub(super) fn maybe_stream_cache_response(
   request_headers: &HeaderMap,
   route: Option<&RouteConfig>,
   certificate_identity: Option<&crate::cache::CacheCertificateIdentity>,
+  proxy_protocol_identity: Option<&crate::cache::CacheProxyProtocolIdentity>,
   parts: http::response::Parts,
   body: ProxyBody,
   prepared: Box<crate::cache::CachePreparedInsert>,
@@ -103,6 +104,7 @@ pub(super) fn maybe_stream_cache_response(
               uri,
               request_headers,
               certificate_identity,
+              proxy_protocol_identity,
             ),
             crate::cache::CacheFillSuppressionReason::StoreFailed,
           );
@@ -120,6 +122,7 @@ pub(super) fn maybe_stream_cache_response(
               uri,
               request_headers,
               certificate_identity,
+              proxy_protocol_identity,
             ),
             crate::cache::CacheFillSuppressionReason::AdmissionRejected,
           );
@@ -135,6 +138,7 @@ pub(super) fn maybe_stream_cache_response(
             uri,
             request_headers,
             certificate_identity,
+            proxy_protocol_identity,
           ));
           CacheReason::NotCacheable
         }
@@ -248,6 +252,7 @@ fn record_fill_stage(
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_ctx<'a>(
   route_cache: Option<&'a str>,
   scheme: &'a str,
@@ -256,8 +261,10 @@ fn insert_ctx<'a>(
   uri: &'a http::Uri,
   request_headers: &'a HeaderMap,
   certificate_identity: Option<&'a crate::cache::CacheCertificateIdentity>,
+  proxy_protocol_identity: Option<&'a crate::cache::CacheProxyProtocolIdentity>,
 ) -> CacheInsertContext<'a> {
   CacheInsertContext {
+    proxy_protocol_identity,
     certificate_identity,
     policy_name: route_cache,
     scheme,

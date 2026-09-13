@@ -266,6 +266,7 @@ impl BuiltFixture {
         tcp_rtt_ms: self.tcp_rtt_ms,
         udp_datagram_size: self.udp_datagram_size,
         udp_connection_id: self.udp_connection_id.as_deref(),
+        proxy_protocol: None,
       },
       tags: &self.tags,
       dynamic_policy: &self.dynamic_policy,

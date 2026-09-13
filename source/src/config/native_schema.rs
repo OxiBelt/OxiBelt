@@ -703,6 +703,13 @@ fn object_schema(shape_path: &str, metadata_path: &str) -> Value {
   {
     object.insert("required".to_string(), json!(["header"]));
   }
+  if matches!(
+    shape_path,
+    "upstreams.proxy_protocol_tls" | "sni_forward.rules.tcp_proxy_protocol_tls"
+  ) && let Some(object) = schema.as_object_mut()
+  {
+    object.insert("required".to_string(), json!(["source"]));
+  }
   if shape_path == "proxy.real_ip.rules"
     && let Some(object) = schema.as_object_mut()
   {
@@ -992,6 +999,10 @@ fn boolean_path(path: &str) -> bool {
       | "proxy.real_ip.rules.enabled"
       | "proxy.real_ip.rules.recursive"
       | "proxy.real_ip.rules.fail_on_untrusted_forwarded_headers"
+      | "listeners.proxy_protocol.tls_tlvs"
+      | "listeners.http_proxy_protocol.tls_tlvs"
+      | "upstreams.proxy_protocol_tls.client_certificate"
+      | "sni_forward.rules.tcp_proxy_protocol_tls.client_certificate"
   ) {
     return true;
   }
@@ -1063,6 +1074,7 @@ fn string_array_path(path: &str) -> bool {
   if matches!(
     path,
     "external_auth.allowed_content_types"
+      | "listeners.http_proxy_protocol.trusted_sources"
       | "runtime.hardening.filesystem_manifest.expected_writable_paths"
       | "certificate_transparency.logs.signed_root.trusted_ed25519_keys"
       | "proxy.real_ip.trusted_proxies"
@@ -1192,6 +1204,18 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
       vec!["off", "redirect_to_https", "proxy"],
     ),
     ("listeners.proxy_protocol.version", vec!["any", "v1", "v2"]),
+    (
+      "listeners.http_proxy_protocol.version",
+      vec!["any", "v1", "v2"],
+    ),
+    (
+      "upstreams.proxy_protocol_tls.source",
+      vec!["local_tls", "received_proxy"],
+    ),
+    (
+      "sni_forward.rules.tcp_proxy_protocol_tls.source",
+      vec!["local_tls", "received_proxy"],
+    ),
     (
       "runtime.direct_h1_io",
       vec!["auto", "tokio_hyper", "compio"],
@@ -1390,6 +1414,11 @@ fn default_value(path: &str) -> Option<Value> {
     "proxy.upstream_resolution.happy_eyeballs.svcb"
     | "proxy.upstream_resolution.happy_eyeballs.pref64" => json!("auto"),
     "proxy.real_ip.enabled" | "proxy.real_ip.rules.enabled" => json!(false),
+    "listeners.proxy_protocol.tls_tlvs" | "listeners.http_proxy_protocol.tls_tlvs" => {
+      json!(false)
+    }
+    "upstreams.proxy_protocol_tls.client_certificate"
+    | "sni_forward.rules.tcp_proxy_protocol_tls.client_certificate" => json!(false),
     "proxy.real_ip.header" | "proxy.real_ip.rules.header" => json!("x-forwarded-for"),
     "proxy.real_ip.recursive" | "proxy.real_ip.rules.recursive" => json!(true),
     "proxy.real_ip.fail_on_untrusted_forwarded_headers"

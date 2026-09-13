@@ -299,6 +299,7 @@ impl PoolState {
             webrtc: true,
             webtransport: true,
             proxy_protocol_egress: ProxyProtocolEgressMode::Off,
+            proxy_protocol_tls: None,
             tls: server.tls.clone(),
             extra_trusted_ca_certs: Vec::new(),
           })
@@ -342,6 +343,7 @@ impl PoolState {
             webrtc: true,
             webtransport: true,
             proxy_protocol_egress: ProxyProtocolEgressMode::Off,
+            proxy_protocol_tls: None,
             tls: UpstreamTlsConfig {
               upstream_revocation: pool
                 .health_check

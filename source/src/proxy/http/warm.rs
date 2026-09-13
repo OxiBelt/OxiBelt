@@ -97,7 +97,17 @@ pub(crate) async fn warm_cache_request(
   )
   .await;
   let status = response.status();
+  let selected_tls_egress = response
+    .extensions()
+    .get::<super::proxy_tls::SelectedEgress>()
+    .is_some();
   let _ = response.into_body().collect().await;
+  if selected_tls_egress {
+    return Ok(CacheWarmResult {
+      status: status.as_u16(),
+      result: "upstream_error",
+    });
+  }
   let resolved = snapshot.route_table.resolve_normalized_host_with_context(
     &crate::routes::normalize_host(host),
     RouteMatchContext {
@@ -112,6 +122,17 @@ pub(crate) async fn warm_cache_request(
     &snapshot.upstreams,
   );
   let stored = if let Some(resolved) = resolved {
+    // Synthetic warm requests have no connection evidence. Never probe an
+    // unpartitioned cache after the request path rejected a TLS-TLV upstream.
+    if resolved
+      .upstream
+      .is_some_and(|upstream| upstream.proxy_protocol_tls.is_some())
+    {
+      return Ok(CacheWarmResult {
+        status: status.as_u16(),
+        result: "upstream_error",
+      });
+    }
     let prepared = super::client_certificate::PreparedCertificateForwarding::prepare(
       &Request::new(()),
       resolved.route,
@@ -120,6 +141,7 @@ pub(crate) async fn warm_cache_request(
     snapshot
       .cache
       .lookup_async(crate::cache::CacheLookupContext {
+        proxy_protocol_identity: None,
         certificate_identity: prepared.as_ref().map(|value| &value.cache_identity),
         policy_name: resolved.route.cache.as_deref(),
         scheme,

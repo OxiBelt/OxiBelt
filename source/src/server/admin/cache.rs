@@ -216,6 +216,7 @@ pub(in crate::server) async fn cache_key_explain_response(
   crate::proxy::http::client_certificate::strip_reserved(&mut headers, snapshot);
   let mut explain = snapshot.cache.explain_key(
     crate::cache::CacheLookupContext {
+      proxy_protocol_identity: None,
       certificate_identity: None,
       policy_name: body.policy.as_deref(),
       scheme: &body.scheme,

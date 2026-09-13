@@ -28,6 +28,25 @@ the new native table, Gateway policy field, controller flags and Helm values,
 and restore application authorization that does not depend on the forwarded
 identity. Validate the resulting configuration with the target binary.
 
+## PROXY v2 TLS metadata relay
+
+The new `listeners.http_proxy_protocol`, `tls_tlvs`,
+`[upstreams.proxy_protocol_tls]`, and
+`[sni_forward.rules.tcp_proxy_protocol_tls]` settings are all opt-in. Existing
+HTTPS PROXY protocol and egress behavior remains unchanged while they are
+absent. Enable an intake only with the concrete direct-proxy CIDRs that can
+send the PROXY v2 preface; do not treat relayed TLS metadata as a replacement
+for local downstream TLS or client-certificate authentication. Direct-upstream
+relay requires `proxy_protocol_egress = "v2"`; SNI forwarding permits only
+`received_proxy` relay on a TCP TLS-only rule. There is no upstream-pool,
+QUIC, or synthetic cache-warming equivalent.
+
+This is an additive native schema epoch `1` contract; no configuration-state
+migration is required. Before rollback to a binary that predates it, remove
+the new listener, direct-upstream, and SNI-rule tables, validate with that
+target binary, and ensure backends do not depend on the new PROXY v2 TLS
+metadata.
+
 ## OxiRule peer certificate metadata
 
 OxiRule adds downstream client and upstream server leaf-certificate fields,

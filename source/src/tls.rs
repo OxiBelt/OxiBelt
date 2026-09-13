@@ -46,6 +46,7 @@ mod negotiation;
 mod ocsp;
 mod outbound_revocation;
 mod provider;
+pub(crate) mod proxy_protocol_metadata;
 mod redis_client;
 mod resumption;
 mod server_policy;

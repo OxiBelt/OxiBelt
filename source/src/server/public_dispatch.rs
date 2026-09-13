@@ -14,10 +14,17 @@ pub(super) async fn handle_connection(
   let _global_permit = acquire_global_connection_permit(&handshake_state).await?;
   let _https_connection_guard =
     handshake_state.runtime_introspection_guard(RuntimeCounter::DownstreamHttpsTcpConnection);
-  let (stream, peer_addr) = proxy_protocol::accept_proxy_header(
+  let physical_peer = peer_addr;
+  let capture_local_tls =
+    crate::proxy_protocol_egress::tls::local_capture_needed(&handshake_state.config);
+  let local_destination = capture_local_tls
+    .then(|| stream.local_addr().ok())
+    .flatten();
+  let (stream, peer_addr, received_proxy) = proxy_protocol::accept_proxy_header_with_metadata(
     stream,
     peer_addr,
     &handshake_state.config.listeners.proxy_protocol,
+    Duration::from_millis(handshake_state.config.limits.client_header_timeout_ms),
   )
   .await?;
   let connection_limit_identity = handshake_state.config.limits.connection_limit_identity;
@@ -40,6 +47,7 @@ pub(super) async fn handle_connection(
     peer_addr,
     handshake_state.clone(),
     drain.clone(),
+    received_proxy.clone(),
   )
   .await?
   else {
@@ -91,6 +99,22 @@ pub(super) async fn handle_connection(
     tls_stream.get_ref().1,
     &client_hello_metadata,
   ));
+  let mut proxy_tls_evidence = crate::proxy_protocol_egress::tls::ConnectionTlsEvidence {
+    received: received_proxy.clone(),
+    local_capture_failed: capture_local_tls && local_destination.is_none(),
+    ..Default::default()
+  };
+  if let Some(destination) = local_destination {
+    match crate::tls::proxy_protocol_metadata::capture_tcp(
+      tls_stream.get_ref().1,
+      physical_peer,
+      destination,
+      crate::proxy_protocol_egress::tls::local_certificate_capture_needed(&handshake_state.config),
+    ) {
+      Ok(local) => proxy_tls_evidence.local = Some(local),
+      Err(_) => proxy_tls_evidence.local_capture_failed = true,
+    }
+  }
   // Pin feature enablement to the handshake snapshot, like the later request state.
   // This avoids retaining client certificate material for connections that cannot forward it.
   let forwarded_client_certificate = (!handshake_state
@@ -131,6 +155,8 @@ pub(super) async fn handle_connection(
   let request_state = handshake_state.clone();
   let request_drain = drain.clone();
   let service = service_fn(move |mut request: hyper::Request<Incoming>| {
+    let received_proxy = received_proxy.clone();
+    let proxy_tls_evidence = proxy_tls_evidence.clone();
     let state = request_state.clone();
     let tls_metadata = tls_metadata.clone();
     let forwarded_client_certificate = forwarded_client_certificate.clone();
@@ -139,6 +165,13 @@ pub(super) async fn handle_connection(
     let connection_limit_context = connection_limit_context.clone();
     let drain = request_drain.clone();
     async move {
+      let transport_metadata = WafTransportMetadataInput {
+        proxy_protocol: received_proxy.as_deref(),
+        ..transport_metadata
+      };
+      if capture_local_tls || received_proxy.is_some() {
+        request.extensions_mut().insert(proxy_tls_evidence);
+      }
       request
         .extensions_mut()
         .insert(http::DownstreamListenerBind(listener_bind));

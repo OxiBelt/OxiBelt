@@ -100,6 +100,7 @@ async fn insert_stale_revalidate_entry(
     cache
       .insert_async(
         CacheInsertContext {
+          proxy_protocol_identity: None,
           policy_name: Some("no-background-refresh"),
           scheme: "https",
           host: "example.test",
@@ -122,6 +123,7 @@ async fn assert_stale_background_refresh_disabled(
 ) {
   match cache
     .lookup_async(CacheLookupContext {
+      proxy_protocol_identity: None,
       policy_name: Some("no-background-refresh"),
       scheme: "https",
       host: "example.test",

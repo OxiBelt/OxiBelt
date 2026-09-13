@@ -178,6 +178,7 @@ impl ResponseCache {
     uri: &Uri,
     request_headers: &HeaderMap,
     certificate_identity: Option<&CacheCertificateIdentity>,
+    proxy_protocol_identity: Option<&CacheProxyProtocolIdentity>,
   ) -> Option<CacheOperationContext> {
     let policy = self.policy(policy_name)?.clone();
     let base_key = certificate_partitioned_base_key(
@@ -185,6 +186,10 @@ impl ResponseCache {
       certificate_identity,
     );
     let partition = expanded_cache_key(&policy.partition_key, scheme, host, uri, request_headers);
+    let base_key = match proxy_protocol_identity {
+      Some(identity) => identity.partition(base_key),
+      None => base_key,
+    };
     let uri = uri.to_string();
     let lookup_key = index::LookupKey::new(&policy.name, &partition, scheme, host, &uri, &base_key);
     let fill_key = format!(
@@ -223,6 +228,7 @@ impl ResponseCache {
       ctx.uri,
       ctx.request_headers,
       ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
     )?;
     let now = SystemTime::now();
     let (key, entry) = {
@@ -344,6 +350,7 @@ impl ResponseCache {
       ctx.uri,
       ctx.request_headers,
       ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
     )?;
     self
       .lookup_shared_async(
@@ -368,6 +375,7 @@ impl ResponseCache {
     }
     self.insert_with_external(
       CacheInsertContext {
+        proxy_protocol_identity: ctx.proxy_protocol_identity,
         policy_name: ctx.policy_name,
         scheme: ctx.scheme,
         host: ctx.host,

@@ -272,6 +272,15 @@ pub(super) async fn try_handle_connection(
 }
 
 fn fast_proxy_preflight_disabled_reason(snapshot: &AppSnapshot) -> Option<&'static str> {
+  if snapshot.config.listeners.proxy_protocol.tls_tlvs
+    || snapshot
+      .config
+      .upstreams
+      .iter()
+      .any(|upstream| upstream.proxy_protocol_tls.is_some())
+  {
+    return Some("PROXY TLS metadata requires the request transport context");
+  }
   if !snapshot.client_certificate_forwarding_headers.is_empty() {
     return Some("client certificate forwarding header ownership");
   }

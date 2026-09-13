@@ -15,6 +15,7 @@ async fn wait_for_fresh_cache_entry(
   for _ in 0..50 {
     if let Some(crate::cache::CacheLookup::Fresh(entry)) =
       state.cache.lookup(crate::cache::CacheLookupContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme,
         host,
@@ -350,6 +351,7 @@ stream_large_objects = true
     state
       .cache
       .lookup(crate::cache::CacheLookupContext {
+        proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.com",

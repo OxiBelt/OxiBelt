@@ -194,6 +194,7 @@ pub(super) async fn serve_http3(
                     Ok(connection) => {
                         if let Err(error) = http3::handle_downstream_connection(
                           connection,
+                          bind,
                           connection_snapshot,
                           connection_shutdown,
                           data_plane_drain,

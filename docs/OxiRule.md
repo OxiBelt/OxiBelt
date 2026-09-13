@@ -1166,6 +1166,7 @@ Request.Cookies: CookieMap
 Request.Normalized: NormalizedRequestView
 Request.Body: BodyView
 Request.Tls: TlsMetadata | Null
+Request.ProxyProtocol: ProxyProtocolMetadata | Null
 Request.Tags: TagMap
 Request.TokenBindings: PersonProofTokenBindingView
 ```
@@ -1331,11 +1332,32 @@ TlsMetadata.ClientCertificatePresent: Bool
 TlsMetadata.ClientCertificate: PeerCertificateMetadata | Null
 ```
 
+```text
+ProxyProtocolMetadata.Version: 'v1' | 'v2'
+ProxyProtocolMetadata.Ssl: ProxyProtocolSslMetadata | Null
+
+ProxyProtocolSslMetadata.ClientTls: Bool
+ProxyProtocolSslMetadata.VerifyCode: Int
+ProxyProtocolSslMetadata.ClientCertificateConnection: Bool
+ProxyProtocolSslMetadata.ClientCertificateSession: Bool
+ProxyProtocolSslMetadata.ClientCertificateVerified: Bool
+ProxyProtocolSslMetadata.Version: String | Null
+ProxyProtocolSslMetadata.CommonName: String | Null
+ProxyProtocolSslMetadata.CipherSuite: String | Null
+ProxyProtocolSslMetadata.CertificateSignatureAlgorithm: String | Null
+ProxyProtocolSslMetadata.CertificateKeyAlgorithm: String | Null
+ProxyProtocolSslMetadata.KeyExchangeGroup: String | Null
+ProxyProtocolSslMetadata.SignatureScheme: String | Null
+ProxyProtocolSslMetadata.ClientCertificate: PeerCertificateMetadata | Null
+```
+
 Current implementation notes:
 
 - TCP request rules expose TCP transport metadata; HTTP/3 and WebTransport request rules expose UDP/QUIC metadata.
 - HTTP/3 TLS fingerprints use the `quinn-rustls-quic-v2` scheme.
 - `Request.Tls.ClientCertificatePresent` reflects the verified downstream client certificate on TCP TLS and HTTP/3/WebTransport. `Request.Tls.ClientCertificate` exposes its leaf metadata. The existing `Response.Tls` placeholder remains disabled with null TLS fields.
+- `Request.ProxyProtocol` is present only when `tls_tlvs` is enabled and a trusted PROXY preface was received; v1 received through `version = "any"` has `Ssl = null`. It is distinct from `Request.Tls`: local downstream TLS state and authentication never derive from relayed PROXY metadata. `ClientCertificateVerified` requires the client-TLS flag, a connection or session certificate flag, and `VerifyCode = 0`.
+- `ProxyProtocolSslMetadata.ClientCertificate` uses the existing bounded certificate representation and never exposes DER. A whole-object access-log projection includes `Version`, `Ssl`, and non-identity SSL flags, verify code, and non-CN strings only. It excludes `CommonName` and `ClientCertificate`; select identity fields explicitly when a policy permits logging them.
 - `Request.Id`, `Response.Id`, `Context.TransactionId`, request/response receive timestamps, and upstream first-byte timing are populated for HTTP request-wide and OxiRule access-log contexts.
 - Upstream connect timing is populated only where the proxy can measure it directly; otherwise it evaluates to `null`.
 - Some local endpoint fields, byte counters, request-level UDP datagram sizes, TCP socket metadata, and unavailable connection identifiers are reserved and may evaluate to `null`.

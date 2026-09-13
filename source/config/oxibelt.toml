@@ -130,6 +130,14 @@ http3 = true
 enabled = false
 version = "any"
 trusted_sources = []
+tls_tlvs = false # accepts PROXY v2 SSL TLVs only
+
+# Separate opt-in for the plaintext HTTP listener. It remains off by default.
+[listeners.http_proxy_protocol]
+enabled = false
+version = "any"
+trusted_sources = []
+tls_tlvs = false
 
 [crypto]
 # TLS uses rustls' AWS-LC provider by default. `ring` is available only when
@@ -1461,6 +1469,11 @@ websocket = true
 webrtc = true
 webtransport = true
 proxy_protocol_egress = "off"
+
+# Optional PROXY v2 TLS metadata relay for this named upstream only.
+# [upstreams.proxy_protocol_tls]
+# source = "local_tls" # local_tls | received_proxy
+# client_certificate = false
 
 [upstreams.tls.ech]
 mode = "disabled"

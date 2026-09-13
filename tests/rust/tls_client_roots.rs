@@ -103,6 +103,7 @@ fn server_config_sets_alpn_from_listener_flags() {
     http2: false,
     http3: false,
     proxy_protocol: ProxyProtocolConfig::default(),
+    http_proxy_protocol: ProxyProtocolConfig::default(),
   };
 
   let server_config =
@@ -212,6 +213,7 @@ async fn server_config_uses_configured_key_exchange_groups() {
     http2: true,
     http3: false,
     proxy_protocol: ProxyProtocolConfig::default(),
+    http_proxy_protocol: ProxyProtocolConfig::default(),
   };
   let server_config =
     tls::build_server_config(&tls_config, &listeners).expect("server config should build");
@@ -272,6 +274,7 @@ async fn server_config_uses_configured_tls13_ciphers() {
     http2: true,
     http3: false,
     proxy_protocol: ProxyProtocolConfig::default(),
+    http_proxy_protocol: ProxyProtocolConfig::default(),
   };
   let server_config =
     tls::build_server_config(&tls_config, &listeners).expect("server config should build");
@@ -323,6 +326,7 @@ fn server_config_applies_resumption_modes() {
     http2: true,
     http3: false,
     proxy_protocol: ProxyProtocolConfig::default(),
+    http_proxy_protocol: ProxyProtocolConfig::default(),
   };
 
   let mut stateful = downstream_tls_config(
@@ -396,6 +400,7 @@ async fn tcp_server_config_accepts_handshake_with_remote_signer() {
     http2: true,
     http3: false,
     proxy_protocol: ProxyProtocolConfig::default(),
+    http_proxy_protocol: ProxyProtocolConfig::default(),
   };
   let server_config =
     tls::build_server_config(&tls_config, &listeners).expect("server config should build");
@@ -489,6 +494,7 @@ async fn remote_signer_rejects_spki_mismatch() {
     http2: true,
     http3: false,
     proxy_protocol: ProxyProtocolConfig::default(),
+    http_proxy_protocol: ProxyProtocolConfig::default(),
   };
   let error = tls::build_server_config(&tls_config, &listeners)
     .expect_err("SPKI mismatch must reject remote signer");
@@ -814,6 +820,7 @@ async fn tcp_selected_peer_certificate(
     http2: true,
     http3: false,
     proxy_protocol: ProxyProtocolConfig::default(),
+    http_proxy_protocol: ProxyProtocolConfig::default(),
   };
   let server_config =
     tls::build_server_config(&tls_config, &listeners).expect("server config should build");

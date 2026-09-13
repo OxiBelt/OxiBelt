@@ -68,6 +68,13 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
   client_addr: std::net::SocketAddr,
   timeouts: EffectiveTimeouts,
 ) -> anyhow::Result<Response<Incoming>> {
+  let prepared_tls = request
+    .extensions()
+    .get::<crate::proxy_protocol_egress::tls::PreparedTlsHeader>()
+    .cloned();
+  if upstream.proxy_protocol_tls.is_some() && prepared_tls.is_none() {
+    anyhow::bail!("required PROXY TLS metadata was not prepared");
+  }
   let upstream_version = TcpUpstreamHttpVersion::from_http_version(upstream_version)?;
   let port = upstream
     .origin
@@ -136,6 +143,7 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
     admission,
     move |remote_addr, attempt_deadline| {
       let tls_identity = tls_identity.clone();
+      let prepared_tls = prepared_tls.clone();
       async move {
         let mut stream = tokio::time::timeout_at(
           attempt_deadline,
@@ -145,15 +153,19 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
         .context("upstream TCP connection timed out")?
         .with_context(|| format!("failed to connect upstream TCP candidate {remote_addr}"))?;
         crate::tcp_socket::enable_tcp_nodelay(&stream, remote_addr, "one-shot upstream");
-        tokio::time::timeout_at(
-          attempt_deadline,
-          crate::proxy_protocol_egress::write_header(
-            &mut stream,
-            proxy_protocol,
-            client_addr,
-            remote_addr,
-          ),
-        )
+        tokio::time::timeout_at(attempt_deadline, async {
+          if let Some(prepared) = prepared_tls {
+            tokio::io::AsyncWriteExt::write_all(&mut stream, prepared.bytes()).await
+          } else {
+            crate::proxy_protocol_egress::write_header(
+              &mut stream,
+              proxy_protocol,
+              client_addr,
+              remote_addr,
+            )
+            .await
+          }
+        })
         .await
         .context("upstream PROXY protocol egress header timed out")?
         .context("failed to write upstream PROXY protocol egress header")?;
@@ -306,7 +318,7 @@ where
         .await
         .context("failed to establish one-shot HTTP/1.1 upstream connection")?;
       tokio::spawn(async move {
-        if let Err(error) = connection.await {
+        if let Err(error) = connection.with_upgrades().await {
           warn!(error = %error, "one-shot HTTP/1.1 upstream connection failed");
         }
       });
@@ -389,6 +401,12 @@ pub(super) fn parts_clone(parts: &http::request::Parts) -> http::request::Parts 
     .uri(parts.uri.clone())
     .version(parts.version);
   *builder.headers_mut().expect("request builder headers") = parts.headers.clone();
+  if let Some(prepared) = parts
+    .extensions
+    .get::<crate::proxy_protocol_egress::tls::PreparedTlsHeader>()
+  {
+    builder = builder.extension(prepared.clone());
+  }
   builder
     .body(())
     .expect("request parts clone builds")

@@ -200,6 +200,8 @@ pub struct UpstreamConfig {
   #[serde(default)]
   pub proxy_protocol_egress: ProxyProtocolEgressMode,
   #[serde(default)]
+  pub proxy_protocol_tls: Option<ProxyProtocolTlsConfig>,
+  #[serde(default)]
   pub tls: UpstreamTlsConfig,
   #[serde(skip)]
   pub extra_trusted_ca_certs: Vec<PathBuf>,
@@ -221,6 +223,20 @@ pub enum ProxyProtocolEgressMode {
   Off,
   V1,
   V2,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyProtocolTlsSource {
+  LocalTls,
+  ReceivedProxy,
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq)]
+pub struct ProxyProtocolTlsConfig {
+  pub source: ProxyProtocolTlsSource,
+  #[serde(default)]
+  pub client_certificate: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

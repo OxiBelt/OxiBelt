@@ -91,6 +91,14 @@ pub(super) async fn handle_connection(
   drain: ConnectionDrain,
 ) -> anyhow::Result<()> {
   let _global_permit = super::acquire_global_connection_permit(&snapshot).await?;
+  let (stream, peer_addr, received_proxy) =
+    crate::proxy_protocol::accept_proxy_header_with_metadata(
+      stream,
+      peer_addr,
+      &snapshot.config.listeners.http_proxy_protocol,
+      Duration::from_millis(snapshot.config.limits.client_header_timeout_ms),
+    )
+    .await?;
   let _plain_connection_guard =
     snapshot.runtime_introspection_guard(RuntimeCounter::PlainHttpConnection);
   let _http1_connection_guard =
@@ -128,7 +136,8 @@ pub(super) async fn handle_connection(
   let request_state = snapshot.clone();
   let tls_metadata = Arc::new(WafTlsMetadata::default());
   let request_drain = drain.clone();
-  let service = service_fn(move |request: hyper::Request<Incoming>| {
+  let service = service_fn(move |mut request: hyper::Request<Incoming>| {
+    let received_proxy = received_proxy.clone();
     let state = request_state.clone();
     let request_index = if state.config.listeners.http_mode == HttpListenerMode::Proxy {
       Some(request_count.fetch_add(1, Ordering::Relaxed))
@@ -139,6 +148,18 @@ pub(super) async fn handle_connection(
     let tls_metadata = tls_metadata.clone();
     let drain = request_drain.clone();
     async move {
+      let transport_metadata = WafTransportMetadataInput {
+        proxy_protocol: received_proxy.as_deref(),
+        ..transport_metadata
+      };
+      if received_proxy.is_some() {
+        request
+          .extensions_mut()
+          .insert(crate::proxy_protocol_egress::tls::ConnectionTlsEvidence {
+            received: received_proxy.clone(),
+            ..Default::default()
+          });
+      }
       let _request_guard = state.runtime_introspection_guard(RuntimeCounter::Http1Request);
       match state.config.listeners.http_mode {
         HttpListenerMode::RedirectToHttps => Ok(super::redirect_to_https(&request)),
@@ -230,6 +251,12 @@ async fn try_sendfile_fast_path(
   shutdown: &mut watch::Receiver<bool>,
   data_plane_drain: &mut watch::Receiver<bool>,
 ) -> anyhow::Result<SendfilePreflight> {
+  if snapshot.config.listeners.http_proxy_protocol.tls_tlvs {
+    return Ok(SendfilePreflight::Continue {
+      io: PlainHttpIo::new(stream, Vec::new()),
+      served_requests: 0,
+    });
+  }
   try_sendfile_fast_path_inner(
     stream,
     peer_addr,

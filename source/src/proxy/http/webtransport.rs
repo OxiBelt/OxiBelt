@@ -527,6 +527,7 @@ pub(crate) async fn prepare_webtransport(
         tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
         udp_datagram_size: transport_metadata.udp_datagram_size,
         udp_connection_id: transport_metadata.udp_connection_id.map(str::to_string),
+        proxy_protocol: transport_metadata.proxy_protocol.cloned().map(Arc::new),
         tags: tags.clone().unwrap_or_default(),
         dynamic_policy: dynamic_policy_context.clone(),
         person_proof: person_proof_snapshot.clone(),

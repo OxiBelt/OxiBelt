@@ -61,6 +61,72 @@ pub(super) fn eval_request_tls_member(ctx: &EvalContext<'_>, field: &str) -> any
   }
 }
 
+pub(super) fn eval_request_proxy_protocol_member(
+  ctx: &EvalContext<'_>,
+  field: &str,
+) -> anyhow::Result<Value> {
+  let metadata = ctx
+    .request
+    .transport_metadata
+    .proxy_protocol
+    .context("missing PROXY protocol metadata")?;
+  match field {
+    "Version" => Ok(Value::String(
+      metadata
+        .version_label()
+        .context("PROXY protocol metadata has no concrete version")?
+        .to_string(),
+    )),
+    "Ssl" => Ok(if metadata.ssl.is_some() {
+      Value::Object(ObjectRef::RequestProxyProtocolSsl)
+    } else {
+      Value::Null
+    }),
+    _ => bail!("unknown WAF object property RequestProxyProtocol.{field}"),
+  }
+}
+
+pub(super) fn eval_request_proxy_protocol_ssl_member(
+  ctx: &EvalContext<'_>,
+  field: &str,
+) -> anyhow::Result<Value> {
+  let ssl = ctx
+    .request
+    .transport_metadata
+    .proxy_protocol
+    .and_then(|metadata| metadata.ssl.as_deref())
+    .context("missing PROXY protocol SSL metadata")?;
+  let client_tls = ssl.client & 0x01 != 0;
+  let client_certificate_connection = ssl.client & 0x02 != 0;
+  let client_certificate_session = ssl.client & 0x04 != 0;
+  match field {
+    "ClientTls" => Ok(Value::Bool(client_tls)),
+    "VerifyCode" => Ok(Value::Int(i64::from(ssl.verify))),
+    "ClientCertificateConnection" => Ok(Value::Bool(client_certificate_connection)),
+    "ClientCertificateSession" => Ok(Value::Bool(client_certificate_session)),
+    "ClientCertificateVerified" => Ok(Value::Bool(
+      client_tls
+        && (client_certificate_connection || client_certificate_session)
+        && ssl.verify == 0,
+    )),
+    "Version" => Ok(optional_string_value(&ssl.version)),
+    "CommonName" => Ok(optional_string_value(&ssl.common_name)),
+    "CipherSuite" => Ok(optional_string_value(&ssl.cipher_suite)),
+    "CertificateSignatureAlgorithm" => {
+      Ok(optional_string_value(&ssl.certificate_signature_algorithm))
+    }
+    "CertificateKeyAlgorithm" => Ok(optional_string_value(&ssl.certificate_key_algorithm)),
+    "KeyExchangeGroup" => Ok(optional_string_value(&ssl.key_exchange_group)),
+    "SignatureScheme" => Ok(optional_string_value(&ssl.signature_scheme)),
+    "ClientCertificate" => Ok(if ssl.client_certificate_metadata().is_some() {
+      Value::Object(ObjectRef::ProxyProtocolClientCertificate)
+    } else {
+      Value::Null
+    }),
+    _ => bail!("unknown WAF object property RequestProxyProtocolSsl.{field}"),
+  }
+}
+
 pub(super) fn eval_request_cookie_call(
   ctx: &EvalContext<'_>,
   method: &str,

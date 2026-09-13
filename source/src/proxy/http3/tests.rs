@@ -49,6 +49,7 @@ async fn inline_candidate_context(
   let (_listener_tx, listener_rx) = watch::channel(false);
   let (_lifecycle_tx, lifecycle_rx) = watch::channel(false);
   H3DownstreamRequestContext {
+    proxy_tls_evidence: None,
     peer_addr: "127.0.0.1:44443".parse().unwrap(),
     udp_connection_id: Arc::from("test-h3"),
     tls_metadata: Arc::new(WafTlsMetadata::default()),

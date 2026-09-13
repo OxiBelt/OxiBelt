@@ -28,13 +28,17 @@ impl Config {
     if self.listeners.http_mode != HttpListenerMode::Off && self.listeners.http_binds.is_empty() {
       bail!("listeners.http_binds is required when listeners.http_mode is not \"off\"");
     }
-    if self.listeners.proxy_protocol.enabled {
-      for cidr in &self.listeners.proxy_protocol.trusted_sources {
-        crate::identity::Cidr::parse(cidr).with_context(|| {
-          format!("invalid listeners.proxy_protocol.trusted_sources entry {cidr}")
-        })?;
-      }
+    self
+      .validate_proxy_protocol_intake("listeners.proxy_protocol", &self.listeners.proxy_protocol)?;
+    if self.listeners.http_proxy_protocol.enabled
+      && (self.listeners.http_mode == HttpListenerMode::Off || self.listeners.http_binds.is_empty())
+    {
+      bail!("listeners.http_proxy_protocol requires an active plaintext HTTP listener");
     }
+    self.validate_proxy_protocol_intake(
+      "listeners.http_proxy_protocol",
+      &self.listeners.http_proxy_protocol,
+    )?;
 
     self.runtime.validate()?;
     self
@@ -128,6 +132,20 @@ impl Config {
       {
         bail!(
           "upstream {} cannot enable proxy_protocol_egress with max_http_version = \"h3\"",
+          upstream.name
+        );
+      }
+      if upstream.proxy_protocol_tls.is_some()
+        && upstream.proxy_protocol_egress != ProxyProtocolEgressMode::V2
+      {
+        bail!(
+          "upstream {} proxy_protocol_tls requires proxy_protocol_egress = \"v2\"",
+          upstream.name
+        );
+      }
+      if upstream.proxy_protocol_tls.is_some() && upstream.max_http_version == HttpVersion::H3 {
+        bail!(
+          "upstream {} proxy_protocol_tls cannot be used with max_http_version = \"h3\"",
           upstream.name
         );
       }
@@ -605,6 +623,26 @@ impl Config {
     crate::waf::validate_config(self)?;
     operational_profile::validate(self)?;
 
+    Ok(())
+  }
+
+  fn validate_proxy_protocol_intake(
+    &self,
+    field: &str,
+    config: &ProxyProtocolConfig,
+  ) -> anyhow::Result<()> {
+    if config.tls_tlvs && !config.enabled {
+      bail!("{field}.tls_tlvs requires {field}.enabled = true");
+    }
+    if config.tls_tlvs && config.version == ProxyProtocolVersion::V1 {
+      bail!("{field}.tls_tlvs requires {field}.version = \"any\" or \"v2\"");
+    }
+    if config.enabled {
+      for cidr in &config.trusted_sources {
+        crate::identity::Cidr::parse(cidr)
+          .with_context(|| format!("invalid {field}.trusted_sources entry {cidr}"))?;
+      }
+    }
     Ok(())
   }
 

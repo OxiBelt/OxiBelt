@@ -81,9 +81,12 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "http_mode",
       "https_bind",
       "https_binds",
+      "http_proxy_protocol",
       "proxy_protocol",
     ][..],
-    "listeners.proxy_protocol" => &["enabled", "trusted_sources", "version"][..],
+    "listeners.proxy_protocol" | "listeners.http_proxy_protocol" => {
+      &["enabled", "tls_tlvs", "trusted_sources", "version"][..]
+    }
     "client_identity" => client_identity::CLIENT_IDENTITY_CONFIG_KEYS,
     "client_identity.asn" => client_identity::CLIENT_IDENTITY_ASN_CONFIG_KEYS,
     "client_identity.asn.managed" => client_identity::CLIENT_IDENTITY_ASN_MANAGED_CONFIG_KEYS,
