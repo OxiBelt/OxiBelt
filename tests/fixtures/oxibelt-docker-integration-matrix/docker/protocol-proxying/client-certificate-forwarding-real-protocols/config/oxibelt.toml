@@ -1,0 +1,150 @@
+[runtime.accept]
+workers = 1
+
+[quic.socket]
+workers = 1
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.client_auth]
+mode = "optional"
+ca_certs = ["client-ca.pem"]
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = ["upstream-ca.pem"]
+
+[compression]
+enabled = true
+gzip = true
+
+[limits]
+max_header_value_bytes = 65536
+max_total_header_bytes = 131072
+
+[cache]
+enabled = true
+store = "memory"
+max_size_bytes = 1048576
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+respect_cache_control = true
+
+[[upstreams]]
+name = "h1"
+origin = "https://mock-https:18443/origin"
+max_http_version = "h1"
+preserve_host = false
+websocket = false
+
+[[upstreams]]
+name = "h2"
+origin = "https://mock-h2:18444/origin"
+max_http_version = "h2"
+preserve_host = false
+
+[[upstreams]]
+name = "h3"
+origin = "https://mock-h3:18445/origin"
+max_http_version = "h3"
+preserve_host = false
+
+[[upstreams]]
+name = "ws"
+origin = "https://mock-websocket:18081"
+max_http_version = "h1"
+preserve_host = false
+websocket = true
+
+[[upstreams]]
+name = "wt"
+origin = "https://mock-webtransport:18446/wt-origin"
+max_http_version = "h3"
+preserve_host = false
+webtransport = true
+
+[[routes]]
+name = "h1-urlpem"
+hosts = ["forward-h1-urlpem.example.test"]
+path_prefix = "/certificate"
+upstream = "h1"
+[routes.client_certificate_forwarding]
+header = "x-verified-client-cert"
+
+[[routes]]
+name = "h1-rfc9440"
+hosts = ["forward-h1-rfc9440.example.test"]
+path_prefix = "/certificate"
+upstream = "h1"
+[routes.client_certificate_forwarding]
+header = "x-verified-client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "h2-urlpem"
+hosts = ["forward-h2-urlpem.example.test"]
+path_prefix = "/certificate"
+upstream = "h2"
+[routes.client_certificate_forwarding]
+header = "x-verified-client-cert"
+
+[[routes]]
+name = "h2-rfc9440"
+hosts = ["forward-h2-rfc9440.example.test"]
+path_prefix = "/certificate"
+upstream = "h2"
+[routes.client_certificate_forwarding]
+header = "x-verified-client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "h3-urlpem"
+hosts = ["forward-h3-urlpem.example.test"]
+path_prefix = "/certificate"
+upstream = "h3"
+[routes.client_certificate_forwarding]
+header = "x-verified-client-cert"
+
+[[routes]]
+name = "h3-rfc9440"
+hosts = ["forward-h3-rfc9440.example.test"]
+path_prefix = "/certificate"
+upstream = "h3"
+[routes.client_certificate_forwarding]
+header = "x-verified-client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "websocket-urlpem"
+hosts = ["forward-ws.example.test"]
+path_prefix = "/ws"
+upstream = "ws"
+[routes.client_certificate_forwarding]
+header = "x-verified-client-cert"
+
+[[routes]]
+name = "webtransport-urlpem"
+hosts = ["forward-wt.example.test"]
+path_prefix = "/wt"
+upstream = "wt"
+[routes.client_certificate_forwarding]
+header = "x-verified-client-cert"
+
+[[routes]]
+name = "cache-urlpem"
+hosts = ["forward-cache.example.test"]
+path_prefix = "/certificate"
+upstream = "h2"
+cache = "default"
+[routes.client_certificate_forwarding]
+header = "x-verified-client-cert"

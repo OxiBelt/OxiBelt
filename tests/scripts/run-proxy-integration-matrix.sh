@@ -13,7 +13,7 @@ if [[ -z "${category}" || -z "${case_name}" ]]; then
 fi
 
 certificate_metadata_case=0
-if [[ "${category}" == "protocol-proxying" && "${case_name}" == "certificate-metadata-real-protocols" ]]; then
+if [[ "${category}" == "protocol-proxying" && ( "${case_name}" == "certificate-metadata-real-protocols" || "${case_name}" == "client-certificate-forwarding-real-protocols" ) ]]; then
   certificate_metadata_case=1
 fi
 
@@ -1471,6 +1471,8 @@ protocol_probe_client_with_explicit_identity() {
   local expect_status="$4"
   local client_cert="$5"
   local client_key="$6"
+  shift 6
+  local header_args=("$@")
   local output=""
   local status=0
   local client_container=""
@@ -1492,7 +1494,8 @@ protocol_probe_client_with_explicit_identity() {
       --ca-cert /tmp/probe-ca.pem \
       --client-cert /tmp/client.pem \
       --client-key /tmp/client.key \
-      --expect-status "${expect_status}" >/dev/null
+      --expect-status "${expect_status}" \
+      "${header_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/probe-ca.pem"
     docker cp "${client_cert}" "${client_container}:/tmp/client.pem"
     docker cp "${client_key}" "${client_container}:/tmp/client.key"
@@ -1911,6 +1914,61 @@ protocol_probe_tls_resumption_load() {
   echo "TLS resumption probe failed after retries with status ${status}" >&2
   echo "${output}" >&2
   fail_with_diagnostics "TLS resumption probe did not observe enough resumed handshakes"
+}
+
+protocol_probe_tls_resumption_load_with_client_identity() {
+  local authority="$1"
+  local path="$2"
+  local connections="$3"
+  local expect_resumed_min="$4"
+  local expect_upstream_header_value="${5:-}"
+  local expect_upstream_header_args=()
+  local output=""
+  local status=0
+  local client_container=""
+
+  if [[ -n "${expect_upstream_header_value}" ]]; then
+    expect_upstream_header_args=(--expect-upstream-header-value "${expect_upstream_header_value}")
+  fi
+
+  for attempt in $(seq 1 "${PROTOCOL_PROBE_ATTEMPTS:-30}"); do
+    client_container="$(unique_docker_container_name "oxibelt-tls-resumption-mtls-client" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      tls-resumption-load \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      --client-cert /tmp/client.pem \
+      --client-key /tmp/client.key \
+      --connections "${connections}" \
+      --expect-resumed-min "${expect_resumed_min}" \
+      "${expect_upstream_header_args[@]}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+    docker cp "${client_tls_dir}/client.pem" "${client_container}:/tmp/client.pem"
+    docker cp "${client_tls_dir}/client.key" "${client_container}:/tmp/client.key"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    else
+      status=$?
+    fi
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "mTLS resumption probe failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "mTLS resumption probe did not observe enough resumed handshakes"
 }
 
 protocol_probe_client_with_headers() {
@@ -2548,6 +2606,21 @@ if [[ "${certificate_metadata_case}" == "1" ]]; then
     -extensions req_ext \
     -out "${client_tls_dir}/client.pem" >/dev/null 2>&1
 
+  if [[ "${case_name}" == "client-certificate-forwarding-real-protocols" ]]; then
+    openssl req -newkey rsa:2048 -sha256 -nodes \
+      -config "${work_dir}/client-leaf.cnf" \
+      -keyout "${client_tls_dir}/client-second.key" \
+      -out "${client_tls_dir}/client-second.csr" >/dev/null 2>&1
+    openssl x509 -req -sha256 -days 1 \
+      -in "${client_tls_dir}/client-second.csr" \
+      -CA "${client_tls_dir}/ca.pem" \
+      -CAkey "${client_tls_dir}/ca.key" \
+      -CAcreateserial \
+      -extfile "${work_dir}/client-leaf.cnf" \
+      -extensions req_ext \
+      -out "${client_tls_dir}/client-second.pem" >/dev/null 2>&1
+  fi
+
   openssl req -newkey rsa:2048 -sha256 -nodes \
     -config "${work_dir}/client-too-many-names-leaf.cnf" \
     -keyout "${client_tls_dir}/client-too-many-names.key" \
@@ -2586,13 +2659,16 @@ upstream_fingerprint = sys.argv[3]
 contents = path.read_text(encoding="utf-8")
 client_placeholder = "__MATRIX_CLIENT_CERT_SHA256__"
 upstream_placeholder = "__MATRIX_UPSTREAM_CERT_SHA256__"
-if contents.count(client_placeholder) != 3 or contents.count(upstream_placeholder) != 3:
+client_count = contents.count(client_placeholder)
+upstream_count = contents.count(upstream_placeholder)
+if (client_count, upstream_count) not in ((0, 0), (3, 3)):
     raise SystemExit("certificate metadata fixture fingerprint placeholder count changed unexpectedly")
-contents = contents.replace(client_placeholder, client_fingerprint)
-contents = contents.replace(upstream_placeholder, upstream_fingerprint)
-temporary = path.with_suffix(".tmp")
-temporary.write_text(contents, encoding="utf-8")
-os.replace(temporary, path)
+if client_count:
+    contents = contents.replace(client_placeholder, client_fingerprint)
+    contents = contents.replace(upstream_placeholder, upstream_fingerprint)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(contents, encoding="utf-8")
+    os.replace(temporary, path)
 PY
 fi
 
@@ -2964,6 +3040,20 @@ if [[ "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then
 fi
 
 if [[ "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" ]]; then
+  webtransport_require_header_args=()
+  if [[ -f "${case_dir}/webtransport-require-header" ]]; then
+    read -r webtransport_require_header <"${case_dir}/webtransport-require-header"
+    webtransport_require_header_args=(--require-header "${webtransport_require_header}")
+  fi
+  if [[ -f "${case_dir}/webtransport-require-header-value" ]]; then
+    read -r webtransport_required_value <"${case_dir}/webtransport-require-header-value"
+    webtransport_required_name="${webtransport_required_value%%:*}"
+    webtransport_required_value="${webtransport_required_value#*:}"
+    if [[ "${webtransport_required_value}" == "__CLIENT_CERT_URL_ENCODED_PEM__" ]]; then
+      webtransport_required_value="$( { printf '%s\n' '-----BEGIN CERTIFICATE-----'; openssl x509 -in "${client_tls_dir}/client.pem" -outform DER | base64 -w 64; printf '%s\n' '-----END CERTIFICATE-----'; } | jq -sRr @uri )"
+    fi
+    webtransport_require_header_args+=(--require-header-value "${webtransport_required_name}:${webtransport_required_value}")
+  fi
   docker create \
     --name "${webtransport_container}" \
     --label "${test_label}" \
@@ -2974,13 +3064,28 @@ if [[ "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" ]]; then
     --listen 0.0.0.0:18446 \
     --cert /tls/server.pem \
     --key /tls/server.key \
-    --name webtransport-upstream >/dev/null
+    --name webtransport-upstream \
+    "${webtransport_require_header_args[@]}" >/dev/null
   docker cp "${upstream_tls_dir}/server.pem" "${webtransport_container}:/tls/server.pem"
   docker cp "${upstream_tls_dir}/server.key" "${webtransport_container}:/tls/server.key"
   docker start "${webtransport_container}" >/dev/null
 fi
 
 if [[ "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" ]]; then
+  websocket_require_header_args=()
+  if [[ -f "${case_dir}/websocket-require-header" ]]; then
+    read -r websocket_require_header <"${case_dir}/websocket-require-header"
+    websocket_require_header_args=(--require-header "${websocket_require_header}")
+  fi
+  if [[ -f "${case_dir}/websocket-require-header-value" ]]; then
+    read -r websocket_required_value <"${case_dir}/websocket-require-header-value"
+    websocket_required_name="${websocket_required_value%%:*}"
+    websocket_required_value="${websocket_required_value#*:}"
+    if [[ "${websocket_required_value}" == "__CLIENT_CERT_URL_ENCODED_PEM__" ]]; then
+      websocket_required_value="$( { printf '%s\n' '-----BEGIN CERTIFICATE-----'; openssl x509 -in "${client_tls_dir}/client.pem" -outform DER | base64 -w 64; printf '%s\n' '-----END CERTIFICATE-----'; } | jq -sRr @uri )"
+    fi
+    websocket_require_header_args+=(--require-header-value "${websocket_required_name}:${websocket_required_value}")
+  fi
   if [[ -f "${case_dir}/tls-websocket-upstream" ]]; then
     docker create \
       --name "${websocket_container}" \
@@ -2991,7 +3096,8 @@ if [[ "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" ]]; then
       websocket-echo-upstream \
       --listen 0.0.0.0:18081 \
       --cert /tls/server.pem \
-      --key /tls/server.key >/dev/null
+      --key /tls/server.key \
+      "${websocket_require_header_args[@]}" >/dev/null
     docker cp "${upstream_tls_dir}/server.pem" "${websocket_container}:/tls/server.pem"
     docker cp "${upstream_tls_dir}/server.key" "${websocket_container}:/tls/server.key"
     docker start "${websocket_container}" >/dev/null
@@ -3003,7 +3109,8 @@ if [[ "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" ]]; then
       --network-alias mock-websocket \
       "${protocol_probe_image}" \
       websocket-echo-upstream \
-      --listen 0.0.0.0:18081 >/dev/null
+      --listen 0.0.0.0:18081 \
+      "${websocket_require_header_args[@]}" >/dev/null
   fi
 fi
 
