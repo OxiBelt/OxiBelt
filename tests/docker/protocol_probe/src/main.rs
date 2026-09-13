@@ -146,9 +146,16 @@ struct DownstreamArgs {
   h3_reset_after_body_prefix: bool,
   headers: HeaderMap,
   ca_cert: String,
+  client_identity: Option<ClientIdentity>,
   tls_version: Option<DownstreamTlsVersion>,
   quic_initial_alpn_padding_bytes: usize,
   expect_status: Option<u16>,
+}
+
+#[derive(Clone)]
+struct ClientIdentity {
+  cert: String,
+  key: String,
 }
 
 #[derive(Clone, Copy)]
@@ -209,6 +216,7 @@ struct RawTlsHttpArgs {
   port: u16,
   server_name: String,
   ca_cert: String,
+  client_identity: Option<ClientIdentity>,
   request_base64: String,
 }
 
@@ -341,6 +349,7 @@ struct WebTransportMultiplexArgs {
   path: String,
   headers: HeaderMap,
   ca_cert: String,
+  client_identity: Option<ClientIdentity>,
   sessions: usize,
   expect_statuses: Vec<u16>,
   extended_protocol: WebTransportProbeProtocol,
@@ -393,6 +402,8 @@ struct AdminOperationWtEventsArgs {
 
 struct WebSocketEchoArgs {
   listen: SocketAddr,
+  cert: Option<String>,
+  key: Option<String>,
 }
 
 struct WebSocketClientArgs {
@@ -402,6 +413,7 @@ struct WebSocketClientArgs {
   authority: String,
   path: String,
   ca_cert: String,
+  client_identity: Option<ClientIdentity>,
   payload: Vec<u8>,
   expect_status: u16,
 }
@@ -576,7 +588,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
   eprintln!(
-        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status>\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected|allocate-success (UDP only)> [--mutation <name>] [--ca-cert <pem>] [--allocation-hold-ms <1..10000>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-base64 <base64>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--h2-eager-body] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64>\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
+        "usage:\n  protocol-probe h2-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe h3-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name>\n  protocol-probe websocket-echo-upstream --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status> [--client-cert <pem> --client-key <pem>]\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected|allocate-success (UDP only)> [--mutation <name>] [--ca-cert <pem>] [--allocation-hold-ms <1..10000>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--client-cert <pem> --client-key <pem>] [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-base64 <base64>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--h2-eager-body] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64> [--client-cert <pem> --client-key <pem>]\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n>\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--client-cert <pem> --client-key <pem>] [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
 }
 
@@ -686,17 +698,26 @@ fn parse_websocket_echo_args(
   mut args: impl Iterator<Item = String>,
 ) -> anyhow::Result<WebSocketEchoArgs> {
   let mut listen = None;
+  let mut cert = None;
+  let mut key = None;
   while let Some(flag) = args.next() {
     let value = args
       .next()
       .ok_or_else(|| anyhow!("missing value for {flag}"))?;
     match flag.as_str() {
       "--listen" => listen = Some(value.parse().context("invalid --listen value")?),
+      "--cert" => cert = Some(value),
+      "--key" => key = Some(value),
       _ => bail!("unknown websocket-echo-upstream flag: {flag}"),
     }
   }
+  if cert.is_some() != key.is_some() {
+    bail!("websocket-echo-upstream requires --cert and --key together");
+  }
   Ok(WebSocketEchoArgs {
     listen: listen.ok_or_else(|| anyhow!("--listen is required"))?,
+    cert,
+    key,
   })
 }
 
@@ -709,6 +730,8 @@ fn parse_websocket_client_args(
   let mut authority = None;
   let mut path = None;
   let mut ca_cert = None;
+  let mut client_cert = None;
+  let mut client_key = None;
   let mut payload = None;
   let mut expect_status = None;
 
@@ -723,6 +746,8 @@ fn parse_websocket_client_args(
       "--authority" => authority = Some(value),
       "--path" => path = Some(validate_origin_form_path(&value)?),
       "--ca-cert" => ca_cert = Some(value),
+      "--client-cert" => client_cert = Some(value),
+      "--client-key" => client_key = Some(value),
       "--payload" => payload = Some(value.into_bytes()),
       "--expect-status" => {
         expect_status = Some(value.parse().context("invalid --expect-status value")?);
@@ -739,6 +764,7 @@ fn parse_websocket_client_args(
     server_name,
     path: path.ok_or_else(|| anyhow!("--path is required"))?,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+    client_identity: client_identity(client_cert, client_key)?,
     payload: payload.ok_or_else(|| anyhow!("--payload is required"))?,
     expect_status: expect_status.ok_or_else(|| anyhow!("--expect-status is required"))?,
   })
@@ -871,6 +897,8 @@ fn parse_webtransport_multiplex_args(
   let mut path = None;
   let mut headers = HeaderMap::new();
   let mut ca_cert = None;
+  let mut client_cert = None;
+  let mut client_key = None;
   let mut sessions = None;
   let mut expect_statuses = None;
   let mut extended_protocol = WebTransportProbeProtocol::WebTransport;
@@ -892,6 +920,8 @@ fn parse_webtransport_multiplex_args(
       "--path" => path = Some(validate_origin_form_path(&value)?),
       "--header" => insert_header(&mut headers, &value)?,
       "--ca-cert" => ca_cert = Some(value),
+      "--client-cert" => client_cert = Some(value),
+      "--client-key" => client_key = Some(value),
       "--sessions" => {
         let parsed = value.parse().context("invalid --sessions value")?;
         if parsed == 0 {
@@ -930,6 +960,7 @@ fn parse_webtransport_multiplex_args(
     path: path.ok_or_else(|| anyhow!("--path is required"))?,
     headers,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+    client_identity: client_identity(client_cert, client_key)?,
     sessions,
     expect_statuses,
     extended_protocol,
@@ -1070,6 +1101,8 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
   let mut h3_reset_after_body_prefix = false;
   let mut headers = HeaderMap::new();
   let mut ca_cert = None;
+  let mut client_cert = None;
+  let mut client_key = None;
   let mut tls_version = None;
   let mut quic_initial_alpn_padding_bytes = 0;
   let mut expect_status = None;
@@ -1142,6 +1175,8 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
         body_encoding = Some(DownstreamBodyEncoding::parse(&value)?);
       }
       "--ca-cert" => ca_cert = Some(value),
+      "--client-cert" => client_cert = Some(value),
+      "--client-key" => client_key = Some(value),
       "--tls-version" => tls_version = Some(DownstreamTlsVersion::parse(&value)?),
       "--quic-initial-alpn-padding" => {
         quic_initial_alpn_padding_bytes = value
@@ -1239,6 +1274,7 @@ fn parse_downstream_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     h3_reset_after_body_prefix,
     headers,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+    client_identity: client_identity(client_cert, client_key)?,
     tls_version,
     quic_initial_alpn_padding_bytes,
     expect_status,
@@ -1367,6 +1403,8 @@ fn parse_raw_tls_http_args(
   let mut port = None;
   let mut server_name = None;
   let mut ca_cert = None;
+  let mut client_cert = None;
+  let mut client_key = None;
   let mut request_base64 = None;
   while let Some(flag) = args.next() {
     let value = args
@@ -1377,6 +1415,8 @@ fn parse_raw_tls_http_args(
       "--port" => port = Some(value.parse().context("invalid --port value")?),
       "--server-name" => server_name = Some(value),
       "--ca-cert" => ca_cert = Some(value),
+      "--client-cert" => client_cert = Some(value),
+      "--client-key" => client_key = Some(value),
       "--request-base64" => request_base64 = Some(value),
       _ => bail!("unknown raw-tls-http flag: {flag}"),
     }
@@ -1386,8 +1426,20 @@ fn parse_raw_tls_http_args(
     port: port.ok_or_else(|| anyhow!("--port is required"))?,
     server_name: server_name.ok_or_else(|| anyhow!("--server-name is required"))?,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
+    client_identity: client_identity(client_cert, client_key)?,
     request_base64: request_base64.ok_or_else(|| anyhow!("--request-base64 is required"))?,
   })
+}
+
+fn client_identity(
+  cert: Option<String>,
+  key: Option<String>,
+) -> anyhow::Result<Option<ClientIdentity>> {
+  match (cert, key) {
+    (Some(cert), Some(key)) => Ok(Some(ClientIdentity { cert, key })),
+    (None, None) => Ok(None),
+    _ => bail!("--client-cert and --client-key must be supplied together"),
+  }
 }
 
 fn parse_raw_h2_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<RawH2Args> {
@@ -2088,18 +2140,52 @@ async fn serve_websocket_echo_upstream(args: WebSocketEchoArgs) -> anyhow::Resul
   let listener = TcpListener::bind(args.listen)
     .await
     .with_context(|| format!("failed to bind WebSocket echo upstream to {}", args.listen))?;
+  let acceptor = match (&args.cert, &args.key) {
+    (Some(cert), Some(key)) => {
+      let mut config = ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+      ))
+      .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+      .context("failed to configure WebSocket upstream TLS versions")?
+      .with_no_client_auth()
+      .with_single_cert(
+        load_certs(Path::new(cert))?,
+        load_private_key(Path::new(key))?,
+      )
+      .context("failed to configure WebSocket upstream certificate")?;
+      config.alpn_protocols = vec![b"http/1.1".to_vec()];
+      Some(TlsAcceptor::from(Arc::new(config)))
+    }
+    (None, None) => None,
+    _ => bail!("websocket-echo-upstream requires --cert and --key together"),
+  };
   loop {
     let (stream, peer_addr) = listener.accept().await.context("failed to accept TCP")?;
+    let acceptor = acceptor.clone();
     tokio::spawn(async move {
-      if let Err(error) = handle_websocket_echo_connection(stream).await {
+      let result = match acceptor {
+        Some(acceptor) => {
+          let stream = acceptor
+            .accept(stream)
+            .await
+            .context("failed to complete WebSocket upstream TLS handshake")?;
+          handle_websocket_echo_connection(stream).await
+        }
+        None => handle_websocket_echo_connection(stream).await,
+      };
+      if let Err(error) = result {
         eprintln!("WebSocket echo connection from {peer_addr} failed: {error:#}");
       }
+      Ok::<(), anyhow::Error>(())
     });
   }
 }
 
-async fn handle_websocket_echo_connection(mut stream: TcpStream) -> anyhow::Result<()> {
-  let head = read_http1_request_head(&mut stream).await?;
+async fn handle_websocket_echo_connection<S>(mut stream: S) -> anyhow::Result<()>
+where
+  S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+  let head = read_http1_head_from_io(&mut stream).await?;
   let headers = parse_http1_headers(&head);
   let key = headers
     .get("sec-websocket-key")
@@ -2141,7 +2227,12 @@ async fn handle_websocket_echo_connection(mut stream: TcpStream) -> anyhow::Resu
 }
 
 async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
-  let mut client_config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1", None)?;
+  let mut client_config = downstream_client_config_with_client_identity(
+    Path::new(&args.ca_cert),
+    b"http/1.1",
+    None,
+    args.client_identity.as_ref(),
+  )?;
   client_config.enable_sni = true;
   let connector = TlsConnector::from(Arc::new(client_config));
   let stream = TcpStream::connect((args.host.as_str(), args.port))
@@ -2166,6 +2257,7 @@ async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
     .await
     .context("failed to read WebSocket handshake response")?;
   let status = parse_http_status(&response_head)?;
+  let response_headers = parse_http1_headers(&response_head);
   if status != args.expect_status {
     bail!(
       "expected WebSocket status {}, got {} with response {response_head:?}",
@@ -2179,6 +2271,7 @@ async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
       serde_json::to_string(&serde_json::json!({
         "status": status,
         "upgraded": false,
+        "headers": response_headers,
       }))?
     );
     return Ok(());
@@ -2203,6 +2296,7 @@ async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
       "status": status,
       "upgraded": true,
       "echoed_bytes": args.payload.len(),
+      "headers": response_headers,
     }))?
   );
   Ok(())
@@ -3216,7 +3310,12 @@ async fn run_tls_resumption_load(args: TlsResumptionLoadArgs) -> anyhow::Result<
 }
 
 async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> anyhow::Result<()> {
-  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3", None)?;
+  let client_config = downstream_client_config_with_client_identity(
+    Path::new(&args.ca_cert),
+    b"h3",
+    None,
+    args.client_identity.as_ref(),
+  )?;
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
   let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
@@ -3439,7 +3538,12 @@ fn raw_tls_http(args: RawTlsHttpArgs) -> anyhow::Result<()> {
     bail!("raw TLS HTTP request must be between 1 and {MAX_BYTES} bytes");
   }
 
-  let config = downstream_client_config(Path::new(&args.ca_cert), b"http/1.1", None)?;
+  let config = downstream_client_config_with_client_identity(
+    Path::new(&args.ca_cert),
+    b"http/1.1",
+    None,
+    args.client_identity.as_ref(),
+  )?;
   let server_name = ServerName::try_from(args.server_name.clone())
     .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
   let mut connection = ClientConnection::new(Arc::new(config), server_name)
@@ -4094,8 +4198,12 @@ async fn wait_for_path(path: &str, timeout: Duration) -> anyhow::Result<()> {
 }
 
 async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
-  let mut client_config =
-    downstream_client_config(Path::new(&args.ca_cert), b"h2", args.tls_version)?;
+  let mut client_config = downstream_client_config_with_client_identity(
+    Path::new(&args.ca_cert),
+    b"h2",
+    args.tls_version,
+    args.client_identity.as_ref(),
+  )?;
   client_config.enable_sni = true;
   let connector = TlsConnector::from(Arc::new(client_config));
   let stream = TcpStream::connect((args.host.as_str(), args.port))
@@ -4228,6 +4336,7 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
     b"h3",
     args.tls_version,
     args.quic_initial_alpn_padding_bytes,
+    args.client_identity.as_ref(),
   )?;
   let quic_crypto =
     QuicClientConfig::try_from(client_config).context("failed to build QUIC TLS client")?;
@@ -4644,7 +4753,22 @@ fn downstream_client_config(
   alpn: &[u8],
   tls_version: Option<DownstreamTlsVersion>,
 ) -> anyhow::Result<ClientConfig> {
-  downstream_client_config_with_quic_initial_alpn_padding(path, alpn, tls_version, 0)
+  downstream_client_config_with_quic_initial_alpn_padding(path, alpn, tls_version, 0, None)
+}
+
+fn downstream_client_config_with_client_identity(
+  path: &Path,
+  alpn: &[u8],
+  tls_version: Option<DownstreamTlsVersion>,
+  client_identity: Option<&ClientIdentity>,
+) -> anyhow::Result<ClientConfig> {
+  downstream_client_config_with_quic_initial_alpn_padding(
+    path,
+    alpn,
+    tls_version,
+    0,
+    client_identity,
+  )
 }
 
 fn downstream_client_config_with_quic_initial_alpn_padding(
@@ -4652,6 +4776,7 @@ fn downstream_client_config_with_quic_initial_alpn_padding(
   alpn: &[u8],
   tls_version: Option<DownstreamTlsVersion>,
   quic_initial_alpn_padding_bytes: usize,
+  client_identity: Option<&ClientIdentity>,
 ) -> anyhow::Result<ClientConfig> {
   let builder =
     ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
@@ -4660,9 +4785,16 @@ fn downstream_client_config_with_quic_initial_alpn_padding(
     None => builder.with_safe_default_protocol_versions(),
   }
   .context("failed to configure downstream TLS versions")?;
-  let mut config = builder
-    .with_root_certificates(load_root_store(path)?)
-    .with_no_client_auth();
+  let builder = builder.with_root_certificates(load_root_store(path)?);
+  let mut config = match client_identity {
+    Some(identity) => builder
+      .with_client_auth_cert(
+        load_certs(Path::new(&identity.cert))?,
+        load_private_key(Path::new(&identity.key))?,
+      )
+      .context("failed to configure downstream client certificate")?,
+    None => builder.with_no_client_auth(),
+  };
   config.alpn_protocols = quic_initial_alpn_protocols(alpn, quic_initial_alpn_padding_bytes)?;
   Ok(config)
 }
@@ -5387,6 +5519,7 @@ mod tests {
       path: "/wt".to_string(),
       headers: HeaderMap::new(),
       ca_cert: "ca.pem".to_string(),
+      client_identity: None,
       sessions,
       expect_statuses,
       extended_protocol,
@@ -5557,6 +5690,30 @@ mod tests {
       Err(error) => error,
     };
     assert!(error.to_string().contains("only supported for HTTP/3"));
+  }
+
+  #[test]
+  fn downstream_client_identity_requires_a_certificate_and_key_pair() {
+    for extra in [
+      vec!["--client-cert", "client.pem"],
+      vec!["--client-key", "client.key"],
+    ] {
+      assert!(
+        parse_downstream_args(downstream_cli_args(&extra).into_iter()).is_err(),
+        "partial client identity must be rejected"
+      );
+    }
+
+    let parsed = parse_downstream_args(
+      downstream_cli_args(&["--client-cert", "client.pem", "--client-key", "client.key"])
+        .into_iter(),
+    )
+    .expect("complete client identity should parse");
+    let identity = parsed
+      .client_identity
+      .expect("client identity should be retained");
+    assert_eq!(identity.cert, "client.pem");
+    assert_eq!(identity.key, "client.key");
   }
 
   #[test]

@@ -12,6 +12,11 @@ if [[ -z "${category}" || -z "${case_name}" ]]; then
   exit 2
 fi
 
+certificate_metadata_case=0
+if [[ "${category}" == "protocol-proxying" && "${case_name}" == "certificate-metadata-real-protocols" ]]; then
+  certificate_metadata_case=1
+fi
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 run_id="$(date +%s)-$$-${RANDOM}"
@@ -20,6 +25,7 @@ case_dir="${work_dir}/case"
 cert_dir="${work_dir}/cert"
 proxy_cert_dir="${work_dir}/proxy-cert"
 upstream_tls_dir="${work_dir}/upstream-tls"
+client_tls_dir="${work_dir}/client-tls"
 postgres_tls_dir="${work_dir}/postgres-tls"
 logs_dir="${work_dir}/logs"
 network_name="oxibelt-matrix-${run_id}"
@@ -132,7 +138,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${case_dir}" "${cert_dir}" "${proxy_cert_dir}" "${upstream_tls_dir}" "${postgres_tls_dir}" "${logs_dir}"
+mkdir -p "${case_dir}" "${cert_dir}" "${proxy_cert_dir}" "${upstream_tls_dir}" "${client_tls_dir}" "${postgres_tls_dir}" "${logs_dir}"
 
 unique_docker_container_name() {
   local prefix="$1"
@@ -1444,6 +1450,105 @@ protocol_probe_client() {
   protocol_probe_client_with_sni_and_ca "${protocol}" "proxy" "${authority}" "${path}" "${expect_status}" "${cert_dir}/fullchain.pem"
 }
 
+protocol_probe_client_with_client_identity() {
+  local protocol="$1"
+  local authority="$2"
+  local path="$3"
+  local expect_status="$4"
+  protocol_probe_client_with_explicit_identity \
+    "${protocol}" \
+    "${authority}" \
+    "${path}" \
+    "${expect_status}" \
+    "${client_tls_dir}/client.pem" \
+    "${client_tls_dir}/client.key"
+}
+
+protocol_probe_client_with_explicit_identity() {
+  local protocol="$1"
+  local authority="$2"
+  local path="$3"
+  local expect_status="$4"
+  local client_cert="$5"
+  local client_key="$6"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 "${PROTOCOL_PROBE_ATTEMPTS:-30}"); do
+    client_container="$(unique_docker_container_name "oxibelt-client-certificate-protocol" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      downstream \
+      --protocol "${protocol}" \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --ca-cert /tmp/probe-ca.pem \
+      --client-cert /tmp/client.pem \
+      --client-key /tmp/client.key \
+      --expect-status "${expect_status}" >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/probe-ca.pem"
+    docker cp "${client_cert}" "${client_container}:/tmp/client.pem"
+    docker cp "${client_key}" "${client_container}:/tmp/client.key"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "client-certificate protocol probe failed after retries with status ${status}: protocol=${protocol} authority=${authority} path=${path}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "client-certificate protocol probe did not reach expected status ${expect_status}"
+}
+
+protocol_probe_http1_client_with_client_identity() {
+  local authority="$1"
+  local path="$2"
+  local request_base64
+  local client_container output status
+  request_base64="$(printf 'GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n' "${path}" "${authority}" | base64 -w 0)"
+  client_container="$(unique_docker_container_name "oxibelt-client-certificate-http1")"
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    "${protocol_probe_image}" \
+    raw-tls-http \
+    --host proxy \
+    --port 8443 \
+    --server-name proxy \
+    --ca-cert /tmp/probe-ca.pem \
+    --client-cert /tmp/client.pem \
+    --client-key /tmp/client.key \
+    --request-base64 "${request_base64}" >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/probe-ca.pem"
+  docker cp "${client_tls_dir}/client.pem" "${client_container}:/tmp/client.pem"
+  docker cp "${client_tls_dir}/client.key" "${client_container}:/tmp/client.key"
+  if output="$(docker_start_stdout_only "${client_container}")"; then
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    printf '%s' "${output}"
+    return 0
+  fi
+  status=$?
+  append_container_stderr "${client_container}"
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+  echo "client-certificate HTTP/1 probe failed with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "client-certificate HTTP/1 probe did not complete"
+}
+
 protocol_probe_http_get() {
   local host="$1"
   local port="$2"
@@ -1603,6 +1708,52 @@ protocol_probe_websocket_client() {
   echo "WebSocket protocol probe failed after retries with status ${status}: authority=${authority} path=${path}" >&2
   echo "${output}" >&2
   fail_with_diagnostics "WebSocket protocol probe did not reach expected status ${expect_status}"
+}
+
+protocol_probe_websocket_client_with_client_identity() {
+  local authority="$1"
+  local path="$2"
+  local payload="$3"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 "${PROTOCOL_PROBE_ATTEMPTS:-30}"); do
+    client_container="$(unique_docker_container_name "oxibelt-client-certificate-websocket" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      websocket-client \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      --client-cert /tmp/client.pem \
+      --client-key /tmp/client.key \
+      --payload "${payload}" \
+      --expect-status 101 >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+    docker cp "${client_tls_dir}/client.pem" "${client_container}:/tmp/client.pem"
+    docker cp "${client_tls_dir}/client.key" "${client_container}:/tmp/client.key"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "client-certificate WebSocket probe failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "client-certificate WebSocket probe did not observe an echoed stream"
 }
 
 protocol_probe_turn_client() {
@@ -2032,6 +2183,51 @@ protocol_probe_webtransport_multiplex() {
   fail_with_diagnostics "WebTransport multiplex probe did not reach expected statuses ${expect_statuses}"
 }
 
+protocol_probe_webtransport_multiplex_with_client_identity() {
+  local authority="$1"
+  local path="$2"
+  local output=""
+  local status=0
+  local client_container=""
+
+  for attempt in $(seq 1 "${PROTOCOL_PROBE_ATTEMPTS:-30}"); do
+    client_container="$(unique_docker_container_name "oxibelt-client-certificate-webtransport" "${attempt}")"
+    docker create \
+      --name "${client_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      "${protocol_probe_image}" \
+      webtransport-multiplex \
+      --host proxy \
+      --port 8443 \
+      --server-name proxy \
+      --authority "${authority}" \
+      --path "${path}" \
+      --ca-cert /tmp/proxy-ca.pem \
+      --client-cert /tmp/client.pem \
+      --client-key /tmp/client.key \
+      --sessions 1 \
+      --expect-statuses 200 >/dev/null
+    docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+    docker cp "${client_tls_dir}/client.pem" "${client_container}:/tmp/client.pem"
+    docker cp "${client_tls_dir}/client.key" "${client_container}:/tmp/client.key"
+
+    if output="$(docker_start_stdout_only "${client_container}")"; then
+      docker rm -f "${client_container}" >/dev/null 2>&1 || true
+      printf '%s' "${output}"
+      return 0
+    fi
+    status=$?
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "client-certificate WebTransport probe failed after retries with status ${status}" >&2
+  echo "${output}" >&2
+  fail_with_diagnostics "client-certificate WebTransport probe did not observe echoed stream and datagram data"
+}
+
 protocol_probe_admin_operation_wt_events() {
   local path="$1"
   local expect_event="$2"
@@ -2155,6 +2351,96 @@ DNS.8 = mock-turn-tls
 DNS.9 = coturn
 EOF
 
+upstream_leaf_config="${work_dir}/upstream-leaf.cnf"
+if [[ "${certificate_metadata_case}" == "1" ]]; then
+  cat >"${work_dir}/certificate-metadata-upstream-leaf.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = mock-https
+
+[req_ext]
+subjectAltName = @alt_names
+extendedKeyUsage = serverAuth
+
+[alt_names]
+DNS.1 = mock-https
+DNS.2 = mock-h2
+DNS.3 = mock-h3
+DNS.4 = mock-webtransport
+DNS.5 = sni-forward.test
+DNS.6 = sni-default.test
+DNS.7 = quic-forward.test
+DNS.8 = mock-turn-tls
+DNS.9 = coturn
+DNS.10 = mock-websocket
+DNS.11 = certificate-upstream.example.test
+IP.1 = 198.51.100.42
+URI.1 = spiffe://matrix.example.test/upstream
+email.1 = upstream-cert@example.test
+EOF
+  upstream_leaf_config="${work_dir}/certificate-metadata-upstream-leaf.cnf"
+
+  cat >"${work_dir}/client-ca.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[req_distinguished_name]
+CN = oxibelt-matrix-client-root
+
+[v3_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+EOF
+
+  cat >"${work_dir}/client-leaf.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = certificate-client.example.test
+
+[req_ext]
+subjectAltName = @alt_names
+extendedKeyUsage = clientAuth
+
+[alt_names]
+DNS.1 = certificate-client.example.test
+IP.1 = 198.51.100.41
+URI.1 = spiffe://matrix.example.test/client
+email.1 = client-cert@example.test
+EOF
+
+  cat >"${work_dir}/client-too-many-names-leaf.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = certificate-client.example.test
+
+[req_ext]
+subjectAltName = @alt_names
+extendedKeyUsage = clientAuth
+
+[alt_names]
+DNS.1 = certificate-client.example.test
+EOF
+  for san_index in $(seq 2 257); do
+    printf 'DNS.%s = client-%03d.certificate-metadata.example.test\n' "${san_index}" "${san_index}" \
+      >>"${work_dir}/client-too-many-names-leaf.cnf"
+  done
+fi
+
 cat >"${work_dir}/downstream.cnf" <<'EOF'
 [req]
 distinguished_name = req_distinguished_name
@@ -2228,7 +2514,7 @@ openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
   -out "${upstream_tls_dir}/ca.pem" >/dev/null 2>&1
 
 openssl req -newkey rsa:2048 -sha256 -nodes \
-  -config "${work_dir}/upstream-leaf.cnf" \
+  -config "${upstream_leaf_config}" \
   -keyout "${upstream_tls_dir}/server.key" \
   -out "${upstream_tls_dir}/server.csr" >/dev/null 2>&1
 
@@ -2237,9 +2523,78 @@ openssl x509 -req -sha256 -days 1 \
   -CA "${upstream_tls_dir}/ca.pem" \
   -CAkey "${upstream_tls_dir}/ca.key" \
   -CAcreateserial \
-  -extfile "${work_dir}/upstream-leaf.cnf" \
+  -extfile "${upstream_leaf_config}" \
   -extensions req_ext \
   -out "${upstream_tls_dir}/server.pem" >/dev/null 2>&1
+
+if [[ "${certificate_metadata_case}" == "1" ]]; then
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
+    -days 1 \
+    -config "${work_dir}/client-ca.cnf" \
+    -keyout "${client_tls_dir}/ca.key" \
+    -out "${client_tls_dir}/ca.pem" >/dev/null 2>&1
+
+  openssl req -newkey rsa:2048 -sha256 -nodes \
+    -config "${work_dir}/client-leaf.cnf" \
+    -keyout "${client_tls_dir}/client.key" \
+    -out "${client_tls_dir}/client.csr" >/dev/null 2>&1
+
+  openssl x509 -req -sha256 -days 1 \
+    -in "${client_tls_dir}/client.csr" \
+    -CA "${client_tls_dir}/ca.pem" \
+    -CAkey "${client_tls_dir}/ca.key" \
+    -CAcreateserial \
+    -extfile "${work_dir}/client-leaf.cnf" \
+    -extensions req_ext \
+    -out "${client_tls_dir}/client.pem" >/dev/null 2>&1
+
+  openssl req -newkey rsa:2048 -sha256 -nodes \
+    -config "${work_dir}/client-too-many-names-leaf.cnf" \
+    -keyout "${client_tls_dir}/client-too-many-names.key" \
+    -out "${client_tls_dir}/client-too-many-names.csr" >/dev/null 2>&1
+
+  openssl x509 -req -sha256 -days 1 \
+    -in "${client_tls_dir}/client-too-many-names.csr" \
+    -CA "${client_tls_dir}/ca.pem" \
+    -CAkey "${client_tls_dir}/ca.key" \
+    -CAcreateserial \
+    -extfile "${work_dir}/client-too-many-names-leaf.cnf" \
+    -extensions req_ext \
+    -out "${client_tls_dir}/client-too-many-names.pem" >/dev/null 2>&1
+
+  certificate_sha256() {
+    openssl x509 -in "$1" -noout -fingerprint -sha256 \
+      | sed -n 's/^sha256 Fingerprint=//Ip' \
+      | tr -d ':' \
+      | tr '[:upper:]' '[:lower:]'
+  }
+
+  client_certificate_fingerprint="$(certificate_sha256 "${client_tls_dir}/client.pem")"
+  upstream_certificate_fingerprint="$(certificate_sha256 "${upstream_tls_dir}/server.pem")"
+  if [[ ! "${client_certificate_fingerprint}" =~ ^[0-9a-f]{64}$ || ! "${upstream_certificate_fingerprint}" =~ ^[0-9a-f]{64}$ ]]; then
+    fail_with_diagnostics "generated certificate fingerprints are not lowercase SHA-256 values"
+  fi
+
+  python3 - "${case_dir}/config/oxibelt.toml" "${client_certificate_fingerprint}" "${upstream_certificate_fingerprint}" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+path = Path(sys.argv[1])
+client_fingerprint = sys.argv[2]
+upstream_fingerprint = sys.argv[3]
+contents = path.read_text(encoding="utf-8")
+client_placeholder = "__MATRIX_CLIENT_CERT_SHA256__"
+upstream_placeholder = "__MATRIX_UPSTREAM_CERT_SHA256__"
+if contents.count(client_placeholder) != 3 or contents.count(upstream_placeholder) != 3:
+    raise SystemExit("certificate metadata fixture fingerprint placeholder count changed unexpectedly")
+contents = contents.replace(client_placeholder, client_fingerprint)
+contents = contents.replace(upstream_placeholder, upstream_fingerprint)
+temporary = path.with_suffix(".tmp")
+temporary.write_text(contents, encoding="utf-8")
+os.replace(temporary, path)
+PY
+fi
 
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
   -days 1 \
@@ -2282,12 +2637,18 @@ openssl x509 -req -sha256 -days 1 \
   -out "${postgres_tls_dir}/client.pem" >/dev/null 2>&1
 
 cp "${upstream_tls_dir}/ca.pem" "${cert_dir}/upstream-ca.pem"
+if [[ "${certificate_metadata_case}" == "1" ]]; then
+  cp "${client_tls_dir}/ca.pem" "${cert_dir}/client-ca.pem"
+fi
 cp "${postgres_tls_dir}/ca.pem" "${cert_dir}/postgres-ca.pem"
 cp "${postgres_tls_dir}/client.pem" "${cert_dir}/postgres-client.pem"
 cp "${postgres_tls_dir}/client.key" "${cert_dir}/postgres-client.key"
 printf 'ocsp' >"${cert_dir}/ocsp.der"
 printf 'not an ECHConfigList' >"${cert_dir}/invalid.echconfiglist"
 chmod 644 "${cert_dir}/"* "${upstream_tls_dir}/"* "${postgres_tls_dir}/"*
+if [[ "${certificate_metadata_case}" == "1" ]]; then
+  chmod 600 "${client_tls_dir}/"*.key
+fi
 chmod 600 "${postgres_tls_dir}/"*.key
 cp "${cert_dir}/"* "${proxy_cert_dir}/"
 if [[ "${CASE_NEED_REMOTE_SIGNER}" == "1" ]]; then
@@ -2620,14 +2981,30 @@ if [[ "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" ]]; then
 fi
 
 if [[ "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" ]]; then
-  docker run -d \
-    --name "${websocket_container}" \
-    --label "${test_label}" \
-    --network "${network_name}" \
-    --network-alias mock-websocket \
-    "${protocol_probe_image}" \
-    websocket-echo-upstream \
-    --listen 0.0.0.0:18081 >/dev/null
+  if [[ -f "${case_dir}/tls-websocket-upstream" ]]; then
+    docker create \
+      --name "${websocket_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --network-alias mock-websocket \
+      "${protocol_probe_image}" \
+      websocket-echo-upstream \
+      --listen 0.0.0.0:18081 \
+      --cert /tls/server.pem \
+      --key /tls/server.key >/dev/null
+    docker cp "${upstream_tls_dir}/server.pem" "${websocket_container}:/tls/server.pem"
+    docker cp "${upstream_tls_dir}/server.key" "${websocket_container}:/tls/server.key"
+    docker start "${websocket_container}" >/dev/null
+  else
+    docker run -d \
+      --name "${websocket_container}" \
+      --label "${test_label}" \
+      --network "${network_name}" \
+      --network-alias mock-websocket \
+      "${protocol_probe_image}" \
+      websocket-echo-upstream \
+      --listen 0.0.0.0:18081 >/dev/null
+  fi
 fi
 
 if [[ "${CASE_NEED_TURN_UDP_UPSTREAM}" == "1" ]]; then

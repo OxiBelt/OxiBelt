@@ -1,0 +1,352 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.client_auth]
+mode = "require"
+ca_certs = ["client-ca.pem"]
+verify_depth = 4
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = ["upstream-ca.pem"]
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h3"
+
+[compression]
+enabled = true
+gzip = true
+deflate = true
+zstd = true
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "require-real-request-and-response-certificate-metadata"
+phase = "response"
+priority = 10
+when = """
+Request.Tls.ClientCertificate != null &&
+Request.Tls.ClientCertificate.FingerprintSha256 == '__MATRIX_CLIENT_CERT_SHA256__' &&
+Request.Tls.ClientCertificate.ParseStatus == 'complete' &&
+Request.Tls.ClientCertificate.SubjectCommonNames.Count == 1 &&
+Request.Tls.ClientCertificate.SubjectCommonNames.contains('certificate-client.example.test') &&
+!Request.Tls.ClientCertificate.SubjectCommonNames.IsTruncated &&
+Request.Tls.ClientCertificate.SanDnsNames.Count == 1 &&
+Request.Tls.ClientCertificate.SanDnsNames.contains('certificate-client.example.test') &&
+!Request.Tls.ClientCertificate.SanDnsNames.IsTruncated &&
+Request.Tls.ClientCertificate.SanIpAddresses.Count == 1 &&
+Request.Tls.ClientCertificate.SanIpAddresses.contains('198.51.100.41') &&
+!Request.Tls.ClientCertificate.SanIpAddresses.IsTruncated &&
+Request.Tls.ClientCertificate.SanUriNames.Count == 1 &&
+Request.Tls.ClientCertificate.SanUriNames.contains('spiffe://matrix.example.test/client') &&
+!Request.Tls.ClientCertificate.SanUriNames.IsTruncated &&
+Request.Tls.ClientCertificate.SanEmailAddresses.Count == 1 &&
+Request.Tls.ClientCertificate.SanEmailAddresses.contains('client-cert@example.test') &&
+!Request.Tls.ClientCertificate.SanEmailAddresses.IsTruncated &&
+Response.Upstream.ServerCertificate != null &&
+Response.Upstream.ServerCertificate.FingerprintSha256 == '__MATRIX_UPSTREAM_CERT_SHA256__' &&
+Response.Upstream.ServerCertificate.ParseStatus == 'complete' &&
+Response.Upstream.ServerCertificate.SubjectCommonNames.Count == 1 &&
+Response.Upstream.ServerCertificate.SubjectCommonNames.contains('mock-https') &&
+!Response.Upstream.ServerCertificate.SubjectCommonNames.IsTruncated &&
+Response.Upstream.ServerCertificate.SanDnsNames.Count == 11 &&
+Response.Upstream.ServerCertificate.SanDnsNames.contains('certificate-upstream.example.test') &&
+!Response.Upstream.ServerCertificate.SanDnsNames.IsTruncated &&
+Response.Upstream.ServerCertificate.SanIpAddresses.Count == 1 &&
+Response.Upstream.ServerCertificate.SanIpAddresses.contains('198.51.100.42') &&
+!Response.Upstream.ServerCertificate.SanIpAddresses.IsTruncated &&
+Response.Upstream.ServerCertificate.SanUriNames.Count == 1 &&
+Response.Upstream.ServerCertificate.SanUriNames.contains('spiffe://matrix.example.test/upstream') &&
+!Response.Upstream.ServerCertificate.SanUriNames.IsTruncated &&
+Response.Upstream.ServerCertificate.SanEmailAddresses.Count == 1 &&
+Response.Upstream.ServerCertificate.SanEmailAddresses.contains('upstream-cert@example.test') &&
+!Response.Upstream.ServerCertificate.SanEmailAddresses.IsTruncated
+"""
+
+[[waf.rules.actions]]
+type = "set_response_header"
+name = "X-Waf-Certificate-Response"
+value = "matched"
+
+[[upstreams]]
+name = "certificate-h1-upstream"
+origin = "https://mock-https:18443/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = false
+webtransport = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[upstreams]]
+name = "certificate-h2-upstream"
+origin = "https://mock-h2:18444/h2-origin"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = false
+webrtc = false
+webtransport = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[upstreams]]
+name = "certificate-h3-upstream"
+origin = "https://mock-h3:18445/h3-origin"
+max_http_version = "h3"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+idle_timeout_ms = 75000
+preserve_host = false
+websocket = false
+webrtc = false
+webtransport = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[upstreams]]
+name = "certificate-websocket-upstream"
+origin = "https://mock-websocket:18081"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = false
+webtransport = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[upstreams]]
+name = "certificate-webtransport-upstream"
+origin = "https://mock-webtransport:18446/wt-origin"
+max_http_version = "h3"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+idle_timeout_ms = 75000
+preserve_host = false
+websocket = false
+webrtc = false
+webtransport = true
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "certificate-h1-route"
+hosts = ["certificate-h1.example.test"]
+path_prefix = "/certificate"
+upstream = "certificate-h1-upstream"
+
+[routes.match.tls.client_cert]
+present = true
+
+[routes.match.tls.client_cert.subject_cn]
+exact = "certificate-client.example.test"
+
+[routes.match.tls.client_cert.san_dns]
+exact = "certificate-client.example.test"
+
+[[routes]]
+name = "certificate-h2-route"
+hosts = ["certificate-h2.example.test"]
+path_prefix = "/certificate"
+upstream = "certificate-h2-upstream"
+
+[routes.match.tls.client_cert]
+present = true
+
+[routes.match.tls.client_cert.subject_cn]
+exact = "certificate-client.example.test"
+
+[routes.match.tls.client_cert.san_dns]
+exact = "certificate-client.example.test"
+
+[[routes]]
+name = "certificate-h3-route"
+hosts = ["certificate-h3.example.test"]
+path_prefix = "/certificate"
+upstream = "certificate-h3-upstream"
+
+[routes.match.tls.client_cert]
+present = true
+
+[routes.match.tls.client_cert.subject_cn]
+exact = "certificate-client.example.test"
+
+[routes.match.tls.client_cert.san_dns]
+exact = "certificate-client.example.test"
+
+[[routes]]
+name = "certificate-websocket-route"
+hosts = ["certificate-ws.example.test"]
+path_prefix = "/ws"
+upstream = "certificate-websocket-upstream"
+
+[routes.match.tls.client_cert]
+present = true
+
+[routes.match.tls.client_cert.subject_cn]
+exact = "certificate-client.example.test"
+
+[routes.match.tls.client_cert.san_dns]
+exact = "certificate-client.example.test"
+
+[[routes.waf.rules]]
+name = "close-websocket-when-upstream-certificate-metadata-is-not-real"
+phase = "stream"
+priority = 10
+when = """
+Stream.Protocol == 'websocket' && !(
+  Request.Tls.ClientCertificate != null &&
+  Request.Tls.ClientCertificate.FingerprintSha256 == '__MATRIX_CLIENT_CERT_SHA256__' &&
+  Request.Tls.ClientCertificate.ParseStatus == 'complete' &&
+  Request.Tls.ClientCertificate.SubjectCommonNames.Count == 1 &&
+  Request.Tls.ClientCertificate.SubjectCommonNames.contains('certificate-client.example.test') &&
+  !Request.Tls.ClientCertificate.SubjectCommonNames.IsTruncated &&
+  Request.Tls.ClientCertificate.SanDnsNames.Count == 1 &&
+  Request.Tls.ClientCertificate.SanDnsNames.contains('certificate-client.example.test') &&
+  !Request.Tls.ClientCertificate.SanDnsNames.IsTruncated &&
+  Request.Tls.ClientCertificate.SanIpAddresses.Count == 1 &&
+  Request.Tls.ClientCertificate.SanIpAddresses.contains('198.51.100.41') &&
+  !Request.Tls.ClientCertificate.SanIpAddresses.IsTruncated &&
+  Request.Tls.ClientCertificate.SanUriNames.Count == 1 &&
+  Request.Tls.ClientCertificate.SanUriNames.contains('spiffe://matrix.example.test/client') &&
+  !Request.Tls.ClientCertificate.SanUriNames.IsTruncated &&
+  Request.Tls.ClientCertificate.SanEmailAddresses.Count == 1 &&
+  Request.Tls.ClientCertificate.SanEmailAddresses.contains('client-cert@example.test') &&
+  !Request.Tls.ClientCertificate.SanEmailAddresses.IsTruncated &&
+  Stream.Upstream.ServerCertificate != null &&
+  Stream.Upstream.ServerCertificate.FingerprintSha256 == '__MATRIX_UPSTREAM_CERT_SHA256__' &&
+  Stream.Upstream.ServerCertificate.ParseStatus == 'complete' &&
+  Stream.Upstream.ServerCertificate.SubjectCommonNames.Count == 1 &&
+  Stream.Upstream.ServerCertificate.SubjectCommonNames.contains('mock-https') &&
+  !Stream.Upstream.ServerCertificate.SubjectCommonNames.IsTruncated &&
+  Stream.Upstream.ServerCertificate.SanDnsNames.Count == 11 &&
+  Stream.Upstream.ServerCertificate.SanDnsNames.contains('certificate-upstream.example.test') &&
+  !Stream.Upstream.ServerCertificate.SanDnsNames.IsTruncated &&
+  Stream.Upstream.ServerCertificate.SanIpAddresses.Count == 1 &&
+  Stream.Upstream.ServerCertificate.SanIpAddresses.contains('198.51.100.42') &&
+  !Stream.Upstream.ServerCertificate.SanIpAddresses.IsTruncated &&
+  Stream.Upstream.ServerCertificate.SanUriNames.Count == 1 &&
+  Stream.Upstream.ServerCertificate.SanUriNames.contains('spiffe://matrix.example.test/upstream') &&
+  !Stream.Upstream.ServerCertificate.SanUriNames.IsTruncated &&
+  Stream.Upstream.ServerCertificate.SanEmailAddresses.Count == 1 &&
+  Stream.Upstream.ServerCertificate.SanEmailAddresses.contains('upstream-cert@example.test') &&
+  !Stream.Upstream.ServerCertificate.SanEmailAddresses.IsTruncated
+)
+"""
+
+[[routes.waf.rules.actions]]
+type = "close_stream"
+websocket_code = 1011
+reason = "missing upstream certificate metadata"
+
+[[routes]]
+name = "certificate-webtransport-route"
+hosts = ["certificate-wt.example.test"]
+path_prefix = "/wt"
+upstream = "certificate-webtransport-upstream"
+
+[routes.match.tls.client_cert]
+present = true
+
+[routes.match.tls.client_cert.subject_cn]
+exact = "certificate-client.example.test"
+
+[routes.match.tls.client_cert.san_dns]
+exact = "certificate-client.example.test"
+
+[[routes.waf.rules]]
+name = "close-webtransport-when-upstream-certificate-metadata-is-not-real"
+phase = "stream"
+priority = 10
+when = """
+Stream.Protocol == 'webtransport' && !(
+  Request.Tls.ClientCertificate != null &&
+  Request.Tls.ClientCertificate.FingerprintSha256 == '__MATRIX_CLIENT_CERT_SHA256__' &&
+  Request.Tls.ClientCertificate.ParseStatus == 'complete' &&
+  Request.Tls.ClientCertificate.SubjectCommonNames.Count == 1 &&
+  Request.Tls.ClientCertificate.SubjectCommonNames.contains('certificate-client.example.test') &&
+  !Request.Tls.ClientCertificate.SubjectCommonNames.IsTruncated &&
+  Request.Tls.ClientCertificate.SanDnsNames.Count == 1 &&
+  Request.Tls.ClientCertificate.SanDnsNames.contains('certificate-client.example.test') &&
+  !Request.Tls.ClientCertificate.SanDnsNames.IsTruncated &&
+  Request.Tls.ClientCertificate.SanIpAddresses.Count == 1 &&
+  Request.Tls.ClientCertificate.SanIpAddresses.contains('198.51.100.41') &&
+  !Request.Tls.ClientCertificate.SanIpAddresses.IsTruncated &&
+  Request.Tls.ClientCertificate.SanUriNames.Count == 1 &&
+  Request.Tls.ClientCertificate.SanUriNames.contains('spiffe://matrix.example.test/client') &&
+  !Request.Tls.ClientCertificate.SanUriNames.IsTruncated &&
+  Request.Tls.ClientCertificate.SanEmailAddresses.Count == 1 &&
+  Request.Tls.ClientCertificate.SanEmailAddresses.contains('client-cert@example.test') &&
+  !Request.Tls.ClientCertificate.SanEmailAddresses.IsTruncated &&
+  Stream.Upstream.ServerCertificate != null &&
+  Stream.Upstream.ServerCertificate.FingerprintSha256 == '__MATRIX_UPSTREAM_CERT_SHA256__' &&
+  Stream.Upstream.ServerCertificate.ParseStatus == 'complete' &&
+  Stream.Upstream.ServerCertificate.SubjectCommonNames.Count == 1 &&
+  Stream.Upstream.ServerCertificate.SubjectCommonNames.contains('mock-https') &&
+  !Stream.Upstream.ServerCertificate.SubjectCommonNames.IsTruncated &&
+  Stream.Upstream.ServerCertificate.SanDnsNames.Count == 11 &&
+  Stream.Upstream.ServerCertificate.SanDnsNames.contains('certificate-upstream.example.test') &&
+  !Stream.Upstream.ServerCertificate.SanDnsNames.IsTruncated &&
+  Stream.Upstream.ServerCertificate.SanIpAddresses.Count == 1 &&
+  Stream.Upstream.ServerCertificate.SanIpAddresses.contains('198.51.100.42') &&
+  !Stream.Upstream.ServerCertificate.SanIpAddresses.IsTruncated &&
+  Stream.Upstream.ServerCertificate.SanUriNames.Count == 1 &&
+  Stream.Upstream.ServerCertificate.SanUriNames.contains('spiffe://matrix.example.test/upstream') &&
+  !Stream.Upstream.ServerCertificate.SanUriNames.IsTruncated &&
+  Stream.Upstream.ServerCertificate.SanEmailAddresses.Count == 1 &&
+  Stream.Upstream.ServerCertificate.SanEmailAddresses.contains('upstream-cert@example.test') &&
+  !Stream.Upstream.ServerCertificate.SanEmailAddresses.IsTruncated
+)
+"""
+
+[[routes.waf.rules.actions]]
+type = "close_stream"
+webtransport_code = 256
+reason = "missing upstream certificate metadata"
+
+[quic.socket]
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = "auto"
+reuse_port = true
