@@ -83,6 +83,18 @@ pub(super) fn eval_member(
         .to_string(),
     )),
     (ObjectRef::Stream, "Payload") => Ok(Value::Object(ObjectRef::StreamPayload)),
+    (ObjectRef::Stream, "Upstream") => Ok(Value::Object(ObjectRef::StreamUpstream)),
+    (ObjectRef::StreamUpstream, "ServerCertificate") => Ok(
+      if ctx
+        .stream
+        .and_then(|stream| stream.upstream_certificate)
+        .is_some()
+      {
+        Value::Object(ObjectRef::StreamServerCertificate)
+      } else {
+        Value::Null
+      },
+    ),
     (ObjectRef::Stream, "WebSocket") => {
       if ctx
         .stream
@@ -460,6 +472,12 @@ pub(super) fn eval_member(
         .unwrap_or(Value::Null),
     ),
     (ObjectRef::RequestTls, field) => object_model::eval_request_tls_member(ctx, field),
+    (
+      ObjectRef::ClientCertificate
+      | ObjectRef::ResponseServerCertificate
+      | ObjectRef::StreamServerCertificate,
+      field,
+    ) => certificate_object::eval_certificate_member(object, field, ctx),
     (ObjectRef::RequestTokenBindings, "UserAgent") => Ok(Value::String(
       request_token_binding_value(ctx.request, PersonProofTokenBinding::UserAgent),
     )),
@@ -576,6 +594,17 @@ pub(super) fn eval_member(
         Value::String(upstream_name.to_string())
       })
     }
+    (ObjectRef::ResponseUpstream, "ServerCertificate") => Ok(
+      if ctx
+        .response
+        .and_then(|response| response.upstream_certificate)
+        .is_some()
+      {
+        Value::Object(ObjectRef::ResponseServerCertificate)
+      } else {
+        Value::Null
+      },
+    ),
     (ObjectRef::ResponseUpstream, "Pool") => Ok(
       ctx
         .response

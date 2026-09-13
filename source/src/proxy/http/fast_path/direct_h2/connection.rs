@@ -31,6 +31,7 @@ pub(super) struct DirectH2Connected {
   pub(super) sender: SendRequest<ProxyBody>,
   pub(super) peer_max_streams: Arc<AtomicUsize>,
   pub(super) driver: DirectH2Driver,
+  pub(super) upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -298,6 +299,7 @@ where
     sender,
     peer_max_streams,
     driver,
+    upstream_certificate: None,
   })
 }
 
@@ -366,10 +368,18 @@ async fn connect_tls_h2_until(
       error: anyhow::anyhow!("direct H2 upstream did not negotiate the h2 ALPN protocol"),
     });
   }
-  h2_handshake_until_with_capacity_notify(tls, http2_config, deadline, capacity_changed)
-    .await
-    .map_err(|error| DirectH2ConnectFailure::Endpoint {
-      class: DirectH2ConnectErrorClass::H2Handshake,
-      error,
-    })
+  let upstream_certificate = tls
+    .get_ref()
+    .1
+    .peer_certificates()
+    .and_then(crate::tls::peer_certificate_metadata);
+  let mut connected =
+    h2_handshake_until_with_capacity_notify(tls, http2_config, deadline, capacity_changed)
+      .await
+      .map_err(|error| DirectH2ConnectFailure::Endpoint {
+        class: DirectH2ConnectErrorClass::H2Handshake,
+        error,
+      })?;
+  connected.upstream_certificate = upstream_certificate;
+  Ok(connected)
 }

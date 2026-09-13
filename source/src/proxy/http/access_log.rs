@@ -213,6 +213,10 @@ impl<'a> SystemAccessLogContext<'a> {
       .zip(self.upstream_error_message.as_deref())
       .map(|(code, message)| WafUpstreamError { code, message });
     Some(WafResponseInput {
+      upstream_certificate: response
+        .extensions()
+        .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
+        .map(|value| value.0.as_ref()),
       request: WafRequestInput {
         request_id: self.request_id(),
         transaction_id: self.transaction_id(),

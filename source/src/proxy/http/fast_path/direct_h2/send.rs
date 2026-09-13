@@ -315,7 +315,12 @@ async fn dispatch_once(
       attempt_admission.record_outcome(CircuitOutcome::Failure(CircuitOutcomeFailure::Status(
         response.status().as_u16(),
       )));
-      DirectH2DispatchResult::Response(DirectH2Response::new(response, direct_sender.lease))
+      let upstream_certificate = direct_sender.lease.connection.upstream_certificate.clone();
+      DirectH2DispatchResult::Response(DirectH2Response::new(
+        response,
+        direct_sender.lease,
+        upstream_certificate,
+      ))
     }
     Ok(Err(mut error)) => {
       let recovered = error.take_message();

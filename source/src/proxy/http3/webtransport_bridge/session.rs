@@ -196,7 +196,7 @@ pub(super) async fn accept_webtransport_session(
     return Ok(());
   }
 
-  let (upstream, upstream_connection_guard) =
+  let (upstream, upstream_connection_guard, upstream_certificate) =
     match connect_upstream_webtransport(&prepared, snapshot.as_ref()).await {
       Ok(upstream) => upstream,
       Err(error) => {
@@ -238,7 +238,10 @@ pub(super) async fn accept_webtransport_session(
     .webtransport_admin
     .register(registration, admin_command_tx)
     .context("failed to register WebTransport admin session")?;
-  let stream_waf = prepared.stream_waf.take();
+  let stream_waf = prepared
+    .stream_waf
+    .take()
+    .map(|context| context.with_upstream_certificate(upstream_certificate));
   let stream_waf_state = stream_waf.as_ref().map(|_| snapshot.clone());
   let introspection_guard = snapshot
     .runtime_introspection

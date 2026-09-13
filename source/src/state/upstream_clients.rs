@@ -27,6 +27,7 @@ use crate::config::{
 use crate::metrics::Metrics;
 use crate::pools::synthetic_upstream_name_for_id;
 use crate::tls;
+use crate::waf::metadata::UpstreamCertificateMetadata;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type UpstreamBody = BoxBody<Bytes, BoxError>;
@@ -42,14 +43,19 @@ impl<T> ReadyHyperIo for T where T: HyperRead + HyperWrite + Send + Unpin {}
 pub(crate) struct ReadyHttpTransport {
   io: Box<dyn ReadyHyperIo>,
   negotiated_h2: bool,
+  upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
 }
 
 impl Connection for ReadyHttpTransport {
   fn connected(&self) -> Connected {
-    if self.negotiated_h2 {
+    let connected = if self.negotiated_h2 {
       Connected::new().negotiated_h2()
     } else {
       Connected::new()
+    };
+    match &self.upstream_certificate {
+      Some(metadata) => connected.extra(UpstreamCertificateMetadata(metadata.clone())),
+      None => connected,
     }
   }
 }
@@ -202,7 +208,10 @@ impl HappyEyeballsHttpConnector {
             stream.set_nodelay(true).map_err(|error| {
               crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::Error::new(error))
             })?;
-            let io: Box<dyn ReadyHyperIo> = match (tls_config, server_name) {
+            let (io, upstream_certificate): (
+              Box<dyn ReadyHyperIo>,
+              Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+            ) = match (tls_config, server_name) {
               (Some(tls_config), Some(server_name)) => {
                 let tls = tokio::time::timeout_at(
                   attempt_deadline,
@@ -224,9 +233,14 @@ impl HappyEyeballsHttpConnector {
                     anyhow::anyhow!("upstream TLS negotiated an unexpected ALPN protocol"),
                   ));
                 }
-                Box::new(TokioIo::new(tls))
+                let upstream_certificate = tls
+                  .get_ref()
+                  .1
+                  .peer_certificates()
+                  .and_then(tls::peer_certificate_metadata);
+                (Box::new(TokioIo::new(tls)), upstream_certificate)
               }
-              (None, None) => Box::new(TokioIo::new(stream)),
+              (None, None) => (Box::new(TokioIo::new(stream)), None),
               _ => {
                 return Err(crate::upstream_resolution::CandidateAttemptError::Endpoint(
                   anyhow::anyhow!("upstream TLS connector has incomplete identity state"),
@@ -236,6 +250,7 @@ impl HappyEyeballsHttpConnector {
             Ok(ReadyHttpTransport {
               io,
               negotiated_h2: protocol.is_h2(),
+              upstream_certificate,
             })
           })
           .await
@@ -924,6 +939,402 @@ mod tests {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
       Poll::Ready(Ok(()))
+    }
+  }
+
+  mod upstream_certificate_tests {
+    use std::convert::Infallible;
+    use std::fs;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Empty};
+    use hyper::service::service_fn;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+
+    use super::common;
+    use super::*;
+
+    #[test]
+    fn ready_transport_attaches_only_its_own_certificate_to_hyper_response_extensions() {
+      let certificate = Arc::new(crate::waf::metadata::WafCertificateMetadata::default());
+      let transport = ReadyHttpTransport {
+        io: Box::new(FakeIo),
+        negotiated_h2: true,
+        upstream_certificate: Some(certificate.clone()),
+      };
+      let connected = transport.connected();
+      let mut extensions = http::Extensions::new();
+      connected.get_extras(&mut extensions);
+
+      assert!(connected.is_negotiated_h2());
+      assert!(Arc::ptr_eq(
+        &extensions
+          .get::<UpstreamCertificateMetadata>()
+          .expect("TLS transport should attach the peer certificate")
+          .0,
+        &certificate,
+      ));
+
+      let cleartext = ReadyHttpTransport {
+        io: Box::new(FakeIo),
+        negotiated_h2: false,
+        upstream_certificate: None,
+      };
+      let mut extensions = http::Extensions::new();
+      cleartext.connected().get_extras(&mut extensions);
+      assert!(
+        extensions.get::<UpstreamCertificateMetadata>().is_none(),
+        "cleartext transports must not synthesize upstream TLS evidence"
+      );
+    }
+
+    #[tokio::test]
+    async fn pooled_tls_responses_reuse_the_verified_peer_certificate_identity() {
+      let temp_dir = common::TempDir::new("pooled-upstream-peer-certificate");
+      let (ca_certificate_path, certificate_path, private_key_path) =
+        tls_test_leaf(&temp_dir, "upstream-peer.test");
+      let (address, server) = spawn_tls_http1_upstream(&certificate_path, &private_key_path).await;
+      let client = tls_test_client(address, "upstream-peer.test", &ca_certificate_path);
+
+      let first = send_tls_test_request(&client, address).await;
+      let first_certificate = first
+        .extensions()
+        .get::<UpstreamCertificateMetadata>()
+        .expect("first TLS response should carry its verified peer certificate")
+        .0
+        .clone();
+      first
+        .into_body()
+        .collect()
+        .await
+        .expect("first response body should drain");
+
+      let second = send_tls_test_request(&client, address).await;
+      let second_certificate = second
+        .extensions()
+        .get::<UpstreamCertificateMetadata>()
+        .expect("reused TLS response should carry its verified peer certificate")
+        .0
+        .clone();
+      second
+        .into_body()
+        .collect()
+        .await
+        .expect("second response body should drain");
+
+      assert!(
+        Arc::ptr_eq(&first_certificate, &second_certificate),
+        "responses from one reused TLS connection must retain that connection's certificate"
+      );
+
+      drop(client);
+      tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("upstream server should close after the pooled client is dropped")
+        .expect("upstream server task should not panic")
+        .expect("upstream HTTP/1 connection should complete");
+    }
+
+    #[tokio::test]
+    async fn distinct_pooled_tls_clients_keep_peer_certificates_isolated() {
+      let temp_dir = common::TempDir::new("isolated-pooled-upstream-peer-certificates");
+      let (first_ca_certificate_path, first_certificate_path, first_private_key_path) =
+        tls_test_leaf(&temp_dir, "first-upstream-peer.test");
+      let (second_ca_certificate_path, second_certificate_path, second_private_key_path) =
+        tls_test_leaf(&temp_dir, "second-upstream-peer.test");
+
+      let (first_address, first_server) =
+        spawn_tls_http1_upstream(&first_certificate_path, &first_private_key_path).await;
+      let first_client = tls_test_client(
+        first_address,
+        "first-upstream-peer.test",
+        &first_ca_certificate_path,
+      );
+      let first_response = send_tls_test_request(&first_client, first_address).await;
+      let first_fingerprint = first_response
+        .extensions()
+        .get::<UpstreamCertificateMetadata>()
+        .expect("first TLS response should carry its own peer certificate")
+        .0
+        .fingerprint_sha256
+        .clone();
+      first_response
+        .into_body()
+        .collect()
+        .await
+        .expect("first isolated response body should drain");
+      drop(first_client);
+      first_server
+        .await
+        .expect("first upstream server task should not panic")
+        .expect("first upstream HTTP/1 connection should complete");
+
+      let (second_address, second_server) =
+        spawn_tls_http1_upstream(&second_certificate_path, &second_private_key_path).await;
+      let second_client = tls_test_client(
+        second_address,
+        "second-upstream-peer.test",
+        &second_ca_certificate_path,
+      );
+      let second_response = send_tls_test_request(&second_client, second_address).await;
+      let second_fingerprint = second_response
+        .extensions()
+        .get::<UpstreamCertificateMetadata>()
+        .expect("second TLS response should carry its own peer certificate")
+        .0
+        .fingerprint_sha256
+        .clone();
+      second_response
+        .into_body()
+        .collect()
+        .await
+        .expect("second isolated response body should drain");
+      drop(second_client);
+      second_server
+        .await
+        .expect("second upstream server task should not panic")
+        .expect("second upstream HTTP/1 connection should complete");
+
+      assert_ne!(
+        first_fingerprint, second_fingerprint,
+        "distinct pooled TLS connections must not share certificate metadata"
+      );
+    }
+
+    #[tokio::test]
+    async fn resumed_tls_connection_rebuilds_response_certificate_from_the_verified_session() {
+      let temp_dir = common::TempDir::new("resumed-upstream-peer-certificate");
+      let (ca_certificate_path, certificate_path, private_key_path) =
+        tls_test_leaf(&temp_dir, "resumed-upstream-peer.test");
+      let (address, server) =
+        spawn_resumable_tls_http1_upstream(&certificate_path, &private_key_path).await;
+      let client = tls_test_client(address, "resumed-upstream-peer.test", &ca_certificate_path);
+
+      let first = send_tls_test_request(&client, address).await;
+      let first_fingerprint = first
+        .extensions()
+        .get::<UpstreamCertificateMetadata>()
+        .expect("initial TLS response should carry its peer certificate")
+        .0
+        .fingerprint_sha256
+        .clone();
+      first
+        .into_body()
+        .collect()
+        .await
+        .expect("initial resumed-session test response body should drain");
+
+      let second = send_tls_test_request(&client, address).await;
+      let second_fingerprint = second
+        .extensions()
+        .get::<UpstreamCertificateMetadata>()
+        .expect("resumed TLS response should carry the session's peer certificate")
+        .0
+        .fingerprint_sha256
+        .clone();
+      second
+        .into_body()
+        .collect()
+        .await
+        .expect("resumed-session response body should drain");
+      drop(client);
+
+      let handshakes = tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("resumption test upstream should complete")
+        .expect("resumption test upstream task should not panic")
+        .expect("resumption test upstream connections should complete");
+      assert_eq!(
+        handshakes.len(),
+        2,
+        "connection-close responses should reconnect"
+      );
+      assert_eq!(handshakes[0], rustls::HandshakeKind::Full);
+      assert_eq!(handshakes[1], rustls::HandshakeKind::Resumed);
+      assert_eq!(
+        first_fingerprint, second_fingerprint,
+        "resumed TLS responses must use the verified session certificate, never stale connection state"
+      );
+    }
+
+    async fn spawn_tls_http1_upstream(
+      certificate_path: &std::path::Path,
+      private_key_path: &std::path::Path,
+    ) -> (
+      std::net::SocketAddr,
+      tokio::task::JoinHandle<anyhow::Result<()>>,
+    ) {
+      let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("TLS test upstream should bind");
+      let address = listener
+        .local_addr()
+        .expect("TLS test upstream should expose its address");
+      let server_config = tls_test_server_config(certificate_path, private_key_path);
+      let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let stream = TlsAcceptor::from(server_config).accept(stream).await?;
+        let service = service_fn(|_request| async {
+          Ok::<_, Infallible>(http::Response::new(Empty::<Bytes>::new()))
+        });
+        hyper::server::conn::http1::Builder::new()
+          .serve_connection(TokioIo::new(stream), service)
+          .await?;
+        Ok(())
+      });
+      (address, server)
+    }
+
+    fn tls_test_leaf(
+      temp_dir: &common::TempDir,
+      server_name: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+      let (ca_certificate_path, ca_private_key_path) =
+        common::create_self_signed_cert(temp_dir.path(), &format!("{server_name}-ca"));
+      let (certificate_path, private_key_path) = common::create_ca_signed_server_cert(
+        temp_dir.path(),
+        server_name,
+        &ca_certificate_path,
+        &ca_private_key_path,
+      );
+      (ca_certificate_path, certificate_path, private_key_path)
+    }
+
+    async fn spawn_resumable_tls_http1_upstream(
+      certificate_path: &std::path::Path,
+      private_key_path: &std::path::Path,
+    ) -> (
+      std::net::SocketAddr,
+      tokio::task::JoinHandle<anyhow::Result<Vec<rustls::HandshakeKind>>>,
+    ) {
+      let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("resumption TLS test upstream should bind");
+      let address = listener
+        .local_addr()
+        .expect("resumption TLS test upstream should expose its address");
+      let server_config = tls_test_server_config(certificate_path, private_key_path);
+      let server = tokio::spawn(async move {
+        let mut handshakes = Vec::with_capacity(2);
+        for _ in 0..2 {
+          let (stream, _) = listener.accept().await?;
+          let stream = TlsAcceptor::from(server_config.clone())
+            .accept(stream)
+            .await?;
+          handshakes.push(
+            stream
+              .get_ref()
+              .1
+              .handshake_kind()
+              .expect("completed TLS handshake should expose its kind"),
+          );
+          let service = service_fn(|_request| async {
+            Ok::<_, Infallible>(
+              http::Response::builder()
+                .header(http::header::CONNECTION, "close")
+                .body(Empty::<Bytes>::new())
+                .expect("connection-close response should build"),
+            )
+          });
+          hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await?;
+        }
+        Ok(handshakes)
+      });
+      (address, server)
+    }
+
+    fn tls_test_client(
+      address: std::net::SocketAddr,
+      server_name: &str,
+      trusted_ca_certificate_path: &std::path::Path,
+    ) -> Client<HappyEyeballsHttpConnector, UpstreamBody> {
+      let mut tls_config = crate::tls::build_upstream_client_config(
+        &[trusted_ca_certificate_path.to_path_buf()],
+        &crate::config::UpstreamEchConfig::default(),
+      )
+      .expect("TLS test client should trust the disposable upstream certificate");
+      tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+      let scheduler_policy = crate::upstream_resolution::CandidateSchedulerConfig::new(
+        crate::upstream_resolution::CandidateSchedulerMode::Enabled,
+        Duration::from_millis(10),
+        Duration::from_millis(10),
+        1,
+        1,
+        1,
+      )
+      .expect("TLS test scheduler policy should be valid");
+      let connector = HappyEyeballsHttpConnector {
+        host: Arc::from("127.0.0.1"),
+        port: address.port(),
+        discovery_id: Arc::from("pooled-upstream-peer-certificate"),
+        connect_timeout: Duration::from_secs(1),
+        resolution_policy: crate::upstream_resolution::ResolutionPolicy::default(),
+        scheduler_policy,
+        protocol: FixedHttpProtocol::H1,
+        svcb_enabled: false,
+        allowed_svcb_ports: Arc::from([]),
+        tls_config: Some(Arc::new(tls_config)),
+        server_name: Some(
+          rustls::pki_types::ServerName::try_from(server_name.to_owned())
+            .expect("TLS test server name should be valid"),
+        ),
+        admission: None,
+      };
+      Client::builder(TokioExecutor::new()).build(connector)
+    }
+
+    async fn send_tls_test_request(
+      client: &Client<HappyEyeballsHttpConnector, UpstreamBody>,
+      address: std::net::SocketAddr,
+    ) -> http::Response<Incoming> {
+      client
+        .request(
+          http::Request::builder()
+            .uri(format!("https://127.0.0.1:{}/", address.port()))
+            .body(
+              Empty::<Bytes>::new()
+                .map_err(|never| -> BoxError { match never {} })
+                .boxed(),
+            )
+            .expect("TLS test request should build"),
+        )
+        .await
+        .expect("TLS test upstream request should succeed")
+    }
+
+    fn tls_test_server_config(
+      certificate_path: &std::path::Path,
+      private_key_path: &std::path::Path,
+    ) -> Arc<rustls::ServerConfig> {
+      let certificates = CertificateDer::pem_slice_iter(
+        &fs::read(certificate_path).expect("TLS test certificate should be readable"),
+      )
+      .collect::<Result<Vec<_>, _>>()
+      .expect("TLS test certificate should parse");
+      let private_key = PrivateKeyDer::from_pem_slice(
+        &fs::read(private_key_path).expect("TLS test private key should be readable"),
+      )
+      .expect("TLS test private key should parse");
+      let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        crate::tls::default_crypto_provider(),
+      ))
+      .with_safe_default_protocol_versions()
+      .expect("TLS test server protocol versions should configure")
+      .with_no_client_auth()
+      .with_single_cert(certificates, private_key)
+      .expect("TLS test server certificate should configure");
+      config.alpn_protocols = vec![b"http/1.1".to_vec()];
+      config.ticketer = rustls::crypto::aws_lc_rs::Ticketer::new()
+        .expect("TLS test server ticket producer should initialize");
+      Arc::new(config)
     }
   }
 

@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use base64::Engine;
@@ -10,6 +11,9 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version}
 
 use crate::config::Config;
 use crate::dynamic_policy::DynamicPolicyContext;
+use crate::waf::metadata::{
+  WafCertificateMetadata, WafCertificateNames, WafClientCertificateMetadata,
+};
 
 use super::super::{
   WafBodyInput, WafPhase, WafProtocol, WafRequestInput, WafResponseInput, WafStreamDirection,
@@ -60,6 +64,8 @@ pub(super) struct BuiltFixture {
   upstream_connect_time_ms: Option<u64>,
   upstream_first_byte_time_ms: Option<u64>,
   upstream_error: Option<OxiRuleUpstreamErrorFixture>,
+  upstream_certificate: Option<Arc<WafCertificateMetadata>>,
+  stream_upstream_certificate: Option<Arc<WafCertificateMetadata>>,
   stream_protocol: WafStreamProtocol,
   stream_direction: WafStreamDirection,
   stream_unit: WafStreamUnit,
@@ -123,6 +129,21 @@ impl BuiltFixture {
     let stream_payload =
       decode_body(stream.payload.as_deref(), stream.payload_base64.as_deref())?.unwrap_or_default();
     let stream_payload_len = stream_payload.len();
+    let client_certificate_details = fixture
+      .request
+      .tls
+      .client_certificate
+      .map(certificate_fixture)
+      .transpose()?;
+    let client_certificate =
+      client_certificate_details
+        .as_ref()
+        .map(|value| WafClientCertificateMetadata {
+          fingerprint_sha256: value.fingerprint_sha256.clone(),
+          subject_common_names: value.subject_common_names.values.clone(),
+          san_dns_names: value.san_dns_names.values.clone(),
+          san_ip_addresses: value.san_ip_addresses.values.clone(),
+        });
     Ok(Self {
       phase,
       route_name,
@@ -154,7 +175,8 @@ impl BuiltFixture {
         alpn: fixture.request.tls.alpn,
         fingerprint: fixture.request.tls.fingerprint,
         fingerprint_scheme: fixture.request.tls.fingerprint_scheme,
-        client_certificate: None,
+        client_certificate,
+        client_certificate_details,
       },
       protocol: parse_protocol(&fixture.request.protocol)?,
       transport_network: parse_transport_network(&fixture.request.transport_network)?,
@@ -183,6 +205,14 @@ impl BuiltFixture {
       upstream_connect_time_ms: response.upstream_connect_time_ms,
       upstream_first_byte_time_ms: response.upstream_first_byte_time_ms,
       upstream_error: response.upstream_error,
+      upstream_certificate: response
+        .server_certificate
+        .map(certificate_fixture)
+        .transpose()?,
+      stream_upstream_certificate: stream
+        .server_certificate
+        .map(certificate_fixture)
+        .transpose()?,
       stream_protocol: parse_stream_protocol(&stream.protocol)?,
       stream_direction: parse_stream_direction(&stream.direction)?,
       stream_unit: parse_stream_unit(&stream.unit)?,
@@ -244,6 +274,7 @@ impl BuiltFixture {
 
   pub(super) fn response_input(&self) -> WafResponseInput<'_> {
     WafResponseInput {
+      upstream_certificate: self.upstream_certificate.as_deref(),
       request: self.request_input(),
       response_id: &self.response_id,
       received_at_unix_ms: current_unix_ms(),
@@ -268,6 +299,7 @@ impl BuiltFixture {
 
   pub(super) fn stream_input(&self) -> WafStreamInput<'_> {
     WafStreamInput {
+      upstream_certificate: self.stream_upstream_certificate.as_deref(),
       request: self.request_input(),
       protocol: self.stream_protocol,
       direction: self.stream_direction,
@@ -435,6 +467,7 @@ fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
 
 fn default_stream_fixture() -> OxiRuleStreamFixture {
   OxiRuleStreamFixture {
+    server_certificate: None,
     protocol: default_stream_protocol(),
     direction: default_stream_direction(),
     unit: default_stream_unit(),
@@ -454,4 +487,45 @@ fn default_websocket_fixture() -> OxiRuleWebSocketFixture {
     message_opcode: None,
     frame_payload_size: None,
   }
+}
+
+fn certificate_fixture(
+  fixture: super::types::OxiRuleCertificateFixture,
+) -> anyhow::Result<Arc<WafCertificateMetadata>> {
+  if fixture.fingerprint_sha256.len() != 64
+    || !fixture
+      .fingerprint_sha256
+      .bytes()
+      .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+  {
+    bail!("certificate fixture fingerprint_sha256 must be 64 lowercase hexadecimal characters");
+  }
+  let lists = [
+    &fixture.subject_common_names,
+    &fixture.san_dns_names,
+    &fixture.san_ip_addresses,
+    &fixture.san_uri_names,
+    &fixture.san_email_addresses,
+  ];
+  let count = lists.iter().map(|list| list.len()).sum::<usize>();
+  let bytes = lists
+    .iter()
+    .flat_map(|list| list.iter())
+    .try_fold(0usize, |total, value| total.checked_add(value.len()));
+  if count > 256 || bytes.is_none_or(|bytes| bytes > 64 * 1024) {
+    bail!("certificate fixture exceeds certificate capture limits");
+  }
+  let names = |values| WafCertificateNames {
+    values,
+    is_truncated: false,
+  };
+  Ok(Arc::new(WafCertificateMetadata {
+    fingerprint_sha256: fixture.fingerprint_sha256,
+    parse_complete: fixture.parse_complete,
+    subject_common_names: names(fixture.subject_common_names),
+    san_dns_names: names(fixture.san_dns_names),
+    san_ip_addresses: names(fixture.san_ip_addresses),
+    san_uri_names: names(fixture.san_uri_names),
+    san_email_addresses: names(fixture.san_email_addresses),
+  }))
 }

@@ -211,6 +211,7 @@ impl DirectH2ConnectAttempt {
 
 pub(super) struct DirectH2Connection {
   sender: SendRequest<ProxyBody>,
+  pub(super) upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
   created_at: Instant,
   last_used_elapsed_ns: AtomicU64,
   pub(super) active_streams: AtomicUsize,
@@ -227,6 +228,8 @@ pub(super) struct DirectH2Sender {
 
 pub(in crate::proxy::http::fast_path) struct DirectH2Response {
   pub(in crate::proxy::http::fast_path) response: Response<Incoming>,
+  pub(in crate::proxy::http::fast_path) upstream_certificate:
+    Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
   lease: Option<DirectH2Lease>,
 }
 
@@ -291,9 +294,14 @@ impl DirectH2Slot {
 }
 
 impl DirectH2Response {
-  pub(super) fn new(response: Response<Incoming>, lease: DirectH2Lease) -> Self {
+  pub(super) fn new(
+    response: Response<Incoming>,
+    lease: DirectH2Lease,
+    upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+  ) -> Self {
     Self {
       response,
+      upstream_certificate,
       lease: Some(lease),
     }
   }
@@ -956,9 +964,11 @@ impl DirectH2Pool {
       sender,
       peer_max_streams,
       driver,
+      upstream_certificate,
     } = connected;
     let connection = Arc::new(DirectH2Connection {
       sender,
+      upstream_certificate,
       created_at: Instant::now(),
       last_used_elapsed_ns: AtomicU64::new(0),
       active_streams: AtomicUsize::new(0),

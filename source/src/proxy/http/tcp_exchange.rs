@@ -2,9 +2,62 @@
 
 use super::*;
 
+use crate::waf::metadata::UpstreamCertificateMetadata;
+
 trait OneShotUpstreamIo: AsyncRead + AsyncWrite + Unpin + Send {}
 
 impl<T> OneShotUpstreamIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+struct OneShotUpstreamTransport {
+  io: Box<dyn OneShotUpstreamIo>,
+  upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+}
+
+impl AsyncRead for OneShotUpstreamTransport {
+  fn poll_read(
+    mut self: std::pin::Pin<&mut Self>,
+    context: &mut std::task::Context<'_>,
+    buffer: &mut tokio::io::ReadBuf<'_>,
+  ) -> std::task::Poll<std::io::Result<()>> {
+    std::pin::Pin::new(&mut *self.io).poll_read(context, buffer)
+  }
+}
+
+impl AsyncWrite for OneShotUpstreamTransport {
+  fn poll_write(
+    mut self: std::pin::Pin<&mut Self>,
+    context: &mut std::task::Context<'_>,
+    buffer: &[u8],
+  ) -> std::task::Poll<std::io::Result<usize>> {
+    std::pin::Pin::new(&mut *self.io).poll_write(context, buffer)
+  }
+
+  fn poll_flush(
+    mut self: std::pin::Pin<&mut Self>,
+    context: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<std::io::Result<()>> {
+    std::pin::Pin::new(&mut *self.io).poll_flush(context)
+  }
+
+  fn poll_shutdown(
+    mut self: std::pin::Pin<&mut Self>,
+    context: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<std::io::Result<()>> {
+    std::pin::Pin::new(&mut *self.io).poll_shutdown(context)
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    self.io.is_write_vectored()
+  }
+
+  fn poll_write_vectored(
+    mut self: std::pin::Pin<&mut Self>,
+    context: &mut std::task::Context<'_>,
+    buffers: &[std::io::IoSlice<'_>],
+  ) -> std::task::Poll<std::io::Result<usize>> {
+    std::pin::Pin::new(&mut *self.io).poll_write_vectored(context, buffers)
+  }
+}
 
 pub(super) async fn send_one_shot_with_proxy_protocol(
   request: Request<ProxyBody>,
@@ -66,7 +119,7 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
     state.circuit_breakers.clone(),
     pool_name.map(Arc::<str>::from),
   );
-  let io = crate::upstream_resolution::connect_http_ready_happy_eyeballs_admitted(
+  let connected = crate::upstream_resolution::connect_http_ready_happy_eyeballs_admitted(
     host,
     port,
     &discovery_id,
@@ -104,7 +157,10 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
         .await
         .context("upstream PROXY protocol egress header timed out")?
         .context("failed to write upstream PROXY protocol egress header")?;
-        let io: Box<dyn OneShotUpstreamIo> = if let Some((tls_config, server_name)) = tls_identity {
+        let (io, upstream_certificate): (
+          Box<dyn OneShotUpstreamIo>,
+          Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+        ) = if let Some((tls_config, server_name)) = tls_identity {
           let tls = tokio::time::timeout_at(
             attempt_deadline,
             tokio_rustls::TlsConnector::from(tls_config).connect(server_name, stream),
@@ -115,21 +171,41 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
           if !upstream_version.accepts_negotiated_alpn(tls.get_ref().1.alpn_protocol()) {
             anyhow::bail!("upstream negotiated an incompatible ALPN protocol");
           }
-          Box::new(tls)
+          let upstream_certificate = tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(crate::tls::peer_certificate_metadata);
+          (Box::new(tls), upstream_certificate)
         } else {
-          Box::new(stream)
+          (Box::new(stream), None)
         };
-        Ok(io)
+        Ok(OneShotUpstreamTransport {
+          io,
+          upstream_certificate,
+        })
       }
     },
   )
   .await?;
-  tokio::time::timeout(
+  let upstream_certificate = connected.get_ref().upstream_certificate.clone();
+  let mut response = tokio::time::timeout(
     timeouts.upstream_first_byte,
-    send_one_shot_over_tcp_io(io, request, upstream_version, &state.config.proxy.http2),
+    send_one_shot_over_tcp_io(
+      connected,
+      request,
+      upstream_version,
+      &state.config.proxy.http2,
+    ),
   )
   .await
-  .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))?
+  .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))??;
+  if let Some(metadata) = upstream_certificate {
+    response
+      .extensions_mut()
+      .insert(UpstreamCertificateMetadata(metadata));
+  }
+  Ok(response)
 }
 
 impl From<TcpUpstreamHttpVersion> for HttpVersion {

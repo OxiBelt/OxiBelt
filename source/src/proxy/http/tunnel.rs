@@ -634,6 +634,9 @@ pub(super) async fn handle_upgrade_request(
   if websocket_framed_bridge {
     remove_websocket_extensions(upstream_response.headers_mut());
   }
+  let upstream_certificate = websocket_upgrade
+    .then(|| take_upstream_certificate(&mut upstream_response))
+    .flatten();
   let upstream_upgrade = hyper::upgrade::on(&mut upstream_response);
   let pool_report = state.pools.clone();
   let upstream_name = upstream.name.clone();
@@ -648,7 +651,11 @@ pub(super) async fn handle_upgrade_request(
       &upstream_name,
     );
   }
-  let websocket_stream_waf = if websocket_upgrade { stream_waf } else { None };
+  let websocket_stream_waf = if websocket_upgrade {
+    stream_waf.map(|context| context.with_upstream_certificate(upstream_certificate))
+  } else {
+    None
+  };
   let bandwidth = resolved.bandwidth.clone();
   let connection_limit_hold =
     TunnelConnectionLimitHold::capture(request_connection_permit, connection_limit_context);
@@ -724,6 +731,48 @@ pub(super) async fn handle_upgrade_request(
 
 fn remove_websocket_extensions(headers: &mut HeaderMap) {
   headers.remove("sec-websocket-extensions");
+}
+
+fn take_upstream_certificate<B>(
+  response: &mut Response<B>,
+) -> Option<Arc<crate::waf::metadata::WafCertificateMetadata>> {
+  response
+    .extensions_mut()
+    .remove::<crate::waf::metadata::UpstreamCertificateMetadata>()
+    .map(|metadata| metadata.0)
+}
+
+#[cfg(test)]
+mod upstream_certificate_tests {
+  use super::*;
+
+  #[test]
+  fn websocket_handoff_takes_the_upstream_certificate_snapshot() {
+    let certificate = Arc::new(crate::waf::metadata::WafCertificateMetadata::default());
+    let mut response = Response::new(());
+    response
+      .extensions_mut()
+      .insert(crate::waf::metadata::UpstreamCertificateMetadata(
+        certificate.clone(),
+      ));
+
+    let taken = take_upstream_certificate(&mut response).expect("certificate extension");
+
+    assert!(Arc::ptr_eq(&taken, &certificate));
+    assert!(
+      response
+        .extensions()
+        .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
+        .is_none()
+    );
+  }
+
+  #[test]
+  fn websocket_handoff_keeps_no_certificate_for_cleartext_upstream() {
+    let mut response = Response::new(());
+
+    assert!(take_upstream_certificate(&mut response).is_none());
+  }
 }
 
 #[cfg(test)]

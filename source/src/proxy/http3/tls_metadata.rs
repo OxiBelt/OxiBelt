@@ -7,6 +7,13 @@ const QUIC_TLS_FINGERPRINT_SCHEME: &str = "quinn-rustls-quic-v2";
 pub(super) fn downstream_quic_tls_metadata(
   connection: &h3_quinn::quinn::Connection,
 ) -> WafTlsMetadata {
+  let peer_certificates = connection.peer_identity().and_then(|identity| {
+    identity
+      .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+      .ok()
+  });
+  let (client_certificate, client_certificate_details) =
+    downstream_peer_certificate_metadata(peer_certificates.as_deref().map(Vec::as_slice));
   let handshake_data = connection.handshake_data().and_then(|data| {
     data
       .downcast::<h3_quinn::quinn::crypto::rustls::HandshakeData>()
@@ -44,8 +51,34 @@ pub(super) fn downstream_quic_tls_metadata(
     alpn,
     fingerprint,
     fingerprint_scheme: Some(QUIC_TLS_FINGERPRINT_SCHEME.to_string()),
-    client_certificate: None,
+    client_certificate,
+    client_certificate_details,
   }
+}
+
+fn downstream_peer_certificate_metadata(
+  certificates: Option<&[rustls::pki_types::CertificateDer<'_>]>,
+) -> (
+  Option<crate::waf::metadata::WafClientCertificateMetadata>,
+  Option<std::sync::Arc<crate::waf::metadata::WafCertificateMetadata>>,
+) {
+  let Some(certificates) = certificates else {
+    return (None, None);
+  };
+  let detailed = crate::tls::peer_certificate_metadata(certificates);
+  // QUIC certificate routing is new: derive it from the bounded capture and
+  // reject every certificate selector when evidence is incomplete. The legacy
+  // TCP projection remains unchanged for compatibility.
+  let legacy = detailed
+    .as_ref()
+    .filter(|value| value.parse_complete)
+    .map(|value| crate::waf::metadata::WafClientCertificateMetadata {
+      fingerprint_sha256: value.fingerprint_sha256.clone(),
+      subject_common_names: value.subject_common_names.values.clone(),
+      san_dns_names: value.san_dns_names.values.clone(),
+      san_ip_addresses: value.san_ip_addresses.values.clone(),
+    });
+  (legacy, detailed)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +121,30 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn downstream_incomplete_peer_identity_keeps_details_without_route_identity() {
+    let certificate = rustls::pki_types::CertificateDer::from(vec![0_u8, 1, 2]);
+    let (legacy, detailed) = downstream_peer_certificate_metadata(Some(&[certificate]));
+
+    assert!(legacy.is_none());
+    assert!(!detailed.as_ref().unwrap().parse_complete);
+    assert_eq!(
+      detailed
+        .expect("detailed metadata")
+        .fingerprint_sha256
+        .len(),
+      64
+    );
+  }
+
+  #[test]
+  fn downstream_peer_identity_omits_metadata_without_certificate_chain() {
+    let (legacy, detailed) = downstream_peer_certificate_metadata(None);
+
+    assert!(legacy.is_none());
+    assert!(detailed.is_none());
+  }
 
   #[test]
   fn quic_tls_fingerprint_payload_uses_exposed_quic_scheme() {

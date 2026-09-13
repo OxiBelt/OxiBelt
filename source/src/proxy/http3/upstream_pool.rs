@@ -321,12 +321,20 @@ impl UpstreamH3Pool {
         .map_err(|failure| failure.into_error())?;
       metrics.record_http_upstream_client_connection_created("h3", "https", "primary");
       let send_request = admitted.connected.send_request.clone();
+      let upstream_certificate = admitted.connected.upstream_certificate.clone();
       let guard = OneShotH3Connection {
         _connected: admitted.connected,
         _connection_admission: admitted.admission,
       };
-      let response =
-        send_h3_request(send_request, request, &uri, timeouts, deadlines.request).await?;
+      let response = send_h3_request(
+        send_request,
+        request,
+        &uri,
+        timeouts,
+        deadlines.request,
+        upstream_certificate,
+      )
+      .await?;
       let (parts, body) = response.into_parts();
       let body = crate::proxy::http::body::with_drop_guard(
         body,
@@ -346,6 +354,7 @@ impl UpstreamH3Pool {
       &uri,
       timeouts,
       deadlines.request,
+      entry.connected.upstream_certificate.clone(),
     )
     .await
     {
@@ -378,6 +387,7 @@ impl UpstreamH3Pool {
   ) -> anyhow::Result<(
     super::webtransport_bridge::UpstreamWebTransportSession,
     WebTransportConnectionGuard,
+    Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
   )> {
     if !self
       .logical_origin
@@ -398,7 +408,7 @@ impl UpstreamH3Pool {
       connected,
       admission,
     } = admitted;
-    let (endpoint, connection) = connected.into_parts()?;
+    let (endpoint, connection, upstream_certificate) = connected.into_parts()?;
     // Only the QUIC/H3 transport candidates race. A single winner sends the
     // WebTransport CONNECT so long-lived sessions are never duplicated.
     let session = tokio::time::timeout_at(
@@ -416,6 +426,7 @@ impl UpstreamH3Pool {
     Ok((
       session,
       WebTransportConnectionGuard::new(endpoint, admission),
+      upstream_certificate,
     ))
   }
 

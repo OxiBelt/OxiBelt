@@ -84,6 +84,9 @@ pub(super) fn downstream_tls_metadata(
     client_certificate: crate::tls::client_certificate_metadata(
       connection.peer_certificates().unwrap_or_default(),
     ),
+    client_certificate_details: crate::tls::peer_certificate_metadata(
+      connection.peer_certificates().unwrap_or_default(),
+    ),
   }
 }
 

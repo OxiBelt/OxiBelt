@@ -34,6 +34,7 @@ mod crlite;
 mod crlite_managed;
 mod crlite_runtime;
 mod downstream_ct;
+mod peer_certificate;
 
 #[cfg(feature = "fuzzing")]
 pub(crate) fn exercise_downstream_ct_fuzzing(data: &[u8]) {
@@ -57,6 +58,8 @@ pub(crate) use cert_metadata::{
 pub(crate) use cert_metadata::{
   VerifiedClientCertificate, VerifiedClientCertificateIdentity, verified_client_certificate,
 };
+pub(crate) use peer_certificate::peer_certificate_metadata;
+pub use peer_certificate::{PeerCertificateMetadata, PeerCertificateNames};
 
 #[cfg(feature = "admin-runtime")]
 pub(crate) use admin_quic::build_admin_quic_server_config_with_crypto_and_resumption;

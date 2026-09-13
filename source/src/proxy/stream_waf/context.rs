@@ -37,6 +37,7 @@ pub(crate) struct StreamWafRequestContext {
   tags: HashMap<String, String>,
   dynamic_policy: DynamicPolicyContext,
   person_proof: PersonProofRequestSnapshot,
+  upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
   max_payload_bytes: usize,
 }
 
@@ -132,8 +133,17 @@ impl StreamWafRequestContext {
       tags: seed.tags,
       dynamic_policy: seed.dynamic_policy,
       person_proof,
+      upstream_certificate: None,
       max_payload_bytes: state.config.waf.limits.max_body_inspection_bytes,
     })
+  }
+
+  pub(crate) fn with_upstream_certificate(
+    mut self,
+    upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+  ) -> Self {
+    self.upstream_certificate = upstream_certificate;
+    self
   }
 
   pub(crate) fn max_payload_bytes(&self) -> usize {
@@ -180,18 +190,19 @@ impl StreamWafRequestContext {
     websocket: WafWebSocketStreamMetadata<'_>,
   ) -> WafStreamDecision {
     state.waf.evaluate_stream_with_person_proof_snapshot(
-      WafStreamInput {
-        request: self.request_input(),
-        protocol: WafStreamProtocol::Websocket,
+      stream_input(
+        self.request_input(),
+        WafStreamProtocol::Websocket,
         direction,
         unit,
-        payload: WafBodyInput {
+        WafBodyInput {
           bytes: payload,
           is_truncated,
         },
-        websocket: Some(websocket),
-        webtransport: None,
-      },
+        Some(websocket),
+        None,
+        self.upstream_certificate.as_deref(),
+      ),
       &self.person_proof,
     )
   }
@@ -205,23 +216,159 @@ impl StreamWafRequestContext {
     metadata: WafWebTransportStreamMetadata,
   ) -> WafStreamDecision {
     state.waf.evaluate_stream_with_person_proof_snapshot(
-      WafStreamInput {
-        request: self.request_input(),
-        protocol: WafStreamProtocol::Webtransport,
+      stream_input(
+        self.request_input(),
+        WafStreamProtocol::Webtransport,
         direction,
-        unit: if metadata.datagram_size.is_some() {
+        if metadata.datagram_size.is_some() {
           WafStreamUnit::WebtransportDatagram
         } else {
           WafStreamUnit::WebtransportStreamChunk
         },
-        payload: WafBodyInput {
+        WafBodyInput {
           bytes: payload,
           is_truncated,
         },
-        websocket: None,
-        webtransport: Some(metadata),
-      },
+        None,
+        Some(metadata),
+        self.upstream_certificate.as_deref(),
+      ),
       &self.person_proof,
     )
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_input<'a>(
+  request: WafRequestInput<'a>,
+  protocol: WafStreamProtocol,
+  direction: WafStreamDirection,
+  unit: WafStreamUnit,
+  payload: WafBodyInput<'a>,
+  websocket: Option<WafWebSocketStreamMetadata<'a>>,
+  webtransport: Option<WafWebTransportStreamMetadata>,
+  upstream_certificate: Option<&'a crate::waf::metadata::WafCertificateMetadata>,
+) -> WafStreamInput<'a> {
+  WafStreamInput {
+    request,
+    protocol,
+    direction,
+    unit,
+    payload,
+    websocket,
+    webtransport,
+    upstream_certificate,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn request_input<'a>(
+    method: &'a Method,
+    uri: &'a Uri,
+    headers: &'a HeaderMap,
+    tls: &'a WafTlsMetadata,
+    tags: &'a HashMap<String, String>,
+    dynamic_policy: &'a DynamicPolicyContext,
+  ) -> WafRequestInput<'a> {
+    WafRequestInput {
+      request_id: "request",
+      transaction_id: "transaction",
+      received_at_unix_ms: 0,
+      method,
+      uri,
+      version: Version::HTTP_3,
+      headers,
+      body: None,
+      peer_addr: "127.0.0.1:443".parse().unwrap(),
+      client_asn: None,
+      downstream_host: "example.test",
+      downstream_scheme: "https",
+      route_name: "stream",
+      tcp_max_hop: None,
+      tls,
+      protocol: WafProtocol::Webtransport,
+      transport_network: WafTransportNetwork::Udp,
+      transport_metadata: WafTransportMetadataInput::default(),
+      tags,
+      dynamic_policy,
+    }
+  }
+
+  #[test]
+  fn stream_input_propagates_upstream_certificate_for_both_directions() {
+    let tls = WafTlsMetadata::default();
+    let tags = HashMap::new();
+    let dynamic_policy = DynamicPolicyContext::default();
+    let certificate = crate::waf::metadata::WafCertificateMetadata::default();
+    let method = Method::GET;
+    let uri = "https://example.test/stream".parse().unwrap();
+    let headers = HeaderMap::new();
+    let payload = b"stream";
+
+    let downstream = stream_input(
+      request_input(&method, &uri, &headers, &tls, &tags, &dynamic_policy),
+      WafStreamProtocol::Websocket,
+      WafStreamDirection::DownstreamToUpstream,
+      WafStreamUnit::WebsocketFrame,
+      WafBodyInput {
+        bytes: payload,
+        is_truncated: false,
+      },
+      None,
+      None,
+      Some(&certificate),
+    );
+    let upstream = stream_input(
+      request_input(&method, &uri, &headers, &tls, &tags, &dynamic_policy),
+      WafStreamProtocol::Webtransport,
+      WafStreamDirection::UpstreamToDownstream,
+      WafStreamUnit::WebtransportStreamChunk,
+      WafBodyInput {
+        bytes: payload,
+        is_truncated: false,
+      },
+      None,
+      None,
+      Some(&certificate),
+    );
+
+    assert!(std::ptr::eq(
+      downstream
+        .upstream_certificate
+        .expect("downstream certificate"),
+      &certificate,
+    ));
+    assert!(std::ptr::eq(
+      upstream.upstream_certificate.expect("upstream certificate"),
+      &certificate,
+    ));
+  }
+
+  #[test]
+  fn stream_input_omits_certificate_without_upstream_identity() {
+    let tls = WafTlsMetadata::default();
+    let tags = HashMap::new();
+    let dynamic_policy = DynamicPolicyContext::default();
+    let method = Method::GET;
+    let uri = "https://example.test/stream".parse().unwrap();
+    let headers = HeaderMap::new();
+    let input = stream_input(
+      request_input(&method, &uri, &headers, &tls, &tags, &dynamic_policy),
+      WafStreamProtocol::Webtransport,
+      WafStreamDirection::UpstreamToDownstream,
+      WafStreamUnit::WebtransportDatagram,
+      WafBodyInput {
+        bytes: b"datagram",
+        is_truncated: false,
+      },
+      None,
+      None,
+      None,
+    );
+
+    assert!(input.upstream_certificate.is_none());
   }
 }

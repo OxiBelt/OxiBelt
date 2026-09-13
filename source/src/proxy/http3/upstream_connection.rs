@@ -25,12 +25,17 @@ impl H3RequestDeadlines {
 pub(in crate::proxy::http3) struct ConnectedQuinnUpstream {
   endpoint: Option<h3_quinn::quinn::Endpoint>,
   connection: Option<h3_quinn::quinn::Connection>,
+  upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
 }
 
 impl ConnectedQuinnUpstream {
   pub(in crate::proxy::http3) fn into_parts(
     mut self,
-  ) -> anyhow::Result<(h3_quinn::quinn::Endpoint, h3_quinn::quinn::Connection)> {
+  ) -> anyhow::Result<(
+    h3_quinn::quinn::Endpoint,
+    h3_quinn::quinn::Connection,
+    Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+  )> {
     let endpoint = self
       .endpoint
       .take()
@@ -39,7 +44,7 @@ impl ConnectedQuinnUpstream {
       .connection
       .take()
       .context("connected QUIC upstream lost its connection")?;
-    Ok((endpoint, connection))
+    Ok((endpoint, connection, self.upstream_certificate.take()))
   }
 }
 
@@ -55,6 +60,8 @@ pub(in crate::proxy::http3) struct ConnectedH3Upstream {
   _endpoint: h3_quinn::quinn::Endpoint,
   pub(in crate::proxy::http3) connection: h3_quinn::quinn::Connection,
   pub(in crate::proxy::http3) send_request: H3SendRequest,
+  pub(in crate::proxy::http3) upstream_certificate:
+    Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
   driver_task: JoinHandle<()>,
 }
 
@@ -105,6 +112,7 @@ pub(super) async fn connect_quinn_upstream(
   .with_context(|| format!("failed to connect upstream QUIC to {server_name}"))?;
   Ok(ConnectedQuinnUpstream {
     endpoint: Some(endpoint),
+    upstream_certificate: upstream_quic_peer_certificate_metadata(&connection),
     connection: Some(connection),
   })
 }
@@ -126,7 +134,7 @@ pub(super) async fn connect_h3_upstream(
     deadline,
   )
   .await?;
-  let (endpoint, quinn_connection) = connected.into_parts()?;
+  let (endpoint, quinn_connection, upstream_certificate) = connected.into_parts()?;
   let connection = quinn_connection.clone();
   let h3_connection = h3_quinn::Connection::new(quinn_connection);
   let established = match tokio::time::timeout_at(
@@ -158,6 +166,7 @@ pub(super) async fn connect_h3_upstream(
     _endpoint: endpoint,
     connection,
     send_request,
+    upstream_certificate,
     driver_task,
   })
 }
@@ -190,6 +199,7 @@ pub(super) async fn send_h3_request(
   uri: &http::Uri,
   timeouts: EffectiveTimeouts,
   request_deadline: tokio::time::Instant,
+  upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
 ) -> anyhow::Result<Response<ProxyBody>> {
   let (parts, mut body) = request.into_parts();
   let h3_request = Request::from_parts(parts, ());
@@ -246,7 +256,38 @@ pub(super) async fn send_h3_request(
     break parts;
   };
   let body = response_body::upstream_h3_response_body(stream, timeouts.upstream_read);
-  Ok(Response::from_parts(parts, body))
+  Ok(attach_upstream_certificate(
+    Response::from_parts(parts, body),
+    upstream_certificate,
+  ))
+}
+
+fn upstream_quic_peer_certificate_metadata(
+  connection: &h3_quinn::quinn::Connection,
+) -> Option<Arc<crate::waf::metadata::WafCertificateMetadata>> {
+  connection
+    .peer_identity()
+    .and_then(|identity| {
+      identity
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .ok()
+    })
+    .as_deref()
+    .and_then(|certificates| crate::tls::peer_certificate_metadata(certificates.as_slice()))
+}
+
+fn attach_upstream_certificate<T>(
+  mut response: Response<T>,
+  upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+) -> Response<T> {
+  if let Some(upstream_certificate) = upstream_certificate {
+    response
+      .extensions_mut()
+      .insert(crate::waf::metadata::UpstreamCertificateMetadata(
+        upstream_certificate,
+      ));
+  }
+  response
 }
 
 pub(in crate::proxy::http3) async fn connect_upstream_webtransport(
@@ -255,6 +296,7 @@ pub(in crate::proxy::http3) async fn connect_upstream_webtransport(
 ) -> anyhow::Result<(
   super::webtransport_bridge::UpstreamWebTransportSession,
   WebTransportConnectionGuard,
+  Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
 )> {
   let client = state
     .h3_clients
@@ -272,4 +314,33 @@ pub(in crate::proxy::http3) async fn connect_upstream_webtransport(
       &state.metrics,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn response_keeps_the_connection_certificate_snapshot() {
+    let certificate = Arc::new(crate::waf::metadata::WafCertificateMetadata::default());
+    let response = attach_upstream_certificate(Response::new(()), Some(certificate.clone()));
+    let extension = response
+      .extensions()
+      .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
+      .expect("upstream certificate extension should be present");
+
+    assert!(Arc::ptr_eq(&extension.0, &certificate));
+  }
+
+  #[test]
+  fn response_omits_certificate_extension_without_peer_identity() {
+    let response = attach_upstream_certificate::<()>(Response::new(()), None);
+
+    assert!(
+      response
+        .extensions()
+        .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
+        .is_none()
+    );
+  }
 }

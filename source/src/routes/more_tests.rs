@@ -348,6 +348,60 @@ fn client_cert_absence_fails_closed_when_http3_metadata_is_unavailable() {
 }
 
 #[test]
+fn client_cert_route_matches_verified_legacy_metadata_on_http3_and_webtransport() {
+  let mut routes = vec![route("fallback", &["example.com"], "/", "fallback")];
+  for (name, protocol) in [
+    ("http3-verified", "http3"),
+    ("webtransport-verified", "webtransport"),
+  ] {
+    let mut verified = route(name, &["example.com"], "/", name);
+    verified.r#match.protocols = vec![protocol.to_string()];
+    verified.r#match.tls.client_cert.present = Some(true);
+    verified.r#match.tls.client_cert.fingerprint_sha256.exact = Some("abc123".to_string());
+    verified.r#match.tls.client_cert.subject_cn.exact = Some("client.example".to_string());
+    verified.r#match.tls.client_cert.san_dns.exact = Some("api.example.com".to_string());
+    verified.r#match.tls.client_cert.san_ip.exact = Some("192.0.2.10".to_string());
+    routes.push(verified);
+  }
+  let upstreams = vec![
+    upstream("fallback"),
+    upstream("http3-verified"),
+    upstream("webtransport-verified"),
+  ];
+  let table = RouteTable::from_routes_for_tests(routes);
+  let tls = WafTlsMetadata {
+    enabled: true,
+    client_certificate: Some(WafClientCertificateMetadata {
+      fingerprint_sha256: "abc123".to_string(),
+      subject_common_names: vec!["client.example".to_string()],
+      san_dns_names: vec!["api.example.com".to_string()],
+      san_ip_addresses: vec!["192.0.2.10".to_string()],
+    }),
+    ..WafTlsMetadata::default()
+  };
+  assert!(tls.client_certificate_details.is_none());
+
+  for (protocol, expected_route) in [
+    (RouteRequestProtocol::Http3, "http3-verified"),
+    (RouteRequestProtocol::Webtransport, "webtransport-verified"),
+  ] {
+    let resolved = table
+      .resolve_normalized_host_with_context(
+        "example.com",
+        RouteMatchContext {
+          path: "/",
+          protocol: Some(protocol),
+          tls: Some(&tls),
+          ..RouteMatchContext::default()
+        },
+        &upstreams,
+      )
+      .unwrap();
+    assert_eq!(resolved.route.name, expected_route, "{protocol:?}");
+  }
+}
+
+#[test]
 fn priority_can_beat_host_specificity() {
   let mut wildcard = route("priority", &["*"], "/", "priority");
   wildcard.r#match.priority = 10;

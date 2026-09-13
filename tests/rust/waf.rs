@@ -88,6 +88,7 @@ fn stream_fixture(payload: &str) -> OxiRuleFixture {
   OxiRuleFixture {
     phase: Some(WafPhase::Stream),
     stream: Some(OxiRuleStreamFixture {
+      server_certificate: None,
       protocol: "websocket".to_string(),
       direction: "downstream_to_upstream".to_string(),
       unit: "websocket_message".to_string(),
@@ -597,6 +598,7 @@ type = "silent_close"
   let peer_addr = "203.0.113.10:49152".parse().unwrap();
 
   let decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -1275,6 +1277,7 @@ value = "is_created(Response.Http.Status)"
   let uri: Uri = "/created".parse().expect("URI should parse");
 
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(
       &method,
       &uri,
@@ -1693,6 +1696,7 @@ body = "blocked response body"
 
   let response_headers = HeaderMap::new();
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -2119,6 +2123,7 @@ status = 451
   let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
 
   let decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -2171,6 +2176,7 @@ status = 451
   let peer_addr: SocketAddr = "203.0.113.10:49152".parse().unwrap();
 
   let complete = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -2191,6 +2197,7 @@ status = 451
   assert!(complete.terminal.is_none());
 
   let truncated = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -2243,6 +2250,7 @@ status = 451
   small_length_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("4"));
 
   let allowed = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -2265,6 +2273,7 @@ status = 451
   let mut large_length_headers = HeaderMap::new();
   large_length_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("9"));
   let rejected = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &request_headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -2399,6 +2408,7 @@ status = 451
   let tags = HashMap::new();
 
   let decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(
       &method,
       &uri,
@@ -3455,6 +3465,7 @@ body = "response body"
 
   let response_headers = HeaderMap::new();
   let response = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -3985,6 +3996,7 @@ reason = "chunk"
   );
 
   let datagram = engine.evaluate_stream(WafStreamInput {
+    upstream_certificate: None,
     request,
     protocol: WafStreamProtocol::Webtransport,
     direction: WafStreamDirection::UpstreamToDownstream,
@@ -4013,6 +4025,7 @@ reason = "chunk"
     WafTransportNetwork::Udp,
   );
   let chunk = engine.evaluate_stream(WafStreamInput {
+    upstream_certificate: None,
     request,
     protocol: WafStreamProtocol::Webtransport,
     direction: WafStreamDirection::DownstreamToUpstream,
@@ -4079,6 +4092,7 @@ fn crs_monitor_mode_scores_and_counts_without_blocking() {
 
   let response_headers = HeaderMap::new();
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -4140,6 +4154,7 @@ fn crs_enforcing_blocks_request_and_response_body_by_anomaly_threshold() {
   let ok_uri: Uri = "/ok".parse().expect("URI should parse");
   let response_headers = HeaderMap::new();
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &ok_uri, &headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -4574,6 +4589,7 @@ SecRule RESPONSE_HEADERS:/^x-oxi-.*/ "@contains response-marker" "id:920321,phas
     HeaderValue::from_static("response-marker"),
   );
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(&method, &uri, &headers, &tags, peer_addr),
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -4985,6 +5001,7 @@ reason = "configured close"
     is_truncated: false,
   };
   let response_input = WafResponseInput {
+    upstream_certificate: None,
     request,
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -5377,6 +5394,7 @@ body = "webtransport blocked"
     fingerprint: Some("quic-fingerprint".to_string()),
     fingerprint_scheme: Some("quinn-rustls-quic-v2".to_string()),
     client_certificate: None,
+    client_certificate_details: None,
   };
 
   let rejected = engine.evaluate_request(request_input_with_protocol_and_network(
@@ -5439,6 +5457,7 @@ body = "blocked UDP connection id"
     fingerprint: Some("quic-fingerprint".to_string()),
     fingerprint_scheme: Some("quinn-rustls-quic-v2".to_string()),
     client_certificate: None,
+    client_certificate_details: None,
   };
   let mut input = request_input_with_protocol_and_network(
     &method,
@@ -5506,6 +5525,7 @@ body = "quic fingerprint blocked"
     fingerprint: Some("quic-fingerprint".to_string()),
     fingerprint_scheme: Some("quinn-rustls-quic-v2".to_string()),
     client_certificate: None,
+    client_certificate_details: None,
   };
 
   let rejected = engine.evaluate_request(request_input_with_protocol_and_network(
@@ -5714,6 +5734,7 @@ value = "no-store"
 
   let response_headers = HeaderMap::new();
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(
       &method,
       &uri,
@@ -5806,6 +5827,7 @@ value = "matched"
   };
 
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request,
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -5927,6 +5949,7 @@ value = "Context.RuleName"
   };
 
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request,
     response_id: "test-response-id",
     received_at_unix_ms: 1_700_000_000_123,
@@ -5993,6 +6016,7 @@ fn system_access_log_default_fields_preserve_duplicate_user_agents() {
     .build_system_access_log(
       &fields,
       WafResponseInput {
+        upstream_certificate: None,
         request: request_input(
           &method,
           &uri,
@@ -6068,6 +6092,7 @@ type = "emit_access_log"
   response_headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("12"));
 
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(
       &method,
       &uri,
@@ -6180,6 +6205,7 @@ value = "Response.Upstream.FirstByteTimeMs"
   let response_headers = HeaderMap::new();
 
   let response_decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request: request_input(
       &method,
       &uri,
@@ -6339,6 +6365,7 @@ fail_closed_body = "mitigation unavailable"
   );
 
   let decision = engine.evaluate_response(WafResponseInput {
+    upstream_certificate: None,
     request,
     response_id: "response-id",
     received_at_unix_ms: 1_700_000_000_100,
@@ -12029,6 +12056,7 @@ fn request_input<'a>(
     fingerprint: None,
     fingerprint_scheme: None,
     client_certificate: None,
+    client_certificate_details: None,
   };
 
   request_input_with_transport(method, uri, headers, tags, peer_addr, None, &TEST_TLS)
@@ -12079,6 +12107,7 @@ fn request_input_with_tcp_max_hop<'a>(
     fingerprint: None,
     fingerprint_scheme: None,
     client_certificate: None,
+    client_certificate_details: None,
   };
 
   request_input_with_transport(
@@ -12169,6 +12198,7 @@ fn websocket_stream_input<'a>(
   websocket: WafWebSocketStreamMetadata<'a>,
 ) -> WafStreamInput<'a> {
   WafStreamInput {
+    upstream_certificate: None,
     request,
     protocol: WafStreamProtocol::Websocket,
     direction,
@@ -12192,6 +12222,7 @@ fn test_tls(fingerprint: &str) -> WafTlsMetadata {
     fingerprint: Some(fingerprint.to_string()),
     fingerprint_scheme: Some("rustls-tcp-negotiated-v2".to_string()),
     client_certificate: None,
+    client_certificate_details: None,
   }
 }
 
@@ -12442,3 +12473,6 @@ fn extract_response_header(
     })
     .unwrap_or_else(|| panic!("{} header should exist", expected_name))
 }
+
+#[path = "waf_certificate.rs"]
+mod certificate_tests;

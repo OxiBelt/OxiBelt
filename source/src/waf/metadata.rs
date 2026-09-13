@@ -1,6 +1,16 @@
 //! Transport and protocol metadata consumed by WAF rules.
 //! Metadata is descriptive and should not mutate the underlying request.
 
+use std::sync::Arc;
+
+pub use crate::tls::{
+  PeerCertificateMetadata as WafCertificateMetadata, PeerCertificateNames as WafCertificateNames,
+};
+
+/// Connection-owned evidence attached to the response actually served by that peer.
+#[derive(Debug, Clone)]
+pub(crate) struct UpstreamCertificateMetadata(pub Arc<WafCertificateMetadata>);
+
 #[derive(Debug, Clone, Default)]
 pub struct WafTlsMetadata {
   pub enabled: bool,
@@ -11,6 +21,7 @@ pub struct WafTlsMetadata {
   pub fingerprint: Option<String>,
   pub fingerprint_scheme: Option<String>,
   pub client_certificate: Option<WafClientCertificateMetadata>,
+  pub client_certificate_details: Option<Arc<WafCertificateMetadata>>,
 }
 
 #[derive(Debug, Clone, Default)]

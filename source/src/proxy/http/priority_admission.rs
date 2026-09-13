@@ -81,8 +81,8 @@ pub(super) fn classify<B>(
   let Some(resolved) = resolved else {
     return PriorityAdmission::default();
   };
-  // Quinn does not expose verified peer-certificate metadata. Keep UDP fail-closed even if a
-  // future caller accidentally supplies descriptive certificate fields.
+  // Reserved-capacity eligibility remains TCP-only even when QUIC exposes a verified
+  // certificate for route matching and OxiRule.
   let mtls = transport_network == WafTransportNetwork::Tcp
     && matched_verified_client_certificate(resolved.route, tls);
   let ipm = ipm_authorized(

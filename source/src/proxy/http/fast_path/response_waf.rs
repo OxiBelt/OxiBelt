@@ -25,6 +25,10 @@ pub(super) fn evaluate_response_waf(
     .expect("fast-path response WAF should have a request-scoped Person proof snapshot");
   state.waf.evaluate_response_with_person_proof_snapshot(
     WafResponseInput {
+      upstream_certificate: parts
+        .extensions
+        .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
+        .map(|value| value.0.as_ref()),
       request,
       response_id: access_log.response_id(),
       received_at_unix_ms: access_log.response_received_at_unix_ms,

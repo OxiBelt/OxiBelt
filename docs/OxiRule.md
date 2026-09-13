@@ -1188,6 +1188,7 @@ Response.Tags: TagMap
 Stream.Protocol: 'websocket' | 'webtransport'
 Stream.Direction: 'downstream_to_upstream' | 'upstream_to_downstream'
 Stream.Unit: 'websocket_frame' | 'websocket_message' | 'webtransport_stream_chunk' | 'webtransport_datagram'
+Stream.Upstream.ServerCertificate: PeerCertificateMetadata | Null
 Stream.Payload: BodyView
 Stream.WebSocket: WebSocketStreamMetadata
 Stream.WebTransport: WebTransportStreamMetadata
@@ -1300,6 +1301,7 @@ UpstreamMetadata.Scheme: String | Null
 UpstreamMetadata.ConnectTimeMs: Int | Null
 UpstreamMetadata.FirstByteTimeMs: Int | Null
 UpstreamMetadata.Error: UpstreamError | Null
+UpstreamMetadata.ServerCertificate: PeerCertificateMetadata | Null
 
 UpstreamError.Code: 'dns_error' | 'connect_timeout' | 'connect_error' | 'tls_error' | 'read_timeout' | 'protocol_error'
 UpstreamError.Message: String
@@ -1326,16 +1328,92 @@ TlsMetadata.Alpn: String | Null
 TlsMetadata.Fingerprint: String | Null
 TlsMetadata.FingerprintScheme: String | Null
 TlsMetadata.ClientCertificatePresent: Bool
+TlsMetadata.ClientCertificate: PeerCertificateMetadata | Null
 ```
 
 Current implementation notes:
 
 - TCP request rules expose TCP transport metadata; HTTP/3 and WebTransport request rules expose UDP/QUIC metadata.
 - HTTP/3 TLS fingerprints use the `quinn-rustls-quic-v2` scheme.
-- `TlsMetadata.ClientCertificatePresent` reflects downstream TCP TLS client certificate presence. HTTP/3 client certificate identity is not currently exposed by the stable QUIC metadata path, so it remains unavailable there.
+- `Request.Tls.ClientCertificatePresent` reflects the verified downstream client certificate on TCP TLS and HTTP/3/WebTransport. `Request.Tls.ClientCertificate` exposes its leaf metadata. The existing `Response.Tls` placeholder remains disabled with null TLS fields.
 - `Request.Id`, `Response.Id`, `Context.TransactionId`, request/response receive timestamps, and upstream first-byte timing are populated for HTTP request-wide and OxiRule access-log contexts.
 - Upstream connect timing is populated only where the proxy can measure it directly; otherwise it evaluates to `null`.
 - Some local endpoint fields, byte counters, request-level UDP datagram sizes, TCP socket metadata, and unavailable connection identifiers are reserved and may evaluate to `null`.
+
+## Peer certificate metadata
+
+```text
+PeerCertificateMetadata.FingerprintSha256: String
+PeerCertificateMetadata.ParseStatus: 'complete' | 'incomplete'
+PeerCertificateMetadata.SubjectCommonNames: BoundedStringList
+PeerCertificateMetadata.SanDnsNames: BoundedStringList
+PeerCertificateMetadata.SanIpAddresses: BoundedStringList
+PeerCertificateMetadata.SanUriNames: BoundedStringList
+PeerCertificateMetadata.SanEmailAddresses: BoundedStringList
+```
+
+`Request.Tls.ClientCertificate` describes the downstream client's verified leaf
+certificate and remains available in response and stream rules.
+`Response.Upstream.ServerCertificate` describes the connection that supplied the
+upstream response. `Stream.Upstream.ServerCertificate` describes the upstream
+connection for the WebSocket or WebTransport session, in either stream direction.
+Upstream certificates are unavailable in request rules. WebSocket upgrades and
+WebTransport CONNECT keep their existing phase handling; upstream identity is
+exposed in stream rules without adding a response-rule phase.
+These fields perform no I/O and add no pre-forward certificate policy phase.
+Response checks run after the upstream has received the request; use existing
+upstream TLS verification policies for connection authentication.
+
+Certificate objects are `null` when no peer certificate is available. Plaintext
+upstreams, local and synthetic failure responses, and cache-served responses
+(including successful revalidation) have no upstream certificate object. Cached
+objects do not retain certificate identities. Pooled and resumed TLS connections
+use their own TLS-stack peer evidence; configured origins, headers, and previous
+requests never supply that evidence.
+
+The fingerprint is SHA-256 over the leaf certificate's DER bytes, encoded as
+64 lowercase hexadecimal characters without separators. It is distinct from
+`Request.Tls.Fingerprint`, which keeps its existing handshake-fingerprint meaning.
+Names preserve certificate order and duplicates. DNS SANs are lowercase; IP SANs
+use canonical address text. CNs, URI SANs, and email SANs preserve decoded text
+and case. Matching uses existing operators; wildcard text stays literal unless
+an operator explicitly applies a pattern. There is no implicit CN fallback or
+mailbox/URI normalization.
+
+Extraction examines at most 64 KiB of leaf DER and retains at most 256 names
+and 64 KiB of name text across all five lists. `ParseStatus` is `incomplete`
+when parsing, a supported name encoding, or a capture limit prevents complete
+extraction. The fingerprint and successfully decoded names remain available;
+TLS acceptance is unchanged. SAN kinds outside DNS, IP, URI, and email are
+intentionally omitted. Lists also apply `max_helper_items` and
+`max_helper_result_bytes`; individual names are never cut to fit. `IsTruncated`
+is true when capture or evaluation omitted names. A complete capture can still
+produce a truncated evaluation list, and `Count` counts only retained names.
+
+Guard missing objects and incomplete lists before using absence as an
+identity-policy decision. For example, a request rule can reject a missing,
+incomplete, or unexpected URI identity with:
+
+```text
+Request.Tls.ClientCertificate == null ||
+Request.Tls.ClientCertificate.ParseStatus != 'complete' ||
+Request.Tls.ClientCertificate.SanUriNames.IsTruncated ||
+!Request.Tls.ClientCertificate.SanUriNames.contains('spiffe://example.test/workload')
+```
+
+Certificate objects and individual fields may be selected explicitly in
+`emit_access_log` or mitigation fields where the phase permits those actions.
+Existing `Request.Tls` and `Response.Upstream` object log projections do not
+implicitly include certificate identities. DER, private keys, and parser errors
+are never exposed through these objects.
+
+Devtools fixtures accept `request.tls.client_certificate`,
+`response.server_certificate`, and `stream.server_certificate`. Each uses
+`fingerprint_sha256`, optional `parse_complete` (default `true`), and arrays
+`subject_common_names`, `san_dns_names`, `san_ip_addresses`, `san_uri_names`,
+and `san_email_addresses`. Fingerprints must be lowercase 64-character hex;
+fixtures exceeding the capture name/text limits are rejected. These are explicit
+synthetic test inputs and are never a production identity source.
 
 ## Bounded Helpers
 

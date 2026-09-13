@@ -32,6 +32,7 @@ mod binary_format;
 mod body_cache;
 mod body_eval;
 mod body_scan;
+mod certificate_object;
 mod compiler;
 mod configuration;
 mod crs;

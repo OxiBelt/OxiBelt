@@ -169,6 +169,7 @@ pub(super) async fn apply_static_waf(
     };
     let response_waf = snapshot.waf.evaluate_response_with_person_proof_snapshot(
       WafResponseInput {
+        upstream_certificate: None,
         request: request_input,
         response_id: access_log.response_id(),
         received_at_unix_ms: access_log.response_received_at_unix_ms,

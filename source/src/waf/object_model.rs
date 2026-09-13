@@ -48,7 +48,15 @@ pub(super) fn eval_request_tls_member(ctx: &EvalContext<'_>, field: &str) -> any
     "Alpn" => Ok(optional_string_value(&ctx.request.tls.alpn)),
     "Fingerprint" => Ok(optional_string_value(&ctx.request.tls.fingerprint)),
     "FingerprintScheme" => Ok(optional_string_value(&ctx.request.tls.fingerprint_scheme)),
-    "ClientCertificatePresent" => Ok(Value::Bool(ctx.request.tls.client_certificate.is_some())),
+    "ClientCertificatePresent" => Ok(Value::Bool(
+      ctx.request.tls.client_certificate.is_some()
+        || ctx.request.tls.client_certificate_details.is_some(),
+    )),
+    "ClientCertificate" => Ok(if ctx.request.tls.client_certificate_details.is_some() {
+      Value::Object(ObjectRef::ClientCertificate)
+    } else {
+      Value::Null
+    }),
     _ => bail!("unknown WAF object property RequestTls.{field}"),
   }
 }

@@ -536,6 +536,7 @@ pub(super) fn upstream_error_response(
   };
   let response_waf = state.waf.evaluate_response_with_person_proof_snapshot(
     WafResponseInput {
+      upstream_certificate: None,
       request,
       response_id: access_log.response_id(),
       received_at_unix_ms: crate::waf::current_unix_ms(),

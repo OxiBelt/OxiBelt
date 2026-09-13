@@ -128,6 +128,76 @@ fn guard_rejects_unsafe_or_incompatible_requests() {
   );
 }
 
+#[tokio::test]
+async fn pooled_connections_keep_upstream_certificate_metadata_isolated() {
+  let first_certificate = Arc::new(crate::waf::metadata::WafCertificateMetadata {
+    fingerprint_sha256: "first-connection".to_owned(),
+    ..Default::default()
+  });
+  let second_certificate = Arc::new(crate::waf::metadata::WafCertificateMetadata {
+    fingerprint_sha256: "second-connection".to_owned(),
+    ..Default::default()
+  });
+  let (first_pool, _) = test_pool(
+    1,
+    1,
+    1,
+    connector_with_certificate(first_certificate.clone()),
+  );
+  let (second_pool, _) = test_pool(
+    1,
+    1,
+    1,
+    connector_with_certificate(second_certificate.clone()),
+  );
+  let metrics = Metrics::new();
+
+  let first = acquire(&first_pool, &metrics, TEST_REQUEST_BUDGET)
+    .await
+    .expect("first connection acquisition should succeed")
+    .expect("first pool should create a connection");
+  let second = acquire(&second_pool, &metrics, TEST_REQUEST_BUDGET)
+    .await
+    .expect("second connection acquisition should succeed")
+    .expect("second pool should create a connection");
+
+  assert!(Arc::ptr_eq(
+    first
+      .lease
+      .connection
+      .upstream_certificate
+      .as_ref()
+      .expect("first pooled connection should retain its certificate"),
+    &first_certificate,
+  ));
+  assert!(Arc::ptr_eq(
+    second
+      .lease
+      .connection
+      .upstream_certificate
+      .as_ref()
+      .expect("second pooled connection should retain its certificate"),
+    &second_certificate,
+  ));
+  assert!(
+    !Arc::ptr_eq(
+      first
+        .lease
+        .connection
+        .upstream_certificate
+        .as_ref()
+        .expect("first pooled connection should retain its certificate"),
+      second
+        .lease
+        .connection
+        .upstream_certificate
+        .as_ref()
+        .expect("second pooled connection should retain its certificate"),
+    ),
+    "direct H2 pools must not share certificate metadata across connections"
+  );
+}
+
 #[test]
 fn prepared_request_restores_the_original_fallback_version() {
   let request = request(Method::GET, http::Version::HTTP_11);
@@ -945,6 +1015,19 @@ where
 
 fn successful_connector(dispatched: Option<Arc<AtomicUsize>>) -> TestConnector {
   connector(move |_| successful_test_connection(None, dispatched.clone()))
+}
+
+fn connector_with_certificate(
+  certificate: Arc<crate::waf::metadata::WafCertificateMetadata>,
+) -> TestConnector {
+  connector(move |_| {
+    let certificate = certificate.clone();
+    async move {
+      let mut connected = successful_test_connection(None, None).await?;
+      connected.upstream_certificate = Some(certificate);
+      Ok(connected)
+    }
+  })
 }
 
 async fn successful_test_connection(

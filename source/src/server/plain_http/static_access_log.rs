@@ -138,6 +138,7 @@ pub(super) async fn emit_system_access_log(
     .emit_async(
       &snapshot.waf,
       WafResponseInput {
+        upstream_certificate: None,
         request: WafRequestInput {
           request_id: access_log.request_id(),
           transaction_id: access_log.transaction_id(),

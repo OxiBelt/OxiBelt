@@ -16,6 +16,7 @@ use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
 use pretty_assertions::assert_eq;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use super::{full_body, maybe_cache_response, maybe_cache_response_with_store_permission};
@@ -474,6 +475,11 @@ stream_large_objects = true
   response
     .headers_mut()
     .insert("x-oxibelt-cache-reason", HeaderValue::from_static("forged"));
+  response
+    .extensions_mut()
+    .insert(crate::waf::metadata::UpstreamCertificateMetadata(Arc::new(
+      crate::waf::metadata::WafCertificateMetadata::default(),
+    )));
   response.headers_mut().insert(
     CACHE_CONTROL,
     HeaderValue::from_static("public, max-age=60"),
@@ -496,6 +502,13 @@ stream_large_objects = true
   .await;
 
   assert_cache_status(&response, "miss", "stored");
+  assert!(
+    response
+      .extensions()
+      .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
+      .is_some(),
+    "the uncached response should retain its connection-owned certificate"
+  );
   let delivered = response
     .into_body()
     .collect()
@@ -515,6 +528,14 @@ stream_large_objects = true
     Some(crate::cache::CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, body);
       assert_no_cache_status_headers(&entry.headers);
+      let cached = super::cache_status::cached_entry_response(entry, &method, &request_headers);
+      assert!(
+        cached
+          .extensions()
+          .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
+          .is_none(),
+        "a reconstructed cache hit must not retain the source connection certificate"
+      );
     }
     other => panic!("expected fresh cache hit, got {other:?}"),
   }

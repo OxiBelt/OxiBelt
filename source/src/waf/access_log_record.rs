@@ -358,6 +358,24 @@ impl AccessLogJsonValue {
         ctx,
       ),
       ObjectRef::ResponseUpstreamError => object_members_json(object, &["Code", "Message"], ctx),
+      ObjectRef::ClientCertificate
+      | ObjectRef::ResponseServerCertificate
+      | ObjectRef::StreamServerCertificate => object_members_json(
+        object,
+        &[
+          "FingerprintSha256",
+          "ParseStatus",
+          "SubjectCommonNames",
+          "SanDnsNames",
+          "SanIpAddresses",
+          "SanUriNames",
+          "SanEmailAddresses",
+        ],
+        ctx,
+      ),
+      ObjectRef::StreamUpstream => {
+        bail!("select Stream.Upstream.ServerCertificate explicitly for access-log fields")
+      }
       ObjectRef::ResponseCookies => Ok(pair_map_json(
         response_cookie_pairs(
           ctx.response.context("missing response context")?.headers,

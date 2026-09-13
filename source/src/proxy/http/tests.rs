@@ -412,6 +412,7 @@ async fn response_waf_reuses_single_use_person_proof_snapshot() {
     .await;
   let snapshot = evaluated.sanitized();
   let response_input = WafResponseInput {
+    upstream_certificate: None,
     request: request.input(&headers),
     response_id: "response-id",
     received_at_unix_ms: crate::waf::current_unix_ms(),

@@ -190,6 +190,8 @@ pub struct OxiRuleResponseFixture {
   pub upstream_first_byte_time_ms: Option<u64>,
   #[serde(default)]
   pub upstream_error: Option<OxiRuleUpstreamErrorFixture>,
+  #[serde(default)]
+  pub server_certificate: Option<OxiRuleCertificateFixture>,
 }
 
 impl Default for OxiRuleResponseFixture {
@@ -208,12 +210,15 @@ impl Default for OxiRuleResponseFixture {
       upstream_connect_time_ms: None,
       upstream_first_byte_time_ms: None,
       upstream_error: None,
+      server_certificate: None,
     }
   }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OxiRuleStreamFixture {
+  #[serde(default)]
+  pub server_certificate: Option<OxiRuleCertificateFixture>,
   #[serde(default = "default_stream_protocol")]
   pub protocol: String,
   #[serde(default = "default_stream_direction")]
@@ -235,6 +240,8 @@ pub struct OxiRuleStreamFixture {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OxiRuleTlsFixture {
   #[serde(default)]
+  pub client_certificate: Option<OxiRuleCertificateFixture>,
+  #[serde(default)]
   pub enabled: bool,
   #[serde(default)]
   pub version: Option<String>,
@@ -248,6 +255,28 @@ pub struct OxiRuleTlsFixture {
   pub fingerprint: Option<String>,
   #[serde(default)]
   pub fingerprint_scheme: Option<String>,
+}
+
+/// Explicit synthetic evidence for offline rule evaluation only.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OxiRuleCertificateFixture {
+  pub fingerprint_sha256: String,
+  #[serde(default = "complete_certificate_fixture")]
+  pub parse_complete: bool,
+  #[serde(default)]
+  pub subject_common_names: Vec<String>,
+  #[serde(default)]
+  pub san_dns_names: Vec<String>,
+  #[serde(default)]
+  pub san_ip_addresses: Vec<String>,
+  #[serde(default)]
+  pub san_uri_names: Vec<String>,
+  #[serde(default)]
+  pub san_email_addresses: Vec<String>,
+}
+
+fn complete_certificate_fixture() -> bool {
+  true
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

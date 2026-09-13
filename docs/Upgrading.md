@@ -5,6 +5,30 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## OxiRule peer certificate metadata
+
+OxiRule adds downstream client and upstream server leaf-certificate fields,
+including SHA-256 fingerprints, CNs, and DNS/IP/URI/email SANs. See
+[Peer certificate metadata](OxiRule.md#peer-certificate-metadata) for phase,
+absence, completeness, truncation, and logging behavior. Existing TLS handshake
+fingerprints retain their meaning. No configuration key, schema epoch, or
+persistent-state migration is introduced.
+
+Verified client certificates can now select HTTP/3/WebTransport routes that
+use existing client-certificate selectors. Review such routes before upgrading;
+previously they did not receive the certificate metadata. Missing or incomplete metadata
+still fails closed, including `present = false`; reserved-capacity mTLS remains
+TCP-only. TLS authentication and early-data policy are unchanged.
+
+Rulepacks using the new fields require a binary with this feature. Before
+rolling back, restore compatible rules and review certificate-based HTTP/3
+routes; old binaries cannot expose these members and use the existing evaluator
+failure policy for unknown properties. Validate the resulting configuration:
+
+```sh
+oxibelt --check --config source/config/oxibelt.toml
+```
+
 ## Dependency maintenance
 
 The September 2026 dependency refresh uses Rust 1.98.1 and pnpm 12.4.1 while

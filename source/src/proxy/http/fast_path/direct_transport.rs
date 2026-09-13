@@ -8,6 +8,7 @@ use crate::overload::WorkKind;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{self, ProxyBody};
 use crate::state::AppSnapshot;
+use crate::waf::metadata::UpstreamCertificateMetadata;
 
 use super::direct_h1::{DirectH1Lease, DirectH1SendResult, try_send_direct_h1};
 use super::direct_h2::{DirectH2Lease, DirectH2SendResult, try_send_direct_h2};
@@ -119,9 +120,15 @@ pub(super) async fn attempt_direct_transport(
     {
       DirectH2SendResult::Sent(result) => DirectTransportAttempt::Sent(result.map(|mut direct| {
         h2_lease = direct.take_lease();
-        direct
+        let mut response = direct
           .response
-          .map(|body| body.map_err(body::boxed_error).boxed())
+          .map(|body| body.map_err(body::boxed_error).boxed());
+        if let Some(metadata) = direct.upstream_certificate.take() {
+          response
+            .extensions_mut()
+            .insert(UpstreamCertificateMetadata(metadata));
+        }
+        response
       })),
       DirectH2SendResult::Fallback { request, deadline } => {
         fallback_deadline = Some(deadline);

@@ -587,6 +587,10 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     };
     let response_waf = state.waf.evaluate_response_with_person_proof_snapshot(
       WafResponseInput {
+        upstream_certificate: parts
+          .extensions
+          .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
+          .map(|value| value.0.as_ref()),
         request: request_input,
         response_id: access_log.response_id(),
         received_at_unix_ms: access_log.response_received_at_unix_ms,

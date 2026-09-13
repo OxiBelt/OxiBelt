@@ -47,6 +47,7 @@ pub struct WafResponseInput<'a> {
   pub upstream_connect_time_ms: Option<u64>,
   pub upstream_first_byte_time_ms: Option<u64>,
   pub upstream_error: Option<WafUpstreamError<'a>>,
+  pub upstream_certificate: Option<&'a metadata::WafCertificateMetadata>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,6 +59,7 @@ pub struct WafStreamInput<'a> {
   pub payload: WafBodyInput<'a>,
   pub websocket: Option<WafWebSocketStreamMetadata<'a>>,
   pub webtransport: Option<WafWebTransportStreamMetadata>,
+  pub upstream_certificate: Option<&'a metadata::WafCertificateMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
