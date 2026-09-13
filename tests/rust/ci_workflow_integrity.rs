@@ -4202,7 +4202,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "kind load docker-image",
     "gateway-api-l4-values.yaml",
     "registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66",
-    "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b\"",
+    "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:b2c234ceca8ab66d00074c63ddeb4a81193f489311fbd17f680155ab5cdd22ed\"",
     "redis_source_digest=\"${redis_source_image##*@sha256:}\"",
     "redis_kind_image=\"docker.io/oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}\"",
     "redis_kind_image_created=0",
@@ -4343,6 +4343,12 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
       "Kubernetes immutable rollout script should preserve {expected}"
     );
   }
+  assert!(
+    !script.contains(
+      "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b\""
+    ),
+    "Kind must import the reviewed AMD64 manifest, not its partially pulled parent index"
+  );
   let role_image_load = "\"${dataplane_image}\" \"${controller_image}\"";
   assert_eq!(
     script.matches(role_image_load).count(),
