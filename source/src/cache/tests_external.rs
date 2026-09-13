@@ -73,6 +73,7 @@ fn external_memory_hit_is_promoted_after_validation() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   };
   let operation = cache
     .operation_context(
@@ -82,6 +83,7 @@ fn external_memory_hit_is_promoted_after_validation() {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.certificate_identity,
     )
     .expect("operation context should build");
 
@@ -117,6 +119,7 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   };
   let operation = cache
     .operation_context(
@@ -126,6 +129,7 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.certificate_identity,
     )
     .expect("operation context should build");
 
@@ -152,6 +156,7 @@ fn external_mismatched_uri_is_safe_miss() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   };
   let operation = cache
     .operation_context(
@@ -161,6 +166,7 @@ fn external_mismatched_uri_is_safe_miss() {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.certificate_identity,
     )
     .expect("operation context should build");
 
@@ -191,6 +197,7 @@ fn external_sensitive_vary_is_safe_miss() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   };
   let operation = cache
     .operation_context(
@@ -200,6 +207,7 @@ fn external_sensitive_vary_is_safe_miss() {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.certificate_identity,
     )
     .expect("operation context should build");
 
@@ -213,4 +221,24 @@ fn external_sensitive_vary_is_safe_miss() {
     }],
   );
   assert!(cache.external_lookup_result(operation, ctx, hit).is_none());
+}
+
+#[test]
+fn external_certificate_vary_with_a_value_is_safe_miss() {
+  let identity = CacheCertificateIdentity::new(
+    "client-cert",
+    "rfc9440",
+    Some("a3dcb4d229de6fde0db5686dee47145dcdc6a1a4ec5a7f5365e5a5df3caa4f4d"),
+  )
+  .expect("certificate identity should be valid");
+  assert!(
+    crate::cache::external::external_vary_matchers(
+      &[ExternalCacheVary {
+        name: "client-cert".to_string(),
+        value: "must-not-be-retained".to_string(),
+      }],
+      Some(&identity),
+    )
+    .is_none()
+  );
 }

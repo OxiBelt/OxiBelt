@@ -28,6 +28,7 @@ mod cache_external;
 mod cache_sections;
 mod certificate_transparency;
 mod circuit_breakers;
+mod client_certificate_forwarding;
 mod client_identity;
 mod compression;
 mod crlite;
@@ -106,6 +107,7 @@ pub use cache_sections::{
 };
 pub use certificate_transparency::*;
 pub use circuit_breakers::*;
+pub use client_certificate_forwarding::*;
 pub use client_identity::*;
 pub use compression::*;
 pub use crlite::*;

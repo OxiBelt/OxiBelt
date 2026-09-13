@@ -121,6 +121,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
         method: &Method::GET,
         uri: &get_uri,
         request_headers: &request_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -138,6 +139,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
     method: &Method::HEAD,
     uri: &get_uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"head-safe")),
     other => panic!("expected HEAD lookup to reuse GET entry, got {other:?}"),
@@ -152,6 +154,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
         method: &Method::HEAD,
         uri: &head_uri,
         request_headers: &request_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -170,6 +173,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
         method: &Method::GET,
         uri: &head_uri,
         request_headers: &request_headers,
+        certificate_identity: None,
       })
       .is_none()
   );
@@ -234,6 +238,7 @@ fn rfc9111_freshness_directives_are_stable() {
           method: &Method::GET,
           uri: &uri,
           request_headers: &request_headers,
+          certificate_identity: None,
         },
         StatusCode::OK,
         &response_headers,
@@ -269,6 +274,7 @@ fn pragma_no_cache_request_revalidates_fresh_entry() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -288,6 +294,7 @@ fn pragma_no_cache_request_revalidates_fresh_entry() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   }) {
     Some(CacheLookup::Revalidate(revalidation)) => {
       assert_eq!(

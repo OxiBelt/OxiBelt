@@ -69,6 +69,98 @@ pub(crate) use streaming::{CacheStreamingInsert, CacheStreamingInsertDecision};
 const TMPFS_CACHE_ROOT: &str = "/dev/shm";
 const SURROGATE_CONTROL_HEADER: &str = "surrogate-control";
 const MAX_VARY_VALUE_BYTES: usize = 8_192;
+const MAX_CERTIFICATE_IDENTITY_HEADER_BYTES: usize = 128;
+const MAX_CERTIFICATE_IDENTITY_FORMAT_BYTES: usize = 64;
+const CERTIFICATE_FINGERPRINT_SHA256_BYTES: usize = 64;
+
+/// Opaque, verified leaf-certificate identity used only to separate internal
+/// response-cache namespaces.
+///
+/// This deliberately contains no certificate bytes. `None` for `fingerprint`
+/// represents an enabled forwarding policy with no client certificate, while
+/// a missing [`CacheCertificateIdentity`] represents forwarding being off.
+#[derive(Clone, Eq, PartialEq)]
+pub struct CacheCertificateIdentity {
+  header_name: HeaderName,
+  format: String,
+  fingerprint_sha256: Option<String>,
+}
+
+impl std::fmt::Debug for CacheCertificateIdentity {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("CacheCertificateIdentity")
+      .field("header_name", &self.header_name)
+      .field("format", &self.format)
+      .field("authenticated", &self.is_authenticated())
+      .finish()
+  }
+}
+
+impl CacheCertificateIdentity {
+  /// Creates a bounded cache discriminator from already-verified leaf evidence.
+  ///
+  /// Callers must provide the normalized forwarding header name and a stable
+  /// format identifier. The cache validates both again to keep this pure cache
+  /// boundary independent from TLS implementation details.
+  pub fn new(
+    header_name: &str,
+    format: &str,
+    fingerprint_sha256: Option<&str>,
+  ) -> anyhow::Result<Self> {
+    if header_name.is_empty() || header_name.len() > MAX_CERTIFICATE_IDENTITY_HEADER_BYTES {
+      bail!("cache certificate identity header name is out of bounds");
+    }
+    let header_name = HeaderName::from_bytes(header_name.as_bytes())?;
+    let format = format.trim();
+    if format.is_empty()
+      || format.len() > MAX_CERTIFICATE_IDENTITY_FORMAT_BYTES
+      || !format.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+      })
+    {
+      bail!("cache certificate identity format must be a lowercase bounded token");
+    }
+    let fingerprint_sha256 = fingerprint_sha256
+      .map(|fingerprint| {
+        if fingerprint.len() != CERTIFICATE_FINGERPRINT_SHA256_BYTES
+          || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+          bail!("cache certificate identity fingerprint must be a SHA-256 hex digest");
+        }
+        Ok(fingerprint.to_ascii_lowercase())
+      })
+      .transpose()?;
+    Ok(Self {
+      header_name,
+      format: format.to_string(),
+      fingerprint_sha256,
+    })
+  }
+
+  /// The configured header name, normalized by `http::HeaderName`.
+  pub fn header_name(&self) -> &HeaderName {
+    &self.header_name
+  }
+
+  /// Stable serialization format selected by the route configuration.
+  pub fn format(&self) -> &str {
+    &self.format
+  }
+
+  /// Whether this cache namespace represents a verified client certificate.
+  ///
+  /// This intentionally reveals only presence, not the fingerprint or any
+  /// certificate material, so response compression can retain identity-safe
+  /// behavior for cached responses.
+  pub fn is_authenticated(&self) -> bool {
+    self.fingerprint_sha256.is_some()
+  }
+
+  pub(crate) fn fingerprint_sha256(&self) -> Option<&str> {
+    self.fingerprint_sha256.as_deref()
+  }
+}
 
 #[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_metadata_and_key(data: &[u8]) {
@@ -174,6 +266,8 @@ pub struct CacheInsertContext<'a> {
   pub method: &'a Method,
   pub uri: &'a Uri,
   pub request_headers: &'a HeaderMap,
+  /// `None` means client-certificate forwarding is off for this request.
+  pub certificate_identity: Option<&'a CacheCertificateIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +278,8 @@ pub struct CacheLookupContext<'a> {
   pub method: &'a Method,
   pub uri: &'a Uri,
   pub request_headers: &'a HeaderMap,
+  /// `None` means client-certificate forwarding is off for this request.
+  pub certificate_identity: Option<&'a CacheCertificateIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize)]

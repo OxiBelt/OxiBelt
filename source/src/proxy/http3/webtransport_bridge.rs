@@ -86,6 +86,7 @@ pub(super) async fn serve_webtransport_connection(
   peer_addr: SocketAddr,
   udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
+  forwarded_client_certificate: Option<crate::tls::ForwardedClientCertificate>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: Arc<AppSnapshot>,
   early_data: crate::quic::h3::EarlyDataTracker,
@@ -108,6 +109,7 @@ pub(super) async fn serve_webtransport_connection(
     peer_addr,
     udp_connection_id.clone(),
     tls_metadata.clone(),
+    forwarded_client_certificate.clone(),
     connection_limit_context.clone(),
     state.clone(),
     early_data.clone(),
@@ -185,6 +187,7 @@ pub(super) async fn serve_webtransport_connection(
               peer_addr,
               udp_connection_id.clone(),
               tls_metadata.clone(),
+              forwarded_client_certificate.clone(),
               connection_limit_context.clone(),
               state.clone(),
               early_data.clone(),
@@ -281,6 +284,7 @@ async fn handle_downstream_request(
   peer_addr: SocketAddr,
   udp_connection_id: Arc<str>,
   tls_metadata: Arc<crate::waf::WafTlsMetadata>,
+  forwarded_client_certificate: Option<crate::tls::ForwardedClientCertificate>,
   connection_limit_context: Option<ConnectionLimitContext>,
   state: Arc<AppSnapshot>,
   early_data: crate::quic::h3::EarlyDataTracker,
@@ -303,6 +307,9 @@ async fn handle_downstream_request(
     http_early_data::mark_verified(&mut request);
   }
   http_early_data::strip_untrusted_header(request.headers_mut());
+  if let Some(certificate) = forwarded_client_certificate {
+    request.extensions_mut().insert(certificate);
+  }
 
   if is_webtransport_request(&request) {
     accept_webtransport_session(

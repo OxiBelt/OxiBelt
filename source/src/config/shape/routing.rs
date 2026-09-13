@@ -190,6 +190,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "security_headers",
       "priority_class",
       "connect_tunneling",
+      "client_certificate_forwarding",
       "generic_http_upgrade",
       "grpc_web",
       "external_auth",
@@ -214,6 +215,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "response_headers",
       "rewrite",
     ][..],
+    "routes.client_certificate_forwarding" => &["format", "header"][..],
     "routes.actions.direct_response" => &["status"][..],
     "routes.actions.cors" => &[
       "allow_credentials",

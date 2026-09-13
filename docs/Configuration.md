@@ -4261,6 +4261,68 @@ active pool state. The file discovery document shape is:
 
 ## Routes
 
+### Forwarding verified downstream client certificates
+
+An upstream-backed route can opt into forwarding its verified downstream leaf
+certificate. This uses the existing `tls.client_auth` policy; it neither enables
+client authentication nor changes certificate acceptance or OxiRule authorization.
+
+```toml
+[[routes]]
+name = "authenticated-app"
+hosts = ["app.example.com"]
+path_prefix = "/"
+upstream = "app"
+
+[routes.client_certificate_forwarding]
+header = "x-client-cert"
+format = "url_encoded_pem" # default; alternatively rfc9440
+```
+
+Omitting the table disables forwarding. `header` is required and must be a valid,
+non-reserved HTTP field name within `limits.max_header_name_bytes`.
+`url_encoded_pem` percent-encodes canonical PEM: standard Base64 wrapped at 64
+characters, LF line endings including the final LF, and only URI unreserved
+bytes left unescaped. `rfc9440` emits the leaf DER as colon-delimited standard
+Base64. The name `client-cert` requires `rfc9440`; `client-cert-chain` is never
+accepted as a forwarding target. No chain or private key is forwarded.
+
+When any route enables forwarding, all configured target names plus `Client-Cert`
+and `Client-Cert-Chain` are reserved throughout that configuration snapshot.
+Client-supplied values are removed before routing and external authorization,
+including on routes without forwarding. Conflicting route request-header actions
+and external-auth forwarding or identity-header configuration are rejected.
+Generated values are added after request mutations, only to the selected
+application upstream, not external-auth or mirror requests. Request trailers
+cannot supply these fields. Upstreams must only trust this identity on connections
+from an authorized OxiBelt instance; configure upstream TLS as appropriate.
+
+Without a verified client certificate, the target header is absent and the
+request proceeds through the existing authorization policy. Use required mTLS or
+OxiRule when absence must deny access. A leaf over the 64 KiB capture bound, or
+an encoded value exceeding the existing individual or aggregate request-header
+limits, returns `431`; serialization failure returns `500`. Values are never
+truncated or converted to anonymous identity on failure.
+
+Forwarding applies to HTTP/1.1, HTTP/2, HTTP/3, gRPC, WebSocket and WebTransport
+handshakes. It does not apply to raw stream listeners or CONNECT tunneling.
+The route must select an upstream or upstream pool.
+
+Internal cache entries and refreshes are separated by trusted leaf fingerprint
+or explicit certificate absence, plus target name and encoding. Operator cache
+partition and purge selectors retain their meaning. Raw certificate values are
+not persisted as cache Vary matchers. Responses on a resolved forwarding route
+are delivered with `Cache-Control: no-store`, after internal cache admission;
+certificate-related downstream `Vary` becomes `*`. Requests with verified
+certificates suppress upstream `Accept-Encoding` and downstream compression.
+Certificate-absent requests keep normal compression behavior.
+
+Gateway-managed routes use the operator-allowlisted
+[`OxiBeltRoutePolicy` extension](GatewayAPI.md); frontend mTLS remains an operator
+base-configuration responsibility.
+
+### Route configuration example
+
 ```toml
 [[routes]]
 name = "api-v1"

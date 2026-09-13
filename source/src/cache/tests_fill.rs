@@ -16,6 +16,7 @@ async fn fill_permit_coalesces_followers_until_leader_drops() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    certificate_identity: None,
   };
   let guard = match cache.begin_fill(ctx.clone()).unwrap() {
     CacheFillPermit::Leader(guard) => guard,
@@ -59,6 +60,7 @@ async fn fill_waiter_times_out_without_leader_drop() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    certificate_identity: None,
   };
   let _guard = match cache.begin_fill(ctx.clone()).unwrap() {
     CacheFillPermit::Leader(guard) => guard,
@@ -73,6 +75,50 @@ async fn fill_waiter_times_out_without_leader_drop() {
     }
   };
   assert!(!waiter.wait_timeout(Duration::from_millis(5)).await);
+}
+
+#[test]
+fn certificate_identity_uses_a_separate_fill_lock() {
+  let cache = ResponseCache::new(
+    &CacheConfig {
+      enabled: true,
+      ..CacheConfig::default()
+    },
+    None,
+  )
+  .unwrap();
+  let uri = "/asset/app.css".parse::<Uri>().unwrap();
+  let headers = HeaderMap::new();
+  let first = CacheCertificateIdentity::new(
+    "client-cert",
+    "url_encoded_pem",
+    Some("a3dcb4d229de6fde0db5686dee47145dcdc6a1a4ec5a7f5365e5a5df3caa4f4d"),
+  )
+  .unwrap();
+  let second = CacheCertificateIdentity::new(
+    "client-cert",
+    "url_encoded_pem",
+    Some("b3dcb4d229de6fde0db5686dee47145dcdc6a1a4ec5a7f5365e5a5df3caa4f4d"),
+  )
+  .unwrap();
+  let context = |identity| CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &headers,
+    certificate_identity: Some(identity),
+  };
+
+  let _first_guard = match cache.begin_fill(context(&first)).unwrap() {
+    CacheFillPermit::Leader(guard) => guard,
+    other => panic!("first certificate identity should lead, got {other:?}"),
+  };
+  assert!(matches!(
+    cache.begin_fill(context(&second)),
+    Some(CacheFillPermit::Leader(_))
+  ));
 }
 
 #[test]
@@ -91,6 +137,7 @@ fn not_stored_fill_suppression_skips_short_lived_locks() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    certificate_identity: None,
   };
   let lookup_ctx = CacheLookupContext {
     policy_name: Some("default"),
@@ -99,6 +146,7 @@ fn not_stored_fill_suppression_skips_short_lived_locks() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    certificate_identity: None,
   };
 
   cache.note_fill_not_stored(insert_ctx.clone());
@@ -136,6 +184,7 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    certificate_identity: None,
   };
   let lookup_ctx = CacheLookupContext {
     policy_name: Some("default"),
@@ -144,6 +193,7 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    certificate_identity: None,
   };
 
   cache.note_fill_not_stored_reason(insert_ctx, CacheFillSuppressionReason::ResponseNoStore);

@@ -60,6 +60,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -77,6 +78,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &HeaderMap::new(),
+    certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, Bytes::from_static(b"surrogate"));
@@ -109,6 +111,7 @@ fn cache_key_explain_includes_partition_and_variant() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      certificate_identity: None,
     },
     Some(&response_headers),
   );
@@ -145,6 +148,7 @@ fn cache_key_explain_reports_vary_rejection_reason() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      certificate_identity: None,
     },
     Some(&response_headers),
   );
@@ -182,6 +186,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &first_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -200,6 +205,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &second_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"b")),
     ),
@@ -231,6 +237,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        certificate_identity: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"gz")),
     ),
@@ -253,6 +260,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        certificate_identity: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"gz")),
     ),
@@ -283,6 +291,7 @@ fn cookie_requests_bypass_cache_by_default() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &request_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -301,6 +310,7 @@ fn cookie_requests_bypass_cache_by_default() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &request_headers,
+        certificate_identity: None,
       })
       .is_none()
   );
@@ -325,6 +335,7 @@ fn named_policy_can_define_negative_cache_defaults() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::NOT_FOUND,
@@ -342,6 +353,7 @@ fn named_policy_can_define_negative_cache_defaults() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &HeaderMap::new(),
+      certificate_identity: None,
     }),
     Some(CacheLookup::Fresh(_))
   ));
@@ -399,6 +411,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
           method: &Method::GET,
           uri: &uri,
           request_headers: &request_headers,
+          certificate_identity: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
       ),
@@ -413,6 +426,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
       let body = if let Some(file) = entry.body_file {
@@ -453,6 +467,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -475,6 +490,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &headers,
+        certificate_identity: None,
       })
       .is_none()
   );
@@ -513,6 +529,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
           method: &Method::GET,
           uri,
           request_headers: &headers,
+          certificate_identity: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers, body),
       ),
@@ -528,6 +545,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
     method: &Method::GET,
     uri: &first_uri,
     request_headers: &headers,
+    certificate_identity: None,
   };
   let second = CacheLookupContext {
     uri: &second_uri,
@@ -557,6 +575,7 @@ fn admission_min_hits_rejects_until_threshold() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    certificate_identity: None,
   };
   let entry = CacheEntry::memory(
     StatusCode::OK,
@@ -576,6 +595,7 @@ fn admission_min_hits_rejects_until_threshold() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &headers,
+        certificate_identity: None,
       })
       .is_none()
   );
@@ -635,6 +655,7 @@ fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
           method: &Method::GET,
           uri: &uri,
           request_headers: &HeaderMap::new(),
+          certificate_identity: None,
         },
         CacheEntry::memory(
           StatusCode::OK,

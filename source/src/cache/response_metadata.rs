@@ -16,6 +16,7 @@ pub(super) fn cache_metadata(
   config: &CacheConfig,
   policy: &CachePolicyRuntime,
   request_headers: &HeaderMap,
+  certificate_identity: Option<&CacheCertificateIdentity>,
   status: StatusCode,
   response_headers: &HeaderMap,
 ) -> Result<ResponseMetadata, CacheFillSuppressionReason> {
@@ -53,6 +54,7 @@ pub(super) fn cache_metadata(
   let vary = vary_matchers_result(
     response_headers,
     request_headers,
+    certificate_identity,
     policy.max_vary_fields,
     MAX_VARY_VALUE_BYTES,
   )
@@ -194,6 +196,7 @@ pub(super) fn validator_headers(headers: &HeaderMap) -> HeaderMap {
 pub(super) fn vary_matchers_result(
   response_headers: &HeaderMap,
   request_headers: &HeaderMap,
+  certificate_identity: Option<&CacheCertificateIdentity>,
   max_fields: usize,
   max_value_bytes: usize,
 ) -> Result<Vec<VaryMatcher>, &'static str> {
@@ -208,10 +211,17 @@ pub(super) fn vary_matchers_result(
       if name == "*" {
         return Err("Vary: * is not cacheable");
       }
+      let lower = name.to_ascii_lowercase();
+      // A forwarded certificate is represented by the opaque base-key
+      // discriminator, never by a persisted request-header value.
+      if certificate_identity
+        .is_some_and(|identity| identity.header_name().as_str() == lower.as_str())
+      {
+        continue;
+      }
       if result.len() >= max_fields {
         return Err("too many Vary fields");
       }
-      let lower = name.to_ascii_lowercase();
       let value = header_values(request_headers, &lower);
       if value.len() > max_value_bytes {
         return Err("Vary value material is too large");

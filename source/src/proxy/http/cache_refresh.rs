@@ -44,6 +44,7 @@ pub(super) fn spawn_background_refresh(
   request_headers: HeaderMap,
   stale: crate::cache::StaleEntry,
 ) -> bool {
+  let certificate_identity = super::client_certificate::cache_identity(outbound).cloned();
   let Some(permit) = state.cache.try_background_refresh_permit(route_cache) else {
     state.metrics.record_cache_background_refresh_skip();
     return false;
@@ -59,6 +60,7 @@ pub(super) fn spawn_background_refresh(
     let Some(fill_permit) = state
       .cache
       .begin_fill_async(crate::cache::CacheLookupContext {
+        certificate_identity: certificate_identity.as_ref(),
         policy_name: route_cache.as_deref(),
         scheme,
         host: &host,
@@ -98,6 +100,7 @@ pub(super) fn spawn_background_refresh(
       method,
       uri,
       request_headers,
+      certificate_identity,
       stale.entry,
     )
     .await
@@ -123,6 +126,7 @@ async fn background_refresh(
   method: Method,
   uri: http::Uri,
   request_headers: HeaderMap,
+  certificate_identity: Option<crate::cache::CacheCertificateIdentity>,
   cached_entry: crate::cache::CacheEntry,
 ) -> anyhow::Result<()> {
   let Some(client) =
@@ -141,6 +145,7 @@ async fn background_refresh(
       .cache
       .update_from_not_modified_async(
         crate::cache::CacheInsertContext {
+          certificate_identity: certificate_identity.as_ref(),
           policy_name: route_cache.as_deref(),
           scheme,
           host: &host,
@@ -186,6 +191,7 @@ async fn background_refresh(
     .cache
     .insert_async(
       crate::cache::CacheInsertContext {
+        certificate_identity: certificate_identity.as_ref(),
         policy_name: route_cache.as_deref(),
         scheme,
         host: &host,

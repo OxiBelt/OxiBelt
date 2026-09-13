@@ -41,6 +41,7 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     grpc_web_mode,
     native_grpc_request,
     request_headers,
+    certificate_identity,
     stale_on_error,
     revalidation_entry,
     cache_store_allowed,
@@ -434,6 +435,7 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
         .cache
         .update_from_not_modified_async(
           crate::cache::CacheInsertContext {
+            certificate_identity: certificate_identity.as_ref(),
             policy_name: resolved.route.cache.as_deref(),
             scheme: downstream_scheme,
             host,
@@ -468,14 +470,21 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
       request_version,
       listener_bind,
     );
-    let response = compression::maybe_compress_response(
-      response,
-      &request_method,
-      &request_headers,
-      resolved.route.compression.as_deref(),
-      &state.config.compression,
-      &state.compression,
-    );
+    let response = if certificate_identity
+      .as_ref()
+      .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
+    {
+      response
+    } else {
+      compression::maybe_compress_response(
+        response,
+        &request_method,
+        &request_headers,
+        resolved.route.compression.as_deref(),
+        &state.config.compression,
+        &state.compression,
+      )
+    };
     return with_downstream_response_timeout(
       response,
       timeouts.response_send,
@@ -649,6 +658,7 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     &request_uri,
     &request_headers,
     Some(resolved.route),
+    certificate_identity.as_ref(),
     cache_store_allowed,
     _cache_fill_guard.take(),
     Some(&applied_route_security_headers),
@@ -663,14 +673,21 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     request_version,
     listener_bind,
   );
-  let response = compression::maybe_compress_response(
-    response,
-    &request_method,
-    &request_headers,
-    resolved.route.compression.as_deref(),
-    &state.config.compression,
-    &state.compression,
-  );
+  let response = if certificate_identity
+    .as_ref()
+    .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
+  {
+    response
+  } else {
+    compression::maybe_compress_response(
+      response,
+      &request_method,
+      &request_headers,
+      resolved.route.compression.as_deref(),
+      &state.config.compression,
+      &state.compression,
+    )
+  };
   let mut response =
     with_downstream_response_timeout(response, timeouts.response_send, transport_network, true);
   apply_sticky_cookie(&mut response, sticky_cookie.as_ref());

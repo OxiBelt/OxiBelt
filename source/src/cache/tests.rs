@@ -1,6 +1,10 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "tests_certificate.rs"]
+mod certificate;
+#[path = "tests_certificate_storage.rs"]
+mod certificate_storage;
 #[path = "tests_core.rs"]
 mod core;
 #[path = "tests_external.rs"]
@@ -102,6 +106,7 @@ async fn insert_stale_revalidate_entry(
           method: &Method::GET,
           uri,
           request_headers,
+          certificate_identity: None,
         },
         CacheEntry::memory(StatusCode::OK, headers, body),
       )
@@ -123,6 +128,7 @@ async fn assert_stale_background_refresh_disabled(
       method: &Method::GET,
       uri,
       request_headers,
+      certificate_identity: None,
     })
     .await
   {

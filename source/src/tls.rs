@@ -41,6 +41,7 @@ pub(crate) fn exercise_downstream_ct_fuzzing(data: &[u8]) {
   downstream_ct::exercise_fuzzing(data);
 }
 mod downstream_tcp;
+mod forwarded_client_certificate;
 mod negotiation;
 mod ocsp;
 mod outbound_revocation;
@@ -57,6 +58,11 @@ pub(crate) use cert_metadata::{
 #[cfg(feature = "admin-runtime")]
 pub(crate) use cert_metadata::{
   VerifiedClientCertificate, VerifiedClientCertificateIdentity, verified_client_certificate,
+};
+#[allow(unused_imports)]
+pub(crate) use forwarded_client_certificate::{
+  ForwardedClientCertificate, ForwardedClientCertificateCaptureError,
+  capture_forwarded_client_certificate,
 };
 pub(crate) use peer_certificate::peer_certificate_metadata;
 pub use peer_certificate::{PeerCertificateMetadata, PeerCertificateNames};

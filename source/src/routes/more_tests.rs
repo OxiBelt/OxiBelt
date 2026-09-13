@@ -54,6 +54,7 @@ fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> Route
     connect_tunneling: false,
     grpc_web: false,
     external_auth: None,
+    client_certificate_forwarding: None,
     ipm: Default::default(),
     cache: None,
     compression: None,

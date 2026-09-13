@@ -135,7 +135,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
       .policy_enabled(resolved.route.cache.as_deref(), &request_method);
   let response_actions_need_request_headers =
     resolved.route.actions.response_headers.has_actions() || resolved.route.actions.cors.is_some();
-  let request_headers = if cache_enabled_for_route
+  let mut request_headers = if cache_enabled_for_route
     || response_waf_enabled
     || native_grpc_request
     || response_actions_need_request_headers
@@ -146,6 +146,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   } else {
     HeaderMap::new()
   };
+  client_certificate::strip_reserved(&mut request_headers, state);
 
   let Some(upstream_uri) = state.upstream_uri_parts.get(&upstream.name) else {
     warn!(upstream = %upstream.name, "missing precomputed upstream URI parts");
@@ -205,9 +206,10 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     };
     outbound = Request::from_parts(parts, body);
   }
-  let identity_headers = state
+  let mut identity_headers = state
     .external_auth
     .identity_headers_for(resolved.route.external_auth.as_deref());
+  identity_headers.extend(state.client_certificate_forwarding_headers.iter().cloned());
   let outbound = outbound.map(|body| {
     let body = filter_trailers(body, state.config.proxy.http.trailers, native_grpc_request);
     semantics::sanitize_upstream_request_trailers(body, identity_headers)
@@ -226,6 +228,10 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   state
     .telemetry
     .inject_trace_context(outbound.headers_mut(), trace_context);
+  if let Err(status) = client_certificate::apply_upstream(&mut outbound, state) {
+    return route_security.text(status, "client certificate forwarding failed");
+  }
+  let certificate_identity = client_certificate::cache_identity(&outbound).cloned();
   request_mirror::spawn_request_mirrors(
     state.clone(),
     resolved.route,
@@ -241,6 +247,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   let mut _cache_fill_guard = None;
   let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
   let initial_cache_lookup = crate::cache::CacheLookupContext {
+    certificate_identity: certificate_identity.as_ref(),
     policy_name: resolved.route.cache.as_deref(),
     scheme: downstream_scheme,
     host,
@@ -293,6 +300,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
       let Some(permit) = state
         .cache
         .begin_fill_decision_async(crate::cache::CacheLookupContext {
+          certificate_identity: certificate_identity.as_ref(),
           policy_name: resolved.route.cache.as_deref(),
           scheme: downstream_scheme,
           host,
@@ -311,6 +319,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           if let Some(lookup) = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              certificate_identity: certificate_identity.as_ref(),
               policy_name: resolved.route.cache.as_deref(),
               scheme: downstream_scheme,
               host,
@@ -376,6 +385,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           if let Some(lookup) = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              certificate_identity: certificate_identity.as_ref(),
               policy_name: resolved.route.cache.as_deref(),
               scheme: downstream_scheme,
               host,
@@ -484,6 +494,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     grpc_web_mode,
     native_grpc_request,
     request_headers,
+    certificate_identity,
     stale_on_error,
     revalidation_entry,
     cache_store_allowed,

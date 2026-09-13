@@ -59,6 +59,7 @@ pub(crate) async fn warm_cache_request(
     http::header::HOST,
     HeaderValue::from_str(host).context("invalid warm host")?,
   );
+  super::client_certificate::strip_reserved(&mut headers, &snapshot);
   let mut request = Request::builder()
     .method(method.clone())
     .uri(uri.clone())
@@ -111,9 +112,15 @@ pub(crate) async fn warm_cache_request(
     &snapshot.upstreams,
   );
   let stored = if let Some(resolved) = resolved {
+    let prepared = super::client_certificate::PreparedCertificateForwarding::prepare(
+      &Request::new(()),
+      resolved.route,
+    )
+    .map_err(|_| anyhow::anyhow!("invalid certificate forwarding configuration"))?;
     snapshot
       .cache
       .lookup_async(crate::cache::CacheLookupContext {
+        certificate_identity: prepared.as_ref().map(|value| &value.cache_identity),
         policy_name: resolved.route.cache.as_deref(),
         scheme,
         host,

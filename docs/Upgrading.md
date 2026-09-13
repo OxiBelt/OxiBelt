@@ -5,6 +5,28 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Downstream client certificate forwarding
+
+`routes.client_certificate_forwarding` is opt-in; existing configurations retain
+their behavior. Before enabling it, configure downstream `tls.client_auth`,
+choose a header trusted only from OxiBelt, and review all routes and external-auth
+policies for use of that name. Enabling any route reserves every configured name
+and `Client-Cert`/`Client-Cert-Chain` snapshot-wide, including routes where the
+feature is disabled. Conflicting configured mutations are rejected.
+
+Certificate-aware cache entries use a separate internal key namespace; no
+cache migration is required, and logical purge partitions remain unchanged.
+Forwarding-route responses carry downstream `Cache-Control: no-store` even when
+OxiBelt's internal cache is enabled. See
+[configuration and trust boundaries](Configuration.md#forwarding-verified-downstream-client-certificates).
+
+Gateway operators must explicitly allow target names before accepting the new
+`OxiBeltRoutePolicy.spec.clientCertificateForwarding` field; the allowlist is
+empty by default. This does not provision frontend mTLS. Before rollback, remove
+the new native table, Gateway policy field, controller flags and Helm values,
+and restore application authorization that does not depend on the forwarded
+identity. Validate the resulting configuration with the target binary.
+
 ## OxiRule peer certificate metadata
 
 OxiRule adds downstream client and upstream server leaf-certificate fields,

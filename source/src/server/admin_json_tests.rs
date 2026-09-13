@@ -570,6 +570,7 @@ fn seed_cache_entry(snapshot: &AppSnapshot, uri: &str, tag: Option<&str>) {
         method: &::http::Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        certificate_identity: None,
       },
       crate::cache::CacheEntry::memory(
         StatusCode::OK,

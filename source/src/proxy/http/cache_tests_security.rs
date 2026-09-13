@@ -153,6 +153,7 @@ async fn cached_downstream_response_reconciles_named_route_security_headers() {
     crate::waf::WafTransportNetwork::Tcp,
     super::super::cache_status::CacheHeaderOutcome::Hit,
     super::super::cache_status::CacheHeaderReason::Fresh,
+    false,
   );
 
   super::assert_cache_status(&response, "hit", "fresh");
@@ -223,6 +224,7 @@ async fn cached_downstream_response_preserves_origin_security_headers_when_route
     crate::waf::WafTransportNetwork::Tcp,
     super::super::cache_status::CacheHeaderOutcome::Hit,
     super::super::cache_status::CacheHeaderReason::Fresh,
+    false,
   );
 
   super::assert_cache_status(&response, "hit", "fresh");
@@ -286,6 +288,7 @@ async fn cached_downstream_response_preserves_origin_headers_unset_by_partial_po
     crate::waf::WafTransportNetwork::Tcp,
     super::super::cache_status::CacheHeaderOutcome::Hit,
     super::super::cache_status::CacheHeaderReason::Fresh,
+    false,
   );
 
   super::assert_cache_status(&response, "hit", "fresh");

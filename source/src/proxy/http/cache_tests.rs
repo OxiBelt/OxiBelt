@@ -127,6 +127,7 @@ cache_methods = ["GET"]
     &uri,
     &request_headers,
     None,
+    None,
     false,
     None,
     None,
@@ -255,6 +256,7 @@ min_hits = 2
         method: &method,
         uri: &uri,
         request_headers: &request_headers,
+        certificate_identity: None,
       })
       .is_some()
   );
@@ -433,6 +435,7 @@ stream_large_objects = true
         method: &method,
         uri: &uri,
         request_headers: &request_headers,
+        certificate_identity: None,
       })
       .is_none()
   );
@@ -524,6 +527,7 @@ stream_large_objects = true
     method: &method,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   }) {
     Some(crate::cache::CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, body);
@@ -649,6 +653,7 @@ respect_cache_control = true
     method: &method,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   }) {
     Some(crate::cache::CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, body);

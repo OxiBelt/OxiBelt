@@ -579,10 +579,14 @@ pub(super) async fn handle_upgrade_request(
   state
     .telemetry
     .inject_trace_context(&mut parts.headers, trace_context);
-  let outbound = Request::from_parts(parts, body);
+  let mut outbound = Request::from_parts(parts, body);
+  if let Err(status) = client_certificate::apply_upstream(&mut outbound, state) {
+    return Some(route_security.text(status, "client certificate forwarding failed"));
+  }
+  let reserved_headers = state.client_certificate_forwarding_headers.to_vec();
   let outbound = outbound.map(|body| {
     body::with_backpressure_send_timeout(
-      body,
+      semantics::sanitize_upstream_request_trailers(body, reserved_headers),
       timeouts.upstream_send,
       BodyTimeoutKind::UpstreamRequestSend,
     )

@@ -194,18 +194,23 @@ pub(crate) fn cached_downstream_response(
   transport_network: WafTransportNetwork,
   outcome: CacheHeaderOutcome,
   reason: CacheHeaderReason,
+  certificate_authenticated: bool,
 ) -> Response<ProxyBody> {
   let mut response =
     cached_status_response(entry, request_method, request_headers, outcome, reason);
   reconcile_cached_security(&mut response, state, route);
-  let response = compression::maybe_compress_response(
-    response,
-    request_method,
-    request_headers,
-    route.compression.as_deref(),
-    &state.config.compression,
-    &state.compression,
-  );
+  let response = if certificate_authenticated {
+    response
+  } else {
+    compression::maybe_compress_response(
+      response,
+      request_method,
+      request_headers,
+      route.compression.as_deref(),
+      &state.config.compression,
+      &state.compression,
+    )
+  };
   with_downstream_response_timeout(response, timeouts.response_send, transport_network, true)
 }
 

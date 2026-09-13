@@ -47,6 +47,7 @@ mod cache_status;
 mod cache_streaming;
 mod cache_wait;
 mod circuit_breakers;
+pub(crate) mod client_certificate;
 pub(crate) mod compression;
 pub(crate) mod early_data;
 mod entry;
@@ -171,7 +172,7 @@ pub(crate) use tls_policy::route_matches_selected_tls_negotiation_policy;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_inner_impl<B>(
-  request: Request<B>,
+  mut request: Request<B>,
   peer_addr: std::net::SocketAddr,
   tcp_max_hop: Option<u8>,
   transport_metadata: WafTransportMetadataInput<'_>,
@@ -194,6 +195,7 @@ where
   B::Error: Into<self::body::BoxError> + Send + Sync + Unpin + 'static,
 {
   state.record_hot_path_request();
+  client_certificate::strip_reserved(request.headers_mut(), state);
 
   if state.lifecycle.is_draining() {
     return draining_response();
@@ -227,7 +229,8 @@ where
   let host = host_snapshot.as_str();
   let downstream_port = host_snapshot.downstream_port(downstream_scheme);
   access_log.set_downstream_host(host);
-  let path = request.uri().path();
+  let routing_uri = request.uri().clone();
+  let path = routing_uri.path();
   if let Err((status, message)) = validate_request_limits(&request, &state.config.limits) {
     return text_response(status, message);
   }
@@ -344,206 +347,219 @@ where
   let Some(resolved) = resolved else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
-  let route_bandwidth = resolved.bandwidth.clone();
-  *selected_bandwidth = Some(route_bandwidth.clone());
-  let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
-  if state
-    .overload
-    .reject_priority(resolved.route.priority_class)
-  {
-    return route_security.apply(overload_response(state.as_ref(), request_version));
-  }
-  if !route_matches_selected_tls_negotiation_policy(state.as_ref(), tls.as_ref(), resolved.route) {
-    warn!(
-      sni = ?tls.sni,
-      host = %host,
-      route = %resolved.route.name,
-      "rejected downstream request with mismatched SNI-selected TLS policy"
-    );
-    return route_security.text(StatusCode::MISDIRECTED_REQUEST, "misdirected request");
-  }
-  if let Some(response) = early_data::reject_if_disallowed(&request, &state.config, resolved.route)
-  {
-    return route_security.apply(response);
-  }
-  access_log.set_route_name(&resolved.route.name);
-  match route_actions::direct_response(resolved.route) {
-    Ok(Some(response)) => return route_security.apply(response),
-    Ok(None) => {}
-    Err(error) => {
-      warn!(error = %error, route = %resolved.route.name, "failed to build route direct response");
-      return route_security.text(StatusCode::INTERNAL_SERVER_ERROR, "invalid direct response");
-    }
-  }
-  let route_circuit_breaker_lease = match state
-    .circuit_breakers
-    .admit_route_scope_request(&resolved.route.name, None)
-    .await
-  {
-    Ok(lease) => lease,
-    Err(rejection) => {
-      return route_security.apply(circuit_breaker_rejection_response(state, rejection));
-    }
-  };
-  let max_request_body_bytes = resolved
-    .route
-    .effective_max_request_body_bytes(&state.config.limits);
-  if let Err((status, message)) = validate_request_body_size_limit(&request, max_request_body_bytes)
-  {
-    return route_security.text(status, message);
-  }
-
-  if let Some(response) =
-    route_runtime::cors_preflight_response(resolved.route, request.method(), request.headers())
-  {
-    return route_security.apply(response);
-  }
-
-  if resolved.execution_plan.features.ipm {
-    let Some(actor) = state.ipm.actor_from_headers(request.headers()) else {
-      return route_security.text(StatusCode::UNAUTHORIZED, "unauthorized");
-    };
-    let action = resolved
-      .route
-      .ipm
-      .action
-      .as_deref()
-      .unwrap_or("route:Invoke");
-    let resource = ipm_resource(state.ipm.namespace(), "route", &resolved.route.name);
-    let context = IpmRequestContext {
-      source_ip: Some(client_addr.ip()),
-      method: Some(request.method().as_str().to_string()),
-      host: Some(host.to_string()),
-      path: Some(path.to_string()),
-      route: Some(resolved.route.name.clone()),
-      protocol: Some(format!("{:?}", request_version)),
-      claims: std::collections::HashMap::new(),
-    };
-    if state.ipm.authorize(&actor, action, &resource, &context) != IpmDecision::Allow {
-      return route_security.text(StatusCode::FORBIDDEN, "forbidden");
-    }
-  }
-
-  let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
-  let (request_parts, request_body) = request.into_parts();
-  let request_body = body::with_read_timeout(
-    Limited::new(
-      request_body,
-      usize::try_from(max_request_body_bytes).unwrap_or(usize::MAX),
-    ),
-    client_body_timeout,
-    BodyTimeoutKind::DownstreamRequestRead,
-  );
-  let request = Request::from_parts(
-    request_parts,
-    body::with_bandwidth(
-      request_body,
-      route_bandwidth,
-      BandwidthDirection::Upload,
-      state.metrics.clone(),
-      crate::metrics::BandwidthTrafficClass::Http,
-      None,
-    ),
-  );
-  let verified_early_data = early_data::is_verified(&request);
-  let cl0_guard_required =
-    h2_or_h3_content_length_zero_guard_required(request_version, request.headers());
-  let request = if !cl0_guard_required {
-    match fast_path::try_handle_plain_proxy(
-      request,
-      state,
-      &resolved,
-      forwarded_client_addr,
-      forwarded_header_cache,
-      client_addr,
-      host,
-      downstream_port,
-      tcp_max_hop,
-      tls.as_ref(),
-      protocol,
-      downstream_scheme,
-      request_version,
-      transport_network,
-      transport_metadata,
-      access_log,
-      trace_context,
-    )
-    .await
-    {
-      Ok(response) => {
-        return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
+  let certificate_forwarding_enabled = resolved.route.client_certificate_forwarding.is_some();
+  let mut response = async {
+    match client_certificate::PreparedCertificateForwarding::prepare(&request, resolved.route) {
+      Ok(Some(prepared)) => {
+        request.extensions_mut().insert(prepared);
       }
-      Err(request) => request,
+      Ok(None) => {}
+      Err(status) => return text_response(status, "client certificate forwarding failed"),
     }
-  } else {
-    request
-  };
-  let request = match reject_content_length_zero_data(request, None, request_version).await {
-    Ok(request) => request,
-    Err(response) => {
+    let route_bandwidth = resolved.bandwidth.clone();
+    *selected_bandwidth = Some(route_bandwidth.clone());
+    let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
+    if state
+      .overload
+      .reject_priority(resolved.route.priority_class)
+    {
+      return route_security.apply(overload_response(state.as_ref(), request_version));
+    }
+    if !route_matches_selected_tls_negotiation_policy(state.as_ref(), tls.as_ref(), resolved.route) {
+      warn!(
+        sni = ?tls.sni,
+        host = %host,
+        route = %resolved.route.name,
+        "rejected downstream request with mismatched SNI-selected TLS policy"
+      );
+      return route_security.text(StatusCode::MISDIRECTED_REQUEST, "misdirected request");
+    }
+    if let Some(response) = early_data::reject_if_disallowed(&request, &state.config, resolved.route)
+    {
       return route_security.apply(response);
     }
-  };
-  let request = if cl0_guard_required {
-    match fast_path::try_handle_plain_proxy(
+    access_log.set_route_name(&resolved.route.name);
+    match route_actions::direct_response(resolved.route) {
+      Ok(Some(response)) => return route_security.apply(response),
+      Ok(None) => {}
+      Err(error) => {
+        warn!(error = %error, route = %resolved.route.name, "failed to build route direct response");
+        return route_security.text(StatusCode::INTERNAL_SERVER_ERROR, "invalid direct response");
+      }
+    }
+    let route_circuit_breaker_lease = match state
+      .circuit_breakers
+      .admit_route_scope_request(&resolved.route.name, None)
+      .await
+    {
+      Ok(lease) => lease,
+      Err(rejection) => {
+        return route_security.apply(circuit_breaker_rejection_response(state, rejection));
+      }
+    };
+    let max_request_body_bytes = resolved
+      .route
+      .effective_max_request_body_bytes(&state.config.limits);
+    if let Err((status, message)) = validate_request_body_size_limit(&request, max_request_body_bytes)
+    {
+      return route_security.text(status, message);
+    }
+
+    if let Some(response) =
+      route_runtime::cors_preflight_response(resolved.route, request.method(), request.headers())
+    {
+      return route_security.apply(response);
+    }
+
+    if resolved.execution_plan.features.ipm {
+      let Some(actor) = state.ipm.actor_from_headers(request.headers()) else {
+        return route_security.text(StatusCode::UNAUTHORIZED, "unauthorized");
+      };
+      let action = resolved
+        .route
+        .ipm
+        .action
+        .as_deref()
+        .unwrap_or("route:Invoke");
+      let resource = ipm_resource(state.ipm.namespace(), "route", &resolved.route.name);
+      let context = IpmRequestContext {
+        source_ip: Some(client_addr.ip()),
+        method: Some(request.method().as_str().to_string()),
+        host: Some(host.to_string()),
+        path: Some(path.to_string()),
+        route: Some(resolved.route.name.clone()),
+        protocol: Some(format!("{:?}", request_version)),
+        claims: std::collections::HashMap::new(),
+      };
+      if state.ipm.authorize(&actor, action, &resource, &context) != IpmDecision::Allow {
+        return route_security.text(StatusCode::FORBIDDEN, "forbidden");
+      }
+    }
+
+    let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
+    let (request_parts, request_body) = request.into_parts();
+    let request_body = body::with_read_timeout(
+      Limited::new(
+        request_body,
+        usize::try_from(max_request_body_bytes).unwrap_or(usize::MAX),
+      ),
+      client_body_timeout,
+      BodyTimeoutKind::DownstreamRequestRead,
+    );
+    let request = Request::from_parts(
+      request_parts,
+      body::with_bandwidth(
+        request_body,
+        route_bandwidth,
+        BandwidthDirection::Upload,
+        state.metrics.clone(),
+        crate::metrics::BandwidthTrafficClass::Http,
+        None,
+      ),
+    );
+    let verified_early_data = early_data::is_verified(&request);
+    let cl0_guard_required =
+      h2_or_h3_content_length_zero_guard_required(request_version, request.headers());
+    let request = if !cl0_guard_required {
+      match fast_path::try_handle_plain_proxy(
+        request,
+        state,
+        &resolved,
+        forwarded_client_addr,
+        forwarded_header_cache,
+        client_addr,
+        host,
+        downstream_port,
+        tcp_max_hop,
+        tls.as_ref(),
+        protocol,
+        downstream_scheme,
+        request_version,
+        transport_network,
+        transport_metadata,
+        access_log,
+        trace_context,
+      )
+      .await
+      {
+        Ok(response) => {
+          return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
+        }
+        Err(request) => request,
+      }
+    } else {
+      request
+    };
+    let request = match reject_content_length_zero_data(request, None, request_version).await {
+      Ok(request) => request,
+      Err(response) => {
+        return route_security.apply(response);
+      }
+    };
+    let request = if cl0_guard_required {
+      match fast_path::try_handle_plain_proxy(
+        request,
+        state,
+        &resolved,
+        forwarded_client_addr,
+        forwarded_header_cache,
+        client_addr,
+        host,
+        downstream_port,
+        tcp_max_hop,
+        tls.as_ref(),
+        protocol,
+        downstream_scheme,
+        request_version,
+        transport_network,
+        transport_metadata,
+        access_log,
+        trace_context,
+      )
+      .await
+      {
+        Ok(response) => {
+          return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
+        }
+        Err(request) => request,
+      }
+    } else {
+      request
+    };
+    pipeline::run(pipeline::InitialContext {
       request,
       state,
-      &resolved,
-      forwarded_client_addr,
-      forwarded_header_cache,
-      client_addr,
+      resolved,
       host,
       downstream_port,
+      client_addr,
+      forwarded_client_addr,
+      forwarded_header_cache,
       tcp_max_hop,
-      tls.as_ref(),
+      tls: &tls,
       protocol,
-      downstream_scheme,
-      request_version,
       transport_network,
       transport_metadata,
+      downstream_scheme,
+      request_version,
+      listener_bind,
+      connection_limit_context: connection_limit_context.as_ref(),
+      drain,
       access_log,
+      request_connection_permit,
       trace_context,
-    )
+      route_circuit_breaker_lease,
+      tags,
+      client_body_timeout,
+      upload_bandwidth_limited: true,
+      max_request_body_bytes,
+      verified_early_data,
+    })
     .await
-    {
-      Ok(response) => {
-        return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
-      }
-      Err(request) => request,
-    }
-  } else {
-    request
-  };
-  pipeline::run(pipeline::InitialContext {
-    request,
-    state,
-    resolved,
-    host,
-    downstream_port,
-    client_addr,
-    forwarded_client_addr,
-    forwarded_header_cache,
-    tcp_max_hop,
-    tls: &tls,
-    protocol,
-    transport_network,
-    transport_metadata,
-    downstream_scheme,
-    request_version,
-    listener_bind,
-    connection_limit_context: connection_limit_context.as_ref(),
-    drain,
-    access_log,
-    request_connection_permit,
-    trace_context,
-    route_circuit_breaker_lease,
-    tags,
-    client_body_timeout,
-    upload_bandwidth_limited: true,
-    max_request_body_bytes,
-    verified_early_data,
-  })
-  .await
+  }
+  .await;
+  client_certificate::finalize_response(&mut response, certificate_forwarding_enabled, state);
+  response
 }
 
 #[cfg(test)]

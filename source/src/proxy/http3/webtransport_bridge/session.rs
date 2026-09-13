@@ -121,12 +121,19 @@ pub(super) async fn accept_webtransport_session(
       return Ok(());
     }
   };
+  let client_certificate_forwarding = prepared.client_certificate_forwarding;
   let shape_prepared_response = |response| {
-    http_proxy::shape_webtransport_response(
+    let mut response = http_proxy::shape_webtransport_response(
       response,
       Some(prepared.bandwidth.clone()),
       snapshot.metrics.clone(),
-    )
+    );
+    crate::proxy::http::client_certificate::finalize_response(
+      &mut response,
+      client_certificate_forwarding,
+      snapshot.as_ref(),
+    );
+    response
   };
 
   #[cfg(feature = "admin-runtime")]
@@ -217,14 +224,18 @@ pub(super) async fn accept_webtransport_session(
       }
     };
 
+  let mut response = Response::builder()
+    .status(StatusCode::OK)
+    .header(WEBTRANSPORT_DRAFT_HEADER, WEBTRANSPORT_DRAFT_VALUE)
+    .body(())
+    .context("failed to build downstream WebTransport response")?;
+  crate::proxy::http::client_certificate::finalize_response(
+    &mut response,
+    client_certificate_forwarding,
+    snapshot.as_ref(),
+  );
   stream
-    .send_response(
-      Response::builder()
-        .status(StatusCode::OK)
-        .header(WEBTRANSPORT_DRAFT_HEADER, WEBTRANSPORT_DRAFT_VALUE)
-        .body(())
-        .context("failed to build downstream WebTransport response")?,
-    )
+    .send_response(response)
     .await
     .context("failed to send downstream WebTransport response")?;
 

@@ -1,5 +1,10 @@
 //! Effective configuration model and deserialization assembly.
 
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use http::HeaderName;
+
 use super::*;
 
 /// Fully validated runtime configuration consumed by listeners, proxying, WAF, and admin code.
@@ -200,6 +205,35 @@ impl<'de> Deserialize<'de> for Config {
       .map_err(serde::de::Error::custom)?;
     config.operational_profile = operational_profile;
     Ok(config)
+  }
+}
+
+impl Config {
+  /// Header names owned by client-certificate forwarding on every request path.
+  ///
+  /// The RFC 9440 names are reserved whenever any forwarding route is configured,
+  /// including when the configured route uses a private header name.
+  pub fn client_certificate_forwarding_headers(&self) -> Arc<[HeaderName]> {
+    let mut headers = BTreeSet::new();
+    for route in &self.routes {
+      let Some(forwarding) = &route.client_certificate_forwarding else {
+        continue;
+      };
+      if let Ok(name) = HeaderName::from_bytes(forwarding.header.as_bytes()) {
+        headers.insert(name.as_str().to_string());
+      }
+    }
+    if headers.is_empty() {
+      return Arc::from([]);
+    }
+    headers.insert("client-cert".to_string());
+    headers.insert("client-cert-chain".to_string());
+    Arc::from(
+      headers
+        .into_iter()
+        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+        .collect::<Vec<_>>(),
+    )
   }
 }
 

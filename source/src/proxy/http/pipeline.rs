@@ -108,6 +108,7 @@ pub(super) struct ExchangeContext<'state, 'request, 'access, 'transport, 'metada
   pub(super) grpc_web_mode: Option<grpc_web::GrpcWebMode>,
   pub(super) native_grpc_request: bool,
   pub(super) request_headers: HeaderMap,
+  pub(super) certificate_identity: Option<crate::cache::CacheCertificateIdentity>,
   pub(super) stale_on_error: Option<crate::cache::CacheEntry>,
   pub(super) revalidation_entry: Option<crate::cache::CacheEntry>,
   pub(super) cache_store_allowed: bool,

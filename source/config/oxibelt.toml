@@ -1787,6 +1787,12 @@ connect_tunneling = false
 grpc_web = false
 # external_auth = "edge-auth"
 # security_headers = "default" # default | off | named policy
+# Optional verified downstream leaf forwarding; configure tls.client_auth first.
+# All forwarding names become protected across routes. Missing certificates omit
+# the header; this option does not require client authentication by itself.
+# [routes.client_certificate_forwarding]
+# header = "x-client-cert"
+# format = "url_encoded_pem" # url_encoded_pem | rfc9440
 
 [[routes]]
 name = "api-v1"

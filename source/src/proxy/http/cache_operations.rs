@@ -23,6 +23,8 @@ pub(super) fn handle_cache_lookup_result(
   revalidation_entry: &mut Option<crate::cache::CacheEntry>,
   record_events: bool,
 ) -> Option<Response<ProxyBody>> {
+  let certificate_authenticated = client_certificate::cache_identity(outbound)
+    .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated);
   match lookup {
     crate::cache::CacheLookup::Fresh(entry) => {
       if cache_entry_blocked_by_waf_body_transform(state.as_ref(), resolved, &entry) {
@@ -43,6 +45,7 @@ pub(super) fn handle_cache_lookup_result(
         transport_network,
         CacheOutcome::Hit,
         CacheReason::Fresh,
+        certificate_authenticated,
       );
       route_runtime::apply_response_actions(
         response.headers_mut(),
@@ -98,6 +101,7 @@ pub(super) fn handle_cache_lookup_result(
           transport_network,
           CacheOutcome::Stale,
           CacheReason::BackgroundRefresh,
+          certificate_authenticated,
         );
         route_runtime::apply_response_actions(
           response.headers_mut(),
@@ -147,6 +151,7 @@ pub(super) fn handle_cache_lookup_result(
           transport_network,
           CacheOutcome::Stale,
           CacheReason::StaleWithoutValidators,
+          certificate_authenticated,
         );
         route_runtime::apply_response_actions(
           response.headers_mut(),
@@ -232,6 +237,7 @@ pub(super) async fn maybe_cache_response(
     uri,
     request_headers,
     route,
+    None,
     true,
     None,
     None,
@@ -250,6 +256,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   uri: &http::Uri,
   request_headers: &HeaderMap,
   route: Option<&RouteConfig>,
+  certificate_identity: Option<&crate::cache::CacheCertificateIdentity>,
   allow_store: bool,
   mut cache_fill_guard: Option<crate::cache::CacheFillGuard>,
   applied_route_security_headers: Option<&AppliedRouteSecurityHeaders>,
@@ -279,6 +286,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   }
   let content_length = cache_streaming::exact_response_content_length(&cache_headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
+    certificate_identity,
     policy_name: route_cache,
     scheme,
     host,
@@ -350,6 +358,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
         uri,
         request_headers,
         route,
+        certificate_identity,
         parts,
         body,
         prepared,

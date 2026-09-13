@@ -62,6 +62,7 @@ pub(super) fn maybe_stream_cache_response(
   uri: &http::Uri,
   request_headers: &HeaderMap,
   route: Option<&RouteConfig>,
+  certificate_identity: Option<&crate::cache::CacheCertificateIdentity>,
   parts: http::response::Parts,
   body: ProxyBody,
   prepared: Box<crate::cache::CachePreparedInsert>,
@@ -94,7 +95,15 @@ pub(super) fn maybe_stream_cache_response(
           record_fill_stage(state, route, "local_store", "store_failed", stream_started);
           state.metrics.record_cache_fill_error();
           state.cache.note_fill_not_stored_reason(
-            insert_ctx(route_cache, scheme, host, method, uri, request_headers),
+            insert_ctx(
+              route_cache,
+              scheme,
+              host,
+              method,
+              uri,
+              request_headers,
+              certificate_identity,
+            ),
             crate::cache::CacheFillSuppressionReason::StoreFailed,
           );
           CacheReason::StoreFailed
@@ -103,7 +112,15 @@ pub(super) fn maybe_stream_cache_response(
           record_fill_stage(state, route, "local_store", "rejected", stream_started);
           state.metrics.record_cache_admission_rejection();
           state.cache.note_fill_not_stored_reason(
-            insert_ctx(route_cache, scheme, host, method, uri, request_headers),
+            insert_ctx(
+              route_cache,
+              scheme,
+              host,
+              method,
+              uri,
+              request_headers,
+              certificate_identity,
+            ),
             crate::cache::CacheFillSuppressionReason::AdmissionRejected,
           );
           CacheReason::AdmissionRejected
@@ -117,6 +134,7 @@ pub(super) fn maybe_stream_cache_response(
             method,
             uri,
             request_headers,
+            certificate_identity,
           ));
           CacheReason::NotCacheable
         }
@@ -237,8 +255,10 @@ fn insert_ctx<'a>(
   method: &'a Method,
   uri: &'a http::Uri,
   request_headers: &'a HeaderMap,
+  certificate_identity: Option<&'a crate::cache::CacheCertificateIdentity>,
 ) -> CacheInsertContext<'a> {
   CacheInsertContext {
+    certificate_identity,
     policy_name: route_cache,
     scheme,
     host,

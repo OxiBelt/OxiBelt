@@ -16,6 +16,11 @@ pub(crate) fn plain_proxy_fast_path_decision<B>(
   state: &AppSnapshot,
   resolved: &ResolvedRoute<'_>,
 ) -> Result<(), PlainProxyFastPathMissReason> {
+  // Certificate header ownership is snapshot-wide. Use the complete pipeline for
+  // its final mutation/trailer scrub, even on routes which do not emit a leaf.
+  if !state.client_certificate_forwarding_headers.is_empty() {
+    return Err(PlainProxyFastPathMissReason::UnsupportedRoute);
+  }
   let plan_enabled = match request.version() {
     http::Version::HTTP_10 | http::Version::HTTP_11 => {
       resolved.execution_plan.fast_path.plain_proxy_h1

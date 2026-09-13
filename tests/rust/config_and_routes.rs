@@ -17647,3 +17647,229 @@ external_auth = "ct-auth"
     .expect_err("monitoring must be restricted to static v1");
   assert!(error.to_string().contains("static_rfc6962_v1"));
 }
+
+#[test]
+fn client_certificate_forwarding_validates_snapshot_wide_header_ownership() {
+  let temp_dir = common::TempDir::new("client-certificate-forwarding-ownership");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "client-certificate-forwarding-ownership");
+  let base = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "upstream = \"app\"",
+    r#"upstream = "app"
+
+[routes.client_certificate_forwarding]
+header = "x-client-certificate""#,
+  );
+
+  for action in [
+    "set = [{ name = \"x-client-certificate\", value = \"spoofed\" }]",
+    "add = [{ name = \"x-client-certificate\", value = \"spoofed\" }]",
+    "remove = [\"x-client-certificate\"]",
+  ] {
+    let raw = format!(
+      r#"{base}
+
+[[routes]]
+name = "disabled-route"
+hosts = ["disabled.example.com"]
+path_prefix = "/"
+upstream = "app"
+
+[routes.actions.request_headers]
+{action}
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("all route actions must respect snapshot-wide certificate headers");
+    assert!(
+      error
+        .to_string()
+        .contains("cannot mutate client certificate forwarding header x-client-certificate"),
+      "unexpected error: {error:#}"
+    );
+  }
+}
+
+#[test]
+fn client_certificate_forwarding_rejects_external_auth_header_collisions() {
+  let temp_dir = common::TempDir::new("client-certificate-forwarding-external-auth");
+  let (cert_path, key_path) = common::create_self_signed_cert(
+    temp_dir.path(),
+    "client-certificate-forwarding-external-auth",
+  );
+  let base = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "upstream = \"app\"",
+    r#"upstream = "app"
+
+[routes.client_certificate_forwarding]
+header = "x-client-certificate""#,
+  );
+
+  for setting in [
+    "forward_headers = [\"x-client-certificate\"]",
+    "identity_headers = [\"x-client-certificate\"]",
+  ] {
+    let raw = format!(
+      r#"{base}
+
+[[external_auth]]
+name = "certificate-auth"
+endpoint = "http://127.0.0.1:19090"
+{setting}
+"#
+    );
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("external auth must not own the certificate forwarding header");
+    assert!(
+      error
+        .to_string()
+        .contains("external_auth certificate-auth cannot use client certificate forwarding header"),
+      "unexpected error: {error:#}"
+    );
+  }
+}
+
+#[test]
+fn client_certificate_forwarding_requires_an_upstream_and_rejects_connect() {
+  let temp_dir = common::TempDir::new("client-certificate-forwarding-target");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "client-certificate-forwarding-target");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let terminal = base.replace(
+    "upstream = \"app\"",
+    r#"[routes.client_certificate_forwarding]
+header = "x-client-certificate"
+
+[routes.actions.direct_response]
+status = 404"#,
+  );
+  let config: Config = toml::from_str(&terminal).expect("terminal route config should parse");
+  let error = config
+    .validate()
+    .expect_err("terminal response cannot forward a client certificate upstream");
+  assert!(
+    error
+      .to_string()
+      .contains("client_certificate_forwarding requires upstream or upstream_pool"),
+    "unexpected error: {error:#}"
+  );
+
+  let connect = base.replace(
+    "upstream = \"app\"",
+    r#"upstream = "app"
+connect_tunneling = true
+
+[routes.client_certificate_forwarding]
+header = "x-client-certificate""#,
+  );
+  let config: Config = toml::from_str(&connect).expect("CONNECT route config should parse");
+  let error = config
+    .validate()
+    .expect_err("CONNECT tunnel cannot forward a client certificate header");
+  assert!(
+    error
+      .to_string()
+      .contains("client_certificate_forwarding cannot be used with connect_tunneling"),
+    "unexpected error: {error:#}"
+  );
+}
+
+#[test]
+fn client_certificate_forwarding_enforces_required_and_safe_configuration() {
+  let temp_dir = common::TempDir::new("client-certificate-forwarding-config");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "client-certificate-forwarding-config");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let missing_header = base.replace(
+    "upstream = \"app\"",
+    "upstream = \"app\"\n\n[routes.client_certificate_forwarding]",
+  );
+  assert!(toml::from_str::<Config>(&missing_header).is_err());
+
+  let invalid_format = base.replace(
+    "upstream = \"app\"",
+    r#"upstream = "app"
+
+[routes.client_certificate_forwarding]
+header = "x-client-certificate"
+format = "der""#,
+  );
+  assert!(toml::from_str::<Config>(&invalid_format).is_err());
+
+  for reserved_header in [
+    "content-length",
+    "accept-encoding",
+    "early-data",
+    "traceparent",
+    "tracestate",
+    "priority",
+  ] {
+    let config: Config = toml::from_str(&base.replace(
+      "upstream = \"app\"",
+      &format!(
+        "upstream = \"app\"\n\n[routes.client_certificate_forwarding]\nheader = \"{reserved_header}\""
+      ),
+    ))
+    .expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("reserved certificate forwarding header must be rejected");
+    assert!(
+      error
+        .to_string()
+        .contains(&format!("cannot use reserved header {reserved_header}"))
+    );
+  }
+}
+
+#[test]
+fn client_certificate_forwarding_header_union_recomputes_from_config() {
+  let temp_dir = common::TempDir::new("client-certificate-forwarding-header-union");
+  let (cert_path, key_path) = common::create_self_signed_cert(
+    temp_dir.path(),
+    "client-certificate-forwarding-header-union",
+  );
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let config_with = |header: &str| {
+    toml::from_str::<Config>(&base.replace(
+      "upstream = \"app\"",
+      &format!(
+        "upstream = \"app\"\n\n[routes.client_certificate_forwarding]\nheader = \"{header}\""
+      ),
+    ))
+    .expect("config should parse")
+  };
+
+  let first = config_with("x-first-client-certificate");
+  let second = config_with("x-second-client-certificate");
+  let first_headers = first.client_certificate_forwarding_headers();
+  let second_headers = second.client_certificate_forwarding_headers();
+
+  assert!(
+    first_headers
+      .iter()
+      .any(|header| header.as_str() == "x-first-client-certificate")
+  );
+  assert!(
+    !second_headers
+      .iter()
+      .any(|header| header.as_str() == "x-first-client-certificate")
+  );
+  for required in [
+    "x-second-client-certificate",
+    "client-cert",
+    "client-cert-chain",
+  ] {
+    assert!(
+      second_headers
+        .iter()
+        .any(|header| header.as_str() == required)
+    );
+  }
+}

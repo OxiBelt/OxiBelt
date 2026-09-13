@@ -211,6 +211,7 @@ Supported downstream TLS features:
 
 - Server certificate chain loading with local private key loading or Unix socket remote signing, including multiple SNI-selected downstream certificates.
 - Optional or required downstream client certificate authentication.
+- Opt-in upstream-backed HTTP routes can forward the TLS-verified downstream leaf certificate in a configurable protected header, using URL-encoded canonical PEM or RFC 9440 encoding. Reserved names are stripped from untrusted requests and trailers, and generated values are limited to the selected application upstream. Missing certificates do not change authorization. Certificate-aware internal cache isolation, downstream `no-store`, and credential compression protections apply as described in [Forwarding verified downstream client certificates](Configuration.md#forwarding-verified-downstream-client-certificates). Raw stream forwarding and CONNECT tunneling are excluded.
 - Client CA roots from configured cert-directory files.
 - Static file-based OCSP stapling and live OCSP fetch/refresh for downstream TLS.
 - Optional downstream TLS early data with global and per-route policy controls.

@@ -255,6 +255,7 @@ impl ResponseCache {
         ctx.method,
         ctx.uri,
         ctx.request_headers,
+        ctx.certificate_identity,
       )?
       .fill_key;
     match self.fills.begin(key.clone(), overload) {

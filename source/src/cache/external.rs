@@ -30,6 +30,7 @@ impl ResponseCache {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.certificate_identity,
     )?;
     let handler = operation.policy.external_handler.as_deref()?;
     let request = ExternalCacheLookupRequest::new(
@@ -74,7 +75,7 @@ impl ResponseCache {
       return None;
     }
     let headers = external_headers(&metadata.headers)?;
-    let vary = external_vary_matchers(&metadata.vary)?;
+    let vary = external_vary_matchers(&metadata.vary, ctx.certificate_identity)?;
     if !external_vary_allowed(&vary) || !vary_matches(&vary, ctx.request_headers) {
       return None;
     }
@@ -370,11 +371,23 @@ fn external_headers(headers: &[ExternalCacheHeader]) -> Option<HeaderMap> {
   Some(result)
 }
 
-fn external_vary_matchers(vary: &[ExternalCacheVary]) -> Option<Vec<VaryMatcher>> {
+pub(super) fn external_vary_matchers(
+  vary: &[ExternalCacheVary],
+  certificate_identity: Option<&CacheCertificateIdentity>,
+) -> Option<Vec<VaryMatcher>> {
   let mut result = Vec::with_capacity(vary.len());
   for item in vary {
     let lower = item.name.to_ascii_lowercase();
     HeaderName::from_bytes(lower.as_bytes()).ok()?;
+    // Cache-produced metadata omits this matcher because the opaque base-key
+    // namespace already varies by certificate. Reject external metadata that
+    // attempts to carry a certificate-header value rather than accepting and
+    // retaining potentially sensitive material.
+    if certificate_identity
+      .is_some_and(|identity| identity.header_name().as_str() == lower.as_str())
+    {
+      return None;
+    }
     result.push(VaryMatcher {
       name: lower,
       value: item.value.clone(),

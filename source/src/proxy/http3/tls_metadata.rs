@@ -56,6 +56,22 @@ pub(super) fn downstream_quic_tls_metadata(
   }
 }
 
+/// Captures the verified QUIC peer leaf for protected request forwarding only.
+///
+/// This deliberately does not add raw certificate material to WAF TLS metadata.
+pub(super) fn downstream_quic_forwarded_client_certificate(
+  connection: &h3_quinn::quinn::Connection,
+) -> Option<crate::tls::ForwardedClientCertificate> {
+  connection
+    .peer_identity()
+    .and_then(|identity| {
+      identity
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .ok()
+    })
+    .and_then(|certificates| crate::tls::capture_forwarded_client_certificate(&certificates))
+}
+
 fn downstream_peer_certificate_metadata(
   certificates: Option<&[rustls::pki_types::CertificateDer<'_>]>,
 ) -> (

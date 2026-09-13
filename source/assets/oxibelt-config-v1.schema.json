@@ -18168,6 +18168,60 @@
             "x-oxibelt-reference-activation": "none",
             "x-oxibelt-secret-class": "none"
           },
+          "client_certificate_forwarding": {
+            "additionalProperties": false,
+            "description": "OxiBelt native field `routes[].client_certificate_forwarding`. Production Rust validation is authoritative.",
+            "properties": {
+              "format": {
+                "default": "url_encoded_pem",
+                "description": "OxiBelt native field `routes[].client_certificate_forwarding.format`. Production Rust validation is authoritative.",
+                "enum": [
+                  "url_encoded_pem",
+                  "rfc9440"
+                ],
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "header": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "array"
+                  },
+                  {
+                    "type": "object"
+                  }
+                ],
+                "description": "OxiBelt native field `routes[].client_certificate_forwarding.header`. Production Rust validation is authoritative.",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "required": [
+              "header"
+            ],
+            "type": "object",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
           "compression": {
             "anyOf": [
               {

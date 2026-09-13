@@ -246,6 +246,7 @@ impl ResponseCache {
         match vary_matchers_result(
           headers,
           ctx.request_headers,
+          ctx.certificate_identity,
           policy.max_vary_fields,
           MAX_VARY_VALUE_BYTES,
         ) {

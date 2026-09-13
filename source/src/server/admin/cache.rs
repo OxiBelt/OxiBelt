@@ -205,7 +205,7 @@ pub(in crate::server) async fn cache_key_explain_response(
     Ok(uri) => uri,
     Err(_) => return text_response(StatusCode::BAD_REQUEST, "invalid uri"),
   };
-  let headers = match header_map_from_strings(body.headers) {
+  let mut headers = match header_map_from_strings(body.headers) {
     Ok(headers) => headers,
     Err(message) => return text_response(StatusCode::BAD_REQUEST, message),
   };
@@ -213,8 +213,10 @@ pub(in crate::server) async fn cache_key_explain_response(
     Ok(headers) => headers,
     Err(message) => return text_response(StatusCode::BAD_REQUEST, message),
   };
-  let explain = snapshot.cache.explain_key(
+  crate::proxy::http::client_certificate::strip_reserved(&mut headers, snapshot);
+  let mut explain = snapshot.cache.explain_key(
     crate::cache::CacheLookupContext {
+      certificate_identity: None,
       policy_name: body.policy.as_deref(),
       scheme: &body.scheme,
       host: &body.host,
@@ -224,6 +226,9 @@ pub(in crate::server) async fn cache_key_explain_response(
     },
     (!response_headers.is_empty()).then_some(&response_headers),
   );
+  if !snapshot.client_certificate_forwarding_headers.is_empty() {
+    explain.reasons.push("Certificate-forwarding routes add a trusted TLS discriminator unavailable to this diagnostic".to_string());
+  }
   json_response(StatusCode::OK, &explain)
 }
 

@@ -168,6 +168,7 @@ impl ResponseCache {
       .any(|item| item.eq_ignore_ascii_case(method.as_str()))
   }
 
+  #[allow(clippy::too_many_arguments)]
   pub(super) fn operation_context(
     &self,
     policy_name: Option<&str>,
@@ -176,9 +177,13 @@ impl ResponseCache {
     method: &Method,
     uri: &Uri,
     request_headers: &HeaderMap,
+    certificate_identity: Option<&CacheCertificateIdentity>,
   ) -> Option<CacheOperationContext> {
     let policy = self.policy(policy_name)?.clone();
-    let base_key = expanded_cache_key(&policy.cache_key, scheme, host, uri, request_headers);
+    let base_key = certificate_partitioned_base_key(
+      expanded_cache_key(&policy.cache_key, scheme, host, uri, request_headers),
+      certificate_identity,
+    );
     let partition = expanded_cache_key(&policy.partition_key, scheme, host, uri, request_headers);
     let uri = uri.to_string();
     let lookup_key = index::LookupKey::new(&policy.name, &partition, scheme, host, &uri, &base_key);
@@ -217,6 +222,7 @@ impl ResponseCache {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.certificate_identity,
     )?;
     let now = SystemTime::now();
     let (key, entry) = {
@@ -337,6 +343,7 @@ impl ResponseCache {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.certificate_identity,
     )?;
     self
       .lookup_shared_async(
@@ -367,6 +374,7 @@ impl ResponseCache {
         method: ctx.method,
         uri: ctx.uri,
         request_headers: ctx.request_headers,
+        certificate_identity: ctx.certificate_identity,
       },
       entry,
       false,

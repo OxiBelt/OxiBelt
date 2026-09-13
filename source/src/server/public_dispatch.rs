@@ -91,6 +91,21 @@ pub(super) async fn handle_connection(
     tls_stream.get_ref().1,
     &client_hello_metadata,
   ));
+  // Pin feature enablement to the handshake snapshot, like the later request state.
+  // This avoids retaining client certificate material for connections that cannot forward it.
+  let forwarded_client_certificate = (!handshake_state
+    .client_certificate_forwarding_headers
+    .is_empty())
+  .then(|| {
+    crate::tls::capture_forwarded_client_certificate(
+      tls_stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .unwrap_or_default(),
+    )
+  })
+  .flatten();
   let tcp_metadata = tcp_hop::transport_metadata(tls_stream.get_ref().0);
   let transport_metadata = WafTransportMetadataInput {
     tcp_mss: tcp_metadata.mss,
@@ -118,6 +133,7 @@ pub(super) async fn handle_connection(
   let service = service_fn(move |mut request: hyper::Request<Incoming>| {
     let state = request_state.clone();
     let tls_metadata = tls_metadata.clone();
+    let forwarded_client_certificate = forwarded_client_certificate.clone();
     let forwarded_header_cache = forwarded_header_cache.clone();
     let request_index = request_count.fetch_add(1, Ordering::Relaxed);
     let connection_limit_context = connection_limit_context.clone();
@@ -126,6 +142,9 @@ pub(super) async fn handle_connection(
       request
         .extensions_mut()
         .insert(http::DownstreamListenerBind(listener_bind));
+      if let Some(certificate) = forwarded_client_certificate {
+        request.extensions_mut().insert(certificate);
+      }
       if tcp_early_data {
         http::early_data::mark_verified(&mut request);
       }

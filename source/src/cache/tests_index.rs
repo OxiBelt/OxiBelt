@@ -28,6 +28,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
           method: &Method::GET,
           uri: &uri,
           request_headers,
+          certificate_identity: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
       ),
@@ -46,6 +47,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
       method: &Method::GET,
       uri: &uri,
       request_headers,
+      certificate_identity: None,
     }) {
       Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body.as_ref(), expected),
       other => panic!("expected indexed cache hit, got {other:?}"),
@@ -65,6 +67,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &english_request,
+        certificate_identity: None,
       })
       .is_none()
   );
@@ -100,6 +103,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
           method: &Method::GET,
           uri: &uri,
           request_headers: &first_headers,
+          certificate_identity: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
       ),
@@ -115,6 +119,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &second_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -138,6 +143,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &second_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"b")),
     ),
@@ -178,6 +184,7 @@ fn vary_variant_count_updates_after_eviction() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &first_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -196,6 +203,7 @@ fn vary_variant_count_updates_after_eviction() {
         method: &Method::GET,
         uri: &filler_uri,
         request_headers: &request_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -214,6 +222,7 @@ fn vary_variant_count_updates_after_eviction() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &first_headers,
+        certificate_identity: None,
       })
       .is_none()
   );
@@ -226,6 +235,7 @@ fn vary_variant_count_updates_after_eviction() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &second_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -261,6 +271,7 @@ fn response_head_decision_rejects_uncacheable_or_unadmitted_heads() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   };
   let mut no_store = HeaderMap::new();
   no_store.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));

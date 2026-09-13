@@ -698,6 +698,11 @@ fn object_schema(shape_path: &str, metadata_path: &str) -> Value {
   {
     object.insert("required".to_string(), json!(["status"]));
   }
+  if shape_path == "routes.client_certificate_forwarding"
+    && let Some(object) = schema.as_object_mut()
+  {
+    object.insert("required".to_string(), json!(["header"]));
+  }
   if shape_path == "proxy.real_ip.rules"
     && let Some(object) = schema.as_object_mut()
   {
@@ -1257,6 +1262,10 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
       "routes.upstream_http_version_mode",
       vec!["exact", "ceiling"],
     ),
+    (
+      "routes.client_certificate_forwarding.format",
+      vec!["url_encoded_pem", "rfc9440"],
+    ),
     ("routes.ct_surface", vec!["submission", "monitoring"]),
     (
       "shared_state.failure_policies.udp_flows",
@@ -1389,6 +1398,7 @@ fn default_value(path: &str) -> Option<Value> {
     "upstreams.happy_eyeballs_mode" => json!("inherit"),
     "upstreams.svcb_allowed_ports" => json!([]),
     "routes.upstream_http_version_mode" => json!("exact"),
+    "routes.client_certificate_forwarding.format" => json!("url_encoded_pem"),
     "routes.ct_surface" => json!("submission"),
     "sni_forward.quic_initial_reassembly.max_pending_sessions" => json!(64),
     "sni_forward.quic_initial_reassembly.max_fragments_per_session" => json!(64),

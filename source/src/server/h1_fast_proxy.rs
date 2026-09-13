@@ -272,6 +272,9 @@ pub(super) async fn try_handle_connection(
 }
 
 fn fast_proxy_preflight_disabled_reason(snapshot: &AppSnapshot) -> Option<&'static str> {
+  if !snapshot.client_certificate_forwarding_headers.is_empty() {
+    return Some("client certificate forwarding header ownership");
+  }
   if snapshot.config.listeners.http_mode != HttpListenerMode::Proxy {
     return Some("HTTPS listener is not in proxy mode");
   }

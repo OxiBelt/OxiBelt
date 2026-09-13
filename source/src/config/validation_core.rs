@@ -1,5 +1,7 @@
 //! Top-level semantic validation and runtime artifact constraints.
 
+use http::HeaderName;
+
 use super::*;
 
 impl Config {
@@ -76,6 +78,11 @@ impl Config {
     self.database.validate()?;
     self.shared_state.validate()?;
     self.validate_external_auth()?;
+    let client_certificate_forwarding_headers = self.client_certificate_forwarding_headers();
+    validate_external_auth_client_certificate_forwarding_conflicts(
+      &self.external_auth,
+      &client_certificate_forwarding_headers,
+    )?;
     self.validate_mitigation_database()?;
 
     let mut upstream_names = HashSet::new();
@@ -267,6 +274,11 @@ impl Config {
 
     let mut route_names = HashSet::new();
     for route in &self.routes {
+      let client_certificate_forwarding =
+        client_certificate_forwarding::validate_client_certificate_forwarding(
+          route,
+          self.limits.max_header_name_bytes,
+        )?;
       if route.upstream_http_version_mode == UpstreamHttpVersionMode::Ceiling
         && route.upstream_http_version.is_none()
       {
@@ -290,6 +302,10 @@ impl Config {
         route::validate_route_path_value(&route.name, "replace_prefix_with", replacement)?;
       }
       route_actions::validate_route_actions_config(route)?;
+      validate_route_client_certificate_forwarding_header_conflicts(
+        route,
+        &client_certificate_forwarding_headers,
+      )?;
       route_static_files::validate_route_static_files_config(&route.name, &route.static_files)?;
       let target_count = usize::from(route.upstream.is_some())
         + usize::from(route.upstream_pool.is_some())
@@ -419,6 +435,20 @@ impl Config {
       if route.static_root.is_none() && route.static_files.has_convenience_options() {
         bail!(
           "route {} cannot set static_files options without static_root",
+          route.name
+        );
+      }
+      if client_certificate_forwarding.is_some()
+        && (route.upstream.is_none() && route.upstream_pool.is_none())
+      {
+        bail!(
+          "route {} client_certificate_forwarding requires upstream or upstream_pool",
+          route.name
+        );
+      }
+      if client_certificate_forwarding.is_some() && route.connect_tunneling {
+        bail!(
+          "route {} client_certificate_forwarding cannot be used with connect_tunneling",
           route.name
         );
       }
@@ -641,4 +671,68 @@ impl Config {
     }
     Ok(())
   }
+}
+
+fn validate_route_client_certificate_forwarding_header_conflicts(
+  route: &RouteConfig,
+  forwarding_headers: &[HeaderName],
+) -> anyhow::Result<()> {
+  if forwarding_headers.is_empty() {
+    return Ok(());
+  }
+  let conflicts = route
+    .actions
+    .request_headers
+    .set
+    .iter()
+    .map(|entry| entry.name.as_str())
+    .chain(
+      route
+        .actions
+        .request_headers
+        .add
+        .iter()
+        .map(|entry| entry.name.as_str()),
+    )
+    .chain(
+      route
+        .actions
+        .request_headers
+        .remove
+        .iter()
+        .map(String::as_str),
+    )
+    .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+    .find(|name| forwarding_headers.contains(name));
+  if let Some(name) = conflicts {
+    bail!(
+      "route {} actions.request_headers cannot mutate client certificate forwarding header {name}",
+      route.name
+    );
+  }
+  Ok(())
+}
+
+fn validate_external_auth_client_certificate_forwarding_conflicts(
+  external_auth: &[ExternalAuthConfig],
+  forwarding_headers: &[HeaderName],
+) -> anyhow::Result<()> {
+  if forwarding_headers.is_empty() {
+    return Ok(());
+  }
+  for auth in external_auth {
+    let conflict = auth
+      .forward_headers
+      .iter()
+      .chain(&auth.identity_headers)
+      .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+      .find(|name| forwarding_headers.contains(name));
+    if let Some(name) = conflict {
+      bail!(
+        "external_auth {} cannot use client certificate forwarding header {name}",
+        auth.name
+      );
+    }
+  }
+  Ok(())
 }

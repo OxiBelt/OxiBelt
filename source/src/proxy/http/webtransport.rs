@@ -43,6 +43,7 @@ pub(crate) struct PreparedWebTransport {
   pub(crate) bandwidth: Arc<RouteBandwidthLimiter>,
   pub(crate) client_addr: std::net::SocketAddr,
   pub(crate) route_name: String,
+  pub(crate) client_certificate_forwarding: bool,
   pub(crate) trace_context: Option<TraceContext>,
   pub(crate) target_url: url::Url,
   pub(crate) headers: http::HeaderMap,
@@ -60,13 +61,26 @@ pub(crate) async fn prepare_webtransport(
   tls: &WafTlsMetadata,
   state: &AppSnapshot,
 ) -> Result<PreparedWebTransport, Box<Response<ProxyBody>>> {
+  let sanitized_request = (!state.client_certificate_forwarding_headers.is_empty()).then(|| {
+    let mut sanitized = request.clone();
+    super::client_certificate::strip_reserved(sanitized.headers_mut(), state);
+    sanitized
+  });
+  let request = sanitized_request.as_ref().unwrap_or(request);
   let mut response_bandwidth: Option<Arc<RouteBandwidthLimiter>> = None;
+  let mut certificate_forwarding_enabled = false;
   macro_rules! preparation_error {
     ($response:expr) => {{
       let response = match response_bandwidth.as_ref() {
         Some(bandwidth) => with_webtransport_bandwidth_context($response, bandwidth.clone()),
         None => $response,
       };
+      let mut response = response;
+      super::client_certificate::finalize_response(
+        &mut response,
+        certificate_forwarding_enabled,
+        state,
+      );
       Box::new(response)
     }};
   }
@@ -137,6 +151,15 @@ pub(crate) async fn prepare_webtransport(
     )));
   };
   response_bandwidth = Some(resolved.bandwidth.clone());
+  certificate_forwarding_enabled = resolved.route.client_certificate_forwarding.is_some();
+  let certificate_forwarding =
+    super::client_certificate::PreparedCertificateForwarding::prepare(request, resolved.route)
+      .map_err(|status| {
+        preparation_error!(text_response(
+          status,
+          "client certificate forwarding failed"
+        ))
+      })?;
   if let Some(response) =
     super::early_data::reject_if_disallowed(request, &state.config, resolved.route)
   {
@@ -691,6 +714,17 @@ pub(crate) async fn prepare_webtransport(
   state
     .telemetry
     .inject_trace_context(&mut headers, trace_context);
+  super::client_certificate::strip_reserved(&mut headers, state);
+  if let Some(prepared) = certificate_forwarding {
+    prepared
+      .apply(&mut headers, &state.config.limits)
+      .map_err(|status| {
+        preparation_error!(text_response(
+          status,
+          "client certificate forwarding failed"
+        ))
+      })?;
+  }
 
   let protocols = parse_webtransport_protocols(&headers);
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
@@ -698,6 +732,7 @@ pub(crate) async fn prepare_webtransport(
     bandwidth: resolved.bandwidth.clone(),
     client_addr,
     route_name: resolved.route.name.clone(),
+    client_certificate_forwarding: certificate_forwarding_enabled,
     trace_context,
     target_url,
     headers,

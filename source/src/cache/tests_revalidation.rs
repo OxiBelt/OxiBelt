@@ -48,6 +48,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   };
   let mut response_headers = HeaderMap::new();
   response_headers.insert(
@@ -79,6 +80,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => entry,
     other => panic!("expected local cache entry before revalidation, got {other:?}"),
@@ -104,6 +106,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      certificate_identity: None,
     })
     .await
   {
@@ -143,6 +146,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
         method: &Method::GET,
         uri: &uri,
         request_headers: &request_headers,
+        certificate_identity: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -160,6 +164,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => entry,
     other => panic!("expected fresh file-backed cache hit, got {other:?}"),
@@ -181,6 +186,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      certificate_identity: None,
     },
     &cached_entry,
     &not_modified_headers,
@@ -193,6 +199,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
       assert_eq!(
@@ -208,4 +215,95 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
     other => panic!("expected revalidated file-backed cache hit, got {other:?}"),
   }
   assert_eq!(cache.stats().disk_entries, 1);
+}
+
+#[test]
+fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
+  let cache = ResponseCache::new(
+    &CacheConfig {
+      enabled: true,
+      ..CacheConfig::default()
+    },
+    None,
+  )
+  .unwrap();
+  let identity = CacheCertificateIdentity::new(
+    "client-cert",
+    "rfc9440",
+    Some("a3dcb4d229de6fde0db5686dee47145dcdc6a1a4ec5a7f5365e5a5df3caa4f4d"),
+  )
+  .unwrap();
+  let uri = "/asset/revalidated-cert.css".parse::<Uri>().unwrap();
+  let request_headers = HeaderMap::new();
+  let mut initial_headers = HeaderMap::new();
+  initial_headers.insert(
+    CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=60"),
+  );
+  initial_headers.insert(
+    HeaderName::from_static("etag"),
+    HeaderValue::from_static("\"v1\""),
+  );
+  initial_headers.insert(
+    HeaderName::from_static("vary"),
+    HeaderValue::from_static("Client-Cert"),
+  );
+  let context = CacheInsertContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &request_headers,
+    certificate_identity: Some(&identity),
+  };
+  assert_eq!(
+    cache.insert(
+      context.clone(),
+      CacheEntry::memory(StatusCode::OK, initial_headers, Bytes::from_static(b"body")),
+    ),
+    CacheInsertOutcome::Stored
+  );
+  let cached = match cache.lookup(CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &request_headers,
+    certificate_identity: Some(&identity),
+  }) {
+    Some(CacheLookup::Fresh(entry)) => entry,
+    other => panic!("expected certificate-aware cache entry, got {other:?}"),
+  };
+  let mut not_modified = HeaderMap::new();
+  not_modified.insert(
+    CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=120"),
+  );
+  not_modified.insert(
+    HeaderName::from_static("etag"),
+    HeaderValue::from_static("\"v2\""),
+  );
+  not_modified.insert(
+    HeaderName::from_static("vary"),
+    HeaderValue::from_static("Client-Cert"),
+  );
+  cache.update_from_not_modified(context, &cached, &not_modified);
+
+  match cache.lookup(CacheLookupContext {
+    policy_name: Some("default"),
+    scheme: "https",
+    host: "example.test",
+    method: &Method::GET,
+    uri: &uri,
+    request_headers: &request_headers,
+    certificate_identity: Some(&identity),
+  }) {
+    Some(CacheLookup::Fresh(entry)) => assert_eq!(
+      entry.headers.get("etag"),
+      Some(&HeaderValue::from_static("\"v2\""))
+    ),
+    other => panic!("expected revalidated certificate-aware cache entry, got {other:?}"),
+  }
 }

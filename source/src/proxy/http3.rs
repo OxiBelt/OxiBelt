@@ -50,7 +50,7 @@ mod upstream_endpoints;
 mod upstream_pool;
 mod webtransport_bridge;
 
-use tls_metadata::downstream_quic_tls_metadata;
+use tls_metadata::{downstream_quic_forwarded_client_certificate, downstream_quic_tls_metadata};
 use upstream_connection::connect_upstream_webtransport;
 pub(crate) use upstream_connection::forward_request;
 pub(crate) use upstream_pool::UpstreamH3Pools;
@@ -114,6 +114,10 @@ pub(crate) async fn handle_downstream_connection(
     .max_webtransport_sessions_per_connection;
   let max_field_section_size = h3_field_section_size(snapshot.config.limits.max_total_header_bytes);
   let tls_metadata = Arc::new(downstream_quic_tls_metadata(&connection));
+  // The connection pins this snapshot; do not capture certificate DER when no route in it can use it.
+  let forwarded_client_certificate = (!snapshot.client_certificate_forwarding_headers.is_empty())
+    .then(|| downstream_quic_forwarded_client_certificate(&connection))
+    .flatten();
   let early_data = crate::quic::h3::EarlyDataTracker::default();
   let downstream_connection = connection.clone();
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
@@ -264,6 +268,9 @@ pub(crate) async fn handle_downstream_connection(
       http_proxy::early_data::mark_verified(&mut request);
     }
     http_proxy::early_data::strip_untrusted_header(request.headers_mut());
+    if let Some(certificate) = &forwarded_client_certificate {
+      request.extensions_mut().insert(certificate.clone());
+    }
 
     if is_webtransport_request(&request) {
       let _overload_request = match snapshot.overload.try_admit_request(::http::Version::HTTP_3) {
@@ -289,6 +296,7 @@ pub(crate) async fn handle_downstream_connection(
         peer_addr,
         udp_connection_id.clone(),
         tls_metadata,
+        forwarded_client_certificate,
         connection_limit_context.clone(),
         snapshot,
         early_data.clone(),

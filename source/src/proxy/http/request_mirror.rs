@@ -79,9 +79,11 @@ pub(super) fn spawn_request_mirrors(
     } else {
       None
     };
+    let mut mirror_request = empty_request_from(outbound);
+    super::client_certificate::strip_reserved(mirror_request.headers_mut(), &state);
     pending.push(PendingMirror {
       pool_name: mirror.upstream_pool.clone(),
-      request: empty_request_from(outbound),
+      request: mirror_request,
       body_receiver,
     });
   }

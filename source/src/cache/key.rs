@@ -2,6 +2,55 @@
 
 use super::*;
 
+const CACHE_CERTIFICATE_DOMAIN: &str = "\0oxibelt-cache-certificate-v1\0";
+const CACHE_PLAIN_KEY_ESCAPE_DOMAIN: &str = "\0oxibelt-cache-plain-key-v1\0";
+
+/// Produces the physical base-key namespace while preserving user-visible
+/// logical cache-key semantics.
+///
+/// Ordinary keys remain byte-for-byte unchanged. Keys containing NUL are
+/// length-prefixed in the plain-key domain first; certificate-aware keys are a
+/// separate length-prefixed tuple. Therefore no user-configured expanded key
+/// can collide with either internal certificate namespace.
+pub(super) fn certificate_partitioned_base_key(
+  base_key: String,
+  certificate_identity: Option<&CacheCertificateIdentity>,
+) -> String {
+  let base_key = escape_plain_base_key(base_key);
+  let Some(identity) = certificate_identity else {
+    return base_key;
+  };
+  let fingerprint = identity.fingerprint_sha256().unwrap_or("absent");
+  format!(
+    "{CACHE_CERTIFICATE_DOMAIN}base:{}:{}header:{}:{}format:{}:{}identity:{}:{}",
+    base_key.len(),
+    base_key,
+    identity.header_name().as_str().len(),
+    identity.header_name().as_str(),
+    identity.format().len(),
+    identity.format(),
+    fingerprint.len(),
+    fingerprint,
+  )
+}
+
+fn escape_plain_base_key(base_key: String) -> String {
+  if !base_key.contains('\0') {
+    return base_key;
+  }
+  let bytes = base_key.as_bytes();
+  let mut encoded =
+    String::with_capacity(CACHE_PLAIN_KEY_ESCAPE_DOMAIN.len() + bytes.len() * 2 + 24);
+  encoded.push_str(CACHE_PLAIN_KEY_ESCAPE_DOMAIN);
+  encoded.push_str(&bytes.len().to_string());
+  encoded.push(':');
+  for byte in bytes {
+    encoded.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
+    encoded.push(char::from(b"0123456789abcdef"[(byte & 0x0f) as usize]));
+  }
+  encoded
+}
+
 pub(super) fn expanded_cache_key(
   template: &str,
   scheme: &str,

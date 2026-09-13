@@ -85,6 +85,7 @@ pub struct AppSnapshot {
   pub route_table: RouteTable,
   pub(crate) sni_forward: SniForwardTable,
   pub(crate) real_ip_policy_selector: crate::identity::RealIpPolicySelector,
+  pub(crate) client_certificate_forwarding_headers: Arc<[http::HeaderName]>,
   pub upstreams: Vec<UpstreamConfig>,
   pub(crate) upstream_uri_parts: HashMap<String, UpstreamUriParts>,
   pub(crate) upstream_uri_parts_by_index: Vec<UpstreamUriParts>,
@@ -665,6 +666,7 @@ impl AppSnapshot {
     )
     .await
     .context("failed to build system access log")?;
+    let client_certificate_forwarding_headers = config.client_certificate_forwarding_headers();
     let request_path_features = RequestPathFeaturePlan::new(
       &config,
       cache.enabled(),
@@ -781,6 +783,7 @@ impl AppSnapshot {
       mitigation,
       access_logs,
       system_access_log,
+      client_certificate_forwarding_headers,
       request_path_features,
       alt_svc_header_values,
       http1_upgrades_possible,
@@ -940,6 +943,7 @@ impl AppSnapshot {
       runtime_health.clone(),
       Some(previous),
     )?;
+    let client_certificate_forwarding_headers = config.client_certificate_forwarding_headers();
     let request_path_features = RequestPathFeaturePlan::new(
       &config,
       previous.cache.enabled(),
@@ -1026,6 +1030,7 @@ impl AppSnapshot {
       mitigation: previous.mitigation.clone(),
       access_logs: previous.access_logs.clone(),
       system_access_log: previous.system_access_log.clone(),
+      client_certificate_forwarding_headers,
       request_path_features,
       alt_svc_header_values,
       http1_upgrades_possible,

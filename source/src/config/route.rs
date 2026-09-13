@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+use super::ClientCertificateForwardingConfig;
 use anyhow::{Context, bail};
 use serde::Deserialize;
 
@@ -80,6 +81,8 @@ pub struct RouteConfig {
   pub grpc_web: bool,
   #[serde(default)]
   pub external_auth: Option<String>,
+  #[serde(default)]
+  pub client_certificate_forwarding: Option<ClientCertificateForwardingConfig>,
   #[serde(default)]
   pub ipm: RouteIpmConfig,
   #[serde(default)]

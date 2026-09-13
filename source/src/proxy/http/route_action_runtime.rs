@@ -242,6 +242,7 @@ mod tests {
 
   fn route_with_actions(actions: RouteActionsConfig) -> RouteConfig {
     RouteConfig {
+      client_certificate_forwarding: None,
       name: "edge".to_string(),
       hosts: vec!["*".to_string()],
       path_prefix: "/".to_string(),

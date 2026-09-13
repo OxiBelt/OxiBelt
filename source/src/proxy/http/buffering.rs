@@ -668,6 +668,7 @@ private_key = "/tmp/key.pem"
       temp_dir: Some(PathBuf::from("/tmp/oxibelt-buffering")),
     };
     let route = RouteConfig {
+      client_certificate_forwarding: None,
       name: "route".to_string(),
       hosts: vec!["example.com".to_string()],
       path_prefix: "/".to_string(),

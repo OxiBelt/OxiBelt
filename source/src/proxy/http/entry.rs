@@ -128,6 +128,7 @@ where
   let downstream_receive_started =
     fast_path::stage_timing::start(state.request_path_features.stage_timing_metrics);
   early_data::strip_untrusted_header(request.headers_mut());
+  client_certificate::strip_reserved(request.headers_mut(), &state);
   if transport_network != WafTransportNetwork::Udp {
     fast_path::stage_timing::record(
       state.as_ref(),

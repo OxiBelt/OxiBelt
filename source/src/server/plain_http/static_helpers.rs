@@ -35,6 +35,9 @@ pub(super) fn sendfile_disabled_reason(
   snapshot: &AppSnapshot,
   kernel_sendfile_available: bool,
 ) -> Option<&'static str> {
+  if !snapshot.client_certificate_forwarding_headers.is_empty() {
+    return Some("client certificate forwarding header ownership");
+  }
   let config = &snapshot.config;
   if config.listeners.http_mode != HttpListenerMode::Proxy {
     return Some("plain listener is not proxy mode");
