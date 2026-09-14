@@ -4157,6 +4157,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     .expect("workflow should define the Kubernetes immutable rollout job");
   let job_text = workflow_job_text(&workflow, "kubernetes-immutable-rollout");
   let script = kubernetes_immutable_rollout_script_text();
+  let download_helper = verified_download_script_text();
   let l4_values = fs::read_to_string(repo_root().join("tests/fixtures/gateway-api-l4-values.yaml"))
     .expect("Gateway API L4 integration values should be readable");
 
@@ -4255,7 +4256,6 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
     "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5",
     "unapproved Kind node image",
-    "sha256sum --check --status",
     "CI event values are untrusted input",
     "OXIBELT_KUBERNETES_ROLLOUT_TIMEOUT_SECONDS must be a decimal value from 60 through 900",
     "controller_readiness_revocation_timeout_seconds=45",
@@ -4487,32 +4487,24 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
       "the Kubernetes rollout must install and wait for the required Gateway API CRD contract {expected}"
     );
   }
+  let helper_source = script
+    .find("source \"${script_dir}/lib/verified-download.sh\"")
+    .expect("the Kubernetes rollout must source the shared verified downloader");
   let gateway_api_download = script
-    .find("curl --fail --location --retry 8")
-    .expect("the Kubernetes rollout must use bounded retries for the pinned Gateway API manifest");
-  let gateway_api_checksum = script
-    .find("printf '%s  %s\\n' \"${gateway_api_sha256}\" \"${gateway_api_manifest}\" | sha256sum --check --status")
-    .expect("the Kubernetes rollout must verify the pinned Gateway API manifest digest");
-  let gateway_api_download_command = &script[gateway_api_download..gateway_api_checksum];
+    .find("download_verified_sha256 \"${gateway_api_url}\" \"${gateway_api_sha256}\" \"${gateway_api_manifest}\"")
+    .expect("the Kubernetes rollout must download the pinned Gateway API manifest through the verifier");
   for expected in [
-    "--retry 8",
-    "--retry-delay 5",
-    "--retry-max-time 90",
-    "--connect-timeout 10",
-    "--max-time 30",
-    "--retry-all-errors",
-    "--output \"${gateway_api_manifest}\"",
-    "\"${gateway_api_url}\"",
+    "--fail --location --silent --show-error",
+    "--retry 8 --retry-all-errors --connect-timeout 10 --max-time 60 --retry-max-time 300",
+    "--output \"${staging}\" \"${url}\"",
+    "sha256sum --check --status",
+    "mv -T --no-clobber -- \"${staging}\" \"${destination}\"",
   ] {
     assert!(
-      gateway_api_download_command.contains(expected),
-      "the pinned Gateway API manifest download must enforce {expected}"
+      download_helper.contains(expected),
+      "the shared verified downloader must enforce {expected}"
     );
   }
-  assert!(
-    !gateway_api_download_command.contains("kind create cluster"),
-    "the Kubernetes rollout must not create the Kind cluster while downloading the manifest"
-  );
   let cluster_create = script
     .find("kind create cluster")
     .expect("the Kubernetes rollout must create its isolated Kind cluster");
@@ -4529,8 +4521,8 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     .find("kube create namespace \"${namespace}\"")
     .expect("the Kubernetes rollout must create its isolated namespace");
   assert!(
-    gateway_api_download < gateway_api_checksum
-      && gateway_api_checksum < cluster_create
+    helper_source < gateway_api_download
+      && gateway_api_download < cluster_create
       && cluster_create < standard_crd_apply
       && standard_crd_apply < oxibelt_crd_apply
       && oxibelt_crd_apply < established_wait

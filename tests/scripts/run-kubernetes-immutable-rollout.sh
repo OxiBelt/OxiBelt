@@ -173,6 +173,9 @@ trap cleanup EXIT
 # shellcheck source=tests/scripts/lib/gateway-verified-client-identity.sh
 source "${script_dir}/lib/gateway-verified-client-identity.sh"
 
+# shellcheck source=tests/scripts/lib/verified-download.sh
+source "${script_dir}/lib/verified-download.sh"
+
 wait_for() {
   local description="$1"
   local timeout_seconds="$2"
@@ -1637,12 +1640,7 @@ external_base_bootstrap_is_unassigned Deployment templates/deployment.yaml \
 external_base_bootstrap_is_unassigned DaemonSet templates/daemonset.yaml \
   || die "external ConfigMap DaemonSet bootstrap must remain unassigned until controller reconciliation"
 
-curl --fail --location --retry 8 --retry-delay 5 --retry-max-time 90 \
-  --connect-timeout 10 --max-time 30 --retry-all-errors \
-  --silent --show-error \
-  --output "${gateway_api_manifest}" \
-  "${gateway_api_url}"
-printf '%s  %s\n' "${gateway_api_sha256}" "${gateway_api_manifest}" | sha256sum --check --status
+download_verified_sha256 "${gateway_api_url}" "${gateway_api_sha256}" "${gateway_api_manifest}"
 
 kind create cluster \
   --name "${cluster_name}" \
