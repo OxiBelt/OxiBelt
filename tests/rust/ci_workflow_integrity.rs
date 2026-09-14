@@ -7265,6 +7265,131 @@ exit 1
 }
 
 #[test]
+fn shared_state_delay_failure_policy_oracle_matches_each_fault_boundary() {
+  let checks_path = repo_root().join("tests/scripts/shared-state-delay-isolation-checks.sh");
+  let run_case = |backend_kind: &str, body: &str| {
+    let response = serde_json::json!({ "body": body }).to_string();
+    Command::new("bash")
+      .arg("-e")
+      .arg("-u")
+      .arg("-o")
+      .arg("pipefail")
+      .arg("-c")
+      .arg(
+        r#"
+source "$1"
+fail_with_diagnostics() {
+  printf '%s\n' "$1" >&2
+  exit 1
+}
+shared_state_delay_assert_failure_policy_observability "$2" "$3"
+"#,
+      )
+      .arg("shared-state-delay-policy-oracle")
+      .arg(&checks_path)
+      .arg(response)
+      .arg(backend_kind)
+      .current_dir(repo_root())
+      .output()
+      .unwrap_or_else(|error| {
+        panic!("shared-state delay policy case {backend_kind} should execute: {error}")
+      })
+  };
+
+  let postgres_valid = concat!(
+    "oxibelt_backend_feature_degraded{mode=\"fail_closed\",kind=\"postgres\",backend=\"cluster\",feature=\"rate_limits\"} 1\n",
+    "oxibelt_backend_failure_policy_applied_total{failure_kind=\"operation_error\",mode=\"fail_closed\",feature=\"rate_limits\",backend=\"cluster\",kind=\"postgres\"} 16\n",
+  );
+  let redis_valid = concat!(
+    "oxibelt_backend_feature_degraded{kind=\"redis\",feature=\"connection_limits\",mode=\"reject_new_only\",backend=\"cluster\"} 1\n",
+    "oxibelt_backend_failure_policy_applied_total{backend=\"cluster\",failure_kind=\"operation_error\",kind=\"redis\",mode=\"reject_new_only\",feature=\"connection_limits\"} 1\n",
+  );
+
+  for (backend_kind, body) in [("postgres", postgres_valid), ("redis", redis_valid)] {
+    let output = run_case(backend_kind, body);
+    assert!(
+      output.status.success(),
+      "valid reordered {backend_kind} policy metrics should pass: {}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+
+  let postgres_counter = |value: &str| {
+    format!(
+      "oxibelt_backend_feature_degraded{{feature=\"rate_limits\",backend=\"cluster\",kind=\"postgres\",mode=\"fail_closed\"}} 1\noxibelt_backend_failure_policy_applied_total{{feature=\"rate_limits\",backend=\"cluster\",kind=\"postgres\",mode=\"fail_closed\",failure_kind=\"operation_error\"}} {value}\n"
+    )
+  };
+  let postgres_gauge = |value: &str| {
+    format!(
+      "oxibelt_backend_feature_degraded{{feature=\"rate_limits\",backend=\"cluster\",kind=\"postgres\",mode=\"fail_closed\"}} {value}\noxibelt_backend_failure_policy_applied_total{{feature=\"rate_limits\",backend=\"cluster\",kind=\"postgres\",mode=\"fail_closed\",failure_kind=\"operation_error\"}} 1\n"
+    )
+  };
+
+  let negative_cases = vec![
+    (
+      "old postgres connection-limit oracle",
+      "postgres",
+      concat!(
+        "oxibelt_backend_feature_degraded{feature=\"connection_limits\",backend=\"cluster\",kind=\"postgres\",mode=\"reject_new_only\"} 1\n",
+        "oxibelt_backend_failure_policy_applied_total{feature=\"connection_limits\",backend=\"cluster\",kind=\"postgres\",mode=\"reject_new_only\",failure_kind=\"operation_error\"} 1\n",
+      )
+      .to_string(),
+    ),
+    ("unknown backend kind", "unknown", postgres_valid.to_string()),
+    (
+      "wrong mode",
+      "postgres",
+      postgres_valid.replace("mode=\"fail_closed\"", "mode=\"reject_new_only\""),
+    ),
+    (
+      "backend lookalike",
+      "postgres",
+      postgres_valid.replace("backend=\"cluster\"", "backend=\"cluster-extra\""),
+    ),
+    (
+      "kind lookalike",
+      "postgres",
+      postgres_valid.replace("kind=\"postgres\"", "kind=\"postgres-extra\""),
+    ),
+    (
+      "feature lookalike",
+      "postgres",
+      postgres_valid.replace("feature=\"rate_limits\"", "feature=\"rate_limits_extra\""),
+    ),
+    (
+      "failure-kind lookalike",
+      "postgres",
+      postgres_valid.replace(
+        "failure_kind=\"operation_error\"",
+        "failure_kind=\"operation_error_extra\"",
+      ),
+    ),
+    ("missing counter", "postgres", postgres_valid.lines().next().unwrap().to_string()),
+    ("missing metrics", "postgres", String::new()),
+    ("zero gauge", "postgres", postgres_gauge("0")),
+    ("non-binary gauge", "postgres", postgres_gauge("10")),
+  ];
+
+  for value in ["0", "01", "1.0", "+1", "-1", "1e1"] {
+    let output = run_case("postgres", &postgres_counter(value));
+    assert!(
+      !output.status.success(),
+      "counter value {value:?} must be rejected: {}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+
+  for (label, backend_kind, body) in negative_cases {
+    let output = run_case(backend_kind, &body);
+    assert!(
+      !output.status.success(),
+      "{label} must be rejected: {}",
+      String::from_utf8_lossy(&output.stderr)
+    );
+  }
+}
+
+#[test]
 fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
   let workflow = workflow_text();
   let jobs = parse_jobs(&workflow);

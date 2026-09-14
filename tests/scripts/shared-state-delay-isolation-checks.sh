@@ -52,25 +52,39 @@ shared_state_delay_timeout_metric_present() {
 shared_state_delay_assert_failure_policy_observability() {
   local response="$1"
   local backend_kind="$2"
-  local metrics
+  local metrics feature mode
+  # These expectations describe the two fixtures' injection boundaries:
+  # PostgreSQL locks the rate-bucket table; Redis pauses all commands and
+  # therefore rejects connections before HTTP rate limiting is reached.
+  case "${backend_kind}" in
+    postgres) feature=rate_limits; mode=fail_closed ;;
+    redis) feature=connection_limits; mode=reject_new_only ;;
+    *)
+      fail_with_diagnostics "unsupported shared-state delay backend kind: ${backend_kind}"
+      return 1
+      ;;
+  esac
   metrics="$(jq -r '.body' <<<"${response}")"
-  if ! grep -F 'oxibelt_backend_feature_degraded{' <<<"${metrics}" \
-    | grep -F 'feature="connection_limits"' \
-    | grep -F 'backend="cluster"' \
-    | grep -F "kind=\"${backend_kind}\"" \
-    | grep -F 'mode="reject_new_only"' \
-    | grep -F ' 1' >/dev/null; then
+  if ! awk -v feature="${feature}" -v mode="${mode}" -v kind="${backend_kind}" '
+    function has_label(name, value) {
+      return index(labels, "," name "=\"" value "\",") > 0
+    }
+    NF == 2 && $1 ~ /}$/ {
+      brace = index($1, "{")
+      if (brace == 0) next
+      metric = substr($1, 1, brace - 1)
+      labels = "," substr($1, brace + 1, length($1) - brace - 1) ","
+      if (!has_label("feature", feature) || !has_label("mode", mode) ||
+          !has_label("backend", "cluster") || !has_label("kind", kind)) next
+      if (metric == "oxibelt_backend_feature_degraded" && $2 ~ /^1$/) degraded = 1
+      if (metric == "oxibelt_backend_failure_policy_applied_total" &&
+          has_label("failure_kind", "operation_error") && $2 ~ /^[1-9][0-9]*$/) applied = 1
+    }
+    END { exit !(degraded && applied) }
+  ' <<<"${metrics}"; then
     printf '%s\n' "${metrics}" >&2
-    fail_with_diagnostics "expected degraded connection-limit backend policy metric after delay"
-  fi
-  if ! grep -F 'oxibelt_backend_failure_policy_applied_total{' <<<"${metrics}" \
-    | grep -F 'feature="connection_limits"' \
-    | grep -F 'backend="cluster"' \
-    | grep -F "kind=\"${backend_kind}\"" \
-    | grep -F 'mode="reject_new_only"' \
-    | grep -F 'failure_kind="operation_error"' >/dev/null; then
-    printf '%s\n' "${metrics}" >&2
-    fail_with_diagnostics "expected bounded backend failure-policy counter after delay"
+    fail_with_diagnostics "expected degraded ${feature}/${mode} policy and positive operation_error counter after ${backend_kind} delay"
+    return 1
   fi
 }
 
