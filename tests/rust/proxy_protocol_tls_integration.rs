@@ -340,15 +340,24 @@ async fn connect_tunnel_writes_local_tls_tlv_before_opaque_payload() {
     .await
     .expect("CONNECT TLS handshake should complete");
   stream
-    .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+    .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\nping")
     .await
-    .expect("CONNECT request should write");
+    .expect("CONNECT request and optimistic tunnel payload should write");
   let response = read_http_header_block(&mut stream).await;
   assert_eq!(response_status(&response), 200);
-  stream
-    .write_all(b"ping")
-    .await
-    .expect("CONNECT tunnel payload should write");
+  let response_headers = std::str::from_utf8(&response).expect("CONNECT response should be ASCII");
+  assert!(
+    !response_headers.lines().any(|line| line
+      .split_once(':')
+      .is_some_and(|(name, _)| name.eq_ignore_ascii_case("content-length"))),
+    "successful CONNECT response must not frame a message body with Content-Length"
+  );
+  assert!(
+    !response_headers.lines().any(|line| line
+      .split_once(':')
+      .is_some_and(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))),
+    "successful CONNECT response must not frame a message body with Transfer-Encoding"
+  );
   let mut echo = [0u8; 4];
   tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut echo))
     .await
@@ -362,6 +371,114 @@ async fn connect_tunnel_writes_local_tls_tlv_before_opaque_payload() {
     .expect("backend observer should remain available");
   assert_ssl_header(&request.proxy_header, "", false);
   assert_eq!(request.request, b"ping");
+
+  server_task.abort();
+  backend_task.abort();
+}
+
+#[tokio::test]
+async fn connect_tunnel_dial_failure_rejects_optimistic_bytes_and_closes() {
+  let temporary = common::TempDir::new("proxy-protocol-local-tls-connect-failure");
+  let (ca_certificate, ca_key) =
+    common::create_self_signed_cert(temporary.path(), "local-connect-failure-ca");
+  let (certificate, key) = common::create_ca_signed_server_cert(
+    temporary.path(),
+    "local-connect-failure.example",
+    &ca_certificate,
+    &ca_key,
+  );
+  let (backend_addr, mut observed, backend_task) = observing_backend().await;
+  let failed_backend_addr = unused_loopback_addr().await;
+  let https_addr = unused_loopback_addr().await;
+  let raw = format!(
+    r#"{}
+
+[[upstreams]]
+name = "connect-failure"
+origin = "http://{failed_backend_addr}"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+proxy_protocol_egress = "v2"
+
+[[routes]]
+name = "connect-failure-route"
+hosts = ["connect-failure.example"]
+path_prefix = "/"
+upstream = "connect-failure"
+connect_tunneling = true
+"#,
+    connect_tls_proxy_config(&certificate, &key, https_addr, backend_addr),
+  );
+  let server_task = start_server(&raw).await;
+
+  let client_config =
+    tls::build_upstream_client_config(&[ca_certificate], &UpstreamEchConfig::default())
+      .expect("test client trust store should accept the generated certificate");
+  let stream = connect_with_retry(https_addr, &server_task).await;
+  let mut stream = TlsConnector::from(Arc::new(client_config))
+    .connect("local-connect-failure.example".try_into().unwrap(), stream)
+    .await
+    .expect("CONNECT TLS handshake should complete");
+  stream
+    .write_all(
+      b"CONNECT connect-failure.example:443 HTTP/1.1\r\nHost: connect-failure.example:443\r\nContent-Length: 0\r\n\r\nGET /second-dispatch HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await
+    .expect("CONNECT request and optimistic HTTP payload should write");
+
+  let response_headers = read_http_header_block(&mut stream).await;
+  assert_eq!(response_status(&response_headers), 502);
+  let response = std::str::from_utf8(&response_headers)
+    .expect("CONNECT failure response headers should be ASCII");
+  assert!(
+    response
+      .lines()
+      .any(|line| line.eq_ignore_ascii_case("connection: close")),
+    "failed CONNECT must close the HTTP/1 connection after rejecting optimistic bytes"
+  );
+  let body_length = response
+    .lines()
+    .find_map(|line| {
+      line
+        .split_once(':')
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+    })
+    .expect("CONNECT failure response should have a bounded body");
+  let mut response_body = vec![0u8; body_length];
+  tokio::time::timeout(
+    Duration::from_secs(2),
+    stream.read_exact(&mut response_body),
+  )
+  .await
+  .unwrap_or_else(|error| {
+    panic!("CONNECT failure response body timed out; headers: {response}; error: {error}")
+  })
+  .unwrap_or_else(|error| {
+    panic!("CONNECT failure response body was incomplete; headers: {response}; error: {error}")
+  });
+  assert!(
+    String::from_utf8_lossy(&response_body).contains("failed to establish CONNECT tunnel"),
+    "CONNECT failure response should explain the upstream connection failure"
+  );
+  let mut trailing = [0u8; 1];
+  match tokio::time::timeout(Duration::from_secs(2), stream.read(&mut trailing)).await {
+    Ok(Ok(0)) => {}
+    Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+    Ok(Ok(read)) => {
+      panic!("optimistic bytes produced {read} bytes after the failed CONNECT response")
+    }
+    Ok(Err(error)) => panic!("failed CONNECT response read returned an error: {error}"),
+    Err(_) => panic!("failed CONNECT response did not close the downstream connection"),
+  }
+  assert!(
+    tokio::time::timeout(Duration::from_millis(200), observed.recv())
+      .await
+      .is_err(),
+    "the optimistic second request must not reach the healthy route upstream"
+  );
 
   server_task.abort();
   backend_task.abort();
@@ -1049,9 +1166,9 @@ where
   S: tokio::io::AsyncRead + Unpin,
 {
   let mut response = Vec::new();
-  let mut buffer = [0u8; 1024];
   loop {
-    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buffer))
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
       .await
       .expect("HTTP response headers should arrive before the test deadline")
       .expect("HTTP response headers should read");
@@ -1059,8 +1176,12 @@ where
       read > 0,
       "connection closed before CONNECT response headers"
     );
-    response.extend_from_slice(&buffer[..read]);
-    if response.windows(4).any(|window| window == b"\r\n\r\n") {
+    response.push(byte[0]);
+    assert!(
+      response.len() <= 65536,
+      "HTTP response headers are too large"
+    );
+    if response.ends_with(b"\r\n\r\n") {
       return response;
     }
   }

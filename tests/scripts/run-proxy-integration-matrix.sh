@@ -1394,6 +1394,20 @@ connect_tunnel_request() {
 }
 
 connect_tunnel_request_with_headers() {
+  connect_tunnel_request_mode 0 "$@"
+}
+
+connect_tunnel_optimistic_request() {
+  connect_tunnel_optimistic_request_with_headers "$1" "$2" "$3"
+}
+
+connect_tunnel_optimistic_request_with_headers() {
+  connect_tunnel_request_mode 1 "$@"
+}
+
+connect_tunnel_request_mode() {
+  local optimistic="$1"
+  shift
   local host="$1"
   local tunneled_path="$2"
   local expect_status="$3"
@@ -1406,6 +1420,10 @@ connect_tunnel_request_with_headers() {
   local output=""
   local status=0
   local client_container=""
+  local optimistic_args=()
+  if [[ "${optimistic}" == "1" ]]; then
+    optimistic_args+=(--optimistic-connect-tunnel)
+  fi
 
   for attempt in $(seq 1 30); do
     client_container="$(unique_docker_container_name "oxibelt-connect-client" "${attempt}")"
@@ -1424,6 +1442,7 @@ connect_tunnel_request_with_headers() {
       --body "" \
       --ca-file /tmp/proxy-ca.pem \
       --connect-tunnel \
+      "${optimistic_args[@]}" \
       --dump-response-json \
       --expect-status "${expect_status}" \
       "${header_args[@]}" >/dev/null

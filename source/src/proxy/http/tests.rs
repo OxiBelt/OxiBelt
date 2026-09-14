@@ -194,6 +194,50 @@ async fn tunnel_connection_limit_hold_keeps_first_request_context_until_drop() {
   assert!(limit_state.acquire_ip_connection(ip, &limits, &[]).is_ok());
 }
 
+#[tokio::test]
+async fn failed_tunnel_dial_permit_can_cover_a_pending_rejection_body() {
+  let limits = crate::config::LimitsConfig {
+    max_connections: 10,
+    max_connections_per_ip: 1,
+    ..crate::config::LimitsConfig::default()
+  };
+  let limit_state = crate::limits::LimitState::new(None);
+  let ip = "203.0.113.12".parse().unwrap();
+  let mut request_permit = Some(
+    limit_state
+      .acquire_ip_connection(ip, &limits, &[])
+      .expect("initial request permit should be acquired"),
+  );
+  let (_body_sender, pending_body) = body::channel_body(1);
+  let response = Response::new(pending_body);
+
+  // A failed pre-tunnel dial leaves the permit for the outer response wrapper.
+  let permit = request_permit
+    .take()
+    .expect("dial failure should leave the request permit available");
+  let mut response = with_connection_permit(response, permit);
+  assert_eq!(
+    limit_state.acquire_ip_connection(ip, &limits, &[]).err(),
+    Some(StatusCode::TOO_MANY_REQUESTS)
+  );
+  assert!(
+    tokio::time::timeout(
+      std::time::Duration::from_millis(10),
+      response.body_mut().frame()
+    )
+    .await
+    .is_err(),
+    "the test response body should remain pending"
+  );
+  assert_eq!(
+    limit_state.acquire_ip_connection(ip, &limits, &[]).err(),
+    Some(StatusCode::TOO_MANY_REQUESTS)
+  );
+
+  drop(response);
+  assert!(limit_state.acquire_ip_connection(ip, &limits, &[]).is_ok());
+}
+
 #[test]
 fn effective_timeouts_prefer_route_overrides() {
   let temp_dir = common::TempDir::new("effective-timeouts");

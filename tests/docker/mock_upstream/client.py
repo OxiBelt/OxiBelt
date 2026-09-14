@@ -253,6 +253,51 @@ def read_http_response(sock, method="GET", hold_after_headers_ms=0):
   return response, response.read()
 
 
+class RawHttpResponse:
+  def __init__(self, status, reason, headers):
+    self.status = status
+    self.reason = reason
+    self._headers = headers
+
+  def getheaders(self):
+    return self._headers
+
+
+def _recv_exact(sock, length):
+  chunks = bytearray()
+  while len(chunks) < length:
+    chunk = sock.recv(length - len(chunks))
+    if not chunk:
+      raise EOFError("connection closed before the HTTP response body completed")
+    chunks.extend(chunk)
+  return bytes(chunks)
+
+
+def _read_raw_http_response_head(sock):
+  header_block = bytearray()
+  while not header_block.endswith(b"\r\n\r\n"):
+    byte = sock.recv(1)
+    if not byte:
+      raise EOFError("connection closed before the HTTP response headers completed")
+    header_block.extend(byte)
+    if len(header_block) > 65536:
+      raise ValueError("HTTP response headers are too large")
+
+  lines = bytes(header_block[:-4]).decode("iso-8859-1").split("\r\n")
+  status_parts = lines[0].split(" ", 2)
+  if len(status_parts) < 2:
+    raise ValueError("invalid HTTP response status line")
+  status = int(status_parts[1])
+  reason = status_parts[2] if len(status_parts) == 3 else ""
+  headers = []
+  for line in lines[1:]:
+    if ":" not in line:
+      raise ValueError("invalid HTTP response header")
+    name, value = line.split(":", 1)
+    headers.append((name, value.strip()))
+  return RawHttpResponse(status, reason, headers)
+
+
 def response_document(response, response_body_bytes):
   return {
     "status": response.status,
@@ -275,14 +320,6 @@ def perform_connect_tunnel(args, host_header, target_path, headers):
       if name.lower() not in {"host", "content-length"}:
         request_lines.append(f"{name}: {value}")
     request = ("\r\n".join(request_lines) + "\r\n\r\n").encode("utf-8")
-    sock.sendall(request)
-    response = http.client.HTTPResponse(sock)
-    response.begin()
-    if response.status != 200:
-      return response, response.read()
-    if args.hold_after_headers_ms > 0:
-      time.sleep(args.hold_after_headers_ms / 1000.0)
-
     tunneled = (
       f"GET {target_path} HTTP/1.1\r\n"
       "Host: tunnel-upstream\r\n"
@@ -290,7 +327,38 @@ def perform_connect_tunnel(args, host_header, target_path, headers):
       "Content-Length: 0\r\n"
       "\r\n"
     ).encode("ascii")
-    sock.sendall(tunneled)
+    if args.optimistic_connect_tunnel:
+      sock.sendall(request + tunneled)
+      response = _read_raw_http_response_head(sock)
+    else:
+      sock.sendall(request)
+      response = http.client.HTTPResponse(sock)
+      response.begin()
+    if response.status != 200:
+      if args.optimistic_connect_tunnel:
+        response_headers = {
+          name.lower(): value for name, value in response.getheaders()
+        }
+        if "content-length" not in response_headers:
+          raise AssertionError(
+            "optimistic CONNECT rejection requires a bounded Content-Length body"
+          )
+        response_body = _recv_exact(
+          sock, int(response_headers["content-length"])
+        )
+        sock.settimeout(args.timeout)
+        trailing = sock.recv(1)
+        if trailing:
+          raise AssertionError(
+            "optimistic CONNECT data produced bytes after the rejected response"
+          )
+      else:
+        response_body = response.read()
+      return response, response_body
+    if args.hold_after_headers_ms > 0:
+      time.sleep(args.hold_after_headers_ms / 1000.0)
+    if not args.optimistic_connect_tunnel:
+      sock.sendall(tunneled)
     return read_http_response(sock)
   finally:
     sock.close()
@@ -351,6 +419,7 @@ def main() -> int:
   parser.add_argument("--scheme", choices=("http", "https"), default="https")
   parser.add_argument("--proxy-protocol-line")
   parser.add_argument("--connect-tunnel", action="store_true")
+  parser.add_argument("--optimistic-connect-tunnel", action="store_true")
   parser.add_argument("--upgrade-token")
   parser.add_argument("--upgrade-headers-only", action="store_true")
   parser.add_argument("--signal-upgrade-ready", action="store_true")
@@ -383,6 +452,8 @@ def main() -> int:
       raise ValueError("--signal-upgrade-ready requires --upgrade-token")
     if args.signal_upgrade_ready and args.connect_tunnel:
       raise ValueError("--signal-upgrade-ready cannot be combined with --connect-tunnel")
+    if args.optimistic_connect_tunnel and not args.connect_tunnel:
+      raise ValueError("--optimistic-connect-tunnel requires --connect-tunnel")
     if args.upgrade_headers_only and not args.upgrade_token:
       raise ValueError("--upgrade-headers-only requires --upgrade-token")
     if args.upgrade_headers_only and args.signal_upgrade_ready:

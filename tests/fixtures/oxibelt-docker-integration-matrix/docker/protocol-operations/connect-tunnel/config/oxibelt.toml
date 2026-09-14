@@ -50,9 +50,24 @@ websocket = true
 webrtc = true
 webtransport = true
 
+[[upstreams]]
+name = "connect-failure-upstream"
+origin = "http://127.0.0.1:1"
+max_http_version = "h1"
+connect_timeout_ms = 1000
+request_timeout_ms = 30000
+preserve_host = false
+
 [[routes]]
 name = "connect-route"
 hosts = ["example.test"]
 path_prefix = "/"
 upstream = "http-upstream"
+connect_tunneling = true
+
+[[routes]]
+name = "connect-failure-route"
+hosts = ["connect-failure.example.test"]
+path_prefix = "/"
+upstream = "connect-failure-upstream"
 connect_tunneling = true

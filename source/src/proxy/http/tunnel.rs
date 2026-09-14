@@ -89,6 +89,32 @@ pub(super) async fn handle_connect_request(
   let pool_selection = selected.into_pool_selection();
   let upstream_resolution = state.config.proxy.upstream_resolution.clone();
   if request_version == http::Version::HTTP_11 || request_version == http::Version::HTTP_10 {
+    let upstream_stream = match dial_tunnel_upstream(
+      &upstream,
+      &upstream_resolution,
+      client_addr,
+      timeouts,
+      connection_admission,
+      prepared_tls,
+    )
+    .await
+    {
+      Ok(upstream_stream) => upstream_stream,
+      Err(error) => {
+        pool_report.report_failure_async(&upstream.name).await;
+        warn!(upstream = %upstream.name, error = %error, "failed to establish CONNECT tunnel");
+        access_log.record_upstream_error("connect_error", &error.to_string());
+        let mut response = route_security.text(
+          StatusCode::BAD_GATEWAY,
+          "failed to establish CONNECT tunnel",
+        );
+        response.headers_mut().insert(
+          http::header::CONNECTION,
+          http::HeaderValue::from_static("close"),
+        );
+        return response;
+      }
+    };
     let downstream_upgrade = hyper::upgrade::on(&mut request);
     let connection_limit_hold =
       TunnelConnectionLimitHold::capture(request_connection_permit, connection_limit_context);
@@ -99,15 +125,6 @@ pub(super) async fn handle_connect_request(
       let result = async {
         let downstream = downstream_upgrade.await?;
         let downstream = TokioIo::new(downstream);
-        let upstream_stream = dial_tunnel_upstream(
-          &upstream,
-          &upstream_resolution,
-          client_addr,
-          timeouts,
-          connection_admission,
-          prepared_tls,
-        )
-        .await?;
         copy_bidirectional_with_idle_and_bandwidth(
           downstream,
           upstream_stream,
