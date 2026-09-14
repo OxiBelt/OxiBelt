@@ -65,6 +65,8 @@ struct ClientArgs {
   completion_port: u16,
   expected_status: StatusCode,
   response_mode: ResponseMode,
+  expected_proxy_status: Option<String>,
+  expected_cache_status: Option<String>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -150,6 +152,8 @@ pub(crate) async fn client(mut values: impl Iterator<Item = String>) -> anyhow::
   let mut completion_port = None;
   let mut expected_status = StatusCode::OK;
   let mut response_mode = ResponseMode::Duplex;
+  let mut expected_proxy_status = None;
+  let mut expected_cache_status = None;
   while let Some(flag) = values.next() {
     let value = values
       .next()
@@ -171,6 +175,8 @@ pub(crate) async fn client(mut values: impl Iterator<Item = String>) -> anyhow::
           .context("unsupported --expect-status")?
       }
       "--response-mode" => response_mode = ResponseMode::parse(&value)?,
+      "--expect-proxy-status" => expected_proxy_status = Some(value),
+      "--expect-cache-status" => expected_cache_status = Some(value),
       _ => bail!("unknown Incremental client option: {flag}"),
     }
   }
@@ -186,6 +192,8 @@ pub(crate) async fn client(mut values: impl Iterator<Item = String>) -> anyhow::
     completion_port: completion_port.ok_or_else(|| anyhow!("--completion-port is required"))?,
     expected_status,
     response_mode,
+    expected_proxy_status,
+    expected_cache_status,
   };
   match args.protocol {
     Protocol::H1 => client_h1(&args).await,
@@ -200,6 +208,7 @@ fn response() -> anyhow::Result<Response<()>> {
   Response::builder()
     .status(StatusCode::OK)
     .header("incremental", "?1")
+    .header("cache-status", "incremental; hit")
     .header("content-type", "text/plain")
     .body(())
     .context("build Incremental response")
@@ -227,6 +236,70 @@ fn assert_incremental(headers: &http::HeaderMap) -> anyhow::Result<()> {
     bail!("response did not preserve Incremental: ?1")
   }
   Ok(())
+}
+fn assert_expected_header<'a>(
+  name: &str,
+  expected: Option<&str>,
+  values: impl Iterator<Item = anyhow::Result<&'a str>>,
+) -> anyhow::Result<()> {
+  let Some(expected) = expected else {
+    return Ok(());
+  };
+  let values = values.collect::<anyhow::Result<Vec<_>>>()?;
+  if values != [expected] {
+    bail!(
+      "response {name} was {:?}, expected exactly {expected:?}",
+      values
+    )
+  }
+  Ok(())
+}
+fn assert_expected_status_headers(
+  headers: &http::HeaderMap,
+  args: &ClientArgs,
+) -> anyhow::Result<()> {
+  assert_expected_header(
+    "Proxy-Status",
+    args.expected_proxy_status.as_deref(),
+    headers
+      .get_all("proxy-status")
+      .iter()
+      .map(|value| value.to_str().context("Proxy-Status was not UTF-8")),
+  )?;
+  assert_expected_header(
+    "Cache-Status",
+    args.expected_cache_status.as_deref(),
+    headers
+      .get_all("cache-status")
+      .iter()
+      .map(|value| value.to_str().context("Cache-Status was not UTF-8")),
+  )
+}
+fn h1_header_values<'a>(response: &'a str, name: &str) -> Vec<&'a str> {
+  response
+    .lines()
+    .skip(1)
+    .filter_map(|line| {
+      let (field, value) = line.split_once(':')?;
+      field.eq_ignore_ascii_case(name).then_some(value.trim())
+    })
+    .collect()
+}
+fn assert_expected_h1_status_headers(response: &str, args: &ClientArgs) -> anyhow::Result<()> {
+  assert_expected_header(
+    "Proxy-Status",
+    args.expected_proxy_status.as_deref(),
+    h1_header_values(response, "proxy-status")
+      .into_iter()
+      .map(Ok),
+  )?;
+  assert_expected_header(
+    "Cache-Status",
+    args.expected_cache_status.as_deref(),
+    h1_header_values(response, "cache-status")
+      .into_iter()
+      .map(Ok),
+  )
 }
 #[track_caller]
 fn within<T>(
@@ -373,7 +446,7 @@ async fn h1_server_exchange<S: AsyncRead + AsyncWrite + Unpin>(
     expect_h1_end(&mut stream).await?;
     return notify_completion(completions).await;
   }
-  stream.write_all(b"HTTP/1.1 200 OK\r\nIncremental: ?1\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n3\r\none\r\n").await.context("send first Incremental H1 response")?;
+  stream.write_all(b"HTTP/1.1 200 OK\r\nIncremental: ?1\r\nCache-Status: incremental; hit\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n3\r\none\r\n").await.context("send first Incremental H1 response")?;
   stream
     .flush()
     .await
@@ -429,6 +502,7 @@ async fn client_h1(args: &ClientArgs) -> anyhow::Result<()> {
   {
     bail!("Incremental H1 response headers invalid")
   }
+  assert_expected_h1_status_headers(response_text, args)?;
   if args.expected_status == StatusCode::NO_CONTENT {
     write_h1_chunk(&mut stream, SECOND).await?;
     write_h1_chunk(&mut stream, LAST).await?;
@@ -712,6 +786,7 @@ async fn client_h2(args: &ClientArgs) -> anyhow::Result<()> {
   })
   .await?;
   assert_incremental(response.headers())?;
+  assert_expected_status_headers(response.headers(), args)?;
   let (_, mut download) = response.into_parts();
   expect_h2_data(&mut download, FIRST).await?;
   upload
@@ -951,6 +1026,7 @@ async fn client_h3(args: &ClientArgs) -> anyhow::Result<()> {
   })
   .await?;
   assert_incremental(response.headers())?;
+  assert_expected_status_headers(response.headers(), args)?;
   if response.status() != args.expected_status {
     bail!(
       "Incremental H3 response status was {}, expected {}",

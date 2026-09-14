@@ -105,6 +105,19 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "http-semantics",
+      "status-headers",
+      "status headers preserve received chains and report every Incremental protocol pair",
+      ExpectStart::Success,
+      Needs {
+        protocol_probe: true,
+        incremental_upstreams: true,
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "http-semantics",
       "incremental-rfc10036-unpooled",
       "RFC 10036 Incremental keeps unpooled HTTP/3 upstream uploads alive after early responses",
       ExpectStart::Success,

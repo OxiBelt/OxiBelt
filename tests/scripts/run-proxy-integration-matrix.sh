@@ -1488,6 +1488,11 @@ incremental_probe_client() {
   local path="$2"
   local expect_status="${3:-200}"
   local response_mode="${4:-duplex}"
+  if (($# > 4)); then
+    shift 4
+  else
+    set --
+  fi
   local completion_host
   case "${path}" in
     /h1/*) completion_host="incremental-h1" ;;
@@ -1513,7 +1518,8 @@ incremental_probe_client() {
     --completion-host "${completion_host}" \
     --completion-port 19000 \
     --expect-status "${expect_status}" \
-    --response-mode "${response_mode}" >/dev/null
+    --response-mode "${response_mode}" \
+    "$@" >/dev/null
   docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
   if ! docker_start_stdout_only "${client_container}"; then
     append_container_stderr "${client_container}"
