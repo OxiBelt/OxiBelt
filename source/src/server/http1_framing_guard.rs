@@ -40,6 +40,9 @@ enum ReadState {
   ChunkedBody(ChunkDecoder),
   AwaitingTunnelResponse(ResponseHeadParser),
   Passthrough,
+  // Reads report EOF so Hyper closes after its current response, while writes
+  // still reach the peer until that rejection response body is complete.
+  TerminalConnectRejection,
   Rejecting {
     response: &'static [u8],
     offset: usize,
@@ -124,13 +127,24 @@ impl<I> Http1FramingGuard<I> {
   }
 
   fn observe_written_response(&mut self, bytes: &[u8]) {
-    let outcome = match &mut self.state {
-      ReadState::AwaitingTunnelResponse(parser) => parser.consume(bytes),
+    let (outcome, tunnel_kind) = match &mut self.state {
+      ReadState::AwaitingTunnelResponse(parser) => (parser.consume(bytes), parser.kind()),
       _ => return,
     };
+    if matches!(outcome, ResponseHeadOutcome::ConnectRejectionPending) {
+      self.buffered.clear();
+      self.buffered_offset = 0;
+      return;
+    }
     self.state = match outcome {
       ResponseHeadOutcome::Pending => return,
+      ResponseHeadOutcome::ConnectRejectionPending => unreachable!("handled above"),
       ResponseHeadOutcome::Accepted => ReadState::Passthrough,
+      ResponseHeadOutcome::Rejected if tunnel_kind == TunnelKind::Connect => {
+        self.buffered.clear();
+        self.buffered_offset = 0;
+        ReadState::TerminalConnectRejection
+      }
       ResponseHeadOutcome::Rejected => ReadState::Head,
       ResponseHeadOutcome::Invalid => ReadState::Rejected,
     };
@@ -229,6 +243,10 @@ where
         }
         ReadState::Rejected => {
           this.state = ReadState::Rejected;
+          return Poll::Ready(Ok(()));
+        }
+        ReadState::TerminalConnectRejection => {
+          this.state = ReadState::TerminalConnectRejection;
           return Poll::Ready(Ok(()));
         }
         awaiting @ ReadState::AwaitingTunnelResponse(_) => {
@@ -450,7 +468,10 @@ fn classify_head(head: &[u8]) -> HeadDisposition {
   {
     return HeadDisposition::Reject;
   }
-  let connect = method.eq_ignore_ascii_case(b"CONNECT");
+  // HTTP method tokens are case-sensitive. Treating an extension method such
+  // as `connect` as CONNECT would switch the guard to tunnel passthrough after
+  // an ordinary 2xx response and disable framing checks on later requests.
+  let connect = method == b"CONNECT";
   let mut has_transfer_encoding = false;
   let mut final_transfer_coding: Option<&[u8]> = None;
   let mut content_length = None;

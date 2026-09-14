@@ -4,12 +4,12 @@
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use http::Request;
 use http::header::{
   AUTHORIZATION, CONNECTION, COOKIE, FORWARDED, HOST, HeaderMap, HeaderName, HeaderValue,
   PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use http::uri::Authority;
+use http::{Method, Request, Version};
 use oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet;
 
 use crate::config::{
@@ -85,6 +85,12 @@ pub(crate) fn validate_authority_host_consistency<B>(
   if hosts.next().is_some() {
     return Err(HostConsistencyError);
   }
+  if matches!(request.method(), &Method::CONNECT)
+    && matches!(request.version(), Version::HTTP_10 | Version::HTTP_11)
+  {
+    return validate_http1_connect_authority(request, host);
+  }
+
   let Some(authority) = request.uri().authority() else {
     return Ok(());
   };
@@ -98,6 +104,82 @@ pub(crate) fn validate_authority_host_consistency<B>(
   } else {
     Err(HostConsistencyError)
   }
+}
+
+fn validate_http1_connect_authority<B>(
+  request: &Request<B>,
+  host: Option<&HeaderValue>,
+) -> Result<(), HostConsistencyError> {
+  let uri = request.uri();
+  if uri.scheme().is_some() || uri.path_and_query().is_some() {
+    return Err(HostConsistencyError);
+  }
+  let authority = uri.authority().ok_or(HostConsistencyError)?;
+  let target = explicit_connect_authority(authority.as_str())?;
+
+  match (request.version(), host) {
+    (Version::HTTP_11, None) => Err(HostConsistencyError),
+    (Version::HTTP_10, None) => Ok(()),
+    (Version::HTTP_10 | Version::HTTP_11, Some(host)) => {
+      let host = host.to_str().map_err(|_| HostConsistencyError)?;
+      let host = connect_host_authority(host)?;
+      if host.host == target.host && host.port.is_none_or(|port| target.port == Some(port)) {
+        Ok(())
+      } else {
+        Err(HostConsistencyError)
+      }
+    }
+    _ => Err(HostConsistencyError),
+  }
+}
+
+fn explicit_connect_authority(raw: &str) -> Result<EffectiveAuthority, HostConsistencyError> {
+  if raw.contains('@') {
+    return Err(HostConsistencyError);
+  }
+  let authority = Authority::from_str(raw.trim()).map_err(|_| HostConsistencyError)?;
+  let port = authority
+    .port_u16()
+    .filter(|port| *port != 0)
+    .ok_or(HostConsistencyError)?;
+  let host = normalize_host(authority.host());
+  if host.is_empty() {
+    return Err(HostConsistencyError);
+  }
+  Ok(EffectiveAuthority {
+    host,
+    port: Some(port),
+  })
+}
+
+fn connect_host_authority(raw: &str) -> Result<EffectiveAuthority, HostConsistencyError> {
+  let raw = raw.trim();
+  if raw.contains('@') {
+    return Err(HostConsistencyError);
+  }
+  let authority = Authority::from_str(raw).map_err(|_| HostConsistencyError)?;
+  let host = normalize_host(authority.host());
+  if host.is_empty() {
+    return Err(HostConsistencyError);
+  }
+  let port = authority.port_u16();
+  if authority_has_explicit_port_delimiter(raw) && port.is_none() {
+    return Err(HostConsistencyError);
+  }
+  Ok(EffectiveAuthority { host, port })
+}
+
+fn authority_has_explicit_port_delimiter(raw: &str) -> bool {
+  if raw.starts_with('[') {
+    return raw
+      .find(']')
+      .and_then(|end| raw.as_bytes().get(end + 1))
+      .is_some_and(|byte| *byte == b':');
+  }
+
+  raw
+    .rsplit_once(':')
+    .is_some_and(|(host, _)| !host.contains(':'))
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

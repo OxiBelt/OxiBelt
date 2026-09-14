@@ -1,6 +1,23 @@
-use http::{HeaderMap, Request};
+use http::{HeaderMap, Method, Request, Uri, Version};
 
 use super::*;
+
+fn connect_request(version: Version, target: &str, host: Option<HeaderValue>) -> Request<()> {
+  let uri = Uri::builder()
+    .authority(target)
+    .build()
+    .expect("CONNECT authority should build");
+  let mut request = Request::builder()
+    .method(Method::CONNECT)
+    .version(version)
+    .uri(uri)
+    .body(())
+    .expect("CONNECT request should build");
+  if let Some(host) = host {
+    request.headers_mut().insert(HOST, host);
+  }
+  request
+}
 
 #[test]
 fn forwarded_header_cache_accounts_for_enabled_scoped_real_ip() {
@@ -97,6 +114,135 @@ fn authority_host_consistency_rejects_duplicate_host_headers() {
     validate_authority_host_consistency(&request),
     Err(HostConsistencyError)
   );
+}
+
+#[test]
+fn http11_connect_requires_matching_authority_form_and_host() {
+  let accepted = connect_request(
+    Version::HTTP_11,
+    "Example.Test.:443",
+    Some(HeaderValue::from_static("example.test")),
+  );
+  assert!(validate_authority_host_consistency(&accepted).is_ok());
+
+  for request in [
+    connect_request(Version::HTTP_11, "example.test:443", None),
+    connect_request(
+      Version::HTTP_11,
+      "example.test:443",
+      Some(HeaderValue::from_static("other.test")),
+    ),
+    connect_request(
+      Version::HTTP_11,
+      "example.test:443",
+      Some(HeaderValue::from_static("example.test:8443")),
+    ),
+    connect_request(
+      Version::HTTP_11,
+      "example.test",
+      Some(HeaderValue::from_static("example.test")),
+    ),
+    connect_request(
+      Version::HTTP_11,
+      "example.test:0",
+      Some(HeaderValue::from_static("example.test")),
+    ),
+  ] {
+    assert_eq!(
+      validate_authority_host_consistency(&request),
+      Err(HostConsistencyError)
+    );
+  }
+}
+
+#[test]
+fn http11_connect_rejects_malformed_host_ports_and_accepts_portless_ipv6_host() {
+  for host in ["example.test:99999", "example.test:http", "example.test:"] {
+    let request = connect_request(
+      Version::HTTP_11,
+      "example.test:443",
+      Some(HeaderValue::from_str(host).expect("test Host should build")),
+    );
+    assert_eq!(
+      validate_authority_host_consistency(&request),
+      Err(HostConsistencyError)
+    );
+  }
+
+  let ipv6 = connect_request(
+    Version::HTTP_11,
+    "[2001:db8::1]:443",
+    Some(HeaderValue::from_static("[2001:db8::1]")),
+  );
+  assert!(validate_authority_host_consistency(&ipv6).is_ok());
+}
+
+#[test]
+fn connect_authority_rejects_userinfo() {
+  assert!(explicit_connect_authority("user@example.test:443").is_err());
+  assert!(connect_host_authority("user@example.test").is_err());
+}
+
+#[test]
+fn connect_authority_rejects_missing_or_invalid_target_ports() {
+  for target in [
+    "example.test",
+    "example.test:",
+    "example.test:http",
+    "example.test:0",
+    "example.test:99999",
+  ] {
+    assert!(
+      explicit_connect_authority(target).is_err(),
+      "CONNECT target unexpectedly accepted: {target}"
+    );
+  }
+}
+
+#[test]
+fn http10_connect_allows_an_absent_host_but_rejects_invalid_or_duplicate_host() {
+  let without_host = connect_request(Version::HTTP_10, "example.test:443", None);
+  assert!(validate_authority_host_consistency(&without_host).is_ok());
+
+  let mut duplicate_host = connect_request(
+    Version::HTTP_10,
+    "example.test:443",
+    Some(HeaderValue::from_static("example.test")),
+  );
+  duplicate_host
+    .headers_mut()
+    .append(HOST, HeaderValue::from_static("example.test"));
+  assert_eq!(
+    validate_authority_host_consistency(&duplicate_host),
+    Err(HostConsistencyError)
+  );
+
+  let invalid_host = connect_request(
+    Version::HTTP_10,
+    "example.test:443",
+    Some(HeaderValue::from_static("example.test:0")),
+  );
+  assert_eq!(
+    validate_authority_host_consistency(&invalid_host),
+    Err(HostConsistencyError)
+  );
+}
+
+#[test]
+fn http11_connect_rejects_non_authority_form_targets() {
+  for uri in ["/tunnel", "http://example.test:443/tunnel"] {
+    let request = Request::builder()
+      .method(Method::CONNECT)
+      .version(Version::HTTP_11)
+      .uri(uri)
+      .header(HOST, "example.test")
+      .body(())
+      .expect("request should build");
+    assert_eq!(
+      validate_authority_host_consistency(&request),
+      Err(HostConsistencyError)
+    );
+  }
 }
 
 #[test]
