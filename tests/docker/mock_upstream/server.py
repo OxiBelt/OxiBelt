@@ -1,5 +1,6 @@
 import json
 import base64
+import hashlib
 import os
 import re
 import socket
@@ -17,8 +18,14 @@ TLS_KEY_FILE = os.environ.get("TLS_KEY_FILE")
 TLS_ENABLED = bool(TLS_CERT_FILE and TLS_KEY_FILE)
 TLS_CLIENT_CA_FILE = os.environ.get("TLS_CLIENT_CA_FILE")
 TLS_REQUIRE_CLIENT_CERT = os.environ.get("TLS_REQUIRE_CLIENT_CERT", "0") == "1"
+TLS_EXPECT_CLIENT_CERT_SHA256 = os.environ.get("TLS_EXPECT_CLIENT_CERT_SHA256")
 if TLS_REQUIRE_CLIENT_CERT and not TLS_CLIENT_CA_FILE:
   raise ValueError("TLS_CLIENT_CA_FILE is required when TLS_REQUIRE_CLIENT_CERT=1")
+if TLS_EXPECT_CLIENT_CERT_SHA256 is not None:
+  if not TLS_CLIENT_CA_FILE:
+    raise ValueError("TLS_CLIENT_CA_FILE is required when TLS_EXPECT_CLIENT_CERT_SHA256 is set")
+  if not re.fullmatch(r"[0-9a-f]{64}", TLS_EXPECT_CLIENT_CERT_SHA256):
+    raise ValueError("TLS_EXPECT_CLIENT_CERT_SHA256 must be 64 lowercase hexadecimal characters")
 UPSTREAM_NAME = os.environ.get("UPSTREAM_NAME", "mock-upstream")
 UPSTREAM_MARKER = "mock-upstream"
 ACCEPT_PROXY_PROTOCOL = os.environ.get("ACCEPT_PROXY_PROTOCOL", "0") == "1"
@@ -155,6 +162,15 @@ class EchoHandler(BaseHTTPRequestHandler):
     self.wfile.write(encoded)
 
   def _handle(self):
+    if TLS_EXPECT_CLIENT_CERT_SHA256 is not None:
+      peer_certificate = self.connection.getpeercert(binary_form=True)
+      if peer_certificate is None:
+        self.send_error(403, "missing TLS client certificate")
+        return
+      peer_fingerprint = hashlib.sha256(peer_certificate).hexdigest()
+      if peer_fingerprint != TLS_EXPECT_CLIENT_CERT_SHA256:
+        self.send_error(403, "unexpected TLS client certificate")
+        return
     body_length = int(self.headers.get("content-length", "0"))
     body = self.rfile.read(body_length).decode("utf-8", "replace") if body_length else ""
     parsed = urlsplit(self.path)

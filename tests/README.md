@@ -1,5 +1,11 @@
 # OxiBelt Test Assets
 
+The [verified client identity deployment guide](../docs/VerifiedClientIdentityForwarding.md)
+composes required downstream mTLS, RFC 9440 `Client-Cert` forwarding, and a
+separate upstream mTLS identity. The `protocol-proxying/client-certificate-forwarding-mtls-rfc9440`
+matrix case checks the authenticated upstream peer and forwarded downstream
+leaf together across HTTP/1.1, HTTP/2, HTTP/3, WebSocket, and WebTransport.
+
 - `rust/`: repository-root Cargo integration tests linked from `source/Cargo.toml`
 - `docker/`: mock upstream image assets for end-to-end proxy verification
 - `scripts/build-targets.sh`: adds the current Linux `gnu` and `musl` targets, then builds both

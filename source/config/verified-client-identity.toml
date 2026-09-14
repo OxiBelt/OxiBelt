@@ -1,0 +1,47 @@
+# Deployment example: see docs/VerifiedClientIdentityForwarding.md.
+# Supply the referenced material below the sibling cert/ directory.
+[config]
+strict_unknown_fields = true
+
+[runtime.accept]
+workers = 1
+
+[quic.socket]
+workers = 1
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "edge/server.pem"
+private_key = "edge/server.key"
+min_version = "tls1.3"
+
+[tls.client_auth]
+mode = "require"
+ca_certs = ["downstream/ca.pem"]
+
+[proxy]
+trusted_ca_certs = ["backend/ca.pem"]
+
+[[upstreams]]
+name = "orders"
+origin = "https://orders.internal:8443"
+max_http_version = "h2"
+
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client/orders/client.pem"
+private_key = "upstream-client/orders/client.key"
+
+[[routes]]
+name = "authenticated-orders"
+hosts = ["orders.example.com"]
+path_prefix = "/"
+upstream = "orders"
+
+[routes.client_certificate_forwarding]
+header = "client-cert"
+format = "rfc9440"

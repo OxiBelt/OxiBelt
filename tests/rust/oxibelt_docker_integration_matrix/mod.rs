@@ -262,6 +262,10 @@ const CASE_ORDER: &[(&str, &str)] = &[
     "protocol-proxying",
     "client-certificate-forwarding-real-protocols",
   ),
+  (
+    "protocol-proxying",
+    "client-certificate-forwarding-mtls-rfc9440",
+  ),
   ("protocol-proxying", "downstream-tls-http-suite"),
   ("protocol-proxying", "downstream-sni-tls-version-override"),
   (

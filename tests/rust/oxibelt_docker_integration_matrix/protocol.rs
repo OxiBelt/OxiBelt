@@ -202,6 +202,22 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "protocol-proxying",
+      "client-certificate-forwarding-mtls-rfc9440",
+      "required downstream mTLS forwards RFC 9440 Client-Cert while every upstream authenticates OxiBelt with an independent client identity",
+      ExpectStart::Success,
+      Needs {
+        https_upstream: true,
+        h2_upstream: true,
+        h3_upstream: true,
+        webtransport_upstream: true,
+        websocket_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "protocol-proxying",
       "downstream-tls-http-suite",
       "one downstream TLS config proxies HTTP/1.1, HTTP/2, and HTTP/3 with stable forwarded metadata",
       ExpectStart::Success,

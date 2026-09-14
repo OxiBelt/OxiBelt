@@ -13,7 +13,11 @@ if [[ -z "${category}" || -z "${case_name}" ]]; then
 fi
 
 certificate_metadata_case=0
-if [[ "${category}" == "protocol-proxying" && ( "${case_name}" == "certificate-metadata-real-protocols" || "${case_name}" == "client-certificate-forwarding-real-protocols" ) ]]; then
+client_certificate_mtls_case=0
+if [[ "${category}" == "protocol-proxying" && "${case_name}" == "client-certificate-forwarding-mtls-rfc9440" ]]; then
+  client_certificate_mtls_case=1
+fi
+if [[ "${category}" == "protocol-proxying" && ( "${case_name}" == "certificate-metadata-real-protocols" || "${case_name}" == "client-certificate-forwarding-real-protocols" || "${client_certificate_mtls_case}" == "1" ) ]]; then
   certificate_metadata_case=1
 fi
 
@@ -25,6 +29,7 @@ case_dir="${work_dir}/case"
 cert_dir="${work_dir}/cert"
 proxy_cert_dir="${work_dir}/proxy-cert"
 upstream_tls_dir="${work_dir}/upstream-tls"
+upstream_client_tls_dir="${work_dir}/upstream-client-tls"
 client_tls_dir="${work_dir}/client-tls"
 postgres_tls_dir="${work_dir}/postgres-tls"
 logs_dir="${work_dir}/logs"
@@ -97,6 +102,7 @@ remote_signer_cert_seed_container="oxibelt-keysigner-cert-seed-${run_id}"
 hardened_config_volume="oxibelt-hardened-config-${run_id}"
 hardened_cert_volume="oxibelt-hardened-cert-${run_id}"
 hardened_oxirule_volume="oxibelt-hardened-oxirule-${run_id}"
+client_identity_cert_volume="oxibelt-client-identity-cert-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
@@ -107,7 +113,8 @@ cleanup() {
     "${remote_signer_cert_volume}" \
     "${hardened_config_volume}" \
     "${hardened_cert_volume}" \
-    "${hardened_oxirule_volume}" >/dev/null 2>&1 || true
+    "${hardened_oxirule_volume}" \
+    "${client_identity_cert_volume}" >/dev/null 2>&1 || true
   if [[ "${remove_mock_image}" == "1" ]]; then
     docker rmi -f "${mock_image}" >/dev/null 2>&1 || true
   fi
@@ -138,7 +145,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "${case_dir}" "${cert_dir}" "${proxy_cert_dir}" "${upstream_tls_dir}" "${client_tls_dir}" "${postgres_tls_dir}" "${logs_dir}"
+mkdir -p "${case_dir}" "${cert_dir}" "${proxy_cert_dir}" "${upstream_tls_dir}" "${upstream_client_tls_dir}" "${client_tls_dir}" "${postgres_tls_dir}" "${logs_dir}"
 
 unique_docker_container_name() {
   local prefix="$1"
@@ -2603,6 +2610,46 @@ openssl x509 -req -sha256 -days 1 \
   -extensions req_ext \
   -out "${upstream_tls_dir}/server.pem" >/dev/null 2>&1
 
+if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+  cat >"${work_dir}/upstream-client-ca.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_ca
+prompt = no
+
+[req_distinguished_name]
+CN = oxibelt-matrix-upstream-client-root
+
+[v3_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+EOF
+  cat >"${work_dir}/upstream-client-leaf.cnf" <<'EOF'
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = req_ext
+prompt = no
+
+[req_distinguished_name]
+CN = oxibelt-upstream-client
+
+[req_ext]
+extendedKeyUsage = clientAuth
+EOF
+  openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+    -config "${work_dir}/upstream-client-ca.cnf" \
+    -keyout "${upstream_client_tls_dir}/ca.key" \
+    -out "${upstream_client_tls_dir}/ca.pem" >/dev/null 2>&1
+  openssl req -newkey rsa:2048 -sha256 -nodes -config "${work_dir}/upstream-client-leaf.cnf" \
+    -keyout "${upstream_client_tls_dir}/client.key" \
+    -out "${upstream_client_tls_dir}/client.csr" >/dev/null 2>&1
+  openssl x509 -req -sha256 -days 1 -in "${upstream_client_tls_dir}/client.csr" \
+    -CA "${upstream_client_tls_dir}/ca.pem" -CAkey "${upstream_client_tls_dir}/ca.key" \
+    -CAcreateserial -extfile "${work_dir}/upstream-client-leaf.cnf" -extensions req_ext \
+    -out "${upstream_client_tls_dir}/client.pem" >/dev/null 2>&1
+  upstream_client_certificate_fingerprint="$(openssl x509 -in "${upstream_client_tls_dir}/client.pem" -outform DER | openssl dgst -sha256 -r | awk '{print $1}')"
+fi
+
 if [[ "${certificate_metadata_case}" == "1" ]]; then
   openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
     -days 1 \
@@ -2624,7 +2671,7 @@ if [[ "${certificate_metadata_case}" == "1" ]]; then
     -extensions req_ext \
     -out "${client_tls_dir}/client.pem" >/dev/null 2>&1
 
-  if [[ "${case_name}" == "client-certificate-forwarding-real-protocols" ]]; then
+  if [[ "${case_name}" == "client-certificate-forwarding-real-protocols" || "${client_certificate_mtls_case}" == "1" ]]; then
     openssl req -newkey rsa:2048 -sha256 -nodes \
       -config "${work_dir}/client-leaf.cnf" \
       -keyout "${client_tls_dir}/client-second.key" \
@@ -2731,6 +2778,10 @@ openssl x509 -req -sha256 -days 1 \
   -out "${postgres_tls_dir}/client.pem" >/dev/null 2>&1
 
 cp "${upstream_tls_dir}/ca.pem" "${cert_dir}/upstream-ca.pem"
+if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+  cp "${upstream_client_tls_dir}/client.pem" "${cert_dir}/upstream-client.pem"
+  cp "${upstream_client_tls_dir}/client.key" "${cert_dir}/upstream-client.key"
+fi
 if [[ "${certificate_metadata_case}" == "1" ]]; then
   cp "${client_tls_dir}/ca.pem" "${cert_dir}/client-ca.pem"
 fi
@@ -2740,6 +2791,10 @@ cp "${postgres_tls_dir}/client.key" "${cert_dir}/postgres-client.key"
 printf 'ocsp' >"${cert_dir}/ocsp.der"
 printf 'not an ECHConfigList' >"${cert_dir}/invalid.echconfiglist"
 chmod 644 "${cert_dir}/"* "${upstream_tls_dir}/"* "${postgres_tls_dir}/"*
+if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+  chmod 644 "${upstream_client_tls_dir}/"*
+  chmod 600 "${cert_dir}/upstream-client.key" "${upstream_client_tls_dir}/"*.key
+fi
 if [[ "${certificate_metadata_case}" == "1" ]]; then
   chmod 600 "${client_tls_dir}/"*.key
 fi
@@ -2982,6 +3037,20 @@ if [[ "${CASE_NEED_NOMAD_SERVER}" == "1" ]]; then
     "${mock_nomad_image}" >/dev/null
 fi
 
+upstream_client_auth_args=()
+upstream_client_auth_env_args=()
+if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+  upstream_client_auth_args=(
+    --client-ca /tls/upstream-client-ca.pem
+    --expect-client-cert-sha256 "${upstream_client_certificate_fingerprint}"
+  )
+  upstream_client_auth_env_args=(
+    -e TLS_CLIENT_CA_FILE=/tls/upstream-client-ca.pem
+    -e TLS_REQUIRE_CLIENT_CERT=1
+    -e "TLS_EXPECT_CLIENT_CERT_SHA256=${upstream_client_certificate_fingerprint}"
+  )
+fi
+
 if [[ "${CASE_NEED_HTTPS_UPSTREAM}" == "1" ]]; then
   docker create \
     --name "${https_container}" \
@@ -2992,9 +3061,13 @@ if [[ "${CASE_NEED_HTTPS_UPSTREAM}" == "1" ]]; then
     -e UPSTREAM_NAME=https-upstream \
     -e TLS_CERT_FILE=/tls/server.pem \
     -e TLS_KEY_FILE=/tls/server.key \
+    "${upstream_client_auth_env_args[@]}" \
     "${mock_image}" >/dev/null
   docker cp "${upstream_tls_dir}/server.pem" "${https_container}:/tls/server.pem"
   docker cp "${upstream_tls_dir}/server.key" "${https_container}:/tls/server.key"
+  if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+    docker cp "${upstream_client_tls_dir}/ca.pem" "${https_container}:/tls/upstream-client-ca.pem"
+  fi
   docker start "${https_container}" >/dev/null
 fi
 
@@ -3009,9 +3082,13 @@ if [[ "${CASE_NEED_H2_UPSTREAM}" == "1" ]]; then
     --listen 0.0.0.0:18444 \
     --cert /tls/server.pem \
     --key /tls/server.key \
-    --name h2-upstream >/dev/null
+    --name h2-upstream \
+    "${upstream_client_auth_args[@]}" >/dev/null
   docker cp "${upstream_tls_dir}/server.pem" "${h2_container}:/tls/server.pem"
   docker cp "${upstream_tls_dir}/server.key" "${h2_container}:/tls/server.key"
+  if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+    docker cp "${upstream_client_tls_dir}/ca.pem" "${h2_container}:/tls/upstream-client-ca.pem"
+  fi
   docker start "${h2_container}" >/dev/null
 fi
 
@@ -3051,9 +3128,13 @@ if [[ "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then
     --listen 0.0.0.0:18445 \
     --cert /tls/server.pem \
     --key /tls/server.key \
-    --name h3-upstream >/dev/null
+    --name h3-upstream \
+    "${upstream_client_auth_args[@]}" >/dev/null
   docker cp "${upstream_tls_dir}/server.pem" "${h3_container}:/tls/server.pem"
   docker cp "${upstream_tls_dir}/server.key" "${h3_container}:/tls/server.key"
+  if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+    docker cp "${upstream_client_tls_dir}/ca.pem" "${h3_container}:/tls/upstream-client-ca.pem"
+  fi
   docker start "${h3_container}" >/dev/null
 fi
 
@@ -3069,6 +3150,8 @@ if [[ "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" ]]; then
     webtransport_required_value="${webtransport_required_value#*:}"
     if [[ "${webtransport_required_value}" == "__CLIENT_CERT_URL_ENCODED_PEM__" ]]; then
       webtransport_required_value="$( { printf '%s\n' '-----BEGIN CERTIFICATE-----'; openssl x509 -in "${client_tls_dir}/client.pem" -outform DER | base64 -w 64; printf '%s\n' '-----END CERTIFICATE-----'; } | jq -sRr @uri )"
+    elif [[ "${webtransport_required_value}" == "__CLIENT_CERT_RFC9440__" ]]; then
+      webtransport_required_value=":$(openssl x509 -in "${client_tls_dir}/client.pem" -outform DER | base64 -w 0):"
     fi
     webtransport_require_header_args+=(--require-header-value "${webtransport_required_name}:${webtransport_required_value}")
   fi
@@ -3083,9 +3166,13 @@ if [[ "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" ]]; then
     --cert /tls/server.pem \
     --key /tls/server.key \
     --name webtransport-upstream \
+    "${upstream_client_auth_args[@]}" \
     "${webtransport_require_header_args[@]}" >/dev/null
   docker cp "${upstream_tls_dir}/server.pem" "${webtransport_container}:/tls/server.pem"
   docker cp "${upstream_tls_dir}/server.key" "${webtransport_container}:/tls/server.key"
+  if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+    docker cp "${upstream_client_tls_dir}/ca.pem" "${webtransport_container}:/tls/upstream-client-ca.pem"
+  fi
   docker start "${webtransport_container}" >/dev/null
 fi
 
@@ -3101,6 +3188,8 @@ if [[ "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" ]]; then
     websocket_required_value="${websocket_required_value#*:}"
     if [[ "${websocket_required_value}" == "__CLIENT_CERT_URL_ENCODED_PEM__" ]]; then
       websocket_required_value="$( { printf '%s\n' '-----BEGIN CERTIFICATE-----'; openssl x509 -in "${client_tls_dir}/client.pem" -outform DER | base64 -w 64; printf '%s\n' '-----END CERTIFICATE-----'; } | jq -sRr @uri )"
+    elif [[ "${websocket_required_value}" == "__CLIENT_CERT_RFC9440__" ]]; then
+      websocket_required_value=":$(openssl x509 -in "${client_tls_dir}/client.pem" -outform DER | base64 -w 0):"
     fi
     websocket_require_header_args+=(--require-header-value "${websocket_required_name}:${websocket_required_value}")
   fi
@@ -3115,9 +3204,13 @@ if [[ "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" ]]; then
       --listen 0.0.0.0:18081 \
       --cert /tls/server.pem \
       --key /tls/server.key \
+      "${upstream_client_auth_args[@]}" \
       "${websocket_require_header_args[@]}" >/dev/null
     docker cp "${upstream_tls_dir}/server.pem" "${websocket_container}:/tls/server.pem"
     docker cp "${upstream_tls_dir}/server.key" "${websocket_container}:/tls/server.key"
+    if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+      docker cp "${upstream_client_tls_dir}/ca.pem" "${websocket_container}:/tls/upstream-client-ca.pem"
+    fi
     docker start "${websocket_container}" >/dev/null
   else
     docker run -d \
@@ -3318,6 +3411,17 @@ if [[ "${CASE_HARDENED_RUNTIME}" == "1" ]]; then
   fi
 fi
 
+# docker cp installs files as root in the target container.  The standalone
+# image runs as UID 10001, so seed this case's 0600 upstream identity key in a
+# volume owned by that runtime UID instead.
+client_identity_fixture_mount_args=()
+if [[ "${client_certificate_mtls_case}" == "1" ]]; then
+  seed_hardened_fixture_volume "${client_identity_cert_volume}" "${proxy_cert_dir}"
+  client_identity_fixture_mount_args=(
+    --mount "type=volume,src=${client_identity_cert_volume},dst=/etc/oxibelt/cert,readonly"
+  )
+fi
+
 proxy_runtime_args=()
 proxy_command_args=()
 if [[ "${CASE_ROOT_NETPORT_SWITCHER}" == "1" ]]; then
@@ -3361,13 +3465,16 @@ docker create \
   "${proxy_runtime_args[@]}" \
   "${seccomp_runtime_args[@]}" \
   "${hardened_fixture_mount_args[@]}" \
+  "${client_identity_fixture_mount_args[@]}" \
   "${remote_signer_docker_args[@]}" \
   "${proxy_dns_args[@]}" \
   "${proxy_image}" \
   "${proxy_command_args[@]}" >/dev/null
 if [[ "${CASE_HARDENED_RUNTIME}" != "1" ]]; then
   docker cp "${case_dir}/config/." "${proxy_container}:/etc/oxibelt/config"
-  docker cp "${proxy_cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
+  if [[ "${client_certificate_mtls_case}" != "1" ]]; then
+    docker cp "${proxy_cert_dir}/." "${proxy_container}:/etc/oxibelt/cert"
+  fi
   if [[ -d "${case_dir}/oxirule" ]]; then
     docker cp "${case_dir}/oxirule/." "${proxy_container}:/etc/oxibelt/oxirule"
   fi

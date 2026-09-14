@@ -1,0 +1,175 @@
+[runtime.accept]
+workers = 1
+
+[quic.socket]
+workers = 1
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.client_auth]
+mode = "require"
+ca_certs = ["client-ca.pem"]
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = ["upstream-ca.pem"]
+
+[cache]
+enabled = true
+store = "memory"
+max_size_bytes = 1048576
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+respect_cache_control = true
+
+[[upstreams]]
+name = "h1"
+origin = "https://mock-https:18443/origin"
+max_http_version = "h1"
+preserve_host = false
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client.pem"
+private_key = "upstream-client.key"
+
+[[upstreams]]
+name = "h2"
+origin = "https://mock-h2:18444/origin"
+max_http_version = "h2"
+preserve_host = false
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client.pem"
+private_key = "upstream-client.key"
+
+[[upstreams]]
+name = "h3"
+origin = "https://mock-h3:18445/origin"
+max_http_version = "h3"
+preserve_host = false
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client.pem"
+private_key = "upstream-client.key"
+
+[[upstreams]]
+name = "ws"
+origin = "https://mock-websocket:18081"
+max_http_version = "h1"
+preserve_host = false
+websocket = true
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client.pem"
+private_key = "upstream-client.key"
+
+[[upstreams]]
+name = "wt"
+origin = "https://mock-webtransport:18446/wt-origin"
+max_http_version = "h3"
+preserve_host = false
+webtransport = true
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client.pem"
+private_key = "upstream-client.key"
+
+[[upstreams]]
+name = "h1-name-mismatch"
+origin = "https://mock-https:18443/origin"
+max_http_version = "h1"
+preserve_host = false
+[upstreams.tls]
+server_name = "name-mismatch.example.test"
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client.pem"
+private_key = "upstream-client.key"
+
+[[upstreams]]
+name = "h1-system-trust"
+origin = "https://mock-https:18443/origin"
+max_http_version = "h1"
+preserve_host = false
+[upstreams.tls]
+trust = "system"
+[upstreams.tls.client_identity]
+cert_chain = "upstream-client.pem"
+private_key = "upstream-client.key"
+
+[[routes]]
+name = "h1"
+hosts = ["identity-h1.example.test"]
+path_prefix = "/"
+upstream = "h1"
+[routes.client_certificate_forwarding]
+header = "client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "h2"
+hosts = ["identity-h2.example.test"]
+path_prefix = "/"
+upstream = "h2"
+[routes.client_certificate_forwarding]
+header = "client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "h3"
+hosts = ["identity-h3.example.test"]
+path_prefix = "/"
+upstream = "h3"
+[routes.client_certificate_forwarding]
+header = "client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "ws"
+hosts = ["identity-ws.example.test"]
+path_prefix = "/"
+upstream = "ws"
+[routes.client_certificate_forwarding]
+header = "client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "wt"
+hosts = ["identity-wt.example.test"]
+path_prefix = "/"
+upstream = "wt"
+[routes.client_certificate_forwarding]
+header = "client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "cache"
+hosts = ["identity-cache.example.test"]
+path_prefix = "/"
+upstream = "h2"
+cache = "default"
+[routes.client_certificate_forwarding]
+header = "client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "name-mismatch"
+hosts = ["identity-name-mismatch.example.test"]
+path_prefix = "/"
+upstream = "h1-name-mismatch"
+[routes.client_certificate_forwarding]
+header = "client-cert"
+format = "rfc9440"
+
+[[routes]]
+name = "system-trust"
+hosts = ["identity-system-trust.example.test"]
+path_prefix = "/"
+upstream = "h1-system-trust"
+[routes.client_certificate_forwarding]
+header = "client-cert"
+format = "rfc9440"
