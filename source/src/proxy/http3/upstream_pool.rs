@@ -322,9 +322,29 @@ impl UpstreamH3Pool {
       metrics.record_http_upstream_client_connection_created("h3", "https", "primary");
       let send_request = admitted.connected.send_request.clone();
       let upstream_certificate = admitted.connected.upstream_certificate.clone();
-      let guard = OneShotH3Connection {
-        _connected: admitted.connected,
-        _connection_admission: admitted.admission,
+      let incremental_exchange = request
+        .extensions()
+        .get::<crate::proxy::http::incremental_exchange::IncrementalExchange>()
+        .cloned();
+      let guard = if let Some(exchange) = &incremental_exchange {
+        OneShotH3Connection::incremental(
+          admitted.connected,
+          admitted.admission,
+          exchange.clone(),
+          timeouts.upstream_send,
+          timeouts.upstream_deadline,
+        )
+      } else {
+        OneShotH3Connection::new(admitted.connected, admitted.admission)
+      };
+      let guard = if let Some(exchange) = &incremental_exchange {
+        // H3 may return response headers before the upload has reached FIN.
+        // Hold the one-shot connection before the fallible send so an early
+        // error cannot release it while the exchange still owns the upload.
+        exchange.retain(guard);
+        None
+      } else {
+        Some(guard)
       };
       let response = send_h3_request(
         send_request,
@@ -335,11 +355,22 @@ impl UpstreamH3Pool {
         upstream_certificate,
       )
       .await?;
+      if incremental_exchange.is_some() {
+        return Ok(response);
+      }
       let (parts, body) = response.into_parts();
-      let body = crate::proxy::http::body::with_drop_guard(
-        body,
-        Arc::new(std::sync::Mutex::new(Some(guard))),
-      );
+      if let Some(exchange) = parts
+        .extensions
+        .get::<crate::proxy::http::incremental_exchange::IncrementalExchange>()
+        .cloned()
+      {
+        if let Some(guard) = guard {
+          exchange.retain(guard);
+        }
+        return Ok(Response::from_parts(parts, body));
+      }
+      let body =
+        crate::proxy::http::body::with_drop_guard(body, Arc::new(std::sync::Mutex::new(guard)));
       return Ok(Response::from_parts(parts, body));
     };
 
@@ -347,7 +378,20 @@ impl UpstreamH3Pool {
       .clone()
       .pooled_lease(pool, upstream, deadlines, metrics.clone())
       .await?;
+    let incremental_exchange = request
+      .extensions()
+      .get::<crate::proxy::http::incremental_exchange::IncrementalExchange>()
+      .cloned();
     let entry = Arc::clone(&lease.connection);
+    // Capture invalidation state before an incremental exchange retains the
+    // lease across this await.
+    let slot = Arc::clone(&lease.slot);
+    let lease = if let Some(exchange) = &incremental_exchange {
+      exchange.retain(lease);
+      None
+    } else {
+      Some(lease)
+    };
     match send_h3_request(
       entry.connected.send_request.clone(),
       request,
@@ -359,13 +403,25 @@ impl UpstreamH3Pool {
     .await
     {
       Ok(response) => {
+        if incremental_exchange.is_some() {
+          return Ok(response);
+        }
         let (parts, body) = response.into_parts();
+        if let Some(exchange) = parts
+          .extensions
+          .get::<crate::proxy::http::incremental_exchange::IncrementalExchange>()
+          .cloned()
+        {
+          if let Some(lease) = lease {
+            exchange.retain(lease);
+          }
+          return Ok(Response::from_parts(parts, body));
+        }
         let body = crate::proxy::http::body::with_drop_guard(body, lease);
         Ok(Response::from_parts(parts, body))
       }
       Err(error) => {
         let connection_closed = entry.connected.connection.close_reason().is_some();
-        let slot = Arc::clone(&lease.slot);
         drop(lease);
         if connection_closed {
           self

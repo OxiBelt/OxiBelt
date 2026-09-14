@@ -101,6 +101,7 @@ impl WafRoutePlan {
       && self.response.body_need() == BodyNeed::None
       && !self.stream.enabled()
       && !self.request_has_upstream_selection_actions()
+      && !self.has_incremental_header_actions()
   }
 
   pub(crate) fn static_sendfile_fast_path_safe(&self) -> bool {
@@ -123,6 +124,27 @@ impl WafRoutePlan {
       .rules()
       .iter()
       .any(|rule| rule.actions.iter().any(action_selects_upstream))
+  }
+
+  fn has_incremental_header_actions(&self) -> bool {
+    // These actions can introduce message-local streaming intent after initial
+    // eligibility. Select the full pipeline before WAF evaluation, avoiding
+    // either replaying WAF side effects on fallback or premature coalescing.
+    self
+      .request
+      .rules()
+      .iter()
+      .chain(self.response.rules())
+      .any(|rule| {
+        rule.actions.iter().any(|action| {
+          matches!(action,
+            CompiledAction::Config(
+              WafActionConfig::SetRequestHeader { name, .. }
+              | WafActionConfig::SetResponseHeader { name, .. }
+            ) if name.eq_ignore_ascii_case("incremental")
+          )
+        })
+      })
   }
 }
 

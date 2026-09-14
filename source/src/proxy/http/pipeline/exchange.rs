@@ -3,6 +3,40 @@
 use super::*;
 
 pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<ProxyBody> {
+  let exchange = context
+    .outbound
+    .extensions()
+    .get::<incremental_exchange::IncrementalExchange>()
+    .cloned();
+  let response_guard = exchange.as_ref().map(|exchange| exchange.begin_response());
+  let mut response = run_inner(context).await;
+  if let Some(exchange) = exchange {
+    if response
+      .extensions()
+      .get::<incremental_exchange::IncrementalExchange>()
+      .is_none()
+    {
+      // A local refusal/error replaced the upstream response: stop its upload.
+      exchange.cancel();
+      exchange.mark_response_complete();
+      response
+        .extensions_mut()
+        .insert(incremental::LocalTerminalResponse);
+    }
+    response.extensions_mut().insert(exchange);
+  }
+  if let Some(guard) = response_guard
+    && response
+      .extensions()
+      .get::<incremental::LocalTerminalResponse>()
+      .is_none()
+  {
+    guard.disarm();
+  }
+  response
+}
+
+async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<ProxyBody> {
   let ExchangeContext {
     state,
     resolved,
@@ -49,6 +83,10 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     cache_fill_guard,
   } = context;
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
+  let incremental_exchange = outbound
+    .extensions()
+    .get::<incremental_exchange::IncrementalExchange>()
+    .cloned();
   let proxy_tls_certificate = proxy_tls::has_certificate_identity(&outbound);
   let request_body = captured_body.as_ref().map(waf_body_input);
   let mut _cache_fill_guard = cache_fill_guard;
@@ -108,6 +146,14 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
         return route_security.apply(circuit_breaker_rejection_response(state, rejection));
       }
     };
+    let upstream_stream_lease = if let Some(exchange) = &incremental_exchange {
+      // Keep accounting through asynchronous FIN/reset, including when the
+      // response-header future is cancelled before it returns a response.
+      exchange.retain(upstream_stream_lease);
+      None
+    } else {
+      Some(upstream_stream_lease)
+    };
     match tokio::time::timeout(
       timeouts.upstream_first_byte,
       crate::proxy::http3::forward_request(outbound, upstream, state.as_ref(), timeouts),
@@ -158,12 +204,19 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
           access_log,
         );
       }
-      Ok(Ok(response)) => {
+      Ok(Ok(mut response)) => {
         upstream_admission.record_outcome(crate::circuit_breakers::CircuitOutcome::Failure(
           crate::circuit_breakers::CircuitOutcomeFailure::Status(response.status().as_u16()),
         ));
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
-        with_circuit_breaker_request_lease(response, upstream_stream_lease)
+        if let Some(exchange) = &incremental_exchange {
+          response.extensions_mut().insert(exchange.clone());
+        }
+        if let Some(lease) = upstream_stream_lease {
+          with_circuit_breaker_request_lease(response, lease)
+        } else {
+          response
+        }
       }
       Ok(Err(error)) => {
         if let Some(rejection) = circuit_breakers::admission_rejection(&error) {
@@ -326,6 +379,9 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     };
     match result {
       Ok(mut response) => {
+        if let Some(exchange) = &incremental_exchange {
+          response.extensions_mut().insert(exchange.clone());
+        }
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         let stream_lease = retry::take_stream_lease(&mut response);
         let response = response.map(|body| body.map_err(boxed_error).boxed());
@@ -413,14 +469,41 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
       state.pools.report_success_async(&upstream.name).await;
     }
   }
-  drop(pool_selection);
+  if let Some(exchange) = &incremental_exchange {
+    exchange.retain(pool_selection);
+  } else {
+    drop(pool_selection);
+  }
 
+  let upstream_incremental = incremental::response_marked(&upstream_response);
+  let response_is_empty = request_method == Method::HEAD
+    || upstream_response.status() == StatusCode::NO_CONTENT
+    || upstream_response.status() == StatusCode::NOT_MODIFIED
+    || upstream_response.body().is_end_stream();
+  if upstream_incremental && !response_is_empty {
+    let response_headers = upstream_response.headers();
+    let sse_streaming =
+      state.config.proxy.http.sse_auto_streaming && semantics::is_sse(response_headers);
+    if (!effective_buffering.response.is_streaming() && !sse_streaming)
+      || waf_body_capture::response_capture_blocks_incremental(
+        upstream_response.version(),
+        response_headers,
+        response_body_need,
+        response_waf_body_compression_transform,
+      )
+    {
+      return route_security.apply(incremental::refused(request_version));
+    }
+  }
   let upstream_response = if let Some(mode) = grpc_web_mode {
-    grpc_web::encode_response(upstream_response, mode)
+    grpc_web::encode_response(upstream_response, mode, upstream_incremental)
   } else {
     upstream_response
   };
   let (mut parts, body) = upstream_response.into_parts();
+  if upstream_incremental {
+    parts.extensions.insert(incremental::IncrementalIntent);
+  }
   if let Some(entry) = stale_on_error.clone()
     && state
       .cache
@@ -459,6 +542,12 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     record_cache_hit_fast_path_selection(state, request_version);
     let mut response =
       cache_status::cached_entry_response(cached_entry, &request_method, &request_headers);
+    if let Some(exchange) = &incremental_exchange {
+      // Replacing a bodyless 304 must not drop the original exchange's receive
+      // guard and cancel an upload which the origin is still reading.
+      exchange.retain(body);
+      response.extensions_mut().insert(exchange.clone());
+    }
     cache_status::reconcile_cached_security(&mut response, state, resolved.route);
     route_runtime::apply_response_actions(response.headers_mut(), resolved.route, &request_headers);
     cache_status::apply(
@@ -512,6 +601,18 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     resolved.route,
   );
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
+
+  if (upstream_incremental || incremental::requested(&parts.headers))
+    && !response_is_empty
+    && waf_body_capture::response_capture_blocks_incremental(
+      parts.version,
+      &parts.headers,
+      response_body_need,
+      response_waf_body_compression_transform,
+    )
+  {
+    return route_security.apply(incremental::refused(request_version));
+  }
 
   let response_inspection_lease = if response_body_need != BodyNeed::None {
     match state
@@ -637,6 +738,19 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
   let mut response_buffering = effective_buffering.response;
   if state.config.proxy.http.sse_auto_streaming && semantics::is_sse(&parts.headers) {
     response_buffering.mode = crate::config::BufferingMode::Streaming;
+  }
+  let incremental_response = upstream_incremental || incremental::requested(&parts.headers);
+  if incremental_response {
+    if !response_is_empty
+      && (!response_buffering.is_streaming()
+        || captured_response_body
+          .as_ref()
+          .is_some_and(|body| !body.bytes.is_empty())
+        || (grpc_web_mode.is_some() && !upstream_incremental))
+    {
+      return route_security.apply(incremental::refused(request_version));
+    }
+    parts.extensions.insert(incremental::IncrementalIntent);
   }
   let body = filter_trailers(body, state.config.proxy.http.trailers, native_grpc_request);
   let body = match buffering::buffer_body(

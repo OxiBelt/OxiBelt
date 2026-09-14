@@ -21,6 +21,7 @@ use crate::metrics::compio_direct_h1::{CompioDirectH1BufferEvent, CompioDirectH1
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::http::body::{self, BoxError, ProxyBody, ProxyBodyFrame};
+use crate::proxy::http::incremental;
 use crate::proxy::http::semantics::{
   InterimResponses, attach_interim_responses, capture_early_hint,
 };
@@ -540,8 +541,11 @@ async fn run_on_connection(
         response_version = Some(version);
         response_body_mode = Some(body_mode);
         response_allows_reuse = !connection_header_contains(&headers, "close");
+        let incremental_requested = incremental::requested(&headers);
         let head = ResponseHead::new(version, status, headers, std::mem::take(&mut interim));
-        if let Some(length) = inline_response_length(body_mode, pending.len()) {
+        if let Some(length) =
+          inline_response_length(incremental_requested, body_mode, pending.len())
+        {
           inline_head = Some(head);
           inline_body_length = Some(length);
         } else {
@@ -907,7 +911,14 @@ async fn send_body_frame(
   }
 }
 
-fn inline_response_length(body_mode: ResponseBodyMode, pending_len: usize) -> Option<usize> {
+fn inline_response_length(
+  incremental: bool,
+  body_mode: ResponseBodyMode,
+  pending_len: usize,
+) -> Option<usize> {
+  if incremental {
+    return None;
+  }
   match body_mode {
     ResponseBodyMode::None => Some(0),
     ResponseBodyMode::ContentLength(length) => usize::try_from(length)
@@ -992,28 +1003,48 @@ mod tests {
   #[test]
   fn inline_response_requires_a_complete_already_buffered_small_body() {
     let maximum = body::KNOWN_SMALL_BODY_MAX_BYTES;
-    assert_eq!(inline_response_length(ResponseBodyMode::None, 0), Some(0));
     assert_eq!(
-      inline_response_length(ResponseBodyMode::ContentLength(maximum as u64), maximum),
+      inline_response_length(false, ResponseBodyMode::None, 0),
+      Some(0)
+    );
+    assert_eq!(
+      inline_response_length(
+        false,
+        ResponseBodyMode::ContentLength(maximum as u64),
+        maximum
+      ),
       Some(maximum)
     );
     assert_eq!(
-      inline_response_length(ResponseBodyMode::ContentLength(maximum as u64), maximum - 1),
+      inline_response_length(
+        false,
+        ResponseBodyMode::ContentLength(maximum as u64),
+        maximum - 1
+      ),
       None
     );
     assert_eq!(
       inline_response_length(
+        false,
         ResponseBodyMode::ContentLength((maximum + 1) as u64),
         maximum + 1
       ),
       None
     );
     assert_eq!(
-      inline_response_length(ResponseBodyMode::Chunked, maximum),
+      inline_response_length(false, ResponseBodyMode::Chunked, maximum),
       None
     );
     assert_eq!(
-      inline_response_length(ResponseBodyMode::CloseDelimited, maximum),
+      inline_response_length(false, ResponseBodyMode::CloseDelimited, maximum),
+      None
+    );
+  }
+
+  #[test]
+  fn incremental_final_head_bypasses_raw_inline_collection() {
+    assert_eq!(
+      inline_response_length(true, ResponseBodyMode::ContentLength(1), 1),
       None
     );
   }

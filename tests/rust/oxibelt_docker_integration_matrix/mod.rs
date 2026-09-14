@@ -54,6 +54,8 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("http-semantics", "compio-response-engine"),
   ("http-semantics", "compio-transport-service"),
   ("http-semantics", "expect-priority"),
+  ("http-semantics", "incremental-rfc10036"),
+  ("http-semantics", "incremental-rfc10036-unpooled"),
   ("http-semantics", "sse-grpc-errors"),
   ("security", "hardened-default-seccomp-runtime"),
   ("security", "required-seccomp-manifest-landlock"),

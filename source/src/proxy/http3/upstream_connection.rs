@@ -201,14 +201,51 @@ pub(super) async fn send_h3_request(
   request_deadline: tokio::time::Instant,
   upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
 ) -> anyhow::Result<Response<ProxyBody>> {
-  let (parts, mut body) = request.into_parts();
+  let (mut parts, body) = request.into_parts();
+  let request_method = parts.method.clone();
+  let incremental = parts
+    .extensions
+    .remove::<crate::proxy::http::incremental_exchange::IncrementalExchange>();
+  let incremental_requested = incremental.is_some()
+    || parts
+      .extensions
+      .get::<crate::proxy::http::incremental::IncrementalIntent>()
+      .is_some()
+    || crate::proxy::http::incremental::requested(&parts.headers);
   let h3_request = Request::from_parts(parts, ());
   // This is the replay boundary. Address failover is complete before this
   // future is polled; failures from here onward are returned to the caller.
-  let mut stream = tokio::time::timeout_at(request_deadline, send_request.send_request(h3_request))
+  if incremental_requested {
+    let exchange = incremental
+      .unwrap_or_else(crate::proxy::http::incremental_exchange::IncrementalExchange::new);
+    // The common pipeline guard covers this raw body until this point. From
+    // here, the transport-local dispatch guard owns pre-spawn failures.
+    exchange.claim_unstarted_upload();
+    let dispatch_guard = exchange.begin_dispatch();
+    let stream = tokio::time::timeout_at(request_deadline, send_request.send_request(h3_request))
+      .await
+      .context("upstream HTTP/3 request stream wait timed out")?
+      .with_context(|| format!("failed to send upstream HTTP/3 request {uri}"))?;
+    return send_incremental_h3_request(
+      stream,
+      body,
+      timeouts,
+      request_deadline,
+      request_method,
+      exchange,
+      dispatch_guard,
+      upstream_certificate,
+    )
+    .await;
+  }
+
+  let stream = tokio::time::timeout_at(request_deadline, send_request.send_request(h3_request))
     .await
     .context("upstream HTTP/3 request stream wait timed out")?
     .with_context(|| format!("failed to send upstream HTTP/3 request {uri}"))?;
+
+  let mut stream = stream;
+  let mut body = body;
 
   while let Some(frame) = body.frame().await {
     let frame = frame.map_err(|error| {
@@ -260,6 +297,163 @@ pub(super) async fn send_h3_request(
     Response::from_parts(parts, body),
     upstream_certificate,
   ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_incremental_h3_request(
+  stream: h3::client::RequestStream<h3_quinn::BidiStream<bytes::Bytes>, bytes::Bytes>,
+  body: ProxyBody,
+  timeouts: EffectiveTimeouts,
+  response_deadline: tokio::time::Instant,
+  request_method: Method,
+  exchange: crate::proxy::http::incremental_exchange::IncrementalExchange,
+  dispatch_guard: crate::proxy::http::incremental_exchange::IncrementalDispatchGuard,
+  upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+) -> anyhow::Result<Response<ProxyBody>> {
+  let (send, mut recv) = stream.split();
+  let upload_exchange = exchange.clone();
+  let upload_deadline = incremental_upload_deadline(timeouts);
+  let upload = tokio::spawn(async move {
+    let mut send = send;
+    let body = crate::proxy::http::incremental_exchange::wrap_request_body_for_transport(
+      body,
+      upload_exchange.clone(),
+    );
+    match upload_incremental_h3_body(
+      &mut send,
+      body,
+      timeouts.upstream_send,
+      upload_deadline,
+      upload_exchange.clone(),
+    )
+    .await
+    {
+      Ok(()) => upload_exchange.mark_upload_complete(),
+      Err(error) => {
+        send.stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+        upload_exchange.fail_upload(format!(
+          "failed to send incremental HTTP/3 request body: {error}"
+        ));
+      }
+    }
+  });
+  // This join handle is owned by the exchange, not a response-body Drop
+  // guard. It is bounded by the request deadline and cancellation state.
+  exchange.retain(upload);
+  let response_guard = dispatch_guard.uploader_started();
+
+  let mut interim = crate::proxy::http::semantics::InterimResponses::default();
+  let parts = loop {
+    let response = tokio::select! {
+      () = exchange.cancelled() => Err(anyhow::anyhow!(
+        "incremental HTTP/3 upload cancelled before upstream response headers"
+      )),
+      response = tokio::time::timeout_at(response_deadline, recv.recv_response()) => response
+        .context("upstream HTTP/3 first byte timed out")
+        .and_then(|response| response.context("failed to receive upstream HTTP/3 response")),
+    };
+    let response = match response {
+      Ok(response) => response,
+      Err(error) => {
+        exchange.cancel();
+        exchange.mark_response_complete();
+        return Err(error);
+      }
+    };
+    if let Some(response) = crate::proxy::http::semantics::sanitize_interim_response(
+      response.status(),
+      response.headers(),
+    ) {
+      interim.responses.push(response);
+      continue;
+    }
+    let (mut parts, _) = response.into_parts();
+    if !interim.responses.is_empty() {
+      parts.extensions.insert(interim);
+    }
+    break parts;
+  };
+  let semantically_empty = response_body_is_semantically_empty(&request_method, parts.status);
+  let body = response_body::observe_incremental_h3_response_body(
+    recv,
+    timeouts.upstream_read,
+    exchange.clone(),
+    semantically_empty,
+  );
+  let mut response = Response::from_parts(parts, body);
+  response.extensions_mut().insert(exchange);
+  response_guard.disarm();
+  Ok(attach_upstream_certificate(response, upstream_certificate))
+}
+
+fn response_body_is_semantically_empty(method: &Method, status: StatusCode) -> bool {
+  *method == Method::HEAD || status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED
+}
+
+fn incremental_upload_deadline(timeouts: EffectiveTimeouts) -> tokio::time::Instant {
+  let now = tokio::time::Instant::now();
+  let deadline = now.checked_add(timeouts.upstream_request).unwrap_or(now);
+  timeouts
+    .upstream_deadline
+    .map(tokio::time::Instant::from_std)
+    .map_or(deadline, |configured| configured.min(deadline))
+}
+
+async fn upload_incremental_h3_body(
+  send: &mut h3::client::RequestStream<
+    <h3_quinn::BidiStream<bytes::Bytes> as h3::quic::BidiStream<bytes::Bytes>>::SendStream,
+    bytes::Bytes,
+  >,
+  mut body: ProxyBody,
+  send_timeout: Duration,
+  deadline: tokio::time::Instant,
+  exchange: crate::proxy::http::incremental_exchange::IncrementalExchange,
+) -> anyhow::Result<()> {
+  loop {
+    let frame = tokio::select! {
+      () = exchange.cancelled() => anyhow::bail!("incremental exchange cancelled"),
+      () = tokio::time::sleep_until(deadline) => anyhow::bail!("incremental upload deadline elapsed"),
+      frame = body.frame() => frame,
+    };
+    let Some(frame) = frame else {
+      break;
+    };
+    let frame =
+      frame.map_err(|error| anyhow::anyhow!("failed to read incremental request body: {error}"))?;
+    match frame.into_data() {
+      Ok(data) => {
+        tokio::select! {
+          () = exchange.cancelled() => anyhow::bail!("incremental exchange cancelled"),
+          () = tokio::time::sleep_until(deadline) => anyhow::bail!("incremental upload deadline elapsed"),
+          sent = tokio::time::timeout(send_timeout, send.send_data(data)) => {
+            sent.context("incremental HTTP/3 request data send timed out")?
+              .context("failed to send incremental HTTP/3 request data")?;
+          }
+        }
+      }
+      Err(frame) => {
+        if let Ok(trailers) = frame.into_trailers() {
+          tokio::select! {
+            () = exchange.cancelled() => anyhow::bail!("incremental exchange cancelled"),
+            () = tokio::time::sleep_until(deadline) => anyhow::bail!("incremental upload deadline elapsed"),
+            sent = tokio::time::timeout(send_timeout, send.send_trailers(trailers)) => {
+              sent.context("incremental HTTP/3 request trailers send timed out")?
+                .context("failed to send incremental HTTP/3 request trailers")?;
+            }
+          }
+        }
+      }
+    }
+  }
+  tokio::select! {
+    () = exchange.cancelled() => anyhow::bail!("incremental exchange cancelled"),
+    () = tokio::time::sleep_until(deadline) => anyhow::bail!("incremental upload deadline elapsed"),
+    finished = tokio::time::timeout(send_timeout, send.finish()) => {
+      finished.context("incremental HTTP/3 request finish timed out")?
+        .context("failed to finish incremental HTTP/3 request")?;
+    }
+  }
+  Ok(())
 }
 
 fn upstream_quic_peer_certificate_metadata(
@@ -342,5 +536,25 @@ mod tests {
         .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
         .is_none()
     );
+  }
+
+  #[test]
+  fn semantic_empty_response_status_or_head_method_is_recognized() {
+    assert!(response_body_is_semantically_empty(
+      &Method::HEAD,
+      StatusCode::OK
+    ));
+    assert!(response_body_is_semantically_empty(
+      &Method::POST,
+      StatusCode::NO_CONTENT
+    ));
+    assert!(response_body_is_semantically_empty(
+      &Method::GET,
+      StatusCode::NOT_MODIFIED
+    ));
+    assert!(!response_body_is_semantically_empty(
+      &Method::GET,
+      StatusCode::OK
+    ));
   }
 }

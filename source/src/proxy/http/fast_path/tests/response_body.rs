@@ -31,6 +31,12 @@ fn response_headers_with_content_length(length: &str) -> HeaderMap {
   headers
 }
 
+fn incremental_response_headers_with_content_length(length: &str) -> HeaderMap {
+  let mut headers = response_headers_with_content_length(length);
+  headers.insert("incremental", http::HeaderValue::from_static("?1"));
+  headers
+}
+
 fn proxy_body(bytes: &'static [u8]) -> body::ProxyBody {
   Full::new(Bytes::from_static(bytes))
     .map_err(|never| -> body::BoxError { match never {} })
@@ -111,6 +117,30 @@ async fn non_h3_fast_path_response_body_inlines_small_known_body_with_materializ
       .to_bytes();
     assert_eq!(bytes, Bytes::from_static(b"ok"));
   }
+}
+
+#[tokio::test]
+async fn incremental_fast_path_response_body_streams_known_small_body() {
+  let prepared = match fast_path_response_body(
+    response_semantics(Method::GET, StatusCode::OK),
+    &incremental_response_headers_with_content_length("2"),
+    proxy_body(b"ok"),
+    response_options(TrailerMode::Drop, http::Version::HTTP_11, false),
+  )
+  .await
+  {
+    Ok(prepared) => prepared,
+    Err(error) => panic!("unexpected response status {}", error.response.status()),
+  };
+
+  assert!(!prepared.known_small_response_body);
+  assert!(prepared.inlined_known_small_body.is_none());
+  assert_eq!(prepared.disposition, "streamed");
+  assert_eq!(prepared.reason, "incremental");
+  assert_eq!(
+    prepared.body.collect().await.unwrap().to_bytes(),
+    Bytes::from_static(b"ok")
+  );
 }
 
 #[tokio::test]

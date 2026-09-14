@@ -16,6 +16,9 @@ pub(crate) fn plain_proxy_fast_path_decision<B>(
   state: &AppSnapshot,
   resolved: &ResolvedRoute<'_>,
 ) -> Result<(), PlainProxyFastPathMissReason> {
+  if crate::proxy::http::incremental::request_marked(request) {
+    return Err(PlainProxyFastPathMissReason::UnsupportedRoute);
+  }
   if state
     .config
     .upstreams

@@ -7,7 +7,7 @@ run_id="$(date +%s)-$$"
 work_dir="${repo_root}/tests/.tmp/${run_id}"
 network_name="oxibelt-it-${run_id}"
 mock_image="oxibelt/mock-upstream:${run_id}"
-proxy_image="oxibelt/proxy-it:${run_id}"
+proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/proxy-it:${run_id}}"
 pq_probe_image="oxibelt/pq-probe:${run_id}"
 http_container="oxibelt-http-${run_id}"
 alternate_upgrade_container="oxibelt-alternate-upgrade-${run_id}"
@@ -25,7 +25,10 @@ cleanup() {
     "${alternate_upgrade_container}" \
     "${http_container}" >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
-  docker rmi -f "${proxy_image}" "${mock_image}" "${pq_probe_image}" >/dev/null 2>&1 || true
+  if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
+    docker rmi -f "${proxy_image}" >/dev/null 2>&1 || true
+  fi
+  docker rmi -f "${mock_image}" "${pq_probe_image}" >/dev/null 2>&1 || true
   if [[ "${KEEP_TEST_ARTIFACTS:-0}" != "1" ]]; then
     rm -rf "${work_dir}"
   fi
@@ -340,11 +343,15 @@ docker build \
   -f "${repo_root}/tests/docker/mock_upstream/Dockerfile" \
   "${repo_root}/tests/docker/mock_upstream"
 
-echo "Building proxy runtime image"
-docker build \
-  -t "${proxy_image}" \
-  -f "${repo_root}/source/ops/Dockerfile.alpine" \
-  "${repo_root}"
+if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
+  echo "Building proxy runtime image"
+  docker build \
+    -t "${proxy_image}" \
+    -f "${repo_root}/source/ops/Dockerfile.alpine" \
+    "${repo_root}"
+else
+  docker image inspect "${proxy_image}" >/dev/null
+fi
 
 echo "Building post-quantum probe image"
 docker build \

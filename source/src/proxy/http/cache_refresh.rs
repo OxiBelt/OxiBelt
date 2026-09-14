@@ -140,6 +140,10 @@ async fn background_refresh(
   };
   let retry_policy = EffectiveRetryPolicy::disabled_direct();
   let response = send_with_retry(client, outbound, timeouts, &state, &retry_policy, None).await?;
+  if super::incremental::response_marked(&response) {
+    state.metrics.record_cache_background_refresh_skip();
+    return Ok(());
+  }
   let (mut parts, body) = response.into_parts();
   if parts.status == StatusCode::NOT_MODIFIED {
     state

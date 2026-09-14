@@ -264,6 +264,15 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   mut cache_fill_guard: Option<crate::cache::CacheFillGuard>,
   applied_route_security_headers: Option<&AppliedRouteSecurityHeaders>,
 ) -> Response<ProxyBody> {
+  if super::incremental::response_marked(&response) {
+    drop(cache_fill_guard);
+    let mut response = response;
+    cache_status::strip_headers(response.headers_mut());
+    if state.cache.strip_surrogate_control(route_cache) {
+      response.headers_mut().remove("surrogate-control");
+    }
+    return response;
+  }
   if !state.request_path_features.cache || !state.cache.policy_enabled(route_cache, method) {
     let mut response = response;
     cache_status::strip_headers(response.headers_mut());

@@ -1,0 +1,101 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[quic.socket]
+reuse_port = true
+
+[quic.upstream_pool]
+enabled = false
+
+[proxy]
+trusted_ca_certs = ["upstream-ca.pem"]
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h3"
+
+[proxy.buffering]
+request = "streaming"
+response = "streaming"
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "incremental-h1"
+origin = "http://incremental-h1:18084/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 10000
+preserve_host = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[upstreams]]
+name = "incremental-h2"
+origin = "https://incremental-h2:18447/origin"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 10000
+preserve_host = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[upstreams]]
+name = "incremental-h3"
+origin = "https://incremental-h3:18448/origin"
+max_http_version = "h3"
+connect_timeout_ms = 3000
+request_timeout_ms = 10000
+preserve_host = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "incremental-h1"
+hosts = ["example.test"]
+path_prefix = "/h1"
+upstream = "incremental-h1"
+
+[[routes]]
+name = "incremental-h2"
+hosts = ["example.test"]
+path_prefix = "/h2"
+upstream = "incremental-h2"
+
+[[routes]]
+name = "incremental-h3"
+hosts = ["example.test"]
+path_prefix = "/h3"
+upstream = "incremental-h3"

@@ -5,6 +5,7 @@ mod common {
   ));
 }
 mod alt_svc;
+mod incremental;
 
 use pretty_assertions::assert_eq;
 

@@ -11,6 +11,7 @@ use crate::config::TrailerMode;
 use crate::metrics::Metrics;
 use crate::metrics::fast_path::labels::FastPathMetricProtocol;
 use crate::proxy::http::body::{self, BodyTimeoutKind, ProxyBody};
+use crate::proxy::http::incremental;
 use crate::proxy::http::semantics::filter_trailers;
 
 use super::small_response::{
@@ -137,6 +138,25 @@ where
       trailers_handled: false,
       disposition: "streamed",
       reason: "no_body_semantics",
+    });
+  }
+
+  if incremental::requested(headers) {
+    let body = response_body
+      .map_err(|error| -> body::BoxError { error.into() })
+      .boxed();
+    return Ok(FastPathResponseBody {
+      body: streaming_body_with_timing(
+        body,
+        options.upstream_read_timeout,
+        options.first_frame_timing,
+      ),
+      known_small_response_body: false,
+      inlined_known_small_body: None,
+      known_no_trailers: false,
+      trailers_handled: false,
+      disposition: "streamed",
+      reason: "incremental",
     });
   }
 

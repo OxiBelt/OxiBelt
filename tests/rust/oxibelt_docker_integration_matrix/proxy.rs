@@ -93,6 +93,30 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "http-semantics",
+      "incremental-rfc10036",
+      "RFC 10036 Incremental streams every downstream and upstream protocol pair duplex",
+      ExpectStart::Success,
+      Needs {
+        protocol_probe: true,
+        incremental_upstreams: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "http-semantics",
+      "incremental-rfc10036-unpooled",
+      "RFC 10036 Incremental keeps unpooled HTTP/3 upstream uploads alive after early responses",
+      ExpectStart::Success,
+      Needs {
+        protocol_probe: true,
+        incremental_upstreams: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "http-semantics",
       "sse-grpc-errors",
       "HTTP semantics keeps SSE streaming and maps proxy errors for gRPC and JSON clients",
       ExpectStart::Success,

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use http::Request;
+use http::{Request, Version};
 use hyper::body::{Body, Incoming};
 
 use crate::bandwidth::BandwidthDirection;
@@ -207,6 +207,7 @@ where
   };
   let mut request_connection_permit = None;
   let mut selected_bandwidth = None;
+  let request_is_head = request.method() == Method::HEAD;
   let response = handle_inner_impl(
     request,
     peer_addr,
@@ -227,11 +228,16 @@ where
     trace_context,
   )
   .await;
+  // Upstream HTTP versions are useful to exchange/WAF policy, but the final
+  // response must describe the protocol of the downstream writer. In
+  // particular, Hyper's H1 encoder cannot serialize an HTTP/3 response head.
+  let response = normalize_downstream_response_version(response, request_version);
   let response = if let Some(limiter) = selected_bandwidth {
     with_final_response_bandwidth(response, limiter, state.metrics.clone(), transport_network)
   } else {
     response
   };
+  let response = with_incremental_response_lifetime(response, request_is_head, request_version);
   let response = if let Some(permit) = request_connection_permit {
     with_connection_permit(response, permit)
   } else {
@@ -248,6 +254,101 @@ where
     telemetry_start,
   );
   response
+}
+
+fn normalize_downstream_response_version(
+  mut response: Response<ProxyBody>,
+  downstream_version: Version,
+) -> Response<ProxyBody> {
+  *response.version_mut() = downstream_version;
+  response
+}
+
+fn with_incremental_response_lifetime(
+  response: Response<ProxyBody>,
+  request_is_head: bool,
+  request_version: Version,
+) -> Response<ProxyBody> {
+  // Track completion outside producer channels: producer EOF can precede
+  // downstream consumption of queued response frames.
+  if let Some(exchange) = response
+    .extensions()
+    .get::<incremental_exchange::IncrementalExchange>()
+    .cloned()
+    .filter(|_| {
+      response
+        .extensions()
+        .get::<incremental::LocalTerminalResponse>()
+        .is_none()
+    })
+  {
+    let bodyless = request_is_head
+      || response.status() == StatusCode::NO_CONTENT
+      || response.status() == StatusCode::NOT_MODIFIED;
+    let h1_length_framed =
+      !bodyless && matches!(request_version, Version::HTTP_10 | Version::HTTP_11);
+    let response_headers = response.headers().clone();
+    response.map(|body| {
+      let body = if bodyless {
+        // HTTP/1 may never poll a semantically forbidden body. Finish the
+        // downstream half at this final handoff without cancelling its upload.
+        // Retain transformed source guards until that upload also terminates.
+        exchange.retain(body);
+        body::known_small_no_trailers_body(bytes::Bytes::new())
+      } else {
+        body
+      };
+      // Match Hyper's H1 dispatcher: it selects an exact body size before
+      // header framing, and a supplied Content-Length otherwise. At a known
+      // boundary Hyper may drop without polling source EOF.
+      let expected_length = h1_length_framed
+        .then(|| h1_expected_response_length(&body, &response_headers, request_version))
+        .flatten();
+      if let Some(length) = expected_length {
+        incremental_exchange::wrap_response_body_with_length(body, exchange, Some(length))
+      } else {
+        incremental_exchange::wrap_response_body(body, exchange)
+      }
+    })
+  } else {
+    response
+  }
+}
+
+fn h1_expected_response_length(
+  body: &ProxyBody,
+  headers: &http::HeaderMap,
+  version: Version,
+) -> Option<u64> {
+  if version == Version::HTTP_11 && headers.contains_key(http::header::TRANSFER_ENCODING) {
+    None
+  } else {
+    body
+      .size_hint()
+      .exact()
+      .or_else(|| h1_header_content_length(headers))
+  }
+}
+
+fn h1_header_content_length(headers: &http::HeaderMap) -> Option<u64> {
+  let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
+  let content_length = h1_content_length_digits(values.next()?.as_bytes())?;
+  for value in values {
+    if h1_content_length_digits(value.as_bytes())? != content_length {
+      return None;
+    }
+  }
+  Some(content_length)
+}
+
+fn h1_content_length_digits(bytes: &[u8]) -> Option<u64> {
+  if bytes.is_empty() {
+    return None;
+  }
+  bytes.iter().try_fold(0_u64, |length, byte| match byte {
+    b'0'..=b'9' => length.checked_mul(10)?.checked_add(u64::from(*byte - b'0')),
+    _ => None,
+  })
 }
 
 pub(crate) fn with_final_response_bandwidth(
@@ -300,6 +401,159 @@ mod tests {
 
   use super::*;
   use crate::bandwidth::BandwidthPolicy;
+
+  #[test]
+  fn final_response_uses_the_downstream_protocol_version() {
+    for downstream_version in [
+      Version::HTTP_10,
+      Version::HTTP_11,
+      Version::HTTP_2,
+      Version::HTTP_3,
+    ] {
+      let mut response = Response::new(body::known_small_no_trailers_body(bytes::Bytes::new()));
+      *response.version_mut() = Version::HTTP_3;
+      assert_eq!(
+        normalize_downstream_response_version(response, downstream_version).version(),
+        downstream_version
+      );
+    }
+  }
+
+  #[test]
+  fn final_response_normalizes_upgrade_heads_for_h1() {
+    let mut response = Response::new(body::known_small_no_trailers_body(bytes::Bytes::new()));
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    *response.version_mut() = Version::HTTP_3;
+    let response = normalize_downstream_response_version(response, Version::HTTP_11);
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(response.version(), Version::HTTP_11);
+  }
+
+  #[test]
+  fn h1_final_handoff_boundary_matches_hyper_length_selection() {
+    let no_headers = http::HeaderMap::new();
+    let exact_body = body::known_small_no_trailers_body(bytes::Bytes::from_static(b"exact"));
+    assert_eq!(
+      h1_expected_response_length(&exact_body, &no_headers, Version::HTTP_11),
+      Some(5),
+      "Hyper uses the final body's exact size even without Content-Length"
+    );
+
+    let (_, unknown_body) = body::channel_body(1);
+    let mut trailer_headers = http::HeaderMap::new();
+    trailer_headers.insert(http::header::CONTENT_LENGTH, "3".parse().unwrap());
+    trailer_headers.insert(http::header::TRAILER, "x-upstream-trailer".parse().unwrap());
+    assert_eq!(unknown_body.size_hint().exact(), None);
+    assert_eq!(
+      h1_expected_response_length(&unknown_body, &trailer_headers, Version::HTTP_11),
+      Some(3)
+    );
+
+    let mut duplicate_headers = http::HeaderMap::new();
+    duplicate_headers.append(http::header::CONTENT_LENGTH, "7".parse().unwrap());
+    duplicate_headers.append(http::header::CONTENT_LENGTH, "7".parse().unwrap());
+    assert_eq!(
+      h1_expected_response_length(&unknown_body, &duplicate_headers, Version::HTTP_11),
+      Some(7)
+    );
+
+    let mut chunked_headers = http::HeaderMap::new();
+    chunked_headers.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+    assert_eq!(
+      h1_expected_response_length(&exact_body, &chunked_headers, Version::HTTP_11),
+      None
+    );
+    assert_eq!(
+      h1_expected_response_length(&exact_body, &chunked_headers, Version::HTTP_10),
+      Some(5),
+      "Hyper ignores Transfer-Encoding for HTTP/1.0"
+    );
+  }
+
+  #[tokio::test]
+  async fn incremental_bodyless_handoff_keeps_upload_and_source_guards_alive() {
+    for (status, request_is_head) in [
+      (StatusCode::NO_CONTENT, false),
+      (StatusCode::NOT_MODIFIED, false),
+      (StatusCode::OK, true),
+    ] {
+      let exchange = incremental_exchange::IncrementalExchange::new();
+      let (source_tx, source_body) = body::channel_body(1);
+      let source = body::with_bandwidth(
+        source_body,
+        RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED),
+        BandwidthDirection::Download,
+        crate::metrics::Metrics::new(),
+        crate::metrics::BandwidthTrafficClass::Http,
+        None,
+      );
+      let mut response = Response::new(source);
+      *response.status_mut() = status;
+      response.extensions_mut().insert(exchange.clone());
+      let response =
+        with_incremental_response_lifetime(response, request_is_head, Version::HTTP_11);
+      assert!(response.body().is_end_stream());
+      drop(response); // Hyper H1 is allowed to suppress body polling entirely.
+      assert!(!exchange.is_cancelled());
+      assert!(!exchange.is_complete());
+      assert!(!source_tx.is_closed());
+      exchange.mark_upload_complete();
+      assert!(exchange.is_complete());
+      tokio::time::timeout(std::time::Duration::from_secs(1), source_tx.closed())
+        .await
+        .unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn incremental_completion_waits_for_final_bandwidth_channel() {
+    struct SourceDropped(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for SourceDropped {
+      fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+          let _ = sender.send(());
+        }
+      }
+    }
+    let exchange = incremental_exchange::IncrementalExchange::new();
+    exchange.mark_upload_complete();
+    let (dropped, source_done) = tokio::sync::oneshot::channel();
+    let source = body::with_drop_guard(
+      body::known_small_no_trailers_body(bytes::Bytes::from_static(b"queued")),
+      SourceDropped(Some(dropped)),
+    );
+    let mut response = Response::new(source);
+    response.extensions_mut().insert(exchange.clone());
+    let response = with_incremental_response_lifetime(
+      with_final_response_bandwidth(
+        response,
+        RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED),
+        crate::metrics::Metrics::new(),
+        WafTransportNetwork::Tcp,
+      ),
+      false,
+      Version::HTTP_11,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), source_done)
+      .await
+      .unwrap()
+      .unwrap();
+    assert!(
+      !exchange.is_complete(),
+      "queued data still belongs to the exchange"
+    );
+    assert_eq!(
+      response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .as_ref(),
+      b"queued"
+    );
+    assert!(exchange.is_complete());
+  }
 
   #[tokio::test]
   async fn final_response_bandwidth_materializes_inlined_h3_body() {

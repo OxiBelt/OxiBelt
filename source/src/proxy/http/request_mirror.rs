@@ -36,6 +36,12 @@ pub(super) fn spawn_request_mirrors(
   host: &str,
   downstream_scheme: &str,
 ) {
+  if super::incremental::request_marked(outbound) {
+    for _ in route_action_runtime::enabled_mirrors(route) {
+      state.metrics.record_request_mirror_skip();
+    }
+    return;
+  }
   if state.overload.request_mirroring_disabled() {
     state.metrics.record_request_mirror_skip();
     return;

@@ -83,6 +83,9 @@ alt_container="oxibelt-alt-${run_id}"
 h2_container="oxibelt-h2-${run_id}"
 h2c_container="oxibelt-h2c-${run_id}"
 h1_stall_container="oxibelt-h1-stall-${run_id}"
+incremental_h1_container="oxibelt-incremental-h1-${run_id}"
+incremental_h2_container="oxibelt-incremental-h2-${run_id}"
+incremental_h3_container="oxibelt-incremental-h3-${run_id}"
 h3_container="oxibelt-h3-${run_id}"
 webtransport_container="oxibelt-webtransport-${run_id}"
 websocket_container="oxibelt-websocket-${run_id}"
@@ -370,6 +373,9 @@ collect_diagnostics() {
   collect_container_log "${h2_container}" "mock-h2.log"
   collect_container_log "${h2c_container}" "mock-h2c.log"
   collect_container_log "${h1_stall_container}" "mock-h1-stall.log"
+  collect_container_log "${incremental_h1_container}" "incremental-h1.log"
+  collect_container_log "${incremental_h2_container}" "incremental-h2.log"
+  collect_container_log "${incremental_h3_container}" "incremental-h3.log"
   collect_container_log "${h3_container}" "mock-h3.log"
   collect_container_log "${webtransport_container}" "mock-webtransport.log"
   collect_container_log "${websocket_container}" "mock-websocket.log"
@@ -1477,6 +1483,46 @@ protocol_probe_client() {
   protocol_probe_client_with_sni_and_ca "${protocol}" "proxy" "${authority}" "${path}" "${expect_status}" "${cert_dir}/fullchain.pem" "$@"
 }
 
+incremental_probe_client() {
+  local protocol="$1"
+  local path="$2"
+  local expect_status="${3:-200}"
+  local response_mode="${4:-duplex}"
+  local completion_host
+  case "${path}" in
+    /h1/*) completion_host="incremental-h1" ;;
+    /h2/*) completion_host="incremental-h2" ;;
+    /h3/*) completion_host="incremental-h3" ;;
+    *) fail_with_diagnostics "Incremental path has no completion upstream: ${path}" ;;
+  esac
+  local client_container
+  client_container="$(unique_docker_container_name "oxibelt-incremental-${protocol}" 1)"
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    "${protocol_probe_image}" \
+    incremental-client \
+    --protocol "${protocol}" \
+    --host proxy \
+    --port 8443 \
+    --server-name proxy \
+    --authority example.test \
+    --path "${path}" \
+    --ca-cert /tmp/proxy-ca.pem \
+    --completion-host "${completion_host}" \
+    --completion-port 19000 \
+    --expect-status "${expect_status}" \
+    --response-mode "${response_mode}" >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+  if ! docker_start_stdout_only "${client_container}"; then
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    fail_with_diagnostics "Incremental ${protocol} client failed for ${path}"
+  fi
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+}
+
 protocol_probe_client_with_client_identity() {
   local protocol="$1"
   local authority="$2"
@@ -2451,6 +2497,8 @@ DNS.6 = sni-default.test
 DNS.7 = quic-forward.test
 DNS.8 = mock-turn-tls
 DNS.9 = coturn
+DNS.10 = incremental-h2
+DNS.11 = incremental-h3
 EOF
 
 upstream_leaf_config="${work_dir}/upstream-leaf.cnf"
@@ -2480,6 +2528,8 @@ DNS.8 = mock-turn-tls
 DNS.9 = coturn
 DNS.10 = mock-websocket
 DNS.11 = certificate-upstream.example.test
+DNS.12 = incremental-h2
+DNS.13 = incremental-h3
 IP.1 = 198.51.100.42
 URI.1 = spiffe://matrix.example.test/upstream
 email.1 = upstream-cert@example.test
@@ -2865,7 +2915,7 @@ if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
     "${repo_root}/tests/docker/pq_probe"
 fi
 
-if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" || "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" || "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" || "${CASE_NEED_TURN_UDP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TCP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TLS_UPSTREAM}" == "1" ]]; then
+if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" || "${CASE_NEED_H2C_UPSTREAM}" == "1" || "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" || "${CASE_NEED_INCREMENTAL_UPSTREAMS}" == "1" || "${CASE_NEED_H3_UPSTREAM}" == "1" || "${CASE_NEED_WEBTRANSPORT_UPSTREAM}" == "1" || "${CASE_NEED_WEBSOCKET_UPSTREAM}" == "1" || "${CASE_NEED_TURN_UDP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TCP_UPSTREAM}" == "1" || "${CASE_NEED_TURN_TLS_UPSTREAM}" == "1" ]]; then
   ensure_helper_image \
     "${protocol_probe_image}" \
     remove_protocol_probe_image \
@@ -3134,6 +3184,36 @@ if [[ "${CASE_NEED_H1_STALL_UPSTREAM}" == "1" ]]; then
     --listen 0.0.0.0:18083 \
     --name h1-stall-upstream \
     --read-delay-ms 1500 >/dev/null
+fi
+
+if [[ "${CASE_NEED_INCREMENTAL_UPSTREAMS}" == "1" ]]; then
+  docker run -d \
+    --name "${incremental_h1_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias incremental-h1 \
+    "${protocol_probe_image}" \
+    incremental-upstream --protocol h1 --listen 0.0.0.0:18084 --completion-listen 0.0.0.0:19000 >/dev/null
+  docker create \
+    --name "${incremental_h2_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias incremental-h2 \
+    "${protocol_probe_image}" \
+    incremental-upstream --protocol h2 --listen 0.0.0.0:18447 --completion-listen 0.0.0.0:19000 --cert /tls/server.pem --key /tls/server.key >/dev/null
+  docker cp "${upstream_tls_dir}/server.pem" "${incremental_h2_container}:/tls/server.pem"
+  docker cp "${upstream_tls_dir}/server.key" "${incremental_h2_container}:/tls/server.key"
+  docker start "${incremental_h2_container}" >/dev/null
+  docker create \
+    --name "${incremental_h3_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias incremental-h3 \
+    "${protocol_probe_image}" \
+    incremental-upstream --protocol h3 --listen 0.0.0.0:18448 --completion-listen 0.0.0.0:19000 --cert /tls/server.pem --key /tls/server.key >/dev/null
+  docker cp "${upstream_tls_dir}/server.pem" "${incremental_h3_container}:/tls/server.pem"
+  docker cp "${upstream_tls_dir}/server.key" "${incremental_h3_container}:/tls/server.key"
+  docker start "${incremental_h3_container}" >/dev/null
 fi
 
 if [[ "${CASE_NEED_H3_UPSTREAM}" == "1" ]]; then

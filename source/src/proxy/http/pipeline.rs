@@ -398,6 +398,14 @@ where
     }
   }
   let mut request = request.map(|body| body.map_err(Into::into).boxed());
+  let auth_body_capture = !request.body().is_end_stream()
+    && state.config.external_auth.iter().any(|auth| {
+      Some(auth.name.as_str()) == resolved.route.external_auth.as_deref()
+        && auth.max_request_body_bytes > 0
+    });
+  if incremental::request_marked(&request) && auth_body_capture {
+    return route_security.apply(incremental::refused(request_version));
+  }
   if resolved.execution_plan.features.external_auth
     && let Some(provider) = resolved.route.external_auth.as_deref()
   {
@@ -415,7 +423,13 @@ where
       )
       .await
     {
-      ExternalAuthOutcome::Allowed => {}
+      ExternalAuthOutcome::Allowed => {
+        if auth_body_capture {
+          request
+            .extensions_mut()
+            .insert(incremental::BodyWasBuffered);
+        }
+      }
       ExternalAuthOutcome::Denied(terminal) => {
         return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
           external_auth_response(terminal),
@@ -531,6 +545,20 @@ where
     waf_body_compression_transform && request_body_need != BodyNeed::None;
   let response_waf_body_compression_transform =
     waf_body_compression_transform && response_body_need != BodyNeed::None;
+  if incremental::request_marked(&request)
+    && request_method != Method::CONNECT
+    && !headers::is_upgrade_request(&request)
+    && !request.body().is_end_stream()
+    && (!effective_buffering.request.is_streaming()
+      || waf_body_capture::request_capture_blocks_incremental(
+        request_version,
+        request.headers(),
+        request_body_need,
+        request_waf_body_compression_transform,
+      ))
+  {
+    return route_security.apply(incremental::refused(request_version));
+  }
   let request = request.map(|request_body| {
     if upload_bandwidth_limited {
       request_body
@@ -571,7 +599,7 @@ where
   } else {
     None
   };
-  let (request, captured_body) =
+  let (mut request, captured_body) =
     if request_method != Method::CONNECT && request_body_need != BodyNeed::None {
       match capture_request_body_for_waf(
         request,
@@ -600,6 +628,14 @@ where
       (request, None)
     };
   let request_body = captured_body.as_ref().map(waf_body_input);
+  if captured_body
+    .as_ref()
+    .is_some_and(|body| !body.bytes.is_empty())
+  {
+    request
+      .extensions_mut()
+      .insert(incremental::BodyWasBuffered);
+  }
 
   let mut request_waf = if request_waf_enabled {
     access_log.ensure_request_ids();

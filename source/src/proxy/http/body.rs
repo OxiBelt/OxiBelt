@@ -215,7 +215,13 @@ where
   );
   tokio::spawn(async move {
     let mut flow = limiter.flow(direction);
-    while let Some(frame) = body.frame().await {
+    loop {
+      let frame = tokio::select! {
+        biased;
+        () = sender.closed() => return,
+        frame = body.frame() => frame,
+      };
+      let Some(frame) = frame else { break };
       let frame = match frame {
         Ok(frame) => frame,
         Err(error) => {
@@ -405,7 +411,13 @@ pub(crate) fn with_backpressure_send_timeout(
     Some(Arc::clone(&terminal_error)),
   );
   tokio::spawn(async move {
-    while let Some(frame) = body.frame().await {
+    loop {
+      let frame = tokio::select! {
+        biased;
+        () = sender.closed() => return,
+        frame = body.frame() => frame,
+      };
+      let Some(frame) = frame else { break };
       let stop_after_send = frame.is_err();
       match tokio::time::timeout(timeout, sender.send(frame)).await {
         Ok(Ok(())) => {}
@@ -438,6 +450,13 @@ pub(crate) fn with_connection_permit(
   response: Response<ProxyBody>,
   permit: ConnectionPermit,
 ) -> Response<ProxyBody> {
+  if let Some(exchange) = response
+    .extensions()
+    .get::<super::incremental_exchange::IncrementalExchange>()
+  {
+    exchange.retain(permit);
+    return response;
+  }
   let (parts, body) = response.into_parts();
   Response::from_parts(parts, with_drop_guard(body, permit))
 }

@@ -122,6 +122,7 @@ struct Needs {
   h2_upstream: bool,
   h2c_upstream: bool,
   h1_stall_upstream: bool,
+  incremental_upstreams: bool,
   h3_upstream: bool,
   webtransport_upstream: bool,
   websocket_upstream: bool,
@@ -496,6 +497,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
   manifest.push_str(&format!(
     "CASE_NEED_H1_STALL_UPSTREAM={}\n",
     bool_env(case.needs.h1_stall_upstream)
+  ));
+  manifest.push_str(&format!(
+    "CASE_NEED_INCREMENTAL_UPSTREAMS={}\n",
+    bool_env(case.needs.incremental_upstreams)
   ));
   manifest.push_str(&format!(
     "CASE_NEED_H3_UPSTREAM={}\n",

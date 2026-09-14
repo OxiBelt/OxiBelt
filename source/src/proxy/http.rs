@@ -55,6 +55,8 @@ pub(crate) mod fast_path;
 mod flow_helpers;
 pub(crate) mod grpc_web;
 pub(crate) mod headers;
+pub(crate) mod incremental;
+pub(crate) mod incremental_exchange;
 pub(crate) mod observability;
 mod overload;
 pub(crate) mod person_proof;
@@ -196,6 +198,7 @@ where
   B::Error: Into<self::body::BoxError> + Send + Sync + Unpin + 'static,
 {
   state.record_hot_path_request();
+  incremental::latch_request(&mut request);
   client_certificate::strip_reserved(request.headers_mut(), state);
 
   if state.lifecycle.is_draining() {

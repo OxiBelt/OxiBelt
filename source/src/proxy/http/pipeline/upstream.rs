@@ -126,6 +126,14 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     );
   }
 
+  if !effective_buffering.request.is_streaming() && !request.body().is_end_stream() {
+    if incremental::request_marked(&request) {
+      return route_security.apply(incremental::refused(request_version));
+    }
+    request
+      .extensions_mut()
+      .insert(incremental::BodyWasBuffered);
+  }
   let request =
     match buffering::buffer_request_body(request, &effective_buffering, state.as_ref()).await {
       Ok(request) => request,
@@ -195,13 +203,23 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     force_strip_accept_encoding: response_waf_body_compression_transform,
   };
   let mut outbound = rebuild_request(request, rebuild);
+  incremental::latch_request(&mut outbound);
+  let incremental_upload = incremental::request_marked(&outbound);
+  if incremental_upload
+    && outbound
+      .extensions()
+      .get::<incremental::BodyWasBuffered>()
+      .is_some()
+  {
+    return route_security.apply(incremental::refused(request_version));
+  }
   early_data::apply_verified_upstream_header(outbound.headers_mut(), verified_early_data);
   semantics::strip_accepted_expect(outbound.headers_mut());
   semantics::apply_priority_policy(outbound.headers_mut(), state.config.proxy.http.priority);
   if let Some(mode) = grpc_web_mode {
     grpc_web::rewrite_request_headers(outbound.headers_mut(), mode);
     let (parts, body) = outbound.into_parts();
-    let body = match grpc_web::decode_request_body(body, mode).await {
+    let body = match grpc_web::decode_request_body(body, mode, incremental_upload).await {
       Ok(body) => body,
       Err(error) => {
         warn!(error = %error, "failed to prepare gRPC-Web upstream request");
@@ -306,7 +324,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     record_route_cache_event(state, resolved.route, "miss", "lookup");
   }
 
-  if cache_enabled_for_route {
+  if cache_enabled_for_route && !incremental_upload {
     loop {
       let Some(permit) = state
         .cache
@@ -470,6 +488,16 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     }
   }
 
+  if incremental_upload {
+    let exchange = incremental_exchange::IncrementalExchange::new();
+    if upstream_version == HttpVersion::H3 {
+      exchange.arm_unstarted_upload();
+    } else {
+      outbound =
+        outbound.map(|body| incremental_exchange::wrap_request_body(body, exchange.clone()));
+    }
+    outbound.extensions_mut().insert(exchange);
+  }
   exchange::run(ExchangeContext {
     state,
     resolved,

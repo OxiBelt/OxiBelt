@@ -68,15 +68,22 @@ fn strip_ascii_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
 pub(crate) async fn decode_request_body(
   body: ProxyBody,
   mode: GrpcWebMode,
+  incremental: bool,
 ) -> anyhow::Result<ProxyBody> {
   match mode {
     GrpcWebMode::Binary => Ok(body),
     GrpcWebMode::Text => {
       let (sender, decoded) = channel_body(16);
       tokio::spawn(async move {
-        let mut decoder = TextDecoder::default();
+        let mut decoder = TextDecoder::new(incremental);
         let mut body = body;
-        while let Some(frame) = body.frame().await {
+        loop {
+          let frame = tokio::select! {
+            biased;
+            () = sender.closed() => return,
+            frame = body.frame() => frame,
+          };
+          let Some(frame) = frame else { break };
           let frame = match frame {
             Ok(frame) => frame,
             Err(error) => {
@@ -136,6 +143,7 @@ pub(crate) async fn decode_request_body(
 pub(crate) fn encode_response(
   mut response: Response<ProxyBody>,
   mode: GrpcWebMode,
+  incremental: bool,
 ) -> Response<ProxyBody> {
   response.headers_mut().insert(
     header::CONTENT_TYPE,
@@ -152,7 +160,13 @@ pub(crate) fn encode_response(
     let mut encoder = TextEncoder::default();
     let mut body = body;
     let mut saw_trailers = false;
-    while let Some(frame) = body.frame().await {
+    loop {
+      let frame = tokio::select! {
+        biased;
+        () = sender.closed() => return,
+        frame = body.frame() => frame,
+      };
+      let Some(frame) = frame else { break };
       let frame = match frame {
         Ok(frame) => frame,
         Err(error) => {
@@ -166,7 +180,10 @@ pub(crate) fn encode_response(
       };
       match frame.into_data() {
         Ok(data) => {
-          if send_data(&sender, mode, &mut encoder, data).await.is_err() {
+          if send_data(&sender, mode, incremental, &mut encoder, data)
+            .await
+            .is_err()
+          {
             return;
           }
         }
@@ -174,7 +191,10 @@ pub(crate) fn encode_response(
           if let Ok(trailers) = frame.into_trailers() {
             saw_trailers = true;
             let frame = encode_trailer_frame(&trailers);
-            if send_data(&sender, mode, &mut encoder, frame).await.is_err() {
+            if send_data(&sender, mode, incremental, &mut encoder, frame)
+              .await
+              .is_err()
+            {
               return;
             }
           }
@@ -183,11 +203,15 @@ pub(crate) fn encode_response(
     }
     if !saw_trailers {
       let frame = encode_trailer_frame(&fallback_trailers);
-      if send_data(&sender, mode, &mut encoder, frame).await.is_err() {
+      if send_data(&sender, mode, incremental, &mut encoder, frame)
+        .await
+        .is_err()
+      {
         return;
       }
     }
     if mode == GrpcWebMode::Text
+      && !incremental
       && let Some(data) = encoder.finish()
     {
       let _ = sender.send(Ok(Frame::data(data))).await;
@@ -199,11 +223,15 @@ pub(crate) fn encode_response(
 async fn send_data(
   sender: &tokio::sync::mpsc::Sender<ProxyBodyFrame>,
   mode: GrpcWebMode,
+  incremental: bool,
   encoder: &mut TextEncoder,
   data: Bytes,
 ) -> Result<(), ()> {
   let data = match mode {
     GrpcWebMode::Binary => data,
+    GrpcWebMode::Text if incremental => {
+      Bytes::from(base64::engine::general_purpose::STANDARD.encode(data))
+    }
     GrpcWebMode::Text => encoder.push(&data),
   };
   if data.is_empty() {
@@ -278,13 +306,23 @@ impl TextEncoder {
   }
 }
 
-#[derive(Default)]
 struct TextDecoder {
   carry: Vec<u8>,
+  incremental: bool,
 }
 
 impl TextDecoder {
-  fn push(&mut self, data: &[u8]) -> Result<Option<Bytes>, base64::DecodeError> {
+  fn new(incremental: bool) -> Self {
+    Self {
+      carry: Vec::with_capacity(3),
+      incremental,
+    }
+  }
+
+  fn push(&mut self, data: &[u8]) -> Result<Option<Bytes>, TextDecodeError> {
+    if self.incremental {
+      return self.push_incremental(data);
+    }
     self.carry.extend_from_slice(data);
     let decode_len = self.carry.len() / 4 * 4;
     if decode_len == 0 {
@@ -296,9 +334,38 @@ impl TextDecoder {
       .decode(chunk)
       .map(Bytes::from)
       .map(Some)
+      .map_err(TextDecodeError::Invalid)
   }
 
-  fn finish(&mut self) -> Result<Option<Bytes>, base64::DecodeError> {
+  fn push_incremental(&mut self, data: &[u8]) -> Result<Option<Bytes>, TextDecodeError> {
+    let mut decoded = BytesMut::new();
+    for &encoded in data {
+      if !encoded.is_ascii_alphanumeric() && encoded != b'+' && encoded != b'/' && encoded != b'=' {
+        return Err(TextDecodeError::InvalidByte(encoded));
+      }
+      if encoded == b'=' && self.carry.len() < 2 {
+        return Err(TextDecodeError::InvalidPadding);
+      }
+      self.carry.push(encoded);
+      if self.carry.len() == 4 {
+        let quartet = std::mem::take(&mut self.carry);
+        let bytes = base64::engine::general_purpose::STANDARD
+          .decode(quartet)
+          .map_err(TextDecodeError::Invalid)?;
+        decoded.extend_from_slice(&bytes);
+      }
+    }
+    if decoded.is_empty() {
+      Ok(None)
+    } else {
+      Ok(Some(decoded.freeze()))
+    }
+  }
+
+  fn finish(&mut self) -> Result<Option<Bytes>, TextDecodeError> {
+    if self.incremental && !self.carry.is_empty() {
+      return Err(TextDecodeError::Truncated);
+    }
     if self.carry.is_empty() {
       Ok(None)
     } else {
@@ -306,6 +373,26 @@ impl TextDecoder {
         .decode(std::mem::take(&mut self.carry))
         .map(Bytes::from)
         .map(Some)
+        .map_err(TextDecodeError::Invalid)
+    }
+  }
+}
+
+#[derive(Debug)]
+enum TextDecodeError {
+  Invalid(base64::DecodeError),
+  InvalidByte(u8),
+  InvalidPadding,
+  Truncated,
+}
+
+impl std::fmt::Display for TextDecodeError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Invalid(error) => write!(formatter, "invalid base64: {error}"),
+      Self::InvalidByte(byte) => write!(formatter, "invalid base64 byte 0x{byte:02x}"),
+      Self::InvalidPadding => formatter.write_str("invalid base64 padding"),
+      Self::Truncated => formatter.write_str("truncated base64 quartet"),
     }
   }
 }
@@ -313,6 +400,27 @@ impl TextDecoder {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn incremental_codecs_cancel_pending_sources() {
+    let (request_tx, request) = channel_body(1);
+    let decoded = decode_request_body(request, GrpcWebMode::Text, true)
+      .await
+      .unwrap();
+    tokio::task::yield_now().await;
+    drop(decoded);
+    tokio::time::timeout(std::time::Duration::from_secs(1), request_tx.closed())
+      .await
+      .expect("decoder must drop cancelled pending upload");
+
+    let (response_tx, response) = channel_body(1);
+    let encoded = encode_response(Response::new(response), GrpcWebMode::Text, true);
+    tokio::task::yield_now().await;
+    drop(encoded);
+    tokio::time::timeout(std::time::Duration::from_secs(1), response_tx.closed())
+      .await
+      .expect("encoder must drop cancelled pending response");
+  }
 
   #[test]
   fn detects_grpc_web_modes() {
@@ -340,7 +448,7 @@ mod tests {
   }
 
   #[test]
-  fn text_encoder_preserves_base64_boundaries() {
+  fn ordinary_text_encoder_preserves_base64_boundaries() {
     let mut encoder = TextEncoder::default();
     let mut out = Vec::new();
     out.extend_from_slice(&encoder.push(b"ab"));
@@ -349,5 +457,85 @@ mod tests {
       out.extend_from_slice(&rest);
     }
     assert_eq!(String::from_utf8(out).unwrap(), "YWJjZGU=");
+  }
+
+  #[test]
+  fn incremental_text_decoder_accepts_fragmented_concatenated_padded_chunks() {
+    let mut decoder = TextDecoder::new(true);
+    assert!(
+      decoder
+        .push(b"TQ=")
+        .expect("partial quartet is buffered")
+        .is_none()
+    );
+    assert_eq!(decoder.push(b"=T").unwrap(), Some(Bytes::from_static(b"M")));
+    assert_eq!(
+      decoder.push(b"g==").unwrap(),
+      Some(Bytes::from_static(b"N"))
+    );
+    assert_eq!(decoder.finish().unwrap(), None);
+  }
+
+  #[test]
+  fn incremental_text_decoder_rejects_invalid_or_truncated_input() {
+    let mut decoder = TextDecoder::new(true);
+    assert!(decoder.push(b"T!").is_err());
+
+    let mut decoder = TextDecoder::new(true);
+    assert!(decoder.push(b"A===").is_err());
+
+    let mut decoder = TextDecoder::new(true);
+    assert!(decoder.push(b"TQ=").is_ok());
+    assert!(matches!(decoder.finish(), Err(TextDecodeError::Truncated)));
+  }
+
+  #[tokio::test]
+  async fn incremental_text_response_chunks_are_independently_padded() {
+    let (sender, body) = channel_body(4);
+    sender
+      .send(Ok(Frame::data(Bytes::from_static(b"M"))))
+      .await
+      .unwrap();
+    let mut trailers = HeaderMap::new();
+    trailers.insert(GRPC_STATUS, HeaderValue::from_static("0"));
+    sender.send(Ok(Frame::trailers(trailers))).await.unwrap();
+    drop(sender);
+    let mut body = encode_response(Response::new(body), GrpcWebMode::Text, true).into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    let last = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert_eq!(first, Bytes::from_static(b"TQ=="));
+    assert_eq!(
+      last,
+      Bytes::from(
+        base64::engine::general_purpose::STANDARD.encode(encode_trailer_frame(&{
+          let mut trailers = HeaderMap::new();
+          trailers.insert(GRPC_STATUS, HeaderValue::from_static("0"));
+          trailers
+        }))
+      )
+    );
+    assert!(body.frame().await.is_none());
+  }
+
+  #[tokio::test]
+  async fn incremental_text_request_decodes_fragmented_padded_chunks() {
+    let (sender, body) = channel_body(4);
+    sender
+      .send(Ok(Frame::data(Bytes::from_static(b"TQ="))))
+      .await
+      .unwrap();
+    sender
+      .send(Ok(Frame::data(Bytes::from_static(b"=Tg=="))))
+      .await
+      .unwrap();
+    drop(sender);
+    let decoded = decode_request_body(body, GrpcWebMode::Text, true)
+      .await
+      .unwrap()
+      .collect()
+      .await
+      .unwrap()
+      .to_bytes();
+    assert_eq!(decoded, Bytes::from_static(b"MN"));
   }
 }

@@ -28,6 +28,26 @@ pub(crate) fn waf_body_input(body: &CapturedBody) -> WafBodyInput<'_> {
   }
 }
 
+pub(crate) fn request_capture_blocks_incremental(
+  version: http::Version,
+  headers: &HeaderMap,
+  body_need: BodyNeed,
+  transform_enabled: bool,
+) -> bool {
+  (transform_enabled && body_need != BodyNeed::None && has_non_identity_content_encoding(headers))
+    || request_body_capture_decision(version, headers, body_need) == WafBodyCaptureDecision::Prefix
+}
+
+pub(crate) fn response_capture_blocks_incremental(
+  version: http::Version,
+  headers: &HeaderMap,
+  body_need: BodyNeed,
+  transform_enabled: bool,
+) -> bool {
+  (transform_enabled && body_need != BodyNeed::None && has_non_identity_content_encoding(headers))
+    || response_body_capture_decision(version, headers, body_need) == WafBodyCaptureDecision::Prefix
+}
+
 pub(crate) async fn capture_request_body_for_waf(
   request: Request<ProxyBody>,
   body_need: BodyNeed,

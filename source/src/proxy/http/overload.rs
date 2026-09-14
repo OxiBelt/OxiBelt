@@ -10,6 +10,13 @@ pub(super) fn with_overload_request_lease(
   response: Response<ProxyBody>,
   lease: RequestLease,
 ) -> Response<ProxyBody> {
+  if let Some(exchange) = response
+    .extensions()
+    .get::<super::incremental_exchange::IncrementalExchange>()
+  {
+    exchange.retain(lease);
+    return response;
+  }
   let (parts, body) = response.into_parts();
   Response::from_parts(parts, body::with_drop_guard(body, lease))
 }

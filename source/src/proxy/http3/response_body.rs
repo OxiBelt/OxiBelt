@@ -11,14 +11,53 @@ use tokio::time::Sleep;
 use crate::proxy::http::body::{
   BodyTimeoutError, BodyTimeoutKind, BoxError, ProxyBody, boxed_error,
 };
+use crate::proxy::http::incremental_exchange::IncrementalExchange;
 
 type H3ClientRequestStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+type H3ClientRequestRecvStream = h3::client::RequestStream<
+  <h3_quinn::BidiStream<Bytes> as h3::quic::BidiStream<Bytes>>::RecvStream,
+  Bytes,
+>;
 
 pub(super) fn upstream_h3_response_body(
   stream: H3ClientRequestStream,
   timeout: Duration,
 ) -> ProxyBody {
   upstream_h3_response_body_inner(stream, timeout)
+}
+
+pub(super) fn observe_incremental_h3_response_body(
+  stream: H3ClientRequestRecvStream,
+  timeout: Duration,
+  exchange: IncrementalExchange,
+  semantically_empty: bool,
+) -> ProxyBody {
+  observe_incremental_h3_response_body_inner(stream, timeout, exchange, semantically_empty)
+}
+
+fn observe_incremental_h3_response_body_inner<S>(
+  stream: S,
+  timeout: Duration,
+  exchange: IncrementalExchange,
+  semantically_empty: bool,
+) -> ProxyBody
+where
+  S: H3ResponseBodyStream,
+{
+  if semantically_empty {
+    // No DATA/trailer section is permitted downstream for HEAD/204/304. Stop
+    // only this receive half and return a genuinely terminal body; dropping
+    // it must never cancel the independent request upload.
+    let mut stream = stream;
+    stream.stop_sending();
+    return http_body_util::Empty::<Bytes>::new()
+      .map_err(|never| match never {})
+      .boxed();
+  }
+  crate::proxy::http::incremental_exchange::observe_upstream_response_body(
+    upstream_h3_response_body_inner(stream, timeout),
+    exchange,
+  )
 }
 
 trait H3ResponseBodyStream: Send + Sync + Unpin + 'static {
@@ -37,7 +76,10 @@ trait H3ResponseBodyStream: Send + Sync + Unpin + 'static {
   fn stop_sending(&mut self);
 }
 
-impl H3ResponseBodyStream for H3ClientRequestStream {
+impl<S> H3ResponseBodyStream for h3::client::RequestStream<S, Bytes>
+where
+  S: h3::quic::RecvStream + Send + Sync + Unpin + 'static,
+{
   type Error = h3::error::StreamError;
 
   fn poll_recv_data_bytes(
@@ -358,6 +400,88 @@ mod tests {
         .contains("upstream response body read timed out")
     );
     assert!(stopped.load(Ordering::SeqCst));
+  }
+
+  #[tokio::test]
+  async fn incremental_h3_source_eof_waits_for_final_downstream_eof() {
+    let exchange = IncrementalExchange::new();
+    let released = Arc::new(AtomicBool::new(false));
+    struct Guard(Arc<AtomicBool>);
+    impl Drop for Guard {
+      fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+      }
+    }
+    exchange.retain(Guard(Arc::clone(&released)));
+    let body = observe_incremental_h3_response_body_inner(
+      FakeResponseStream::new([FakeStreamEvent::End]),
+      Duration::from_secs(30),
+      exchange.clone(),
+      false,
+    );
+    body.collect().await.expect("response should complete");
+    assert!(!exchange.is_cancelled());
+    assert!(!exchange.is_complete());
+    exchange.mark_upload_complete();
+    assert!(
+      !released.load(Ordering::SeqCst),
+      "upstream source EOF must not release resources before final downstream EOF"
+    );
+    let final_body = crate::proxy::http::incremental_exchange::wrap_response_body(
+      http_body_util::Empty::<Bytes>::new()
+        .map_err(|never| match never {})
+        .boxed(),
+      exchange.clone(),
+    );
+    final_body
+      .collect()
+      .await
+      .expect("final downstream response should complete");
+    assert!(exchange.is_complete());
+    assert!(released.load(Ordering::SeqCst));
+  }
+
+  #[test]
+  fn abandoned_incremental_h3_response_cancels_upload_and_receive_half() {
+    let exchange = IncrementalExchange::new();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let body = observe_incremental_h3_response_body_inner(
+      FakeResponseStream::pending(stopped.clone()),
+      Duration::from_secs(30),
+      exchange.clone(),
+      false,
+    );
+    drop(body);
+    assert!(exchange.is_cancelled());
+    assert!(
+      !exchange.is_complete(),
+      "only the final downstream wrapper may complete the response half"
+    );
+    assert!(stopped.load(Ordering::SeqCst));
+  }
+
+  #[test]
+  fn semantic_empty_incremental_h3_response_is_terminal_without_cancelling_upload() {
+    let exchange = IncrementalExchange::new();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let body = observe_incremental_h3_response_body_inner(
+      FakeResponseStream::pending(stopped.clone()),
+      Duration::from_secs(30),
+      exchange.clone(),
+      true,
+    );
+    assert!(body.is_end_stream());
+    let final_body =
+      crate::proxy::http::incremental_exchange::wrap_response_body(body, exchange.clone());
+    assert!(final_body.is_end_stream());
+    drop(final_body);
+    assert!(
+      !exchange.is_cancelled(),
+      "a downstream H1 server may drop a HEAD/204/304 body without cancelling upload"
+    );
+    assert!(stopped.load(Ordering::SeqCst));
+    exchange.mark_upload_complete();
+    assert!(exchange.is_complete());
   }
 
   #[test]

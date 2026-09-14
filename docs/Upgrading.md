@@ -5,6 +5,23 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Incremental HTTP forwarding
+
+Valid `Incremental: ?1` request and response messages now opt into
+[RFC 10036 forwarding](Incremental.md) automatically. Unmarked traffic and
+configuration defaults are unchanged. Review clients that already send this
+header: required buffering, WAF body capture or external-auth body capture now
+produces `501` with `incremental_refused` rather than waiting for that body.
+Accepted marked uploads are one-shot and are not mirrored; marked responses
+skip optional compression and new cache collection. gRPC-Web text peers must
+accept independently padded Base64 chunks.
+
+No configuration key, schema epoch, Admin API, rule syntax or persisted-state
+migration is introduced. Rollback needs no state conversion, but an older
+binary does not provide these forwarding guarantees; stop incremental clients
+or restore compatible application behavior before rolling back. Validate
+streaming routes using the matrix command in the feature guide.
+
 ## Downstream client certificate forwarding
 
 `routes.client_certificate_forwarding` is opt-in; existing configurations retain

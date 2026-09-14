@@ -389,6 +389,34 @@ async fn bandwidth_body_splits_payload_and_excludes_shaping_from_inner_read_time
   assert!(shaped.frame().await.is_none());
 }
 
+#[tokio::test]
+async fn incremental_channel_workers_cancel_pending_sources() {
+  for bandwidth in [false, true] {
+    let (source_tx, source) = channel_body(1);
+    let wrapped = if bandwidth {
+      with_bandwidth(
+        source,
+        RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED),
+        BandwidthDirection::Upload,
+        Metrics::new(),
+        BandwidthTrafficClass::Http,
+        None,
+      )
+    } else {
+      with_backpressure_send_timeout(
+        source,
+        Duration::from_secs(60),
+        BodyTimeoutKind::UpstreamRequestSend,
+      )
+    };
+    tokio::task::yield_now().await;
+    drop(wrapped);
+    tokio::time::timeout(Duration::from_secs(1), source_tx.closed())
+      .await
+      .expect("cancelled consumer must promptly drop a pending source");
+  }
+}
+
 #[tokio::test(start_paused = true)]
 async fn bandwidth_body_observes_unlimited_to_limited_policy_updates() {
   let limiter = RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED);

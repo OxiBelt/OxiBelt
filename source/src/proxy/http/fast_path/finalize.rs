@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use super::super::apply_alt_svc_header;
 use super::super::flow_helpers::tags_ref;
+use super::super::{apply_alt_svc_header, incremental};
 use super::compiled::SelectedCompiledProxyAction;
 use super::direct_h1::{DirectH1Lease, recycle_response_body};
 use super::direct_h2::{DirectH2Lease, release_response_body as release_direct_h2_response_body};
@@ -71,6 +71,7 @@ pub(super) fn finalize_response(
   trailers_handled: bool,
   response_send_timeout: Duration,
 ) -> Response<ProxyBody> {
+  latch_upstream_incremental_response(&mut parts);
   if let Some(lease) = direct_h1_lease {
     response_body = recycle_response_body(response_body, lease, known_small_response_body);
   }
@@ -194,6 +195,21 @@ pub(super) fn finalize_response(
       apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
     }
   }
+  if incremental_response_requires_refusal(
+    &parts,
+    &response_body,
+    known_small_response_body,
+    inlined_known_small_body.as_ref(),
+  ) {
+    return with_route_security_headers(
+      incremental::refused(request_version),
+      &state.config.security,
+      resolved.route,
+    );
+  }
+  if incremental::requested(&parts.headers) {
+    parts.extensions.insert(incremental::IncrementalIntent);
+  }
   if fast_path_alt_svc_possible(state, downstream_scheme, request_version) {
     apply_alt_svc_header(
       &mut parts.headers,
@@ -233,6 +249,36 @@ pub(super) fn finalize_response(
   timing::record_finalize(state, metric_protocol, request_version, finalize_started);
   response
     .map(|body| maybe_wrap_h2_response_send_timing(state, request_version, metric_protocol, body))
+}
+
+fn latch_upstream_incremental_response(parts: &mut Parts) {
+  // Preserve a valid upstream signal even if Connection nominates its field
+  // name and hop-by-hop stripping removes the header below.
+  if incremental::requested(&parts.headers) {
+    parts.extensions.insert(incremental::IncrementalIntent);
+  }
+}
+
+fn incremental_response_requires_refusal(
+  parts: &Parts,
+  response_body: &ProxyBody,
+  known_small_response_body: bool,
+  inlined_known_small_body: Option<&body::InlinedKnownSmallResponseBody>,
+) -> bool {
+  if !(parts
+    .extensions
+    .get::<incremental::IncrementalIntent>()
+    .is_some()
+    || incremental::requested(&parts.headers))
+  {
+    return false;
+  }
+
+  // The fast path has already read a nonempty known-small body by this point.
+  // An after-the-fact signal cannot turn that materialization into streaming.
+  known_small_response_body
+    && (inlined_known_small_body.is_some_and(|body| !body.data.is_empty())
+      || hyper::body::Body::size_hint(response_body).lower() > 0)
 }
 
 fn can_use_compiled_known_small_noop_response(
@@ -453,6 +499,58 @@ reuse_port = true
       .expect("response should build")
       .into_parts()
       .0
+  }
+
+  #[test]
+  fn upstream_incremental_signal_latches_before_header_removal() {
+    let mut parts = response_parts(http::Version::HTTP_2);
+    parts
+      .headers
+      .insert("incremental", HeaderValue::from_static("?1"));
+
+    latch_upstream_incremental_response(&mut parts);
+    parts.headers.remove("incremental");
+
+    assert!(
+      parts
+        .extensions
+        .get::<incremental::IncrementalIntent>()
+        .is_some()
+    );
+  }
+
+  #[test]
+  fn late_waf_incremental_signal_refuses_nonempty_known_small_body() {
+    let mut parts = response_parts(http::Version::HTTP_2);
+    apply_header_mutations(
+      &mut parts.headers,
+      &[HeaderMutation::Set {
+        name: HeaderName::from_static("incremental"),
+        value: HeaderValue::from_static("?1"),
+      }],
+    );
+
+    assert!(incremental_response_requires_refusal(
+      &parts,
+      &body::known_small_no_trailers_body(Bytes::from_static(b"ok")),
+      true,
+      None,
+    ));
+  }
+
+  #[test]
+  fn late_incremental_signal_preserves_known_empty_response() {
+    let mut parts = response_parts(http::Version::HTTP_2);
+    parts
+      .headers
+      .insert("incremental", HeaderValue::from_static("?1"));
+
+    assert!(!incremental_response_requires_refusal(
+      &parts,
+      &empty_proxy_body(),
+      true,
+      None,
+    ));
   }
 
   fn can_use_h2_known_small_noop(

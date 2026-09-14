@@ -186,6 +186,9 @@ pub(crate) fn maybe_compress_response(
   config: &CompressionConfig,
   state: &CompressionState,
 ) -> Response<ProxyBody> {
+  if super::incremental::response_marked(&response) {
+    return response;
+  }
   if !config.enabled {
     return response;
   }
