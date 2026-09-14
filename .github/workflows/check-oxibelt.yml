@@ -2054,12 +2054,10 @@ jobs:
       - name: Validate Gateway controller high availability
         run: tests/scripts/check-helm-gateway-controller-ha.sh
 
-      - name: Install Kind and kubectl
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          version: v0.33.0
-          kubectl_version: ${{ matrix.kubectl }}
-          install_only: true
+      - name: Install verified Kind and kubectl
+        env:
+          KUBECTL_VERSION: ${{ matrix.kubectl }}
+        run: tests/scripts/install-ci-kind-kubectl.sh "${KUBECTL_VERSION}" "${RUNNER_TEMP}/oxibelt-ci-tools"
 
       - name: Download AMD64 data-plane Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -2123,12 +2121,10 @@ jobs:
           tests/scripts/check-helm-strict-dataplane.sh
           tests/scripts/check-helm-edge-secure-medium-v2.sh
 
-      - name: Install Kind and kubectl
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          version: v0.33.0
-          kubectl_version: v1.34.11
-          install_only: true
+      - name: Install verified Kind and kubectl
+        env:
+          KUBECTL_VERSION: v1.34.11
+        run: tests/scripts/install-ci-kind-kubectl.sh "${KUBECTL_VERSION}" "${RUNNER_TEMP}/oxibelt-ci-tools"
 
       - name: Download AMD64 strict data-plane Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -2172,12 +2168,10 @@ jobs:
         with:
           version: v3.22.0
 
-      - name: Install Kind and kubectl
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          version: v0.33.0
-          kubectl_version: v1.34.11
-          install_only: true
+      - name: Install verified Kind and kubectl
+        env:
+          KUBECTL_VERSION: v1.34.11
+        run: tests/scripts/install-ci-kind-kubectl.sh "${KUBECTL_VERSION}" "${RUNNER_TEMP}/oxibelt-ci-tools"
 
       - name: Download AMD64 strict data-plane Docker image artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
@@ -2238,12 +2232,10 @@ jobs:
       - name: Validate Helm autoscaling configuration
         run: tests/scripts/check-helm-autoscaling.sh
 
-      - name: Install Kind and kubectl
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          version: v0.33.0
-          kubectl_version: v1.34.11
-          install_only: true
+      - name: Install verified Kind and kubectl
+        env:
+          KUBECTL_VERSION: v1.34.11
+        run: tests/scripts/install-ci-kind-kubectl.sh "${KUBECTL_VERSION}" "${RUNNER_TEMP}/oxibelt-ci-tools"
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
@@ -2299,12 +2291,10 @@ jobs:
       - name: Validate Helm NetworkPolicy configuration
         run: tests/scripts/check-helm-network-policy.sh
 
-      - name: Install kubectl
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          version: v0.33.0
-          kubectl_version: v1.34.11
-          install_only: true
+      - name: Install verified Kind and kubectl
+        env:
+          KUBECTL_VERSION: v1.34.11
+        run: tests/scripts/install-ci-kind-kubectl.sh "${KUBECTL_VERSION}" "${RUNNER_TEMP}/oxibelt-ci-tools"
 
       - name: Install Minikube
         env:
@@ -2380,12 +2370,10 @@ jobs:
           tests/scripts/check-helm-network-policy.sh
           tests/scripts/check-helm-image-digest.sh
 
-      - name: Install current Kind and kubectl
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
-        with:
-          version: v0.33.0
-          kubectl_version: ${{ matrix.kubectl }}
-          install_only: true
+      - name: Install verified Kind and kubectl
+        env:
+          KUBECTL_VERSION: ${{ matrix.kubectl }}
+        run: tests/scripts/install-ci-kind-kubectl.sh "${KUBECTL_VERSION}" "${RUNNER_TEMP}/oxibelt-ci-tools"
 
       - name: Validate chart resources against current Kubernetes
         env:

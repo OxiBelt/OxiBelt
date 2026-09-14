@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "ci_workflow_integrity/download_recovery.rs"]
+mod download_recovery;
+
 #[derive(Clone, Debug)]
 struct Job {
   needs: Vec<String>,
@@ -42,9 +45,7 @@ const DOCKER_INTEGRATION_JOBS: &[&str] = &[
   "docker-integration-security",
 ];
 const DOCKER_SECURITY_FUZZ_JOB_COUNT: usize = 1;
-const KIND_ACTION_RETRY_PIN: &str =
-  "helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0";
-const KIND_ACTION_V1_14_0_SHA: &str = "ef37e7f390d99f746eb8b610417061a60e82a6cc";
+const KIND_KUBECTL_INSTALL_COMMAND: &str = "tests/scripts/install-ci-kind-kubectl.sh \"${KUBECTL_VERSION}\" \"${RUNNER_TEMP}/oxibelt-ci-tools\"";
 
 const OXIBELT_IMAGE_ARTIFACTS: &[(&str, &str, &str, &str)] = &[
   (
@@ -1012,6 +1013,16 @@ fn admin_audit_anchor_postgres_script_text() -> String {
 fn kubernetes_immutable_rollout_script_text() -> String {
   fs::read_to_string(repo_root().join("tests/scripts/run-kubernetes-immutable-rollout.sh"))
     .expect("Kubernetes immutable rollout script should be readable")
+}
+
+fn verified_download_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/lib/verified-download.sh"))
+    .expect("verified download helper should be readable")
+}
+
+fn ci_kind_kubectl_installer_script_text() -> String {
+  fs::read_to_string(repo_root().join("tests/scripts/install-ci-kind-kubectl.sh"))
+    .expect("CI Kind and kubectl installer should be readable")
 }
 
 fn helm_strict_hardening_live_script_text() -> String {
@@ -4049,44 +4060,91 @@ fn rust_advisory_checks_gate_downstream_build_jobs() {
 }
 
 #[test]
-fn kind_action_installs_are_retry_hardened_and_install_only() {
+fn kind_and_kubectl_install_uses_the_owned_verified_installer() {
   let workflow = workflow_text();
-  let any_uses_marker = "uses: helm/kind-action@";
-  let uses_marker = format!("uses: {KIND_ACTION_RETRY_PIN}");
+  let installer = ci_kind_kubectl_installer_script_text();
+  let download_helper = verified_download_script_text();
 
   assert_eq!(
-    workflow.matches(any_uses_marker).count(),
-    6,
-    "the workflow should contain exactly the reviewed Kind action uses"
+    workflow.matches("uses: helm/kind-action@").count(),
+    0,
+    "all CI Kind and kubectl installation must use the repository's verified installer"
   );
   assert_eq!(
-    workflow.matches(&uses_marker).count(),
+    workflow.matches(KIND_KUBECTL_INSTALL_COMMAND).count(),
     6,
-    "every Kind installation should use the exact upstream retry-fix commit"
+    "every former Kind action use should call the owned checksum-verified installer"
   );
-  assert!(
-    !workflow.contains(KIND_ACTION_V1_14_0_SHA),
-    "the one-shot v1.14.0 Kind action pin must not remain"
+  assert_eq!(
+    workflow
+      .matches("name: Install verified Kind and kubectl")
+      .count(),
+    6,
+    "all six Kubernetes jobs must retain their verified tool-install step"
   );
-
-  for (index, remainder) in workflow.split(&uses_marker).skip(1).enumerate() {
-    let action_step = remainder
-      .split_once("\n      - ")
-      .map_or(remainder, |(step, _)| step);
+  for expected in [
+    "kind_version=\"v0.33.0\"",
+    "kind_sha256=\"aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d\"",
+    "v1.34.11)\n    kubectl_sha256=\"8efbb9435132a190920eb65a47a8c1ecf755ad85ab57a600c9bedbab460bb7a8\"",
+    "v1.35.8)\n    kubectl_sha256=\"874d5e72dbb819f43cff16bcd1e4f8bac5b7f2361fe1e55049b0a6c676fb0cbf\"",
+    "v1.36.4)\n    kubectl_sha256=\"8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a\"",
+    "v1.37.0)\n    kubectl_sha256=\"6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f\"",
+    "download_verified_sha256",
+    "https://github.com/kubernetes-sigs/kind/releases/download/${kind_version}/kind-linux-amd64",
+    "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl",
+    "version --client=true --output=json",
+    "mv -T --no-clobber -- \"${staging_dir}\" \"${install_dir}\"",
+  ] {
     assert!(
-      action_step.contains("install_only: true"),
-      "Kind action use {index} must remain install-only"
+      installer.contains(expected),
+      "the owned Kubernetes installer should enforce {expected}"
     );
-    for forbidden in ["registry:", "cloud_provider:"] {
-      assert!(
-        !action_step
-          .lines()
-          .map(str::trim_start)
-          .any(|line| line.starts_with(forbidden)),
-        "Kind action use {index} must not enable unreachable behavior with {forbidden}"
-      );
-    }
   }
+  let kind_digest = installer
+    .find("kind_sha256=")
+    .expect("the installer should bind the pinned Kind digest");
+  let first_download = installer
+    .find("download_verified_sha256")
+    .expect("the installer should verify the Kind download");
+  let second_download = installer[first_download + 1..]
+    .find("download_verified_sha256")
+    .map(|offset| first_download + 1 + offset)
+    .expect("the installer should verify the kubectl download");
+  let kind_version_check = installer
+    .find("kind_report=")
+    .expect("the installer should check the downloaded Kind version");
+  let kubectl_version_check = installer
+    .find("kubectl_report=")
+    .expect("the installer should check the downloaded kubectl version");
+  let publish_directory = installer
+    .find("mv -T --no-clobber")
+    .expect("the installer should atomically publish the verified tool directory");
+  let publish_path = installer
+    .find(">>\"${GITHUB_PATH}\"")
+    .expect("the installer should publish GITHUB_PATH only after tool verification");
+  assert!(
+    kind_digest < first_download
+      && first_download < second_download
+      && second_download < kind_version_check
+      && kind_version_check < kubectl_version_check
+      && kubectl_version_check < publish_directory
+      && publish_directory < publish_path,
+    "both pinned downloads and version checks must precede directory and GITHUB_PATH publication"
+  );
+  for expected in [
+    "--retry 8 --retry-all-errors --connect-timeout 10 --max-time 60 --retry-max-time 300",
+    "sha256sum --check --status",
+    "mv -T --no-clobber -- \"${staging}\" \"${destination}\"",
+  ] {
+    assert!(
+      download_helper.contains(expected),
+      "the shared downloader should enforce {expected}"
+    );
+  }
+  assert!(
+    !download_helper.contains("--retry-delay"),
+    "the shared downloader should preserve curl's bounded exponential retry delay"
+  );
 }
 
 #[test]
@@ -4165,10 +4223,9 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "tests/scripts/check-helm-service-account-token.sh",
     "name: Validate Gateway controller high availability",
     "tests/scripts/check-helm-gateway-controller-ha.sh",
-    KIND_ACTION_RETRY_PIN,
-    "version: v0.33.0",
-    "kubectl_version: ${{ matrix.kubectl }}",
-    "install_only: true",
+    "name: Install verified Kind and kubectl",
+    "KUBECTL_VERSION: ${{ matrix.kubectl }}",
+    KIND_KUBECTL_INSTALL_COMMAND,
     "name: oxibelt-dataplane-alpine-musl-amd64-image",
     "name: oxibelt-gateway-controller-alpine-musl-amd64-image",
     "docker load --input \"${RUNNER_TEMP}/oxibelt-dataplane-image/oxibelt-dataplane-alpine-musl-amd64.tar\"",
@@ -4532,7 +4589,9 @@ fn kubernetes_strict_hardening_ci_is_provider_neutral_and_invocation_isolated() 
     "name: Kubernetes strict seccomp and Landlock hardening",
     "actions: read",
     "contents: read",
-    "version: v0.33.0",
+    "name: Install verified Kind and kubectl",
+    "KUBECTL_VERSION: v1.34.11",
+    KIND_KUBECTL_INSTALL_COMMAND,
     "tests/scripts/check-helm-strict-dataplane.sh",
     "tests/scripts/check-helm-edge-secure-medium-v2.sh",
     "name: oxibelt-dataplane-strict-alpine-musl-amd64-image",
@@ -4625,8 +4684,9 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
     "contents: read",
     "rustup toolchain install 1.98.1 --profile minimal",
     "version: v3.22.0",
-    "version: v0.33.0",
-    "kubectl_version: v1.34.11",
+    "name: Install verified Kind and kubectl",
+    "KUBECTL_VERSION: v1.34.11",
+    KIND_KUBECTL_INSTALL_COMMAND,
     "name: oxibelt-dataplane-strict-alpine-musl-amd64-image",
     "name: oxibelt-tools-alpine-musl-amd64-image",
     "OXIBELT_ADMISSION_STRICT_ARTIFACT_DIR:",
@@ -6006,10 +6066,9 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "tests/scripts/check-helm-pod-lifecycle.sh",
     "name: Validate Helm autoscaling configuration",
     "tests/scripts/check-helm-autoscaling.sh",
-    KIND_ACTION_RETRY_PIN,
-    "version: v0.33.0",
-    "kubectl_version: v1.34.11",
-    "install_only: true",
+    "name: Install verified Kind and kubectl",
+    "KUBECTL_VERSION: v1.34.11",
+    KIND_KUBECTL_INSTALL_COMMAND,
     "tests/scripts/select-amd64-docker-image-artifact.sh auto",
     "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}\"",
     "OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}",
@@ -6157,10 +6216,9 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "version: v3.22.0",
     "name: Validate Helm NetworkPolicy configuration",
     "tests/scripts/check-helm-network-policy.sh",
-    KIND_ACTION_RETRY_PIN,
-    "version: v0.33.0",
-    "kubectl_version: v1.34.11",
-    "install_only: true",
+    "name: Install verified Kind and kubectl",
+    "KUBECTL_VERSION: v1.34.11",
+    KIND_KUBECTL_INSTALL_COMMAND,
     "MINIKUBE_VERSION: v1.39.0",
     "MINIKUBE_SHA256: b738496da01be06bbaf80c688f57ce25acd3849fbb518155f3a88e03ef555aa4",
     "curl --fail --location --retry 3 --retry-all-errors --retry-delay 2",
@@ -6349,9 +6407,9 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
     "tests/scripts/check-helm-autoscaling.sh",
     "tests/scripts/check-helm-network-policy.sh",
     "tests/scripts/check-helm-image-digest.sh",
-    KIND_ACTION_RETRY_PIN,
-    "version: v0.33.0",
-    "kubectl_version: ${{ matrix.kubectl }}",
+    "name: Install verified Kind and kubectl",
+    "KUBECTL_VERSION: ${{ matrix.kubectl }}",
+    KIND_KUBECTL_INSTALL_COMMAND,
     "kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d",
     "kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0",
     "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
