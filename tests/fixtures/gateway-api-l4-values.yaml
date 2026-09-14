@@ -60,6 +60,14 @@ config:
     max_version = "tls1.3"
     {{ include "oxibelt.publicTlsConfig" . }}
 
+    # The Gateway client-identity qualification supplies this CA in the
+    # chart-owned public TLS Secret. RoutePolicy only projects an already
+    # verified leaf; the base configuration owns this required verification.
+    [tls.client_auth]
+    mode = "require"
+    ca_certs = ["downstream-client-ca.pem"]
+    verify_depth = 4
+
     [health]
     enabled = true
     bind = "0.0.0.0:{{ .Values.health.port }}"

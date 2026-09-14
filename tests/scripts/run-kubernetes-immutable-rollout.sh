@@ -52,6 +52,8 @@ port_forward_pid=""
 udp_flow_probe_pid=""
 cluster_created=0
 redis_kind_image_created=0
+gateway_identity_protocol_probe_image=""
+gateway_identity_protocol_probe_image_created=0
 admin_server_name=""
 admin_service_name="${workload_name}-admin"
 controller_selector="app.kubernetes.io/name=oxibelt-gateway-controller"
@@ -146,6 +148,9 @@ cleanup() {
   if ((redis_kind_image_created == 1)); then
     docker image rm --no-prune "${redis_kind_image}" >/dev/null 2>&1 || true
   fi
+  if ((gateway_identity_protocol_probe_image_created == 1)); then
+    docker image rm --no-prune "${gateway_identity_protocol_probe_image}" >/dev/null 2>&1 || true
+  fi
 
   case "${work_dir}" in
     "${repo_root}"/tests/.tmp/kubernetes-immutable-rollout-*)
@@ -161,6 +166,12 @@ cleanup() {
   exit "${status}"
 }
 trap cleanup EXIT
+
+# The verified-client identity phase is deliberately sourced so its focused
+# Gateway setup stays separate from the baseline immutable rollout harness.
+# It is invoked only after every baseline assertion has completed.
+# shellcheck source=tests/scripts/lib/gateway-verified-client-identity.sh
+source "${script_dir}/lib/gateway-verified-client-identity.sh"
 
 wait_for() {
   local description="$1"
@@ -1679,9 +1690,19 @@ kube wait --for=condition=Established --timeout=120s \
 
 kube create namespace "${namespace}" >/dev/null
 kube create namespace "${outside_namespace}" >/dev/null
+# The focused Gateway identity phase uses a separate frontend client CA. Keep
+# it in the chart-owned public TLS Secret so the base configuration can require
+# client authentication independently of Gateway route policy.
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+  -subj '/CN=OxiBelt Gateway downstream client CA' \
+  -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+  -keyout "${work_dir}/downstream-client-ca.key" \
+  -out "${work_dir}/downstream-client-ca.pem" \
+  >/dev/null 2>&1
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
   -subj '/CN=oxibelt-rollout.test' \
-  -addext 'subjectAltName=DNS:oxibelt-rollout.test' \
+  -addext 'subjectAltName=DNS:oxibelt-rollout.test,DNS:verified-client.example.test' \
   -keyout "${work_dir}/tls.key" \
   -out "${work_dir}/tls.crt" \
   >/dev/null 2>&1
@@ -1689,6 +1710,10 @@ kube -n "${namespace}" create secret tls oxibelt-tls \
   --cert "${work_dir}/tls.crt" \
   --key "${work_dir}/tls.key" \
   >/dev/null
+downstream_client_ca_base64="$(base64 -w 0 "${work_dir}/downstream-client-ca.pem")"
+kube -n "${namespace}" patch secret oxibelt-tls --type=merge \
+  --patch "{\"data\":{\"downstream-client-ca.pem\":\"${downstream_client_ca_base64}\"}}" >/dev/null
+unset downstream_client_ca_base64
 
 # Keep all credentials inside this invocation's guarded temporary directory.
 # The data-plane image receives only the corresponding Kubernetes Secrets; the
@@ -2536,5 +2561,7 @@ wait_for "a failed-closed stale-config Pod" 60 \
   stale_config_pod_failed_closed "${stale_pod}"
 wait_for "the immutable digest-mismatch log from stale-config Pod" 30 \
   stale_config_pod_reports_digest_mismatch "${stale_pod}"
+
+verify_gateway_verified_client_identity
 
 echo "Kubernetes immutable three-replica rollout and focused Gateway API TCP/UDP integration passed"

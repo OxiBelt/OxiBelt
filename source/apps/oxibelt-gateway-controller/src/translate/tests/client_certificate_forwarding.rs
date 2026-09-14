@@ -1,6 +1,6 @@
 use super::{
-  GRPC_FIXTURE, HTTP_FILTER_FIXTURE, HTTP_FIXTURE, args, generated_toml_validates,
-  has_error_containing, objects, translate_objects,
+  GRPC_FIXTURE, HTTP_FILTER_FIXTURE, HTTP_FIXTURE, args, generated_toml_parses,
+  generated_toml_validates, has_error_containing, objects, translate_objects,
 };
 
 fn policy(kind: &str, name: &str, forwarding: &str) -> String {
@@ -51,6 +51,92 @@ fn http_and_grpc_route_policies_render_admitted_verified_client_leaf_forwarding(
   .expect("translate GRPCRoute");
   assert!(grpc.toml.contains("header = \"x-verified-client-cert\""));
   assert!(grpc.toml.contains("format = \"rfc9440\""));
+}
+
+#[test]
+fn http_and_grpc_forwarding_compose_with_gateway_upstream_client_identity() {
+  let temp_dir = super::common::TempDir::new("gateway-forwarded-client-identity");
+  let (certificate_path, private_key_path) =
+    super::common::create_self_signed_cert(temp_dir.path(), "orders-client.example.test");
+  let certificate = super::base64_encode(&std::fs::read(certificate_path).expect("certificate"));
+  let private_key = super::base64_encode(&std::fs::read(private_key_path).expect("private key"));
+  let source_secret = format!(
+    "\n---\napiVersion: v1\nkind: Secret\nmetadata: {{name: orders-client, namespace: default, uid: source-uid, resourceVersion: \"17\"}}\ntype: kubernetes.io/tls\ndata:\n  tls.crt: {certificate}\n  tls.key: {private_key}\n"
+  );
+  let backend_policy = "\n---\napiVersion: gateway.networking.k8s.io/v1\nkind: BackendTLSPolicy\nmetadata: {name: backend-tls, namespace: default}\nspec:\n  targetRefs:\n  - {group: \"\", kind: Service, name: SERVICE_NAME}\n  validation:\n    hostname: backend.example.test\n    wellKnownCACertificates: System\n";
+  let gateway_identity = "  gatewayClassName: oxibelt\n  tls:\n    backend:\n      clientCertificateRef: {name: orders-client}";
+  let mut policy_args = args();
+  policy_args.client_certificate_forward_allowed_headers = vec!["client-cert".to_string()];
+  policy_args
+    .upstream_client_tls_source_secrets
+    .push(crate::cli::SourceSecretAllowlistEntry {
+      namespace: "default".to_string(),
+      name: "orders-client".to_string(),
+      certificate_key: "tls.crt".to_string(),
+      private_key_key: "tls.key".to_string(),
+    });
+
+  let http = HTTP_FIXTURE
+    .replace("  gatewayClassName: oxibelt", gateway_identity)
+    .replace("  - matches:\n", extension_ref())
+    .replace(
+      "    - name: canary\n      port: 8080\n      weight: 20\n",
+      "",
+    );
+  let http = translate_objects(
+    &objects(&format!(
+      "{http}{}{}{}",
+      policy(
+        "HTTPRoute",
+        "app",
+        "    header: client-cert\n    format: rfc9440"
+      ),
+      source_secret,
+      backend_policy.replace("SERVICE_NAME", "app")
+    )),
+    &policy_args,
+  )
+  .expect("translate HTTPRoute identity composition");
+
+  let grpc = GRPC_FIXTURE
+    .replace("  gatewayClassName: oxibelt", gateway_identity)
+    .replace(
+      "    filters:\n",
+      "    filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: client-cert\n",
+    );
+  let grpc = translate_objects(
+    &objects(&format!(
+      "{grpc}{}{}{}",
+      policy(
+        "GRPCRoute",
+        "echo",
+        "    header: client-cert\n    format: rfc9440",
+      )
+      .replacen("namespace: default", "namespace: rpc", 1),
+      source_secret,
+      backend_policy.replace("SERVICE_NAME", "echo")
+    )),
+    &policy_args,
+  )
+  .expect("translate GRPCRoute identity composition");
+
+  for rendered in [&http, &grpc] {
+    assert_eq!(rendered.client_identities.len(), 1);
+    assert!(
+      rendered
+        .toml
+        .contains("[upstream_pools.servers.tls.client_identity]")
+    );
+    assert!(
+      rendered
+        .toml
+        .contains("[routes.client_certificate_forwarding]")
+    );
+    assert!(rendered.toml.contains("header = \"client-cert\""));
+    assert!(rendered.toml.contains("format = \"rfc9440\""));
+    assert!(!rendered.toml.contains(&private_key));
+    generated_toml_parses(&rendered.toml);
+  }
 }
 
 #[test]

@@ -65,6 +65,44 @@ For direct Helm deployments, use the existing
 to mount the upstream pair, and keep downstream client-authentication policy
 in the operator's base configuration.
 
+## Gateway-managed deployment
+
+Pair the [Gateway resources](../deploy/helm/oxibelt-gateway-controller/examples/verified-client-identity.yaml)
+with the [controller values](../deploy/helm/oxibelt-gateway-controller/examples/verified-client-identity-values.yaml).
+The example uses `storefront` for the Gateway, route, policy, and backend Service,
+and `backend-secrets` for OxiBelt's upstream client Secret. Configure the
+controller's namespace watch scope to observe both namespaces.
+
+Supply these deployment-specific resources before applying the example:
+
+- An OxiBelt GatewayClass and data-plane target with an HTTPS listener. Supply
+  its server certificate for `storefront.example.com` in the `oxibelt-tls`
+  Secret in `storefront`, matching the listener's certificate reference.
+- Operator-owned base configuration with required `tls.client_auth` and a
+  mounted downstream client CA, as in the native example.
+- An `orders` Service on port `8443` in `storefront`, pointing to the backend
+  that requires and authorizes OxiBelt's upstream client identity and negotiates
+  HTTP/2 over TLS with ALPN `h2`.
+- An `orders-server-ca` ConfigMap in `storefront`, with `ca.crt` containing the
+  public CA bundle for the backend certificate named
+  `orders.backend.example.com`.
+- An `orders-client` Secret in `backend-secrets`, containing the upstream
+  client chain in `tls.crt` and its matching key in `tls.key`.
+
+The controller values admit precisely `client-cert` as a forwarding header and
+the named upstream Secret as a credential source. The Gateway selects that
+Secret with `spec.tls.backend.clientCertificateRef`; the accompanying
+ReferenceGrant authorizes references from Gateways in `storefront` to that
+specific Secret. The route policy selects RFC 9440 forwarding. Neither policy
+changes downstream certificate acceptance. BackendTLSPolicy independently
+verifies the upstream server.
+
+The controller derives and projects the credential into its selected data-plane
+target; do not also configure a competing native upstream identity for the
+generated route. A missing or withdrawn grant produces the existing
+match-equivalent `503` behavior for a resolvable HTTPRoute dependency failure.
+See [Gateway API](GatewayAPI.md) for ambiguity and last-good-rollout semantics.
+
 ## Rotation and failure behavior
 
 Native upstream identity files are full-reload inputs. Validate and activate a
@@ -73,6 +111,13 @@ downstream-only TLS refresh does not rotate upstream credentials. New snapshots
 construct the upstream clients with the replacement material. Existing
 connections follow the normal drain lifecycle; rotation does not promise
 instant revocation of an established connection.
+
+For immutable Kubernetes deployments, use the normal Secret/workload rollout
+mechanism. Gateway-managed upstream identities create a new derived Secret and
+workload revision on source Secret changes. Wait for the committed revision and
+Ready Pods before testing fresh connections. Preserve a valid previous
+credential during a planned trust overlap; removing upstream trust is a
+separate backend operation.
 
 Absent optional downstream credentials would cause an absent header under the
 existing forwarding contract. This example selects required downstream mTLS
@@ -97,3 +142,15 @@ tests/scripts/run-proxy-integration-matrix.sh protocol-proxying client-certifica
 The second command retains the existing optional-authentication and encoding
 regressions. Test prerequisites and cleanup conventions are described in
 [tests/README.md](../tests/README.md).
+
+The combined Gateway scenario runs at the end of the existing isolated Kind
+qualification, using the data-plane and controller images supplied to that
+harness:
+
+```sh
+tests/scripts/run-kubernetes-immutable-rollout.sh
+```
+
+It exercises grant denial, authenticated forwarding, upstream Secret rotation,
+and grant withdrawal against the live controller and backend. This focused
+qualification does not change the Gateway feature's existing lifecycle status.

@@ -5,6 +5,9 @@ composes required downstream mTLS, RFC 9440 `Client-Cert` forwarding, and a
 separate upstream mTLS identity. The `protocol-proxying/client-certificate-forwarding-mtls-rfc9440`
 matrix case checks the authenticated upstream peer and forwarded downstream
 leaf together across HTTP/1.1, HTTP/2, HTTP/3, WebSocket, and WebTransport.
+The final phase of `scripts/run-kubernetes-immutable-rollout.sh` checks the
+same identity composition through Gateway policies, including cross-namespace
+grant denial, upstream credential rotation, and grant withdrawal.
 
 - `rust/`: repository-root Cargo integration tests linked from `source/Cargo.toml`
 - `docker/`: mock upstream image assets for end-to-end proxy verification

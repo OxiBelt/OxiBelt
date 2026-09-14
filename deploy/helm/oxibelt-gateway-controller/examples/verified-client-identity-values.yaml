@@ -1,0 +1,10 @@
+# Values paired with verified-client-identity.yaml.
+upstreamClientTls:
+  sourceSecretAllowlist:
+  - namespace: backend-secrets
+    name: orders-client
+    certificateKey: tls.crt
+    privateKeyKey: tls.key
+routePolicy:
+  allowedClientCertificateForwardHeaders:
+  - client-cert

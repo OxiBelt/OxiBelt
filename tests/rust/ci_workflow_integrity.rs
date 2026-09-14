@@ -4104,8 +4104,11 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
 
   assert_eq!(
     job.needs,
-    vec!["docker-alpine-musl-role-image-amd64".to_owned()],
-    "the Kubernetes rollout job should consume distinct AMD64 data-plane and controller artifacts"
+    vec![
+      "docker-alpine-musl-role-image-amd64".to_owned(),
+      "docker-integration-helper-images".to_owned(),
+    ],
+    "the Kubernetes rollout job should consume distinct role artifacts and its mTLS protocol helper"
   );
   for expected in [
     "name: Docker role image (Alpine musl, amd64, ${{ matrix.role.name }})",
@@ -4172,6 +4175,10 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "docker load --input \"${RUNNER_TEMP}/oxibelt-gateway-controller-image/oxibelt-gateway-controller-alpine-musl-amd64.tar\"",
     "OXIBELT_DATAPLANE_DOCKER_IMAGE: oxibelt-dataplane:alpine-musl-amd64",
     "OXIBELT_GATEWAY_CONTROLLER_DOCKER_IMAGE: oxibelt-gateway-controller:alpine-musl-amd64",
+    "name: oxibelt-docker-integration-helper-images",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar\"",
+    "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci",
+    "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
     "OXIBELT_KUBERNETES_KIND_NODE_IMAGE: ${{ matrix.node_image }}",
     "tests/scripts/run-kubernetes-immutable-rollout.sh",
     "timeout-minutes: 30",
@@ -7595,15 +7602,15 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     workflow
       .matches("name: Download Docker integration helper image artifact")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 4,
-    "each Docker integration/security-fuzz job, all three Admin PostgreSQL durability jobs, and isolated Firefox should download the helper image artifact"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 5,
+    "Docker integration/security-fuzz, Admin PostgreSQL durability, isolated Firefox, and Kubernetes rollout should download the helper artifact"
   );
   assert_eq!(
     workflow
       .matches("name: Load Docker integration helper images")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 1,
-    "each Docker integration/security-fuzz job and isolated Firefox should load the helper image tar"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 2,
+    "Docker integration/security-fuzz, isolated Firefox, and Kubernetes rollout should load the helper image tar"
   );
   for value in [
     "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
@@ -7619,14 +7626,13 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
   ] {
     let expected_count = if value == "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci" {
       DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3
-    } else if value == "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci" {
-      DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 1
     } else if matches!(
       value,
-      "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci"
+      "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci"
+        | "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci"
         | "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\""
     ) {
-      DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT
+      DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 1
     } else {
       DOCKER_INTEGRATION_JOBS.len()
     };
