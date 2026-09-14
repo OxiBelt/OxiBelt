@@ -74,6 +74,7 @@ mod route_action_runtime;
 mod route_actions;
 pub(crate) mod semantics;
 pub(crate) mod static_files;
+pub(crate) mod status_headers;
 mod tcp_exchange;
 mod timeouts;
 mod tls_policy;
@@ -351,6 +352,16 @@ where
   let Some(resolved) = resolved else {
     return text_response(StatusCode::NOT_FOUND, "no matching route");
   };
+  let status_policy = state
+    .config
+    .proxy
+    .status_headers
+    .for_route(Some(resolved.route));
+  let cache_forward_reason = state.cache.diagnostic_forward_reason(
+    resolved.route.cache.as_deref(),
+    request.method(),
+    request.headers(),
+  );
   let certificate_forwarding_enabled = resolved.route.client_certificate_forwarding.is_some();
   let mut response = async {
     match client_certificate::PreparedCertificateForwarding::prepare(&request, resolved.route) {
@@ -562,6 +573,8 @@ where
     .await
   }
   .await;
+  status_headers::complete_cache_forward(&mut response, cache_forward_reason);
+  response.extensions_mut().insert(status_policy);
   client_certificate::finalize_response(&mut response, certificate_forwarding_enabled, state);
   proxy_tls::finalize_response(&mut response, access_log.proxy_tls_enabled);
   response

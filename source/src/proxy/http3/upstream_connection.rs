@@ -108,7 +108,12 @@ pub(super) async fn connect_quinn_upstream(
       .with_context(|| format!("failed to start upstream QUIC connection to {server_name}"))?,
   )
   .await
-  .context("upstream QUIC connect timed out")?
+  .map_err(|_| {
+    crate::upstream_failure::annotate(
+      anyhow::anyhow!("upstream QUIC connect timed out"),
+      crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+    )
+  })?
   .with_context(|| format!("failed to connect upstream QUIC to {server_name}"))?;
   Ok(ConnectedQuinnUpstream {
     endpoint: Some(endpoint),
@@ -149,14 +154,19 @@ pub(super) async fn connect_h3_upstream(
     Ok(established) => established,
     Err(_) => {
       connection.close(0u32.into(), b"upstream HTTP/3 handshake timed out");
-      anyhow::bail!("upstream HTTP/3 handshake timed out");
+      return Err(crate::upstream_failure::annotate(
+        anyhow::anyhow!("upstream HTTP/3 handshake timed out"),
+        crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+      ));
     }
   };
   let (mut driver, send_request) = match established {
     Ok(established) => established,
     Err(error) => {
       connection.close(0u32.into(), b"upstream HTTP/3 handshake failed");
-      return Err(error).context("failed to establish upstream HTTP/3 connection");
+      return Err(
+        anyhow::Error::new(error).context("failed to establish upstream HTTP/3 connection"),
+      );
     }
   };
   let driver_task = tokio::spawn(async move {

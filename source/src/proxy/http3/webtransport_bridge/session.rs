@@ -133,7 +133,7 @@ pub(super) async fn accept_webtransport_session(
       client_certificate_forwarding,
       snapshot.as_ref(),
     );
-    response
+    crate::proxy::http::status_headers::finalize(response, &prepared.status_headers)
   };
 
   #[cfg(feature = "admin-runtime")]
@@ -214,9 +214,12 @@ pub(super) async fn accept_webtransport_session(
         );
         respond_to_h3_request(
           stream,
-          shape_prepared_response(text_response(
-            StatusCode::BAD_GATEWAY,
-            "upstream WebTransport CONNECT failed",
+          shape_prepared_response(crate::proxy::http::status_headers::transport_error(
+            text_response(
+              StatusCode::BAD_GATEWAY,
+              "upstream WebTransport CONNECT failed",
+            ),
+            error.as_ref(),
           )),
         )
         .await?;
@@ -234,6 +237,7 @@ pub(super) async fn accept_webtransport_session(
     client_certificate_forwarding,
     snapshot.as_ref(),
   );
+  crate::proxy::http::status_headers::finalize_head(&mut response, &prepared.status_headers);
   stream
     .send_response(response)
     .await

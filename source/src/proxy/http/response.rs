@@ -130,7 +130,11 @@ pub(super) fn proxy_error_response(
 pub(super) fn upstream_selection_error_response(
   error: UpstreamSelectionError,
 ) -> Response<ProxyBody> {
-  match error {
+  let diagnostic = match &error {
+    UpstreamSelectionError::PoolUnavailable { .. } => "destination_unavailable",
+    _ => "destination_not_found",
+  };
+  let response = match error {
     UpstreamSelectionError::UnknownWafUpstream(upstream) => {
       warn!(upstream, "WAF selected an unknown upstream");
       text_response(StatusCode::BAD_GATEWAY, "WAF selected an unknown upstream")
@@ -147,7 +151,8 @@ pub(super) fn upstream_selection_error_response(
       warn!(upstream, "pool selected an unknown synthetic upstream");
       text_response(StatusCode::BAD_GATEWAY, "no available upstream pool server")
     }
-  }
+  };
+  super::status_headers::error(response, diagnostic)
 }
 
 pub(super) fn external_auth_response(terminal: ExternalAuthTerminal) -> Response<ProxyBody> {
@@ -228,6 +233,27 @@ pub(super) fn request_buffering_error_response(
 pub(super) fn response_buffering_error_response(
   error: buffering::BufferingError,
 ) -> Response<ProxyBody> {
+  let diagnostic = match &error {
+    buffering::BufferingError::TooLarge => Some("http_response_body_too_large"),
+    buffering::BufferingError::Body(error)
+      if error_is_timeout(error, BodyTimeoutKind::UpstreamResponseRead) =>
+    {
+      Some("connection_read_timeout")
+    }
+    buffering::BufferingError::Body(error) => {
+      crate::upstream_failure::classify(error.as_ref()).map(|failure| failure.as_str())
+    }
+    buffering::BufferingError::Io(_) => Some("proxy_internal_error"),
+    buffering::BufferingError::MissingTempDir => Some("proxy_configuration_error"),
+  };
+  let response = response_buffering_error_body(error);
+  match diagnostic {
+    Some(diagnostic) => super::status_headers::error(response, diagnostic),
+    None => response,
+  }
+}
+
+fn response_buffering_error_body(error: buffering::BufferingError) -> Response<ProxyBody> {
   match error {
     buffering::BufferingError::TooLarge => text_response(
       StatusCode::BAD_GATEWAY,
@@ -462,6 +488,7 @@ pub(super) fn upstream_error_response(
   upstream_connect_time_ms: Option<u64>,
   upstream_first_byte_time_ms: Option<u64>,
   upstream_error_code: &str,
+  diagnostic: Option<&'static str>,
   error_message: &str,
   request_response_mutations: &[HeaderMutation],
   access_log: &mut SystemAccessLogContext<'_>,
@@ -494,6 +521,9 @@ pub(super) fn upstream_error_response(
       upstream_error_code,
     )
   });
+  if let Some(token) = diagnostic {
+    response = super::status_headers::error(response, token);
+  }
   apply_route_security_headers(response.headers_mut(), &state.config.security, route);
   apply_header_mutations(response.headers_mut(), request_response_mutations);
   if !state.waf.has_response_rules(route_name) {

@@ -31,6 +31,7 @@ pub(super) fn handle_cache_lookup_result(
       if cache_entry_blocked_by_waf_body_transform(state.as_ref(), resolved, &entry) {
         return None;
       }
+      let expires_at = entry.expires_at;
       state.metrics.record_cache_hit();
       record_cache_hit_fast_path_selection(state, request_version);
       if record_events {
@@ -48,6 +49,20 @@ pub(super) fn handle_cache_lookup_result(
         CacheReason::Fresh,
         certificate_authenticated,
       );
+      if response
+        .extensions()
+        .get::<cache_status::UnavailableCachedBody>()
+        .is_none()
+      {
+        cache_status::attach_standard_status(
+          &mut response,
+          cache_status::StandardCacheStatus {
+            hit: true,
+            expires_at,
+            ..cache_status::StandardCacheStatus::default()
+          },
+        );
+      }
       route_runtime::apply_response_actions(
         response.headers_mut(),
         resolved.route,
@@ -88,6 +103,7 @@ pub(super) fn handle_cache_lookup_result(
           stale.clone(),
         )
       {
+        let expires_at = stale.entry.expires_at;
         state.metrics.record_cache_stale();
         if record_events {
           record_route_cache_event(state, resolved.route, "stale", "background_refresh");
@@ -104,6 +120,21 @@ pub(super) fn handle_cache_lookup_result(
           CacheReason::BackgroundRefresh,
           certificate_authenticated,
         );
+        if response
+          .extensions()
+          .get::<cache_status::UnavailableCachedBody>()
+          .is_none()
+        {
+          cache_status::attach_standard_status(
+            &mut response,
+            cache_status::StandardCacheStatus {
+              hit: true,
+              expires_at,
+              detail: Some("background-refresh"),
+              ..cache_status::StandardCacheStatus::default()
+            },
+          );
+        }
         route_runtime::apply_response_actions(
           response.headers_mut(),
           resolved.route,
@@ -137,6 +168,7 @@ pub(super) fn handle_cache_lookup_result(
         if stale_blocked_by_transform {
           return None;
         }
+        let expires_at = stale.entry.expires_at;
         state.metrics.record_cache_hit();
         record_cache_hit_fast_path_selection(state, request_version);
         if record_events {
@@ -154,6 +186,21 @@ pub(super) fn handle_cache_lookup_result(
           CacheReason::StaleWithoutValidators,
           certificate_authenticated,
         );
+        if response
+          .extensions()
+          .get::<cache_status::UnavailableCachedBody>()
+          .is_none()
+        {
+          cache_status::attach_standard_status(
+            &mut response,
+            cache_status::StandardCacheStatus {
+              hit: true,
+              expires_at,
+              detail: Some("stale-without-validators"),
+              ..cache_status::StandardCacheStatus::default()
+            },
+          );
+        }
         route_runtime::apply_response_actions(
           response.headers_mut(),
           resolved.route,
@@ -268,6 +315,16 @@ pub(super) async fn maybe_cache_response_with_store_permission(
     drop(cache_fill_guard);
     let mut response = response;
     cache_status::strip_headers(response.headers_mut());
+    if state.cache.policy_enabled(route_cache, method) {
+      cache_status::attach_standard_status(
+        &mut response,
+        cache_status::StandardCacheStatus {
+          stored: Some(false),
+          detail: Some("incremental-bypass"),
+          ..cache_status::StandardCacheStatus::default()
+        },
+      );
+    }
     if state.cache.strip_surrogate_control(route_cache) {
       response.headers_mut().remove("surrogate-control");
     }
@@ -279,6 +336,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
     return response;
   }
   let (mut parts, mut body) = response.into_parts();
+  super::status_headers::restore_received_headers(&mut parts);
   cache_status::strip_headers(&mut parts.headers);
   let mut cache_headers = parts.headers.clone();
   if let Some(applied) = applied_route_security_headers {
@@ -293,6 +351,14 @@ pub(super) async fn maybe_cache_response_with_store_permission(
       &mut response,
       CacheOutcome::Miss,
       CacheReason::StoreNotAllowed,
+    );
+    cache_status::attach_standard_status(
+      &mut response,
+      cache_status::StandardCacheStatus {
+        stored: Some(false),
+        detail: Some("store-not-allowed"),
+        ..cache_status::StandardCacheStatus::default()
+      },
     );
     return response;
   }
@@ -337,6 +403,14 @@ pub(super) async fn maybe_cache_response_with_store_permission(
           CacheOutcome::Miss,
           CacheReason::from_rejection(reason),
         );
+        cache_status::attach_standard_status(
+          &mut response,
+          cache_status::StandardCacheStatus {
+            stored: Some(false),
+            detail: Some(reason.as_str()),
+            ..cache_status::StandardCacheStatus::default()
+          },
+        );
         return response;
       }
       crate::cache::CachePreparedInsertDecision::NotCacheable(reason) => {
@@ -352,6 +426,14 @@ pub(super) async fn maybe_cache_response_with_store_permission(
           &mut response,
           CacheOutcome::Miss,
           CacheReason::from_rejection(reason),
+        );
+        cache_status::attach_standard_status(
+          &mut response,
+          cache_status::StandardCacheStatus {
+            stored: Some(false),
+            detail: Some(reason.as_str()),
+            ..cache_status::StandardCacheStatus::default()
+          },
         );
         return response;
       }
@@ -398,6 +480,14 @@ pub(super) async fn maybe_cache_response_with_store_permission(
     }
     let mut response = Response::from_parts(parts, body);
     cache_status::apply(&mut response, CacheOutcome::Miss, CacheReason::TooLarge);
+    cache_status::attach_standard_status(
+      &mut response,
+      cache_status::StandardCacheStatus {
+        stored: Some(false),
+        detail: Some("too_large"),
+        ..cache_status::StandardCacheStatus::default()
+      },
+    );
     return response;
   }
   let collect_started = Instant::now();
@@ -409,7 +499,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
         cache_headers.remove("surrogate-control");
       }
       let store_started = Instant::now();
-      let reason = match state
+      let (reason, stored, detail) = match state
         .cache
         .insert_prepared_async(
           *prepared,
@@ -424,12 +514,20 @@ pub(super) async fn maybe_cache_response_with_store_permission(
             insert_ctx(),
             crate::cache::CacheFillSuppressionReason::AdmissionRejected,
           );
-          CacheReason::AdmissionRejected
+          (
+            CacheReason::AdmissionRejected,
+            Some(false),
+            Some("admission_rejected"),
+          )
         }
         crate::cache::CacheInsertOutcome::AdmissionWarming => {
           record_fill_stage("local_store", "admission_warming", store_started);
           state.metrics.record_cache_admission_rejection();
-          CacheReason::AdmissionWarming
+          (
+            CacheReason::AdmissionWarming,
+            Some(false),
+            Some("admission_warming"),
+          )
         }
         crate::cache::CacheInsertOutcome::StoreFailed => {
           record_fill_stage("local_store", "store_failed", store_started);
@@ -438,24 +536,36 @@ pub(super) async fn maybe_cache_response_with_store_permission(
             insert_ctx(),
             crate::cache::CacheFillSuppressionReason::StoreFailed,
           );
-          CacheReason::StoreFailed
+          (CacheReason::StoreFailed, Some(false), Some("store_failed"))
         }
         crate::cache::CacheInsertOutcome::NotCacheable => {
           record_fill_stage("local_store", "not_cacheable", store_started);
           state.cache.note_fill_not_stored(insert_ctx());
-          CacheReason::NotCacheable
+          (
+            CacheReason::NotCacheable,
+            Some(false),
+            Some("not_cacheable"),
+          )
         }
         crate::cache::CacheInsertOutcome::Stored => {
           record_fill_stage("local_store", "stored", store_started);
           if state.cache.shared_cache_enabled() {
             record_fill_stage("shared_store", "submitted", Instant::now());
           }
-          CacheReason::Stored
+          (CacheReason::Stored, Some(true), None)
         }
       };
       let body_len = bytes.len();
       let mut response = Response::from_parts(parts, full_body(bytes));
       cache_status::apply(&mut response, CacheOutcome::Miss, reason);
+      cache_status::attach_standard_status(
+        &mut response,
+        cache_status::StandardCacheStatus {
+          stored,
+          detail,
+          ..cache_status::StandardCacheStatus::default()
+        },
+      );
       if body::is_known_small_response_body_len(body_len) {
         response
           .extensions_mut()
@@ -466,18 +576,36 @@ pub(super) async fn maybe_cache_response_with_store_permission(
     Err(error) if error_is_timeout(&error, BodyTimeoutKind::UpstreamResponseRead) => {
       record_fill_stage("body_collect", "timeout", collect_started);
       state.metrics.record_cache_fill_error();
-      cache_status::store_failed_response(text_response(
+      let mut response = cache_status::store_failed_response(text_response(
         StatusCode::GATEWAY_TIMEOUT,
         "upstream response body timed out",
-      ))
+      ));
+      cache_status::attach_standard_status(
+        &mut response,
+        cache_status::StandardCacheStatus {
+          stored: Some(false),
+          detail: Some("response_read_timeout"),
+          ..cache_status::StandardCacheStatus::default()
+        },
+      );
+      response
     }
     Err(error) => {
       record_fill_stage("body_collect", "error", collect_started);
       state.metrics.record_cache_fill_error();
-      cache_status::store_failed_response(text_response(
+      let mut response = cache_status::store_failed_response(text_response(
         StatusCode::BAD_GATEWAY,
         &format!("failed to read upstream response body: {error}"),
-      ))
+      ));
+      cache_status::attach_standard_status(
+        &mut response,
+        cache_status::StandardCacheStatus {
+          stored: Some(false),
+          detail: Some("response_read_error"),
+          ..cache_status::StandardCacheStatus::default()
+        },
+      );
+      response
     }
   }
 }

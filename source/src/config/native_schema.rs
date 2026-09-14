@@ -802,6 +802,18 @@ fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
 
 #[cfg(feature = "config-tooling")]
 fn scalar_schema(path: &str) -> Value {
+  if matches!(
+    path,
+    "proxy.status_headers.identifier" | "routes.status_headers.identifier"
+  ) {
+    return json!({
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[ -~]+$",
+      "not": {"pattern": "^ +$"}
+    });
+  }
   if path == "webrtc_turn_listeners.realm" {
     return json!({"type": "string", "minLength": 1, "maxLength": 763});
   }
@@ -1003,6 +1015,10 @@ fn boolean_path(path: &str) -> bool {
       | "listeners.http_proxy_protocol.tls_tlvs"
       | "upstreams.proxy_protocol_tls.client_certificate"
       | "sni_forward.rules.tcp_proxy_protocol_tls.client_certificate"
+      | "proxy.status_headers.proxy_status"
+      | "proxy.status_headers.cache_status"
+      | "routes.status_headers.proxy_status"
+      | "routes.status_headers.cache_status"
   ) {
     return true;
   }
@@ -1278,6 +1294,8 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
         "cf-connecting-ip",
       ],
     ),
+    ("proxy.status_headers.upstream", vec!["preserve", "strip"]),
+    ("routes.status_headers.upstream", vec!["preserve", "strip"]),
     (
       "upstreams.happy_eyeballs_mode",
       vec!["inherit", "v3", "legacy"],
@@ -1414,6 +1432,8 @@ fn default_value(path: &str) -> Option<Value> {
     "proxy.upstream_resolution.happy_eyeballs.svcb"
     | "proxy.upstream_resolution.happy_eyeballs.pref64" => json!("auto"),
     "proxy.real_ip.enabled" | "proxy.real_ip.rules.enabled" => json!(false),
+    "proxy.status_headers.proxy_status" | "proxy.status_headers.cache_status" => json!(true),
+    "proxy.status_headers.upstream" => json!("preserve"),
     "listeners.proxy_protocol.tls_tlvs" | "listeners.http_proxy_protocol.tls_tlvs" => {
       json!(false)
     }

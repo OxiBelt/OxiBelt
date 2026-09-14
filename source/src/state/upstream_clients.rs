@@ -196,9 +196,12 @@ impl HappyEyeballsHttpConnector {
             let stream = tokio::time::timeout_at(attempt_deadline, TcpStream::connect(address))
               .await
               .map_err(|_| {
-                crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::anyhow!(
-                  "upstream TCP candidate {address} timed out"
-                ))
+                crate::upstream_resolution::CandidateAttemptError::Endpoint(
+                  crate::upstream_failure::annotate(
+                    anyhow::anyhow!("upstream TCP candidate {address} timed out"),
+                    crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+                  ),
+                )
               })?
               .map_err(|error| {
                 crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::Error::new(
@@ -219,9 +222,12 @@ impl HappyEyeballsHttpConnector {
                 )
                 .await
                 .map_err(|_| {
-                  crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::anyhow!(
-                    "upstream TLS handshake timed out"
-                  ))
+                  crate::upstream_resolution::CandidateAttemptError::Endpoint(
+                    crate::upstream_failure::annotate(
+                      anyhow::anyhow!("upstream TLS handshake timed out"),
+                      crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+                    ),
+                  )
                 })?
                 .map_err(|error| {
                   crate::upstream_resolution::CandidateAttemptError::Endpoint(anyhow::Error::new(
@@ -230,7 +236,10 @@ impl HappyEyeballsHttpConnector {
                 })?;
                 if !protocol.accepts_negotiated_alpn(tls.get_ref().1.alpn_protocol()) {
                   return Err(crate::upstream_resolution::CandidateAttemptError::Endpoint(
-                    anyhow::anyhow!("upstream TLS negotiated an unexpected ALPN protocol"),
+                    crate::upstream_failure::annotate(
+                      anyhow::anyhow!("upstream TLS negotiated an unexpected ALPN protocol"),
+                      crate::upstream_failure::UpstreamFailure::TlsProtocolError,
+                    ),
                   ));
                 }
                 let upstream_certificate = tls
@@ -301,17 +310,29 @@ fn http_candidate_race_error(
     }
     | crate::upstream_resolution::CandidateRaceError::Exhausted {
       last_endpoint_error: Some(error),
+      endpoint_failures: 0 | 1,
       admission_error: None,
     } => error
       .context("upstream connection candidates were exhausted")
       .into(),
-    crate::upstream_resolution::CandidateRaceError::Deadline => {
-      anyhow::anyhow!("upstream connection deadline elapsed").into()
-    }
+    crate::upstream_resolution::CandidateRaceError::Exhausted {
+      last_endpoint_error: Some(error),
+      endpoint_failures: _,
+      admission_error: None,
+    } => crate::upstream_failure::ambiguous_candidate_failure(
+      error.context("upstream connection candidates were exhausted"),
+    )
+    .into(),
+    crate::upstream_resolution::CandidateRaceError::Deadline => crate::upstream_failure::annotate(
+      anyhow::anyhow!("upstream connection deadline elapsed"),
+      crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+    )
+    .into(),
     crate::upstream_resolution::CandidateRaceError::NoCandidates
     | crate::upstream_resolution::CandidateRaceError::Exhausted {
       last_endpoint_error: None,
       admission_error: None,
+      ..
     } => anyhow::anyhow!("upstream resolver returned no candidates").into(),
   }
 }
@@ -1455,6 +1476,7 @@ mod tests {
     let boxed =
       http_candidate_race_error(crate::upstream_resolution::CandidateRaceError::Exhausted {
         last_endpoint_error: None,
+        endpoint_failures: 0,
         admission_error: Some(error),
       });
     let error = anyhow::Error::from_boxed(boxed);

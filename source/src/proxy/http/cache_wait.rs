@@ -20,6 +20,21 @@ use super::{
 
 const SHARED_FILL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+pub(super) fn mark_collapsed_follower_response(response: &mut Response<ProxyBody>) {
+  let expires_at = response
+    .extensions()
+    .get::<super::cache_status::StandardCacheStatus>()
+    .and_then(|status| status.expires_at);
+  super::cache_status::attach_standard_status(
+    response,
+    super::cache_status::StandardCacheStatus {
+      expires_at,
+      detail: Some("collapsed"),
+      ..super::cache_status::StandardCacheStatus::default()
+    },
+  );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn wait_for_shared_fill(
   state: &Arc<AppSnapshot>,
@@ -73,7 +88,7 @@ pub(super) async fn wait_for_shared_fill(
       continue;
     };
     record_route_cache_fill_stage(state, resolved.route, "lock_wait", "shared_lookup", started);
-    return handle_cache_lookup_result(
+    let mut response = handle_cache_lookup_result(
       state,
       resolved,
       lookup,
@@ -92,6 +107,8 @@ pub(super) async fn wait_for_shared_fill(
       stale_on_error,
       revalidation_entry,
       false,
-    );
+    )?;
+    mark_collapsed_follower_response(&mut response);
+    return Some(response);
   }
 }

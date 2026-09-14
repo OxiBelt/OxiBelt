@@ -644,7 +644,8 @@ impl SharedCacheEntry {
         shared_entry_headers(self)?,
         bytes::Bytes::from(self.body.clone()),
       )
-      .with_stored_at(shared_entry_stored_at(self)),
+      .with_stored_at(shared_entry_stored_at(self))
+      .with_expires_at(shared_entry_expires_at(self)),
     )
   }
 }
@@ -661,6 +662,10 @@ fn shared_entry_headers(entry: &SharedCacheEntry) -> Option<HeaderMap> {
 
 fn shared_entry_stored_at(entry: &SharedCacheEntry) -> std::time::SystemTime {
   std::time::UNIX_EPOCH + std::time::Duration::from_millis(entry.stored_at_ms.max(0) as u64)
+}
+
+fn shared_entry_expires_at(entry: &SharedCacheEntry) -> std::time::SystemTime {
+  std::time::UNIX_EPOCH + std::time::Duration::from_millis(entry.expires_at_ms.max(0) as u64)
 }
 
 fn validator_headers(headers: &HeaderMap) -> HeaderMap {

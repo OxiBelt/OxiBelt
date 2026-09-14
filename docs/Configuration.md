@@ -1233,6 +1233,12 @@ QUIC Initial inspection diagnostics are sampled per logical listener. DEBUG reco
 [proxy]
 trusted_ca_certs = []
 
+[proxy.status_headers]
+proxy_status = true
+cache_status = true
+upstream = "preserve" # preserve | strip
+# identifier = "edge-a"
+
 [proxy.forwarded_headers]
 mode = "overwrite" # overwrite | append
 client_ip_source = "resolved" # resolved | direct_peer
@@ -1335,6 +1341,10 @@ mode = "legacy_plain" # legacy_plain | plain | json
 `[[proxy.real_ip.rules]]` selects a complete Real-IP policy per request. Every rule needs a unique `name` and at least one nonempty selector list: `hosts`, `server_names`, or both. Values within one list are alternatives; when both lists are present, both conditions must match. Rules are evaluated in declaration order and the first matching rule wins, including an `enabled = false` rule. Overlapping selectors are allowed. If no rule matches, OxiBelt uses the global `[proxy.real_ip]` table; disabling that table does not disable an enabled matching rule. Rules do not inherit global fields. Each rule has the same five policy fields and defaults as the global table: `enabled = false`, `trusted_proxies = []`, `header = "x-forwarded-for"`, `recursive = true`, and `fail_on_untrusted_forwarded_headers = false`.
 
 `hosts` matches the received, validated request authority and never a forwarded host header. Host matching ignores an authority port, ASCII case, and a terminal dot; exact IP-literal hosts are valid selectors. `server_names` matches downstream TLS SNI only, with ASCII-case and terminal-dot normalization; plaintext requests and TLS requests without SNI do not satisfy it. Synthetic Admin cache-warm targets supply SNI only for HTTPS targets. The exact name and `*.suffix` forms are supported for both selectors. A wildcard matches one or more labels below its suffix and does not match the apex. Real-IP selection does not alter Host route matching or downstream TLS policy validation. First-request connection-limit identity remains bound from that request, while other consumers resolve their Real-IP policy for each request. A full configuration reload applies the new policy only to new snapshots; connections already using a snapshot retain that snapshot for their lifetime.
+
+`[proxy.status_headers]` controls the RFC `Proxy-Status` and `Cache-Status` headers exposed to downstream clients. `proxy_status = true`, `cache_status = true`, and `upstream = "preserve"` are the defaults. They add these downstream diagnostic headers by default; this is an additive HTTP response change. `proxy_status` controls `Proxy-Status`, while `cache_status` controls `Cache-Status`; the existing `X-OxiBelt-Cache` and `X-OxiBelt-Cache-Reason` headers and all other proxy behavior remain unchanged. OxiBelt owns generated `Cache-Status` only on cache-enabled routes; on uncached routes, valid received status-header chains remain available when `upstream = "preserve"`. `upstream = "strip"` removes received status headers before downstream delivery. Setting either family to `false` suppresses both received and generated headers in that RFC header family, except the `incremental_refused` protocol signal. Generated status headers take precedence over received values, and received chains are untrusted data: OxiBelt does not project raw diagnostics into its generated status. See the [status-header contract](StatusHeaders.md) for generated-member lifetime, received-chain limits, and cache-fact rules.
+
+`identifier` is an optional alias for generated local status members. When absent, the runtime generates its stable identifier; it is never inferred from a received chain. If configured, it must contain one through 128 printable ASCII characters and cannot be whitespace-only. `[routes.status_headers]` is a sparse override: each omitted field inherits the global value. This setting creates no new trailers and does not change WAF phase selection or WAF response processing.
 
 `generic_http_upgrade` and `connect_tunneling` enable the global capability only. Individual routes must also opt in with `generic_http_upgrade = true` or `connect_tunneling = true`. CONNECT tunnels are not open-proxy tunnels; OxiBelt connects only to the selected route upstream origin. HTTP/1.x CONNECT requires an authority-form target with an explicit valid port; HTTP/1.1 also requires exactly one matching valid `Host` field. OxiBelt returns `200` only after the selected upstream connection and its configured PROXY-protocol header (including TLS metadata) are ready. Every rejected CONNECT closes the downstream connection after its response, and successful CONNECT responses have no `Content-Length` or `Transfer-Encoding`. `proxy.grpc_web.enabled` enables the global gRPC-Web transformer, and each route must also set `grpc_web = true`.
 
@@ -4362,6 +4372,11 @@ upstream = "app"
 # cache = "default"
 # compression = "default" # default | off | named policy
 # security_headers = "default" # default | off | named policy
+# [routes.status_headers]
+# proxy_status = true
+# cache_status = false
+# upstream = "strip" # preserve | strip
+# identifier = "api-edge"
 # priority_class = "default" # admin | health | security_callback | interactive | default | background | crawler
 
 [routes.match]
@@ -4541,6 +4556,7 @@ Fields:
 - `cache`: optional cache reference; `default` uses `[cache]`, and any other value must match `[[cache.policies]].name`.
 - `compression`: optional downstream response compression policy; omitted means `default`, `off` disables compression for the route, and any other value must match `[[compression.policies]].name`. Named compression policies must not use the exact lowercase names `default` or `off`.
 - `security_headers`: optional security response header policy; omitted means `default`, `off` disables OxiBelt-managed security header insertion for the route, and any other value must match `[[security.header_policies]].name`. Named security header policies must not use the exact lowercase names `default` or `off`.
+- `status_headers`: sparse status-header override. Each field is optional and inherits `[proxy.status_headers]`: `proxy_status` and `cache_status` control their generated and received status-header families, `upstream` is `preserve` or `strip`, and `identifier` replaces the generated local status identifier for this route.
 - `priority_class`: trusted configuration-assigned admission and overload class. It defaults to `default`. Soft overload shedding acts only on `background` and `crawler`; priority admission additionally caps `background` at `50%` and `crawler` at `25%` by default. A label alone never grants reserved request capacity: the selected route must independently pass local IPM authorization or match a verified TCP TLS client certificate. `admin` and `health` never create public-listener reservations; their capacity belongs to the dedicated listener controls. Never derive this value from a client header or route name, and ignore HTTP `Priority` for admission.
 - `waf.http_body_compression`: optional route override for compressed HTTP request/response bodies before WAF body inspection. `inherit` uses the global setting, `off` disables the transform for the route, and `transform` enables it for that route.
 

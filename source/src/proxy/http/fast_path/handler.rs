@@ -647,6 +647,7 @@ impl PlainProxyFastPath {
           &state.config.security,
           resolved.route,
         );
+        let response = super::super::status_headers::transport_error(response, error.as_ref());
         state.record_hot_path_response(response.status());
         return response;
       }

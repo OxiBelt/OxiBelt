@@ -14491,6 +14491,62 @@
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
         },
+        "status_headers": {
+          "additionalProperties": false,
+          "description": "OxiBelt native field `proxy.status_headers`. Production Rust validation is authoritative.",
+          "properties": {
+            "cache_status": {
+              "default": true,
+              "description": "OxiBelt native field `proxy.status_headers.cache_status`. Production Rust validation is authoritative.",
+              "type": "boolean",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "identifier": {
+              "description": "OxiBelt native field `proxy.status_headers.identifier`. Production Rust validation is authoritative.",
+              "maxLength": 128,
+              "minLength": 1,
+              "not": {
+                "pattern": "^ +$"
+              },
+              "pattern": "^[ -~]+$",
+              "type": "string",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "proxy_status": {
+              "default": true,
+              "description": "OxiBelt native field `proxy.status_headers.proxy_status`. Production Rust validation is authoritative.",
+              "type": "boolean",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "upstream": {
+              "default": "preserve",
+              "description": "OxiBelt native field `proxy.status_headers.upstream`. Production Rust validation is authoritative.",
+              "enum": [
+                "preserve",
+                "strip"
+              ],
+              "type": "string",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            }
+          },
+          "type": "object",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
         "trusted_ca_certs": {
           "description": "OxiBelt native field `proxy.trusted_ca_certs`. Production Rust validation is authoritative.",
           "items": {
@@ -20561,6 +20617,59 @@
               }
             ],
             "description": "OxiBelt native field `routes[].static_root`. Production Rust validation is authoritative.",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "status_headers": {
+            "additionalProperties": false,
+            "description": "OxiBelt native field `routes[].status_headers`. Production Rust validation is authoritative.",
+            "properties": {
+              "cache_status": {
+                "description": "OxiBelt native field `routes[].status_headers.cache_status`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "identifier": {
+                "description": "OxiBelt native field `routes[].status_headers.identifier`. Production Rust validation is authoritative.",
+                "maxLength": 128,
+                "minLength": 1,
+                "not": {
+                  "pattern": "^ +$"
+                },
+                "pattern": "^[ -~]+$",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "proxy_status": {
+                "description": "OxiBelt native field `routes[].status_headers.proxy_status`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "upstream": {
+                "description": "OxiBelt native field `routes[].status_headers.upstream`. Production Rust validation is authoritative.",
+                "enum": [
+                  "preserve",
+                  "strip"
+                ],
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "type": "object",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
             "x-oxibelt-reference-activation": "none",

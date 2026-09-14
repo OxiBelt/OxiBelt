@@ -679,22 +679,29 @@ pub(super) async fn handle_upgrade_request(
         state.pools.report_failure_async(&upstream.name).await;
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         access_log.record_upstream_error("connect_error", &error.to_string());
-        return Some(route_security.text(
-          StatusCode::BAD_GATEWAY,
-          &format!("upstream upgrade request failed: {error}"),
+        return Some(super::status_headers::transport_error(
+          route_security.text(
+            StatusCode::BAD_GATEWAY,
+            &format!("upstream upgrade request failed: {error}"),
+          ),
+          error.as_ref(),
         ));
       }
       Err(_) => {
         state.pools.report_failure_async(&upstream.name).await;
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         access_log.record_upstream_error("read_timeout", "upstream upgrade request timed out");
-        return Some(route_security.text(
-          StatusCode::BAD_GATEWAY,
-          "upstream upgrade request timed out",
+        return Some(super::status_headers::error(
+          route_security.text(
+            StatusCode::BAD_GATEWAY,
+            "upstream upgrade request timed out",
+          ),
+          "http_response_timeout",
         ));
       }
     };
 
+  super::status_headers::capture_upstream(&mut upstream_response);
   if upstream_response.status() != StatusCode::SWITCHING_PROTOCOLS {
     let response = upstream_response.map(|body| body.map_err(boxed_error).boxed());
     return Some(route_security.apply(response));
@@ -703,7 +710,10 @@ pub(super) async fn handle_upgrade_request(
     const MESSAGE: &str = "upstream did not select the WebSocket upgrade protocol";
     state.pools.report_failure_async(&upstream.name).await;
     access_log.record_upstream_error("protocol_error", MESSAGE);
-    return Some(route_security.text(StatusCode::BAD_GATEWAY, MESSAGE));
+    return Some(super::status_headers::error(
+      route_security.text(StatusCode::BAD_GATEWAY, MESSAGE),
+      "http_upgrade_failed",
+    ));
   }
   if websocket_framed_bridge {
     remove_websocket_extensions(upstream_response.headers_mut());

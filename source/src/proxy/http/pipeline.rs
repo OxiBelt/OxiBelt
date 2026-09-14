@@ -362,7 +362,7 @@ where
     )
     .await;
     return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
-      response,
+      status_headers::origin(response),
       state.as_ref(),
       evaluated_person_proof.as_ref(),
       dynamic_person_proof_mutation_added,
@@ -517,6 +517,7 @@ where
         .map_err(|never| -> body::BoxError { match never {} })
         .boxed(),
     );
+    response.extensions_mut().insert(status_headers::OriginRole);
     *response.status_mut() = ct_response.status;
     if let Ok(content_type) = http::HeaderValue::from_str(ct_response.content_type) {
       response
@@ -720,7 +721,7 @@ where
     )
     .await;
     let response = static_files::finalize_response(
-      response,
+      status_headers::origin(response),
       state.as_ref(),
       resolved.route,
       &request_waf,

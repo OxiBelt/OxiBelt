@@ -14,8 +14,9 @@ use crate::waf::RouteWafConfig;
 use super::route_actions::RouteActionsConfig;
 use super::{
   BufferingMode, CircuitBreakerScopeOverride, HttpVersion, LimitsConfig, PriorityClass,
-  RetryCondition, RouteIpmConfig, RouteStaticFilesConfig, Tls12CipherSuite, Tls13CipherSuite,
-  TlsEarlyDataMode, TlsKeyExchangeGroup, TlsVersion, default_hosts, default_path_prefix,
+  RetryCondition, RouteIpmConfig, RouteStaticFilesConfig, RouteStatusHeadersConfig,
+  Tls12CipherSuite, Tls13CipherSuite, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsVersion,
+  default_hosts, default_path_prefix,
 };
 
 mod conflicts;
@@ -91,6 +92,8 @@ pub struct RouteConfig {
   pub compression: Option<String>,
   #[serde(default)]
   pub security_headers: Option<String>,
+  #[serde(default)]
+  pub status_headers: RouteStatusHeadersConfig,
   #[serde(default)]
   pub priority_class: PriorityClass,
   #[serde(default)]

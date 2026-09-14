@@ -82,6 +82,7 @@ pub mod tls;
 pub mod turn;
 pub mod upstream_control;
 pub mod upstream_discovery;
+pub(crate) mod upstream_failure;
 pub(crate) mod upstream_resolution;
 pub mod waf;
 #[cfg(feature = "admin-runtime")]

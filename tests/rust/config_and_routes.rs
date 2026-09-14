@@ -27,10 +27,11 @@ use oxibelt::config::{
   QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeArtifact,
   RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
   SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
-  StaticPrecompressedEncoding, StreamNetwork, Tls12CipherSuite, Tls13CipherSuite,
-  TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup, TlsServerResumptionMode, TlsVersion,
-  TrailerMode, UdpFlowState, UpstreamDiscoveryProvider, UpstreamEchMode,
-  UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode, resolve_auto_worker_count,
+  StaticPrecompressedEncoding, StatusHeaderUpstream, StreamNetwork, Tls12CipherSuite,
+  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
+  TlsServerResumptionMode, TlsVersion, TrailerMode, UdpFlowState, UpstreamDiscoveryProvider,
+  UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
+  resolve_auto_worker_count,
 };
 use oxibelt::hardening::RequiredHardeningFailurePolicy;
 use oxibelt::quic::load_host_key;
@@ -15125,6 +15126,74 @@ fn forwarded_headers_mode_defaults_to_overwrite() {
     ForwardedClientIpSource::Resolved
   );
   config.validate().expect("config should validate");
+}
+
+#[test]
+fn status_headers_default_and_sparse_route_overrides_resolve() {
+  let temp_dir = common::TempDir::new("status-headers");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "status-headers");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    + r#"
+
+[proxy.status_headers]
+identifier = "edge-a"
+
+[routes.status_headers]
+cache_status = false
+upstream = "strip"
+identifier = "api-edge"
+"#;
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+
+  assert!(config.proxy.status_headers.proxy_status);
+  assert!(config.proxy.status_headers.cache_status);
+  assert_eq!(
+    config.proxy.status_headers.upstream,
+    StatusHeaderUpstream::Preserve
+  );
+  let effective = config.proxy.status_headers.for_route(config.routes.first());
+  assert!(effective.proxy_status);
+  assert!(!effective.cache_status);
+  assert_eq!(effective.upstream, StatusHeaderUpstream::Strip);
+  assert_eq!(effective.identifier.as_deref(), Some("api-edge"));
+  assert_eq!(
+    config.proxy.status_headers.for_route(None),
+    config.proxy.status_headers
+  );
+}
+
+#[test]
+fn status_headers_reject_invalid_identifiers() {
+  let temp_dir = common::TempDir::new("status-headers-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "status-headers-invalid");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for (table, identifier) in [
+    ("proxy.status_headers", " "),
+    ("proxy.status_headers", "status\n"),
+    ("proxy.status_headers", "status🦀"),
+    ("routes.status_headers", " "),
+  ] {
+    let raw = format!("{base}\n[{table}]\nidentifier = {identifier:?}\n");
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("identifier should fail validation");
+    assert!(
+      error
+        .to_string()
+        .contains("must be 1 through 128 printable ASCII characters and not whitespace-only"),
+      "unexpected error: {error}"
+    );
+  }
+
+  let identifier = "x".repeat(129);
+  let raw = format!("{base}\n[proxy.status_headers]\nidentifier = {identifier:?}\n");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  assert!(config.validate().is_err());
 }
 
 #[test]

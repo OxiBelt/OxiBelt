@@ -283,17 +283,21 @@ impl StoredEntry {
     match &self.body {
       StoredBody::Memory(body) => Some(
         CacheEntry::memory(self.status, self.headers.clone(), body.clone())
-          .with_stored_at(self.stored_at),
+          .with_stored_at(self.stored_at)
+          .with_expires_at(self.expires_at),
       ),
       StoredBody::Tmpfs(path) | StoredBody::Disk(path) => {
         let body_len = std::fs::metadata(path).ok()?.len().try_into().ok()?;
-        Some(CacheEntry::file(
-          self.status,
-          self.headers.clone(),
-          path.clone(),
-          body_len,
-          self.stored_at,
-        ))
+        Some(
+          CacheEntry::file(
+            self.status,
+            self.headers.clone(),
+            path.clone(),
+            body_len,
+            self.stored_at,
+          )
+          .with_expires_at(self.expires_at),
+        )
       }
     }
   }

@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+fn diagnostic_forward_reason_reports_only_proven_policy_and_request_facts() {
+  let disabled = ResponseCache::new(&CacheConfig::default(), None).unwrap();
+  assert_eq!(
+    disabled.diagnostic_forward_reason(None, &Method::GET, &HeaderMap::new()),
+    None
+  );
+
+  let config = CacheConfig {
+    enabled: true,
+    ..CacheConfig::default()
+  };
+  let cache = ResponseCache::new(&config, None).unwrap();
+  assert_eq!(
+    cache.diagnostic_forward_reason(None, &Method::GET, &HeaderMap::new()),
+    Some("miss")
+  );
+  assert_eq!(
+    cache.diagnostic_forward_reason(None, &Method::POST, &HeaderMap::new()),
+    Some("method")
+  );
+  let mut bypass_headers = HeaderMap::new();
+  bypass_headers.insert(
+    http::header::AUTHORIZATION,
+    HeaderValue::from_static("Bearer test"),
+  );
+  assert_eq!(
+    cache.diagnostic_forward_reason(None, &Method::GET, &bypass_headers),
+    Some("bypass")
+  );
+  assert_eq!(
+    cache.diagnostic_forward_reason(Some("missing-policy"), &Method::GET, &HeaderMap::new()),
+    None
+  );
+}
+
+#[test]
 fn indexed_lookup_preserves_vary_variants_and_purge() {
   let config = CacheConfig {
     enabled: true,

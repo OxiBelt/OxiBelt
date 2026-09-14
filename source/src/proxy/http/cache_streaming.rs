@@ -80,7 +80,7 @@ pub(super) fn maybe_stream_cache_response(
       Ok(streaming_response(state, route_cache, parts, body, insert))
     }
     crate::cache::CacheStreamingInsertDecision::Rejected(outcome) => {
-      let reason = match outcome {
+      let (reason, standard_status) = match outcome {
         crate::cache::CacheInsertOutcome::AdmissionWarming => {
           record_fill_stage(
             state,
@@ -90,7 +90,14 @@ pub(super) fn maybe_stream_cache_response(
             stream_started,
           );
           state.metrics.record_cache_admission_rejection();
-          CacheReason::AdmissionWarming
+          (
+            CacheReason::AdmissionWarming,
+            cache_status::StandardCacheStatus {
+              stored: Some(false),
+              detail: Some("admission_warming"),
+              ..cache_status::StandardCacheStatus::default()
+            },
+          )
         }
         crate::cache::CacheInsertOutcome::StoreFailed => {
           record_fill_stage(state, route, "local_store", "store_failed", stream_started);
@@ -108,7 +115,14 @@ pub(super) fn maybe_stream_cache_response(
             ),
             crate::cache::CacheFillSuppressionReason::StoreFailed,
           );
-          CacheReason::StoreFailed
+          (
+            CacheReason::StoreFailed,
+            cache_status::StandardCacheStatus {
+              stored: Some(false),
+              detail: Some("store_failed"),
+              ..cache_status::StandardCacheStatus::default()
+            },
+          )
         }
         crate::cache::CacheInsertOutcome::Rejected => {
           record_fill_stage(state, route, "local_store", "rejected", stream_started);
@@ -126,7 +140,14 @@ pub(super) fn maybe_stream_cache_response(
             ),
             crate::cache::CacheFillSuppressionReason::AdmissionRejected,
           );
-          CacheReason::AdmissionRejected
+          (
+            CacheReason::AdmissionRejected,
+            cache_status::StandardCacheStatus {
+              stored: Some(false),
+              detail: Some("admission_rejected"),
+              ..cache_status::StandardCacheStatus::default()
+            },
+          )
         }
         crate::cache::CacheInsertOutcome::NotCacheable => {
           record_fill_stage(state, route, "local_store", "not_cacheable", stream_started);
@@ -140,9 +161,22 @@ pub(super) fn maybe_stream_cache_response(
             certificate_identity,
             proxy_protocol_identity,
           ));
-          CacheReason::NotCacheable
+          (
+            CacheReason::NotCacheable,
+            cache_status::StandardCacheStatus {
+              stored: Some(false),
+              detail: Some("not_cacheable"),
+              ..cache_status::StandardCacheStatus::default()
+            },
+          )
         }
-        crate::cache::CacheInsertOutcome::Stored => CacheReason::Stored,
+        crate::cache::CacheInsertOutcome::Stored => (
+          CacheReason::Stored,
+          cache_status::StandardCacheStatus {
+            stored: Some(true),
+            ..cache_status::StandardCacheStatus::default()
+          },
+        ),
       };
       Ok(streaming_rejection_response(
         state,
@@ -150,6 +184,7 @@ pub(super) fn maybe_stream_cache_response(
         parts,
         body,
         reason,
+        standard_status,
       ))
     }
     crate::cache::CacheStreamingInsertDecision::NotEligible => Err(Box::new((parts, body))),
@@ -214,6 +249,13 @@ fn streaming_response(
   strip_surrogate_control_if_needed(state, route_cache, &mut parts.headers);
   let mut response = Response::from_parts(parts, cache_streaming_body(body, insert));
   cache_status::apply(&mut response, CacheOutcome::Miss, CacheReason::Stored);
+  cache_status::attach_standard_status(
+    &mut response,
+    cache_status::StandardCacheStatus {
+      detail: Some("streaming_pending"),
+      ..cache_status::StandardCacheStatus::default()
+    },
+  );
   response
 }
 
@@ -223,10 +265,12 @@ fn streaming_rejection_response(
   mut parts: http::response::Parts,
   body: ProxyBody,
   reason: CacheReason,
+  standard_status: cache_status::StandardCacheStatus,
 ) -> Response<ProxyBody> {
   strip_surrogate_control_if_needed(state, route_cache, &mut parts.headers);
   let mut response = Response::from_parts(parts, body);
   cache_status::apply(&mut response, CacheOutcome::Miss, reason);
+  cache_status::attach_standard_status(&mut response, standard_status);
   response
 }
 

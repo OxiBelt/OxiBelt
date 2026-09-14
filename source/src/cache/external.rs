@@ -140,6 +140,7 @@ impl ResponseCache {
           return None;
         }
         CacheEntry::temporary_file(status, headers, file, body_len, stored_at)
+          .with_expires_at(expires_at)
       }
     };
     if request_no_cache(ctx.request_headers) || metadata.must_revalidate {

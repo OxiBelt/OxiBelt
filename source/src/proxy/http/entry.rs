@@ -163,6 +163,7 @@ where
     Ok(lease) => lease,
     Err(_) => {
       let response = overload_response(state.as_ref(), request_version);
+      let response = super::status_headers::finalize(response, &state.config.proxy.status_headers);
       emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
       record_request_observability(
         &state,
@@ -194,6 +195,7 @@ where
     Ok(lease) => lease,
     Err(rejection) => {
       let response = circuit_breaker_rejection_response(state.as_ref(), rejection);
+      let response = super::status_headers::finalize(response, &state.config.proxy.status_headers);
       emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
       record_request_observability(
         &state,
@@ -231,6 +233,7 @@ where
   // Upstream HTTP versions are useful to exchange/WAF policy, but the final
   // response must describe the protocol of the downstream writer. In
   // particular, Hyper's H1 encoder cannot serialize an HTTP/3 response head.
+  let response = super::status_headers::finalize(response, &state.config.proxy.status_headers);
   let response = normalize_downstream_response_version(response, request_version);
   let response = if let Some(limiter) = selected_bandwidth {
     with_final_response_bandwidth(response, limiter, state.metrics.clone(), transport_network)

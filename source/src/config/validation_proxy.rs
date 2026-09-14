@@ -4,6 +4,12 @@ use super::*;
 
 impl Config {
   pub(super) fn validate_proxy(&self) -> anyhow::Result<()> {
+    self.proxy.status_headers.validate("proxy.status_headers")?;
+    for (index, route) in self.routes.iter().enumerate() {
+      route
+        .status_headers
+        .validate(&format!("routes[{index}].status_headers"))?;
+    }
     if self.proxy.retry.tries == 0 {
       bail!("proxy.retry.tries must be greater than 0");
     }

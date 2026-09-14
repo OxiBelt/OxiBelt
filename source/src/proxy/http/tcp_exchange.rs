@@ -150,7 +150,12 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
           tokio::net::TcpStream::connect(remote_addr),
         )
         .await
-        .context("upstream TCP connection timed out")?
+        .map_err(|_| {
+          crate::upstream_failure::annotate(
+            anyhow::anyhow!("upstream TCP connection timed out"),
+            crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+          )
+        })?
         .with_context(|| format!("failed to connect upstream TCP candidate {remote_addr}"))?;
         crate::tcp_socket::enable_tcp_nodelay(&stream, remote_addr, "one-shot upstream");
         tokio::time::timeout_at(attempt_deadline, async {
@@ -167,7 +172,12 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
           }
         })
         .await
-        .context("upstream PROXY protocol egress header timed out")?
+        .map_err(|_| {
+          crate::upstream_failure::annotate(
+            anyhow::anyhow!("upstream PROXY protocol egress header timed out"),
+            crate::upstream_failure::UpstreamFailure::ConnectionWriteTimeout,
+          )
+        })?
         .context("failed to write upstream PROXY protocol egress header")?;
         let (io, upstream_certificate): (
           Box<dyn OneShotUpstreamIo>,
@@ -178,10 +188,18 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
             tokio_rustls::TlsConnector::from(tls_config).connect(server_name, stream),
           )
           .await
-          .context("upstream TLS handshake timed out")?
+          .map_err(|_| {
+            crate::upstream_failure::annotate(
+              anyhow::anyhow!("upstream TLS handshake timed out"),
+              crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+            )
+          })?
           .context("upstream TLS handshake failed")?;
           if !upstream_version.accepts_negotiated_alpn(tls.get_ref().1.alpn_protocol()) {
-            anyhow::bail!("upstream negotiated an incompatible ALPN protocol");
+            return Err(crate::upstream_failure::annotate(
+              anyhow::anyhow!("upstream negotiated an incompatible ALPN protocol"),
+              crate::upstream_failure::UpstreamFailure::TlsProtocolError,
+            ));
           }
           let upstream_certificate = tls
             .get_ref()
@@ -211,7 +229,12 @@ pub(super) async fn send_one_shot_with_proxy_protocol(
     ),
   )
   .await
-  .map_err(|_| UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte))??;
+  .map_err(|_| {
+    crate::upstream_failure::annotate(
+      anyhow::Error::new(UpstreamFirstByteTimeout::new(timeouts.upstream_first_byte)),
+      crate::upstream_failure::UpstreamFailure::HttpResponseTimeout,
+    )
+  })??;
   if let Some(metadata) = upstream_certificate {
     response
       .extensions_mut()
@@ -293,7 +316,9 @@ impl std::fmt::Display for UpstreamFirstByteTimeout {
 impl std::error::Error for UpstreamFirstByteTimeout {}
 
 pub(super) fn error_is_upstream_first_byte_timeout(error: &anyhow::Error) -> bool {
-  error.downcast_ref::<UpstreamFirstByteTimeout>().is_some()
+  error
+    .chain()
+    .any(|source| source.downcast_ref::<UpstreamFirstByteTimeout>().is_some())
 }
 
 pub(super) fn should_report_upstream_request_failure(

@@ -131,6 +131,8 @@ pub struct ProxyConfig {
   #[serde(default)]
   pub static_files: ProxyStaticFilesConfig,
   #[serde(default)]
+  pub status_headers: StatusHeadersConfig,
+  #[serde(default)]
   pub trusted_ca_certs: Vec<PathBuf>,
   #[serde(default)]
   pub upstream_revocation: OutboundTlsRevocationConfig,

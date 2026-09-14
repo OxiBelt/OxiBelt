@@ -9,7 +9,7 @@ use http::header::{
   CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, EXPIRES, IF_MODIFIED_SINCE, IF_NONE_MATCH,
   LAST_MODIFIED, VARY,
 };
-use http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
 use tokio::io::AsyncReadExt;
@@ -30,6 +30,29 @@ const CACHE_HEADER: &str = "x-oxibelt-cache";
 const CACHE_REASON_HEADER: &str = "x-oxibelt-cache-reason";
 const AGE_HEADER: &str = "age";
 const UNAVAILABLE_CACHE_BODY: &[u8] = b"cached response body is unavailable";
+
+/// Facts about this response that the local cache can establish.
+///
+/// The response finalizer turns these into an RFC 9211 Cache-Status member.
+/// Missing fields deliberately stay unknown instead of being inferred from
+/// the legacy OxiBelt diagnostic labels.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StandardCacheStatus {
+  pub hit: bool,
+  pub forwarded: Option<&'static str>,
+  pub forwarded_status: Option<u16>,
+  pub stored: Option<bool>,
+  pub collapsed: Option<bool>,
+  pub expires_at: Option<SystemTime>,
+  pub detail: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UnavailableCachedBody;
+
+pub(crate) fn attach_standard_status<B>(response: &mut Response<B>, status: StandardCacheStatus) {
+  response.extensions_mut().insert(status);
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum CacheHeaderOutcome {
@@ -135,6 +158,7 @@ pub(crate) fn cached_entry_response(
   let mut response = Response::new(body);
   *response.status_mut() = entry.status;
   *response.headers_mut() = entry.headers;
+  super::status_headers::capture_cached(&mut response);
   apply_age_header(response.headers_mut(), entry.stored_at);
   if body::is_known_small_response_body_len(body_len) {
     response
@@ -163,6 +187,7 @@ pub(crate) fn stale_if_error_response(
   method: &Method,
   request_headers: &HeaderMap,
 ) -> Response<ProxyBody> {
+  let expires_at = entry.expires_at;
   let mut response = cached_status_response(
     entry,
     method,
@@ -170,6 +195,20 @@ pub(crate) fn stale_if_error_response(
     CacheHeaderOutcome::Stale,
     CacheHeaderReason::StaleIfError,
   );
+  if response
+    .extensions()
+    .get::<UnavailableCachedBody>()
+    .is_none()
+  {
+    attach_standard_status(
+      &mut response,
+      StandardCacheStatus {
+        expires_at,
+        detail: Some("stale-if-error"),
+        ..StandardCacheStatus::default()
+      },
+    );
+  }
   reconcile_cached_security(&mut response, state, route);
   response
 }
@@ -251,6 +290,7 @@ fn unavailable_cached_body_response() -> Response<ProxyBody> {
     HeaderValue::from_str(&body.len().to_string())
       .unwrap_or_else(|_| HeaderValue::from_static("0")),
   );
+  response.extensions_mut().insert(UnavailableCachedBody);
   apply(
     &mut response,
     CacheHeaderOutcome::Miss,
@@ -274,7 +314,15 @@ fn conditional_not_modified_response(
     return None;
   }
   let mut headers = HeaderMap::new();
-  for name in [CACHE_CONTROL, ETAG, EXPIRES, LAST_MODIFIED, VARY] {
+  for name in [
+    CACHE_CONTROL,
+    ETAG,
+    EXPIRES,
+    LAST_MODIFIED,
+    VARY,
+    HeaderName::from_static("cache-status"),
+    HeaderName::from_static("proxy-status"),
+  ] {
     for value in entry.headers.get_all(&name) {
       headers.append(name.clone(), value.clone());
     }
@@ -283,6 +331,7 @@ fn conditional_not_modified_response(
   let mut response = Response::new(full_body(bytes::Bytes::new()));
   *response.status_mut() = StatusCode::NOT_MODIFIED;
   *response.headers_mut() = headers;
+  super::status_headers::capture_cached(&mut response);
   Some(response)
 }
 

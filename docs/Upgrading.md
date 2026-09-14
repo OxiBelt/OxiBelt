@@ -22,6 +22,21 @@ binary does not provide these forwarding guarantees; stop incremental clients
 or restore compatible application behavior before rolling back. Validate
 streaming routes using the matrix command in the feature guide.
 
+## Status-header configuration
+
+`[proxy.status_headers]` and `[routes.status_headers]` are additive native
+configuration schema epoch `1` tables. Their default-on behavior adds RFC
+`Proxy-Status` and `Cache-Status` diagnostics to downstream responses and can
+therefore affect clients that compare response headers exactly. Legacy
+`X-OxiBelt-Cache` diagnostics and every other proxy, cache, WAF, and trailer
+semantic remain unchanged. Set explicit values before rollout when a route
+needs different proxy or cache status exposure, upstream stripping, or a stable
+generated identifier. The change does not migrate persisted state and applies
+with the normal full configuration reload. Before rollback to a binary that
+predates these tables, remove them and validate the complete configuration with
+the target binary. See the [status-header contract](StatusHeaders.md) for the
+observable header rules.
+
 ## Downstream client certificate forwarding
 
 `routes.client_certificate_forwarding` is opt-in; existing configurations retain

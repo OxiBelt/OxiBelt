@@ -24,6 +24,7 @@ pub struct CacheEntry {
   pub(crate) _body_file_guard: Option<Arc<tempfile::NamedTempFile>>,
   pub body_len: usize,
   pub stored_at: SystemTime,
+  pub(crate) expires_at: Option<SystemTime>,
 }
 
 impl CacheEntry {
@@ -38,11 +39,17 @@ impl CacheEntry {
       _body_file_guard: None,
       body_len,
       stored_at: SystemTime::now(),
+      expires_at: None,
     }
   }
 
   pub(crate) fn with_stored_at(mut self, stored_at: SystemTime) -> Self {
     self.stored_at = stored_at;
+    self
+  }
+
+  pub(crate) fn with_expires_at(mut self, expires_at: SystemTime) -> Self {
+    self.expires_at = Some(expires_at);
     self
   }
 
@@ -66,6 +73,7 @@ impl CacheEntry {
       _body_file_guard: None,
       body_len,
       stored_at,
+      expires_at: None,
     }
   }
 
@@ -90,6 +98,7 @@ impl CacheEntry {
       _body_file_guard: Some(Arc::new(file)),
       body_len,
       stored_at,
+      expires_at: None,
     }
   }
 

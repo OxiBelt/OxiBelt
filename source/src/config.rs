@@ -77,6 +77,7 @@ mod shared_state;
 mod sni_forward;
 mod source_paths;
 mod static_files;
+mod status_headers;
 mod stream;
 mod telemetry;
 mod tls;
@@ -191,6 +192,7 @@ pub use source_paths::{
   ConfigSourcePaths, DownstreamTlsCertificateSourcePaths, TurnListenerTlsSourcePaths,
 };
 pub use static_files::*;
+pub use status_headers::*;
 pub use stream::*;
 pub use telemetry::*;
 pub use tls::*;

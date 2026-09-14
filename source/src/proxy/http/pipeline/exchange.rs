@@ -199,6 +199,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           access_log.upstream_connect_time_ms,
           access_log.upstream_first_byte_time_ms,
           "read_timeout",
+          Some("http_response_timeout"),
           "upstream request timed out",
           &request_waf.response_header_mutations,
           access_log,
@@ -262,6 +263,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           access_log.upstream_connect_time_ms,
           access_log.upstream_first_byte_time_ms,
           "connect_error",
+          crate::upstream_failure::classify(error.as_ref()).map(|failure| failure.as_str()),
           &error.to_string(),
           &request_waf.response_header_mutations,
           access_log,
@@ -452,6 +454,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           access_log.upstream_connect_time_ms,
           access_log.upstream_first_byte_time_ms,
           error_code,
+          crate::upstream_failure::classify(error.as_ref()).map(|failure| failure.as_str()),
           &error_message,
           &request_waf.response_header_mutations,
           access_log,
@@ -495,6 +498,21 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       return route_security.apply(incremental::refused(request_version));
     }
   }
+  let mut upstream_response = upstream_response;
+  status_headers::capture_upstream(&mut upstream_response);
+  let revalidation_reason = revalidation_entry.as_ref().map(|entry| {
+    if entry
+      .expires_at
+      .is_some_and(|expiry| expiry > std::time::SystemTime::now())
+    {
+      "request"
+    } else {
+      "stale"
+    }
+  });
+  if let Some(reason) = revalidation_reason {
+    status_headers::set_cache_forward_reason(&mut upstream_response, reason);
+  }
   let upstream_response = if let Some(mode) = grpc_web_mode {
     grpc_web::encode_response(upstream_response, mode, upstream_incremental)
   } else {
@@ -510,7 +528,15 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       .stale_if_error_allows_status(resolved.route.cache.as_deref(), parts.status)
   {
     state.metrics.record_cache_stale();
-    return stale_if_error_response(entry);
+    let mut response = stale_if_error_response(entry);
+    if let Some(facts) = response
+      .extensions_mut()
+      .get_mut::<cache_status::StandardCacheStatus>()
+    {
+      facts.forwarded = Some("stale");
+      facts.forwarded_status = Some(parts.status.as_u16());
+    }
+    return response;
   }
   if parts.status == StatusCode::NOT_MODIFIED
     && let Some(entry) = revalidation_entry.clone()
@@ -555,6 +581,23 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       CacheOutcome::Revalidated,
       CacheReason::NotModified,
     );
+    if let Some(facts) = response
+      .extensions_mut()
+      .get_mut::<cache_status::StandardCacheStatus>()
+    {
+      facts.hit = false;
+      facts.forwarded = Some(revalidation_reason.unwrap_or("stale"));
+      facts.forwarded_status = Some(304);
+      facts.expires_at = None;
+    } else {
+      response
+        .extensions_mut()
+        .insert(cache_status::StandardCacheStatus {
+          forwarded: Some(revalidation_reason.unwrap_or("stale")),
+          forwarded_status: Some(304),
+          ..Default::default()
+        });
+    }
     apply_response_alt_svc(
       &mut response,
       state.as_ref(),

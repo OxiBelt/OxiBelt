@@ -447,6 +447,8 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
               &mut revalidation_entry,
               false,
             ) {
+              let mut response = response;
+              cache_wait::mark_collapsed_follower_response(&mut response);
               return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
             }
           } else {

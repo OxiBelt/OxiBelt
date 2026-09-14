@@ -291,6 +291,8 @@ pub(crate) async fn handle_downstream_connection(
               .headers_mut()
               .insert(::http::header::RETRY_AFTER, value);
           }
+          let response =
+            http_proxy::status_headers::finalize(response, &snapshot.config.proxy.status_headers);
           respond_to_h3_request(stream, response).await?;
           continue;
         }
@@ -317,7 +319,11 @@ pub(crate) async fn handle_downstream_connection(
     }
 
     if !request_admission.try_admit() {
-      respond_to_h3_request(stream, request_tasks::too_many_requests_response()).await?;
+      let response = http_proxy::status_headers::finalize(
+        request_tasks::too_many_requests_response(),
+        &snapshot.config.proxy.status_headers,
+      );
+      respond_to_h3_request(stream, response).await?;
       continue;
     }
 

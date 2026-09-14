@@ -166,8 +166,9 @@ impl H3EndpointRuntime {
             H3PoolWaitOutcome::Error,
             started.elapsed(),
           );
-          return Err(SharedConnectFailure::message(
+          return Err(SharedConnectFailure::typed_message(
             "upstream HTTP/3 resolution timed out",
+            crate::upstream_failure::UpstreamFailure::DnsTimeout,
             deadline,
           ));
         }
@@ -362,8 +363,9 @@ where
   ConnectFuture: Future<Output = anyhow::Result<T>>,
 {
   if tokio::time::Instant::now() >= deadline {
-    return Err(SharedConnectFailure::message(
+    return Err(SharedConnectFailure::typed_message(
       "upstream HTTP/3 endpoint race timed out",
+      crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
       deadline,
     ));
   }
@@ -382,8 +384,9 @@ where
     ));
   }
   if tokio::time::Instant::now() >= deadline {
-    return Err(SharedConnectFailure::message(
+    return Err(SharedConnectFailure::typed_message(
       "upstream HTTP/3 endpoint race timed out",
+      crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
       deadline,
     ));
   }
@@ -411,6 +414,7 @@ where
   };
   let mut next_launch = next_candidate_launch(tokio::time::Instant::now(), stagger, deadline);
   let mut last_endpoint_error = None;
+  let mut endpoint_failures = 0usize;
   let mut admission_error = None;
   let mut deferred_admission = false;
 
@@ -432,8 +436,9 @@ where
     tokio::select! {
       _ = tokio::time::sleep_until(deadline) => {
         record_candidate_cancellations(metrics, active_by_family);
-        return Err(SharedConnectFailure::message(
+        return Err(SharedConnectFailure::typed_message(
           "upstream HTTP/3 endpoint race timed out",
+          crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
           deadline,
         ));
       }
@@ -478,6 +483,7 @@ where
             );
             record_failure(policy, health, address, metrics).await;
             last_endpoint_error = Some(error);
+            endpoint_failures = endpoint_failures.saturating_add(1);
             if deferred_admission {
               deferred_admission = false;
               admission_error = None;
@@ -549,7 +555,11 @@ where
       .await
       .unwrap_or_else(|| retry_deadline(policy, now, deadline))
   };
-  Err(SharedConnectFailure::from_error(error, retry_at))
+  Err(if endpoint_failures > 1 {
+    SharedConnectFailure::from_ambiguous_error(error, retry_at)
+  } else {
+    SharedConnectFailure::from_error(error, retry_at)
+  })
 }
 
 async fn candidate_plan(

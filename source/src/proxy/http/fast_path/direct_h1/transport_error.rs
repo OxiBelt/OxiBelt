@@ -46,7 +46,10 @@ impl DirectH1TransportError {
   pub(super) fn response_protocol(source: anyhow::Error) -> anyhow::Error {
     Self {
       kind: DirectH1TransportFailureKind::ResponseProtocol,
-      source,
+      source: crate::upstream_failure::annotate(
+        source,
+        crate::upstream_failure::UpstreamFailure::HttpProtocolError,
+      ),
     }
     .into()
   }
@@ -54,7 +57,10 @@ impl DirectH1TransportError {
   pub(super) fn read_timeout(source: anyhow::Error) -> anyhow::Error {
     Self {
       kind: DirectH1TransportFailureKind::ReadTimeout,
-      source,
+      source: crate::upstream_failure::annotate(
+        source,
+        crate::upstream_failure::UpstreamFailure::ConnectionReadTimeout,
+      ),
     }
     .into()
   }
@@ -97,7 +103,11 @@ impl fmt::Display for DirectH1TransportError {
   }
 }
 
-impl std::error::Error for DirectH1TransportError {}
+impl std::error::Error for DirectH1TransportError {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    Some(self.source.as_ref())
+  }
+}
 
 pub(super) fn direct_h1_transport_miss_reason(
   error: &anyhow::Error,
@@ -105,10 +115,18 @@ pub(super) fn direct_h1_transport_miss_reason(
   if let Some(error) = error.downcast_ref::<DirectH1TransportError>() {
     return error.reason();
   }
-  if error.to_string().contains("timed out") {
-    FastPathTransportMissReason::ConnectError
-  } else {
-    FastPathTransportMissReason::SendError
+  match crate::upstream_failure::classify(error.as_ref()) {
+    Some(
+      crate::upstream_failure::UpstreamFailure::ConnectionTimeout
+      | crate::upstream_failure::UpstreamFailure::ConnectionRefused,
+    ) => FastPathTransportMissReason::ConnectError,
+    Some(
+      crate::upstream_failure::UpstreamFailure::ConnectionReadTimeout
+      | crate::upstream_failure::UpstreamFailure::HttpResponseTimeout
+      | crate::upstream_failure::UpstreamFailure::HttpProtocolError
+      | crate::upstream_failure::UpstreamFailure::ConnectionTerminated,
+    ) => FastPathTransportMissReason::ResponseError,
+    _ => FastPathTransportMissReason::SendError,
   }
 }
 
@@ -129,5 +147,20 @@ pub(in crate::proxy::http::fast_path) fn direct_h1_upstream_error_response(
     DirectH1UpstreamErrorKind::DownstreamCancellation => {
       Some(("downstream_cancellation", StatusCode::BAD_GATEWAY))
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn source_preserves_the_typed_marker_without_changing_display() {
+    let error = DirectH1TransportError::read_timeout(anyhow::anyhow!("read failed"));
+    assert_eq!(error.to_string(), "read failed");
+    assert_eq!(
+      crate::upstream_failure::classify(error.as_ref()),
+      Some(crate::upstream_failure::UpstreamFailure::ConnectionReadTimeout)
+    );
   }
 }

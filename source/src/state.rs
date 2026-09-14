@@ -332,6 +332,7 @@ impl AppSnapshot {
     supplied_topology: Option<RuntimeTopologySnapshot>,
     supplied_hardening: Option<RuntimeHardeningSnapshot>,
   ) -> anyhow::Result<Self> {
+    crate::proxy::http::status_headers::initialize()?;
     if config.rollout.is_immutable() {
       config
         .validate()

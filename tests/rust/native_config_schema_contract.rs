@@ -204,6 +204,51 @@ fn real_ip_rule_schema_is_typed_strict_and_full_reload() {
 }
 
 #[test]
+fn status_header_schema_publishes_defaults_sparse_route_overrides_and_identifier_bounds() {
+  let schema: serde_json::Value =
+    serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))
+      .expect("generated native schema should be JSON");
+
+  for path in [
+    "proxy.status_headers.proxy_status",
+    "proxy.status_headers.cache_status",
+    "routes[].status_headers.proxy_status",
+    "routes[].status_headers.cache_status",
+  ] {
+    assert_eq!(
+      schema_node_for_metadata_path(&schema, path)["type"],
+      "boolean",
+      "unexpected type at {path}"
+    );
+  }
+  assert_eq!(
+    schema_node_for_metadata_path(&schema, "proxy.status_headers.proxy_status")["default"],
+    true
+  );
+  assert_eq!(
+    schema_node_for_metadata_path(&schema, "proxy.status_headers.cache_status")["default"],
+    true
+  );
+  assert_eq!(
+    schema_node_for_metadata_path(&schema, "proxy.status_headers.upstream")["enum"],
+    serde_json::json!(["preserve", "strip"])
+  );
+  assert_eq!(
+    schema_node_for_metadata_path(&schema, "proxy.status_headers.upstream")["default"],
+    "preserve"
+  );
+  for path in [
+    "proxy.status_headers.identifier",
+    "routes[].status_headers.identifier",
+  ] {
+    let identifier = schema_node_for_metadata_path(&schema, path);
+    assert_eq!(identifier["type"], "string", "unexpected type at {path}");
+    assert_eq!(identifier["minLength"], 1, "unexpected minimum at {path}");
+    assert_eq!(identifier["maxLength"], 128, "unexpected maximum at {path}");
+  }
+}
+
+#[test]
 fn proxy_protocol_tls_schema_is_typed_strict_and_requires_a_source() {
   let schema: serde_json::Value =
     serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))

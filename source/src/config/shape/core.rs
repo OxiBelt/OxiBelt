@@ -266,6 +266,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "real_ip",
       "retry",
       "static_files",
+      "status_headers",
       "trusted_ca_certs",
       "upstream_revocation",
       "upgrades",
@@ -297,6 +298,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "proxy.upstream_revocation.crlite" => crlite::CRLITE_CONFIG_KEYS,
     "proxy.upstream_revocation.crlite.managed" => crlite::CRLITE_MANAGED_CONFIG_KEYS,
     "proxy.forwarded_headers" => &["client_ip_source", "mode"][..],
+    "proxy.status_headers" => &["cache_status", "identifier", "proxy_status", "upstream"][..],
     "proxy.auto_upgrade" => &["enabled", "max_http_version"][..],
     "proxy.real_ip" => &[
       "enabled",

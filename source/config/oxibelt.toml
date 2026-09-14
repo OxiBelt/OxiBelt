@@ -384,6 +384,12 @@ max_lifetime_ms = 600000
 [proxy]
 trusted_ca_certs = []
 
+[proxy.status_headers]
+proxy_status = true
+cache_status = true
+upstream = "preserve" # preserve | strip
+# identifier = "edge-a"
+
 [proxy.upstream_revocation.ocsp]
 mode = "disabled" # disabled | live_fetch
 failure_policy = "fail_closed" # fail_closed | degraded_allow
@@ -1800,6 +1806,11 @@ connect_tunneling = false
 grpc_web = false
 # external_auth = "edge-auth"
 # security_headers = "default" # default | off | named policy
+# [routes.status_headers]
+# proxy_status = true
+# cache_status = true
+# upstream = "preserve" # preserve | strip
+# identifier = "api-edge"
 # Optional verified downstream leaf forwarding; configure tls.client_auth first.
 # All forwarding names become protected across routes. Missing certificates omit
 # the header; this option does not require client authentication by itself.

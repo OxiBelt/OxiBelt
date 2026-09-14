@@ -148,6 +148,28 @@ impl ResponseCache {
     self.config.enabled && self.policy(policy_name).is_some() && self.is_cacheable_method(method)
   }
 
+  /// Describe why this cache would forward the request before the response is available.
+  ///
+  /// This intentionally does not distinguish URI misses from Vary misses: lookup
+  /// currently exposes neither distinction to the forwarding path.
+  pub(crate) fn diagnostic_forward_reason(
+    &self,
+    policy_name: Option<&str>,
+    method: &Method,
+    headers: &HeaderMap,
+  ) -> Option<&'static str> {
+    if !self.config.enabled || self.policy(policy_name).is_none() {
+      return None;
+    }
+    if !self.is_cacheable_method(method) {
+      return Some("method");
+    }
+    if request_no_store(headers, &self.bypass_request_headers) {
+      return Some("bypass");
+    }
+    Some("miss")
+  }
+
   pub fn is_cacheable_method(&self, method: &Method) -> bool {
     if method == Method::HEAD {
       return self

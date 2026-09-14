@@ -297,11 +297,11 @@ async fn handle_downstream_request(
   request_admission: &mut request_tasks::RequestAdmission,
 ) -> anyhow::Result<()> {
   if drain.is_draining() {
-    respond_to_h3_request(
-      stream,
+    let response = crate::proxy::http::status_headers::finalize(
       text_response(StatusCode::SERVICE_UNAVAILABLE, "draining"),
-    )
-    .await?;
+      &state.config.proxy.status_headers,
+    );
+    respond_to_h3_request(stream, response).await?;
     return Ok(());
   }
 
@@ -332,7 +332,11 @@ async fn handle_downstream_request(
     .await?;
   } else {
     if !request_admission.try_admit() {
-      respond_to_h3_request(stream, request_tasks::too_many_requests_response()).await?;
+      let response = crate::proxy::http::status_headers::finalize(
+        request_tasks::too_many_requests_response(),
+        &state.config.proxy.status_headers,
+      );
+      respond_to_h3_request(stream, response).await?;
       return Ok(());
     }
 

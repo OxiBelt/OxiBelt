@@ -130,7 +130,10 @@ pub(super) async fn connect_direct_h2(
               .await
               .map_err(|_| DirectH2ConnectFailure::Endpoint {
                 class: DirectH2ConnectErrorClass::TcpConnect,
-                error: anyhow::anyhow!("direct H2 upstream candidate {address} timed out"),
+                error: crate::upstream_failure::annotate(
+                  anyhow::anyhow!("direct H2 upstream candidate {address} timed out"),
+                  crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+                ),
               })?
               .with_context(|| format!("failed to connect direct H2 upstream candidate {address}"))
               .map_err(|error| DirectH2ConnectFailure::Endpoint {
@@ -210,20 +213,40 @@ fn map_candidate_race_error(
     }
     | CandidateRaceError::Exhausted {
       last_endpoint_error: Some(error),
+      endpoint_failures: 0 | 1,
       admission_error: None,
     } => error,
+    CandidateRaceError::Exhausted {
+      last_endpoint_error: Some(error),
+      endpoint_failures: _,
+      admission_error: None,
+    } => ambiguous_candidate_race_failure(error),
     CandidateRaceError::Deadline => DirectH2ConnectFailure::Endpoint {
       class: DirectH2ConnectErrorClass::TcpConnect,
-      error: anyhow::anyhow!("direct H2 upstream connection deadline elapsed"),
+      error: crate::upstream_failure::annotate(
+        anyhow::anyhow!("direct H2 upstream connection deadline elapsed"),
+        crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+      ),
     },
     CandidateRaceError::NoCandidates
     | CandidateRaceError::Exhausted {
       last_endpoint_error: None,
       admission_error: None,
+      ..
     } => DirectH2ConnectFailure::Endpoint {
       class: DirectH2ConnectErrorClass::TcpConnect,
       error: anyhow::anyhow!("direct H2 upstream resolver returned no usable candidates"),
     },
+  }
+}
+
+fn ambiguous_candidate_race_failure(error: DirectH2ConnectFailure) -> DirectH2ConnectFailure {
+  match error {
+    DirectH2ConnectFailure::Endpoint { class, error } => DirectH2ConnectFailure::Endpoint {
+      class,
+      error: crate::upstream_failure::ambiguous_candidate_failure(error),
+    },
+    DirectH2ConnectFailure::Admission(error) => DirectH2ConnectFailure::Admission(error),
   }
 }
 
@@ -253,7 +276,12 @@ where
     h2_handshake_with_capacity_notify(io, http2_config, capacity_changed),
   )
   .await
-  .context("direct H2 upstream HTTP/2 handshake timed out")?
+  .map_err(|_| {
+    crate::upstream_failure::annotate(
+      anyhow::anyhow!("direct H2 upstream HTTP/2 handshake timed out"),
+      crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+    )
+  })?
 }
 
 #[cfg(test)]
@@ -345,7 +373,10 @@ async fn connect_tls_h2_until(
   let server_name = rustls::pki_types::ServerName::try_from(server_name).map_err(|error| {
     DirectH2ConnectFailure::Endpoint {
       class: DirectH2ConnectErrorClass::TlsHandshake,
-      error: anyhow::anyhow!("invalid upstream TLS server name: {error}"),
+      error: crate::upstream_failure::annotate(
+        anyhow::anyhow!("invalid upstream TLS server name: {error}"),
+        crate::upstream_failure::UpstreamFailure::TlsProtocolError,
+      ),
     }
   })?;
   let tls = tokio::time::timeout_at(
@@ -355,7 +386,10 @@ async fn connect_tls_h2_until(
   .await
   .map_err(|_| DirectH2ConnectFailure::Endpoint {
     class: DirectH2ConnectErrorClass::TlsHandshake,
-    error: anyhow::anyhow!("direct H2 upstream TLS handshake timed out"),
+    error: crate::upstream_failure::annotate(
+      anyhow::anyhow!("direct H2 upstream TLS handshake timed out"),
+      crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+    ),
   })?
   .context("direct H2 upstream TLS handshake failed")
   .map_err(|error| DirectH2ConnectFailure::Endpoint {
@@ -365,7 +399,10 @@ async fn connect_tls_h2_until(
   if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
     return Err(DirectH2ConnectFailure::Endpoint {
       class: DirectH2ConnectErrorClass::TlsHandshake,
-      error: anyhow::anyhow!("direct H2 upstream did not negotiate the h2 ALPN protocol"),
+      error: crate::upstream_failure::annotate(
+        anyhow::anyhow!("direct H2 upstream did not negotiate the h2 ALPN protocol"),
+        crate::upstream_failure::UpstreamFailure::TlsProtocolError,
+      ),
     });
   }
   let upstream_certificate = tls

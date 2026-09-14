@@ -18,6 +18,7 @@ use pretty_assertions::assert_eq;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::{Duration, SystemTime};
 
 use super::{full_body, maybe_cache_response, maybe_cache_response_with_store_permission};
 use crate::config::Config;
@@ -34,6 +35,37 @@ fn assert_cache_status<B>(response: &Response<B>, outcome: &str, reason: &str) {
 fn assert_no_cache_status_headers(headers: &HeaderMap) {
   assert!(!headers.contains_key("x-oxibelt-cache"));
   assert!(!headers.contains_key("x-oxibelt-cache-reason"));
+}
+
+#[test]
+fn collapsed_follower_keeps_expiry_without_claiming_hit_or_forward_facts() {
+  let expires_at = SystemTime::now() + Duration::from_secs(60);
+  let mut response = Response::new(full_body(bytes::Bytes::new()));
+  response
+    .extensions_mut()
+    .insert(super::cache_status::StandardCacheStatus {
+      hit: true,
+      forwarded: Some("stale"),
+      forwarded_status: Some(200),
+      stored: Some(true),
+      collapsed: Some(true),
+      expires_at: Some(expires_at),
+      detail: Some("previous"),
+    });
+
+  super::cache_wait::mark_collapsed_follower_response(&mut response);
+
+  let status = response
+    .extensions()
+    .get::<super::cache_status::StandardCacheStatus>()
+    .expect("collapsed follower should retain cache diagnostics");
+  assert!(!status.hit);
+  assert_eq!(status.forwarded, None);
+  assert_eq!(status.forwarded_status, None);
+  assert_eq!(status.stored, None);
+  assert_eq!(status.collapsed, None);
+  assert_eq!(status.expires_at, Some(expires_at));
+  assert_eq!(status.detail, Some("collapsed"));
 }
 
 fn parse_config(raw: &str) -> Config {
@@ -535,6 +567,10 @@ stream_large_objects = true
   }) {
     Some(crate::cache::CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, body);
+      assert!(
+        entry.expires_at.is_some(),
+        "stored expiry should reach cache hits"
+      );
       assert_no_cache_status_headers(&entry.headers);
       let cached = super::cache_status::cached_entry_response(entry, &method, &request_headers);
       assert!(
@@ -588,6 +624,55 @@ fn cached_status_response_marks_hit_stale_and_revalidated() {
     );
     assert_cache_status(&response, expected_outcome, expected_reason);
   }
+}
+
+#[test]
+fn cached_responses_preserve_received_status_chains_including_conditional_304() {
+  let mut headers = HeaderMap::new();
+  headers.insert(http::header::ETAG, HeaderValue::from_static("\"v1\""));
+  headers.insert(
+    "cache-status",
+    HeaderValue::from_static("\"upstream-cache\"; hit"),
+  );
+  headers.insert(
+    "proxy-status",
+    HeaderValue::from_static("\"upstream-proxy\"; error=connection_timeout; received-status=502"),
+  );
+  let expires_at = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+  let entry = crate::cache::CacheEntry::memory(
+    StatusCode::OK,
+    headers,
+    bytes::Bytes::from_static(b"cached"),
+  )
+  .with_expires_at(expires_at);
+
+  let full =
+    super::cache_status::cached_entry_response(entry.clone(), &Method::GET, &HeaderMap::new());
+  assert_eq!(
+    full.headers().get("cache-status").unwrap(),
+    "\"upstream-cache\"; hit"
+  );
+  assert_eq!(
+    full.headers().get("proxy-status").unwrap(),
+    "\"upstream-proxy\"; error=connection_timeout; received-status=502"
+  );
+
+  let mut request_headers = HeaderMap::new();
+  request_headers.insert(
+    http::header::IF_NONE_MATCH,
+    HeaderValue::from_static("\"v1\""),
+  );
+  let conditional =
+    super::cache_status::cached_entry_response(entry, &Method::GET, &request_headers);
+  assert_eq!(conditional.status(), StatusCode::NOT_MODIFIED);
+  assert_eq!(
+    conditional.headers().get("cache-status").unwrap(),
+    "\"upstream-cache\"; hit"
+  );
+  assert_eq!(
+    conditional.headers().get("proxy-status").unwrap(),
+    "\"upstream-proxy\"; error=connection_timeout; received-status=502"
+  );
 }
 
 #[tokio::test]

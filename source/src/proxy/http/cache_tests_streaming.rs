@@ -477,6 +477,20 @@ async fn missing_file_backed_body_fails_closed() {
 
   assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
   assert_cache_status(&response, "miss", "store_failed");
+  assert!(
+    response
+      .extensions()
+      .get::<super::super::cache_status::UnavailableCachedBody>()
+      .is_some(),
+    "local missing-body failures must be distinguishable from cache hits"
+  );
+  assert!(
+    response
+      .extensions()
+      .get::<super::super::cache_status::StandardCacheStatus>()
+      .is_none(),
+    "local missing-body failures must not emit an RFC 9211 cache member"
+  );
   assert_ne!(response.headers().get(CONTENT_LENGTH).unwrap(), "128");
   let body = response
     .into_body()

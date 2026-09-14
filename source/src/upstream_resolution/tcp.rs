@@ -684,7 +684,10 @@ async fn resolve_absolute_target(
 
 fn candidate_race_error(error: CandidateRaceError<anyhow::Error>) -> anyhow::Error {
   match error {
-    CandidateRaceError::Deadline => anyhow::anyhow!("upstream TCP connection deadline elapsed"),
+    CandidateRaceError::Deadline => crate::upstream_failure::annotate(
+      anyhow::anyhow!("upstream TCP connection deadline elapsed"),
+      crate::upstream_failure::UpstreamFailure::ConnectionTimeout,
+    ),
     CandidateRaceError::NoCandidates => {
       anyhow::anyhow!("upstream resolver returned no TCP candidates")
     }
@@ -694,11 +697,18 @@ fn candidate_race_error(error: CandidateRaceError<anyhow::Error>) -> anyhow::Err
     }
     | CandidateRaceError::Exhausted {
       last_endpoint_error: Some(error),
+      endpoint_failures: 0 | 1,
       admission_error: None,
     } => error,
     CandidateRaceError::Exhausted {
+      last_endpoint_error: Some(error),
+      endpoint_failures: _,
+      admission_error: None,
+    } => crate::upstream_failure::ambiguous_candidate_failure(error),
+    CandidateRaceError::Exhausted {
       last_endpoint_error: None,
       admission_error: None,
+      ..
     } => anyhow::anyhow!("upstream TCP candidates were exhausted"),
   }
 }

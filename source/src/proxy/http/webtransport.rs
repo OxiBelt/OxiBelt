@@ -40,6 +40,7 @@ pub(crate) use response_bandwidth::shape_webtransport_response;
 use response_bandwidth::with_webtransport_bandwidth_context;
 
 pub(crate) struct PreparedWebTransport {
+  pub(crate) status_headers: crate::config::StatusHeadersConfig,
   pub(crate) bandwidth: Arc<RouteBandwidthLimiter>,
   pub(crate) client_addr: std::net::SocketAddr,
   pub(crate) route_name: String,
@@ -69,6 +70,7 @@ pub(crate) async fn prepare_webtransport(
   let request = sanitized_request.as_ref().unwrap_or(request);
   let mut response_bandwidth: Option<Arc<RouteBandwidthLimiter>> = None;
   let mut certificate_forwarding_enabled = false;
+  let mut status_headers = state.config.proxy.status_headers.clone();
   macro_rules! preparation_error {
     ($response:expr) => {{
       let response = match response_bandwidth.as_ref() {
@@ -81,7 +83,8 @@ pub(crate) async fn prepare_webtransport(
         certificate_forwarding_enabled,
         state,
       );
-      Box::new(response)
+      response.extensions_mut().insert(status_headers.clone());
+      Box::new(super::status_headers::finalize(response, &status_headers))
     }};
   }
   if validate_authority_host_consistency(request).is_err() {
@@ -150,6 +153,11 @@ pub(crate) async fn prepare_webtransport(
       "no matching route",
     )));
   };
+  status_headers = state
+    .config
+    .proxy
+    .status_headers
+    .for_route(Some(resolved.route));
   response_bandwidth = Some(resolved.bandwidth.clone());
   certificate_forwarding_enabled = resolved.route.client_certificate_forwarding.is_some();
   let certificate_forwarding =
@@ -730,6 +738,7 @@ pub(crate) async fn prepare_webtransport(
   let protocols = parse_webtransport_protocols(&headers);
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
   Ok(PreparedWebTransport {
+    status_headers,
     bandwidth: resolved.bandwidth.clone(),
     client_addr,
     route_name: resolved.route.name.clone(),

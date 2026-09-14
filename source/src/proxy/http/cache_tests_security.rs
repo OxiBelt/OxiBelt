@@ -331,6 +331,7 @@ async fn stale_if_error_route_response_reconciles_security_headers() {
     HeaderValue::from_static("stored-nosniff"),
   );
 
+  let expires_at = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
   let response = super::super::cache_status::stale_if_error_response(
     &state,
     route,
@@ -338,12 +339,20 @@ async fn stale_if_error_route_response_reconciles_security_headers() {
       StatusCode::OK,
       headers,
       bytes::Bytes::from_static(b"cached"),
-    ),
+    )
+    .with_expires_at(expires_at),
     &Method::GET,
     &HeaderMap::new(),
   );
 
   super::assert_cache_status(&response, "stale", "stale_if_error");
+  let cache_facts = response
+    .extensions()
+    .get::<super::super::cache_status::StandardCacheStatus>()
+    .expect("stale fallback should expose known expiry facts");
+  assert!(!cache_facts.hit);
+  assert_eq!(cache_facts.expires_at, Some(expires_at));
+  assert_eq!(cache_facts.detail, Some("stale-if-error"));
   assert_eq!(
     response.headers().get("strict-transport-security").unwrap(),
     "max-age=15768000"

@@ -192,6 +192,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "retry",
       "circuit_breaker",
       "security_headers",
+      "status_headers",
       "priority_class",
       "connect_tunneling",
       "client_certificate_forwarding",
@@ -219,6 +220,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "response_headers",
       "rewrite",
     ][..],
+    "routes.status_headers" => &["cache_status", "identifier", "proxy_status", "upstream"][..],
     "routes.client_certificate_forwarding" => &["format", "header"][..],
     "routes.actions.direct_response" => &["status"][..],
     "routes.actions.cors" => &[

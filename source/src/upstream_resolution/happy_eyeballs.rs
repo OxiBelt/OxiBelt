@@ -171,6 +171,7 @@ pub(crate) enum CandidateRaceError<E> {
   NoCandidates,
   Exhausted {
     last_endpoint_error: Option<E>,
+    endpoint_failures: usize,
     admission_error: Option<E>,
   },
 }
@@ -202,6 +203,7 @@ where
   let mut launches_suppressed = false;
   let mut deferred_admission = false;
   let mut last_endpoint_error = None;
+  let mut endpoint_failures = 0usize;
   let mut admission_error = None;
 
   replace_pending(&mut pending, updates.borrow().as_ref(), &started, config);
@@ -210,7 +212,11 @@ where
     let now = Instant::now();
     if now >= deadline {
       // Returning drops `in_flight`, which is the cancellation mechanism.
-      return Err(deadline_race_error(last_endpoint_error, admission_error));
+      return Err(deadline_race_error(
+        last_endpoint_error,
+        endpoint_failures,
+        admission_error,
+      ));
     }
 
     let racing = config.mode() == CandidateSchedulerMode::Enabled;
@@ -247,6 +253,7 @@ where
       if launches_suppressed {
         return Err(CandidateRaceError::Exhausted {
           last_endpoint_error,
+          endpoint_failures,
           admission_error,
         });
       }
@@ -254,6 +261,7 @@ where
         return if last_endpoint_error.is_some() || admission_error.is_some() {
           Err(CandidateRaceError::Exhausted {
             last_endpoint_error,
+            endpoint_failures,
             admission_error,
           })
         } else {
@@ -280,7 +288,7 @@ where
           return if let Err(CandidateAttemptError::LocalAdmission(error)) = result
             && !may_self_contend
           {
-            Err(deadline_race_error(last_endpoint_error, Some(error)))
+            Err(deadline_race_error(last_endpoint_error, endpoint_failures, Some(error)))
           } else {
             Err(CandidateRaceError::Deadline)
           };
@@ -289,6 +297,7 @@ where
           Ok(ready) => return Ok(ready),
           Err(CandidateAttemptError::Endpoint(error)) => {
             last_endpoint_error = Some(error);
+            endpoint_failures = endpoint_failures.saturating_add(1);
             if deferred_admission {
               deferred_admission = false;
               launches_suppressed = false;
@@ -320,7 +329,11 @@ where
         }
       }
       _ = tokio::time::sleep_until(deadline) => {
-        return Err(deadline_race_error(last_endpoint_error, admission_error));
+        return Err(deadline_race_error(
+          last_endpoint_error,
+          endpoint_failures,
+          admission_error,
+        ));
       }
       changed = updates.changed(), if !updates_closed => {
         match changed {
@@ -339,11 +352,13 @@ where
 
 fn deadline_race_error<E>(
   last_endpoint_error: Option<E>,
+  endpoint_failures: usize,
   admission_error: Option<E>,
 ) -> CandidateRaceError<E> {
   if admission_error.is_some() {
     CandidateRaceError::Exhausted {
       last_endpoint_error,
+      endpoint_failures,
       admission_error,
     }
   } else {
@@ -762,6 +777,7 @@ mod tests {
       task.await.expect("scheduler task"),
       Err(CandidateRaceError::Exhausted {
         last_endpoint_error: None,
+        endpoint_failures: 0,
         admission_error: Some("locally full"),
       })
     );

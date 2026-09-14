@@ -145,6 +145,8 @@ async fn background_refresh(
     return Ok(());
   }
   let (mut parts, body) = response.into_parts();
+  super::status_headers::capture_upstream_parts(&mut parts);
+  super::status_headers::restore_received_headers(&mut parts);
   if parts.status == StatusCode::NOT_MODIFIED {
     state
       .cache
@@ -245,4 +247,32 @@ fn empty_request_from<B>(request: &Request<B>) -> Request<ProxyBody> {
   builder
     .body(full_body(bytes::Bytes::new()))
     .expect("request clone builds")
+}
+
+#[cfg(test)]
+mod tests {
+  use http::{HeaderValue, Response};
+
+  #[test]
+  fn background_refresh_restores_the_captured_upstream_status_chain() {
+    let response = Response::builder()
+      .header("proxy-status", "upstream; error=connection_timeout")
+      .header("cache-status", "upstream-cache; hit")
+      .body(())
+      .expect("valid test response");
+    let (mut parts, _) = response.into_parts();
+
+    super::super::status_headers::capture_upstream_parts(&mut parts);
+    parts.headers.insert(
+      "proxy-status",
+      HeaderValue::from_static("forged; error=dns_error"),
+    );
+    super::super::status_headers::restore_received_headers(&mut parts);
+
+    assert_eq!(
+      parts.headers["proxy-status"],
+      "upstream; error=connection_timeout"
+    );
+    assert_eq!(parts.headers["cache-status"], "upstream-cache; hit");
+  }
 }

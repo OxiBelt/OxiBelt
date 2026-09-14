@@ -80,6 +80,7 @@ pub(super) fn finalize_response(
       release_direct_h2_response_body(response_body, lease, known_small_response_body);
   }
   strip_hop_by_hop_headers(&mut parts.headers);
+  super::super::status_headers::capture_upstream_parts(&mut parts);
 
   if can_use_compiled_known_small_noop_response(
     compiled_known_small_noop_candidate,

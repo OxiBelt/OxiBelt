@@ -69,6 +69,9 @@ pub(crate) fn refused(version: Version) -> Response<ProxyBody> {
     StatusCode::NOT_IMPLEMENTED,
     "incremental forwarding is incompatible with the effective body policy",
   );
+  response
+    .extensions_mut()
+    .insert(super::status_headers::IncrementalRefusal);
   response.headers_mut().insert(
     "proxy-status",
     HeaderValue::from_static("oxibelt; error=incremental_refused"),
