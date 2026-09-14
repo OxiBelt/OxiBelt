@@ -154,6 +154,24 @@ type ParsedCli = {
 }
 /* oxlint-enable oxibelt/pascal-case */
 
+// These exact modules are behind #[cfg(test)] in the Gateway Controller.
+// leader_election, rollout, status, watch, and translate gate their tests.rs;
+// translate/tests.rs also owns the listed fixtures, policy tests, and children.
+// Review the compilation boundary and add regressions before admitting new paths.
+const ReviewedGatewayTestOnlyPaths: ReadonlySet<string> = new Set([
+  'source/apps/oxibelt-gateway-controller/src/leader_election/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/rollout/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/status/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/watch/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/fixtures.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/policy_tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests/backend_diagnostics.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests/client_certificate_forwarding.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests/external_auth.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests/l4.rs'
+])
+
 const CompatibilitySurfaceSections: CompatibilitySurface[] = [
   {
     section: 'Configuration',
@@ -790,6 +808,12 @@ function RequiredSectionsForPaths(Paths: string[]): Set<RequiredReleaseSection> 
   const Required = new Set<RequiredReleaseSection>()
   for (const PathValue of Paths) {
     for (const Surface of CompatibilitySurfaceSections) {
+      if (
+        Surface.section === 'Executables and images' &&
+        ReviewedGatewayTestOnlyPaths.has(PathValue)
+      ) {
+        continue
+      }
       if (Surface.patterns.some(Pattern => Pattern.test(PathValue))) {
         Required.add(Surface.section)
       }

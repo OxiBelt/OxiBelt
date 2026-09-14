@@ -157,6 +157,15 @@ compatibility surfaces with:
 pnpm run release-contract:check
 ```
 
+The compatibility classifier exempts an explicit, reviewed set of Gateway
+Controller test-only modules from the `Executables and images` category.
+The set is maintained in `devops/sources/release_contract.ts`; new paths require
+review of their `#[cfg(test)]` boundary and regression coverage before admission.
+Production modules containing inline tests, other application paths, and
+configuration examples remain classified. This exception applies to both
+change-range documentation checks and candidate compatibility sections; it
+does not relax the documentation-only beta-to-stable transition above.
+
 Before pushing a stable or beta tag, create the intended signed annotated tag
 locally at the exact validated commit and exercise the same candidate contract
 used by the tag workflow:

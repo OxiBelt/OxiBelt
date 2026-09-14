@@ -15,6 +15,19 @@ import {
 
 const BaselineRevision = '1111111111111111111111111111111111111111'
 const ReleaseContractSource = fileURLToPath(new URL('../sources/release_contract.ts', import.meta.url))
+const GatewayControllerTestPaths = [
+  'source/apps/oxibelt-gateway-controller/src/leader_election/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/rollout/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/status/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/watch/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/fixtures.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/policy_tests.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests/backend_diagnostics.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests/client_certificate_forwarding.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests/external_auth.rs',
+  'source/apps/oxibelt-gateway-controller/src/translate/tests/l4.rs'
+] as const
 
 const BaselineEntry = `## [0.6.5] - 2026-07-16
 
@@ -152,6 +165,35 @@ function CommitBuildTagRevision(Root: string): string {
 
 function RemoveWorkspace(Root: string): void {
   Fs.rmSync(Root, { force: true, recursive: true })
+}
+
+function CreateChangedWorkspace(Paths: readonly string[]): { root: string, base: string, head: string } {
+  const Root = CreateContractWorkspace()
+  Git(Root, ['init', '-q'])
+  for (const PathValue of Paths) {
+    WriteFile(Root, PathValue, 'const RELEASE_CONTRACT_FIXTURE: u8 = 1;\n')
+  }
+  const Base = Commit(Root, 'baseline')
+  for (const PathValue of Paths) {
+    WriteFile(Root, PathValue, 'const RELEASE_CONTRACT_FIXTURE: u8 = 2;\n')
+  }
+  return { root: Root, base: Base, head: Commit(Root, 'change') }
+}
+
+function CreateBetaCandidate(
+  ChangedPath: string,
+  Entry = GovernedEntry('0.7.0-beta.1')
+): { root: string, revision: string } {
+  const Root = CreateContractWorkspace()
+  Git(Root, ['init', '-q'])
+  WriteFile(Root, ChangedPath, 'const RELEASE_CONTRACT_FIXTURE: u8 = 1;\n')
+  Commit(Root, 'baseline')
+  Git(Root, ['tag', '0.6.5'])
+  WriteFile(Root, 'CHANGELOG-beta.md', `# Beta\n\n${Entry}`)
+  WriteFile(Root, ChangedPath, 'const RELEASE_CONTRACT_FIXTURE: u8 = 2;\n')
+  const Revision = Commit(Root, 'beta release')
+  Git(Root, ['tag', '0.7.0-beta.1'])
+  return { root: Root, revision: Revision }
 }
 
 test('accepts the forward-only historical baseline and governed stable entry', () => {
@@ -983,6 +1025,200 @@ test('requires a substantive candidate section for deleted compatibility surface
       revision: DocumentedRevision
     })
     Assert.equal(Result.receipt.revision, DocumentedRevision)
+  } finally {
+    RemoveWorkspace(Root)
+  }
+})
+
+test('exempts only the exact gateway-controller test paths from undocumented check changes', () => {
+  const Fixture = CreateChangedWorkspace(GatewayControllerTestPaths)
+  try {
+    ValidateRepositoryReleaseContract({
+      workspacePath: Fixture.root,
+      changeBase: Fixture.base,
+      changeHead: Fixture.head
+    })
+  } finally {
+    RemoveWorkspace(Fixture.root)
+  }
+})
+
+test('keeps unknown gateway-controller paths, manifests, and other apps release-governed', () => {
+  const Cases = [
+    'source/apps/oxibelt-gateway-controller/src/leader_election/tests_extra.rs',
+    'source/apps/oxibelt-gateway-controller/src/translate/tests/new_case.rs',
+    'source/apps/oxibelt-gateway-controller/src/translate/tests/client_certificate_forwarding.rs.backup',
+    'source/apps/oxibelt-gateway-controller/src/translate.rs',
+    'source/apps/oxibelt-gateway-controller/build.rs',
+    'source/apps/oxibelt-gateway-controller/Cargo.toml',
+    'source/apps/oxibeltctl/src/tests.rs'
+  ]
+  for (const PathValue of Cases) {
+    const Fixture = CreateChangedWorkspace([PathValue])
+    try {
+      Assert.throws(
+        () => ValidateRepositoryReleaseContract({
+          workspacePath: Fixture.root,
+          changeBase: Fixture.base,
+          changeHead: Fixture.head
+        }),
+        /compatibility surfaces changed \(Executables and images\) without updating a changelog ledger or docs\/Upgrading\.md/
+      )
+    } finally {
+      RemoveWorkspace(Fixture.root)
+    }
+  }
+})
+
+test('does not hide Configuration changes behind exempt gateway-controller tests', () => {
+  const Fixture = CreateChangedWorkspace([
+    GatewayControllerTestPaths[0],
+    'source/config/verified-client-identity.toml'
+  ])
+  try {
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Fixture.root,
+        changeBase: Fixture.base,
+        changeHead: Fixture.head
+      }),
+      /compatibility surfaces changed \(Configuration\) without updating a changelog ledger or docs\/Upgrading\.md/
+    )
+  } finally {
+    RemoveWorkspace(Fixture.root)
+  }
+})
+
+test('keeps deletions and production renames across the gateway-controller test boundary visible', () => {
+  const ExactTestPath = GatewayControllerTestPaths[0]
+  const ProductionPath = 'source/apps/oxibelt-gateway-controller/src/leader_election/mod.rs'
+  const Cases: Array<{
+    name: string
+    setup: (Root: string) => void
+    mutate: (Root: string) => void
+    accepted: boolean
+  }> = [
+    {
+      name: 'deletes an exempt test',
+      setup: Root => WriteFile(Root, ExactTestPath, 'const VALUE: u8 = 1;\n'),
+      mutate: Root => Fs.rmSync(Path.join(Root, ExactTestPath)),
+      accepted: true
+    },
+    {
+      name: 'deletes production code',
+      setup: Root => WriteFile(Root, ProductionPath, 'const VALUE: u8 = 1;\n'),
+      mutate: Root => Fs.rmSync(Path.join(Root, ProductionPath)),
+      accepted: false
+    },
+    {
+      name: 'renames production code into an exempt test path',
+      setup: Root => WriteFile(Root, ProductionPath, 'const VALUE: u8 = 1;\n'),
+      mutate: Root => Fs.renameSync(Path.join(Root, ProductionPath), Path.join(Root, ExactTestPath)),
+      accepted: false
+    },
+    {
+      name: 'renames an exempt test path into production code',
+      setup: Root => WriteFile(Root, ExactTestPath, 'const VALUE: u8 = 1;\n'),
+      mutate: Root => Fs.renameSync(Path.join(Root, ExactTestPath), Path.join(Root, ProductionPath)),
+      accepted: false
+    }
+  ]
+  for (const Case of Cases) {
+    const Root = CreateContractWorkspace()
+    try {
+      Git(Root, ['init', '-q'])
+      Case.setup(Root)
+      const Base = Commit(Root, 'baseline')
+      Case.mutate(Root)
+      const Head = Commit(Root, Case.name)
+      const Check = () => ValidateRepositoryReleaseContract({
+        workspacePath: Root,
+        changeBase: Base,
+        changeHead: Head
+      })
+      if (Case.accepted) {
+        Check()
+      } else {
+        Assert.throws(Check, /compatibility surfaces changed \(Executables and images\)/)
+      }
+    } finally {
+      RemoveWorkspace(Root)
+    }
+  }
+})
+
+test('exempts exact gateway-controller tests for beta candidates but requires substantive production sections', () => {
+  const EmptyConfigurationEntry = GovernedEntry('0.7.0-beta.1').replace(
+    '- Add a person-reviewed configuration compatibility statement.',
+    '- No changes for this release.'
+  ).replace(
+    '### Security\n\n- No changes for this release.',
+    '### Security\n\n- Preserve the existing release validation boundary.'
+  )
+  const Cases = [
+    {
+      path: GatewayControllerTestPaths[10],
+      entry: GovernedEntry('0.7.0-beta.1'),
+      expected: undefined
+    },
+    {
+      path: 'source/apps/oxibelt-gateway-controller/src/rollout/mod.rs',
+      entry: GovernedEntry('0.7.0-beta.1'),
+      expected: /changes the Executables and images compatibility surface but marks that section unchanged/
+    },
+    {
+      path: 'source/src/config/example.rs',
+      entry: EmptyConfigurationEntry,
+      expected: /changes the Configuration compatibility surface but marks that section unchanged/
+    }
+  ]
+  for (const Case of Cases) {
+    const Fixture = CreateBetaCandidate(Case.path, Case.entry)
+    try {
+      const Candidate = () => BuildReleaseCandidate({
+        workspacePath: Fixture.root,
+        ref: 'refs/tags/0.7.0-beta.1',
+        revision: Fixture.revision
+      })
+      if (Case.expected === undefined) {
+        Assert.equal(Candidate().receipt.revision, Fixture.revision)
+      } else {
+        Assert.throws(Candidate, Case.expected)
+      }
+    } finally {
+      RemoveWorkspace(Fixture.root)
+    }
+  }
+})
+
+test('keeps the beta-to-stable two-file rule based on raw changed paths', () => {
+  const Root = CreateContractWorkspace()
+  const ExactTestPath = GatewayControllerTestPaths[0]
+  try {
+    Git(Root, ['init', '-q'])
+    WriteFile(Root, ExactTestPath, 'const RELEASE_CONTRACT_FIXTURE: u8 = 1;\n')
+    Commit(Root, 'baseline')
+    Git(Root, ['tag', '0.6.5'])
+    WriteFile(Root, 'CHANGELOG-beta.md', `# Beta\n\n${GovernedEntry('0.7.0-beta.1')}`)
+    WriteFile(Root, ExactTestPath, 'const RELEASE_CONTRACT_FIXTURE: u8 = 2;\n')
+    Commit(Root, 'beta release')
+    Git(Root, ['tag', '0.7.0-beta.1'])
+
+    const StableEntry = GovernedEntry('0.7.0', '0.6.5', '`0.6.5`, `0.7.0-beta.1`')
+    WriteFile(Root, 'CHANGELOG.md', `# Stable\n\n${StableEntry}\n${BaselineEntry}`)
+    WriteFile(Root, 'docs/Upgrading.md', '# Upgrading\n\n## Upgrade from 0.6.5\n\nStable carry-forward.\n')
+    WriteFile(Root, ExactTestPath, 'const RELEASE_CONTRACT_FIXTURE: u8 = 3;\n')
+    const StableRevision = Commit(Root, 'stable release')
+    Git(Root, ['tag', '0.7.0'])
+
+    Assert.throws(
+      () => BuildReleaseCandidate({
+        workspacePath: Root,
+        ref: 'refs/tags/0.7.0',
+        revision: StableRevision
+      }),
+      /stable release 0\.7\.0 may change only CHANGELOG\.md and docs\/Upgrading\.md after 0\.7\.0-beta\.1/
+    )
   } finally {
     RemoveWorkspace(Root)
   }
