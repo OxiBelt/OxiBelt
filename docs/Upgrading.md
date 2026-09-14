@@ -28,6 +28,27 @@ the new native table, Gateway policy field, controller flags and Helm values,
 and restore application authorization that does not depend on the forwarded
 identity. Validate the resulting configuration with the target binary.
 
+The [native deployment example](../source/config/verified-client-identity.toml)
+combines required downstream client authentication with a separate upstream
+client identity and RFC 9440 forwarding. The
+[Gateway resources](../deploy/helm/oxibelt-gateway-controller/examples/verified-client-identity.yaml)
+and paired
+[controller values](../deploy/helm/oxibelt-gateway-controller/examples/verified-client-identity-values.yaml)
+compose the same existing features through an admitted upstream Secret,
+`clientCertificateRef`, and the required cross-namespace `ReferenceGrant`.
+Configure downstream authentication independently, and require the backend to
+authenticate and authorize OxiBelt before trusting the forwarded certificate.
+These examples preserve existing defaults, schema epochs, and executable/image
+roles and require no persistent-state migration.
+
+Follow [deployment and rotation guidance](VerifiedClientIdentityForwarding.md)
+when adopting these examples. Native upstream credentials require a full
+configuration reload; Gateway-managed Secret rotation requires the new
+workload revision to become Ready. Existing connections follow the normal
+drain lifecycle. When reverting the deployment, restore the previous upstream
+identity configuration or Gateway references together with the backend trust
+policy, and apply the forwarding rollback guidance above.
+
 ## PROXY v2 TLS metadata relay
 
 The new `listeners.http_proxy_protocol`, `tls_tlvs`,
