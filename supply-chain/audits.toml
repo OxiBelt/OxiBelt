@@ -1303,6 +1303,12 @@ criteria = "safe-to-deploy"
 delta = "0.23.43 -> 0.23.44"
 notes = "Reviewed the complete checksum-matched TLS delta for OxiBelt's aws-lc-rs, logging, TLS 1.2, and prefer-post-quantum features. Invalid TLS 1.2 signature schemes become fatal alerts, empty OCSP payloads are rejected, rejected ECH restores the public name, Unix keylog files use mode 0600, and AWS-LC ML-DSA signing is added without weakening certificate or handshake validation."
 
+[[audits.rustls]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.23.44 -> 0.23.45"
+notes = "Reviewed the complete checksum-matched source delta with independent review for OxiBelt's AWS-LC, optional ring, TLS 1.2, logging, std, and prefer-post-quantum features. Handshake alignment now rejects complete as well as partial pending messages at key changes, fixing RUSTSEC-2026-0285. HelloRetryRequest retains the selected cipher suite and PSK-offer presence and prevents a TLS 1.2 downgrade; both signing-key providers zeroize consumed private-key DER on success and error. No dependency requirements, feature defaults, build script, license, unsafe-code boundary, or certificate-verification policy changed."
+
 [[audits.rustls-pki-types]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"

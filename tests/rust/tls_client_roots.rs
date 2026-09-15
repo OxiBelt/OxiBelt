@@ -21,7 +21,7 @@ use oxibelt::remote_signer::{
 };
 use oxibelt::tls;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
-use rustls::{CipherSuite, NamedGroup};
+use rustls::{CipherSuite, ClientConnection, NamedGroup, PeerMisbehaved, ServerConnection};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
@@ -109,6 +109,58 @@ fn server_config_sets_alpn_from_listener_flags() {
   let server_config =
     tls::build_server_config(&tls_config, &listeners).expect("server config should build");
   assert_eq!(server_config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+}
+
+#[test]
+fn tls13_rejects_complete_handshake_message_after_server_hello() {
+  assert_tls13_handshake_succeeds();
+
+  let (mut client, mut server) = tls13_connection_pair();
+  let mut client_hello = Vec::new();
+  client
+    .write_tls(&mut client_hello)
+    .expect("client hello should serialize");
+  server
+    .read_tls(&mut client_hello.as_slice())
+    .expect("server should read client hello");
+  server
+    .process_new_packets()
+    .expect("server should process client hello");
+
+  let mut server_flight = Vec::new();
+  while server.wants_write() {
+    server
+      .write_tls(&mut server_flight)
+      .expect("server flight should serialize");
+  }
+
+  let first_record_len = u16::from_be_bytes([server_flight[3], server_flight[4]]) as usize;
+  let first_record_end = 5 + first_record_len;
+  assert_eq!(
+    server_flight[0], 22,
+    "first server record must be a handshake"
+  );
+  assert_eq!(
+    server_flight[5], 2,
+    "first handshake message must be ServerHello"
+  );
+
+  let mut server_hello_record = server_flight[..first_record_end].to_vec();
+  let empty_encrypted_extensions = [8, 0, 0, 2, 0, 0];
+  let updated_len = u16::try_from(first_record_len + empty_encrypted_extensions.len())
+    .expect("synthetic record length must fit TLS framing");
+  server_hello_record[3..5].copy_from_slice(&updated_len.to_be_bytes());
+  server_hello_record.extend_from_slice(&empty_encrypted_extensions);
+
+  client
+    .read_tls(&mut server_hello_record.as_slice())
+    .expect("client should read synthetic server hello record");
+  assert_eq!(
+    client
+      .process_new_packets()
+      .expect_err("TLS 1.3 must reject EncryptedExtensions in the ServerHello record"),
+    PeerMisbehaved::KeyEpochWithPendingFragment.into(),
+  );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -803,6 +855,97 @@ fn downstream_tls_config(
     crlite: oxibelt::config::CrliteConfig::default(),
     ct: oxibelt::config::DownstreamCtConfig::default(),
   }
+}
+
+fn tls13_connection_pair() -> (ClientConnection, ServerConnection) {
+  let temp_dir = common::TempDir::new("tls13-key-epoch");
+  let (ca_cert_path, ca_key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "tls13-key-epoch-ca");
+  let (cert_path, key_path) = common::create_ca_signed_server_cert(
+    temp_dir.path(),
+    "tls13-key-epoch.test",
+    &ca_cert_path,
+    &ca_key_path,
+  );
+  let tls_config = downstream_tls_config(cert_path, key_path, TlsClientAuthConfig::default());
+  let listeners = ListenerConfig {
+    https_bind: "127.0.0.1:8443".parse().unwrap(),
+    https_binds: vec!["127.0.0.1:8443".parse().unwrap()],
+    http_bind: None,
+    http_binds: Vec::new(),
+    http_mode: Default::default(),
+    http1: true,
+    http2: true,
+    http3: false,
+    proxy_protocol: ProxyProtocolConfig::default(),
+    http_proxy_protocol: ProxyProtocolConfig::default(),
+  };
+  let server_config =
+    tls::build_server_config(&tls_config, &listeners).expect("server config should build");
+  let client_config =
+    tls::build_upstream_client_config(&[ca_cert_path], &UpstreamEchConfig::default())
+      .expect("client config should build");
+  let client = ClientConnection::new(
+    Arc::new(client_config),
+    "tls13-key-epoch.test".try_into().unwrap(),
+  )
+  .expect("client connection should build");
+  let server = ServerConnection::new(server_config).expect("server connection should build");
+  (client, server)
+}
+
+fn assert_tls13_handshake_succeeds() {
+  let (mut client, mut server) = tls13_connection_pair();
+  let mut client_hello = Vec::new();
+  client
+    .write_tls(&mut client_hello)
+    .expect("client hello should serialize");
+  server
+    .read_tls(&mut client_hello.as_slice())
+    .expect("server should read client hello");
+  server
+    .process_new_packets()
+    .expect("server should process client hello");
+
+  let mut server_flight = Vec::new();
+  while server.wants_write() {
+    server
+      .write_tls(&mut server_flight)
+      .expect("server flight should serialize");
+  }
+  client
+    .read_tls(&mut server_flight.as_slice())
+    .expect("client should read server flight");
+  client
+    .process_new_packets()
+    .expect("client should process server flight");
+
+  let mut client_finish = Vec::new();
+  while client.wants_write() {
+    client
+      .write_tls(&mut client_finish)
+      .expect("client finish should serialize");
+  }
+  server
+    .read_tls(&mut client_finish.as_slice())
+    .expect("server should read client finish");
+  server
+    .process_new_packets()
+    .expect("server should process client finish");
+  assert!(
+    !client.is_handshaking() && !server.is_handshaking(),
+    "untouched TLS 1.3 handshake should complete"
+  );
+  assert_eq!(
+    client.protocol_version(),
+    Some(rustls::ProtocolVersion::TLSv1_3),
+    "client should negotiate TLS 1.3"
+  );
+  assert_eq!(
+    server.protocol_version(),
+    Some(rustls::ProtocolVersion::TLSv1_3),
+    "server should negotiate TLS 1.3"
+  );
 }
 
 async fn tcp_selected_peer_certificate(
