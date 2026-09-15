@@ -44,6 +44,7 @@ fn lookup_context<'a>(
     method: &Method::GET,
     uri,
     request_headers,
+    query_identity: None,
     certificate_identity,
   }
 }
@@ -72,6 +73,7 @@ fn insert_certificate_variants(
           method: &Method::GET,
           uri,
           request_headers,
+          query_identity: None,
           certificate_identity: identity,
         },
         CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body),
@@ -185,6 +187,7 @@ async fn shared_cache_keeps_certificate_identity_variants_separate_and_purgeable
             method: &Method::GET,
             uri: &uri,
             request_headers: &request_headers,
+            query_identity: None,
             certificate_identity: identity,
           },
           CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body),

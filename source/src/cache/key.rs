@@ -4,6 +4,8 @@ use super::*;
 
 const CACHE_CERTIFICATE_DOMAIN: &str = "\0oxibelt-cache-certificate-v1\0";
 const CACHE_PLAIN_KEY_ESCAPE_DOMAIN: &str = "\0oxibelt-cache-plain-key-v1\0";
+pub(super) const CACHE_QUERY_DOMAIN: &str = "\0oxibelt-cache-query-v1\0";
+pub(crate) const QUERY_EXTERNAL_CACHE_KEY_VERSION: &str = "oxibelt-cache-query-key-v1";
 
 /// Produces the physical base-key namespace while preserving user-visible
 /// logical cache-key semantics.
@@ -32,6 +34,39 @@ pub(super) fn certificate_partitioned_base_key(
     fingerprint.len(),
     fingerprint,
   )
+}
+
+/// Applies the QUERY namespace after every existing identity partition.
+/// Keeping this outermost makes Query entries distinguishable for targeted
+/// invalidation even when certificate or PROXY-TLS partitioning is enabled.
+pub(super) fn query_partitioned_base_key(
+  base_key: String,
+  identity: &CacheQueryIdentity,
+) -> String {
+  let mut material = Vec::with_capacity(base_key.len() + 512);
+  material.extend_from_slice(CACHE_QUERY_DOMAIN.as_bytes());
+  append_query_field(&mut material, base_key.as_bytes());
+  identity.append_key_material(&mut material);
+  let digest = crate::crypto::sha256(&material);
+  let mut encoded = String::with_capacity(CACHE_QUERY_DOMAIN.len() + 64);
+  encoded.push_str(CACHE_QUERY_DOMAIN);
+  for byte in digest {
+    use std::fmt::Write as _;
+    let _ = write!(encoded, "{byte:02x}");
+  }
+  encoded
+}
+
+pub(crate) fn is_query_v1_base_key(base_key: &str) -> bool {
+  base_key.starts_with(CACHE_QUERY_DOMAIN)
+}
+
+pub(crate) fn external_cache_key_version(base_key: &str) -> &'static str {
+  if is_query_v1_base_key(base_key) {
+    QUERY_EXTERNAL_CACHE_KEY_VERSION
+  } else {
+    super::external_handler::CACHE_KEY_VERSION
+  }
 }
 
 fn escape_plain_base_key(base_key: String) -> String {

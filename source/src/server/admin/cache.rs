@@ -3,8 +3,9 @@ use std::time::{Duration, SystemTime};
 
 use ::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, Uri};
 use anyhow::bail;
+use base64::Engine as _;
 use hyper::body::Incoming;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
 
@@ -19,7 +20,9 @@ use super::super::{
 use super::{collect_admin_json, json_response};
 
 mod warm;
-pub(in crate::server) use warm::{cache_warm_response, enqueue_cache_warm_operation};
+pub(in crate::server) use warm::{
+  cache_warm_response, enqueue_cache_warm_operation, recover_cache_warm_command,
+};
 
 fn allowed(authorization: &AdminAuthorization<'_>, action: &str, resource_name: &str) -> bool {
   authorization.is_allowed(action, resource_name)
@@ -116,6 +119,39 @@ struct AdminCacheKeyExplainRequest {
   headers: std::collections::HashMap<String, String>,
   #[serde(default)]
   response_headers: std::collections::HashMap<String, String>,
+  #[serde(default)]
+  query: Option<AdminCacheQueryExplain>,
+}
+
+/// A base64 field value keeps the diagnostic wire format lossless without
+/// interpreting untrusted header bytes as UTF-8.  A vector, rather than a
+/// map, preserves field order and repeated names.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(in crate::server) struct AdminBase64Header {
+  pub(in crate::server) name: String,
+  pub(in crate::server) value_base64: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminCacheQueryTarget {
+  scheme: String,
+  authority: String,
+  uri: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminCacheQueryRepresentation {
+  target: AdminCacheQueryTarget,
+  headers: Vec<AdminBase64Header>,
+  body_base64: String,
+  #[serde(default)]
+  trailers: Vec<AdminBase64Header>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AdminCacheQueryExplain {
+  original: AdminCacheQueryRepresentation,
+  effective: AdminCacheQueryRepresentation,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +249,10 @@ pub(in crate::server) async fn cache_key_explain_response(
     Ok(headers) => headers,
     Err(message) => return text_response(StatusCode::BAD_REQUEST, message),
   };
+  let query_identity = match prepare_key_explain_query(&method, body.query.as_ref()) {
+    Ok(identity) => identity,
+    Err(message) => return text_response(StatusCode::BAD_REQUEST, message),
+  };
   crate::proxy::http::client_certificate::strip_reserved(&mut headers, snapshot);
   let mut explain = snapshot.cache.explain_key(
     crate::cache::CacheLookupContext {
@@ -224,13 +264,106 @@ pub(in crate::server) async fn cache_key_explain_response(
       method: &method,
       uri: &uri,
       request_headers: &headers,
+      query_identity: query_identity.as_ref().map(|value| &value.identity),
     },
     (!response_headers.is_empty()).then_some(&response_headers),
   );
   if !snapshot.client_certificate_forwarding_headers.is_empty() {
     explain.reasons.push("Certificate-forwarding routes add a trusted TLS discriminator unavailable to this diagnostic".to_string());
   }
-  json_response(StatusCode::OK, &explain)
+  if let Some(query) = query_identity {
+    let mut response = serde_json::to_value(explain).unwrap_or(serde_json::Value::Null);
+    response["query"] = query.wire;
+    json_response(StatusCode::OK, &response)
+  } else {
+    json_response(StatusCode::OK, &explain)
+  }
+}
+
+struct PreparedKeyExplainQuery {
+  identity: crate::cache::CacheQueryIdentity,
+  wire: serde_json::Value,
+}
+
+fn prepare_key_explain_query(
+  method: &Method,
+  query: Option<&AdminCacheQueryExplain>,
+) -> Result<Option<PreparedKeyExplainQuery>, &'static str> {
+  if method.as_str() != "QUERY" {
+    return if query.is_some() {
+      Err("query identity is only valid for QUERY")
+    } else {
+      Ok(None)
+    };
+  }
+  let query = query.ok_or("QUERY key-explain requires query.original and query.effective")?;
+  let (original, _) = prepare_key_explain_query_representation(&query.original)?;
+  let (effective, effective_headers) = prepare_key_explain_query_representation(&query.effective)?;
+  let identity = crate::cache::CacheQueryIdentity::new(original, effective, effective_headers)
+    .map_err(|_| "invalid QUERY cache identity")?;
+  Ok(Some(PreparedKeyExplainQuery {
+    identity,
+    wire: serde_json::to_value(query).map_err(|_| "invalid QUERY cache identity")?,
+  }))
+}
+
+fn prepare_key_explain_query_representation(
+  representation: &AdminCacheQueryRepresentation,
+) -> Result<(crate::cache::CacheQueryRepresentation, HeaderMap), &'static str> {
+  let uri = representation
+    .target
+    .uri
+    .parse::<Uri>()
+    .map_err(|_| "invalid QUERY target URI")?;
+  let headers = header_map_from_base64(&representation.headers)?;
+  let trailers = header_map_from_base64(&representation.trailers)?;
+  let query_method = Method::from_bytes(b"QUERY").map_err(|_| "invalid QUERY cache identity")?;
+  crate::proxy::http::query::validate_content_type(&query_method, &headers)?;
+  let body = decode_base64_bounded(&representation.body_base64)?;
+  let identity = crate::cache::CacheQueryRepresentation::new(
+    &representation.target.scheme,
+    &representation.target.authority,
+    &uri,
+    body.len() as u64,
+    crate::crypto::sha256(&body),
+    &headers,
+    &trailers,
+  )
+  .map_err(|_| "invalid QUERY cache identity")?;
+  Ok((identity, headers))
+}
+
+const ADMIN_QUERY_BODY_MAX_BYTES: usize = 48 * 1024;
+
+pub(in crate::server) fn decode_base64_bounded(value: &str) -> Result<Vec<u8>, &'static str> {
+  // The request envelope has a 64 KiB limit. Keep the decoded request body
+  // separately bounded so it cannot turn a compact encoded value into an
+  // unbounded replay payload.
+  if value.len() > (ADMIN_QUERY_BODY_MAX_BYTES * 4 / 3) + 8 {
+    return Err("QUERY body exceeds its bound");
+  }
+  let body = base64::engine::general_purpose::STANDARD
+    .decode(value)
+    .map_err(|_| "invalid QUERY body base64")?;
+  if body.len() > ADMIN_QUERY_BODY_MAX_BYTES {
+    return Err("QUERY body exceeds its bound");
+  }
+  Ok(body)
+}
+
+pub(in crate::server) fn header_map_from_base64(
+  headers: &[AdminBase64Header],
+) -> Result<HeaderMap, &'static str> {
+  let mut map = HeaderMap::new();
+  for header in headers {
+    let name = HeaderName::from_bytes(header.name.as_bytes()).map_err(|_| "invalid header name")?;
+    let value = base64::engine::general_purpose::STANDARD
+      .decode(&header.value_base64)
+      .map_err(|_| "invalid header value base64")?;
+    let value = HeaderValue::from_bytes(&value).map_err(|_| "invalid header value")?;
+    map.append(name, value);
+  }
+  Ok(map)
 }
 
 pub(in crate::server) async fn cache_purge_json_response(
@@ -712,4 +845,75 @@ pub(in crate::server) async fn cache_purge_response(
     body.push('\n');
   }
   text_response(StatusCode::OK, &body)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn query_representation(uri: &str) -> AdminCacheQueryRepresentation {
+    AdminCacheQueryRepresentation {
+      target: AdminCacheQueryTarget {
+        scheme: "https".to_string(),
+        authority: "example.com".to_string(),
+        uri: uri.to_string(),
+      },
+      headers: vec![AdminBase64Header {
+        name: "content-type".to_string(),
+        value_base64: "YXBwbGljYXRpb24vanNvbg==".to_string(),
+      }],
+      body_base64: "e30=".to_string(),
+      trailers: vec![AdminBase64Header {
+        name: "x-query-trailer".to_string(),
+        value_base64: "dmFsdWU=".to_string(),
+      }],
+    }
+  }
+
+  #[test]
+  fn query_key_explain_requires_explicit_lossless_representations() {
+    let method = Method::from_bytes(b"QUERY").expect("QUERY method");
+    assert_eq!(
+      prepare_key_explain_query(&method, None).err(),
+      Some("QUERY key-explain requires query.original and query.effective")
+    );
+    let prepared = prepare_key_explain_query(
+      &method,
+      Some(&AdminCacheQueryExplain {
+        original: query_representation("/received"),
+        effective: query_representation("/forwarded"),
+      }),
+    )
+    .expect("valid QUERY views")
+    .expect("QUERY identity");
+    assert_eq!(
+      prepared.wire["original"]["target"]["uri"].as_str(),
+      Some("/received")
+    );
+    assert_eq!(
+      prepared.wire["effective"]["target"]["uri"].as_str(),
+      Some("/forwarded")
+    );
+  }
+
+  #[test]
+  fn query_header_decoder_preserves_repeated_header_order() {
+    let headers = header_map_from_base64(&[
+      AdminBase64Header {
+        name: "x-query".to_string(),
+        value_base64: "b25l".to_string(),
+      },
+      AdminBase64Header {
+        name: "x-query".to_string(),
+        value_base64: "dHdv".to_string(),
+      },
+    ])
+    .expect("base64 headers");
+    let values = headers
+      .get_all("x-query")
+      .iter()
+      .map(|value| value.as_bytes())
+      .collect::<Vec<_>>();
+    assert_eq!(values, vec![b"one".as_slice(), b"two".as_slice()]);
+  }
 }

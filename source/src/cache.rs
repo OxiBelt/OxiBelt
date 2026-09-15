@@ -1,7 +1,7 @@
 //! Response cache coordination and cache-key enforcement for proxy traffic.
 //! Cache admission remains separate from HTTP forwarding so policy decisions stay auditable.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +44,7 @@ mod policy;
 mod proxy_protocol_identity;
 pub use proxy_protocol_identity::CacheProxyProtocolIdentity;
 mod purge;
+mod query_epoch_disk;
 mod range;
 mod recovery;
 mod response_metadata;
@@ -58,7 +59,7 @@ pub use entry::{CacheBodyFile, CacheEntry};
 pub(crate) use external_handler::ExternalCacheRuntime;
 pub(crate) use fill::{CacheFillDecision, CacheFillSuppressionReason};
 pub use fill::{CacheFillGuard, CacheFillWaiter};
-use key::*;
+pub(crate) use key::*;
 use metadata::{decode_metadata, encode_metadata, remove_metadata};
 use policy::*;
 pub(crate) use range::range_entry;
@@ -71,9 +72,14 @@ pub(crate) use streaming::{CacheStreamingInsert, CacheStreamingInsertDecision};
 const TMPFS_CACHE_ROOT: &str = "/dev/shm";
 const SURROGATE_CONTROL_HEADER: &str = "surrogate-control";
 const MAX_VARY_VALUE_BYTES: usize = 8_192;
+pub(crate) const QUERY_IDENTITY_METADATA_MAX_BYTES: usize = 8_192;
+pub(crate) const QUERY_IDENTITY_MAX_FIELDS: usize = 64;
 const MAX_CERTIFICATE_IDENTITY_HEADER_BYTES: usize = 128;
 const MAX_CERTIFICATE_IDENTITY_FORMAT_BYTES: usize = 64;
 const CERTIFICATE_FINGERPRINT_SHA256_BYTES: usize = 64;
+/// Fixed Q1 invalidation buckets bound memory while conservatively coupling
+/// colliding targets (a miss/bypass is safe; a stale hit is not).
+pub(crate) const QUERY_EPOCH_BUCKETS: u16 = 256;
 
 /// Opaque, verified leaf-certificate identity used only to separate internal
 /// response-cache namespaces.
@@ -269,6 +275,9 @@ pub struct CacheInsertContext<'a> {
   pub method: &'a Method,
   pub uri: &'a Uri,
   pub request_headers: &'a HeaderMap,
+  /// QUERY-only cache identity.  A QUERY request is never cacheable without
+  /// this complete, bounded identity.
+  pub query_identity: Option<&'a CacheQueryIdentity>,
   /// `None` means client-certificate forwarding is off for this request.
   pub certificate_identity: Option<&'a CacheCertificateIdentity>,
 }
@@ -282,8 +291,136 @@ pub struct CacheLookupContext<'a> {
   pub method: &'a Method,
   pub uri: &'a Uri,
   pub request_headers: &'a HeaderMap,
+  /// QUERY-only cache identity.  A QUERY request is never cacheable without
+  /// this complete, bounded identity.
+  pub query_identity: Option<&'a CacheQueryIdentity>,
   /// `None` means client-certificate forwarding is off for this request.
   pub certificate_identity: Option<&'a CacheCertificateIdentity>,
+}
+
+/// The target and representation of one side of a QUERY transformation.
+///
+/// This contains only bounded request metadata and a body digest; it never
+/// owns request content or a replay handle.  The proxy constructs an original
+/// representation before request transformations and an effective one after
+/// them, then passes both to [`CacheQueryIdentity`].
+#[derive(Clone)]
+pub struct CacheQueryRepresentation {
+  target_scheme: String,
+  target_authority: String,
+  target_uri: String,
+  body_len: u64,
+  body_sha256: [u8; 32],
+  content_headers: HeaderMap,
+  trailers: HeaderMap,
+}
+
+impl std::fmt::Debug for CacheQueryRepresentation {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("CacheQueryRepresentation")
+      .field("target_scheme", &self.target_scheme)
+      .field("target_authority", &self.target_authority)
+      .field("target_uri", &self.target_uri)
+      .field("body_len", &self.body_len)
+      .field("content_header_count", &self.content_headers.len())
+      .field("trailer_count", &self.trailers.len())
+      .finish_non_exhaustive()
+  }
+}
+
+impl CacheQueryRepresentation {
+  /// Builds one bounded QUERY representation. `headers` is reduced to
+  /// Content-* fields except Content-Length; trailers are retained separately
+  /// because they have distinct HTTP semantics.
+  pub fn new(
+    target_scheme: &str,
+    target_authority: &str,
+    target_uri: &Uri,
+    body_len: u64,
+    body_sha256: [u8; 32],
+    headers: &HeaderMap,
+    trailers: &HeaderMap,
+  ) -> anyhow::Result<Self> {
+    query_representation_from_parts(
+      target_scheme,
+      target_authority,
+      target_uri,
+      body_len,
+      body_sha256,
+      headers,
+      trailers,
+    )
+  }
+}
+
+/// Complete cache identity for an exact-uppercase QUERY request.
+///
+/// `cache_view_headers` are the final headers sent to the origin and are used
+/// for configured cache-key/partition tokens and Vary matching.  The original
+/// and effective representations remain separate so a WAF or coding transform
+/// cannot collapse distinct received queries.
+#[derive(Clone)]
+pub struct CacheQueryIdentity {
+  original: CacheQueryRepresentation,
+  effective: CacheQueryRepresentation,
+  cache_view_headers: HeaderMap,
+  generation: Arc<Mutex<Option<CacheQueryGeneration>>>,
+  epoch_authority_failed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for CacheQueryIdentity {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("CacheQueryIdentity")
+      .field("original", &self.original)
+      .field("effective", &self.effective)
+      .field("cache_view_header_count", &self.cache_view_headers.len())
+      .finish_non_exhaustive()
+  }
+}
+
+impl CacheQueryIdentity {
+  pub fn new(
+    original: CacheQueryRepresentation,
+    effective: CacheQueryRepresentation,
+    cache_view_headers: HeaderMap,
+  ) -> anyhow::Result<Self> {
+    validate_query_header_map(&cache_view_headers, QUERY_IDENTITY_METADATA_MAX_BYTES)?;
+    Ok(Self {
+      original,
+      effective,
+      cache_view_headers,
+      generation: Arc::new(Mutex::new(None)),
+      epoch_authority_failed: Arc::new(AtomicBool::new(false)),
+    })
+  }
+
+  pub fn cache_view_headers(&self) -> &HeaderMap {
+    &self.cache_view_headers
+  }
+
+  pub(crate) fn append_key_material(&self, output: &mut Vec<u8>) {
+    append_query_representation(output, &self.original);
+    append_query_representation(output, &self.effective);
+  }
+
+  pub(crate) fn query_target_epoch(&self) -> Option<u64> {
+    self
+      .generation
+      .lock()
+      .unwrap_or_else(|error| error.into_inner())
+      .as_ref()
+      .map(|generation| generation.value)
+  }
+
+  pub(crate) fn reject_query_cache_epoch(&self) {
+    self.epoch_authority_failed.store(true, Ordering::Release);
+  }
+
+  pub(crate) fn query_cache_epoch_rejected(&self) -> bool {
+    self.epoch_authority_failed.load(Ordering::Acquire)
+  }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -299,6 +436,87 @@ pub struct CacheKeyExplain {
   pub reasons: Vec<String>,
 }
 
+fn query_representation_from_parts(
+  target_scheme: &str,
+  target_authority: &str,
+  target_uri: &Uri,
+  body_len: u64,
+  body_sha256: [u8; 32],
+  headers: &HeaderMap,
+  trailers: &HeaderMap,
+) -> anyhow::Result<CacheQueryRepresentation> {
+  if target_scheme.is_empty()
+    || target_authority.is_empty()
+    || target_uri.path().is_empty()
+    || !target_uri.path().starts_with('/')
+  {
+    bail!("QUERY cache identity target is invalid");
+  }
+  let mut content_headers = HeaderMap::new();
+  for (name, value) in headers {
+    if name.as_str().starts_with("content-") && name != http::header::CONTENT_LENGTH {
+      content_headers.append(name.clone(), value.clone());
+    }
+  }
+  validate_query_header_map(&content_headers, QUERY_IDENTITY_METADATA_MAX_BYTES)?;
+  validate_query_header_map(trailers, QUERY_IDENTITY_METADATA_MAX_BYTES)?;
+  Ok(CacheQueryRepresentation {
+    target_scheme: target_scheme.to_string(),
+    target_authority: target_authority.to_string(),
+    target_uri: target_uri.to_string(),
+    body_len,
+    body_sha256,
+    content_headers,
+    trailers: trailers.clone(),
+  })
+}
+
+fn validate_query_header_map(headers: &HeaderMap, max_bytes: usize) -> anyhow::Result<()> {
+  if headers.len() > QUERY_IDENTITY_MAX_FIELDS {
+    bail!("QUERY cache identity has too many metadata fields");
+  }
+  let bytes = headers.iter().try_fold(0usize, |total, (name, value)| {
+    total
+      .checked_add(name.as_str().len())
+      .and_then(|total| total.checked_add(value.as_bytes().len()))
+      .and_then(|total| total.checked_add(8))
+  });
+  if bytes.is_none_or(|bytes| bytes > max_bytes) {
+    bail!("QUERY cache identity metadata exceeds its bound");
+  }
+  Ok(())
+}
+
+fn append_query_representation(output: &mut Vec<u8>, representation: &CacheQueryRepresentation) {
+  append_query_field(output, representation.target_scheme.as_bytes());
+  append_query_field(output, representation.target_authority.as_bytes());
+  append_query_field(output, representation.target_uri.as_bytes());
+  append_query_field(output, &representation.body_len.to_be_bytes());
+  append_query_field(output, &representation.body_sha256);
+  append_query_headers(output, &representation.content_headers);
+  append_query_headers(output, &representation.trailers);
+}
+
+fn append_query_headers(output: &mut Vec<u8>, headers: &HeaderMap) {
+  let mut fields = headers
+    .iter()
+    .map(|(name, value)| (name.as_str(), value.as_bytes()))
+    .collect::<Vec<_>>();
+  // Canonicalize distinct field names while retaining the wire order of
+  // repeated values for one name. QUERY identity binds ordered trailers.
+  fields.sort_by_key(|(name, _)| *name);
+  append_query_field(output, &(fields.len() as u64).to_be_bytes());
+  for (name, value) in fields {
+    append_query_field(output, name.as_bytes());
+    append_query_field(output, value);
+  }
+}
+
+fn append_query_field(output: &mut Vec<u8>, value: &[u8]) {
+  output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+  output.extend_from_slice(value);
+}
+
 #[derive(Debug)]
 pub(crate) struct CachePreparedInsert {
   policy: CachePolicyRuntime,
@@ -312,6 +530,9 @@ pub(crate) struct CachePreparedInsert {
   stored_headers: HeaderMap,
   metadata: ResponseMetadata,
   header_bytes: usize,
+  fill_key: String,
+  query_target: Option<CacheQueryInvalidationTarget>,
+  query_generation: Option<CacheQueryGeneration>,
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +555,8 @@ pub(in crate::cache) struct StoredEntry {
   stored_at: SystemTime,
   vary: Vec<VaryMatcher>,
   tags: Vec<String>,
+  /// Persisted Q1 target epoch. `None` is reserved for legacy methods.
+  query_target_epoch: Option<u64>,
   size: usize,
 }
 
@@ -354,6 +577,48 @@ struct CacheOperationContext {
   scheme: String,
   host: String,
   uri: String,
+  query_target: Option<CacheQueryInvalidationTarget>,
+}
+
+/// Identifies the equivalent resource whose QUERY variants are invalidated.
+/// It intentionally has no body material: invalidation covers every QUERY
+/// representation of this target in the selected partition.
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct CacheQueryInvalidationTarget {
+  policy: String,
+  scheme: String,
+  host: String,
+  uri: String,
+  partition: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CacheQueryGeneration {
+  target: CacheQueryInvalidationTarget,
+  value: u64,
+}
+
+impl CacheQueryInvalidationTarget {
+  fn new(policy: &str, scheme: &str, host: &str, uri: &str, partition: Option<&str>) -> Self {
+    Self {
+      policy: policy.to_string(),
+      scheme: scheme.to_string(),
+      host: host.to_string(),
+      uri: uri.to_string(),
+      partition: partition.map(str::to_string),
+    }
+  }
+
+  fn matches(&self, other: &Self) -> bool {
+    self.policy == other.policy
+      && self.scheme == other.scheme
+      && self.host == other.host
+      && self.uri == other.uri
+      && self
+        .partition
+        .as_ref()
+        .is_none_or(|partition| other.partition.as_ref() == Some(partition))
+  }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -388,6 +653,10 @@ struct CacheInner {
   order: VecDeque<String>,
   purge_nonces: HashMap<String, SystemTime>,
   purge_nonce_order: VecDeque<String>,
+  /// A remote QUERY invalidation failure must not be followed by a stale
+  /// shared/external hit or an in-flight reinsert for that target.
+  failed_query_invalidations: HashSet<(String, u16)>,
+  query_invalidation_generations: HashMap<(String, u16), u64>,
   memory_size: usize,
   disk_size: usize,
   disk_inflight_size: usize,
@@ -397,6 +666,8 @@ struct CacheInner {
   disk_recovered_entries_total: u64,
   disk_recovery_errors_total: u64,
   disk_recovery_removed_files_total: u64,
+  disk_query_epochs_loaded: bool,
+  discard_recovered_query_entries: bool,
 }
 
 #[derive(Debug, Clone)]

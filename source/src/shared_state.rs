@@ -319,6 +319,9 @@ pub struct SharedCacheEntry {
   pub vary: Vec<SharedVaryMatcher>,
   #[serde(default)]
   pub tags: Vec<String>,
+  /// Q1 target epoch. Absent legacy records are never usable for QUERY.
+  #[serde(default)]
+  pub query_target_epoch: Option<u64>,
 }
 
 fn shared_cache_entry_now_ms() -> i64 {

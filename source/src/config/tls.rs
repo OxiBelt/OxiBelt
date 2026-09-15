@@ -235,7 +235,9 @@ impl TlsEarlyDataMode {
   pub fn permits_method(self, method: &http::Method) -> bool {
     match self {
       Self::Off => false,
-      Self::SafeMethods => matches!(method, &http::Method::GET | &http::Method::HEAD),
+      Self::SafeMethods => {
+        matches!(method, &http::Method::GET | &http::Method::HEAD) || method.as_str() == "QUERY"
+      }
       Self::On => true,
     }
   }

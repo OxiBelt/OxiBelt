@@ -77,7 +77,7 @@ pub struct IpmActor {
   pub groups: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct IpmRequestContext {
   pub source_ip: Option<IpAddr>,
   pub method: Option<String>,
@@ -299,6 +299,21 @@ impl IpmRuntime {
   ) -> IpmDecision {
     let snapshot = self.snapshot();
     authorize_snapshot(&snapshot, actor, action, resource, context)
+  }
+
+  /// Resolves a durable-operation principal against the current IPM snapshot.
+  ///
+  /// Recovery deliberately rehydrates only the canonical enabled principal.
+  /// It does not reuse a submitted credential, its expiry, or caller supplied
+  /// group claims, so revocation and group changes take effect before resumed
+  /// work is authorized.
+  pub(crate) fn current_enabled_actor(&self, principal: &str) -> Option<IpmActor> {
+    self
+      .snapshot()
+      .principals
+      .get(principal)
+      .filter(|record| record.enabled)
+      .map(|record| record.actor.clone())
   }
 }
 

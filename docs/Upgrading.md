@@ -31,6 +31,30 @@ binary does not provide these forwarding guarantees; stop incremental clients
 or restore compatible application behavior before rolling back. Validate
 streaming routes using the matrix command in the feature guide.
 
+## HTTP QUERY
+
+Exact-uppercase QUERY now requires one valid Content-Type and is included in
+TLS `safe_methods`. Add `QUERY` to cache methods only when the origin supports
+its semantics; GET/HEAD defaults and cache keys remain unchanged. QUERY entries
+use a separate versioned namespace. HTTP/3 now honors eligible HTTP retry
+policies, including explicitly opted-in non-idempotent methods. Review retry
+settings before rollout. Before rollback, disable QUERY caching and finish or
+cancel QUERY warming; an older binary lacks the new admission and body-bound
+cache guarantees. See [QUERY behavior and validation](Query.md).
+
+## Admin QUERY cache operations
+
+The Admin cache warm and key-explain endpoints add exact-uppercase `QUERY`
+support. Existing GET and HEAD payloads and responses remain compatible.
+QUERY warm callers must provide a valid `Content-Type` and base64 request body,
+with optional ordered base64 trailers; QUERY key-explain callers must provide explicit
+original and effective representations. Async cache-warm recovery now stores
+encrypted request-context artifacts and per-item encrypted checkpoints. No
+database schema epoch changes, configuration migration, or operator action is
+required. An older binary cannot resume a QUERY cache-warm operation accepted
+by this version; allow that operation to finish before rollback, or cancel it
+and submit a compatible GET or HEAD warm request after rollback.
+
 ## Status-header configuration
 
 `[proxy.status_headers]` and `[routes.status_headers]` are additive native

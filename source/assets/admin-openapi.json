@@ -5088,6 +5088,16 @@
                   "additionalProperties": {
                     "type": "string"
                   }
+                },
+                "query": {
+                  "description": "Required for exact-uppercase QUERY. Both representations are supplied explicitly; the diagnostic does not infer transforms.",
+                  "type": "object",
+                  "required": ["original", "effective"],
+                  "properties": {
+                    "original": { "$ref": "#/components/schemas/CacheQueryRepresentation" },
+                    "effective": { "$ref": "#/components/schemas/CacheQueryRepresentation" }
+                  },
+                  "additionalProperties": false
                 }
               },
               "additionalProperties": false
@@ -5124,7 +5134,8 @@
                         "type": "string",
                         "enum": [
                           "GET",
-                          "HEAD"
+                          "HEAD",
+                          "QUERY"
                         ]
                       },
                       "scheme": {
@@ -5141,6 +5152,15 @@
                         "additionalProperties": {
                           "type": "string"
                         }
+                      },
+                      "query_body_base64": {
+                        "type": "string",
+                        "description": "Required for QUERY; base64 request body, limited to 48 KiB after decoding."
+                      },
+                      "query_trailers": {
+                        "type": "array",
+                        "description": "QUERY trailers in received order. Values are base64 encoded.",
+                        "items": { "$ref": "#/components/schemas/CacheBase64Header" }
                       }
                     },
                     "additionalProperties": false
@@ -6383,6 +6403,41 @@
       }
     },
     "schemas": {
+      "CacheBase64Header": {
+        "type": "object",
+        "required": ["name", "value_base64"],
+        "properties": {
+          "name": { "type": "string" },
+          "value_base64": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "CacheQueryRepresentation": {
+        "type": "object",
+        "required": ["target", "headers", "body_base64"],
+        "properties": {
+          "target": {
+            "type": "object",
+            "required": ["scheme", "authority", "uri"],
+            "properties": {
+              "scheme": { "type": "string" },
+              "authority": { "type": "string" },
+              "uri": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "headers": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CacheBase64Header" }
+          },
+          "body_base64": { "type": "string" },
+          "trailers": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/CacheBase64Header" }
+          }
+        },
+        "additionalProperties": false
+      },
       "DownstreamCtStatus": {
         "type": "object",
         "required": [

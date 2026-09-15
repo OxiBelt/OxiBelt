@@ -134,13 +134,20 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
       .extensions_mut()
       .insert(incremental::BodyWasBuffered);
   }
-  let request =
+  let request = if request
+    .extensions()
+    .get::<query::capture::OriginalQuery>()
+    .is_some()
+  {
+    request
+  } else {
     match buffering::buffer_request_body(request, &effective_buffering, state.as_ref()).await {
       Ok(request) => request,
       Err(error) => {
         return route_security.apply(request_buffering_error_response(error));
       }
-    };
+    }
+  };
   let cache_enabled_for_route = resolved.execution_plan.features.cache
     && state
       .cache
@@ -260,6 +267,22 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   let certificate_identity = client_certificate::cache_identity(&outbound).cloned();
   proxy_tls::apply_upstream(&mut outbound);
   let proxy_protocol_identity = proxy_tls::cache_identity(&outbound).cloned();
+  if let Err(message) = query::validate_content_type(outbound.method(), outbound.headers()) {
+    return route_security.text(StatusCode::BAD_REQUEST, message);
+  }
+  let mut outbound = match query::prepare_cache_request(outbound, &effective_buffering, state).await
+  {
+    Ok(outbound) => outbound,
+    Err(error) => return route_security.apply(request_buffering_error_response(error)),
+  };
+  let query_identity = outbound
+    .extensions()
+    .get::<crate::cache::CacheQueryIdentity>()
+    .cloned();
+  if let Some(original) = outbound.extensions().get::<query::capture::OriginalQuery>() {
+    request_headers = original.headers.clone();
+    client_certificate::strip_reserved(&mut request_headers, state);
+  }
   request_mirror::spawn_request_mirrors(
     state.clone(),
     resolved.route,
@@ -275,6 +298,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   let mut _cache_fill_guard = None;
   let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
   let initial_cache_lookup = crate::cache::CacheLookupContext {
+    query_identity: query_identity.as_ref(),
     proxy_protocol_identity: proxy_protocol_identity.as_ref(),
     certificate_identity: certificate_identity.as_ref(),
     policy_name: resolved.route.cache.as_deref(),
@@ -329,6 +353,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
       let Some(permit) = state
         .cache
         .begin_fill_decision_async(crate::cache::CacheLookupContext {
+          query_identity: query_identity.as_ref(),
           proxy_protocol_identity: proxy_protocol_identity.as_ref(),
           certificate_identity: certificate_identity.as_ref(),
           policy_name: resolved.route.cache.as_deref(),
@@ -349,6 +374,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           if let Some(lookup) = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              query_identity: query_identity.as_ref(),
               proxy_protocol_identity: proxy_protocol_identity.as_ref(),
               certificate_identity: certificate_identity.as_ref(),
               policy_name: resolved.route.cache.as_deref(),
@@ -416,6 +442,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           if let Some(lookup) = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              query_identity: query_identity.as_ref(),
               proxy_protocol_identity: proxy_protocol_identity.as_ref(),
               certificate_identity: certificate_identity.as_ref(),
               policy_name: resolved.route.cache.as_deref(),

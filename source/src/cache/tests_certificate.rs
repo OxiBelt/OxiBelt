@@ -101,6 +101,7 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
           method: &Method::GET,
           uri: &uri,
           request_headers: &request_headers,
+          query_identity: None,
           certificate_identity: identity,
         },
         CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body),
@@ -117,6 +118,7 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
       &Method::GET,
       &uri,
       &request_headers,
+      None,
       Some(&first),
       None,
     )
@@ -129,6 +131,7 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
       &Method::GET,
       &uri,
       &request_headers,
+      None,
       Some(&second),
       None,
     )
@@ -150,6 +153,7 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      query_identity: None,
       certificate_identity: identity,
     }) {
       Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, expected),
@@ -194,6 +198,7 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
         method: &Method::GET,
         uri: &uri,
         request_headers: &inserted_headers,
+        query_identity: None,
         certificate_identity: Some(&identity),
       },
       CacheEntry::memory(
@@ -217,6 +222,7 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
       method: &Method::GET,
       uri: &uri,
       request_headers: &lookup_headers,
+      query_identity: None,
       certificate_identity: Some(&identity),
     }),
     Some(CacheLookup::Fresh(_))
@@ -231,6 +237,7 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
       method: &Method::GET,
       uri: &uri,
       request_headers: &lookup_headers,
+      query_identity: None,
       certificate_identity: Some(&identity),
     },
     Some(&response_headers),

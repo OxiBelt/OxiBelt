@@ -63,6 +63,7 @@ pub(crate) mod person_proof;
 mod pipeline;
 mod priority_admission;
 mod proxy_tls;
+pub(crate) mod query;
 pub(crate) mod request;
 pub(crate) mod request_framing;
 mod request_mirror;
@@ -89,7 +90,7 @@ pub(crate) mod webtransport;
 #[cfg(feature = "admin-runtime")]
 pub(crate) mod warm;
 #[cfg(feature = "admin-runtime")]
-pub(crate) use warm::{cache_warm_tls_metadata, warm_cache_request};
+pub(crate) use warm::{WarmRequest, cache_warm_tls_metadata, warm_cache_request};
 
 pub(crate) use self::access_log::SystemAccessLogContext;
 #[cfg(test)]
@@ -146,8 +147,8 @@ pub(crate) use self::response_timeout::{
   downstream_response_send_timeout, with_downstream_response_timeout,
 };
 use self::retry::{
-  EffectiveRetryPolicy, RetryAdmissionContext, send_one_shot_with_state, send_pool_with_retry,
-  send_with_retry,
+  EffectiveRetryPolicy, RetryAdmissionContext, send_h3_with_retry, send_one_shot_with_state,
+  send_pool_with_retry, send_with_retry,
 };
 use self::route_action_runtime as route_runtime;
 use self::semantics::filter_trailers;
@@ -394,6 +395,9 @@ where
       return route_security.apply(response);
     }
     access_log.set_route_name(&resolved.route.name);
+    if let Err(message) = query::validate_content_type(request.method(), request.headers()) {
+      return route_security.text(StatusCode::BAD_REQUEST, message);
+    }
     match route_actions::direct_response(resolved.route) {
       Ok(Some(response)) => return route_security.apply(response),
       Ok(None) => {}

@@ -64,6 +64,7 @@ pub(super) fn maybe_stream_cache_response(
   route: Option<&RouteConfig>,
   certificate_identity: Option<&crate::cache::CacheCertificateIdentity>,
   proxy_protocol_identity: Option<&crate::cache::CacheProxyProtocolIdentity>,
+  query_identity: Option<&crate::cache::CacheQueryIdentity>,
   parts: http::response::Parts,
   body: ProxyBody,
   prepared: Box<crate::cache::CachePreparedInsert>,
@@ -112,6 +113,7 @@ pub(super) fn maybe_stream_cache_response(
               request_headers,
               certificate_identity,
               proxy_protocol_identity,
+              query_identity,
             ),
             crate::cache::CacheFillSuppressionReason::StoreFailed,
           );
@@ -137,6 +139,7 @@ pub(super) fn maybe_stream_cache_response(
               request_headers,
               certificate_identity,
               proxy_protocol_identity,
+              query_identity,
             ),
             crate::cache::CacheFillSuppressionReason::AdmissionRejected,
           );
@@ -160,6 +163,7 @@ pub(super) fn maybe_stream_cache_response(
             request_headers,
             certificate_identity,
             proxy_protocol_identity,
+            query_identity,
           ));
           (
             CacheReason::NotCacheable,
@@ -306,8 +310,10 @@ fn insert_ctx<'a>(
   request_headers: &'a HeaderMap,
   certificate_identity: Option<&'a crate::cache::CacheCertificateIdentity>,
   proxy_protocol_identity: Option<&'a crate::cache::CacheProxyProtocolIdentity>,
+  query_identity: Option<&'a crate::cache::CacheQueryIdentity>,
 ) -> CacheInsertContext<'a> {
   CacheInsertContext {
+    query_identity,
     proxy_protocol_identity,
     certificate_identity,
     policy_name: route_cache,

@@ -171,6 +171,15 @@ impl ResponseCache {
   }
 
   pub fn is_cacheable_method(&self, method: &Method) -> bool {
+    // HTTP method tokens are case-sensitive.  Preserve the historical
+    // case-insensitive configuration matching for existing methods, but never
+    // let a spelling such as `query` enter a bodyless generic cache key.
+    if method.as_str() == "QUERY" {
+      return self.config.cache_methods.iter().any(|item| item == "QUERY");
+    }
+    if method.as_str().eq_ignore_ascii_case("QUERY") {
+      return false;
+    }
     if method == Method::HEAD {
       return self
         .config
@@ -199,6 +208,7 @@ impl ResponseCache {
     method: &Method,
     uri: &Uri,
     request_headers: &HeaderMap,
+    query_identity: Option<&CacheQueryIdentity>,
     certificate_identity: Option<&CacheCertificateIdentity>,
     proxy_protocol_identity: Option<&CacheProxyProtocolIdentity>,
   ) -> Option<CacheOperationContext> {
@@ -212,7 +222,16 @@ impl ResponseCache {
       Some(identity) => identity.partition(base_key),
       None => base_key,
     };
+    let is_query = method.as_str() == "QUERY";
+    let base_key = match (is_query, query_identity) {
+      (true, Some(identity)) => query_partitioned_base_key(base_key, identity),
+      (true, None) => return None,
+      (false, _) => base_key,
+    };
     let uri = uri.to_string();
+    let query_target = is_query.then(|| {
+      CacheQueryInvalidationTarget::new(&policy.name, scheme, host, &uri, Some(&partition))
+    });
     let lookup_key = index::LookupKey::new(&policy.name, &partition, scheme, host, &uri, &base_key);
     let fill_key = format!(
       "{}\n{}\n{}\n{}\n{}\n{}",
@@ -232,6 +251,7 @@ impl ResponseCache {
       scheme: scheme.to_string(),
       host: host.to_string(),
       uri,
+      query_target,
     })
   }
 
@@ -239,19 +259,32 @@ impl ResponseCache {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
       return None;
     }
-    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
+    // RFC 9111 requires these origin preconditions to be evaluated by the
+    // origin. A cached QUERY response may still be stored after that request.
+    if query_context_origin_precondition_bypass(&ctx) {
       return None;
     }
+    if cache_request_bypassed(&ctx, &self.bypass_request_headers) {
+      return None;
+    }
+    let request_headers = cache_view_headers(&ctx);
     let operation = self.operation_context(
       ctx.policy_name,
       ctx.scheme,
       ctx.host,
       ctx.method,
       ctx.uri,
-      ctx.request_headers,
+      request_headers,
+      ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
     )?;
+    if self.query_target_cache_bypassed(&operation) {
+      return None;
+    }
+    if !self.bind_query_generation(ctx.query_identity, &operation) {
+      return None;
+    }
     let now = SystemTime::now();
     let (key, entry) = {
       let mut inner = self.inner_guard();
@@ -260,10 +293,14 @@ impl ResponseCache {
         .candidates(&operation.lookup_key)
         .and_then(|candidates| {
           candidates.into_iter().find(|key| {
-            inner
-              .entries
-              .get(key)
-              .is_some_and(|entry| vary_matches(&entry.vary, ctx.request_headers))
+            inner.entries.get(key).is_some_and(|entry| {
+              vary_matches(&entry.vary, request_headers)
+                && (!is_query_v1_base_key(&operation.base_key)
+                  || entry.query_target_epoch
+                    == ctx
+                      .query_identity
+                      .and_then(CacheQueryIdentity::query_target_epoch))
+            })
           })
         });
       let Some(key) = key else {
@@ -277,10 +314,17 @@ impl ResponseCache {
         );
       };
 
-      let expired = inner
-        .entries
-        .get(&key)
-        .is_some_and(|entry| entry.stale_if_error_until.unwrap_or(entry.expires_at) <= now);
+      let expired = inner.entries.get(&key).is_some_and(|entry| {
+        let mut retain_until = entry.stale_if_error_until.unwrap_or(entry.expires_at);
+        if is_query_v1_base_key(&entry.base_key) {
+          retain_until = retain_until.max(
+            entry
+              .stale_while_revalidate_until
+              .unwrap_or(entry.expires_at),
+          );
+        }
+        retain_until <= now
+      });
       if expired {
         remove_entry(&mut inner, &key);
         return None;
@@ -293,9 +337,9 @@ impl ResponseCache {
       remove_entry(&mut inner, &key);
       return None;
     };
-    if request_no_cache(ctx.request_headers) || entry.must_revalidate || entry.expires_at <= now {
+    if request_no_cache(request_headers) || entry.must_revalidate || entry.expires_at <= now {
       let validators = validator_headers(&entry.headers);
-      if !request_no_cache(ctx.request_headers)
+      if !request_no_cache(request_headers)
         && !entry.must_revalidate
         && entry
           .stale_while_revalidate_until
@@ -304,11 +348,17 @@ impl ResponseCache {
         return Some(CacheLookup::Stale(StaleEntry {
           entry: cache_entry,
           request_headers: validators,
-          serve_stale_on_error: entry.stale_if_error_until.is_some_and(|until| until > now),
+          serve_stale_on_error: (!is_query_v1_base_key(&entry.base_key) || !entry.must_revalidate)
+            && entry.stale_if_error_until.is_some_and(|until| until > now),
           background_refresh: operation.policy.background_refresh,
         }));
       }
       if validators.is_empty() {
+        if is_query_v1_base_key(&entry.base_key)
+          && (request_no_cache(request_headers) || entry.must_revalidate)
+        {
+          return None;
+        }
         if entry
           .stale_while_revalidate_until
           .is_some_and(|until| until > now)
@@ -316,7 +366,9 @@ impl ResponseCache {
           return Some(CacheLookup::Stale(StaleEntry {
             entry: cache_entry,
             request_headers: HeaderMap::new(),
-            serve_stale_on_error: entry.stale_if_error_until.is_some_and(|until| until > now),
+            serve_stale_on_error: (!is_query_v1_base_key(&entry.base_key)
+              || !entry.must_revalidate)
+              && entry.stale_if_error_until.is_some_and(|until| until > now),
             background_refresh: entry
               .stale_while_revalidate_until
               .is_some_and(|until| until > now)
@@ -335,7 +387,8 @@ impl ResponseCache {
       return Some(CacheLookup::Revalidate(Revalidation {
         entry: cache_entry,
         request_headers: validators,
-        serve_stale_on_error: entry.stale_if_error_until.is_some_and(|until| until > now),
+        serve_stale_on_error: (!is_query_v1_base_key(&entry.base_key) || !entry.must_revalidate)
+          && entry.stale_if_error_until.is_some_and(|until| until > now),
       }));
     }
     Some(CacheLookup::Fresh(cache_entry))
@@ -356,11 +409,13 @@ impl ResponseCache {
   }
 
   pub async fn lookup_async(&self, ctx: CacheLookupContext<'_>) -> Option<CacheLookup> {
-    if let Some(lookup) = self.lookup(ctx.clone()) {
+    let is_query = ctx.method.as_str() == "QUERY";
+    if !is_query && let Some(lookup) = self.lookup(ctx.clone()) {
       return Some(lookup);
     }
     if !self.policy_enabled(ctx.policy_name, ctx.method)
-      || request_no_store(ctx.request_headers, &self.bypass_request_headers)
+      || cache_request_bypassed(&ctx, &self.bypass_request_headers)
+      || query_context_origin_precondition_bypass(&ctx)
     {
       return None;
     }
@@ -370,10 +425,23 @@ impl ResponseCache {
       ctx.host,
       ctx.method,
       ctx.uri,
-      ctx.request_headers,
+      cache_view_headers(&ctx),
+      ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
     )?;
+    if self.query_target_cache_bypassed(&operation) {
+      return None;
+    }
+    if !self
+      .bind_query_generation_async(ctx.query_identity, &operation)
+      .await
+    {
+      return None;
+    }
+    if is_query && let Some(lookup) = self.lookup(ctx.clone()) {
+      return Some(lookup);
+    }
     self
       .lookup_shared_async(
         &operation.policy.name,
@@ -404,10 +472,236 @@ impl ResponseCache {
         method: ctx.method,
         uri: ctx.uri,
         request_headers: ctx.request_headers,
+        query_identity: ctx.query_identity,
         certificate_identity: ctx.certificate_identity,
       },
       entry,
       false,
     );
   }
+}
+
+pub(super) fn cache_view_headers<'a>(ctx: &'a CacheLookupContext<'_>) -> &'a HeaderMap {
+  ctx
+    .query_identity
+    .map(CacheQueryIdentity::cache_view_headers)
+    .unwrap_or(ctx.request_headers)
+}
+
+pub(super) fn cache_request_bypassed(
+  ctx: &CacheLookupContext<'_>,
+  bypass_headers: &[HeaderName],
+) -> bool {
+  request_no_store(ctx.request_headers, bypass_headers)
+    || ctx
+      .query_identity
+      .is_some_and(|identity| request_no_store(identity.cache_view_headers(), bypass_headers))
+}
+
+/// QUERY's origin preconditions cannot be answered from a cached response.
+/// Keep legacy method behavior unchanged while forwarding QUERY for origin
+/// evaluation as RFC 9111 requires.
+pub(crate) fn query_origin_precondition_bypass(method: &Method, headers: &HeaderMap) -> bool {
+  method.as_str() == "QUERY"
+    && (headers.contains_key(http::header::IF_MATCH)
+      || headers.contains_key(http::header::IF_UNMODIFIED_SINCE))
+}
+
+pub(super) fn query_context_origin_precondition_bypass(ctx: &CacheLookupContext<'_>) -> bool {
+  query_origin_precondition_bypass(ctx.method, ctx.request_headers)
+    || ctx.query_identity.is_some_and(|identity| {
+      query_origin_precondition_bypass(ctx.method, identity.cache_view_headers())
+    })
+}
+
+impl ResponseCache {
+  pub(super) fn query_target_cache_bypassed(&self, operation: &CacheOperationContext) -> bool {
+    operation.query_target.as_ref().is_some_and(|target| {
+      self
+        .inner_guard()
+        .failed_query_invalidations
+        .contains(&query_epoch_bucket(target))
+    })
+  }
+
+  pub(super) fn mark_query_invalidation_failed(&self, target: CacheQueryInvalidationTarget) {
+    let mut inner = self.inner_guard();
+    inner
+      .failed_query_invalidations
+      .insert(query_epoch_bucket(&target));
+    if self.persist_disk_query_epochs(&inner).is_err() {
+      tracing::warn!("QUERY invalidation failure state could not be persisted");
+    }
+  }
+
+  pub(super) fn prepared_query_cache_bypassed(&self, prepared: &CachePreparedInsert) -> bool {
+    prepared.query_target.as_ref().is_some_and(|target| {
+      let generation_current = prepared.query_generation.as_ref().is_some_and(|bound| {
+        bound.target == *target
+          && self
+            .inner_guard()
+            .query_invalidation_generations
+            .get(&query_epoch_bucket(target))
+            .copied()
+            .unwrap_or(0)
+            == bound.value
+      });
+      !generation_current
+        || self.fills.is_fenced(&prepared.fill_key)
+        || self
+          .inner_guard()
+          .failed_query_invalidations
+          .contains(&query_epoch_bucket(target))
+    })
+  }
+
+  pub(super) fn prepared_generation_current_locked(
+    &self,
+    inner: &CacheInner,
+    prepared: &CachePreparedInsert,
+  ) -> bool {
+    let Some(target) = prepared.query_target.as_ref() else {
+      return true;
+    };
+    let Some(bound) = prepared.query_generation.as_ref() else {
+      return false;
+    };
+    bound.target == *target
+      && inner
+        .query_invalidation_generations
+        .get(&query_epoch_bucket(target))
+        .copied()
+        .unwrap_or(0)
+        == bound.value
+      && !inner
+        .failed_query_invalidations
+        .contains(&query_epoch_bucket(target))
+  }
+
+  pub(super) fn bind_query_generation(
+    &self,
+    identity: Option<&CacheQueryIdentity>,
+    operation: &CacheOperationContext,
+  ) -> bool {
+    let (Some(identity), Some(target)) = (identity, operation.query_target.as_ref()) else {
+      return operation.query_target.is_none();
+    };
+    if identity.query_cache_epoch_rejected() {
+      return false;
+    }
+    let inner = self.inner_guard();
+    let current = inner
+      .query_invalidation_generations
+      .get(&query_epoch_bucket(target))
+      .copied()
+      .unwrap_or(0);
+    let mut generation = identity
+      .generation
+      .lock()
+      .unwrap_or_else(|error| error.into_inner());
+    match generation.as_ref() {
+      Some(bound) => bound.target == *target && bound.value == current,
+      None => {
+        *generation = Some(CacheQueryGeneration {
+          target: target.clone(),
+          value: current,
+        });
+        true
+      }
+    }
+  }
+
+  /// Binds Q1 work to the durable target epoch before an L2/L3 operation.
+  /// The local generation map is advanced to the durable value first, so a
+  /// request that was admitted before another replica invalidated the target
+  /// cannot later publish under a current generation.
+  pub(super) async fn bind_query_generation_async(
+    &self,
+    identity: Option<&CacheQueryIdentity>,
+    operation: &CacheOperationContext,
+  ) -> bool {
+    let (Some(identity), Some(target)) = (identity, operation.query_target.as_ref()) else {
+      return operation.query_target.is_none();
+    };
+    if let Some(shared) = self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+    {
+      let Ok(epoch) = shared
+        .cache_query_epoch(&target.policy, &target.scheme, &target.host, &target.uri)
+        .await
+      else {
+        identity.reject_query_cache_epoch();
+        return false;
+      };
+      let mut inner = self.inner_guard();
+      let current = inner
+        .query_invalidation_generations
+        .entry(query_epoch_bucket(target))
+        .or_default();
+      if epoch < *current {
+        identity.reject_query_cache_epoch();
+        return false;
+      }
+      *current = epoch;
+    } else if operation.policy.external_handler.is_some() {
+      let Some(epoch) = self.external_query_epoch(target, false).await else {
+        identity.reject_query_cache_epoch();
+        return false;
+      };
+      let mut inner = self.inner_guard();
+      let current = inner
+        .query_invalidation_generations
+        .entry(query_epoch_bucket(target))
+        .or_default();
+      if epoch < *current {
+        identity.reject_query_cache_epoch();
+        return false;
+      }
+      *current = epoch;
+    }
+    self.bind_query_generation(Some(identity), operation)
+  }
+
+  pub(super) fn advance_query_generation(&self, target: &CacheQueryInvalidationTarget) {
+    self.advance_query_generation_to(target, None);
+  }
+
+  pub(super) fn advance_query_generation_to(
+    &self,
+    target: &CacheQueryInvalidationTarget,
+    durable_epoch: Option<u64>,
+  ) {
+    let mut inner = self.inner_guard();
+    let current = inner
+      .query_invalidation_generations
+      .get(&query_epoch_bucket(target))
+      .copied()
+      .unwrap_or(0);
+    let next = durable_epoch.unwrap_or_else(|| current.saturating_add(1));
+    if durable_epoch.is_some() && next < current {
+      return;
+    }
+    inner
+      .query_invalidation_generations
+      .insert(query_epoch_bucket(target), next);
+    if self.persist_disk_query_epochs(&inner).is_err() {
+      inner
+        .failed_query_invalidations
+        .insert(query_epoch_bucket(target));
+    }
+  }
+}
+
+fn query_epoch_bucket(target: &CacheQueryInvalidationTarget) -> (String, u16) {
+  let material = format!(
+    "{}\n{}\n{}\n{}",
+    target.policy, target.scheme, target.host, target.uri
+  );
+  let digest = crate::crypto::sha256(material.as_bytes());
+  (
+    target.policy.clone(),
+    u16::from_be_bytes([digest[0], digest[1]]) % crate::cache::QUERY_EPOCH_BUCKETS,
+  )
 }

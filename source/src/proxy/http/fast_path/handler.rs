@@ -197,6 +197,8 @@ impl PlainProxyFastPath {
     }
     access_log.set_upstream(&upstream.name, upstream.origin.scheme());
     let request_method = request.method().clone();
+    let invalidation_uri =
+      super::super::query::invalidates_target(&request_method).then(|| request.uri().clone());
     let request_context =
       response_waf_enabled.then(|| (request_method.clone(), request.uri().clone()));
     let request_body_definitely_empty = request_body_definitely_empty(&request);
@@ -594,6 +596,7 @@ impl PlainProxyFastPath {
             }),
           )
           .await
+          .map(|response| response.map(|body| body.map_err(body::boxed_error).boxed()))
         } else {
           send_one_shot_with_state(
             client,
@@ -606,9 +609,10 @@ impl PlainProxyFastPath {
             }),
           )
           .await
+          .map(|response| response.map(|body| body.map_err(body::boxed_error).boxed()))
         };
         timing::general_result(snapshot, metric_protocol, result.is_ok(), general_started);
-        result.map(|response| response.map(|body| body.map_err(body::boxed_error).boxed()))
+        result
       }
     };
     let mut upstream_response = match upstream_response_result {
@@ -652,6 +656,17 @@ impl PlainProxyFastPath {
         return response;
       }
     };
+    if let Some(uri) = invalidation_uri {
+      super::super::query::invalidate_after_origin_response(
+        state.as_ref(),
+        &request_method,
+        upstream_response.status(),
+        downstream_scheme,
+        host,
+        &uri,
+      )
+      .await;
+    }
     if report_pool_success && let Some(latency_ms) = upstream_started_at.map(elapsed_ms) {
       state
         .pools

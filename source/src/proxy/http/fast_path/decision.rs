@@ -16,7 +16,10 @@ pub(crate) fn plain_proxy_fast_path_decision<B>(
   state: &AppSnapshot,
   resolved: &ResolvedRoute<'_>,
 ) -> Result<(), PlainProxyFastPathMissReason> {
-  if crate::proxy::http::incremental::request_marked(request) {
+  // QUERY requires final Content-Type validation after all request mutations.
+  if crate::proxy::http::query::is_query(request.method())
+    || crate::proxy::http::incremental::request_marked(request)
+  {
     return Err(PlainProxyFastPathMissReason::UnsupportedRoute);
   }
   if state

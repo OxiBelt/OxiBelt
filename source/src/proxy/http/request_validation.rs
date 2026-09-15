@@ -100,6 +100,8 @@ where
   } else {
     body
   };
+  let retain_trailers = query::is_query(&parts.method);
+  let mut trailers = None;
   while let Some(frame) = body.frame().await {
     let frame = match frame {
       Ok(frame) => frame,
@@ -123,6 +125,15 @@ where
         ));
       }
     };
+    if retain_trailers && let Some(value) = frame.trailers_ref() {
+      if trailers.is_some() {
+        return Err(text_response(
+          StatusCode::BAD_REQUEST,
+          "invalid request trailers",
+        ));
+      }
+      trailers = Some(value.clone());
+    }
     if frame.data_ref().is_some_and(|data| !data.is_empty()) {
       return Err(text_response(
         StatusCode::PAYLOAD_TOO_LARGE,
@@ -131,7 +142,13 @@ where
     }
   }
 
-  let mut request = Request::from_parts(parts, Either::Right(full_body(bytes::Bytes::new())));
+  let mut request = Request::from_parts(
+    parts,
+    Either::Right(body::materialized_known_small_body(
+      bytes::Bytes::new(),
+      trailers,
+    )),
+  );
   request
     .extensions_mut()
     .insert(VerifiedContentLengthZeroBody);

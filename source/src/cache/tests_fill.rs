@@ -17,6 +17,7 @@ async fn fill_permit_coalesces_followers_until_leader_drops() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let guard = match cache.begin_fill(ctx.clone()).unwrap() {
@@ -62,6 +63,7 @@ async fn fill_waiter_times_out_without_leader_drop() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let _guard = match cache.begin_fill(ctx.clone()).unwrap() {
@@ -111,6 +113,7 @@ fn certificate_identity_uses_a_separate_fill_lock() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: Some(identity),
   };
 
@@ -141,6 +144,7 @@ fn not_stored_fill_suppression_skips_short_lived_locks() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let lookup_ctx = CacheLookupContext {
@@ -151,6 +155,7 @@ fn not_stored_fill_suppression_skips_short_lived_locks() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
 
@@ -190,6 +195,7 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let lookup_ctx = CacheLookupContext {
@@ -200,6 +206,7 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
 

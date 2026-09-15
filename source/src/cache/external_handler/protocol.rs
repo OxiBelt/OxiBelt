@@ -6,6 +6,9 @@ use tempfile::NamedTempFile;
 
 pub(crate) const PROTOCOL_VERSION: &str = "oxibelt-external-cache-v1";
 pub(crate) const CACHE_KEY_VERSION: &str = "oxibelt-cache-key-v1";
+/// Required on every Q1 request, entry, and purge.  Q1 peers that do not
+/// preserve this epoch are treated as legacy and their results are bypassed.
+pub(crate) const QUERY_EPOCH_CAPABILITY: &str = "query-target-epoch-v1";
 pub(crate) const FRAME_PREFIX_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,15 +61,28 @@ pub(crate) struct ExternalCacheEntryMetadata {
   pub must_revalidate: bool,
   pub vary: Vec<ExternalCacheVary>,
   pub tags: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub query_target_epoch: Option<u64>,
 }
 
 impl ExternalCacheEntryMetadata {
-  pub(crate) fn validate_versions(&self) -> anyhow::Result<()> {
+  pub(crate) fn validate_versions(&self, expected_cache_key_version: &str) -> anyhow::Result<()> {
     if self.protocol_version != PROTOCOL_VERSION {
       bail!("unsupported external cache protocol version");
     }
-    if self.cache_key_version != CACHE_KEY_VERSION {
+    if !matches!(
+      expected_cache_key_version,
+      CACHE_KEY_VERSION | super::super::key::QUERY_EXTERNAL_CACHE_KEY_VERSION
+    ) {
       bail!("unsupported external cache key version");
+    }
+    if self.cache_key_version != expected_cache_key_version {
+      bail!("unsupported external cache key version");
+    }
+    if expected_cache_key_version == super::super::key::QUERY_EXTERNAL_CACHE_KEY_VERSION
+      && self.query_target_epoch.is_none()
+    {
+      bail!("Q1 external cache metadata is missing its target epoch");
     }
     Ok(())
   }
@@ -84,11 +100,73 @@ pub(crate) struct ExternalCacheLookupRequest {
   pub uri: String,
   pub method: String,
   pub request_no_cache: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub query_target_epoch: Option<u64>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub required_capabilities: Vec<String>,
+}
+
+/// A typed, target-scoped Q1 epoch exchange.  It is separate from cache
+/// lookup so the caller can validate its L1 before accepting a hit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ExternalCacheQueryEpochRequest {
+  pub protocol_version: String,
+  pub cache_key_version: String,
+  pub policy: String,
+  pub scheme: String,
+  pub host: String,
+  pub uri: String,
+  pub advance: bool,
+  pub epoch_bucket: u16,
+  pub required_capabilities: Vec<String>,
+}
+
+impl ExternalCacheQueryEpochRequest {
+  pub(crate) fn new(
+    policy: String,
+    scheme: String,
+    host: String,
+    uri: String,
+    advance: bool,
+  ) -> Self {
+    let material = format!("{policy}\n{scheme}\n{host}\n{uri}");
+    let digest = crate::crypto::sha256(material.as_bytes());
+    let epoch_bucket =
+      u16::from_be_bytes([digest[0], digest[1]]) % crate::cache::QUERY_EPOCH_BUCKETS;
+    Self {
+      protocol_version: PROTOCOL_VERSION.to_string(),
+      cache_key_version: super::super::key::QUERY_EXTERNAL_CACHE_KEY_VERSION.to_string(),
+      policy,
+      scheme,
+      host,
+      uri,
+      advance,
+      epoch_bucket,
+      required_capabilities: vec![QUERY_EPOCH_CAPABILITY.to_string()],
+    }
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ExternalCacheQueryEpochResponse {
+  pub target_epoch: u64,
+  #[serde(default)]
+  pub capabilities: Vec<String>,
+}
+
+impl ExternalCacheQueryEpochResponse {
+  pub(crate) fn validates_q1(&self) -> bool {
+    self
+      .capabilities
+      .iter()
+      .any(|capability| capability == QUERY_EPOCH_CAPABILITY)
+  }
 }
 
 impl ExternalCacheLookupRequest {
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
+    cache_key_version: String,
     policy: String,
     partition: String,
     base_key: String,
@@ -97,10 +175,11 @@ impl ExternalCacheLookupRequest {
     uri: String,
     method: String,
     request_no_cache: bool,
+    query_target_epoch: Option<u64>,
   ) -> Self {
     Self {
       protocol_version: PROTOCOL_VERSION.to_string(),
-      cache_key_version: CACHE_KEY_VERSION.to_string(),
+      cache_key_version,
       policy,
       partition,
       base_key,
@@ -109,6 +188,10 @@ impl ExternalCacheLookupRequest {
       uri,
       method,
       request_no_cache,
+      query_target_epoch,
+      required_capabilities: query_target_epoch
+        .map(|_| vec![QUERY_EPOCH_CAPABILITY.to_string()])
+        .unwrap_or_default(),
     }
   }
 }
@@ -135,6 +218,10 @@ pub(crate) struct ExternalCachePurgeRequest {
   pub path_prefix: Option<String>,
   pub tag: Option<String>,
   pub partition: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub query_target_epoch: Option<u64>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub required_capabilities: Vec<String>,
 }
 
 #[cfg(feature = "admin-runtime")]
@@ -150,9 +237,8 @@ impl ExternalCachePurgeRequest {
     tag: Option<String>,
     partition: Option<String>,
   ) -> Self {
-    Self {
-      protocol_version: PROTOCOL_VERSION.to_string(),
-      cache_key_version: CACHE_KEY_VERSION.to_string(),
+    Self::with_cache_key_version(
+      CACHE_KEY_VERSION.to_string(),
       purge_type,
       policy,
       scheme,
@@ -161,6 +247,38 @@ impl ExternalCachePurgeRequest {
       path_prefix,
       tag,
       partition,
+      None,
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub(crate) fn with_cache_key_version(
+    cache_key_version: String,
+    purge_type: ExternalCachePurgeKind,
+    policy: String,
+    scheme: Option<String>,
+    host: Option<String>,
+    uri: Option<String>,
+    path_prefix: Option<String>,
+    tag: Option<String>,
+    partition: Option<String>,
+    query_target_epoch: Option<u64>,
+  ) -> Self {
+    Self {
+      protocol_version: PROTOCOL_VERSION.to_string(),
+      cache_key_version,
+      purge_type,
+      policy,
+      scheme,
+      host,
+      uri,
+      path_prefix,
+      tag,
+      partition,
+      query_target_epoch,
+      required_capabilities: query_target_epoch
+        .map(|_| vec![QUERY_EPOCH_CAPABILITY.to_string()])
+        .unwrap_or_default(),
     }
   }
 }
@@ -178,7 +296,7 @@ pub(crate) enum ExternalCacheBody {
 }
 
 pub(crate) fn serialize_metadata(metadata: &ExternalCacheEntryMetadata) -> anyhow::Result<Vec<u8>> {
-  metadata.validate_versions()?;
+  metadata.validate_versions(&metadata.cache_key_version)?;
   serde_json::to_vec(metadata).context("failed to serialize external cache metadata")
 }
 
@@ -210,13 +328,109 @@ pub(crate) fn framed_entry_bytes(
 pub(crate) fn parse_metadata(bytes: &[u8]) -> anyhow::Result<ExternalCacheEntryMetadata> {
   let metadata = serde_json::from_slice::<ExternalCacheEntryMetadata>(bytes)
     .map_err(|error| anyhow!("external cache metadata is not valid JSON: {error}"))?;
-  metadata.validate_versions()?;
+  metadata.validate_versions(&metadata.cache_key_version)?;
   Ok(metadata)
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn legacy_get_lookup_omits_q1_fields() {
+    let request = ExternalCacheLookupRequest::new(
+      CACHE_KEY_VERSION.to_string(),
+      "default".to_string(),
+      String::new(),
+      "https://example.test/asset".to_string(),
+      "https".to_string(),
+      "example.test".to_string(),
+      "/asset".to_string(),
+      "GET".to_string(),
+      false,
+      None,
+    );
+    let value = serde_json::to_value(request).expect("GET lookup should serialize");
+    assert!(value.get("query_target_epoch").is_none());
+    assert!(value.get("required_capabilities").is_none());
+  }
+
+  #[test]
+  fn query_epoch_request_binds_target_bucket_and_capability() {
+    let request = ExternalCacheQueryEpochRequest::new(
+      "default".to_string(),
+      "https".to_string(),
+      "example.test".to_string(),
+      "/asset".to_string(),
+      true,
+    );
+    let digest = crate::crypto::sha256(b"default\nhttps\nexample.test\n/asset");
+    assert_eq!(
+      request.epoch_bucket,
+      u16::from_be_bytes([digest[0], digest[1]]) % crate::cache::QUERY_EPOCH_BUCKETS
+    );
+    assert!(request.advance);
+    assert_eq!(
+      request.required_capabilities,
+      vec![QUERY_EPOCH_CAPABILITY.to_string()]
+    );
+    let value = serde_json::to_value(request).expect("QUERY epoch request should serialize");
+    assert_eq!(
+      value["cache_key_version"],
+      crate::cache::key::QUERY_EXTERNAL_CACHE_KEY_VERSION
+    );
+    assert_eq!(value["required_capabilities"][0], QUERY_EPOCH_CAPABILITY);
+  }
+
+  #[test]
+  fn query_epoch_response_requires_capability() {
+    assert!(
+      !ExternalCacheQueryEpochResponse {
+        target_epoch: 7,
+        capabilities: Vec::new(),
+      }
+      .validates_q1()
+    );
+    assert!(
+      ExternalCacheQueryEpochResponse {
+        target_epoch: 7,
+        capabilities: vec![QUERY_EPOCH_CAPABILITY.to_string()],
+      }
+      .validates_q1()
+    );
+  }
+
+  #[test]
+  fn q1_metadata_without_epoch_is_rejected() {
+    let metadata = ExternalCacheEntryMetadata {
+      protocol_version: PROTOCOL_VERSION.to_string(),
+      cache_key_version: crate::cache::key::QUERY_EXTERNAL_CACHE_KEY_VERSION.to_string(),
+      policy: "default".to_string(),
+      partition: String::new(),
+      base_key: "\0oxibelt-cache-query-v1\0fixture".to_string(),
+      variant_key: "fixture".to_string(),
+      scheme: "https".to_string(),
+      host: "example.test".to_string(),
+      uri: "/asset".to_string(),
+      status: 200,
+      headers: Vec::new(),
+      security_headers_neutral: true,
+      body_len: 0,
+      stored_at_ms: 1,
+      expires_at_ms: 2,
+      stale_if_error_until_ms: None,
+      stale_while_revalidate_until_ms: None,
+      must_revalidate: false,
+      vary: Vec::new(),
+      tags: Vec::new(),
+      query_target_epoch: None,
+    };
+    assert!(
+      metadata
+        .validate_versions(crate::cache::key::QUERY_EXTERNAL_CACHE_KEY_VERSION)
+        .is_err()
+    );
+  }
 
   #[test]
   fn framed_entry_round_trips_metadata_and_body() {
@@ -244,6 +458,7 @@ mod tests {
       must_revalidate: false,
       vary: Vec::new(),
       tags: vec!["tag".to_string()],
+      query_target_epoch: None,
     };
 
     let frame = framed_entry_bytes(&metadata, b"body").expect("frame should encode");

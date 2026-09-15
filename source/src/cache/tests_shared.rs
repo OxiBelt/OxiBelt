@@ -72,6 +72,7 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &request_headers,
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(
@@ -91,6 +92,7 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &request_headers,
+        query_identity: None,
         certificate_identity: None,
       })
       .await,
@@ -113,6 +115,7 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &request_headers,
+        query_identity: None,
         certificate_identity: None,
       })
       .await
@@ -139,6 +142,7 @@ async fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
 
@@ -152,6 +156,7 @@ async fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &headers,
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(
@@ -215,6 +220,7 @@ async fn shared_cache_purge_propagates_an_enumeration_cap_error() {
             method: &Method::GET,
             uri: &uri,
             request_headers: &headers,
+            query_identity: None,
             certificate_identity: None,
           },
           CacheEntry::memory(
@@ -267,6 +273,7 @@ async fn shared_cache_legacy_entry_without_index_is_a_safe_miss() {
           method: &Method::GET,
           uri: &uri,
           request_headers: &headers,
+          query_identity: None,
           certificate_identity: None,
         },
         CacheEntry::memory(
@@ -294,6 +301,7 @@ async fn shared_cache_legacy_entry_without_index_is_a_safe_miss() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &headers,
+        query_identity: None,
         certificate_identity: None,
       })
       .await
@@ -335,6 +343,7 @@ async fn shared_cache_vary_lookup_uses_indexed_variant() {
           method: &Method::GET,
           uri: &uri,
           request_headers: &request_headers,
+          query_identity: None,
           certificate_identity: None,
         },
         CacheEntry::memory(
@@ -360,6 +369,7 @@ async fn shared_cache_vary_lookup_uses_indexed_variant() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      query_identity: None,
       certificate_identity: None,
     })
     .await
@@ -393,6 +403,7 @@ async fn shared_cache_large_body_uses_retrievable_chunks() {
           method: &Method::GET,
           uri: &uri,
           request_headers: &headers,
+          query_identity: None,
           certificate_identity: None,
         },
         CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body.clone()),
@@ -410,6 +421,7 @@ async fn shared_cache_large_body_uses_retrievable_chunks() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &headers,
+      query_identity: None,
       certificate_identity: None,
     })
     .await
@@ -457,6 +469,7 @@ async fn shared_cache_streaming_disk_fill_writes_chunked_l2_entry() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &headers,
+      query_identity: None,
       certificate_identity: None,
     })
     .await
@@ -496,6 +509,7 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
@@ -514,6 +528,7 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &headers,
+        query_identity: None,
         certificate_identity: None,
       })
       .await
@@ -546,6 +561,7 @@ async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
         method: &Method::GET,
         uri: &secret_uri,
         request_headers: &headers,
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(
@@ -564,6 +580,7 @@ async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
     method: &Method::GET,
     uri: &other_uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
   assert!(second.lookup_async(other_ctx).await.is_none());
@@ -576,6 +593,7 @@ async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
     method: &Method::GET,
     uri: &secret_uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
   match second.lookup_async(secret_ctx).await {
@@ -637,6 +655,7 @@ async fn stream_disk_fill(
       method: &Method::GET,
       uri,
       request_headers,
+      query_identity: None,
       certificate_identity: None,
     },
     StatusCode::OK,
@@ -672,6 +691,7 @@ async fn wait_for_fresh(
         method: &Method::GET,
         uri,
         request_headers,
+        query_identity: None,
         certificate_identity: None,
       }),
       Some(CacheLookup::Fresh(_))

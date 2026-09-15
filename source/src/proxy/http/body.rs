@@ -23,6 +23,27 @@ use crate::metrics::{BandwidthTrafficClass, Metrics};
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub(crate) type ProxyBody = BoxBody<Bytes, BoxError>;
 pub(crate) type ProxyBodyFrame = Result<Frame<Bytes>, BoxError>;
+/// Declare captured trailers so an HTTP/1 encoder can use chunked framing.
+/// Hyper only sends trailer fields named by the request's Trailer header.
+pub(crate) fn prepare_replay_trailer_headers(
+  headers: &mut HeaderMap,
+  trailers: &HeaderMap,
+) -> Result<(), http::header::InvalidHeaderValue> {
+  if trailers.is_empty() {
+    return Ok(());
+  }
+  let names = trailers
+    .keys()
+    .map(http::HeaderName::as_str)
+    .collect::<Vec<_>>()
+    .join(", ");
+  let value = http::HeaderValue::from_str(&names)?;
+  headers.remove(http::header::CONTENT_LENGTH);
+  headers.remove(http::header::TRANSFER_ENCODING);
+  headers.insert(http::header::TRAILER, value);
+  Ok(())
+}
+
 const TIMEOUT_BODY_CHANNEL_CAPACITY: usize = 16;
 const BANDWIDTH_BODY_CHANNEL_CAPACITY: usize = 1;
 pub(crate) const KNOWN_SMALL_BODY_MAX_BYTES: usize = 16 * 1024;

@@ -33,18 +33,24 @@ impl ResponseCache {
     self: &Arc<Self>,
     ctx: CacheLookupContext<'_>,
   ) -> Option<CacheFillDecision> {
-    let key = self
-      .operation_context(
-        ctx.policy_name,
-        ctx.scheme,
-        ctx.host,
-        ctx.method,
-        ctx.uri,
-        ctx.request_headers,
-        ctx.certificate_identity,
-        ctx.proxy_protocol_identity,
-      )?
-      .fill_key;
+    let operation = self.operation_context(
+      ctx.policy_name,
+      ctx.scheme,
+      ctx.host,
+      ctx.method,
+      ctx.uri,
+      super::lookup::cache_view_headers(&ctx),
+      ctx.query_identity,
+      ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
+    )?;
+    if !self
+      .bind_query_generation_async(ctx.query_identity, &operation)
+      .await
+    {
+      return None;
+    }
+    let key = operation.fill_key;
     let decision = self.begin_fill_decision(ctx)?;
     let CacheFillDecision::Leader(mut guard) = decision else {
       return Some(decision);
@@ -87,7 +93,7 @@ impl ResponseCache {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
       return;
     }
-    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
+    if cache_insert_request_bypassed(&ctx, &self.bypass_request_headers) {
       return;
     }
     let Some(key) = self
@@ -97,7 +103,8 @@ impl ResponseCache {
         ctx.host,
         ctx.method,
         ctx.uri,
-        ctx.request_headers,
+        cache_insert_view_headers(&ctx),
+        ctx.query_identity,
         ctx.certificate_identity,
         ctx.proxy_protocol_identity,
       )
@@ -117,6 +124,27 @@ impl ResponseCache {
     ctx: CacheInsertContext<'_>,
     entry: CacheEntry,
   ) -> CacheInsertOutcome {
+    if ctx.method.as_str() == "QUERY" {
+      let Some(operation) = self.operation_context(
+        ctx.policy_name,
+        ctx.scheme,
+        ctx.host,
+        ctx.method,
+        ctx.uri,
+        cache_insert_view_headers(&ctx),
+        ctx.query_identity,
+        ctx.certificate_identity,
+        ctx.proxy_protocol_identity,
+      ) else {
+        return CacheInsertOutcome::NotCacheable;
+      };
+      if !self
+        .bind_query_generation_async(ctx.query_identity, &operation)
+        .await
+      {
+        return CacheInsertOutcome::NotCacheable;
+      }
+    }
     let shared_context = ctx.clone();
     let status = entry.status;
     let headers = entry.headers.clone();
@@ -172,6 +200,9 @@ impl ResponseCache {
     entry: CacheEntry,
     publish_external: bool,
   ) -> CacheInsertOutcome {
+    if self.prepared_query_cache_bypassed(&prepared) {
+      return CacheInsertOutcome::NotCacheable;
+    }
     let body_len = entry.body_len();
     let size = match body_len.checked_add(prepared.header_bytes) {
       Some(size) if size <= self.config.max_size_bytes => size,
@@ -179,6 +210,9 @@ impl ResponseCache {
     };
     let external_entry = {
       let mut inner = self.inner_guard();
+      if !self.prepared_generation_current_locked(&inner, &prepared) {
+        return CacheInsertOutcome::NotCacheable;
+      }
       if variant_count_exceeded(
         &inner,
         &prepared.policy,
@@ -228,6 +262,7 @@ impl ResponseCache {
         stored_at: prepared.metadata.stored_at,
         vary: prepared.metadata.vary,
         tags,
+        query_target_epoch: prepared.query_generation.as_ref().map(|bound| bound.value),
         size,
       };
       if let Err(error) = self.persist_metadata(&stored) {
@@ -361,7 +396,7 @@ impl ResponseCache {
     if ctx.method == Method::HEAD {
       return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
     }
-    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
+    if cache_insert_request_bypassed(&ctx, &self.bypass_request_headers) {
       return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
     }
     let Some(operation) = self.operation_context(
@@ -370,16 +405,26 @@ impl ResponseCache {
       ctx.host,
       ctx.method,
       ctx.uri,
-      ctx.request_headers,
+      cache_insert_view_headers(&ctx),
+      ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
     ) else {
       return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
     };
+    if self.query_target_cache_bypassed(&operation) {
+      return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
+    }
+    if self.fills.is_fenced(&operation.fill_key) {
+      return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
+    }
+    if !self.bind_query_generation(ctx.query_identity, &operation) {
+      return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
+    }
     let metadata = match cache_metadata(
       &self.config,
       &operation.policy,
-      ctx.request_headers,
+      cache_insert_view_headers(&ctx),
       ctx.certificate_identity,
       status,
       response_headers,
@@ -412,6 +457,32 @@ impl ResponseCache {
       stored_headers,
       metadata,
       header_bytes,
+      fill_key: operation.fill_key,
+      query_target: operation.query_target,
+      query_generation: ctx.query_identity.and_then(|identity| {
+        identity
+          .generation
+          .lock()
+          .unwrap_or_else(|error| error.into_inner())
+          .clone()
+      }),
     }))
   }
+}
+
+fn cache_insert_view_headers<'a>(ctx: &'a CacheInsertContext<'_>) -> &'a HeaderMap {
+  ctx
+    .query_identity
+    .map(CacheQueryIdentity::cache_view_headers)
+    .unwrap_or(ctx.request_headers)
+}
+
+fn cache_insert_request_bypassed(
+  ctx: &CacheInsertContext<'_>,
+  bypass_headers: &[HeaderName],
+) -> bool {
+  request_no_store(ctx.request_headers, bypass_headers)
+    || ctx
+      .query_identity
+      .is_some_and(|identity| request_no_store(identity.cache_view_headers(), bypass_headers))
 }

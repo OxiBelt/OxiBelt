@@ -283,6 +283,7 @@ min_hits = 2
     state
       .cache
       .lookup(crate::cache::CacheLookupContext {
+        query_identity: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -463,6 +464,7 @@ stream_large_objects = true
     state
       .cache
       .lookup(crate::cache::CacheLookupContext {
+        query_identity: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -556,6 +558,7 @@ stream_large_objects = true
   assert_eq!(delivered, body);
   assert_eq!(state.cache.stats().memory_entries, 1);
   match state.cache.lookup(crate::cache::CacheLookupContext {
+    query_identity: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -736,6 +739,7 @@ respect_cache_control = true
   assert_eq!(delivered, body);
   assert_eq!(delivered.as_ptr(), body_ptr);
   match state.cache.lookup(crate::cache::CacheLookupContext {
+    query_identity: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",

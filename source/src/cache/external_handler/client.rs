@@ -22,7 +22,8 @@ use crate::config::ExternalCacheHandlerConfig;
 use crate::tls;
 
 use super::protocol::{
-  ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheLookupRequest, FRAME_PREFIX_BYTES,
+  ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheLookupRequest,
+  ExternalCacheQueryEpochRequest, ExternalCacheQueryEpochResponse, FRAME_PREFIX_BYTES,
   external_cache_metadata_frame, parse_metadata,
 };
 #[cfg(feature = "admin-runtime")]
@@ -129,6 +130,37 @@ impl ExternalCacheHttpClient {
     })
     .await
     .context("external cache lookup timed out")?
+  }
+
+  pub(crate) async fn query_epoch(
+    &self,
+    request: &ExternalCacheQueryEpochRequest,
+  ) -> anyhow::Result<ExternalCacheQueryEpochResponse> {
+    let body = serde_json::to_vec(request).context("failed to encode external QUERY epoch")?;
+    let request = self.request(Method::POST, "query-epoch", json_body(Bytes::from(body)))?;
+    tokio::time::timeout(self.request_timeout, async {
+      let response = self
+        .client
+        .request(request)
+        .await
+        .context("external QUERY epoch request failed")?;
+      if !response.status().is_success() {
+        bail!("external QUERY epoch returned {}", response.status());
+      }
+      let bytes = http_body_util::Limited::new(response.into_body(), self.max_metadata_bytes)
+        .collect()
+        .await
+        .map_err(|error| anyhow!("external QUERY epoch response failed: {error}"))?
+        .to_bytes();
+      let response: ExternalCacheQueryEpochResponse =
+        serde_json::from_slice(&bytes).context("external QUERY epoch response is not JSON")?;
+      if !response.validates_q1() {
+        bail!("external cache handler does not support Q1 target epochs");
+      }
+      Ok(response)
+    })
+    .await
+    .context("external QUERY epoch request timed out")?
   }
 
   pub(crate) async fn fill(
@@ -427,6 +459,7 @@ mod tests {
 
   fn lookup_request() -> ExternalCacheLookupRequest {
     ExternalCacheLookupRequest::new(
+      super::super::protocol::CACHE_KEY_VERSION.to_string(),
       "default".to_string(),
       String::new(),
       "key".to_string(),
@@ -435,6 +468,7 @@ mod tests {
       "/".to_string(),
       "GET".to_string(),
       false,
+      None,
     )
   }
 

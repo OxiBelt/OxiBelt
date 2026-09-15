@@ -23,7 +23,7 @@ mod cache;
 mod dynamic_policy_query;
 pub(super) use cache::{
   cache_key_explain_response, cache_purge_json_response, cache_purge_response, cache_warm_response,
-  enqueue_cache_warm_operation, signed_cache_purge_actor,
+  enqueue_cache_warm_operation, recover_cache_warm_command, signed_cache_purge_actor,
 };
 
 pub(super) const ADMIN_JSON_BODY_LIMIT: usize = 64 * 1024;

@@ -31,10 +31,13 @@ impl ResponseCache {
         base_key,
         &uri,
         ctx.method,
-        ctx.request_headers,
-        request_no_cache(ctx.request_headers),
+        super::lookup::cache_view_headers(&ctx),
+        request_no_cache(super::lookup::cache_view_headers(&ctx)),
         background_refresh,
         max_vary_variants,
+        ctx
+          .query_identity
+          .and_then(crate::cache::CacheQueryIdentity::query_target_epoch),
       )
       .await
     {

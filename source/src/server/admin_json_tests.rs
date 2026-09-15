@@ -564,6 +564,7 @@ fn seed_cache_entry(snapshot: &AppSnapshot, uri: &str, tag: Option<&str>) {
   assert_eq!(
     snapshot.cache.insert(
       crate::cache::CacheInsertContext {
+        query_identity: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "http",

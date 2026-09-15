@@ -61,6 +61,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(
@@ -80,6 +81,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &HeaderMap::new(),
+    query_identity: None,
     certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
@@ -114,6 +116,7 @@ fn cache_key_explain_includes_partition_and_variant() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      query_identity: None,
       certificate_identity: None,
     },
     Some(&response_headers),
@@ -152,6 +155,7 @@ fn cache_key_explain_reports_vary_rejection_reason() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      query_identity: None,
       certificate_identity: None,
     },
     Some(&response_headers),
@@ -191,6 +195,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &first_headers,
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(
@@ -211,6 +216,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &second_headers,
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"b")),
@@ -244,6 +250,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"gz")),
@@ -268,6 +275,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"gz")),
@@ -300,6 +308,7 @@ fn cookie_requests_bypass_cache_by_default() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &request_headers,
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(
@@ -320,6 +329,7 @@ fn cookie_requests_bypass_cache_by_default() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &request_headers,
+        query_identity: None,
         certificate_identity: None,
       })
       .is_none()
@@ -346,6 +356,7 @@ fn named_policy_can_define_negative_cache_defaults() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &HeaderMap::new(),
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(
@@ -365,6 +376,7 @@ fn named_policy_can_define_negative_cache_defaults() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &HeaderMap::new(),
+      query_identity: None,
       certificate_identity: None,
     }),
     Some(CacheLookup::Fresh(_))
@@ -424,6 +436,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
           method: &Method::GET,
           uri: &uri,
           request_headers: &request_headers,
+          query_identity: None,
           certificate_identity: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
@@ -440,6 +453,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
@@ -482,6 +496,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &headers,
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(
@@ -506,6 +521,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &headers,
+        query_identity: None,
         certificate_identity: None,
       })
       .is_none()
@@ -546,6 +562,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
           method: &Method::GET,
           uri,
           request_headers: &headers,
+          query_identity: None,
           certificate_identity: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers, body),
@@ -563,6 +580,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
     method: &Method::GET,
     uri: &first_uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let second = CacheLookupContext {
@@ -595,6 +613,7 @@ fn admission_min_hits_rejects_until_threshold() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let entry = CacheEntry::memory(
@@ -616,6 +635,7 @@ fn admission_min_hits_rejects_until_threshold() {
         method: &Method::GET,
         uri: &uri,
         request_headers: &headers,
+        query_identity: None,
         certificate_identity: None,
       })
       .is_none()
@@ -677,6 +697,7 @@ fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
           method: &Method::GET,
           uri: &uri,
           request_headers: &HeaderMap::new(),
+          query_identity: None,
           certificate_identity: None,
         },
         CacheEntry::memory(
@@ -728,6 +749,7 @@ fn disk_cache_recovery_does_not_trust_metadata_body_path() {
     stored_at: UNIX_EPOCH + Duration::from_secs(1),
     vary: Vec::new(),
     tags: Vec::new(),
+    query_target_epoch: None,
     size: 4,
   };
   std::fs::write(&meta_path, encode_metadata(&stored).unwrap()).unwrap();

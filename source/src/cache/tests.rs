@@ -13,6 +13,8 @@ mod external;
 mod fill;
 #[path = "tests_index.rs"]
 mod index;
+#[path = "tests_query.rs"]
+mod query;
 #[path = "tests_recovery.rs"]
 mod recovery;
 #[path = "tests_revalidation.rs"]
@@ -107,6 +109,7 @@ async fn insert_stale_revalidate_entry(
           method: &Method::GET,
           uri,
           request_headers,
+          query_identity: None,
           certificate_identity: None,
         },
         CacheEntry::memory(StatusCode::OK, headers, body),
@@ -130,6 +133,7 @@ async fn assert_stale_background_refresh_disabled(
       method: &Method::GET,
       uri,
       request_headers,
+      query_identity: None,
       certificate_identity: None,
     })
     .await

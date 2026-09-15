@@ -26,7 +26,6 @@ impl DurableOperationRuntime {
     }
     match Self::build(config, audit).await {
       Ok(runtime) => {
-        runtime.spawn_recovery_sweeper();
         info!("durable Admin operation journal is active");
         Ok(Some(runtime))
       }
@@ -116,9 +115,9 @@ impl DurableOperationRuntime {
       max_queued: operations.max_queued,
       max_stored: operations.max_stored,
       result_max_bytes: operations.result_max_bytes,
+      checkpoint_max_bytes: operations.checkpoint_max_bytes,
       shutting_down: Arc::new(AtomicBool::new(false)),
     };
-    runtime.recover_incomplete().await?;
     let _ = runtime.journal.prune_terminal(128).await?;
     Ok(runtime)
   }

@@ -74,6 +74,7 @@ fn lookup_context<'a>(
     method: &Method::GET,
     uri,
     request_headers: headers,
+    query_identity: None,
     certificate_identity,
   }
 }
@@ -92,6 +93,7 @@ fn insert_context<'a>(
     method: &Method::GET,
     uri,
     request_headers: headers,
+    query_identity: None,
     certificate_identity,
   }
 }
@@ -375,6 +377,7 @@ async fn shared_and_external_cache_paths_validate_proxy_tls_identity_namespaces(
       matching_context.method,
       matching_context.uri,
       matching_context.request_headers,
+      matching_context.query_identity,
       matching_context.certificate_identity,
       matching_context.proxy_protocol_identity,
     )
@@ -402,6 +405,7 @@ async fn shared_and_external_cache_paths_validate_proxy_tls_identity_namespaces(
       mismatched_context.method,
       mismatched_context.uri,
       mismatched_context.request_headers,
+      mismatched_context.query_identity,
       mismatched_context.certificate_identity,
       mismatched_context.proxy_protocol_identity,
     )
@@ -431,6 +435,7 @@ fn external_hit_for_context(
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
     )
@@ -465,6 +470,7 @@ fn external_hit(operation: &CacheOperationContext, body: Bytes) -> ExternalCache
       must_revalidate: false,
       vary: Vec::new(),
       tags: Vec::new(),
+      query_target_epoch: None,
     },
     body: ExternalCacheBody::Memory(body),
   }

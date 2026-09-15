@@ -304,12 +304,16 @@ fn conditional_not_modified_response(
   method: &Method,
   request_headers: &HeaderMap,
 ) -> Option<Response<ProxyBody>> {
-  if method != Method::GET && method != Method::HEAD {
+  if method != Method::GET && method != Method::HEAD && !super::query::is_query(method) {
     return None;
   }
-  let not_modified = if_none_match_matches(entry, request_headers)
-    || (request_headers.get(IF_NONE_MATCH).is_none()
-      && if_modified_since_matches(entry, request_headers));
+  let not_modified = if super::query::is_query(method) {
+    super::query::conditional::not_modified(entry, request_headers).unwrap_or(false)
+  } else {
+    if_none_match_matches(entry, request_headers)
+      || (request_headers.get(IF_NONE_MATCH).is_none()
+        && if_modified_since_matches(entry, request_headers))
+  };
   if !not_modified {
     return None;
   }

@@ -443,5 +443,5 @@ pub(crate) fn is_idempotent(method: &Method) -> bool {
   matches!(
     *method,
     Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE | Method::PUT | Method::DELETE
-  )
+  ) || method.as_str() == "QUERY"
 }

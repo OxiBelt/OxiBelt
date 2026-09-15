@@ -89,6 +89,10 @@ fi
 
 export OXIBELT_REQUIRE_ADMIN_OPERATION_POSTGRES_TESTS=1
 export OXIBELT_TEST_ADMIN_OPERATION_POSTGRES_URL="postgres://oxibelt:${postgres_password}@${postgres_connect_host}:${host_port}/oxibelt"
+# The recovery cases intentionally use fixed process-start configuration so
+# Rust tests never mutate process environment in a parallel test binary.
+export OXIBELT_TEST_ADMIN_OPERATION_RECOVERY_ARTIFACT_KEY="AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+export OXIBELT_TEST_ADMIN_OPERATION_RECOVERY_INSTANCE_ID="recovery-worker"
 
 cd -- "${repo_root}"
 if ! timeout --signal=TERM 35m \

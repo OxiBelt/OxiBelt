@@ -7,15 +7,31 @@ use anyhow::Context as _;
 use tokio::time::MissedTickBehavior;
 use tracing::warn;
 
+use crate::state::AppHandle;
+
+use super::runtime::AdminOperationRuntime;
 use super::runtime_durable::DurableOperationRuntime;
-use super::runtime_durable_support::receipt_bytes;
+use super::runtime_durable_support::{receipt_bytes, snapshot_from_journal};
 use super::types::{
-  ADMIN_OPERATION_SCHEMA_VERSION, AdminOperationSafeErrorClass, AdminOperationState,
+  ADMIN_OPERATION_SCHEMA_VERSION, AdminOperationKind, AdminOperationRecoveryClass,
+  AdminOperationSafeErrorClass, AdminOperationState,
 };
-use super::{JournalOperation, TerminalUpdate};
+use super::{JournalOperation, OperationArtifactBinding, TerminalUpdate};
 
 impl DurableOperationRuntime {
-  pub(super) fn spawn_recovery_sweeper(&self) {
+  pub(super) async fn activate_recovery(
+    &self,
+    operations: AdminOperationRuntime,
+    state: AppHandle,
+  ) -> anyhow::Result<()> {
+    self
+      .recover_incomplete(operations.clone(), state.clone())
+      .await?;
+    self.spawn_recovery_sweeper(operations, state);
+    Ok(())
+  }
+
+  fn spawn_recovery_sweeper(&self, operations: AdminOperationRuntime, state: AppHandle) {
     let runtime = self.clone();
     tokio::spawn(async move {
       let mut interval =
@@ -27,7 +43,11 @@ impl DurableOperationRuntime {
         if runtime.shutting_down.load(Ordering::SeqCst) {
           return;
         }
-        if runtime.recover_incomplete().await.is_err() {
+        if runtime
+          .recover_incomplete(operations.clone(), state.clone())
+          .await
+          .is_err()
+        {
           warn!("durable Admin operation recovery sweep failed");
         }
       }
@@ -90,11 +110,22 @@ impl DurableOperationRuntime {
     Ok(updated)
   }
 
-  pub(super) async fn recover_incomplete(&self) -> anyhow::Result<()> {
+  async fn recover_incomplete(
+    &self,
+    operations: AdminOperationRuntime,
+    state: AppHandle,
+  ) -> anyhow::Result<()> {
     let batch = self
       .journal
       .recover_expired(ADMIN_OPERATION_SCHEMA_VERSION, 1000)
       .await?;
+    // Preserve the journal's lifetime and recovery classification. These
+    // rows cannot be deferred or resumed even if their former lease remains.
+    let must_terminalize = batch
+      .requires_terminalization
+      .iter()
+      .map(|operation| operation.operation_id.clone())
+      .collect::<std::collections::HashSet<_>>();
     let mut incomplete = batch.requires_terminalization;
     incomplete.extend(batch.recovered);
     let orphans = self
@@ -111,11 +142,145 @@ impl DurableOperationRuntime {
       if current.state.is_terminal() {
         continue;
       }
+      if !must_terminalize.contains(&current.operation_id)
+        && current.kind == AdminOperationKind::CacheWarm
+        && current.recovery_class == AdminOperationRecoveryClass::Resumable
+      {
+        match current.state {
+          AdminOperationState::Queued => {
+            if self
+              .resume_cache_warm(&operations, state.clone(), &current)
+              .await
+              .is_ok()
+            {
+              continue;
+            }
+          }
+          AdminOperationState::CancellationRequested => {
+            // A cancellation recovered from an expired lease has no owner.
+            // Commit its fenced terminal receipt; never dispatch another item.
+            if current.owner_worker_id.is_none() {
+              self.cancel_unstarted(&current).await?;
+            }
+            // An old boot may still own an unexpired lease. Leave it alone
+            // until recover_expired fences that owner and clears it.
+            continue;
+          }
+          AdminOperationState::Claimed | AdminOperationState::Running => {
+            // A same-instance restart sees its former boot as an orphan
+            // before the lease expires. Deferring avoids terminalizing work
+            // that recover_expired will safely requeue under a new fence.
+            continue;
+          }
+          _ => {}
+        }
+      }
       self
         .terminalize_incomplete(&current, "executor_recovery_unavailable")
         .await?;
     }
     Ok(())
+  }
+
+  /// Reclaim the normal lease and run through the same executor used by a
+  /// local submission. The command artifact is authenticated against every
+  /// journal binding before it is deserialized; a crash can therefore repeat
+  /// at most the in-flight item, never synthesize a new command.
+  async fn resume_cache_warm(
+    &self,
+    operations: &AdminOperationRuntime,
+    state: AppHandle,
+    current: &JournalOperation,
+  ) -> anyhow::Result<()> {
+    let stored = self
+      .journal
+      .load_artifact(&current.operation_id, "command-v1")
+      .await?
+      .ok_or_else(|| anyhow::anyhow!("cache warm command artifact is absent"))?;
+    validate_command_binding(self.journal.namespace(), current, &stored.binding)?;
+    let plaintext = self.cipher.open(stored)?;
+    let command = serde_json::from_slice(plaintext.as_bytes())?;
+    let checkpoint = self.cache_warm_checkpoint(current).await?;
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if !operations
+      .insert_durable_local(
+        snapshot_from_journal(current),
+        std::sync::Arc::clone(&cancel),
+      )
+      .await
+    {
+      return Ok(());
+    }
+    let backend = self.clone();
+    let operation_id = current.operation_id.clone();
+    let principal = current.principal.clone();
+    let operations = operations.clone();
+    tokio::spawn(async move {
+      backend
+        .run_once(
+          operations,
+          operation_id,
+          cancel,
+          move |context| async move {
+            crate::server::admin::recover_cache_warm_command(
+              command, state, principal, context, checkpoint,
+            )
+            .await
+          },
+        )
+        .await;
+    });
+    Ok(())
+  }
+
+  async fn cache_warm_checkpoint(
+    &self,
+    current: &JournalOperation,
+  ) -> anyhow::Result<serde_json::Value> {
+    let Some(artifact_id) = current.checkpoint_artifact_id.as_deref() else {
+      return Ok(serde_json::json!({
+        "version": 1,
+        "next_index": 0,
+        "results": [],
+      }));
+    };
+    let stored = self
+      .journal
+      .load_artifact(&current.operation_id, artifact_id)
+      .await?
+      .context("cache warm checkpoint artifact is absent")?;
+    validate_checkpoint_binding(
+      self.journal.namespace(),
+      current,
+      &stored.binding,
+      artifact_id,
+    )?;
+    let plaintext = self.cipher.open(stored)?;
+    let checkpoint: serde_json::Value = serde_json::from_slice(plaintext.as_bytes())?;
+    let object = checkpoint
+      .as_object()
+      .filter(|value| {
+        value.len() == 3
+          && value.get("version") == Some(&serde_json::json!(1))
+          && value
+            .get("results")
+            .is_some_and(serde_json::Value::is_array)
+      })
+      .context("cache warm checkpoint is invalid")?;
+    let next_index = object
+      .get("next_index")
+      .and_then(serde_json::Value::as_u64)
+      .filter(|value| *value <= 128)
+      .and_then(|value| usize::try_from(value).ok())
+      .context("cache warm checkpoint is invalid")?;
+    anyhow::ensure!(
+      object
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|results| results.len() == next_index),
+      "cache warm checkpoint is invalid"
+    );
+    Ok(checkpoint)
   }
 
   async fn terminalize_incomplete(
@@ -178,4 +343,47 @@ impl DurableOperationRuntime {
     }
     Ok(updated)
   }
+}
+
+fn validate_command_binding(
+  namespace: &str,
+  operation: &JournalOperation,
+  binding: &OperationArtifactBinding,
+) -> anyhow::Result<()> {
+  anyhow::ensure!(
+    binding.namespace == namespace
+      && binding.operation_id == operation.operation_id
+      && binding.artifact_id == "command-v1"
+      && binding.artifact_kind == "command"
+      && binding.operation_kind == operation.kind.as_str()
+      && binding.schema_version == operation.schema_version
+      && binding.principal == operation.principal
+      && binding.permission_action == operation.permission_action
+      && binding.resource_digest == operation.resource_digest
+      && binding.request_fingerprint == operation.request_fingerprint,
+    "cache warm command artifact binding does not match its journal operation"
+  );
+  Ok(())
+}
+
+fn validate_checkpoint_binding(
+  namespace: &str,
+  operation: &JournalOperation,
+  binding: &OperationArtifactBinding,
+  artifact_id: &str,
+) -> anyhow::Result<()> {
+  anyhow::ensure!(
+    binding.namespace == namespace
+      && binding.operation_id == operation.operation_id
+      && binding.artifact_id == artifact_id
+      && binding.artifact_kind == "checkpoint"
+      && binding.operation_kind == operation.kind.as_str()
+      && binding.schema_version == operation.schema_version
+      && binding.principal == operation.principal
+      && binding.permission_action == operation.permission_action
+      && binding.resource_digest == operation.resource_digest
+      && binding.request_fingerprint == operation.request_fingerprint,
+    "cache warm checkpoint artifact binding does not match its journal operation"
+  );
+  Ok(())
 }

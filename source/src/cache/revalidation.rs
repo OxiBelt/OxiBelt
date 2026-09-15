@@ -53,6 +53,12 @@ fn update_prepared_not_modified(
   };
   let (shared_entry, external_metadata) = {
     let mut inner = cache.inner_guard();
+    // A 304 may arrive after an unsafe response invalidated this Q1 target.
+    // Validate while holding the same lock that detaches and republishes the
+    // entry, otherwise the revalidation path could resurrect old metadata.
+    if !cache.prepared_generation_current_locked(&inner, &prepared) {
+      return;
+    }
     let Some(mut stored) = detach_entry(&mut inner, &prepared.variant_key) else {
       return;
     };

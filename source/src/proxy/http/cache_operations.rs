@@ -23,6 +23,16 @@ pub(super) fn handle_cache_lookup_result(
   revalidation_entry: &mut Option<crate::cache::CacheEntry>,
   record_events: bool,
 ) -> Option<Response<ProxyBody>> {
+  if query::is_query(request_method) {
+    let entry = match &lookup {
+      crate::cache::CacheLookup::Fresh(entry) => entry,
+      crate::cache::CacheLookup::Stale(stale) => &stale.entry,
+      crate::cache::CacheLookup::Revalidate(revalidation) => &revalidation.entry,
+    };
+    if query::conditional::not_modified(entry, request_headers).is_err() {
+      return None;
+    }
+  }
   let certificate_authenticated = client_certificate::cache_identity(outbound)
     .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
     || proxy_tls::has_certificate_identity(outbound);
@@ -86,6 +96,7 @@ pub(super) fn handle_cache_lookup_result(
           resolved.execution_plan.waf,
           upstream,
           upstream_version,
+          request_method,
         )
         && cache_refresh::spawn_background_refresh(
           state.clone(),
@@ -311,6 +322,10 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   mut cache_fill_guard: Option<crate::cache::CacheFillGuard>,
   applied_route_security_headers: Option<&AppliedRouteSecurityHeaders>,
 ) -> Response<ProxyBody> {
+  let query_identity = response
+    .extensions()
+    .get::<crate::cache::CacheQueryIdentity>()
+    .cloned();
   if super::incremental::response_marked(&response) {
     drop(cache_fill_guard);
     let mut response = response;
@@ -364,6 +379,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   }
   let content_length = cache_streaming::exact_response_content_length(&cache_headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
+    query_identity: query_identity.as_ref(),
     proxy_protocol_identity,
     certificate_identity,
     policy_name: route_cache,
@@ -455,6 +471,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
         route,
         certificate_identity,
         proxy_protocol_identity,
+        query_identity.as_ref(),
         parts,
         body,
         prepared,

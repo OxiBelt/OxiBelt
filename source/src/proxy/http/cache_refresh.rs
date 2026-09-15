@@ -22,8 +22,9 @@ pub(super) fn can_background_refresh(
   waf: crate::routes::RouteWafExecutionPlan,
   upstream: &UpstreamConfig,
   upstream_version: HttpVersion,
+  method: &Method,
 ) -> bool {
-  upstream_version != HttpVersion::H3
+  (upstream_version != HttpVersion::H3 || super::query::is_query(method))
     && upstream.proxy_protocol_egress == ProxyProtocolEgressMode::Off
     && !waf.response.enabled()
 }
@@ -45,6 +46,18 @@ pub(super) fn spawn_background_refresh(
   stale: crate::cache::StaleEntry,
 ) -> bool {
   let certificate_identity = super::client_certificate::cache_identity(outbound).cloned();
+  let query_identity = outbound
+    .extensions()
+    .get::<crate::cache::CacheQueryIdentity>()
+    .cloned();
+  let query_snapshot = outbound
+    .extensions()
+    .get::<super::query::capture::QueryReplaySnapshot>()
+    .cloned();
+  if super::query::is_query(&method) && (query_identity.is_none() || query_snapshot.is_none()) {
+    state.metrics.record_cache_background_refresh_skip();
+    return false;
+  }
   let Some(permit) = state.cache.try_background_refresh_permit(route_cache) else {
     state.metrics.record_cache_background_refresh_skip();
     return false;
@@ -57,9 +70,19 @@ pub(super) fn spawn_background_refresh(
     outbound.headers_mut().insert(name.clone(), value.clone());
   }
   tokio::spawn(async move {
+    if let Some(snapshot) = query_snapshot {
+      match snapshot.body().await {
+        Ok(body) => *outbound.body_mut() = body,
+        Err(_) => {
+          state.metrics.record_cache_background_refresh_error();
+          return;
+        }
+      }
+    }
     let Some(fill_permit) = state
       .cache
       .begin_fill_async(crate::cache::CacheLookupContext {
+        query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,
         certificate_identity: certificate_identity.as_ref(),
         policy_name: route_cache.as_deref(),
@@ -102,6 +125,7 @@ pub(super) fn spawn_background_refresh(
       uri,
       request_headers,
       certificate_identity,
+      query_identity,
       stale.entry,
     )
     .await
@@ -128,18 +152,26 @@ async fn background_refresh(
   uri: http::Uri,
   request_headers: HeaderMap,
   certificate_identity: Option<crate::cache::CacheCertificateIdentity>,
+  query_identity: Option<crate::cache::CacheQueryIdentity>,
   cached_entry: crate::cache::CacheEntry,
 ) -> anyhow::Result<()> {
-  let Some(client) =
-    state
-      .clients
-      .for_upstream_version(&upstream.name, upstream.origin.scheme(), upstream_version)
-  else {
-    state.metrics.record_cache_background_refresh_skip();
-    return Ok(());
-  };
   let retry_policy = EffectiveRetryPolicy::disabled_direct();
-  let response = send_with_retry(client, outbound, timeouts, &state, &retry_policy, None).await?;
+  let response = if upstream_version == HttpVersion::H3 {
+    super::retry::send_h3_with_retry(outbound, &upstream, timeouts, &state, &retry_policy, None)
+      .await?
+  } else {
+    let Some(client) = state.clients.for_upstream_version(
+      &upstream.name,
+      upstream.origin.scheme(),
+      upstream_version,
+    ) else {
+      state.metrics.record_cache_background_refresh_skip();
+      return Ok(());
+    };
+    send_with_retry(client, outbound, timeouts, &state, &retry_policy, None)
+      .await?
+      .map(|body| body.map_err(boxed_error).boxed())
+  };
   if super::incremental::response_marked(&response) {
     state.metrics.record_cache_background_refresh_skip();
     return Ok(());
@@ -152,6 +184,7 @@ async fn background_refresh(
       .cache
       .update_from_not_modified_async(
         crate::cache::CacheInsertContext {
+          query_identity: query_identity.as_ref(),
           proxy_protocol_identity: None,
           certificate_identity: certificate_identity.as_ref(),
           policy_name: route_cache.as_deref(),
@@ -184,10 +217,12 @@ async fn background_refresh(
     return Ok(());
   }
   let body = body::with_read_timeout(
-    body.map_err(boxed_error).boxed(),
+    body,
     timeouts.upstream_read,
     BodyTimeoutKind::UpstreamResponseRead,
   );
+  let body: ProxyBody =
+    http_body_util::Limited::new(body, state.config.proxy.buffering.max_memory_body_bytes).boxed();
   let bytes = body
     .collect()
     .await
@@ -199,6 +234,7 @@ async fn background_refresh(
     .cache
     .insert_async(
       crate::cache::CacheInsertContext {
+        query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,
         certificate_identity: certificate_identity.as_ref(),
         policy_name: route_cache.as_deref(),

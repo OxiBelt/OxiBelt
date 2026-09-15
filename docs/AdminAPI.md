@@ -605,6 +605,32 @@ subject, or group overrides require `ipm:SimulatePrincipal` plus the referenced
 target resources; inline policy or binding overlays require `ipm:SimulatePolicy`
 plus the touched policy, binding, principal, or group resources.
 
+`POST /admin/v1/cache/warm` keeps its existing GET and HEAD JSON item shape.
+An exact-uppercase `QUERY` item additionally requires a valid single
+`Content-Type` and `query_body_base64`, and may include ordered `query_trailers`
+entries of `{ "name", "value_base64" }`; the decoded body is limited to 48 KiB and the
+complete Admin request remains limited to 64 KiB. QUERY warming rejects routes
+whose cache identity needs trusted PROXY-TLS evidence with `422`. The generic
+`POST /admin/v1/operations` request limit remains 1 MiB, but its
+`cache_warm` command is independently limited to the same 64 KiB serialized
+warm shape.
+
+For QUERY, `POST /admin/v1/cache/key-explain` requires
+`query.original` and `query.effective`. Each representation contains its
+explicit `{scheme, authority, uri}` target, ordered base64 header and trailer
+entries, and `body_base64`. The response returns that supplied representation
+under `query`; it does not infer or disclose body content, a body digest, or a
+transformation. Existing GET and HEAD explain request and response shapes are
+unchanged.
+
+Durable asynchronous cache warming seals the submitted request, direct peer,
+and authenticated request context. A restart resolves the submitting principal
+from the current enabled IPM snapshot and reauthorizes the current policy and
+host for every remaining item. Each completed item has an encrypted, atomically
+published cursor checkpoint. Revoked principals, changed permissions, invalid
+artifacts, missing context from legacy commands, and every other operation kind
+fail closed instead of replaying.
+
 The legacy signed query purge endpoints under `/cache/purge*` are documented
 in `docs/Configuration.md`; they are intentionally outside the first
 `/admin/v1/*` OpenAPI contract.

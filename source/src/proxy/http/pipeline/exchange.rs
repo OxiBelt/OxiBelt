@@ -80,8 +80,8 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     request_headers,
     certificate_identity,
     proxy_protocol_identity,
-    stale_on_error,
-    revalidation_entry,
+    mut stale_on_error,
+    mut revalidation_entry,
     cache_store_allowed,
     cache_fill_guard,
   } = context;
@@ -119,128 +119,122 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
   );
 
   let upstream_started_at = Instant::now();
+  // Cache QUERY identity is captured before any transport attempt consumes
+  // the outbound body. It is later handed to both 304 revalidation and the
+  // cache-store response path without changing their public call shape.
+  let mut query_identity = outbound
+    .extensions()
+    .get::<crate::cache::CacheQueryIdentity>()
+    .cloned();
   let mut report_pool_success = true;
   let upstream_response = if upstream_version == HttpVersion::H3 {
-    let mut upstream_admission = match state
-      .circuit_breakers
-      .admit_upstream_attempt(
-        &resolved.route.name,
-        selected_pool_name.as_deref(),
-        Instant::now().checked_add(timeouts.upstream_request),
+    let retry_policy = if native_grpc_request {
+      EffectiveRetryPolicy::for_grpc_request(
+        &state.config,
+        resolved.route,
+        semantics::should_retry_grpc(&state.config),
       )
-      .await
-    {
-      Ok(lease) => lease,
-      Err(rejection) => {
-        return route_security.apply(circuit_breaker_rejection_response(state, rejection));
-      }
-    };
-    let upstream_stream_lease = match state
-      .circuit_breakers
-      .admit_upstream_stream(
-        &resolved.route.name,
-        selected_pool_name.as_deref(),
-        Instant::now().checked_add(timeouts.upstream_request),
-      )
-      .await
-    {
-      Ok(lease) => lease,
-      Err(rejection) => {
-        return route_security.apply(circuit_breaker_rejection_response(state, rejection));
-      }
-    };
-    let upstream_stream_lease = if let Some(exchange) = &incremental_exchange {
-      // Keep accounting through asynchronous FIN/reset, including when the
-      // response-header future is cancelled before it returns a response.
-      exchange.retain(upstream_stream_lease);
-      None
     } else {
-      Some(upstream_stream_lease)
+      EffectiveRetryPolicy::for_http_request(&state.config, resolved.route, &request_method)
     };
-    match tokio::time::timeout(
-      timeouts.upstream_first_byte,
-      crate::proxy::http3::forward_request(outbound, upstream, state.as_ref(), timeouts),
-    )
-    .await
-    {
-      Err(_) => {
-        upstream_admission.record_outcome(crate::circuit_breakers::CircuitOutcome::Failure(
-          crate::circuit_breakers::CircuitOutcomeFailure::FirstByteTimeout,
-        ));
-        if should_report_upstream_request_failure(true, grpc_timeout_caps) {
-          state.pools.report_failure_async(&upstream.name).await;
+    let mut pool_failures_reported = false;
+    let result = if let Some(selection) = pool_selection.take() {
+      pool_failures_reported = true;
+      send_pool_with_retry(
+        state.as_ref(),
+        outbound,
+        upstream_index,
+        selection,
+        resolved.route,
+        &request_uri,
+        &resolved.path_captures,
+        client_addr,
+        host,
+        downstream_scheme,
+        pool_retry_cookie.as_ref(),
+        &request_waf,
+        timeouts,
+        &retry_policy,
+      )
+      .await
+      .map(|success| {
+        if !success.cache_identity_unchanged {
+          // A pool retry selected a new effective origin target. Forward the
+          // response, but bypass QUERY cache insertion rather than binding it
+          // to the identity captured for the first target.
+          query_identity = None;
+          if query::is_query(&request_method) {
+            stale_on_error = None;
+            revalidation_entry = None;
+          }
         }
-        warn!(upstream = %upstream.name, "upstream HTTP/3 request timed out");
+        upstream_index = success.upstream_index;
+        upstream = &state.upstreams[upstream_index];
+        access_log.set_upstream(&upstream.name, upstream.origin.scheme());
+        report_pool_success = success.report_success;
+        sticky_cookie = success.pool_selection.sticky_cookie();
+        pool_selection = Some(success.pool_selection);
+        success.response
+      })
+    } else {
+      send_h3_with_retry(
+        outbound,
+        upstream,
+        timeouts,
+        state,
+        &retry_policy,
+        Some(RetryAdmissionContext {
+          route_name: &resolved.route.name,
+          pool_name: selected_pool_name.as_deref(),
+        }),
+      )
+      .await
+    };
+    match result {
+      Ok(mut response) => {
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
-        access_log.record_upstream_error("read_timeout", "upstream request timed out");
-        if let Some(entry) = stale_on_error.clone()
-          && state
-            .cache
-            .stale_if_error_allows_read_timeout(resolved.route.cache.as_deref())
-        {
-          state.metrics.record_cache_stale();
-          return stale_if_error_response(entry);
-        }
-        return upstream_error_response(
-          state,
-          resolved.route,
-          &request_method,
-          &request_uri,
-          request_version,
-          &request_headers,
-          client_addr,
-          host,
-          tcp_max_hop,
-          tls.as_ref(),
-          protocol,
-          transport_network,
-          transport_metadata,
-          request_body,
-          tags_ref(&tags),
-          &upstream.name,
-          upstream.origin.scheme(),
-          access_log.upstream_connect_time_ms,
-          access_log.upstream_first_byte_time_ms,
-          "read_timeout",
-          Some("http_response_timeout"),
-          "upstream request timed out",
-          &request_waf.response_header_mutations,
-          access_log,
-        );
-      }
-      Ok(Ok(mut response)) => {
-        upstream_admission.record_outcome(crate::circuit_breakers::CircuitOutcome::Failure(
-          crate::circuit_breakers::CircuitOutcomeFailure::Status(response.status().as_u16()),
-        ));
-        access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
+        let stream_lease = retry::take_stream_lease(&mut response);
         if let Some(exchange) = &incremental_exchange {
           response.extensions_mut().insert(exchange.clone());
-        }
-        if let Some(lease) = upstream_stream_lease {
+          if let Some(lease) = stream_lease {
+            exchange.retain(lease);
+          }
+          response
+        } else if let Some(lease) = stream_lease {
           with_circuit_breaker_request_lease(response, lease)
         } else {
           response
         }
       }
-      Ok(Err(error)) => {
+      Err(error) => {
         if let Some(rejection) = circuit_breakers::admission_rejection(&error) {
           return route_security.apply(circuit_breaker_rejection_response(state, rejection));
         }
-        upstream_admission.record_outcome(crate::circuit_breakers::CircuitOutcome::Failure(
-          crate::circuit_breakers::CircuitOutcomeFailure::ConnectError,
-        ));
-        state.pools.report_failure_async(&upstream.name).await;
-        warn!(
-            error = %error,
-            upstream = %upstream.name,
-            "upstream HTTP/3 request failed"
-        );
+        let upstream_first_byte_timeout = error_is_upstream_first_byte_timeout(&error);
+        if !pool_failures_reported
+          && should_report_upstream_request_failure(upstream_first_byte_timeout, grpc_timeout_caps)
+        {
+          state.pools.report_failure_async(&upstream.name).await;
+        }
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
-        access_log.record_upstream_error("connect_error", &error.to_string());
+        let error_message = error.to_string();
+        let error_code = if upstream_first_byte_timeout || error_message.contains("timed out") {
+          "read_timeout"
+        } else {
+          "connect_error"
+        };
+        warn!(error = %error, upstream = %upstream.name, "upstream HTTP/3 request failed");
+        access_log.record_upstream_error(error_code, &error_message);
         if let Some(entry) = stale_on_error.clone()
-          && state
-            .cache
-            .stale_if_error_allows_connect(resolved.route.cache.as_deref())
+          && if error_code == "read_timeout" {
+            state
+              .cache
+              .stale_if_error_allows_read_timeout(resolved.route.cache.as_deref())
+          } else {
+            state
+              .cache
+              .stale_if_error_allows_connect(resolved.route.cache.as_deref())
+          }
         {
           state.metrics.record_cache_stale();
           return stale_if_error_response(entry);
@@ -265,9 +259,9 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           upstream.origin.scheme(),
           access_log.upstream_connect_time_ms,
           access_log.upstream_first_byte_time_ms,
-          "connect_error",
+          error_code,
           crate::upstream_failure::classify(error.as_ref()).map(|failure| failure.as_str()),
-          &error.to_string(),
+          &error_message,
           &request_waf.response_header_mutations,
           access_log,
         );
@@ -324,6 +318,16 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         )
         .await
         .map(|success| {
+          if !success.cache_identity_unchanged {
+            // A pool retry selected a new effective origin target. Forward the
+            // response, but bypass QUERY cache insertion rather than binding it
+            // to the identity captured for the first target.
+            query_identity = None;
+            if query::is_query(&request_method) {
+              stale_on_error = None;
+              revalidation_entry = None;
+            }
+          }
           upstream_index = success.upstream_index;
           upstream = &state.upstreams[upstream_index];
           access_log.set_upstream(&upstream.name, upstream.origin.scheme());
@@ -367,7 +371,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           if let Some(capture) = early_hints_capture {
             semantics::attach_interim_responses(&mut response, capture.take());
           }
-          response
+          response.map(|body| body.map_err(boxed_error).boxed())
         })
       }
     } else {
@@ -381,6 +385,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         timeouts,
       )
       .await
+      .map(|response| response.map(|body| body.map_err(boxed_error).boxed()))
     };
     match result {
       Ok(mut response) => {
@@ -389,7 +394,6 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         }
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         let stream_lease = retry::take_stream_lease(&mut response);
-        let response = response.map(|body| body.map_err(boxed_error).boxed());
         match stream_lease {
           Some(lease) => with_circuit_breaker_request_lease(response, lease),
           None => response,
@@ -465,6 +469,15 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       }
     }
   };
+  query::invalidate_after_origin_response(
+    state.as_ref(),
+    &request_method,
+    upstream_response.status(),
+    downstream_scheme,
+    host,
+    &request_uri,
+  )
+  .await;
   if report_pool_success {
     if let Some(latency_ms) = access_log.upstream_first_byte_time_ms {
       state
@@ -550,6 +563,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         .update_from_not_modified_async(
           crate::cache::CacheInsertContext {
             proxy_protocol_identity: proxy_protocol_identity.as_ref(),
+            query_identity: query_identity.as_ref(),
             certificate_identity: certificate_identity.as_ref(),
             policy_name: resolved.route.cache.as_deref(),
             scheme: downstream_scheme,
@@ -812,8 +826,12 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     }
   };
 
+  let mut cache_candidate = Response::from_parts(parts, body);
+  if let Some(query_identity) = query_identity {
+    cache_candidate.extensions_mut().insert(query_identity);
+  }
   let mut response = maybe_cache_response_with_store_permission(
-    Response::from_parts(parts, body),
+    cache_candidate,
     state,
     resolved.route.cache.as_deref(),
     downstream_scheme,

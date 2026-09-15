@@ -2,7 +2,7 @@
 //! One fill owner streams the upstream response while waiters observe the committed entry.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime};
@@ -15,7 +15,7 @@ use crate::runtime_health::{
 };
 use crate::shared_state::SharedCacheLock;
 
-use super::{CacheLookupContext, ResponseCache, request_no_store};
+use super::{CacheLookupContext, CacheQueryInvalidationTarget, ResponseCache};
 
 const FILL_SHARDS: usize = 64;
 const SHORT_SUPPRESSION_TTL: Duration = Duration::from_secs(1);
@@ -120,9 +120,16 @@ pub(crate) struct CacheFillCoordinator {
 
 #[derive(Debug, Default)]
 struct CacheFillShard {
-  inflight: HashMap<String, Arc<Notify>>,
+  inflight: HashMap<String, InflightFill>,
+  fenced: HashSet<String>,
   suppressed_until: HashMap<String, SuppressedFill>,
   suppressed_order: VecDeque<String>,
+}
+
+#[derive(Debug)]
+struct InflightFill {
+  notify: Arc<Notify>,
+  query_target: Option<CacheQueryInvalidationTarget>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -144,8 +151,8 @@ impl CacheFillCoordinator {
       Ok(shard) => shard,
       Err(poisoned) => {
         let mut shard = poisoned.into_inner();
-        for notify in shard.inflight.values() {
-          notify.notify_waiters();
+        for fill in shard.inflight.values() {
+          fill.notify.notify_waiters();
         }
         *shard = CacheFillShard::default();
         self.shards[shard_index].clear_poison();
@@ -166,24 +173,34 @@ impl CacheFillCoordinator {
   pub(crate) fn begin(
     self: &Arc<Self>,
     key: String,
+    query_target: Option<CacheQueryInvalidationTarget>,
     overload: Option<Arc<OverloadRuntime>>,
   ) -> CacheFillDecision {
     let shard_index = shard_index(&key);
     let now = SystemTime::now();
     let mut shard = self.shard_guard(shard_index);
     prune_suppressions(&mut shard, now);
+    if shard.fenced.contains(&key) {
+      return CacheFillDecision::Suppressed(CacheFillSuppressionReason::Unknown);
+    }
     if let Some(suppressed) = shard.suppressed_until.get(&key)
       && suppressed.until > now
     {
       return CacheFillDecision::Suppressed(suppressed.reason);
     }
-    if let Some(notify) = shard.inflight.get(&key) {
+    if let Some(fill) = shard.inflight.get(&key) {
       return CacheFillDecision::Follower(CacheFillWaiter {
-        notify: notify.clone(),
+        notify: fill.notify.clone(),
       });
     }
     let notify = Arc::new(Notify::new());
-    shard.inflight.insert(key.clone(), notify.clone());
+    shard.inflight.insert(
+      key.clone(),
+      InflightFill {
+        notify: notify.clone(),
+        query_target,
+      },
+    );
     CacheFillDecision::Leader(CacheFillGuard {
       coordinator: Arc::downgrade(self),
       key,
@@ -216,14 +233,42 @@ impl CacheFillCoordinator {
     }
   }
 
+  /// Stops existing QUERY fills for this target from publishing after
+  /// invalidation. The fence clears when the owning fill guard completes.
+  pub(crate) fn fence_query_target(&self, target: &CacheQueryInvalidationTarget) {
+    for shard_index in 0..FILL_SHARDS {
+      let mut shard = self.shard_guard(shard_index);
+      let keys = shard
+        .inflight
+        .iter()
+        .filter(|(_, fill)| {
+          fill
+            .query_target
+            .as_ref()
+            .is_some_and(|item| target.matches(item))
+        })
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+      shard.fenced.extend(keys);
+    }
+  }
+
+  pub(crate) fn is_fenced(&self, key: &str) -> bool {
+    self.shard_guard(shard_index(key)).fenced.contains(key)
+  }
+
   fn finish(&self, key: &str, fallback: &Arc<Notify>) -> Arc<Notify> {
     let shard_index = shard_index(key);
     let mut shard = self.shard_guard(shard_index);
     match shard.inflight.get(key) {
-      Some(current) if Arc::ptr_eq(current, fallback) => shard
-        .inflight
-        .remove(key)
-        .unwrap_or_else(|| fallback.clone()),
+      Some(current) if Arc::ptr_eq(&current.notify, fallback) => {
+        shard.fenced.remove(key);
+        shard
+          .inflight
+          .remove(key)
+          .map(|fill| fill.notify)
+          .unwrap_or_else(|| fallback.clone())
+      }
       Some(_) | None => fallback.clone(),
     }
   }
@@ -237,7 +282,10 @@ impl ResponseCache {
     if !self.config.lock || !self.policy_enabled(ctx.policy_name, ctx.method) {
       return None;
     }
-    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
+    if super::lookup::cache_request_bypassed(&ctx, &self.bypass_request_headers) {
+      return None;
+    }
+    if super::lookup::query_context_origin_precondition_bypass(&ctx) {
       return None;
     }
     let overload = self.overload.load().clone();
@@ -247,19 +295,25 @@ impl ResponseCache {
     {
       return None;
     }
-    let key = self
-      .operation_context(
-        ctx.policy_name,
-        ctx.scheme,
-        ctx.host,
-        ctx.method,
-        ctx.uri,
-        ctx.request_headers,
-        ctx.certificate_identity,
-        ctx.proxy_protocol_identity,
-      )?
-      .fill_key;
-    match self.fills.begin(key.clone(), overload) {
+    let operation = self.operation_context(
+      ctx.policy_name,
+      ctx.scheme,
+      ctx.host,
+      ctx.method,
+      ctx.uri,
+      super::lookup::cache_view_headers(&ctx),
+      ctx.query_identity,
+      ctx.certificate_identity,
+      ctx.proxy_protocol_identity,
+    )?;
+    if self.query_target_cache_bypassed(&operation) {
+      return None;
+    }
+    let key = operation.fill_key;
+    match self
+      .fills
+      .begin(key.clone(), operation.query_target, overload)
+    {
       CacheFillDecision::Leader(guard) => Some(CacheFillDecision::Leader(guard)),
       CacheFillDecision::Follower(waiter) => Some(CacheFillDecision::Follower(waiter)),
       CacheFillDecision::SharedConflict => Some(CacheFillDecision::SharedConflict),
@@ -301,13 +355,13 @@ mod tests {
     let health = Arc::new(RuntimeHealth::default());
     let coordinator = CacheFillCoordinator::new(health.clone());
     let key = "https://example.test/stampede".to_string();
-    let old_leader = match coordinator.begin(key.clone(), None) {
+    let old_leader = match coordinator.begin(key.clone(), None, None) {
       CacheFillDecision::Leader(leader) => leader,
       other => panic!("first fill should lead, got {other:?}"),
     };
     let mut notifications = Vec::new();
     for _ in 0..16 {
-      let waiter = match coordinator.begin(key.clone(), None) {
+      let waiter = match coordinator.begin(key.clone(), None, None) {
         CacheFillDecision::Follower(waiter) => waiter,
         other => panic!("concurrent fill should wait, got {other:?}"),
       };
@@ -328,7 +382,7 @@ mod tests {
     }));
     assert!(poisoned.is_err(), "injected poison should panic");
 
-    let replacement_leader = match coordinator.begin(key.clone(), None) {
+    let replacement_leader = match coordinator.begin(key.clone(), None, None) {
       CacheFillDecision::Leader(leader) => leader,
       other => panic!("recovery should elect a replacement leader, got {other:?}"),
     };
@@ -339,7 +393,7 @@ mod tests {
     }
 
     drop(old_leader);
-    let replacement_waiter = match coordinator.begin(key.clone(), None) {
+    let replacement_waiter = match coordinator.begin(key.clone(), None, None) {
       CacheFillDecision::Follower(waiter) => waiter,
       other => panic!("stale leader drop must not evict replacement, got {other:?}"),
     };
@@ -350,7 +404,7 @@ mod tests {
       .await
       .expect("replacement leader drop should wake its waiter");
     assert!(matches!(
-      coordinator.begin(key, None),
+      coordinator.begin(key, None, None),
       CacheFillDecision::Leader(_)
     ));
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast};
 use tracing::warn;
@@ -45,6 +46,7 @@ pub(super) struct DurableOperationRuntime {
   pub(super) max_queued: usize,
   pub(super) max_stored: usize,
   pub(super) result_max_bytes: usize,
+  pub(super) checkpoint_max_bytes: usize,
   pub(super) shutting_down: Arc<AtomicBool>,
 }
 
@@ -275,7 +277,7 @@ impl DurableOperationRuntime {
     });
   }
 
-  async fn run_once<F, Fut>(
+  pub(in crate::server) async fn run_once<F, Fut>(
     self,
     runtime: AdminOperationRuntime,
     operation_id: String,
@@ -499,6 +501,88 @@ impl DurableOperationRuntime {
           cancel.store(true, Ordering::SeqCst);
         }
         warn!(operation_id, error = %error, "failed to persist durable Admin operation progress")
+      }
+    }
+  }
+
+  pub(super) async fn checkpoint(
+    &self,
+    runtime: &AdminOperationRuntime,
+    operation_id: &str,
+    guard: &Arc<Mutex<LeaseGuard>>,
+    progress: AdminOperationProgress,
+    checkpoint: Value,
+  ) {
+    let progress_value = match serde_json::to_value(&progress) {
+      Ok(value) => value,
+      Err(_) => return,
+    };
+    let checkpoint_bytes = match serde_json::to_vec(&checkpoint) {
+      Ok(bytes) => bytes,
+      Err(_) => return,
+    };
+    if checkpoint_bytes.len() > self.checkpoint_max_bytes {
+      if let Some((cancel, _, _)) = runtime.durable_local_parts(operation_id).await {
+        cancel.store(true, Ordering::SeqCst);
+      }
+      return;
+    }
+    let mut current = guard.lock().await;
+    let result = async {
+      let operation = self
+        .journal
+        .load(&current.operation_id)
+        .await?
+        .context("checkpointed Admin operation disappeared")?;
+      anyhow::ensure!(
+        operation.revision == current.expected_revision,
+        "checkpointed Admin operation lost its fencing revision"
+      );
+      let artifact_id = format!("checkpoint-v1-{}", operation.revision.saturating_add(1));
+      let binding = OperationArtifactBinding {
+        namespace: self.journal.namespace().to_string(),
+        operation_id: operation.operation_id.clone(),
+        artifact_id: artifact_id.clone(),
+        artifact_kind: "checkpoint".to_string(),
+        operation_kind: operation.kind.as_str().to_string(),
+        schema_version: operation.schema_version,
+        principal: operation.principal.clone(),
+        permission_action: operation.permission_action.clone(),
+        resource_digest: operation.resource_digest.clone(),
+        request_fingerprint: operation.request_fingerprint.clone(),
+      };
+      let sealed = self
+        .cipher
+        .seal(binding, OperationArtifactPlaintext::new(checkpoint_bytes))?;
+      let mut tx = self.journal.pool().begin().await?;
+      anyhow::ensure!(
+        self.journal.put_artifact_tx(&mut tx, &sealed).await?,
+        "checkpoint artifact already exists"
+      );
+      let updated = self
+        .journal
+        .update_progress_tx(&mut tx, &current, &progress_value, Some(&artifact_id))
+        .await?
+        .context("checkpointed Admin operation lost its fence")?;
+      tx.commit().await?;
+      Ok::<_, anyhow::Error>(Some(updated))
+    }
+    .await;
+    match result {
+      Ok(Some(operation)) => {
+        if let Some(next) = operation.lease_guard() {
+          *current = next;
+        }
+        drop(current);
+        runtime
+          .publish_durable(snapshot_from_journal(&operation), "operation.progress")
+          .await;
+      }
+      Ok(None) | Err(_) => {
+        drop(current);
+        if let Some((cancel, _, _)) = runtime.durable_local_parts(operation_id).await {
+          cancel.store(true, Ordering::SeqCst);
+        }
       }
     }
   }

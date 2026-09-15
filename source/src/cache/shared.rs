@@ -50,5 +50,6 @@ pub(in crate::cache) fn shared_cache_entry_metadata(
       })
       .collect(),
     tags: entry.tags.clone(),
+    query_target_epoch: entry.query_target_epoch,
   }
 }

@@ -56,6 +56,12 @@ pub(super) fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
     "security_headers_neutral={}",
     entry.security_headers_neutral
   ));
+  if super::is_query_v1_base_key(&entry.base_key) {
+    let epoch = entry
+      .query_target_epoch
+      .ok_or_else(|| anyhow!("Q1 disk entry is missing its target epoch"))?;
+    lines.push(format!("query_target_epoch={epoch}"));
+  }
   for matcher in &entry.vary {
     lines.push(format!(
       "vary={}:{}",
@@ -185,6 +191,18 @@ pub(super) fn decode_metadata_text(
     .get("security_headers_neutral")
     .and_then(|items| items.first())
     .is_some_and(|value| value == "true");
+  let query_target_epoch = values
+    .get("query_target_epoch")
+    .and_then(|items| items.first())
+    .map(|value| {
+      value
+        .parse::<u64>()
+        .map_err(|_| anyhow!("invalid Q1 cache target epoch"))
+    })
+    .transpose()?;
+  if super::is_query_v1_base_key(&base_key) && query_target_epoch.is_none() {
+    bail!("legacy Q1 disk metadata is missing its target epoch");
+  }
   Ok(StoredEntry {
     policy,
     partition,
@@ -204,6 +222,7 @@ pub(super) fn decode_metadata_text(
     stored_at,
     vary,
     tags,
+    query_target_epoch,
     size,
   })
 }

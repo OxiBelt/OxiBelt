@@ -398,6 +398,14 @@ where
     }
   }
   let mut request = request.map(|body| body.map_err(Into::into).boxed());
+  if query::is_query(&request_method)
+    && state
+      .cache
+      .policy_enabled(resolved.route.cache.as_deref(), &request_method)
+    && !incremental::request_marked(&request)
+  {
+    request = query::capture::track_original(request, downstream_scheme, host);
+  }
   let auth_body_capture = !request.body().is_end_stream()
     && state.config.external_auth.iter().any(|auth| {
       Some(auth.name.as_str()) == resolved.route.external_auth.as_deref()

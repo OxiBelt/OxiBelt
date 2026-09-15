@@ -56,6 +56,7 @@ fn external_hit(
       must_revalidate: false,
       vary,
       tags: Vec::new(),
+      query_target_epoch: None,
     },
     body: ExternalCacheBody::Memory(body),
   }
@@ -74,6 +75,7 @@ fn external_memory_hit_is_promoted_after_validation() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let operation = cache
@@ -84,6 +86,7 @@ fn external_memory_hit_is_promoted_after_validation() {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
     )
@@ -122,6 +125,7 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let operation = cache
@@ -132,6 +136,7 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
     )
@@ -161,6 +166,7 @@ fn external_mismatched_uri_is_safe_miss() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let operation = cache
@@ -171,6 +177,7 @@ fn external_mismatched_uri_is_safe_miss() {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
     )
@@ -204,6 +211,7 @@ fn external_sensitive_vary_is_safe_miss() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let operation = cache
@@ -214,6 +222,7 @@ fn external_sensitive_vary_is_safe_miss() {
       ctx.method,
       ctx.uri,
       ctx.request_headers,
+      ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
     )
@@ -248,5 +257,32 @@ fn external_certificate_vary_with_a_value_is_safe_miss() {
       Some(&identity),
     )
     .is_none()
+  );
+}
+
+#[cfg(feature = "admin-runtime")]
+#[tokio::test]
+async fn legacy_external_purges_do_not_emit_query_protocol_requests() {
+  let cache = cache_with_external_handler();
+  assert_eq!(
+    cache
+      .purge_external_exact_partition("default", "https", "example.test", "/asset", None)
+      .await
+      .len(),
+    1
+  );
+  assert_eq!(
+    cache
+      .purge_external_prefix_partition("default", "https", "example.test", "/", None)
+      .await
+      .len(),
+    1
+  );
+  assert_eq!(
+    cache
+      .purge_external_tag_partition("default", "tag", None, None, None)
+      .await
+      .len(),
+    1
   );
 }

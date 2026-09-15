@@ -1,0 +1,102 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = ["upstream-ca.pem"]
+
+[cache]
+enabled = true
+store = "memory"
+max_size_bytes = 1048576
+default_ttl_seconds = 60
+cache_methods = ["GET", "QUERY"]
+respect_cache_control = false
+
+[[upstreams]]
+name = "http-upstream"
+origin = "http://mock-http:18080/origin"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[upstreams]]
+name = "h2-upstream"
+origin = "https://mock-h2:18444/h2-origin"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[upstreams]]
+name = "h3-upstream"
+origin = "https://mock-h3:18445/h3-origin"
+max_http_version = "h3"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+webrtc = true
+webtransport = true
+
+[[routes]]
+name = "query-h1"
+hosts = ["example.test"]
+path_prefix = "/h1"
+upstream = "http-upstream"
+upstream_http_version = "h1"
+cache = "default"
+
+[[routes]]
+name = "query-h2"
+hosts = ["example.test"]
+path_prefix = "/h2"
+upstream = "h2-upstream"
+upstream_http_version = "h2"
+cache = "default"
+
+[[routes]]
+name = "query-h3"
+hosts = ["example.test"]
+path_prefix = "/h3"
+upstream = "h3-upstream"
+upstream_http_version = "h3"
+cache = "default"
+
+[quic.socket]
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = "auto"
+reuse_port = true

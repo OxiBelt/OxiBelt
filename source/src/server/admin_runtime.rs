@@ -78,6 +78,7 @@ pub(crate) async fn prepare_controlled(
     let snapshot = state.snapshot();
     AdminOperationRuntime::prepare(&snapshot.config, &snapshot.admin_audit).await?
   };
+  admin_operations.activate_recovery(state.clone()).await?;
   let mut listeners = ListenerSupervisor::start(
     state.clone(),
     error_tx.clone(),

@@ -3,6 +3,170 @@
 use super::*;
 
 impl ResponseCache {
+  /// Invalidates only Q1 variants of one target after a successful unsafe or
+  /// unknown-method origin response.  Administrative purges deliberately stay
+  /// broad; this internal path must not alter GET/HEAD entries.
+  pub async fn invalidate_query_target_async(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+    partition: Option<&str>,
+  ) -> anyhow::Result<usize> {
+    let target = CacheQueryInvalidationTarget::new(policy, scheme, host, uri, partition);
+    let shared_epoch = match self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+    {
+      Some(shared) => match shared
+        .cache_advance_query_epoch(policy, scheme, host, uri)
+        .await
+      {
+        Ok(epoch) => Some(epoch),
+        Err(error) => {
+          self.advance_query_generation(&target);
+          self.fills.fence_query_target(&target);
+          self.invalidate_query_target_inner(&target);
+          self.mark_query_invalidation_failed(target);
+          return Err(
+            error.context("QUERY cache invalidation could not advance the shared target epoch"),
+          );
+        }
+      },
+      None => None,
+    };
+    let external_epoch = if shared_epoch.is_none()
+      && self
+        .policy(Some(policy))
+        .is_some_and(|item| item.external_handler.is_some())
+    {
+      match self.external_query_epoch(&target, true).await {
+        Some(epoch) => Some(epoch),
+        None => {
+          self.mark_query_invalidation_failed(target);
+          anyhow::bail!("QUERY cache invalidation could not advance the external target epoch");
+        }
+      }
+    } else {
+      None
+    };
+    self.advance_query_generation_to(&target, shared_epoch.or(external_epoch));
+    self.fills.fence_query_target(&target);
+    let local_count = self.invalidate_query_target_inner(&target);
+    let shared_result = match self
+      .shared_state
+      .as_ref()
+      .filter(|shared| shared.has_cache())
+    {
+      Some(shared) => {
+        shared
+          .cache_purge_query_exact(policy, scheme, host, uri, partition)
+          .await
+      }
+      None => Ok(0),
+    };
+    let mut failed = shared_result.is_err();
+    let shared_count = shared_result.unwrap_or(0);
+    #[cfg(feature = "admin-runtime")]
+    {
+      // Preserve local/shared invalidation ordering before contacting an
+      // optional external handler. The report is deliberately internal: this
+      // path is automatic RFC 9111 invalidation, not an admin purge surface.
+      let reports = self
+        .purge_external_query_exact_partition(
+          policy,
+          scheme,
+          host,
+          uri,
+          partition,
+          shared_epoch.or(external_epoch).unwrap_or_default(),
+        )
+        .await;
+      failed |= reports.iter().any(|report| report.status != "ok");
+    }
+    if failed {
+      self.mark_query_invalidation_failed(target);
+      anyhow::bail!("QUERY cache invalidation did not reach every configured cache backend");
+    }
+    Ok(local_count.saturating_add(shared_count))
+  }
+
+  /// Invalidates QUERY variants for every configured policy at a target. This
+  /// is used for unsafe/unknown origin responses, whose route does not need to
+  /// select the same cache policy as earlier QUERY requests.
+  pub async fn invalidate_query_target_async_all_policies(
+    &self,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+  ) -> anyhow::Result<usize> {
+    let query_method =
+      Method::from_bytes(b"QUERY").map_err(|_| anyhow::anyhow!("invalid QUERY method"))?;
+    let policies = self
+      .policies
+      .keys()
+      .filter(|policy| self.policy_enabled(Some(policy), &query_method))
+      .cloned()
+      .collect::<Vec<_>>();
+    let mut count = 0usize;
+    let mut failed = false;
+    for policy in policies {
+      match self
+        .invalidate_query_target_async(&policy, scheme, host, uri, None)
+        .await
+      {
+        Ok(purged) => count = count.saturating_add(purged),
+        Err(_) => failed = true,
+      }
+    }
+    if failed {
+      anyhow::bail!("QUERY cache invalidation did not reach every configured cache backend");
+    }
+    Ok(count)
+  }
+
+  #[cfg(test)]
+  pub(crate) fn invalidate_query_target(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+    partition: Option<&str>,
+  ) -> usize {
+    let target = CacheQueryInvalidationTarget::new(policy, scheme, host, uri, partition);
+    self.advance_query_generation(&target);
+    self.fills.fence_query_target(&target);
+    self.invalidate_query_target_inner(&target)
+  }
+
+  fn invalidate_query_target_inner(&self, target: &CacheQueryInvalidationTarget) -> usize {
+    let mut inner = self.inner_guard();
+    let keys = inner
+      .entries
+      .iter()
+      .filter(|(_, entry)| {
+        entry.policy == target.policy
+          && entry.scheme == target.scheme
+          && entry.host == target.host
+          && entry.uri == target.uri
+          && target
+            .partition
+            .as_ref()
+            .is_none_or(|partition| entry.partition == *partition)
+          && is_query_v1_base_key(&entry.base_key)
+      })
+      .map(|(key, _)| key.clone())
+      .collect::<Vec<_>>();
+    let count = keys.len();
+    for key in keys {
+      remove_entry(&mut inner, &key);
+    }
+    count
+  }
+
   pub fn purge_exact(&self, policy: &str, scheme: &str, host: &str, uri: &str) -> usize {
     self.purge_exact_partition(policy, scheme, host, uri, None)
   }
@@ -222,30 +386,56 @@ impl ResponseCache {
     if !cacheable_method {
       reasons.push("method not configured as cacheable".to_string());
     }
-    let bypassed = request_no_store(ctx.request_headers, &self.bypass_request_headers);
+    let bypassed = super::lookup::cache_request_bypassed(&ctx, &self.bypass_request_headers);
     if bypassed {
       reasons.push("request carries a bypass header or Cache-Control: no-store".to_string());
     }
     let (policy_name, partition, base_key, vary_fields, variant_key) = if let Some(policy) = policy
     {
-      let partition = expanded_cache_key(
-        &policy.partition_key,
+      let request_headers = super::lookup::cache_view_headers(&ctx);
+      let operation = self.operation_context(
+        ctx.policy_name,
         ctx.scheme,
         ctx.host,
+        ctx.method,
         ctx.uri,
-        ctx.request_headers,
+        request_headers,
+        ctx.query_identity,
+        ctx.certificate_identity,
+        ctx.proxy_protocol_identity,
       );
-      let base_key = expanded_cache_key(
-        &policy.cache_key,
-        ctx.scheme,
-        ctx.host,
-        ctx.uri,
-        ctx.request_headers,
-      );
+      let Some(operation) = operation else {
+        reasons.push("QUERY cache identity is required".to_string());
+        return CacheKeyExplain {
+          policy: policy.name.clone(),
+          enabled: self.config.enabled,
+          cacheable_method,
+          bypassed,
+          partition: String::new(),
+          base_key: String::new(),
+          variant_key: None,
+          vary_fields: Vec::new(),
+          reasons,
+        };
+      };
+      let partition = operation.partition;
+      let base_key = if ctx.method.as_str() == "QUERY" {
+        operation.base_key
+      } else {
+        // Legacy explanation exposes the logical key, never certificate or
+        // PROXY identity partition material.
+        expanded_cache_key(
+          &policy.cache_key,
+          ctx.scheme,
+          ctx.host,
+          ctx.uri,
+          request_headers,
+        )
+      };
       let (vary_fields, variant_key) = if let Some(headers) = response_headers {
         match vary_matchers_result(
           headers,
-          ctx.request_headers,
+          request_headers,
           ctx.certificate_identity,
           policy.max_vary_fields,
           MAX_VARY_VALUE_BYTES,

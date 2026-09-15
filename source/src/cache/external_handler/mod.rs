@@ -8,7 +8,7 @@ mod runtime;
 pub(crate) use client::{ExternalCacheLookupHit, ExternalCachePublishBody};
 pub(crate) use protocol::{
   CACHE_KEY_VERSION, ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheHeader,
-  ExternalCacheLookupRequest, ExternalCacheVary, PROTOCOL_VERSION,
+  ExternalCacheLookupRequest, ExternalCacheQueryEpochRequest, ExternalCacheVary, PROTOCOL_VERSION,
 };
 #[cfg(feature = "admin-runtime")]
 pub(crate) use protocol::{ExternalCachePurgeKind, ExternalCachePurgeRequest};

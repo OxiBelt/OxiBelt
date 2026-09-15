@@ -110,6 +110,9 @@ impl ResponseCache {
     body_len: usize,
     fill_guard: Option<CacheFillGuard>,
   ) -> CacheStreamingInsertDecision {
+    if self.prepared_query_cache_bypassed(&prepared) {
+      return CacheStreamingInsertDecision::NotEligible;
+    }
     if !self.config.stream_large_objects {
       return CacheStreamingInsertDecision::NotEligible;
     }
@@ -317,6 +320,9 @@ impl ResponseCache {
     body_len: usize,
     mut reservation: StreamingDiskReservation,
   ) -> CacheInsertOutcome {
+    if self.prepared_query_cache_bypassed(&prepared) {
+      return CacheInsertOutcome::NotCacheable;
+    }
     let size = match body_len.checked_add(prepared.header_bytes) {
       Some(size) if size <= self.config.max_size_bytes => size,
       _ => return CacheInsertOutcome::Rejected,
@@ -331,6 +337,12 @@ impl ResponseCache {
         .is_some_and(|limit| size > limit)
     {
       return CacheInsertOutcome::Rejected;
+    }
+    {
+      let inner = self.inner_guard();
+      if !self.prepared_generation_current_locked(&inner, &prepared) {
+        return CacheInsertOutcome::NotCacheable;
+      }
     }
     let variant_key = prepared.variant_key.clone();
     let tags = extract_tags(&prepared.stored_headers, &prepared.policy);
@@ -353,6 +365,7 @@ impl ResponseCache {
       stored_at: prepared.metadata.stored_at,
       vary: prepared.metadata.vary,
       tags,
+      query_target_epoch: prepared.query_generation.as_ref().map(|bound| bound.value),
       size,
     };
     let (shared_entry, external_entry) = {

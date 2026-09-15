@@ -66,6 +66,7 @@ impl ResponseCache {
     };
     let mut recovery_guard = self.disk_recovery_guard();
     if self.disk_rebuild_requested.swap(false, Ordering::AcqRel) {
+      self.load_disk_query_epochs(inner, dir);
       *recovery_guard = std::fs::read_dir(dir)
         .ok()
         .map(|entries| DiskRecoveryState {
@@ -140,6 +141,13 @@ impl ResponseCache {
       }
       match decode_metadata(&path, dir) {
         Ok(stored) => {
+          if inner.discard_recovered_query_entries && super::is_query_v1_base_key(&stored.base_key)
+          {
+            remove_metadata(&stored);
+            stored.remove_body();
+            inner.disk_recovery_removed_files_total += 2;
+            continue;
+          }
           if !stored.security_headers_neutral {
             remove_metadata(&stored);
             stored.remove_body();
@@ -147,12 +155,15 @@ impl ResponseCache {
             continue;
           }
           let now = SystemTime::now();
-          if stored
-            .stale_if_error_until
-            .unwrap_or(stored.expires_at)
-            .duration_since(now)
-            .is_err()
-          {
+          let mut retain_until = stored.stale_if_error_until.unwrap_or(stored.expires_at);
+          if super::is_query_v1_base_key(&stored.base_key) {
+            retain_until = retain_until.max(
+              stored
+                .stale_while_revalidate_until
+                .unwrap_or(stored.expires_at),
+            );
+          }
+          if retain_until.duration_since(now).is_err() {
             remove_metadata(&stored);
             stored.remove_body();
             inner.disk_recovery_removed_files_total += 2;

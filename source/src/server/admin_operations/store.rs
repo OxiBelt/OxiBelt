@@ -672,8 +672,30 @@ impl OperationJournal {
     if let Some(value) = checkpoint_artifact_id {
       validate_text("checkpoint_artifact_id", value, 256)?;
     }
-    let progress_json = serde_json::to_string(progress)?;
     let mut tx = self.pool.begin().await?;
+    let operation = self
+      .update_progress_tx(&mut tx, guard, progress, checkpoint_artifact_id)
+      .await?;
+    tx.commit().await?;
+    Ok(operation)
+  }
+
+  /// Advances durable progress in a caller-owned transaction. Checkpoint
+  /// callers seal and insert their artifact in this same transaction so an
+  /// operation never points at an absent or unauthenticated checkpoint.
+  pub async fn update_progress_tx(
+    &self,
+    tx: &mut Transaction<'_, Postgres>,
+    guard: &LeaseGuard,
+    progress: &Value,
+    checkpoint_artifact_id: Option<&str>,
+  ) -> anyhow::Result<Option<JournalOperation>> {
+    guard.validate()?;
+    validate_json("progress", progress, MAX_JSON_BYTES)?;
+    if let Some(value) = checkpoint_artifact_id {
+      validate_text("checkpoint_artifact_id", value, 256)?;
+    }
+    let progress_json = serde_json::to_string(progress)?;
     let row = sqlx::query(AssertSqlSafe(format!(
       "UPDATE oxibelt_admin_operations SET progress = $7::jsonb, checkpoint_artifact_id = $8,
          revision = revision + 1, updated_at = now()
@@ -690,15 +712,14 @@ impl OperationJournal {
     .bind(i64::try_from(guard.expected_revision)?)
     .bind(&progress_json)
     .bind(checkpoint_artifact_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some(row) = row else {
-      tx.commit().await?;
       return Ok(None);
     };
     let operation = operation_from_row(&row)?;
     insert_event_tx(
-      &mut tx,
+      &mut *tx,
       &self.namespace,
       &guard.operation_id,
       operation.revision,
@@ -708,7 +729,6 @@ impl OperationJournal {
       None,
     )
     .await?;
-    tx.commit().await?;
     Ok(Some(operation))
   }
 }

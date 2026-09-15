@@ -3,24 +3,26 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use http::{HeaderValue, Method, Request, Response, StatusCode};
-use http_body_util::BodyExt;
-use hyper::body::{Body, Incoming};
+use bytes::{Bytes, BytesMut};
+use http::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH};
+use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::{Body, Frame, Incoming};
 
 use crate::config::{Config, HttpVersion, RetryCondition, RouteConfig, UpstreamConfig};
-use crate::overload::{OverloadRuntime, WorkKind};
+use crate::overload::{OverloadRuntime, WorkKind, WorkLease};
 use crate::pools::PoolSelection;
 use crate::state::{AppSnapshot, UpstreamClientRef};
 
-use super::body::ProxyBody;
+use super::body::{BoxError, ProxyBody, boxed_error};
 use super::route_actions::{self, RouteActionRenderContext};
 use super::upstream::select_pool_upstream_excluding;
 use super::version::{select_route_upstream_http_version, upstream_request_version};
-use super::{EffectiveTimeouts, UpstreamFirstByteTimeout, full_body, is_idempotent, parts_clone};
+use super::{EffectiveTimeouts, UpstreamFirstByteTimeout, is_idempotent, parts_clone};
 
 mod admission;
-use admission::send_attempt;
 pub(super) use admission::take_stream_lease;
+use admission::{H3AttemptContext, send_attempt, send_h3_attempt};
 
 #[derive(Clone, Debug)]
 pub(super) struct EffectiveRetryPolicy {
@@ -43,6 +45,176 @@ pub(super) enum AttemptFailure {
   ConnectError,
   ReadTimeout,
   Status(StatusCode),
+}
+
+/// A bounded request body used by retryable upstream attempts.
+/// `BodyExt::collect().to_bytes()` silently discards trailers, so retry
+/// buffering retains the complete DATA content and the terminal trailer map.
+/// DATA chunk boundaries have no HTTP semantics, therefore data is coalesced
+/// to avoid unbounded per-frame allocation overhead.
+#[derive(Clone, Debug)]
+struct ReplayableBody {
+  data: Bytes,
+  trailers: Option<HeaderMap>,
+  bytes: usize,
+  trailer_bytes: usize,
+  has_data_frame: bool,
+}
+
+impl ReplayableBody {
+  async fn capture(
+    mut body: ProxyBody,
+    maximum_bytes: usize,
+    maximum_trailer_bytes: usize,
+    maximum_trailer_fields: usize,
+    deadline: Instant,
+  ) -> anyhow::Result<Self> {
+    let mut data = BytesMut::new();
+    let mut trailers = None;
+    let mut bytes = 0_usize;
+    let mut trailer_bytes = 0_usize;
+    let mut has_data_frame = false;
+    loop {
+      let remaining = deadline.saturating_duration_since(Instant::now());
+      if remaining.is_zero() {
+        anyhow::bail!("upstream retry budget exhausted while buffering request body");
+      }
+      let frame = tokio::time::timeout(remaining, body.frame())
+        .await
+        .map_err(|_| {
+          anyhow::anyhow!("upstream retry budget exhausted while buffering request body")
+        })?
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("failed to buffer retryable request body: {error}"))?;
+      let Some(frame) = frame else { break };
+      match frame.into_data() {
+        Ok(frame_data) => {
+          if trailers.is_some() {
+            anyhow::bail!("retryable request body contains DATA after trailers");
+          }
+          has_data_frame = true;
+          bytes = bytes
+            .checked_add(frame_data.len())
+            .ok_or_else(|| anyhow::anyhow!("retryable request body exceeds memory bound"))?;
+          if bytes > maximum_bytes {
+            anyhow::bail!("retryable request body exceeds memory bound");
+          }
+          data.extend_from_slice(&frame_data);
+        }
+        Err(frame) => {
+          if let Ok(frame_trailers) = frame.into_trailers() {
+            if trailers.is_some() {
+              anyhow::bail!("retryable request body contains multiple trailer frames");
+            }
+            trailer_bytes = header_map_bytes(&frame_trailers)?;
+            if frame_trailers.len() > maximum_trailer_fields
+              || trailer_bytes > maximum_trailer_bytes
+            {
+              anyhow::bail!("retryable request trailers exceed memory bound");
+            }
+            trailers = Some(frame_trailers);
+          } else {
+            anyhow::bail!("retryable request body contains an unsupported frame");
+          }
+        }
+      }
+    }
+    Ok(Self {
+      // Freeze an exact immutable copy so growing `BytesMut` capacity cannot
+      // retain an unaccounted allocation across retry attempts.
+      data: Bytes::copy_from_slice(&data),
+      trailers,
+      bytes,
+      trailer_bytes,
+      has_data_frame,
+    })
+  }
+
+  fn replay_body(&self) -> ProxyBody {
+    let mut frames =
+      Vec::with_capacity(usize::from(self.has_data_frame) + usize::from(self.trailers.is_some()));
+    if self.has_data_frame {
+      frames.push(Ok::<_, BoxError>(Frame::data(self.data.clone())));
+    }
+    if let Some(trailers) = self.trailers.clone() {
+      frames.push(Ok(Frame::trailers(trailers)));
+    }
+    StreamBody::new(futures_util::stream::iter(frames)).boxed()
+  }
+
+  /// An error after any request framing was handed to the transport is
+  /// ambiguous. A status response still proves a completed attempt and can be
+  /// retried by policy; transport errors are replayed only for an empty body.
+  fn is_completely_empty(&self) -> bool {
+    !self.has_data_frame && self.bytes == 0 && self.trailers.is_none()
+  }
+
+  fn retained_bytes(&self) -> usize {
+    self.bytes.saturating_add(self.trailer_bytes)
+  }
+}
+
+fn header_map_bytes(headers: &HeaderMap) -> anyhow::Result<usize> {
+  headers.iter().try_fold(0usize, |total, (name, value)| {
+    total
+      .checked_add(name.as_str().len())
+      .and_then(|total| total.checked_add(value.as_bytes().len()))
+      .ok_or_else(|| anyhow::anyhow!("retryable request trailers exceed memory bound"))
+  })
+}
+
+struct ReplayableRequest {
+  parts: http::request::Parts,
+  body: ReplayableBody,
+  query_identity: Option<crate::cache::CacheQueryIdentity>,
+  _buffered_body: WorkLease,
+}
+
+async fn capture_replayable_request(
+  request: Request<ProxyBody>,
+  state: &AppSnapshot,
+  deadline: Instant,
+) -> anyhow::Result<ReplayableRequest> {
+  let query_identity = request
+    .extensions()
+    .get::<crate::cache::CacheQueryIdentity>()
+    .cloned();
+  let (mut parts, body) = request.into_parts();
+  let replay = ReplayableBody::capture(
+    body,
+    state.config.proxy.buffering.max_memory_body_bytes,
+    state.config.limits.max_total_header_bytes,
+    state.config.limits.max_headers,
+    deadline,
+  )
+  .await?;
+  if let Some(trailers) = replay.trailers.as_ref() {
+    super::body::prepare_replay_trailer_headers(&mut parts.headers, trailers)?;
+  }
+  let buffered_body = state.overload.lease(
+    WorkKind::RequestBodyBufferedBytes,
+    replay.retained_bytes() as u64,
+  );
+  // The accounting lease follows the request lifetime through the retry loop.
+  Ok(ReplayableRequest {
+    parts,
+    body: replay,
+    query_identity,
+    _buffered_body: buffered_body,
+  })
+}
+
+/// Cache revalidation can add validators after the cache view is captured.
+/// A pool reselection may change the effective origin target, so restore the
+/// cache-view conditional fields before sending that later attempt. This
+/// retains client-provided conditionals and removes only cache-injected ones.
+fn restore_query_cache_view_validators(headers: &mut HeaderMap, cache_view: &HeaderMap) {
+  for name in [IF_NONE_MATCH, IF_MODIFIED_SINCE] {
+    headers.remove(&name);
+    for value in cache_view.get_all(&name) {
+      headers.append(name.clone(), value.clone());
+    }
+  }
 }
 
 /// Configured identities for one normal upstream attempt.
@@ -255,27 +427,14 @@ pub(super) async fn send_with_retry(
   }
 
   let deadline = retry_deadline(&policy, timeouts);
-  let (parts, body) = request.into_parts();
-  let remaining = deadline.saturating_duration_since(Instant::now());
-  if remaining.is_zero() {
-    anyhow::bail!("upstream retry budget exhausted before request-body buffering");
-  }
-  let body = tokio::time::timeout(remaining, body.collect())
-    .await
-    .map_err(|_| anyhow::anyhow!("upstream retry budget exhausted while buffering request body"))?
-    .map_err(|error| anyhow::anyhow!("failed to buffer retryable request body: {error}"))?
-    .to_bytes();
-  let _buffered_body = state
-    .overload
-    .lease(WorkKind::RequestBodyBufferedBytes, body.len() as u64);
+  let replay = capture_replayable_request(request, state, deadline).await?;
   let mut last_error = None;
-  let mut last_response = None;
   for attempt in 0..policy.tries {
     let Some(attempt_timeout) = policy.attempt_timeout(timeouts.upstream_first_byte, deadline)
     else {
       break;
     };
-    let outbound = Request::from_parts(parts_clone(&parts), full_body(body.clone()));
+    let outbound = Request::from_parts(parts_clone(&replay.parts), replay.body.replay_body());
     match send_attempt(
       client,
       outbound,
@@ -293,18 +452,17 @@ pub(super) async fn send_with_retry(
           if !has_remaining_attempt(&policy, attempt) {
             return Ok(response);
           }
-          last_response = Some(response);
+          // A retryable status response is deliberately discarded before the
+          // next admission. It owns an upstream-stream permit, and retaining
+          // it while a max-streams=1 route admits the next attempt deadlocks
+          // the retry until its deadline.
+          drop(response);
           sleep_before_retry(&policy, attempt, deadline).await;
           continue;
         }
         return Ok(response);
       }
       Err(error) => {
-        if super::circuit_breakers::admission_rejection(&error).is_some()
-          && let Some(response) = last_response.take()
-        {
-          return Ok(response);
-        }
         let failure = if error.downcast_ref::<UpstreamFirstByteTimeout>().is_some() {
           AttemptFailure::ReadTimeout
         } else {
@@ -316,10 +474,7 @@ pub(super) async fn send_with_retry(
         // boundary can duplicate a partial write, even for an idempotent
         // method. Status-based retries remain safe because a response proves
         // the attempt completed.
-        if !body.is_empty()
-          || !policy.matches_failure(failure)
-          || !has_remaining_attempt(&policy, attempt)
-        {
+        if !can_retry_transport_error(&replay.body, &policy, failure, attempt) {
           break;
         }
       }
@@ -327,9 +482,6 @@ pub(super) async fn send_with_retry(
     sleep_before_retry(&policy, attempt, deadline).await;
   }
 
-  if let Some(response) = last_response {
-    return Ok(response);
-  }
   Err(last_error.unwrap_or_else(|| anyhow::anyhow!("upstream retry budget exhausted")))
 }
 
@@ -351,11 +503,181 @@ pub(super) async fn send_one_shot_with_state(
   send_attempt(client, request, timeout, deadline, state, admission, false).await
 }
 
+fn into_proxy_response(response: Response<Incoming>) -> Response<ProxyBody> {
+  response.map(|body| body.map_err(boxed_error).boxed())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UpstreamAttemptTransport {
+  Hyper,
+  H3,
+}
+
+fn upstream_attempt_transport(upstream_version: HttpVersion) -> UpstreamAttemptTransport {
+  if upstream_version == HttpVersion::H3 {
+    UpstreamAttemptTransport::H3
+  } else {
+    UpstreamAttemptTransport::Hyper
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_transport_attempt(
+  state: &AppSnapshot,
+  upstream: &UpstreamConfig,
+  upstream_index: usize,
+  upstream_version: HttpVersion,
+  request: Request<ProxyBody>,
+  timeouts: EffectiveTimeouts,
+  timeout: Duration,
+  deadline: Option<Instant>,
+  admission: Option<RetryAdmissionContext<'_>>,
+  retry: bool,
+) -> anyhow::Result<Response<ProxyBody>> {
+  if upstream_attempt_transport(upstream_version) == UpstreamAttemptTransport::H3 {
+    return send_h3_attempt(
+      request,
+      H3AttemptContext {
+        upstream,
+        timeouts,
+        timeout,
+        deadline,
+        state,
+        admission,
+        retry,
+      },
+    )
+    .await;
+  }
+  let client = state
+    .clients
+    .for_upstream_index(upstream_index, upstream.origin.scheme(), upstream_version)
+    .ok_or_else(|| anyhow::anyhow!("upstream client is not configured"))?;
+  send_attempt(client, request, timeout, deadline, state, admission, retry)
+    .await
+    .map(into_proxy_response)
+}
+
+fn can_retry_transport_error(
+  replay: &ReplayableBody,
+  policy: &EffectiveRetryPolicy,
+  failure: AttemptFailure,
+  attempt: usize,
+) -> bool {
+  replay.is_completely_empty()
+    && policy.matches_failure(failure)
+    && has_remaining_attempt(policy, attempt)
+}
+
+pub(super) async fn send_h3_with_retry(
+  request: Request<ProxyBody>,
+  upstream: &UpstreamConfig,
+  timeouts: EffectiveTimeouts,
+  state: &AppSnapshot,
+  policy: &EffectiveRetryPolicy,
+  admission: Option<RetryAdmissionContext<'_>>,
+) -> anyhow::Result<Response<ProxyBody>> {
+  let policy = policy.adjusted_for_overload(state.overload.as_ref());
+  if !policy.enabled || !retry_body_can_be_buffered(&request, state) {
+    return send_h3_one_shot(request, upstream, timeouts, state, admission).await;
+  }
+
+  let deadline = retry_deadline(&policy, timeouts);
+  let replay = capture_replayable_request(request, state, deadline).await?;
+  let mut last_error = None;
+  for attempt in 0..policy.tries {
+    let Some(attempt_timeout) = policy.attempt_timeout(timeouts.upstream_first_byte, deadline)
+    else {
+      break;
+    };
+    let outbound = Request::from_parts(parts_clone(&replay.parts), replay.body.replay_body());
+    match send_h3_attempt(
+      outbound,
+      H3AttemptContext {
+        upstream,
+        timeouts,
+        timeout: attempt_timeout,
+        deadline: Some(deadline),
+        state,
+        admission,
+        retry: attempt > 0,
+      },
+    )
+    .await
+    {
+      Ok(response) => {
+        let failure = AttemptFailure::Status(response.status());
+        if policy.matches_failure(failure) {
+          if !has_remaining_attempt(&policy, attempt) {
+            return Ok(response);
+          }
+          // Release the stream admission carried by this response before
+          // asking for the next attempt. Retaining it would deadlock a
+          // max-streams=1 route until the retry deadline.
+          drop(response);
+          sleep_before_retry(&policy, attempt, deadline).await;
+          continue;
+        }
+        return Ok(response);
+      }
+      Err(error) => {
+        let failure = if error.downcast_ref::<UpstreamFirstByteTimeout>().is_some() {
+          AttemptFailure::ReadTimeout
+        } else {
+          AttemptFailure::ConnectError
+        };
+        last_error = Some(error);
+        // H3 does not expose a transport-level "body definitely unsent"
+        // signal. Retrying a failed bodyful attempt would cross an ambiguous
+        // DATA/trailer boundary; only an entirely empty replay body may retry.
+        if !can_retry_transport_error(&replay.body, &policy, failure, attempt) {
+          break;
+        }
+      }
+    }
+    sleep_before_retry(&policy, attempt, deadline).await;
+  }
+  Err(last_error.unwrap_or_else(|| anyhow::anyhow!("upstream retry budget exhausted")))
+}
+
+async fn send_h3_one_shot(
+  request: Request<ProxyBody>,
+  upstream: &UpstreamConfig,
+  timeouts: EffectiveTimeouts,
+  state: &AppSnapshot,
+  admission: Option<RetryAdmissionContext<'_>>,
+) -> anyhow::Result<Response<ProxyBody>> {
+  let deadline = timeouts
+    .upstream_deadline
+    .or_else(|| Instant::now().checked_add(timeouts.upstream_request));
+  let timeout = deadline
+    .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    .unwrap_or(timeouts.upstream_request)
+    .min(timeouts.upstream_first_byte)
+    .min(timeouts.upstream_request);
+  send_h3_attempt(
+    request,
+    H3AttemptContext {
+      upstream,
+      timeouts,
+      timeout,
+      deadline,
+      state,
+      admission,
+      retry: false,
+    },
+  )
+  .await
+}
+
 pub(super) struct PoolRetrySuccess {
-  pub(super) response: Response<Incoming>,
+  pub(super) response: Response<ProxyBody>,
   pub(super) upstream_index: usize,
   pub(super) pool_selection: PoolSelection,
   pub(super) report_success: bool,
+  /// A pool reselection can change the effective QUERY target. The caller
+  /// must then bypass cache insertion unless it rebuilds a final identity.
+  pub(super) cache_identity_unchanged: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -380,24 +702,30 @@ pub(super) async fn send_pool_with_retry(
     anyhow::bail!("selected upstream index is not configured");
   };
   let initial_version = selected_upstream_http_version(state, route, initial_upstream);
-  let Some(initial_client) = state.clients.for_upstream_index(
-    initial_upstream_index,
-    initial_upstream.origin.scheme(),
-    initial_version,
-  ) else {
-    anyhow::bail!("upstream client is not configured");
-  };
 
   if !policy.enabled || !retry_body_can_be_buffered(&request, state) {
-    return match send_one_shot_with_state(
-      initial_client,
+    let deadline = timeouts
+      .upstream_deadline
+      .or_else(|| Instant::now().checked_add(timeouts.upstream_request));
+    let timeout = deadline
+      .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+      .unwrap_or(timeouts.upstream_request)
+      .min(timeouts.upstream_first_byte)
+      .min(timeouts.upstream_request);
+    return match send_transport_attempt(
+      state,
+      initial_upstream,
+      initial_upstream_index,
+      initial_version,
       request,
       timeouts,
-      state,
+      timeout,
+      deadline,
       Some(RetryAdmissionContext {
         route_name: &route.name,
         pool_name: route.upstream_pool.as_deref(),
       }),
+      false,
     )
     .await
     {
@@ -408,6 +736,7 @@ pub(super) async fn send_pool_with_retry(
           upstream_index: initial_upstream_index,
           pool_selection: initial_pool_selection,
           report_success,
+          cache_identity_unchanged: true,
         })
       }
       Err(error) => Err(error),
@@ -415,26 +744,12 @@ pub(super) async fn send_pool_with_retry(
   }
 
   let deadline = retry_deadline(&policy, timeouts);
-  let (parts, body) = request.into_parts();
-  let remaining = deadline.saturating_duration_since(Instant::now());
-  if remaining.is_zero() {
-    anyhow::bail!("upstream retry budget exhausted before request-body buffering");
-  }
-  let body = tokio::time::timeout(remaining, body.collect())
-    .await
-    .map_err(|_| anyhow::anyhow!("upstream retry budget exhausted while buffering request body"))?
-    .map_err(|error| anyhow::anyhow!("failed to buffer retryable request body: {error}"))?
-    .to_bytes();
-  let _buffered_body = state
-    .overload
-    .lease(WorkKind::RequestBodyBufferedBytes, body.len() as u64);
+  let replay = capture_replayable_request(request, state, deadline).await?;
   let mut current_upstream_index = initial_upstream_index;
   let mut current_selection = Some(initial_pool_selection);
   let mut failed_upstreams = Vec::new();
   let mut last_error = None;
-  let mut last_response = None;
-  let mut last_response_selection = None;
-  let mut last_response_upstream_index = None;
+  let mut cache_identity_unchanged = true;
   let Some(pool_name) = request_waf
     .upstream_pool_override
     .as_deref()
@@ -446,6 +761,7 @@ pub(super) async fn send_pool_with_retry(
 
   for attempt in 0..policy.tries {
     if attempt > 0 && policy.reselect_pool_on_retry {
+      cache_identity_unchanged = false;
       drop(current_selection.take());
       let selected = match select_pool_upstream_excluding(
         state,
@@ -508,33 +824,25 @@ pub(super) async fn send_pool_with_retry(
         downstream_uri: original_uri,
       },
     )?;
-    let Some(client) = state.clients.for_upstream_index(
-      current_upstream_index,
-      upstream.origin.scheme(),
-      upstream_version,
-    ) else {
-      last_error = Some(anyhow::anyhow!("upstream client is not configured"));
-      report_pool_attempt_failure(
-        state,
-        upstream,
-        &mut current_selection,
-        &mut failed_upstreams,
-        &policy,
-      )
-      .await;
-      continue;
-    };
-
-    let mut attempt_parts = parts_clone(&parts);
+    let mut attempt_parts = parts_clone(&replay.parts);
     attempt_parts.uri = target_uri;
     attempt_parts.version = upstream_request_version(upstream_version);
-    let outbound = Request::from_parts(attempt_parts, full_body(body.clone()));
-    match send_attempt(
-      client,
+    if !cache_identity_unchanged && let Some(identity) = replay.query_identity.as_ref() {
+      restore_query_cache_view_validators(
+        &mut attempt_parts.headers,
+        identity.cache_view_headers(),
+      );
+    }
+    let outbound = Request::from_parts(attempt_parts, replay.body.replay_body());
+    match send_transport_attempt(
+      state,
+      upstream,
+      current_upstream_index,
+      upstream_version,
       outbound,
+      timeouts,
       attempt_timeout,
       Some(deadline),
-      state,
       Some(RetryAdmissionContext {
         route_name: &route.name,
         pool_name: Some(pool_name),
@@ -563,14 +871,13 @@ pub(super) async fn send_pool_with_retry(
               upstream_index: current_upstream_index,
               pool_selection,
               report_success: false,
+              cache_identity_unchanged,
             });
           }
-          let selection = current_selection
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the active selection"))?;
-          last_response = Some(response);
-          last_response_selection = Some(selection);
-          last_response_upstream_index = Some(current_upstream_index);
+          // As with direct H3 retry, drop the retryable response before the
+          // next admission. Keep the active selection for a non-reselected
+          // retry, but do not retain its response stream lease.
+          drop(response);
           sleep_before_retry(&policy, attempt, deadline).await;
           continue;
         }
@@ -582,26 +889,10 @@ pub(super) async fn send_pool_with_retry(
           upstream_index: current_upstream_index,
           pool_selection,
           report_success: true,
+          cache_identity_unchanged,
         });
       }
       Err(error) => {
-        if super::circuit_breakers::admission_rejection(&error).is_some()
-          && let Some(response) = last_response.take()
-        {
-          drop(current_selection.take());
-          let pool_selection = last_response_selection
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the active selection"))?;
-          let upstream_index = last_response_upstream_index
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the response index"))?;
-          return Ok(PoolRetrySuccess {
-            response,
-            upstream_index,
-            pool_selection,
-            report_success: false,
-          });
-        }
         let failure = if error.downcast_ref::<UpstreamFirstByteTimeout>().is_some() {
           AttemptFailure::ReadTimeout
         } else {
@@ -619,28 +910,12 @@ pub(super) async fn send_pool_with_retry(
           )
           .await;
         }
-        if !body.is_empty() || !retryable || !has_remaining_attempt(&policy, attempt) {
+        if !can_retry_transport_error(&replay.body, &policy, failure, attempt) {
           break;
         }
       }
     }
     sleep_before_retry(&policy, attempt, deadline).await;
-  }
-
-  if let Some(response) = last_response {
-    drop(current_selection.take());
-    let pool_selection = last_response_selection
-      .take()
-      .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the active selection"))?;
-    let upstream_index = last_response_upstream_index
-      .take()
-      .ok_or_else(|| anyhow::anyhow!("upstream pool retry lost the response index"))?;
-    return Ok(PoolRetrySuccess {
-      response,
-      upstream_index,
-      pool_selection,
-      report_success: false,
-    });
   }
   Err(last_error.unwrap_or_else(|| anyhow::anyhow!("upstream retry budget exhausted")))
 }
@@ -660,9 +935,8 @@ async fn report_pool_attempt_failure(
   {
     failed_upstreams.push(upstream.name.clone());
   }
-  // Keep the selected-server lease through bounded backoff. If a retry budget
-  // rejects the next attempt we can return a retryable upstream response
-  // without losing the response's selected-server lifetime.
+  // Keep the selected-server lease through bounded backoff so a
+  // non-reselected next attempt preserves normal pool accounting.
 }
 
 async fn report_pool_passive_failure(

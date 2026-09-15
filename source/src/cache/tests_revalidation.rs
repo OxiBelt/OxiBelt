@@ -49,6 +49,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: None,
   };
   let mut response_headers = HeaderMap::new();
@@ -82,6 +83,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => entry,
@@ -109,6 +111,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      query_identity: None,
       certificate_identity: None,
     })
     .await
@@ -150,6 +153,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
         method: &Method::GET,
         uri: &uri,
         request_headers: &request_headers,
+        query_identity: None,
         certificate_identity: None,
       },
       CacheEntry::memory(
@@ -169,6 +173,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => entry,
@@ -192,6 +197,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
       method: &Method::GET,
       uri: &uri,
       request_headers: &request_headers,
+      query_identity: None,
       certificate_identity: None,
     },
     &cached_entry,
@@ -206,6 +212,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
@@ -263,6 +270,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: Some(&identity),
   };
   assert_eq!(
@@ -280,6 +288,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: Some(&identity),
   }) {
     Some(CacheLookup::Fresh(entry)) => entry,
@@ -308,6 +317,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     method: &Method::GET,
     uri: &uri,
     request_headers: &request_headers,
+    query_identity: None,
     certificate_identity: Some(&identity),
   }) {
     Some(CacheLookup::Fresh(entry)) => assert_eq!(

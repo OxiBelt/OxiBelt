@@ -14,6 +14,56 @@ use super::{
 };
 
 impl SharedState {
+  /// Reads the durable generation for all Q1 variants of a target.  The
+  /// counter deliberately excludes the cache partition: an unsafe response
+  /// invalidates every private partition for the selected resource.
+  pub async fn cache_query_epoch(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+  ) -> anyhow::Result<u64> {
+    let Some(backend) = &self.cache else {
+      return Ok(0);
+    };
+    let key = self.shared_query_epoch_key(policy, scheme, host, uri);
+    let result = match tokio::time::timeout(self.operation_timeout, backend.counter_get(&key)).await
+    {
+      Ok(result) => result.map(|value| value as u64),
+      Err(_) => Err(anyhow::anyhow!("shared QUERY epoch read timed out")),
+    };
+    self.observe_backend_result(SharedStateFeature::Cache, &result);
+    result
+  }
+
+  /// Atomically advances the durable Q1 target generation before deletion.
+  /// A stale fill can still finish its bytes, but its old epoch can never be
+  /// selected by a subsequent lookup.
+  pub async fn cache_advance_query_epoch(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+  ) -> anyhow::Result<u64> {
+    let Some(backend) = &self.cache else {
+      return Ok(0);
+    };
+    let key = self.shared_query_epoch_key(policy, scheme, host, uri);
+    let result = match tokio::time::timeout(
+      self.operation_timeout,
+      backend.counter_add(&key, 1, None),
+    )
+    .await
+    {
+      Ok(result) => result.map(|value| value as u64),
+      Err(_) => Err(anyhow::anyhow!("shared QUERY epoch advance timed out")),
+    };
+    self.observe_backend_result(SharedStateFeature::Cache, &result);
+    result
+  }
+
   #[allow(clippy::too_many_arguments)]
   pub async fn cache_lookup(
     &self,
@@ -28,6 +78,7 @@ impl SharedState {
     request_no_cache: bool,
     background_refresh: bool,
     max_vary_variants: usize,
+    query_target_epoch: Option<u64>,
   ) -> anyhow::Result<Option<CacheLookup>> {
     let result = match tokio::time::timeout(
       self.operation_timeout,
@@ -43,6 +94,7 @@ impl SharedState {
         request_no_cache,
         background_refresh,
         max_vary_variants,
+        query_target_epoch,
       ),
     )
     .await
@@ -67,17 +119,29 @@ impl SharedState {
     request_no_cache: bool,
     background_refresh: bool,
     max_vary_variants: usize,
+    query_target_epoch: Option<u64>,
   ) -> anyhow::Result<Option<CacheLookup>> {
     let Some(backend) = &self.cache else {
       return Ok(None);
     };
     let now = now_unix_ms();
     let direct_variant_key = shared_no_vary_variant_key(partition, base_key);
-    let direct_key = self.shared_cache_entry_key(&direct_variant_key);
+    let direct_key = self.shared_cache_entry_key(&direct_variant_key, query_target_epoch);
     if let Some(bytes) = backend.get(&direct_key).await?
       && let Ok(entry) = serde_json::from_slice::<SharedCacheEntry>(&bytes)
       && entry.vary.is_empty()
-      && shared_entry_matches(&entry, policy, scheme, host, partition, base_key, uri)
+      && shared_entry_matches(
+        &entry,
+        SharedCacheMatch {
+          policy,
+          scheme,
+          host,
+          partition,
+          base_key,
+          uri,
+          query_target_epoch,
+        },
+      )
       && let Some(lookup) = self
         .cache_lookup_entry(
           backend,
@@ -129,7 +193,10 @@ impl SharedState {
           cleanup.push(index_key.clone());
           continue;
         };
-        candidates.push((index_key.clone(), self.shared_cache_entry_key(&variant_key)));
+        candidates.push((
+          index_key.clone(),
+          self.shared_cache_entry_key_from_storage(&variant_key),
+        ));
       }
       let entry_keys = candidates
         .iter()
@@ -147,8 +214,18 @@ impl SharedState {
           cleanup.push(index_key);
           continue;
         };
-        if !shared_entry_matches(&entry, policy, scheme, host, partition, base_key, uri)
-          || !shared_vary_matches(&entry.vary, request_headers)
+        if !shared_entry_matches(
+          &entry,
+          SharedCacheMatch {
+            policy,
+            scheme,
+            host,
+            partition,
+            base_key,
+            uri,
+            query_target_epoch,
+          },
+        ) || !shared_vary_matches(&entry.vary, request_headers)
         {
           continue;
         }
@@ -198,7 +275,7 @@ impl SharedState {
     background_refresh: bool,
     now: i64,
   ) -> anyhow::Result<Option<CacheLookup>> {
-    if entry.stale_if_error_until_ms.unwrap_or(entry.expires_at_ms) <= now {
+    if shared_cache_retention_until_ms(&entry) <= now {
       if let Some(entry_key) = entry_key {
         let _ = backend.delete(entry_key).await;
       }
@@ -226,6 +303,7 @@ impl SharedState {
     }
     if request_no_cache || entry.must_revalidate || entry.expires_at_ms <= now {
       let validators = validator_headers(&cache_entry.headers);
+      let query_entry = crate::cache::is_query_v1_base_key(&entry.base_key);
       if !request_no_cache
         && !entry.must_revalidate
         && entry
@@ -242,6 +320,9 @@ impl SharedState {
         })));
       }
       if validators.is_empty() {
+        if query_entry && (request_no_cache || entry.must_revalidate) {
+          return Ok(None);
+        }
         if entry
           .stale_while_revalidate_until_ms
           .is_some_and(|until| until > now)
@@ -270,9 +351,10 @@ impl SharedState {
       return Ok(Some(CacheLookup::Revalidate(Revalidation {
         entry: cache_entry,
         request_headers: validators,
-        serve_stale_on_error: entry
-          .stale_if_error_until_ms
-          .is_some_and(|until| until > now),
+        serve_stale_on_error: (!query_entry || !entry.must_revalidate)
+          && entry
+            .stale_if_error_until_ms
+            .is_some_and(|until| until > now),
       })));
     }
     Ok(Some(CacheLookup::Fresh(cache_entry)))
@@ -302,18 +384,14 @@ impl SharedState {
     backend: &Backend,
     entry: &SharedCacheEntry,
   ) -> anyhow::Result<()> {
-    let ttl = super::ttl_from_expires_ms(
-      entry
-        .stale_if_error_until_ms
-        .unwrap_or(entry.expires_at_ms)
-        .max(entry.expires_at_ms),
-    );
-    let key = self.key(&format!("cache:entry:{}", entry.variant_key));
+    let ttl = super::ttl_from_expires_ms(shared_cache_retention_until_ms(entry));
+    let key = self.shared_cache_entry_key(&entry.variant_key, entry.query_target_epoch);
     let mut entry = entry.clone();
     entry.body_len = entry.body.len();
     if entry.body.len() > self.cache_chunk_bytes {
       let chunk_ttl = ttl;
-      let stem = shared_cache_chunk_stem(&entry.variant_key);
+      let storage_variant = self.shared_cache_storage_variant_key(&entry);
+      let stem = shared_cache_chunk_stem(&storage_variant);
       let mut chunks = Vec::new();
       for (index, chunk) in entry.body.chunks(self.cache_chunk_bytes).enumerate() {
         let chunk_key = self.key(&format!("cache:chunk:{stem}:{index}"));
@@ -338,14 +416,10 @@ impl SharedState {
     let Some(backend) = &self.cache else {
       return Ok(());
     };
-    let ttl = super::ttl_from_expires_ms(
-      entry
-        .stale_if_error_until_ms
-        .unwrap_or(entry.expires_at_ms)
-        .max(entry.expires_at_ms),
-    );
+    let ttl = super::ttl_from_expires_ms(shared_cache_retention_until_ms(entry));
     let mut file = tokio::fs::File::open(body_path).await?;
-    let stem = shared_cache_chunk_stem(&entry.variant_key);
+    let storage_variant = self.shared_cache_storage_variant_key(entry);
+    let stem = shared_cache_chunk_stem(&storage_variant);
     let mut chunks = Vec::new();
     let mut buffer = vec![0_u8; self.cache_chunk_bytes.max(1)];
     let mut copied = 0_usize;
@@ -368,7 +442,7 @@ impl SharedState {
       delete_shared_chunks(backend, &chunks).await;
       anyhow::bail!("shared cache file body length mismatch: expected {body_len}, copied {copied}");
     }
-    let key = self.shared_cache_entry_key(&entry.variant_key);
+    let key = self.shared_cache_entry_key(&entry.variant_key, entry.query_target_epoch);
     let mut entry = entry.clone();
     entry.body.clear();
     entry.body_len = body_len;
@@ -386,20 +460,43 @@ impl SharedState {
     let Some(backend) = &self.cache else {
       return;
     };
-    let ttl = super::ttl_from_expires_ms(
-      entry
-        .stale_if_error_until_ms
-        .unwrap_or(entry.expires_at_ms)
-        .max(entry.expires_at_ms),
-    );
+    let ttl = super::ttl_from_expires_ms(shared_cache_retention_until_ms(entry));
     let key = self.shared_cache_index_key(entry);
-    if let Err(error) = backend.put(&key, entry.variant_key.as_bytes(), ttl).await {
+    let storage_variant = self.shared_cache_storage_variant_key(entry);
+    if let Err(error) = backend.put(&key, storage_variant.as_bytes(), ttl).await {
       warn!(error = %error, "failed to write shared cache index");
     }
   }
 
-  fn shared_cache_entry_key(&self, variant_key: &str) -> String {
+  fn shared_cache_entry_key(&self, variant_key: &str, query_target_epoch: Option<u64>) -> String {
+    let storage_variant = match query_target_epoch {
+      Some(epoch) => format!("q1-epoch:{epoch}:{variant_key}"),
+      None => variant_key.to_string(),
+    };
+    self.shared_cache_entry_key_from_storage(&storage_variant)
+  }
+
+  fn shared_cache_storage_variant_key(&self, entry: &SharedCacheEntry) -> String {
+    match entry.query_target_epoch {
+      Some(epoch) => format!("q1-epoch:{epoch}:{}", entry.variant_key),
+      None => entry.variant_key.clone(),
+    }
+  }
+
+  fn shared_cache_entry_key_from_storage(&self, variant_key: &str) -> String {
     self.key(&format!("cache:entry:{variant_key}"))
+  }
+
+  fn shared_query_epoch_key(&self, policy: &str, scheme: &str, host: &str, uri: &str) -> String {
+    let material = format!("{policy}\n{scheme}\n{host}\n{uri}");
+    let digest = crate::crypto::sha256(material.as_bytes());
+    let bucket = u16::from_be_bytes([digest[0], digest[1]]) % crate::cache::QUERY_EPOCH_BUCKETS;
+    // Policy names are configuration-bounded; targets map into a fixed bucket
+    // set. A collision only forces an extra Q1 miss after invalidation.
+    self.key(&format!(
+      "cache:query-epoch:{}:{bucket}",
+      digest_hex(policy.as_bytes())
+    ))
   }
 
   fn shared_cache_index_key(&self, entry: &SharedCacheEntry) -> String {
@@ -474,6 +571,29 @@ impl SharedState {
           && entry.host == host
           && entry.uri == uri
           && partition.is_none_or(|partition| entry.partition == partition)
+      })
+      .await
+  }
+
+  /// Removes only OxiBelt QUERY-v1 cache entries for one target.  This is an
+  /// internal invalidation primitive; the public cache-purge API remains
+  /// intentionally broad across all cache-key namespaces.
+  pub async fn cache_purge_query_exact(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+    partition: Option<&str>,
+  ) -> anyhow::Result<usize> {
+    self
+      .cache_purge(|entry| {
+        entry.policy == policy
+          && entry.scheme == scheme
+          && entry.host == host
+          && entry.uri == uri
+          && partition.is_none_or(|partition| entry.partition == partition)
+          && crate::cache::is_query_v1_base_key(&entry.base_key)
       })
       .await
   }
@@ -668,6 +788,24 @@ fn shared_entry_expires_at(entry: &SharedCacheEntry) -> std::time::SystemTime {
   std::time::UNIX_EPOCH + std::time::Duration::from_millis(entry.expires_at_ms.max(0) as u64)
 }
 
+/// Q1 entries must survive their stale-while-revalidate window so a later
+/// reader can initiate or join its revalidation. Legacy GET/HEAD keeps its
+/// established stale-if-error retention bound.
+fn shared_cache_retention_until_ms(entry: &SharedCacheEntry) -> i64 {
+  let mut retention = entry
+    .stale_if_error_until_ms
+    .unwrap_or(entry.expires_at_ms)
+    .max(entry.expires_at_ms);
+  if crate::cache::is_query_v1_base_key(&entry.base_key) {
+    retention = retention.max(
+      entry
+        .stale_while_revalidate_until_ms
+        .unwrap_or(entry.expires_at_ms),
+    );
+  }
+  retention
+}
+
 fn validator_headers(headers: &HeaderMap) -> HeaderMap {
   let mut validators = HeaderMap::new();
   if let Some(etag) = headers.get(http::header::ETAG) {
@@ -685,21 +823,26 @@ fn shared_vary_matches(vary: &[SharedVaryMatcher], request_headers: &HeaderMap) 
     .all(|item| header_values(request_headers, &item.name) == item.value)
 }
 
-fn shared_entry_matches(
-  entry: &SharedCacheEntry,
-  policy: &str,
-  scheme: &str,
-  host: &str,
-  partition: &str,
-  base_key: &str,
-  uri: &str,
-) -> bool {
-  entry.policy == policy
-    && entry.scheme == scheme
-    && entry.host == host
-    && entry.partition == partition
-    && entry.base_key == base_key
-    && entry.uri == uri
+struct SharedCacheMatch<'a> {
+  policy: &'a str,
+  scheme: &'a str,
+  host: &'a str,
+  partition: &'a str,
+  base_key: &'a str,
+  uri: &'a str,
+  query_target_epoch: Option<u64>,
+}
+
+fn shared_entry_matches(entry: &SharedCacheEntry, target: SharedCacheMatch<'_>) -> bool {
+  entry.policy == target.policy
+    && entry.scheme == target.scheme
+    && entry.host == target.host
+    && entry.partition == target.partition
+    && entry.base_key == target.base_key
+    && entry.uri == target.uri
+    && (!crate::cache::is_query_v1_base_key(target.base_key)
+      || (target.query_target_epoch.is_some()
+        && entry.query_target_epoch == target.query_target_epoch))
 }
 
 pub fn shared_header_values(headers: &HeaderMap, name: &str) -> String {
@@ -730,4 +873,109 @@ fn shared_no_vary_variant_key(partition: &str, base_key: &str) -> String {
 
 fn digest_hex(bytes: &[u8]) -> String {
   super::hex_encode(&crate::crypto::sha256(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use http::{HeaderMap, Method};
+
+  fn entry(query_target_epoch: Option<u64>) -> SharedCacheEntry {
+    SharedCacheEntry {
+      policy: "default".to_string(),
+      partition: String::new(),
+      base_key: match query_target_epoch {
+        Some(_) => "\0oxibelt-cache-query-v1\0fixture".to_string(),
+        None => "fixture".to_string(),
+      },
+      variant_key: "fixture".to_string(),
+      scheme: "https".to_string(),
+      host: "example.test".to_string(),
+      uri: "/asset".to_string(),
+      status: 200,
+      headers: Vec::new(),
+      security_headers_neutral: true,
+      body: Vec::new(),
+      body_len: 0,
+      body_chunks: Vec::new(),
+      stored_at_ms: 0,
+      expires_at_ms: 100,
+      stale_if_error_until_ms: Some(200),
+      stale_while_revalidate_until_ms: Some(300),
+      must_revalidate: false,
+      vary: Vec::new(),
+      tags: Vec::new(),
+      query_target_epoch,
+    }
+  }
+
+  #[test]
+  fn q1_shared_entry_retains_its_stale_while_revalidate_window() {
+    assert_eq!(shared_cache_retention_until_ms(&entry(Some(0))), 300);
+    assert_eq!(shared_cache_retention_until_ms(&entry(None)), 200);
+  }
+
+  #[tokio::test]
+  async fn q1_shared_lookup_serves_stale_during_its_swr_window() {
+    let shared = SharedState::test_memory("q1-shared-swr");
+    let now = now_unix_ms();
+    let mut stale_entry = entry(Some(0));
+    stale_entry.variant_key = shared_no_vary_variant_key("", &stale_entry.base_key);
+    stale_entry.expires_at_ms = now.saturating_sub(1);
+    stale_entry.stale_if_error_until_ms = None;
+    stale_entry.stale_while_revalidate_until_ms = Some(now.saturating_add(60_000));
+    shared.cache_put(&stale_entry).await;
+
+    let headers = HeaderMap::new();
+    let lookup = shared
+      .cache_lookup(
+        "default",
+        "https",
+        "example.test",
+        "",
+        &stale_entry.base_key,
+        "/asset",
+        &Method::GET,
+        &headers,
+        false,
+        true,
+        1,
+        Some(0),
+      )
+      .await
+      .expect("shared Q1 lookup should not fail");
+    assert!(matches!(lookup, Some(CacheLookup::Stale(_))));
+  }
+
+  #[tokio::test]
+  async fn q1_no_cache_without_validators_never_uses_swr() {
+    let shared = SharedState::test_memory("q1-shared-swr-no-cache");
+    let now = now_unix_ms();
+    let mut stale_entry = entry(Some(0));
+    stale_entry.variant_key = shared_no_vary_variant_key("", &stale_entry.base_key);
+    stale_entry.expires_at_ms = now.saturating_sub(1);
+    stale_entry.stale_if_error_until_ms = None;
+    stale_entry.stale_while_revalidate_until_ms = Some(now.saturating_add(60_000));
+    shared.cache_put(&stale_entry).await;
+
+    let headers = HeaderMap::new();
+    let lookup = shared
+      .cache_lookup(
+        "default",
+        "https",
+        "example.test",
+        "",
+        &stale_entry.base_key,
+        "/asset",
+        &Method::GET,
+        &headers,
+        true,
+        true,
+        1,
+        Some(0),
+      )
+      .await
+      .expect("shared Q1 no-cache lookup should not fail");
+    assert!(lookup.is_none());
+  }
 }

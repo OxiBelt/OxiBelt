@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 use crate::admin_audit::AdminAuditRuntime;
 use crate::config::{AdminOperationsConfig, Config};
+use crate::state::AppHandle;
 
 use super::id::new_operation_id;
 use super::runtime_durable::DurableOperationRuntime;
@@ -151,6 +152,16 @@ impl AdminOperationRuntime {
     if let Some(durable) = self.inner.durable.as_ref() {
       durable.shutdown().await;
     }
+  }
+
+  /// Start durable recovery only after the AppHandle exists. A cache-warm
+  /// resumption needs the current snapshot to re-evaluate route, Real-IP, and
+  /// IPM policy facts; startup before that point must not terminalize it.
+  pub(in crate::server) async fn activate_recovery(&self, state: AppHandle) -> anyhow::Result<()> {
+    if let Some(durable) = self.inner.durable.as_ref() {
+      durable.activate_recovery(self.clone(), state).await?;
+    }
+    Ok(())
   }
 
   pub(in crate::server) fn config(&self) -> &AdminOperationsConfig {
@@ -689,6 +700,33 @@ impl AdminOperationContext {
         push_event(record, "operation.progress");
       })
       .await;
+  }
+
+  /// Atomically persists encrypted resumable-work state with its public
+  /// progress cursor. The checkpoint payload is never emitted in operation
+  /// events or result values.
+  pub(in crate::server) async fn checkpoint(
+    &self,
+    phase: impl Into<String>,
+    processed: u64,
+    total: u64,
+    checkpoint: Value,
+  ) {
+    let phase = phase.into();
+    let progress = AdminOperationProgress {
+      phase: Some(phase.clone()),
+      processed: Some(processed),
+      total: Some(total),
+    };
+    if let Some(guard) = self.durable_guard.as_ref()
+      && let Some(durable) = self.runtime.inner.durable.as_ref()
+    {
+      durable
+        .checkpoint(&self.runtime, &self.id, guard, progress, checkpoint)
+        .await;
+      return;
+    }
+    self.progress(phase, Some(processed), Some(total)).await;
   }
 
   pub(in crate::server) fn ensure_not_cancelled(&self) -> Result<(), String> {

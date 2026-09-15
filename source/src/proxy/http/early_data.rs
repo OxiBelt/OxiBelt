@@ -62,9 +62,11 @@ mod tests {
   use http::Method;
 
   #[test]
-  fn safe_methods_permit_only_get_and_head() {
+  fn safe_methods_permit_get_head_and_query() {
     assert!(TlsEarlyDataMode::SafeMethods.permits_method(&Method::GET));
     assert!(TlsEarlyDataMode::SafeMethods.permits_method(&Method::HEAD));
+    assert!(TlsEarlyDataMode::SafeMethods.permits_method(&Method::from_bytes(b"QUERY").unwrap()));
+    assert!(!TlsEarlyDataMode::SafeMethods.permits_method(&Method::from_bytes(b"query").unwrap()));
     assert!(!TlsEarlyDataMode::SafeMethods.permits_method(&Method::POST));
     assert!(!TlsEarlyDataMode::Off.permits_method(&Method::GET));
     assert!(TlsEarlyDataMode::On.permits_method(&Method::POST));

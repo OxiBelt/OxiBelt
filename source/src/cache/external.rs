@@ -1,9 +1,9 @@
 //! External cache L3 integration built on top of local cache policy decisions.
 
 use super::external_handler::{
-  CACHE_KEY_VERSION, ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheHeader,
-  ExternalCacheLookupHit, ExternalCacheLookupRequest, ExternalCachePublishBody, ExternalCacheVary,
-  PROTOCOL_VERSION,
+  ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheHeader, ExternalCacheLookupHit,
+  ExternalCacheLookupRequest, ExternalCachePublishBody, ExternalCacheQueryEpochRequest,
+  ExternalCacheVary, PROTOCOL_VERSION,
 };
 #[cfg(feature = "admin-runtime")]
 use super::external_handler::{
@@ -12,6 +12,31 @@ use super::external_handler::{
 use super::*;
 
 impl ResponseCache {
+  pub(super) async fn external_query_epoch(
+    &self,
+    target: &CacheQueryInvalidationTarget,
+    advance: bool,
+  ) -> Option<u64> {
+    let handler = self
+      .policy(Some(&target.policy))?
+      .external_handler
+      .as_deref()?;
+    self
+      .external_cache
+      .query_epoch(
+        handler,
+        ExternalCacheQueryEpochRequest::new(
+          target.policy.clone(),
+          target.scheme.clone(),
+          target.host.clone(),
+          target.uri.clone(),
+          advance,
+        ),
+      )
+      .await
+      .map(|response| response.target_epoch)
+  }
+
   pub(crate) async fn lookup_external(
     &self,
     ctx: CacheLookupContext<'_>,
@@ -20,7 +45,10 @@ impl ResponseCache {
     if !self.policy_enabled(ctx.policy_name, ctx.method) {
       return None;
     }
-    if request_no_store(ctx.request_headers, &self.bypass_request_headers) {
+    if super::lookup::query_context_origin_precondition_bypass(&ctx) {
+      return None;
+    }
+    if super::lookup::cache_request_bypassed(&ctx, &self.bypass_request_headers) {
       return None;
     }
     let operation = self.operation_context(
@@ -29,12 +57,23 @@ impl ResponseCache {
       ctx.host,
       ctx.method,
       ctx.uri,
-      ctx.request_headers,
+      super::lookup::cache_view_headers(&ctx),
+      ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
     )?;
+    if self.query_target_cache_bypassed(&operation) {
+      return None;
+    }
+    if !self
+      .bind_query_generation_async(ctx.query_identity, &operation)
+      .await
+    {
+      return None;
+    }
     let handler = operation.policy.external_handler.as_deref()?;
     let request = ExternalCacheLookupRequest::new(
+      external_cache_key_version(&operation.base_key).to_string(),
       operation.policy.name.clone(),
       operation.partition.clone(),
       operation.base_key.clone(),
@@ -42,7 +81,10 @@ impl ResponseCache {
       operation.host.clone(),
       operation.uri.clone(),
       ctx.method.as_str().to_string(),
-      request_no_cache(ctx.request_headers),
+      request_no_cache(super::lookup::cache_view_headers(&ctx)),
+      ctx
+        .query_identity
+        .and_then(CacheQueryIdentity::query_target_epoch),
     );
     let hit = self
       .external_cache
@@ -58,7 +100,17 @@ impl ResponseCache {
     hit: ExternalCacheLookupHit,
   ) -> Option<CacheLookup> {
     let metadata = hit.metadata;
-    metadata.validate_versions().ok()?;
+    metadata
+      .validate_versions(external_cache_key_version(&operation.base_key))
+      .ok()?;
+    if is_query_v1_base_key(&operation.base_key)
+      && metadata.query_target_epoch
+        != ctx
+          .query_identity
+          .and_then(CacheQueryIdentity::query_target_epoch)
+    {
+      return None;
+    }
     if metadata.policy != operation.policy.name
       || metadata.partition != operation.partition
       || metadata.base_key != operation.base_key
@@ -77,7 +129,9 @@ impl ResponseCache {
     }
     let headers = external_headers(&metadata.headers)?;
     let vary = external_vary_matchers(&metadata.vary, ctx.certificate_identity)?;
-    if !external_vary_allowed(&vary) || !vary_matches(&vary, ctx.request_headers) {
+    if !external_vary_allowed(&vary)
+      || !vary_matches(&vary, super::lookup::cache_view_headers(&ctx))
+    {
       return None;
     }
     if metadata.variant_key != variant_key(&operation.partition, &operation.base_key, &vary) {
@@ -88,7 +142,10 @@ impl ResponseCache {
     if metadata.expires_at_ms < metadata.stored_at_ms {
       return None;
     }
-    if expires_at <= SystemTime::now() {
+    let now = SystemTime::now();
+    let expired = expires_at <= now;
+    let query_expired = is_query_v1_base_key(&metadata.base_key) && expired;
+    if external_cache_retention_until_ms(&metadata) <= system_time_ms(now) {
       return None;
     }
     let stale_if_error_until = match metadata.stale_if_error_until_ms {
@@ -128,6 +185,7 @@ impl ResponseCache {
           stored_at,
           vary,
           tags,
+          query_target_epoch: metadata.query_target_epoch,
           size,
         };
         let entry = stored.to_cache_entry()?;
@@ -143,15 +201,68 @@ impl ResponseCache {
           .with_expires_at(expires_at)
       }
     };
-    if request_no_cache(ctx.request_headers) || metadata.must_revalidate {
+    if request_no_cache(super::lookup::cache_view_headers(&ctx))
+      || metadata.must_revalidate
+      || expired
+    {
       let validators = validator_headers(&entry.headers);
+      if query_expired
+        && !request_no_cache(super::lookup::cache_view_headers(&ctx))
+        && !metadata.must_revalidate
+        && metadata
+          .stale_while_revalidate_until_ms
+          .is_some_and(|until| until > system_time_ms(now))
+      {
+        return Some(CacheLookup::Stale(StaleEntry {
+          entry,
+          request_headers: validators,
+          serve_stale_on_error: metadata
+            .stale_if_error_until_ms
+            .is_some_and(|until| until > system_time_ms(now)),
+          background_refresh: operation.policy.background_refresh,
+        }));
+      }
       if validators.is_empty() {
+        if is_query_v1_base_key(&metadata.base_key)
+          && (request_no_cache(super::lookup::cache_view_headers(&ctx)) || metadata.must_revalidate)
+        {
+          return None;
+        }
+        if query_expired
+          && metadata
+            .stale_while_revalidate_until_ms
+            .is_some_and(|until| until > system_time_ms(now))
+        {
+          return Some(CacheLookup::Stale(StaleEntry {
+            entry,
+            request_headers: HeaderMap::new(),
+            serve_stale_on_error: metadata
+              .stale_if_error_until_ms
+              .is_some_and(|until| until > system_time_ms(now)),
+            background_refresh: operation.policy.background_refresh,
+          }));
+        }
+        if query_expired
+          && metadata
+            .stale_if_error_until_ms
+            .is_some_and(|until| until > system_time_ms(now))
+        {
+          return Some(CacheLookup::Revalidate(Revalidation {
+            entry,
+            request_headers: HeaderMap::new(),
+            serve_stale_on_error: true,
+          }));
+        }
         return None;
       }
       return Some(CacheLookup::Revalidate(Revalidation {
         entry,
         request_headers: validators,
-        serve_stale_on_error: false,
+        serve_stale_on_error: query_expired
+          && !metadata.must_revalidate
+          && metadata
+            .stale_if_error_until_ms
+            .is_some_and(|until| until > system_time_ms(now)),
       }));
     }
     Some(CacheLookup::Fresh(entry))
@@ -211,12 +322,15 @@ impl ResponseCache {
     if !external_vary_allowed(&entry.vary) {
       return None;
     }
+    if is_query_v1_base_key(&entry.base_key) && entry.query_target_epoch.is_none() {
+      return None;
+    }
     let body_len = stored_body_len(&entry.body)?;
     Some((
       handler,
       ExternalCacheEntryMetadata {
         protocol_version: PROTOCOL_VERSION.to_string(),
-        cache_key_version: CACHE_KEY_VERSION.to_string(),
+        cache_key_version: external_cache_key_version(&entry.base_key).to_string(),
         policy: entry.policy.clone(),
         partition: entry.partition.clone(),
         base_key: entry.base_key.clone(),
@@ -248,6 +362,7 @@ impl ResponseCache {
           })
           .collect(),
         tags: entry.tags.clone(),
+        query_target_epoch: entry.query_target_epoch,
       },
     ))
   }
@@ -278,7 +393,7 @@ impl ResponseCache {
     uri: &str,
     partition: Option<&str>,
   ) -> Vec<ExternalCachePurgeReport> {
-    self
+    let mut reports = self
       .purge_external(
         policy,
         ExternalCachePurgeRequest::new(
@@ -290,6 +405,58 @@ impl ResponseCache {
           None,
           None,
           partition.map(str::to_string),
+        ),
+      )
+      .await;
+    reports.extend(
+      self
+        .purge_external(
+          policy,
+          ExternalCachePurgeRequest::with_cache_key_version(
+            QUERY_EXTERNAL_CACHE_KEY_VERSION.to_string(),
+            ExternalCachePurgeKind::Exact,
+            policy.to_string(),
+            Some(scheme.to_string()),
+            Some(host.to_string()),
+            Some(uri.to_string()),
+            None,
+            None,
+            partition.map(str::to_string),
+            None,
+          ),
+        )
+        .await,
+    );
+    reports
+  }
+
+  /// Query-target invalidation is emitted in the isolated Q1 external-key
+  /// namespace.  A handler that does not implement Q1 cannot affect QUERY
+  /// entries and therefore fails closed as a cache miss.
+  #[cfg(feature = "admin-runtime")]
+  pub(crate) async fn purge_external_query_exact_partition(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+    partition: Option<&str>,
+    query_target_epoch: u64,
+  ) -> Vec<ExternalCachePurgeReport> {
+    self
+      .purge_external(
+        policy,
+        ExternalCachePurgeRequest::with_cache_key_version(
+          QUERY_EXTERNAL_CACHE_KEY_VERSION.to_string(),
+          ExternalCachePurgeKind::Exact,
+          policy.to_string(),
+          Some(scheme.to_string()),
+          Some(host.to_string()),
+          Some(uri.to_string()),
+          None,
+          None,
+          partition.map(str::to_string),
+          Some(query_target_epoch),
         ),
       )
       .await
@@ -304,7 +471,7 @@ impl ResponseCache {
     path_prefix: &str,
     partition: Option<&str>,
   ) -> Vec<ExternalCachePurgeReport> {
-    self
+    let mut reports = self
       .purge_external(
         policy,
         ExternalCachePurgeRequest::new(
@@ -318,7 +485,27 @@ impl ResponseCache {
           partition.map(str::to_string),
         ),
       )
-      .await
+      .await;
+    reports.extend(
+      self
+        .purge_external(
+          policy,
+          ExternalCachePurgeRequest::with_cache_key_version(
+            QUERY_EXTERNAL_CACHE_KEY_VERSION.to_string(),
+            ExternalCachePurgeKind::Prefix,
+            policy.to_string(),
+            Some(scheme.to_string()),
+            Some(host.to_string()),
+            None,
+            Some(path_prefix.to_string()),
+            None,
+            partition.map(str::to_string),
+            None,
+          ),
+        )
+        .await,
+    );
+    reports
   }
 
   #[cfg(feature = "admin-runtime")]
@@ -330,7 +517,7 @@ impl ResponseCache {
     host: Option<&str>,
     partition: Option<&str>,
   ) -> Vec<ExternalCachePurgeReport> {
-    self
+    let mut reports = self
       .purge_external(
         policy,
         ExternalCachePurgeRequest::new(
@@ -344,7 +531,27 @@ impl ResponseCache {
           partition.map(str::to_string),
         ),
       )
-      .await
+      .await;
+    reports.extend(
+      self
+        .purge_external(
+          policy,
+          ExternalCachePurgeRequest::with_cache_key_version(
+            QUERY_EXTERNAL_CACHE_KEY_VERSION.to_string(),
+            ExternalCachePurgeKind::Tag,
+            policy.to_string(),
+            scheme.map(str::to_string),
+            host.map(str::to_string),
+            None,
+            None,
+            Some(tag.to_string()),
+            partition.map(str::to_string),
+            None,
+          ),
+        )
+        .await,
+    );
+    reports
   }
 
   #[cfg(feature = "admin-runtime")]
@@ -353,6 +560,17 @@ impl ResponseCache {
     policy: &str,
     purge: ExternalCachePurgeRequest,
   ) -> Vec<ExternalCachePurgeReport> {
+    // Legacy-only policies must not send a second, unsupported Q1 purge to
+    // their external handler or change the Admin result shape.
+    if purge.cache_key_version == QUERY_EXTERNAL_CACHE_KEY_VERSION
+      && !self
+        .config
+        .cache_methods
+        .iter()
+        .any(|method| method == "QUERY")
+    {
+      return Vec::new();
+    }
     let Some(handler) = self
       .policy(Some(policy))
       .and_then(|policy| policy.external_handler.as_deref())
@@ -361,6 +579,24 @@ impl ResponseCache {
     };
     vec![self.external_cache.purge(handler, purge).await]
   }
+}
+
+fn external_cache_retention_until_ms(metadata: &ExternalCacheEntryMetadata) -> i64 {
+  let mut retention = metadata.expires_at_ms;
+  if is_query_v1_base_key(&metadata.base_key) {
+    retention = retention
+      .max(
+        metadata
+          .stale_if_error_until_ms
+          .unwrap_or(metadata.expires_at_ms),
+      )
+      .max(
+        metadata
+          .stale_while_revalidate_until_ms
+          .unwrap_or(metadata.expires_at_ms),
+      );
+  }
+  retention
 }
 
 fn external_headers(headers: &[ExternalCacheHeader]) -> Option<HeaderMap> {

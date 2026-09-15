@@ -14,7 +14,10 @@ use crate::metrics::Metrics;
 use super::client::{ExternalCacheHttpClient, ExternalCacheLookupHit, ExternalCachePublishBody};
 #[cfg(feature = "admin-runtime")]
 use super::protocol::ExternalCachePurgeRequest;
-use super::protocol::{ExternalCacheEntryMetadata, ExternalCacheLookupRequest};
+use super::protocol::{
+  ExternalCacheEntryMetadata, ExternalCacheLookupRequest, ExternalCacheQueryEpochRequest,
+  ExternalCacheQueryEpochResponse,
+};
 
 #[derive(Clone)]
 pub(crate) struct ExternalCacheRuntime {
@@ -98,6 +101,31 @@ impl ExternalCacheRuntime {
       Err(error) => {
         self.record(&handler.name, "lookup", "error");
         warn!(handler = %handler.name, error = %error, "external cache lookup failed");
+        None
+      }
+    }
+  }
+
+  /// Returns `None` for an absent, legacy, saturated, or failed handler. Q1
+  /// callers treat that as a fail-closed cache bypass.
+  pub(crate) async fn query_epoch(
+    &self,
+    handler_name: &str,
+    request: ExternalCacheQueryEpochRequest,
+  ) -> Option<ExternalCacheQueryEpochResponse> {
+    let handler = self.handlers.get(handler_name)?;
+    let Ok(_permit) = handler.limiter.clone().try_acquire_owned() else {
+      self.record(&handler.name, "query_epoch", "saturated");
+      return None;
+    };
+    match handler.client.query_epoch(&request).await {
+      Ok(response) => {
+        self.record(&handler.name, "query_epoch", "ok");
+        Some(response)
+      }
+      Err(error) => {
+        self.record(&handler.name, "query_epoch", "error");
+        warn!(handler = %handler.name, error = %error, "external QUERY epoch request failed");
         None
       }
     }

@@ -203,6 +203,20 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "cache",
+      "query-protocol-cache-matrix",
+      "QUERY cache identity preserves request bodies across HTTP/1, HTTP/2, and HTTP/3 downstream and upstream paths",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        h2_upstream: true,
+        h3_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "cache",
       "large-object-cache",
       "large cacheable objects survive upstream removal",
       ExpectStart::Success,

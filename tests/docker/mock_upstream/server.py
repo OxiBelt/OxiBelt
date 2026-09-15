@@ -133,6 +133,9 @@ class EchoHandler(BaseHTTPRequestHandler):
   def do_HEAD(self):
     self._handle()
 
+  def do_QUERY(self):
+    self._handle()
+
   def do_POST(self):
     if CAPTURE_REQUESTS:
       self._capture_request()
