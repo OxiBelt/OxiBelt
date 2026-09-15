@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "ci_workflow_integrity/certificate_fixtures.rs"]
+mod certificate_fixtures;
 #[path = "ci_workflow_integrity/download_recovery.rs"]
 mod download_recovery;
 

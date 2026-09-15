@@ -2509,6 +2509,8 @@ EOF
 
 upstream_leaf_config="${work_dir}/upstream-leaf.cnf"
 if [[ "${certificate_metadata_case}" == "1" ]]; then
+  # Metadata rules assert this template's exact DNS count; unrelated protocol
+  # aliases belong in the general upstream certificate template above.
   cat >"${work_dir}/certificate-metadata-upstream-leaf.cnf" <<'EOF'
 [req]
 distinguished_name = req_distinguished_name
@@ -2534,8 +2536,6 @@ DNS.8 = mock-turn-tls
 DNS.9 = coturn
 DNS.10 = mock-websocket
 DNS.11 = certificate-upstream.example.test
-DNS.12 = incremental-h2
-DNS.13 = incremental-h3
 IP.1 = 198.51.100.42
 URI.1 = spiffe://matrix.example.test/upstream
 email.1 = upstream-cert@example.test
