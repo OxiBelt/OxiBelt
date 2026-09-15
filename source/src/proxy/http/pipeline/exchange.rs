@@ -3,6 +3,8 @@
 use super::*;
 
 pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<ProxyBody> {
+  let incremental_request = incremental::request_marked(&context.outbound);
+  let request_version = context.request_version;
   let exchange = context
     .outbound
     .extensions()
@@ -10,6 +12,7 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     .cloned();
   let response_guard = exchange.as_ref().map(|exchange| exchange.begin_response());
   let mut response = run_inner(context).await;
+  incremental::adapt_admission_rejection(&mut response, incremental_request, request_version);
   if let Some(exchange) = exchange {
     if response
       .extensions()

@@ -125,6 +125,7 @@ where
   B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
 {
   let request_version = request.version();
+  let incremental_request = incremental::request_marked(&request);
   let downstream_receive_started =
     fast_path::stage_timing::start(state.request_path_features.stage_timing_metrics);
   early_data::strip_untrusted_header(request.headers_mut());
@@ -194,7 +195,8 @@ where
   {
     Ok(lease) => lease,
     Err(rejection) => {
-      let response = circuit_breaker_rejection_response(state.as_ref(), rejection);
+      let mut response = circuit_breaker_rejection_response(state.as_ref(), rejection);
+      incremental::adapt_admission_rejection(&mut response, incremental_request, request_version);
       let response = super::status_headers::finalize(response, &state.config.proxy.status_headers);
       emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
       record_request_observability(
@@ -210,7 +212,7 @@ where
   let mut request_connection_permit = None;
   let mut selected_bandwidth = None;
   let request_is_head = request.method() == Method::HEAD;
-  let response = handle_inner_impl(
+  let mut response = handle_inner_impl(
     request,
     peer_addr,
     tcp_max_hop,
@@ -230,6 +232,7 @@ where
     trace_context,
   )
   .await;
+  incremental::adapt_admission_rejection(&mut response, incremental_request, request_version);
   // Upstream HTTP versions are useful to exchange/WAF policy, but the final
   // response must describe the protocol of the downstream writer. In
   // particular, Hyper's H1 encoder cannot serialize an HTTP/3 response head.

@@ -17,6 +17,7 @@ pub(crate) fn rejection_response(
   let status = StatusCode::from_u16(snapshot.circuit_breakers.response_status())
     .unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
   let mut response = text_response(status, "request admission unavailable");
+  response.extensions_mut().insert(rejection);
   let retry_after = retry_after_seconds(rejection.retry_after);
   if let Ok(value) = http::HeaderValue::from_str(&retry_after.to_string()) {
     response
@@ -68,5 +69,18 @@ mod tests {
     };
     let error = anyhow::Error::new(rejection).context("upstream connector failed");
     assert_eq!(admission_rejection(&error), Some(rejection));
+  }
+
+  #[test]
+  fn retry_after_rounds_up_with_a_one_second_minimum() {
+    for (duration, expected) in [
+      (Duration::ZERO, 1),
+      (Duration::from_millis(1), 1),
+      (Duration::from_secs(1), 1),
+      (Duration::from_millis(1001), 2),
+      (Duration::MAX, u64::MAX),
+    ] {
+      assert_eq!(retry_after_seconds(duration), expected);
+    }
   }
 }

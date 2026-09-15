@@ -59,6 +59,25 @@ or conversion cannot retroactively make that work incremental; forwarding is
 refused. Prefer signaling on the original message and selecting a route whose
 required policy can operate without body capture.
 
+## Temporary capacity rejection
+
+When a marked request is rejected because admission reaches an active limit,
+a pending queue is full, or a pending queue times out, OxiBelt returns
+`429 Too Many Requests` as described in [RFC 10036 Section 4.2](https://www.rfc-editor.org/rfc/rfc10036.html#section-4.2).
+The response includes `Retry-After`, `Cache-Control: no-store`, and
+`Proxy-Status: oxibelt; error=connection_limit_reached`. The retry delay uses
+existing admission timing, rounded up to whole seconds with a minimum of one.
+The protocol status field remains present even when global or route
+`proxy_status` emission is disabled, independently of the configured identifier
+and upstream status-header policy.
+
+These marked capacity rejections always close HTTP/1.0 and HTTP/1.1 connections,
+including known-empty requests, so an unread upload cannot be reused as another
+request. HTTP/2 and HTTP/3 responses do not include `Connection: close`.
+Circuit-open, retry-budget and internal-state-unavailable failures retain their
+configured admission response, as do all unmarked requests. Limits, queues,
+retry selection, readiness and admission-resource lifetimes are unchanged.
+
 ## gRPC-Web text
 
 For a marked gRPC-Web text upload, the decoder forwards each complete Base64

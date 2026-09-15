@@ -6,6 +6,8 @@ mod common {
 }
 mod alt_svc;
 mod incremental;
+mod incremental_capacity;
+mod incremental_capacity_wire;
 
 use pretty_assertions::assert_eq;
 

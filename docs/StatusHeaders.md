@@ -39,8 +39,9 @@ diagnostics. A preserved valid chain precedes the local member. A local member
 replaces a received chain when appending it would exceed those bounds.
 
 `upstream = "strip"` removes received chains. Disabling `proxy_status` or
-`cache_status` removes both received and local fields in that family. The sole
-exception is `Proxy-Status: oxibelt; error=incremental_refused`, which remains
-the required Incremental protocol refusal signal. OxiBelt does not generate
-new trailers; it only retains a valid received status field in trailers when
-the selected policy permits it.
+`cache_status` removes both received and local fields in that family. The
+Incremental protocol signals `Proxy-Status: oxibelt; error=incremental_refused`
+and `Proxy-Status: oxibelt; error=connection_limit_reached` remain mandatory for
+[permanent refusals and marked capacity rejections](Incremental.md), respectively.
+OxiBelt does not generate new trailers; it only retains a valid received status
+field in trailers when the selected policy permits it.

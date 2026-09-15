@@ -16,6 +16,15 @@ Accepted marked uploads are one-shot and are not mirrored; marked responses
 skip optional compression and new cache collection. gRPC-Web text peers must
 accept independently padded Base64 chunks.
 
+Marked requests rejected for an active admission limit, full queue, or queue
+timeout now receive `429`, the existing `Retry-After`, `Cache-Control: no-store`,
+and mandatory `Proxy-Status: oxibelt; error=connection_limit_reached`, including
+when ordinary status-header emission is disabled. These responses always close
+HTTP/1.x connections. Other admission failures and unmarked requests retain
+their existing behavior. Clients that compare admission statuses or headers
+exactly should account for this correction. Rolling back restores the earlier
+capacity rejection status and header behavior.
+
 No configuration key, schema epoch, Admin API, rule syntax or persisted-state
 migration is introduced. Rollback needs no state conversion, but an older
 binary does not provide these forwarding guarantees; stop incremental clients

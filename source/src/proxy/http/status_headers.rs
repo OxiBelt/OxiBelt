@@ -54,6 +54,8 @@ pub(crate) struct OriginRole;
 #[derive(Clone, Copy)]
 pub(crate) struct IncrementalRefusal;
 #[derive(Clone, Copy)]
+pub(super) struct IncrementalCapacityRejection;
+#[derive(Clone, Copy)]
 struct Finalized;
 #[derive(Clone, Copy)]
 struct ProxyError(&'static str);
@@ -198,6 +200,14 @@ pub(crate) fn finalize_head<B>(response: &mut Response<B>, defaults: &StatusHead
   let proxy = if response.extensions().get::<IncrementalRefusal>().is_some() {
     Some(HeaderValue::from_static(
       "oxibelt; error=incremental_refused",
+    ))
+  } else if response
+    .extensions()
+    .get::<IncrementalCapacityRejection>()
+    .is_some()
+  {
+    Some(HeaderValue::from_static(
+      "oxibelt; error=connection_limit_reached",
     ))
   } else if config.proxy_status {
     let local = public_id.filter(|_| own).map(|id| {
