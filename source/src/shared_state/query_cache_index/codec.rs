@@ -72,18 +72,26 @@ pub(super) fn validate_redis_expiry_ref(
   validate_target_namespace(expiry_key, &expiry_ref.target_key)
 }
 
-pub(super) fn validate_target_namespace(
-  namespace_key: &str,
+pub(super) fn validate_target_namespace(expiry_key: &str, target_key: &str) -> anyhow::Result<()> {
+  let namespace = query_cache_namespace(expiry_key)?;
+  validate_target_logical_namespace(namespace, target_key)
+}
+
+pub(super) fn validate_target_logical_namespace(
+  namespace: &str,
   target_key: &str,
 ) -> anyhow::Result<()> {
-  let namespace = namespace_key
-    .strip_suffix(":cache:q1-expiry-v1")
-    .context("invalid Redis QUERY expiry-index key")?;
   let target_prefix = format!("{namespace}:cache:q1-target-v1:");
   if !target_key.starts_with(&target_prefix) {
-    bail!("Redis QUERY expiry reference crosses a shared-state namespace");
+    bail!("QUERY expiry reference crosses a shared-state namespace");
   }
   Ok(())
+}
+
+pub(super) fn query_cache_namespace(expiry_key: &str) -> anyhow::Result<&str> {
+  expiry_key
+    .strip_suffix(":cache:q1-expiry-v1")
+    .context("invalid QUERY expiry-index key")
 }
 
 pub(super) fn validate_redis_member(

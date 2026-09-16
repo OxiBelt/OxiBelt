@@ -3,12 +3,13 @@ use super::*;
 impl PostgresBackend {
   pub(super) async fn query_cache_publish(
     &self,
-    namespace_key: &str,
+    expiry_key: &str,
     target_key: &str,
     member: &QueryCacheIndexMember,
     entry_value: &[u8],
   ) -> anyhow::Result<()> {
-    validate_target_namespace(namespace_key, target_key)?;
+    validate_target_namespace(expiry_key, target_key)?;
+    let namespace_key = query_cache_namespace(expiry_key)?;
     validate_member_keys(target_key, member)?;
     let epoch =
       i64::try_from(member.epoch).context("QUERY cache epoch exceeds PostgreSQL bigint")?;
@@ -61,11 +62,13 @@ impl PostgresBackend {
 
   pub(super) async fn query_cache_cleanup_before(
     &self,
-    namespace_key: &str,
+    expiry_key: &str,
     target_key: &str,
     before_epoch: u64,
     limit: usize,
   ) -> anyhow::Result<QueryCacheCleanupBatch> {
+    validate_target_namespace(expiry_key, target_key)?;
+    let namespace_key = query_cache_namespace(expiry_key)?;
     let before = i64::try_from(before_epoch).unwrap_or(i64::MAX);
     self
       .query_cache_cleanup_rows(
@@ -82,9 +85,10 @@ impl PostgresBackend {
 
   pub(super) async fn query_cache_cleanup_expired(
     &self,
-    namespace_key: &str,
+    expiry_key: &str,
     limit: usize,
   ) -> anyhow::Result<QueryCacheCleanupBatch> {
+    let namespace_key = query_cache_namespace(expiry_key)?;
     self
       .query_cache_cleanup_rows(
         "SELECT target_key, storage_variant, member FROM oxibelt_shared_cache_query_targets
@@ -133,7 +137,7 @@ impl PostgresBackend {
       if member.version != QUERY_CACHE_INDEX_VERSION
         || member.storage_variant != *storage_variant
         || target_key.is_some_and(|expected| expected != row_target_key)
-        || validate_target_namespace(namespace_key, row_target_key).is_err()
+        || validate_target_logical_namespace(namespace_key, row_target_key).is_err()
         || validate_member_keys(row_target_key, &member).is_err()
       {
         sqlx::query(

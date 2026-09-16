@@ -47,6 +47,17 @@ fn redis_member_validation_rejects_tampered_keys_and_cross_namespace_expiry_refs
 }
 
 #[test]
+fn postgres_namespace_uses_the_logical_shared_state_namespace() {
+  assert_eq!(
+    query_cache_namespace("ns:cache:q1-expiry-v1").unwrap(),
+    "ns"
+  );
+  assert!(validate_target_logical_namespace("ns", &target_key()).is_ok());
+  assert!(validate_target_logical_namespace("other", &target_key()).is_err());
+  assert!(query_cache_namespace("ns:cache:q1-expiry-v2").is_err());
+}
+
+#[test]
 fn memory_cleanup_is_bounded_and_preserves_a_newer_lookup_pointer() {
   let backend = MemoryBackend::default();
   let target = target_key();

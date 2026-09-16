@@ -492,7 +492,7 @@ impl SharedState {
 
   fn shared_cache_entry_key(&self, variant_key: &str, query_target_epoch: Option<u64>) -> String {
     let storage_variant = match query_target_epoch {
-      Some(epoch) => format!("q1-epoch:{epoch}:{variant_key}"),
+      Some(epoch) => format!("q1-epoch:{epoch}:{}", digest_hex(variant_key.as_bytes())),
       None => variant_key.to_string(),
     };
     self.shared_cache_entry_key_from_storage(&storage_variant)
@@ -500,7 +500,10 @@ impl SharedState {
 
   pub(super) fn shared_cache_storage_variant_key(&self, entry: &SharedCacheEntry) -> String {
     match entry.query_target_epoch {
-      Some(epoch) => format!("q1-epoch:{epoch}:{}", entry.variant_key),
+      Some(epoch) => format!(
+        "q1-epoch:{epoch}:{}",
+        digest_hex(entry.variant_key.as_bytes())
+      ),
       None => entry.variant_key.clone(),
     }
   }
@@ -935,6 +938,21 @@ mod tests {
   fn q1_shared_entry_retains_its_stale_while_revalidate_window() {
     assert_eq!(shared_cache_retention_until_ms(&entry(Some(0))), 300);
     assert_eq!(shared_cache_retention_until_ms(&entry(None)), 200);
+  }
+
+  #[test]
+  fn q1_shared_storage_keys_are_text_safe_and_match_direct_lookup() {
+    let shared = SharedState::test_memory("q1-shared-storage-key");
+    let mut query_entry = entry(Some(7));
+    query_entry.variant_key = shared_no_vary_variant_key("", &query_entry.base_key);
+
+    let storage_variant = shared.shared_cache_storage_variant_key(&query_entry);
+    assert!(!storage_variant.contains('\0'));
+    assert_eq!(storage_variant.len(), "q1-epoch:7:".len() + 64);
+    assert_eq!(
+      shared.shared_cache_entry_key(&query_entry.variant_key, Some(7)),
+      shared.shared_cache_entry_key_from_storage(&storage_variant)
+    );
   }
 
   #[tokio::test]
