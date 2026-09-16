@@ -402,6 +402,17 @@ impl SharedState {
       entry.body_chunks = chunks;
     }
     let value = serde_json::to_vec(&entry)?;
+    match self
+      .cache_publish_query_indexed(backend, &entry, &value, ttl)
+      .await
+    {
+      Ok(true) => return Ok(()),
+      Ok(false) => {}
+      Err(error) => {
+        delete_shared_chunks(backend, &entry.body_chunks).await;
+        return Err(error);
+      }
+    }
     backend.put(&key, &value, ttl).await?;
     self.cache_put_index(&entry).await;
     Ok(())
@@ -448,6 +459,17 @@ impl SharedState {
     entry.body_len = body_len;
     entry.body_chunks = chunks;
     let value = serde_json::to_vec(&entry)?;
+    match self
+      .cache_publish_query_indexed(backend, &entry, &value, ttl)
+      .await
+    {
+      Ok(true) => return Ok(()),
+      Ok(false) => {}
+      Err(error) => {
+        delete_shared_chunks(backend, &entry.body_chunks).await;
+        return Err(error);
+      }
+    }
     if let Err(error) = backend.put(&key, &value, ttl).await {
       delete_shared_chunks(backend, &entry.body_chunks).await;
       return Err(error);
@@ -476,14 +498,14 @@ impl SharedState {
     self.shared_cache_entry_key_from_storage(&storage_variant)
   }
 
-  fn shared_cache_storage_variant_key(&self, entry: &SharedCacheEntry) -> String {
+  pub(super) fn shared_cache_storage_variant_key(&self, entry: &SharedCacheEntry) -> String {
     match entry.query_target_epoch {
       Some(epoch) => format!("q1-epoch:{epoch}:{}", entry.variant_key),
       None => entry.variant_key.clone(),
     }
   }
 
-  fn shared_cache_entry_key_from_storage(&self, variant_key: &str) -> String {
+  pub(super) fn shared_cache_entry_key_from_storage(&self, variant_key: &str) -> String {
     self.key(&format!("cache:entry:{variant_key}"))
   }
 
@@ -499,7 +521,7 @@ impl SharedState {
     ))
   }
 
-  fn shared_cache_index_key(&self, entry: &SharedCacheEntry) -> String {
+  pub(super) fn shared_cache_index_key(&self, entry: &SharedCacheEntry) -> String {
     let prefix = self.shared_cache_index_prefix(
       &entry.policy,
       &entry.scheme,
@@ -791,7 +813,7 @@ fn shared_entry_expires_at(entry: &SharedCacheEntry) -> std::time::SystemTime {
 /// Q1 entries must survive their stale-while-revalidate window so a later
 /// reader can initiate or join its revalidation. Legacy GET/HEAD keeps its
 /// established stale-if-error retention bound.
-fn shared_cache_retention_until_ms(entry: &SharedCacheEntry) -> i64 {
+pub(super) fn shared_cache_retention_until_ms(entry: &SharedCacheEntry) -> i64 {
   let mut retention = entry
     .stale_if_error_until_ms
     .unwrap_or(entry.expires_at_ms)
@@ -863,7 +885,7 @@ fn header_values(headers: &HeaderMap, name: &str) -> String {
     .unwrap_or_default()
 }
 
-fn shared_cache_chunk_stem(variant_key: &str) -> String {
+pub(super) fn shared_cache_chunk_stem(variant_key: &str) -> String {
   digest_hex(variant_key.as_bytes())
 }
 

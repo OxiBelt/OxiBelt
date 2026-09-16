@@ -68,6 +68,7 @@ impl SharedState {
       reload: Some(backend),
       failure_registry,
       cleanup: CleanupDispatcher::new(),
+      query_cache_expiry_scheduler: Arc::default(),
     })
   }
 
@@ -183,6 +184,7 @@ impl SharedState {
       reload: None,
       failure_registry,
       cleanup: CleanupDispatcher::new(),
+      query_cache_expiry_scheduler: Arc::default(),
     })
   }
 }

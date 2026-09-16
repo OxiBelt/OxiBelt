@@ -137,6 +137,34 @@ pub(super) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
   .execute(&mut *tx)
   .await?;
   sqlx::query(
+    "CREATE TABLE IF NOT EXISTS oxibelt_shared_cache_query_targets (
+       namespace_key text NOT NULL,
+       target_key text NOT NULL,
+       entry_epoch bigint NOT NULL CHECK (entry_epoch >= 0),
+       storage_variant text NOT NULL,
+       member bytea NOT NULL,
+       chunk_count bigint NOT NULL CHECK (chunk_count >= 0),
+       expires_at_ms bigint NOT NULL,
+       PRIMARY KEY (namespace_key, target_key, storage_variant)
+     )",
+  )
+  .execute(&mut *tx)
+  .await?;
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS oxibelt_shared_cache_query_targets_epoch
+     ON oxibelt_shared_cache_query_targets
+       (namespace_key, target_key, entry_epoch, storage_variant)",
+  )
+  .execute(&mut *tx)
+  .await?;
+  sqlx::query(
+    "CREATE INDEX IF NOT EXISTS oxibelt_shared_cache_query_targets_expires
+     ON oxibelt_shared_cache_query_targets
+       (namespace_key, expires_at_ms, target_key, storage_variant)",
+  )
+  .execute(&mut *tx)
+  .await?;
+  sqlx::query(
     "CREATE TABLE IF NOT EXISTS oxibelt_shared_idempotency (
        record_key text PRIMARY KEY,
        fingerprint bytea NOT NULL,

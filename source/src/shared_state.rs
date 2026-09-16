@@ -6,8 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -39,6 +38,7 @@ mod failure_policy;
 mod feature_flags;
 mod helpers;
 mod person_proof;
+mod query_cache_index;
 mod rate_limits;
 mod redis_connection;
 mod redis_pool;
@@ -104,6 +104,7 @@ pub struct SharedState {
   reload: Option<Arc<Backend>>,
   failure_registry: Arc<BackendFailureRegistry>,
   cleanup: Arc<CleanupDispatcher>,
+  query_cache_expiry_scheduler: Arc<QueryCacheExpiryScheduler>,
 }
 
 #[derive(Clone, Debug)]
@@ -130,11 +131,36 @@ struct PostgresBackend {
 #[derive(Clone, Debug, Default)]
 struct MemoryBackend {
   values: Arc<Mutex<HashMap<String, MemoryValue>>>,
+  query_cache_indexes: Arc<Mutex<HashMap<String, HashMap<String, QueryCacheIndexMember>>>>,
   counters: Arc<Mutex<HashMap<String, MemoryCounter>>>,
   leases: Arc<Mutex<HashMap<String, MemoryLease>>>,
   rate_indexes: Arc<Mutex<HashMap<String, HashMap<String, i64>>>>,
   udp_flows: Arc<Mutex<HashMap<String, udp_flows::MemoryUdpFlowScope>>>,
   fail_next_operation: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct QueryCacheIndexMember {
+  version: u8,
+  epoch: u64,
+  storage_variant: String,
+  entry_key: String,
+  lookup_index_key: String,
+  chunk_key_prefix: String,
+  chunk_count: usize,
+  expires_at_ms: i64,
+}
+
+#[derive(Debug, Default)]
+struct QueryCacheExpiryScheduler {
+  writes_since_cleanup: AtomicU64,
+  running: AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QueryCacheCleanupBatch {
+  pub removed: usize,
+  pub remaining: bool,
 }
 
 #[cfg(test)]
@@ -503,7 +529,9 @@ impl SharedState {
       reload,
       failure_registry,
       cleanup: CleanupDispatcher::new(),
+      query_cache_expiry_scheduler: Arc::new(QueryCacheExpiryScheduler::default()),
     });
+    state.start_query_cache_expiry_worker();
     state.record_reload_generation(config).await;
     Ok(Some(state))
   }
