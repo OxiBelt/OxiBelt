@@ -11,6 +11,8 @@ use crate::metrics::Metrics;
 
 use super::*;
 
+const EXTERNAL_QUERY_CLEANUP_MAX_QUANTA: u8 = 4;
+
 #[derive(Debug)]
 pub(super) struct QueryCleanupDispatcher {
   sender: mpsc::Sender<QueryCleanupRequest>,
@@ -28,6 +30,7 @@ pub(super) struct QueryCleanupRequest {
   shared_pending: bool,
   shared_expiry_pending: bool,
   external_pending: bool,
+  external_quanta_remaining: u8,
   _permit: OwnedSemaphorePermit,
 }
 
@@ -38,6 +41,9 @@ impl QueryCleanupRequest {
     self.shared_pending |= newer.shared_pending;
     self.shared_expiry_pending |= newer.shared_expiry_pending;
     self.external_pending |= newer.external_pending;
+    self.external_quanta_remaining = self
+      .external_quanta_remaining
+      .max(newer.external_quanta_remaining);
   }
 
   fn pending(&self) -> bool {
@@ -107,6 +113,7 @@ impl QueryCleanupDispatcher {
       shared_pending,
       shared_expiry_pending: shared_pending,
       external_pending,
+      external_quanta_remaining: EXTERNAL_QUERY_CLEANUP_MAX_QUANTA,
       _permit: permit,
     };
     self.metrics.record_cache_query_cleanup_enqueue_started();
@@ -308,8 +315,7 @@ impl ResponseCache {
       {
         Some(report) => {
           entries = entries.saturating_add(report.purged);
-          request.external_pending = !report.complete && report.purged > 0;
-          if !report.complete && report.purged == 0 {
+          if !request.record_external_result(report.purged, report.complete) {
             succeeded = false;
           }
         }
@@ -389,6 +395,14 @@ impl ResponseCache {
   }
 }
 
+impl QueryCleanupRequest {
+  fn record_external_result(&mut self, purged: usize, complete: bool) -> bool {
+    self.external_quanta_remaining = self.external_quanta_remaining.saturating_sub(1);
+    self.external_pending = !complete && purged > 0 && self.external_quanta_remaining > 0;
+    complete || self.external_pending
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -426,5 +440,30 @@ mod tests {
       receiver.try_recv().expect("permit is reusable").target.uri,
       "/second"
     );
+  }
+
+  #[test]
+  fn external_cleanup_stops_after_fixed_progress_budget() {
+    let permit = Arc::new(Semaphore::new(1))
+      .try_acquire_owned()
+      .expect("cleanup permit is available");
+    let mut request = QueryCleanupRequest {
+      target: target("/external"),
+      before_epoch: 7,
+      local_pending: false,
+      shared_pending: false,
+      shared_expiry_pending: false,
+      external_pending: true,
+      external_quanta_remaining: EXTERNAL_QUERY_CLEANUP_MAX_QUANTA,
+      _permit: permit,
+    };
+
+    for _ in 1..EXTERNAL_QUERY_CLEANUP_MAX_QUANTA {
+      assert!(request.record_external_result(1, false));
+      assert!(request.external_pending);
+    }
+    assert!(!request.record_external_result(1, false));
+    assert!(!request.external_pending);
+    assert_eq!(request.external_quanta_remaining, 0);
   }
 }

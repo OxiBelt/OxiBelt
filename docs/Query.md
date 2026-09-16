@@ -97,12 +97,15 @@ must observe completed increments. QUERY lookup and entry metadata bind
 `POST query-cleanup` after a completed epoch advance. That request carries
 the Q1 target, `before_epoch`, a positive bounded `limit`, and required
 capabilities, including both Q1 epoch and cleanup capabilities; its JSON
-response contains bounded `purged`, `complete`, and both capabilities.
-Cleanup is best effort and only reclaims entries older than the
-fence, so it never establishes invalidation correctness. A handler that
+response contains bounded `purged`, `complete`, and both capabilities. One
+invalidation permits at most four bounded external cleanup exchanges, so a
+handler cannot keep a cleanup target alive indefinitely by repeatedly claiming
+partial progress. Cleanup is best effort and only reclaims entries older than
+the fence, so it never establishes invalidation correctness. A handler that
 supports `query-target-epoch-v1` but lacks the cleanup capability remains
 eligible for QUERY caching and relies on normal expiry for physical
-reclamation. When shared cache is configured, its epoch counter is
+reclamation. Work remaining after the exchange budget also relies on expiry.
+When shared cache is configured, its epoch counter is
 authoritative for the external tier too. Handlers without
 `query-target-epoch-v1` bypass QUERY caching. Legacy GET/HEAD messages omit
 these optional fields and keep their existing keys.
