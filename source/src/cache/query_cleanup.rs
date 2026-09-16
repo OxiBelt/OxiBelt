@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinSet;
 
 use crate::config::CacheQueryCleanupConfig;
@@ -14,12 +14,13 @@ use super::*;
 #[derive(Debug)]
 pub(super) struct QueryCleanupDispatcher {
   sender: mpsc::Sender<QueryCleanupRequest>,
+  permits: Arc<Semaphore>,
   metrics: Arc<Metrics>,
   batch_size: usize,
   max_concurrent: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct QueryCleanupRequest {
   target: CacheQueryInvalidationTarget,
   before_epoch: u64,
@@ -27,6 +28,7 @@ pub(super) struct QueryCleanupRequest {
   shared_pending: bool,
   shared_expiry_pending: bool,
   external_pending: bool,
+  _permit: OwnedSemaphorePermit,
 }
 
 impl QueryCleanupRequest {
@@ -55,10 +57,12 @@ impl QueryCleanupDispatcher {
     config: &CacheQueryCleanupConfig,
     metrics: Arc<Metrics>,
   ) -> (Self, mpsc::Receiver<QueryCleanupRequest>) {
-    let (sender, receiver) = mpsc::channel(config.queue_capacity.clamp(1, 1024));
+    let queue_capacity = config.queue_capacity.clamp(1, 1024);
+    let (sender, receiver) = mpsc::channel(queue_capacity);
     (
       Self {
         sender,
+        permits: Arc::new(Semaphore::new(queue_capacity)),
         metrics,
         batch_size: config.batch_size.clamp(1, 512),
         max_concurrent: config.max_concurrent.clamp(1, 4),
@@ -91,6 +95,11 @@ impl QueryCleanupDispatcher {
     shared_pending: bool,
     external_pending: bool,
   ) {
+    let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+      self.metrics.record_cache_query_cleanup_enqueue_started();
+      self.metrics.record_cache_query_cleanup_enqueue_failed();
+      return;
+    };
     let request = QueryCleanupRequest {
       target,
       before_epoch,
@@ -98,6 +107,7 @@ impl QueryCleanupDispatcher {
       shared_pending,
       shared_expiry_pending: shared_pending,
       external_pending,
+      _permit: permit,
     };
     self.metrics.record_cache_query_cleanup_enqueue_started();
     match self.sender.try_send(request) {
@@ -376,5 +386,45 @@ impl ResponseCache {
         })
       });
     (removed, more)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn target(uri: &str) -> CacheQueryInvalidationTarget {
+    CacheQueryInvalidationTarget {
+      policy: "default".to_string(),
+      scheme: "https".to_string(),
+      host: "example.test".to_string(),
+      uri: uri.to_string(),
+      partition: None,
+    }
+  }
+
+  #[test]
+  fn queue_capacity_bounds_all_outstanding_targets() {
+    let config = CacheQueryCleanupConfig {
+      queue_capacity: 1,
+      ..CacheQueryCleanupConfig::default()
+    };
+    let (dispatcher, mut receiver) = QueryCleanupDispatcher::new(&config, Metrics::new());
+
+    dispatcher.enqueue(target("/first"), 1, false, false);
+    dispatcher.enqueue(target("/second"), 1, false, false);
+
+    assert_eq!(dispatcher.permits.available_permits(), 0);
+    let first = receiver.try_recv().expect("first target is queued");
+    assert_eq!(first.target.uri, "/first");
+    assert!(receiver.try_recv().is_err());
+
+    drop(first);
+    assert_eq!(dispatcher.permits.available_permits(), 1);
+    dispatcher.enqueue(target("/second"), 1, false, false);
+    assert_eq!(
+      receiver.try_recv().expect("permit is reusable").target.uri,
+      "/second"
+    );
   }
 }
