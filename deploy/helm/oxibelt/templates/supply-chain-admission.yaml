@@ -100,6 +100,9 @@ spec:
         - /var/run/oxibelt-admission/tls/tls.crt
         - --tls-key
         - /var/run/oxibelt-admission/tls/tls.key
+        {{- if .Values.supplyChainAdmission.webhook.enableSecp256r1Mlkem768 }}
+        - --tls-secp256r1mlkem768
+        {{- end }}
         - --listen
         - 0.0.0.0:8443
         ports:

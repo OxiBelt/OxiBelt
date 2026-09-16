@@ -39,6 +39,9 @@ spec:
         args:
         - "--controller-name={{ .Values.controllerName }}"
         - "--managed-config-path={{ .Values.managedConfigPath }}"
+        {{- if .Values.auxiliaryTls.enableSecp256r1Mlkem768 }}
+        - "--auxiliary-tls-secp256r1mlkem768"
+        {{- end }}
         - "run"
         - "--rollout-target-namespace={{ default .Release.Namespace .Values.rollout.target.namespace }}"
         - "--rollout-target-kind={{ .Values.rollout.target.kind }}"

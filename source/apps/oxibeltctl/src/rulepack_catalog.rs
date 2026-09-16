@@ -14,7 +14,7 @@ use crate::cli::{
   RulepackSubcommand, RulepackUpdateArgs,
 };
 use crate::rulepack_catalog_index::{
-  CatalogRulepack, compare_versions, compatibility_error, is_compatible, load_repo_catalog,
+  CatalogRulepack, compare_versions, compatibility_error, is_compatible,
 };
 use crate::rulepack_catalog_registry::{
   RulepackRepoConfig, ensure_repo_name, load_registry, registry_path, save_registry,
@@ -112,7 +112,10 @@ struct ActiveRulepack {
   version: String,
 }
 
-pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<bool> {
+pub(crate) async fn run_local_if_requested_with_aux(
+  command: &Command,
+  enable_secp256r1mlkem768: bool,
+) -> anyhow::Result<bool> {
   let Command::Rulepack(command) = command else {
     return Ok(false);
   };
@@ -122,26 +125,28 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
       Ok(true)
     }
     RulepackSubcommand::Search(args) => {
-      print_search(args, Duration::from_secs(10)).await?;
+      print_search(args, Duration::from_secs(10), enable_secp256r1mlkem768).await?;
       Ok(true)
     }
     RulepackSubcommand::Info(args) => {
-      print_info(args, Duration::from_secs(10)).await?;
+      print_info(args, Duration::from_secs(10), enable_secp256r1mlkem768).await?;
       Ok(true)
     }
     _ => Ok(false),
   }
 }
 
-pub(crate) async fn resolve_install_args(
+pub(crate) async fn resolve_install_args_with_aux(
   args: &RulepackCatalogInstallArgs,
   timeout: Duration,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<RulepackApplyArgs> {
   let selection = select_catalog_entry(
     &args.name,
     args.version.as_deref(),
     args.repo.as_deref(),
     timeout,
+    enable_secp256r1mlkem768,
   )
   .await?;
   if let Some(error) = compatibility_error(&selection.entry) {
@@ -162,15 +167,21 @@ pub(crate) async fn resolve_install_args(
   })
 }
 
-pub(crate) async fn print_update_plan(
+pub(crate) async fn print_update_plan_with_aux(
   client: &AdminClient,
   args: &RulepackUpdateArgs,
   output: OutputFormat,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<()> {
   if !args.plan {
     bail!("rulepack update currently supports --plan only");
   }
-  let entries = load_entries(args.repo.as_deref(), client.timeout()).await?;
+  let entries = load_entries_with_aux(
+    args.repo.as_deref(),
+    client.timeout(),
+    enable_secp256r1mlkem768,
+  )
+  .await?;
   let active = active_rulepacks(client).await?;
   let mut updates = Vec::new();
   let mut warnings = Vec::new();
@@ -258,9 +269,14 @@ fn run_repo_command(args: &RulepackRepoCommand) -> anyhow::Result<()> {
   }
 }
 
-async fn print_search(args: &RulepackSearchArgs, timeout: Duration) -> anyhow::Result<()> {
+async fn print_search(
+  args: &RulepackSearchArgs,
+  timeout: Duration,
+  enable_secp256r1mlkem768: bool,
+) -> anyhow::Result<()> {
   let query = args.query.to_ascii_lowercase();
-  let entries = load_entries(args.repo.as_deref(), timeout).await?;
+  let entries =
+    load_entries_with_aux(args.repo.as_deref(), timeout, enable_secp256r1mlkem768).await?;
   let skipped_incompatible = entries
     .iter()
     .filter(|entry| !is_compatible(&entry.entry))
@@ -279,12 +295,17 @@ async fn print_search(args: &RulepackSearchArgs, timeout: Duration) -> anyhow::R
   })
 }
 
-async fn print_info(args: &RulepackInfoArgs, timeout: Duration) -> anyhow::Result<()> {
+async fn print_info(
+  args: &RulepackInfoArgs,
+  timeout: Duration,
+  enable_secp256r1mlkem768: bool,
+) -> anyhow::Result<()> {
   let selection = select_catalog_entry(
     &args.name,
     args.version.as_deref(),
     args.repo.as_deref(),
     timeout,
+    enable_secp256r1mlkem768,
   )
   .await?;
   if let Some(error) = compatibility_error(&selection.entry) {
@@ -300,8 +321,9 @@ async fn select_catalog_entry(
   version: Option<&str>,
   repo: Option<&str>,
   timeout: Duration,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<CatalogEntrySelection> {
-  let entries = load_entries(repo, timeout).await?;
+  let entries = load_entries_with_aux(repo, timeout, enable_secp256r1mlkem768).await?;
   let all_candidates = entries
     .into_iter()
     .filter(|candidate| candidate.entry.name == name)
@@ -334,9 +356,10 @@ async fn select_catalog_entry(
   Ok((*newest).clone())
 }
 
-async fn load_entries(
+async fn load_entries_with_aux(
   repo_filter: Option<&str>,
   timeout: Duration,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<Vec<CatalogEntrySelection>> {
   let registry = load_registry()?;
   if registry.repos.is_empty() {
@@ -354,7 +377,13 @@ async fn load_entries(
     if repo_filter.is_some_and(|wanted| wanted != repo_name) {
       continue;
     }
-    let catalog = load_repo_catalog(repo_name, repo, timeout).await?;
+    let catalog = crate::rulepack_catalog_index::load_repo_catalog_with_aux(
+      repo_name,
+      repo,
+      timeout,
+      enable_secp256r1mlkem768,
+    )
+    .await?;
     for entry in catalog.entries {
       let key = (
         catalog.repo.clone(),

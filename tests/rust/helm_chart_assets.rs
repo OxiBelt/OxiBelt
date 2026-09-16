@@ -145,6 +145,10 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   assert_eq!(values["image"]["digest"], "");
   assert_eq!(values["supplyChainAdmission"]["enabled"], false);
   assert_eq!(
+    values["supplyChainAdmission"]["webhook"]["enableSecp256r1Mlkem768"],
+    false
+  );
+  assert_eq!(
     values["supplyChainAdmission"]["webhook"]["image"]["repository"],
     "ghcr.io/oxibelt/oxibelt-tools"
   );
@@ -309,6 +313,11 @@ fn data_plane_chart_metadata_and_values_are_valid() {
     schema["properties"]["supplyChainAdmission"]["properties"]["webhook"]["properties"]["timeoutSeconds"]
       ["maximum"],
     10
+  );
+  assert_eq!(
+    schema["properties"]["supplyChainAdmission"]["properties"]["webhook"]["properties"]["enableSecp256r1Mlkem768"]
+      ["type"],
+    "boolean"
   );
   let webhook_source_patterns = schema["properties"]["supplyChainAdmission"]["properties"]
     ["webhook"]["properties"]["apiServerSourceCidrs"]["items"]["oneOf"]
@@ -843,6 +852,7 @@ fn data_plane_chart_templates_cover_production_runtime_contracts() {
   }
 
   let admission = read_repo("deploy/helm/oxibelt/templates/supply-chain-admission.yaml");
+  assert!(admission.contains("--tls-secp256r1mlkem768"));
   for needle in [
     "kind: ValidatingWebhookConfiguration",
     "failurePolicy: Fail",
@@ -1265,6 +1275,7 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(values["podDisruptionBudget"]["minAvailable"], 1);
   assert_eq!(values["podAntiAffinity"]["enabled"], true);
   assert_eq!(values["controllerName"], "oxibelt.dev/gateway-controller");
+  assert_eq!(values["auxiliaryTls"]["enableSecp256r1Mlkem768"], false);
   assert_eq!(values["backendResolution"], "cluster_dns");
   assert_eq!(
     values["upstreamClientTls"]["sourceSecretAllowlist"],
@@ -1313,6 +1324,10 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(
     schema["properties"]["backendResolution"]["enum"][1],
     "endpoint_slice_watch"
+  );
+  assert_eq!(
+    schema["properties"]["auxiliaryTls"]["properties"]["enableSecp256r1Mlkem768"]["type"],
+    "boolean"
   );
   assert_eq!(
     schema["properties"]["filters"]["properties"]["requestMirror"]["properties"]["maxBodyBytes"]["maximum"],
@@ -1374,6 +1389,7 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   );
 
   let deployment = read_repo("deploy/helm/oxibelt-gateway-controller/templates/deployment.yaml");
+  assert!(deployment.contains("--auxiliary-tls-secp256r1mlkem768"));
   assert!(
     deployment.contains("image: {{ include \"oxibelt-gateway-controller.image\" . | quote }}")
   );

@@ -84,13 +84,23 @@ struct CatalogRulepackRaw {
   description: Option<String>,
 }
 
+#[cfg(test)]
 pub(crate) async fn load_repo_catalog(
   repo_name: &str,
   repo: &RulepackRepoConfig,
   timeout: Duration,
 ) -> anyhow::Result<LoadedCatalog> {
+  load_repo_catalog_with_aux(repo_name, repo, timeout, false).await
+}
+
+pub(crate) async fn load_repo_catalog_with_aux(
+  repo_name: &str,
+  repo: &RulepackRepoConfig,
+  timeout: Duration,
+  enable_secp256r1mlkem768: bool,
+) -> anyhow::Result<LoadedCatalog> {
   validate_catalog_url(&repo.url, repo.allow_insecure_rulepack_url)?;
-  let bytes = crate::rulepack_url::download_url_bytes(
+  let bytes = crate::rulepack_url::download_url_bytes_with_aux(
     &repo.url,
     &repo.ca_certs,
     repo.token_env.as_deref(),
@@ -98,6 +108,7 @@ pub(crate) async fn load_repo_catalog(
     MAX_RULEPACK_INDEX_BYTES,
     "application/toml, application/json, text/plain",
     "rulepack catalog index",
+    enable_secp256r1mlkem768,
   )
   .await?;
   let source = format!(

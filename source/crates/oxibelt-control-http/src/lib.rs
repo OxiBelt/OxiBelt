@@ -73,6 +73,14 @@ impl std::error::Error for ControlHttpResponseBodyLimitError {}
 impl ControlHttpClient {
   /// Build a client with WebPKI roots plus explicitly supplied PEM roots.
   pub fn new(extra_root_certs: &[std::path::PathBuf]) -> anyhow::Result<Self> {
+    Self::new_with_secp256r1mlkem768(extra_root_certs, false)
+  }
+
+  /// Build a client with optional RFC 10024 SecP256r1MLKEM768 support.
+  pub fn new_with_secp256r1mlkem768(
+    extra_root_certs: &[std::path::PathBuf],
+    enable_secp256r1mlkem768: bool,
+  ) -> anyhow::Result<Self> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     for path in extra_root_certs {
@@ -88,7 +96,24 @@ impl ControlHttpClient {
         );
       }
     }
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    if enable_secp256r1mlkem768
+      && !provider
+        .kx_groups
+        .iter()
+        .any(|group| group.name() == rustls::NamedGroup::secp256r1MLKEM768)
+    {
+      let insert_at = provider
+        .kx_groups
+        .iter()
+        .position(|group| group.name() == rustls::NamedGroup::X25519MLKEM768)
+        .map_or(0, |position| position + 1);
+      provider.kx_groups.insert(
+        insert_at,
+        rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
+      );
+    }
+    let provider = Arc::new(provider);
     let tls_config = rustls::ClientConfig::builder_with_provider(provider)
       .with_safe_default_protocol_versions()
       .context("failed to configure control-plane TLS versions")?
@@ -210,6 +235,13 @@ mod tests {
   use http::StatusCode;
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::TcpListener;
+
+  #[test]
+  fn secp256r1mlkem768_client_support_is_opt_in() {
+    ControlHttpClient::new(&[]).expect("default control HTTP client should build");
+    ControlHttpClient::new_with_secp256r1mlkem768(&[], true)
+      .expect("opt-in control HTTP client should build");
+  }
 
   #[tokio::test]
   async fn request_timeout_covers_response_body_collection() {

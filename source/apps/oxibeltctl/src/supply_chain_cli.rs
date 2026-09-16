@@ -128,6 +128,9 @@ pub(crate) struct SupplyChainAdmissionServerArgs {
   pub(crate) tls_cert: PathBuf,
   #[arg(long = "tls-key", value_name = "FILE")]
   pub(crate) tls_key: PathBuf,
+  /// Enable RFC 10024 SecP256r1MLKEM768 for the webhook TLS server.
+  #[arg(long = "tls-secp256r1mlkem768")]
+  pub(crate) tls_secp256r1mlkem768: bool,
   #[arg(long, default_value = "0.0.0.0:8443")]
   pub(crate) listen: SocketAddr,
 }

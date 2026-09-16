@@ -63,6 +63,12 @@ pub(crate) struct AdminArgs {
   pub(crate) break_glass_access: bool,
   #[arg(long = "ca-cert", value_name = "FILE")]
   pub(crate) ca_certs: Vec<PathBuf>,
+  /// Enable RFC 10024 SecP256r1MLKEM768 for the Admin TLS connection.
+  #[arg(long = "admin-tls-secp256r1mlkem768")]
+  pub(crate) admin_tls_secp256r1mlkem768: bool,
+  /// Enable RFC 10024 SecP256r1MLKEM768 for owned auxiliary HTTPS clients.
+  #[arg(long = "auxiliary-tls-secp256r1mlkem768")]
+  pub(crate) auxiliary_tls_secp256r1mlkem768: bool,
   #[arg(long, value_name = "FILE", requires = "client_key")]
   pub(crate) client_cert: Option<PathBuf>,
   #[arg(long, value_name = "FILE", requires = "client_cert")]
@@ -792,6 +798,22 @@ mod tests {
   }
 
   #[test]
+  fn tls_post_quantum_flags_are_opt_in() {
+    let cli = Cli::try_parse_from([
+      "oxibeltctl",
+      "--admin-tls-secp256r1mlkem768",
+      "--auxiliary-tls-secp256r1mlkem768",
+      "status",
+    ])
+    .expect("TLS flags should parse");
+    assert!(cli.admin.admin_tls_secp256r1mlkem768);
+    assert!(cli.admin.auxiliary_tls_secp256r1mlkem768);
+    let cli = Cli::try_parse_from(["oxibeltctl", "status"]).expect("status should parse");
+    assert!(!cli.admin.admin_tls_secp256r1mlkem768);
+    assert!(!cli.admin.auxiliary_tls_secp256r1mlkem768);
+  }
+
+  #[test]
   fn break_glass_access_selects_break_glass_token_env() {
     let args = test_admin_args(true);
     assert_eq!(selected_token_env(&args), BREAK_GLASS_TOKEN_ENV);
@@ -805,6 +827,8 @@ mod tests {
       token_file: None,
       break_glass_access,
       ca_certs: Vec::new(),
+      admin_tls_secp256r1mlkem768: false,
+      auxiliary_tls_secp256r1mlkem768: false,
       client_cert: None,
       client_key: None,
       timeout_ms: 1000,

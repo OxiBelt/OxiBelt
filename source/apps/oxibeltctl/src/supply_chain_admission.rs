@@ -120,7 +120,7 @@ pub(crate) async fn serve(args: &SupplyChainAdmissionServerArgs) -> anyhow::Resu
     &revocations,
     now_unix_seconds()?,
   )?;
-  let tls = load_tls_acceptor(&args.tls_cert, &args.tls_key)?;
+  let tls = load_tls_acceptor(&args.tls_cert, &args.tls_key, args.tls_secp256r1mlkem768)?;
   let listener = TcpListener::bind(args.listen)
     .await
     .with_context(|| format!("failed to bind admission server at {}", args.listen))?;
@@ -451,6 +451,7 @@ async fn collect_bounded(mut body: Incoming) -> Result<Vec<u8>, StatusCode> {
 fn load_tls_acceptor(
   cert_path: &std::path::Path,
   key_path: &std::path::Path,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<TlsAcceptor> {
   let cert_bytes = read_tls_file(cert_path, 256 * 1024, "admission TLS certificate")?;
   let certs = CertificateDer::pem_slice_iter(&cert_bytes)
@@ -469,7 +470,16 @@ fn load_tls_acceptor(
     "admission TLS key must contain exactly one private key"
   );
   let key = keys.pop().context("admission TLS key is missing")?;
-  let mut config = rustls::ServerConfig::builder()
+  let builder = if enable_secp256r1mlkem768 {
+    rustls::ServerConfig::builder_with_provider(
+      oxibelt::tls::aws_lc_provider_with_secp256r1mlkem768(true).into(),
+    )
+    .with_safe_default_protocol_versions()
+    .context("failed to configure admission TLS versions")?
+  } else {
+    rustls::ServerConfig::builder()
+  };
+  let mut config = builder
     .with_no_client_auth()
     .with_single_cert(certs, key)
     .context("admission TLS certificate and key do not match")?;

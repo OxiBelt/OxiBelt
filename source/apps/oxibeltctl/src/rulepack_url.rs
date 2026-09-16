@@ -16,11 +16,12 @@ use crate::rulepack_openpgp::{
 
 const MAX_RULEPACK_BYTES: usize = 1024 * 1024;
 
-pub(crate) async fn load_url_source(
+pub(crate) async fn load_url_source_with_aux(
   args: &RulepackSourceArgs,
   url: &Url,
   timeout: Duration,
   require_pin: bool,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<LoadedRulepackSource> {
   validate_rulepack_url(url, args.allow_insecure_rulepack_url)?;
   ensure_manifest_url_suffix(url)?;
@@ -53,7 +54,7 @@ pub(crate) async fn load_url_source(
       "rulepack apply from URL requires --sha256, a trusted OpenPGP signature, or --allow-unpinned-rulepack"
     );
   }
-  let bytes = download_url_bytes(
+  let bytes = download_url_bytes_with_aux(
     url,
     &args.ca_certs,
     args.token_env.as_deref(),
@@ -61,6 +62,7 @@ pub(crate) async fn load_url_source(
     MAX_RULEPACK_BYTES,
     "application/toml, text/plain",
     "rulepack",
+    enable_secp256r1mlkem768,
   )
   .await?;
   let source_sha256 = sha256_hex(&bytes);
@@ -68,7 +70,8 @@ pub(crate) async fn load_url_source(
     verify_sha256_digest(expected, &source_sha256)?;
   }
   let signature_verification = if require_openpgp_signature {
-    let signature_bytes = load_rulepack_signature(args, url, timeout).await?;
+    let signature_bytes =
+      load_rulepack_signature(args, url, timeout, enable_secp256r1mlkem768).await?;
     Some(verify_rulepack_signature(
       &signature_bytes,
       &bytes,
@@ -99,6 +102,7 @@ async fn load_rulepack_signature(
   args: &RulepackSourceArgs,
   rulepack_url: &Url,
   timeout: Duration,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<Vec<u8>> {
   if let Some(path) = &args.openpgp_signature_file {
     return read_signature_file(path);
@@ -111,7 +115,7 @@ async fn load_rulepack_signature(
     .token_env
     .as_deref()
     .filter(|_| same_origin(rulepack_url, signature_url));
-  download_url_bytes(
+  download_url_bytes_with_aux(
     signature_url,
     &args.ca_certs,
     token_env,
@@ -119,11 +123,13 @@ async fn load_rulepack_signature(
     MAX_OPENPGP_SIGNATURE_BYTES,
     "application/pgp-signature, application/octet-stream, text/plain",
     "rulepack OpenPGP signature",
+    enable_secp256r1mlkem768,
   )
   .await
 }
 
-pub(crate) async fn download_url_bytes(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn download_url_bytes_with_aux(
   url: &Url,
   ca_certs: &[PathBuf],
   token_env: Option<&str>,
@@ -131,8 +137,10 @@ pub(crate) async fn download_url_bytes(
   max_bytes: usize,
   accept: &'static str,
   label: &'static str,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<Vec<u8>> {
-  let client = ControlHttpClient::new(ca_certs).context("failed to build rulepack HTTP client")?;
+  let client = ControlHttpClient::new_with_secp256r1mlkem768(ca_certs, enable_secp256r1mlkem768)
+    .context("failed to build rulepack HTTP client")?;
   let uri = oxibelt::control_http::uri_from_url(&request_url(url))?;
   let mut builder = Request::builder()
     .method(Method::GET)

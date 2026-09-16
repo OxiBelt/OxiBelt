@@ -7,8 +7,13 @@ pub(super) async fn admin_plan_value(
   if context.fixture.is_some() || context.replay.is_some() {
     return Ok(None);
   }
-  let loaded =
-    crate::rulepack::load_rulepack_source(context.source, client.timeout(), true).await?;
+  let loaded = crate::rulepack::load_rulepack_source_with_aux(
+    context.source,
+    client.timeout(),
+    true,
+    client.auxiliary_tls_secp256r1mlkem768(),
+  )
+  .await?;
   if loaded.git_commit.is_some() {
     return Ok(None);
   }

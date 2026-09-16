@@ -123,6 +123,11 @@ Argon2id PHC hash in `[[ipm.credentials]].break_glass_access_token_hash`.
 Break-glass access credentials are accepted on the Admin listener only and are
 ignored for downstream route IPM requests.
 
+Admin TLS keeps the default key-exchange groups unless
+`--admin-tls-secp256r1mlkem768` is supplied. The independently scoped
+`--auxiliary-tls-secp256r1mlkem768` flag opts owned HTTPS downloads and CT
+monitor clients into RFC 10024 SecP256r1MLKEM768; both flags default to off.
+
 ### `edge-secure-medium` v1
 
 Select the built-in secure-medium profile at the top level of the main

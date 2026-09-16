@@ -35,6 +35,14 @@
       "required": ["leaseName", "leaseDurationSeconds", "renewDeadlineSeconds", "retryPeriodSeconds"]
     },
     "controllerName": { "type": "string", "minLength": 1 },
+    "auxiliaryTls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enableSecp256r1Mlkem768"],
+      "properties": {
+        "enableSecp256r1Mlkem768": { "type": "boolean", "default": false }
+      }
+    },
     "managedConfigPath": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)+\\.toml$"

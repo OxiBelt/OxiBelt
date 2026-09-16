@@ -47,7 +47,10 @@ struct Witness {
   root_hash: String,
 }
 
-pub(crate) async fn run(args: &CtMonitorArgs) -> anyhow::Result<i32> {
+pub(crate) async fn run(
+  args: &CtMonitorArgs,
+  enable_secp256r1mlkem768: bool,
+) -> anyhow::Result<i32> {
   validate_url(&args.url, args.allow_loopback_http)?;
   let log_id = parse_hex_32(&args.log_id, "RFC 6962 LogID")?;
   let public_key =
@@ -60,7 +63,7 @@ pub(crate) async fn run(args: &CtMonitorArgs) -> anyhow::Result<i32> {
     bail!("RFC 6962 LogID does not equal SHA-256 of the supplied P-256 SubjectPublicKeyInfo");
   }
   let timeout = Duration::from_millis(args.timeout_ms);
-  let client = build_client(&args.ca_certs)?;
+  let client = build_client(&args.ca_certs, enable_secp256r1mlkem768)?;
   let sth_url = endpoint(&args.url, "ct/v1/get-sth")?;
   let body = get(&client, sth_url, timeout).await?;
   let sth: GetSthResponseV1 =
@@ -165,7 +168,10 @@ async fn fetch_consistency(
     .collect()
 }
 
-fn build_client(extra_roots: &[std::path::PathBuf]) -> anyhow::Result<MonitorClient> {
+fn build_client(
+  extra_roots: &[std::path::PathBuf],
+  enable_secp256r1mlkem768: bool,
+) -> anyhow::Result<MonitorClient> {
   let mut roots = RootCertStore::empty();
   roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
   for path in extra_roots {
@@ -187,12 +193,13 @@ fn build_client(extra_roots: &[std::path::PathBuf]) -> anyhow::Result<MonitorCli
       );
     }
   }
-  let tls =
-    ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
-      .with_safe_default_protocol_versions()
-      .context("failed to configure CT monitor TLS versions")?
-      .with_root_certificates(roots)
-      .with_no_client_auth();
+  let tls = ClientConfig::builder_with_provider(
+    oxibelt::tls::aws_lc_provider_with_secp256r1mlkem768(enable_secp256r1mlkem768).into(),
+  )
+  .with_safe_default_protocol_versions()
+  .context("failed to configure CT monitor TLS versions")?
+  .with_root_certificates(roots)
+  .with_no_client_auth();
   let mut http = HttpConnector::new();
   http.enforce_http(false);
   http.set_connect_timeout(Some(Duration::from_secs(5)));

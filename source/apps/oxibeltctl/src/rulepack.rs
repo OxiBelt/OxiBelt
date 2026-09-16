@@ -20,14 +20,24 @@ use crate::output::{print_permission_hint, print_response};
 use crate::plan::{PermissionHint, RequestPlan};
 use crate::rulepack_install::{installed_rulepack_lock_path, installed_rulepack_path};
 use crate::rulepack_render::render_options;
-use crate::rulepack_url::load_url_source;
+use crate::rulepack_url::load_url_source_with_aux;
 #[cfg(test)]
 use crate::rulepack_url::{
   ensure_manifest_url_suffix, same_origin, validate_rulepack_signature_url, validate_rulepack_url,
 };
 
+#[cfg(test)]
 pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<bool> {
-  if crate::rulepack_catalog::run_local_if_requested(command).await? {
+  run_local_if_requested_with_aux(command, false).await
+}
+
+pub(crate) async fn run_local_if_requested_with_aux(
+  command: &Command,
+  enable_secp256r1mlkem768: bool,
+) -> anyhow::Result<bool> {
+  if crate::rulepack_catalog::run_local_if_requested_with_aux(command, enable_secp256r1mlkem768)
+    .await?
+  {
     return Ok(true);
   }
   let Command::Rulepack(command) = command else {
@@ -35,7 +45,13 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
   };
   match &command.command {
     RulepackSubcommand::Inspect(args) => {
-      let loaded = load_rulepack_source(&args.source, Duration::from_secs(10), false).await?;
+      let loaded = load_rulepack_source_with_aux(
+        &args.source,
+        Duration::from_secs(10),
+        false,
+        enable_secp256r1mlkem768,
+      )
+      .await?;
       let report = inspect_rulepack(
         &loaded.manifest,
         &loaded.source_label,
@@ -45,7 +61,13 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
       Ok(true)
     }
     RulepackSubcommand::Render(args) => {
-      let loaded = load_rulepack_source(&args.source, Duration::from_secs(10), false).await?;
+      let loaded = load_rulepack_source_with_aux(
+        &args.source,
+        Duration::from_secs(10),
+        false,
+        enable_secp256r1mlkem768,
+      )
+      .await?;
       let cli_vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
       let cli_binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
       let resolved = crate::rulepack_values::resolve_rulepack_inputs(
@@ -85,7 +107,13 @@ pub(crate) async fn run_local_if_requested(command: &Command) -> anyhow::Result<
       Ok(true)
     }
     RulepackSubcommand::Check(args) => {
-      let loaded = load_rulepack_source(&args.source, Duration::from_secs(10), false).await?;
+      let loaded = load_rulepack_source_with_aux(
+        &args.source,
+        Duration::from_secs(10),
+        false,
+        enable_secp256r1mlkem768,
+      )
+      .await?;
       let cli_vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
       let cli_binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
       let resolved = crate::rulepack_values::resolve_rulepack_inputs(
@@ -177,7 +205,13 @@ pub(crate) async fn run_remote_if_requested_signed(
       Ok(true)
     }
     RulepackSubcommand::Fit(args) => {
-      print_fit_report(client, args, output).await?;
+      print_fit_report(
+        client,
+        args,
+        output,
+        client.auxiliary_tls_secp256r1mlkem768(),
+      )
+      .await?;
       Ok(true)
     }
     RulepackSubcommand::Plan(args) => {
@@ -199,8 +233,12 @@ pub(crate) async fn run_remote_if_requested_signed(
       Ok(true)
     }
     RulepackSubcommand::Install(args) => {
-      let apply_args =
-        crate::rulepack_catalog::resolve_install_args(args, client.timeout()).await?;
+      let apply_args = crate::rulepack_catalog::resolve_install_args_with_aux(
+        args,
+        client.timeout(),
+        client.auxiliary_tls_secp256r1mlkem768(),
+      )
+      .await?;
       if apply_args.dry_run {
         crate::rulepack_plan::print_apply_dry_run(client, &apply_args, output).await?;
         return Ok(true);
@@ -211,7 +249,13 @@ pub(crate) async fn run_remote_if_requested_signed(
       Ok(true)
     }
     RulepackSubcommand::Update(args) => {
-      crate::rulepack_catalog::print_update_plan(client, args, output).await?;
+      crate::rulepack_catalog::print_update_plan_with_aux(
+        client,
+        args,
+        output,
+        client.auxiliary_tls_secp256r1mlkem768(),
+      )
+      .await?;
       Ok(true)
     }
     RulepackSubcommand::Remove(args) => {
@@ -294,8 +338,15 @@ async fn print_fit_report(
   client: &AdminClient,
   args: &RulepackFitArgs,
   output: OutputFormat,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<()> {
-  let loaded = load_rulepack_source(&args.source, client.timeout(), false).await?;
+  let loaded = load_rulepack_source_with_aux(
+    &args.source,
+    client.timeout(),
+    false,
+    enable_secp256r1mlkem768,
+  )
+  .await?;
   let cli_vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
   let cli_binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
   let resolved = crate::rulepack_values::resolve_rulepack_inputs(
@@ -448,15 +499,27 @@ impl LoadedRulepackSource {
   }
 }
 
+#[cfg(test)]
 pub(crate) async fn load_rulepack_source(
   args: &RulepackSourceArgs,
   timeout: Duration,
   require_pin: bool,
 ) -> anyhow::Result<LoadedRulepackSource> {
+  load_rulepack_source_with_aux(args, timeout, require_pin, false).await
+}
+
+pub(crate) async fn load_rulepack_source_with_aux(
+  args: &RulepackSourceArgs,
+  timeout: Duration,
+  require_pin: bool,
+  enable_secp256r1mlkem768: bool,
+) -> anyhow::Result<LoadedRulepackSource> {
   match (&args.file, &args.dir, &args.url, &args.git) {
     (Some(path), None, None, None) => load_file_source(path),
     (None, Some(dir), None, None) => load_dir_source(dir, &args.manifest, None),
-    (None, None, Some(url), None) => load_url_source(args, url, timeout, require_pin).await,
+    (None, None, Some(url), None) => {
+      load_url_source_with_aux(args, url, timeout, require_pin, enable_secp256r1mlkem768).await
+    }
     (None, None, None, Some(git)) => load_git_source(args, git, require_pin),
     _ => bail!("rulepack source requires exactly one of --file, --dir, --url, or --git"),
   }

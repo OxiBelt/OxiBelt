@@ -218,6 +218,7 @@ fn translation_args(endpoint_slice_watch: bool) -> SharedArgs {
     upstream_client_tls_source_secrets: Vec::new(),
     dry_run: true,
     health_bind: None,
+    auxiliary_tls_secp256r1mlkem768: false,
   }
 }
 

@@ -79,8 +79,12 @@ pub(crate) async fn plan_command(
     Command::Challenge(args) => crate::dynamic_policy_plan::plan_challenge(args),
     Command::RateLimit(args) => crate::dynamic_policy_plan::plan_rate_limit(args),
     Command::Mitigate(args) => {
-      let catalog =
-        crate::profile_catalog::load_mitigation_profile_catalog(args, client.timeout()).await?;
+      let catalog = crate::profile_catalog::load_mitigation_profile_catalog_with_aux(
+        args,
+        client.timeout(),
+        client.auxiliary_tls_secp256r1mlkem768(),
+      )
+      .await?;
       crate::dynamic_policy_plan::plan_mitigate(args, &catalog)
     }
     Command::Cache(command) => plan_cache(command),

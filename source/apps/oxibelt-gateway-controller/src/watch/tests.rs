@@ -891,6 +891,7 @@ fn shared_args() -> SharedArgs {
     upstream_client_tls_source_secrets: Vec::new(),
     dry_run: false,
     health_bind: None,
+    auxiliary_tls_secp256r1mlkem768: false,
   }
 }
 

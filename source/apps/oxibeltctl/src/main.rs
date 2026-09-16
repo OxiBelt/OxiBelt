@@ -162,7 +162,12 @@ async fn run() -> anyhow::Result<i32> {
   if doctor::run_local_if_requested(&cli.command).await? {
     return Ok(0);
   }
-  if rulepack::run_local_if_requested(&cli.command).await? {
+  if rulepack::run_local_if_requested_with_aux(
+    &cli.command,
+    cli.admin.auxiliary_tls_secp256r1mlkem768,
+  )
+  .await?
+  {
     return Ok(0);
   }
   if config_compat::run_local_if_requested(&cli.command)? {
@@ -171,7 +176,9 @@ async fn run() -> anyhow::Result<i32> {
   if let Some(code) = supply_chain::run_if_requested(&cli.command).await? {
     return Ok(code);
   }
-  if let Some(code) = ct::run_if_requested(&cli.command).await? {
+  if let Some(code) =
+    ct::run_if_requested(&cli.command, cli.admin.auxiliary_tls_secp256r1mlkem768).await?
+  {
     return Ok(code);
   }
   let client = build_client(&cli.admin)?;
@@ -258,5 +265,6 @@ fn build_client(args: &AdminArgs) -> anyhow::Result<AdminClient> {
   options.ca_certs = args.ca_certs.clone();
   options.client_cert = args.client_cert.clone();
   options.client_key = args.client_key.clone();
-  AdminClient::new(options)
+  options.auxiliary_tls_secp256r1mlkem768 = args.auxiliary_tls_secp256r1mlkem768;
+  AdminClient::new_with_secp256r1mlkem768(options, args.admin_tls_secp256r1mlkem768)
 }

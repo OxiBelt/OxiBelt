@@ -86,6 +86,9 @@ pub struct SharedArgs {
   pub dry_run: bool,
   #[arg(long, global = true)]
   pub health_bind: Option<SocketAddr>,
+  /// Enable RFC 10024 SecP256r1MLKEM768 for Kubernetes API HTTPS.
+  #[arg(long, global = true)]
+  pub auxiliary_tls_secp256r1mlkem768: bool,
 }
 
 impl SharedArgs {

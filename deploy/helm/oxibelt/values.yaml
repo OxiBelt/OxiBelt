@@ -31,6 +31,9 @@ supplyChainAdmission:
     revocations: |-
       {"schemaVersion":1,"revocations":[]}
   webhook:
+    # Enable RFC 10024 SecP256r1MLKEM768 only for the admission webhook TLS
+    # server. The default preserves the existing TLS group set.
+    enableSecp256r1Mlkem768: false
     # Exact tools-image digest containing `oxibeltctl supply-chain
     # admission-server`. The webhook is a separately pinned bootstrap
     # component and is not covered by the data-plane bundle.

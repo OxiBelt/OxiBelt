@@ -47,9 +47,10 @@ pub(crate) struct MitigationProfile {
   pub(crate) mode: Option<String>,
 }
 
-pub(crate) async fn load_mitigation_profile_catalog(
+pub(crate) async fn load_mitigation_profile_catalog_with_aux(
   args: &MitigateArgs,
   timeout: Duration,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<MitigationProfileCatalog> {
   match (&args.profile_file, &args.profile_url) {
     (Some(path), None) => {
@@ -59,7 +60,7 @@ pub(crate) async fn load_mitigation_profile_catalog(
     }
     (None, Some(url)) => {
       validate_profile_url(url, args.allow_insecure_profile_url)?;
-      let bytes = download_profile_catalog(args, timeout).await?;
+      let bytes = download_profile_catalog(args, timeout, enable_secp256r1mlkem768).await?;
       if let Some(expected) = args.profile_sha256.as_deref() {
         verify_sha256(expected, &bytes)?;
       }
@@ -78,6 +79,7 @@ fn parse_catalog(bytes: &[u8], source: &str) -> anyhow::Result<MitigationProfile
 async fn download_profile_catalog(
   args: &MitigateArgs,
   timeout: Duration,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<Vec<u8>> {
   let url = args
     .profile_url
@@ -89,8 +91,9 @@ async fn download_profile_catalog(
     .as_str()
     .parse::<http::Uri>()
     .with_context(|| format!("invalid mitigation profile URL {diagnostic_url}"))?;
-  let client = ControlHttpClient::new(&args.profile_ca_certs)
-    .context("failed to build mitigation profile HTTP client")?;
+  let client =
+    ControlHttpClient::new_with_secp256r1mlkem768(&args.profile_ca_certs, enable_secp256r1mlkem768)
+      .context("failed to build mitigation profile HTTP client")?;
   let mut builder = Request::builder()
     .method(http::Method::GET)
     .uri(uri)

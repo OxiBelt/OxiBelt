@@ -24,6 +24,10 @@ leaderElection:
   retryPeriodSeconds: 2
 
 controllerName: oxibelt.dev/gateway-controller
+# Enable RFC 10024 SecP256r1MLKEM768 only for the controller's Kubernetes API
+# HTTPS client. The default keeps the existing TLS group set.
+auxiliaryTls:
+  enableSecp256r1Mlkem768: false
 # A safe nested relative `.toml` path under the selected workload config root.
 managedConfigPath: conf.d/gateway-api.generated.toml
 # Empty scopes namespaced Gateway API reads to the controller release

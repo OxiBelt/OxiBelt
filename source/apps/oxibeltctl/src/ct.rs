@@ -1,6 +1,9 @@
 use crate::cli::{Command, CtSubcommand};
 
-pub(crate) async fn run_if_requested(command: &Command) -> anyhow::Result<Option<i32>> {
+pub(crate) async fn run_if_requested(
+  command: &Command,
+  enable_secp256r1mlkem768: bool,
+) -> anyhow::Result<Option<i32>> {
   let Command::Ct(command) = command else {
     return Ok(None);
   };
@@ -8,7 +11,7 @@ pub(crate) async fn run_if_requested(command: &Command) -> anyhow::Result<Option
     CtSubcommand::Postgres(command) => crate::ct_postgres::run(&command.command).await?,
     CtSubcommand::Roots(command) => crate::ct_roots::run(&command.command)?,
     CtSubcommand::Shard(command) => crate::ct_shards::run(&command.command)?,
-    CtSubcommand::Monitor(args) => crate::ct_monitor::run(args).await?,
+    CtSubcommand::Monitor(args) => crate::ct_monitor::run(args, enable_secp256r1mlkem768).await?,
   };
   Ok(Some(code))
 }

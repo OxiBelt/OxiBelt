@@ -216,7 +216,13 @@ pub(crate) async fn prepare_rulepack_apply(
   args: &RulepackApplyArgs,
   confirm_interactive_apply: bool,
 ) -> anyhow::Result<PreparedRulepackApply> {
-  let loaded = crate::rulepack::load_rulepack_source(&args.source, client.timeout(), true).await?;
+  let loaded = crate::rulepack::load_rulepack_source_with_aux(
+    &args.source,
+    client.timeout(),
+    true,
+    client.auxiliary_tls_secp256r1mlkem768(),
+  )
+  .await?;
   let cli_vars = crate::rulepack_fit::parse_key_values(&args.vars, "--var")?;
   let cli_binds = crate::rulepack_fit::parse_key_values(&args.binds, "--bind")?;
   let resolved = crate::rulepack_values::resolve_rulepack_inputs(
@@ -268,8 +274,13 @@ async fn build_report(
   client: &AdminClient,
   context: RulepackReportContext<'_>,
 ) -> anyhow::Result<RulepackPreinstallReport> {
-  let loaded =
-    crate::rulepack::load_rulepack_source(context.source, client.timeout(), true).await?;
+  let loaded = crate::rulepack::load_rulepack_source_with_aux(
+    context.source,
+    client.timeout(),
+    true,
+    client.auxiliary_tls_secp256r1mlkem768(),
+  )
+  .await?;
   let cli_vars = crate::rulepack_fit::parse_key_values(context.vars, "--var")?;
   let cli_binds = crate::rulepack_fit::parse_key_values(context.binds, "--bind")?;
   let resolved = crate::rulepack_values::resolve_rulepack_inputs(

@@ -531,8 +531,9 @@
         "webhook": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["image", "replicas", "tlsSecretName", "apiServerSourceCidrs", "caBundle", "timeoutSeconds"],
+          "required": ["image", "replicas", "tlsSecretName", "apiServerSourceCidrs", "caBundle", "timeoutSeconds", "enableSecp256r1Mlkem768"],
           "properties": {
+            "enableSecp256r1Mlkem768": { "type": "boolean", "default": false },
             "image": {
               "type": "object",
               "additionalProperties": false,

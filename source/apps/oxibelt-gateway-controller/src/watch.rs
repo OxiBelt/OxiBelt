@@ -87,7 +87,10 @@ impl KubernetesPoller {
       .into_iter()
       .collect::<Vec<_>>();
     Ok(Self {
-      client: ControlHttpClient::new(&ca_certs)?,
+      client: ControlHttpClient::new_with_secp256r1mlkem768(
+        &ca_certs,
+        args.auxiliary_tls_secp256r1mlkem768,
+      )?,
       base_url,
       service_account_token_path: token_path.to_path_buf(),
       namespace: args.watch_namespace.clone(),

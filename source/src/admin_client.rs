@@ -37,6 +37,10 @@ pub struct AdminClientOptions {
   pub client_cert: Option<PathBuf>,
   pub client_key: Option<PathBuf>,
   pub max_body_bytes: usize,
+  /// Enable RFC 10024 SecP256r1MLKEM768 for this Admin TLS client.
+  pub admin_tls_secp256r1mlkem768: bool,
+  /// Enable RFC 10024 SecP256r1MLKEM768 for owned auxiliary HTTPS clients.
+  pub auxiliary_tls_secp256r1mlkem768: bool,
 }
 
 impl AdminClientOptions {
@@ -49,6 +53,8 @@ impl AdminClientOptions {
       client_cert: None,
       client_key: None,
       max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+      admin_tls_secp256r1mlkem768: false,
+      auxiliary_tls_secp256r1mlkem768: false,
     }
   }
 }
@@ -68,10 +74,20 @@ pub struct AdminResponse {
 
 impl AdminClient {
   pub fn new(options: AdminClientOptions) -> anyhow::Result<Self> {
+    let enabled = options.admin_tls_secp256r1mlkem768;
+    Self::new_with_secp256r1mlkem768(options, enabled)
+  }
+
+  pub fn new_with_secp256r1mlkem768(
+    mut options: AdminClientOptions,
+    enable_secp256r1mlkem768: bool,
+  ) -> anyhow::Result<Self> {
+    options.admin_tls_secp256r1mlkem768 = enable_secp256r1mlkem768;
     let tls_config = build_tls_config(
       &options.ca_certs,
       options.client_cert.as_deref(),
       options.client_key.as_deref(),
+      options.admin_tls_secp256r1mlkem768,
     )?;
     let mut http = HttpConnector::new();
     http.enforce_http(false);
@@ -95,6 +111,10 @@ impl AdminClient {
 
   pub fn timeout(&self) -> Duration {
     self.options.timeout
+  }
+
+  pub fn auxiliary_tls_secp256r1mlkem768(&self) -> bool {
+    self.options.auxiliary_tls_secp256r1mlkem768
   }
 
   pub async fn request_json(
@@ -234,8 +254,13 @@ fn build_tls_config(
   extra_roots: &[PathBuf],
   client_cert: Option<&Path>,
   client_key: Option<&Path>,
+  enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<ClientConfig> {
-  let provider = crate::tls::default_crypto_provider();
+  let provider = if enable_secp256r1mlkem768 {
+    crate::tls::aws_lc_provider_with_secp256r1mlkem768(true)
+  } else {
+    crate::tls::default_crypto_provider()
+  };
   let roots = load_root_store(extra_roots)?;
   let builder = ClientConfig::builder_with_provider(provider.into())
     .with_safe_default_protocol_versions()
@@ -340,6 +365,18 @@ fn full_body(bytes: Bytes) -> AdminBody {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::sync::Arc;
+
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  use tokio::net::TcpListener;
+  use tokio_rustls::TlsAcceptor;
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
 
   #[test]
   fn joins_admin_endpoint_from_root_url() {
@@ -379,5 +416,124 @@ mod tests {
     headers.clear();
     headers.insert("x-oxibelt-mutation", "signed".parse().expect("header"));
     assert!(validate_extra_headers(&headers).is_ok());
+  }
+
+  #[test]
+  fn admin_tls_secp256r1mlkem768_is_opt_in() {
+    let options = AdminClientOptions::new(
+      Url::parse(DEFAULT_ADMIN_URL).expect("url"),
+      "token".to_string(),
+      Duration::from_secs(1),
+    );
+    assert!(!options.admin_tls_secp256r1mlkem768);
+    assert!(!options.auxiliary_tls_secp256r1mlkem768);
+    AdminClient::new(options.clone()).expect("default Admin client should build");
+    AdminClient::new_with_secp256r1mlkem768(options, true)
+      .expect("opt-in Admin client should build");
+
+    let mut options = AdminClientOptions::new(
+      Url::parse(DEFAULT_ADMIN_URL).expect("url"),
+      "token".to_string(),
+      Duration::from_secs(1),
+    );
+    options.admin_tls_secp256r1mlkem768 = true;
+    AdminClient::new(options).expect("field-enabled Admin client should build");
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn admin_tls_secp256r1mlkem768_handshakes_only_when_enabled() {
+    const TEST_TIMEOUT: Duration = Duration::from_secs(3);
+    let temp_dir = common::TempDir::new("admin-pq-target-handshake");
+    let (ca_path, ca_key) = common::create_self_signed_cert(temp_dir.path(), "admin-pq-ca");
+    let (cert_path, key_path) =
+      common::create_ca_signed_server_cert(temp_dir.path(), "localhost", &ca_path, &ca_key);
+    let listener = TcpListener::bind("127.0.0.1:0")
+      .await
+      .expect("Admin TLS test listener should bind");
+    let address = listener
+      .local_addr()
+      .expect("Admin TLS test listener should have an address");
+
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768];
+    let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+      .with_safe_default_protocol_versions()
+      .expect("target-only server TLS versions should configure")
+      .with_no_client_auth()
+      .with_single_cert(
+        load_certs(&cert_path).expect("test certificate should load"),
+        load_private_key(&key_path).expect("test key should load"),
+      )
+      .expect("target-only server TLS config should build");
+    let acceptor = TlsAcceptor::from(Arc::new(server_config));
+    let server = tokio::spawn(async move {
+      let mut outcomes = Vec::with_capacity(2);
+      for _ in 0..2 {
+        let (stream, _) = tokio::time::timeout(TEST_TIMEOUT, listener.accept())
+          .await
+          .expect("Admin TLS test server accept should not time out")
+          .expect("Admin TLS test server should accept");
+        let handshake = tokio::time::timeout(TEST_TIMEOUT, acceptor.accept(stream)).await;
+        match handshake {
+          Ok(Ok(mut stream)) => {
+            outcomes.push(true);
+            let mut request = [0_u8; 1024];
+            tokio::time::timeout(TEST_TIMEOUT, stream.read(&mut request))
+              .await
+              .expect("Admin TLS test server read should not time out")
+              .expect("Admin TLS test server should read the request");
+            tokio::time::timeout(
+              TEST_TIMEOUT,
+              stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"),
+            )
+            .await
+            .expect("Admin TLS test server write should not time out")
+            .expect("Admin TLS test server should write the response");
+          }
+          _ => outcomes.push(false),
+        }
+      }
+      outcomes
+    });
+
+    let admin_url = |enabled| {
+      Url::parse(&format!("https://localhost:{}", address.port()))
+        .map(|admin_url| {
+          let mut options = AdminClientOptions::new(admin_url, "token".to_string(), TEST_TIMEOUT);
+          options.ca_certs = vec![ca_path.clone()];
+          options.admin_tls_secp256r1mlkem768 = enabled;
+          options
+        })
+        .expect("Admin TLS test URL should parse")
+    };
+    let default_client =
+      AdminClient::new(admin_url(false)).expect("default Admin client should build");
+    let default_result = tokio::time::timeout(
+      TEST_TIMEOUT,
+      default_client.request(Method::GET, "/admin/v1/config/status", None, None),
+    )
+    .await
+    .expect("default Admin request should not time out");
+    assert!(
+      default_result.is_err(),
+      "default Admin TLS client must reject a target-only peer"
+    );
+
+    let enabled_client =
+      AdminClient::new(admin_url(true)).expect("opt-in Admin client should build");
+    let response = tokio::time::timeout(
+      TEST_TIMEOUT,
+      enabled_client.request(Method::GET, "/admin/v1/config/status", None, None),
+    )
+    .await
+    .expect("opt-in Admin request should not time out")
+    .expect("opt-in Admin client should handshake with target-only peer");
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body.as_ref(), b"ok");
+
+    assert_eq!(
+      server.await.expect("Admin TLS test server should finish"),
+      vec![false, true]
+    );
   }
 }
