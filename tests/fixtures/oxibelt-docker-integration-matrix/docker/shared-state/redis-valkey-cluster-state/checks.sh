@@ -8,6 +8,7 @@ run_case_checks() {
   assert_shared_person_proof_admin_revocation
   assert_shared_pool_health
   assert_shared_cache_uri_isolation
+  assert_shared_query_cache_cleanup
   assert_shared_cache
   assert_no_redis_keys_commands
 }
@@ -204,6 +205,33 @@ assert_shared_cache_uri_isolation() {
 
   other="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/cache-key/shared-uri?body=other-cache&cache_control=public&content_type=text/plain" 200 "GET" "" "X-Forwarded-For: 203.0.113.36")"
   assert_response_jq "${other}" '.body == "other-cache"'
+}
+
+assert_shared_query_cache_cleanup() {
+  local target seed hit unsafe miss index_count attempt
+  target="/app/shared-query?body=shared-query&cache_control=public&content_type=text/plain"
+
+  seed="$(client_request_with_headers "example.test" "${target}" 200 "QUERY" '{"selector":"one"}' "X-Forwarded-For: 203.0.113.43" "Content-Type: application/json")"
+  assert_response_jq "${seed}" '.headers["x-oxibelt-cache"] == "miss" and .body == "shared-query"'
+
+  hit="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${target}" 200 "QUERY" '{"selector":"one"}' "X-Forwarded-For: 203.0.113.44" "Content-Type: application/json")"
+  assert_response_jq "${hit}" '.headers["x-oxibelt-cache"] == "hit" and .body == "shared-query"'
+
+  unsafe="$(client_request_with_headers "example.test" "${target}" 200 "POST" '{"update":true}' "X-Forwarded-For: 203.0.113.45" "Content-Type: application/json")"
+  assert_response_jq "${unsafe}" '.status == 200'
+
+  miss="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${target}" 200 "QUERY" '{"selector":"one"}' "X-Forwarded-For: 203.0.113.46" "Content-Type: application/json")"
+  assert_response_jq "${miss}" '.headers["x-oxibelt-cache"] == "miss" and .body == "shared-query"'
+
+  index_count=""
+  for attempt in $(seq 1 50); do
+    index_count="$(docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli ZCARD "matrix-shared:cache:q1-expiry-v1"; else redis-cli ZCARD "matrix-shared:cache:q1-expiry-v1"; fi' | tr -d '\r')"
+    [[ "${index_count}" == "1" ]] && break
+    sleep 0.1
+  done
+  if [[ "${index_count}" != "1" ]]; then
+    fail_with_diagnostics "expected Redis QUERY cleanup to retain only the current indexed generation, got ${index_count}"
+  fi
 }
 
 assert_shared_cache() {

@@ -80,7 +80,7 @@ enabled = true
 store = "memory"
 max_size_bytes = 1048576
 default_ttl_seconds = 60
-cache_methods = ["GET", "HEAD"]
+cache_methods = ["GET", "HEAD", "QUERY"]
 respect_cache_control = true
 lock = true
 
