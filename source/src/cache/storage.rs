@@ -248,12 +248,49 @@ pub(super) fn index_entry(inner: &mut CacheInner, entry: &StoredEntry) {
   inner
     .index
     .insert(entry_lookup_key(entry), &entry.variant_key);
+  if let Some(epoch) = entry.query_target_epoch {
+    inner
+      .query_variants_by_target
+      .entry(CacheQueryTargetKey::from_entry(entry))
+      .or_default()
+      .entry(entry.partition.clone())
+      .or_default()
+      .entry(epoch)
+      .or_default()
+      .insert(entry.variant_key.clone());
+  }
 }
 
 pub(super) fn unindex_entry(inner: &mut CacheInner, entry: &StoredEntry) {
   inner
     .index
     .remove(&entry_lookup_key(entry), &entry.variant_key);
+  let Some(epoch) = entry.query_target_epoch else {
+    return;
+  };
+  let target = CacheQueryTargetKey::from_entry(entry);
+  let mut remove_target = false;
+  if let Some(partitions) = inner.query_variants_by_target.get_mut(&target) {
+    let mut remove_partition = false;
+    if let Some(epochs) = partitions.get_mut(&entry.partition) {
+      let mut remove_epoch = false;
+      if let Some(variants) = epochs.get_mut(&epoch) {
+        variants.remove(&entry.variant_key);
+        remove_epoch = variants.is_empty();
+      }
+      if remove_epoch {
+        epochs.remove(&epoch);
+      }
+      remove_partition = epochs.is_empty();
+    }
+    if remove_partition {
+      partitions.remove(&entry.partition);
+    }
+    remove_target = partitions.is_empty();
+  }
+  if remove_target {
+    inner.query_variants_by_target.remove(&target);
+  }
 }
 
 pub(super) fn entry_lookup_key(entry: &StoredEntry) -> index::LookupKey {

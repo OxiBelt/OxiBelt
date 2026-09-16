@@ -16,11 +16,39 @@ fn prometheus_output_omits_waf_rule_metadata() {
   assert!(body.contains("oxibelt_requests_total"));
   assert!(body.contains("oxibelt_cache_tag_purges_total"));
   assert!(body.contains("oxibelt_cache_background_refresh_success_total"));
+  assert!(body.contains("oxibelt_cache_query_cleanup_queue_depth"));
   assert!(body.contains("oxibelt_cache_disk_recovered_entries_total"));
   assert!(body.contains("oxibelt_tls_server_session_storage_put_total"));
   assert!(!body.contains("oxibelt_waf_rule_hits_total"));
   assert!(!body.contains("rule_name"));
   assert!(!body.contains("rule_id"));
+}
+
+#[test]
+fn query_cleanup_metrics_are_aggregate_and_saturating() {
+  let metrics = Metrics::new();
+  metrics.record_cache_query_cleanup_dequeued();
+  metrics.record_cache_query_cleanup_enqueue_started();
+  metrics.record_cache_query_cleanup_enqueued();
+  metrics.record_cache_query_cleanup_dequeued();
+  metrics.record_cache_query_cleanup_started();
+  metrics.record_cache_query_cleanup_finished(3, true);
+  metrics.record_cache_query_cleanup_enqueue_started();
+  metrics.record_cache_query_cleanup_enqueue_failed();
+
+  let body = metrics.prometheus(
+    &MetricsConfig::default(),
+    CacheStats::default(),
+    TlsServerSessionStorageStats::default(),
+  );
+  assert!(body.contains("oxibelt_cache_query_cleanup_enqueued_total 1"));
+  assert!(body.contains("oxibelt_cache_query_cleanup_dropped_total 1"));
+  assert!(body.contains("oxibelt_cache_query_cleanup_completed_total 1"));
+  assert!(body.contains("oxibelt_cache_query_cleanup_entries_total 3"));
+  assert!(body.contains("oxibelt_cache_query_cleanup_queue_depth 0"));
+  assert!(body.contains("oxibelt_cache_query_cleanup_in_flight 0"));
+  assert!(!body.contains("query_cleanup_target"));
+  assert!(!body.contains("query_cleanup_uri"));
 }
 
 #[test]

@@ -54,6 +54,14 @@ pub struct Metrics {
   cache_background_refresh_success_total: AtomicU64,
   cache_background_refresh_errors_total: AtomicU64,
   cache_background_refresh_skips_total: AtomicU64,
+  cache_query_cleanup_enqueued_total: AtomicU64,
+  cache_query_cleanup_coalesced_total: AtomicU64,
+  cache_query_cleanup_dropped_total: AtomicU64,
+  cache_query_cleanup_completed_total: AtomicU64,
+  cache_query_cleanup_errors_total: AtomicU64,
+  cache_query_cleanup_entries_total: AtomicU64,
+  cache_query_cleanup_queue_depth: AtomicU64,
+  cache_query_cleanup_in_flight: AtomicU64,
   dynamic_policy_matches_total: AtomicU64,
   dynamic_policy_rejects_total: AtomicU64,
   dynamic_policy_rate_limit_denied_total: AtomicU64,
@@ -396,6 +404,62 @@ impl Metrics {
       .fetch_add(1, Ordering::Relaxed);
   }
 
+  pub(crate) fn record_cache_query_cleanup_enqueue_started(&self) {
+    self
+      .cache_query_cleanup_queue_depth
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub(crate) fn record_cache_query_cleanup_enqueued(&self) {
+    self
+      .cache_query_cleanup_enqueued_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub(crate) fn record_cache_query_cleanup_enqueue_failed(&self) {
+    atomic_saturating_decrement(&self.cache_query_cleanup_queue_depth);
+    self.record_cache_query_cleanup_dropped();
+  }
+
+  pub(crate) fn record_cache_query_cleanup_dequeued(&self) {
+    atomic_saturating_decrement(&self.cache_query_cleanup_queue_depth);
+  }
+
+  pub(crate) fn record_cache_query_cleanup_coalesced(&self) {
+    self
+      .cache_query_cleanup_coalesced_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub(crate) fn record_cache_query_cleanup_dropped(&self) {
+    self
+      .cache_query_cleanup_dropped_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub(crate) fn record_cache_query_cleanup_started(&self) {
+    self
+      .cache_query_cleanup_in_flight
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
+  pub(crate) fn record_cache_query_cleanup_finished(&self, entries: usize, succeeded: bool) {
+    atomic_saturating_decrement(&self.cache_query_cleanup_in_flight);
+    self.cache_query_cleanup_entries_total.fetch_add(
+      u64::try_from(entries).unwrap_or(u64::MAX),
+      Ordering::Relaxed,
+    );
+    if succeeded {
+      self
+        .cache_query_cleanup_completed_total
+        .fetch_add(1, Ordering::Relaxed);
+    } else {
+      self
+        .cache_query_cleanup_errors_total
+        .fetch_add(1, Ordering::Relaxed);
+    }
+  }
+
   pub fn record_dynamic_policy_match(&self) {
     self
       .dynamic_policy_matches_total
@@ -617,6 +681,66 @@ impl Metrics {
     );
     append_metric(
       &mut output,
+      "oxibelt_cache_query_cleanup_enqueued_total",
+      "counter",
+      self
+        .cache_query_cleanup_enqueued_total
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_query_cleanup_coalesced_total",
+      "counter",
+      self
+        .cache_query_cleanup_coalesced_total
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_query_cleanup_dropped_total",
+      "counter",
+      self
+        .cache_query_cleanup_dropped_total
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_query_cleanup_completed_total",
+      "counter",
+      self
+        .cache_query_cleanup_completed_total
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_query_cleanup_errors_total",
+      "counter",
+      self
+        .cache_query_cleanup_errors_total
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_query_cleanup_entries_total",
+      "counter",
+      self
+        .cache_query_cleanup_entries_total
+        .load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_query_cleanup_queue_depth",
+      "gauge",
+      self.cache_query_cleanup_queue_depth.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_query_cleanup_in_flight",
+      "gauge",
+      self.cache_query_cleanup_in_flight.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
       "oxibelt_dynamic_policy_matches_total",
       "counter",
       self.dynamic_policy_matches_total.load(Ordering::Relaxed),
@@ -744,6 +868,12 @@ fn append_metric(output: &mut String, name: &str, kind: &str, value: impl std::f
   output.push(' ');
   let _ = write!(output, "{value}");
   output.push('\n');
+}
+
+fn atomic_saturating_decrement(value: &AtomicU64) {
+  let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    Some(current.saturating_sub(1))
+  });
 }
 
 #[cfg(test)]

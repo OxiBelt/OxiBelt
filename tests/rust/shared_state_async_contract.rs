@@ -114,6 +114,12 @@ fn shared_state_backend_implementation_has_no_blocking_bridge() {
     "source/src/shared_state/feature_flags.rs",
     "source/src/shared_state/helpers.rs",
     "source/src/shared_state/person_proof.rs",
+    "source/src/shared_state/query_cache_index.rs",
+    "source/src/shared_state/query_cache_index/codec.rs",
+    "source/src/shared_state/query_cache_index/dispatch.rs",
+    "source/src/shared_state/query_cache_index/operations.rs",
+    "source/src/shared_state/query_cache_index/postgres.rs",
+    "source/src/shared_state/query_cache_index/redis.rs",
     "source/src/shared_state/rate_limits.rs",
     "source/src/shared_state/redis_connection.rs",
     "source/src/shared_state/redis_pool.rs",
@@ -146,9 +152,56 @@ fn shared_state_enumeration_never_issues_the_redis_keys_command() {
     "source/src/shared_state/cache_store.rs",
     "source/src/shared_state/enumeration.rs",
     "source/src/shared_state/person_proof.rs",
+    "source/src/shared_state/query_cache_index.rs",
+    "source/src/shared_state/query_cache_index/redis.rs",
   ] {
     let source = read_repo_file(path);
     assert_absent(path, &source, "b\"KEYS\"");
+  }
+}
+
+#[test]
+fn automatic_query_invalidation_has_no_cache_wide_cleanup_path() {
+  let purge_path = "source/src/cache/purge.rs";
+  let purge = read_repo_file(purge_path);
+  let (_, automatic) = purge
+    .split_once("pub async fn invalidate_query_target_async(")
+    .expect("automatic QUERY invalidation should exist");
+  let (automatic, _) = automatic
+    .split_once("/// Invalidates QUERY variants for every configured policy")
+    .expect("automatic QUERY invalidation should have a bounded function body");
+  for forbidden in [
+    "invalidate_query_target_inner",
+    "cache_purge_query_exact",
+    "purge_external_query_exact_partition",
+    ".entries.iter()",
+  ] {
+    assert_absent(purge_path, automatic, forbidden);
+  }
+
+  let cleanup_path = "source/src/cache/query_cleanup.rs";
+  let cleanup = read_repo_file(cleanup_path);
+  let (_, local_cleanup) = cleanup
+    .split_once("pub(super) fn cleanup_local_query_target_batch(")
+    .expect("indexed local QUERY cleanup should exist");
+  assert!(
+    local_cleanup.contains("query_variants_by_target"),
+    "{cleanup_path} must select local cleanup work from the target index"
+  );
+  assert_absent(cleanup_path, local_cleanup, ".entries.iter()");
+
+  for shared_path in [
+    "source/src/shared_state/query_cache_index.rs",
+    "source/src/shared_state/query_cache_index/codec.rs",
+    "source/src/shared_state/query_cache_index/dispatch.rs",
+    "source/src/shared_state/query_cache_index/operations.rs",
+    "source/src/shared_state/query_cache_index/postgres.rs",
+    "source/src/shared_state/query_cache_index/redis.rs",
+  ] {
+    let shared = read_repo_file(shared_path);
+    for forbidden in ["enumeration_keys(", "cache_purge(", "b\"SCAN\""] {
+      assert_absent(shared_path, &shared, forbidden);
+    }
   }
 }
 

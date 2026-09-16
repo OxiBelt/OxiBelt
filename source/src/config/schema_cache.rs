@@ -108,6 +108,26 @@ pub enum LimitMode {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CacheQueryCleanupConfig {
+  #[serde(default = "default_cache_query_cleanup_queue_capacity")]
+  pub queue_capacity: usize,
+  #[serde(default = "default_cache_query_cleanup_batch_size")]
+  pub batch_size: usize,
+  #[serde(default = "default_cache_query_cleanup_max_concurrent")]
+  pub max_concurrent: usize,
+}
+
+impl Default for CacheQueryCleanupConfig {
+  fn default() -> Self {
+    Self {
+      queue_capacity: default_cache_query_cleanup_queue_capacity(),
+      batch_size: default_cache_query_cleanup_batch_size(),
+      max_concurrent: default_cache_query_cleanup_max_concurrent(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CacheConfig {
   #[serde(default)]
   pub enabled: bool,
@@ -167,6 +187,8 @@ pub struct CacheConfig {
   pub background_refresh: bool,
   #[serde(default = "default_cache_background_refresh_max_concurrent")]
   pub background_refresh_max_concurrent: usize,
+  #[serde(default)]
+  pub query_cleanup: CacheQueryCleanupConfig,
   #[serde(default = "default_cache_lock_wait_timeout_ms")]
   pub lock_wait_timeout_ms: u64,
   #[serde(default)]
@@ -215,6 +237,7 @@ impl Default for CacheConfig {
       stream_chunk_bytes: default_cache_stream_chunk_bytes(),
       background_refresh: true,
       background_refresh_max_concurrent: default_cache_background_refresh_max_concurrent(),
+      query_cleanup: CacheQueryCleanupConfig::default(),
       lock_wait_timeout_ms: default_cache_lock_wait_timeout_ms(),
       copy_file_range: CacheCopyFileRangeMode::Auto,
       admission: CacheAdmissionConfig::default(),

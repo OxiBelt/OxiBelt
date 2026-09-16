@@ -23,6 +23,7 @@ use crate::tls;
 
 use super::protocol::{
   ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheLookupRequest,
+  ExternalCacheQueryCleanupRequest, ExternalCacheQueryCleanupResponse,
   ExternalCacheQueryEpochRequest, ExternalCacheQueryEpochResponse, FRAME_PREFIX_BYTES,
   external_cache_metadata_frame, parse_metadata,
 };
@@ -161,6 +162,41 @@ impl ExternalCacheHttpClient {
     })
     .await
     .context("external QUERY epoch request timed out")?
+  }
+
+  pub(crate) async fn query_cleanup(
+    &self,
+    request: &ExternalCacheQueryCleanupRequest,
+  ) -> anyhow::Result<ExternalCacheQueryCleanupResponse> {
+    let body = serde_json::to_vec(request).context("failed to encode external QUERY cleanup")?;
+    if body.len() > self.max_metadata_bytes {
+      bail!("external QUERY cleanup request exceeds configured limit");
+    }
+    let limit = request.limit;
+    let request = self.request(Method::POST, "query-cleanup", json_body(Bytes::from(body)))?;
+    tokio::time::timeout(self.request_timeout, async {
+      let response = self
+        .client
+        .request(request)
+        .await
+        .context("external QUERY cleanup request failed")?;
+      if !response.status().is_success() {
+        bail!("external QUERY cleanup returned {}", response.status());
+      }
+      let bytes = http_body_util::Limited::new(response.into_body(), self.max_metadata_bytes)
+        .collect()
+        .await
+        .map_err(|error| anyhow!("external QUERY cleanup response failed: {error}"))?
+        .to_bytes();
+      let response: ExternalCacheQueryCleanupResponse =
+        serde_json::from_slice(&bytes).context("external QUERY cleanup response is not JSON")?;
+      if !response.validates_q1_cleanup(limit) {
+        bail!("external cache handler returned an invalid QUERY cleanup response");
+      }
+      Ok(response)
+    })
+    .await
+    .context("external QUERY cleanup request timed out")?
   }
 
   pub(crate) async fn fill(
@@ -485,6 +521,42 @@ mod tests {
     )
   }
 
+  fn query_cleanup_request() -> ExternalCacheQueryCleanupRequest {
+    ExternalCacheQueryCleanupRequest::new(
+      "default".to_string(),
+      "https".to_string(),
+      "example.test".to_string(),
+      "/".to_string(),
+      7,
+      4,
+    )
+  }
+
+  #[tokio::test]
+  async fn query_cleanup_rejects_an_oversized_request_body_before_network_io() {
+    let client = ExternalCacheHttpClient::new(
+      &handler_config("http://127.0.0.1:9/internal/v1/cache/"),
+      &[],
+      1024,
+      1024,
+    )
+    .unwrap();
+    let request = ExternalCacheQueryCleanupRequest::new(
+      "default".to_string(),
+      "https".to_string(),
+      "example.test".to_string(),
+      format!("/{}", "x".repeat(2048)),
+      7,
+      4,
+    );
+
+    let error = client
+      .query_cleanup(&request)
+      .await
+      .expect_err("oversized cleanup request must fail before connecting");
+    assert!(format!("{error:#}").contains("cleanup request exceeds configured limit"));
+  }
+
   #[tokio::test]
   #[ignore = "requires loopback sockets, which are unavailable in some sandboxes"]
   async fn lookup_timeout_maps_to_error() {
@@ -564,5 +636,55 @@ mod tests {
       Err(error) => error,
     };
     assert!(format!("{error:#}").contains("external cache purge timed out"));
+  }
+
+  #[tokio::test]
+  #[ignore = "requires loopback sockets, which are unavailable in some sandboxes"]
+  async fn query_cleanup_rejects_missing_capability() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!(
+      "http://{}/internal/v1/cache/",
+      listener.local_addr().unwrap()
+    );
+    tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      let mut buffer = [0u8; 1024];
+      let _ = stream.read(&mut buffer).await;
+      let body = b"{\"purged\":0,\"complete\":true,\"capabilities\":[]}";
+      let response = format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", body.len());
+      let _ = stream.write_all(response.as_bytes()).await;
+      let _ = stream.write_all(body).await;
+    });
+    let client = ExternalCacheHttpClient::new(&handler_config(&endpoint), &[], 1024, 1024).unwrap();
+    let error = client
+      .query_cleanup(&query_cleanup_request())
+      .await
+      .expect_err("cleanup response without capabilities must fail");
+    assert!(format!("{error:#}").contains("invalid QUERY cleanup response"));
+  }
+
+  #[tokio::test]
+  #[ignore = "requires loopback sockets, which are unavailable in some sandboxes"]
+  async fn query_cleanup_timeout_covers_stalled_response_body() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let endpoint = format!(
+      "http://{}/internal/v1/cache/",
+      listener.local_addr().unwrap()
+    );
+    tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      let mut buffer = [0u8; 1024];
+      let _ = stream.read(&mut buffer).await;
+      let _ = stream
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 64\r\n\r\n{\"purged\":")
+        .await;
+      tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+    let client = ExternalCacheHttpClient::new(&handler_config(&endpoint), &[], 1024, 1024).unwrap();
+    let error = client
+      .query_cleanup(&query_cleanup_request())
+      .await
+      .expect_err("stalled cleanup body must time out");
+    assert!(format!("{error:#}").contains("external QUERY cleanup request timed out"));
   }
 }

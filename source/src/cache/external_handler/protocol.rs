@@ -9,6 +9,11 @@ pub(crate) const CACHE_KEY_VERSION: &str = "oxibelt-cache-key-v1";
 /// Required on every Q1 request, entry, and purge.  Q1 peers that do not
 /// preserve this epoch are treated as legacy and their results are bypassed.
 pub(crate) const QUERY_EPOCH_CAPABILITY: &str = "query-target-epoch-v1";
+/// Required for a bounded, best-effort cleanup of Q1 entries older than a
+/// completed target epoch. This is deliberately separate from administrative
+/// purges so a handler can constrain the operation to one QUERY target.
+pub(crate) const QUERY_CLEANUP_BEFORE_EPOCH_CAPABILITY: &str =
+  "query-target-cleanup-before-epoch-v1";
 pub(crate) const FRAME_PREFIX_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -160,6 +165,70 @@ impl ExternalCacheQueryEpochResponse {
       .capabilities
       .iter()
       .any(|capability| capability == QUERY_EPOCH_CAPABILITY)
+  }
+}
+
+/// A bounded, best-effort request to reclaim Q1 records older than a completed
+/// target epoch. It must never be interpreted as the invalidation fence: the
+/// epoch exchange remains authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ExternalCacheQueryCleanupRequest {
+  pub protocol_version: String,
+  pub cache_key_version: String,
+  pub policy: String,
+  pub scheme: String,
+  pub host: String,
+  pub uri: String,
+  pub before_epoch: u64,
+  pub limit: usize,
+  pub required_capabilities: Vec<String>,
+}
+
+impl ExternalCacheQueryCleanupRequest {
+  pub(crate) fn new(
+    policy: String,
+    scheme: String,
+    host: String,
+    uri: String,
+    before_epoch: u64,
+    limit: usize,
+  ) -> Self {
+    Self {
+      protocol_version: PROTOCOL_VERSION.to_string(),
+      cache_key_version: super::super::key::QUERY_EXTERNAL_CACHE_KEY_VERSION.to_string(),
+      policy,
+      scheme,
+      host,
+      uri,
+      before_epoch,
+      limit: limit.max(1),
+      required_capabilities: vec![
+        QUERY_EPOCH_CAPABILITY.to_string(),
+        QUERY_CLEANUP_BEFORE_EPOCH_CAPABILITY.to_string(),
+      ],
+    }
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ExternalCacheQueryCleanupResponse {
+  pub purged: usize,
+  pub complete: bool,
+  #[serde(default)]
+  pub capabilities: Vec<String>,
+}
+
+impl ExternalCacheQueryCleanupResponse {
+  pub(crate) fn validates_q1_cleanup(&self, limit: usize) -> bool {
+    self.purged <= limit
+      && self
+        .capabilities
+        .iter()
+        .any(|capability| capability == QUERY_EPOCH_CAPABILITY)
+      && self
+        .capabilities
+        .iter()
+        .any(|capability| capability == QUERY_CLEANUP_BEFORE_EPOCH_CAPABILITY)
   }
 }
 
@@ -398,6 +467,63 @@ mod tests {
       }
       .validates_q1()
     );
+  }
+
+  #[test]
+  fn query_cleanup_request_is_q1_scoped_and_bounded() {
+    let request = ExternalCacheQueryCleanupRequest::new(
+      "default".to_string(),
+      "https".to_string(),
+      "example.test".to_string(),
+      "/asset".to_string(),
+      7,
+      0,
+    );
+    assert_eq!(
+      request.cache_key_version,
+      crate::cache::key::QUERY_EXTERNAL_CACHE_KEY_VERSION
+    );
+    assert_eq!(request.before_epoch, 7);
+    assert_eq!(request.limit, 1);
+    assert_eq!(
+      request.required_capabilities,
+      vec![
+        QUERY_EPOCH_CAPABILITY.to_string(),
+        QUERY_CLEANUP_BEFORE_EPOCH_CAPABILITY.to_string(),
+      ]
+    );
+  }
+
+  #[test]
+  fn query_cleanup_response_requires_capabilities_and_a_bounded_count() {
+    let complete = ExternalCacheQueryCleanupResponse {
+      purged: 3,
+      complete: true,
+      capabilities: vec![
+        QUERY_EPOCH_CAPABILITY.to_string(),
+        QUERY_CLEANUP_BEFORE_EPOCH_CAPABILITY.to_string(),
+      ],
+    };
+    assert!(complete.validates_q1_cleanup(3));
+
+    let partial_without_progress = ExternalCacheQueryCleanupResponse {
+      purged: 0,
+      complete: false,
+      ..complete.clone()
+    };
+    assert!(partial_without_progress.validates_q1_cleanup(3));
+
+    let missing_capability = ExternalCacheQueryCleanupResponse {
+      capabilities: vec![QUERY_EPOCH_CAPABILITY.to_string()],
+      ..complete.clone()
+    };
+    assert!(!missing_capability.validates_q1_cleanup(3));
+
+    let oversized_count = ExternalCacheQueryCleanupResponse {
+      purged: 4,
+      ..complete
+    };
+    assert!(!oversized_count.validates_q1_cleanup(3));
   }
 
   #[test]

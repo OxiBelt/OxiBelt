@@ -280,6 +280,15 @@ impl Config {
     if self.cache.background_refresh_max_concurrent == 0 {
       bail!("cache.background_refresh_max_concurrent must be greater than 0");
     }
+    if !(1..=1024).contains(&self.cache.query_cleanup.queue_capacity) {
+      bail!("cache.query_cleanup.queue_capacity must be between 1 and 1024");
+    }
+    if !(1..=512).contains(&self.cache.query_cleanup.batch_size) {
+      bail!("cache.query_cleanup.batch_size must be between 1 and 512");
+    }
+    if !(1..=4).contains(&self.cache.query_cleanup.max_concurrent) {
+      bail!("cache.query_cleanup.max_concurrent must be between 1 and 4");
+    }
     if self.cache.lock_wait_timeout_ms == 0 {
       bail!("cache.lock_wait_timeout_ms must be greater than 0");
     }

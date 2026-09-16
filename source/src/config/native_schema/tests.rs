@@ -213,3 +213,22 @@ fn declares_quic_upstream_resolution_schema_bounds_and_defaults() {
     assert_eq!(default_value(path), Some(default), "{path}");
   }
 }
+
+#[cfg(feature = "config-tooling")]
+#[test]
+fn declares_cache_query_cleanup_schema_bounds_and_defaults() {
+  let expected = [
+    ("cache.query_cleanup.queue_capacity", 1, 1_024, json!(64)),
+    ("cache.query_cleanup.batch_size", 1, 512, json!(128)),
+    ("cache.query_cleanup.max_concurrent", 1, 4, json!(1)),
+  ];
+
+  for (path, minimum, maximum, default) in expected {
+    assert_eq!(
+      bounded_integer_range(path),
+      Some((minimum, maximum)),
+      "{path}"
+    );
+    assert_eq!(default_value(path), Some(default), "{path}");
+  }
+}

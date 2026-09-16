@@ -26,9 +26,11 @@ impl ResponseCache {
       {
         Ok(epoch) => Some(epoch),
         Err(error) => {
-          self.advance_query_generation(&target);
+          let local_epoch = self.advance_query_generation(&target);
           self.fills.fence_query_target(&target);
-          self.invalidate_query_target_inner(&target);
+          self
+            .query_cleanup
+            .enqueue(target.clone(), local_epoch, false, false);
           self.mark_query_invalidation_failed(target);
           return Err(
             error.context("QUERY cache invalidation could not advance the shared target epoch"),
@@ -52,45 +54,21 @@ impl ResponseCache {
     } else {
       None
     };
-    self.advance_query_generation_to(&target, shared_epoch.or(external_epoch));
+    let effective_epoch =
+      self.advance_query_generation_to(&target, shared_epoch.or(external_epoch));
     self.fills.fence_query_target(&target);
-    let local_count = self.invalidate_query_target_inner(&target);
-    let shared_result = match self
+    let shared_pending = self
       .shared_state
       .as_ref()
       .filter(|shared| shared.has_cache())
-    {
-      Some(shared) => {
-        shared
-          .cache_purge_query_exact(policy, scheme, host, uri, partition)
-          .await
-      }
-      None => Ok(0),
-    };
-    let mut failed = shared_result.is_err();
-    let shared_count = shared_result.unwrap_or(0);
-    #[cfg(feature = "admin-runtime")]
-    {
-      // Preserve local/shared invalidation ordering before contacting an
-      // optional external handler. The report is deliberately internal: this
-      // path is automatic RFC 9111 invalidation, not an admin purge surface.
-      let reports = self
-        .purge_external_query_exact_partition(
-          policy,
-          scheme,
-          host,
-          uri,
-          partition,
-          shared_epoch.or(external_epoch).unwrap_or_default(),
-        )
-        .await;
-      failed |= reports.iter().any(|report| report.status != "ok");
-    }
-    if failed {
-      self.mark_query_invalidation_failed(target);
-      anyhow::bail!("QUERY cache invalidation did not reach every configured cache backend");
-    }
-    Ok(local_count.saturating_add(shared_count))
+      .is_some();
+    let external_pending = self
+      .policy(Some(policy))
+      .is_some_and(|item| item.external_handler.is_some());
+    self
+      .query_cleanup
+      .enqueue(target, effective_epoch, shared_pending, external_pending);
+    Ok(0)
   }
 
   /// Invalidates QUERY variants for every configured policy at a target. This
@@ -137,34 +115,25 @@ impl ResponseCache {
     partition: Option<&str>,
   ) -> usize {
     let target = CacheQueryInvalidationTarget::new(policy, scheme, host, uri, partition);
-    self.advance_query_generation(&target);
+    let before_epoch = self.advance_query_generation(&target);
     self.fills.fence_query_target(&target);
-    self.invalidate_query_target_inner(&target)
+    self.invalidate_query_target_inner(&target, before_epoch)
   }
 
-  fn invalidate_query_target_inner(&self, target: &CacheQueryInvalidationTarget) -> usize {
-    let mut inner = self.inner_guard();
-    let keys = inner
-      .entries
-      .iter()
-      .filter(|(_, entry)| {
-        entry.policy == target.policy
-          && entry.scheme == target.scheme
-          && entry.host == target.host
-          && entry.uri == target.uri
-          && target
-            .partition
-            .as_ref()
-            .is_none_or(|partition| entry.partition == *partition)
-          && is_query_v1_base_key(&entry.base_key)
-      })
-      .map(|(key, _)| key.clone())
-      .collect::<Vec<_>>();
-    let count = keys.len();
-    for key in keys {
-      remove_entry(&mut inner, &key);
+  #[cfg(test)]
+  fn invalidate_query_target_inner(
+    &self,
+    target: &CacheQueryInvalidationTarget,
+    before_epoch: u64,
+  ) -> usize {
+    let mut count = 0usize;
+    loop {
+      let (removed, more) = self.cleanup_local_query_target_batch(target, before_epoch, 128);
+      count = count.saturating_add(removed);
+      if !more {
+        return count;
+      }
     }
-    count
   }
 
   pub fn purge_exact(&self, policy: &str, scheme: &str, host: &str, uri: &str) -> usize {

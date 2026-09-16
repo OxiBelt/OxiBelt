@@ -5600,6 +5600,84 @@ cache = "assets"
 }
 
 #[test]
+fn cache_query_cleanup_config_defaults_and_parse() {
+  let temp_dir = common::TempDir::new("cache-query-cleanup");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "cache-query-cleanup");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let default_config: Config = toml::from_str(&base).expect("config should parse");
+  default_config
+    .validate()
+    .expect("default query cleanup config should validate");
+  assert_eq!(default_config.cache.query_cleanup.queue_capacity, 64);
+  assert_eq!(default_config.cache.query_cleanup.batch_size, 128);
+  assert_eq!(default_config.cache.query_cleanup.max_concurrent, 1);
+
+  let raw = format!(
+    "{base}\n[cache.query_cleanup]\nqueue_capacity = 1024\nbatch_size = 512\nmax_concurrent = 4\n"
+  );
+  let config: Config = toml::from_str(&raw).expect("query cleanup config should parse");
+  config
+    .validate()
+    .expect("maximum query cleanup values should validate");
+  assert_eq!(config.cache.query_cleanup.queue_capacity, 1024);
+  assert_eq!(config.cache.query_cleanup.batch_size, 512);
+  assert_eq!(config.cache.query_cleanup.max_concurrent, 4);
+}
+
+#[test]
+fn cache_query_cleanup_config_rejects_values_outside_bounds() {
+  let temp_dir = common::TempDir::new("cache-query-cleanup-invalid");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "cache-query-cleanup-invalid");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  for (field, value, expected) in [
+    (
+      "queue_capacity",
+      0,
+      "cache.query_cleanup.queue_capacity must be between 1 and 1024",
+    ),
+    (
+      "queue_capacity",
+      1025,
+      "cache.query_cleanup.queue_capacity must be between 1 and 1024",
+    ),
+    (
+      "batch_size",
+      0,
+      "cache.query_cleanup.batch_size must be between 1 and 512",
+    ),
+    (
+      "batch_size",
+      513,
+      "cache.query_cleanup.batch_size must be between 1 and 512",
+    ),
+    (
+      "max_concurrent",
+      0,
+      "cache.query_cleanup.max_concurrent must be between 1 and 4",
+    ),
+    (
+      "max_concurrent",
+      5,
+      "cache.query_cleanup.max_concurrent must be between 1 and 4",
+    ),
+  ] {
+    let raw = format!("{base}\n[cache.query_cleanup]\n{field} = {value}\n");
+    let config: Config = toml::from_str(&raw).expect("query cleanup config should parse");
+    let error = config
+      .validate()
+      .expect_err("out-of-range query cleanup value should fail validation");
+    assert!(
+      error.to_string().contains(expected),
+      "unexpected validation error for {field}={value}: {error:#}"
+    );
+  }
+}
+
+#[test]
 fn cache_external_handler_config_parse_and_policy_override() {
   let temp_dir = common::TempDir::new("cache-external-handler");
   let (cert_path, key_path) =

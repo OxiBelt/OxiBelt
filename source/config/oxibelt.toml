@@ -672,6 +672,11 @@ negative_statuses = []
 negative_ttl_seconds = 0
 # external_handler = "massive"
 
+[cache.query_cleanup]
+queue_capacity = 64
+batch_size = 128
+max_concurrent = 1
+
 [cache.surrogate]
 enabled = true
 strip_response_header = true

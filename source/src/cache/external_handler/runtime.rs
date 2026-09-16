@@ -15,8 +15,8 @@ use super::client::{ExternalCacheHttpClient, ExternalCacheLookupHit, ExternalCac
 #[cfg(feature = "admin-runtime")]
 use super::protocol::ExternalCachePurgeRequest;
 use super::protocol::{
-  ExternalCacheEntryMetadata, ExternalCacheLookupRequest, ExternalCacheQueryEpochRequest,
-  ExternalCacheQueryEpochResponse,
+  ExternalCacheEntryMetadata, ExternalCacheLookupRequest, ExternalCacheQueryCleanupRequest,
+  ExternalCacheQueryEpochRequest, ExternalCacheQueryEpochResponse,
 };
 
 #[derive(Clone)]
@@ -38,6 +38,12 @@ pub(crate) struct ExternalCachePurgeReport {
   pub status: &'static str,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub purged: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct ExternalCacheQueryCleanupReport {
+  pub purged: usize,
+  pub complete: bool,
 }
 
 impl ExternalCacheRuntime {
@@ -126,6 +132,39 @@ impl ExternalCacheRuntime {
       Err(error) => {
         self.record(&handler.name, "query_epoch", "error");
         warn!(handler = %handler.name, error = %error, "external QUERY epoch request failed");
+        None
+      }
+    }
+  }
+
+  /// Attempts bounded external Q1 cleanup without affecting invalidation
+  /// correctness. Absence, saturation, and errors are all best-effort misses.
+  pub(crate) async fn query_cleanup(
+    &self,
+    handler_name: &str,
+    request: ExternalCacheQueryCleanupRequest,
+  ) -> Option<ExternalCacheQueryCleanupReport> {
+    let handler = self.handlers.get(handler_name)?;
+    let Ok(_permit) = handler.limiter.clone().try_acquire_owned() else {
+      self.record(&handler.name, "query_cleanup", "saturated");
+      return None;
+    };
+    match handler.client.query_cleanup(&request).await {
+      Ok(response) => {
+        let outcome = if response.complete {
+          "complete"
+        } else {
+          "partial"
+        };
+        self.record(&handler.name, "query_cleanup", outcome);
+        Some(ExternalCacheQueryCleanupReport {
+          purged: response.purged,
+          complete: response.complete,
+        })
+      }
+      Err(error) => {
+        self.record(&handler.name, "query_cleanup", "error");
+        warn!(handler = %handler.name, error = %error, "external QUERY cleanup request failed");
         None
       }
     }
@@ -237,5 +276,71 @@ impl fmt::Debug for ExternalCacheRuntime {
       .debug_struct("ExternalCacheRuntime")
       .field("handlers", &self.handlers.keys().collect::<Vec<_>>())
       .finish_non_exhaustive()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::HashMap;
+  use std::sync::Arc;
+
+  use super::*;
+  use crate::config::{
+    ExternalCacheHandlerConfig, ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind,
+    MetricsConfig,
+  };
+  use crate::tls::TlsServerSessionStorageStats;
+  use url::Url;
+
+  fn cleanup_request() -> ExternalCacheQueryCleanupRequest {
+    ExternalCacheQueryCleanupRequest::new(
+      "default".to_string(),
+      "https".to_string(),
+      "example.test".to_string(),
+      "/asset".to_string(),
+      3,
+      8,
+    )
+  }
+
+  #[tokio::test]
+  async fn query_cleanup_is_try_admitted_and_uses_fixed_saturation_metrics() {
+    let metrics = Metrics::new();
+    let config = ExternalCacheHandlerConfig {
+      name: "cleanup-test".to_string(),
+      kind: ExternalCacheHandlerKind::Http,
+      endpoint: Url::parse("http://127.0.0.1:9/").unwrap(),
+      token_env: None,
+      connect_timeout_ms: 50,
+      request_timeout_ms: 50,
+      max_metadata_bytes: 1024,
+      max_body_bytes: Some(1024),
+      max_inflight_requests: 1,
+      fail_policy: ExternalCacheHandlerFailPolicy::LocalOnly,
+    };
+    let handler = Arc::new(ExternalCacheHandler {
+      name: config.name.clone(),
+      client: ExternalCacheHttpClient::new(&config, &[], 1024, 1024).unwrap(),
+      limiter: Arc::new(Semaphore::new(0)),
+    });
+    let runtime = ExternalCacheRuntime {
+      handlers: Arc::new(HashMap::from([(config.name.clone(), handler)])),
+      metrics: metrics.clone(),
+    };
+
+    assert!(
+      runtime
+        .query_cleanup(&config.name, cleanup_request())
+        .await
+        .is_none()
+    );
+    let prometheus = metrics.prometheus(
+      &MetricsConfig::default(),
+      crate::cache::CacheStats::default(),
+      TlsServerSessionStorageStats::default(),
+    );
+    assert!(prometheus.contains(
+      "oxibelt_external_cache_operations_total{handler=\"cleanup-test\",operation=\"query_cleanup\",outcome=\"saturated\"} 1"
+    ));
   }
 }

@@ -481,6 +481,7 @@ impl AppSnapshot {
       shared_state.clone(),
       external_cache,
       runtime_health.clone(),
+      metrics.clone(),
     )
     .context("failed to build response cache")?;
     cache.set_overload_runtime(overload.clone());

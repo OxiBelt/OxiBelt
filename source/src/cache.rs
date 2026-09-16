@@ -1,7 +1,7 @@
 //! Response cache coordination and cache-key enforcement for proxy traffic.
 //! Cache admission remains separate from HTTP forwarding so policy decisions stay auditable.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +44,7 @@ mod policy;
 mod proxy_protocol_identity;
 pub use proxy_protocol_identity::CacheProxyProtocolIdentity;
 mod purge;
+mod query_cleanup;
 mod query_epoch_disk;
 mod range;
 mod recovery;
@@ -592,6 +593,34 @@ struct CacheQueryInvalidationTarget {
   partition: Option<String>,
 }
 
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct CacheQueryTargetKey {
+  policy: String,
+  scheme: String,
+  host: String,
+  uri: String,
+}
+
+impl CacheQueryTargetKey {
+  fn from_target(target: &CacheQueryInvalidationTarget) -> Self {
+    Self {
+      policy: target.policy.clone(),
+      scheme: target.scheme.clone(),
+      host: target.host.clone(),
+      uri: target.uri.clone(),
+    }
+  }
+
+  fn from_entry(entry: &StoredEntry) -> Self {
+    Self {
+      policy: entry.policy.clone(),
+      scheme: entry.scheme.clone(),
+      host: entry.host.clone(),
+      uri: entry.uri.clone(),
+    }
+  }
+}
+
 #[derive(Debug, Clone)]
 struct CacheQueryGeneration {
   target: CacheQueryInvalidationTarget,
@@ -650,6 +679,8 @@ struct VaryMatcher {
 struct CacheInner {
   entries: HashMap<String, StoredEntry>,
   index: index::CacheIndex,
+  query_variants_by_target:
+    HashMap<CacheQueryTargetKey, HashMap<String, BTreeMap<u64, HashSet<String>>>>,
   order: VecDeque<String>,
   purge_nonces: HashMap<String, SystemTime>,
   purge_nonce_order: VecDeque<String>,
@@ -725,6 +756,7 @@ pub struct ResponseCache {
   runtime_health: Arc<RuntimeHealth>,
   shared_state: Option<Arc<SharedState>>,
   external_cache: ExternalCacheRuntime,
+  query_cleanup: query_cleanup::QueryCleanupDispatcher,
   overload: ArcSwapOption<OverloadRuntime>,
 }
 
@@ -738,6 +770,7 @@ impl Drop for ResponseCache {
     }
     inner.order.clear();
     inner.index.clear();
+    inner.query_variants_by_target.clear();
     inner.memory_size = 0;
     inner.disk_size = 0;
     inner.disk_inflight_size = 0;

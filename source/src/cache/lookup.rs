@@ -7,11 +7,13 @@ impl ResponseCache {
     config: &CacheConfig,
     shared_state: Option<Arc<SharedState>>,
   ) -> anyhow::Result<Arc<Self>> {
+    let metrics = crate::metrics::Metrics::new();
     Self::new_with_external_and_health(
       config,
       shared_state,
-      ExternalCacheRuntime::disabled(crate::metrics::Metrics::new()),
+      ExternalCacheRuntime::disabled(metrics.clone()),
       Arc::new(RuntimeHealth::default()),
+      metrics,
     )
   }
 
@@ -20,6 +22,7 @@ impl ResponseCache {
     shared_state: Option<Arc<SharedState>>,
     external_cache: ExternalCacheRuntime,
     runtime_health: Arc<RuntimeHealth>,
+    metrics: Arc<crate::metrics::Metrics>,
   ) -> anyhow::Result<Arc<Self>> {
     let tmpfs_dir = if config.enabled && config.store == CacheStore::Tmpfs {
       let dir = config
@@ -82,6 +85,8 @@ impl ResponseCache {
       })
       .collect();
 
+    let (query_cleanup, query_cleanup_receiver) =
+      query_cleanup::QueryCleanupDispatcher::new(&config.query_cleanup, metrics.clone());
     let cache = Arc::new(Self {
       config: config.clone(),
       policies,
@@ -96,8 +101,12 @@ impl ResponseCache {
       runtime_health,
       shared_state,
       external_cache,
+      query_cleanup,
       overload: ArcSwapOption::empty(),
     });
+    cache
+      .query_cleanup
+      .start(Arc::downgrade(&cache), query_cleanup_receiver);
     cache.rebuild_disk_entries_at_startup();
     Ok(cache)
   }
@@ -664,15 +673,15 @@ impl ResponseCache {
     self.bind_query_generation(Some(identity), operation)
   }
 
-  pub(super) fn advance_query_generation(&self, target: &CacheQueryInvalidationTarget) {
-    self.advance_query_generation_to(target, None);
+  pub(super) fn advance_query_generation(&self, target: &CacheQueryInvalidationTarget) -> u64 {
+    self.advance_query_generation_to(target, None)
   }
 
   pub(super) fn advance_query_generation_to(
     &self,
     target: &CacheQueryInvalidationTarget,
     durable_epoch: Option<u64>,
-  ) {
+  ) -> u64 {
     let mut inner = self.inner_guard();
     let current = inner
       .query_invalidation_generations
@@ -681,7 +690,7 @@ impl ResponseCache {
       .unwrap_or(0);
     let next = durable_epoch.unwrap_or_else(|| current.saturating_add(1));
     if durable_epoch.is_some() && next < current {
-      return;
+      return current;
     }
     inner
       .query_invalidation_generations
@@ -691,6 +700,7 @@ impl ResponseCache {
         .failed_query_invalidations
         .insert(query_epoch_bucket(target));
     }
+    next
   }
 }
 

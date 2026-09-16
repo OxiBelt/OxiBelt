@@ -79,6 +79,9 @@ Local disk caches atomically persist a versioned epoch vector. Invalid vectors
 disable QUERY reuse; a missing vector discards recovered QUERY entries before
 initializing fresh state. Shared caches read the authoritative epoch before
 local hits, so a late shared-store write cannot resurrect an invalidated entry.
+Target-index expiry is reclaimed in bounded background pages after successful
+QUERY publications and by a lifecycle-bound periodic sweep; publication does
+not wait for this physical cleanup.
 
 External handlers retain protocol `oxibelt-external-cache-v1`. QUERY entries
 use key version `oxibelt-cache-query-key-v1` and require capability
@@ -89,10 +92,20 @@ must include `target_epoch` and a `capabilities` array containing the required
 capability. The handler must durably maintain a nondecreasing counter per
 policy and bucket, atomically incrementing it when `advance` is true. Reads
 must observe completed increments. QUERY lookup and entry metadata bind
-`query_target_epoch`; purge requests carry it as well. When shared cache is
-configured, its epoch counter is authoritative for the external tier too.
-Legacy handlers without the capability bypass QUERY caching. Legacy GET/HEAD
-messages omit these optional fields and keep their existing keys.
+`query_target_epoch`. A handler can additionally advertise
+`query-target-cleanup-before-epoch-v1` and accept
+`POST query-cleanup` after a completed epoch advance. That request carries
+the Q1 target, `before_epoch`, a positive bounded `limit`, and required
+capabilities, including both Q1 epoch and cleanup capabilities; its JSON
+response contains bounded `purged`, `complete`, and both capabilities.
+Cleanup is best effort and only reclaims entries older than the
+fence, so it never establishes invalidation correctness. A handler that
+supports `query-target-epoch-v1` but lacks the cleanup capability remains
+eligible for QUERY caching and relies on normal expiry for physical
+reclamation. When shared cache is configured, its epoch counter is
+authoritative for the external tier too. Handlers without
+`query-target-epoch-v1` bypass QUERY caching. Legacy GET/HEAD messages omit
+these optional fields and keep their existing keys.
 
 ## Retries
 

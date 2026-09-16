@@ -260,6 +260,18 @@ fn external_certificate_vary_with_a_value_is_safe_miss() {
   );
 }
 
+#[tokio::test]
+async fn external_query_cleanup_is_a_best_effort_separate_operation() {
+  let cache = cache_with_external_handler();
+  assert!(
+    cache
+      .cleanup_external_query_before_epoch("default", "https", "example.test", "/asset", 7, 128,)
+      .await
+      .is_none(),
+    "a missing runtime handler must not make cleanup behave like an admin purge"
+  );
+}
+
 #[cfg(feature = "admin-runtime")]
 #[tokio::test]
 async fn legacy_external_purges_do_not_emit_query_protocol_requests() {

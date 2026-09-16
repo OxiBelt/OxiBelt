@@ -948,6 +948,9 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     "certificate_transparency.logs.gateway.cache_max_bytes" => (1, 64 * 1024 * 1024),
     "certificate_transparency.logs.gateway.cache_max_entries" => (1, 100_000),
     "webrtc_turn_listeners.auth.nonce_ttl_seconds" => (1, 3_600),
+    "cache.query_cleanup.queue_capacity" => (1, 1_024),
+    "cache.query_cleanup.batch_size" => (1, 512),
+    "cache.query_cleanup.max_concurrent" => (1, 4),
     _ => return None,
   };
   Some(range)
@@ -1457,6 +1460,9 @@ fn default_value(path: &str) -> Option<Value> {
     }
     "sni_forward.quic_initial_reassembly.max_total_buffered_bytes" => json!(4_194_304),
     "sni_forward.quic_initial_reassembly.timeout_ms" => json!(10_000),
+    "cache.query_cleanup.queue_capacity" => json!(64),
+    "cache.query_cleanup.batch_size" => json!(128),
+    "cache.query_cleanup.max_concurrent" => json!(1),
     "stream_listeners.udp_flow_state" => json!("local"),
     "turn_upstream_pools.health_check.connect_timeout_ms" => json!(3_000),
     "turn_upstream_pools.health_check.tls_handshake_timeout_ms" => json!(5_000),

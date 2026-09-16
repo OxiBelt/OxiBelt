@@ -344,6 +344,123 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
   ));
 }
 
+#[test]
+fn absent_query_target_does_not_examine_unrelated_cache_entries() {
+  let cache = ResponseCache::new(
+    &CacheConfig {
+      enabled: true,
+      cache_methods: vec!["GET".to_string(), "QUERY".to_string()],
+      cache_key: "{scheme}:{host}:{uri}".to_string(),
+      ..CacheConfig::default()
+    },
+    None,
+  )
+  .unwrap();
+  let headers = HeaderMap::new();
+  let mut response_headers = HeaderMap::new();
+  response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("max-age=60"));
+  for index in 0..4096 {
+    let uri = format!("/unrelated/{index}").parse::<Uri>().unwrap();
+    assert_eq!(
+      cache.insert(
+        CacheInsertContext {
+          proxy_protocol_identity: None,
+          policy_name: Some("default"),
+          scheme: "https",
+          host: "example.test",
+          method: &Method::GET,
+          uri: &uri,
+          request_headers: &headers,
+          query_identity: None,
+          certificate_identity: None,
+        },
+        CacheEntry::memory(
+          StatusCode::OK,
+          response_headers.clone(),
+          Bytes::from_static(b"x"),
+        ),
+      ),
+      CacheInsertOutcome::Stored,
+    );
+  }
+  assert_eq!(cache.inner_guard().entries.len(), 4096);
+  assert_eq!(
+    cache.invalidate_query_target("default", "https", "example.test", "/missing", None),
+    0,
+  );
+  assert_eq!(cache.inner_guard().entries.len(), 4096);
+}
+
+#[tokio::test]
+async fn automatic_query_invalidation_returns_after_fencing_and_reclaims_in_background() {
+  let cache = query_cache();
+  let uri = "/background-cleanup".parse::<Uri>().unwrap();
+  let method = Method::from_bytes(b"QUERY").unwrap();
+  let headers = HeaderMap::new();
+  let identity = query_identity(&uri, b"query", b"query");
+  let mut response_headers = HeaderMap::new();
+  response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("max-age=60"));
+  assert_eq!(
+    cache.insert(
+      CacheInsertContext {
+        proxy_protocol_identity: None,
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &method,
+        uri: &uri,
+        request_headers: &headers,
+        query_identity: Some(&identity),
+        certificate_identity: None,
+      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers,
+        Bytes::from_static(b"query"),
+      ),
+    ),
+    CacheInsertOutcome::Stored,
+  );
+
+  assert_eq!(
+    cache
+      .invalidate_query_target_async(
+        "default",
+        "https",
+        "example.test",
+        "/background-cleanup",
+        None,
+      )
+      .await
+      .unwrap(),
+    0,
+  );
+  let fresh_identity = query_identity(&uri, b"query", b"query");
+  assert!(
+    cache
+      .lookup(CacheLookupContext {
+        proxy_protocol_identity: None,
+        policy_name: Some("default"),
+        scheme: "https",
+        host: "example.test",
+        method: &method,
+        uri: &uri,
+        request_headers: &headers,
+        query_identity: Some(&fresh_identity),
+        certificate_identity: None,
+      })
+      .is_none(),
+    "epoch fencing must make the stale entry unreachable before cleanup completes",
+  );
+  for _ in 0..100 {
+    if cache.inner_guard().entries.is_empty() {
+      return;
+    }
+    tokio::task::yield_now().await;
+  }
+  panic!("background QUERY cleanup did not reclaim the stale local entry");
+}
+
 #[tokio::test]
 async fn shared_query_epoch_rejects_a_delayed_replica_publish() {
   let shared = crate::shared_state::SharedState::test_memory("query-target-epoch");

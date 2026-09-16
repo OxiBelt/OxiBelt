@@ -2,8 +2,9 @@
 
 use super::external_handler::{
   ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheHeader, ExternalCacheLookupHit,
-  ExternalCacheLookupRequest, ExternalCachePublishBody, ExternalCacheQueryEpochRequest,
-  ExternalCacheVary, PROTOCOL_VERSION,
+  ExternalCacheLookupRequest, ExternalCachePublishBody, ExternalCacheQueryCleanupReport,
+  ExternalCacheQueryCleanupRequest, ExternalCacheQueryEpochRequest, ExternalCacheVary,
+  PROTOCOL_VERSION,
 };
 #[cfg(feature = "admin-runtime")]
 use super::external_handler::{
@@ -35,6 +36,34 @@ impl ResponseCache {
       )
       .await
       .map(|response| response.target_epoch)
+  }
+
+  /// Reclaims Q1 records only after the authoritative epoch has advanced. This
+  /// is best effort and must never be used as the invalidation fence.
+  pub(crate) async fn cleanup_external_query_before_epoch(
+    &self,
+    policy: &str,
+    scheme: &str,
+    host: &str,
+    uri: &str,
+    before_epoch: u64,
+    limit: usize,
+  ) -> Option<ExternalCacheQueryCleanupReport> {
+    let handler = self.policy(Some(policy))?.external_handler.as_deref()?;
+    self
+      .external_cache
+      .query_cleanup(
+        handler,
+        ExternalCacheQueryCleanupRequest::new(
+          policy.to_string(),
+          scheme.to_string(),
+          host.to_string(),
+          uri.to_string(),
+          before_epoch,
+          limit,
+        ),
+      )
+      .await
   }
 
   pub(crate) async fn lookup_external(
@@ -428,38 +457,6 @@ impl ResponseCache {
         .await,
     );
     reports
-  }
-
-  /// Query-target invalidation is emitted in the isolated Q1 external-key
-  /// namespace.  A handler that does not implement Q1 cannot affect QUERY
-  /// entries and therefore fails closed as a cache miss.
-  #[cfg(feature = "admin-runtime")]
-  pub(crate) async fn purge_external_query_exact_partition(
-    &self,
-    policy: &str,
-    scheme: &str,
-    host: &str,
-    uri: &str,
-    partition: Option<&str>,
-    query_target_epoch: u64,
-  ) -> Vec<ExternalCachePurgeReport> {
-    self
-      .purge_external(
-        policy,
-        ExternalCachePurgeRequest::with_cache_key_version(
-          QUERY_EXTERNAL_CACHE_KEY_VERSION.to_string(),
-          ExternalCachePurgeKind::Exact,
-          policy.to_string(),
-          Some(scheme.to_string()),
-          Some(host.to_string()),
-          Some(uri.to_string()),
-          None,
-          None,
-          partition.map(str::to_string),
-          Some(query_target_epoch),
-        ),
-      )
-      .await
   }
 
   #[cfg(feature = "admin-runtime")]

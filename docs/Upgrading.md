@@ -42,6 +42,20 @@ settings before rollout. Before rollback, disable QUERY caching and finish or
 cancel QUERY warming; an older binary lacks the new admission and body-bound
 cache guarantees. See [QUERY behavior and validation](Query.md).
 
+QUERY invalidation now fences reuse before bounded asynchronous physical
+cleanup. The optional `[cache.query_cleanup]` table controls queue capacity,
+per-operation batch size, and cleanup concurrency; its defaults require no
+configuration change. Shared Redis and PostgreSQL caches add target indexes.
+PostgreSQL creates the additive `oxibelt_shared_cache_query_targets` table and
+its indexes automatically, while Redis index keys remain inside the configured
+shared-state namespace.
+
+Before rolling back to a binary that predates `[cache.query_cleanup]`, remove
+that table from native configuration. The older binary ignores the additive
+shared index data. Disable QUERY caching and wait through the configured cache
+retention period before optionally deleting those Redis keys or the PostgreSQL
+table; no conversion of cached response values is required.
+
 ## Admin QUERY cache operations
 
 The Admin cache warm and key-explain endpoints add exact-uppercase `QUERY`

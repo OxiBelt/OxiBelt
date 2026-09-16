@@ -154,6 +154,18 @@ pub(super) fn default_cache_background_refresh_max_concurrent() -> usize {
   16
 }
 
+pub(super) fn default_cache_query_cleanup_queue_capacity() -> usize {
+  64
+}
+
+pub(super) fn default_cache_query_cleanup_batch_size() -> usize {
+  128
+}
+
+pub(super) fn default_cache_query_cleanup_max_concurrent() -> usize {
+  1
+}
+
 pub(super) fn default_cache_lock_wait_timeout_ms() -> u64 {
   10_000
 }

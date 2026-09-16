@@ -456,6 +456,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "negative_ttl_seconds",
       "partition_key",
       "policies",
+      "query_cleanup",
       "respect_cache_control",
       "stale_if_error",
       "stale_if_error_seconds",
@@ -493,6 +494,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "read_timeout",
       "statuses",
     ][..],
+    "cache.query_cleanup" => &["batch_size", "max_concurrent", "queue_capacity"][..],
     "cache.policies" => &[
       "admission",
       "background_refresh",
