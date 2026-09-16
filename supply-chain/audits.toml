@@ -1183,6 +1183,12 @@ criteria = "safe-to-deploy"
 delta = "0.1.13 -> 0.1.14"
 notes = "Reviewed the checksum-matched profile, mapping, LazyLock, and Unicode 17 data delta with optional networking disabled. OxiBelt uses only byte-bounded OpaqueString enforcement for TURN credentials, realms, USERHASH, and long-term keys. All 4,448,274 differential scalar/context/boundary records matched the prior graph byte-for-byte, and 88 TURN tests passed. Other profiles are outside the selected OxiBelt path; no unsafe or FFI capability is added."
 
+[[audits.precis-profiles]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.1.14 -> 0.2.0"
+notes = "Reviewed the complete checksum-matched package delta and independently verified that production source, build.rs, and bundled Unicode data are byte-identical. This release corrects the public precis-core dependency versioning mistake in the yanked 0.1.14 release. Changes are limited to package metadata, lint configuration, changelog, packaged development lockfile, and coverage-only test gating. OxiBelt retains the existing precis-core 0.2.0, precis-tools 0.1.10, and unicode-normalization 0.1.25 graph with optional networking disabled; bounded TURN OpaqueString normalization and rejection semantics are unchanged. No unsafe, FFI, build capability, network behavior, or license change is introduced."
+
 [[audits.precis-tools]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"

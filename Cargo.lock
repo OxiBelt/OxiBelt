@@ -3748,9 +3748,9 @@ dependencies = [
 
 [[package]]
 name = "precis-profiles"
-version = "0.1.14"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf0d5f1e813bb7e363c42b8013808215a06a95ffe038df5e85334009e0ac57c2"
+checksum = "53ed6b19435958c029101ce63ae26e010973fcc79aaddfda5b3afa7102602ab4"
 dependencies = [
  "precis-core",
  "precis-tools",
