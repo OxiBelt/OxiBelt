@@ -470,5 +470,16 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       },
       None,
     ),
+    docker_case(
+      "protocol-startup",
+      "pq-secp256r1mlkem768",
+      "RFC 10024 SecP256r1MLKEM768 opt-in interoperates with OpenSSL in both TLS roles",
+      ExpectStart::Success,
+      Needs {
+        pq_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
   ]
 }

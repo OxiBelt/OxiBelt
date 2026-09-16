@@ -667,6 +667,7 @@ echo "${pq_x25519_output}" | grep -F 'requested_group=X25519 negotiated_group=X2
 
 pq_hybrid_output="$(run_pq_probe "x25519mlkem768" "success")"
 echo "${pq_hybrid_output}" | grep -F 'requested_group=X25519MLKEM768 negotiated_group=X25519MLKEM768'
+run_pq_probe "secp256r1mlkem768" "failure"
 
 echo "HTTP and HTTPS proxy integration checks passed"
 echo "WebSocket and generic HTTP Upgrade protocol binding checks passed"

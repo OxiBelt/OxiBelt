@@ -297,4 +297,5 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("protocol-proxying", "downstream-h3-upstream-h2"),
   ("protocol-proxying", "downstream-h3-upstream-h2c"),
   ("protocol-startup", "pq-tls-groups"),
+  ("protocol-startup", "pq-secp256r1mlkem768"),
 ];

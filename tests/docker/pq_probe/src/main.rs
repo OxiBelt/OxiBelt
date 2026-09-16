@@ -13,6 +13,7 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore};
 enum ProbeGroup {
   X25519,
   X25519MlKem768,
+  Secp256r1MlKem768,
 }
 
 impl ProbeGroup {
@@ -20,6 +21,7 @@ impl ProbeGroup {
     match raw {
       "x25519" => Ok(Self::X25519),
       "x25519mlkem768" => Ok(Self::X25519MlKem768),
+      "secp256r1mlkem768" => Ok(Self::Secp256r1MlKem768),
       _ => bail!("unsupported probe group: {raw}"),
     }
   }
@@ -28,6 +30,7 @@ impl ProbeGroup {
     match self {
       Self::X25519 => rustls::crypto::aws_lc_rs::kx_group::X25519,
       Self::X25519MlKem768 => rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
+      Self::Secp256r1MlKem768 => rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
     }
   }
 
@@ -35,6 +38,7 @@ impl ProbeGroup {
     match self {
       Self::X25519 => "X25519",
       Self::X25519MlKem768 => "X25519MLKEM768",
+      Self::Secp256r1MlKem768 => "SecP256r1MLKEM768",
     }
   }
 }
@@ -121,6 +125,10 @@ fn main() -> anyhow::Result<()> {
     .negotiated_cipher_suite()
     .ok_or_else(|| anyhow!("TLS handshake completed without a cipher suite"))?
     .suite();
+
+  if negotiated_group != args.group.supported_group().name() {
+    bail!("peer did not negotiate the requested group");
+  }
 
   println!(
         "handshake_ok requested_group={} negotiated_group={negotiated_group:?} protocol={protocol_version:?} cipher_suite={cipher_suite:?}",

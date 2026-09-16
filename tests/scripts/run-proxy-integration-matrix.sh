@@ -2441,6 +2441,8 @@ redis_is_ready() {
 
 run_pq_probe() {
   local group="$1"
+  local expected="${2:-success}"
+  local server_name="${3:-proxy}"
   local container_name="oxibelt-pq-${group}-${run_id}"
   local output=""
 
@@ -2451,17 +2453,39 @@ run_pq_probe() {
     "${pq_probe_image}" \
     --host proxy \
     --port 8443 \
-    --server-name proxy \
+    --server-name "${server_name}" \
     --ca-cert /tmp/downstream-ca.pem \
     --group "${group}" >/dev/null
   docker cp "${cert_dir}/fullchain.pem" "${container_name}:/tmp/downstream-ca.pem"
 
-  if ! output="$(docker start -a "${container_name}" 2>&1)"; then
+  if output="$(docker start -a "${container_name}" 2>&1)"; then
+    [[ "${expected}" == "success" ]] || fail_with_diagnostics "disabled group ${group} unexpectedly negotiated"
+  elif [[ "${expected}" != "failure" ]] || ! grep -F 'TLS handshake failed' <<<"${output}" >/dev/null; then
     echo "${output}" >&2
-    docker rm -f "${container_name}" >/dev/null 2>&1 || true
     fail_with_diagnostics "post-quantum probe failed for group ${group}"
   fi
   docker rm -f "${container_name}" >/dev/null 2>&1 || true
+  echo "${output}"
+}
+
+run_pq_openssl_probe() {
+  local expected="$1"
+  local container_name="oxibelt-pq-openssl-${run_id}"
+  local output=""
+  docker create --name "${container_name}" --label "${test_label}" --network "${network_name}" \
+    --entrypoint openssl "${pq_probe_image}" s_client -connect proxy:8443 -servername proxy \
+    -verify_hostname proxy -verify_return_error -CAfile /tmp/ca.pem -tls1_3 \
+    -groups SecP256r1MLKEM768 -brief >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${container_name}:/tmp/ca.pem"
+  if output="$(timeout 15s docker start -a "${container_name}" 2>&1)"; then
+    [[ "${expected}" == "success" ]] || fail_with_diagnostics "OpenSSL negotiated disabled SecP256r1MLKEM768"
+    grep -i 'SecP256r1MLKEM768' <<<"${output}" >/dev/null \
+      || fail_with_diagnostics "OpenSSL did not report the negotiated RFC 10024 group"
+  elif [[ "${expected}" != "failure" ]] || ! grep -i 'handshake failure' <<<"${output}" >/dev/null; then
+    echo "${output}" >&2
+    fail_with_diagnostics "OpenSSL SecP256r1MLKEM768 interoperability failed"
+  fi
+  docker rm -f "${container_name}" >/dev/null
   echo "${output}"
 }
 
@@ -3703,6 +3727,18 @@ if [[ "${CASE_NEED_PQ_PROBE}" == "1" ]]; then
   if ! grep -F 'requested_group=X25519MLKEM768 negotiated_group=X25519MLKEM768' <<<"${pq_hybrid_output}" >/dev/null; then
     echo "${pq_hybrid_output}" >&2
     fail_with_diagnostics "X25519MLKEM768 probe did not negotiate the expected group"
+  fi
+
+  pq_secp_expected="failure"
+  if [[ "${case_name}" == "pq-secp256r1mlkem768" ]]; then
+    pq_secp_expected="success"
+  fi
+  run_pq_probe "secp256r1mlkem768" "${pq_secp_expected}"
+  run_pq_openssl_probe "${pq_secp_expected}"
+  if [[ "${case_name}" == "pq-secp256r1mlkem768" ]]; then
+    # The opt-in applies only to the exact proxy SNI, not the default policy.
+    run_pq_probe "x25519" "success" "example.test"
+    run_pq_probe "secp256r1mlkem768" "failure" "example.test"
   fi
 fi
 
