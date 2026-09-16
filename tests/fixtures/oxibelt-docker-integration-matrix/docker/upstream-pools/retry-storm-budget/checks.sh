@@ -53,6 +53,22 @@ retry_storm_global_metric_value() {
   '
 }
 
+retry_storm_validate_responses() {
+  local response_file="$1"
+  jq -e '
+    type == "array"
+    and length == 16
+    and all(.[];
+      type == "object"
+      and (has("error") | not)
+      and (.status | type == "number")
+      and (.status == 503 or .status == 504)
+    )
+    and ([.[] | select(.status == 503)] | length == 15)
+    and ([.[] | select(.status == 504)] | length == 1)
+  ' "${response_file}" >/dev/null
+}
+
 run_case_checks() {
   local gate_id="retry-storm" request_path burst_file burst_pid gate_status metrics live
   local original_attempts retry_attempts retry_rejections active_retry queued_retry
@@ -69,7 +85,7 @@ run_case_checks() {
     --scheme https \
     --authority example.test \
     --path "${request_path}" \
-    --allowed-statuses 503 \
+    --allowed-statuses 503,504 \
     --concurrency 16 \
     --timeout-seconds 10 \
     --output "${burst_file}" \
@@ -121,7 +137,7 @@ run_case_checks() {
   if ! wait "${burst_pid}"; then
     fail_with_diagnostics "bounded retry storm burst failed"
   fi
-  jq -e 'length == 16 and all(.[]; .status == 503)' "${burst_file}" >/dev/null \
+  retry_storm_validate_responses "${burst_file}" \
     || fail_with_diagnostics "retry storm responses escaped the configured failure envelope"
 
   metrics="$(retry_storm_proxy_request 9090 ops.test /metrics 200)"

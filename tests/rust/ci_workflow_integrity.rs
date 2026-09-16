@@ -7,6 +7,8 @@ use std::process::Command;
 mod certificate_fixtures;
 #[path = "ci_workflow_integrity/download_recovery.rs"]
 mod download_recovery;
+#[path = "ci_workflow_integrity/retry_storm.rs"]
+mod retry_storm;
 
 #[derive(Clone, Debug)]
 struct Job {
@@ -6882,9 +6884,11 @@ fn concurrency_fault_cases_are_registered_bounded_and_rootless() {
     "10#${observed_budget} > 15",
     "[[ \"${observed_budget}\" == \"15\" ]]",
     "retry storm did not reach fifteen durable budget rejections",
+    "--allowed-statuses 503,504",
     "--concurrency 16",
     "--timeout-seconds 10",
     "wait \"${burst_pid}\"",
+    "retry_storm_validate_responses \"${burst_file}\"",
     "\"${original_attempts}\" != \"16\"",
     "\"${retry_attempts}\" != \"1\"",
     "\"${retry_rejections}\" != \"15\"",
