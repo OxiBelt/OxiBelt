@@ -24,8 +24,13 @@ pub(in crate::config) fn validate_tls_key_exchange_groups(
   }
   let mut seen = HashSet::new();
   for group in groups {
-    if version == TlsVersion::Tls12 && *group == TlsKeyExchangeGroup::X25519MlKem768 {
-      bail!("{field_name} cannot include x25519mlkem768 for tls1.2");
+    if version == TlsVersion::Tls12
+      && matches!(
+        group,
+        TlsKeyExchangeGroup::X25519MlKem768 | TlsKeyExchangeGroup::Secp256r1MlKem768
+      )
+    {
+      bail!("{field_name} cannot include {} for tls1.2", group.as_str());
     }
     if !seen.insert(*group) {
       bail!("{field_name} contains duplicate {}", group.as_str());

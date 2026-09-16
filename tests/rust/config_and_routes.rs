@@ -903,6 +903,9 @@ fn crypto_config_defaults_validate() {
   config.validate().expect("config should validate");
 
   assert_eq!(config.crypto.tls_provider, TlsCryptoProvider::AwsLcRs);
+  assert!(!config.crypto.auxiliary_tls.enable_secp256r1mlkem768);
+  assert!(!config.upstreams[0].tls.enable_secp256r1mlkem768);
+  assert!(!config.admin.tls.enable_secp256r1mlkem768);
   assert_eq!(
     config.crypto.primitive_provider,
     CryptoPrimitiveProvider::RustCrypto
@@ -1171,6 +1174,222 @@ tls_provider = "ring"
   assert!(
     error.to_string().contains(expected),
     "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn crypto_ring_rejects_secp256r1_mlkem768_opt_in_controls() {
+  let temp_dir = common::TempDir::new("crypto-ring-secp256r1-mlkem768");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "crypto-ring-secp256r1-mlkem768");
+  let raw = common::minimal_config_toml(&cert_path, &key_path)
+    .replace(
+      "[tls]",
+      r#"[crypto]
+tls_provider = "ring"
+
+[crypto.auxiliary_tls]
+enable_secp256r1mlkem768 = true
+
+[tls]"#,
+    )
+    .replace(
+      "[tls.ocsp]",
+      "[tls.1_3]\nkey_exchange_groups = [\"x25519\", \"secp256r1\", \"secp384r1\"]\n\n[tls.ocsp]",
+    );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("ring must reject SecP256r1MLKEM768 opt-in controls");
+  let expected = if cfg!(feature = "crypto-ring") {
+    "crypto.auxiliary_tls.enable_secp256r1mlkem768 requires crypto.tls_provider = \"aws_lc_rs\""
+  } else {
+    "crypto.tls_provider = \"ring\" requires the crypto-ring build feature"
+  };
+  assert!(
+    error.to_string().contains(expected),
+    "unexpected error: {error}"
+  );
+}
+
+#[test]
+fn crypto_ring_rejects_secp256r1_mlkem768_on_every_tls_surface() {
+  let temp_dir = common::TempDir::new("crypto-ring-secp256r1-mlkem768-surfaces");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "crypto-ring-secp256r1-mlkem768-surfaces");
+  let baseline = common::minimal_config_toml(&cert_path, &key_path)
+    .replace(
+      "[tls]",
+      r#"[crypto]
+tls_provider = "ring"
+
+[tls]"#,
+    )
+    .replace(
+      "[tls.ocsp]",
+      "[tls.1_3]\nkey_exchange_groups = [\"x25519\", \"secp256r1\", \"secp384r1\"]\n\n[tls.ocsp]",
+    );
+  let classical_groups = "key_exchange_groups = [\"x25519\", \"secp256r1\", \"secp384r1\"]";
+  let cases = [
+    (
+      "global TLS 1.3",
+      baseline.replace(
+        classical_groups,
+        "key_exchange_groups = [\"secp256r1mlkem768\"]",
+      ),
+      "tls.1_3.key_exchange_groups cannot include secp256r1mlkem768",
+    ),
+    (
+      "exact-SNI route TLS 1.3",
+      format!("{baseline}\n[routes.tls.1_3]\nkey_exchange_groups = [\"secp256r1mlkem768\"]\n"),
+      "route app-root tls.1_3.key_exchange_groups cannot include secp256r1mlkem768",
+    ),
+    (
+      "auxiliary TLS",
+      format!("{baseline}\n[crypto.auxiliary_tls]\nenable_secp256r1mlkem768 = true\n"),
+      "crypto.auxiliary_tls.enable_secp256r1mlkem768 requires crypto.tls_provider = \"aws_lc_rs\"",
+    ),
+    (
+      "Admin TLS",
+      format!("{baseline}\n[admin.tls]\nenable_secp256r1mlkem768 = true\n"),
+      "admin.tls.enable_secp256r1mlkem768 requires crypto.tls_provider = \"aws_lc_rs\"",
+    ),
+    (
+      "direct upstream TLS",
+      format!("{baseline}\n[upstreams.tls]\nenable_secp256r1mlkem768 = true\n"),
+      "upstream app tls.enable_secp256r1mlkem768 requires crypto.tls_provider = \"aws_lc_rs\"",
+    ),
+    (
+      "upstream pool server TLS",
+      format!(
+        r#"{baseline}
+[[upstream_pools]]
+name = "pool"
+
+[[upstream_pools.servers]]
+id = "pool-server"
+origin = "https://pool.example.test"
+
+[upstream_pools.servers.tls]
+enable_secp256r1mlkem768 = true
+"#
+      ),
+      "upstream pool pool server pool-server tls.enable_secp256r1mlkem768 requires crypto.tls_provider = \"aws_lc_rs\"",
+    ),
+    (
+      "upstream pool discovery TLS",
+      format!(
+        r#"{baseline}
+[[upstream_pools]]
+name = "pool"
+
+[[upstream_pools.discovery]]
+id = "pool-discovery"
+provider = "dns"
+name = "discovery.example.test"
+
+[upstream_pools.discovery.tls]
+enable_secp256r1mlkem768 = true
+"#
+      ),
+      "upstream pool pool discovery pool-discovery tls.enable_secp256r1mlkem768 requires crypto.tls_provider = \"aws_lc_rs\"",
+    ),
+    (
+      "TURN upstream pool TLS",
+      format!(
+        r#"{baseline}
+[[turn_upstream_pools]]
+name = "turn-pool"
+
+[[turn_upstream_pools.servers]]
+id = "turn-server"
+origin = "turns://turn.example.test"
+
+[turn_upstream_pools.servers.tls]
+enable_secp256r1mlkem768 = true
+"#
+      ),
+      "TURN upstream pool turn-pool server turn-server tls.enable_secp256r1mlkem768 requires crypto.tls_provider = \"aws_lc_rs\"",
+    ),
+    (
+      "Redis TLS",
+      format!(
+        r#"{baseline}
+[shared_state]
+enabled = true
+default_backend = "redis"
+
+[[shared_state.backends]]
+name = "redis"
+kind = "redis"
+connection_url = "rediss://redis.example.test:6379/0"
+
+[shared_state.backends.redis_tls]
+enable_secp256r1mlkem768 = true
+"#
+      ),
+      "shared_state backend redis redis_tls.enable_secp256r1mlkem768 requires crypto.tls_provider = \"aws_lc_rs\"",
+    ),
+  ];
+
+  for (surface, raw, ring_error) in cases {
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    let error = config
+      .validate()
+      .expect_err("ring must reject the RFC 10024 control");
+    let expected = if cfg!(feature = "crypto-ring") {
+      ring_error
+    } else {
+      "crypto.tls_provider = \"ring\" requires the crypto-ring build feature"
+    };
+    assert!(
+      error.to_string().contains(expected),
+      "unexpected {surface} error: {error}"
+    );
+  }
+}
+
+#[test]
+fn secp256r1_mlkem768_non_downstream_controls_parse_disabled_by_default_and_opt_in() {
+  let temp_dir = common::TempDir::new("secp256r1-mlkem768-controls");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "secp256r1-mlkem768-controls");
+  let raw = format!(
+    r#"{}
+
+[crypto.auxiliary_tls]
+enable_secp256r1mlkem768 = true
+
+[upstreams.tls]
+enable_secp256r1mlkem768 = true
+
+[admin.tls]
+enable_secp256r1mlkem768 = true
+
+[shared_state]
+enabled = true
+default_backend = "redis-main"
+
+[[shared_state.backends]]
+name = "redis-main"
+kind = "redis"
+connection_url = "rediss://redis.example.test:6379/0"
+
+[shared_state.backends.redis_tls]
+enable_secp256r1mlkem768 = true
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("controls should parse");
+  config.validate().expect("AWS-LC controls should validate");
+  assert!(config.crypto.auxiliary_tls.enable_secp256r1mlkem768);
+  assert!(config.upstreams[0].tls.enable_secp256r1mlkem768);
+  assert!(config.admin.tls.enable_secp256r1mlkem768);
+  assert!(
+    config.shared_state.backends[0]
+      .redis_tls
+      .enable_secp256r1mlkem768
   );
 }
 
@@ -3872,6 +4091,19 @@ fn tls_versions_and_session_ticket_rotation_are_validated() {
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "tls-validation");
   let base = common::minimal_config_toml(&cert_path, &key_path);
 
+  let default_config: Config = toml::from_str(&base).expect("default config should parse");
+  default_config
+    .validate()
+    .expect("default config should validate");
+  assert!(
+    !default_config
+      .tls
+      .tls13
+      .key_exchange_groups
+      .contains(&TlsKeyExchangeGroup::Secp256r1MlKem768),
+    "SecP256r1MLKEM768 must remain disabled by the default downstream policy"
+  );
+
   let raw = base.replace(
     "[tls.ocsp]",
     r#"min_version = "tls1.2"
@@ -4124,6 +4356,18 @@ fn tls_key_exchange_groups_parse_and_validate() {
     config.tls.tls13.key_exchange_groups,
     vec![TlsKeyExchangeGroup::X25519]
   );
+  let raw = base.replace(
+    "private_key =",
+    "key_exchange_groups = [\"secp256r1mlkem768\"]\nprivate_key =",
+  );
+  let config: Config = toml::from_str(&raw).expect("new TLS group should parse");
+  config
+    .validate()
+    .expect("new TLS group should validate for TLS 1.3");
+  assert_eq!(
+    config.tls.tls13.key_exchange_groups,
+    vec![TlsKeyExchangeGroup::Secp256r1MlKem768]
+  );
   assert_eq!(
     config.tls.tls12.key_exchange_groups,
     vec![
@@ -4246,7 +4490,7 @@ fn route_tls_key_exchange_groups_validate_sni_only_scope() {
   let base = common::minimal_config_toml(&cert_path, &key_path);
   let route_override = r#"
 [routes.tls.1_3]
-key_exchange_groups = ["x25519"]
+  key_exchange_groups = ["secp256r1mlkem768"]
 ciphers = ["TLS_AES_128_GCM_SHA256"]
 
 [routes.tls.1_2]
@@ -4260,7 +4504,7 @@ groups = ["TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"]
     .expect("exact-host root route TLS policy should validate");
   assert_eq!(
     config.routes[0].tls.tls13.key_exchange_groups.as_deref(),
-    Some([TlsKeyExchangeGroup::X25519].as_slice())
+    Some([TlsKeyExchangeGroup::Secp256r1MlKem768].as_slice())
   );
   assert_eq!(
     config.routes[0].tls.tls13.ciphers.as_deref(),
@@ -4863,6 +5107,31 @@ max_version = "tls1.2"
     error
       .to_string()
       .contains("admin.tls.min_version must be less than or equal to admin.tls.max_version"),
+    "unexpected error: {error}"
+  );
+
+  let raw = format!(
+    r#"
+{base}
+
+[admin]
+enabled = true
+bearer_token_env = "OXIBELT_ADMIN_TOKEN_TEST"
+
+[admin.tls]
+min_version = "tls1.2"
+max_version = "tls1.2"
+enable_secp256r1mlkem768 = true
+"#
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("SecP256r1MLKEM768 requires Admin TLS 1.3");
+  assert!(
+    error
+      .to_string()
+      .contains("admin.tls.enable_secp256r1mlkem768 requires admin.tls to permit tls1.3"),
     "unexpected error: {error}"
   );
 
@@ -6333,6 +6602,16 @@ connection_url = "redis://127.0.0.1:6379/0"
 
 [shared_state.backends.redis_tls]
 server_name = "redis.edge.svc""#,
+      "redis_tls settings require a rediss:// URL",
+    ),
+    (
+      "secp256r1-mlkem768-on-plaintext",
+      r#"enabled = true"#,
+      r#"kind = "redis"
+connection_url = "redis://127.0.0.1:6379/0"
+
+[shared_state.backends.redis_tls]
+enable_secp256r1mlkem768 = true"#,
       "redis_tls settings require a rediss:// URL",
     ),
     (

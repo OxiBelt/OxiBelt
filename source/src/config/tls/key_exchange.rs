@@ -52,6 +52,7 @@ impl TlsNegotiationPolicy {
 #[serde(rename_all = "lowercase")]
 pub enum TlsKeyExchangeGroup {
   X25519MlKem768,
+  Secp256r1MlKem768,
   X25519,
   Secp256r1,
   Secp384r1,
@@ -61,6 +62,7 @@ impl TlsKeyExchangeGroup {
   pub(crate) fn as_str(self) -> &'static str {
     match self {
       Self::X25519MlKem768 => "x25519mlkem768",
+      Self::Secp256r1MlKem768 => "secp256r1mlkem768",
       Self::X25519 => "x25519",
       Self::Secp256r1 => "secp256r1",
       Self::Secp384r1 => "secp384r1",

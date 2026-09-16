@@ -33,6 +33,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     | "upstream_pools.discovery.tls"
     | "turn_upstream_pools.servers.tls" => &[
       "ech",
+      "enable_secp256r1mlkem768",
       "client_identity",
       "resumption",
       "server_name",

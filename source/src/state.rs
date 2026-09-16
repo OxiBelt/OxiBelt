@@ -568,12 +568,20 @@ impl AppSnapshot {
       AdminMutationRuntime::new_or_reuse(&config, &admin_audit, prior_admin_mutations)
         .await
         .context("failed to build Admin mutation runtime")?;
-    let crlite = tls::CrliteRuntime::new(&config.tls, metrics.clone())
-      .await
-      .context("failed to build CRLite runtime")?;
-    let downstream_ct = tls::DownstreamCtRuntime::new(&config.tls, metrics.clone())
-      .await
-      .context("failed to build downstream CT runtime")?;
+    let crlite = tls::CrliteRuntime::new_with_auxiliary_tls(
+      &config.tls,
+      config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+      metrics.clone(),
+    )
+    .await
+    .context("failed to build CRLite runtime")?;
+    let downstream_ct = tls::DownstreamCtRuntime::new_with_auxiliary_tls(
+      &config.tls,
+      config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+      metrics.clone(),
+    )
+    .await
+    .context("failed to build downstream CT runtime")?;
     let ocsp_staple = tls::OcspStapleRuntime::new(
       &config.crypto,
       &config.tls,

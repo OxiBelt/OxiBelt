@@ -127,7 +127,11 @@ struct LoadedList {
 }
 
 impl DownstreamCtRuntime {
-  pub(crate) async fn new(tls: &TlsConfig, metrics: Arc<Metrics>) -> anyhow::Result<Self> {
+  pub(crate) async fn new_with_auxiliary_tls(
+    tls: &TlsConfig,
+    enable_secp256r1mlkem768: bool,
+    metrics: Arc<Metrics>,
+  ) -> anyhow::Result<Self> {
     let contexts = certificate_contexts(tls)?;
     let partitions = certificate_partitions(tls, &contexts);
     reject_ambiguous_identity_modes(&contexts)?;
@@ -142,7 +146,7 @@ impl DownstreamCtRuntime {
     }
 
     let now = unix_now();
-    let initial_list = load_initial_list(tls, now).await;
+    let initial_list = load_initial_list(tls, enable_secp256r1mlkem768, now).await;
     let (list, cache_present, fetched_at, initial_error) = match initial_list {
       Ok(loaded) => (
         Some(loaded.snapshot),
@@ -181,6 +185,7 @@ impl DownstreamCtRuntime {
     let worker = if tls.ct.log_list.mode == DownstreamCtLogListMode::Managed {
       Some(spawn_refresh_worker(
         tls.clone(),
+        enable_secp256r1mlkem768,
         contexts,
         gates.clone(),
         list_stale_at.clone(),
@@ -618,12 +623,23 @@ fn disabled_status(tls: &TlsConfig, contexts: &[CertificateContext]) -> Downstre
   }
 }
 
-async fn load_initial_list(tls: &TlsConfig, now: u64) -> anyhow::Result<LoadedList> {
+async fn load_initial_list(
+  tls: &TlsConfig,
+  enable_secp256r1mlkem768: bool,
+  now: u64,
+) -> anyhow::Result<LoadedList> {
   match tls.ct.log_list.mode {
     DownstreamCtLogListMode::StaticFile => load_static_list(tls, now),
     DownstreamCtLogListMode::Managed => {
       let cached = load_cached_list(tls, now).ok();
-      match fetch_and_store_list(tls, now, cached.as_ref().map(|loaded| &loaded.snapshot)).await {
+      match fetch_and_store_list(
+        tls,
+        enable_secp256r1mlkem768,
+        now,
+        cached.as_ref().map(|loaded| &loaded.snapshot),
+      )
+      .await
+      {
         Ok(loaded) => Ok(loaded),
         Err(error) => cached
           .filter(|loaded| !loaded.snapshot.is_stale_at(now))
@@ -662,8 +678,10 @@ fn load_static_list(tls: &TlsConfig, now: u64) -> anyhow::Result<LoadedList> {
   })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_refresh_worker(
   tls: TlsConfig,
+  enable_secp256r1mlkem768: bool,
   contexts: Vec<CertificateContext>,
   gates: Arc<HashMap<String, Arc<AtomicBool>>>,
   list_stale_at: Arc<AtomicU64>,
@@ -672,7 +690,7 @@ fn spawn_refresh_worker(
   mut current: Option<CtLogListSnapshot>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
   // Build this before spawning so startup reports WebPKI bootstrap failures.
-  let client = ControlHttpClient::new_webpki_only()
+  let client = ControlHttpClient::new_webpki_only_with_auxiliary_tls(enable_secp256r1mlkem768)
     .context("failed to build managed CT WebPKI-only client")?;
   Ok(tokio::spawn(async move {
     loop {
@@ -760,10 +778,11 @@ fn spawn_refresh_worker(
 
 async fn fetch_and_store_list(
   tls: &TlsConfig,
+  enable_secp256r1mlkem768: bool,
   now: u64,
   previous: Option<&CtLogListSnapshot>,
 ) -> anyhow::Result<LoadedList> {
-  let client = ControlHttpClient::new_webpki_only()
+  let client = ControlHttpClient::new_webpki_only_with_auxiliary_tls(enable_secp256r1mlkem768)
     .context("failed to build managed CT WebPKI-only client")?;
   let loaded = fetch_list(tls, &client, now).await?;
   if let Some(previous) = previous {

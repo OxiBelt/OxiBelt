@@ -60,7 +60,16 @@ pub struct CrliteRuntimeStatus {
 }
 
 impl CrliteRuntime {
+  #[cfg(test)]
   pub(crate) async fn new(tls: &TlsConfig, metrics: Arc<Metrics>) -> anyhow::Result<Self> {
+    Self::new_with_auxiliary_tls(tls, false, metrics).await
+  }
+
+  pub(crate) async fn new_with_auxiliary_tls(
+    tls: &TlsConfig,
+    enable_secp256r1mlkem768: bool,
+    metrics: Arc<Metrics>,
+  ) -> anyhow::Result<Self> {
     if tls.crlite.mode == CrliteMode::Disabled {
       metrics.set_crlite_enabled(false);
       metrics.set_crlite_filter_stale(false);
@@ -76,7 +85,9 @@ impl CrliteRuntime {
     match tls.crlite.mode {
       CrliteMode::Disabled => unreachable!("disabled CRLite returned above"),
       CrliteMode::Enforce => Self::from_local_filter(tls, metrics, checked_at),
-      CrliteMode::Managed => Self::from_managed_filter(tls, metrics, checked_at).await,
+      CrliteMode::Managed => {
+        Self::from_managed_filter(tls, enable_secp256r1mlkem768, metrics, checked_at).await
+      }
     }
   }
 
@@ -125,11 +136,13 @@ impl CrliteRuntime {
 
   async fn from_managed_filter(
     tls: &TlsConfig,
+    enable_secp256r1mlkem768: bool,
     metrics: Arc<Metrics>,
     checked_at: Option<u64>,
   ) -> anyhow::Result<Self> {
-    let remote_client = ManagedCrliteRemoteClient::new_webpki_only()
-      .context("failed to build managed CRLite HTTP client")?;
+    let remote_client =
+      ManagedCrliteRemoteClient::new_webpki_only_with_auxiliary_tls(enable_secp256r1mlkem768)
+        .context("failed to build managed CRLite HTTP client")?;
     let reject_handshakes = Arc::new(AtomicBool::new(false));
     let loaded = super::crlite_managed::load_or_fetch_filter(tls, &remote_client).await;
     record_managed_load_metrics(&loaded, &metrics);

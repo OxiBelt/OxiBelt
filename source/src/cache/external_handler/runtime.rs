@@ -66,6 +66,7 @@ impl ExternalCacheRuntime {
       let client = ExternalCacheHttpClient::new(
         handler,
         &config.proxy.trusted_ca_certs,
+        config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
         config.proxy.buffering.max_memory_body_bytes,
         max_body_bytes,
       )?;
@@ -320,7 +321,7 @@ mod tests {
     };
     let handler = Arc::new(ExternalCacheHandler {
       name: config.name.clone(),
-      client: ExternalCacheHttpClient::new(&config, &[], 1024, 1024).unwrap(),
+      client: ExternalCacheHttpClient::new(&config, &[], false, 1024, 1024).unwrap(),
       limiter: Arc::new(Semaphore::new(0)),
     });
     let runtime = ExternalCacheRuntime {

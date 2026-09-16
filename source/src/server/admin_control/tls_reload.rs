@@ -13,12 +13,20 @@ pub(super) async fn build_downstream_tls_reload_configs(
   crate::tls::DownstreamTlsServerConfig,
   Option<crate::tls::DownstreamQuicServerConfig>,
 )> {
-  let crlite = crate::tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
-    .await
-    .context("failed to build CRLite runtime")?;
-  let downstream_ct = crate::tls::DownstreamCtRuntime::new(&config.tls, active.metrics.clone())
-    .await
-    .context("failed to build downstream CT runtime")?;
+  let crlite = crate::tls::CrliteRuntime::new_with_auxiliary_tls(
+    &config.tls,
+    config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+    active.metrics.clone(),
+  )
+  .await
+  .context("failed to build CRLite runtime")?;
+  let downstream_ct = crate::tls::DownstreamCtRuntime::new_with_auxiliary_tls(
+    &config.tls,
+    config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+    active.metrics.clone(),
+  )
+  .await
+  .context("failed to build downstream CT runtime")?;
   let ocsp_staple = crate::tls::OcspStapleRuntime::new(
     &config.crypto,
     &config.tls,

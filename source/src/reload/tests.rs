@@ -183,6 +183,57 @@ fn full_reload_rejects_hot_reload_manager_changes() {
   );
 }
 
+#[test]
+fn full_reload_rejects_secp256r1_mlkem768_non_downstream_policy_changes() {
+  let active = parse_secp256r1_mlkem768_reload_config();
+  let mut replacements = Vec::new();
+
+  let mut replacement = active.clone();
+  replacement.crypto.auxiliary_tls.enable_secp256r1mlkem768 = true;
+  replacements.push(replacement);
+
+  let mut replacement = active.clone();
+  replacement.admin.tls.enable_secp256r1mlkem768 = true;
+  replacements.push(replacement);
+
+  let mut replacement = active.clone();
+  replacement.upstreams[0].tls.enable_secp256r1mlkem768 = true;
+  replacements.push(replacement);
+
+  let mut replacement = active.clone();
+  replacement.upstream_pools[0].servers[0]
+    .tls
+    .enable_secp256r1mlkem768 = true;
+  replacements.push(replacement);
+
+  let mut replacement = active.clone();
+  replacement.upstream_pools[0].discovery[0]
+    .tls
+    .enable_secp256r1mlkem768 = true;
+  replacements.push(replacement);
+
+  let mut replacement = active.clone();
+  replacement.turn_upstream_pools[0].servers[0]
+    .tls
+    .enable_secp256r1mlkem768 = true;
+  replacements.push(replacement);
+
+  let mut replacement = active.clone();
+  replacement.shared_state.backends[0]
+    .redis_tls
+    .enable_secp256r1mlkem768 = true;
+  replacements.push(replacement);
+
+  for replacement in replacements {
+    assert_eq!(
+      classify_full_reload_runtime_compatibility(&active, &replacement),
+      FullReloadCompatibility::RestartRequired(
+        FullReloadRestartReason::TlsKeyExchangeGroupControls
+      )
+    );
+  }
+}
+
 fn parse_worker_reload_config(worker_threads: usize) -> Config {
   toml::from_str(&format!(
     r#"
@@ -206,6 +257,57 @@ cert_chain = "fullchain.pem"
 private_key = "privkey.pem"
 "#
   ))
+  .expect("test config should parse")
+}
+
+fn parse_secp256r1_mlkem768_reload_config() -> Config {
+  toml::from_str(
+    r#"
+[runtime]
+worker_threads = 2
+
+[runtime.accept]
+workers = 1
+reuse_port = false
+backlog = 1024
+accept_error_backoff_ms = 50
+
+[listeners]
+https_bind = "127.0.0.1:8443"
+http1 = true
+http2 = true
+http3 = false
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[[upstreams]]
+name = "direct"
+origin = "https://direct.example.test"
+
+[[upstream_pools]]
+name = "pool"
+
+[[upstream_pools.servers]]
+origin = "https://pool.example.test"
+
+[[upstream_pools.discovery]]
+provider = "dns"
+name = "discovery.example.test"
+
+[[turn_upstream_pools]]
+name = "turn-pool"
+
+[[turn_upstream_pools.servers]]
+origin = "turns://turn.example.test"
+
+[[shared_state.backends]]
+name = "redis"
+kind = "redis"
+connection_url = "rediss://redis.example.test:6379/0"
+"#,
+  )
   .expect("test config should parse")
 }
 

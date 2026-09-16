@@ -81,6 +81,9 @@ fn supported_key_exchange_group(
   match provider {
     TlsCryptoProvider::AwsLcRs => Ok(match group {
       TlsKeyExchangeGroup::X25519MlKem768 => rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
+      TlsKeyExchangeGroup::Secp256r1MlKem768 => {
+        rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768
+      }
       TlsKeyExchangeGroup::X25519 => rustls::crypto::aws_lc_rs::kx_group::X25519,
       TlsKeyExchangeGroup::Secp256r1 => rustls::crypto::aws_lc_rs::kx_group::SECP256R1,
       TlsKeyExchangeGroup::Secp384r1 => rustls::crypto::aws_lc_rs::kx_group::SECP384R1,
@@ -143,6 +146,9 @@ fn supported_ring_key_exchange_group(
   group: TlsKeyExchangeGroup,
 ) -> anyhow::Result<&'static dyn rustls::crypto::SupportedKxGroup> {
   match group {
+    TlsKeyExchangeGroup::Secp256r1MlKem768 => {
+      anyhow::bail!("secp256r1mlkem768 is not supported by crypto.tls_provider = \"ring\"")
+    }
     TlsKeyExchangeGroup::X25519MlKem768 => {
       anyhow::bail!("x25519mlkem768 is not supported by crypto.tls_provider = \"ring\"")
     }

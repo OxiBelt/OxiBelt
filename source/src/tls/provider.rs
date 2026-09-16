@@ -37,6 +37,37 @@ pub(in crate::tls) fn default_crypto_provider() -> rustls::crypto::CryptoProvide
   rustls::crypto::aws_lc_rs::default_provider()
 }
 
+/// Build an AWS-LC provider with an explicit RFC 10024 P-256 hybrid opt-in.
+/// The existing first key share and process-global provider remain unchanged.
+pub fn aws_lc_provider_with_secp256r1mlkem768(enabled: bool) -> rustls::crypto::CryptoProvider {
+  let mut provider = default_crypto_provider();
+  if enabled {
+    let position = provider
+      .kx_groups
+      .iter()
+      .position(|group| group.name() == rustls::NamedGroup::X25519MLKEM768)
+      .map_or(0, |position| position + 1);
+    provider.kx_groups.insert(
+      position,
+      rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
+    );
+  }
+  provider
+}
+
+pub(in crate::tls) fn crypto_provider_with_secp256r1mlkem768(
+  config: &CryptoConfig,
+  enabled: bool,
+) -> anyhow::Result<rustls::crypto::CryptoProvider> {
+  if !enabled {
+    return crypto_provider(config);
+  }
+  if config.tls_provider != TlsCryptoProvider::AwsLcRs {
+    anyhow::bail!("secp256r1mlkem768 requires crypto.tls_provider = \"aws_lc_rs\"");
+  }
+  Ok(aws_lc_provider_with_secp256r1mlkem768(true))
+}
+
 pub(crate) fn configured_provider_state(
   config: &CryptoConfig,
 ) -> anyhow::Result<ConfiguredProviderState> {

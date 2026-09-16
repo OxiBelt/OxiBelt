@@ -1,6 +1,7 @@
 //! Hot-reload loading and validation.
 //! New snapshots are built fully before replacing the active runtime state.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -281,12 +282,20 @@ impl ReloadManager {
     let mut config = active.config.clone();
     reload_downstream_tls_paths(&mut config)?;
     let hardening = active.admitted_reload_hardening(&config)?;
-    let crlite = tls::CrliteRuntime::new(&config.tls, active.metrics.clone())
-      .await
-      .context("failed to build CRLite runtime")?;
-    let downstream_ct = tls::DownstreamCtRuntime::new(&config.tls, active.metrics.clone())
-      .await
-      .context("failed to build downstream CT runtime")?;
+    let crlite = tls::CrliteRuntime::new_with_auxiliary_tls(
+      &config.tls,
+      config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+      active.metrics.clone(),
+    )
+    .await
+    .context("failed to build CRLite runtime")?;
+    let downstream_ct = tls::DownstreamCtRuntime::new_with_auxiliary_tls(
+      &config.tls,
+      config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+      active.metrics.clone(),
+    )
+    .await
+    .context("failed to build downstream CT runtime")?;
     let ocsp_staple = tls::OcspStapleRuntime::new(
       &config.crypto,
       &config.tls,
@@ -485,6 +494,7 @@ pub(crate) enum FullReloadRestartReason {
   HotReloadManager,
   NetportSwitcher,
   CryptoProvider,
+  TlsKeyExchangeGroupControls,
   LoggingLevel,
   MetricsListener,
   HealthListener,
@@ -524,6 +534,10 @@ impl FullReloadRestartReason {
       }
       Self::CryptoProvider => {
         "full hot reload rejected because crypto provider selection is process-global"
+          .to_string()
+      }
+      Self::TlsKeyExchangeGroupControls => {
+        "full hot reload rejected because SecP256r1MLKEM768 TLS key-exchange policy is restart-only"
           .to_string()
       }
       Self::LoggingLevel => {
@@ -581,6 +595,11 @@ pub(crate) fn classify_full_reload_runtime_compatibility(
   {
     return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::NetportSwitcher);
   }
+  if secp256r1_mlkem768_opt_in_paths(active) != secp256r1_mlkem768_opt_in_paths(replacement) {
+    return FullReloadCompatibility::RestartRequired(
+      FullReloadRestartReason::TlsKeyExchangeGroupControls,
+    );
+  }
   if replacement.crypto != active.crypto {
     return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::CryptoProvider);
   }
@@ -620,6 +639,61 @@ pub(crate) fn classify_full_reload_runtime_compatibility(
     );
   }
   FullReloadCompatibility::InProcess
+}
+
+fn secp256r1_mlkem768_opt_in_paths(config: &Config) -> BTreeSet<String> {
+  let mut paths = BTreeSet::new();
+  if config.crypto.auxiliary_tls.enable_secp256r1mlkem768 {
+    paths.insert("crypto.auxiliary_tls.enable_secp256r1mlkem768".to_string());
+  }
+  if config.admin.tls.enable_secp256r1mlkem768 {
+    paths.insert("admin.tls.enable_secp256r1mlkem768".to_string());
+  }
+  for upstream in &config.upstreams {
+    if upstream.tls.enable_secp256r1mlkem768 {
+      paths.insert(format!(
+        "upstreams.{}.tls.enable_secp256r1mlkem768",
+        upstream.name
+      ));
+    }
+  }
+  for pool in &config.upstream_pools {
+    for (index, server) in pool.servers.iter().enumerate() {
+      if server.tls.enable_secp256r1mlkem768 {
+        paths.insert(format!(
+          "upstream_pools.{}.servers.{index}.tls.enable_secp256r1mlkem768",
+          pool.name
+        ));
+      }
+    }
+    for (index, discovery) in pool.discovery.iter().enumerate() {
+      if discovery.tls.enable_secp256r1mlkem768 {
+        paths.insert(format!(
+          "upstream_pools.{}.discovery.{index}.tls.enable_secp256r1mlkem768",
+          pool.name
+        ));
+      }
+    }
+  }
+  for pool in &config.turn_upstream_pools {
+    for (index, server) in pool.servers.iter().enumerate() {
+      if server.tls.enable_secp256r1mlkem768 {
+        paths.insert(format!(
+          "turn_upstream_pools.{}.servers.{index}.tls.enable_secp256r1mlkem768",
+          pool.name
+        ));
+      }
+    }
+  }
+  for backend in &config.shared_state.backends {
+    if backend.redis_tls.enable_secp256r1mlkem768 {
+      paths.insert(format!(
+        "shared_state.backends.{}.redis_tls.enable_secp256r1mlkem768",
+        backend.name
+      ));
+    }
+  }
+  paths
 }
 
 #[cfg(test)]

@@ -300,6 +300,7 @@ async fn rediss_validates_custom_ca_spki_mtls_and_acl_files_before_activation() 
   });
 
   let tls = RedisTlsConfig {
+    enable_secp256r1mlkem768: false,
     trust_store: RedisTrustStore::Custom,
     server_name: Some("redis.edge.test".to_string()),
     ca_cert: Some(ca_cert),

@@ -94,6 +94,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       client_identity::CLIENT_IDENTITY_ASN_IANA_REGISTRY_CONFIG_KEYS
     }
     "crypto" => crypto::CRYPTO_CONFIG_KEYS,
+    "crypto.auxiliary_tls" => crypto::CRYPTO_AUXILIARY_TLS_CONFIG_KEYS,
     "crypto.primitives" => crypto::CRYPTO_PRIMITIVES_CONFIG_KEYS,
     "crypto.primitive_backends" => crypto::CRYPTO_PRIMITIVE_BACKENDS_CONFIG_KEYS,
     "certificate_transparency" => certificate_transparency::CERTIFICATE_TRANSPARENCY_CONFIG_KEYS,

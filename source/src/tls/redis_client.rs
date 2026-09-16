@@ -72,6 +72,7 @@ impl fmt::Debug for RedisTlsClientConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RedisTlsIdentity {
   pub(crate) tls_provider: TlsCryptoProvider,
+  pub(crate) enable_secp256r1mlkem768: bool,
   pub(crate) trust_store: RedisTrustStore,
   pub(crate) server_name: String,
   pub(crate) ca_cert: Option<std::path::PathBuf>,
@@ -91,7 +92,10 @@ pub(crate) fn build_redis_tls_client_config(
     .map_err(|error| anyhow!("invalid Redis TLS server name: {error}"))?;
   let pins = parse_spki_pins(&tls.server_spki_sha256)?;
   let roots = Arc::new(load_redis_root_store(tls)?);
-  let provider = Arc::new(super::provider::crypto_provider(crypto)?);
+  let provider = Arc::new(super::provider::crypto_provider_with_secp256r1mlkem768(
+    crypto,
+    tls.enable_secp256r1mlkem768,
+  )?);
   let builder = ClientConfig::builder_with_provider(provider.clone())
     .with_safe_default_protocol_versions()
     .context("failed to configure Redis TLS protocol versions")?;
@@ -133,6 +137,7 @@ pub(crate) fn build_redis_tls_client_config(
     server_name,
     identity: RedisTlsIdentity {
       tls_provider: crypto.tls_provider,
+      enable_secp256r1mlkem768: tls.enable_secp256r1mlkem768,
       trust_store: tls.trust_store,
       server_name: server_name_text.to_string(),
       ca_cert: tls.ca_cert.clone(),

@@ -514,6 +514,44 @@ fn upstream_tls_subject_alt_names_schema_is_typed_and_bounded() {
 }
 
 #[test]
+fn secp256r1_mlkem768_controls_are_strict_boolean_schema_fields() {
+  let schema: serde_json::Value =
+    serde_json::from_str(&generate_native_config_schema().expect("native schema should generate"))
+      .expect("generated native schema should be JSON");
+  let backends = schema_node_for_metadata_path(&schema, "shared_state.backends");
+  assert_eq!(backends["type"], "array");
+  assert_eq!(backends["items"]["type"], "object");
+  let validator = jsonschema::validator_for(&schema).expect("generated schema should compile");
+  assert!(validator.is_valid(&serde_json::json!({
+    "listeners": {},
+    "tls": {},
+    "shared_state": { "backends": [{
+      "name": "redis-pq",
+      "kind": "redis",
+      "connection_url": "rediss://localhost:6379",
+      "redis_tls": { "enable_secp256r1mlkem768": true }
+    }] }
+  })));
+  for path in [
+    "crypto.auxiliary_tls.enable_secp256r1mlkem768",
+    "admin.tls.enable_secp256r1mlkem768",
+    "upstreams[].tls.enable_secp256r1mlkem768",
+    "upstream_pools[].servers[].tls.enable_secp256r1mlkem768",
+    "upstream_pools[].discovery[].tls.enable_secp256r1mlkem768",
+    "turn_upstream_pools[].servers[].tls.enable_secp256r1mlkem768",
+    "shared_state.backends[].redis_tls.enable_secp256r1mlkem768",
+  ] {
+    let field = schema_node_for_metadata_path(&schema, path);
+    assert_eq!(field["type"], "boolean", "unexpected type at {path}");
+    assert_eq!(field["default"], false, "unexpected default at {path}");
+    assert_eq!(
+      field["x-oxibelt-config-activation"], "restart_required",
+      "unexpected reload activation at {path}"
+    );
+  }
+}
+
+#[test]
 fn turn_schema_publishes_bounded_admission_and_password_algorithm_defaults() {
   let schema = generate_native_config_schema().expect("native schema should generate");
   let schema: serde_json::Value =
@@ -652,6 +690,13 @@ fn startup_owned_fields_are_explicitly_restart_classified() {
     "runtime.netport_switcher.enabled",
     "runtime.unprivileged_mode",
     "crypto.tls_provider",
+    "crypto.auxiliary_tls.enable_secp256r1mlkem768",
+    "admin.tls.enable_secp256r1mlkem768",
+    "upstreams[0].tls.enable_secp256r1mlkem768",
+    "upstream_pools[0].servers[0].tls.enable_secp256r1mlkem768",
+    "upstream_pools[0].discovery[0].tls.enable_secp256r1mlkem768",
+    "turn_upstream_pools[0].servers[0].tls.enable_secp256r1mlkem768",
+    "shared_state.backends[0].redis_tls.enable_secp256r1mlkem768",
     "logging.level",
     "metrics.enabled",
     "metrics.bind",

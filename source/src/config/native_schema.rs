@@ -357,6 +357,13 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
   full_reload("certificate_transparency.*"),
   full_reload("routes[].ct_log"),
   full_reload("routes[].ct_surface"),
+  restart("admin.tls.enable_secp256r1mlkem768"),
+  restart("upstreams[].tls.enable_secp256r1mlkem768"),
+  restart("upstream_pools[].servers[].tls.enable_secp256r1mlkem768"),
+  restart("upstream_pools[].discovery[].tls.enable_secp256r1mlkem768"),
+  restart("turn_upstream_pools[].servers[].tls.enable_secp256r1mlkem768"),
+  restart("shared_state.backends[].redis_tls.enable_secp256r1mlkem768"),
+  restart("crypto.auxiliary_tls.enable_secp256r1mlkem768"),
   conditional("runtime.main_runtime"),
   conditional("runtime.topology_policy"),
   restart("runtime.worker_threads"),
@@ -979,6 +986,7 @@ fn is_array_path(path: &str) -> bool {
     "routes.actions.request_mirrors",
     "proxy.real_ip.rules",
     "security.header_policies",
+    "shared_state.backends",
     "sni_forward.rules",
     "stream_listeners",
     "stream_listeners.sni_rules",
@@ -1030,6 +1038,7 @@ fn boolean_path(path: &str) -> bool {
       || name == "reuse_port"
       || name == "s3_virtual_hosted_style"
       || name.ends_with("_enabled")
+      || name.starts_with("enable_")
       || name.starts_with("allow_")
       || name.starts_with("check_")
       || name.starts_with("reject_")
@@ -1405,6 +1414,13 @@ fn default_value(path: &str) -> Option<Value> {
     "certificate_transparency.logs.admission.allow_precert_signing_ca" => json!(false),
     "config.lb_policy_compat_profile" => json!("strict"),
     "config.strict_unknown_fields" | "config.warn_on_deprecated_fields" => json!(true),
+    "crypto.auxiliary_tls.enable_secp256r1mlkem768"
+    | "admin.tls.enable_secp256r1mlkem768"
+    | "upstreams.tls.enable_secp256r1mlkem768"
+    | "upstream_pools.servers.tls.enable_secp256r1mlkem768"
+    | "upstream_pools.discovery.tls.enable_secp256r1mlkem768"
+    | "turn_upstream_pools.servers.tls.enable_secp256r1mlkem768"
+    | "shared_state.backends.redis_tls.enable_secp256r1mlkem768" => json!(false),
     "logging.level" => json!("info"),
     "runtime.direct_h1_io" => json!("auto"),
     "runtime.hot_reload.mode" => json!("off"),

@@ -172,15 +172,26 @@ async fn run_polling_discovery_worker(
       break;
     }
 
-    let snapshot = state.snapshot();
     let fallback_delay = Duration::from_millis(discovery.refresh_interval_ms);
+    let snapshot = state.snapshot();
+    let client = match super::build_discovery_control_http(&snapshot, &discovery) {
+      Ok(client) => client,
+      Err(error) => {
+        tracing::warn!(
+          error = %error,
+          pool = %pool_name,
+          provider = ?discovery.provider,
+          "dynamic upstream discovery TLS client build failed"
+        );
+        tokio::select! {
+          _ = shutdown.changed() => {}
+          _ = tokio::time::sleep(fallback_delay) => {}
+        }
+        continue;
+      }
+    };
     let result = if discovery.provider == UpstreamDiscoveryProvider::Nomad && discovery.watch {
-      match super::nomad::discover_nomad_servers(
-        &snapshot.control_http,
-        &discovery,
-        nomad_index.as_deref(),
-      )
-      .await
+      match super::nomad::discover_nomad_servers(&client, &discovery, nomad_index.as_deref()).await
       {
         Ok(result) => {
           nomad_index = result.index;
@@ -189,7 +200,7 @@ async fn run_polling_discovery_worker(
         Err(error) => Err(error),
       }
     } else {
-      super::discover_servers(&snapshot.control_http, &discovery).await
+      super::discover_servers(&client, &discovery).await
     };
     let delay = match result {
       Ok((servers, delay)) => {

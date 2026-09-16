@@ -1,6 +1,10 @@
 #[path = "common/mod.rs"]
 mod common;
 
+#[cfg(feature = "admin-runtime")]
+#[path = "tls_client_roots/pq.rs"]
+mod pq;
+
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

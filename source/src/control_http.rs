@@ -46,6 +46,18 @@ impl ControlHttpClient {
     Self::new_with_crypto(extra_root_certs, &crypto)
   }
 
+  /// Builds a generic control-plane client with the auxiliary TLS key-exchange policy.
+  ///
+  /// The derived configuration deliberately retains the historical AWS-LC/default
+  /// provider and trust behavior; this switch controls only the auxiliary group.
+  pub fn new_with_secp256r1mlkem768(
+    extra_root_certs: &[std::path::PathBuf],
+    enabled: bool,
+  ) -> anyhow::Result<Self> {
+    let crypto = auxiliary_crypto_config(enabled);
+    Self::new_with_crypto(extra_root_certs, &crypto)
+  }
+
   pub(crate) fn new_with_crypto(
     extra_root_certs: &[std::path::PathBuf],
     crypto: &CryptoConfig,
@@ -112,8 +124,14 @@ impl ControlHttpClient {
     ))
   }
 
+  #[cfg(test)]
   pub(crate) fn new_webpki_only() -> anyhow::Result<Self> {
     let crypto = CryptoConfig::default();
+    Self::new_webpki_only_with_crypto(&crypto)
+  }
+
+  pub(crate) fn new_webpki_only_with_auxiliary_tls(enabled: bool) -> anyhow::Result<Self> {
+    let crypto = auxiliary_crypto_config(enabled);
     Self::new_webpki_only_with_crypto(&crypto)
   }
 
@@ -194,6 +212,12 @@ impl ControlHttpClient {
   }
 }
 
+fn auxiliary_crypto_config(enabled: bool) -> CryptoConfig {
+  let mut crypto = CryptoConfig::default();
+  crypto.auxiliary_tls.enable_secp256r1mlkem768 = enabled;
+  crypto
+}
+
 async fn collect_response(
   response: Response<Incoming>,
   max_body_bytes: usize,
@@ -233,12 +257,67 @@ pub fn uri_from_url(url: &url::Url) -> anyhow::Result<Uri> {
 mod tests {
   use super::*;
   use http::StatusCode;
-  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
+  use std::fs;
+  use std::sync::Arc;
+  use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
   use tokio::net::TcpListener;
+  use tokio_rustls::TlsAcceptor;
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
 
   #[test]
   fn webpki_only_client_builds_without_operator_roots() {
     ControlHttpClient::new_webpki_only().expect("WebPKI-only control HTTP client should build");
+  }
+
+  #[test]
+  fn auxiliary_client_builds_with_secp256r1mlkem768_enabled() {
+    ControlHttpClient::new_with_secp256r1mlkem768(&[], true)
+      .expect("auxiliary control HTTP client should build");
+    ControlHttpClient::new_webpki_only_with_auxiliary_tls(true)
+      .expect("auxiliary WebPKI-only control HTTP client should build");
+  }
+
+  #[tokio::test]
+  async fn auxiliary_control_client_negotiates_secp256r1mlkem768_with_configured_ca() {
+    let temp_dir = common::TempDir::new("control-http-pq-interop");
+    let (ca, ca_key) = common::create_self_signed_cert(temp_dir.path(), "control-http-pq-ca");
+    let (cert, key) =
+      common::create_ca_signed_server_cert(temp_dir.path(), "localhost", &ca, &ca_key);
+    let (uri, server) = spawn_secp256r1mlkem768_server(&cert, &key).await;
+
+    let default = ControlHttpClient::new(std::slice::from_ref(&ca))
+      .expect("default control client should build");
+    let default_request = Request::builder()
+      .uri(uri.clone())
+      .body(empty_body())
+      .expect("default control request should build");
+    assert!(
+      default
+        .request(default_request, Duration::from_secs(3), 1024)
+        .await
+        .is_err(),
+      "default-off control client must not negotiate the P-256 hybrid group"
+    );
+
+    let enabled = ControlHttpClient::new_with_secp256r1mlkem768(std::slice::from_ref(&ca), true)
+      .expect("auxiliary control client should build");
+    let request = Request::builder()
+      .uri(uri)
+      .body(empty_body())
+      .expect("auxiliary control request should build");
+    let response = enabled
+      .request(request, Duration::from_secs(3), 1024)
+      .await
+      .expect("auxiliary control client should negotiate the P-256 hybrid group");
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(server.await.expect("PQ TLS server task should complete"));
   }
 
   #[tokio::test]
@@ -312,7 +391,7 @@ mod tests {
       .expect("test server URI should parse")
   }
 
-  async fn read_request_headers(stream: &mut tokio::net::TcpStream) {
+  async fn read_request_headers(stream: &mut (impl AsyncRead + Unpin)) {
     let mut buffer = [0_u8; 1024];
     let mut received = Vec::new();
     loop {
@@ -328,5 +407,62 @@ mod tests {
         break;
       }
     }
+  }
+
+  async fn spawn_secp256r1mlkem768_server(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+  ) -> (Uri, tokio::task::JoinHandle<bool>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+      .await
+      .expect("PQ TLS server should bind");
+    let port = listener
+      .local_addr()
+      .expect("PQ TLS listener should expose its address")
+      .port();
+    let cert_bytes = fs::read(cert_path).expect("PQ TLS certificate should be readable");
+    let certificates = CertificateDer::pem_slice_iter(&cert_bytes)
+      .collect::<Result<Vec<_>, _>>()
+      .expect("PQ TLS certificate should parse");
+    let key_bytes = fs::read(key_path).expect("PQ TLS key should be readable");
+    let private_key =
+      PrivateKeyDer::from_pem_slice(&key_bytes).expect("PQ TLS private key should parse");
+    let mut provider = crate::tls::aws_lc_provider_with_secp256r1mlkem768(true);
+    provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768];
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+      .with_safe_default_protocol_versions()
+      .expect("PQ TLS versions should configure")
+      .with_no_client_auth()
+      .with_single_cert(certificates, private_key)
+      .expect("PQ TLS server config should build");
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let server = tokio::spawn(async move {
+      for _ in 0..2 {
+        let Ok(Ok((stream, _))) =
+          tokio::time::timeout(Duration::from_secs(3), listener.accept()).await
+        else {
+          return false;
+        };
+        let Ok(mut stream) = acceptor.accept(stream).await else {
+          continue;
+        };
+        read_request_headers(&mut stream).await;
+        if stream
+          .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+          .await
+          .is_ok()
+        {
+          return true;
+        }
+      }
+      false
+    });
+    (
+      format!("https://localhost:{port}/")
+        .parse()
+        .expect("PQ TLS URI should parse"),
+      server,
+    )
   }
 }

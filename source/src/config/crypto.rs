@@ -7,12 +7,15 @@ use serde::Deserialize;
 use super::{Config, TlsKeyExchangeGroup, UpstreamEchMode};
 
 pub(in crate::config) const CRYPTO_CONFIG_KEYS: &[&str] = &[
+  "auxiliary_tls",
   "primitive_backend",
   "primitive_backends",
   "primitive_provider",
   "primitives",
   "tls_provider",
 ];
+pub(in crate::config) const CRYPTO_AUXILIARY_TLS_CONFIG_KEYS: &[&str] =
+  &["enable_secp256r1mlkem768"];
 
 pub(in crate::config) const CRYPTO_PRIMITIVES_CONFIG_KEYS: &[&str] =
   &["aes_gcm", "chacha20poly1305", "hkdf", "hmac_sha256", "sha2"];
@@ -21,6 +24,8 @@ pub(in crate::config) const CRYPTO_PRIMITIVE_BACKENDS_CONFIG_KEYS: &[&str] =
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CryptoConfig {
+  #[serde(default)]
+  pub auxiliary_tls: AuxiliaryTlsConfig,
   #[serde(default)]
   pub tls_provider: TlsCryptoProvider,
   #[serde(default)]
@@ -36,6 +41,7 @@ pub struct CryptoConfig {
 impl Default for CryptoConfig {
   fn default() -> Self {
     Self {
+      auxiliary_tls: AuxiliaryTlsConfig::default(),
       tls_provider: TlsCryptoProvider::AwsLcRs,
       primitive_provider: CryptoPrimitiveProvider::RustCrypto,
       primitive_backend: CryptoPrimitiveBackend::Auto,
@@ -43,6 +49,15 @@ impl Default for CryptoConfig {
       primitive_backends: CryptoPrimitiveBackendOverrides::default(),
     }
   }
+}
+
+/// TLS key-exchange policy for OxiBelt-owned auxiliary clients.
+///
+/// This is intentionally separate from downstream, upstream, Admin, and Redis policies.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct AuxiliaryTlsConfig {
+  #[serde(default)]
+  pub enable_secp256r1mlkem768: bool,
 }
 
 impl CryptoConfig {
@@ -607,6 +622,10 @@ fn validate_ring_tls_compatibility(config: &Config) -> anyhow::Result<()> {
     }
   }
   for upstream in &config.upstreams {
+    reject_ring_secp256r1_mlkem768(
+      &format!("upstream {} tls.enable_secp256r1mlkem768", upstream.name),
+      upstream.tls.enable_secp256r1mlkem768,
+    )?;
     if upstream.tls.ech.mode != UpstreamEchMode::Disabled {
       bail!(
         "upstream {} tls.ech.mode requires crypto.tls_provider = \"aws_lc_rs\"",
@@ -614,12 +633,78 @@ fn validate_ring_tls_compatibility(config: &Config) -> anyhow::Result<()> {
       );
     }
   }
+  for pool in &config.upstream_pools {
+    for server in &pool.servers {
+      reject_ring_secp256r1_mlkem768(
+        &format!(
+          "upstream pool {} server {} tls.enable_secp256r1mlkem768",
+          pool.name,
+          server.id.as_deref().unwrap_or(server.origin.as_str())
+        ),
+        server.tls.enable_secp256r1mlkem768,
+      )?;
+    }
+    for discovery in &pool.discovery {
+      reject_ring_secp256r1_mlkem768(
+        &format!(
+          "upstream pool {} discovery {} tls.enable_secp256r1mlkem768",
+          pool.name,
+          discovery.effective_id()
+        ),
+        discovery.tls.enable_secp256r1mlkem768,
+      )?;
+    }
+  }
+  for pool in &config.turn_upstream_pools {
+    for server in &pool.servers {
+      reject_ring_secp256r1_mlkem768(
+        &format!(
+          "TURN upstream pool {} server {} tls.enable_secp256r1mlkem768",
+          pool.name,
+          server.id.as_deref().unwrap_or(server.origin.as_str())
+        ),
+        server.tls.enable_secp256r1mlkem768,
+      )?;
+    }
+  }
+  for backend in &config.shared_state.backends {
+    reject_ring_secp256r1_mlkem768(
+      &format!(
+        "shared_state backend {} redis_tls.enable_secp256r1mlkem768",
+        backend.name
+      ),
+      backend.redis_tls.enable_secp256r1mlkem768,
+    )?;
+  }
+  reject_ring_secp256r1_mlkem768(
+    "admin.tls.enable_secp256r1mlkem768",
+    config.admin.tls.enable_secp256r1mlkem768,
+  )?;
+  reject_ring_secp256r1_mlkem768(
+    "crypto.auxiliary_tls.enable_secp256r1mlkem768",
+    config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+  )?;
   Ok(())
 }
 
 fn reject_ring_pq_groups(field_name: &str, groups: &[TlsKeyExchangeGroup]) -> anyhow::Result<()> {
-  if groups.contains(&TlsKeyExchangeGroup::X25519MlKem768) {
-    bail!("{field_name} cannot include x25519mlkem768 when crypto.tls_provider = \"ring\"");
+  for group in groups {
+    if matches!(
+      group,
+      TlsKeyExchangeGroup::X25519MlKem768 | TlsKeyExchangeGroup::Secp256r1MlKem768
+    ) {
+      bail!(
+        "{field_name} cannot include {} when crypto.tls_provider = \"ring\"",
+        group.as_str()
+      );
+    }
+  }
+  Ok(())
+}
+
+fn reject_ring_secp256r1_mlkem768(field_name: &str, enabled: bool) -> anyhow::Result<()> {
+  if enabled {
+    bail!("{field_name} requires crypto.tls_provider = \"aws_lc_rs\"");
   }
   Ok(())
 }

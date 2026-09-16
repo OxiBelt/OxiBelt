@@ -88,6 +88,7 @@ pub(crate) use ocsp::verify_signature_with_cert as verify_certificate_signature;
 pub(crate) use outbound_revocation::OutboundRevocationRuntime;
 #[cfg(feature = "admin-runtime")]
 pub use outbound_revocation::OutboundRevocationRuntimeStatus;
+pub use provider::aws_lc_provider_with_secp256r1mlkem768;
 pub(crate) use provider::{
   ConfiguredProviderInstall, ConfiguredProviderInstallError, ConfiguredProviderState,
   configured_provider_state, ensure_configured_provider,
@@ -277,6 +278,11 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
   if quic.zero_rtt == QuicZeroRttMode::SafeMethods {
     server_config.max_early_data_size = u32::MAX;
   }
+  let enable_secp256r1mlkem768 = server_config
+    .crypto_provider()
+    .kx_groups
+    .iter()
+    .any(|group| group.name() == rustls::NamedGroup::secp256r1MLKEM768);
   configure_server_resumption(
     &mut server_config,
     &tls.resumption,
@@ -287,6 +293,7 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
       client_auth_identity: client_auth_identity(&tls.client_auth)?,
       alpn_family: "h3",
       tls_provider: crypto.tls_provider,
+      enable_secp256r1mlkem768,
     },
     resumption_state,
   )?;
@@ -324,7 +331,10 @@ pub(crate) fn build_admin_server_config_with_crypto_and_resumption(
   tls: &AdminTlsConfig,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<Arc<ServerConfig>> {
-  let provider = Arc::new(provider::crypto_provider(crypto)?);
+  let provider = Arc::new(provider::crypto_provider_with_secp256r1mlkem768(
+    crypto,
+    tls.enable_secp256r1mlkem768,
+  )?);
   let mut certificates = Vec::new();
   let mut default = None;
   let mut identity_certs = Vec::new();
@@ -373,6 +383,7 @@ pub(crate) fn build_admin_server_config_with_crypto_and_resumption(
       client_auth_identity: client_auth_identity(&tls.client_auth)?,
       alpn_family: "admin-http1",
       tls_provider: crypto.tls_provider,
+      enable_secp256r1mlkem768: tls.enable_secp256r1mlkem768,
     },
     resumption_state,
   )?;
@@ -508,6 +519,11 @@ fn build_turn_server_config_with_provider(
     .resumption
     .as_ref()
     .unwrap_or(&default_tls.resumption);
+  let enable_secp256r1mlkem768 = server_config
+    .crypto_provider()
+    .kx_groups
+    .iter()
+    .any(|group| group.name() == rustls::NamedGroup::secp256r1MLKEM768);
   configure_server_resumption(
     &mut server_config,
     resumption,
@@ -518,6 +534,7 @@ fn build_turn_server_config_with_provider(
       client_auth_identity: "client-auth:off".to_string(),
       alpn_family: "turn",
       tls_provider: crypto.tls_provider,
+      enable_secp256r1mlkem768,
     },
     resumption_state,
   )?;

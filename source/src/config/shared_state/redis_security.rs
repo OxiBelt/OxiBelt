@@ -54,6 +54,9 @@ pub enum RedisTrustStore {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RedisTlsConfig {
+  /// Enables the RFC 10024 SecP256r1MLKEM768 TLS 1.3 key-exchange group for this Redis backend.
+  #[serde(default)]
+  pub enable_secp256r1mlkem768: bool,
   #[serde(default)]
   pub trust_store: RedisTrustStore,
   #[serde(default)]
@@ -71,6 +74,7 @@ pub struct RedisTlsConfig {
 impl Default for RedisTlsConfig {
   fn default() -> Self {
     Self {
+      enable_secp256r1mlkem768: false,
       trust_store: RedisTrustStore::Webpki,
       server_name: None,
       ca_cert: None,
@@ -83,7 +87,8 @@ impl Default for RedisTlsConfig {
 
 impl RedisTlsConfig {
   pub(crate) fn is_configured(&self) -> bool {
-    self.trust_store != RedisTrustStore::Webpki
+    self.enable_secp256r1mlkem768
+      || self.trust_store != RedisTrustStore::Webpki
       || self.server_name.is_some()
       || self.ca_cert.is_some()
       || self.client_cert.is_some()

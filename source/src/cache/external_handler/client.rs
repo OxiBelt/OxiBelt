@@ -18,7 +18,9 @@ use tokio_util::io::ReaderStream;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::config::ExternalCacheHandlerConfig;
+use crate::config::{
+  CryptoConfig, ExternalCacheHandlerConfig, UpstreamEchConfig, UpstreamTlsResumptionConfig,
+};
 use crate::tls;
 
 use super::protocol::{
@@ -53,12 +55,22 @@ impl ExternalCacheHttpClient {
   pub(crate) fn new(
     config: &ExternalCacheHandlerConfig,
     trusted_ca_certs: &[PathBuf],
+    enable_auxiliary_tls_secp256r1mlkem768: bool,
     memory_body_bytes: usize,
     max_body_bytes: usize,
   ) -> anyhow::Result<Self> {
-    let tls_config = tls::build_upstream_client_config(
+    // External cache is an auxiliary client. Keep the legacy default provider
+    // and roots while selecting the optional auxiliary key-exchange group.
+    let mut crypto = CryptoConfig::default();
+    crypto.auxiliary_tls.enable_secp256r1mlkem768 = enable_auxiliary_tls_secp256r1mlkem768;
+    let tls_config = tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
+      &crypto,
       trusted_ca_certs,
-      &crate::config::UpstreamEchConfig::default(),
+      &UpstreamEchConfig::default(),
+      &UpstreamTlsResumptionConfig::default(),
+      None,
+      "cache-external-handler",
+      None,
     )
     .context("failed to build external cache handler TLS client config")?;
     let mut http = HttpConnector::new();
@@ -475,8 +487,19 @@ async fn read_framed_lookup(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
+  use std::fs;
+  use std::sync::Arc;
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::TcpListener;
+  use tokio_rustls::TlsAcceptor;
+
+  mod common {
+    include!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/../tests/rust/common/mod.rs"
+    ));
+  }
 
   fn handler_config(endpoint: &str) -> ExternalCacheHandlerConfig {
     ExternalCacheHandlerConfig {
@@ -533,10 +556,42 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn external_cache_client_negotiates_secp256r1mlkem768_with_configured_ca() {
+    let temp_dir = common::TempDir::new("external-cache-pq-interop");
+    let (ca, ca_key) = common::create_self_signed_cert(temp_dir.path(), "external-cache-pq-ca");
+    let (cert, key) =
+      common::create_ca_signed_server_cert(temp_dir.path(), "localhost", &ca, &ca_key);
+    let (endpoint, server) = spawn_secp256r1mlkem768_server(&cert, &key).await;
+    let config = handler_config(&endpoint);
+    let request = lookup_request();
+
+    let default =
+      ExternalCacheHttpClient::new(&config, std::slice::from_ref(&ca), false, 1024, 1024)
+        .expect("default external cache client should build");
+    assert!(
+      default.lookup(&request, None).await.is_err(),
+      "default-off external cache client must not negotiate the P-256 hybrid group"
+    );
+
+    let enabled =
+      ExternalCacheHttpClient::new(&config, std::slice::from_ref(&ca), true, 1024, 1024)
+        .expect("auxiliary external cache client should build");
+    assert!(
+      enabled
+        .lookup(&request, None)
+        .await
+        .expect("auxiliary external cache client should negotiate the P-256 hybrid group")
+        .is_none()
+    );
+    assert!(server.await.expect("PQ TLS server task should complete"));
+  }
+
+  #[tokio::test]
   async fn query_cleanup_rejects_an_oversized_request_body_before_network_io() {
     let client = ExternalCacheHttpClient::new(
       &handler_config("http://127.0.0.1:9/internal/v1/cache/"),
       &[],
+      false,
       1024,
       1024,
     )
@@ -575,7 +630,7 @@ mod tests {
         .await;
     });
     let config = handler_config(&endpoint);
-    let client = ExternalCacheHttpClient::new(&config, &[], 1024, 1024).unwrap();
+    let client = ExternalCacheHttpClient::new(&config, &[], false, 1024, 1024).unwrap();
     let request = lookup_request();
     let error = match client.lookup(&request, None).await {
       Ok(_) => panic!("delayed lookup should time out"),
@@ -602,7 +657,7 @@ mod tests {
       tokio::time::sleep(Duration::from_millis(200)).await;
     });
     let config = handler_config(&endpoint);
-    let client = ExternalCacheHttpClient::new(&config, &[], 1024, 1024).unwrap();
+    let client = ExternalCacheHttpClient::new(&config, &[], false, 1024, 1024).unwrap();
     let request = lookup_request();
     let error = match client.lookup(&request, None).await {
       Ok(_) => panic!("stalled lookup body should time out"),
@@ -629,7 +684,7 @@ mod tests {
       tokio::time::sleep(Duration::from_millis(200)).await;
     });
     let config = handler_config(&endpoint);
-    let client = ExternalCacheHttpClient::new(&config, &[], 1024, 1024).unwrap();
+    let client = ExternalCacheHttpClient::new(&config, &[], false, 1024, 1024).unwrap();
     let request = purge_request();
     let error = match client.purge(&request).await {
       Ok(_) => panic!("stalled purge body should time out"),
@@ -655,7 +710,8 @@ mod tests {
       let _ = stream.write_all(response.as_bytes()).await;
       let _ = stream.write_all(body).await;
     });
-    let client = ExternalCacheHttpClient::new(&handler_config(&endpoint), &[], 1024, 1024).unwrap();
+    let client =
+      ExternalCacheHttpClient::new(&handler_config(&endpoint), &[], false, 1024, 1024).unwrap();
     let error = client
       .query_cleanup(&query_cleanup_request())
       .await
@@ -680,11 +736,68 @@ mod tests {
         .await;
       tokio::time::sleep(Duration::from_millis(200)).await;
     });
-    let client = ExternalCacheHttpClient::new(&handler_config(&endpoint), &[], 1024, 1024).unwrap();
+    let client =
+      ExternalCacheHttpClient::new(&handler_config(&endpoint), &[], false, 1024, 1024).unwrap();
     let error = client
       .query_cleanup(&query_cleanup_request())
       .await
       .expect_err("stalled cleanup body must time out");
     assert!(format!("{error:#}").contains("external QUERY cleanup request timed out"));
+  }
+
+  async fn spawn_secp256r1mlkem768_server(
+    cert_path: &Path,
+    key_path: &Path,
+  ) -> (String, tokio::task::JoinHandle<bool>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+      .await
+      .expect("PQ TLS server should bind");
+    let port = listener
+      .local_addr()
+      .expect("PQ TLS listener should expose its address")
+      .port();
+    let cert_bytes = fs::read(cert_path).expect("PQ TLS certificate should be readable");
+    let certificates = CertificateDer::pem_slice_iter(&cert_bytes)
+      .collect::<Result<Vec<_>, _>>()
+      .expect("PQ TLS certificate should parse");
+    let key_bytes = fs::read(key_path).expect("PQ TLS key should be readable");
+    let private_key =
+      PrivateKeyDer::from_pem_slice(&key_bytes).expect("PQ TLS private key should parse");
+    let mut provider = crate::tls::aws_lc_provider_with_secp256r1mlkem768(true);
+    provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768];
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+      .with_safe_default_protocol_versions()
+      .expect("PQ TLS versions should configure")
+      .with_no_client_auth()
+      .with_single_cert(certificates, private_key)
+      .expect("PQ TLS server config should build");
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let server = tokio::spawn(async move {
+      for _ in 0..2 {
+        let Ok(Ok((stream, _))) =
+          tokio::time::timeout(Duration::from_secs(3), listener.accept()).await
+        else {
+          return false;
+        };
+        let Ok(mut stream) = acceptor.accept(stream).await else {
+          continue;
+        };
+        let mut buffer = [0_u8; 1024];
+        let _ = stream.read(&mut buffer).await;
+        if stream
+          .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+          .await
+          .is_ok()
+        {
+          return true;
+        }
+      }
+      false
+    });
+    (
+      format!("https://localhost:{port}/internal/v1/cache/"),
+      server,
+    )
   }
 }

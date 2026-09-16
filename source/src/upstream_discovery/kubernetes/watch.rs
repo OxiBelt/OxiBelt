@@ -29,14 +29,25 @@ pub(in crate::upstream_discovery) async fn run_kubernetes_endpoint_slice_watch(
     }
 
     let snapshot = state.snapshot();
-    match run_endpoint_slice_watch_session(
-      &snapshot.control_http,
-      &state,
-      &pool_name,
-      &discovery,
-      &mut shutdown,
-    )
-    .await
+    let client =
+      match crate::upstream_discovery::build_discovery_control_http(&snapshot, &discovery) {
+        Ok(client) => client,
+        Err(error) => {
+          tracing::warn!(
+            error = %error,
+            pool = %pool_name,
+            "Kubernetes EndpointSlice watch TLS client build failed"
+          );
+          let delay = Duration::from_millis(discovery.refresh_interval_ms);
+          tokio::select! {
+            _ = shutdown.changed() => {}
+            _ = tokio::time::sleep(delay) => {}
+          }
+          continue;
+        }
+      };
+    match run_endpoint_slice_watch_session(&client, &state, &pool_name, &discovery, &mut shutdown)
+      .await
     {
       Ok(WatchSessionEnd::Shutdown) => break,
       Ok(WatchSessionEnd::Reconnect) | Ok(WatchSessionEnd::ResourceExpired) => {}

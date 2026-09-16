@@ -202,6 +202,11 @@ fn build_downstream_tcp_server_config_with_provider(
     }
     .with_cert_resolver(cert_resolver);
   server_config.max_early_data_size = build.max_early_data_size;
+  let enable_secp256r1mlkem768 = server_config
+    .crypto_provider()
+    .kx_groups
+    .iter()
+    .any(|group| group.name() == rustls::NamedGroup::secp256r1MLKEM768);
   configure_server_resumption(
     &mut server_config,
     &build.tls.resumption,
@@ -212,6 +217,7 @@ fn build_downstream_tcp_server_config_with_provider(
       client_auth_identity: client_auth_identity(&build.tls.client_auth)?,
       alpn_family: "http1-http2",
       tls_provider: build.crypto.tls_provider,
+      enable_secp256r1mlkem768,
     },
     build.resumption_state,
   )?;

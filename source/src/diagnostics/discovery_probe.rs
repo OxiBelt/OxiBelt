@@ -31,25 +31,6 @@ pub(super) async fn probe_discovery(
       return;
     }
   };
-  let client = match ControlHttpClient::new_with_crypto_and_revocation(
-    &config.proxy.trusted_ca_certs,
-    &config.crypto,
-    &revocation,
-    revocation.default_policy(),
-  ) {
-    Ok(client) => client,
-    Err(error) => {
-      report.push(
-        DiagnosticSeverity::Error,
-        "probe.discovery_client_failed",
-        "probe",
-        "upstream_pools.discovery",
-        format!("failed to build discovery HTTP client: {error:#}"),
-        "Fix proxy.trusted_ca_certs or discovery TLS settings before running discovery probes.",
-      );
-      return;
-    }
-  };
   for pool in &config.upstream_pools {
     for (index, discovery) in pool.discovery.iter().enumerate() {
       let target = format!("{}.discovery{index}.{:?}", pool.name, discovery.provider);
@@ -62,6 +43,27 @@ pub(super) async fn probe_discovery(
         );
         continue;
       }
+      let mut crypto = config.crypto.clone();
+      crypto.auxiliary_tls.enable_secp256r1mlkem768 = discovery.tls.enable_secp256r1mlkem768;
+      let client = match ControlHttpClient::new_with_crypto_and_revocation(
+        &config.proxy.trusted_ca_certs,
+        &crypto,
+        &revocation,
+        revocation.default_policy(),
+      ) {
+        Ok(client) => client,
+        Err(error) => {
+          report.push(
+            DiagnosticSeverity::Error,
+            "probe.discovery_client_failed",
+            "probe",
+            &target,
+            format!("failed to build discovery HTTP client: {error:#}"),
+            "Fix proxy.trusted_ca_certs or discovery TLS settings before running discovery probes.",
+          );
+          continue;
+        }
+      };
       match crate::upstream_discovery::discover_servers(&client, discovery).await {
         Ok((servers, _)) => report.probe(
           "upstream",

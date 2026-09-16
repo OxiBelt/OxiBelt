@@ -571,6 +571,7 @@ fn client_offers_any_group(
 fn named_group(group: TlsKeyExchangeGroup) -> NamedGroup {
   match group {
     TlsKeyExchangeGroup::X25519MlKem768 => NamedGroup::X25519MLKEM768,
+    TlsKeyExchangeGroup::Secp256r1MlKem768 => NamedGroup::secp256r1MLKEM768,
     TlsKeyExchangeGroup::X25519 => NamedGroup::X25519,
     TlsKeyExchangeGroup::Secp256r1 => NamedGroup::secp256r1,
     TlsKeyExchangeGroup::Secp384r1 => NamedGroup::secp384r1,

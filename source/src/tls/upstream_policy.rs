@@ -27,6 +27,7 @@ pub(crate) fn build_upstream_client_config_with_policy(
   let root_certificates = effective_policy_roots(inherited_root_certificates, tls);
   build_upstream_client_config_with_trust(
     crypto,
+    tls.enable_secp256r1mlkem768,
     &root_certificates,
     tls.trust,
     &tls.subject_alt_names,
@@ -52,6 +53,7 @@ pub(crate) fn build_upstream_quic_client_config_with_policy(
   let root_certificates = effective_policy_roots(inherited_root_certificates, tls);
   build_upstream_quic_client_config_with_trust(
     crypto,
+    tls.enable_secp256r1mlkem768,
     &root_certificates,
     tls.trust,
     &tls.subject_alt_names,

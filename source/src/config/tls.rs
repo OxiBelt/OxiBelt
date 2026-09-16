@@ -436,6 +436,8 @@ pub enum UpstreamTls12ResumptionMode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdminTlsConfig {
   pub enabled: bool,
+  /// Enables the RFC 10024 SecP256r1MLKEM768 TLS 1.3 key-exchange group.
+  pub enable_secp256r1mlkem768: bool,
   pub min_version: TlsVersion,
   pub max_version: TlsVersion,
   pub session_tickets: bool,
@@ -452,6 +454,7 @@ impl Default for AdminTlsConfig {
     let resumption = TlsServerResumptionConfig::off();
     Self {
       enabled: false,
+      enable_secp256r1mlkem768: false,
       min_version: TlsVersion::Tls13,
       max_version: TlsVersion::Tls13,
       session_tickets: false,
@@ -474,6 +477,8 @@ impl<'de> Deserialize<'de> for AdminTlsConfig {
     struct RawAdminTlsConfig {
       #[serde(default)]
       enabled: bool,
+      #[serde(default)]
+      enable_secp256r1mlkem768: bool,
       #[serde(default = "default_tls_min_version")]
       min_version: TlsVersion,
       #[serde(default = "default_tls_max_version")]
@@ -505,6 +510,7 @@ impl<'de> Deserialize<'de> for AdminTlsConfig {
       .map_err(serde::de::Error::custom)?;
     Ok(Self {
       enabled: raw.enabled,
+      enable_secp256r1mlkem768: raw.enable_secp256r1mlkem768,
       min_version: raw.min_version,
       max_version: raw.max_version,
       session_tickets,
@@ -557,6 +563,9 @@ impl AdminTlsConfig {
   pub(super) fn validate(&self) -> anyhow::Result<()> {
     if self.min_version > self.max_version {
       bail!("admin.tls.min_version must be less than or equal to admin.tls.max_version");
+    }
+    if self.enable_secp256r1mlkem768 && self.max_version < TlsVersion::Tls13 {
+      bail!("admin.tls.enable_secp256r1mlkem768 requires admin.tls to permit tls1.3");
     }
     if self.session_ticket_rotation_seconds == 0 {
       bail!("admin.tls.session_ticket_rotation_seconds must be greater than 0");

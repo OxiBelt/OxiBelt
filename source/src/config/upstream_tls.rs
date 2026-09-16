@@ -16,6 +16,9 @@ use super::{
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct UpstreamTlsConfig {
+  /// Enables the RFC 10024 SecP256r1MLKEM768 TLS 1.3 key-exchange group for this upstream.
+  #[serde(default)]
+  pub enable_secp256r1mlkem768: bool,
   #[serde(default)]
   pub server_name: Option<String>,
   #[serde(default)]

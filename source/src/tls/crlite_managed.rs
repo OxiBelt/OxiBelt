@@ -32,9 +32,18 @@ pub(super) struct ManagedCrliteRemoteClient {
 }
 
 impl ManagedCrliteRemoteClient {
+  #[cfg(test)]
   pub(super) fn new_webpki_only() -> anyhow::Result<Self> {
+    Self::new_webpki_only_with_auxiliary_tls(false)
+  }
+
+  pub(super) fn new_webpki_only_with_auxiliary_tls(
+    enable_secp256r1mlkem768: bool,
+  ) -> anyhow::Result<Self> {
     Ok(Self {
-      control_http: ControlHttpClient::new_webpki_only()?,
+      control_http: ControlHttpClient::new_webpki_only_with_auxiliary_tls(
+        enable_secp256r1mlkem768,
+      )?,
     })
   }
 

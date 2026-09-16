@@ -35,7 +35,10 @@ pub(crate) fn build_admin_quic_server_config_with_crypto_and_resumption(
   quic_host_key_base_dir: Option<&std::path::Path>,
   resumption_state: Option<&TlsResumptionState>,
 ) -> anyhow::Result<QuinnServerConfig> {
-  let provider = Arc::new(super::provider::crypto_provider(crypto)?);
+  let provider = Arc::new(super::provider::crypto_provider_with_secp256r1mlkem768(
+    crypto,
+    tls.enable_secp256r1mlkem768,
+  )?);
   let mut certificates = Vec::new();
   let mut default = None;
   let mut identity_certs = Vec::new();
@@ -83,6 +86,7 @@ pub(crate) fn build_admin_quic_server_config_with_crypto_and_resumption(
       client_auth_identity: client_auth_identity(&tls.client_auth)?,
       alpn_family: "admin-h3",
       tls_provider: crypto.tls_provider,
+      enable_secp256r1mlkem768: tls.enable_secp256r1mlkem768,
     },
     resumption_state,
   )?;

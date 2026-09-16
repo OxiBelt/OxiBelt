@@ -12,7 +12,7 @@ use crate::config::{
   UpstreamPoolServerState,
 };
 use crate::control_http::ControlHttpClient;
-use crate::state::AppHandle;
+use crate::state::{AppHandle, AppSnapshot};
 use crate::upstream_control;
 use crate::upstream_resolution::{DnsAnswer, DnsQueryType, lookup_dns};
 
@@ -22,6 +22,34 @@ mod kubernetes;
 mod nomad;
 mod supervisor;
 pub(crate) use supervisor::run_dynamic_upstream_discovery;
+
+/// Builds a generic control client with the discovery source's KX-group opt-in.
+///
+/// Discovery otherwise retains the established generic control-plane TLS trust
+/// and authentication policy.
+pub(crate) fn build_discovery_control_http(
+  snapshot: &AppSnapshot,
+  discovery: &UpstreamPoolDiscoveryConfig,
+) -> anyhow::Result<ControlHttpClient> {
+  if snapshot
+    .config
+    .crypto
+    .auxiliary_tls
+    .enable_secp256r1mlkem768
+    == discovery.tls.enable_secp256r1mlkem768
+  {
+    // Preserve the existing connection pool and root-loading lifecycle when policies match.
+    return Ok(snapshot.control_http.clone());
+  }
+  let mut crypto = snapshot.config.crypto.clone();
+  crypto.auxiliary_tls.enable_secp256r1mlkem768 = discovery.tls.enable_secp256r1mlkem768;
+  ControlHttpClient::new_with_crypto_and_revocation(
+    &snapshot.config.proxy.trusted_ca_certs,
+    &crypto,
+    &snapshot.outbound_revocation,
+    snapshot.outbound_revocation.default_policy(),
+  )
+}
 
 #[cfg(test)]
 mod runtime_tests;

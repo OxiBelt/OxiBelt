@@ -162,7 +162,10 @@ pub fn build_upstream_client_config(
 pub(crate) fn build_webpki_client_config_with_crypto(
   crypto: &CryptoConfig,
 ) -> anyhow::Result<ClientConfig> {
-  let provider = Arc::new(super::provider::crypto_provider(crypto)?);
+  let provider = Arc::new(super::provider::crypto_provider_with_secp256r1mlkem768(
+    crypto,
+    crypto.auxiliary_tls.enable_secp256r1mlkem768,
+  )?);
   let roots = load_webpki_root_store();
   let builder = ClientConfig::builder_with_provider(provider)
     .with_safe_default_protocol_versions()
@@ -201,6 +204,7 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
 ) -> anyhow::Result<ClientConfig> {
   build_upstream_client_config_with_trust(
     crypto,
+    crypto.auxiliary_tls.enable_secp256r1mlkem768,
     extra_root_certificates,
     UpstreamTlsTrust::Inherit,
     &[],
@@ -216,6 +220,7 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_upstream_client_config_with_trust(
   crypto: &CryptoConfig,
+  enable_secp256r1mlkem768: bool,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
   subject_alt_names: &[UpstreamTlsSubjectAltName],
@@ -234,6 +239,7 @@ pub(super) fn build_upstream_client_config_with_trust(
   if client_identity.is_some() {
     return build_uncached_upstream_client_config(
       crypto,
+      enable_secp256r1mlkem768,
       extra_root_certificates,
       trust,
       subject_alt_names,
@@ -247,6 +253,7 @@ pub(super) fn build_upstream_client_config_with_trust(
   let key = upstream_client_config_key(
     "tcp",
     crypto.tls_provider,
+    enable_secp256r1mlkem768,
     upstream_name,
     extra_root_certificates,
     trust,
@@ -260,6 +267,7 @@ pub(super) fn build_upstream_client_config_with_trust(
     return state.upstream_client_config(key, || {
       build_uncached_upstream_client_config(
         crypto,
+        enable_secp256r1mlkem768,
         extra_root_certificates,
         trust,
         subject_alt_names,
@@ -273,6 +281,7 @@ pub(super) fn build_upstream_client_config_with_trust(
   }
   build_uncached_upstream_client_config(
     crypto,
+    enable_secp256r1mlkem768,
     extra_root_certificates,
     trust,
     subject_alt_names,
@@ -287,6 +296,7 @@ pub(super) fn build_upstream_client_config_with_trust(
 #[allow(clippy::too_many_arguments)]
 fn build_uncached_upstream_client_config(
   crypto: &CryptoConfig,
+  enable_secp256r1mlkem768: bool,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
   subject_alt_names: &[UpstreamTlsSubjectAltName],
@@ -296,7 +306,10 @@ fn build_uncached_upstream_client_config(
   quic_only: bool,
   revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
 ) -> anyhow::Result<ClientConfig> {
-  let provider = Arc::new(super::provider::crypto_provider(crypto)?);
+  let provider = Arc::new(super::provider::crypto_provider_with_secp256r1mlkem768(
+    crypto,
+    enable_secp256r1mlkem768,
+  )?);
   let roots = Arc::new(load_upstream_root_store_with_trust(
     extra_root_certificates,
     trust,
@@ -461,6 +474,7 @@ pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revoc
 ) -> anyhow::Result<QuinnClientConfig> {
   build_upstream_quic_client_config_with_trust(
     crypto,
+    false,
     extra_root_certificates,
     UpstreamTlsTrust::Inherit,
     &[],
@@ -477,6 +491,7 @@ pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revoc
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_upstream_quic_client_config_with_trust(
   crypto: &CryptoConfig,
+  enable_secp256r1mlkem768: bool,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
   subject_alt_names: &[UpstreamTlsSubjectAltName],
@@ -491,6 +506,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
   if client_identity.is_some() {
     let mut client_config = build_uncached_upstream_client_config(
       crypto,
+      enable_secp256r1mlkem768,
       extra_root_certificates,
       trust,
       subject_alt_names,
@@ -506,6 +522,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
   let key = upstream_client_config_key(
     "quic",
     crypto.tls_provider,
+    enable_secp256r1mlkem768,
     upstream_name,
     extra_root_certificates,
     trust,
@@ -522,6 +539,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
     state.upstream_client_config(key, || {
       build_uncached_upstream_client_config(
         crypto,
+        enable_secp256r1mlkem768,
         extra_root_certificates,
         trust,
         subject_alt_names,
@@ -535,6 +553,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
   } else {
     build_uncached_upstream_client_config(
       crypto,
+      enable_secp256r1mlkem768,
       extra_root_certificates,
       trust,
       subject_alt_names,
@@ -621,17 +640,150 @@ mod tests {
   use std::time::Duration;
 
   use crate::config::{
-    Config, ListenerConfig, OcspConfig, ProxyProtocolConfig, Tls12CipherSuite,
+    Config, ListenerConfig, OcspConfig, ProxyProtocolConfig, QuicConfig, Tls12CipherSuite,
     Tls12NegotiationConfig, Tls13CipherSuite, Tls13NegotiationConfig, TlsClientAuthConfig,
     TlsClientAuthMode, TlsConfig, TlsKeyExchangeGroup, TlsRemoteSignerConfig, TlsVersion,
     UpstreamEchConfig, UpstreamTlsClientIdentityConfig, UpstreamTlsConfig,
     UpstreamTlsResumptionConfig, UpstreamTlsSubjectAltName,
   };
   use crate::metrics::Metrics;
+  use h3_quinn::quinn::Endpoint;
   use rustls::HandshakeKind;
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::{TcpListener, TcpStream};
   use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn secp256r1mlkem768_upstream_and_auxiliary_policies_are_independent() {
+    let dir = common::TempDir::new("pq-client-policies");
+    let name = "pq-upstream.test";
+    let (ca, ca_key) = common::create_self_signed_cert(dir.path(), "pq-ca");
+    let (cert, key) = common::create_ca_signed_server_cert(dir.path(), name, &ca, &ca_key);
+    let mut server = test_tls_config(cert, key);
+    server.tls13.key_exchange_groups = vec![TlsKeyExchangeGroup::Secp256r1MlKem768];
+    server.key_exchange_groups = server.tls13.key_exchange_groups.clone();
+    let state = TlsResumptionState::default();
+    for auxiliary in [false, true] {
+      let mut crypto = CryptoConfig::default();
+      crypto.auxiliary_tls.enable_secp256r1mlkem768 = auxiliary;
+      for enabled in [false, true, false] {
+        let policy = UpstreamTlsConfig {
+          enable_secp256r1mlkem768: enabled,
+          ..Default::default()
+        };
+        let client = crate::tls::build_upstream_client_config_with_policy(
+          &crypto,
+          std::slice::from_ref(&ca),
+          &policy,
+          Some(&state),
+          "same-upstream",
+          None,
+        )
+        .unwrap();
+        assert_eq!(run_one_handshake(&server, client, name).await, enabled);
+      }
+      let client = build_upstream_client_config_with_crypto_resumption_and_revocation(
+        &crypto,
+        std::slice::from_ref(&ca),
+        &UpstreamEchConfig::default(),
+        &UpstreamTlsResumptionConfig::default(),
+        Some(&state),
+        "same-auxiliary",
+        None,
+      )
+      .unwrap();
+      assert_eq!(run_one_handshake(&server, client, name).await, auxiliary);
+    }
+    let mut previous_identity = None;
+    for enabled in [false, true] {
+      let redis = crate::tls::build_redis_tls_client_config(
+        &CryptoConfig::default(),
+        &crate::config::RedisTlsConfig {
+          enable_secp256r1mlkem768: enabled,
+          trust_store: crate::config::RedisTrustStore::Custom,
+          ca_cert: Some(ca.clone()),
+          ..Default::default()
+        },
+        name,
+      )
+      .unwrap();
+      assert_eq!(
+        run_one_handshake(&server, redis.config.as_ref().clone(), name).await,
+        enabled
+      );
+      if let Some(previous) = previous_identity {
+        assert_ne!(
+          previous, redis.identity,
+          "Redis pool identities must include the opt-in"
+        );
+      }
+      previous_identity = Some(redis.identity);
+    }
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn named_upstream_quic_secp256r1mlkem768_requires_opt_in_and_is_cache_isolated() {
+    let dir = common::TempDir::new("pq-upstream-quic-policy");
+    let server_name = "pq-upstream-quic.test";
+    let (ca, ca_key) = common::create_self_signed_cert(dir.path(), "pq-upstream-quic-ca");
+    let (cert, key) = common::create_ca_signed_server_cert(dir.path(), server_name, &ca, &ca_key);
+    let mut server_tls = test_tls_config(cert, key);
+    server_tls.tls13.key_exchange_groups = vec![TlsKeyExchangeGroup::Secp256r1MlKem768];
+    server_tls.key_exchange_groups = server_tls.tls13.key_exchange_groups.clone();
+    let crypto = CryptoConfig::default();
+    let quic = QuicConfig::default();
+    let state = TlsResumptionState::default();
+
+    for enabled in [false, true, false] {
+      let policy = UpstreamTlsConfig {
+        enable_secp256r1mlkem768: enabled,
+        ..Default::default()
+      };
+      let client_config = crate::tls::build_upstream_quic_client_config_with_policy(
+        &crypto,
+        std::slice::from_ref(&ca),
+        &policy,
+        &quic,
+        Some(&state),
+        "same-named-upstream",
+        None,
+      )
+      .expect("named upstream QUIC client config should build");
+      let server_config = crate::tls::build_quic_server_config(&server_tls, &quic, None)
+        .expect("P-256 hybrid QUIC server config should build");
+      let server = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())
+        .expect("PQ QUIC server should bind");
+      let client =
+        Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("PQ QUIC client should bind");
+      let accept = async {
+        server
+          .accept()
+          .await
+          .expect("QUIC server should accept")
+          .await
+      };
+      let connect = client
+        .connect_with(client_config, server.local_addr().unwrap(), server_name)
+        .expect("PQ QUIC connect setup should succeed");
+      let (accepted, connected) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(accept, connect)
+      })
+      .await
+      .expect("PQ QUIC handshake should not time out");
+      assert_eq!(
+        accepted.is_ok(),
+        enabled,
+        "server handshake enabled={enabled}"
+      );
+      assert_eq!(
+        connected.is_ok(),
+        enabled,
+        "client handshake enabled={enabled}"
+      );
+      client.close(0u32.into(), b"done");
+      server.close(0u32.into(), b"done");
+    }
+  }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn upstream_revocation_disables_tls_resumption() {
@@ -713,6 +865,7 @@ mod tests {
     let resumption = TlsResumptionState::default();
     let client = build_upstream_client_config_with_trust(
       &CryptoConfig::default(),
+      false,
       std::slice::from_ref(&ca_cert),
       UpstreamTlsTrust::Inherit,
       &policy.subject_alt_names,
@@ -770,6 +923,7 @@ mod tests {
     };
     let authenticated = build_upstream_client_config_with_trust(
       &CryptoConfig::default(),
+      false,
       std::slice::from_ref(&ca_cert),
       UpstreamTlsTrust::Inherit,
       &policy.subject_alt_names,
@@ -788,6 +942,7 @@ mod tests {
 
     let unauthenticated = build_upstream_client_config_with_trust(
       &CryptoConfig::default(),
+      false,
       std::slice::from_ref(&ca_cert),
       UpstreamTlsTrust::Inherit,
       &[],
@@ -885,6 +1040,7 @@ mod tests {
       };
       build_upstream_client_config_with_trust(
         &CryptoConfig::default(),
+        false,
         roots,
         UpstreamTlsTrust::Inherit,
         &policy.subject_alt_names,

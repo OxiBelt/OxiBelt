@@ -70,12 +70,14 @@ pub(super) struct TlsServerResumptionKey {
   pub(super) client_auth_identity: String,
   pub(super) alpn_family: &'static str,
   pub(super) tls_provider: TlsCryptoProvider,
+  pub(super) enable_secp256r1mlkem768: bool,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct TlsClientConfigKey {
   scope: &'static str,
   tls_provider: TlsCryptoProvider,
+  enable_secp256r1mlkem768: bool,
   upstream_name: String,
   roots_identity: String,
   subject_alt_names_identity: String,
@@ -442,6 +444,7 @@ pub(super) fn upstream_client_resumption(config: &UpstreamTlsResumptionConfig) -
 pub(super) fn upstream_client_config_key(
   scope: &'static str,
   tls_provider: TlsCryptoProvider,
+  enable_secp256r1mlkem768: bool,
   upstream_name: &str,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
@@ -452,6 +455,7 @@ pub(super) fn upstream_client_config_key(
   Ok(TlsClientConfigKey {
     scope,
     tls_provider,
+    enable_secp256r1mlkem768,
     upstream_name: upstream_name.to_string(),
     roots_identity: upstream_roots_identity(extra_root_certificates, trust)?,
     subject_alt_names_identity: upstream_subject_alt_names_identity(subject_alt_names),
@@ -585,6 +589,7 @@ mod tests {
       upstream_client_config_key(
         "tcp",
         TlsCryptoProvider::default(),
+        false,
         "backend",
         &[],
         UpstreamTlsTrust::Inherit,
