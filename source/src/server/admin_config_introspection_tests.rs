@@ -25,6 +25,8 @@ use super::admin_control::{
 };
 use super::admin_ops::admin_config_response;
 
+mod pq_discovery;
+
 mod common {
   include!(concat!(
     env!("CARGO_MANIFEST_DIR"),

@@ -292,6 +292,18 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "hot-reload",
+      "full-reload-after-pq-discovery",
+      "full hot reload preserves discovered PQ endpoints and rejects a restart-only toggle",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        https_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "hot-reload",
       "telemetry-tracing-disable",
       "full hot reload rebuilds telemetry tracing and stops traceparent propagation when disabled",
       ExpectStart::Success,

@@ -18,6 +18,8 @@ use crate::shared_state::SharedState;
 use crate::state::{AppHandle, AppSnapshot};
 use crate::stream::StreamListenerGeneration;
 
+mod runtime_discovered_pq_tests;
+
 mod common {
   include!(concat!(
     env!("CARGO_MANIFEST_DIR"),

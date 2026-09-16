@@ -2,6 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 
+mod pq_policy;
+
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -231,6 +233,66 @@ fn full_reload_rejects_secp256r1_mlkem768_non_downstream_policy_changes() {
         FullReloadRestartReason::TlsKeyExchangeGroupControls
       )
     );
+    assert_eq!(
+      classify_full_reload_runtime_compatibility(&replacement, &active),
+      FullReloadCompatibility::RestartRequired(
+        FullReloadRestartReason::TlsKeyExchangeGroupControls
+      ),
+      "disabling a configured opt-in also requires restart"
+    );
+  }
+}
+
+#[test]
+fn full_reload_accepts_pq_discovery_runtime_servers() {
+  let mut configured = parse_secp256r1_mlkem768_reload_config();
+  configured.upstream_pools[0].discovery[0]
+    .tls
+    .enable_secp256r1mlkem768 = true;
+  let mut active = configured.clone();
+  let discovered = active.upstream_pools[0].servers[0].clone();
+  crate::upstream_control::replace_discovered_servers(
+    &mut active,
+    "pool",
+    crate::config::UpstreamPoolServerSource::Dns,
+    "dns",
+    vec![discovered],
+  )
+  .expect("discovery should populate the active configuration");
+  assert_eq!(active.upstream_pools[0].servers.len(), 2);
+  assert!(
+    active.upstream_pools[0].servers[1]
+      .tls
+      .enable_secp256r1mlkem768
+  );
+  assert_eq!(
+    classify_full_reload_runtime_compatibility(&active, &configured),
+    FullReloadCompatibility::InProcess,
+    "runtime TLS copies must not become configured restart-only controls"
+  );
+  let mut replacement = configured.clone();
+  replacement.compression.enabled = !configured.compression.enabled;
+  validate_full_reload_runtime_compatibility(&active, &replacement)
+    .expect("unrelated reloadable changes should remain compatible");
+  replacement.upstream_pools[0].discovery[0]
+    .tls
+    .enable_secp256r1mlkem768 = false;
+  assert_eq!(
+    classify_full_reload_runtime_compatibility(&active, &replacement),
+    FullReloadCompatibility::RestartRequired(FullReloadRestartReason::TlsKeyExchangeGroupControls)
+  );
+  for count in [2, 1, 0] {
+    let discovered = configured.upstream_pools[0].servers[0].clone();
+    crate::upstream_control::replace_discovered_servers(
+      &mut active,
+      "pool",
+      crate::config::UpstreamPoolServerSource::Dns,
+      "dns",
+      vec![discovered; count],
+    )
+    .expect("discovery membership should update");
+    validate_full_reload_runtime_compatibility(&active, &configured)
+      .expect("discovery membership changes must not change configured TLS controls");
   }
 }
 

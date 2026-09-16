@@ -1,0 +1,8 @@
+{
+  "servers": [
+    {
+      "id": "file-secure",
+      "origin": "https://mock-https:18443/backend"
+    }
+  ]
+}

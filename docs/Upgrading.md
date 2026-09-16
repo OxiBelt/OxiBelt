@@ -7,6 +7,15 @@ commands, known issues, and rollback constraints that supplement this guide.
 
 ## RFC 10024 SecP256r1MLKEM768
 
+Full reload compares configured PQ controls independently of runtime discovery
+membership. Discovered servers inheriting an unchanged discovery TLS opt-in no
+longer prevent unrelated configuration reloads. Explicit server IDs and effective
+discovery IDs retain their policy identity across reordering; unnamed servers
+keep their positional identity. Changing a configured opt-in still requires a
+restart. No configuration or state migration is needed; rollback restores the
+earlier reload limitation. Validate this correction with
+`tests/scripts/run-proxy-integration-matrix.sh hot-reload full-reload-after-pq-discovery`.
+
 The native schema also corrects `shared_state.backends` to an array of backend tables, matching the existing TOML/runtime contract. The schema epoch and Redis runtime semantics are unchanged.
 
 RFC 10024 `secp256r1mlkem768` is additive and disabled by default on every TLS surface. Downstream TLS opts in through the existing `tls.1_3.key_exchange_groups` or exact-SNI route list; named upstream, Admin, Redis, and auxiliary TLS use their independent `enable_secp256r1mlkem768` controls. The non-downstream boolean controls are restart-only and are rejected with `crypto.tls_provider = "ring"`; they require TLS 1.3, and Redis requires `rediss://`. Existing downstream reload behavior for its group lists is unchanged. No migration is needed for existing configurations. Before rollback to an older binary, remove all new enum values and opt-in controls, validate the target configuration, and restart so client and server TLS state is rebuilt.

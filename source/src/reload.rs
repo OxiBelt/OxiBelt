@@ -1,7 +1,6 @@
 //! Hot-reload loading and validation.
 //! New snapshots are built fully before replacing the active runtime state.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -22,6 +21,8 @@ use crate::waf::WafEngine;
 #[cfg(feature = "admin-runtime")]
 #[path = "reload/audit.rs"]
 mod audit;
+
+mod tls_policy;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ReloadTrigger {
@@ -595,7 +596,7 @@ pub(crate) fn classify_full_reload_runtime_compatibility(
   {
     return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::NetportSwitcher);
   }
-  if secp256r1_mlkem768_opt_in_paths(active) != secp256r1_mlkem768_opt_in_paths(replacement) {
+  if tls_policy::secp256r1_mlkem768_changed(active, replacement) {
     return FullReloadCompatibility::RestartRequired(
       FullReloadRestartReason::TlsKeyExchangeGroupControls,
     );
@@ -639,61 +640,6 @@ pub(crate) fn classify_full_reload_runtime_compatibility(
     );
   }
   FullReloadCompatibility::InProcess
-}
-
-fn secp256r1_mlkem768_opt_in_paths(config: &Config) -> BTreeSet<String> {
-  let mut paths = BTreeSet::new();
-  if config.crypto.auxiliary_tls.enable_secp256r1mlkem768 {
-    paths.insert("crypto.auxiliary_tls.enable_secp256r1mlkem768".to_string());
-  }
-  if config.admin.tls.enable_secp256r1mlkem768 {
-    paths.insert("admin.tls.enable_secp256r1mlkem768".to_string());
-  }
-  for upstream in &config.upstreams {
-    if upstream.tls.enable_secp256r1mlkem768 {
-      paths.insert(format!(
-        "upstreams.{}.tls.enable_secp256r1mlkem768",
-        upstream.name
-      ));
-    }
-  }
-  for pool in &config.upstream_pools {
-    for (index, server) in pool.servers.iter().enumerate() {
-      if server.tls.enable_secp256r1mlkem768 {
-        paths.insert(format!(
-          "upstream_pools.{}.servers.{index}.tls.enable_secp256r1mlkem768",
-          pool.name
-        ));
-      }
-    }
-    for (index, discovery) in pool.discovery.iter().enumerate() {
-      if discovery.tls.enable_secp256r1mlkem768 {
-        paths.insert(format!(
-          "upstream_pools.{}.discovery.{index}.tls.enable_secp256r1mlkem768",
-          pool.name
-        ));
-      }
-    }
-  }
-  for pool in &config.turn_upstream_pools {
-    for (index, server) in pool.servers.iter().enumerate() {
-      if server.tls.enable_secp256r1mlkem768 {
-        paths.insert(format!(
-          "turn_upstream_pools.{}.servers.{index}.tls.enable_secp256r1mlkem768",
-          pool.name
-        ));
-      }
-    }
-  }
-  for backend in &config.shared_state.backends {
-    if backend.redis_tls.enable_secp256r1mlkem768 {
-      paths.insert(format!(
-        "shared_state.backends.{}.redis_tls.enable_secp256r1mlkem768",
-        backend.name
-      ));
-    }
-  }
-  paths
 }
 
 #[cfg(test)]

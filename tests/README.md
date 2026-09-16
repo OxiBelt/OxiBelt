@@ -139,7 +139,7 @@ The exact API verification/download model, consumer trust boundary, historical
 OCI referrer warning, and operator-owned admission guidance are documented in
 [`docs/SupplyChain.md`](../docs/SupplyChain.md).
 
-Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/downstream-tls-only`, `hot-reload/full-config-tls-listener-rebind`, `hot-reload/telemetry-tracing-disable`, and `hot-reload/webtransport-stale-snapshot-drain`. The WebTransport drain case keeps an existing session open through the long-connection grace window while asserting new streams on that drained HTTP/3 bridge are rejected. The telemetry case verifies full reload rebuilds tracing state and stops `traceparent` propagation when tracing is disabled. The browser matrix also runs a `hot-reload` scenario for both Chromium and Firefox, updates config and certificate material in place, sends `SIGHUP`, and asserts browser-visible behavior changed.
+Hot reload matrix coverage includes `hot-reload/oxirule-config`, `hot-reload/downstream-tls-only`, `hot-reload/full-config-tls-listener-rebind`, `hot-reload/full-reload-after-pq-discovery`, `hot-reload/telemetry-tracing-disable`, and `hot-reload/webtransport-stale-snapshot-drain`. The PQ discovery case proves a file-discovered HTTPS endpoint is healthy before and after an unrelated full reload, then verifies a configured discovery SecP256r1MLKEM768 toggle is rejected as restart-only while the prior WAF behavior remains active. The WebTransport drain case keeps an existing session open through the long-connection grace window while asserting new streams on that drained HTTP/3 bridge are rejected. The telemetry case verifies full reload rebuilds tracing state and stops `traceparent` propagation when tracing is disabled. The browser matrix also runs a `hot-reload` scenario for both Chromium and Firefox, updates config and certificate material in place, sends `SIGHUP`, and asserts browser-visible behavior changed.
 
 ## Concurrency and Fault-Injection Invariants
 
@@ -175,4 +175,5 @@ tests/scripts/run-proxy-integration-matrix.sh upstream-pools retry-storm-budget
 tests/scripts/run-proxy-integration-matrix.sh cache collapsed-forwarding-metrics
 tests/scripts/run-proxy-integration-matrix.sh lifecycle process-signal-h2-h3-drain
 tests/scripts/run-proxy-integration-matrix.sh http-semantics compio-transport-service
+tests/scripts/run-proxy-integration-matrix.sh hot-reload full-reload-after-pq-discovery
 ```
