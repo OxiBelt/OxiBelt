@@ -37,6 +37,7 @@ fn lookup_context<'a>(
   certificate_identity: Option<&'a CacheCertificateIdentity>,
 ) -> CacheLookupContext<'a> {
   CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -66,6 +67,7 @@ fn insert_certificate_variants(
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
@@ -180,6 +182,7 @@ async fn shared_cache_keeps_certificate_identity_variants_separate_and_purgeable
       writer
         .insert_async(
           CacheInsertContext {
+            no_vary_search: None,
             proxy_protocol_identity: None,
             policy_name: Some("default"),
             scheme: "https",

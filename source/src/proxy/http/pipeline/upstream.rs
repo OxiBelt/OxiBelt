@@ -283,6 +283,44 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     request_headers = original.headers.clone();
     client_certificate::strip_reserved(&mut request_headers, state);
   }
+  // NVS aliases are only safe after request WAF mutations and route rewrites
+  // have produced the actual origin request. Response-WAF routes remain exact
+  // because cached hits do not rerun response inspection.
+  let no_vary_search = if cache_enabled_for_route
+    && state.cache.no_vary_search_enabled()
+    && !response_waf_enabled
+  {
+    let material = format!(
+      "nvs-proxy-v1|route={:?}|upstream={:?}|pool={:?}|version={:?}|request_waf={:?}|response_headers={:?}",
+      resolved.execution_plan.nvs_context_fingerprint,
+      upstream.name,
+      selected_pool_name,
+      upstream_version,
+      request_waf.request_header_mutations,
+      request_waf.response_header_mutations,
+    );
+    crate::cache::CacheNvsRequest::new(outbound.uri().clone(), material.as_bytes())
+  } else {
+    None
+  };
+  if let Some(no_vary_search) = no_vary_search.as_ref() {
+    outbound.extensions_mut().insert(no_vary_search.clone());
+    state
+      .cache
+      .bind_nvs_epoch(crate::cache::CacheLookupContext {
+        no_vary_search: Some(no_vary_search),
+        query_identity: query_identity.as_ref(),
+        proxy_protocol_identity: proxy_protocol_identity.as_ref(),
+        certificate_identity: certificate_identity.as_ref(),
+        policy_name: resolved.route.cache.as_deref(),
+        scheme: downstream_scheme,
+        host,
+        method: &request_method,
+        uri: &request_uri,
+        request_headers: &request_headers,
+      })
+      .await;
+  }
   request_mirror::spawn_request_mirrors(
     state.clone(),
     resolved.route,
@@ -297,7 +335,9 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   let mut stale_on_error = None;
   let mut _cache_fill_guard = None;
   let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
+  let nvs_original_headers = no_vary_search.as_ref().map(|_| outbound.headers().clone());
   let initial_cache_lookup = crate::cache::CacheLookupContext {
+    no_vary_search: None,
     query_identity: query_identity.as_ref(),
     proxy_protocol_identity: proxy_protocol_identity.as_ref(),
     certificate_identity: certificate_identity.as_ref(),
@@ -319,6 +359,30 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
         )
         .await
     }
+  };
+  let lookup = if lookup.is_some() {
+    lookup
+  } else if let Some(no_vary_search) = no_vary_search.as_ref() {
+    state
+      .cache
+      .lookup_nvs_async(
+        crate::cache::CacheLookupContext {
+          no_vary_search: Some(no_vary_search),
+          query_identity: query_identity.as_ref(),
+          proxy_protocol_identity: proxy_protocol_identity.as_ref(),
+          certificate_identity: certificate_identity.as_ref(),
+          policy_name: resolved.route.cache.as_deref(),
+          scheme: downstream_scheme,
+          host,
+          method: &request_method,
+          uri: &request_uri,
+          request_headers: &request_headers,
+        },
+        state.config.proxy.buffering.temp_dir.as_deref(),
+      )
+      .await
+  } else {
+    None
   };
   if let Some(lookup) = lookup {
     if let Some(response) = handle_cache_lookup_result(
@@ -349,18 +413,38 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   }
 
   if cache_enabled_for_route && !incremental_upload {
+    // An NVS alias revalidation sends a conditional request for its owner.
+    // Coordinate the fill under that owner key, while every post-wait cache
+    // read below remains anchored to the original alias and rechecks NVS.
     loop {
+      let owner_fill_metadata = revalidation_entry
+        .as_ref()
+        .filter(|entry| entry.nvs_alias)
+        .and_then(|entry| entry.no_vary_search.as_ref());
+      let owner_fill_uri =
+        owner_fill_metadata.and_then(|metadata| metadata.owner_uri.parse::<http::Uri>().ok());
+      let owner_revalidation = owner_fill_uri.is_some();
+      let owner_fill_query_identity = owner_fill_metadata.and_then(|metadata| {
+        query_identity
+          .as_ref()
+          .map(|identity| identity.for_nvs_owner(metadata))
+      });
+      let fill_uri = owner_fill_uri.as_ref().unwrap_or(&request_uri);
+      let fill_query_identity = owner_fill_query_identity
+        .as_ref()
+        .or(query_identity.as_ref());
       let Some(permit) = state
         .cache
         .begin_fill_decision_async(crate::cache::CacheLookupContext {
-          query_identity: query_identity.as_ref(),
+          no_vary_search: None,
+          query_identity: fill_query_identity,
           proxy_protocol_identity: proxy_protocol_identity.as_ref(),
           certificate_identity: certificate_identity.as_ref(),
           policy_name: resolved.route.cache.as_deref(),
           scheme: downstream_scheme,
           host,
           method: &request_method,
-          uri: &request_uri,
+          uri: fill_uri,
           request_headers: &request_headers,
         })
         .await
@@ -371,9 +455,10 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
         crate::cache::CacheFillDecision::Leader(guard) => {
           _cache_fill_guard = Some(guard);
           cache_store_allowed = true;
-          if let Some(lookup) = state
+          let lookup = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              no_vary_search: None,
               query_identity: query_identity.as_ref(),
               proxy_protocol_identity: proxy_protocol_identity.as_ref(),
               certificate_identity: certificate_identity.as_ref(),
@@ -384,7 +469,26 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
               uri: &request_uri,
               request_headers: &request_headers,
             })
+            .await;
+          let lookup = if lookup.is_some() {
+            lookup
+          } else {
+            lookup_nvs_for_original_alias(
+              state,
+              no_vary_search.as_ref(),
+              query_identity.as_ref(),
+              proxy_protocol_identity.as_ref(),
+              certificate_identity.as_ref(),
+              resolved.route.cache.as_deref(),
+              downstream_scheme,
+              host,
+              &request_method,
+              &request_uri,
+              &request_headers,
+            )
             .await
+          };
+          if let Some(lookup) = lookup
             && let Some(response) = handle_cache_lookup_result(
               state,
               &resolved,
@@ -439,9 +543,10 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
             "notified",
             lock_wait_started,
           );
-          if let Some(lookup) = state
+          let lookup = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              no_vary_search: None,
               query_identity: query_identity.as_ref(),
               proxy_protocol_identity: proxy_protocol_identity.as_ref(),
               certificate_identity: certificate_identity.as_ref(),
@@ -452,8 +557,26 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
               uri: &request_uri,
               request_headers: &request_headers,
             })
+            .await;
+          let lookup = if lookup.is_some() {
+            lookup
+          } else {
+            lookup_nvs_for_original_alias(
+              state,
+              no_vary_search.as_ref(),
+              query_identity.as_ref(),
+              proxy_protocol_identity.as_ref(),
+              certificate_identity.as_ref(),
+              resolved.route.cache.as_deref(),
+              downstream_scheme,
+              host,
+              &request_method,
+              &request_uri,
+              &request_headers,
+            )
             .await
-          {
+          };
+          if let Some(lookup) = lookup {
             if let Some(response) = handle_cache_lookup_result(
               state,
               &resolved,
@@ -485,6 +608,49 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           }
         }
         crate::cache::CacheFillDecision::SharedConflict => {
+          if owner_revalidation {
+            if let Some(lookup) = wait_for_shared_nvs_alias_fill(
+              state,
+              &resolved,
+              no_vary_search.as_ref(),
+              query_identity.as_ref(),
+              proxy_protocol_identity.as_ref(),
+              certificate_identity.as_ref(),
+              resolved.route.cache.as_deref(),
+              downstream_scheme,
+              host,
+              &request_method,
+              &request_uri,
+              &request_headers,
+            )
+            .await
+              && let Some(response) = handle_cache_lookup_result(
+                state,
+                &resolved,
+                lookup,
+                &mut outbound,
+                upstream,
+                upstream_version,
+                timeouts,
+                downstream_scheme,
+                host,
+                &request_method,
+                &request_uri,
+                &request_headers,
+                request_version,
+                listener_bind,
+                transport_network,
+                &mut stale_on_error,
+                &mut revalidation_entry,
+                false,
+              )
+            {
+              let mut response = response;
+              cache_wait::mark_collapsed_follower_response(&mut response);
+              return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
+            }
+            break;
+          }
           if let Some(response) = cache_wait::wait_for_shared_fill(
             state,
             &resolved,
@@ -507,6 +673,45 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           {
             return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
           }
+          if let Some(lookup) = lookup_nvs_for_original_alias(
+            state,
+            no_vary_search.as_ref(),
+            query_identity.as_ref(),
+            proxy_protocol_identity.as_ref(),
+            certificate_identity.as_ref(),
+            resolved.route.cache.as_deref(),
+            downstream_scheme,
+            host,
+            &request_method,
+            &request_uri,
+            &request_headers,
+          )
+          .await
+            && let Some(response) = handle_cache_lookup_result(
+              state,
+              &resolved,
+              lookup,
+              &mut outbound,
+              upstream,
+              upstream_version,
+              timeouts,
+              downstream_scheme,
+              host,
+              &request_method,
+              &request_uri,
+              &request_headers,
+              request_version,
+              listener_bind,
+              transport_network,
+              &mut stale_on_error,
+              &mut revalidation_entry,
+              false,
+            )
+          {
+            let mut response = response;
+            cache_wait::mark_collapsed_follower_response(&mut response);
+            return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
+          }
           break;
         }
         crate::cache::CacheFillDecision::Suppressed(reason) => {
@@ -515,6 +720,46 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
         }
       }
     }
+  }
+
+  if let Some(entry) = revalidation_entry.as_ref().filter(|entry| entry.nvs_alias)
+    && !state
+      .cache
+      .nvs_owner_current(
+        crate::cache::CacheLookupContext {
+          no_vary_search: no_vary_search.as_ref(),
+          policy_name: resolved.route.cache.as_deref(),
+          scheme: downstream_scheme,
+          host,
+          method: &request_method,
+          uri: &request_uri,
+          request_headers: &request_headers,
+          query_identity: query_identity.as_ref(),
+          certificate_identity: certificate_identity.as_ref(),
+          proxy_protocol_identity: proxy_protocol_identity.as_ref(),
+        },
+        entry,
+      )
+      .await
+  {
+    // A leader or purge replaced the owner's policy while this alias waited.
+    // Its former validators and response may no longer authorize this alias.
+    if let Some(request) = no_vary_search.as_ref() {
+      *outbound.uri_mut() = request.effective_uri.clone();
+    }
+    if let Some(headers) = nvs_original_headers {
+      *outbound.headers_mut() = headers;
+    }
+    if let Some(identity) = query_identity.as_ref() {
+      outbound.extensions_mut().insert(identity.clone());
+    }
+    outbound
+      .extensions_mut()
+      .remove::<cache_operations::NvsOwnerTarget>();
+    revalidation_entry = None;
+    stale_on_error = None;
+    cache_store_allowed = false;
+    drop(_cache_fill_guard.take());
   }
 
   if incremental_upload {
@@ -571,6 +816,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     grpc_web_mode,
     native_grpc_request,
     request_headers,
+    no_vary_search,
     certificate_identity,
     proxy_protocol_identity,
     stale_on_error,
@@ -579,4 +825,108 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     cache_fill_guard: _cache_fill_guard,
   })
   .await
+}
+
+const SHARED_FILL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_shared_nvs_alias_fill(
+  state: &AppSnapshot,
+  resolved: &crate::routes::ResolvedRoute<'_>,
+  no_vary_search: Option<&crate::cache::CacheNvsRequest>,
+  query_identity: Option<&crate::cache::CacheQueryIdentity>,
+  proxy_protocol_identity: Option<&crate::cache::CacheProxyProtocolIdentity>,
+  certificate_identity: Option<&crate::cache::CacheCertificateIdentity>,
+  policy_name: Option<&str>,
+  scheme: &str,
+  host: &str,
+  method: &Method,
+  uri: &http::Uri,
+  request_headers: &HeaderMap,
+) -> Option<crate::cache::CacheLookup> {
+  state.metrics.record_cache_fill_lock_conflict();
+  record_route_cache_event(state, resolved.route, "miss", "shared_lock_conflict");
+  let started = Instant::now();
+  let timeout = state.cache.lock_wait_timeout(policy_name);
+  loop {
+    let elapsed = started.elapsed();
+    if elapsed >= timeout {
+      record_route_cache_fill_stage(state, resolved.route, "lock_wait", "timeout", started);
+      state.metrics.record_cache_fill_lock_timeout();
+      record_route_cache_event(state, resolved.route, "miss", "fill_lock_timeout");
+      return None;
+    }
+    tokio::time::sleep(SHARED_FILL_POLL_INTERVAL.min(timeout - elapsed)).await;
+    let exact = state
+      .cache
+      .lookup_async(crate::cache::CacheLookupContext {
+        no_vary_search: None,
+        query_identity,
+        proxy_protocol_identity,
+        certificate_identity,
+        policy_name,
+        scheme,
+        host,
+        method,
+        uri,
+        request_headers,
+      })
+      .await;
+    let lookup = if exact.is_some() {
+      exact
+    } else {
+      lookup_nvs_for_original_alias(
+        state,
+        no_vary_search,
+        query_identity,
+        proxy_protocol_identity,
+        certificate_identity,
+        policy_name,
+        scheme,
+        host,
+        method,
+        uri,
+        request_headers,
+      )
+      .await
+    };
+    if lookup.is_some() {
+      record_route_cache_fill_stage(state, resolved.route, "lock_wait", "shared_lookup", started);
+      return lookup;
+    }
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn lookup_nvs_for_original_alias(
+  state: &AppSnapshot,
+  no_vary_search: Option<&crate::cache::CacheNvsRequest>,
+  query_identity: Option<&crate::cache::CacheQueryIdentity>,
+  proxy_protocol_identity: Option<&crate::cache::CacheProxyProtocolIdentity>,
+  certificate_identity: Option<&crate::cache::CacheCertificateIdentity>,
+  policy_name: Option<&str>,
+  scheme: &str,
+  host: &str,
+  method: &Method,
+  uri: &http::Uri,
+  request_headers: &HeaderMap,
+) -> Option<crate::cache::CacheLookup> {
+  state
+    .cache
+    .lookup_nvs_async(
+      crate::cache::CacheLookupContext {
+        no_vary_search: Some(no_vary_search?),
+        query_identity,
+        proxy_protocol_identity,
+        certificate_identity,
+        policy_name,
+        scheme,
+        host,
+        method,
+        uri,
+        request_headers,
+      },
+      state.config.proxy.buffering.temp_dir.as_deref(),
+    )
+    .await
 }

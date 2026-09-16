@@ -54,6 +54,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -74,6 +75,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
   );
 
   match cache.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -109,6 +111,7 @@ fn cache_key_explain_includes_partition_and_variant() {
 
   let explain = cache.explain_key(
     CacheLookupContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -148,6 +151,7 @@ fn cache_key_explain_reports_vary_rejection_reason() {
 
   let explain = cache.explain_key(
     CacheLookupContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -188,6 +192,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -209,6 +214,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -243,6 +249,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -268,6 +275,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -301,6 +309,7 @@ fn cookie_requests_bypass_cache_by_default() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -322,6 +331,7 @@ fn cookie_requests_bypass_cache_by_default() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -349,6 +359,7 @@ fn named_policy_can_define_negative_cache_defaults() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("negative"),
         scheme: "https",
@@ -369,6 +380,7 @@ fn named_policy_can_define_negative_cache_defaults() {
   );
   assert!(matches!(
     cache.lookup(CacheLookupContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("negative"),
       scheme: "https",
@@ -429,6 +441,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
@@ -446,6 +459,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
   }
 
   match cache.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -489,6 +503,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -514,6 +529,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -555,6 +571,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
@@ -573,6 +590,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
 
   assert_eq!(cache.purge_tag("default", "css", None, None), 1);
   let first = CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -584,6 +602,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
     certificate_identity: None,
   };
   let second = CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     uri: &second_uri,
     ..first.clone()
@@ -606,6 +625,7 @@ fn admission_min_hits_rejects_until_threshold() {
   let uri = "/asset/app.css".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let ctx = CacheInsertContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -628,6 +648,7 @@ fn admission_min_hits_rejects_until_threshold() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -690,6 +711,7 @@ fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
@@ -731,6 +753,7 @@ fn disk_cache_recovery_does_not_trust_metadata_body_path() {
   let variant_key = "https:example.test:/asset/poison.css";
   let meta_path = cache_file_path(&cache_dir, variant_key, CacheFileKind::Meta).unwrap();
   let stored = StoredEntry {
+    no_vary_search: None,
     policy: "default".to_string(),
     partition: String::new(),
     base_key: "https:example.test:/asset/poison.css".to_string(),

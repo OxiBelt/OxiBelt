@@ -13,6 +13,8 @@ mod external;
 mod fill;
 #[path = "tests_index.rs"]
 mod index;
+#[path = "tests_no_vary_search.rs"]
+mod no_vary_search;
 #[path = "tests_query.rs"]
 mod query;
 #[path = "tests_recovery.rs"]
@@ -102,6 +104,7 @@ async fn insert_stale_revalidate_entry(
     cache
       .insert_async(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("no-background-refresh"),
           scheme: "https",
@@ -126,6 +129,7 @@ async fn assert_stale_background_refresh_disabled(
 ) {
   match cache
     .lookup_async(CacheLookupContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("no-background-refresh"),
       scheme: "https",

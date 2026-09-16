@@ -67,6 +67,7 @@ fn lookup_context<'a>(
   proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
 ) -> CacheLookupContext<'a> {
   CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity,
     policy_name: Some("default"),
     scheme: "https",
@@ -86,6 +87,7 @@ fn insert_context<'a>(
   proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
 ) -> CacheInsertContext<'a> {
   CacheInsertContext {
+    no_vary_search: None,
     proxy_protocol_identity,
     policy_name: Some("default"),
     scheme: "https",
@@ -471,6 +473,7 @@ fn external_hit(operation: &CacheOperationContext, body: Bytes) -> ExternalCache
       vary: Vec::new(),
       tags: Vec::new(),
       query_target_epoch: None,
+      no_vary_search: None,
     },
     body: ExternalCacheBody::Memory(body),
   }

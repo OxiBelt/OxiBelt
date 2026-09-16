@@ -32,8 +32,8 @@ use super::protocol::{
 #[cfg(feature = "admin-runtime")]
 use super::protocol::{ExternalCachePurgeRequest, ExternalCachePurgeResponse};
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
-type ExternalHttpBody = BoxBody<Bytes, BoxError>;
+pub(super) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub(super) type ExternalHttpBody = BoxBody<Bytes, BoxError>;
 
 pub(crate) struct ExternalCacheLookupHit {
   pub(crate) metadata: ExternalCacheEntryMetadata,
@@ -42,11 +42,11 @@ pub(crate) struct ExternalCacheLookupHit {
 
 #[derive(Clone)]
 pub(crate) struct ExternalCacheHttpClient {
-  client: Client<hyper_rustls::HttpsConnector<HttpConnector>, ExternalHttpBody>,
+  pub(super) client: Client<hyper_rustls::HttpsConnector<HttpConnector>, ExternalHttpBody>,
   endpoint: Url,
   token: Option<Zeroizing<String>>,
-  request_timeout: Duration,
-  max_metadata_bytes: usize,
+  pub(super) request_timeout: Duration,
+  pub(super) max_metadata_bytes: usize,
   max_body_bytes: usize,
   memory_body_bytes: usize,
 }
@@ -285,7 +285,7 @@ impl ExternalCacheHttpClient {
     .context("external cache purge timed out")?
   }
 
-  fn request(
+  pub(super) fn request(
     &self,
     method: Method,
     operation: &str,
@@ -331,7 +331,7 @@ fn empty_body() -> ExternalHttpBody {
     .boxed()
 }
 
-fn json_body(bytes: Bytes) -> ExternalHttpBody {
+pub(super) fn json_body(bytes: Bytes) -> ExternalHttpBody {
   if bytes.is_empty() {
     return empty_body();
   }

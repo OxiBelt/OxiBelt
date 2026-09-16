@@ -11,6 +11,7 @@ fn disk_cache_recovery_rejects_legacy_security_header_metadata() {
   let meta_path = cache_file_path(&cache_dir, variant_key, CacheFileKind::Meta).unwrap();
   std::fs::write(&body_path, b"body").unwrap();
   let stored = StoredEntry {
+    no_vary_search: None,
     policy: "default".to_string(),
     partition: String::new(),
     base_key: "https:example.test:/asset/legacy.css".to_string(),

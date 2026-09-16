@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Preserves the incoming QUERY representation while an NVS alias temporarily
+/// retargets the outbound conditional request to its cached owner.
+#[derive(Clone)]
+pub(super) struct NvsAliasQueryIdentity(pub(crate) crate::cache::CacheQueryIdentity);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_cache_lookup_result(
   state: &Arc<AppSnapshot>,
@@ -161,6 +166,7 @@ pub(super) fn handle_cache_lookup_result(
         return Some(response);
       }
       if !stale.request_headers.is_empty() {
+        retarget_nvs_revalidation(outbound, &stale.entry);
         state.metrics.record_cache_revalidation();
         if record_events {
           record_route_cache_event(state, resolved.route, "revalidate", "stale_validators");
@@ -237,6 +243,7 @@ pub(super) fn handle_cache_lookup_result(
       for (name, value) in &revalidation.request_headers {
         outbound.headers_mut().insert(name.clone(), value.clone());
       }
+      retarget_nvs_revalidation(outbound, &revalidation.entry);
       if !revalidation_blocked_by_transform {
         if revalidation.serve_stale_on_error {
           *stale_on_error = Some(revalidation.entry.clone());
@@ -247,6 +254,48 @@ pub(super) fn handle_cache_lookup_result(
     }
   }
 }
+
+/// An NVS alias revalidates its stored owner representation. The downstream
+/// request URI remains with the caller for WAF and response processing.
+fn retarget_nvs_revalidation(outbound: &mut Request<ProxyBody>, entry: &crate::cache::CacheEntry) {
+  if !entry.nvs_alias {
+    return;
+  }
+  let Some(metadata) = entry.no_vary_search.as_ref() else {
+    return;
+  };
+  if outbound
+    .extensions()
+    .get::<NvsAliasQueryIdentity>()
+    .is_none()
+    && let Some(identity) = outbound
+      .extensions()
+      .get::<crate::cache::CacheQueryIdentity>()
+      .cloned()
+  {
+    outbound
+      .extensions_mut()
+      .insert(NvsAliasQueryIdentity(identity));
+  }
+  let Ok(owner_effective_uri) = metadata.effective_uri.parse() else {
+    return;
+  };
+  *outbound.uri_mut() = owner_effective_uri;
+  let owner_target = NvsOwnerTarget(outbound.uri().clone());
+  outbound.extensions_mut().insert(owner_target);
+  if let Some(identity) = outbound
+    .extensions()
+    .get::<crate::cache::CacheQueryIdentity>()
+    .cloned()
+  {
+    outbound
+      .extensions_mut()
+      .insert(identity.for_nvs_owner(metadata));
+  }
+}
+
+#[derive(Clone)]
+pub(super) struct NvsOwnerTarget(pub http::Uri);
 
 pub(super) fn record_cache_hit_fast_path_selection(
   state: &AppSnapshot,
@@ -298,6 +347,7 @@ pub(super) async fn maybe_cache_response(
     route,
     None,
     None,
+    None,
     true,
     None,
     None,
@@ -316,6 +366,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   uri: &http::Uri,
   request_headers: &HeaderMap,
   route: Option<&RouteConfig>,
+  no_vary_search: Option<&crate::cache::CacheNvsRequest>,
   certificate_identity: Option<&crate::cache::CacheCertificateIdentity>,
   proxy_protocol_identity: Option<&crate::cache::CacheProxyProtocolIdentity>,
   allow_store: bool,
@@ -379,6 +430,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   }
   let content_length = cache_streaming::exact_response_content_length(&cache_headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
+    no_vary_search,
     query_identity: query_identity.as_ref(),
     proxy_protocol_identity,
     certificate_identity,
@@ -660,6 +712,12 @@ pub(super) async fn collect_cache_response_body(
 }
 
 pub(super) fn merge_not_modified_headers(headers: &mut HeaderMap, not_modified: &HeaderMap) {
+  if not_modified.contains_key("no-vary-search") {
+    headers.remove("no-vary-search");
+    for value in not_modified.get_all("no-vary-search") {
+      headers.append("no-vary-search", value.clone());
+    }
+  }
   for (name, value) in not_modified {
     if matches!(
       name.as_str(),

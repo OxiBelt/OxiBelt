@@ -65,6 +65,7 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
   first
     .insert_async(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -85,6 +86,7 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
   assert!(matches!(
     second
       .lookup_async(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -108,6 +110,7 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
   assert!(
     second
       .lookup_async(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -135,6 +138,7 @@ async fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
   let uri = "/asset/app.css?body=shared".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -149,6 +153,7 @@ async fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
   first
     .insert_async(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -213,6 +218,7 @@ async fn shared_cache_purge_propagates_an_enumeration_cap_error() {
       first
         .insert_async(
           CacheInsertContext {
+            no_vary_search: None,
             proxy_protocol_identity: None,
             policy_name: Some("default"),
             scheme: "https",
@@ -266,6 +272,7 @@ async fn shared_cache_legacy_entry_without_index_is_a_safe_miss() {
     first
       .insert_async(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
@@ -294,6 +301,7 @@ async fn shared_cache_legacy_entry_without_index_is_a_safe_miss() {
   assert!(
     second
       .lookup_async(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -336,6 +344,7 @@ async fn shared_cache_vary_lookup_uses_indexed_variant() {
     first
       .insert_async(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
@@ -362,6 +371,7 @@ async fn shared_cache_vary_lookup_uses_indexed_variant() {
 
   match second
     .lookup_async(CacheLookupContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -396,6 +406,7 @@ async fn shared_cache_large_body_uses_retrievable_chunks() {
     first
       .insert_async(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
@@ -414,6 +425,7 @@ async fn shared_cache_large_body_uses_retrievable_chunks() {
 
   match second
     .lookup_async(CacheLookupContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -462,6 +474,7 @@ async fn shared_cache_streaming_disk_fill_writes_chunked_l2_entry() {
   );
   match second
     .lookup_async(CacheLookupContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -502,6 +515,7 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
   shared.test_delete_raw_key(&chunk_keys[0]);
 
   match first.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -521,6 +535,7 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
   assert!(
     second
       .lookup_async(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -554,6 +569,7 @@ async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
   first
     .insert_async(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -573,6 +589,7 @@ async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
     .await;
 
   let other_ctx = CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -586,6 +603,7 @@ async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
   assert!(second.lookup_async(other_ctx).await.is_none());
 
   let secret_ctx = CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -648,6 +666,7 @@ async fn stream_disk_fill(
   );
   let prepared = match cache.prepare_insert(
     CacheInsertContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -684,6 +703,7 @@ async fn wait_for_fresh(
   for _ in 0..100 {
     if matches!(
       cache.lookup(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",

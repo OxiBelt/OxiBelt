@@ -304,6 +304,9 @@ impl ResponseCache {
           candidates.into_iter().find(|key| {
             inner.entries.get(key).is_some_and(|entry| {
               vary_matches(&entry.vary, request_headers)
+                && entry.no_vary_search.as_ref().is_none_or(|nvs| {
+                  self.nvs_current_locked(&inner, &entry.policy, &entry.scheme, &entry.host, nvs)
+                })
                 && (!is_query_v1_base_key(&operation.base_key)
                   || entry.query_target_epoch
                     == ctx
@@ -418,6 +421,34 @@ impl ResponseCache {
   }
 
   pub async fn lookup_async(&self, ctx: CacheLookupContext<'_>) -> Option<CacheLookup> {
+    let result = self.lookup_exact_async(ctx.clone()).await?;
+    let entry = match &result {
+      CacheLookup::Fresh(entry) => entry,
+      CacheLookup::Stale(stale) => &stale.entry,
+      CacheLookup::Revalidate(revalidation) => &revalidation.entry,
+    };
+    if let Some(metadata) = &entry.no_vary_search {
+      let policy = self.policy(ctx.policy_name)?;
+      let uri = metadata.owner_uri.parse::<Uri>().ok()?;
+      if self
+        .nvs_epoch(
+          &nvs::target(&policy.name, ctx.scheme, ctx.host, &uri),
+          false,
+        )
+        .await
+        != Some(metadata.epoch)
+        || self
+          .nvs_epoch(&nvs::policy_target(&policy.name), false)
+          .await
+          != Some(metadata.policy_epoch)
+      {
+        return None;
+      }
+    }
+    Some(result)
+  }
+
+  async fn lookup_exact_async(&self, ctx: CacheLookupContext<'_>) -> Option<CacheLookup> {
     let is_query = ctx.method.as_str() == "QUERY";
     if !is_query && let Some(lookup) = self.lookup(ctx.clone()) {
       return Some(lookup);
@@ -474,6 +505,7 @@ impl ResponseCache {
     }
     self.insert_with_external(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: ctx.proxy_protocol_identity,
         policy_name: ctx.policy_name,
         scheme: ctx.scheme,
@@ -569,6 +601,17 @@ impl ResponseCache {
     inner: &CacheInner,
     prepared: &CachePreparedInsert,
   ) -> bool {
+    if let Some(nvs) = prepared.no_vary_search.as_ref()
+      && !self.nvs_current_locked(
+        inner,
+        &prepared.policy.name,
+        &prepared.scheme,
+        &prepared.host,
+        nvs,
+      )
+    {
+      return false;
+    }
     let Some(target) = prepared.query_target.as_ref() else {
       return true;
     };
@@ -704,7 +747,7 @@ impl ResponseCache {
   }
 }
 
-fn query_epoch_bucket(target: &CacheQueryInvalidationTarget) -> (String, u16) {
+pub(super) fn query_epoch_bucket(target: &CacheQueryInvalidationTarget) -> (String, u16) {
   let material = format!(
     "{}\n{}\n{}\n{}",
     target.policy, target.scheme, target.host, target.uri

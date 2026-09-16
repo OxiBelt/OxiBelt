@@ -9,6 +9,7 @@ run_case_checks() {
   assert_shared_pool_health
   assert_shared_cache_uri_isolation
   assert_shared_query_cache_cleanup
+  assert_shared_no_vary_search
   assert_shared_cache
   assert_no_redis_keys_commands
 }
@@ -232,6 +233,24 @@ assert_shared_query_cache_cleanup() {
   if [[ "${index_count}" != "1" ]]; then
     fail_with_diagnostics "expected Redis QUERY cleanup to retain only the current indexed generation, got ${index_count}"
   fi
+}
+
+assert_shared_no_vary_search() {
+  local seed alias purge miss
+  local seed_path="/app/shared-nvs?noise=one&keep=stable&body=shared-nvs&cache_control=public&content_type=text/plain&no_vary_search=params%3D%28%22noise%22%29"
+  local alias_path="${seed_path/noise=one/noise=two}"
+
+  seed="$(client_request_with_headers "example.test" "${seed_path}" 200 "GET" "" "X-Forwarded-For: 203.0.113.47")"
+  assert_response_jq "${seed}" '.headers["x-oxibelt-cache"] == "miss" and .body == "shared-nvs"'
+
+  alias="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${alias_path}" 200 "GET" "" "X-Forwarded-For: 203.0.113.48")"
+  assert_response_jq "${alias}" '.headers["x-oxibelt-cache"] == "hit" and .body == "shared-nvs" and .headers["no-vary-search"] == "params=(\"noise\")"'
+
+  purge="$(plain_client_request_with_headers_to_target "proxy-a" 9092 "proxy-a" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/shared-nvs%3Fnoise%3Dtwo%26keep%3Dstable%26body%3Dshared-nvs%26cache_control%3Dpublic%26content_type%3Dtext/plain%26no_vary_search%3Dparams%253D%2528%2522noise%2522%2529" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
+  assert_response_jq "${purge}" '.body | test("^purged=[1-9][0-9]*\\n$")'
+
+  miss="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${alias_path}" 200 "GET" "" "X-Forwarded-For: 203.0.113.49")"
+  assert_response_jq "${miss}" '.headers["x-oxibelt-cache"] == "miss" and .body == "shared-nvs"'
 }
 
 assert_shared_cache() {

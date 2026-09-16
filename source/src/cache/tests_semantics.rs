@@ -115,6 +115,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -135,6 +136,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
   );
 
   match cache.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -152,6 +154,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -173,6 +176,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -240,6 +244,7 @@ fn rfc9111_freshness_directives_are_stable() {
     assert_eq!(
       cache.response_head_decision(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
@@ -278,6 +283,7 @@ fn pragma_no_cache_request_revalidates_fresh_entry() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -300,6 +306,7 @@ fn pragma_no_cache_request_revalidates_fresh_entry() {
   let mut request_headers = HeaderMap::new();
   request_headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
   match cache.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",

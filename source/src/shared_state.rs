@@ -31,6 +31,7 @@ mod backend_memory;
 mod backend_postgres;
 mod backend_redis;
 mod cache_lock;
+mod cache_nvs;
 mod cache_store;
 mod enumeration;
 mod failure_epoch;
@@ -348,6 +349,10 @@ pub struct SharedCacheEntry {
   /// Q1 target epoch. Absent legacy records are never usable for QUERY.
   #[serde(default)]
   pub query_target_epoch: Option<u64>,
+  /// Response-owned No-Vary-Search evidence.  It is an optional discovery
+  /// hint only; the owning cache object is rechecked before reuse.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub no_vary_search: Option<crate::cache::CacheNvsMetadata>,
 }
 
 fn shared_cache_entry_now_ms() -> i64 {

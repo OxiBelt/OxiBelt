@@ -2,6 +2,16 @@
 
 use super::*;
 
+#[derive(Clone)]
+struct NvsAliasReplay {
+  method: Method,
+  uri: http::Uri,
+  version: http::Version,
+  headers: HeaderMap,
+  query_snapshot: Option<query::capture::QueryReplaySnapshot>,
+  query_identity: Option<crate::cache::CacheQueryIdentity>,
+}
+
 pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<ProxyBody> {
   let incremental_request = incremental::request_marked(&context.outbound);
   let request_version = context.request_version;
@@ -78,11 +88,12 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     grpc_web_mode,
     native_grpc_request,
     request_headers,
+    mut no_vary_search,
     certificate_identity,
     proxy_protocol_identity,
     mut stale_on_error,
     mut revalidation_entry,
-    cache_store_allowed,
+    mut cache_store_allowed,
     cache_fill_guard,
   } = context;
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
@@ -126,6 +137,50 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     .extensions()
     .get::<crate::cache::CacheQueryIdentity>()
     .cloned();
+  let revalidation_owner_uri = revalidation_entry
+    .as_ref()
+    .filter(|entry| entry.nvs_alias)
+    .and_then(|entry| entry.no_vary_search.as_ref())
+    .and_then(|metadata| metadata.owner_uri.parse::<http::Uri>().ok());
+  let revalidation_owner_nvs = revalidation_entry
+    .as_ref()
+    .filter(|entry| entry.nvs_alias)
+    .and_then(|entry| entry.no_vary_search.as_ref())
+    .and_then(|metadata| no_vary_search.as_ref()?.for_owner(metadata));
+  // A rejected alias 304 may need an unconditional replay. Keep that replay
+  // inside the upstream request budget that started before the conditional
+  // owner request, including reopening a QUERY snapshot.
+  let nvs_alias_deadline = revalidation_entry
+    .as_ref()
+    .filter(|entry| entry.nvs_alias)
+    .and_then(|_| {
+      timeouts
+        .upstream_deadline
+        .or_else(|| std::time::Instant::now().checked_add(timeouts.upstream_request))
+    });
+  let alias_replay = revalidation_entry
+    .as_ref()
+    .filter(|entry| entry.nvs_alias)
+    .and(no_vary_search.as_ref())
+    .map(|request| {
+      let mut headers = outbound.headers().clone();
+      headers.remove(http::header::IF_NONE_MATCH);
+      headers.remove(http::header::IF_MODIFIED_SINCE);
+      NvsAliasReplay {
+        method: outbound.method().clone(),
+        uri: request.effective_uri.clone(),
+        version: outbound.version(),
+        headers,
+        query_snapshot: outbound
+          .extensions()
+          .get::<query::capture::QueryReplaySnapshot>()
+          .cloned(),
+        query_identity: outbound
+          .extensions()
+          .get::<cache_operations::NvsAliasQueryIdentity>()
+          .map(|identity| identity.0.clone()),
+      }
+    });
   let mut report_pool_success = true;
   let upstream_response = if upstream_version == HttpVersion::H3 {
     let retry_policy = if native_grpc_request {
@@ -159,6 +214,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       .await
       .map(|success| {
         if !success.cache_identity_unchanged {
+          no_vary_search = None;
           // A pool retry selected a new effective origin target. Forward the
           // response, but bypass QUERY cache insertion rather than binding it
           // to the identity captured for the first target.
@@ -319,6 +375,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         .await
         .map(|success| {
           if !success.cache_identity_unchanged {
+            no_vary_search = None;
             // A pool retry selected a new effective origin target. Forward the
             // response, but bypass QUERY cache insertion rather than binding it
             // to the identity captured for the first target.
@@ -521,6 +578,12 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     }
   }
   let mut upstream_response = upstream_response;
+  if let Some(no_vary_search) = no_vary_search.as_ref() {
+    no_vary_search.capture_origin(upstream_response.headers());
+  }
+  if let Some(owner_nvs) = revalidation_owner_nvs.as_ref() {
+    owner_nvs.capture_origin(upstream_response.headers());
+  }
   status_headers::capture_upstream(&mut upstream_response);
   let revalidation_reason = revalidation_entry.as_ref().map(|entry| {
     if entry
@@ -540,9 +603,159 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
   } else {
     upstream_response
   };
-  let (mut parts, body) = upstream_response.into_parts();
+  let (mut parts, mut body) = upstream_response.into_parts();
   if upstream_incremental {
     parts.extensions.insert(incremental::IncrementalIntent);
+  }
+  let owner_current =
+    if let Some(entry) = revalidation_entry.as_ref().filter(|entry| entry.nvs_alias) {
+      state
+        .cache
+        .nvs_owner_current(
+          crate::cache::CacheLookupContext {
+            no_vary_search: no_vary_search.as_ref(),
+            policy_name: resolved.route.cache.as_deref(),
+            scheme: downstream_scheme,
+            host,
+            method: &request_method,
+            uri: &request_uri,
+            request_headers: &request_headers,
+            query_identity: query_identity.as_ref(),
+            certificate_identity: certificate_identity.as_ref(),
+            proxy_protocol_identity: proxy_protocol_identity.as_ref(),
+          },
+          entry,
+        )
+        .await
+    } else {
+      true
+    };
+  let alias_policy_rejected = revalidation_entry
+    .as_ref()
+    .is_some_and(|entry| entry.nvs_alias)
+    && (!owner_current
+      || !revalidation_entry.as_ref().is_some_and(|entry| {
+        no_vary_search.as_ref().is_some_and(|request| {
+          state.cache.nvs_response_allows_alias(
+            entry,
+            &request_uri,
+            request,
+            &parts.headers,
+            parts.status == StatusCode::NOT_MODIFIED,
+          )
+        })
+      }))
+    && !(owner_current
+      && stale_on_error.is_some()
+      && state
+        .cache
+        .stale_if_error_allows_status(resolved.route.cache.as_deref(), parts.status));
+  if let Some(entry) = revalidation_entry.as_ref()
+    && state.cache.nvs_policy_changed(
+      entry,
+      &parts.headers,
+      parts.status == StatusCode::NOT_MODIFIED,
+    )
+  {
+    let replacement_allowed = state
+      .cache
+      .replace_nvs_policy(
+        crate::cache::CacheLookupContext {
+          no_vary_search: revalidation_owner_nvs.as_ref().or(no_vary_search.as_ref()),
+          policy_name: resolved.route.cache.as_deref(),
+          scheme: downstream_scheme,
+          host,
+          method: &request_method,
+          uri: revalidation_owner_uri.as_ref().unwrap_or(&request_uri),
+          request_headers: &request_headers,
+          query_identity: query_identity.as_ref(),
+          certificate_identity: certificate_identity.as_ref(),
+          proxy_protocol_identity: proxy_protocol_identity.as_ref(),
+        },
+        entry,
+      )
+      .await;
+    cache_store_allowed &= replacement_allowed;
+  }
+  if alias_policy_rejected {
+    // The conditional request still revalidated the owner representation.
+    // Update its metadata and indexes before fetching the original alias, so
+    // a broader, superseded policy cannot serve concurrent aliases.
+    if parts.status == StatusCode::NOT_MODIFIED
+      && cache_store_allowed
+      && let Some(entry) = revalidation_entry.as_ref()
+    {
+      state
+        .cache
+        .update_from_not_modified_async(
+          crate::cache::CacheInsertContext {
+            no_vary_search: revalidation_owner_nvs.as_ref().or(no_vary_search.as_ref()),
+            proxy_protocol_identity: proxy_protocol_identity.as_ref(),
+            query_identity: query_identity.as_ref(),
+            certificate_identity: certificate_identity.as_ref(),
+            policy_name: resolved.route.cache.as_deref(),
+            scheme: downstream_scheme,
+            host,
+            method: &request_method,
+            uri: revalidation_owner_uri.as_ref().unwrap_or(&request_uri),
+            request_headers: &request_headers,
+          },
+          entry,
+          &parts.headers,
+        )
+        .await;
+    }
+    // Even a non-cacheable replacement must retire the superseded owner.
+    // Keep this exchange exact-only: rebinding an old fill could conceal a
+    // concurrent unsafe-request fence while the owner was being revalidated.
+    if let Some(request) = no_vary_search.as_ref() {
+      request.reset_epoch_for_replay();
+    }
+    let Some(replay) = alias_replay else {
+      return route_security.text(
+        StatusCode::BAD_GATEWAY,
+        "No-Vary-Search alias revalidation cannot be replayed",
+      );
+    };
+    let alias_identity = replay.query_identity.clone();
+    let response = match replay_nvs_alias_request(
+      replay,
+      upstream,
+      upstream_version,
+      timeouts,
+      nvs_alias_deadline.unwrap_or_else(std::time::Instant::now),
+      state,
+      selected_pool_name.as_deref(),
+      client_addr,
+      &resolved.route.name,
+    )
+    .await
+    {
+      Ok(response) => response,
+      Err(error) => {
+        warn!(error = %error, upstream = %upstream.name, "NVS alias replay failed");
+        return route_security.text(
+          StatusCode::BAD_GATEWAY,
+          "No-Vary-Search alias revalidation failed",
+        );
+      }
+    };
+    let (mut replay_parts, replay_body) = response.into_parts();
+    if replay_parts.status == StatusCode::NOT_MODIFIED {
+      return route_security.text(
+        StatusCode::BAD_GATEWAY,
+        "No-Vary-Search alias replay returned not modified",
+      );
+    }
+    if let Some(no_vary_search) = no_vary_search.as_ref() {
+      no_vary_search.capture_origin(&replay_parts.headers);
+    }
+    status_headers::capture_upstream_parts(&mut replay_parts);
+    parts = replay_parts;
+    body = replay_body;
+    query_identity = alias_identity;
+    revalidation_entry = None;
+    stale_on_error = None;
   }
   if let Some(entry) = stale_on_error.clone()
     && state
@@ -562,12 +775,19 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
   }
   if parts.status == StatusCode::NOT_MODIFIED
     && let Some(entry) = revalidation_entry.clone()
+    && (!entry.nvs_alias
+      || no_vary_search.as_ref().is_some_and(|request| {
+        state
+          .cache
+          .nvs_revalidation_allows_alias(&entry, &request_uri, request, &parts.headers)
+      }))
   {
     if cache_store_allowed {
       state
         .cache
         .update_from_not_modified_async(
           crate::cache::CacheInsertContext {
+            no_vary_search: revalidation_owner_nvs.as_ref().or(no_vary_search.as_ref()),
             proxy_protocol_identity: proxy_protocol_identity.as_ref(),
             query_identity: query_identity.as_ref(),
             certificate_identity: certificate_identity.as_ref(),
@@ -575,7 +795,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
             scheme: downstream_scheme,
             host,
             method: &request_method,
-            uri: &request_uri,
+            uri: revalidation_owner_uri.as_ref().unwrap_or(&request_uri),
             request_headers: &request_headers,
           },
           &entry,
@@ -843,9 +1063,24 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     downstream_scheme,
     host,
     &request_method,
-    &request_uri,
+    if revalidation_entry
+      .as_ref()
+      .is_some_and(|entry| entry.nvs_alias)
+    {
+      revalidation_owner_uri.as_ref().unwrap_or(&request_uri)
+    } else {
+      &request_uri
+    },
     &request_headers,
     Some(resolved.route),
+    if revalidation_entry
+      .as_ref()
+      .is_some_and(|entry| entry.nvs_alias)
+    {
+      revalidation_owner_nvs.as_ref()
+    } else {
+      no_vary_search.as_ref()
+    },
     certificate_identity.as_ref(),
     proxy_protocol_identity.as_ref(),
     cache_store_allowed,
@@ -884,4 +1119,67 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
   let response = with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
   state.record_hot_path_response(response.status());
   response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn replay_nvs_alias_request(
+  replay: NvsAliasReplay,
+  upstream: &UpstreamConfig,
+  upstream_version: HttpVersion,
+  timeouts: EffectiveTimeouts,
+  deadline: std::time::Instant,
+  state: &AppSnapshot,
+  pool_name: Option<&str>,
+  client_addr: SocketAddr,
+  route_name: &str,
+) -> anyhow::Result<Response<ProxyBody>> {
+  let timeouts = timeouts.cap_upstream_to_deadline(deadline);
+  let mut builder = Request::builder()
+    .method(replay.method.clone())
+    .uri(replay.uri)
+    .version(replay.version);
+  let Some(headers) = builder.headers_mut() else {
+    anyhow::bail!("request builder did not expose headers");
+  };
+  *headers = replay.headers;
+  let mut request = builder.body(full_body(bytes::Bytes::new()))?;
+  if let Some(snapshot) = replay.query_snapshot {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+      anyhow::bail!("No-Vary-Search alias replay exhausted its upstream deadline");
+    }
+    *request.body_mut() = tokio::time::timeout(remaining, snapshot.body())
+      .await
+      .map_err(|_| {
+        anyhow::anyhow!("No-Vary-Search alias replay exhausted its upstream deadline")
+      })??;
+  }
+  let policy = EffectiveRetryPolicy::disabled_direct();
+  let admission = Some(RetryAdmissionContext {
+    route_name,
+    pool_name,
+  });
+  if upstream_version == HttpVersion::H3 {
+    return send_h3_with_retry(request, upstream, timeouts, state, &policy, admission).await;
+  }
+  if upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off {
+    return send_one_shot_with_proxy_protocol(
+      request,
+      upstream,
+      state,
+      pool_name,
+      upstream_version,
+      client_addr,
+      timeouts,
+    )
+    .await
+    .map(|response| response.map(|body| body.map_err(boxed_error).boxed()));
+  }
+  let client = state
+    .clients
+    .for_upstream_version(&upstream.name, upstream.origin.scheme(), upstream_version)
+    .ok_or_else(|| anyhow::anyhow!("upstream client is not configured"))?;
+  send_with_retry(client, request, timeouts, state, &policy, admission)
+    .await
+    .map(|response| response.map(|body| body.map_err(boxed_error).boxed()))
 }

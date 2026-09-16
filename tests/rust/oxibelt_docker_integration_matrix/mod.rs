@@ -155,6 +155,8 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("cache", "vary-explosion-rejection"),
   ("cache", "json-warming"),
   ("cache", "query-protocol-cache-matrix"),
+  ("cache", "no-vary-search-protocol-matrix"),
+  ("cache", "no-vary-search-lifecycle"),
   ("cache", "large-object-cache"),
   ("cache", "large-object-over-memory-not-cached"),
   ("cache", "huge-object-streaming-disk"),

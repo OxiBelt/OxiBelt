@@ -42,6 +42,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
   let uri = "/asset/revalidated-l2.css".parse::<Uri>().unwrap();
   let request_headers = HeaderMap::new();
   let context = CacheInsertContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -76,6 +77,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
   );
 
   let cached_entry = match first.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -104,6 +106,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
 
   match second
     .lookup_async(CacheLookupContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -146,6 +149,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -166,6 +170,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
   );
 
   let cached_entry = match cache.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -190,6 +195,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
   );
   cache.update_from_not_modified(
     CacheInsertContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -205,6 +211,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
   );
 
   match cache.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -263,6 +270,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     HeaderValue::from_static("Client-Cert"),
   );
   let context = CacheInsertContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -281,6 +289,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     CacheInsertOutcome::Stored
   );
   let cached = match cache.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -310,6 +319,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
   cache.update_from_not_modified(context, &cached, &not_modified);
 
   match cache.lookup(CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",

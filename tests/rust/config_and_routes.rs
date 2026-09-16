@@ -5770,6 +5770,7 @@ fn cache_advanced_policy_config_parse() {
 
 [cache]
 enabled = true
+no_vary_search = false
 partition_key = "{{header:X-Tenant-ID}}"
 tag_headers = ["Surrogate-Key", "Cache-Tag"]
 max_tags_per_entry = 16
@@ -5839,6 +5840,7 @@ cache = "assets"
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");
   assert_eq!(config.cache.max_tags_per_entry, 16);
+  assert!(!config.cache.no_vary_search);
   assert_eq!(config.cache.partition_key, "{header:X-Tenant-ID}");
   assert_eq!(config.cache.max_vary_fields, 4);
   assert_eq!(config.cache.max_vary_variants_per_key, 8);
@@ -5882,6 +5884,7 @@ fn cache_query_cleanup_config_defaults_and_parse() {
   assert_eq!(default_config.cache.query_cleanup.queue_capacity, 64);
   assert_eq!(default_config.cache.query_cleanup.batch_size, 128);
   assert_eq!(default_config.cache.query_cleanup.max_concurrent, 1);
+  assert!(default_config.cache.no_vary_search);
 
   let raw = format!(
     "{base}\n[cache.query_cleanup]\nqueue_capacity = 1024\nbatch_size = 512\nmax_concurrent = 4\n"

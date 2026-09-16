@@ -39,6 +39,16 @@ they bind both the received and effective upstream representations:
 - Complete content length and SHA-256 digest.
 - Content metadata and ordered duplicate trailer values.
 
+The top-level `cache.no_vary_search` switch defaults to `true` and applies to
+GET, HEAD, and QUERY. With the switch enabled, OxiBelt tries an exact query
+first and may use a bounded indexed equivalent only when the response's
+current draft-09 `No-Vary-Search` declaration covers both received and
+effective query representations. Explicit `{query:name}` key tokens and the
+raw configured partition remain authoritative. Response-WAF routes are
+exact-only. Setting the switch to `false` disables equivalent alias lookup and
+storage while retaining forwarding and invalidation; it is a top-level cache
+setting and has no policy override.
+
 The effective headers supply key-template and `Vary` values. Credential and
 no-store bypass rules apply to both received and effective headers. No QUERY
 entry is eligible without complete, bounded identity. GET and HEAD keys keep
@@ -107,8 +117,10 @@ eligible for QUERY caching and relies on normal expiry for physical
 reclamation. Work remaining after the exchange budget also relies on expiry.
 When shared cache is configured, its epoch counter is
 authoritative for the external tier too. Handlers without
-`query-target-epoch-v1` bypass QUERY caching. Legacy GET/HEAD messages omit
-these optional fields and keep their existing keys.
+`query-target-epoch-v1` bypass QUERY caching. L3 handlers without the optional
+No-Vary-Search capability remain eligible for exact-key QUERY and GET/HEAD
+operations but do not use equivalent aliases. Legacy messages omit these
+optional fields and keep their existing keys.
 
 ## Retries
 

@@ -12,6 +12,10 @@ use crate::config::Config;
 use crate::metrics::Metrics;
 
 use super::client::{ExternalCacheHttpClient, ExternalCacheLookupHit, ExternalCachePublishBody};
+use super::nvs_protocol::{
+  ExternalCacheNvsCandidatesRequest, ExternalCacheNvsCandidatesResponse,
+  ExternalCacheNvsEpochRequest, ExternalCacheNvsEpochResponse,
+};
 #[cfg(feature = "admin-runtime")]
 use super::protocol::ExternalCachePurgeRequest;
 use super::protocol::{
@@ -133,6 +137,52 @@ impl ExternalCacheRuntime {
       Err(error) => {
         self.record(&handler.name, "query_epoch", "error");
         warn!(handler = %handler.name, error = %error, "external QUERY epoch request failed");
+        None
+      }
+    }
+  }
+
+  pub(crate) async fn nvs_epoch(
+    &self,
+    handler_name: &str,
+    request: ExternalCacheNvsEpochRequest,
+  ) -> Option<ExternalCacheNvsEpochResponse> {
+    let handler = self.handlers.get(handler_name)?;
+    let Ok(_permit) = handler.limiter.clone().try_acquire_owned() else {
+      self.record(&handler.name, "nvs_epoch", "saturated");
+      return None;
+    };
+    match handler.client.nvs_epoch(&request).await {
+      Ok(response) => {
+        self.record(&handler.name, "nvs_epoch", "ok");
+        Some(response)
+      }
+      Err(error) => {
+        self.record(&handler.name, "nvs_epoch", "error");
+        warn!(handler = %handler.name, error = %error, "external No-Vary-Search epoch request failed");
+        None
+      }
+    }
+  }
+
+  pub(crate) async fn nvs_candidates(
+    &self,
+    handler_name: &str,
+    request: ExternalCacheNvsCandidatesRequest,
+  ) -> Option<ExternalCacheNvsCandidatesResponse> {
+    let handler = self.handlers.get(handler_name)?;
+    let Ok(_permit) = handler.limiter.clone().try_acquire_owned() else {
+      self.record(&handler.name, "nvs_candidates", "saturated");
+      return None;
+    };
+    match handler.client.nvs_candidates(&request).await {
+      Ok(response) => {
+        self.record(&handler.name, "nvs_candidates", "ok");
+        Some(response)
+      }
+      Err(error) => {
+        self.record(&handler.name, "nvs_candidates", "error");
+        warn!(handler = %handler.name, error = %error, "external No-Vary-Search candidate request failed");
         None
       }
     }

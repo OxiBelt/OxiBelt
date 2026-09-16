@@ -659,6 +659,7 @@ default_ttl_seconds = 60
 cache_methods = ["GET", "HEAD"]
 cache_key = "{scheme}:{host}:{uri}"
 partition_key = ""
+no_vary_search = true
 respect_cache_control = true
 stream_large_objects = true
 stream_chunk_bytes = 1048576

@@ -42,6 +42,30 @@ impl ResponseCache {
       .await
     {
       Ok(Some(lookup)) => {
+        let entry = match &lookup {
+          CacheLookup::Fresh(entry) => entry,
+          CacheLookup::Stale(stale) => &stale.entry,
+          CacheLookup::Revalidate(revalidation) => &revalidation.entry,
+        };
+        if let Some(metadata) = entry.no_vary_search.as_ref() {
+          let owner_uri = metadata.owner_uri.parse().ok()?;
+          if !metadata.valid()
+            || metadata.owner_uri != uri
+            || self
+              .nvs_epoch(
+                &super::nvs::target(policy, ctx.scheme, ctx.host, &owner_uri),
+                false,
+              )
+              .await
+              != Some(metadata.epoch)
+            || self
+              .nvs_epoch(&super::nvs::policy_target(policy), false)
+              .await
+              != Some(metadata.policy_epoch)
+          {
+            return None;
+          }
+        }
         if matches!(lookup, CacheLookup::Fresh(_)) {
           self.promote_shared_lookup(ctx, &lookup);
         }

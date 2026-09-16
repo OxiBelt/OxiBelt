@@ -233,7 +233,10 @@ class EchoHandler(BaseHTTPRequestHandler):
       "public-stale-error": "public, max-age=1, stale-if-error=30",
     }.get(query.get("cache_control", [""])[0])
     try:
-      etag = _query_header(query, "etag")
+      etag = _safe_header_value(
+        "etag_sequence",
+        _sequence_value(query, "etag_sequence", sequence_index, _query_header(query, "etag")),
+      )
       last_modified = _query_header(query, "last_modified")
       early_link = _query_header(query, "early_link", "</style.css>; rel=preload; as=style")
       content_type = _query_header(query, "content_type", "application/json")
@@ -247,6 +250,15 @@ class EchoHandler(BaseHTTPRequestHandler):
       cache_tag = _query_header(query, "cache_tag")
       expires = _query_header(query, "expires")
       vary = _query_header(query, "vary")
+      no_vary_search = _safe_header_value(
+        "no_vary_search_sequence",
+        _sequence_value(
+          query,
+          "no_vary_search_sequence",
+          sequence_index,
+          _query_header(query, "no_vary_search"),
+        ),
+      )
     except ValueError as error:
       self.send_error(400, str(error))
       return
@@ -255,6 +267,8 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.send_header("etag", etag)
       if last_modified:
         self.send_header("last-modified", last_modified)
+      if no_vary_search:
+        self.send_header("no-vary-search", no_vary_search)
       self.end_headers()
       return
     if last_modified and _if_modified_since_matches(
@@ -265,6 +279,8 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.send_header("last-modified", last_modified)
       if etag:
         self.send_header("etag", etag)
+      if no_vary_search:
+        self.send_header("no-vary-search", no_vary_search)
       self.end_headers()
       return
     payload = {
@@ -302,7 +318,14 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.send_header("content-encoding", content_encoding)
     if any(
       key in query
-      for key in ("sequence_key", "body_sequence", "status_sequence", "header_delay_sequence")
+      for key in (
+        "sequence_key",
+        "body_sequence",
+        "status_sequence",
+        "etag_sequence",
+        "header_delay_sequence",
+        "no_vary_search_sequence",
+      )
     ):
       self.send_header("x-sequence-index", str(sequence_index))
     if query.get("set_cookie"):
@@ -323,6 +346,8 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.send_header("expires", expires)
     if vary:
       self.send_header("vary", vary)
+    if no_vary_search:
+      self.send_header("no-vary-search", no_vary_search)
     if chunked_response:
       self.send_header("transfer-encoding", "chunked")
     else:
@@ -557,7 +582,14 @@ def _recursive_percent_decode(value, max_depth=16):
 def _sequence_index(path, query):
   if not any(
     key in query
-    for key in ("sequence_key", "body_sequence", "status_sequence", "header_delay_sequence")
+    for key in (
+      "sequence_key",
+      "body_sequence",
+      "status_sequence",
+      "etag_sequence",
+      "header_delay_sequence",
+      "no_vary_search_sequence",
+    )
   ):
     return 0
   key = query.get("sequence_key", [path])[0]

@@ -99,6 +99,7 @@ fn query_requires_exact_method_and_complete_identity() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -114,6 +115,7 @@ fn query_requires_exact_method_and_complete_identity() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -240,6 +242,7 @@ fn query_origin_preconditions_bypass_cache_and_fill_lock() {
   let mut headers = query_headers();
   headers.insert(IF_MATCH, HeaderValue::from_static("\"current\""));
   let ctx = CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -289,6 +292,7 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -310,6 +314,7 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -330,6 +335,7 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
   );
   assert!(matches!(
     cache.lookup(CacheLookupContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -364,6 +370,7 @@ fn absent_query_target_does_not_examine_unrelated_cache_entries() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
           scheme: "https",
@@ -403,6 +410,7 @@ async fn automatic_query_invalidation_returns_after_fencing_and_reclaims_in_back
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -439,6 +447,7 @@ async fn automatic_query_invalidation_returns_after_fencing_and_reclaims_in_back
   assert!(
     cache
       .lookup(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -472,6 +481,7 @@ async fn shared_query_epoch_rejects_a_delayed_replica_publish() {
   let method = Method::from_bytes(b"QUERY").unwrap();
   let old_identity = query_identity(&uri, b"old", b"old");
   let old_ctx = CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -487,6 +497,7 @@ async fn shared_query_epoch_rejects_a_delayed_replica_publish() {
   response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("max-age=60"));
   let prepared = match first.prepare_insert(
     CacheInsertContext {
+      no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
       scheme: "https",
@@ -519,6 +530,7 @@ async fn shared_query_epoch_rejects_a_delayed_replica_publish() {
   );
   let new_identity = query_identity(&uri, b"old", b"old");
   let observer_ctx = CacheLookupContext {
+    no_vary_search: None,
     query_identity: Some(&new_identity),
     ..old_ctx
   };
@@ -551,6 +563,7 @@ fn query_invalidation_fences_active_fill_until_owner_finishes() {
   let method = Method::from_bytes(b"QUERY").unwrap();
   let headers = query_headers();
   let context = CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
     scheme: "https",
@@ -572,6 +585,7 @@ fn query_invalidation_fences_active_fill_until_owner_finishes() {
   assert!(matches!(
     cache.prepare_insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -616,6 +630,7 @@ fn failed_query_invalidation_bypasses_only_that_query_target() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
         scheme: "https",
@@ -673,6 +688,7 @@ fn query_disk_epoch_survives_invalidation_and_restart() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        no_vary_search: None,
         proxy_protocol_identity: None,
         certificate_identity: None,
         policy_name: Some("default"),
@@ -691,6 +707,7 @@ fn query_disk_epoch_survives_invalidation_and_restart() {
   let cache = ResponseCache::new(&config, None).unwrap();
   let identity = query_identity(&uri, b"query", b"query");
   let context = CacheLookupContext {
+    no_vary_search: None,
     proxy_protocol_identity: None,
     certificate_identity: None,
     policy_name: Some("default"),
@@ -712,6 +729,7 @@ fn query_disk_epoch_survives_invalidation_and_restart() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        no_vary_search: None,
         query_identity: Some(&identity),
         ..context
       })

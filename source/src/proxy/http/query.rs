@@ -110,6 +110,14 @@ pub(crate) async fn invalidate_after_origin_response(
   {
     tracing::warn!("QUERY target cache invalidation failed; QUERY reuse is fenced");
   }
+  if state
+    .cache
+    .invalidate_nvs_all_policies(scheme, host, uri)
+    .await
+    .is_err()
+  {
+    tracing::warn!("No-Vary-Search cache invalidation failed; alias reuse is fenced");
+  }
 }
 
 /// Validate the field envelope and media-type syntax, without interpreting

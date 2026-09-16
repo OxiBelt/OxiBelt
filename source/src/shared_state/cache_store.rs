@@ -406,7 +406,10 @@ impl SharedState {
       .cache_publish_query_indexed(backend, &entry, &value, ttl)
       .await
     {
-      Ok(true) => return Ok(()),
+      Ok(true) => {
+        self.cache_put_nvs_index(&entry).await;
+        return Ok(());
+      }
       Ok(false) => {}
       Err(error) => {
         delete_shared_chunks(backend, &entry.body_chunks).await;
@@ -415,6 +418,7 @@ impl SharedState {
     }
     backend.put(&key, &value, ttl).await?;
     self.cache_put_index(&entry).await;
+    self.cache_put_nvs_index(&entry).await;
     Ok(())
   }
 
@@ -463,7 +467,10 @@ impl SharedState {
       .cache_publish_query_indexed(backend, &entry, &value, ttl)
       .await
     {
-      Ok(true) => return Ok(()),
+      Ok(true) => {
+        self.cache_put_nvs_index(&entry).await;
+        return Ok(());
+      }
       Ok(false) => {}
       Err(error) => {
         delete_shared_chunks(backend, &entry.body_chunks).await;
@@ -475,6 +482,7 @@ impl SharedState {
       return Err(error);
     }
     self.cache_put_index(&entry).await;
+    self.cache_put_nvs_index(&entry).await;
     Ok(())
   }
 
@@ -589,13 +597,25 @@ impl SharedState {
     uri: &str,
     partition: Option<&str>,
   ) -> anyhow::Result<usize> {
+    let requested_path = uri
+      .parse::<Uri>()
+      .ok()
+      .map(|value| value.path().to_string());
     self
       .cache_purge(|entry| {
         entry.policy == policy
           && entry.scheme == scheme
           && entry.host == host
-          && entry.uri == uri
           && partition.is_none_or(|partition| entry.partition == partition)
+          && (entry.uri == uri
+            || (entry.no_vary_search.is_some()
+              && requested_path.as_ref().is_some_and(|path| {
+                entry
+                  .uri
+                  .parse::<Uri>()
+                  .ok()
+                  .is_some_and(|owner| owner.path() == path)
+              })))
       })
       .await
   }
@@ -706,6 +726,13 @@ impl SharedState {
           if matches(&entry) {
             delete_keys.push(key.clone());
             delete_keys.push(self.shared_cache_index_key(&entry));
+            if entry
+              .no_vary_search
+              .as_ref()
+              .is_some_and(crate::cache::CacheNvsMetadata::valid)
+            {
+              delete_keys.push(self.shared_nvs_index_key(&entry));
+            }
             delete_keys.extend(entry.body_chunks.iter().cloned());
             purged = purged.saturating_add(1);
           }
@@ -762,13 +789,15 @@ impl SharedState {
       return None;
     }
     drop(writer);
-    Some(CacheEntry::temporary_file(
+    let mut cache_entry = CacheEntry::temporary_file(
       http::StatusCode::from_u16(entry.status).ok()?,
       headers,
       file,
       entry.body_len,
       stored_at,
-    ))
+    );
+    cache_entry.no_vary_search = entry.no_vary_search.clone();
+    Some(cache_entry)
   }
 }
 
@@ -783,15 +812,15 @@ impl SharedCacheEntry {
     if !self.security_headers_neutral {
       return None;
     }
-    Some(
-      CacheEntry::memory(
-        http::StatusCode::from_u16(self.status).ok()?,
-        shared_entry_headers(self)?,
-        bytes::Bytes::from(self.body.clone()),
-      )
-      .with_stored_at(shared_entry_stored_at(self))
-      .with_expires_at(shared_entry_expires_at(self)),
+    let mut cache_entry = CacheEntry::memory(
+      http::StatusCode::from_u16(self.status).ok()?,
+      shared_entry_headers(self)?,
+      bytes::Bytes::from(self.body.clone()),
     )
+    .with_stored_at(shared_entry_stored_at(self))
+    .with_expires_at(shared_entry_expires_at(self));
+    cache_entry.no_vary_search = self.no_vary_search.clone();
+    Some(cache_entry)
   }
 }
 
@@ -931,6 +960,7 @@ mod tests {
       vary: Vec::new(),
       tags: Vec::new(),
       query_target_epoch,
+      no_vary_search: None,
     }
   }
 

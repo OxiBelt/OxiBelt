@@ -153,6 +153,8 @@ pub struct CacheConfig {
   pub cache_key: String,
   #[serde(default)]
   pub partition_key: String,
+  #[serde(default = "default_cache_no_vary_search")]
+  pub no_vary_search: bool,
   #[serde(default = "default_true")]
   pub respect_cache_control: bool,
   #[serde(default)]
@@ -220,6 +222,7 @@ impl Default for CacheConfig {
       cache_methods: default_cache_methods(),
       cache_key: default_cache_key(),
       partition_key: String::new(),
+      no_vary_search: default_cache_no_vary_search(),
       respect_cache_control: true,
       surrogate: CacheSurrogateConfig::default(),
       stale_if_error_seconds: 0,

@@ -40,6 +40,9 @@ mod insert;
 mod key;
 mod lookup;
 mod metadata;
+mod nvs;
+pub use nvs::{CacheNvsCandidate, CacheNvsExplain, CacheNvsMetadata, CacheNvsRequest};
+mod no_vary_search;
 mod policy;
 mod proxy_protocol_identity;
 pub use proxy_protocol_identity::CacheProxyProtocolIdentity;
@@ -269,6 +272,7 @@ pub(crate) enum CachePreparedInsertDecision {
 
 #[derive(Debug, Clone)]
 pub struct CacheInsertContext<'a> {
+  pub no_vary_search: Option<&'a CacheNvsRequest>,
   pub proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
   pub policy_name: Option<&'a str>,
   pub scheme: &'a str,
@@ -285,6 +289,7 @@ pub struct CacheInsertContext<'a> {
 
 #[derive(Debug, Clone)]
 pub struct CacheLookupContext<'a> {
+  pub no_vary_search: Option<&'a CacheNvsRequest>,
   pub proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
   pub policy_name: Option<&'a str>,
   pub scheme: &'a str,
@@ -430,6 +435,7 @@ pub struct CacheKeyExplain {
   pub enabled: bool,
   pub cacheable_method: bool,
   pub bypassed: bool,
+  pub no_vary_search: Option<CacheNvsExplain>,
   pub partition: String,
   pub base_key: String,
   pub variant_key: Option<String>,
@@ -520,6 +526,7 @@ fn append_query_field(output: &mut Vec<u8>, value: &[u8]) {
 
 #[derive(Debug)]
 pub(crate) struct CachePreparedInsert {
+  no_vary_search: Option<CacheNvsMetadata>,
   policy: CachePolicyRuntime,
   partition: String,
   base_key: String,
@@ -538,6 +545,7 @@ pub(crate) struct CachePreparedInsert {
 
 #[derive(Debug, Clone)]
 pub(in crate::cache) struct StoredEntry {
+  no_vary_search: Option<CacheNvsMetadata>,
   policy: String,
   partition: String,
   base_key: String,
@@ -677,6 +685,7 @@ struct VaryMatcher {
 
 #[derive(Debug, Default)]
 struct CacheInner {
+  nvs_index: HashMap<String, HashSet<String>>,
   entries: HashMap<String, StoredEntry>,
   index: index::CacheIndex,
   query_variants_by_target:

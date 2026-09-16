@@ -11,6 +11,9 @@ pub struct RouteExecutionPlan {
   pub fast_path: FastPathPlan,
   pub features: RouteFeaturePlan,
   pub waf: RouteWafExecutionPlan,
+  /// Stable configuration evidence used to scope No-Vary-Search aliases
+  /// without serializing route configuration on request hot paths.
+  pub nvs_context_fingerprint: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -128,6 +131,27 @@ pub(super) fn route_execution_plan(
     },
     features,
     waf,
+    nvs_context_fingerprint: (config.cache.enabled
+      && config.cache.no_vary_search
+      && route.static_root.is_none())
+    .then(|| {
+      // These configuration values contain only scalar, option, and vector
+      // members. Sort upstream projections so equivalent configurations
+      // produce the same cross-node scope regardless of source ordering.
+      let mut upstreams = config
+        .upstreams
+        .iter()
+        .map(|upstream| format!("{upstream:?}"))
+        .collect::<Vec<_>>();
+      upstreams.sort_unstable();
+      crate::crypto::sha256(
+        format!(
+          "nvs-route-v1|route={route:?}|cache={:?}|upstreams={upstreams:?}",
+          config.cache
+        )
+        .as_bytes(),
+      )
+    }),
   }
 }
 

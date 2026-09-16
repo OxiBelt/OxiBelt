@@ -140,7 +140,17 @@ impl ResponseCache {
         continue;
       }
       match decode_metadata(&path, dir) {
-        Ok(stored) => {
+        Ok(mut stored) => {
+          if inner.discard_recovered_query_entries && stored.no_vary_search.is_some() {
+            stored.no_vary_search = None;
+            // Authority loss must remain exact-only after subsequent restarts.
+            if self.persist_metadata(&stored).is_err() {
+              remove_metadata(&stored);
+              stored.remove_body();
+              inner.disk_recovery_removed_files_total += 2;
+              continue;
+            }
+          }
           if inner.discard_recovered_query_entries && super::is_query_v1_base_key(&stored.base_key)
           {
             remove_metadata(&stored);

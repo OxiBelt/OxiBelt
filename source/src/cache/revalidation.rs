@@ -16,6 +16,7 @@ pub(super) fn update_from_not_modified(
       headers.insert(name.clone(), value.clone());
     }
   }
+  merge_nvs_not_modified_headers(&mut headers, not_modified_headers);
   let body_len = cached_entry.body_len();
   let old_prepared = match cache.prepare_insert(
     ctx.clone(),
@@ -28,13 +29,36 @@ pub(super) fn update_from_not_modified(
       return;
     }
   };
-  let prepared = match cache.prepare_insert(ctx, cached_entry.status, &headers, Some(body_len)) {
+  let mut prepared = match cache.prepare_insert(ctx, cached_entry.status, &headers, Some(body_len))
+  {
     CachePreparedInsertDecision::Cacheable(prepared) => prepared,
     CachePreparedInsertDecision::NotCacheable(_) | CachePreparedInsertDecision::Rejected(_) => {
       return;
     }
   };
-  if old_prepared.variant_key != prepared.variant_key {
+  if !not_modified_headers.contains_key("no-vary-search") {
+    prepared.no_vary_search = cached_entry.no_vary_search.clone();
+    prepared.header_bytes = header_size(&prepared.stored_headers)
+      .saturating_add(nvs::metadata_size(prepared.no_vary_search.as_ref()));
+  }
+  let replace = {
+    let mut inner = cache.inner_guard();
+    if !cache.prepared_generation_current_locked(&inner, &prepared) {
+      return;
+    }
+    if old_prepared.variant_key != prepared.variant_key {
+      remove_entry(&mut inner, &old_prepared.variant_key);
+      true
+    } else {
+      !inner.entries.contains_key(&prepared.variant_key)
+    }
+  };
+  // A validated owner may have come from L2/L3, or acquired a new Vary key.
+  // Publish its body only after the 304 has renewed its response metadata.
+  if replace {
+    let mut entry = cached_entry.clone();
+    entry.headers = headers;
+    cache.insert_prepared(*prepared, entry);
     return;
   }
 
@@ -71,6 +95,7 @@ fn update_prepared_not_modified(
     stored.must_revalidate = prepared.metadata.must_revalidate;
     stored.stored_at = prepared.metadata.stored_at;
     stored.vary = prepared.metadata.vary;
+    stored.no_vary_search = prepared.no_vary_search;
     stored.tags = extract_tags(&headers, &prepared.policy);
     stored.size = size;
     if let Err(error) = cache.persist_metadata(&stored) {
@@ -97,5 +122,14 @@ fn update_prepared_not_modified(
   let _ = shared_entry;
   if let Some((handler, metadata)) = external_metadata {
     cache.spawn_external_revalidate(handler, metadata);
+  }
+}
+
+pub(super) fn merge_nvs_not_modified_headers(headers: &mut HeaderMap, update: &HeaderMap) {
+  if update.contains_key("no-vary-search") {
+    headers.remove("no-vary-search");
+    for value in update.get_all("no-vary-search") {
+      headers.append("no-vary-search", value.clone());
+    }
   }
 }

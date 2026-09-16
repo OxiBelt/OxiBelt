@@ -62,6 +62,24 @@ shared index data. Disable QUERY caching and wait through the configured cache
 retention period before optionally deleting those Redis keys or the PostgreSQL
 table; no conversion of cached response values is required.
 
+`cache.no_vary_search` is a top-level, default-on switch for the current
+draft-09 automatic No-Vary-Search behavior. It covers GET, HEAD, and QUERY
+across local, shared, and optional external cache tiers. Exact lookup remains
+first; equivalent lookup and storage use bounded indexes, and equivalent
+aliases are invalidated conservatively by policy and origin path. Explicit
+`{query:name}` tokens, raw partitions, and response-WAF exact-only behavior
+remain unchanged. A legacy L3 handler without the optional capability keeps
+exact-key behavior. Setting the switch to `false` disables alias lookup and
+storage while retaining forwarding and invalidation.
+
+For a mixed-version rollout, set `cache.no_vary_search = false` on each upgraded
+node while older writers remain. Apply the new key together with the upgraded
+binary, since older binaries may reject unknown configuration keys. Complete
+the binary upgrade on every cache participant. Purge the old cache
+state, including local disk, shared, and external entries, then set the switch
+back to `true`. This prevents entries written under the old exact-only layout
+from being reused as equivalent aliases during the transition.
+
 ## Admin QUERY cache operations
 
 The Admin cache warm and key-explain endpoints add exact-uppercase `QUERY`

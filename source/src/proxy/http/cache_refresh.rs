@@ -46,10 +46,26 @@ pub(super) fn spawn_background_refresh(
   stale: crate::cache::StaleEntry,
 ) -> bool {
   let certificate_identity = super::client_certificate::cache_identity(outbound).cloned();
-  let query_identity = outbound
+  let mut query_identity = outbound
     .extensions()
     .get::<crate::cache::CacheQueryIdentity>()
     .cloned();
+  let nvs_metadata = stale.entry.no_vary_search.as_ref();
+  let no_vary_search = nvs_metadata.and_then(|metadata| {
+    outbound
+      .extensions()
+      .get::<crate::cache::CacheNvsRequest>()
+      .and_then(|request| request.for_owner(metadata))
+  });
+  let uri = nvs_metadata
+    .and_then(|metadata| metadata.owner_uri.parse::<http::Uri>().ok())
+    .unwrap_or(uri);
+  if stale.entry.nvs_alias
+    && let Some(metadata) = nvs_metadata
+    && let Some(identity) = query_identity.as_ref()
+  {
+    query_identity = Some(identity.for_nvs_owner(metadata));
+  }
   let query_snapshot = outbound
     .extensions()
     .get::<super::query::capture::QueryReplaySnapshot>()
@@ -66,6 +82,15 @@ pub(super) fn spawn_background_refresh(
   let route_security_headers = route_security_headers.map(str::to_string);
   let upstream = upstream.clone();
   let mut outbound = empty_request_from(outbound);
+  if stale.entry.nvs_alias
+    && let Some(metadata) = nvs_metadata
+    && let Ok(owner_effective_uri) = metadata.effective_uri.parse()
+  {
+    *outbound.uri_mut() = owner_effective_uri;
+  }
+  if let Some(identity) = query_identity.as_ref() {
+    outbound.extensions_mut().insert(identity.clone());
+  }
   for (name, value) in &stale.request_headers {
     outbound.headers_mut().insert(name.clone(), value.clone());
   }
@@ -82,6 +107,7 @@ pub(super) fn spawn_background_refresh(
     let Some(fill_permit) = state
       .cache
       .begin_fill_async(crate::cache::CacheLookupContext {
+        no_vary_search: no_vary_search.as_ref(),
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,
         certificate_identity: certificate_identity.as_ref(),
@@ -126,6 +152,7 @@ pub(super) fn spawn_background_refresh(
       request_headers,
       certificate_identity,
       query_identity,
+      no_vary_search,
       stale.entry,
     )
     .await
@@ -153,6 +180,7 @@ async fn background_refresh(
   request_headers: HeaderMap,
   certificate_identity: Option<crate::cache::CacheCertificateIdentity>,
   query_identity: Option<crate::cache::CacheQueryIdentity>,
+  no_vary_search: Option<crate::cache::CacheNvsRequest>,
   cached_entry: crate::cache::CacheEntry,
 ) -> anyhow::Result<()> {
   let retry_policy = EffectiveRetryPolicy::disabled_direct();
@@ -177,13 +205,43 @@ async fn background_refresh(
     return Ok(());
   }
   let (mut parts, body) = response.into_parts();
+  if let Some(no_vary_search) = no_vary_search.as_ref() {
+    no_vary_search.capture_origin(&parts.headers);
+  }
   super::status_headers::capture_upstream_parts(&mut parts);
   super::status_headers::restore_received_headers(&mut parts);
+  if state.cache.nvs_policy_changed(
+    &cached_entry,
+    &parts.headers,
+    parts.status == StatusCode::NOT_MODIFIED,
+  ) && !state
+    .cache
+    .replace_nvs_policy(
+      crate::cache::CacheLookupContext {
+        no_vary_search: no_vary_search.as_ref(),
+        query_identity: query_identity.as_ref(),
+        proxy_protocol_identity: None,
+        certificate_identity: certificate_identity.as_ref(),
+        policy_name: route_cache.as_deref(),
+        scheme,
+        host: &host,
+        method: &method,
+        uri: &uri,
+        request_headers: &request_headers,
+      },
+      &cached_entry,
+    )
+    .await
+  {
+    state.metrics.record_cache_background_refresh_skip();
+    return Ok(());
+  }
   if parts.status == StatusCode::NOT_MODIFIED {
     state
       .cache
       .update_from_not_modified_async(
         crate::cache::CacheInsertContext {
+          no_vary_search: no_vary_search.as_ref(),
           query_identity: query_identity.as_ref(),
           proxy_protocol_identity: None,
           certificate_identity: certificate_identity.as_ref(),
@@ -234,6 +292,7 @@ async fn background_refresh(
     .cache
     .insert_async(
       crate::cache::CacheInsertContext {
+        no_vary_search: no_vary_search.as_ref(),
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,
         certificate_identity: certificate_identity.as_ref(),

@@ -217,6 +217,31 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "cache",
+      "no-vary-search-protocol-matrix",
+      "No-Vary-Search reuses GET, HEAD, and QUERY cache entries across HTTP/1, HTTP/2, and HTTP/3 paths",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        h2_upstream: true,
+        h3_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "cache",
+      "no-vary-search-lifecycle",
+      "No-Vary-Search aliases revalidate through the owner and are purged together",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "cache",
       "large-object-cache",
       "large cacheable objects survive upstream removal",
       ExpectStart::Success,

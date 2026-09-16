@@ -185,6 +185,7 @@ pub(crate) async fn warm_cache_request(
     snapshot
       .cache
       .lookup_async(crate::cache::CacheLookupContext {
+        no_vary_search: None,
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,
         certificate_identity: prepared.as_ref().map(|value| &value.cache_identity),

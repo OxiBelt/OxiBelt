@@ -68,6 +68,8 @@ pub(crate) struct ExternalCacheEntryMetadata {
   pub tags: Vec<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub query_target_epoch: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub no_vary_search: Option<crate::cache::CacheNvsMetadata>,
 }
 
 impl ExternalCacheEntryMetadata {
@@ -88,6 +90,13 @@ impl ExternalCacheEntryMetadata {
       && self.query_target_epoch.is_none()
     {
       bail!("Q1 external cache metadata is missing its target epoch");
+    }
+    if self
+      .no_vary_search
+      .as_ref()
+      .is_some_and(|metadata| !metadata.valid())
+    {
+      bail!("external cache No-Vary-Search metadata is invalid");
     }
     Ok(())
   }
@@ -550,6 +559,7 @@ mod tests {
       vary: Vec::new(),
       tags: Vec::new(),
       query_target_epoch: None,
+      no_vary_search: None,
     };
     assert!(
       metadata
@@ -585,6 +595,7 @@ mod tests {
       vary: Vec::new(),
       tags: vec!["tag".to_string()],
       query_target_epoch: None,
+      no_vary_search: None,
     };
 
     let frame = framed_entry_bytes(&metadata, b"body").expect("frame should encode");

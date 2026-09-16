@@ -118,6 +118,10 @@ pub(super) fn default_cache_key() -> String {
   "{scheme}:{host}:{uri}".to_string()
 }
 
+pub(super) fn default_cache_no_vary_search() -> bool {
+  true
+}
+
 pub(super) fn default_cache_tag_headers() -> Vec<String> {
   vec!["Surrogate-Key".to_string(), "Cache-Tag".to_string()]
 }

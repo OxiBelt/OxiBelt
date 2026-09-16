@@ -165,7 +165,15 @@ impl ResponseCache {
     publish_external: bool,
   ) -> CacheInsertOutcome {
     match self.prepare_insert(ctx, entry.status, &entry.headers, Some(entry.body.len())) {
-      CachePreparedInsertDecision::Cacheable(prepared) => {
+      CachePreparedInsertDecision::Cacheable(mut prepared) => {
+        if prepared.no_vary_search.is_none() {
+          prepared.no_vary_search = entry
+            .no_vary_search
+            .clone()
+            .filter(|nvs| nvs.valid() && nvs.owner_uri == prepared.uri);
+          prepared.header_bytes = header_size(&prepared.stored_headers)
+            .saturating_add(nvs::metadata_size(prepared.no_vary_search.as_ref()));
+        }
         self.insert_prepared_with_external(*prepared, entry, publish_external)
       }
       CachePreparedInsertDecision::NotCacheable(_) => CacheInsertOutcome::NotCacheable,
@@ -244,6 +252,7 @@ impl ResponseCache {
       };
       let tags = extract_tags(&entry.headers, &prepared.policy);
       let stored = StoredEntry {
+        no_vary_search: prepared.no_vary_search,
         policy: prepared.policy.name.clone(),
         partition: prepared.partition,
         base_key: prepared.base_key,
@@ -364,6 +373,7 @@ impl ResponseCache {
         headers.insert(name.clone(), value.clone());
       }
     }
+    revalidation::merge_nvs_not_modified_headers(&mut headers, not_modified_headers);
     self
       .write_shared_entry_for_insert(ctx, cached_entry.status, &headers, cached_entry.body_len())
       .await;
@@ -433,7 +443,9 @@ impl ResponseCache {
       Err(reason) => return CachePreparedInsertDecision::NotCacheable(reason),
     };
     let stored_headers = stored_response_headers(response_headers, &self.config);
-    let header_bytes = header_size(&stored_headers);
+    let no_vary_search = self.prepare_nvs(&ctx, &stored_headers);
+    let header_bytes =
+      header_size(&stored_headers).saturating_add(nvs::metadata_size(no_vary_search.as_ref()));
     if content_length.is_some_and(|body_len| {
       body_len
         .checked_add(header_bytes)
@@ -446,6 +458,7 @@ impl ResponseCache {
     }
     let variant_key = variant_key(&operation.partition, &operation.base_key, &metadata.vary);
     CachePreparedInsertDecision::Cacheable(Box::new(CachePreparedInsert {
+      no_vary_search,
       policy: operation.policy,
       partition: operation.partition,
       base_key: operation.base_key,

@@ -3665,6 +3665,15 @@
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
         },
+        "no_vary_search": {
+          "default": true,
+          "description": "OxiBelt native field `cache.no_vary_search`. Production Rust validation is authoritative.",
+          "type": "boolean",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
         "partition_key": {
           "anyOf": [
             {

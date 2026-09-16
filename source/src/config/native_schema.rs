@@ -1030,6 +1030,7 @@ fn boolean_path(path: &str) -> bool {
       | "proxy.status_headers.cache_status"
       | "routes.status_headers.proxy_status"
       | "routes.status_headers.cache_status"
+      | "cache.no_vary_search"
   ) {
     return true;
   }
@@ -1479,6 +1480,7 @@ fn default_value(path: &str) -> Option<Value> {
     "cache.query_cleanup.queue_capacity" => json!(64),
     "cache.query_cleanup.batch_size" => json!(128),
     "cache.query_cleanup.max_concurrent" => json!(1),
+    "cache.no_vary_search" => json!(true),
     "stream_listeners.udp_flow_state" => json!("local"),
     "turn_upstream_pools.health_check.connect_timeout_ms" => json!(3_000),
     "turn_upstream_pools.health_check.tls_handshake_timeout_ms" => json!(5_000),

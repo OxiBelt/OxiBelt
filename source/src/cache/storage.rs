@@ -245,6 +245,12 @@ pub(super) fn remove_replaced_entry_files(existing: StoredEntry, replacement: &S
 }
 
 pub(super) fn index_entry(inner: &mut CacheInner, entry: &StoredEntry) {
+  if let Some(nvs) = entry.no_vary_search.as_ref().filter(|nvs| nvs.valid()) {
+    let candidates = inner.nvs_index.entry(nvs.scope.clone()).or_default();
+    if candidates.len() < nvs.candidate_limit {
+      candidates.insert(entry.variant_key.clone());
+    }
+  }
   inner
     .index
     .insert(entry_lookup_key(entry), &entry.variant_key);
@@ -262,6 +268,14 @@ pub(super) fn index_entry(inner: &mut CacheInner, entry: &StoredEntry) {
 }
 
 pub(super) fn unindex_entry(inner: &mut CacheInner, entry: &StoredEntry) {
+  if let Some(nvs) = &entry.no_vary_search
+    && let Some(candidates) = inner.nvs_index.get_mut(&nvs.scope)
+  {
+    candidates.remove(&entry.variant_key);
+    if candidates.is_empty() {
+      inner.nvs_index.remove(&nvs.scope);
+    }
+  }
   inner
     .index
     .remove(&entry_lookup_key(entry), &entry.variant_key);
@@ -317,7 +331,7 @@ impl StoredEntry {
     if !self.security_headers_neutral {
       return None;
     }
-    match &self.body {
+    let mut entry = match &self.body {
       StoredBody::Memory(body) => Some(
         CacheEntry::memory(self.status, self.headers.clone(), body.clone())
           .with_stored_at(self.stored_at)
@@ -336,7 +350,9 @@ impl StoredEntry {
           .with_expires_at(self.expires_at),
         )
       }
-    }
+    }?;
+    entry.no_vary_search = self.no_vary_search.clone();
+    Some(entry)
   }
 
   pub(super) fn remove_body(self) {

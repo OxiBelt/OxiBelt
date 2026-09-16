@@ -254,8 +254,12 @@ pub(in crate::server) async fn cache_key_explain_response(
     Err(message) => return text_response(StatusCode::BAD_REQUEST, message),
   };
   crate::proxy::http::client_certificate::strip_reserved(&mut headers, snapshot);
+  let no_vary_search = body.query.as_ref().and_then(|query| {
+    crate::cache::CacheNvsRequest::new(query.effective.target.uri.parse().ok()?, b"admin-explain")
+  });
   let mut explain = snapshot.cache.explain_key(
     crate::cache::CacheLookupContext {
+      no_vary_search: no_vary_search.as_ref(),
       proxy_protocol_identity: None,
       certificate_identity: None,
       policy_name: body.policy.as_deref(),

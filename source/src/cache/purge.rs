@@ -148,6 +148,10 @@ impl ResponseCache {
     uri: &str,
     partition: Option<&str>,
   ) -> usize {
+    let parsed_uri = uri.parse::<Uri>().ok();
+    if let Some(uri) = &parsed_uri {
+      self.advance_query_generation(&nvs::target(policy, scheme, host, uri));
+    }
     let mut inner = self.inner_guard();
     let keys = inner
       .entries
@@ -156,7 +160,15 @@ impl ResponseCache {
         entry.policy == policy
           && entry.scheme == scheme
           && entry.host == host
-          && entry.uri == uri
+          && (entry.uri == uri
+            || (entry.no_vary_search.is_some()
+              && parsed_uri.as_ref().is_some_and(|target| {
+                entry
+                  .uri
+                  .parse::<Uri>()
+                  .ok()
+                  .is_some_and(|stored| stored.path() == target.path())
+              })))
           && partition.is_none_or(|partition| entry.partition == partition)
       })
       .map(|(key, _)| key.clone())
@@ -177,6 +189,14 @@ impl ResponseCache {
     partition: Option<&str>,
   ) -> anyhow::Result<usize> {
     let count = self.purge_exact_partition(policy, scheme, host, uri, partition);
+    if let Ok(uri) = uri.parse::<Uri>() {
+      let epoch = self
+        .nvs_epoch(&nvs::target(policy, scheme, host, &uri), true)
+        .await;
+      if epoch.is_none() && self.shared_state.as_ref().is_some_and(|s| s.has_cache()) {
+        bail!("No-Vary-Search purge could not fence the shared path");
+      }
+    }
     let shared_count = match self
       .shared_state
       .as_ref()
@@ -204,6 +224,7 @@ impl ResponseCache {
     path_prefix: &str,
     partition: Option<&str>,
   ) -> usize {
+    self.advance_query_generation(&nvs::policy_target(policy));
     let mut inner = self.inner_guard();
     let keys = inner
       .entries
@@ -237,6 +258,14 @@ impl ResponseCache {
     partition: Option<&str>,
   ) -> anyhow::Result<usize> {
     let count = self.purge_prefix_partition(policy, scheme, host, path_prefix, partition);
+    if self
+      .nvs_epoch(&nvs::policy_target(policy), true)
+      .await
+      .is_none()
+      && self.shared_state.as_ref().is_some_and(|s| s.has_cache())
+    {
+      bail!("No-Vary-Search purge could not fence the shared policy");
+    }
     let shared_count = match self
       .shared_state
       .as_ref()
@@ -270,6 +299,7 @@ impl ResponseCache {
     host: Option<&str>,
     partition: Option<&str>,
   ) -> usize {
+    self.advance_query_generation(&nvs::policy_target(policy));
     let mut inner = self.inner_guard();
     let keys = inner
       .entries
@@ -299,6 +329,14 @@ impl ResponseCache {
     partition: Option<&str>,
   ) -> anyhow::Result<usize> {
     let count = self.purge_tag_partition(policy, tag, scheme, host, partition);
+    if self
+      .nvs_epoch(&nvs::policy_target(policy), true)
+      .await
+      .is_none()
+      && self.shared_state.as_ref().is_some_and(|s| s.has_cache())
+    {
+      bail!("No-Vary-Search purge could not fence the shared policy");
+    }
     let shared_count = match self
       .shared_state
       .as_ref()
@@ -346,6 +384,8 @@ impl ResponseCache {
     ctx: CacheLookupContext<'_>,
     response_headers: Option<&HeaderMap>,
   ) -> CacheKeyExplain {
+    let no_vary_search = matches!(ctx.method.as_str(), "GET" | "HEAD" | "QUERY")
+      .then(|| nvs::explain(self.no_vary_search_enabled(), &ctx, response_headers));
     let policy = self.policy(ctx.policy_name);
     let mut reasons = Vec::new();
     if !self.config.enabled {
@@ -380,6 +420,7 @@ impl ResponseCache {
           enabled: self.config.enabled,
           cacheable_method,
           bypassed,
+          no_vary_search,
           partition: String::new(),
           base_key: String::new(),
           variant_key: None,
@@ -444,6 +485,7 @@ impl ResponseCache {
       enabled: self.config.enabled && policy.is_some(),
       cacheable_method,
       bypassed,
+      no_vary_search,
       partition,
       base_key,
       variant_key,

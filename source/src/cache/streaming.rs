@@ -347,6 +347,7 @@ impl ResponseCache {
     let variant_key = prepared.variant_key.clone();
     let tags = extract_tags(&prepared.stored_headers, &prepared.policy);
     let stored = StoredEntry {
+      no_vary_search: prepared.no_vary_search.clone(),
       policy: prepared.policy.name.clone(),
       partition: prepared.partition,
       base_key: prepared.base_key,

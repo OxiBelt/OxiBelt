@@ -313,6 +313,7 @@ fn insert_ctx<'a>(
   query_identity: Option<&'a crate::cache::CacheQueryIdentity>,
 ) -> CacheInsertContext<'a> {
   CacheInsertContext {
+    no_vary_search: None,
     query_identity,
     proxy_protocol_identity,
     certificate_identity,

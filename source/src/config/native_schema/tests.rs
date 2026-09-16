@@ -232,3 +232,15 @@ fn declares_cache_query_cleanup_schema_bounds_and_defaults() {
     assert_eq!(default_value(path), Some(default), "{path}");
   }
 }
+
+#[cfg(feature = "config-tooling")]
+#[test]
+fn declares_cache_no_vary_search_as_top_level_boolean_with_default() {
+  assert!(boolean_path("cache.no_vary_search"));
+  assert_eq!(default_value("cache.no_vary_search"), Some(json!(true)));
+  assert!(
+    !allowed_config_keys("cache.policies")
+      .unwrap()
+      .contains(&"no_vary_search")
+  );
+}

@@ -29,12 +29,7 @@ struct EpochBucket {
 
 impl ResponseCache {
   pub(super) fn load_disk_query_epochs(&self, inner: &mut CacheInner, directory: &Path) {
-    if !self
-      .config
-      .cache_methods
-      .iter()
-      .any(|method| method == "QUERY")
-    {
+    if !self.config.enabled {
       return;
     }
     if inner.disk_query_epochs_loaded {
@@ -125,12 +120,7 @@ impl ResponseCache {
   }
 
   pub(super) fn persist_disk_query_epochs(&self, inner: &CacheInner) -> anyhow::Result<()> {
-    if !self
-      .config
-      .cache_methods
-      .iter()
-      .any(|method| method == "QUERY")
-    {
+    if !self.config.enabled {
       return Ok(());
     }
     let Some(directory) = self.disk_dir.as_ref() else {

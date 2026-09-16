@@ -2820,7 +2820,9 @@ async fn echo_h3_upstream_request(
     "instance_id": instance_id.as_ref(),
     "connection_id": connection_id,
   });
-  json_response(status, payload.to_string(), Some(upstream_name.as_ref()))
+  let mut response = json_response(status, payload.to_string(), Some(upstream_name.as_ref()));
+  apply_no_vary_search_fixture(&parts.uri, &mut response);
+  response
 }
 
 async fn echo_upstream_request(
@@ -2860,7 +2862,21 @@ async fn echo_upstream_request(
     "headers": header_json(&parts.headers),
     "body": body_text,
   });
-  json_response(status, payload.to_string(), Some(upstream_name.as_ref()))
+  let mut response = json_response(status, payload.to_string(), Some(upstream_name.as_ref()));
+  apply_no_vary_search_fixture(&parts.uri, &mut response);
+  response
+}
+
+fn apply_no_vary_search_fixture(uri: &Uri, response: &mut Response<Full<Bytes>>) {
+  if let Some(query) = uri.query() {
+    if let Some((_, value)) =
+      url::form_urlencoded::parse(query.as_bytes()).find(|(name, _)| name == "no_vary_search")
+    {
+      if let Ok(value) = HeaderValue::from_str(&value) {
+        response.headers_mut().insert("no-vary-search", value);
+      }
+    }
+  }
 }
 
 fn query_u64(uri: &Uri, key: &str) -> Option<u64> {

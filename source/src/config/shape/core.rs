@@ -453,6 +453,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "max_size_bytes",
       "memory_auto_fraction",
       "memory_max_size_bytes",
+      "no_vary_search",
       "negative_statuses",
       "negative_ttl_seconds",
       "partition_key",

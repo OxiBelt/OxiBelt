@@ -24,6 +24,9 @@ pub(super) fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
     .ok_or_else(|| anyhow!("invalid cache body path"))?;
   let mut lines = Vec::new();
   lines.push("version=1".to_string());
+  if let Some(nvs) = &entry.no_vary_search {
+    lines.push(format!("no_vary_search={}", b64(&serde_json::to_vec(nvs)?)));
+  }
   for (key, value) in [
     ("policy", entry.policy.as_str()),
     ("partition", entry.partition.as_str()),
@@ -204,6 +207,14 @@ pub(super) fn decode_metadata_text(
     bail!("legacy Q1 disk metadata is missing its target epoch");
   }
   Ok(StoredEntry {
+    no_vary_search: values
+      .get("no_vary_search")
+      .filter(|values| values.len() == 1)
+      .and_then(|values| values.first())
+      .filter(|value| value.len() <= 65_536)
+      .and_then(|value| unb64(value).ok())
+      .and_then(|value| serde_json::from_str::<super::CacheNvsMetadata>(&value).ok())
+      .filter(|nvs| nvs.valid() && nvs.owner_uri == uri),
     policy,
     partition,
     base_key,

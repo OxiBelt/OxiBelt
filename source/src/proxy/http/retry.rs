@@ -697,7 +697,15 @@ pub(super) async fn send_pool_with_retry(
   timeouts: EffectiveTimeouts,
   policy: &EffectiveRetryPolicy,
 ) -> anyhow::Result<PoolRetrySuccess> {
-  let policy = policy.adjusted_for_overload(state.overload.as_ref());
+  let mut policy = policy.adjusted_for_overload(state.overload.as_ref());
+  let nvs_owner_target = request
+    .extensions()
+    .get::<super::cache_operations::NvsOwnerTarget>()
+    .cloned();
+  if nvs_owner_target.is_some() {
+    // Owner validators cannot migrate to another origin during failover.
+    policy.reselect_pool_on_retry = false;
+  }
   let Some(initial_upstream) = state.upstreams.get(initial_upstream_index) else {
     anyhow::bail!("selected upstream index is not configured");
   };
@@ -813,17 +821,21 @@ pub(super) async fn send_pool_with_retry(
       .await;
       continue;
     };
-    let target_uri = route_actions::build_upstream_uri(
-      upstream_uri,
-      route,
-      RouteActionRenderContext {
-        route_prefix: route.effective_path_prefix(),
-        path_captures,
-        downstream_scheme,
-        downstream_host,
-        downstream_uri: original_uri,
-      },
-    )?;
+    let target_uri = if let Some(owner) = &nvs_owner_target {
+      owner.0.clone()
+    } else {
+      route_actions::build_upstream_uri(
+        upstream_uri,
+        route,
+        RouteActionRenderContext {
+          route_prefix: route.effective_path_prefix(),
+          path_captures,
+          downstream_scheme,
+          downstream_host,
+          downstream_uri: original_uri,
+        },
+      )?
+    };
     let mut attempt_parts = parts_clone(&replay.parts);
     attempt_parts.uri = target_uri;
     attempt_parts.version = upstream_request_version(upstream_version);

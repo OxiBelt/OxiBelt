@@ -2,9 +2,9 @@
 
 use super::external_handler::{
   ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheHeader, ExternalCacheLookupHit,
-  ExternalCacheLookupRequest, ExternalCachePublishBody, ExternalCacheQueryCleanupReport,
-  ExternalCacheQueryCleanupRequest, ExternalCacheQueryEpochRequest, ExternalCacheVary,
-  PROTOCOL_VERSION,
+  ExternalCacheLookupRequest, ExternalCacheNvsCandidatesRequest, ExternalCacheNvsEpochRequest,
+  ExternalCachePublishBody, ExternalCacheQueryCleanupReport, ExternalCacheQueryCleanupRequest,
+  ExternalCacheQueryEpochRequest, ExternalCacheVary, PROTOCOL_VERSION,
 };
 #[cfg(feature = "admin-runtime")]
 use super::external_handler::{
@@ -13,6 +13,48 @@ use super::external_handler::{
 use super::*;
 
 impl ResponseCache {
+  pub(super) async fn external_nvs_epoch(
+    &self,
+    target: &CacheQueryInvalidationTarget,
+    advance: bool,
+  ) -> Option<u64> {
+    let handler = self
+      .policy(Some(&target.policy))?
+      .external_handler
+      .as_deref()?;
+    self
+      .external_cache
+      .nvs_epoch(
+        handler,
+        ExternalCacheNvsEpochRequest::new(
+          target.policy.clone(),
+          target.scheme.clone(),
+          target.host.clone(),
+          target.uri.clone(),
+          advance,
+        ),
+      )
+      .await
+      .map(|response| response.target_epoch)
+  }
+
+  pub(super) async fn external_nvs_candidates(
+    &self,
+    policy: &str,
+    scope: &str,
+    limit: usize,
+  ) -> Option<Vec<CacheNvsCandidate>> {
+    let handler = self.policy(Some(policy))?.external_handler.as_deref()?;
+    self
+      .external_cache
+      .nvs_candidates(
+        handler,
+        ExternalCacheNvsCandidatesRequest::new(policy.to_string(), scope.to_string(), limit),
+      )
+      .await
+      .map(|response| response.candidates)
+  }
+
   pub(super) async fn external_query_epoch(
     &self,
     target: &CacheQueryInvalidationTarget,
@@ -119,6 +161,24 @@ impl ResponseCache {
       .external_cache
       .lookup(handler, request, temp_dir)
       .await?;
+    if let Some(metadata) = hit.metadata.no_vary_search.as_ref() {
+      if !metadata.valid() || metadata.owner_uri != operation.uri {
+        return None;
+      }
+      let owner_uri = metadata.owner_uri.parse::<Uri>().ok()?;
+      let path_target = super::nvs::target(
+        &operation.policy.name,
+        &operation.scheme,
+        &operation.host,
+        &owner_uri,
+      );
+      let policy_target = super::nvs::policy_target(&operation.policy.name);
+      if self.nvs_epoch(&path_target, false).await != Some(metadata.epoch)
+        || self.nvs_epoch(&policy_target, false).await != Some(metadata.policy_epoch)
+      {
+        return None;
+      }
+    }
     self.external_lookup_result(operation, ctx, hit)
   }
 
@@ -185,7 +245,10 @@ impl ResponseCache {
       Some(value) => Some(system_time_from_ms(value)?),
       None => None,
     };
-    let size = metadata.body_len.checked_add(header_size(&headers))?;
+    let size = metadata
+      .body_len
+      .checked_add(header_size(&headers))?
+      .checked_add(nvs::metadata_size(metadata.no_vary_search.as_ref()))?;
     if size > self.config.max_size_bytes {
       return None;
     }
@@ -197,6 +260,7 @@ impl ResponseCache {
         }
         let stored = StoredEntry {
           policy: operation.policy.name.clone(),
+          no_vary_search: metadata.no_vary_search.clone(),
           partition: operation.partition.clone(),
           base_key: operation.base_key.clone(),
           variant_key: metadata.variant_key.clone(),
@@ -226,8 +290,10 @@ impl ResponseCache {
         if body_len != metadata.body_len {
           return None;
         }
-        CacheEntry::temporary_file(status, headers, file, body_len, stored_at)
-          .with_expires_at(expires_at)
+        let mut entry = CacheEntry::temporary_file(status, headers, file, body_len, stored_at)
+          .with_expires_at(expires_at);
+        entry.no_vary_search = metadata.no_vary_search.clone();
+        entry
       }
     };
     if request_no_cache(super::lookup::cache_view_headers(&ctx))
@@ -392,6 +458,7 @@ impl ResponseCache {
           .collect(),
         tags: entry.tags.clone(),
         query_target_epoch: entry.query_target_epoch,
+        no_vary_search: entry.no_vary_search.clone(),
       },
     ))
   }
