@@ -69,7 +69,10 @@ fn collapsed_follower_keeps_expiry_without_claiming_hit_or_forward_facts() {
 }
 
 fn parse_config(raw: &str) -> Config {
-  let config: Config = toml::from_str(raw).expect("config should parse");
+  let mut config: Config = toml::from_str(raw).expect("config should parse");
+  // These fixtures exercise the legacy body collection and storage paths
+  // directly, without the ingress-created cache-group request token.
+  config.cache.groups.enabled = false;
   config.validate().expect("config should validate");
   config
 }
@@ -284,6 +287,7 @@ min_hits = 2
     state
       .cache
       .lookup(crate::cache::CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         query_identity: None,
         proxy_protocol_identity: None,
@@ -466,6 +470,7 @@ stream_large_objects = true
     state
       .cache
       .lookup(crate::cache::CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         query_identity: None,
         proxy_protocol_identity: None,
@@ -561,6 +566,7 @@ stream_large_objects = true
   assert_eq!(delivered, body);
   assert_eq!(state.cache.stats().memory_entries, 1);
   match state.cache.lookup(crate::cache::CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     query_identity: None,
     proxy_protocol_identity: None,
@@ -743,6 +749,7 @@ respect_cache_control = true
   assert_eq!(delivered, body);
   assert_eq!(delivered.as_ptr(), body_ptr);
   match state.cache.lookup(crate::cache::CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     query_identity: None,
     proxy_protocol_identity: None,

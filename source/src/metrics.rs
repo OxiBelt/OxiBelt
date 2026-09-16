@@ -46,6 +46,9 @@ pub struct Metrics {
   cache_stale_served_total: AtomicU64,
   cache_purges_total: AtomicU64,
   cache_tag_purges_total: AtomicU64,
+  cache_group_invalidations_total: AtomicU64,
+  cache_group_errors_total: AtomicU64,
+  cache_group_recoveries_total: AtomicU64,
   cache_admission_rejections_total: AtomicU64,
   cache_fill_waiters_total: AtomicU64,
   cache_fill_lock_conflicts_total: AtomicU64,
@@ -354,6 +357,24 @@ impl Metrics {
     self.cache_purges_total.fetch_add(1, Ordering::Relaxed);
   }
 
+  pub(crate) fn record_cache_group_invalidation(&self, success: bool) {
+    if success {
+      self
+        .cache_group_invalidations_total
+        .fetch_add(1, Ordering::Relaxed);
+    } else {
+      self
+        .cache_group_errors_total
+        .fetch_add(1, Ordering::Relaxed);
+    }
+  }
+
+  pub(crate) fn record_cache_group_recovery(&self) {
+    self
+      .cache_group_recoveries_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
   pub fn record_cache_tag_purge(&self) {
     self.cache_tag_purges_total.fetch_add(1, Ordering::Relaxed);
   }
@@ -622,6 +643,24 @@ impl Metrics {
       "oxibelt_cache_tag_purges_total",
       "counter",
       self.cache_tag_purges_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_group_invalidations_total",
+      "counter",
+      self.cache_group_invalidations_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_group_errors_total",
+      "counter",
+      self.cache_group_errors_total.load(Ordering::Relaxed),
+    );
+    append_metric(
+      &mut output,
+      "oxibelt_cache_group_recoveries_total",
+      "counter",
+      self.cache_group_recoveries_total.load(Ordering::Relaxed),
     );
     append_metric(
       &mut output,

@@ -5,6 +5,9 @@ use super::*;
 const CACHE_CERTIFICATE_DOMAIN: &str = "\0oxibelt-cache-certificate-v1\0";
 const CACHE_PLAIN_KEY_ESCAPE_DOMAIN: &str = "\0oxibelt-cache-plain-key-v1\0";
 pub(super) const CACHE_QUERY_DOMAIN: &str = "\0oxibelt-cache-query-v1\0";
+pub(crate) const GROUP_EXTERNAL_CACHE_KEY_VERSION: &str = "oxibelt-cache-groups-key-v1";
+pub(crate) const GROUP_QUERY_EXTERNAL_CACHE_KEY_VERSION: &str = "oxibelt-cache-groups-query-key-v1";
+const GROUP_QUERY_DOMAIN: &str = "\0oxibelt-cache-groups-query-v1\0";
 pub(crate) const QUERY_EXTERNAL_CACHE_KEY_VERSION: &str = "oxibelt-cache-query-key-v1";
 
 /// Produces the physical base-key namespace while preserving user-visible
@@ -43,13 +46,18 @@ pub(super) fn query_partitioned_base_key(
   base_key: String,
   identity: &CacheQueryIdentity,
 ) -> String {
+  let domain = if base_key.starts_with("\0oxibelt-cache-groups-v1\0") {
+    GROUP_QUERY_DOMAIN
+  } else {
+    CACHE_QUERY_DOMAIN
+  };
   let mut material = Vec::with_capacity(base_key.len() + 512);
-  material.extend_from_slice(CACHE_QUERY_DOMAIN.as_bytes());
+  material.extend_from_slice(domain.as_bytes());
   append_query_field(&mut material, base_key.as_bytes());
   identity.append_key_material(&mut material);
   let digest = crate::crypto::sha256(&material);
   let mut encoded = String::with_capacity(CACHE_QUERY_DOMAIN.len() + 64);
-  encoded.push_str(CACHE_QUERY_DOMAIN);
+  encoded.push_str(domain);
   for byte in digest {
     use std::fmt::Write as _;
     let _ = write!(encoded, "{byte:02x}");
@@ -58,11 +66,15 @@ pub(super) fn query_partitioned_base_key(
 }
 
 pub(crate) fn is_query_v1_base_key(base_key: &str) -> bool {
-  base_key.starts_with(CACHE_QUERY_DOMAIN)
+  base_key.starts_with(CACHE_QUERY_DOMAIN) || base_key.starts_with(GROUP_QUERY_DOMAIN)
 }
 
 pub(crate) fn external_cache_key_version(base_key: &str) -> &'static str {
-  if is_query_v1_base_key(base_key) {
+  if base_key.starts_with(GROUP_QUERY_DOMAIN) {
+    GROUP_QUERY_EXTERNAL_CACHE_KEY_VERSION
+  } else if base_key.starts_with("\0oxibelt-cache-groups-v1\0") {
+    GROUP_EXTERNAL_CACHE_KEY_VERSION
+  } else if is_query_v1_base_key(base_key) {
     QUERY_EXTERNAL_CACHE_KEY_VERSION
   } else {
     super::external_handler::CACHE_KEY_VERSION

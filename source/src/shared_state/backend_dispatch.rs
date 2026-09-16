@@ -417,6 +417,33 @@ impl Backend {
     }
   }
 
+  pub(super) async fn compare_exchange(
+    &self,
+    key: &str,
+    expected: Option<&[u8]>,
+    replacement: &[u8],
+  ) -> anyhow::Result<bool> {
+    match self {
+      Self::Redis(redis) => {
+        redis
+          .runtime
+          .execute("cache_group_compare_exchange", || {
+            redis.compare_exchange(key, expected, replacement)
+          })
+          .await
+      }
+      Self::Postgres(pg) => {
+        pg.runtime
+          .execute("cache_group_compare_exchange", || {
+            pg.compare_exchange(key, expected, replacement)
+          })
+          .await
+      }
+      #[cfg(test)]
+      Self::Memory(memory) => memory.compare_exchange(key, expected, replacement),
+    }
+  }
+
   pub(super) async fn delete(&self, key: &str) -> anyhow::Result<()> {
     match self {
       Self::Redis(redis) => {

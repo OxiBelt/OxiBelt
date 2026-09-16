@@ -2470,6 +2470,7 @@ jobs:
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
           OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+          OXIBELT_EXTERNAL_CACHE_HANDLER_IMAGE: oxibelt/mock-external-cache:ci
           OXIBELT_MOCK_DNS_IMAGE: oxibelt/mock-dns:ci
           OXIBELT_MOCK_KUBERNETES_IMAGE: oxibelt/mock-kubernetes:ci
           OXIBELT_MOCK_NOMAD_IMAGE: oxibelt/mock-nomad:ci

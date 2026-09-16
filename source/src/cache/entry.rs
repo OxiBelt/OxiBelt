@@ -16,6 +16,7 @@ pub struct CacheBodyFile {
 
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
+  pub group_stamp: Option<super::CacheGroupStamp>,
   pub no_vary_search: Option<super::CacheNvsMetadata>,
   pub(crate) nvs_alias: bool,
   pub status: StatusCode,
@@ -33,6 +34,7 @@ impl CacheEntry {
   pub fn memory(status: StatusCode, headers: HeaderMap, body: Bytes) -> Self {
     let body_len = body.len();
     Self {
+      group_stamp: None,
       no_vary_search: None,
       nvs_alias: false,
       status,
@@ -65,6 +67,7 @@ impl CacheEntry {
     stored_at: SystemTime,
   ) -> Self {
     Self {
+      group_stamp: None,
       no_vary_search: None,
       nvs_alias: false,
       status,
@@ -92,6 +95,7 @@ impl CacheEntry {
   ) -> Self {
     let path = file.path().to_path_buf();
     Self {
+      group_stamp: None,
       no_vary_search: None,
       nvs_alias: false,
       status,

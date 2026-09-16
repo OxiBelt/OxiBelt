@@ -3458,6 +3458,26 @@
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
         },
+        "groups": {
+          "additionalProperties": false,
+          "description": "OxiBelt native field `cache.groups`. Production Rust validation is authoritative.",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "description": "OxiBelt native field `cache.groups.enabled`. Production Rust validation is authoritative.",
+              "type": "boolean",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            }
+          },
+          "type": "object",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
         "lock": {
           "anyOf": [
             {
@@ -3955,6 +3975,25 @@
                   }
                 ],
                 "description": "OxiBelt native field `cache.policies[].external_handler`. Production Rust validation is authoritative.",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "groups": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `cache.policies[].groups`. Production Rust validation is authoritative.",
+                "properties": {
+                  "enabled": {
+                    "description": "OxiBelt native field `cache.policies[].groups.enabled`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
                 "x-oxibelt-config-activation": "full_reload",
                 "x-oxibelt-introduced-epoch": 1,
                 "x-oxibelt-reference-activation": "none",

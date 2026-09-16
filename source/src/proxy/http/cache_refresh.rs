@@ -7,7 +7,7 @@ use http_body_util::BodyExt;
 use hyper::body::Body;
 use tracing::warn;
 
-use crate::config::{HttpVersion, ProxyProtocolEgressMode, UpstreamConfig};
+use crate::config::{HttpVersion, ProxyProtocolEgressMode, RouteConfig, UpstreamConfig};
 use crate::state::AppSnapshot;
 
 use super::body::{self, BodyTimeoutKind, ProxyBody, boxed_error};
@@ -38,6 +38,7 @@ pub(super) fn spawn_background_refresh(
   timeouts: EffectiveTimeouts,
   route_cache: Option<&str>,
   route_security_headers: Option<&str>,
+  route: &RouteConfig,
   scheme: &'static str,
   host: String,
   method: Method,
@@ -80,7 +81,15 @@ pub(super) fn spawn_background_refresh(
   };
   let route_cache = route_cache.map(str::to_string);
   let route_security_headers = route_security_headers.map(str::to_string);
+  let route = route.clone();
   let upstream = upstream.clone();
+  // The outbound URI and Host now identify the upstream after request
+  // rebuilding. Refreshes remain scoped to the original downstream origin,
+  // but take a fresh group snapshot so they cannot reuse a stale generation.
+  let group_request = outbound
+    .extensions()
+    .get::<crate::cache::CacheGroupRequest>()
+    .map(|request| crate::cache::CacheGroupRequest::new(request.origin.clone()));
   let mut outbound = empty_request_from(outbound);
   if stale.entry.nvs_alias
     && let Some(metadata) = nvs_metadata
@@ -104,22 +113,24 @@ pub(super) fn spawn_background_refresh(
         }
       }
     }
-    let Some(fill_permit) = state
-      .cache
-      .begin_fill_async(crate::cache::CacheLookupContext {
-        no_vary_search: no_vary_search.as_ref(),
-        query_identity: query_identity.as_ref(),
-        proxy_protocol_identity: None,
-        certificate_identity: certificate_identity.as_ref(),
-        policy_name: route_cache.as_deref(),
-        scheme,
-        host: &host,
-        method: &method,
-        uri: &uri,
-        request_headers: &request_headers,
-      })
-      .await
-    else {
+    let group_context = || crate::cache::CacheLookupContext {
+      group_request: group_request.as_ref(),
+      no_vary_search: no_vary_search.as_ref(),
+      query_identity: query_identity.as_ref(),
+      proxy_protocol_identity: None,
+      certificate_identity: certificate_identity.as_ref(),
+      policy_name: route_cache.as_deref(),
+      scheme,
+      host: &host,
+      method: &method,
+      uri: &uri,
+      request_headers: &request_headers,
+    };
+    if !state.cache.bind_group_request(group_context()).await {
+      state.metrics.record_cache_background_refresh_skip();
+      return;
+    }
+    let Some(fill_permit) = state.cache.begin_fill_async(group_context()).await else {
       state.metrics.record_cache_background_refresh_skip();
       return;
     };
@@ -145,6 +156,7 @@ pub(super) fn spawn_background_refresh(
       timeouts,
       route_cache,
       route_security_headers,
+      route,
       scheme,
       host,
       method,
@@ -153,6 +165,7 @@ pub(super) fn spawn_background_refresh(
       certificate_identity,
       query_identity,
       no_vary_search,
+      group_request,
       stale.entry,
     )
     .await
@@ -173,6 +186,7 @@ async fn background_refresh(
   timeouts: EffectiveTimeouts,
   route_cache: Option<String>,
   route_security_headers: Option<String>,
+  route: RouteConfig,
   scheme: &'static str,
   host: String,
   method: Method,
@@ -181,6 +195,7 @@ async fn background_refresh(
   certificate_identity: Option<crate::cache::CacheCertificateIdentity>,
   query_identity: Option<crate::cache::CacheQueryIdentity>,
   no_vary_search: Option<crate::cache::CacheNvsRequest>,
+  group_request: Option<crate::cache::CacheGroupRequest>,
   cached_entry: crate::cache::CacheEntry,
 ) -> anyhow::Result<()> {
   let retry_policy = EffectiveRetryPolicy::disabled_direct();
@@ -218,6 +233,7 @@ async fn background_refresh(
     .cache
     .replace_nvs_policy(
       crate::cache::CacheLookupContext {
+        group_request: group_request.as_ref(),
         no_vary_search: no_vary_search.as_ref(),
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,
@@ -237,10 +253,11 @@ async fn background_refresh(
     return Ok(());
   }
   if parts.status == StatusCode::NOT_MODIFIED {
-    state
+    if !state
       .cache
       .update_from_not_modified_async(
         crate::cache::CacheInsertContext {
+          group_request: group_request.as_ref(),
           no_vary_search: no_vary_search.as_ref(),
           query_identity: query_identity.as_ref(),
           proxy_protocol_identity: None,
@@ -255,7 +272,11 @@ async fn background_refresh(
         &cached_entry,
         &parts.headers,
       )
-      .await;
+      .await
+    {
+      state.metrics.record_cache_background_refresh_skip();
+      return Ok(());
+    }
     state.metrics.record_cache_background_refresh_success();
     return Ok(());
   }
@@ -266,6 +287,7 @@ async fn background_refresh(
     &state.config.security,
     route_security_headers.as_deref(),
   );
+  super::route_runtime::apply_response_actions(&mut parts.headers, &route, &request_headers);
   if body
     .size_hint()
     .upper()
@@ -292,6 +314,7 @@ async fn background_refresh(
     .cache
     .insert_async(
       crate::cache::CacheInsertContext {
+        group_request: group_request.as_ref(),
         no_vary_search: no_vary_search.as_ref(),
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,

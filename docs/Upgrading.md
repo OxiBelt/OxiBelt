@@ -89,6 +89,27 @@ state, including local disk, shared, and external entries, then set the switch
 back to `true`. This prevents entries written under the old exact-only layout
 from being reused as equivalent aliases during the transition.
 
+## RFC 9875 cache groups
+
+Cache groups add the default-on `[cache.groups]` table and optional nested
+`[cache.policies.groups]` override. They use a new cache namespace and bounded
+authority state, so enabling them produces cold misses for existing cache
+objects. The configuration and native-schema epochs do not change.
+
+For a mixed-version deployment, explicitly set `[cache.groups] enabled = false`
+on upgraded nodes, upgrade every cache participant, and then enable it. The
+group namespace gives legacy cache entries cold misses, so a normal upgrade
+does not require a cache clear. Clear failed authority state only when recovery
+requires it. A disconnected node has no pre-request invalidation barrier; a
+node that did not receive an invalidation can reuse its local entry until
+recovery or expiry.
+
+Before rollback to a binary that predates cache groups, disable the feature,
+remove `[cache.groups]` and each policy `groups` override, and remove
+`cache:PurgeGroup` and group-purge API values from automation. Cold-clear all
+cache tiers and group authority records before starting the older binary. The
+older binary must not read the group namespace or persisted generation state.
+
 ## Admin QUERY cache operations
 
 The Admin cache warm and key-explain endpoints add exact-uppercase `QUERY`

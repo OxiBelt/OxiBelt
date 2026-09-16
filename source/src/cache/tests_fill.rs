@@ -4,12 +4,14 @@ use super::*;
 async fn fill_permit_coalesces_followers_until_leader_drops() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
   let uri = "/asset/app.css?v=1".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -51,12 +53,14 @@ async fn fill_permit_coalesces_followers_until_leader_drops() {
 async fn fill_waiter_times_out_without_leader_drop() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
   let uri = "/asset/app.css?v=1".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -88,6 +92,7 @@ fn certificate_identity_uses_a_separate_fill_lock() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -108,6 +113,7 @@ fn certificate_identity_uses_a_separate_fill_lock() {
   )
   .unwrap();
   let context = |identity| CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -134,12 +140,14 @@ fn certificate_identity_uses_a_separate_fill_lock() {
 fn not_stored_fill_suppression_skips_short_lived_locks() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
   let uri = "/asset/no-store.css".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let insert_ctx = CacheInsertContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -152,6 +160,7 @@ fn not_stored_fill_suppression_skips_short_lived_locks() {
     certificate_identity: None,
   };
   let lookup_ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -187,12 +196,14 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
 
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
   let uri = "/asset/no-store.css".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let insert_ctx = CacheInsertContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -205,6 +216,7 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
     certificate_identity: None,
   };
   let lookup_ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),

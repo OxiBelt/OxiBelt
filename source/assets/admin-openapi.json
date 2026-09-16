@@ -1785,7 +1785,7 @@
           "cache"
         ],
         "operationId": "purgeCache",
-        "summary": "Purge cache entries by exact URL, path prefix, or tag.",
+        "summary": "Purge cache entries by exact URL, path prefix, tag, or RFC 9875 cache group.",
         "requestBody": {
           "$ref": "#/components/requestBodies/CachePurgeRequest"
         },
@@ -5187,7 +5187,8 @@
                   "enum": [
                     "exact",
                     "prefix",
-                    "tag"
+                    "tag",
+                    "group"
                   ]
                 },
                 "policy": {
@@ -5208,10 +5209,82 @@
                 "tag": {
                   "type": "string"
                 },
+                "origin": {
+                  "type": "string",
+                  "description": "Absolute HTTP or HTTPS origin URI with no path other than optional /, query, fragment, or credentials.",
+                  "format": "uri"
+                },
+                "group": {
+                  "type": "string",
+                  "description": "Decoded opaque RFC 9875 cache-group name. It is limited to 256 printable ASCII bytes.",
+                  "maxLength": 256,
+                  "pattern": "^[ -~]{0,256}$"
+                },
                 "partition": {
                   "type": "string"
                 }
               },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "exact"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "host",
+                      "uri"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "prefix"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "host",
+                      "path_prefix"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "tag"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "tag"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "group"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "origin",
+                      "group"
+                    ]
+                  }
+                }
+              ],
               "additionalProperties": false
             }
           }

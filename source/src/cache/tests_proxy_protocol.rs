@@ -67,6 +67,7 @@ fn lookup_context<'a>(
   proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
 ) -> CacheLookupContext<'a> {
   CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity,
     policy_name: Some("default"),
@@ -87,6 +88,7 @@ fn insert_context<'a>(
   proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
 ) -> CacheInsertContext<'a> {
   CacheInsertContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity,
     policy_name: Some("default"),
@@ -150,6 +152,7 @@ fn proxy_tls_identity_partitions_same_request_by_source_metadata_address_and_abs
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -216,6 +219,7 @@ fn proxy_tls_identity_composes_with_client_certificate_identity() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -281,6 +285,7 @@ fn disk_cache_recovery_preserves_proxy_tls_identity_namespaces() {
   let directory = tempfile::tempdir().expect("temporary disk cache directory should exist");
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(directory.path().to_path_buf()),
     disk_max_size_bytes: Some(1024 * 1024),
@@ -327,6 +332,7 @@ async fn shared_and_external_cache_paths_validate_proxy_tls_identity_namespaces(
   let shared = crate::shared_state::SharedState::test_memory("proxy-tls-cache-namespaces");
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     external_handler: Some("proxy-tls-external".to_string()),
     ..CacheConfig::default()
   };
@@ -382,6 +388,7 @@ async fn shared_and_external_cache_paths_validate_proxy_tls_identity_namespaces(
       matching_context.query_identity,
       matching_context.certificate_identity,
       matching_context.proxy_protocol_identity,
+      None,
     )
     .expect("external operation should build");
   assert!(matches!(
@@ -410,6 +417,7 @@ async fn shared_and_external_cache_paths_validate_proxy_tls_identity_namespaces(
       mismatched_context.query_identity,
       mismatched_context.certificate_identity,
       mismatched_context.proxy_protocol_identity,
+      None,
     )
     .expect("mismatched external operation should build");
   assert!(
@@ -440,6 +448,7 @@ fn external_hit_for_context(
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )
     .expect("external operation should build");
   external_hit(&operation, body)
@@ -474,6 +483,8 @@ fn external_hit(operation: &CacheOperationContext, body: Bytes) -> ExternalCache
       tags: Vec::new(),
       query_target_epoch: None,
       no_vary_search: None,
+      group_stamp: None,
+      capabilities: Vec::new(),
     },
     body: ExternalCacheBody::Memory(body),
   }

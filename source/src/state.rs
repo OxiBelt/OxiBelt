@@ -476,14 +476,19 @@ impl AppSnapshot {
     );
     let external_cache = crate::cache::ExternalCacheRuntime::new(&config, metrics.clone())
       .context("failed to build external cache handlers")?;
-    let cache = ResponseCache::new_with_external_and_health(
+    let cache = ResponseCache::new_with_external_and_health_with_previous(
       &config.cache,
       shared_state.clone(),
       external_cache,
       runtime_health.clone(),
       metrics.clone(),
+      previous.map(|snapshot| snapshot.cache.as_ref()),
     )
     .context("failed to build response cache")?;
+    cache
+      .initialize_group_activation(previous.map(|snapshot| snapshot.cache.as_ref()))
+      .await
+      .context("failed to activate cache group generations")?;
     cache.set_overload_runtime(overload.clone());
     let telemetry = match previous {
       Some(_) => TelemetryRuntime::new(&config.telemetry.tracing)

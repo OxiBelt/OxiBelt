@@ -688,6 +688,7 @@ pub(crate) enum CachePurgeSubcommand {
   Exact(CacheExactArgs),
   Prefix(CachePrefixArgs),
   Tag(CacheTagArgs),
+  Group(CacheGroupArgs),
 }
 
 #[derive(Debug, Args)]
@@ -728,6 +729,19 @@ pub(crate) struct CacheTagArgs {
   pub(crate) host: Option<String>,
   #[arg(long)]
   pub(crate) tag: String,
+  #[arg(long)]
+  pub(crate) partition: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CacheGroupArgs {
+  #[arg(long, default_value = "default")]
+  pub(crate) policy: String,
+  #[arg(long)]
+  pub(crate) origin: String,
+  /// Decoded printable ASCII cache-group name, for example `release-1`.
+  #[arg(long)]
+  pub(crate) group: String,
   #[arg(long)]
   pub(crate) partition: Option<String>,
 }

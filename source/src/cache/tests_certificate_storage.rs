@@ -37,6 +37,7 @@ fn lookup_context<'a>(
   certificate_identity: Option<&'a CacheCertificateIdentity>,
 ) -> CacheLookupContext<'a> {
   CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -67,6 +68,7 @@ fn insert_certificate_variants(
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
@@ -121,6 +123,7 @@ fn disk_cache_recovery_keeps_certificate_identity_variants_separate_and_purgeabl
   let temp_dir = TestTempDir::new();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(temp_dir.path.clone()),
     disk_max_size_bytes: Some(1024 * 1024),
@@ -164,6 +167,7 @@ async fn shared_cache_keeps_certificate_identity_variants_separate_and_purgeable
   let shared = crate::shared_state::SharedState::test_memory("cache-certificate-storage");
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let writer = ResponseCache::new(&config, Some(shared.clone())).unwrap();
@@ -182,6 +186,7 @@ async fn shared_cache_keeps_certificate_identity_variants_separate_and_purgeable
       writer
         .insert_async(
           CacheInsertContext {
+            group_request: None,
             no_vary_search: None,
             proxy_protocol_identity: None,
             policy_name: Some("default"),

@@ -6,6 +6,7 @@ fn disk_not_modified_update_preserves_file_backed_body() {
   let temp_dir = TestTempDir::new();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(temp_dir.path.clone()),
     disk_max_size_bytes: Some(1024 * 1024),
@@ -20,6 +21,7 @@ fn memory_then_disk_not_modified_update_preserves_file_backed_body_after_disk_fa
   let temp_dir = TestTempDir::new();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::MemoryThenDisk,
     memory_max_size_bytes: Some(1),
     disk_dir: Some(temp_dir.path.clone()),
@@ -35,6 +37,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
   let shared = crate::shared_state::SharedState::test_memory("cache-revalidation-l2");
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
@@ -42,6 +45,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
   let uri = "/asset/revalidated-l2.css".parse::<Uri>().unwrap();
   let request_headers = HeaderMap::new();
   let context = CacheInsertContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -77,6 +81,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
   );
 
   let cached_entry = match first.lookup(CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -106,6 +111,7 @@ async fn shared_not_modified_update_republishes_l2_entry() {
 
   match second
     .lookup_async(CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
@@ -149,6 +155,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -170,6 +177,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
   );
 
   let cached_entry = match cache.lookup(CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -195,6 +203,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
   );
   cache.update_from_not_modified(
     CacheInsertContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
@@ -211,6 +220,7 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
   );
 
   match cache.lookup(CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -243,6 +253,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -270,6 +281,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     HeaderValue::from_static("Client-Cert"),
   );
   let context = CacheInsertContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -289,6 +301,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     CacheInsertOutcome::Stored
   );
   let cached = match cache.lookup(CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -319,6 +332,7 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
   cache.update_from_not_modified(context, &cached, &not_modified);
 
   match cache.lookup(CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),

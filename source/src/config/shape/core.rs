@@ -443,6 +443,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "enabled",
       "external_handler",
       "external_handlers",
+      "groups",
       "lock",
       "lock_wait_timeout_ms",
       "copy_file_range",
@@ -477,6 +478,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "min_hits",
       "statuses",
     ][..],
+    "cache.groups" => &["enabled"][..],
     "cache.surrogate" => &["enabled", "strip_response_header"][..],
     "cache.external_handlers" => &[
       "connect_timeout_ms",
@@ -505,6 +507,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "default_ttl_seconds",
       "disk_max_size_bytes",
       "external_handler",
+      "groups",
       "lock_wait_timeout_ms",
       "max_tag_bytes",
       "max_tags_per_entry",
@@ -520,6 +523,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "store",
       "tag_headers",
     ][..],
+    "cache.policies.groups" => &["enabled"][..],
     "cache.policies.admission" => &[
       "content_types",
       "max_body_bytes",

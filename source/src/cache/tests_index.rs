@@ -10,6 +10,7 @@ fn diagnostic_forward_reason_reports_only_proven_policy_and_request_facts() {
 
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
@@ -40,6 +41,7 @@ fn diagnostic_forward_reason_reports_only_proven_policy_and_request_facts() {
 fn indexed_lookup_preserves_vary_variants_and_purge() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
@@ -58,6 +60,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
@@ -80,6 +83,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
     (&french_request, b"bonjour".as_slice()),
   ] {
     match cache.lookup(CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
@@ -103,6 +107,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -122,6 +127,7 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
 fn vary_variant_count_updates_after_replace_and_purge() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     max_vary_variants_per_key: 1,
     ..CacheConfig::default()
   };
@@ -142,6 +148,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
@@ -161,6 +168,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -188,6 +196,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -209,6 +218,7 @@ fn vary_variant_count_updates_after_replace_and_purge() {
 fn vary_variant_count_updates_after_eviction() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     max_size_bytes: 96,
     memory_max_size_bytes: Some(96),
     max_vary_variants_per_key: 1,
@@ -232,6 +242,7 @@ fn vary_variant_count_updates_after_eviction() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -254,6 +265,7 @@ fn vary_variant_count_updates_after_eviction() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -276,6 +288,7 @@ fn vary_variant_count_updates_after_eviction() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -292,6 +305,7 @@ fn vary_variant_count_updates_after_eviction() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -318,6 +332,7 @@ fn response_head_decision_rejects_uncacheable_or_unadmitted_heads() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       admission: CacheAdmissionConfig {
         content_types: vec!["text/css".to_string()],
         max_body_bytes: 4,
@@ -331,6 +346,7 @@ fn response_head_decision_rejects_uncacheable_or_unadmitted_heads() {
   let uri = "/asset/app.css".parse::<Uri>().unwrap();
   let request_headers = HeaderMap::new();
   let ctx = CacheInsertContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),

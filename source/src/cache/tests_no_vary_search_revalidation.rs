@@ -5,6 +5,7 @@ async fn no_vary_search_not_modified_reindexes_changed_rules_and_vary() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -59,6 +60,7 @@ async fn no_vary_search_not_modified_reindexes_changed_rules_and_vary() {
   cache
     .update_from_not_modified_async(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: Some(&owner_request),
         policy_name: None,
         scheme: "https",
@@ -100,6 +102,7 @@ async fn no_vary_search_not_modified_preserves_absent_rule_for_shared_only_owner
   let shared = crate::shared_state::SharedState::test_memory("nvs-revalidation-shared");
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();
@@ -147,6 +150,7 @@ async fn no_vary_search_not_modified_preserves_absent_rule_for_shared_only_owner
   second
     .update_from_not_modified_async(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: Some(&owner_request),
         policy_name: None,
         scheme: "https",
@@ -179,6 +183,7 @@ async fn no_vary_search_missing_disk_epochs_cannot_resurrect_after_two_restarts(
   let directory = tempfile::tempdir().unwrap();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(directory.path().to_path_buf()),
     disk_max_size_bytes: Some(1024 * 1024),
@@ -229,6 +234,7 @@ async fn no_vary_search_policy_replacement_fences_declined_fills_and_loses_to_un
     let cache = ResponseCache::new(
       &CacheConfig {
         enabled: true,
+        groups: crate::config::CacheGroupsConfig { enabled: false },
         ..CacheConfig::default()
       },
       None,
@@ -278,6 +284,7 @@ async fn no_vary_search_policy_replacement_fences_declined_fills_and_loses_to_un
       cache
         .update_from_not_modified_async(
           CacheInsertContext {
+            group_request: None,
             no_vary_search: Some(&request),
             policy_name: None,
             scheme: "https",
@@ -313,6 +320,7 @@ async fn no_vary_search_tmpfs_alias_uses_the_original_body_file() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       store: CacheStore::Tmpfs,
       tmpfs_dir: Some(directory.path().to_path_buf()),
       ..CacheConfig::default()
@@ -347,6 +355,7 @@ async fn no_vary_search_oversized_owner_metadata_preserves_exact_reuse() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,

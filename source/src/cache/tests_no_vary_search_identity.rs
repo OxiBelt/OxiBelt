@@ -5,6 +5,7 @@ async fn query_aliases_require_body_content_headers_trailers_and_both_identities
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       cache_methods: vec!["GET".into(), "HEAD".into(), "QUERY".into()],
       ..CacheConfig::default()
     },
@@ -91,6 +92,7 @@ async fn key_order_keeps_duplicate_name_order_significant() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -129,6 +131,7 @@ async fn nvs_candidate_directory_obeys_bounded_limit() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       max_vary_variants_per_key: 2,
       ..CacheConfig::default()
     },
@@ -155,6 +158,7 @@ async fn nvs_scope_separates_partition_credentials_certificate_and_route() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       partition_key: "{header:x-tenant}".into(),
       ..CacheConfig::default()
     },

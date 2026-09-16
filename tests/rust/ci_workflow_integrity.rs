@@ -1541,6 +1541,7 @@ fn python_docker_helpers_track_the_supported_alpine_base() {
     "tests/docker/mock_dns/Dockerfile",
     "tests/docker/mock_kubernetes/Dockerfile",
     "tests/docker/mock_nomad/Dockerfile",
+    "tests/docker/mock_external_cache/Dockerfile",
     "tests/docker/mock_upstream/Dockerfile",
   ] {
     let contents = fs::read_to_string(repo_root().join(dockerfile))
@@ -7610,6 +7611,7 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
   );
   for image in [
     "oxibelt/mock-upstream:ci",
+    "oxibelt/mock-external-cache:ci",
     "oxibelt/mock-dns:ci",
     "oxibelt/mock-kubernetes:ci",
     "oxibelt/pq-probe:ci",
@@ -7698,6 +7700,13 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
       "each Docker integration job should pass {value}"
     );
   }
+  assert_eq!(
+    workflow
+      .matches("OXIBELT_EXTERNAL_CACHE_HANDLER_IMAGE: oxibelt/mock-external-cache:ci")
+      .count(),
+    1,
+    "the Docker matrix must use the artifact-preserved external cache helper",
+  );
   assert!(
     !workflow.contains(
       "OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e"
@@ -7803,11 +7812,10 @@ fi
       .join("oxibelt-docker-integration-helper-images.tar")
       .is_file()
   );
-  assert!(
-    fs::read_to_string(&output_file)
-      .expect("successful helper producer should publish outputs")
-      .contains("redis_image=oxibelt/valkey:ci\n")
-  );
+  let outputs =
+    fs::read_to_string(&output_file).expect("successful helper producer should publish outputs");
+  assert!(outputs.contains("redis_image=oxibelt/valkey:ci\n"));
+  assert!(outputs.contains("external_cache_image=oxibelt/mock-external-cache:ci\n"));
 
   for (label, failure, expected_status) in [
     ("pull-failure", "pull", 42),

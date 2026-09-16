@@ -111,6 +111,7 @@ pub(super) fn handle_cache_lookup_result(
           timeouts,
           resolved.route.cache.as_deref(),
           resolved.route.security_headers.as_deref(),
+          resolved.route,
           downstream_scheme,
           host.to_string(),
           request_method.clone(),
@@ -373,6 +374,10 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   mut cache_fill_guard: Option<crate::cache::CacheFillGuard>,
   applied_route_security_headers: Option<&AppliedRouteSecurityHeaders>,
 ) -> Response<ProxyBody> {
+  let group_request = response
+    .extensions()
+    .get::<crate::cache::CacheGroupRequest>()
+    .cloned();
   let query_identity = response
     .extensions()
     .get::<crate::cache::CacheQueryIdentity>()
@@ -430,6 +435,7 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   }
   let content_length = cache_streaming::exact_response_content_length(&cache_headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
+    group_request: group_request.as_ref(),
     no_vary_search,
     query_identity: query_identity.as_ref(),
     proxy_protocol_identity,
@@ -712,10 +718,12 @@ pub(super) async fn collect_cache_response_body(
 }
 
 pub(super) fn merge_not_modified_headers(headers: &mut HeaderMap, not_modified: &HeaderMap) {
-  if not_modified.contains_key("no-vary-search") {
-    headers.remove("no-vary-search");
-    for value in not_modified.get_all("no-vary-search") {
-      headers.append("no-vary-search", value.clone());
+  for name in ["no-vary-search", "cache-groups", "cache-group-invalidation"] {
+    if not_modified.contains_key(name) {
+      headers.remove(name);
+      for value in not_modified.get_all(name) {
+        headers.append(name, value.clone());
+      }
     }
   }
   for (name, value) in not_modified {

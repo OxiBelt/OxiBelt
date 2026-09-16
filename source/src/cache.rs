@@ -35,6 +35,8 @@ mod external;
 mod external_handler;
 mod file_clone;
 mod fill;
+mod groups;
+pub use groups::{CacheGroupOrigin, CacheGroupRequest, CacheGroupStamp};
 mod index;
 mod insert;
 mod key;
@@ -272,6 +274,7 @@ pub(crate) enum CachePreparedInsertDecision {
 
 #[derive(Debug, Clone)]
 pub struct CacheInsertContext<'a> {
+  pub group_request: Option<&'a CacheGroupRequest>,
   pub no_vary_search: Option<&'a CacheNvsRequest>,
   pub proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
   pub policy_name: Option<&'a str>,
@@ -289,6 +292,7 @@ pub struct CacheInsertContext<'a> {
 
 #[derive(Debug, Clone)]
 pub struct CacheLookupContext<'a> {
+  pub group_request: Option<&'a CacheGroupRequest>,
   pub no_vary_search: Option<&'a CacheNvsRequest>,
   pub proxy_protocol_identity: Option<&'a CacheProxyProtocolIdentity>,
   pub policy_name: Option<&'a str>,
@@ -526,6 +530,9 @@ fn append_query_field(output: &mut Vec<u8>, value: &[u8]) {
 
 #[derive(Debug)]
 pub(crate) struct CachePreparedInsert {
+  group_stamp: Option<CacheGroupStamp>,
+  group_previous: Option<CacheGroupStamp>,
+  group_published: bool,
   no_vary_search: Option<CacheNvsMetadata>,
   policy: CachePolicyRuntime,
   partition: String,
@@ -545,6 +552,7 @@ pub(crate) struct CachePreparedInsert {
 
 #[derive(Debug, Clone)]
 pub(in crate::cache) struct StoredEntry {
+  group_stamp: Option<CacheGroupStamp>,
   no_vary_search: Option<CacheNvsMetadata>,
   policy: String,
   partition: String,
@@ -712,6 +720,7 @@ struct CacheInner {
 
 #[derive(Debug, Clone)]
 struct CachePolicyRuntime {
+  groups_enabled: bool,
   name: String,
   store: CacheStore,
   cache_key: String,
@@ -752,6 +761,8 @@ struct CachePolicyRuleRuntime {
 
 #[derive(Debug)]
 pub struct ResponseCache {
+  group_metrics: Arc<crate::metrics::Metrics>,
+  groups: Arc<groups::GroupRuntime>,
   config: CacheConfig,
   policies: HashMap<String, CachePolicyRuntime>,
   bypass_request_headers: Vec<HeaderName>,

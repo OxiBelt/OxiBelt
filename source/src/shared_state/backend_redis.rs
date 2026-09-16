@@ -87,6 +87,50 @@ impl RedisBackend {
     }
   }
 
+  pub(super) async fn compare_exchange(
+    &self,
+    key: &str,
+    expected: Option<&[u8]>,
+    replacement: &[u8],
+  ) -> anyhow::Result<bool> {
+    // `SET` deliberately omits expiry so a successful coherence update also
+    // removes any legacy TTL rather than silently resetting the group state.
+    let script = r#"
+local current = redis.call('GET', KEYS[1])
+if ARGV[1] == '0' then
+  if not current then
+    redis.call('SET', KEYS[1], ARGV[3])
+    return 1
+  end
+  return 0
+end
+if current and current == ARGV[2] then
+  redis.call('SET', KEYS[1], ARGV[3])
+  return 1
+end
+return 0
+"#;
+    let expected_present = u8::from(expected.is_some()).to_string().into_bytes();
+    let expected = expected.unwrap_or_default().to_vec();
+    match self
+      .command(&[
+        b"EVAL".to_vec(),
+        script.as_bytes().to_vec(),
+        b"1".to_vec(),
+        key.as_bytes().to_vec(),
+        expected_present,
+        expected,
+        replacement.to_vec(),
+      ])
+      .await?
+      .into_i64()?
+    {
+      0 => Ok(false),
+      1 => Ok(true),
+      outcome => bail!("unexpected Redis cache group compare-exchange outcome {outcome}"),
+    }
+  }
+
   pub(super) async fn delete(&self, key: &str) -> anyhow::Result<()> {
     let _ = self
       .command(&[b"DEL".to_vec(), key.as_bytes().to_vec()])

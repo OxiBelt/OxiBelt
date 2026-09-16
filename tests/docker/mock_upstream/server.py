@@ -259,6 +259,12 @@ class EchoHandler(BaseHTTPRequestHandler):
           _query_header(query, "no_vary_search"),
         ),
       )
+      cache_groups = _safe_header_value(
+        "cache_groups", _query_header(query, "cache_groups")
+      )
+      cache_group_invalidation = _safe_header_value(
+        "cache_group_invalidation", _query_header(query, "cache_group_invalidation")
+      )
     except ValueError as error:
       self.send_error(400, str(error))
       return
@@ -348,6 +354,10 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.send_header("vary", vary)
     if no_vary_search:
       self.send_header("no-vary-search", no_vary_search)
+    if cache_groups:
+      self.send_header("cache-groups", cache_groups)
+    if cache_group_invalidation:
+      self.send_header("cache-group-invalidation", cache_group_invalidation)
     if chunked_response:
       self.send_header("transfer-encoding", "chunked")
     else:

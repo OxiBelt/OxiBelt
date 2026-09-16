@@ -25,6 +25,7 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 image_tar="${output_dir%/}/oxibelt-docker-integration-helper-images.tar"
 
 mock_upstream_image="oxibelt/mock-upstream:ci"
+external_cache_image="oxibelt/mock-external-cache:ci"
 mock_dns_image="oxibelt/mock-dns:ci"
 mock_kubernetes_image="oxibelt/mock-kubernetes:ci"
 mock_nomad_image="oxibelt/mock-nomad:ci"
@@ -89,6 +90,11 @@ build_helper_image \
   "${repo_root}/tests/docker/mock_upstream"
 
 build_helper_image \
+  "${external_cache_image}" \
+  "${repo_root}/tests/docker/mock_external_cache/Dockerfile" \
+  "${repo_root}/tests/docker/mock_external_cache"
+
+build_helper_image \
   "${mock_dns_image}" \
   "${repo_root}/tests/docker/mock_dns/Dockerfile" \
   "${repo_root}/tests/docker/mock_dns"
@@ -121,6 +127,7 @@ build_helper_image \
 retry_command 3 docker save \
   --output "${image_tar}" \
   "${mock_upstream_image}" \
+  "${external_cache_image}" \
   "${mock_dns_image}" \
   "${mock_kubernetes_image}" \
   "${mock_nomad_image}" \
@@ -134,6 +141,7 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
     echo "image_tar=$(basename "${image_tar}")"
     echo "mock_upstream_image=${mock_upstream_image}"
+    echo "external_cache_image=${external_cache_image}"
     echo "mock_dns_image=${mock_dns_image}"
     echo "mock_kubernetes_image=${mock_kubernetes_image}"
     echo "mock_nomad_image=${mock_nomad_image}"

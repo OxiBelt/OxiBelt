@@ -14,7 +14,7 @@ use super::{
   CacheFileKind, CacheFillGuard, CacheInsertOutcome, CachePreparedInsert, PreparedBodyAdmission,
   ResponseCache, StoredBody, StoredEntry, add_size, admit_prepared_body, cache_file_path,
   detach_entry, extract_tags, index_entry, remove_entry, remove_replaced_entry_files, select_store,
-  shared_cache_entry_metadata, total_size, variant_count_exceeded,
+  shared_cache_entry_metadata, total_size,
 };
 
 const STREAMING_FILL_CHANNEL_CAPACITY: usize = 64;
@@ -149,8 +149,8 @@ impl ResponseCache {
     };
     {
       let mut inner = self.inner_guard();
-      if variant_count_exceeded(
-        &inner,
+      if self.variant_count_exceeded(
+        &mut inner,
         &prepared.policy,
         &prepared.partition,
         &prepared.base_key,
@@ -298,18 +298,34 @@ impl ResponseCache {
       return;
     }
     drop(file);
+    let publication = match self.publish_group_prepared(&prepared).await {
+      Ok(publication) => publication,
+      Err(_) => {
+        remove_streaming_body(&tmp_path);
+        return;
+      }
+    };
+    // Streamed fills negotiate before their synchronous external metadata is
+    // constructed; a failed negotiation leaves the local entry available.
+    let _ = self
+      .external_group_publish_capable(&prepared.policy.name)
+      .await;
     if tokio::fs::rename(&tmp_path, &body_path).await.is_err() {
       remove_streaming_body(&tmp_path);
       remove_streaming_body(&body_path);
+      if let Some(publication) = publication {
+        self.discard_group_publication(publication).await;
+      }
       return;
     }
-    if !matches!(
-      self
-        .insert_streamed_disk_file(prepared, body_path.clone(), body_len, reservation)
-        .await,
-      CacheInsertOutcome::Stored
-    ) {
+    let outcome = self
+      .insert_streamed_disk_file(prepared, body_path.clone(), body_len, reservation)
+      .await;
+    if outcome != CacheInsertOutcome::Stored {
       remove_streaming_body(&body_path);
+      if let Some(publication) = publication {
+        self.discard_group_publication(publication).await;
+      }
     }
   }
 
@@ -347,6 +363,7 @@ impl ResponseCache {
     let variant_key = prepared.variant_key.clone();
     let tags = extract_tags(&prepared.stored_headers, &prepared.policy);
     let stored = StoredEntry {
+      group_stamp: prepared.group_stamp.clone(),
       no_vary_search: prepared.no_vary_search.clone(),
       policy: prepared.policy.name.clone(),
       partition: prepared.partition,
@@ -371,8 +388,8 @@ impl ResponseCache {
     };
     let (shared_entry, external_entry) = {
       let mut inner = self.inner_guard();
-      if variant_count_exceeded(
-        &inner,
+      if self.variant_count_exceeded(
+        &mut inner,
         &prepared.policy,
         &stored.partition,
         &stored.base_key,

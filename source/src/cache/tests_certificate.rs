@@ -62,6 +62,7 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       partition_key: "{header:x-tenant}".to_string(),
       ..CacheConfig::default()
     },
@@ -94,6 +95,7 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
@@ -122,6 +124,7 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
       None,
       Some(&first),
       None,
+      None,
     )
     .unwrap();
   let second_operation = cache
@@ -135,6 +138,7 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
       None,
       Some(&second),
       None,
+      None,
     )
     .unwrap();
   assert_eq!(first_operation.partition, second_operation.partition);
@@ -147,6 +151,7 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
     (None, Bytes::from_static(b"off")),
   ] {
     match cache.lookup(CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
@@ -169,6 +174,7 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -193,6 +199,7 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -218,6 +225,7 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
   lookup_headers.insert("accept-language", HeaderValue::from_static("en"));
   assert!(matches!(
     cache.lookup(CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
@@ -234,6 +242,7 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
 
   let explain = cache.explain_key(
     CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),

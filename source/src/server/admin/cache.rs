@@ -44,6 +44,21 @@ fn authorize_cache_target(
   allowed(authorization, action, &host_resource)
 }
 
+/// RFC 9875-capable policies make every purge operation capable of removing a
+/// group-associated representation. Require the group-specific grant before
+/// dispatching any mutation, including the legacy signed-query endpoints.
+fn authorize_cache_purge_mutation(
+  snapshot: &AppSnapshot,
+  authorization: &AdminAuthorization<'_>,
+  action: &str,
+  policy: &str,
+  host: Option<&str>,
+) -> bool {
+  authorize_cache_target(authorization, action, policy, host)
+    && (!snapshot.cache.groups_enabled(policy)
+      || authorize_cache_target(authorization, "cache:PurgeGroup", policy, host))
+}
+
 struct CacheWarmPolicyInput<'a> {
   host: &'a str,
   requested_policy: Option<&'a str>,
@@ -171,6 +186,10 @@ struct AdminCachePurgeJsonRequest {
   #[serde(default)]
   tag: Option<String>,
   #[serde(default)]
+  origin: Option<String>,
+  #[serde(default)]
+  group: Option<String>,
+  #[serde(default)]
   partition: Option<String>,
 }
 
@@ -257,8 +276,14 @@ pub(in crate::server) async fn cache_key_explain_response(
   let no_vary_search = body.query.as_ref().and_then(|query| {
     crate::cache::CacheNvsRequest::new(query.effective.target.uri.parse().ok()?, b"admin-explain")
   });
+  // Key explanation only needs the stable origin portion of a group request
+  // to derive its base key; it must not obtain or mutate a group epoch.
+  let group_request = crate::cache::CacheGroupOrigin::new(&body.scheme, &body.host)
+    .ok()
+    .map(crate::cache::CacheGroupRequest::new);
   let mut explain = snapshot.cache.explain_key(
     crate::cache::CacheLookupContext {
+      group_request: group_request.as_ref(),
       no_vary_search: no_vary_search.as_ref(),
       proxy_protocol_identity: None,
       certificate_identity: None,
@@ -409,7 +434,13 @@ pub(in crate::server) async fn cache_purge_json_response(
         );
         return text_response(StatusCode::BAD_REQUEST, "missing uri");
       };
-      if !authorize_cache_target(authorization, "cache:PurgeObject", policy, Some(host)) {
+      if !authorize_cache_purge_mutation(
+        snapshot,
+        authorization,
+        "cache:PurgeObject",
+        policy,
+        Some(host),
+      ) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       let purged = match snapshot
@@ -427,10 +458,14 @@ pub(in crate::server) async fn cache_purge_json_response(
           );
         }
       };
-      let external_reports = snapshot
-        .cache
-        .purge_external_exact_partition(policy, scheme, host, uri, partition)
-        .await;
+      let external_reports = if snapshot.cache.groups_enabled(policy) {
+        Vec::new()
+      } else {
+        snapshot
+          .cache
+          .purge_external_exact_partition(policy, scheme, host, uri, partition)
+          .await
+      };
       (purged, external_reports)
     }
     "prefix" => {
@@ -452,7 +487,13 @@ pub(in crate::server) async fn cache_purge_json_response(
         );
         return text_response(StatusCode::BAD_REQUEST, "missing path_prefix");
       };
-      if !authorize_cache_target(authorization, "cache:PurgePrefix", policy, Some(host)) {
+      if !authorize_cache_purge_mutation(
+        snapshot,
+        authorization,
+        "cache:PurgePrefix",
+        policy,
+        Some(host),
+      ) {
         return text_response(StatusCode::FORBIDDEN, "forbidden");
       }
       let purged = match snapshot
@@ -470,10 +511,14 @@ pub(in crate::server) async fn cache_purge_json_response(
           );
         }
       };
-      let external_reports = snapshot
-        .cache
-        .purge_external_prefix_partition(policy, scheme, host, path_prefix, partition)
-        .await;
+      let external_reports = if snapshot.cache.groups_enabled(policy) {
+        Vec::new()
+      } else {
+        snapshot
+          .cache
+          .purge_external_prefix_partition(policy, scheme, host, path_prefix, partition)
+          .await
+      };
       (purged, external_reports)
     }
     "tag" => {
@@ -486,7 +531,8 @@ pub(in crate::server) async fn cache_purge_json_response(
         );
         return text_response(StatusCode::BAD_REQUEST, "missing tag");
       };
-      if !authorize_cache_target(
+      if !authorize_cache_purge_mutation(
+        snapshot,
         authorization,
         "cache:PurgeTag",
         policy,
@@ -515,17 +561,89 @@ pub(in crate::server) async fn cache_purge_json_response(
           );
         }
       };
-      let external_reports = snapshot
-        .cache
-        .purge_external_tag_partition(
-          policy,
-          tag,
-          body.scheme.as_deref(),
-          body.host.as_deref(),
-          partition,
-        )
-        .await;
+      let external_reports = if snapshot.cache.groups_enabled(policy) {
+        Vec::new()
+      } else {
+        snapshot
+          .cache
+          .purge_external_tag_partition(
+            policy,
+            tag,
+            body.scheme.as_deref(),
+            body.host.as_deref(),
+            partition,
+          )
+          .await
+      };
       (purged, external_reports)
+    }
+    "group" => {
+      let Some(origin) = body.origin.as_deref() else {
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_group_json",
+          "missing origin",
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing origin");
+      };
+      let origin = match crate::cache::CacheGroupOrigin::parse_origin(origin) {
+        Ok(origin) => origin,
+        Err(_) => {
+          audit_rejected_cache_purge(
+            peer_addr,
+            authorization.actor,
+            "cache_purge_group_json",
+            "invalid origin",
+          );
+          return text_response(StatusCode::BAD_REQUEST, "invalid origin");
+        }
+      };
+      let Some(group) = body.group.as_deref() else {
+        audit_rejected_cache_purge(
+          peer_addr,
+          authorization.actor,
+          "cache_purge_group_json",
+          "missing group",
+        );
+        return text_response(StatusCode::BAD_REQUEST, "missing group");
+      };
+      let group = match parse_admin_cache_group(group) {
+        Ok(group) => group,
+        Err(reason) => {
+          audit_rejected_cache_purge(
+            peer_addr,
+            authorization.actor,
+            "cache_purge_group_json",
+            reason,
+          );
+          return text_response(StatusCode::BAD_REQUEST, reason);
+        }
+      };
+      if !authorize_cache_target(
+        authorization,
+        "cache:PurgeGroup",
+        policy,
+        Some(&origin.authority()),
+      ) {
+        return text_response(StatusCode::FORBIDDEN, "forbidden");
+      }
+      let purged = match snapshot
+        .cache
+        .purge_group_async(policy, &origin, &group, partition)
+        .await
+      {
+        Ok(purged) => purged,
+        Err(error) => {
+          return cache_purge_unavailable_response(
+            peer_addr,
+            authorization.actor,
+            "cache_purge_group_json",
+            error,
+          );
+        }
+      };
+      (purged, Vec::new())
     }
     _ => {
       audit_rejected_cache_purge(
@@ -550,6 +668,7 @@ pub(in crate::server) async fn cache_purge_json_response(
       "exact" => "cache_purge_json",
       "prefix" => "cache_purge_prefix_json",
       "tag" => "cache_purge_tag_json",
+      "group" => "cache_purge_group_json",
       _ => "cache_purge_json",
     },
     None,
@@ -570,6 +689,16 @@ pub(in crate::server) async fn cache_purge_json_response(
     response["external_handlers"] = json!(external_reports);
   }
   json_response(StatusCode::OK, &response)
+}
+
+fn parse_admin_cache_group(value: &str) -> Result<String, &'static str> {
+  if value.len() > 256 {
+    return Err("group exceeds 256 bytes");
+  }
+  if !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) {
+    return Err("invalid group");
+  }
+  Ok(value.to_string())
 }
 
 fn audit_rejected_cache_purge(
@@ -670,7 +799,7 @@ pub(in crate::server) async fn cache_purge_response(
         );
         return text_response(StatusCode::BAD_REQUEST, "missing uri");
       };
-      if !authorize_cache_target(authorization, action, policy, Some(host)) {
+      if !authorize_cache_purge_mutation(snapshot, authorization, action, policy, Some(host)) {
         admin_audit(
           peer_addr,
           authorization.actor,
@@ -697,10 +826,14 @@ pub(in crate::server) async fn cache_purge_response(
           );
         }
       };
-      let external_reports = snapshot
-        .cache
-        .purge_external_exact_partition(policy, purge_scheme, host, uri, partition)
-        .await;
+      let external_reports = if snapshot.cache.groups_enabled(policy) {
+        Vec::new()
+      } else {
+        snapshot
+          .cache
+          .purge_external_exact_partition(policy, purge_scheme, host, uri, partition)
+          .await
+      };
       (purged, external_reports)
     }
     "/cache/purge-prefix" => {
@@ -728,7 +861,7 @@ pub(in crate::server) async fn cache_purge_response(
         );
         return text_response(StatusCode::BAD_REQUEST, "missing path_prefix");
       };
-      if !authorize_cache_target(authorization, action, policy, Some(host)) {
+      if !authorize_cache_purge_mutation(snapshot, authorization, action, policy, Some(host)) {
         admin_audit(
           peer_addr,
           authorization.actor,
@@ -755,10 +888,14 @@ pub(in crate::server) async fn cache_purge_response(
           );
         }
       };
-      let external_reports = snapshot
-        .cache
-        .purge_external_prefix_partition(policy, purge_scheme, host, path_prefix, partition)
-        .await;
+      let external_reports = if snapshot.cache.groups_enabled(policy) {
+        Vec::new()
+      } else {
+        snapshot
+          .cache
+          .purge_external_prefix_partition(policy, purge_scheme, host, path_prefix, partition)
+          .await
+      };
       (purged, external_reports)
     }
     "/cache/purge-tag" => {
@@ -774,7 +911,7 @@ pub(in crate::server) async fn cache_purge_response(
         );
         return text_response(StatusCode::BAD_REQUEST, "missing tag");
       };
-      if !authorize_cache_target(authorization, action, policy, host) {
+      if !authorize_cache_purge_mutation(snapshot, authorization, action, policy, host) {
         admin_audit(
           peer_addr,
           authorization.actor,
@@ -807,16 +944,20 @@ pub(in crate::server) async fn cache_purge_response(
           );
         }
       };
-      let external_reports = snapshot
-        .cache
-        .purge_external_tag_partition(
-          policy,
-          tag,
-          params.get("scheme").map(String::as_str),
-          host,
-          partition,
-        )
-        .await;
+      let external_reports = if snapshot.cache.groups_enabled(policy) {
+        Vec::new()
+      } else {
+        snapshot
+          .cache
+          .purge_external_tag_partition(
+            policy,
+            tag,
+            params.get("scheme").map(String::as_str),
+            host,
+            partition,
+          )
+          .await
+      };
       (purged, external_reports)
     }
     _ => unreachable!("admin cache purge path checked before dispatch"),
@@ -897,6 +1038,22 @@ mod tests {
     assert_eq!(
       prepared.wire["effective"]["target"]["uri"].as_str(),
       Some("/forwarded")
+    );
+  }
+
+  #[test]
+  fn cache_group_purge_accepts_bounded_decoded_printable_strings() {
+    assert_eq!(
+      parse_admin_cache_group("release-1"),
+      Ok("release-1".to_string())
+    );
+    assert_eq!(parse_admin_cache_group("a\\\"b"), Ok("a\\\"b".to_string()));
+    assert_eq!(parse_admin_cache_group(""), Ok(String::new()));
+    assert_eq!(parse_admin_cache_group("release\n1"), Err("invalid group"));
+    assert_eq!(parse_admin_cache_group("snowman ☃"), Err("invalid group"));
+    assert_eq!(
+      parse_admin_cache_group(&"x".repeat(257)),
+      Err("group exceeds 256 bytes")
     );
   }
 

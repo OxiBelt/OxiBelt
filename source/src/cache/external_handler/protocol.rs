@@ -14,6 +14,9 @@ pub(crate) const QUERY_EPOCH_CAPABILITY: &str = "query-target-epoch-v1";
 /// purges so a handler can constrain the operation to one QUERY target.
 pub(crate) const QUERY_CLEANUP_BEFORE_EPOCH_CAPABILITY: &str =
   "query-target-cleanup-before-epoch-v1";
+/// Required for entries and authority exchanges that participate in RFC 9875
+/// cache-group coherence. Handlers must echo it before their state is trusted.
+pub(crate) const CACHE_GROUPS_CAPABILITY: &str = "cache-groups-v1";
 pub(crate) const FRAME_PREFIX_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +73,10 @@ pub(crate) struct ExternalCacheEntryMetadata {
   pub query_target_epoch: Option<u64>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub no_vary_search: Option<crate::cache::CacheNvsMetadata>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub group_stamp: Option<crate::cache::CacheGroupStamp>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub capabilities: Vec<String>,
 }
 
 impl ExternalCacheEntryMetadata {
@@ -77,19 +84,32 @@ impl ExternalCacheEntryMetadata {
     if self.protocol_version != PROTOCOL_VERSION {
       bail!("unsupported external cache protocol version");
     }
-    if !matches!(
-      expected_cache_key_version,
-      CACHE_KEY_VERSION | super::super::key::QUERY_EXTERNAL_CACHE_KEY_VERSION
-    ) {
+    if !is_supported_cache_key_version(expected_cache_key_version) {
       bail!("unsupported external cache key version");
     }
     if self.cache_key_version != expected_cache_key_version {
       bail!("unsupported external cache key version");
     }
-    if expected_cache_key_version == super::super::key::QUERY_EXTERNAL_CACHE_KEY_VERSION
-      && self.query_target_epoch.is_none()
-    {
+    if query_epoch_required(expected_cache_key_version) && self.query_target_epoch.is_none() {
       bail!("Q1 external cache metadata is missing its target epoch");
+    }
+    if cache_groups_required(expected_cache_key_version) {
+      if !self
+        .capabilities
+        .iter()
+        .any(|capability| capability == CACHE_GROUPS_CAPABILITY)
+      {
+        bail!("external cache group metadata is missing its capability");
+      }
+      if !self
+        .group_stamp
+        .as_ref()
+        .is_some_and(crate::cache::CacheGroupStamp::valid)
+      {
+        bail!("external cache group metadata is missing a valid stamp");
+      }
+    } else if self.group_stamp.is_some() {
+      bail!("external cache group stamp has an incompatible key version");
     }
     if self
       .no_vary_search
@@ -255,6 +275,8 @@ impl ExternalCacheLookupRequest {
     request_no_cache: bool,
     query_target_epoch: Option<u64>,
   ) -> Self {
+    let required_capabilities =
+      required_capabilities_for_cache_key_version(&cache_key_version, query_target_epoch.is_some());
     Self {
       protocol_version: PROTOCOL_VERSION.to_string(),
       cache_key_version,
@@ -267,11 +289,49 @@ impl ExternalCacheLookupRequest {
       method,
       request_no_cache,
       query_target_epoch,
-      required_capabilities: query_target_epoch
-        .map(|_| vec![QUERY_EPOCH_CAPABILITY.to_string()])
-        .unwrap_or_default(),
+      required_capabilities,
     }
   }
+}
+
+pub(crate) fn required_capabilities_for_cache_key_version(
+  cache_key_version: &str,
+  query_target_epoch: bool,
+) -> Vec<String> {
+  let mut capabilities = Vec::new();
+  if query_target_epoch {
+    capabilities.push(QUERY_EPOCH_CAPABILITY.to_string());
+  }
+  if cache_groups_required(cache_key_version) {
+    capabilities.push(CACHE_GROUPS_CAPABILITY.to_string());
+  }
+  capabilities
+}
+
+fn is_supported_cache_key_version(cache_key_version: &str) -> bool {
+  matches!(
+    cache_key_version,
+    CACHE_KEY_VERSION
+      | super::super::key::QUERY_EXTERNAL_CACHE_KEY_VERSION
+      | super::super::key::GROUP_EXTERNAL_CACHE_KEY_VERSION
+      | super::super::key::GROUP_QUERY_EXTERNAL_CACHE_KEY_VERSION
+  )
+}
+
+fn query_epoch_required(cache_key_version: &str) -> bool {
+  matches!(
+    cache_key_version,
+    super::super::key::QUERY_EXTERNAL_CACHE_KEY_VERSION
+      | super::super::key::GROUP_QUERY_EXTERNAL_CACHE_KEY_VERSION
+  )
+}
+
+pub(crate) fn cache_groups_required(cache_key_version: &str) -> bool {
+  matches!(
+    cache_key_version,
+    super::super::key::GROUP_EXTERNAL_CACHE_KEY_VERSION
+      | super::super::key::GROUP_QUERY_EXTERNAL_CACHE_KEY_VERSION
+  )
 }
 
 #[cfg(feature = "admin-runtime")]
@@ -434,6 +494,26 @@ mod tests {
   }
 
   #[test]
+  fn group_lookup_requires_its_capability() {
+    let request = ExternalCacheLookupRequest::new(
+      crate::cache::key::GROUP_EXTERNAL_CACHE_KEY_VERSION.to_string(),
+      "default".to_string(),
+      String::new(),
+      "\0oxibelt-cache-groups-v1\0fixture".to_string(),
+      "https".to_string(),
+      "example.test".to_string(),
+      "/asset".to_string(),
+      "GET".to_string(),
+      false,
+      None,
+    );
+    assert_eq!(
+      request.required_capabilities,
+      vec![CACHE_GROUPS_CAPABILITY.to_string()]
+    );
+  }
+
+  #[test]
   fn query_epoch_request_binds_target_bucket_and_capability() {
     let request = ExternalCacheQueryEpochRequest::new(
       "default".to_string(),
@@ -560,6 +640,8 @@ mod tests {
       tags: Vec::new(),
       query_target_epoch: None,
       no_vary_search: None,
+      group_stamp: None,
+      capabilities: Vec::new(),
     };
     assert!(
       metadata
@@ -596,6 +678,8 @@ mod tests {
       tags: vec!["tag".to_string()],
       query_target_epoch: None,
       no_vary_search: None,
+      group_stamp: None,
+      capabilities: Vec::new(),
     };
 
     let frame = framed_entry_bytes(&metadata, b"body").expect("frame should encode");
@@ -605,5 +689,67 @@ mod tests {
 
     assert_eq!(decoded, metadata);
     assert_eq!(&frame[FRAME_PREFIX_BYTES + len..], b"body");
+  }
+
+  #[test]
+  fn group_metadata_requires_its_key_version_stamp_and_capability() {
+    let stamp = crate::cache::CacheGroupStamp {
+      policy: "default".to_string(),
+      origin: crate::cache::CacheGroupOrigin::new("https", "example.test").unwrap(),
+      partition: String::new(),
+      incarnation: "a".repeat(64),
+      sequence: 0,
+      target: "/asset".to_string(),
+      groups: Vec::new(),
+      tags: Vec::new(),
+      equivalent_path: None,
+    };
+    let metadata = ExternalCacheEntryMetadata {
+      protocol_version: PROTOCOL_VERSION.to_string(),
+      cache_key_version: crate::cache::key::GROUP_EXTERNAL_CACHE_KEY_VERSION.to_string(),
+      policy: "default".to_string(),
+      partition: String::new(),
+      base_key: "\0oxibelt-cache-groups-v1\0fixture".to_string(),
+      variant_key: "fixture".to_string(),
+      scheme: "https".to_string(),
+      host: "example.test".to_string(),
+      uri: "/asset".to_string(),
+      status: 200,
+      headers: Vec::new(),
+      security_headers_neutral: true,
+      body_len: 0,
+      stored_at_ms: 1,
+      expires_at_ms: 2,
+      stale_if_error_until_ms: None,
+      stale_while_revalidate_until_ms: None,
+      must_revalidate: false,
+      vary: Vec::new(),
+      tags: Vec::new(),
+      query_target_epoch: None,
+      no_vary_search: None,
+      group_stamp: Some(stamp),
+      capabilities: vec![CACHE_GROUPS_CAPABILITY.to_string()],
+    };
+    assert!(
+      metadata
+        .validate_versions(crate::cache::key::GROUP_EXTERNAL_CACHE_KEY_VERSION)
+        .is_ok()
+    );
+    assert!(
+      ExternalCacheEntryMetadata {
+        capabilities: Vec::new(),
+        ..metadata.clone()
+      }
+      .validate_versions(crate::cache::key::GROUP_EXTERNAL_CACHE_KEY_VERSION)
+      .is_err()
+    );
+    assert!(
+      ExternalCacheEntryMetadata {
+        group_stamp: None,
+        ..metadata
+      }
+      .validate_versions(crate::cache::key::GROUP_EXTERNAL_CACHE_KEY_VERSION)
+      .is_err()
+    );
   }
 }

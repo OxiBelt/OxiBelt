@@ -11,6 +11,7 @@ fn disk_cache_recovery_rejects_legacy_security_header_metadata() {
   let meta_path = cache_file_path(&cache_dir, variant_key, CacheFileKind::Meta).unwrap();
   std::fs::write(&body_path, b"body").unwrap();
   let stored = StoredEntry {
+    group_stamp: None,
     no_vary_search: None,
     policy: "default".to_string(),
     partition: String::new(),
@@ -43,6 +44,7 @@ fn disk_cache_recovery_rejects_legacy_security_header_metadata() {
 
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(cache_dir),
     disk_max_size_bytes: Some(1024 * 1024),

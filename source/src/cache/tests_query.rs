@@ -64,6 +64,7 @@ fn query_identity_with_trailers(uri: &Uri, trailers: &HeaderMap) -> CacheQueryId
 fn query_cache() -> Arc<ResponseCache> {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     cache_methods: vec!["GET".to_string(), "HEAD".to_string(), "QUERY".to_string()],
     // Prove Q1 still binds the target when an operator intentionally uses a
     // template that omits every target component.
@@ -76,6 +77,7 @@ fn query_cache() -> Arc<ResponseCache> {
 fn shared_query_cache(shared: Arc<crate::shared_state::SharedState>) -> Arc<ResponseCache> {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     cache_methods: vec!["GET".to_string(), "HEAD".to_string(), "QUERY".to_string()],
     cache_key: "constant".to_string(),
     ..CacheConfig::default()
@@ -99,6 +101,7 @@ fn query_requires_exact_method_and_complete_identity() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -115,6 +118,7 @@ fn query_requires_exact_method_and_complete_identity() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -152,6 +156,7 @@ fn query_key_separates_original_effective_body_and_target() {
       Some(&first),
       None,
       None,
+      None,
     )
     .unwrap()
     .base_key;
@@ -166,6 +171,7 @@ fn query_key_separates_original_effective_body_and_target() {
       Some(&transformed),
       None,
       None,
+      None,
     )
     .unwrap()
     .base_key;
@@ -178,6 +184,7 @@ fn query_key_separates_original_effective_body_and_target() {
       &second_uri,
       &headers,
       Some(&target_changed),
+      None,
       None,
       None,
     )
@@ -212,6 +219,7 @@ fn query_key_preserves_duplicate_trailer_value_order() {
       Some(&query_identity_with_trailers(&uri, &first_trailers)),
       None,
       None,
+      None,
     )
     .unwrap()
     .base_key;
@@ -224,6 +232,7 @@ fn query_key_preserves_duplicate_trailer_value_order() {
       &uri,
       &headers,
       Some(&query_identity_with_trailers(&uri, &second_trailers)),
+      None,
       None,
       None,
     )
@@ -242,6 +251,7 @@ fn query_origin_preconditions_bypass_cache_and_fill_lock() {
   let mut headers = query_headers();
   headers.insert(IF_MATCH, HeaderValue::from_static("\"current\""));
   let ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -292,6 +302,7 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -314,6 +325,7 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -335,6 +347,7 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
   );
   assert!(matches!(
     cache.lookup(CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
@@ -355,6 +368,7 @@ fn absent_query_target_does_not_examine_unrelated_cache_entries() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       cache_methods: vec!["GET".to_string(), "QUERY".to_string()],
       cache_key: "{scheme}:{host}:{uri}".to_string(),
       ..CacheConfig::default()
@@ -370,6 +384,7 @@ fn absent_query_target_does_not_examine_unrelated_cache_entries() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
@@ -410,6 +425,7 @@ async fn automatic_query_invalidation_returns_after_fencing_and_reclaims_in_back
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -447,6 +463,7 @@ async fn automatic_query_invalidation_returns_after_fencing_and_reclaims_in_back
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -481,6 +498,7 @@ async fn shared_query_epoch_rejects_a_delayed_replica_publish() {
   let method = Method::from_bytes(b"QUERY").unwrap();
   let old_identity = query_identity(&uri, b"old", b"old");
   let old_ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -497,6 +515,7 @@ async fn shared_query_epoch_rejects_a_delayed_replica_publish() {
   response_headers.insert(CACHE_CONTROL, HeaderValue::from_static("max-age=60"));
   let prepared = match first.prepare_insert(
     CacheInsertContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
@@ -530,6 +549,7 @@ async fn shared_query_epoch_rejects_a_delayed_replica_publish() {
   );
   let new_identity = query_identity(&uri, b"old", b"old");
   let observer_ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     query_identity: Some(&new_identity),
     ..old_ctx
@@ -563,6 +583,7 @@ fn query_invalidation_fences_active_fill_until_owner_finishes() {
   let method = Method::from_bytes(b"QUERY").unwrap();
   let headers = query_headers();
   let context = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -585,6 +606,7 @@ fn query_invalidation_fences_active_fill_until_owner_finishes() {
   assert!(matches!(
     cache.prepare_insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -623,6 +645,7 @@ fn failed_query_invalidation_bypasses_only_that_query_target() {
       Some(&identity),
       None,
       None,
+      None,
     )
     .unwrap();
   let target = operation.query_target.clone().unwrap();
@@ -630,6 +653,7 @@ fn failed_query_invalidation_bypasses_only_that_query_target() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -656,6 +680,7 @@ fn failed_query_invalidation_bypasses_only_that_query_target() {
       Some(&different_identity),
       None,
       None,
+      None,
     )
     .unwrap();
   assert!(!cache.query_target_cache_bypassed(&other_operation));
@@ -666,6 +691,7 @@ fn query_disk_epoch_survives_invalidation_and_restart() {
   let directory = tempfile::tempdir().unwrap();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(directory.path().to_path_buf()),
     cache_methods: vec!["GET".into(), "HEAD".into(), "QUERY".into()],
@@ -688,6 +714,7 @@ fn query_disk_epoch_survives_invalidation_and_restart() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         certificate_identity: None,
@@ -707,6 +734,7 @@ fn query_disk_epoch_survives_invalidation_and_restart() {
   let cache = ResponseCache::new(&config, None).unwrap();
   let identity = query_identity(&uri, b"query", b"query");
   let context = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     certificate_identity: None,
@@ -729,6 +757,7 @@ fn query_disk_epoch_survives_invalidation_and_restart() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         query_identity: Some(&identity),
         ..context
@@ -742,6 +771,7 @@ fn query_disk_epoch_corruption_fails_closed_without_following_temporary_symlinks
   let directory = tempfile::tempdir().unwrap();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(directory.path().to_path_buf()),
     cache_methods: vec!["QUERY".into()],

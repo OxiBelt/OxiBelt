@@ -93,6 +93,15 @@ pub(crate) async fn warm_cache_request(
     .body(super::body::materialized_known_small_body(body, trailers))
     .context("failed to build warm request")?;
   *request.headers_mut() = headers.clone();
+  if snapshot.cache.enabled()
+    && let Ok(origin) = crate::cache::CacheGroupOrigin::new(scheme, host)
+  {
+    // Cache warm bypasses the normal ingress request constructor, so retain
+    // the submitted authority when creating the cache-group request scope.
+    request
+      .extensions_mut()
+      .insert(crate::cache::CacheGroupRequest::new(origin));
+  }
   let (listener_tx, listener_rx) = watch::channel(false);
   let (lifecycle_tx, lifecycle_rx) = watch::channel(false);
   let _ = listener_tx.send(false);
@@ -185,6 +194,7 @@ pub(crate) async fn warm_cache_request(
     snapshot
       .cache
       .lookup_async(crate::cache::CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,

@@ -126,6 +126,7 @@ mod tests {
     no_vary_search: Option<&'a super::super::CacheNvsRequest>,
   ) -> CacheLookupContext<'a> {
     CacheLookupContext {
+      group_request: None,
       no_vary_search,
       proxy_protocol_identity: None,
       certificate_identity: None,

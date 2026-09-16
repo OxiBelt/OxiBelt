@@ -31,11 +31,13 @@ mod shared;
 fn cache_config_with_disabled_named_background_refresh() -> CacheConfig {
   CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     policies: vec![crate::config::CachePolicyConfig {
       name: "no-background-refresh".to_string(),
       store: None,
       cache_key: None,
       partition_key: None,
+      groups: None,
       default_ttl_seconds: None,
       negative_statuses: None,
       negative_ttl_seconds: None,
@@ -64,6 +66,7 @@ fn test_cache_policy_with_negative_status() -> crate::config::CachePolicyConfig 
     store: None,
     cache_key: None,
     partition_key: None,
+    groups: None,
     default_ttl_seconds: None,
     negative_statuses: Some(vec![404]),
     negative_ttl_seconds: Some(30),
@@ -104,6 +107,7 @@ async fn insert_stale_revalidate_entry(
     cache
       .insert_async(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("no-background-refresh"),
@@ -129,6 +133,7 @@ async fn assert_stale_background_refresh_disabled(
 ) {
   match cache
     .lookup_async(CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("no-background-refresh"),

@@ -43,6 +43,7 @@ impl ResponseCache {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )?;
     if !self
       .bind_query_generation_async(ctx.query_identity, &operation)
@@ -107,6 +108,7 @@ impl ResponseCache {
         ctx.query_identity,
         ctx.certificate_identity,
         ctx.proxy_protocol_identity,
+        ctx.group_request,
       )
       .map(|operation| operation.fill_key)
     else {
@@ -135,6 +137,7 @@ impl ResponseCache {
         ctx.query_identity,
         ctx.certificate_identity,
         ctx.proxy_protocol_identity,
+        ctx.group_request,
       ) else {
         return CacheInsertOutcome::NotCacheable;
       };
@@ -145,17 +148,13 @@ impl ResponseCache {
         return CacheInsertOutcome::NotCacheable;
       }
     }
-    let shared_context = ctx.clone();
-    let status = entry.status;
-    let headers = entry.headers.clone();
-    let body_len = entry.body.len();
-    let outcome = self.insert(ctx, entry);
-    if outcome == CacheInsertOutcome::Stored {
-      self
-        .write_shared_entry_for_insert(shared_context, status, &headers, body_len)
-        .await;
+    match self.prepare_insert(ctx, entry.status, &entry.headers, Some(entry.body_len())) {
+      CachePreparedInsertDecision::Cacheable(prepared) => {
+        self.insert_prepared_async(*prepared, entry).await
+      }
+      CachePreparedInsertDecision::NotCacheable(_) => CacheInsertOutcome::NotCacheable,
+      CachePreparedInsertDecision::Rejected(_) => CacheInsertOutcome::Rejected,
     }
-    outcome
   }
 
   pub(super) fn insert_with_external(
@@ -166,13 +165,19 @@ impl ResponseCache {
   ) -> CacheInsertOutcome {
     match self.prepare_insert(ctx, entry.status, &entry.headers, Some(entry.body.len())) {
       CachePreparedInsertDecision::Cacheable(mut prepared) => {
+        if entry.group_stamp.is_some() {
+          prepared.group_stamp = entry.group_stamp.clone();
+          // Promotion retains an already-authorized remote representation.
+          prepared.group_published = true;
+        }
         if prepared.no_vary_search.is_none() {
           prepared.no_vary_search = entry
             .no_vary_search
             .clone()
             .filter(|nvs| nvs.valid() && nvs.owner_uri == prepared.uri);
           prepared.header_bytes = header_size(&prepared.stored_headers)
-            .saturating_add(nvs::metadata_size(prepared.no_vary_search.as_ref()));
+            .saturating_add(nvs::metadata_size(prepared.no_vary_search.as_ref()))
+            .saturating_add(groups::metadata_size(prepared.group_stamp.as_ref()));
         }
         self.insert_prepared_with_external(*prepared, entry, publish_external)
       }
@@ -191,18 +196,49 @@ impl ResponseCache {
 
   pub(crate) async fn insert_prepared_async(
     &self,
-    prepared: CachePreparedInsert,
+    mut prepared: CachePreparedInsert,
     entry: CacheEntry,
   ) -> CacheInsertOutcome {
+    let publication = match self.publish_group_prepared(&prepared).await {
+      Ok(publication) => publication,
+      Err(_) => return CacheInsertOutcome::NotCacheable,
+    };
+    prepared.group_published = true;
+    // Negotiate L3 group support before the synchronous metadata builder runs.
+    // Legacy or unavailable handlers suppress only external publication.
+    let _ = self
+      .external_group_publish_capable(&prepared.policy.name)
+      .await;
     let variant_key = prepared.variant_key.clone();
     let outcome = self.insert_prepared(prepared, entry);
     if outcome == CacheInsertOutcome::Stored {
       self.write_shared_entry_for_variant(&variant_key).await;
+    } else if let Some(publication) = publication {
+      self.rollback_group_publication(publication).await;
     }
     outcome
   }
 
   pub(super) fn insert_prepared_with_external(
+    &self,
+    prepared: CachePreparedInsert,
+    entry: CacheEntry,
+    publish_external: bool,
+  ) -> CacheInsertOutcome {
+    let publication = match self.publish_group_prepared_local(&prepared) {
+      Ok(publication) => publication,
+      Err(_) => return CacheInsertOutcome::NotCacheable,
+    };
+    let outcome = self.insert_prepared_with_external_published(prepared, entry, publish_external);
+    if outcome != CacheInsertOutcome::Stored
+      && let Some(publication) = publication
+    {
+      self.rollback_group_publication_local(publication);
+    }
+    outcome
+  }
+
+  fn insert_prepared_with_external_published(
     &self,
     prepared: CachePreparedInsert,
     entry: CacheEntry,
@@ -221,8 +257,8 @@ impl ResponseCache {
       if !self.prepared_generation_current_locked(&inner, &prepared) {
         return CacheInsertOutcome::NotCacheable;
       }
-      if variant_count_exceeded(
-        &inner,
+      if self.variant_count_exceeded(
+        &mut inner,
         &prepared.policy,
         &prepared.partition,
         &prepared.base_key,
@@ -252,6 +288,7 @@ impl ResponseCache {
       };
       let tags = extract_tags(&entry.headers, &prepared.policy);
       let stored = StoredEntry {
+        group_stamp: prepared.group_stamp,
         no_vary_search: prepared.no_vary_search,
         policy: prepared.policy.name.clone(),
         partition: prepared.partition,
@@ -281,8 +318,8 @@ impl ResponseCache {
           return CacheInsertOutcome::StoreFailed;
         }
       }
-      if variant_count_exceeded(
-        &inner,
+      if self.variant_count_exceeded(
+        &mut inner,
         &prepared.policy,
         &stored.partition,
         &stored.base_key,
@@ -354,6 +391,11 @@ impl ResponseCache {
     cached_entry: &CacheEntry,
     not_modified_headers: &HeaderMap,
   ) {
+    // Group authorities may be remote. Request paths must await their atomic
+    // old/new membership check through update_from_not_modified_async.
+    if self.groups_enabled(ctx.policy_name.unwrap_or("default")) {
+      return;
+    }
     revalidation::update_from_not_modified(self, ctx, cached_entry, not_modified_headers);
   }
 
@@ -362,7 +404,45 @@ impl ResponseCache {
     ctx: CacheInsertContext<'_>,
     cached_entry: &CacheEntry,
     not_modified_headers: &HeaderMap,
-  ) {
+  ) -> bool {
+    if self.groups_enabled(ctx.policy_name.unwrap_or("default")) {
+      let Some(previous) = cached_entry.group_stamp.as_ref() else {
+        return false;
+      };
+      let mut headers = cached_entry.headers.clone();
+      for name in [
+        "cache-control",
+        "expires",
+        "etag",
+        "last-modified",
+        "vary",
+        "cache-groups",
+        "cache-group-invalidation",
+        "no-vary-search",
+      ] {
+        if not_modified_headers.contains_key(name) {
+          headers.remove(name);
+          for value in not_modified_headers.get_all(name) {
+            headers.append(name, value.clone());
+          }
+        }
+      }
+      let CachePreparedInsertDecision::Cacheable(mut prepared) = self.prepare_insert(
+        ctx,
+        cached_entry.status,
+        &headers,
+        Some(cached_entry.body_len()),
+      ) else {
+        return false;
+      };
+      prepared.group_previous = Some(previous.clone());
+      if !not_modified_headers.contains_key("no-vary-search") {
+        prepared.no_vary_search = cached_entry.no_vary_search.clone();
+      }
+      let mut entry = cached_entry.clone();
+      entry.headers = headers;
+      return self.insert_prepared_async(*prepared, entry).await == CacheInsertOutcome::Stored;
+    }
     self.update_from_not_modified(ctx.clone(), cached_entry, not_modified_headers);
     let mut headers = cached_entry.headers.clone();
     for (name, value) in not_modified_headers {
@@ -377,6 +457,7 @@ impl ResponseCache {
     self
       .write_shared_entry_for_insert(ctx, cached_entry.status, &headers, cached_entry.body_len())
       .await;
+    true
   }
 
   pub fn response_head_decision(
@@ -419,6 +500,7 @@ impl ResponseCache {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     ) else {
       return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
     };
@@ -442,10 +524,27 @@ impl ResponseCache {
       Ok(metadata) => metadata,
       Err(reason) => return CachePreparedInsertDecision::NotCacheable(reason),
     };
+    let mut group_stamp = match self.prepare_group_stamp(
+      &ctx,
+      response_headers,
+      extract_tags(response_headers, &operation.policy),
+    ) {
+      Ok(stamp) => stamp,
+      Err(_) => {
+        return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
+      }
+    };
     let stored_headers = stored_response_headers(response_headers, &self.config);
     let no_vary_search = self.prepare_nvs(&ctx, &stored_headers);
-    let header_bytes =
-      header_size(&stored_headers).saturating_add(nvs::metadata_size(no_vary_search.as_ref()));
+    if let Some(stamp) = &mut group_stamp {
+      stamp.equivalent_path = no_vary_search
+        .as_ref()
+        .and_then(|nvs| nvs.owner_uri.parse::<Uri>().ok())
+        .map(|uri| uri.path().to_string());
+    }
+    let header_bytes = header_size(&stored_headers)
+      .saturating_add(nvs::metadata_size(no_vary_search.as_ref()))
+      .saturating_add(groups::metadata_size(group_stamp.as_ref()));
     if content_length.is_some_and(|body_len| {
       body_len
         .checked_add(header_bytes)
@@ -456,8 +555,17 @@ impl ResponseCache {
     if !admit_response_head(&operation.policy, status, response_headers, content_length) {
       return CachePreparedInsertDecision::Rejected(CacheFillSuppressionReason::AdmissionRejected);
     }
-    let variant_key = variant_key(&operation.partition, &operation.base_key, &metadata.vary);
+    let mut variant_key = variant_key(&operation.partition, &operation.base_key, &metadata.vary);
+    if let Some(stamp) = &group_stamp {
+      variant_key.push_str(&format!(
+        "\ngroup-generation={}:{}",
+        stamp.incarnation, stamp.sequence
+      ));
+    }
     CachePreparedInsertDecision::Cacheable(Box::new(CachePreparedInsert {
+      group_stamp,
+      group_previous: None,
+      group_published: false,
       no_vary_search,
       policy: operation.policy,
       partition: operation.partition,
@@ -483,7 +591,9 @@ impl ResponseCache {
   }
 }
 
-fn cache_insert_view_headers<'a>(ctx: &'a CacheInsertContext<'_>) -> &'a HeaderMap {
+pub(in crate::cache) fn cache_insert_view_headers<'a>(
+  ctx: &'a CacheInsertContext<'_>,
+) -> &'a HeaderMap {
   ctx
     .query_identity
     .map(CacheQueryIdentity::cache_view_headers)

@@ -24,6 +24,24 @@ impl ResponseCache {
     runtime_health: Arc<RuntimeHealth>,
     metrics: Arc<crate::metrics::Metrics>,
   ) -> anyhow::Result<Arc<Self>> {
+    Self::new_with_external_and_health_with_previous(
+      config,
+      shared_state,
+      external_cache,
+      runtime_health,
+      metrics,
+      None,
+    )
+  }
+
+  pub(crate) fn new_with_external_and_health_with_previous(
+    config: &CacheConfig,
+    shared_state: Option<Arc<SharedState>>,
+    external_cache: ExternalCacheRuntime,
+    runtime_health: Arc<RuntimeHealth>,
+    metrics: Arc<crate::metrics::Metrics>,
+    previous: Option<&Self>,
+  ) -> anyhow::Result<Arc<Self>> {
     let tmpfs_dir = if config.enabled && config.store == CacheStore::Tmpfs {
       let dir = config
         .tmpfs_dir
@@ -47,6 +65,7 @@ impl ResponseCache {
       .memory_max_size_bytes
       .unwrap_or_else(|| auto_memory_cache_limit(config));
     let default_policy = CachePolicyRuntime {
+      groups_enabled: config.groups.enabled,
       name: "default".to_string(),
       store: config.store,
       cache_key: config.cache_key.clone(),
@@ -88,6 +107,14 @@ impl ResponseCache {
     let (query_cleanup, query_cleanup_receiver) =
       query_cleanup::QueryCleanupDispatcher::new(&config.query_cleanup, metrics.clone());
     let cache = Arc::new(Self {
+      group_metrics: metrics.clone(),
+      // Reloaded snapshots share group state with the draining snapshot.  A
+      // fresh runtime would persist a new local authority before activation
+      // and could overwrite the durable state the old snapshot still needs.
+      groups: match previous {
+        Some(previous) => previous.groups.clone(),
+        None => Arc::new(groups::GroupRuntime::new(config, disk_dir.as_deref())?),
+      },
       config: config.clone(),
       policies,
       bypass_request_headers: cache_tag_headers(&config.bypass_request_headers),
@@ -220,6 +247,7 @@ impl ResponseCache {
     query_identity: Option<&CacheQueryIdentity>,
     certificate_identity: Option<&CacheCertificateIdentity>,
     proxy_protocol_identity: Option<&CacheProxyProtocolIdentity>,
+    group_request: Option<&CacheGroupRequest>,
   ) -> Option<CacheOperationContext> {
     let policy = self.policy(policy_name)?.clone();
     let base_key = certificate_partitioned_base_key(
@@ -231,6 +259,7 @@ impl ResponseCache {
       Some(identity) => identity.partition(base_key),
       None => base_key,
     };
+    let base_key = self.group_key(&policy.name, base_key, group_request)?;
     let is_query = method.as_str() == "QUERY";
     let base_key = match (is_query, query_identity) {
       (true, Some(identity)) => query_partitioned_base_key(base_key, identity),
@@ -287,6 +316,7 @@ impl ResponseCache {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )?;
     if self.query_target_cache_bypassed(&operation) {
       return None;
@@ -303,7 +333,8 @@ impl ResponseCache {
         .and_then(|candidates| {
           candidates.into_iter().find(|key| {
             inner.entries.get(key).is_some_and(|entry| {
-              vary_matches(&entry.vary, request_headers)
+              self.group_entry_current_local(&entry.policy, entry.group_stamp.as_ref())
+                && vary_matches(&entry.vary, request_headers)
                 && entry.no_vary_search.as_ref().is_none_or(|nvs| {
                   self.nvs_current_locked(&inner, &entry.policy, &entry.scheme, &entry.host, nvs)
                 })
@@ -421,12 +452,25 @@ impl ResponseCache {
   }
 
   pub async fn lookup_async(&self, ctx: CacheLookupContext<'_>) -> Option<CacheLookup> {
+    if !self.bind_group_request(ctx.clone()).await {
+      return None;
+    }
     let result = self.lookup_exact_async(ctx.clone()).await?;
     let entry = match &result {
       CacheLookup::Fresh(entry) => entry,
       CacheLookup::Stale(stale) => &stale.entry,
       CacheLookup::Revalidate(revalidation) => &revalidation.entry,
     };
+    if !self.group_entry_matches(&ctx, entry)
+      || !self
+        .group_entry_current(
+          ctx.policy_name.unwrap_or("default"),
+          entry.group_stamp.as_ref(),
+        )
+        .await
+    {
+      return None;
+    }
     if let Some(metadata) = &entry.no_vary_search {
       let policy = self.policy(ctx.policy_name)?;
       let uri = metadata.owner_uri.parse::<Uri>().ok()?;
@@ -469,6 +513,7 @@ impl ResponseCache {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )?;
     if self.query_target_cache_bypassed(&operation) {
       return None;
@@ -505,6 +550,7 @@ impl ResponseCache {
     }
     self.insert_with_external(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: ctx.proxy_protocol_identity,
         policy_name: ctx.policy_name,

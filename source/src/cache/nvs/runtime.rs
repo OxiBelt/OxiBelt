@@ -166,6 +166,7 @@ impl ResponseCache {
     let (epoch, policy_epoch) = (*request.epoch.lock().ok()?)?;
     let policy = self.policy(ctx.policy_name)?;
     let lookup = CacheLookupContext {
+      group_request: ctx.group_request,
       no_vary_search: ctx.no_vary_search,
       policy_name: ctx.policy_name,
       scheme: ctx.scheme,
@@ -298,6 +299,7 @@ impl ResponseCache {
         .query_identity
         .map(|identity| identity.for_nvs_owner(metadata));
       let owner = CacheLookupContext {
+        group_request: ctx.group_request,
         no_vary_search: None,
         uri: &owner_uri,
         query_identity: identity.as_ref(),
@@ -340,7 +342,11 @@ impl ResponseCache {
     if !self.config.enabled {
       return Ok(());
     }
-    for policy in self.policies.keys() {
+    for policy in self
+      .policies
+      .keys()
+      .filter(|policy| !self.groups_enabled(policy))
+    {
       let target = target(policy, scheme, host, uri);
       if self.nvs_epoch(&target, true).await.is_none() {
         // Unsupported legacy L3 handlers never admit aliases.

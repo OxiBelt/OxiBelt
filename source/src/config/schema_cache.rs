@@ -155,6 +155,8 @@ pub struct CacheConfig {
   pub partition_key: String,
   #[serde(default = "default_cache_no_vary_search")]
   pub no_vary_search: bool,
+  #[serde(default)]
+  pub groups: CacheGroupsConfig,
   #[serde(default = "default_true")]
   pub respect_cache_control: bool,
   #[serde(default)]
@@ -223,6 +225,7 @@ impl Default for CacheConfig {
       cache_key: default_cache_key(),
       partition_key: String::new(),
       no_vary_search: default_cache_no_vary_search(),
+      groups: CacheGroupsConfig::default(),
       respect_cache_control: true,
       surrogate: CacheSurrogateConfig::default(),
       stale_if_error_seconds: 0,
@@ -287,6 +290,8 @@ pub struct CachePolicyConfig {
   #[serde(default)]
   pub partition_key: Option<String>,
   #[serde(default)]
+  pub groups: Option<CacheGroupsConfig>,
+  #[serde(default)]
   pub default_ttl_seconds: Option<u64>,
   #[serde(default)]
   pub negative_statuses: Option<Vec<u16>>,
@@ -320,4 +325,19 @@ pub struct CachePolicyConfig {
   pub external_handler: Option<String>,
   #[serde(default)]
   pub rules: Vec<CachePolicyRuleConfig>,
+}
+
+/// Cache-group behavior shared by RFC 9875 response and invalidation fields.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CacheGroupsConfig {
+  #[serde(default = "default_cache_groups_enabled")]
+  pub enabled: bool,
+}
+
+impl Default for CacheGroupsConfig {
+  fn default() -> Self {
+    Self {
+      enabled: default_cache_groups_enabled(),
+    }
+  }
 }

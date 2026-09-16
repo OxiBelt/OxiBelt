@@ -30,6 +30,7 @@ mod backend_dispatch;
 mod backend_memory;
 mod backend_postgres;
 mod backend_redis;
+mod cache_group;
 mod cache_lock;
 mod cache_nvs;
 mod cache_store;
@@ -353,6 +354,10 @@ pub struct SharedCacheEntry {
   /// hint only; the owning cache object is rechecked before reuse.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub no_vary_search: Option<crate::cache::CacheNvsMetadata>,
+  /// Response-owned cache-group freshness evidence. Legacy entries without a
+  /// stamp remain deserializable and are treated as outside group coherence.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub group_stamp: Option<crate::cache::CacheGroupStamp>,
 }
 
 fn shared_cache_entry_now_ms() -> i64 {

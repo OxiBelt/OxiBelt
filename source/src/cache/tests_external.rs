@@ -9,6 +9,7 @@ fn cache_with_external_handler() -> Arc<ResponseCache> {
   ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       external_handler: Some("massive".to_string()),
       ..CacheConfig::default()
     },
@@ -58,6 +59,8 @@ fn external_hit(
       tags: Vec::new(),
       query_target_epoch: None,
       no_vary_search: None,
+      group_stamp: None,
+      capabilities: Vec::new(),
     },
     body: ExternalCacheBody::Memory(body),
   }
@@ -69,6 +72,7 @@ fn external_memory_hit_is_promoted_after_validation() {
   let uri = "/asset.css".parse::<Uri>().expect("uri should parse");
   let request_headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: None,
@@ -91,6 +95,7 @@ fn external_memory_hit_is_promoted_after_validation() {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )
     .expect("operation context should build");
 
@@ -120,6 +125,7 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
   let uri = "/asset.css".parse::<Uri>().expect("uri should parse");
   let request_headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: None,
@@ -142,6 +148,7 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )
     .expect("operation context should build");
 
@@ -156,12 +163,112 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
   assert!(cache.external_lookup_result(operation, ctx, hit).is_none());
 }
 
+#[tokio::test]
+async fn external_group_generation_round_trips_and_rejects_a_changed_variant() {
+  for membership in [None, Some("\"alpha\"")] {
+    let cache = ResponseCache::new(
+      &CacheConfig {
+        enabled: true,
+        ..CacheConfig::default()
+      },
+      None,
+    )
+    .unwrap();
+    let uri: Uri = "/grouped.css".parse().unwrap();
+    let headers = HeaderMap::new();
+    let request =
+      CacheGroupRequest::new(CacheGroupOrigin::new("https", "example.test:8443").unwrap());
+    let ctx = CacheLookupContext {
+      group_request: Some(&request),
+      no_vary_search: None,
+      proxy_protocol_identity: None,
+      policy_name: None,
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &uri,
+      request_headers: &headers,
+      query_identity: None,
+      certificate_identity: None,
+    };
+    assert!(cache.bind_group_request(ctx.clone()).await);
+    let operation = cache
+      .operation_context(
+        None,
+        "https",
+        "example.test",
+        &Method::GET,
+        &uri,
+        &headers,
+        None,
+        None,
+        None,
+        Some(&request),
+      )
+      .unwrap();
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+      CACHE_CONTROL,
+      HeaderValue::from_static("public, max-age=60"),
+    );
+    if let Some(membership) = membership {
+      response_headers.insert("cache-groups", HeaderValue::from_str(membership).unwrap());
+    }
+    let CachePreparedInsertDecision::Cacheable(prepared) = cache.prepare_insert(
+      CacheInsertContext {
+        group_request: Some(&request),
+        no_vary_search: None,
+        proxy_protocol_identity: None,
+        policy_name: None,
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &headers,
+        query_identity: None,
+        certificate_identity: None,
+      },
+      StatusCode::OK,
+      &response_headers,
+      Some(4),
+    ) else {
+      panic!("group-aware response should be admitted")
+    };
+    let mut hit = external_hit(
+      &operation,
+      Bytes::from_static(b"body"),
+      "/grouped.css",
+      vec![],
+    );
+    hit.metadata.cache_key_version = key::GROUP_EXTERNAL_CACHE_KEY_VERSION.into();
+    hit.metadata.capabilities = vec!["cache-groups-v1".into()];
+    hit.metadata.variant_key = prepared.variant_key;
+    hit.metadata.group_stamp = prepared.group_stamp;
+    let mut wrong = ExternalCacheLookupHit {
+      metadata: hit.metadata.clone(),
+      body: ExternalCacheBody::Memory(Bytes::from_static(b"body")),
+    };
+    wrong.metadata.variant_key.push_str("changed");
+    assert!(
+      cache
+        .external_lookup_result(operation.clone(), ctx.clone(), wrong)
+        .is_none()
+    );
+    assert!(matches!(
+      cache.external_lookup_result(operation, ctx.clone(), hit),
+      Some(CacheLookup::Fresh(_))
+    ));
+    assert!(matches!(cache.lookup(ctx), Some(CacheLookup::Fresh(_))));
+  }
+}
+
 #[test]
 fn external_mismatched_uri_is_safe_miss() {
   let cache = cache_with_external_handler();
   let uri = "/asset.css".parse::<Uri>().expect("uri should parse");
   let request_headers = HeaderMap::new();
   let ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: None,
@@ -184,6 +291,7 @@ fn external_mismatched_uri_is_safe_miss() {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )
     .expect("operation context should build");
 
@@ -208,6 +316,7 @@ fn external_sensitive_vary_is_safe_miss() {
   let mut request_headers = HeaderMap::new();
   request_headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
   let ctx = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: None,
@@ -230,6 +339,7 @@ fn external_sensitive_vary_is_safe_miss() {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )
     .expect("operation context should build");
 

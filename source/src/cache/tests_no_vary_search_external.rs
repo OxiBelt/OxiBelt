@@ -57,7 +57,11 @@ fn external_cache(endpoint: &str) -> Arc<ResponseCache> {
     "{}\n[cache]\nenabled = true\nstore = \"memory\"\nno_vary_search = true\nexternal_handler = \"nvs\"\n\n[[cache.external_handlers]]\nname = \"nvs\"\nkind = \"http\"\nendpoint = \"{endpoint}\"\nconnect_timeout_ms = 250\nrequest_timeout_ms = 1000\nmax_metadata_bytes = 65536\nmax_body_bytes = 65536\nmax_inflight_requests = 8\nfail_policy = \"local_only\"\n",
     common::minimal_config_toml(&certificate, &key)
   );
-  let config: Config = toml::from_str(&raw).expect("external cache fixture config should parse");
+  let mut config: Config =
+    toml::from_str(&raw).expect("external cache fixture config should parse");
+  // This handler exercises the independent legacy NVS protocol and supplies
+  // no group authority or downstream-origin request token.
+  config.cache.groups.enabled = false;
   let metrics = crate::metrics::Metrics::new();
   let runtime = ExternalCacheRuntime::new(&config, metrics.clone())
     .expect("external cache runtime should build");
@@ -88,6 +92,7 @@ async fn owner_candidate(cache: &ResponseCache) -> CacheNvsCandidate {
   let metadata = cache
     .prepare_nvs(
       &CacheInsertContext {
+        group_request: None,
         no_vary_search: Some(&request),
         policy_name: None,
         scheme: "https",
@@ -142,6 +147,8 @@ fn framed_owner_response(
     tags: Vec::new(),
     query_target_epoch: None,
     no_vary_search: Some(no_vary_search),
+    group_stamp: None,
+    capabilities: Vec::new(),
   };
   let metadata = serde_json::to_vec(&metadata).expect("external metadata should serialize");
   let mut response = Vec::with_capacity(8 + metadata.len() + body.len());

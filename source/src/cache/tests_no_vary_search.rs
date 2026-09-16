@@ -25,6 +25,7 @@ fn context<'a>(
   headers: &'a HeaderMap,
 ) -> CacheLookupContext<'a> {
   CacheLookupContext {
+    group_request: None,
     no_vary_search: Some(request),
     policy_name: None,
     scheme: "https",
@@ -49,6 +50,7 @@ async fn seed(cache: &ResponseCache, uri: &Uri, effective: &str, field: &str) {
     cache
       .insert_async(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: Some(&request),
           policy_name: None,
           scheme: "https",
@@ -85,6 +87,7 @@ fn context_with_options<'a>(
   certificate_identity: Option<&'a CacheCertificateIdentity>,
 ) -> CacheLookupContext<'a> {
   CacheLookupContext {
+    group_request: None,
     no_vary_search: Some(request),
     policy_name: None,
     scheme: "https",
@@ -127,6 +130,7 @@ async fn seed_with_options(
     cache
       .insert_async(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: Some(&request),
           policy_name: None,
           scheme: "https",
@@ -218,6 +222,7 @@ async fn aliases_preserve_both_targets_and_custom_query_dimensions() {
     let cache = ResponseCache::new(
       &CacheConfig {
         enabled: true,
+        groups: crate::config::CacheGroupsConfig { enabled: false },
         cache_key: template.into(),
         ..CacheConfig::default()
       },
@@ -273,6 +278,7 @@ async fn query_rewrites_require_equivalence_on_each_side() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -317,6 +323,7 @@ async fn exact_purge_fences_equivalent_objects_and_inflight_fills() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -361,6 +368,7 @@ async fn exact_purge_fences_equivalent_objects_and_inflight_fills() {
     cache
       .insert_async(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: Some(&request),
           policy_name: None,
           scheme: "https",
@@ -384,6 +392,7 @@ async fn invalid_headers_and_changed_origin_fields_never_authorize_aliases() {
   let cache = ResponseCache::new(
     &CacheConfig {
       enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
       ..CacheConfig::default()
     },
     None,
@@ -421,6 +430,7 @@ async fn invalid_headers_and_changed_origin_fields_never_authorize_aliases() {
     cache
       .insert_async(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: Some(&request),
           policy_name: None,
           scheme: "https",
@@ -453,6 +463,7 @@ async fn disk_recovery_preserves_only_generation_qualified_aliases() {
   let directory = tempfile::tempdir().unwrap();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(directory.path().to_path_buf()),
     disk_max_size_bytes: Some(1024 * 1024),
@@ -499,6 +510,7 @@ async fn disk_recovery_preserves_only_generation_qualified_aliases() {
 async fn same_process_config_toggle_disables_nvs_aliases_but_keeps_exact_cache() {
   let mut config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let enabled = ResponseCache::new(&config, None).unwrap();
@@ -544,6 +556,7 @@ async fn same_process_config_toggle_disables_nvs_aliases_but_keeps_exact_cache()
   assert!(
     disabled
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         policy_name: None,
         scheme: "https",
@@ -564,6 +577,7 @@ async fn shared_memory_nvs_owner_and_alias_cross_cache_instances() {
   let shared = crate::shared_state::SharedState::test_memory("nvs-shared-two-instance");
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let first = ResponseCache::new(&config, Some(shared.clone())).unwrap();

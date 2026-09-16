@@ -85,7 +85,9 @@ impl ResponseCache {
     let policies = self
       .policies
       .keys()
-      .filter(|policy| self.policy_enabled(Some(policy), &query_method))
+      .filter(|policy| {
+        !self.groups_enabled(policy) && self.policy_enabled(Some(policy), &query_method)
+      })
       .cloned()
       .collect::<Vec<_>>();
     let mut count = 0usize;
@@ -188,6 +190,19 @@ impl ResponseCache {
     uri: &str,
     partition: Option<&str>,
   ) -> anyhow::Result<usize> {
+    if self.groups_enabled(policy) {
+      return self
+        .invalidate_groups(
+          policy,
+          None,
+          partition,
+          Some(host),
+          Some(scheme),
+          groups::model::Selector::Exact(uri.to_string()),
+          &[],
+        )
+        .await;
+    }
     let count = self.purge_exact_partition(policy, scheme, host, uri, partition);
     if let Ok(uri) = uri.parse::<Uri>() {
       let epoch = self
@@ -257,6 +272,19 @@ impl ResponseCache {
     path_prefix: &str,
     partition: Option<&str>,
   ) -> anyhow::Result<usize> {
+    if self.groups_enabled(policy) {
+      return self
+        .invalidate_groups(
+          policy,
+          None,
+          partition,
+          Some(host),
+          Some(scheme),
+          groups::model::Selector::Prefix(path_prefix.to_string()),
+          &[],
+        )
+        .await;
+    }
     let count = self.purge_prefix_partition(policy, scheme, host, path_prefix, partition);
     if self
       .nvs_epoch(&nvs::policy_target(policy), true)
@@ -328,6 +356,19 @@ impl ResponseCache {
     host: Option<&str>,
     partition: Option<&str>,
   ) -> anyhow::Result<usize> {
+    if self.groups_enabled(policy) {
+      return self
+        .invalidate_groups(
+          policy,
+          None,
+          partition,
+          host,
+          scheme,
+          groups::model::Selector::Tag(tag.to_string()),
+          &[],
+        )
+        .await;
+    }
     let count = self.purge_tag_partition(policy, tag, scheme, host, partition);
     if self
       .nvs_epoch(&nvs::policy_target(policy), true)
@@ -412,6 +453,7 @@ impl ResponseCache {
         ctx.query_identity,
         ctx.certificate_identity,
         ctx.proxy_protocol_identity,
+        ctx.group_request,
       );
       let Some(operation) = operation else {
         reasons.push("QUERY cache identity is required".to_string());

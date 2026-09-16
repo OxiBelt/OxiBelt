@@ -231,6 +231,21 @@ where
     return text_response(StatusCode::BAD_REQUEST, "ambiguous host header");
   }
 
+  if state.cache.enabled() {
+    let authority = request.uri().authority().map(|a| a.as_str()).or_else(|| {
+      request
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    });
+    if let Some(origin) =
+      authority.and_then(|a| crate::cache::CacheGroupOrigin::new(downstream_scheme, a).ok())
+    {
+      request
+        .extensions_mut()
+        .insert(crate::cache::CacheGroupRequest::new(origin));
+    }
+  }
   let host_snapshot = extract_host_snapshot(&request);
   let host = host_snapshot.as_str();
   let downstream_port = host_snapshot.downstream_port(downstream_scheme);

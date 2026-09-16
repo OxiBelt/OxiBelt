@@ -35,6 +35,7 @@ postgres_tls_dir="${work_dir}/postgres-tls"
 logs_dir="${work_dir}/logs"
 network_name="oxibelt-matrix-${run_id}"
 mock_image="${OXIBELT_MOCK_UPSTREAM_IMAGE:-oxibelt/mock-upstream:${run_id}}"
+external_cache_image="${OXIBELT_EXTERNAL_CACHE_HANDLER_IMAGE:-oxibelt/mock-external-cache:${run_id}}"
 mock_dns_image="${OXIBELT_MOCK_DNS_IMAGE:-oxibelt/mock-dns:${run_id}}"
 mock_kubernetes_image="${OXIBELT_MOCK_KUBERNETES_IMAGE:-oxibelt/mock-kubernetes:${run_id}}"
 mock_nomad_image="${OXIBELT_MOCK_NOMAD_IMAGE:-oxibelt/mock-nomad:${run_id}}"
@@ -47,6 +48,7 @@ proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/proxy-matrix:${run_id}}"
 keysigner_image="${OXIBELT_KEYSIGNER_DOCKER_IMAGE:-${proxy_image}}"
 require_preloaded_helper_images="${OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES:-0}"
 remove_mock_image=0
+remove_external_cache_image=0
 remove_mock_dns_image=0
 remove_mock_kubernetes_image=0
 remove_mock_nomad_image=0
@@ -56,6 +58,9 @@ remove_postgres_image=0
 remove_proxy_image=0
 if [[ -z "${OXIBELT_MOCK_UPSTREAM_IMAGE:-}" ]]; then
   remove_mock_image=1
+fi
+if [[ -z "${OXIBELT_EXTERNAL_CACHE_HANDLER_IMAGE:-}" ]]; then
+  remove_external_cache_image=1
 fi
 if [[ -z "${OXIBELT_MOCK_DNS_IMAGE:-}" ]]; then
   remove_mock_dns_image=1
@@ -77,6 +82,7 @@ if [[ -z "${OXIBELT_POSTGRES_IMAGE:-}" ]]; then
 fi
 proxy_container="oxibelt-proxy-${run_id}"
 proxy_b_container="oxibelt-proxy-b-${run_id}"
+external_cache_container="oxibelt-external-cache-${run_id}"
 http_container="oxibelt-http-${run_id}"
 https_container="oxibelt-https-${run_id}"
 alt_container="oxibelt-alt-${run_id}"
@@ -120,6 +126,9 @@ cleanup() {
     "${client_identity_cert_volume}" >/dev/null 2>&1 || true
   if [[ "${remove_mock_image}" == "1" ]]; then
     docker rmi -f "${mock_image}" >/dev/null 2>&1 || true
+  fi
+  if [[ "${remove_external_cache_image}" == "1" ]]; then
+    docker rmi -f "${external_cache_image}" >/dev/null 2>&1 || true
   fi
   if [[ "${remove_mock_dns_image}" == "1" ]]; then
     docker rmi -f "${mock_dns_image}" >/dev/null 2>&1 || true
@@ -367,6 +376,7 @@ collect_diagnostics() {
   mkdir -p "${logs_dir}"
   collect_container_log "${proxy_container}" "proxy.log"
   collect_container_log "${proxy_b_container}" "proxy-b.log"
+  collect_container_log "${external_cache_container}" "mock-external-cache.log"
   collect_container_log "${http_container}" "mock-http.log"
   collect_container_log "${https_container}" "mock-https.log"
   collect_container_log "${alt_container}" "mock-alt.log"
@@ -2913,6 +2923,14 @@ if [[ "${CASE_EXPECT_START}" == "success" || "${CASE_HARDENED_RUNTIME}" == "1" |
     "${repo_root}/tests/docker/mock_upstream"
 fi
 
+if [[ "${CASE_NEED_EXTERNAL_CACHE_HANDLER}" == "1" ]]; then
+  ensure_helper_image \
+    "${external_cache_image}" \
+    remove_external_cache_image \
+    "${repo_root}/tests/docker/mock_external_cache/Dockerfile" \
+    "${repo_root}/tests/docker/mock_external_cache"
+fi
+
 if [[ "${CASE_NEED_DNS_SERVER}" == "1" ]]; then
   ensure_helper_image \
     "${mock_dns_image}" \
@@ -3077,6 +3095,15 @@ if [[ "${CASE_NEED_HTTP_UPSTREAM}" == "1" ]]; then
     -e UPSTREAM_NAME=http-upstream \
     -e ACCEPT_PROXY_PROTOCOL=1 \
     "${mock_image}" >/dev/null
+fi
+
+if [[ "${CASE_NEED_EXTERNAL_CACHE_HANDLER}" == "1" ]]; then
+  docker run -d \
+    --name "${external_cache_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    --network-alias mock-external-cache \
+    "${external_cache_image}" >/dev/null
 fi
 
 if [[ "${CASE_NEED_ALT_UPSTREAM}" == "1" ]]; then

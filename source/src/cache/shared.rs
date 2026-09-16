@@ -52,5 +52,6 @@ pub(in crate::cache) fn shared_cache_entry_metadata(
     tags: entry.tags.clone(),
     query_target_epoch: entry.query_target_epoch,
     no_vary_search: entry.no_vary_search.clone(),
+    group_stamp: entry.group_stamp.clone(),
   }
 }

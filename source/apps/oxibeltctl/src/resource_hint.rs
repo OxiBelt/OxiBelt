@@ -15,6 +15,10 @@ pub(crate) fn cache_target(policy: &str, host: Option<&str>) -> Vec<String> {
   ]
 }
 
+pub(crate) fn cache_group_target(policy: &str, authority: &str) -> Vec<String> {
+  cache_target(policy, Some(authority))
+}
+
 pub(crate) fn cache_key_explain_target(body: &Value) -> Vec<String> {
   let policy = string_field(body, "policy").unwrap_or("default");
   cache_target(policy, string_field(body, "host"))

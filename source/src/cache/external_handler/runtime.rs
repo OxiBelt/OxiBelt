@@ -188,6 +188,78 @@ impl ExternalCacheRuntime {
     }
   }
 
+  /// Reads a durable external cache-group authority record. Errors are kept
+  /// visible so group callers can fence reuse instead of treating a failed
+  /// remote read as an empty authority.
+  pub(crate) async fn group_read(
+    &self,
+    handler_name: &str,
+    key: &str,
+  ) -> anyhow::Result<Option<Vec<u8>>> {
+    let handler = self
+      .handlers
+      .get(handler_name)
+      .ok_or_else(|| anyhow::anyhow!("external cache handler {handler_name} is not configured"))?;
+    let Ok(_permit) = handler.limiter.clone().try_acquire_owned() else {
+      self.record(&handler.name, "cache_group_read", "saturated");
+      return Err(anyhow::anyhow!("external cache group request is saturated"));
+    };
+    match handler.client.group_read(key).await {
+      Ok(value) => {
+        self.record(
+          &handler.name,
+          "cache_group_read",
+          if value.is_some() { "hit" } else { "miss" },
+        );
+        Ok(value)
+      }
+      Err(error) => {
+        self.record(&handler.name, "cache_group_read", "error");
+        warn!(handler = %handler.name, error = %error, "external cache group read failed");
+        Err(error)
+      }
+    }
+  }
+
+  /// Atomically creates or replaces a durable external cache-group authority
+  /// record. The handler protocol is responsible for preserving no-expiry
+  /// semantics; OxiBelt supplies only the byte-exact CAS transition.
+  pub(crate) async fn group_compare_exchange(
+    &self,
+    handler_name: &str,
+    key: &str,
+    expected: Option<&[u8]>,
+    replacement: &[u8],
+  ) -> anyhow::Result<bool> {
+    let handler = self
+      .handlers
+      .get(handler_name)
+      .ok_or_else(|| anyhow::anyhow!("external cache handler {handler_name} is not configured"))?;
+    let Ok(_permit) = handler.limiter.clone().try_acquire_owned() else {
+      self.record(&handler.name, "cache_group_compare_exchange", "saturated");
+      return Err(anyhow::anyhow!("external cache group request is saturated"));
+    };
+    match handler
+      .client
+      .group_compare_exchange(key, expected, replacement)
+      .await
+    {
+      Ok(exchanged) => {
+        self.record(
+          &handler.name,
+          "cache_group_compare_exchange",
+          if exchanged { "exchanged" } else { "mismatch" },
+        );
+        Ok(exchanged)
+      }
+      Err(error) => {
+        self.record(&handler.name, "cache_group_compare_exchange", "error");
+        warn!(handler = %handler.name, error = %error, "external cache group compare-exchange failed");
+        Err(error)
+      }
+    }
+  }
+
   /// Attempts bounded external Q1 cleanup without affecting invalidation
   /// correctness. Absence, saturation, and errors are all best-effort misses.
   pub(crate) async fn query_cleanup(

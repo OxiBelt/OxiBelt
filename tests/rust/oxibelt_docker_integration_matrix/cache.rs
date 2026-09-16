@@ -4,6 +4,45 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
   vec![
     docker_case(
       "cache",
+      "cache-groups-redis-coherence",
+      "Redis shared cache-group authority preserves bounded RFC 9875 coherence across two proxy nodes",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        redis: true,
+        second_proxy: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "cache",
+      "cache-groups-postgres-coherence",
+      "PostgreSQL shared cache-group authority preserves bounded RFC 9875 coherence across two proxy nodes",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        postgres: true,
+        second_proxy: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "cache",
+      "cache-groups-external-coherence",
+      "external cache-group authority preserves bounded RFC 9875 coherence across two proxy nodes",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        external_cache_handler: true,
+        second_proxy: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "cache",
       "tmpfs-route-cache",
       "tmpfs cache serves a route response after the upstream disappears",
       ExpectStart::Success,

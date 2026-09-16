@@ -99,6 +99,7 @@ fn if_range_mismatch_serves_full_cached_body() {
 fn head_can_read_get_cache_but_head_miss_does_not_store() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     cache_methods: vec!["GET".to_string()],
     ..CacheConfig::default()
   };
@@ -115,6 +116,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -136,6 +138,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
   );
 
   match cache.lookup(CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -154,6 +157,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -176,6 +180,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -195,6 +200,7 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
 fn rfc9111_freshness_directives_are_stable() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
@@ -244,6 +250,7 @@ fn rfc9111_freshness_directives_are_stable() {
     assert_eq!(
       cache.response_head_decision(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
@@ -269,6 +276,7 @@ fn rfc9111_freshness_directives_are_stable() {
 fn pragma_no_cache_request_revalidates_fresh_entry() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
@@ -283,6 +291,7 @@ fn pragma_no_cache_request_revalidates_fresh_entry() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -306,6 +315,7 @@ fn pragma_no_cache_request_revalidates_fresh_entry() {
   let mut request_headers = HeaderMap::new();
   request_headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
   match cache.lookup(CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),

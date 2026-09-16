@@ -103,7 +103,7 @@ async fn query_cache_purge_authorizes_specific_type_and_policy() {
   let addr = listener
     .local_addr()
     .expect("admin listener address should be available");
-  let config = admin_listener_exact_purge_ipm_config(&cert_path, &key_path, addr);
+  let config = admin_listener_exact_purge_ipm_config(&cert_path, &key_path, addr, false, false);
   let snapshot = AppSnapshot::new(config)
     .await
     .expect("snapshot should initialize");
@@ -146,6 +146,114 @@ async fn query_cache_purge_authorizes_specific_type_and_policy() {
 
   let _ = shutdown.send(true);
   task.abort();
+}
+
+#[tokio::test]
+async fn group_enabled_cache_purges_require_group_permission_before_mutating_entries() {
+  let temp_dir = common::TempDir::new("admin-group-purge-ipm");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "admin-group-purge-ipm");
+
+  let denied_listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("denied admin listener should bind");
+  let denied_addr = denied_listener
+    .local_addr()
+    .expect("denied admin listener address should be available");
+  let denied_snapshot = AppSnapshot::new(admin_listener_exact_purge_ipm_config(
+    &cert_path,
+    &key_path,
+    denied_addr,
+    false,
+    true,
+  ))
+  .await
+  .expect("group-enabled denied snapshot should initialize");
+  seed_group_cache_entry(&denied_snapshot, "/groups/exact", "exact").await;
+  let denied_state = AppHandle::new(denied_snapshot);
+  let (denied_shutdown, denied_shutdown_rx) = watch::channel(false);
+  let denied_task = tokio::spawn(serve_admin_listener(
+    denied_listener,
+    denied_addr,
+    denied_state.clone(),
+    test_admin_control(),
+    test_admin_operations(),
+    denied_shutdown_rx,
+  ));
+
+  let response = admin_json_purge_response(
+    denied_addr,
+    r#"{"type":"exact","policy":"default","scheme":"http","host":"example.com","uri":"/groups/exact"}"#,
+  )
+  .await;
+  assert!(
+    response.starts_with("HTTP/1.1 403 Forbidden"),
+    "PurgeObject without PurgeGroup must reject before mutation: {}",
+    log_safe_text(&response)
+  );
+  assert!(
+    group_cache_entry_is_fresh(&denied_state.snapshot(), "/groups/exact").await,
+    "the denied exact purge must leave the group entry current"
+  );
+  let _ = denied_shutdown.send(true);
+  denied_task.abort();
+
+  let allowed_listener = TcpListener::bind("127.0.0.1:0")
+    .await
+    .expect("allowed admin listener should bind");
+  let allowed_addr = allowed_listener
+    .local_addr()
+    .expect("allowed admin listener address should be available");
+  let allowed_snapshot = AppSnapshot::new(admin_listener_exact_purge_ipm_config(
+    &cert_path,
+    &key_path,
+    allowed_addr,
+    true,
+    true,
+  ))
+  .await
+  .expect("group-enabled allowed snapshot should initialize");
+  seed_group_cache_entry(&allowed_snapshot, "/groups/exact", "exact").await;
+  seed_group_cache_entry(&allowed_snapshot, "/groups/empty", "").await;
+  seed_group_cache_entry(&allowed_snapshot, "/groups/string", "release-1").await;
+  let allowed_state = AppHandle::new(allowed_snapshot);
+  let (allowed_shutdown, allowed_shutdown_rx) = watch::channel(false);
+  let allowed_task = tokio::spawn(serve_admin_listener(
+    allowed_listener,
+    allowed_addr,
+    allowed_state.clone(),
+    test_admin_control(),
+    test_admin_operations(),
+    allowed_shutdown_rx,
+  ));
+
+  for (body, uri) in [
+    (
+      r#"{"type":"exact","policy":"default","scheme":"http","host":"example.com","uri":"/groups/exact"}"#,
+      "/groups/exact",
+    ),
+    (
+      r#"{"type":"group","policy":"default","origin":"http://example.com","group":""}"#,
+      "/groups/empty",
+    ),
+    (
+      r#"{"type":"group","policy":"default","origin":"http://example.com/","group":"release-1"}"#,
+      "/groups/string",
+    ),
+  ] {
+    let response = admin_json_purge_response(allowed_addr, body).await;
+    assert!(
+      response.starts_with("HTTP/1.1 200 OK") && response.contains(r#""purged":1"#),
+      "PurgeGroup grant should authorize purge: {}",
+      log_safe_text(&response)
+    );
+    assert!(
+      !group_cache_entry_is_fresh(&allowed_state.snapshot(), uri).await,
+      "authorized group purge should make {uri} unavailable"
+    );
+  }
+  let _ = allowed_shutdown.send(true);
+  allowed_task.abort();
 }
 
 #[tokio::test]
@@ -437,6 +545,8 @@ fn admin_listener_exact_purge_ipm_config(
   cert_path: &Path,
   key_path: &Path,
   admin_bind: SocketAddr,
+  grant_purge_group: bool,
+  groups_enabled: bool,
 ) -> Config {
   let mut raw = common::minimal_config_toml(cert_path, key_path)
     .replace("unprivileged_mode = true", "unprivileged_mode = false")
@@ -444,6 +554,11 @@ fn admin_listener_exact_purge_ipm_config(
       "https_bind = \"127.0.0.1:8443\"",
       "https_bind = \"127.0.0.1:0\"",
     );
+  let actions = if grant_purge_group {
+    r#"["cache:PurgeObject", "cache:PurgeGroup"]"#
+  } else {
+    r#"["cache:PurgeObject"]"#
+  };
   raw.push_str(&format!(
     r#"
 
@@ -475,7 +590,7 @@ name = "exact-default"
 
 [[ipm.policies.statements]]
 effect = "allow"
-actions = ["cache:PurgeObject"]
+actions = {actions}
 resources = [
   "oxibelt:oxibelt:cache:policy/default",
   "oxibelt:oxibelt:cache:host/example.com",
@@ -486,7 +601,12 @@ principal = "purger"
 policy = "exact-default"
 "#
   ));
-  parse_config(&raw)
+  let mut config = parse_config(&raw);
+  config.cache.groups.enabled = groups_enabled;
+  config
+    .validate()
+    .expect("group cache configuration should validate");
+  config
 }
 
 fn admin_listener_source_ip_deny_config(
@@ -546,7 +666,10 @@ policy = "config-local-network"
 }
 
 fn parse_config(raw: &str) -> Config {
-  let config: Config = toml::from_str(raw).expect("config should parse");
+  let mut config: Config = toml::from_str(raw).expect("config should parse");
+  // These Admin fixtures seed legacy cache entries through direct contexts
+  // that intentionally have no ingress cache-group request token.
+  config.cache.groups.enabled = false;
   config.validate().expect("config should validate");
   config
 }
@@ -564,6 +687,7 @@ fn seed_cache_entry(snapshot: &AppSnapshot, uri: &str, tag: Option<&str>) {
   assert_eq!(
     snapshot.cache.insert(
       crate::cache::CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         query_identity: None,
         proxy_protocol_identity: None,
@@ -583,6 +707,95 @@ fn seed_cache_entry(snapshot: &AppSnapshot, uri: &str, tag: Option<&str>) {
     ),
     crate::cache::CacheInsertOutcome::Stored
   );
+}
+
+async fn seed_group_cache_entry(snapshot: &AppSnapshot, uri: &str, group: &str) {
+  let uri = uri.parse::<::http::Uri>().expect("cache URI should parse");
+  let method = ::http::Method::GET;
+  let request_headers = HeaderMap::new();
+  let request = crate::cache::CacheGroupRequest::new(
+    crate::cache::CacheGroupOrigin::new("http", "example.com")
+      .expect("group origin should be valid"),
+  );
+  let lookup = crate::cache::CacheLookupContext {
+    group_request: Some(&request),
+    no_vary_search: None,
+    query_identity: None,
+    proxy_protocol_identity: None,
+    policy_name: Some("default"),
+    scheme: "http",
+    host: "example.com",
+    method: &method,
+    uri: &uri,
+    request_headers: &request_headers,
+    certificate_identity: None,
+  };
+  assert!(snapshot.cache.bind_group_request(lookup).await);
+  let mut headers = HeaderMap::new();
+  headers.insert(
+    ::http::header::CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=60"),
+  );
+  headers.insert(
+    "cache-groups",
+    HeaderValue::from_str(&serde_json::to_string(group).expect("group string should encode"))
+      .expect("group field should be valid"),
+  );
+  assert_eq!(
+    snapshot
+      .cache
+      .insert_async(
+        crate::cache::CacheInsertContext {
+          group_request: Some(&request),
+          no_vary_search: None,
+          query_identity: None,
+          proxy_protocol_identity: None,
+          policy_name: Some("default"),
+          scheme: "http",
+          host: "example.com",
+          method: &method,
+          uri: &uri,
+          request_headers: &request_headers,
+          certificate_identity: None,
+        },
+        crate::cache::CacheEntry::memory(
+          StatusCode::OK,
+          headers,
+          bytes::Bytes::from_static(b"cached")
+        ),
+      )
+      .await,
+    crate::cache::CacheInsertOutcome::Stored
+  );
+}
+
+async fn group_cache_entry_is_fresh(snapshot: &AppSnapshot, uri: &str) -> bool {
+  let uri = uri.parse::<::http::Uri>().expect("cache URI should parse");
+  let method = ::http::Method::GET;
+  let request_headers = HeaderMap::new();
+  let request = crate::cache::CacheGroupRequest::new(
+    crate::cache::CacheGroupOrigin::new("http", "example.com")
+      .expect("group origin should be valid"),
+  );
+  matches!(
+    snapshot
+      .cache
+      .lookup_async(crate::cache::CacheLookupContext {
+        group_request: Some(&request),
+        no_vary_search: None,
+        query_identity: None,
+        proxy_protocol_identity: None,
+        policy_name: Some("default"),
+        scheme: "http",
+        host: "example.com",
+        method: &method,
+        uri: &uri,
+        request_headers: &request_headers,
+        certificate_identity: None,
+      })
+      .await,
+    Some(crate::cache::CacheLookup::Fresh(_))
+  )
 }
 
 async fn admin_json_purge_response(addr: SocketAddr, body: &str) -> String {

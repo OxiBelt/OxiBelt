@@ -5,6 +5,7 @@ use super::external_handler::{
   ExternalCacheLookupRequest, ExternalCacheNvsCandidatesRequest, ExternalCacheNvsEpochRequest,
   ExternalCachePublishBody, ExternalCacheQueryCleanupReport, ExternalCacheQueryCleanupRequest,
   ExternalCacheQueryEpochRequest, ExternalCacheVary, PROTOCOL_VERSION,
+  required_capabilities_for_cache_key_version,
 };
 #[cfg(feature = "admin-runtime")]
 use super::external_handler::{
@@ -122,6 +123,13 @@ impl ResponseCache {
     if super::lookup::cache_request_bypassed(&ctx, &self.bypass_request_headers) {
       return None;
     }
+    // Direct external lookups (notably an NVS owner lookup) may bypass the
+    // normal lookup_async entry point. Bind the request's group snapshot here
+    // as well, so the external record is always checked against this request's
+    // authority scope.
+    if !self.bind_group_request(ctx.clone()).await {
+      return None;
+    }
     let operation = self.operation_context(
       ctx.policy_name,
       ctx.scheme,
@@ -132,8 +140,18 @@ impl ResponseCache {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )?;
     if self.query_target_cache_bypassed(&operation) {
+      return None;
+    }
+    // A group-stamped L3 entry is only meaningful when its handler has
+    // negotiated the group protocol. An unsupported legacy handler leaves L1
+    // usable; a later outage is retained as an established remote authority
+    // failure and therefore bypasses this entry.
+    if operation.policy.groups_enabled
+      && !self.groups_external_capable(&operation.policy.name).await
+    {
       return None;
     }
     if !self
@@ -161,6 +179,24 @@ impl ResponseCache {
       .external_cache
       .lookup(handler, request, temp_dir)
       .await?;
+    hit
+      .metadata
+      .validate_versions(external_cache_key_version(&operation.base_key))
+      .ok()?;
+    if operation.policy.groups_enabled {
+      let stamp = hit.metadata.group_stamp.as_ref()?;
+      let request_stamp = ctx.group_request?.snapshot()?;
+      if stamp.policy != operation.policy.name
+        || stamp.origin != request_stamp.origin
+        || stamp.partition != request_stamp.partition
+        || stamp.target != operation.uri
+        || !self
+          .group_entry_current(&operation.policy.name, Some(stamp))
+          .await
+      {
+        return None;
+      }
+    }
     if let Some(metadata) = hit.metadata.no_vary_search.as_ref() {
       if !metadata.valid() || metadata.owner_uri != operation.uri {
         return None;
@@ -223,7 +259,14 @@ impl ResponseCache {
     {
       return None;
     }
-    if metadata.variant_key != variant_key(&operation.partition, &operation.base_key, &vary) {
+    let mut expected_variant = variant_key(&operation.partition, &operation.base_key, &vary);
+    if let Some(stamp) = &metadata.group_stamp {
+      expected_variant.push_str(&format!(
+        "\ngroup-generation={}:{}",
+        stamp.incarnation, stamp.sequence
+      ));
+    }
+    if metadata.variant_key != expected_variant {
       return None;
     }
     let stored_at = system_time_from_ms(metadata.stored_at_ms)?;
@@ -248,7 +291,8 @@ impl ResponseCache {
     let size = metadata
       .body_len
       .checked_add(header_size(&headers))?
-      .checked_add(nvs::metadata_size(metadata.no_vary_search.as_ref()))?;
+      .checked_add(nvs::metadata_size(metadata.no_vary_search.as_ref()))?
+      .checked_add(groups::metadata_size(metadata.group_stamp.as_ref()))?;
     if size > self.config.max_size_bytes {
       return None;
     }
@@ -259,6 +303,7 @@ impl ResponseCache {
           return None;
         }
         let stored = StoredEntry {
+          group_stamp: metadata.group_stamp.clone(),
           policy: operation.policy.name.clone(),
           no_vary_search: metadata.no_vary_search.clone(),
           partition: operation.partition.clone(),
@@ -292,6 +337,7 @@ impl ResponseCache {
         }
         let mut entry = CacheEntry::temporary_file(status, headers, file, body_len, stored_at)
           .with_expires_at(expires_at);
+        entry.group_stamp = metadata.group_stamp.clone();
         entry.no_vary_search = metadata.no_vary_search.clone();
         entry
       }
@@ -368,8 +414,8 @@ impl ResponseCache {
       return;
     }
     let mut inner = self.inner_guard();
-    if variant_count_exceeded(
-      &inner,
+    if self.variant_count_exceeded(
+      &mut inner,
       policy,
       &stored.partition,
       &stored.base_key,
@@ -420,12 +466,27 @@ impl ResponseCache {
     if is_query_v1_base_key(&entry.base_key) && entry.query_target_epoch.is_none() {
       return None;
     }
+    if policy.groups_enabled {
+      // Synchronous paths must never silently probe an external handler. The
+      // request-path publisher negotiates first; callers without that async
+      // step keep this record local.
+      if self.groups.external_mode(&entry.policy) != Some(true) {
+        return None;
+      }
+      let stamp = entry.group_stamp.as_ref()?;
+      if !stamp.valid() || stamp.policy != entry.policy {
+        return None;
+      }
+    } else if entry.group_stamp.is_some() {
+      return None;
+    }
     let body_len = stored_body_len(&entry.body)?;
+    let cache_key_version = external_cache_key_version(&entry.base_key);
     Some((
       handler,
       ExternalCacheEntryMetadata {
         protocol_version: PROTOCOL_VERSION.to_string(),
-        cache_key_version: external_cache_key_version(&entry.base_key).to_string(),
+        cache_key_version: cache_key_version.to_string(),
         policy: entry.policy.clone(),
         partition: entry.partition.clone(),
         base_key: entry.base_key.clone(),
@@ -459,8 +520,24 @@ impl ResponseCache {
         tags: entry.tags.clone(),
         query_target_epoch: entry.query_target_epoch,
         no_vary_search: entry.no_vary_search.clone(),
+        group_stamp: entry.group_stamp.clone(),
+        capabilities: required_capabilities_for_cache_key_version(
+          cache_key_version,
+          entry.query_target_epoch.is_some(),
+        ),
       },
     ))
+  }
+
+  /// Negotiate L3 group support before an async publisher serializes metadata.
+  /// A legacy handler is remembered as unsupported and the caller continues
+  /// with its local cache entry. A failed established handler remains remote
+  /// authority and returns false, keeping grouped reuse fail-closed.
+  pub(in crate::cache) async fn external_group_publish_capable(&self, policy: &str) -> bool {
+    let Some(runtime) = self.policy(Some(policy)) else {
+      return false;
+    };
+    !runtime.groups_enabled || self.groups_external_capable(policy).await
   }
 
   pub(in crate::cache) fn spawn_external_fill(

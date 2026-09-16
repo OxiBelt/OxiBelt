@@ -24,6 +24,9 @@ pub(super) fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
     .ok_or_else(|| anyhow!("invalid cache body path"))?;
   let mut lines = Vec::new();
   lines.push("version=1".to_string());
+  if let Some(stamp) = &entry.group_stamp {
+    lines.push(format!("group_stamp={}", b64(&serde_json::to_vec(stamp)?)));
+  }
   if let Some(nvs) = &entry.no_vary_search {
     lines.push(format!("no_vary_search={}", b64(&serde_json::to_vec(nvs)?)));
   }
@@ -206,7 +209,33 @@ pub(super) fn decode_metadata_text(
   if super::is_query_v1_base_key(&base_key) && query_target_epoch.is_none() {
     bail!("legacy Q1 disk metadata is missing its target epoch");
   }
+  let group_stamp = values
+    .get("group_stamp")
+    .map(|items| -> anyhow::Result<super::CacheGroupStamp> {
+      if items.len() != 1 || items[0].len() > 131072 {
+        bail!("invalid cache group metadata envelope");
+      }
+      let stamp: super::CacheGroupStamp = serde_json::from_str(&unb64(&items[0])?)?;
+      if !stamp.valid()
+        || stamp.policy != policy
+        || stamp.partition != partition
+        || stamp.target != uri
+      {
+        bail!("cache group metadata scope mismatch");
+      }
+      Ok(stamp)
+    })
+    .transpose()?;
+  if matches!(
+    super::external_cache_key_version(&base_key),
+    super::key::GROUP_EXTERNAL_CACHE_KEY_VERSION
+      | super::key::GROUP_QUERY_EXTERNAL_CACHE_KEY_VERSION
+  ) && group_stamp.is_none()
+  {
+    bail!("group-enabled cache metadata missing coherence stamp");
+  }
   Ok(StoredEntry {
+    group_stamp,
     no_vary_search: values
       .get("no_vary_search")
       .filter(|values| values.len() == 1)

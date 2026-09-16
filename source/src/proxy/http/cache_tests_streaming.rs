@@ -15,6 +15,7 @@ async fn wait_for_fresh_cache_entry(
   for _ in 0..50 {
     if let Some(crate::cache::CacheLookup::Fresh(entry)) =
       state.cache.lookup(crate::cache::CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         query_identity: None,
         proxy_protocol_identity: None,
@@ -353,6 +354,7 @@ stream_large_objects = true
     state
       .cache
       .lookup(crate::cache::CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         query_identity: None,
         proxy_protocol_identity: None,

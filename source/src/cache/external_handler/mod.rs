@@ -2,17 +2,20 @@
 //! OxiBelt remains authoritative for cache policy; handlers store already-admitted records.
 
 mod client;
+mod group_client;
+mod group_protocol;
 mod nvs_client;
 mod nvs_protocol;
 mod protocol;
 mod runtime;
 
 pub(crate) use client::{ExternalCacheLookupHit, ExternalCachePublishBody};
+pub(crate) use group_protocol::UnsupportedCacheGroups;
 pub(crate) use nvs_protocol::{ExternalCacheNvsCandidatesRequest, ExternalCacheNvsEpochRequest};
 pub(crate) use protocol::{
   CACHE_KEY_VERSION, ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheHeader,
   ExternalCacheLookupRequest, ExternalCacheQueryCleanupRequest, ExternalCacheQueryEpochRequest,
-  ExternalCacheVary, PROTOCOL_VERSION,
+  ExternalCacheVary, PROTOCOL_VERSION, required_capabilities_for_cache_key_version,
 };
 #[cfg(feature = "admin-runtime")]
 pub(crate) use protocol::{ExternalCachePurgeKind, ExternalCachePurgeRequest};

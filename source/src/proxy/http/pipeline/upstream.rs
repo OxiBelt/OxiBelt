@@ -275,6 +275,10 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     Ok(outbound) => outbound,
     Err(error) => return route_security.apply(request_buffering_error_response(error)),
   };
+  let group_request = outbound
+    .extensions()
+    .get::<crate::cache::CacheGroupRequest>()
+    .cloned();
   let query_identity = outbound
     .extensions()
     .get::<crate::cache::CacheQueryIdentity>()
@@ -308,6 +312,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     state
       .cache
       .bind_nvs_epoch(crate::cache::CacheLookupContext {
+        group_request: group_request.as_ref(),
         no_vary_search: Some(no_vary_search),
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: proxy_protocol_identity.as_ref(),
@@ -337,6 +342,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
   let nvs_original_headers = no_vary_search.as_ref().map(|_| outbound.headers().clone());
   let initial_cache_lookup = crate::cache::CacheLookupContext {
+    group_request: group_request.as_ref(),
     no_vary_search: None,
     query_identity: query_identity.as_ref(),
     proxy_protocol_identity: proxy_protocol_identity.as_ref(),
@@ -367,6 +373,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
       .cache
       .lookup_nvs_async(
         crate::cache::CacheLookupContext {
+          group_request: group_request.as_ref(),
           no_vary_search: Some(no_vary_search),
           query_identity: query_identity.as_ref(),
           proxy_protocol_identity: proxy_protocol_identity.as_ref(),
@@ -436,6 +443,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
       let Some(permit) = state
         .cache
         .begin_fill_decision_async(crate::cache::CacheLookupContext {
+          group_request: group_request.as_ref(),
           no_vary_search: None,
           query_identity: fill_query_identity,
           proxy_protocol_identity: proxy_protocol_identity.as_ref(),
@@ -458,6 +466,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           let lookup = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              group_request: group_request.as_ref(),
               no_vary_search: None,
               query_identity: query_identity.as_ref(),
               proxy_protocol_identity: proxy_protocol_identity.as_ref(),
@@ -485,6 +494,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
               &request_method,
               &request_uri,
               &request_headers,
+              group_request.as_ref(),
             )
             .await
           };
@@ -546,6 +556,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
           let lookup = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              group_request: group_request.as_ref(),
               no_vary_search: None,
               query_identity: query_identity.as_ref(),
               proxy_protocol_identity: proxy_protocol_identity.as_ref(),
@@ -573,6 +584,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
               &request_method,
               &request_uri,
               &request_headers,
+              group_request.as_ref(),
             )
             .await
           };
@@ -622,6 +634,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
               &request_method,
               &request_uri,
               &request_headers,
+              group_request.as_ref(),
             )
             .await
               && let Some(response) = handle_cache_lookup_result(
@@ -685,6 +698,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
             &request_method,
             &request_uri,
             &request_headers,
+            group_request.as_ref(),
           )
           .await
             && let Some(response) = handle_cache_lookup_result(
@@ -727,6 +741,7 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
       .cache
       .nvs_owner_current(
         crate::cache::CacheLookupContext {
+          group_request: group_request.as_ref(),
           no_vary_search: no_vary_search.as_ref(),
           policy_name: resolved.route.cache.as_deref(),
           scheme: downstream_scheme,
@@ -843,6 +858,7 @@ async fn wait_for_shared_nvs_alias_fill(
   method: &Method,
   uri: &http::Uri,
   request_headers: &HeaderMap,
+  group_request: Option<&crate::cache::CacheGroupRequest>,
 ) -> Option<crate::cache::CacheLookup> {
   state.metrics.record_cache_fill_lock_conflict();
   record_route_cache_event(state, resolved.route, "miss", "shared_lock_conflict");
@@ -860,6 +876,7 @@ async fn wait_for_shared_nvs_alias_fill(
     let exact = state
       .cache
       .lookup_async(crate::cache::CacheLookupContext {
+        group_request,
         no_vary_search: None,
         query_identity,
         proxy_protocol_identity,
@@ -887,6 +904,7 @@ async fn wait_for_shared_nvs_alias_fill(
         method,
         uri,
         request_headers,
+        group_request,
       )
       .await
     };
@@ -910,11 +928,13 @@ async fn lookup_nvs_for_original_alias(
   method: &Method,
   uri: &http::Uri,
   request_headers: &HeaderMap,
+  group_request: Option<&crate::cache::CacheGroupRequest>,
 ) -> Option<crate::cache::CacheLookup> {
   state
     .cache
     .lookup_nvs_async(
       crate::cache::CacheLookupContext {
+        group_request,
         no_vary_search: Some(no_vary_search?),
         query_identity,
         proxy_protocol_identity,

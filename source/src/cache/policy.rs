@@ -84,18 +84,48 @@ pub(super) fn stored_response_headers(headers: &HeaderMap, config: &CacheConfig)
   headers
 }
 
-pub(super) fn variant_count_exceeded(
-  inner: &CacheInner,
-  policy: &CachePolicyRuntime,
-  partition: &str,
-  base_key: &str,
-  variant_key: &str,
-) -> bool {
-  if inner.entries.contains_key(variant_key) {
-    return false;
+impl ResponseCache {
+  pub(super) fn variant_count_exceeded(
+    &self,
+    inner: &mut CacheInner,
+    policy: &CachePolicyRuntime,
+    partition: &str,
+    base_key: &str,
+    variant_key: &str,
+  ) -> bool {
+    if inner.entries.contains_key(variant_key) {
+      return false;
+    }
+    let group = index::VariantGroupKey::new(&policy.name, partition, base_key);
+    if inner.index.variant_count(&group) < policy.max_vary_variants_per_key {
+      return false;
+    }
+    if !policy.groups_enabled {
+      return true;
+    }
+
+    // Group invalidation advances a stamp rather than immediately deleting all
+    // bodies. Remove only obsolete variants when they would otherwise consume
+    // this key's Vary budget. Group authority remains intact in `self.groups`.
+    let obsolete = inner
+      .entries
+      .iter()
+      .filter(|(_, entry)| {
+        entry.policy == policy.name
+          && entry.partition == partition
+          && entry.base_key == base_key
+          && entry
+            .group_stamp
+            .as_ref()
+            .is_some_and(|stamp| !self.group_entry_current_local(&entry.policy, Some(stamp)))
+      })
+      .map(|(key, _)| key.clone())
+      .collect::<Vec<_>>();
+    for key in obsolete {
+      remove_entry(inner, &key);
+    }
+    inner.index.variant_count(&group) >= policy.max_vary_variants_per_key
   }
-  let group = index::VariantGroupKey::new(&policy.name, partition, base_key);
-  inner.index.variant_count(&group) >= policy.max_vary_variants_per_key
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -199,6 +229,10 @@ pub(super) fn policy_runtime(
   default_memory_limit: usize,
 ) -> CachePolicyRuntime {
   CachePolicyRuntime {
+    groups_enabled: policy
+      .groups
+      .as_ref()
+      .map_or(config.groups.enabled, |g| g.enabled),
     name: policy.name.clone(),
     store: policy.store.unwrap_or(config.store),
     cache_key: policy

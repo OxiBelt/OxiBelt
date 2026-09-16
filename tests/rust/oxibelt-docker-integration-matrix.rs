@@ -138,6 +138,7 @@ struct Needs {
   postgres: bool,
   postgres_mtls: bool,
   redis: bool,
+  external_cache_handler: bool,
   remote_signer: bool,
   second_proxy: bool,
 }
@@ -559,6 +560,10 @@ fn materialize_docker_case(case: &DockerCase, output: &Path) -> Result<()> {
     bool_env(case.needs.postgres_mtls)
   ));
   manifest.push_str(&format!("CASE_NEED_REDIS={}\n", bool_env(case.needs.redis)));
+  manifest.push_str(&format!(
+    "CASE_NEED_EXTERNAL_CACHE_HANDLER={}\n",
+    bool_env(case.needs.external_cache_handler)
+  ));
   manifest.push_str(&format!(
     "CASE_NEED_REMOTE_SIGNER={}\n",
     bool_env(case.needs.remote_signer)

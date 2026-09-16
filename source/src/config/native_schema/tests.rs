@@ -244,3 +244,18 @@ fn declares_cache_no_vary_search_as_top_level_boolean_with_default() {
       .contains(&"no_vary_search")
   );
 }
+
+#[cfg(feature = "config-tooling")]
+#[test]
+fn declares_cache_groups_with_only_an_enabled_switch() {
+  assert!(boolean_path("cache.groups.enabled"));
+  assert_eq!(default_value("cache.groups.enabled"), Some(json!(true)));
+  assert!(
+    allowed_config_keys("cache.groups")
+      .is_some_and(|keys| keys.len() == 1 && keys.contains("enabled"))
+  );
+  assert!(
+    allowed_config_keys("cache.policies.groups")
+      .is_some_and(|keys| keys.len() == 1 && keys.contains("enabled"))
+  );
+}

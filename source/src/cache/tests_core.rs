@@ -40,6 +40,7 @@ fn range_entry_returns_partial_body() {
 fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
@@ -54,6 +55,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -75,6 +77,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
   );
 
   match cache.lookup(CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -98,6 +101,7 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
 fn cache_key_explain_includes_partition_and_variant() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     partition_key: "{header:X-Tenant-ID}".to_string(),
     ..CacheConfig::default()
   };
@@ -111,6 +115,7 @@ fn cache_key_explain_includes_partition_and_variant() {
 
   let explain = cache.explain_key(
     CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
@@ -140,6 +145,7 @@ fn cache_key_explain_includes_partition_and_variant() {
 fn cache_key_explain_reports_vary_rejection_reason() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     max_vary_fields: 1,
     ..CacheConfig::default()
   };
@@ -151,6 +157,7 @@ fn cache_key_explain_reports_vary_rejection_reason() {
 
   let explain = cache.explain_key(
     CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("default"),
@@ -173,6 +180,7 @@ fn cache_key_explain_reports_vary_rejection_reason() {
 fn vary_variant_cap_rejects_exploding_variants() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     max_vary_variants_per_key: 1,
     ..CacheConfig::default()
   };
@@ -192,6 +200,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -214,6 +223,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -235,6 +245,7 @@ fn vary_variant_cap_rejects_exploding_variants() {
 fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
@@ -249,6 +260,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -275,6 +287,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -296,6 +309,7 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
 fn cookie_requests_bypass_cache_by_default() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
@@ -309,6 +323,7 @@ fn cookie_requests_bypass_cache_by_default() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -331,6 +346,7 @@ fn cookie_requests_bypass_cache_by_default() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -350,6 +366,7 @@ fn cookie_requests_bypass_cache_by_default() {
 fn named_policy_can_define_negative_cache_defaults() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     policies: vec![test_cache_policy_with_negative_status()],
     ..CacheConfig::default()
   };
@@ -359,6 +376,7 @@ fn named_policy_can_define_negative_cache_defaults() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("negative"),
@@ -380,6 +398,7 @@ fn named_policy_can_define_negative_cache_defaults() {
   );
   assert!(matches!(
     cache.lookup(CacheLookupContext {
+      group_request: None,
       no_vary_search: None,
       proxy_protocol_identity: None,
       policy_name: Some("negative"),
@@ -400,6 +419,7 @@ fn disk_cache_replacement_preserves_new_body() {
   let temp_dir = TestTempDir::new();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(temp_dir.path.clone()),
     disk_max_size_bytes: Some(1024 * 1024),
@@ -414,6 +434,7 @@ fn memory_then_disk_replacement_preserves_new_body_after_disk_fallback() {
   let temp_dir = TestTempDir::new();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::MemoryThenDisk,
     memory_max_size_bytes: Some(1),
     disk_dir: Some(temp_dir.path.clone()),
@@ -441,6 +462,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
@@ -459,6 +481,7 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
   }
 
   match cache.lookup(CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -492,6 +515,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
   let temp_dir = TestTempDir::new();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(temp_dir.path.clone()),
     disk_max_size_bytes: Some(1024 * 1024),
@@ -503,6 +527,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
   assert_eq!(
     cache.insert(
       CacheInsertContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -529,6 +554,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -549,6 +575,7 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
 fn cache_tag_purge_removes_matching_entries_only() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     ..CacheConfig::default()
   };
   let cache = ResponseCache::new(&config, None).unwrap();
@@ -571,6 +598,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
@@ -590,6 +618,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
 
   assert_eq!(cache.purge_tag("default", "css", None, None), 1);
   let first = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -602,6 +631,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
     certificate_identity: None,
   };
   let second = CacheLookupContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     uri: &second_uri,
@@ -615,6 +645,7 @@ fn cache_tag_purge_removes_matching_entries_only() {
 fn admission_min_hits_rejects_until_threshold() {
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     admission: CacheAdmissionConfig {
       min_hits: 2,
       ..CacheAdmissionConfig::default()
@@ -625,6 +656,7 @@ fn admission_min_hits_rejects_until_threshold() {
   let uri = "/asset/app.css".parse::<Uri>().unwrap();
   let headers = HeaderMap::new();
   let ctx = CacheInsertContext {
+    group_request: None,
     no_vary_search: None,
     proxy_protocol_identity: None,
     policy_name: Some("default"),
@@ -648,6 +680,7 @@ fn admission_min_hits_rejects_until_threshold() {
   assert!(
     cache
       .lookup(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         proxy_protocol_identity: None,
         policy_name: Some("default"),
@@ -700,6 +733,7 @@ fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
   let temp_dir = TestTempDir::new();
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(temp_dir.path.clone()),
     disk_max_size_bytes: Some(1024 * 1024),
@@ -711,6 +745,7 @@ fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
     assert_eq!(
       cache.insert(
         CacheInsertContext {
+          group_request: None,
           no_vary_search: None,
           proxy_protocol_identity: None,
           policy_name: Some("default"),
@@ -753,6 +788,7 @@ fn disk_cache_recovery_does_not_trust_metadata_body_path() {
   let variant_key = "https:example.test:/asset/poison.css";
   let meta_path = cache_file_path(&cache_dir, variant_key, CacheFileKind::Meta).unwrap();
   let stored = StoredEntry {
+    group_stamp: None,
     no_vary_search: None,
     policy: "default".to_string(),
     partition: String::new(),
@@ -779,6 +815,7 @@ fn disk_cache_recovery_does_not_trust_metadata_body_path() {
 
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(cache_dir),
     disk_max_size_bytes: Some(1024 * 1024),

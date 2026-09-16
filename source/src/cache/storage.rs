@@ -351,6 +351,7 @@ impl StoredEntry {
         )
       }
     }?;
+    entry.group_stamp = self.group_stamp.clone();
     entry.no_vary_search = self.no_vary_search.clone();
     Some(entry)
   }

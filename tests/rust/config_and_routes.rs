@@ -5871,6 +5871,52 @@ cache = "assets"
 }
 
 #[test]
+fn cache_groups_defaults_overrides_and_strict_shape() {
+  let temp_dir = common::TempDir::new("cache-groups-config");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "cache-groups-config");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let defaults: Config = toml::from_str(&base).expect("default config should parse");
+  assert!(defaults.cache.groups.enabled);
+
+  let fragment = r#"
+[cache.groups]
+enabled = false
+
+[[cache.policies]]
+name = "inherited"
+
+[[cache.policies]]
+name = "grouped"
+[cache.policies.groups]
+enabled = true
+"#;
+  let config: Config =
+    toml::from_str(&format!("{base}\n{fragment}")).expect("group overrides should parse");
+  config.validate().expect("group overrides should validate");
+  assert!(!config.cache.groups.enabled);
+  assert!(config.cache.policies[0].groups.is_none());
+  assert!(config.cache.policies[1].groups.as_ref().unwrap().enabled);
+
+  for (table, prefix) in [
+    ("[cache.groups]", "cache.groups"),
+    (
+      "[[cache.policies]]\nname = \"grouped\"\n[cache.policies.groups]",
+      "cache.policies.groups",
+    ),
+  ] {
+    let path = write_loadable_config(&temp_dir, prefix, |raw| {
+      format!("{raw}\n{table}\nunexpected = true\n")
+    });
+    let error = Config::load(&path).expect_err("unknown group settings must fail");
+    assert!(
+      error.to_string().contains(&format!("{prefix}.unexpected")),
+      "unexpected error: {error:#}"
+    );
+  }
+}
+
+#[test]
 fn cache_query_cleanup_config_defaults_and_parse() {
   let temp_dir = common::TempDir::new("cache-query-cleanup");
   let (cert_path, key_path) =

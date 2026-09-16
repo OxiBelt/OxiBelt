@@ -59,8 +59,56 @@ fn cache_purge_hints_policy_and_normalized_host_resources() {
 
   assert_eq!(plan.permission.action, "cache:PurgeObject");
   assert_eq!(
+    plan.permission.required_actions,
+    vec!["cache:PurgeObject", "cache:PurgeGroup"]
+  );
+  assert_eq!(
     plan.permission.resources,
     vec!["policy/default", "host/example.com"]
+  );
+}
+
+#[test]
+fn cache_group_purge_hints_its_action_and_normalized_origin_host() {
+  let parsed = Cli::try_parse_from([
+    "oxibeltctl",
+    "cache",
+    "purge",
+    "group",
+    "--policy",
+    "assets",
+    "--origin",
+    "HTTPS://Assets.Example.COM:443/",
+    "--group",
+    "release-1",
+    "--partition",
+    "tenant-a",
+  ])
+  .expect("cache group purge should parse");
+  let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .expect("runtime");
+  let client = dummy_client();
+  let plan = runtime
+    .block_on(plan_command(&client, &parsed.command))
+    .expect("plan");
+
+  assert_eq!(plan.permission.action, "cache:PurgeGroup");
+  assert_eq!(plan.permission.required_actions, vec!["cache:PurgeGroup"]);
+  assert_eq!(
+    plan.permission.resources,
+    vec!["policy/assets", "host/assets.example.com"]
+  );
+  assert_eq!(
+    plan.body,
+    Some(serde_json::json!({
+      "type": "group",
+      "policy": "assets",
+      "origin": "HTTPS://Assets.Example.COM:443/",
+      "group": "release-1",
+      "partition": "tenant-a",
+    }))
   );
 }
 

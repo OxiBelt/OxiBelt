@@ -58,6 +58,10 @@ pub(crate) fn plain_proxy_fast_path_decision<B>(
     && state
       .cache
       .policy_enabled(resolved.route.cache.as_deref(), request.method())
+    || (state
+      .cache
+      .groups_enabled(resolved.route.cache.as_deref().unwrap_or("default"))
+      && super::super::query::invalidates_target(request.method()))
   {
     return Err(PlainProxyFastPathMissReason::CachePolicy);
   }

@@ -113,6 +113,36 @@ fn admin_version_documents_embedded_asset_identity() {
 }
 
 #[test]
+fn cache_purge_documents_rfc9875_group_requirements() {
+  let spec = openapi();
+  let schema = &spec["components"]["requestBodies"]["CachePurgeRequest"]["content"]["application/json"]
+    ["schema"];
+  let kinds = json_string_set(
+    &schema["properties"]["type"]["enum"],
+    "CachePurgeRequest.type",
+  );
+  assert!(kinds.contains("group"));
+  assert!(schema["properties"].get("origin").is_some());
+  let group = &schema["properties"]["group"];
+  assert_eq!(group["type"], "string");
+  assert_eq!(group["maxLength"], 256);
+  assert_eq!(group["pattern"], "^[ -~]{0,256}$");
+  let group_requirement = schema["allOf"]
+    .as_array()
+    .expect("CachePurgeRequest conditional requirements must be an array")
+    .iter()
+    .find(|condition| condition["if"]["properties"]["type"]["const"] == "group")
+    .expect("CachePurgeRequest must require fields for group purges");
+  assert_eq!(
+    json_string_set(
+      &group_requirement["then"]["required"],
+      "group purge required fields"
+    ),
+    BTreeSet::from(["group".to_string(), "origin".to_string()])
+  );
+}
+
+#[test]
 fn admin_metadata_operations_declare_bearer_security() {
   let spec = openapi();
   for path in [

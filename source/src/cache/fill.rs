@@ -305,6 +305,7 @@ impl ResponseCache {
       ctx.query_identity,
       ctx.certificate_identity,
       ctx.proxy_protocol_identity,
+      ctx.group_request,
     )?;
     if self.query_target_cache_bypassed(&operation) {
       return None;

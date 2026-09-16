@@ -251,6 +251,10 @@ fn scope(ctx: &CacheLookupContext<'_>, policy: &CachePolicyRuntime) -> Option<St
     return None;
   }
   let mut material = Vec::new();
+  if policy.groups_enabled {
+    let origin = ctx.group_request?.origin.as_origin();
+    append_query_field(&mut material, origin.as_bytes());
+  }
   for value in [
     "oxibelt-nvs-scope-v1",
     &policy.name,

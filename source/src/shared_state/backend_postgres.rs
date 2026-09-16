@@ -45,6 +45,47 @@ impl PostgresBackend {
     Ok(value)
   }
 
+  pub(super) async fn compare_exchange(
+    &self,
+    key: &str,
+    expected: Option<&[u8]>,
+    replacement: &[u8],
+  ) -> anyhow::Result<bool> {
+    let now = now_unix_ms();
+    let result = match expected {
+      Some(expected) => {
+        sqlx::query(
+          "UPDATE oxibelt_shared_state
+         SET value = $3, expires_at_ms = NULL
+         WHERE key = $1 AND value = $2
+           AND (expires_at_ms IS NULL OR expires_at_ms > $4)",
+        )
+        .bind(key)
+        .bind(expected)
+        .bind(replacement)
+        .bind(now)
+        .execute(&self.pool)
+        .await?
+      }
+      None => {
+        sqlx::query(
+          "INSERT INTO oxibelt_shared_state (key, value, expires_at_ms)
+         VALUES ($1, $2, NULL)
+         ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value, expires_at_ms = NULL
+           WHERE oxibelt_shared_state.expires_at_ms IS NOT NULL
+             AND oxibelt_shared_state.expires_at_ms <= $3",
+        )
+        .bind(key)
+        .bind(replacement)
+        .bind(now)
+        .execute(&self.pool)
+        .await?
+      }
+    };
+    Ok(result.rows_affected() == 1)
+  }
+
   pub(super) async fn delete(&self, key: &str) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM oxibelt_shared_state WHERE key = $1")
       .bind(key)

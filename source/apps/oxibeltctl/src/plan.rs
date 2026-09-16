@@ -19,6 +19,9 @@ pub(crate) struct RequestPlan {
 
 pub(crate) struct PermissionHint {
   pub(crate) action: String,
+  /// Every action the Admin endpoint can require for this command.
+  /// `action` remains the primary action for backwards-compatible callers.
+  pub(crate) required_actions: Vec<String>,
   pub(crate) resources: Vec<String>,
 }
 
@@ -28,12 +31,23 @@ impl PermissionHint {
   }
 
   pub(crate) fn with_resources(action: &str, resources: Vec<String>) -> Self {
+    Self::with_required_actions(action, vec![action], resources)
+  }
+
+  pub(crate) fn with_required_actions(
+    action: &str,
+    required_actions: Vec<&str>,
+    resources: Vec<String>,
+  ) -> Self {
     let mut resources = resource_hint::unique(resources);
     if resources.is_empty() {
       resources.push("*".to_string());
     }
     Self {
       action: action.to_string(),
+      required_actions: resource_hint::unique(
+        required_actions.into_iter().map(str::to_string).collect(),
+      ),
       resources,
     }
   }
@@ -490,6 +504,24 @@ fn plan_cache_purge(purge: &CachePurgeCommand) -> anyhow::Result<RequestPlan> {
       &args.policy,
       args.host.as_deref(),
     ),
+    CachePurgeSubcommand::Group(args) => {
+      let origin = oxibelt::cache::CacheGroupOrigin::parse_origin(&args.origin)
+        .context("invalid cache group origin")?;
+      post_json_with_permission(
+        "/admin/v1/cache/purge",
+        remove_nulls(json!({
+          "type": "group",
+          "policy": args.policy,
+          "origin": args.origin,
+          "group": args.group,
+          "partition": args.partition,
+        })),
+        PermissionHint::with_resources(
+          "cache:PurgeGroup",
+          resource_hint::cache_group_target(&args.policy, &origin.authority()),
+        ),
+      )
+    }
   }
 }
 
@@ -671,7 +703,11 @@ fn cache_purge(
   post_json_with_permission(
     "/admin/v1/cache/purge",
     remove_nulls(body),
-    PermissionHint::with_resources(action, resource_hint::cache_target(policy, host)),
+    PermissionHint::with_required_actions(
+      action,
+      vec![action, "cache:PurgeGroup"],
+      resource_hint::cache_target(policy, host),
+    ),
   )
 }
 

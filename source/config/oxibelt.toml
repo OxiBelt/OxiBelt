@@ -680,6 +680,9 @@ negative_statuses = []
 negative_ttl_seconds = 0
 # external_handler = "massive"
 
+[cache.groups]
+enabled = true
+
 [cache.query_cleanup]
 queue_capacity = 64
 batch_size = 128

@@ -95,6 +95,35 @@ impl MemoryBackend {
     Ok(values.get(key).map(|value| value.value.clone()))
   }
 
+  pub(super) fn compare_exchange(
+    &self,
+    key: &str,
+    expected: Option<&[u8]>,
+    replacement: &[u8],
+  ) -> anyhow::Result<bool> {
+    let mut values = self
+      .values
+      .lock()
+      .expect("memory shared state lock poisoned");
+    purge_expired_values(&mut values, now_unix_ms());
+    let matches = match (values.get(key), expected) {
+      (None, None) => true,
+      (Some(current), Some(expected)) => current.value.as_slice() == expected,
+      _ => false,
+    };
+    if !matches {
+      return Ok(false);
+    }
+    values.insert(
+      key.to_string(),
+      MemoryValue {
+        value: replacement.to_vec(),
+        expires_at_ms: None,
+      },
+    );
+    Ok(true)
+  }
+
   pub(super) fn delete(&self, key: &str) -> anyhow::Result<()> {
     self
       .values

@@ -13,6 +13,7 @@ fn poisoned_cache_state_recovers_in_bounded_disk_batches() {
   }
   let config = CacheConfig {
     enabled: true,
+    groups: crate::config::CacheGroupsConfig { enabled: false },
     store: CacheStore::Disk,
     disk_dir: Some(temp_dir.path.clone()),
     disk_max_size_bytes: Some(1024 * 1024),

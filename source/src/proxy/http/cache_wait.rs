@@ -78,6 +78,7 @@ pub(super) async fn wait_for_shared_fill(
     let Some(lookup) = state
       .cache
       .lookup_async(CacheLookupContext {
+        group_request: None,
         no_vary_search: None,
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: proxy_protocol_identity.as_ref(),

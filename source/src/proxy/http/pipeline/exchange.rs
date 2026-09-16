@@ -96,6 +96,10 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     mut cache_store_allowed,
     cache_fill_guard,
   } = context;
+  let group_request = outbound
+    .extensions()
+    .get::<crate::cache::CacheGroupRequest>()
+    .cloned();
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
   let incremental_exchange = outbound
     .extensions()
@@ -158,6 +162,34 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         .upstream_deadline
         .or_else(|| std::time::Instant::now().checked_add(timeouts.upstream_request))
     });
+  // A 304 is only safe to turn back into a cached body while the stored
+  // representation still belongs to the current cache-group generation.
+  // Keep an unconditional replay of the original request so an invalidated
+  // representation can be refetched within the same upstream deadline.
+  let revalidation_replay_deadline = revalidation_entry.as_ref().and_then(|_| {
+    timeouts
+      .upstream_deadline
+      .or_else(|| std::time::Instant::now().checked_add(timeouts.upstream_request))
+  });
+  let revalidation_replay = revalidation_entry.as_ref().map(|_| {
+    let mut headers = outbound.headers().clone();
+    headers.remove(http::header::IF_NONE_MATCH);
+    headers.remove(http::header::IF_MODIFIED_SINCE);
+    NvsAliasReplay {
+      method: outbound.method().clone(),
+      uri: request_uri.clone(),
+      version: outbound.version(),
+      headers,
+      query_snapshot: outbound
+        .extensions()
+        .get::<query::capture::QueryReplaySnapshot>()
+        .cloned(),
+      query_identity: outbound
+        .extensions()
+        .get::<crate::cache::CacheQueryIdentity>()
+        .cloned(),
+    }
+  });
   let alias_replay = revalidation_entry
     .as_ref()
     .filter(|entry| entry.nvs_alias)
@@ -291,6 +323,13 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
               .cache
               .stale_if_error_allows_connect(resolved.route.cache.as_deref())
           }
+          && state
+            .cache
+            .group_entry_current(
+              resolved.route.cache.as_deref().unwrap_or("default"),
+              entry.group_stamp.as_ref(),
+            )
+            .await
         {
           state.metrics.record_cache_stale();
           return stale_if_error_response(entry);
@@ -499,6 +538,13 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
               .cache
               .stale_if_error_allows_connect(resolved.route.cache.as_deref())
           }
+          && state
+            .cache
+            .group_entry_current(
+              resolved.route.cache.as_deref().unwrap_or("default"),
+              entry.group_stamp.as_ref(),
+            )
+            .await
         {
           state.metrics.record_cache_stale();
           return stale_if_error_response(entry);
@@ -604,8 +650,98 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     upstream_response
   };
   let (mut parts, mut body) = upstream_response.into_parts();
+  if let Some(request) = &group_request {
+    parts.extensions.insert(request.clone());
+  }
+  let mut origin_response_guard = state
+    .cache
+    .group_origin_response_guard(resolved.route.cache.as_deref(), &request_method);
   if upstream_incremental {
     parts.extensions.insert(incremental::IncrementalIntent);
+  }
+  if parts.status == StatusCode::NOT_MODIFIED && revalidation_entry.is_some() {
+    // A revalidation head participates in cache metadata just like a full
+    // origin response. Apply the header-only portion of the response policy
+    // before parsing Cache-Groups or publishing the replacement entry. These
+    // headers are consumed by the update operation, not returned directly, so
+    // the cached response still receives the normal one-time finalization.
+    strip_hop_by_hop_headers(&mut parts.headers);
+    if state.config.proxy.http.trailers == crate::config::TrailerMode::Drop && !native_grpc_request
+    {
+      parts.headers.remove(http::header::TRAILER);
+    }
+    semantics::apply_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
+    apply_route_security_headers_with_snapshot(
+      &mut parts.headers,
+      &state.config.security,
+      resolved.route,
+    );
+    apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
+    if response_waf_enabled {
+      access_log.ensure_response_ids();
+      access_log.response_received_at_unix_ms = crate::waf::current_unix_ms();
+      let request_input = WafRequestInput {
+        request_id: access_log.request_id(),
+        transaction_id: access_log.transaction_id(),
+        received_at_unix_ms: access_log.request_received_at_unix_ms,
+        method: &request_method,
+        uri: &request_uri,
+        version: request_version,
+        headers: &request_headers,
+        body: request_body,
+        peer_addr: client_addr,
+        client_asn,
+        downstream_host: host,
+        downstream_scheme,
+        route_name: &resolved.route.name,
+        tcp_max_hop,
+        tls: tls.as_ref(),
+        protocol,
+        transport_network,
+        transport_metadata,
+        tags: tags_ref(&tags),
+        dynamic_policy: &access_log.dynamic_policy,
+      };
+      let Some(person_proof) = access_log.person_proof_snapshot() else {
+        tracing::error!(route = %resolved.route.name, "response WAF request context is unavailable");
+        return route_security.text(
+          StatusCode::INTERNAL_SERVER_ERROR,
+          "response security context is unavailable",
+        );
+      };
+      let response_waf = state.waf.evaluate_response_with_person_proof_snapshot(
+        WafResponseInput {
+          upstream_certificate: parts
+            .extensions
+            .get::<crate::waf::metadata::UpstreamCertificateMetadata>()
+            .map(|value| value.0.as_ref()),
+          request: request_input,
+          response_id: access_log.response_id(),
+          received_at_unix_ms: access_log.response_received_at_unix_ms,
+          version: parts.version,
+          status: parts.status,
+          headers: &parts.headers,
+          body: None,
+          upstream_name: &upstream.name,
+          upstream_pool: access_log.upstream_pool.as_deref(),
+          upstream_scheme: upstream.origin.scheme(),
+          upstream_connect_time_ms: access_log.upstream_connect_time_ms,
+          upstream_first_byte_time_ms: access_log.upstream_first_byte_time_ms,
+          upstream_error: None,
+        },
+        person_proof,
+      );
+      for access_log in &response_waf.access_logs {
+        state.access_logs.emit(access_log);
+      }
+      if let Some(terminal) = response_waf.terminal {
+        let mut mutations = request_waf.response_header_mutations.clone();
+        mutations.extend(response_waf.response_header_mutations);
+        return route_security.waf_http_terminal(terminal, &mutations);
+      }
+      apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
+    }
+    route_runtime::apply_response_actions(&mut parts.headers, resolved.route, &request_headers);
   }
   let owner_current =
     if let Some(entry) = revalidation_entry.as_ref().filter(|entry| entry.nvs_alias) {
@@ -613,6 +749,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         .cache
         .nvs_owner_current(
           crate::cache::CacheLookupContext {
+            group_request: group_request.as_ref(),
             no_vary_search: no_vary_search.as_ref(),
             policy_name: resolved.route.cache.as_deref(),
             scheme: downstream_scheme,
@@ -630,10 +767,26 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     } else {
       true
     };
+  let group_revalidation_current = if parts.status == StatusCode::NOT_MODIFIED {
+    if let Some(entry) = revalidation_entry.as_ref() {
+      state
+        .cache
+        .group_entry_current(
+          resolved.route.cache.as_deref().unwrap_or("default"),
+          entry.group_stamp.as_ref(),
+        )
+        .await
+    } else {
+      true
+    }
+  } else {
+    true
+  };
   let alias_policy_rejected = revalidation_entry
     .as_ref()
     .is_some_and(|entry| entry.nvs_alias)
-    && (!owner_current
+    && (!group_revalidation_current
+      || !owner_current
       || !revalidation_entry.as_ref().is_some_and(|entry| {
         no_vary_search.as_ref().is_some_and(|request| {
           state.cache.nvs_response_allows_alias(
@@ -661,6 +814,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       .cache
       .replace_nvs_policy(
         crate::cache::CacheLookupContext {
+          group_request: group_request.as_ref(),
           no_vary_search: revalidation_owner_nvs.as_ref().or(no_vary_search.as_ref()),
           policy_name: resolved.route.cache.as_deref(),
           scheme: downstream_scheme,
@@ -689,6 +843,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         .cache
         .update_from_not_modified_async(
           crate::cache::CacheInsertContext {
+            group_request: group_request.as_ref(),
             no_vary_search: revalidation_owner_nvs.as_ref().or(no_vary_search.as_ref()),
             proxy_protocol_identity: proxy_protocol_identity.as_ref(),
             query_identity: query_identity.as_ref(),
@@ -741,6 +896,9 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       }
     };
     let (mut replay_parts, replay_body) = response.into_parts();
+    if let Some(request) = &group_request {
+      replay_parts.extensions.insert(request.clone());
+    }
     if replay_parts.status == StatusCode::NOT_MODIFIED {
       return route_security.text(
         StatusCode::BAD_GATEWAY,
@@ -761,6 +919,13 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     && state
       .cache
       .stale_if_error_allows_status(resolved.route.cache.as_deref(), parts.status)
+    && state
+      .cache
+      .group_entry_current(
+        resolved.route.cache.as_deref().unwrap_or("default"),
+        entry.group_stamp.as_ref(),
+      )
+      .await
   {
     state.metrics.record_cache_stale();
     let mut response = stale_if_error_response(entry);
@@ -782,11 +947,14 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           .nvs_revalidation_allows_alias(&entry, &request_uri, request, &parts.headers)
       }))
   {
-    if cache_store_allowed {
+    let metadata_current = if !group_revalidation_current {
+      false
+    } else if cache_store_allowed {
       state
         .cache
         .update_from_not_modified_async(
           crate::cache::CacheInsertContext {
+            group_request: group_request.as_ref(),
             no_vary_search: revalidation_owner_nvs.as_ref().or(no_vary_search.as_ref()),
             proxy_protocol_identity: proxy_protocol_identity.as_ref(),
             query_identity: query_identity.as_ref(),
@@ -801,75 +969,126 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           &entry,
           &parts.headers,
         )
-        .await;
-    }
-    let mut cached_entry = entry;
-    let mut headers = cached_entry.headers.clone();
-    merge_not_modified_headers(&mut headers, &parts.headers);
-    cached_entry.headers = headers;
-    state.metrics.record_cache_hit();
-    record_cache_hit_fast_path_selection(state, request_version);
-    let mut response =
-      cache_status::cached_entry_response(cached_entry, &request_method, &request_headers);
-    if let Some(exchange) = &incremental_exchange {
-      // Replacing a bodyless 304 must not drop the original exchange's receive
-      // guard and cancel an upload which the origin is still reading.
-      exchange.retain(body);
-      response.extensions_mut().insert(exchange.clone());
-    }
-    cache_status::reconcile_cached_security(&mut response, state, resolved.route);
-    route_runtime::apply_response_actions(response.headers_mut(), resolved.route, &request_headers);
-    cache_status::apply(
-      &mut response,
-      CacheOutcome::Revalidated,
-      CacheReason::NotModified,
-    );
-    if let Some(facts) = response
-      .extensions_mut()
-      .get_mut::<cache_status::StandardCacheStatus>()
-    {
-      facts.hit = false;
-      facts.forwarded = Some(revalidation_reason.unwrap_or("stale"));
-      facts.forwarded_status = Some(304);
-      facts.expires_at = None;
+        .await
     } else {
-      response
-        .extensions_mut()
-        .insert(cache_status::StandardCacheStatus {
-          forwarded: Some(revalidation_reason.unwrap_or("stale")),
-          forwarded_status: Some(304),
-          ..Default::default()
-        });
-    }
-    apply_response_alt_svc(
-      &mut response,
-      state.as_ref(),
-      downstream_scheme,
-      request_version,
-      listener_bind,
-    );
-    let response = if proxy_tls_certificate
-      || certificate_identity
-        .as_ref()
-        .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
-    {
-      response
-    } else {
-      compression::maybe_compress_response(
-        response,
-        &request_method,
-        &request_headers,
-        resolved.route.compression.as_deref(),
-        &state.config.compression,
-        &state.compression,
-      )
+      true
     };
-    return with_downstream_response_timeout(
-      response,
-      timeouts.response_send,
-      transport_network,
-      true,
-    );
+    if !metadata_current {
+      let Some(replay) = revalidation_replay else {
+        return route_security.text(
+          StatusCode::BAD_GATEWAY,
+          "cache revalidation cannot be replayed",
+        );
+      };
+      let response = match replay_nvs_alias_request(
+        replay,
+        upstream,
+        upstream_version,
+        timeouts,
+        revalidation_replay_deadline.unwrap_or_else(std::time::Instant::now),
+        state,
+        selected_pool_name.as_deref(),
+        client_addr,
+        &resolved.route.name,
+      )
+      .await
+      {
+        Ok(response) => response,
+        Err(error) => {
+          warn!(error = %error, upstream = %upstream.name, "cache revalidation replay failed");
+          return route_security.text(StatusCode::BAD_GATEWAY, "cache revalidation failed");
+        }
+      };
+      let (mut replay_parts, replay_body) = response.into_parts();
+      if replay_parts.status == StatusCode::NOT_MODIFIED {
+        return route_security.text(
+          StatusCode::BAD_GATEWAY,
+          "cache revalidation replay returned not modified",
+        );
+      }
+      if let Some(request) = &group_request {
+        replay_parts.extensions.insert(request.clone());
+      }
+      if let Some(no_vary_search) = no_vary_search.as_ref() {
+        no_vary_search.capture_origin(&replay_parts.headers);
+      }
+      status_headers::capture_upstream_parts(&mut replay_parts);
+      parts = replay_parts;
+      body = replay_body;
+      revalidation_entry = None;
+    } else {
+      let mut cached_entry = entry;
+      let mut headers = cached_entry.headers.clone();
+      merge_not_modified_headers(&mut headers, &parts.headers);
+      cached_entry.headers = headers;
+      state.metrics.record_cache_hit();
+      record_cache_hit_fast_path_selection(state, request_version);
+      let mut response =
+        cache_status::cached_entry_response(cached_entry, &request_method, &request_headers);
+      if let Some(exchange) = &incremental_exchange {
+        // Replacing a bodyless 304 must not drop the original exchange's receive
+        // guard and cancel an upload which the origin is still reading.
+        exchange.retain(body);
+        response.extensions_mut().insert(exchange.clone());
+      }
+      cache_status::reconcile_cached_security(&mut response, state, resolved.route);
+      route_runtime::apply_response_actions(
+        response.headers_mut(),
+        resolved.route,
+        &request_headers,
+      );
+      cache_status::apply(
+        &mut response,
+        CacheOutcome::Revalidated,
+        CacheReason::NotModified,
+      );
+      if let Some(facts) = response
+        .extensions_mut()
+        .get_mut::<cache_status::StandardCacheStatus>()
+      {
+        facts.hit = false;
+        facts.forwarded = Some(revalidation_reason.unwrap_or("stale"));
+        facts.forwarded_status = Some(304);
+        facts.expires_at = None;
+      } else {
+        response
+          .extensions_mut()
+          .insert(cache_status::StandardCacheStatus {
+            forwarded: Some(revalidation_reason.unwrap_or("stale")),
+            forwarded_status: Some(304),
+            ..Default::default()
+          });
+      }
+      apply_response_alt_svc(
+        &mut response,
+        state.as_ref(),
+        downstream_scheme,
+        request_version,
+        listener_bind,
+      );
+      let response = if proxy_tls_certificate
+        || certificate_identity
+          .as_ref()
+          .is_some_and(crate::cache::CacheCertificateIdentity::is_authenticated)
+      {
+        response
+      } else {
+        compression::maybe_compress_response(
+          response,
+          &request_method,
+          &request_headers,
+          resolved.route.compression.as_deref(),
+          &state.config.compression,
+          &state.compression,
+        )
+      };
+      return with_downstream_response_timeout(
+        response,
+        timeouts.response_send,
+        transport_network,
+        true,
+      );
+    }
   }
   let body = body::with_read_timeout(
     body,
@@ -1011,6 +1230,34 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       state.access_logs.emit(access_log);
     }
     if let Some(terminal) = response_waf.terminal {
+      // A terminal response WAF result replaces the upstream response for
+      // the client, but cannot undo a completed unsafe origin request.
+      // Preserve origin-derived invalidation semantics without allowing the
+      // synthetic WAF response to provide cache metadata.
+      let mut origin_headers = parts.headers.clone();
+      apply_header_mutations(&mut origin_headers, &response_waf.response_header_mutations);
+      route_runtime::apply_response_actions(&mut origin_headers, resolved.route, &request_headers);
+      state
+        .cache
+        .groups_after_origin_response(
+          crate::cache::CacheLookupContext {
+            group_request: group_request.as_ref(),
+            no_vary_search: no_vary_search.as_ref(),
+            query_identity: query_identity.as_ref(),
+            proxy_protocol_identity: proxy_protocol_identity.as_ref(),
+            certificate_identity: certificate_identity.as_ref(),
+            policy_name: resolved.route.cache.as_deref(),
+            scheme: downstream_scheme,
+            host,
+            method: &request_method,
+            uri: &request_uri,
+            request_headers: &request_headers,
+          },
+          parts.status,
+          &origin_headers,
+        )
+        .await;
+      origin_response_guard.disarm();
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
       return route_security.waf_http_terminal(terminal, &mutations);
@@ -1020,6 +1267,27 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
   drop(response_decompression_lease);
   drop(response_inspection_lease);
   route_runtime::apply_response_actions(&mut parts.headers, resolved.route, &request_headers);
+  state
+    .cache
+    .groups_after_origin_response(
+      crate::cache::CacheLookupContext {
+        group_request: group_request.as_ref(),
+        no_vary_search: no_vary_search.as_ref(),
+        query_identity: query_identity.as_ref(),
+        proxy_protocol_identity: proxy_protocol_identity.as_ref(),
+        certificate_identity: certificate_identity.as_ref(),
+        policy_name: resolved.route.cache.as_deref(),
+        scheme: downstream_scheme,
+        host,
+        method: &request_method,
+        uri: &request_uri,
+        request_headers: &request_headers,
+      },
+      parts.status,
+      &parts.headers,
+    )
+    .await;
+  origin_response_guard.disarm();
   cache_status::strip_headers(&mut parts.headers);
   let mut response_buffering = effective_buffering.response;
   if state.config.proxy.http.sse_auto_streaming && semantics::is_sse(&parts.headers) {

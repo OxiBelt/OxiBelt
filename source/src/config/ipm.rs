@@ -576,6 +576,7 @@ fn allowed_actions_for_service(service: &str) -> &'static [&'static str] {
       "PurgeObject",
       "PurgePrefix",
       "PurgeTag",
+      "PurgeGroup",
     ],
     "upstream-pool" => &[
       "GetStatus",

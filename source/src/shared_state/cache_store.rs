@@ -517,7 +517,23 @@ impl SharedState {
   }
 
   pub(super) fn shared_cache_entry_key_from_storage(&self, variant_key: &str) -> String {
-    self.key(&format!("cache:entry:{variant_key}"))
+    self.shared_cache_scoped_storage_key("entry", variant_key)
+  }
+
+  fn shared_cache_scoped_storage_key(&self, kind: &str, component: &str) -> String {
+    // Logical group identities use reserved NUL-delimited domains. PostgreSQL
+    // text keys cannot contain NUL; digest only these new physical identities
+    // while retaining every established entry/lock key byte-for-byte.
+    if component.contains("\0oxibelt-cache-groups-v1\0")
+      || component.contains("\0oxibelt-cache-groups-query-v1\0")
+    {
+      self.key(&format!(
+        "cache:{kind}:group-v1:{}",
+        digest_hex(component.as_bytes())
+      ))
+    } else {
+      self.key(&format!("cache:{kind}:{component}"))
+    }
   }
 
   fn shared_query_epoch_key(&self, policy: &str, scheme: &str, host: &str, uri: &str) -> String {
@@ -570,7 +586,7 @@ impl SharedState {
       return Ok(None);
     };
     let backend = backend.clone();
-    let key = self.key(&format!("cache:lock:{fill_key}"));
+    let key = self.shared_cache_scoped_storage_key("lock", fill_key);
     let token = random_hex(16)?;
     let result = match backend
       .put_if_absent(&key, token.as_bytes(), Some(self.cache_lock))
@@ -797,6 +813,7 @@ impl SharedState {
       stored_at,
     );
     cache_entry.no_vary_search = entry.no_vary_search.clone();
+    cache_entry.group_stamp = entry.group_stamp.clone();
     Some(cache_entry)
   }
 }
@@ -820,6 +837,7 @@ impl SharedCacheEntry {
     .with_stored_at(shared_entry_stored_at(self))
     .with_expires_at(shared_entry_expires_at(self));
     cache_entry.no_vary_search = self.no_vary_search.clone();
+    cache_entry.group_stamp = self.group_stamp.clone();
     Some(cache_entry)
   }
 }
@@ -961,6 +979,7 @@ mod tests {
       tags: Vec::new(),
       query_target_epoch,
       no_vary_search: None,
+      group_stamp: None,
     }
   }
 
@@ -968,6 +987,34 @@ mod tests {
   fn q1_shared_entry_retains_its_stale_while_revalidate_window() {
     assert_eq!(shared_cache_retention_until_ms(&entry(Some(0))), 300);
     assert_eq!(shared_cache_retention_until_ms(&entry(None)), 200);
+  }
+
+  #[test]
+  fn group_entry_and_lock_keys_are_text_safe_and_generation_isolated() {
+    let shared = SharedState::test_memory("groups-storage-key");
+    let first = "partition=tenant\n\0oxibelt-cache-groups-v1\0digest\ngroup-generation=owner:1";
+    let second = first.replace("owner:1", "owner:2");
+    for kind in ["entry", "lock"] {
+      let first_key = shared.shared_cache_scoped_storage_key(kind, first);
+      let second_key = shared.shared_cache_scoped_storage_key(kind, &second);
+      assert!(!first_key.contains('\0'));
+      assert!(!second_key.contains('\0'));
+      assert_ne!(first_key, second_key);
+      assert_eq!(
+        first_key,
+        shared.shared_cache_scoped_storage_key(kind, first)
+      );
+      assert_eq!(
+        shared.shared_cache_scoped_storage_key(kind, "partition=tenant\nlegacy"),
+        shared.key(&format!("cache:{kind}:partition=tenant\nlegacy"))
+      );
+    }
+    let query = "partition=tenant\n\0oxibelt-cache-groups-query-v1\0digest";
+    assert!(
+      !shared
+        .shared_cache_scoped_storage_key("lock", query)
+        .contains('\0')
+    );
   }
 
   #[test]
