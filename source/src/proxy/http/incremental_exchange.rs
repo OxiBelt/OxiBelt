@@ -6,7 +6,7 @@
 use std::fmt;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -14,6 +14,7 @@ use futures_util::task::AtomicWaker;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::sync::Notify;
+use tokio::time::Instant;
 
 use super::body::{BoxError, ProxyBody, boxed_error};
 
@@ -27,20 +28,40 @@ pub(crate) struct IncrementalExchange {
 struct IncrementalExchangeInner {
   terminal_halves: AtomicU8,
   unstarted_upload: AtomicBool,
+  upload_outcome: AtomicU8,
+  upload_deadline: OnceLock<Instant>,
+  upload_deadline_armed: AtomicBool,
+  upload_completion: Notify,
   cancelled: AtomicBool,
   cancellation: Notify,
   request_waker: AtomicWaker,
   response_waker: AtomicWaker,
-  failure: Mutex<Option<String>>,
+  failure: Mutex<Option<IncrementalExchangeFailure>>,
   retained: Mutex<Vec<Box<dyn Send + 'static>>>,
 }
 
 impl IncrementalExchange {
   pub(crate) fn new() -> Self {
+    Self::with_optional_upload_deadline(None)
+  }
+
+  pub(crate) fn with_upload_deadline(deadline: Instant) -> Self {
+    Self::with_optional_upload_deadline(Some(deadline))
+  }
+
+  fn with_optional_upload_deadline(upload_deadline: Option<Instant>) -> Self {
+    let deadline = OnceLock::new();
+    if let Some(upload_deadline) = upload_deadline {
+      let _ = deadline.set(upload_deadline);
+    }
     Self {
       inner: Arc::new(IncrementalExchangeInner {
         terminal_halves: AtomicU8::new(0),
         unstarted_upload: AtomicBool::new(false),
+        upload_outcome: AtomicU8::new(UPLOAD_ACTIVE),
+        upload_deadline: deadline,
+        upload_deadline_armed: AtomicBool::new(false),
+        upload_completion: Notify::new(),
         cancelled: AtomicBool::new(false),
         cancellation: Notify::new(),
         request_waker: AtomicWaker::new(),
@@ -76,18 +97,37 @@ impl IncrementalExchange {
       .failure
       .lock()
       .unwrap_or_else(|poisoned| poisoned.into_inner())
-      .clone()
+      .as_ref()
+      .map(ToString::to_string)
   }
 
   pub(crate) fn cancellation_error(&self) -> BoxError {
-    boxed_error(IncrementalExchangeError::new(
-      self
-        .failure()
-        .unwrap_or_else(|| "incremental exchange cancelled".to_string()),
-    ))
+    match self
+      .inner
+      .failure
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .clone()
+    {
+      Some(IncrementalExchangeFailure::UploadDeadline) => {
+        boxed_error(IncrementalUploadDeadlineError)
+      }
+      Some(IncrementalExchangeFailure::Message(message)) => {
+        boxed_error(IncrementalExchangeError::new(message))
+      }
+      None => boxed_error(IncrementalExchangeError::new(
+        "incremental exchange cancelled",
+      )),
+    }
   }
 
   pub(crate) fn cancel(&self) {
+    let _ = self.inner.upload_outcome.compare_exchange(
+      UPLOAD_ACTIVE,
+      UPLOAD_CANCELLED,
+      Ordering::AcqRel,
+      Ordering::Acquire,
+    );
     if !self.inner.cancelled.swap(true, Ordering::AcqRel) {
       self.inner.cancellation.notify_waiters();
       self.inner.request_waker.wake();
@@ -122,6 +162,45 @@ impl IncrementalExchange {
     self.inner.unstarted_upload.swap(false, Ordering::AcqRel)
   }
 
+  pub(crate) fn upload_deadline(&self) -> Option<Instant> {
+    self.inner.upload_deadline.get().copied()
+  }
+
+  pub(crate) fn set_upload_deadline(&self, deadline: Instant) -> Instant {
+    *self.inner.upload_deadline.get_or_init(|| deadline)
+  }
+
+  /// Start the post-header H1/H2 deadline without depending on Hyper polling
+  /// the request body. H3 enforces the same stored deadline in its uploader.
+  pub(crate) fn arm_upload_deadline(&self) {
+    let Some(deadline) = self.upload_deadline() else {
+      return;
+    };
+    if self.upload_is_complete() || self.is_cancelled() {
+      return;
+    }
+    if self
+      .inner
+      .upload_deadline_armed
+      .swap(true, Ordering::AcqRel)
+    {
+      return;
+    }
+    if Instant::now() >= deadline {
+      self.expire_upload_deadline();
+      return;
+    }
+    let exchange = self.clone();
+    tokio::spawn(async move {
+      tokio::select! {
+        biased;
+        () = exchange.upload_completed() => {}
+        () = exchange.cancelled() => {}
+        () = tokio::time::sleep_until(deadline) => exchange.expire_upload_deadline(),
+      }
+    });
+  }
+
   pub(crate) fn fail_upload(&self, message: impl Into<String>) {
     self.store_failure(message.into());
     self.cancel();
@@ -149,8 +228,15 @@ impl IncrementalExchange {
   }
 
   pub(crate) fn mark_upload_complete(&self) {
+    let _ = self.inner.upload_outcome.compare_exchange(
+      UPLOAD_ACTIVE,
+      UPLOAD_COMPLETED,
+      Ordering::AcqRel,
+      Ordering::Acquire,
+    );
     self.inner.unstarted_upload.store(false, Ordering::Release);
     self.mark_terminal_half(UPLOAD_COMPLETE);
+    self.inner.upload_completion.notify_waiters();
   }
 
   pub(crate) fn mark_response_complete(&self) {
@@ -165,6 +251,22 @@ impl IncrementalExchange {
     self.inner.terminal_halves.load(Ordering::Acquire) & RESPONSE_COMPLETE != 0
   }
 
+  fn upload_is_complete(&self) -> bool {
+    self.inner.terminal_halves.load(Ordering::Acquire) & UPLOAD_COMPLETE != 0
+  }
+
+  async fn upload_completed(&self) {
+    loop {
+      let notified = self.inner.upload_completion.notified();
+      tokio::pin!(notified);
+      notified.as_mut().enable();
+      if self.upload_is_complete() {
+        return;
+      }
+      notified.await;
+    }
+  }
+
   pub(crate) async fn cancelled(&self) {
     loop {
       let notified = self.inner.cancellation.notified();
@@ -177,14 +279,36 @@ impl IncrementalExchange {
     }
   }
 
+  fn expire_upload_deadline(&self) {
+    if self
+      .inner
+      .upload_outcome
+      .compare_exchange(
+        UPLOAD_ACTIVE,
+        UPLOAD_DEADLINE_EXPIRED,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+      )
+      .is_err()
+    {
+      return;
+    }
+    self.store_failure_kind(IncrementalExchangeFailure::UploadDeadline);
+    self.cancel();
+  }
+
   fn store_failure(&self, message: String) {
+    self.store_failure_kind(IncrementalExchangeFailure::Message(message));
+  }
+
+  fn store_failure_kind(&self, value: IncrementalExchangeFailure) {
     let mut failure = self
       .inner
       .failure
       .lock()
       .unwrap_or_else(|poisoned| poisoned.into_inner());
     if failure.is_none() {
-      *failure = Some(message);
+      *failure = Some(value);
     }
   }
 
@@ -219,6 +343,10 @@ impl IncrementalExchange {
 const UPLOAD_COMPLETE: u8 = 0b01;
 const RESPONSE_COMPLETE: u8 = 0b10;
 const BOTH_COMPLETE: u8 = UPLOAD_COMPLETE | RESPONSE_COMPLETE;
+const UPLOAD_ACTIVE: u8 = 0;
+const UPLOAD_COMPLETED: u8 = 1;
+const UPLOAD_CANCELLED: u8 = 2;
+const UPLOAD_DEADLINE_EXPIRED: u8 = 3;
 
 /// Wrap a downstream request body so response cancellation interrupts a
 /// pending body read and so request EOF participates in exchange lifetime.
@@ -249,6 +377,7 @@ fn wrap_request_body_inner(
     exchange,
     terminal,
     mark_upload_on_terminal_source,
+    upload_completion_on_drop: false,
   }
   .boxed()
 }
@@ -302,6 +431,7 @@ struct IncrementalRequestBody {
   exchange: IncrementalExchange,
   terminal: bool,
   mark_upload_on_terminal_source: bool,
+  upload_completion_on_drop: bool,
 }
 
 impl Body for IncrementalRequestBody {
@@ -314,17 +444,13 @@ impl Body for IncrementalRequestBody {
   ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
     if self.exchange.is_cancelled() {
       self.terminal = true;
-      if self.mark_upload_on_terminal_source {
-        self.exchange.mark_upload_complete();
-      }
+      self.upload_completion_on_drop = self.mark_upload_on_terminal_source;
       return Poll::Ready(Some(Err(self.exchange.cancellation_error())));
     }
     self.exchange.inner.request_waker.register(cx.waker());
     if self.exchange.is_cancelled() {
       self.terminal = true;
-      if self.mark_upload_on_terminal_source {
-        self.exchange.mark_upload_complete();
-      }
+      self.upload_completion_on_drop = self.mark_upload_on_terminal_source;
       return Poll::Ready(Some(Err(self.exchange.cancellation_error())));
     }
     match Pin::new(&mut self.body).poll_frame(cx) {
@@ -337,11 +463,8 @@ impl Body for IncrementalRequestBody {
       }
       Poll::Ready(Some(Err(error))) => {
         self.terminal = true;
-        if self.mark_upload_on_terminal_source {
-          self.exchange.fail_upload(error.to_string());
-        } else {
-          self.exchange.signal_upload_failure(error.to_string());
-        }
+        self.exchange.signal_upload_failure(error.to_string());
+        self.upload_completion_on_drop = self.mark_upload_on_terminal_source;
         Poll::Ready(Some(Err(error)))
       }
       poll => poll,
@@ -366,6 +489,8 @@ impl Drop for IncrementalRequestBody {
       if self.mark_upload_on_terminal_source {
         self.exchange.mark_upload_complete();
       }
+    } else if self.upload_completion_on_drop {
+      self.exchange.mark_upload_complete();
     }
   }
 }
@@ -506,6 +631,32 @@ impl Drop for IncrementalResponseBody {
     }
   }
 }
+
+#[derive(Clone, Debug)]
+enum IncrementalExchangeFailure {
+  Message(String),
+  UploadDeadline,
+}
+
+impl fmt::Display for IncrementalExchangeFailure {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Message(message) => formatter.write_str(message),
+      Self::UploadDeadline => IncrementalUploadDeadlineError.fmt(formatter),
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct IncrementalUploadDeadlineError;
+
+impl fmt::Display for IncrementalUploadDeadlineError {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str("incremental upload deadline timed out")
+  }
+}
+
+impl std::error::Error for IncrementalUploadDeadlineError {}
 
 #[derive(Debug)]
 struct IncrementalExchangeError {

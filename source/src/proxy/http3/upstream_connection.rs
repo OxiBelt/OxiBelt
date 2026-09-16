@@ -322,7 +322,7 @@ async fn send_incremental_h3_request(
 ) -> anyhow::Result<Response<ProxyBody>> {
   let (send, mut recv) = stream.split();
   let upload_exchange = exchange.clone();
-  let upload_deadline = incremental_upload_deadline(timeouts);
+  let upload_deadline = exchange.set_upload_deadline(timeouts.incremental_upload_deadline());
   let upload = tokio::spawn(async move {
     let mut send = send;
     let body = crate::proxy::http::incremental_exchange::wrap_request_body_for_transport(
@@ -398,15 +398,6 @@ async fn send_incremental_h3_request(
 
 fn response_body_is_semantically_empty(method: &Method, status: StatusCode) -> bool {
   *method == Method::HEAD || status == StatusCode::NO_CONTENT || status == StatusCode::NOT_MODIFIED
-}
-
-fn incremental_upload_deadline(timeouts: EffectiveTimeouts) -> tokio::time::Instant {
-  let now = tokio::time::Instant::now();
-  let deadline = now.checked_add(timeouts.upstream_request).unwrap_or(now);
-  timeouts
-    .upstream_deadline
-    .map(tokio::time::Instant::from_std)
-    .map_or(deadline, |configured| configured.min(deadline))
 }
 
 async fn upload_incremental_h3_body(

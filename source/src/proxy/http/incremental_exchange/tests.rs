@@ -165,6 +165,116 @@ async fn upload_can_finish_after_response_eof() {
   assert!(!exchange.is_cancelled());
 }
 
+#[tokio::test(start_paused = true)]
+async fn absolute_upload_deadline_cancels_without_releasing_before_body_terminal() {
+  struct Guard(Arc<AtomicBool>);
+  impl Drop for Guard {
+    fn drop(&mut self) {
+      self.0.store(true, Ordering::Release);
+    }
+  }
+
+  let deadline = Instant::now() + std::time::Duration::from_millis(50);
+  let exchange = IncrementalExchange::with_upload_deadline(deadline);
+  exchange.mark_response_complete();
+  let released = Arc::new(AtomicBool::new(false));
+  exchange.retain(Guard(Arc::clone(&released)));
+  let (_sender, body) = super::super::body::channel_body(1);
+  let mut request = wrap_request_body(body, exchange.clone());
+
+  exchange.arm_upload_deadline();
+  exchange.arm_upload_deadline();
+  tokio::task::yield_now().await;
+  tokio::time::advance(std::time::Duration::from_millis(49)).await;
+  assert!(!exchange.is_cancelled());
+  assert!(!released.load(Ordering::Acquire));
+
+  tokio::time::advance(std::time::Duration::from_millis(1)).await;
+  tokio::task::yield_now().await;
+  assert!(exchange.is_cancelled());
+  assert_eq!(
+    exchange.failure().as_deref(),
+    Some("incremental upload deadline timed out")
+  );
+  assert!(
+    !released.load(Ordering::Acquire),
+    "timer expiry alone must not release transport-owned resources"
+  );
+
+  let error = request
+    .frame()
+    .await
+    .expect("deadline should produce a terminal request frame")
+    .expect_err("deadline should fail the upload");
+  assert!(
+    error
+      .downcast_ref::<IncrementalUploadDeadlineError>()
+      .is_some()
+  );
+  assert!(!exchange.is_complete());
+  assert!(!released.load(Ordering::Acquire));
+  drop(request);
+  assert!(exchange.is_complete());
+  assert!(released.load(Ordering::Acquire));
+}
+
+#[tokio::test(start_paused = true)]
+async fn upload_progress_does_not_reset_the_absolute_deadline() {
+  let deadline = Instant::now() + std::time::Duration::from_millis(50);
+  let exchange = IncrementalExchange::with_upload_deadline(deadline);
+  exchange.mark_response_complete();
+  let (sender, body) = super::super::body::channel_body(2);
+  let mut request = wrap_request_body(body, exchange.clone());
+  exchange.arm_upload_deadline();
+  tokio::task::yield_now().await;
+
+  tokio::time::advance(std::time::Duration::from_millis(30)).await;
+  sender
+    .send(Ok(Frame::data(Bytes::from_static(b"progress"))))
+    .await
+    .expect("progress frame should queue");
+  let frame = request
+    .frame()
+    .await
+    .expect("progress frame should exist")
+    .expect("progress frame should succeed");
+  assert_eq!(frame.data_ref().expect("data frame").as_ref(), b"progress");
+
+  tokio::time::advance(std::time::Duration::from_millis(20)).await;
+  tokio::task::yield_now().await;
+  let error = request
+    .frame()
+    .await
+    .expect("deadline should produce a terminal request frame")
+    .expect_err("periodic progress must not extend the deadline");
+  assert!(
+    error
+      .downcast_ref::<IncrementalUploadDeadlineError>()
+      .is_some()
+  );
+  assert!(!exchange.is_complete());
+  drop(request);
+  assert!(exchange.is_complete());
+}
+
+#[tokio::test(start_paused = true)]
+async fn clean_upload_completion_disarms_the_deadline() {
+  let deadline = Instant::now() + std::time::Duration::from_millis(50);
+  let exchange = IncrementalExchange::with_upload_deadline(deadline);
+  exchange.mark_response_complete();
+  let (sender, body) = super::super::body::channel_body(1);
+  let request = wrap_request_body(body, exchange.clone());
+  exchange.arm_upload_deadline();
+  drop(sender);
+
+  request.collect().await.expect("upload EOF should be clean");
+  assert!(exchange.is_complete());
+  tokio::time::advance(std::time::Duration::from_millis(100)).await;
+  tokio::task::yield_now().await;
+  assert!(!exchange.is_cancelled());
+  assert_eq!(exchange.failure(), None);
+}
+
 #[tokio::test]
 async fn transport_owned_request_eof_waits_for_transport_completion() {
   let exchange = IncrementalExchange::new();

@@ -84,6 +84,19 @@ impl EffectiveTimeouts {
     capped
   }
 
+  /// Resolve one immutable deadline for an accepted incremental upload.
+  ///
+  /// The configured request budget starts when the transport takes ownership
+  /// of the upload, while an inherited absolute deadline can only shorten it.
+  pub(crate) fn incremental_upload_deadline(self) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    let configured = now.checked_add(self.upstream_request).unwrap_or(now);
+    self
+      .upstream_deadline
+      .map(tokio::time::Instant::from_std)
+      .map_or(configured, |deadline| deadline.min(configured))
+  }
+
   fn cap_upstream_to_remaining(mut self, remaining: Duration) -> Self {
     self.upstream_connect = self.upstream_connect.min(remaining);
     self.upstream_request = self.upstream_request.min(remaining);

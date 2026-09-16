@@ -2,6 +2,7 @@ use super::*;
 use hyper::body::{Frame, SizeHint};
 use pretty_assertions::assert_eq;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -100,6 +101,33 @@ where
   )
   .await
   .expect("headers must complete without body EOF")
+}
+
+fn incremental_upload<B>(body: B) -> Request<B> {
+  Request::builder()
+    .method("POST")
+    .uri("/upload")
+    .header("host", "example.com")
+    .header("incremental", "?1")
+    .body(body)
+    .unwrap()
+}
+
+async fn read_h1_head(socket: &mut tokio::net::TcpStream) {
+  let mut head = Vec::new();
+  while !head.ends_with(b"\r\n\r\n") {
+    head.push(socket.read_u8().await.unwrap());
+  }
+}
+
+async fn wait_for_exchange_completion(exchange: &incremental_exchange::IncrementalExchange) {
+  tokio::time::timeout(Duration::from_secs(2), async {
+    while !exchange.is_complete() {
+      tokio::task::yield_now().await;
+    }
+  })
+  .await
+  .expect("terminated upload must release its retained admission lease");
 }
 
 #[tokio::test]
@@ -213,6 +241,220 @@ allowed_content_types = ["application/octet-stream"]
   )
   .await;
   assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn incremental_h1_upload_deadline_cancels_periodic_upload_releases_admission_and_retires_connection()
+ {
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let accepted = Arc::new(AtomicUsize::new(0));
+  let accepted_by_server = accepted.clone();
+  let (first_fragment_tx, first_fragment_rx) = tokio::sync::oneshot::channel();
+  let server = tokio::spawn(async move {
+    let mut first_fragment_tx = Some(first_fragment_tx);
+    for connection in 0..2 {
+      let (mut socket, _) = listener.accept().await.unwrap();
+      accepted_by_server.fetch_add(1, Ordering::SeqCst);
+      read_h1_head(&mut socket).await;
+      socket
+        .write_all(b"HTTP/1.1 200 OK\r\nIncremental: ?1\r\nContent-Length: 0\r\n\r\n")
+        .await
+        .unwrap();
+      if connection == 0 {
+        let mut byte = [0];
+        assert_eq!(
+          tokio::time::timeout(Duration::from_secs(1), socket.read(&mut byte))
+            .await
+            .expect("a pre-deadline fragment must reach the upstream")
+            .unwrap(),
+          1
+        );
+        let _ = first_fragment_tx.take().unwrap().send(());
+        let mut remainder = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut remainder))
+          .await
+          .expect("deadline cancellation must retire the HTTP/1 upstream connection")
+          .unwrap();
+      }
+    }
+  });
+  let (state, _temp) = snapshot("", |config| {
+    config.upstreams[0].origin = format!("http://{address}").parse().unwrap();
+    config.upstreams[0].max_http_version = HttpVersion::H1;
+    config.routes[0].upstream_http_version = Some(HttpVersion::H1);
+    config.upstreams[0].request_timeout_ms = 300;
+    config.circuit_breakers.global.max_active_requests = crate::config::CapacitySetting::Fixed(1);
+    config.circuit_breakers.global.max_pending_requests = crate::config::CapacitySetting::Fixed(0);
+    config.circuit_breakers.route_defaults.max_active_requests =
+      crate::config::CapacitySetting::Fixed(2);
+  })
+  .await;
+  let (upload, body) = body::channel_body(8);
+  let response = send(state.clone(), incremental_upload(body)).await;
+  assert_eq!(response.status(), StatusCode::OK);
+  let exchange = response
+    .extensions()
+    .get::<incremental_exchange::IncrementalExchange>()
+    .cloned()
+    .expect("accepted incremental response must retain its exchange");
+  response.into_body().collect().await.unwrap();
+
+  upload
+    .send(Ok(Frame::data(bytes::Bytes::from_static(b"first"))))
+    .await
+    .unwrap();
+  tokio::time::timeout(Duration::from_secs(1), first_fragment_rx)
+    .await
+    .expect("upstream must receive the first body fragment")
+    .unwrap();
+
+  for fragment in [b"second".as_slice(), b"third", b"fourth"] {
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    upload
+      .send(Ok(Frame::data(bytes::Bytes::copy_from_slice(fragment))))
+      .await
+      .unwrap();
+  }
+
+  let refusal = send(state.clone(), incremental_upload(UnpolledBody)).await;
+  assert_eq!(refusal.status(), StatusCode::TOO_MANY_REQUESTS);
+
+  tokio::time::timeout(Duration::from_millis(250), exchange.cancelled())
+    .await
+    .expect("periodic upload progress must not extend the absolute request deadline");
+  assert_eq!(
+    exchange.failure().as_deref(),
+    Some("incremental upload deadline timed out")
+  );
+  wait_for_exchange_completion(&exchange).await;
+
+  let recovered = tokio::time::timeout(
+    Duration::from_secs(2),
+    send(state, incremental_upload(empty_test_body())),
+  )
+  .await
+  .expect("admission recovery must reach a fresh H1 connection");
+  assert_eq!(recovered.status(), StatusCode::OK);
+  recovered.into_body().collect().await.unwrap();
+  tokio::time::timeout(Duration::from_secs(2), server)
+    .await
+    .expect("recovered request must use a new HTTP/1 upstream connection")
+    .unwrap();
+  assert_eq!(
+    accepted.load(Ordering::SeqCst),
+    2,
+    "the cancelled HTTP/1 upload connection must not be reused"
+  );
+}
+
+#[tokio::test]
+async fn incremental_h2_upload_deadline_cancels_after_early_response() {
+  use std::convert::Infallible;
+
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let (fragment_tx, fragment_rx) = tokio::sync::oneshot::channel();
+  let (reset_tx, reset_rx) = tokio::sync::oneshot::channel();
+  let server = tokio::spawn(async move {
+    let (stream, _) = listener.accept().await.unwrap();
+    let fragment_tx = Arc::new(std::sync::Mutex::new(Some(fragment_tx)));
+    let reset_tx = Arc::new(std::sync::Mutex::new(Some(reset_tx)));
+    let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
+      let mut fragment_tx = fragment_tx
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+      let reset_tx = reset_tx
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+      async move {
+        tokio::spawn(async move {
+          let mut body = request.into_body();
+          let mut first_data_frame = true;
+          let mut reset = false;
+          while let Some(frame) = body.frame().await {
+            match frame {
+              Ok(frame) if first_data_frame && frame.data_ref().is_some() => {
+                first_data_frame = false;
+                if let Some(fragment_tx) = fragment_tx.take() {
+                  let _ = fragment_tx.send(());
+                }
+              }
+              Ok(_) => {}
+              Err(_) => {
+                reset = true;
+                break;
+              }
+            }
+          }
+          if let Some(reset_tx) = reset_tx {
+            let _ = reset_tx.send(reset);
+          }
+        });
+        Ok::<_, Infallible>(
+          Response::builder()
+            .header("incremental", "?1")
+            .body(empty_test_body())
+            .unwrap(),
+        )
+      }
+    });
+    let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+      .serve_connection(TokioIo::new(stream), service)
+      .await;
+  });
+  let (state, _temp) = snapshot("", |config| {
+    config.upstreams[0].origin = format!("http://{address}").parse().unwrap();
+    config.upstreams[0].max_http_version = HttpVersion::H2;
+    config.routes[0].upstream_http_version = Some(HttpVersion::H2);
+    config.upstreams[0].request_timeout_ms = 300;
+  })
+  .await;
+  let (upload, body) = body::channel_body(4);
+  let response = send(state.clone(), incremental_upload(body)).await;
+  assert_eq!(response.status(), StatusCode::OK);
+  let exchange = response
+    .extensions()
+    .get::<incremental_exchange::IncrementalExchange>()
+    .cloned()
+    .expect("accepted incremental response must retain its exchange");
+  response.into_body().collect().await.unwrap();
+
+  upload
+    .send(Ok(Frame::data(bytes::Bytes::from_static(b"first"))))
+    .await
+    .unwrap();
+  tokio::time::timeout(Duration::from_secs(1), fragment_rx)
+    .await
+    .expect("H2 upstream must receive the pre-deadline body fragment")
+    .unwrap();
+  tokio::time::sleep(Duration::from_millis(180)).await;
+  upload
+    .send(Ok(Frame::data(bytes::Bytes::from_static(b"later"))))
+    .await
+    .unwrap();
+  tokio::time::timeout(Duration::from_millis(180), exchange.cancelled())
+    .await
+    .expect("H2 body activity must not renew the absolute deadline");
+  wait_for_exchange_completion(&exchange).await;
+  assert!(
+    tokio::time::timeout(Duration::from_secs(1), reset_rx)
+      .await
+      .expect("deadline cancellation must terminate the first H2 stream")
+      .expect("the first H2 body drain must report its terminal state"),
+    "the first H2 upload must end with a reset"
+  );
+  let recovered = tokio::time::timeout(
+    Duration::from_secs(2),
+    send(state, incremental_upload(empty_test_body())),
+  )
+  .await
+  .expect("the existing H2 connection must accept another stream");
+  assert_eq!(recovered.status(), StatusCode::OK);
+  recovered.into_body().collect().await.unwrap();
+  server.abort();
 }
 
 #[tokio::test]

@@ -394,10 +394,16 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         }
         access_log.upstream_first_byte_time_ms = Some(elapsed_ms(upstream_started_at));
         let stream_lease = retry::take_stream_lease(&mut response);
-        match stream_lease {
+        let response = match stream_lease {
           Some(lease) => with_circuit_breaker_request_lease(response, lease),
           None => response,
+        };
+        if upstream_version != HttpVersion::H3
+          && let Some(exchange) = &incremental_exchange
+        {
+          exchange.arm_upload_deadline();
         }
+        response
       }
       Err(error) => {
         if error_indicates_body_timeout(&error, BodyTimeoutKind::DownstreamRequestRead) {

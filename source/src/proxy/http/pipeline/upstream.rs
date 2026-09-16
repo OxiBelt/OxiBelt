@@ -518,7 +518,13 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   }
 
   if incremental_upload {
-    let exchange = incremental_exchange::IncrementalExchange::new();
+    let exchange = if upstream_version == HttpVersion::H3 {
+      incremental_exchange::IncrementalExchange::new()
+    } else {
+      incremental_exchange::IncrementalExchange::with_upload_deadline(
+        timeouts.incremental_upload_deadline(),
+      )
+    };
     if upstream_version == HttpVersion::H3 {
       exchange.arm_unstarted_upload();
     } else {
