@@ -115,7 +115,7 @@ client_identity_cert_volume="oxibelt-client-identity-cert-${run_id}"
 test_label="oxibelt.test.run=${run_id}"
 
 cleanup() {
-  docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -f >/dev/null 2>&1 || true
+  docker ps -aq --filter "label=${test_label}" | xargs -r docker rm -fv >/dev/null 2>&1 || true
   docker network rm "${network_name}" >/dev/null 2>&1 || true
   docker volume rm \
     "${remote_signer_socket_volume}" \
