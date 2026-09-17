@@ -7700,12 +7700,10 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
       "each Docker integration job should pass {value}"
     );
   }
-  assert_eq!(
-    workflow
-      .matches("OXIBELT_EXTERNAL_CACHE_HANDLER_IMAGE: oxibelt/mock-external-cache:ci")
-      .count(),
-    1,
-    "the Docker matrix must use the artifact-preserved external cache helper",
+  let cache_job = workflow_job_text(&workflow, "docker-integration-cache");
+  assert!(
+    cache_job.contains("OXIBELT_EXTERNAL_CACHE_HANDLER_IMAGE: oxibelt/mock-external-cache:ci"),
+    "the cache matrix must use the artifact-preserved external cache helper",
   );
   assert!(
     !workflow.contains(

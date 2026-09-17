@@ -386,6 +386,9 @@ Failures should be easy to diagnose, mock upstream behavior should be
 deterministic, and test ports, hostnames, and container names should be
 explicit.
 
+The cache Docker matrix consumes the artifact-preserved
+`oxibelt/mock-external-cache:ci` helper tag with preload enforcement enabled.
+
 ## Browser and DevOps Changes
 
 If browser-based tests are added, they must run with both Chromium WebDriver
