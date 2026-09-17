@@ -11,7 +11,7 @@ default = []
 native-mimalloc = ["dep:cc"]
 
 [build-dependencies]
-cc = { version = "=1.4.5", optional = true }
+cc = { version = "=1.4.6", optional = true }
 
 [lints]
 workspace = true
