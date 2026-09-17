@@ -76,8 +76,18 @@ if [[ -n "$client" ]]; then docker network connect "$network" "$client"; connect
 pgpass="$(printf '%s' "pg:${run_id}"|sha256sum|cut -c1-32)"; access="upload${run_id}"; secret="$(printf '%s' "s3:${run_id}"|sha256sum|cut -c1-40)"
 docker run -d --name "$pg" --label "$label" --network "$network" --network-alias postgres -p 127.0.0.1::5432 -e POSTGRES_USER=oxibelt -e POSTGRES_DB=oxibelt -e POSTGRES_PASSWORD="$pgpass" "$postgres_image" >/dev/null
 docker run -d --name "$minio" --label "$label" --network "$network" --network-alias minio -p 127.0.0.1::9000 -e MINIO_ROOT_USER="$access" -e MINIO_ROOT_PASSWORD="$secret" --mount "type=volume,src=$cert_volume,dst=/certs,readonly" --mount "type=volume,src=$data_volume,dst=/data" "$image" server --certs-dir /certs /data >/dev/null
-for _ in {1..30}; do docker exec "$pg" pg_isready -U oxibelt -d oxibelt >/dev/null 2>&1&&break; sleep 1; done
-docker exec "$pg" pg_isready -U oxibelt -d oxibelt >/dev/null||die "PostgreSQL not ready"
+postgres_is_ready(){ docker exec "$pg" pg_isready --host 127.0.0.1 --username oxibelt --dbname oxibelt >/dev/null 2>&1; }
+postgres_logs(){ docker logs --tail 200 "$pg" >&2 || true; }
+postgres_ready=0
+for _ in {1..30}; do
+  if postgres_is_ready; then postgres_ready=1; break; fi
+  sleep 1
+done
+if [[ "$postgres_ready" != 1 ]]; then
+  echo "managed upload store check: PostgreSQL TCP listener did not become ready after 30 attempts" >&2
+  postgres_logs
+  exit 1
+fi
 mc_run(){ mc="oxibelt-upload-mc-${run_id}"; status=0; timeout 30s docker run --name "$mc" --rm --network "$network" --mount "type=bind,src=$docker_work/mc-ca,dst=/root/.mc/certs/CAs,readonly" -e "MC_HOST_local=https://${access}:${secret}@minio:9000" "$mc_image" "$@"||status=$?; if ((status!=0)); then docker rm -f "$mc" >/dev/null 2>&1||true; fi; mc=""; return "$status"; }
 for _ in {1..30}; do mc_run ready local >/dev/null 2>&1&&break; sleep 1; done
 mc_run ready local >/dev/null||die "MinIO not ready"

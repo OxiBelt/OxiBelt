@@ -7,6 +7,8 @@ use std::process::Command;
 mod certificate_fixtures;
 #[path = "ci_workflow_integrity/download_recovery.rs"]
 mod download_recovery;
+#[path = "ci_workflow_integrity/managed_upload.rs"]
+mod managed_upload;
 #[path = "ci_workflow_integrity/minio_download.rs"]
 mod minio_download;
 #[path = "ci_workflow_integrity/retry_storm.rs"]
