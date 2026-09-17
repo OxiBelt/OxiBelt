@@ -23,12 +23,14 @@ use crate::rt::Timer;
 /// The sender side of an established connection.
 pub struct SendRequest<B> {
     dispatch: dispatch::UnboundedSender<Request<B>, Response<IncomingBody>>,
+    webtransport_settings: h2::webtransport::SettingsHandle,
 }
 
 impl<B> Clone for SendRequest<B> {
     fn clone(&self) -> SendRequest<B> {
         SendRequest {
             dispatch: self.dispatch.clone(),
+            webtransport_settings: self.webtransport_settings.clone(),
         }
     }
 }
@@ -136,6 +138,47 @@ impl<B> SendRequest<B>
 where
     B: Body + 'static,
 {
+    /// Sends an extended CONNECT request for WebTransport over HTTP/2.
+    ///
+    /// This waits for the server's acknowledged WebTransport and extended
+    /// CONNECT SETTINGS before dispatching the request. The request body must
+    /// be empty and the method must be `CONNECT`.
+    pub fn send_webtransport_request(
+        &mut self,
+        mut req: Request<B>,
+    ) -> impl Future<Output = crate::Result<(Response<()>, crate::ext::WebTransportSession)>> {
+        let mut dispatch = self.dispatch.clone();
+        let settings = self.webtransport_settings.clone();
+        req.extensions_mut()
+            .insert(crate::ext::Protocol::from_static("webtransport"));
+        req.extensions_mut().insert(crate::ext::WebTransportRequest);
+
+        async move {
+            if req.method() != http::Method::CONNECT || !req.body().is_end_stream() {
+                return Err(crate::Error::new_user_invalid_connect());
+            }
+
+            crate::common::future::poll_fn(|cx| match settings.poll_peer_webtransport_settings(cx) {
+                Poll::Ready(_) => Poll::Ready(crate::Result::<()>::Ok(())),
+                Poll::Pending => Poll::Pending,
+            })
+            .await?;
+
+            let sent = dispatch.send(req);
+            let mut response = match sent {
+                Ok(rx) => match rx.await {
+                    Ok(Ok(response)) => response,
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => panic!("dispatch dropped without returning error"),
+                },
+                Err(_) => return Err(crate::Error::new_closed()),
+            };
+            let session = crate::ext::on_webtransport(&mut response).await?;
+            let (parts, _) = response.into_parts();
+            Ok((Response::from_parts(parts, ()), session))
+        }
+    }
+
     /// Sends a `Request` on the associated connection.
     ///
     /// Returns a future that if successful, yields the `Response`.
@@ -554,6 +597,12 @@ where
         self
     }
 
+    /// Sends these WebTransport SETTINGS in the HTTP/2 connection preface.
+    pub fn webtransport_settings(&mut self, settings: crate::ext::WebTransportSettings) -> &mut Self {
+        self.h2_builder.webtransport_settings = Some(settings.into());
+        self
+    }
+
     /// Constructs a connection with the configured options and IO.
     /// See [`client::conn`](crate::client::conn) for more.
     ///
@@ -585,6 +634,7 @@ where
             Ok((
                 SendRequest {
                     dispatch: tx.unbound(),
+                    webtransport_settings: h2.webtransport_settings(),
                 },
                 Connection {
                     inner: (PhantomData, h2),
@@ -596,6 +646,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::Builder;
 
     #[tokio::test]
     #[ignore] // only compilation is checked
@@ -769,5 +820,111 @@ mod tests {
                 conn.await.unwrap();
             });
         }
+    }
+
+    #[tokio::test]
+    async fn webtransport_connect_keeps_server_settings_from_request_boundary() {
+        use std::future::poll_fn;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct TokioExecutor;
+
+        impl<F> crate::rt::Executor<F> for TokioExecutor
+        where
+            F: std::future::Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            fn execute(&self, future: F) {
+                tokio::spawn(future);
+            }
+        }
+
+        let initial = crate::ext::WebTransportSettings {
+            enabled: true,
+            initial_max_data: Some(10),
+            ..Default::default()
+        };
+        let updated = crate::ext::WebTransportSettings {
+            enabled: true,
+            initial_max_data: Some(20),
+            ..Default::default()
+        };
+        let (server_io, client_io) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut builder = h2::server::Builder::new();
+            builder.enable_connect_protocol();
+            builder.webtransport_settings(initial.into());
+            let mut connection = builder
+                .handshake::<_, bytes::Bytes>(server_io)
+                .await
+                .expect("HTTP/2 server handshake");
+            let (_request, mut respond) = connection
+                .accept()
+                .await
+                .expect("HTTP/2 connection remains open")
+                .expect("WebTransport request");
+
+            // This SETTINGS frame is acknowledged by the running client while
+            // the CONNECT response remains deliberately delayed.
+            connection
+                .set_webtransport_settings(updated.into())
+                .expect("queue updated WebTransport settings");
+            let _ = tokio::time::timeout(
+                Duration::from_millis(25),
+                poll_fn(|cx| match connection.poll_accept(cx) {
+                    Poll::Ready(Some(Ok(_))) => panic!("unexpected second request"),
+                    Poll::Ready(Some(Err(error))) => panic!("HTTP/2 server error: {error}"),
+                    Poll::Ready(None) => Poll::Ready(()),
+                    Poll::Pending => Poll::Pending,
+                }),
+            )
+            .await;
+
+            respond
+                .send_response(http::Response::new(()), false)
+                .expect("accept WebTransport CONNECT");
+            let _ = tokio::time::timeout(
+                Duration::from_millis(25),
+                poll_fn(|cx| match connection.poll_accept(cx) {
+                    Poll::Ready(Some(Ok(_))) => panic!("unexpected second request"),
+                    Poll::Ready(Some(Err(error))) => panic!("HTTP/2 server error: {error}"),
+                    Poll::Ready(None) => Poll::Ready(()),
+                    Poll::Pending => Poll::Pending,
+                }),
+            )
+            .await;
+        });
+
+        let mut builder = Builder::new(TokioExecutor);
+        builder.webtransport_settings(crate::ext::WebTransportSettings {
+            enabled: true,
+            ..Default::default()
+        });
+        let (mut client, connection) = builder
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(client_io))
+            .await
+            .expect("Hyper HTTP/2 client handshake");
+        let client_driver = tokio::spawn(async move { connection.await });
+
+        let request = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("https://example.test/webtransport")
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .expect("WebTransport request");
+        let (_response, session) = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.send_webtransport_request(request),
+        )
+        .await
+        .expect("WebTransport response timeout")
+        .expect("WebTransport response");
+
+        assert_eq!(session.peer_settings(), Some(initial));
+        assert_ne!(session.peer_settings(), Some(updated));
+
+        client_driver.abort();
+        server.await.expect("server task");
     }
 }

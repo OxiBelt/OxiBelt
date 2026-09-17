@@ -24,7 +24,7 @@ use crate::client::dispatch::{Callback, SendWhen, TrySendError};
 use crate::common::either::Either;
 use crate::common::io::Compat;
 use crate::common::time::Time;
-use crate::ext::{OnInformational, Protocol};
+use crate::ext::{OnInformational, Protocol, WebTransportRequest};
 use crate::headers;
 use crate::proto::Dispatched;
 use crate::rt::bounds::{Http2ClientConnExec, Http2UpgradedExec};
@@ -78,6 +78,7 @@ pub(crate) struct Config {
   pub(crate) header_table_size: Option<u32>,
   pub(crate) max_concurrent_streams: Option<u32>,
   pub(crate) reset_stream_duration: Option<Duration>,
+  pub(crate) webtransport_settings: Option<h2::webtransport::Settings>,
 }
 
 impl Default for Config {
@@ -99,6 +100,7 @@ impl Default for Config {
       header_table_size: None,
       max_concurrent_streams: None,
       reset_stream_duration: None,
+      webtransport_settings: None,
     }
   }
 }
@@ -130,6 +132,9 @@ fn new_builder(config: &Config) -> Builder {
   }
   if let Some(dur) = config.reset_stream_duration {
     builder.reset_stream_duration(dur);
+  }
+  if let Some(settings) = config.webtransport_settings {
+    builder.webtransport_settings(settings);
   }
   builder
 }
@@ -418,6 +423,7 @@ where
   body_tx: SendStream<SendBuf<B::Data>>,
   body: B,
   informational: Option<OnInformational>,
+  is_webtransport: bool,
   cb: Callback<Request<B>, Response<IncomingBody>>,
 }
 
@@ -447,6 +453,9 @@ where
 {
   pub(crate) fn is_extended_connect_protocol_enabled(&self) -> bool {
     self.h2_tx.is_extended_connect_protocol_enabled()
+  }
+  pub(crate) fn webtransport_settings(&self) -> h2::webtransport::SettingsHandle {
+    self.h2_tx.webtransport_settings()
   }
   pub(crate) fn current_max_send_streams(&self) -> usize {
     self.h2_tx.current_max_send_streams()
@@ -572,6 +581,7 @@ where
           informational: f.informational,
           ping: Some(ping),
           send_stream: Some(send_stream),
+          is_webtransport: f.is_webtransport,
           exec: self.executor.clone(),
           cancel_tx: Some(cancel_tx),
         },
@@ -593,7 +603,8 @@ pin_project! {
         ping: Option<Recorder>,
         #[pin]
         send_stream: Option<Option<SendStream<SendBuf<<B as Body>::Data>>>>,
-        exec: E,
+        is_webtransport: bool,
+              exec: E,
         cancel_tx: Option<oneshot::Sender<()>>,
     }
 }
@@ -631,18 +642,30 @@ where
       }
     }
 
-    let result = ready!(this.fut.poll(cx));
+    let result = ready!(this.fut.as_mut().poll(cx));
 
     let ping = this.ping.take().expect("Future polled twice");
     let send_stream = this.send_stream.take().expect("Future polled twice");
 
     match result {
       Ok(res) => {
+        let webtransport_local_settings = res
+          .extensions()
+          .get::<h2::webtransport::ReceivedSettingsSnapshot>()
+          .and_then(|snapshot| snapshot.local_settings())
+          .map(|snapshot| snapshot.settings().into());
+        let webtransport_peer_settings = this
+          .fut
+          .webtransport_peer_settings()
+          .flatten()
+          .map(|snapshot| snapshot.settings().into());
         // record that we got the response headers
         ping.record_non_data();
 
         let content_length = headers::content_length_parse_all(res.headers());
-        if let (Some(mut send_stream), StatusCode::OK) = (send_stream, res.status()) {
+        let accepting_connect = (*this.is_webtransport && res.status().is_success())
+          || (!*this.is_webtransport && res.status() == StatusCode::OK);
+        if let (Some(mut send_stream), true) = (send_stream, accepting_connect) {
           if content_length.map_or(false, |len| len != 0) {
             warn!("h2 connect response with non-zero body not supported");
 
@@ -655,14 +678,25 @@ where
           let (parts, recv_stream) = res.into_parts();
           let mut res = Response::from_parts(parts, IncomingBody::empty());
 
-          let (pending, on_upgrade) = crate::upgrade::pending();
-
-          let (h2_up, up_task) = super::upgrade::pair(send_stream, recv_stream, ping);
-          self.exec.execute_upgrade(up_task);
-          let upgraded = Upgraded::new(h2_up, Bytes::new());
-
-          pending.fulfill(upgraded);
-          res.extensions_mut().insert(on_upgrade);
+          if *this.is_webtransport {
+            let (pending, on_webtransport) = crate::ext::webtransport_pending();
+            let (session, task) = super::upgrade::webtransport_pair(
+              send_stream,
+              recv_stream,
+              webtransport_local_settings,
+              webtransport_peer_settings,
+            );
+            self.exec.execute_upgrade(task);
+            pending.fulfill(session);
+            res.extensions_mut().insert(on_webtransport);
+          } else {
+            let (pending, on_upgrade) = crate::upgrade::pending();
+            let (h2_up, up_task) = super::upgrade::pair(send_stream, recv_stream, ping);
+            self.exec.execute_upgrade(up_task);
+            let upgraded = Upgraded::new(h2_up, Bytes::new());
+            pending.fulfill(upgraded);
+            res.extensions_mut().insert(on_upgrade);
+          }
 
           Poll::Ready(Ok(res))
         } else {
@@ -732,6 +766,7 @@ where
           }
 
           let is_connect = req.method() == Method::CONNECT;
+          let is_webtransport = req.extensions().get::<WebTransportRequest>().is_some();
           let eos = body.is_end_stream();
 
           if is_connect
@@ -748,7 +783,22 @@ where
           if let Some(protocol) = req.extensions_mut().remove::<Protocol>() {
             req.extensions_mut().insert(protocol.into_inner());
           }
+          req.extensions_mut().remove::<WebTransportRequest>();
           let informational = req.extensions_mut().remove::<OnInformational>();
+          if is_webtransport
+            && self
+              .h2_tx
+              .webtransport_settings()
+              .peer_webtransport_settings()
+              .is_none()
+          {
+            debug!("peer WebTransport SETTINGS no longer permit CONNECT");
+            cb.send(Err(TrySendError {
+              error: crate::Error::new_user_invalid_connect(),
+              message: None,
+            }));
+            continue;
+          }
 
           let (fut, body_tx) = match self.h2_tx.send_request(req, !is_connect && eos) {
             Ok(ok) => ok,
@@ -769,6 +819,7 @@ where
             body_tx,
             body,
             informational,
+            is_webtransport,
             cb,
           };
 

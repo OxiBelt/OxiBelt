@@ -3,6 +3,7 @@ use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use atomic_waker::AtomicWaker;
@@ -16,6 +17,42 @@ use super::ping::Recorder;
 use super::SendBuf;
 use crate::rt::{Read, ReadBufCursor, Write};
 
+pub(crate) enum SendCommand {
+    Data(Bytes),
+    Finish,
+}
+
+pub(crate) struct ResetState {
+    reason: Mutex<Option<Reason>>,
+    task: AtomicWaker,
+}
+
+impl ResetState {
+    fn new() -> Self {
+        Self {
+            reason: Mutex::new(None),
+            task: AtomicWaker::new(),
+        }
+    }
+
+    pub(crate) fn request(&self, reason: Reason) {
+        if let Ok(mut pending) = self.reason.lock() {
+            if pending.is_none() {
+                *pending = Some(reason);
+            }
+        }
+        self.task.wake();
+    }
+
+    fn take(&self) -> Option<Reason> {
+        self.reason.lock().ok().and_then(|mut pending| pending.take())
+    }
+
+    fn register(&self, cx: &Context<'_>) {
+        self.task.register(cx.waker());
+    }
+}
+
 pub(super) fn pair<B>(
     send_stream: SendStream<SendBuf<B>>,
     recv_stream: RecvStream,
@@ -24,6 +61,7 @@ pub(super) fn pair<B>(
     let (tx, rx) = mpsc::channel(1);
     let (error_tx, error_rx) = oneshot::channel();
     let close_notify = Arc::new(UpgradedCloseNotify::new());
+    let reset = Arc::new(ResetState::new());
 
     (
         H2Upgraded {
@@ -40,6 +78,35 @@ pub(super) fn pair<B>(
             h2_tx: send_stream,
             rx,
             close_notify,
+            reset,
+            error_tx: Some(error_tx),
+        },
+    )
+}
+
+pub(super) fn webtransport_pair<B>(
+    send_stream: SendStream<SendBuf<B>>,
+    recv_stream: RecvStream,
+    local_settings: Option<crate::ext::WebTransportSettings>,
+    peer_settings: Option<crate::ext::WebTransportSettings>,
+) -> (crate::ext::WebTransportSession, UpgradedSendStreamTask<B>) {
+    let (tx, rx) = mpsc::channel(1);
+    let (error_tx, error_rx) = oneshot::channel();
+    let reset = Arc::new(ResetState::new());
+    (
+        crate::ext::WebTransportSession::new(
+            recv_stream,
+            tx,
+            error_rx,
+            reset.clone(),
+            local_settings,
+            peer_settings,
+        ),
+        UpgradedSendStreamTask {
+            h2_tx: send_stream,
+            rx,
+            close_notify: Arc::new(UpgradedCloseNotify::new()),
+            reset,
             error_tx: Some(error_tx),
         },
     )
@@ -53,7 +120,7 @@ pub(super) struct H2Upgraded {
 }
 
 struct UpgradedSendStreamBridge {
-    tx: mpsc::Sender<Cursor<Box<[u8]>>>,
+    tx: mpsc::Sender<SendCommand>,
     error_rx: oneshot::Receiver<crate::Error>,
     close_notify: Arc<UpgradedCloseNotify>,
 }
@@ -103,8 +170,9 @@ pin_project! {
         #[pin]
         h2_tx: SendStream<SendBuf<B>>,
         #[pin]
-        rx: mpsc::Receiver<Cursor<Box<[u8]>>>,
+        rx: mpsc::Receiver<SendCommand>,
         close_notify: Arc<UpgradedCloseNotify>,
+        reset: Arc<ResetState>,
         error_tx: Option<oneshot::Sender<crate::Error>>,
     }
 }
@@ -123,6 +191,15 @@ where
         // one of the sides hanging up, so the task doesn't live around
         // longer than it's meant to.
         loop {
+            if let Some(reason) = me.reset.take() {
+                me.h2_tx.send_reset(reason);
+                return Poll::Ready(Ok(()));
+            }
+            me.reset.register(cx);
+            if let Some(reason) = me.reset.take() {
+                me.h2_tx.send_reset(reason);
+                return Poll::Ready(Ok(()));
+            }
             // we don't have the next chunk of data yet, so just reserve 1 byte to make
             // sure there's some capacity available. h2 will handle the capacity management
             // for the actual body chunk.
@@ -185,10 +262,19 @@ where
             }
 
             match me.rx.as_mut().poll_next(cx) {
-                Poll::Ready(Some(cursor)) => {
+                Poll::Ready(Some(SendCommand::Data(data))) => {
                     me.h2_tx
-                        .send_data(SendBuf::Cursor(cursor), false)
+                        .send_data(
+                            SendBuf::Cursor(Cursor::new(data.to_vec().into_boxed_slice())),
+                            false,
+                        )
                         .map_err(crate::Error::new_body_write)?;
+                }
+                Poll::Ready(Some(SendCommand::Finish)) => {
+                    me.h2_tx
+                        .send_data(SendBuf::None, true)
+                        .map_err(crate::Error::new_body_write)?;
+                    return Poll::Ready(Ok(()));
                 }
                 Poll::Ready(None) => {
                     me.h2_tx
@@ -201,6 +287,31 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_request_preempts_a_full_payload_channel() {
+        let (mut payload, _receiver) = mpsc::channel(1);
+        let mut full = false;
+        for _ in 0..8 {
+            if payload
+                .try_send(SendCommand::Data(Bytes::from_static(b"blocked")))
+                .is_err()
+            {
+                full = true;
+                break;
+            }
+        }
+        assert!(full);
+
+        let reset = ResetState::new();
+        reset.request(Reason::FLOW_CONTROL_ERROR);
+        assert_eq!(reset.take(), Some(Reason::FLOW_CONTROL_ERROR));
     }
 }
 
@@ -288,7 +399,11 @@ impl Write for H2Upgraded {
         }
 
         let n = buf.len();
-        match self.send_stream.tx.start_send(Cursor::new(buf.into())) {
+        match self
+            .send_stream
+            .tx
+            .start_send(SendCommand::Data(Bytes::copy_from_slice(buf)))
+        {
             Ok(()) => Poll::Ready(Ok(n)),
             Err(_task_dropped) => {
                 // if the task dropped, check if there was an error

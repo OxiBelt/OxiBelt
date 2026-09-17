@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_core::ready;
 use h2::server::{Connection, Handshake, SendResponse};
-use h2::{Reason, RecvStream};
+use h2::{Reason, RecvStream, SendStream};
 use http::{Method, Request};
 use pin_project_lite::pin_project;
 
@@ -16,7 +16,9 @@ use crate::body::{Body, Incoming as IncomingBody};
 use crate::common::date;
 use crate::common::io::Compat;
 use crate::common::time::Time;
-use crate::ext::{informational_channel, InformationalReceiver, Protocol};
+use crate::ext::{
+  informational_channel, webtransport_pending, InformationalReceiver, PendingWebTransport, Protocol,
+};
 use crate::headers;
 use crate::proto::h2::ping::Recorder;
 use crate::proto::Dispatched;
@@ -47,6 +49,7 @@ pub(crate) struct Config {
   pub(crate) initial_stream_window_size: u32,
   pub(crate) max_frame_size: u32,
   pub(crate) enable_connect_protocol: bool,
+  pub(crate) webtransport_settings: Option<h2::webtransport::Settings>,
   pub(crate) max_concurrent_streams: Option<u32>,
   pub(crate) max_pending_accept_reset_streams: Option<usize>,
   pub(crate) max_local_error_reset_streams: Option<usize>,
@@ -66,6 +69,7 @@ impl Default for Config {
       initial_stream_window_size: DEFAULT_STREAM_WINDOW,
       max_frame_size: DEFAULT_MAX_FRAME_SIZE,
       enable_connect_protocol: false,
+      webtransport_settings: None,
       max_concurrent_streams: Some(200),
       max_pending_accept_reset_streams: None,
       max_local_error_reset_streams: Some(DEFAULT_MAX_LOCAL_ERROR_RESET_STREAMS),
@@ -151,6 +155,9 @@ where
     }
     if config.enable_connect_protocol {
       builder.enable_connect_protocol();
+    }
+    if let Some(settings) = config.webtransport_settings {
+      builder.webtransport_settings(settings);
     }
     let handshake = builder.handshake(Compat::new(io));
 
@@ -286,15 +293,46 @@ where
                 respond.send_reset(h2::Reason::INTERNAL_ERROR);
                 return Poll::Ready(Ok(()));
               }
-              let (pending, upgrade) = crate::upgrade::pending();
-              debug_assert!(parts.extensions.get::<OnUpgrade>().is_none());
-              parts.extensions.insert(upgrade);
+              let is_webtransport = parts
+                .extensions
+                .get::<h2::ext::Protocol>()
+                .map(|protocol| protocol.as_str() == "webtransport")
+                .unwrap_or(false);
+              // RFC draft-15 section 4.3.1 freezes server-sent SETTINGS when
+              // the CONNECT request is received. Do not defer this snapshot
+              // to application acceptance of the request.
+              let webtransport_local_settings = parts
+                .extensions
+                .remove::<h2::webtransport::ReceivedSettingsSnapshot>()
+                .and_then(|snapshot| snapshot.local_settings())
+                .map(|snapshot| snapshot.settings().into());
+              if is_webtransport
+                && !webtransport_local_settings
+                  .as_ref()
+                  .map(|settings: &crate::ext::WebTransportSettings| settings.enabled)
+                  .unwrap_or(false)
+              {
+                warn!("received WebTransport CONNECT before enabled SETTINGS acknowledgement");
+                respond.send_reset(h2::Reason::PROTOCOL_ERROR);
+                continue;
+              }
+              let pending = if is_webtransport {
+                let (pending, on_webtransport) = webtransport_pending();
+                parts.extensions.insert(on_webtransport);
+                ConnectPending::WebTransport(pending)
+              } else {
+                let (pending, upgrade) = crate::upgrade::pending();
+                debug_assert!(parts.extensions.get::<OnUpgrade>().is_none());
+                parts.extensions.insert(upgrade);
+                ConnectPending::Upgrade(pending)
+              };
               (
                 Request::from_parts(parts, IncomingBody::empty()),
                 Some(ConnectParts {
                   pending,
                   ping,
                   recv_stream: stream,
+                  webtransport_local_settings,
                 }),
               )
             };
@@ -389,13 +427,25 @@ pin_project! {
             #[pin]
             pipe: PipeToSendStream<B>,
         },
+        WebTransport {
+            send_stream: Option<SendStream<SendBuf<B::Data>>>,
+            recv_stream: Option<RecvStream>,
+            pending: Option<PendingWebTransport>,
+            local_settings: Option<crate::ext::WebTransportSettings>,
+        },
     }
 }
 
 struct ConnectParts {
-  pending: Pending,
+  pending: ConnectPending,
   ping: Recorder,
   recv_stream: RecvStream,
+  webtransport_local_settings: Option<crate::ext::WebTransportSettings>,
+}
+
+enum ConnectPending {
+  Upgrade(Pending),
+  WebTransport(PendingWebTransport),
 }
 
 impl<F, B, E> H2Stream<F, B, E>
@@ -528,12 +578,26 @@ where
                 warn!("successful response to CONNECT request disallows content-length header");
               }
               let send_stream = reply!(me, res, false);
-              let (h2_up, up_task) =
-                super::upgrade::pair(send_stream, connect_parts.recv_stream, connect_parts.ping);
-              connect_parts
-                .pending
-                .fulfill(Upgraded::new(h2_up, Bytes::new()));
-              self.exec.execute_upgrade(up_task);
+              match connect_parts.pending {
+                ConnectPending::Upgrade(pending) => {
+                  let (h2_up, up_task) = super::upgrade::pair(
+                    send_stream,
+                    connect_parts.recv_stream,
+                    connect_parts.ping,
+                  );
+                  pending.fulfill(Upgraded::new(h2_up, Bytes::new()));
+                  self.exec.execute_upgrade(up_task);
+                }
+                ConnectPending::WebTransport(pending) => {
+                  me.state.set(H2StreamState::WebTransport {
+                    send_stream: Some(send_stream),
+                    recv_stream: Some(connect_parts.recv_stream),
+                    pending: Some(pending),
+                    local_settings: connect_parts.webtransport_local_settings,
+                  });
+                  continue;
+                }
+              }
               return Poll::Ready(Ok(()));
             }
           }
@@ -552,6 +616,30 @@ where
             reply!(me, res, true);
             return Poll::Ready(Ok(()));
           }
+        }
+        H2StreamStateProj::WebTransport {
+          send_stream,
+          recv_stream,
+          pending,
+          local_settings,
+        } => {
+          let peer_settings = ready!(send_stream
+            .as_mut()
+            .expect("WebTransport send stream")
+            .poll_webtransport_peer_settings(cx))
+          .map_err(crate::Error::new_h2)?;
+          let (session, task) = super::upgrade::webtransport_pair(
+            send_stream.take().expect("WebTransport send stream"),
+            recv_stream.take().expect("WebTransport receive stream"),
+            *local_settings,
+            peer_settings.map(|snapshot| snapshot.settings().into()),
+          );
+          pending
+            .take()
+            .expect("WebTransport pending session")
+            .fulfill(session);
+          self.exec.execute_upgrade(task);
+          return Poll::Ready(Ok(()));
         }
         H2StreamStateProj::Body { pipe } => {
           return pipe.poll(cx);
@@ -724,6 +812,159 @@ mod tests {
         .status(),
       StatusCode::OK
     );
+
+    drop(client);
+    client_driver.abort();
+    server.abort();
+  }
+
+  #[tokio::test]
+  async fn webtransport_connect_uses_each_direction_at_its_boundary() {
+    use std::sync::{Arc, Mutex};
+
+    let server_initial = crate::ext::WebTransportSettings {
+      enabled: true,
+      initial_max_data: Some(10),
+      ..Default::default()
+    };
+    let client_initial = crate::ext::WebTransportSettings {
+      enabled: true,
+      initial_max_data: Some(30),
+      ..Default::default()
+    };
+    let client_updated = crate::ext::WebTransportSettings {
+      enabled: true,
+      initial_max_data: Some(40),
+      ..Default::default()
+    };
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (session_tx, session_rx) = tokio::sync::oneshot::channel();
+    let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
+    let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+    let session_tx = Arc::new(Mutex::new(Some(session_tx)));
+    let service = service_fn(move |mut request: Request<IncomingBody>| {
+      let on_webtransport = crate::ext::on_webtransport(&mut request);
+      let entered_tx = entered_tx
+        .lock()
+        .expect("entered sender lock")
+        .take()
+        .expect("single WebTransport request");
+      let release_rx = release_rx
+        .lock()
+        .expect("release receiver lock")
+        .take()
+        .expect("single WebTransport request");
+      let session_tx = session_tx
+        .lock()
+        .expect("session sender lock")
+        .take()
+        .expect("single WebTransport request");
+      async move {
+        entered_tx.send(()).expect("notify request receipt");
+        session_tx
+          .send(on_webtransport)
+          .expect("return session future");
+        release_rx.await.expect("release delayed response");
+        Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new()))
+      }
+    });
+
+    let (server_io, client_io) = tokio::io::duplex(4096);
+    let server = tokio::spawn(async move {
+      let mut builder = crate::server::conn::http2::Builder::new(TokioExecutor);
+      builder.enable_connect_protocol();
+      builder.webtransport_settings(server_initial);
+      builder
+        .serve_connection(Compat::new(server_io), service)
+        .await
+    });
+
+    let mut builder = h2::client::Builder::new();
+    builder.webtransport_settings(client_initial.into());
+    let (mut client, connection) = builder
+      .handshake::<_, Bytes>(client_io)
+      .await
+      .expect("HTTP/2 client handshake");
+    let (settings_tx, mut settings_rx) =
+      tokio::sync::mpsc::unbounded_channel::<h2::webtransport::Settings>();
+    let client_driver = tokio::spawn(async move {
+      let mut connection = Box::pin(connection);
+      loop {
+        tokio::select! {
+          result = connection.as_mut() => return result,
+          Some(settings) = settings_rx.recv() => connection
+            .as_mut()
+            .set_webtransport_settings(settings)
+            .expect("send updated client settings"),
+          else => return Ok(()),
+        }
+      }
+    });
+    let settings = client.webtransport_settings();
+    let mut request = Request::builder()
+      .method(Method::CONNECT)
+      .uri("https://example.test/webtransport")
+      .body(())
+      .expect("WebTransport request");
+    request
+      .extensions_mut()
+      .insert(h2::ext::Protocol::from_static("webtransport"));
+    let (response, _send_stream) = client
+      .send_request(request, false)
+      .expect("send WebTransport CONNECT");
+    tokio::time::timeout(Duration::from_secs(1), entered_rx)
+      .await
+      .expect("server did not receive WebTransport CONNECT")
+      .expect("service request notification");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+      loop {
+        if settings
+          .local_acknowledged()
+          .map(|snapshot| snapshot.settings().initial_max_data)
+          == Some(client_initial.initial_max_data)
+        {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+      }
+    })
+    .await
+    .expect("server did not acknowledge initial client settings");
+    settings_tx
+      .send(client_updated.into())
+      .expect("deliver updated client settings");
+    tokio::time::timeout(Duration::from_secs(1), async {
+      loop {
+        if settings
+          .local_acknowledged()
+          .map(|snapshot| snapshot.settings().initial_max_data)
+          == Some(client_updated.initial_max_data)
+        {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+      }
+    })
+    .await
+    .expect("server did not acknowledge updated client settings");
+
+    release_tx.send(()).expect("release server response");
+    tokio::time::timeout(Duration::from_secs(1), response)
+      .await
+      .expect("WebTransport response timeout")
+      .expect("WebTransport response");
+    let session = tokio::time::timeout(Duration::from_secs(1), session_rx)
+      .await
+      .expect("session future timeout")
+      .expect("session future channel")
+      .await
+      .expect("WebTransport session");
+
+    assert_eq!(session.local_settings(), Some(server_initial));
+    assert_eq!(session.peer_settings(), Some(client_updated));
+    assert_ne!(session.peer_settings(), Some(client_initial));
 
     drop(client);
     client_driver.abort();

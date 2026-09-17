@@ -25,7 +25,7 @@ OxiBelt workspace member; its generated test lockfile is not shipped.
 notice, and `supply-chain/dependency-policy.json` locks that manifest.
 
 The source review on 2026-09-17 compared the patch against the checksum-matched
-crates.io artifact. All 64 upstream source files remain present. Semantic
+crates.io artifact. All 64 upstream source files remain present. The informational-response
 changes are confined to `ext/informational{,_sender}.rs`, `ext/mod.rs`,
 `proto/h1/{conn,dispatch,mod,role}.rs`, and `proto/h2/{client,server}.rs`.
 The patch adds no unsafe code and changes no existing unsafe block or unsafe
@@ -35,8 +35,8 @@ network acquisition, or native capability is added.
 An independent transport review exercises the HTTP/1 encoder's final-response
 state, cross-protocol interim-version conversion, interim/final ordering,
 bounded queues, duplicate `100` suppression, and HTTP/2 client/server delivery.
-The complete inline full-feature library suite passed (127 tests; six upstream
-tests ignored). OxiBelt's cross-protocol probe
+The informational-response baseline passed its inline full-feature library
+suite (127 tests; six upstream tests ignored). OxiBelt's cross-protocol probe
 is the integration boundary; unit results are not performance qualification.
 
 Alternatives considered were waiting for upstream server informational APIs,
@@ -45,3 +45,20 @@ the required live negotiated upload support; bypassing the encoder would split
 framing ownership. Keep this patch narrow, review each Hyper update and at
 least every 30 days, and remove it when an upstream release satisfies the
 tracked feature and integration tests.
+
+## HTTP/2 WebTransport extension
+
+[Issue #195](https://github.com/OxiBelt/OxiBelt/issues/195), with the same owner,
+tracks the additional draft-15 WebTransport patch. It adds typed CONNECT session
+handoff after response HEADERS enter wire order, immutable directional SETTINGS
+receipts supplied by the paired `h2` patch, and
+independent receive/send halves. The writer remains owned by Hyper, uses a
+bounded payload channel, and accepts an out-of-band reset so exhausted peer
+send credit cannot prevent session cancellation. Existing ordinary CONNECT,
+HTTP/1, and informational-response behavior must retain their regression tests.
+
+The additional source review covers `ext/webtransport.rs`, HTTP/2 connection
+builders, `proto/h2/{client,server,upgrade}.rs`, and their ownership boundaries.
+It adds no unsafe block or native capability. WebTransport capsule and stream
+flow control live in OxiBelt's common transport module. Keep both tracked patch
+requirements in the removal criteria when adopting a future upstream release.

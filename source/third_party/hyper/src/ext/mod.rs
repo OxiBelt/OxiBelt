@@ -49,6 +49,18 @@ use std::collections::HashMap;
 #[cfg(feature = "http2")]
 use std::fmt;
 
+#[cfg(feature = "http2")]
+mod webtransport;
+#[cfg(feature = "http2")]
+pub use webtransport::{
+  on_webtransport, OnWebTransport, WebTransportReceive, WebTransportReset, WebTransportSend,
+  WebTransportSession, WebTransportSettings,
+};
+#[cfg(feature = "http2")]
+pub(crate) use webtransport::{
+  pending as webtransport_pending, PendingWebTransport, WebTransportRequest,
+};
+
 #[cfg(any(feature = "http1", feature = "ffi"))]
 mod h1_reason_phrase;
 #[cfg(any(feature = "http1", feature = "ffi"))]

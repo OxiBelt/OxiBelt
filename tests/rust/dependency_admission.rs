@@ -668,6 +668,10 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
             || (name == "hyper" && version == "1.11.1" && {
               assert_hyper_vendor_admission();
               true
+            })
+            || (name == "h2" && version == "0.4.19" && {
+              assert_h2_vendor_admission();
+              true
             }),
           "critical dependency {name}@{version} is not an approved registry or byte-locked vendored package"
         );
@@ -962,12 +966,17 @@ fn assert_hyper_vendor_admission() {
     .as_table()
     .expect("reviewed Hyper patch");
   assert_eq!(root["patch"].as_table().expect("patch table").len(), 1);
-  assert_eq!(patches.len(), 1, "unreviewed Cargo patch");
+  assert_eq!(patches.len(), 2, "unreviewed Cargo patch");
+  assert_eq!(
+    patches["h2"]["path"].as_str(),
+    Some("source/third_party/h2")
+  );
+  assert_eq!(patches["h2"].as_table().expect("patch").len(), 1);
   assert_eq!(patches["hyper"]["path"].as_str(), Some(VENDOR));
   assert_eq!(patches["hyper"].as_table().expect("patch").len(), 1);
   assert_eq!(
     string_array(&root["workspace"]["exclude"], "exclusions"),
-    vec![VENDOR]
+    vec![VENDOR, "source/third_party/h2"]
   );
   let manifest = toml_document(&format!("{VENDOR}/Cargo.toml"));
   assert_eq!(manifest["package"]["name"].as_str(), Some("hyper"));
@@ -989,8 +998,11 @@ fn assert_hyper_vendor_admission() {
   let sources = policy["rust"]["vendoredRustSources"]
     .as_array()
     .expect("vendor inventory");
-  assert_eq!(sources.len(), 1);
-  let source = &sources[0];
+  assert_eq!(sources.len(), 2);
+  let source = sources
+    .iter()
+    .find(|source| source["name"] == "hyper")
+    .expect("Hyper source inventory");
   assert_eq!(source["name"], "hyper");
   assert_eq!(source["version"], "1.11.1");
   assert_eq!(source["path"], VENDOR);
@@ -1023,6 +1035,62 @@ fn assert_hyper_vendor_admission() {
 #[test]
 fn hyper_transport_source_is_byte_locked_and_governed() {
   assert_hyper_vendor_admission();
+}
+
+fn assert_h2_vendor_admission() {
+  const VENDOR: &str = "source/third_party/h2";
+  let policy = json_policy();
+  let source = policy["rust"]["vendoredRustSources"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|source| source["name"] == "h2")
+    .expect("h2 source inventory");
+  assert_eq!(source["version"], "0.4.19");
+  assert_eq!(source["path"], VENDOR);
+  assert_eq!(source["license"], "MIT");
+  assert_eq!(source["owner"], "@piquark6046");
+  assert_eq!(
+    source["trackingIssue"],
+    "https://github.com/OxiBelt/OxiBelt/issues/195"
+  );
+  assert_eq!(
+    source["upstreamArchiveSha256"],
+    "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
+  );
+  assert_eq!(source["manifestPath"], "supply-chain/h2-source.sha256");
+  assert_eq!(
+    sha256_hex(read("supply-chain/h2-source.sha256").as_bytes()),
+    source["manifestSha256"]
+  );
+  let expected = checksum_manifest("supply-chain/h2-source.sha256");
+  let mut actual = hash_regular_tree(&repo_root().join(VENDOR));
+  actual.remove("Cargo.lock");
+  assert_eq!(
+    actual, expected,
+    "vendored h2 changed without source review"
+  );
+  let manifest = toml_document(&format!("{VENDOR}/Cargo.toml"));
+  assert_eq!(manifest["package"]["name"].as_str(), Some("h2"));
+  assert_eq!(manifest["package"]["version"].as_str(), Some("0.4.19"));
+  assert_eq!(manifest["package"]["license"].as_str(), Some("MIT"));
+  assert_eq!(manifest["package"]["build"].as_bool(), Some(false));
+  let lock = toml_document("Cargo.lock");
+  let packages = lock["package"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .filter(|package| package["name"].as_str() == Some("h2"))
+    .collect::<Vec<_>>();
+  assert_eq!(packages.len(), 1);
+  assert_eq!(packages[0]["version"].as_str(), Some("0.4.19"));
+  assert!(packages[0].get("source").is_none());
+  assert!(packages[0].get("checksum").is_none());
+}
+
+#[test]
+fn h2_transport_source_is_byte_locked_and_governed() {
+  assert_h2_vendor_admission();
 }
 
 #[test]

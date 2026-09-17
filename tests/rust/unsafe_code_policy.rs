@@ -11,7 +11,8 @@ const UNSAFE_ALLOWLIST: &[&str] = &[
   "source/src/hardening/syscalls.rs",
   "source/src/tcp_hop/syscalls.rs",
 ];
-const REVIEWED_THIRD_PARTY_ROOTS: &[&str] = &["source/third_party/hyper/"];
+const REVIEWED_THIRD_PARTY_ROOTS: &[&str] =
+  &["source/third_party/h2/", "source/third_party/hyper/"];
 const GOVERNED_LINTS: &[&str] = &[
   "unsafe_code",
   "unsafe_op_in_unsafe_fn",
@@ -249,9 +250,12 @@ fn policy_inspection_rejects_bypasses_and_stale_entries() {
   assert!(is_reviewed_third_party(
     "source/third_party/hyper/src/lib.rs"
   ));
+  assert!(is_reviewed_third_party("source/third_party/h2/src/lib.rs"));
   for first_party_lookalike in [
     "source/third_party/hyper.rs",
     "source/third_party/hyper-local/src/lib.rs",
+    "source/third_party/h2-local/src/lib.rs",
+    "source/third_party/h2.rs",
     "source/third_party/another-vendor/src/lib.rs",
     "source/src/third_party/hyper/src/lib.rs",
   ] {

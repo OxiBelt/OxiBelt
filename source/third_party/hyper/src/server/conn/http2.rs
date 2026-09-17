@@ -260,6 +260,13 @@ impl<E> Builder<E> {
         self
     }
 
+    /// Enables extended CONNECT and sends these WebTransport SETTINGS.
+    pub fn webtransport_settings(&mut self, settings: crate::ext::WebTransportSettings) -> &mut Self {
+        self.h2_builder.enable_connect_protocol = true;
+        self.h2_builder.webtransport_settings = Some(settings.into());
+        self
+    }
+
     /// Sets the header table size.
     ///
     /// This setting informs the peer of the maximum size of the header compression

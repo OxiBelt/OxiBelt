@@ -18,6 +18,7 @@ tokio = { version = "=1.53.1", features = ["sync"] }
 # source as the repository workspace. Cargo patches are not inherited across
 # workspace roots.
 [patch.crates-io]
+h2 = { path = "../../../source/third_party/h2" }
 hyper = { path = "../../../source/third_party/hyper" }
 
 [lints.rust]

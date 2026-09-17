@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "a88d90fd12dc27ffbaa4389f5eb6a32a566d5ba5dcc30c72b0f44eb105d8c40f",
+      "lockfileSha256": "8bbf6116489aea357e750b5304b03a87c22033801c23505dc52fcb1e4e79b0da",
       "exemptionInventorySha256": "bd21e1575dce0d01e19bb0741a9e09da3f666de87814c5740a645fe920d5ee5a",
       "exemptedPackageVersions": 456
     },
@@ -77,19 +77,34 @@
     },
     "vendoredRustSources": [
       {
+        "name": "h2",
+        "version": "0.4.19",
+        "path": "source/third_party/h2",
+        "upstreamRepository": "https://github.com/hyperium/h2",
+        "upstreamArchiveSha256": "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16",
+        "manifestPath": "supply-chain/h2-source.sha256",
+        "manifestSha256": "d552a9896eb23a8dc3f2464eb647fbda8e1901e7fcd1878c6d30254b97aadefc",
+        "license": "MIT",
+        "owner": "@piquark6046",
+        "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/195",
+        "reviewedOn": "2026-09-17",
+        "maintenanceReviewIntervalDays": 30,
+        "removalCriteria": "Replace this patch when upstream acknowledged WebTransport SETTINGS snapshots satisfy the draft-15 transport and isolation matrix. Review every h2 update and retain HTTP/2 stream and unsafe invariants."
+      },
+      {
         "name": "hyper",
         "version": "1.11.1",
         "path": "source/third_party/hyper",
         "upstreamRepository": "https://github.com/hyperium/hyper",
         "upstreamArchiveSha256": "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43",
         "manifestPath": "supply-chain/hyper-source.sha256",
-        "manifestSha256": "7e4a174a08d3c76eef37021152d0282551b2d9d5ad3ab0c8401420358a3ca355",
+        "manifestSha256": "743b3007d74de67347e949a92f33d013650f4c46d380624994cbd91e2f0962b4",
         "license": "MIT",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/194",
         "reviewedOn": "2026-09-17",
         "maintenanceReviewIntervalDays": 30,
-        "removalCriteria": "Replace this exact patch with an upstream release once bounded HTTP/1 and HTTP/2 server informational sending and HTTP/2 client callbacks pass the OxiBelt cross-protocol matrix. Review every Hyper update and preserve upstream framing, ownership, and unsafe invariants."
+        "removalCriteria": "Replace this exact patch with an upstream release once bounded HTTP/1 and HTTP/2 server informational sending and HTTP/2 client callbacks pass the OxiBelt cross-protocol matrix. Also require equivalent typed WebTransport CONNECT handoff, acknowledged settings snapshots, and bounded independently driven send/reset semantics tracked in issue #195. Review every Hyper update and preserve upstream framing, ownership, and unsafe invariants."
       }
     ],
     "nativeSources": [
@@ -296,7 +311,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:a88d90fd12dc27ffbaa4389f5eb6a32a566d5ba5dcc30c72b0f44eb105d8c40f",
+      "subject": "Cargo.lock@sha256:8bbf6116489aea357e750b5304b03a87c22033801c23505dc52fcb1e4e79b0da",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. The development-only proptest graph adds exact rand 0.9, rand_chacha 0.9, and rand_core 0.9 lines tracked by https://github.com/OxiBelt/OxiBelt/issues/172; any further line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -308,7 +323,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:a88d90fd12dc27ffbaa4389f5eb6a32a566d5ba5dcc30c72b0f44eb105d8c40f",
+      "subject": "Cargo.lock@sha256:8bbf6116489aea357e750b5304b03a87c22033801c23505dc52fcb1e4e79b0da",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
