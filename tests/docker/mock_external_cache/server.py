@@ -2,11 +2,15 @@
 
 import base64
 import json
+import math
+import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 CAPABILITY = "cache-groups-v1"
+MAX_STARTUP_DELAY_SECONDS = 5.0
 STATE_LIMIT = 16 * 1024 * 1024
 LOCK = threading.Lock()
 ENTRIES = {}
@@ -16,6 +20,19 @@ GROUP_STATE = {}
 def framed(metadata, body):
   encoded = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
   return len(encoded).to_bytes(8, "big") + encoded + body
+
+
+def startup_delay_seconds():
+  raw = os.environ.get("STARTUP_DELAY_SECONDS", "0")
+  try:
+    delay = float(raw)
+  except ValueError as error:
+    raise SystemExit("STARTUP_DELAY_SECONDS must be a number") from error
+  if not math.isfinite(delay) or not 0.0 <= delay <= MAX_STARTUP_DELAY_SECONDS:
+    raise SystemExit(
+      f"STARTUP_DELAY_SECONDS must be between 0 and {MAX_STARTUP_DELAY_SECONDS}"
+    )
+  return delay
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -119,4 +136,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+  time.sleep(startup_delay_seconds())
   ThreadingHTTPServer(("0.0.0.0", 18081), Handler).serve_forever()

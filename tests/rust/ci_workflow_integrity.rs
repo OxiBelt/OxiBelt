@@ -7716,6 +7716,83 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
 }
 
 #[test]
+fn docker_external_cache_waits_for_semantic_readiness() {
+  let root = repo_root();
+  let matrix = fs::read_to_string(root.join("tests/scripts/run-proxy-integration-matrix.sh"))
+    .expect("Docker integration matrix script should be readable");
+  let server = fs::read_to_string(root.join("tests/docker/mock_external_cache/server.py"))
+    .expect("external cache helper should be readable");
+
+  for expected in [
+    "MAX_STARTUP_DELAY_SECONDS = 5.0",
+    "os.environ.get(\"STARTUP_DELAY_SECONDS\", \"0\")",
+    "math.isfinite(delay)",
+    "0.0 <= delay <= MAX_STARTUP_DELAY_SECONDS",
+    "time.sleep(startup_delay_seconds())",
+  ] {
+    assert!(
+      server.contains(expected),
+      "external cache startup-delay fixture should preserve {expected}"
+    );
+  }
+
+  let readiness_start = matrix
+    .find("external_cache_is_ready() {")
+    .expect("matrix should define external cache readiness");
+  let readiness_end = matrix[readiness_start..]
+    .find("\n}\n\nrun_pq_probe()")
+    .map(|offset| readiness_start + offset)
+    .expect("external cache readiness function should stay bounded");
+  let readiness = &matrix[readiness_start..readiness_end];
+  for expected in [
+    "oxibelt-external-cache-v1",
+    "cache-groups-v1",
+    "\"mode\": \"read\"",
+    "/v1/cache/cache-group-state",
+    "response.status != 200",
+  ] {
+    assert!(
+      readiness.contains(expected),
+      "external cache readiness should preserve {expected}"
+    );
+  }
+  assert!(
+    !readiness.contains("compare_exchange"),
+    "external cache readiness must not mutate cache-group authority state"
+  );
+
+  for expected in [
+    "-e STARTUP_DELAY_SECONDS=2",
+    "external_cache_deadline=$((SECONDS + 10))",
+    "while ((SECONDS < external_cache_deadline)); do",
+    "external_cache_ready=1",
+    "sleep 0.1",
+    "external cache handler exited before readiness",
+    "external cache handler did not become ready",
+  ] {
+    assert!(
+      matrix.contains(expected),
+      "external cache launch should preserve {expected}"
+    );
+  }
+
+  let launch = matrix
+    .find("--network-alias mock-external-cache")
+    .expect("matrix should launch the external cache helper");
+  let wait = matrix[launch..]
+    .find("if external_cache_is_ready; then")
+    .map(|offset| launch + offset)
+    .expect("matrix should wait for external cache readiness after launch");
+  let proxy_start = matrix
+    .find("docker start \"${proxy_container}\"")
+    .expect("matrix should start the proxy");
+  assert!(
+    launch < wait && wait < proxy_start,
+    "external cache readiness must follow helper launch and precede proxy startup"
+  );
+}
+
+#[test]
 fn docker_integration_helper_valkey_alias_is_saved_and_fail_closed() {
   let repo = repo_root();
   let temp_dir = tempfile::Builder::new()

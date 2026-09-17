@@ -2464,6 +2464,34 @@ redis_is_ready() {
   docker exec "${redis_container}" sh -c 'if command -v valkey-cli >/dev/null 2>&1; then valkey-cli ping; else redis-cli ping; fi' 2>/dev/null | grep -F PONG >/dev/null
 }
 
+external_cache_is_ready() {
+  docker exec "${external_cache_container}" python -c '
+import http.client
+import json
+
+request = {
+  "protocol_version": "oxibelt-external-cache-v1",
+  "required_capabilities": ["cache-groups-v1"],
+  "key": "readiness",
+  "mode": "read",
+}
+connection = http.client.HTTPConnection("127.0.0.1", 18081, timeout=0.2)
+try:
+  connection.request(
+    "POST",
+    "/v1/cache/cache-group-state",
+    body=json.dumps(request),
+    headers={"content-type": "application/json"},
+  )
+  response = connection.getresponse()
+  body = json.loads(response.read())
+  if response.status != 200 or "cache-groups-v1" not in body.get("capabilities", []):
+    raise SystemExit(1)
+finally:
+  connection.close()
+' >/dev/null 2>&1
+}
+
 run_pq_probe() {
   local group="$1"
   local expected="${2:-success}"
@@ -3118,7 +3146,24 @@ if [[ "${CASE_NEED_EXTERNAL_CACHE_HANDLER}" == "1" ]]; then
     --label "${test_label}" \
     --network "${network_name}" \
     --network-alias mock-external-cache \
+    -e STARTUP_DELAY_SECONDS=2 \
     "${external_cache_image}" >/dev/null
+
+  external_cache_ready=0
+  external_cache_deadline=$((SECONDS + 10))
+  while ((SECONDS < external_cache_deadline)); do
+    if external_cache_is_ready; then
+      external_cache_ready=1
+      break
+    fi
+    if [[ "$(docker inspect -f '{{.State.Running}}' "${external_cache_container}" 2>/dev/null || echo false)" != "true" ]]; then
+      fail_with_diagnostics "external cache handler exited before readiness"
+    fi
+    sleep 0.1
+  done
+  if [[ "${external_cache_ready}" != "1" ]]; then
+    fail_with_diagnostics "external cache handler did not become ready"
+  fi
 fi
 
 if [[ "${CASE_NEED_ALT_UPSTREAM}" == "1" ]]; then
