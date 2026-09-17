@@ -389,6 +389,11 @@ explicit.
 The cache Docker matrix consumes the artifact-preserved
 `oxibelt/mock-external-cache:ci` helper tag with preload enforcement enabled.
 
+The CT object-store MinIO fixture separately prefetches Go modules with at
+most two ten-minute attempts and a five-second backoff, then compiles once
+without dependency downloads. Download exhaustion or integrity failures must
+fail the fixture build without bypassing checksum or TLS verification.
+
 ## Browser and DevOps Changes
 
 If browser-based tests are added, they must run with both Chromium WebDriver

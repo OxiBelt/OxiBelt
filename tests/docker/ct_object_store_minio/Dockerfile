@@ -21,8 +21,12 @@ RUN command -v wget >/dev/null \
 
 WORKDIR /src
 
-RUN test "RELEASE.$(printf '%s' "${MINIO_SOURCE_VERSION}" | sed 's/:/-/g')" = "${MINIO_SOURCE_RELEASE}" \
-  && CGO_ENABLED=0 go build -tags kqueue -trimpath -buildvcs=false \
+COPY --chmod=755 prefetch-go-modules.sh /usr/local/bin/prefetch-go-modules
+
+RUN prefetch-go-modules
+
+RUN --network=none test "RELEASE.$(printf '%s' "${MINIO_SOURCE_VERSION}" | sed 's/:/-/g')" = "${MINIO_SOURCE_RELEASE}" \
+  && CGO_ENABLED=0 GOPROXY=off go build -mod=readonly -tags kqueue -trimpath -buildvcs=false \
     -ldflags "-s -w \
       -X github.com/minio/minio/cmd.Version=${MINIO_SOURCE_VERSION} \
       -X github.com/minio/minio/cmd.CopyrightYear=2025 \
