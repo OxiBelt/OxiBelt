@@ -5,7 +5,7 @@ run_case_checks() {
   response="$(client_request "example.test" "${path}" 200)"
   assert_response_jq "${response}" '.headers["x-oxibelt-cache"] == "miss" and .headers["x-oxibelt-cache-reason"] == "stored"'
   purge="$(plain_client_request_with_headers_on_port 9092 "proxy" "/cache/purge?policy=default&scheme=https&host=example.test&uri=/app/audit-purge%3Fcache_control%3Dpublic%26token%3Draw-secret-not-for-audit" 200 "POST" "" "Authorization: Bearer matrix-admin-token")"
-  assert_response_jq "${purge}" '.body == "purged=2\n"'
+  assert_response_jq "${purge}" '.body == "purged=1\n"'
   logs="$(docker logs "${proxy_container}" 2>&1 || true)"
   audit_logs="$(grep -F 'oxibelt.admin.audit' <<<"${logs}" || true)"
   if ! grep -F 'cache_purge' <<<"${audit_logs}" | grep -F 'applied' >/dev/null; then

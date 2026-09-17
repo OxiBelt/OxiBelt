@@ -17,6 +17,8 @@ mod index;
 mod no_vary_search;
 #[path = "tests_query.rs"]
 mod query;
+#[path = "tests_query_groups.rs"]
+mod query_groups;
 #[path = "tests_recovery.rs"]
 mod recovery;
 #[path = "tests_revalidation.rs"]

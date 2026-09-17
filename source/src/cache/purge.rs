@@ -85,9 +85,7 @@ impl ResponseCache {
     let policies = self
       .policies
       .keys()
-      .filter(|policy| {
-        !self.groups_enabled(policy) && self.policy_enabled(Some(policy), &query_method)
-      })
+      .filter(|policy| self.policy_enabled(Some(policy), &query_method))
       .cloned()
       .collect::<Vec<_>>();
     let mut count = 0usize;

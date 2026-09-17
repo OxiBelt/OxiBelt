@@ -2,10 +2,20 @@ use super::*;
 use http::header::{CACHE_CONTROL, CONTENT_TYPE, IF_MATCH};
 
 fn query_identity(uri: &Uri, original: &[u8], effective: &[u8]) -> CacheQueryIdentity {
+  query_identity_with_cache_headers(uri, original, effective, HeaderMap::new())
+}
+
+pub(super) fn query_identity_with_cache_headers(
+  uri: &Uri,
+  original: &[u8],
+  effective: &[u8],
+  mut cache_view_headers: HeaderMap,
+) -> CacheQueryIdentity {
   let mut original_headers = HeaderMap::new();
   original_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-  let mut effective_headers = HeaderMap::new();
+  let mut effective_headers = cache_view_headers.clone();
   effective_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+  cache_view_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
   CacheQueryIdentity::new(
     CacheQueryRepresentation::new(
       "https",
@@ -27,7 +37,7 @@ fn query_identity(uri: &Uri, original: &[u8], effective: &[u8]) -> CacheQueryIde
       &HeaderMap::new(),
     )
     .unwrap(),
-    effective_headers,
+    cache_view_headers,
   )
   .unwrap()
 }
