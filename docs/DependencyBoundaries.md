@@ -140,11 +140,14 @@ accidental public modules.
 `tests/scripts/check-cargo-package-boundaries.sh` is the stable entrypoint for
 the Cargo role analyzer. The analyzer uses package-scoped `cargo tree` output
 for the resolved normal/build package and feature graph; `cargo metadata`
-supplies workspace package identity only. The structured
-`package_boundaries` Rust contract parses direct manifest and target facts.
-The checks fail closed on Cargo errors, malformed or empty graphs, missing
-roots, unknown local packages, and forbidden packages or features. Their unit
-tests include valid and deliberately invalid graph fixtures.
+supplies workspace package identity only. Non-workspace local packages must
+match a reviewed `rust.vendoredRustSources` record in
+`supply-chain/dependency-policy.json` by name, version, and canonical
+repository path. The structured `package_boundaries` Rust contract parses
+direct manifest and target facts. The checks fail closed on Cargo errors,
+malformed or empty graphs, missing roots, unknown or unreviewed local packages,
+and forbidden packages or features. Their unit tests include valid and
+deliberately invalid graph fixtures.
 
 Run the boundary checks from the repository root:
 

@@ -12,12 +12,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, Sequence
+from urllib.parse import unquote, urlsplit
 
 
 MAXIMUM_CARGO_OUTPUT_BYTES = 16 * 1024 * 1024
 PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*$")
 VERSION_RE = re.compile(r"^[^()\s|]+$")
 FEATURE_RE = re.compile(r"^[A-Za-z0-9_+.-]+$")
+VENDORED_RUST_SOURCES_POLICY_PATH = Path("supply-chain/dependency-policy.json")
 WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -42,10 +44,22 @@ class GraphSummary:
     workspace_packages: int
 
 
+@dataclass(frozen=True, order=True)
+class LocalPackageIdentity:
+    """A path-resolved Cargo package with its canonical source identity."""
+
+    name: str
+    version: str
+    canonical_path: str
+
+    def display(self) -> str:
+        return f"{self.name} v{self.version} ({self.canonical_path})"
+
+
 @dataclass(frozen=True)
 class ParsedCargoTree:
     features_by_package: dict[str, frozenset[str]]
-    local_packages: frozenset[str]
+    local_packages: frozenset[LocalPackageIdentity]
 
 
 RUNTIME_WORKSPACE_PACKAGES = frozenset(
@@ -356,12 +370,31 @@ def _is_local_source(source: str) -> bool:
     ) or WINDOWS_PATH_RE.match(source) is not None
 
 
-def _parse_cargo_tree(output: str) -> ParsedCargoTree:
+def _canonical_local_source(source: str, repo_root: Path) -> str:
+    """Resolve a Cargo local source annotation to a canonical filesystem path."""
+
+    path_source = source
+    if path_source.startswith("path+file://"):
+        path_source = path_source.removeprefix("path+")
+    if path_source.startswith("file://"):
+        parsed = urlsplit(path_source)
+        if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+            _fail(f"local Cargo source must be a local file URL: {source!r}")
+        path_source = unquote(parsed.path)
+
+    path = Path(path_source)
+    if not path.is_absolute():
+        path = repo_root / path
+    return str(path.resolve())
+
+
+def _parse_cargo_tree(output: str, repo_root: Path | None = None) -> ParsedCargoTree:
     """Parse package features and local sources from Cargo tree output."""
 
     _bounded_output(output, "cargo tree")
+    repo_root = (Path.cwd() if repo_root is None else repo_root).resolve()
     packages: dict[str, set[str]] = {}
-    local_packages: set[str] = set()
+    local_packages: set[LocalPackageIdentity] = set()
     for line_number, raw_line in enumerate(output.splitlines(), 1):
         line = raw_line.strip()
         if not line:
@@ -404,7 +437,13 @@ def _parse_cargo_tree(output: str) -> ParsedCargoTree:
                 )
             source = source_annotation[1:-1]
             if _is_local_source(source):
-                local_packages.add(package)
+                local_packages.add(
+                    LocalPackageIdentity(
+                        name=package,
+                        version=version,
+                        canonical_path=_canonical_local_source(source, repo_root),
+                    )
+                )
 
         features: set[str] = set()
         if feature_text:
@@ -439,23 +478,110 @@ def parse_cargo_tree(output: str) -> dict[str, frozenset[str]]:
     return _parse_cargo_tree(output).features_by_package
 
 
+def load_reviewed_vendored_rust_sources(
+    repo_root: Path,
+) -> frozenset[LocalPackageIdentity]:
+    """Load exact local-package identities reviewed by supply-chain policy."""
+
+    repo_root = repo_root.resolve()
+    policy_path = repo_root / VENDORED_RUST_SOURCES_POLICY_PATH
+    try:
+        document = json.loads(policy_path.read_text(encoding="utf-8"))
+    except OSError as error:
+        _fail(f"cannot read vendored Rust source policy {policy_path}: {error}")
+    except json.JSONDecodeError as error:
+        _fail(f"vendored Rust source policy is not valid JSON: {error}")
+
+    if not isinstance(document, dict):
+        _fail("vendored Rust source policy root must be an object")
+    rust_policy = document.get("rust")
+    if not isinstance(rust_policy, dict):
+        _fail("vendored Rust source policy must contain a rust object")
+    sources = rust_policy.get("vendoredRustSources")
+    if not isinstance(sources, list):
+        _fail("vendored Rust source policy must contain a source array")
+
+    identities: set[LocalPackageIdentity] = set()
+    names_and_versions: set[tuple[str, str]] = set()
+    canonical_paths: set[str] = set()
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict):
+            _fail(f"vendored Rust source {index} must be an object")
+        name = source.get("name")
+        version = source.get("version")
+        declared_path = source.get("path")
+        if not isinstance(name, str) or not PACKAGE_NAME_RE.fullmatch(name):
+            _fail(f"vendored Rust source {index} has an invalid name")
+        if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+            _fail(f"vendored Rust source {index} has an invalid version")
+        if not isinstance(declared_path, str) or not declared_path:
+            _fail(f"vendored Rust source {index} has an invalid path")
+
+        vendor_path = Path(declared_path)
+        if (
+            vendor_path.is_absolute()
+            or any(part in {".", ".."} for part in vendor_path.parts)
+            or declared_path != vendor_path.as_posix()
+        ):
+            _fail(
+                f"vendored Rust source {index} path must be a normalized "
+                "repository-relative path"
+            )
+        canonical_path = str((repo_root / vendor_path).resolve())
+        try:
+            Path(canonical_path).relative_to(repo_root)
+        except ValueError:
+            _fail(f"vendored Rust source {index} path escapes the repository")
+        if not Path(canonical_path).is_dir() or not (
+            Path(canonical_path) / "Cargo.toml"
+        ).is_file():
+            _fail(
+                f"vendored Rust source {index} path must contain a Cargo.toml: "
+                f"{declared_path}"
+            )
+
+        name_and_version = (name, version)
+        if name_and_version in names_and_versions:
+            _fail(
+                "vendored Rust source inventory repeats a package identity: "
+                f"{name} v{version}"
+            )
+        if canonical_path in canonical_paths:
+            _fail(
+                "vendored Rust source inventory repeats a canonical path: "
+                f"{canonical_path}"
+            )
+        names_and_versions.add(name_and_version)
+        canonical_paths.add(canonical_path)
+        identities.add(LocalPackageIdentity(name, version, canonical_path))
+    return frozenset(identities)
+
+
 def validate_profile_graph(
     policy: GraphPolicy,
     output: str,
     workspace_packages: frozenset[str],
+    reviewed_vendored_sources: frozenset[LocalPackageIdentity] = frozenset(),
+    repo_root: Path | None = None,
 ) -> GraphSummary:
     """Validate one resolved production graph against its role policy."""
 
-    parsed_graph = _parse_cargo_tree(output)
+    parsed_graph = _parse_cargo_tree(output, repo_root)
     graph = parsed_graph.features_by_package
     violations: list[str] = []
     if policy.package not in graph:
         violations.append(f"root package {policy.package!r} is missing")
 
-    unknown_local = sorted(parsed_graph.local_packages - workspace_packages)
+    unknown_local = sorted(
+        identity
+        for identity in parsed_graph.local_packages
+        if identity.name not in workspace_packages
+        and identity not in reviewed_vendored_sources
+    )
     if unknown_local:
         violations.append(
-            "unknown local/path packages: " + ", ".join(unknown_local)
+            "unknown local/path packages: "
+            + ", ".join(identity.display() for identity in unknown_local)
         )
 
     resolved_workspace = frozenset(graph).intersection(workspace_packages)
@@ -619,6 +745,7 @@ def validate_repository(repo_root: Path) -> None:
         capture_stdout=True,
     )
     workspace_packages = parse_workspace_metadata(metadata)
+    reviewed_vendored_sources = load_reviewed_vendored_rust_sources(repo_root)
 
     for label, command in COMPILE_COMMANDS:
         _run(command, repo_root, capture_stdout=False)
@@ -630,7 +757,13 @@ def validate_repository(repo_root: Path) -> None:
             repo_root,
             capture_stdout=True,
         )
-        summary = validate_profile_graph(policy, graph, workspace_packages)
+        summary = validate_profile_graph(
+            policy,
+            graph,
+            workspace_packages,
+            reviewed_vendored_sources,
+            repo_root,
+        )
         print(
             f"OxiBelt {policy.label} package boundary passed "
             f"({summary.packages} packages; "

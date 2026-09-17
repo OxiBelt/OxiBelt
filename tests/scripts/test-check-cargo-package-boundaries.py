@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -35,6 +36,10 @@ WORKSPACE_PACKAGES = frozenset(
 
 def fixture(name: str) -> str:
     return (FIXTURE_ROOT / name).read_text(encoding="utf-8")
+
+
+def local_identity(name: str, version: str, path: str) -> object:
+    return CHECKER.LocalPackageIdentity(name, version, str(Path(path).resolve()))
 
 
 class CargoPackageBoundaryTests(unittest.TestCase):
@@ -68,6 +73,241 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                 fixture("forbidden-unknown-local.txt"),
                 WORKSPACE_PACKAGES,
             )
+
+    def test_reviewed_vendored_identities_require_exact_name_version_and_path(
+        self,
+    ) -> None:
+        policy = CHECKER.POLICY_BY_LABEL["strict data plane"]
+        reviewed = frozenset(
+            {
+                local_identity("h2", "0.4.19", "/workspace/source/third_party/h2"),
+                local_identity(
+                    "hyper", "1.11.1", "/workspace/source/third_party/hyper"
+                ),
+            }
+        )
+        graph = (
+            f"{fixture('allowed-strict.txt')}"
+            "h2 v0.4.19 (/workspace/source/third_party/h2)|\n"
+            "hyper v1.11.1 (/workspace/source/third_party/hyper)|http2\n"
+        )
+        summary = CHECKER.validate_profile_graph(
+            policy,
+            graph,
+            WORKSPACE_PACKAGES,
+            reviewed,
+        )
+        self.assertEqual(summary.packages, 7)
+        self.assertEqual(summary.workspace_packages, 4)
+
+        uri_graph = (
+            f"{fixture('allowed-strict.txt')}"
+            "h2 v0.4.19 (file:///workspace/source/third_party/h2)|\n"
+            "hyper v1.11.1 (path+file:///workspace/source/third_party/hyper)|http2\n"
+        )
+        self.assertEqual(
+            CHECKER.validate_profile_graph(
+                policy,
+                uri_graph,
+                WORKSPACE_PACKAGES,
+                reviewed,
+            ),
+            summary,
+        )
+
+        for package in [
+            "h2 v0.4.20 (/workspace/source/third_party/h2)|",
+            "h2 v0.4.19 (/workspace/source/third_party/h2-unreviewed)|",
+        ]:
+            with self.subTest(package=package):
+                with self.assertRaisesRegex(
+                    CHECKER.BoundaryError,
+                    r"unknown local/path packages: h2 v0\.4",
+                ):
+                    CHECKER.validate_profile_graph(
+                        policy,
+                        f"{fixture('allowed-strict.txt')}{package}\n",
+                        WORKSPACE_PACKAGES,
+                        reviewed,
+                    )
+
+        mixed_graph = (
+            f"{fixture('allowed-strict.txt')}"
+            "h2 v0.4.19 (/workspace/source/third_party/h2)|\n"
+            "h2 v0.4.19 (/workspace/source/third_party/h2-unreviewed)|\n"
+        )
+        with self.assertRaisesRegex(
+            CHECKER.BoundaryError,
+            r"unknown local/path packages: h2 v0\.4\.19 "
+            r"\(/workspace/source/third_party/h2-unreviewed\)",
+        ):
+            CHECKER.validate_profile_graph(
+                policy,
+                mixed_graph,
+                WORKSPACE_PACKAGES,
+                reviewed,
+            )
+
+    def test_vendored_source_inventory_is_strict_and_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repo_root = Path(temporary_directory)
+
+            def write_policy(sources: object) -> None:
+                policy_path = repo_root / "supply-chain/dependency-policy.json"
+                policy_path.parent.mkdir(exist_ok=True)
+                policy_path.write_text(
+                    json.dumps({"rust": {"vendoredRustSources": sources}}),
+                    encoding="utf-8",
+                )
+
+            def create_vendor(path: str) -> None:
+                vendor = repo_root / path
+                vendor.mkdir(parents=True, exist_ok=True)
+                (vendor / "Cargo.toml").touch()
+
+            create_vendor("vendor/h2")
+            create_vendor("vendor/hyper")
+            valid_sources = [
+                {"name": "h2", "version": "0.4.19", "path": "vendor/h2"},
+                {"name": "hyper", "version": "1.11.1", "path": "vendor/hyper"},
+            ]
+            write_policy(valid_sources)
+            self.assertEqual(
+                CHECKER.load_reviewed_vendored_rust_sources(repo_root),
+                frozenset(
+                    {
+                        local_identity("h2", "0.4.19", str(repo_root / "vendor/h2")),
+                        local_identity(
+                            "hyper", "1.11.1", str(repo_root / "vendor/hyper")
+                        ),
+                    }
+                ),
+            )
+
+            cases = [
+                ("not-a-list", "source array"),
+                (
+                    [
+                        {
+                            "name": "h2",
+                            "version": "0.4.19",
+                            "path": "../outside",
+                        }
+                    ],
+                    "normalized repository-relative path",
+                ),
+                (
+                    [
+                        valid_sources[0],
+                        {
+                            "name": "h2",
+                            "version": "0.4.19",
+                            "path": "vendor/hyper",
+                        },
+                    ],
+                    "repeats a package identity",
+                ),
+            ]
+            for sources, expected in cases:
+                with self.subTest(sources=sources):
+                    write_policy(sources)
+                    with self.assertRaisesRegex(CHECKER.BoundaryError, expected):
+                        CHECKER.load_reviewed_vendored_rust_sources(repo_root)
+
+    def test_vendored_source_inventory_rejects_resolved_path_aliases_and_escapes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            repo_root = temporary_root / "repo"
+            repo_root.mkdir()
+            policy_path = repo_root / "supply-chain/dependency-policy.json"
+            policy_path.parent.mkdir()
+            vendor = repo_root / "vendor/h2"
+            vendor.mkdir(parents=True)
+            (vendor / "Cargo.toml").touch()
+
+            alias = repo_root / "vendor/h2-alias"
+            escaped_vendor = temporary_root / "outside"
+            escaped_vendor.mkdir()
+            (escaped_vendor / "Cargo.toml").touch()
+            try:
+                alias.symlink_to("h2", target_is_directory=True)
+                (repo_root / "vendor/escape").symlink_to(
+                    escaped_vendor,
+                    target_is_directory=True,
+                )
+            except OSError as error:
+                self.skipTest(f"symlink creation is unavailable: {error}")
+
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "rust": {
+                            "vendoredRustSources": [
+                                {
+                                    "name": "h2",
+                                    "version": "0.4.19",
+                                    "path": "vendor/h2",
+                                },
+                                {
+                                    "name": "hyper",
+                                    "version": "1.11.1",
+                                    "path": "vendor/h2-alias",
+                                },
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                CHECKER.BoundaryError,
+                "repeats a canonical path",
+            ):
+                CHECKER.load_reviewed_vendored_rust_sources(repo_root)
+
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "rust": {
+                            "vendoredRustSources": [
+                                {
+                                    "name": "h2",
+                                    "version": "0.4.19",
+                                    "path": "vendor/escape",
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                CHECKER.BoundaryError,
+                "escapes the repository",
+            ):
+                CHECKER.load_reviewed_vendored_rust_sources(repo_root)
+
+    def test_repository_vendor_inventory_matches_the_resolved_patch_identities(
+        self,
+    ) -> None:
+        repo_root = SCRIPT_PATH.parents[2]
+        self.assertEqual(
+            CHECKER.load_reviewed_vendored_rust_sources(repo_root),
+            frozenset(
+                {
+                    local_identity(
+                        "h2", "0.4.19", str(repo_root / "source/third_party/h2")
+                    ),
+                    local_identity(
+                        "hyper",
+                        "1.11.1",
+                        str(repo_root / "source/third_party/hyper"),
+                    ),
+                }
+            ),
+        )
 
     def test_rejects_default_and_admin_feature_leakage(self) -> None:
         with self.assertRaisesRegex(
