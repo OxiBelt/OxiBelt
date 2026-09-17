@@ -231,6 +231,77 @@ pub(super) fn build_upstream_client_config_with_trust(
   upstream_name: &str,
   revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
 ) -> anyhow::Result<ClientConfig> {
+  build_upstream_client_config_with_trust_scope(
+    crypto,
+    enable_secp256r1mlkem768,
+    extra_root_certificates,
+    trust,
+    subject_alt_names,
+    client_identity,
+    ech,
+    resumption,
+    state,
+    upstream_name,
+    revocation,
+    "tcp",
+    false,
+  )
+}
+
+/// Builds the dedicated TLS 1.3-only client used by HTTP/2 WebTransport.
+///
+/// Its resumption/config cache scope is intentionally separate from ordinary
+/// TCP clients: sharing would let an H2 WebTransport connection inherit an
+/// ordinary TLS 1.2-capable client configuration.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_upstream_h2_webtransport_client_config_with_trust(
+  crypto: &CryptoConfig,
+  enable_secp256r1mlkem768: bool,
+  extra_root_certificates: &[std::path::PathBuf],
+  trust: UpstreamTlsTrust,
+  subject_alt_names: &[UpstreamTlsSubjectAltName],
+  client_identity: Option<&UpstreamTlsClientIdentityConfig>,
+  ech: &UpstreamEchConfig,
+  resumption: &UpstreamTlsResumptionConfig,
+  state: Option<&TlsResumptionState>,
+  upstream_name: &str,
+  revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
+) -> anyhow::Result<ClientConfig> {
+  let mut config = build_upstream_client_config_with_trust_scope(
+    crypto,
+    enable_secp256r1mlkem768,
+    extra_root_certificates,
+    trust,
+    subject_alt_names,
+    client_identity,
+    ech,
+    resumption,
+    state,
+    upstream_name,
+    revocation,
+    "webtransport-h2",
+    true,
+  )?;
+  config.alpn_protocols = vec![b"h2".to_vec()];
+  Ok(config)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_upstream_client_config_with_trust_scope(
+  crypto: &CryptoConfig,
+  enable_secp256r1mlkem768: bool,
+  extra_root_certificates: &[std::path::PathBuf],
+  trust: UpstreamTlsTrust,
+  subject_alt_names: &[UpstreamTlsSubjectAltName],
+  client_identity: Option<&UpstreamTlsClientIdentityConfig>,
+  ech: &UpstreamEchConfig,
+  resumption: &UpstreamTlsResumptionConfig,
+  state: Option<&TlsResumptionState>,
+  upstream_name: &str,
+  revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
+  scope: &'static str,
+  tls13_only: bool,
+) -> anyhow::Result<ClientConfig> {
   let revocation_enabled = revocation
     .as_ref()
     .is_some_and(|(_, policy)| policy.enabled());
@@ -246,12 +317,12 @@ pub(super) fn build_upstream_client_config_with_trust(
       client_identity,
       ech,
       resumption,
-      false,
+      tls13_only,
       revocation,
     );
   }
   let key = upstream_client_config_key(
-    "tcp",
+    scope,
     crypto.tls_provider,
     enable_secp256r1mlkem768,
     upstream_name,
@@ -274,7 +345,7 @@ pub(super) fn build_upstream_client_config_with_trust(
         None,
         ech,
         resumption,
-        false,
+        tls13_only,
         None,
       )
     });
@@ -288,7 +359,7 @@ pub(super) fn build_upstream_client_config_with_trust(
     None,
     ech,
     resumption,
-    false,
+    tls13_only,
     revocation,
   )
 }
@@ -325,7 +396,7 @@ fn build_uncached_upstream_client_config(
       .context("failed to configure upstream TLS 1.3 ECH")?,
     None if quic_only => builder
       .with_protocol_versions(&[&rustls::version::TLS13])
-      .context("failed to configure upstream QUIC TLS versions")?,
+      .context("failed to configure upstream TLS 1.3-only versions")?,
     None => builder
       .with_safe_default_protocol_versions()
       .context("failed to configure upstream TLS versions")?,

@@ -9,7 +9,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use h3_webtransport::server::WebTransportSession;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -24,20 +24,17 @@ use crate::runtime_health::RuntimeTaskKind;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminAuthorization, admin_authentication, admin_request_context};
-use super::admin_operations::{
-  AdminOperationEvent, AdminOperationRuntime, can_access_operation, encode_ndjson_event,
-};
+use super::admin_operations::{AdminOperationRuntime, can_access_operation, encode_ndjson_event};
 use super::{admin_error, connection_errors};
 
-#[path = "admin_h3_webtransport.rs"]
-mod webtransport;
+use super::admin_webtransport as webtransport;
 
 type AdminH3BidiStream = crate::quic::h3::BidiStream<Bytes>;
 type AdminH3RequestStream = h3::server::RequestStream<AdminH3BidiStream, Bytes>;
 type AdminH3Connection = h3::server::Connection<crate::quic::h3::Connection, Bytes>;
 type AdminWebTransportSession = WebTransportSession<crate::quic::h3::Connection, Bytes>;
 
-const TERMINAL_EVENT_DRAIN_DELAY: Duration = Duration::from_millis(250);
+use webtransport::TERMINAL_EVENT_DRAIN_DELAY;
 
 pub(super) struct AdminHttp3ListenerTask {
   bind: SocketAddr,
@@ -497,10 +494,15 @@ async fn handle_operation_event_webtransport(
         return Ok(());
       }
     };
-  let response =
-    prepare_operation_event_webtransport(&request, &state, &operations, peer_addr, listener_bind)
-      .await;
-  let (history, receiver, permit) = match response {
+  let subscription = match webtransport::prepare_operation_event_subscription(
+    &request,
+    &state,
+    &operations,
+    peer_addr,
+    admin_http3_listener_current(&state.snapshot(), listener_bind),
+  )
+  .await
+  {
     Ok(value) => value,
     Err(response) => {
       let response = finalize_admin_h3_response(response, audit, reservation).await;
@@ -525,91 +527,18 @@ async fn handle_operation_event_webtransport(
   reservation
     .commit(&audit, audit.finish(StatusCode::OK))
     .await?;
-  write_operation_events(session, history, receiver, permit).await
-}
-
-async fn prepare_operation_event_webtransport(
-  request: &Request<()>,
-  state: &AppHandle,
-  operations: &AdminOperationRuntime,
-  peer_addr: SocketAddr,
-  listener_bind: SocketAddr,
-) -> Result<
-  (
-    Vec<AdminOperationEvent>,
-    broadcast::Receiver<AdminOperationEvent>,
-    OwnedSemaphorePermit,
-  ),
-  Response<ProxyBody>,
-> {
-  let snapshot = state.snapshot();
-  if !admin_http3_listener_current(&snapshot, listener_bind) {
-    return Err(text_response(StatusCode::NOT_FOUND, "not found"));
-  }
-  if !operations.config().webtransport {
-    return Err(text_response(
-      StatusCode::METHOD_NOT_ALLOWED,
-      "WebTransport operation events are disabled",
-    ));
-  }
-  let operation_id = webtransport::operation_id_from_path(request.uri().path())
-    .map_err(|error| text_response(StatusCode::BAD_REQUEST, &error.to_string()))?;
-  let context = admin_request_context(request, peer_addr);
-  let audit = AdminAuditHandle::from_request(request);
-  let authentication = match admin_authentication(request, &snapshot.config, &snapshot.ipm).await {
-    Ok(authentication) => authentication,
-    Err(failure) => {
-      if snapshot.config.admin.workload_identity.enabled {
-        snapshot
-          .metrics
-          .record_admin_workload_identity_authentication("rejected", failure.reason());
-      }
-      if let Some(audit) = &audit {
-        failure.record_audit(audit);
-      }
-      return Err(text_response(StatusCode::UNAUTHORIZED, "unauthorized"));
-    }
-  };
-  if snapshot.config.admin.workload_identity.enabled {
-    snapshot
-      .metrics
-      .record_admin_workload_identity_authentication("accepted", authentication.reason());
-  }
-  if let Some(audit) = &audit {
-    authentication.record_audit(audit);
-  }
-  webtransport::require_break_glass_activation(
-    &snapshot,
-    authentication.authenticated_with_break_glass(),
-    &authentication.actor.principal,
-  )
-  .await?;
-  let actor = &authentication.actor;
-  let authorization = if let Some(audit) = audit {
-    AdminAuthorization::new_with_audit(actor, &snapshot.ipm, &context, audit)
-  } else {
-    AdminAuthorization::new(actor, &snapshot.ipm, &context)
-  };
-  let (history, receiver, operation) = match operations.subscribe(operation_id).await {
-    Ok(Some(subscription)) => subscription,
-    Ok(None) => return Err(text_response(StatusCode::NOT_FOUND, "not found")),
-    Err(error) => return Err(webtransport::error_response(error)),
-  };
-  if !can_access_operation(&authorization, &operation, "admin:ReadOperation") {
-    return Err(text_response(StatusCode::FORBIDDEN, "forbidden"));
-  }
-  let permit = operations
-    .try_acquire_webtransport_session()
-    .map_err(webtransport::error_response)?;
-  Ok((history, receiver, permit))
+  write_operation_events(session, subscription).await
 }
 
 async fn write_operation_events(
   session: AdminWebTransportSession,
-  history: Vec<AdminOperationEvent>,
-  mut receiver: broadcast::Receiver<AdminOperationEvent>,
-  _permit: OwnedSemaphorePermit,
+  subscription: webtransport::OperationEventSubscription,
 ) -> anyhow::Result<()> {
+  let webtransport::OperationEventSubscription {
+    history,
+    mut receiver,
+    permit: _permit,
+  } = subscription;
   let mut stream = session
     .open_uni(session.session_id())
     .await

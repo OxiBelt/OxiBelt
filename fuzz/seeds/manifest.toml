@@ -243,3 +243,11 @@ sha256 = "4fd29884da293d4c51663fa70c74bf8fecf6b3b9111bb9727dd585789e4cf184"
 origin = "Repository-authored synthetic DNS A response for example.test using a documentation address."
 license = "Apache-2.0"
 classification = "non-secret"
+
+[[seed]]
+target = "http2_webtransport"
+path = "fuzz/seeds/http2_webtransport/stream-and-credit.capsules"
+sha256 = "9442b402eb904498c82a6ab0a914cd79e0db10fe3be7eebe714a2fdd61467544"
+origin = "Repository-authored synthetic draft-15 capsule bytes with credit, stream, and FIN boundaries."
+license = "Apache-2.0"
+classification = "non-secret"

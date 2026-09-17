@@ -96,6 +96,7 @@ pub(super) const TLS_REMOTE_SIGNER_CONFIG_KEYS: &[&str] = &[
 pub(super) const TLS_CLIENT_AUTH_CONFIG_KEYS: &[&str] = &["ca_certs", "mode", "verify_depth"];
 
 pub(super) const ADMIN_CONFIG_KEYS: &[&str] = &[
+  "http2",
   "allow_insecure_plaintext",
   "audit",
   "bearer_token_env",

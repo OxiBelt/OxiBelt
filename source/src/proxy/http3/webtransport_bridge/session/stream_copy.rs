@@ -1,9 +1,10 @@
 //! WebTransport stream forwarding with WAF and bandwidth enforcement.
 
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use h3_webtransport::SessionId;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::sync::mpsc;
 
 use super::traffic_shaping::{acquire_stream_bandwidth, bandwidth_direction};
@@ -16,10 +17,109 @@ use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContex
 use crate::state::AppSnapshot;
 use crate::waf::{WafStreamDirection, WafWebTransportStreamKind};
 
+pub(super) trait ResettableSend {
+  fn reset(&mut self, code: u32) -> std::io::Result<()>;
+}
+
+pub(super) trait StoppableRecv {
+  fn stop(&mut self, code: u32) -> std::io::Result<()>;
+}
+
+pub(super) trait StopAwareSend {
+  fn poll_stopped(&mut self, context: &mut Context<'_>) -> Poll<std::io::Result<u32>>;
+}
+
+enum SendProgress<T> {
+  Progress(T),
+  Stopped(u32),
+}
+
+impl<T> ResettableSend for &mut T
+where
+  T: ResettableSend + ?Sized,
+{
+  fn reset(&mut self, code: u32) -> std::io::Result<()> {
+    (**self).reset(code)
+  }
+}
+
+impl<T> StoppableRecv for &mut T
+where
+  T: StoppableRecv + ?Sized,
+{
+  fn stop(&mut self, code: u32) -> std::io::Result<()> {
+    (**self).stop(code)
+  }
+}
+
+impl<T> StopAwareSend for &mut T
+where
+  T: StopAwareSend + ?Sized,
+{
+  fn poll_stopped(&mut self, context: &mut Context<'_>) -> Poll<std::io::Result<u32>> {
+    (**self).poll_stopped(context)
+  }
+}
+
+impl ResettableSend for UpstreamWebTransportSendStream {
+  fn reset(&mut self, code: u32) -> std::io::Result<()> {
+    UpstreamWebTransportSendStream::reset(self, code)
+  }
+}
+
+impl ResettableSend for super::super::DownstreamUniSendStream {
+  fn reset(&mut self, code: u32) -> std::io::Result<()> {
+    h3::quic::SendStream::reset(self, super::super::h3_application_code_to_wire(code));
+    Ok(())
+  }
+}
+
+impl StoppableRecv for UpstreamWebTransportRecvStream {
+  fn stop(&mut self, code: u32) -> std::io::Result<()> {
+    UpstreamWebTransportRecvStream::stop(self, code)
+  }
+}
+
+impl StoppableRecv for super::super::DownstreamUniRecvStream {
+  fn stop(&mut self, code: u32) -> std::io::Result<()> {
+    h3::quic::RecvStream::stop_sending(self, super::super::h3_application_code_to_wire(code));
+    Ok(())
+  }
+}
+
+impl StopAwareSend for UpstreamWebTransportSendStream {
+  fn poll_stopped(&mut self, context: &mut Context<'_>) -> Poll<std::io::Result<u32>> {
+    UpstreamWebTransportSendStream::poll_stopped(self, context)
+  }
+}
+
+// h3 does not expose a separate STOP_SENDING future for request-stream send
+// halves. An empty unframed send reaches Quinn's stopped check before it
+// attempts to write, so the bounded watchdog in `copy_one_way` can forward an
+// otherwise idle downstream STOP_SENDING without injecting application bytes.
+impl StopAwareSend for super::super::DownstreamUniSendStream {
+  fn poll_stopped(&mut self, context: &mut Context<'_>) -> Poll<std::io::Result<u32>> {
+    let mut empty = bytes::Bytes::new();
+    match h3::quic::SendStreamUnframed::poll_send(self, context, &mut empty) {
+      Poll::Ready(Err(h3::quic::StreamErrorIncoming::StreamTerminated { error_code })) => {
+        match super::super::h3_application_code_from_wire(error_code) {
+          Some(code) => Poll::Ready(Ok(code)),
+          None => Poll::Ready(Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "downstream HTTP/3 STOP_SENDING used a non-WebTransport error code",
+          ))),
+        }
+      }
+      Poll::Ready(Err(error)) => Poll::Ready(Err(std::io::Error::other(error))),
+      Poll::Ready(Ok(_)) | Poll::Pending => Poll::Pending,
+    }
+  }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn copy_bidi_stream<D>(
+pub(super) async fn copy_bidi_stream(
   session_id: SessionId,
-  downstream: D,
+  downstream: super::super::DownstreamBidiStream,
   mut upstream_send: UpstreamWebTransportSendStream,
   mut upstream_recv: UpstreamWebTransportRecvStream,
   activity: mpsc::Sender<DispatcherEvent>,
@@ -27,11 +127,12 @@ pub(super) async fn copy_bidi_stream<D>(
   stream_waf: Option<StreamWafRequestContext>,
   bandwidth: Arc<RouteBandwidthLimiter>,
   metrics: Arc<Metrics>,
-) -> anyhow::Result<()>
-where
-  D: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-  let (mut downstream_recv, mut downstream_send) = tokio::io::split(downstream);
+) -> anyhow::Result<()> {
+  // Split at the QUIC boundary rather than with Tokio I/O.  The resulting
+  // send half still implements h3::quic::SendStream, so a reset received from
+  // an H2 capsule stream can retain its WebTransport application code when it
+  // is forwarded to the downstream H3 stream.
+  let (mut downstream_send, mut downstream_recv) = h3::quic::BidiStream::split(downstream);
   let downstream_to_upstream = copy_one_way(
     session_id,
     &mut downstream_recv,
@@ -74,17 +175,52 @@ pub(super) async fn copy_one_way<R, W>(
   metrics: Arc<Metrics>,
 ) -> anyhow::Result<()>
 where
-  R: AsyncRead + Unpin,
-  W: AsyncWrite + Unpin,
+  R: AsyncRead + StoppableRecv + Unpin,
+  W: AsyncWrite + ResettableSend + StopAwareSend + Unpin,
 {
   let mut buffer = vec![0u8; 16 * 1024];
   let bandwidth_direction = bandwidth_direction(direction);
   let mut bandwidth_flow = bandwidth.flow(bandwidth_direction);
   loop {
-    let read = recv.read(&mut buffer).await?;
+    let read = match tokio::select! {
+      biased;
+      stopped = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        std::future::poll_fn(|context| send.poll_stopped(context)),
+      ) => {
+        let Ok(stopped) = stopped else { continue; };
+        recv.stop(stopped?)?;
+        return Ok(());
+      }
+      read = recv.read(&mut buffer) => read,
+    } {
+      Ok(read) => read,
+      Err(error) => {
+        if let Some(code) = received_reset_code(&error) {
+          // Preserve bytes already delivered by QUIC when the next hop uses
+          // the H2 reliable-reset capsule. Quinn's own flush remains a no-op.
+          return match flush_or_stop(&mut send).await? {
+            SendProgress::Progress(()) => {
+              send.reset(code)?;
+              Ok(())
+            }
+            SendProgress::Stopped(code) => {
+              recv.stop(code)?;
+              Ok(())
+            }
+          };
+        }
+        return Err(error.into());
+      }
+    };
     if read == 0 {
-      send.shutdown().await?;
-      return Ok(());
+      return match shutdown_or_stop(&mut send).await? {
+        SendProgress::Progress(()) => Ok(()),
+        SendProgress::Stopped(code) => {
+          recv.stop(code)?;
+          Ok(())
+        }
+      };
     }
     if bandwidth_direction == crate::bandwidth::BandwidthDirection::Download
       && let (Some(state), Some(context)) = (stream_waf_state.as_ref(), stream_waf.as_ref())
@@ -101,15 +237,30 @@ where
     while offset < read {
       let bandwidth_limited = bandwidth_flow.is_limited().map_err(anyhow::Error::from)?;
       let granted = if bandwidth_limited {
-        acquire_stream_bandwidth(
+        let acquisition = acquire_stream_bandwidth(
           session_id,
           &activity,
           &mut bandwidth_flow,
           read - offset,
           &metrics,
           bandwidth_direction,
-        )
-        .await?
+        );
+        tokio::pin!(acquisition);
+        loop {
+          tokio::select! {
+            biased;
+            stopped = std::future::poll_fn(|context| send.poll_stopped(context)) => {
+              recv.stop(stopped?)?;
+              return Ok(());
+            }
+            grant = &mut acquisition => break grant?,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+              // The downstream H3 adapter detects STOP_SENDING with an empty
+              // send probe. Re-poll it even if that transport does not wake the
+              // bandwidth waiter when the peer stops the stream.
+            }
+          }
+        }
       } else {
         read - offset
       };
@@ -124,9 +275,179 @@ where
           stream_waf_bridge::webtransport_stream_metadata(stream_kind),
         )?;
       }
-      send.write_all(&buffer[offset..offset + granted]).await?;
-      offset += granted;
+      match write_or_stop(&mut send, &buffer[offset..offset + granted]).await? {
+        SendProgress::Progress(written) => offset += written,
+        SendProgress::Stopped(code) => {
+          recv.stop(code)?;
+          return Ok(());
+        }
+      }
     }
     report_activity(&activity, session_id);
+  }
+}
+
+fn received_reset_code(error: &std::io::Error) -> Option<u32> {
+  crate::webtransport::stream_reset_code(error).or_else(|| {
+    let h3::quic::StreamErrorIncoming::StreamTerminated { error_code } =
+      error
+        .get_ref()?
+        .downcast_ref::<h3::quic::StreamErrorIncoming>()?
+    else {
+      return None;
+    };
+    super::super::h3_application_code_from_wire(*error_code)
+  })
+}
+
+async fn write_or_stop<W>(send: &mut W, bytes: &[u8]) -> std::io::Result<SendProgress<usize>>
+where
+  W: AsyncWrite + StopAwareSend + Unpin,
+{
+  std::future::poll_fn(|context| match send.poll_stopped(context) {
+    Poll::Ready(Ok(code)) => Poll::Ready(Ok(SendProgress::Stopped(code))),
+    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+    Poll::Pending => match std::pin::Pin::new(&mut *send).poll_write(context, bytes) {
+      Poll::Ready(Ok(0)) if !bytes.is_empty() => Poll::Ready(Err(std::io::Error::new(
+        std::io::ErrorKind::WriteZero,
+        "failed to forward WebTransport stream payload",
+      ))),
+      Poll::Ready(Ok(written)) => Poll::Ready(Ok(SendProgress::Progress(written))),
+      Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+      Poll::Pending => Poll::Pending,
+    },
+  })
+  .await
+}
+
+async fn shutdown_or_stop<W>(send: &mut W) -> std::io::Result<SendProgress<()>>
+where
+  W: AsyncWrite + StopAwareSend + Unpin,
+{
+  std::future::poll_fn(|context| match send.poll_stopped(context) {
+    Poll::Ready(Ok(code)) => Poll::Ready(Ok(SendProgress::Stopped(code))),
+    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+    Poll::Pending => match std::pin::Pin::new(&mut *send).poll_shutdown(context) {
+      Poll::Ready(Ok(())) => Poll::Ready(Ok(SendProgress::Progress(()))),
+      Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+      Poll::Pending => Poll::Pending,
+    },
+  })
+  .await
+}
+
+async fn flush_or_stop<W>(send: &mut W) -> std::io::Result<SendProgress<()>>
+where
+  W: AsyncWrite + StopAwareSend + Unpin,
+{
+  std::future::poll_fn(|context| match send.poll_stopped(context) {
+    Poll::Ready(Ok(code)) => Poll::Ready(Ok(SendProgress::Stopped(code))),
+    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+    Poll::Pending => match std::pin::Pin::new(&mut *send).poll_flush(context) {
+      Poll::Ready(Ok(())) => Poll::Ready(Ok(SendProgress::Progress(()))),
+      Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+      Poll::Pending => Poll::Pending,
+    },
+  })
+  .await
+}
+
+#[cfg(test)]
+mod tests {
+  use std::pin::Pin;
+  use std::sync::Arc;
+  use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+  use std::task::{Context, Poll, Waker};
+
+  use tokio::io::AsyncWrite;
+
+  use super::{SendProgress, StopAwareSend, received_reset_code, write_or_stop};
+
+  #[derive(Default)]
+  struct StopState {
+    code: AtomicU32,
+    waker: std::sync::Mutex<Option<Waker>>,
+  }
+
+  struct PendingSend {
+    state: Arc<StopState>,
+    writes: Arc<AtomicUsize>,
+  }
+
+  impl StopAwareSend for PendingSend {
+    fn poll_stopped(&mut self, context: &mut Context<'_>) -> Poll<std::io::Result<u32>> {
+      let code = self.state.code.load(Ordering::Acquire);
+      if code != 0 {
+        return Poll::Ready(Ok(code - 1));
+      }
+      *self.state.waker.lock().unwrap() = Some(context.waker().clone());
+      Poll::Pending
+    }
+  }
+
+  impl AsyncWrite for PendingSend {
+    fn poll_write(
+      self: Pin<&mut Self>,
+      _: &mut Context<'_>,
+      _: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+      self.writes.fetch_add(1, Ordering::AcqRel);
+      Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+      Poll::Pending
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+      Poll::Pending
+    }
+  }
+
+  #[tokio::test]
+  async fn stop_preempts_a_blocked_stream_write_without_a_write_error() {
+    let state = Arc::new(StopState::default());
+    let writes = Arc::new(AtomicUsize::new(0));
+    let mut task = tokio::spawn({
+      let state = state.clone();
+      let writes = writes.clone();
+      async move {
+        let mut send = PendingSend { state, writes };
+        write_or_stop(&mut send, b"buffered").await.unwrap()
+      }
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+      while writes.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+      }
+    })
+    .await
+    .expect("write helper was not polled");
+    state.code.store(4_322, Ordering::Release);
+    if let Some(waker) = state.waker.lock().unwrap().take() {
+      waker.wake();
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(1), &mut task)
+      .await
+      .expect("STOP_SENDING did not interrupt the blocked write")
+      .expect("write task panicked")
+    {
+      SendProgress::Stopped(code) => assert_eq!(code, 4_321),
+      SendProgress::Progress(_) => {
+        panic!("blocked write completed instead of observing STOP_SENDING")
+      }
+    }
+  }
+
+  #[test]
+  fn downstream_h3_reset_preserves_the_webtransport_application_code() {
+    let code = 4_321;
+    let error = std::io::Error::other(h3::quic::StreamErrorIncoming::StreamTerminated {
+      error_code: super::super::super::h3_application_code_to_wire(code),
+    });
+
+    assert_eq!(received_reset_code(&error), Some(code));
   }
 }

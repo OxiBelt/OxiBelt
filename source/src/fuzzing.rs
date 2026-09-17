@@ -243,6 +243,35 @@ pub fn exercise_http3_webtransport(data: &[u8]) {
   }
 }
 
+/// Exercises the streaming HTTP/2 capsule parser at two independent fragment widths.
+pub fn exercise_http2_webtransport(data: &[u8]) {
+  let data = bounded(data);
+  for width in [1, 1 + data.first().copied().unwrap_or(0) as usize] {
+    let mut decoder = crate::webtransport::codec::Decoder::default();
+    let mut valid = true;
+    for chunk in data.chunks(width) {
+      let mut bytes = bytes::Bytes::copy_from_slice(chunk);
+      loop {
+        match decoder.next(&mut bytes) {
+          Ok(Some(crate::webtransport::codec::Event::Stream { data, .. })) => {
+            assert!(data.len() <= crate::webtransport::codec::QUANTUM);
+          }
+          Ok(Some(_)) => {}
+          Ok(None) => break,
+          Err(_) => {
+            valid = false;
+            break;
+          }
+        }
+      }
+      if !valid {
+        break;
+      }
+    }
+    let _ = decoder.finish();
+  }
+}
+
 /// Exercises the shared upstream DNS response parser without performing I/O.
 pub fn exercise_upstream_dns_resolution(data: &[u8]) {
   let decoded;

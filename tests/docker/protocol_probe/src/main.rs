@@ -42,6 +42,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 mod incremental;
 mod managed_upload;
+mod webtransport_h2;
 
 #[derive(Clone, Copy)]
 enum DownstreamProtocol {
@@ -600,6 +601,8 @@ async fn main() -> anyhow::Result<()> {
     "admin-operation-wt-events" => {
       run_admin_operation_wt_events_client(parse_admin_operation_wt_events_args(args)?).await
     }
+    "webtransport-h2-client" => webtransport_h2::client(args).await,
+    "webtransport-h2-upstream" => webtransport_h2::upstream(args).await,
     _ => {
       usage();
       bail!("unknown command: {command}");
@@ -2280,13 +2283,50 @@ async fn handle_webtransport_upstream_request(
     tokio::select! {
         result = session.accept_bi() => {
             let (mut send, mut recv) = result.context("failed to accept WebTransport bidi stream")?;
-            let bytes = recv.read_to_end(64 * 1024).await.context("failed to read WebTransport bidi stream")?;
-            send.write_all(&bytes).await.context("failed to echo WebTransport bidi stream")?;
-            send.finish().context("failed to finish WebTransport bidi stream")?;
+            let mut received = Vec::new();
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+              match recv.read(&mut chunk).await {
+                Ok(Some(count)) => {
+                  if received.len().saturating_add(count) > 64 * 1024 {
+                    bail!("WebTransport bidi stream exceeded 64 KiB");
+                  }
+                  received.extend_from_slice(&chunk[..count]);
+                  send.write_all(&chunk[..count]).await.context("failed to echo WebTransport bidi stream")?;
+                }
+                Ok(None) => {
+                  send.finish().context("failed to finish WebTransport bidi stream")?;
+                  break;
+                }
+                Err(web_transport_quinn::ReadError::Reset(code)) => {
+                  if code != 0x1020_3040 || !b"h2-reset-prefix".starts_with(&received) {
+                    bail!("WebTransport reset changed its error code or delivered a non-prefix payload");
+                  }
+                  send.finish().context("failed to finish reset WebTransport peer stream")?;
+                  break;
+                }
+                Err(error) => return Err(error).context("failed to read WebTransport bidi stream"),
+              }
+            }
+        }
+        result = session.accept_uni() => {
+            let mut recv = result.context("failed to accept WebTransport uni stream")?;
+            let bytes = recv.read_to_end(64 * 1024).await.context("failed to read WebTransport uni stream")?;
+            let mut send = session.open_uni().await.context("failed to open WebTransport uni echo stream")?;
+            send.write_all(&bytes).await.context("failed to echo WebTransport uni stream")?;
+            send.finish().context("failed to finish WebTransport uni echo stream")?;
         }
         result = session.read_datagram() => {
             let bytes = result.context("failed to read WebTransport datagram")?;
-            session.send_datagram(bytes).context("failed to echo WebTransport datagram")?;
+            session.send_datagram(bytes.clone()).context("failed to echo WebTransport datagram")?;
+            if bytes == Bytes::from_static(b"h2-webtransport-datagram-echo") {
+              let (mut send, mut recv) = session.open_bi().await.context("failed to open WebTransport stop probe")?;
+              send.write_all(b"stop-probe").await.context("failed to write WebTransport stop probe")?;
+              send.finish().context("failed to finish WebTransport stop probe")?;
+              recv.stop(0x5060_7080).context("failed to stop WebTransport probe receive side")?;
+              // Quinn cannot report a peer RESET through received_reset() after
+              // local stop(); the peer probe asserts the exact STOP code.
+            }
         }
         _ = session.closed() => {
             return Ok(());
@@ -3656,7 +3696,67 @@ async fn run_webtransport_data_client(
     bail!("WebTransport bidirectional stream echo changed payload binding");
   }
 
-  let datagram_payload = Bytes::from(format!("datagram:{}", args.path));
+  let uni_payload = Bytes::from_static(b"h2-webtransport-uni-echo");
+  let mut uni_send = tokio::time::timeout(Duration::from_secs(2), session.open_uni())
+    .await
+    .context("timed out opening WebTransport unidirectional stream")?
+    .context("failed to open WebTransport unidirectional stream")?;
+  uni_send
+    .write_all(&uni_payload)
+    .await
+    .context("failed to send WebTransport unidirectional payload")?;
+  uni_send
+    .finish()
+    .context("failed to finish WebTransport unidirectional payload")?;
+  let mut uni_echo = tokio::time::timeout(Duration::from_secs(2), session.accept_uni())
+    .await
+    .context("timed out accepting WebTransport unidirectional echo")?
+    .context("failed to accept WebTransport unidirectional echo")?;
+  let echoed_uni = tokio::time::timeout(Duration::from_secs(2), uni_echo.read_to_end(64 * 1024))
+    .await
+    .context("timed out reading WebTransport unidirectional echo")?
+    .context("failed to read WebTransport unidirectional echo")?;
+  if echoed_uni != uni_payload {
+    bail!("WebTransport unidirectional echo changed payload binding");
+  }
+
+  let (mut reset_send, mut reset_echo) =
+    tokio::time::timeout(Duration::from_secs(2), session.open_bi())
+      .await
+      .context("timed out opening WebTransport reset stream")?
+      .context("failed to open WebTransport reset stream")?;
+  reset_send
+    .write_all(b"h2-reset-prefix")
+    .await
+    .context("failed to write WebTransport reset prefix")?;
+  let mut echoed_reset_prefix = [0u8; 1];
+  tokio::time::timeout(
+    Duration::from_secs(2),
+    reset_echo.read_exact(&mut echoed_reset_prefix),
+  )
+  .await
+  .context("timed out waiting for the mapped WebTransport reset prefix")?
+  .context("failed to read the mapped WebTransport reset prefix")?;
+  if echoed_reset_prefix != b"h"[..] {
+    bail!("WebTransport reset echo was not a valid application prefix");
+  }
+  reset_send
+    .reset(0x1020_3040)
+    .context("failed to reset WebTransport stream")?;
+
+  // QUIC can discard an unacknowledged WebTransport stream association when
+  // RESET_STREAM races its header. The stream is intentionally unobservable,
+  // so the following datagram proves the session and connection stay usable.
+  let (mut pre_header_reset, _pre_header_echo) =
+    tokio::time::timeout(Duration::from_secs(2), session.open_bi())
+      .await
+      .context("timed out opening pre-header reset stream")?
+      .context("failed to open pre-header reset stream")?;
+  pre_header_reset
+    .reset(0x1020_3040)
+    .context("failed to issue pre-header WebTransport reset")?;
+
+  let datagram_payload = Bytes::from_static(b"h2-webtransport-datagram-echo");
   session
     .send_datagram(datagram_payload.clone())
     .context("failed to send WebTransport datagram")?;
@@ -3668,6 +3768,27 @@ async fn run_webtransport_data_client(
     bail!("WebTransport datagram echo changed session binding");
   }
 
+  let (mut stopped_send, mut stop_recv) =
+    tokio::time::timeout(Duration::from_secs(2), session.accept_bi())
+      .await
+      .context("timed out accepting WebTransport stop probe")?
+      .context("failed to accept WebTransport stop probe")?;
+  let stop_payload = tokio::time::timeout(Duration::from_secs(2), stop_recv.read_to_end(64 * 1024))
+    .await
+    .context("timed out reading WebTransport stop probe")?
+    .context("failed to read WebTransport stop probe")?;
+  if stop_payload != b"stop-probe" {
+    bail!("WebTransport stop probe changed payload binding");
+  }
+  let stopped = tokio::time::timeout(Duration::from_secs(2), stopped_send.stopped())
+    .await
+    .context("timed out waiting for WebTransport STOP_SENDING")?
+    .context("failed while waiting for WebTransport STOP_SENDING")?;
+  if stopped != Some(0x5060_7080) {
+    bail!("WebTransport STOP_SENDING changed application error code");
+  }
+  let _ = stopped_send.reset(0x5060_7080);
+
   session.close(0, b"probe complete");
   let _ = session.closed().await;
   println!(
@@ -3675,7 +3796,12 @@ async fn run_webtransport_data_client(
     serde_json::json!({
       "statuses": [200],
       "stream_echo_bytes": echoed_stream.len(),
+      "uni_echo_bytes": echoed_uni.len(),
       "datagram_echo_bytes": echoed_datagram.len(),
+      "reset_code": 0x1020_3040_u32,
+      "mapped_reset_prefix_bytes": echoed_reset_prefix.len(),
+      "pre_header_reset_survived": true,
+      "stop_code": 0x5060_7080_u32,
     })
   );
   Ok(())

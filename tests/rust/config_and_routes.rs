@@ -21,14 +21,14 @@ use oxibelt::config::{
   DynamicPolicyFailPolicy, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode,
   ExternalAuthProvider, ExternalCacheHandlerFailPolicy, ExternalCacheHandlerKind,
   ForwardedClientIpSource, ForwardedHeaderMode, GrpcRetryMode, HealthCheckProtocol, HotReloadMode,
-  IpmPolicyEffect, KubernetesDiscoveryResource, LbPolicyCompatProfile, LoadBalancingAlgorithm,
-  MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode, PriorityClass, PriorityMode,
-  PriorityRejectionPolicy, ProxyProtocolEgressMode, ProxyProtocolTlsSource, ProxyProtocolVersion,
-  QuicZeroRttMode, RateLimitIdentityPart, RateLimitKey, RetryCondition, RuntimeArtifact,
-  RuntimeMainRuntimeMode, RuntimeOverrides, SharedStateBackendKind,
-  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
-  StaticPrecompressedEncoding, StatusHeaderUpstream, StreamNetwork, Tls12CipherSuite,
-  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
+  HttpVersion, IpmPolicyEffect, KubernetesDiscoveryResource, LbPolicyCompatProfile,
+  LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode,
+  PriorityClass, PriorityMode, PriorityRejectionPolicy, ProxyProtocolEgressMode,
+  ProxyProtocolTlsSource, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
+  RateLimitKey, RetryCondition, RuntimeArtifact, RuntimeMainRuntimeMode, RuntimeOverrides,
+  SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
+  StaticFilesSendfileMode, StaticPrecompressedEncoding, StatusHeaderUpstream, StreamNetwork,
+  Tls12CipherSuite, Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
   TlsServerResumptionMode, TlsVersion, TrailerMode, UdpFlowState, UpstreamDiscoveryProvider,
   UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
   resolve_auto_worker_count,
@@ -2218,6 +2218,52 @@ refresh_interval_ms = 1000
   assert_eq!(discovery.token_env.as_deref(), Some("NOMAD_TOKEN"));
   assert!(discovery.watch);
   assert_eq!(discovery.watch_timeout_seconds, 45);
+}
+
+#[test]
+fn upstream_pool_http3_requires_https_static_and_discovery_members() {
+  let temp_dir = common::TempDir::new("pool-http3-https");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "pool-http3-https");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let static_pool = format!(
+    r#"{base}
+
+[[upstream_pools]]
+name = "static-h3"
+max_http_version = "h3"
+
+[[upstream_pools.servers]]
+origin = "http://backend.example"
+"#
+  );
+  let discovery_pool = format!(
+    r#"{base}
+
+[[upstream_pools]]
+name = "discovery-h3"
+max_http_version = "h3"
+
+[[upstream_pools.discovery]]
+provider = "dns"
+name = "backend.example"
+scheme = "http"
+"#
+  );
+
+  for raw in [static_pool, discovery_pool] {
+    let config: Config = toml::from_str(&raw).expect("config should parse");
+    assert_eq!(
+      config.upstream_pools[0].max_http_version,
+      Some(HttpVersion::H3)
+    );
+    assert!(
+      config
+        .validate()
+        .expect_err("HTTP/3 pool must require HTTPS members")
+        .to_string()
+        .contains("requires every")
+    );
+  }
 }
 
 #[test]
@@ -18010,7 +18056,7 @@ origin = "https://app.internal.example"
   assert!(
     error
       .to_string()
-      .contains("cannot set upstream_http_version = \"h3\" for upstream_pool routes"),
+      .contains("upstream_http_version cannot exceed upstream pool app-pool max_http_version"),
     "unexpected error: {error}"
   );
 }

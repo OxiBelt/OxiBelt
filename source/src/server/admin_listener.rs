@@ -14,14 +14,14 @@ use tokio_rustls::TlsAcceptor;
 use super::{AdminControlHandle, AdminOperationRuntime, admin_response};
 use crate::state::AppHandle;
 
-struct AdminHttp1Context {
-  peer_addr: SocketAddr,
-  listener_bind: SocketAddr,
-  state: AppHandle,
-  admin_control: AdminControlHandle,
-  admin_operations: AdminOperationRuntime,
-  scheme: &'static str,
-  client_certificate: Option<crate::tls::VerifiedClientCertificate>,
+pub(super) struct AdminConnectionContext {
+  pub(super) peer_addr: SocketAddr,
+  pub(super) listener_bind: SocketAddr,
+  pub(super) state: AppHandle,
+  pub(super) admin_control: AdminControlHandle,
+  pub(super) admin_operations: AdminOperationRuntime,
+  pub(super) scheme: &'static str,
+  pub(super) client_certificate: Option<crate::tls::VerifiedClientCertificate>,
 }
 
 pub(super) async fn tcp_stream_starts_with_tls(stream: &TcpStream) -> bool {
@@ -58,19 +58,21 @@ pub(super) async fn handle_admin_tls_connection(
       .peer_certificates()
       .unwrap_or_default(),
   );
-  serve_admin_http1(
-    tls_stream,
-    AdminHttp1Context {
-      peer_addr,
-      listener_bind,
-      state,
-      admin_control,
-      admin_operations,
-      scheme: "https",
-      client_certificate,
-    },
-  )
-  .await
+  let context = AdminConnectionContext {
+    peer_addr,
+    listener_bind,
+    state,
+    admin_control,
+    admin_operations,
+    scheme: "https",
+    client_certificate,
+  };
+  let negotiated_h2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
+  let tls13 = tls_stream.get_ref().1.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_3);
+  if negotiated_h2 {
+    return super::admin_h2::serve_admin_http2(tls_stream, context, tls13).await;
+  }
+  serve_admin_http1(tls_stream, context).await
 }
 
 pub(super) async fn handle_admin_plaintext_connection(
@@ -83,7 +85,7 @@ pub(super) async fn handle_admin_plaintext_connection(
 ) -> anyhow::Result<()> {
   serve_admin_http1(
     stream,
-    AdminHttp1Context {
+    AdminConnectionContext {
       peer_addr,
       listener_bind,
       state,
@@ -96,11 +98,11 @@ pub(super) async fn handle_admin_plaintext_connection(
   .await
 }
 
-async fn serve_admin_http1<I>(io: I, context: AdminHttp1Context) -> anyhow::Result<()>
+async fn serve_admin_http1<I>(io: I, context: AdminConnectionContext) -> anyhow::Result<()>
 where
   I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-  let AdminHttp1Context {
+  let AdminConnectionContext {
     peer_addr,
     listener_bind,
     state,

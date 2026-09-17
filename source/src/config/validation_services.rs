@@ -7,6 +7,7 @@ impl Config {
     self.validate_legacy_admin_authorization()?;
     self.validate_admin_audit_config_fields()?;
     self.validate_admin_operations_config()?;
+    self.admin.http2.webtransport.validate()?;
     if self.admin.audit.queue_capacity == 0 {
       bail!("admin.audit.queue_capacity must be greater than 0");
     }

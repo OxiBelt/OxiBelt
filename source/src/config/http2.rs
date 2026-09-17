@@ -5,6 +5,8 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
 pub struct ProxyHttp2Config {
+  #[serde(default)]
+  pub webtransport: H2WebTransportConfig,
   #[serde(default = "default_true")]
   pub adaptive_window: bool,
   #[serde(default)]
@@ -28,6 +30,7 @@ pub struct ProxyHttp2Config {
 impl Default for ProxyHttp2Config {
   fn default() -> Self {
     Self {
+      webtransport: H2WebTransportConfig::default(),
       adaptive_window: true,
       initial_stream_window_bytes: None,
       initial_connection_window_bytes: None,
@@ -38,6 +41,69 @@ impl Default for ProxyHttp2Config {
       keep_alive_timeout_ms: default_http2_keep_alive_timeout_ms(),
       keep_alive_while_idle: false,
     }
+  }
+}
+
+/// Application buffers for sessions with an HTTP/2 WebTransport leg.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct H2WebTransportConfig {
+  pub max_concurrent_uni_streams: u32,
+  pub max_concurrent_bidi_streams: u32,
+  pub max_stream_buffer_bytes: usize,
+  pub max_session_buffer_bytes: usize,
+  pub max_total_buffer_bytes: usize,
+}
+
+impl Default for H2WebTransportConfig {
+  fn default() -> Self {
+    Self {
+      max_concurrent_uni_streams: 100,
+      max_concurrent_bidi_streams: 100,
+      max_stream_buffer_bytes: 65_536,
+      max_session_buffer_bytes: 1_048_576,
+      max_total_buffer_bytes: 67_108_864,
+    }
+  }
+}
+
+impl H2WebTransportConfig {
+  /// Conservative memory admission for both endpoints' live stream directions.
+  pub(crate) fn session_reservation_bytes(&self) -> Option<usize> {
+    let uni = usize::try_from(self.max_concurrent_uni_streams).ok()?;
+    let bidi = usize::try_from(self.max_concurrent_bidi_streams).ok()?;
+    let staging = uni
+      .checked_mul(2)?
+      .checked_add(bidi.checked_mul(4)?)?
+      .checked_mul(16_384)?;
+    let metadata = uni.checked_add(bidi)?.checked_mul(2)?.checked_mul(1024)?;
+    self
+      .max_session_buffer_bytes
+      .checked_mul(2)?
+      .checked_add(staging)?
+      .checked_add(metadata)?
+      .checked_add(196_608)
+  }
+
+  pub(crate) fn validate(&self) -> anyhow::Result<()> {
+    anyhow::ensure!(
+      self.max_concurrent_uni_streams > 0 && self.max_concurrent_bidi_streams > 0,
+      "proxy.http2.webtransport stream limits must be positive"
+    );
+    anyhow::ensure!(
+      self.max_stream_buffer_bytes > 0
+        && self.max_stream_buffer_bytes <= self.max_session_buffer_bytes
+        && self.max_session_buffer_bytes <= self.max_total_buffer_bytes
+        && self.max_total_buffer_bytes <= u32::MAX as usize,
+      "proxy.http2.webtransport requires 0 < stream <= session <= total buffer bytes <= 4294967295"
+    );
+    anyhow::ensure!(
+      self
+        .session_reservation_bytes()
+        .is_some_and(|bytes| bytes <= self.max_total_buffer_bytes),
+      "proxy.http2.webtransport total budget must hold both session directions, stream staging, and protocol overhead"
+    );
+    Ok(())
   }
 }
 

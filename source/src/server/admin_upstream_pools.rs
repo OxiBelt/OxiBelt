@@ -235,6 +235,13 @@ async fn admin_add_pool_server(
     if server.weight == 0 {
       bail!("upstream pool server weight must be greater than 0");
     }
+    if pool.max_http_version == Some(crate::config::HttpVersion::H3)
+      && server.origin.scheme() != "https"
+    {
+      bail!(
+        "upstream pool {pool_name} max_http_version = \"h3\" requires an https:// server origin"
+      );
+    }
     server.source = UpstreamPoolServerSource::Admin;
     pool.servers.push(server);
     Ok(())

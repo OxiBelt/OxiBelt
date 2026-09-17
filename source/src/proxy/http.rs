@@ -160,6 +160,7 @@ use self::uri::validate_downstream_path;
 use cache_operations::*;
 use request_validation::*;
 pub(crate) use request_validation::{validate_request_body_size_limit, validate_request_limits};
+pub(crate) use tcp_exchange::connect_upstream_tcp;
 pub(super) use tcp_exchange::is_idempotent;
 use tcp_exchange::*;
 use tunnel::*;
@@ -176,6 +177,7 @@ use self::waf_body_coding::has_non_identity_content_encoding;
 pub(crate) use self::webtransport::{
   PreparedWebTransport, prepare_webtransport, shape_webtransport_response,
 };
+pub(crate) use route_action_runtime::origin_allowed as cors_origin_allowed;
 pub(crate) use tls_policy::route_matches_selected_tls_negotiation_policy;
 
 #[allow(clippy::too_many_arguments)]

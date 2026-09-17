@@ -7,18 +7,19 @@ use std::task::Poll;
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use futures_util::{future::poll_fn, ready};
-use h3::frame::FrameStream;
+use h3::frame::{FrameStream, FrameStreamError};
 use h3::proto::frame::Frame;
 use h3::quic::{OpenStreams, SendStreamUnframed, StreamErrorIncoming, StreamId};
 use h3::stream::{BidiStreamHeader, BufRecvStream, UniStreamHeader, WriteBuf};
 use h3_datagram::datagram_handler::HandleDatagramsExt;
 use h3_webtransport::SessionId;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use super::{
   DispatcherEvent, DownstreamBidiEvent, DownstreamBidiStream, DownstreamUniRecvStream,
-  DownstreamUniSendStream, H3DatagramReader, H3DatagramSender, H3OpenStreams, H3ServerConnection,
+  DownstreamUniSendStream, H3BidiStream, H3DatagramReader, H3DatagramSender, H3OpenStreams,
+  H3ServerConnection,
 };
 
 pub(super) struct DownstreamWebTransportConnection {
@@ -104,82 +105,174 @@ pub(super) fn spawn_downstream_reader_tasks(
   events: mpsc::Sender<DispatcherEvent>,
 ) -> Vec<JoinHandle<()>> {
   vec![
-    tokio::spawn(read_downstream_bidi_task(
+    tokio::spawn(read_downstream_streams_task(
       downstream.clone(),
       events.clone(),
     )),
-    tokio::spawn(read_downstream_uni_task(downstream.clone(), events.clone())),
     tokio::spawn(read_downstream_datagrams_task(downstream, events)),
   ]
 }
 
-async fn read_downstream_bidi_task(
+async fn read_downstream_streams_task(
   downstream: Arc<DownstreamWebTransportConnection>,
   events: mpsc::Sender<DispatcherEvent>,
 ) {
+  let mut resolvers = JoinSet::new();
   loop {
-    match accept_downstream_bidi(&downstream).await {
-      Ok(Some(DownstreamBidiEvent::WebTransport(session_id, stream))) => {
-        if events
-          .send(DispatcherEvent::DownstreamBidi(session_id, stream))
-          .await
-          .is_err()
-        {
-          return;
+    tokio::select! {
+      biased;
+      resolved = resolvers.join_next(), if !resolvers.is_empty() => {
+        let result = match resolved {
+          Some(Ok(result)) => result,
+          Some(Err(error)) => Err(error.into()),
+          None => continue,
+        };
+        match result {
+          Ok(event) => {
+            if !send_downstream_bidi_event(&events, event).await {
+              return;
+            }
+          }
+          Err(error) => {
+            let _ = events.send(DispatcherEvent::Fatal(error)).await;
+            return;
+          }
         }
       }
-      Ok(Some(DownstreamBidiEvent::Request(request, stream))) => {
-        if events
-          .send(DispatcherEvent::DownstreamRequest(request, stream))
-          .await
-          .is_err()
-        {
-          return;
+      accepted = accept_downstream_stream(&downstream) => {
+        match accepted {
+          Ok(AcceptedDownstreamStream::Bidi(stream)) => {
+            let downstream = downstream.clone();
+            resolvers.spawn(async move { resolve_downstream_bidi(&downstream, stream).await });
+          }
+          Ok(AcceptedDownstreamStream::Uni(session_id, stream)) => {
+            if events
+              .send(DispatcherEvent::DownstreamUni(session_id, stream))
+              .await
+              .is_err()
+            {
+              return;
+            }
+          }
+          Ok(AcceptedDownstreamStream::ConnectionClosed) => {
+            let _ = events.send(DispatcherEvent::ConnectionClosed).await;
+            return;
+          }
+          Err(error) => {
+            let _ = events.send(DispatcherEvent::Fatal(error)).await;
+            return;
+          }
         }
-      }
-      Ok(Some(DownstreamBidiEvent::Closed)) => {}
-      Ok(None) => {
-        let _ = events.send(DispatcherEvent::ConnectionClosed).await;
-        return;
-      }
-      Err(error) => {
-        let _ = events.send(DispatcherEvent::Fatal(error)).await;
-        return;
       }
     }
   }
 }
 
-async fn accept_downstream_bidi(
-  downstream: &DownstreamWebTransportConnection,
-) -> anyhow::Result<Option<DownstreamBidiEvent>> {
-  let stream = poll_fn(|cx| {
-    let mut connection = match downstream.connection_guard() {
-      Ok(connection) => connection,
-      Err(error) => return Poll::Ready(Err(error)),
-    };
-    match connection.poll_accept_request_stream(cx) {
+async fn send_downstream_bidi_event(
+  events: &mpsc::Sender<DispatcherEvent>,
+  event: DownstreamBidiEvent,
+) -> bool {
+  let event = match event {
+    DownstreamBidiEvent::WebTransport(session_id, stream) => {
+      DispatcherEvent::DownstreamBidi(session_id, stream)
+    }
+    DownstreamBidiEvent::Request(request, stream) => {
+      DispatcherEvent::DownstreamRequest(request, stream)
+    }
+    DownstreamBidiEvent::Closed => return true,
+  };
+  events.send(event).await.is_ok()
+}
+
+enum AcceptedDownstreamStream<U = DownstreamUniRecvStream, B = H3BidiStream> {
+  Bidi(B),
+  Uni(SessionId, U),
+  ConnectionClosed,
+}
+
+trait DownstreamStreamSource {
+  type Uni;
+  type Bidi;
+
+  fn pop_uni(&mut self) -> Option<(SessionId, Self::Uni)>;
+  fn poll_bidi(
+    &mut self,
+    context: &mut std::task::Context<'_>,
+  ) -> Poll<anyhow::Result<Option<Self::Bidi>>>;
+}
+
+impl DownstreamStreamSource for H3ServerConnection {
+  type Uni = DownstreamUniRecvStream;
+  type Bidi = H3BidiStream;
+
+  fn pop_uni(&mut self) -> Option<(SessionId, Self::Uni)> {
+    self.inner.accepted_streams_mut().wt_uni_streams.pop()
+  }
+
+  fn poll_bidi(
+    &mut self,
+    context: &mut std::task::Context<'_>,
+  ) -> Poll<anyhow::Result<Option<Self::Bidi>>> {
+    match self.poll_accept_request_stream(context) {
       Poll::Ready(result) => {
         Poll::Ready(result.context("failed to accept downstream HTTP/3 bidirectional stream"))
       }
       Poll::Pending => Poll::Pending,
     }
-  })
-  .await?;
+  }
+}
 
-  let Some(stream) = stream else {
-    return Ok(None);
-  };
+fn poll_downstream_stream<S>(
+  source: &mut S,
+  context: &mut std::task::Context<'_>,
+) -> Poll<anyhow::Result<AcceptedDownstreamStream<S::Uni, S::Bidi>>>
+where
+  S: DownstreamStreamSource,
+{
+  if let Some((session_id, stream)) = source.pop_uni() {
+    return Poll::Ready(Ok(AcceptedDownstreamStream::Uni(session_id, stream)));
+  }
+  match source.poll_bidi(context) {
+    Poll::Ready(Ok(Some(stream))) => Poll::Ready(Ok(AcceptedDownstreamStream::Bidi(stream))),
+    Poll::Ready(Ok(None)) => Poll::Ready(Ok(AcceptedDownstreamStream::ConnectionClosed)),
+    Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+    Poll::Pending => match source.pop_uni() {
+      Some((session_id, stream)) => {
+        Poll::Ready(Ok(AcceptedDownstreamStream::Uni(session_id, stream)))
+      }
+      None => Poll::Pending,
+    },
+  }
+}
+
+async fn accept_downstream_stream(
+  downstream: &DownstreamWebTransportConnection,
+) -> anyhow::Result<AcceptedDownstreamStream> {
+  poll_fn(|context| {
+    let mut connection = match downstream.connection_guard() {
+      Ok(connection) => connection,
+      Err(error) => return Poll::Ready(Err(error)),
+    };
+    poll_downstream_stream(&mut *connection, context)
+  })
+  .await
+}
+
+async fn resolve_downstream_bidi(
+  downstream: &DownstreamWebTransportConnection,
+  stream: H3BidiStream,
+) -> anyhow::Result<DownstreamBidiEvent> {
   let stream = FrameStream::new(BufRecvStream::new(stream));
   let mut resolver = { downstream.connection_guard()?.create_resolver(stream) };
   let frame = poll_fn(|cx| resolver.frame_stream.poll_next(cx)).await;
 
   match frame {
-    Ok(Some(Frame::WebTransportStream(session_id))) => Ok(Some(DownstreamBidiEvent::WebTransport(
+    Ok(Some(Frame::WebTransportStream(session_id))) => Ok(DownstreamBidiEvent::WebTransport(
       session_id,
       resolver.frame_stream.into_inner(),
-    ))),
-    Ok(None) => Ok(Some(DownstreamBidiEvent::Closed)),
+    )),
+    Ok(None) => Ok(DownstreamBidiEvent::Closed),
+    Err(error) if first_frame_stream_terminated(&error) => Ok(DownstreamBidiEvent::Closed),
     frame => {
       let (request, stream) = resolver
         .accept_with_frame(frame)
@@ -187,53 +280,16 @@ async fn accept_downstream_bidi(
         .resolve()
         .await
         .context("failed to resolve downstream HTTP/3 request")?;
-      Ok(Some(DownstreamBidiEvent::Request(
-        request,
-        Box::new(stream),
-      )))
+      Ok(DownstreamBidiEvent::Request(request, Box::new(stream)))
     }
   }
 }
 
-async fn read_downstream_uni_task(
-  downstream: Arc<DownstreamWebTransportConnection>,
-  events: mpsc::Sender<DispatcherEvent>,
-) {
-  loop {
-    match accept_downstream_uni(&downstream).await {
-      Ok((session_id, stream)) => {
-        if events
-          .send(DispatcherEvent::DownstreamUni(session_id, stream))
-          .await
-          .is_err()
-        {
-          return;
-        }
-      }
-      Err(error) => {
-        let _ = events.send(DispatcherEvent::Fatal(error)).await;
-        return;
-      }
-    }
-  }
-}
-
-async fn accept_downstream_uni(
-  downstream: &DownstreamWebTransportConnection,
-) -> anyhow::Result<(SessionId, DownstreamUniRecvStream)> {
-  poll_fn(|cx| {
-    let mut conn = match downstream.connection_guard() {
-      Ok(conn) => conn,
-      Err(error) => return Poll::Ready(Err(error)),
-    };
-    conn.inner.poll_accept_recv(cx)?;
-    if let Some((session_id, stream)) = conn.inner.accepted_streams_mut().wt_uni_streams.pop() {
-      return Poll::Ready(Ok((session_id, stream)));
-    }
-    Poll::Pending
-  })
-  .await
-  .context("failed to accept downstream WebTransport unidirectional stream")
+fn first_frame_stream_terminated(error: &FrameStreamError) -> bool {
+  matches!(
+    error,
+    FrameStreamError::Quic(StreamErrorIncoming::StreamTerminated { .. })
+  )
 }
 
 async fn read_downstream_datagrams_task(
@@ -290,4 +346,76 @@ where
 
 fn downstream_stream_error(error: StreamErrorIncoming) -> anyhow::Error {
   anyhow::anyhow!("downstream WebTransport stream error: {error:?}")
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::VecDeque;
+  use std::task::{Context, Poll};
+
+  use futures_util::task::noop_waker_ref;
+  use h3::frame::{FrameProtocolError, FrameStreamError};
+  use h3::quic::{ConnectionErrorIncoming, StreamErrorIncoming};
+  use h3_webtransport::SessionId;
+
+  use super::{
+    AcceptedDownstreamStream, DownstreamStreamSource, first_frame_stream_terminated,
+    poll_downstream_stream,
+  };
+
+  struct UniQueuedByBidiPoll {
+    uni: VecDeque<(SessionId, &'static str)>,
+    bidi_polls: usize,
+  }
+
+  impl DownstreamStreamSource for UniQueuedByBidiPoll {
+    type Uni = &'static str;
+    type Bidi = ();
+
+    fn pop_uni(&mut self) -> Option<(SessionId, Self::Uni)> {
+      self.uni.pop_front()
+    }
+
+    fn poll_bidi(&mut self, _: &mut Context<'_>) -> Poll<anyhow::Result<Option<Self::Bidi>>> {
+      self.bidi_polls += 1;
+      self.uni.push_back((SessionId::try_from(4).unwrap(), "uni"));
+      Poll::Pending
+    }
+  }
+
+  #[test]
+  fn uni_queued_while_polling_bidi_does_not_need_another_wake() {
+    let mut source = UniQueuedByBidiPoll {
+      uni: VecDeque::new(),
+      bidi_polls: 0,
+    };
+    let mut context = Context::from_waker(noop_waker_ref());
+
+    match poll_downstream_stream(&mut source, &mut context) {
+      Poll::Ready(Ok(AcceptedDownstreamStream::Uni(session_id, "uni"))) => {
+        assert_eq!(session_id, SessionId::try_from(4).unwrap());
+      }
+      _ => panic!("uni stream queued by bidi polling remained asleep"),
+    }
+    assert_eq!(source.bidi_polls, 1);
+    assert!(source.uni.is_empty());
+  }
+
+  #[test]
+  fn reset_before_first_frame_is_stream_scoped() {
+    assert!(first_frame_stream_terminated(&FrameStreamError::Quic(
+      StreamErrorIncoming::StreamTerminated { error_code: 42 },
+    )));
+    assert!(!first_frame_stream_terminated(&FrameStreamError::Quic(
+      StreamErrorIncoming::ConnectionErrorIncoming {
+        connection_error: ConnectionErrorIncoming::InternalError("connection lost".into()),
+      },
+    )));
+    assert!(!first_frame_stream_terminated(&FrameStreamError::Proto(
+      FrameProtocolError::Malformed
+    ),));
+    assert!(!first_frame_stream_terminated(
+      &FrameStreamError::UnexpectedEnd,
+    ));
+  }
 }

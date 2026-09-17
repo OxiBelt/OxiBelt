@@ -6,7 +6,7 @@ mod common {
 }
 
 use http::header::HOST;
-use http::{Method, Request, StatusCode};
+use http::{Method, Request};
 use pretty_assertions::assert_eq;
 
 use super::prepare_webtransport;
@@ -85,6 +85,7 @@ upstream = "app"
   let prepared = prepare_webtransport(
     &webtransport_request(),
     "203.0.113.10:45678".parse().unwrap(),
+    None,
     WafTransportMetadataInput::default(),
     &WafTlsMetadata::default(),
     &state,
@@ -101,7 +102,7 @@ upstream = "app"
 }
 
 #[tokio::test]
-async fn prepare_webtransport_pool_route_returns_bad_gateway_without_panicking() {
+async fn prepare_webtransport_selects_https_pool_with_inferred_h2() {
   let temp_dir = common::TempDir::new("pool-webtransport");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "pool-webtransport");
   let raw = format!(
@@ -147,18 +148,20 @@ upstream_pool = "app-pool"
     .await
     .expect("snapshot should initialize");
 
-  let response = match prepare_webtransport(
+  let prepared = prepare_webtransport(
     &webtransport_request(),
     "203.0.113.10:45678".parse().unwrap(),
+    None,
     WafTransportMetadataInput::default(),
     &WafTlsMetadata::default(),
     &state,
   )
   .await
-  {
-    Ok(_) => panic!("pool route should be rejected with a response, not panic"),
-    Err(response) => response,
-  };
+  .expect("HTTPS pool should prepare its inferred H2 transport");
 
-  assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+  assert_eq!(prepared.upstream_version, crate::config::HttpVersion::H2);
+  assert_eq!(
+    prepared.target_url.as_str(),
+    "https://app-a.example/origin/session?token=1"
+  );
 }

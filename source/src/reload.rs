@@ -160,6 +160,7 @@ impl ReloadManager {
         &client_certificate_forwarding_headers,
       );
     let snapshot = AppSnapshot {
+      webtransport_h2_budget: active.webtransport_h2_budget.clone(),
       runtime_topology: active.runtime_topology.clone(),
       hardening,
       route_table,
@@ -376,6 +377,7 @@ impl ReloadManager {
         &client_certificate_forwarding_headers,
       );
     let snapshot = AppSnapshot {
+      webtransport_h2_budget: active.webtransport_h2_budget.clone(),
       runtime_topology: active.runtime_topology.clone(),
       hardening,
       route_table: active.route_table.clone(),

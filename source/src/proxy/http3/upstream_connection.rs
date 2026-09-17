@@ -79,6 +79,25 @@ pub(in crate::proxy::http3) struct WebTransportConnectionGuard {
   _connection_admission: crate::circuit_breakers::AdmissionLease,
 }
 
+/// Keeps the dedicated upstream transport and its connection admission alive
+/// for a bridged WebTransport session.
+pub(crate) struct UpstreamWebTransportConnectionGuard {
+  _h3: Option<WebTransportConnectionGuard>,
+  _h2: Option<crate::proxy::webtransport_h2::upstream::H2WebTransportConnectionGuard>,
+}
+
+impl UpstreamWebTransportConnectionGuard {
+  pub(crate) fn is_http2(&self) -> bool {
+    self._h2.is_some()
+  }
+
+  pub(crate) async fn finish_http2(&mut self) {
+    if let Some(guard) = &mut self._h2 {
+      guard.finish().await;
+    }
+  }
+}
+
 impl WebTransportConnectionGuard {
   pub(in crate::proxy::http3) fn new(
     endpoint: h3_quinn::quinn::Endpoint,
@@ -672,30 +691,76 @@ fn attach_upstream_certificate<T>(
   response
 }
 
-pub(in crate::proxy::http3) async fn connect_upstream_webtransport(
+pub(crate) async fn connect_upstream_webtransport(
   prepared: &http_proxy::PreparedWebTransport,
   state: &AppSnapshot,
 ) -> anyhow::Result<(
   super::webtransport_bridge::UpstreamWebTransportSession,
-  WebTransportConnectionGuard,
+  UpstreamWebTransportConnectionGuard,
   Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
 )> {
-  let client = state
-    .h3_clients
-    .for_upstream(&prepared.upstream.name)
-    .with_context(|| {
-      format!(
-        "missing upstream WebTransport client for {}",
-        prepared.upstream.name
-      )
-    })?;
-  client
-    .connect_webtransport(
-      prepared,
-      &state.config.proxy.trusted_ca_certs,
-      &state.metrics,
-    )
-    .await
+  match prepared.upstream_version {
+    crate::config::HttpVersion::H3 => {
+      let client = state
+        .h3_clients
+        .for_upstream(&prepared.upstream.name)
+        .with_context(|| {
+          format!(
+            "missing upstream WebTransport client for {}",
+            prepared.upstream.name
+          )
+        })?;
+      let headers = h3_connect_headers(&prepared.headers, prepared.downstream_http2);
+      let (session, guard, certificate) = client
+        .connect_webtransport(
+          prepared,
+          headers,
+          &state.config.proxy.trusted_ca_certs,
+          &state.metrics,
+        )
+        .await?;
+      Ok((
+        session,
+        UpstreamWebTransportConnectionGuard {
+          _h3: Some(guard),
+          _h2: None,
+        },
+        certificate,
+      ))
+    }
+    crate::config::HttpVersion::H2 => {
+      let (session, guard, certificate) =
+        crate::proxy::webtransport_h2::upstream::connect_upstream_webtransport(prepared, state)
+          .await?;
+      Ok((
+        session,
+        UpstreamWebTransportConnectionGuard {
+          _h3: None,
+          _h2: Some(guard),
+        },
+        certificate,
+      ))
+    }
+    crate::config::HttpVersion::H1 => anyhow::bail!(
+      "WebTransport forwarding requires the selected upstream HTTP version to be HTTP/2 or HTTP/3"
+    ),
+  }
+}
+
+fn h3_connect_headers(headers: &http::HeaderMap, downstream_http2: bool) -> http::HeaderMap {
+  let mut headers = headers.clone();
+  if downstream_http2 {
+    // These are the HTTP/2 capsule representation, not H3 WebTransport
+    // request fields. The H3 connector intentionally preserves the existing
+    // H3-to-H3 contract on the other branch.
+    headers.remove("capsule-protocol");
+    headers.remove("webtransport-init");
+    headers.insert(
+      "sec-webtransport-http3-draft",
+      http::HeaderValue::from_static("draft02"),
+    );
+  }
+  headers
 }
 
 #[cfg(test)]
@@ -744,5 +809,29 @@ mod tests {
       &Method::GET,
       StatusCode::OK
     ));
+  }
+
+  #[test]
+  fn h2_capsule_connect_headers_are_regenerated_for_an_h3_leg() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("capsule-protocol", http::HeaderValue::from_static("?1"));
+    headers.insert("webtransport-init", http::HeaderValue::from_static("a=?0"));
+    headers.insert("x-route-header", http::HeaderValue::from_static("kept"));
+    let headers = h3_connect_headers(&headers, true);
+    assert!(!headers.contains_key("capsule-protocol"));
+    assert!(!headers.contains_key("webtransport-init"));
+    assert_eq!(headers["sec-webtransport-http3-draft"], "draft02");
+    assert_eq!(headers["x-route-header"], "kept");
+  }
+
+  #[test]
+  fn h3_connect_headers_preserve_the_h3_to_h3_contract() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+      "sec-webtransport-http3-draft",
+      http::HeaderValue::from_static("existing"),
+    );
+    let headers = h3_connect_headers(&headers, false);
+    assert_eq!(headers["sec-webtransport-http3-draft"], "existing");
   }
 }

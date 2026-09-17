@@ -118,7 +118,9 @@ pub(crate) use upstream_client::{
   build_webpki_client_config_with_crypto, validate_upstream_client_identity,
 };
 pub(crate) use upstream_policy::{
-  build_upstream_client_config_with_policy, build_upstream_quic_client_config_with_policy,
+  build_upstream_client_config_with_policy,
+  build_upstream_h2_webtransport_client_config_with_policy,
+  build_upstream_quic_client_config_with_policy,
 };
 
 pub fn install_default_provider() -> anyhow::Result<()> {
@@ -381,13 +383,13 @@ pub(crate) fn build_admin_server_config_with_crypto_and_resumption(
       mode: tls.resumption.mode,
       server_identity: certificate_identity(&identity_certs),
       client_auth_identity: client_auth_identity(&tls.client_auth)?,
-      alpn_family: "admin-http1",
+      alpn_family: "admin-http1-http2",
       tls_provider: crypto.tls_provider,
       enable_secp256r1mlkem768: tls.enable_secp256r1mlkem768,
     },
     resumption_state,
   )?;
-  server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+  server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
   Ok(Arc::new(server_config))
 }
 

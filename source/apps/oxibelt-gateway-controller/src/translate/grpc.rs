@@ -90,6 +90,7 @@ impl TranslationState {
             &generated.name,
             &source,
             client_identity.as_identity(),
+            None,
           ) {
             Ok(pool) => pool,
             Err(failure) => {
@@ -143,8 +144,11 @@ fn grpc_match_route(
       methods: vec!["POST".to_string()],
       headers,
       queries: Vec::new(),
+      protocols: Vec::new(),
       priority: 11_000 - (rule_index as i32 * 100) - match_index as i32,
       upstream_pool: None,
+      upstream_http_version: None,
+      webtransport_upstream_http_version: None,
       direct_response_status: None,
       rewrite: None,
       redirect: None,

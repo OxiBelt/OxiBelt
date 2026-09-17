@@ -9,8 +9,8 @@ use serde::Deserialize;
 use url::Url;
 
 use super::{
-  DnsDiscoveryRecordType, LoadBalancingAlgorithm, UpstreamDiscoveryProvider, UpstreamPoolConfig,
-  UpstreamTlsConfig, validate_optional_non_empty,
+  DiscoveryUpstreamScheme, DnsDiscoveryRecordType, HttpVersion, LoadBalancingAlgorithm,
+  UpstreamDiscoveryProvider, UpstreamPoolConfig, UpstreamTlsConfig, validate_optional_non_empty,
 };
 
 pub(super) const MAX_DISCOVERY_INSTANCES_PER_POOL: usize = 64;
@@ -295,6 +295,14 @@ pub(super) fn validate_pool_discovery(pool: &UpstreamPoolConfig) -> anyhow::Resu
       });
   let mut identities = HashSet::new();
   for discovery in &pool.discovery {
+    if pool.max_http_version == Some(HttpVersion::H3)
+      && discovery.scheme != DiscoveryUpstreamScheme::Https
+    {
+      bail!(
+        "upstream pool {} max_http_version = \"h3\" requires every discovery scheme to be https",
+        pool.name
+      );
+    }
     if let Some(id) = discovery.id.as_deref() {
       super::validate_runtime_identifier("upstream discovery id", id)?;
     }

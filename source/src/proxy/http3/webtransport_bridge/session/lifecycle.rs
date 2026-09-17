@@ -87,10 +87,25 @@ pub(super) fn close_session_inner(
   };
   record_session_end_metrics(&session, metrics_close);
   session_index.remove(session_id);
-  for task in session.tasks {
+  for task in &session.tasks {
     task.abort();
   }
   session.upstream.close(close_code, reason);
   session.connect_stream.stop_stream(Code::H3_NO_ERROR);
   session.connect_stream.stop_sending(Code::H3_NO_ERROR);
+  retire_http2_upstream(session);
+}
+
+pub(super) fn retire_http2_upstream(mut session: ActiveWebTransportSession) {
+  if session._upstream_connection_guard.is_http2() {
+    // H2 CLOSE is queued asynchronously. Retain the session's permits and
+    // reservations until its forwarding tasks and carrier have retired.
+    tokio::spawn(async move {
+      for task in session.tasks.drain(..) {
+        let _ = task.await;
+      }
+      session._upstream_connection_guard.finish_http2().await;
+      drop(session);
+    });
+  }
 }

@@ -7,12 +7,12 @@ use crate::config::ConnectionLimitIdentityMode;
 use crate::limits::{ConnectionLimitContext, ConnectionPermit};
 use crate::state::AppSnapshot;
 
-pub(super) struct WebTransportSessionPermits {
+pub(crate) struct WebTransportSessionPermits {
   _request_connection_permit: Option<ConnectionPermit>,
   _webtransport_session_permit: ConnectionPermit,
 }
 
-pub(super) async fn acquire_webtransport_session_permits(
+pub(crate) async fn acquire_webtransport_session_permits(
   client_ip: std::net::IpAddr,
   connection_limit_context: Option<&ConnectionLimitContext>,
   state: &AppSnapshot,

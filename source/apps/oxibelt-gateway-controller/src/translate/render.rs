@@ -50,6 +50,11 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
     out.push_str("name = ");
     out.push_str(&toml_string(&pool.name));
     out.push('\n');
+    if let Some(max_http_version) = pool.max_http_version {
+      out.push_str("max_http_version = ");
+      out.push_str(&toml_string(max_http_version.as_str()));
+      out.push('\n');
+    }
     for server in &pool.servers {
       out.push_str("\n[[upstream_pools.servers]]\n");
       out.push_str("id = ");
@@ -212,6 +217,12 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       out.push_str(&toml_string(upstream_pool));
       out.push('\n');
     }
+    if let Some(upstream_http_version) = route.upstream_http_version {
+      out.push_str("upstream_http_version = ");
+      out.push_str(&toml_string(upstream_http_version.as_str()));
+      out.push('\n');
+      out.push_str("upstream_http_version_mode = \"exact\"\n");
+    }
     if let Some(external_auth) = &route.external_auth {
       out.push_str("external_auth = ");
       out.push_str(&toml_string(external_auth));
@@ -240,6 +251,11 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
     out.push_str("priority = ");
     out.push_str(&route.priority.to_string());
     out.push('\n');
+    if !route.protocols.is_empty() {
+      out.push_str("protocols = ");
+      out.push_str(&toml_string_array(&route.protocols));
+      out.push('\n');
+    }
     if !route.methods.is_empty() {
       out.push_str("methods = ");
       out.push_str(&toml_string_array(&route.methods));

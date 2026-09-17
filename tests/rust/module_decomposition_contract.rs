@@ -21,6 +21,9 @@ const PURE_WAF_MODULES: &[&str] = &[
   "waf/object_model.rs",
 ];
 const WEBTRANSPORT_ADMIN_BRIDGES: &[&str] = &[
+  // The H2 session owner registers and drains sessions through the same
+  // transport-neutral runtime registry as the H3 session owner.
+  "proxy/webtransport_h2/ingress.rs",
   "proxy/http3/webtransport_bridge/session.rs",
   "proxy/http3/webtransport_bridge/session/state.rs",
   "proxy/http3/webtransport_bridge/session/admin_commands.rs",

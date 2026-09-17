@@ -34,6 +34,7 @@ required_jobs=(
   docker-alpine-musl-image-riscv64
   docker-image-trivy-scan
   docker-integration-helper-images
+  webtransport-h2-integration
   admin-mutation-postgres
   admin-operation-postgres
   admin-audit-anchor-postgres

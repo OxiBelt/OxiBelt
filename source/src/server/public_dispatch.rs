@@ -99,6 +99,8 @@ pub(super) async fn handle_connection(
     tls_stream.get_ref().1,
     &client_hello_metadata,
   ));
+  let h2_webtransport_tls13 =
+    tls_stream.get_ref().1.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_3);
   let mut proxy_tls_evidence = crate::proxy_protocol_egress::tls::ConnectionTlsEvidence {
     received: received_proxy.clone(),
     local_capture_failed: capture_local_tls && local_destination.is_none(),
@@ -138,6 +140,7 @@ pub(super) async fn handle_connection(
   };
 
   let request_count = Arc::new(AtomicUsize::new(0));
+  let webtransport_session_count = Arc::new(AtomicUsize::new(0));
   let request_counter = if negotiated == b"h2" {
     RuntimeCounter::Http2Stream
   } else {
@@ -154,6 +157,7 @@ pub(super) async fn handle_connection(
   let h1_request_count = request_count.clone();
   let request_state = handshake_state.clone();
   let request_drain = drain.clone();
+  let request_webtransport_sessions = webtransport_session_count.clone();
   let service = service_fn(move |mut request: hyper::Request<Incoming>| {
     let received_proxy = received_proxy.clone();
     let proxy_tls_evidence = proxy_tls_evidence.clone();
@@ -164,6 +168,7 @@ pub(super) async fn handle_connection(
     let request_index = request_count.fetch_add(1, Ordering::Relaxed);
     let connection_limit_context = connection_limit_context.clone();
     let drain = request_drain.clone();
+    let webtransport_sessions = request_webtransport_sessions.clone();
     async move {
       let transport_metadata = WafTransportMetadataInput {
         proxy_protocol: received_proxy.as_deref(),
@@ -187,6 +192,25 @@ pub(super) async fn handle_connection(
           StatusCode::TOO_MANY_REQUESTS,
           "too many requests on this connection",
         ));
+      }
+      if request.version() == ::http::Version::HTTP_2
+        && crate::proxy::webtransport_h2::ingress::is_webtransport_request(&request)
+      {
+        return Ok(
+          crate::proxy::webtransport_h2::ingress::handle_request(
+            request,
+            peer_addr,
+            tcp_max_hop,
+            transport_metadata,
+            tls_metadata,
+            connection_limit_context,
+            state,
+            h2_webtransport_tls13,
+            drain,
+            webtransport_sessions,
+          )
+          .await,
+        );
       }
       let response = http::handle_with_forwarded_header_cache(
         request,
@@ -215,6 +239,9 @@ pub(super) async fn handle_connection(
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     builder.timer(TokioTimer::new());
     crate::h2_tuning::apply_server_defaults(&mut builder, &handshake_state.config.proxy.http2);
+    if h2_webtransport_tls13 {
+      builder.webtransport_settings(crate::proxy::webtransport_h2::ingress::server_settings());
+    }
     builder.max_header_list_size(handshake_state.config.limits.max_total_header_bytes as u32);
     let io = prefixed_io::PrefixedIo::new(tls_stream, early_data_prefix);
     let connection = builder.serve_connection(TokioIo::new(io), service);

@@ -333,6 +333,7 @@ async fn webtransport_preparation_uses_scoped_client_identity() {
   let prepared = webtransport::prepare_webtransport(
     &request,
     "10.0.0.7:443".parse().unwrap(),
+    None,
     WafTransportMetadataInput::default(),
     &tls,
     state.as_ref(),

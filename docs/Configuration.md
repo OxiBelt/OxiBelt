@@ -2198,7 +2198,7 @@ value = "spiffe://example.test/ns/edge/sa/controller"
 principal = "controller"
 ```
 
-With `bearer_mode = "required"`, the bearer or break-glass credential must resolve to the same IPM principal as the certificate. `optional` permits a mapped certificate to act as that principal without a bearer credential. A missing, malformed, revoked, unmapped, ambiguous, or mismatched identity returns the generic Admin `401` response. Certificate rotation can overlap old and new exact SAN mappings while both target the same principal. Certificate-chain failures such as an unknown CA or expired certificate fail during TLS and never reach HTTP authorization. The binding applies to Admin TCP TLS and Admin HTTP/3 only; it does not change public listener identity behavior. `/admin/v1/capabilities` reports whether the binding is active and its bearer mode.
+With `bearer_mode = "required"`, the bearer or break-glass credential must resolve to the same IPM principal as the certificate. `optional` permits a mapped certificate to act as that principal without a bearer credential. A missing, malformed, revoked, unmapped, ambiguous, or mismatched identity returns the generic Admin `401` response. Certificate rotation can overlap old and new exact SAN mappings while both target the same principal. Certificate-chain failures such as an unknown CA or expired certificate fail during TLS and never reach HTTP authorization. The binding applies to Admin TCP TLS, HTTP/2, and HTTP/3 only; it does not change public listener identity behavior. `/admin/v1/capabilities` reports whether the binding is active and its bearer mode.
 
 `[admin.http3]` enables an opt-in UDP HTTP/3 Admin listener for Admin WebTransport operation event subscriptions. It requires `admin.enabled = true`, `admin.tls.enabled = true`, and Admin TLS settings that allow TLS 1.3. When `bind` is omitted, OxiBelt listens on the same IP and port as `admin.bind` over UDP; the existing HTTP/1 Admin listener remains unchanged.
 
@@ -2271,7 +2271,7 @@ lowercase UUIDs. `GET /admin/v1/operations/{id}/events` streams SSE by default
 or NDJSON with `?format=ndjson`; this follows MCP Streamable HTTP-style event
 streaming semantics, but OxiBelt is not a full MCP server. WebSocket event
 subscriptions are limited to `/admin/v1/operations/{id}/events/ws`.
-When both `[admin.http3]` and `admin.operations.webtransport` are enabled,
+When `admin.operations.webtransport` is enabled, TLS 1.3 HTTP/2 and enabled
 HTTP/3 clients may use WebTransport `CONNECT
 /admin/v1/operations/{id}/events/wt`; OxiBelt accepts the session and writes
 newline-delimited JSON operation events on one server-initiated unidirectional
@@ -4554,7 +4554,7 @@ upstream = "app"
 # server_error = "/50x.html"
 ```
 
-`upstream_http_version` is a route-level backend protocol override and must not exceed the selected upstream capability. HTTP/3 overrides are rejected for upstream-pool routes and for upstreams with PROXY protocol egress enabled.
+`upstream_http_version` is a route-level backend protocol override and must not exceed the selected upstream capability. For upstream-pool routes, HTTP/3 overrides require a pool explicitly configured with `max_http_version = "h3"`. HTTP/3 overrides remain rejected for upstreams with PROXY protocol egress enabled.
 
 Route timeout overrides are optional. Omitted values inherit from `[limits]` for downstream behavior and from the selected `[[upstreams]]` entry for upstream behavior. TLS handshake and downstream header read timeouts are not route-level because route matching has not happened yet.
 
@@ -4983,3 +4983,53 @@ hosts = ["example.com", "www.example.com"]
 path_prefix = "/"
 upstream = "app"
 ```
+
+## HTTP/2 WebTransport
+
+HTTP/2 WebTransport is built into TLS 1.3 public listeners and uses the existing
+route protocol and upstream `webtransport` controls. Select an HTTP/2 or HTTP/3
+upstream with the existing route version controls; selection never falls back to
+another transport or replays CONNECT. Both directions support unidirectional and
+bidirectional streams and datagrams. Existing HTTP/3 behavior is preserved.
+
+```toml
+[proxy.http2.webtransport]
+max_concurrent_uni_streams = 100
+max_concurrent_bidi_streams = 100
+max_stream_buffer_bytes = 65536
+max_session_buffer_bytes = 1048576
+max_total_buffer_bytes = 67108864
+```
+
+Stream counts must be positive. Buffer sizes require
+`0 < stream <= session <= total <= 4294967295`. The total budget must accommodate
+both session directions plus bounded protocol and per-stream metadata. Admission
+reserves that capacity before accepting a downstream session. The process budget
+is retained across reloads, so old sessions continue counting against a replacement
+configuration's ceiling. The existing total, per-IP, named identity, per-connection,
+idle, WAF, bandwidth, and drain controls also apply to HTTP/2 sessions.
+
+Native `[[upstream_pools]]` accepts optional `max_http_version = "h1" | "h2" | "h3"`.
+Omission preserves existing H1/H2 inference. An H3 pool requires HTTPS origins for
+static, discovered, and Admin-added members. This setting controls forwarding;
+health-check transport retains its existing configuration. Gateway's
+`OxiBeltRoutePolicy.spec.webTransport.upstreamHttpVersion` selects `h2` or `h3`
+for a separate WebTransport-only sibling route and pool; see [Gateway API](GatewayAPI.md).
+
+TLS Admin listeners advertise HTTP/2 and HTTP/1.1. Ordinary Admin HTTP/2 APIs keep
+the configured TLS policy; WebTransport requires TLS 1.3. Plaintext Admin listeners
+remain HTTP/1.1. `admin.operations.webtransport` and its existing session limit
+apply to the same `/admin/v1/operations/{id}/events/wt` endpoint on both H2 and H3.
+The H2 endpoint emits NDJSON on a server-initiated unidirectional stream and grants
+no client application-stream credit.
+
+```toml
+[admin.http2.webtransport]
+outbound_queue_bytes_per_session = 65536
+outbound_queue_bytes_total = 4194304
+```
+
+Admin queue budgets require at least four per-session bytes, with per-session bytes no greater than
+total bytes and total bytes no greater than `4294967295`. They are independent of
+the public proxy budget and retained across reloads. See [WebTransport](WebTransport.md)
+for the pinned wire contract and interoperability limitations.

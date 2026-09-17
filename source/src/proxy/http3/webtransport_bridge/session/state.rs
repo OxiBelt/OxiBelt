@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 
 use super::super::super::H3RequestStream;
-use super::super::super::upstream_connection::WebTransportConnectionGuard;
+use super::super::super::UpstreamWebTransportConnectionGuard;
 use super::super::upstream_adapter::UpstreamWebTransportSession;
 use super::connection_limits::WebTransportSessionPermits;
 use super::datagram_pacing::DatagramPacerSender;
@@ -22,7 +22,7 @@ use crate::webtransport_admin::WebTransportSessionGuard;
 
 pub(in crate::proxy::http3::webtransport_bridge) struct ActiveWebTransportSession {
   pub(super) upstream: Arc<UpstreamWebTransportSession>,
-  pub(super) _upstream_connection_guard: WebTransportConnectionGuard,
+  pub(super) _upstream_connection_guard: UpstreamWebTransportConnectionGuard,
   pub(super) connect_stream: H3RequestStream,
   #[cfg(feature = "admin-runtime")]
   pub(super) admin_guard: WebTransportSessionGuard,

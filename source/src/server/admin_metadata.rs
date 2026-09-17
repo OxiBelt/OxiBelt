@@ -70,8 +70,13 @@ fn capabilities_response(
     "upstream_pool_runtime_control": true,
     "stream_pool_runtime_control": true,
     "admin_operations": snapshot.config.admin.operations.enabled,
+    "admin_http2": snapshot.config.admin.enabled && snapshot.config.admin.tls.enabled,
     "admin_http3": snapshot.config.admin.http3.enabled,
     "admin_operation_webtransport": snapshot.config.admin.operations.webtransport,
+    "admin_operation_webtransport_h2": snapshot.config.admin.enabled
+      && snapshot.config.admin.tls.enabled
+      && snapshot.config.admin.tls.max_version == crate::config::TlsVersion::Tls13
+      && snapshot.config.admin.operations.webtransport,
     "admin_audit": snapshot.config.admin.audit.enabled,
     "admin_audit_anchoring": snapshot.config.admin.audit.anchor.enabled,
     "admin_mutation_replay": snapshot.config.admin.mutations.mode.enabled(),

@@ -40,6 +40,7 @@ pub(crate) use response_bandwidth::shape_webtransport_response;
 use response_bandwidth::with_webtransport_bandwidth_context;
 
 pub(crate) struct PreparedWebTransport {
+  pub(crate) downstream_http2: bool,
   pub(crate) status_headers: crate::config::StatusHeadersConfig,
   pub(crate) bandwidth: Arc<RouteBandwidthLimiter>,
   pub(crate) client_addr: std::net::SocketAddr,
@@ -50,6 +51,7 @@ pub(crate) struct PreparedWebTransport {
   pub(crate) headers: http::HeaderMap,
   pub(crate) protocols: Vec<String>,
   pub(crate) upstream: UpstreamConfig,
+  pub(crate) upstream_version: HttpVersion,
   pub(crate) timeouts: EffectiveTimeouts,
   pub(crate) stream_waf: Option<StreamWafRequestContext>,
   _pool_selection: Option<PoolSelection>,
@@ -58,6 +60,7 @@ pub(crate) struct PreparedWebTransport {
 pub(crate) async fn prepare_webtransport(
   request: &Request<()>,
   peer_addr: std::net::SocketAddr,
+  tcp_max_hop: Option<u8>,
   transport_metadata: WafTransportMetadataInput<'_>,
   tls: &WafTlsMetadata,
   state: &AppSnapshot,
@@ -211,7 +214,7 @@ pub(crate) async fn prepare_webtransport(
           headers: Some(request.headers()),
           tls_fingerprint: tls.fingerprint.as_deref(),
           client_asn,
-          tcp_max_hop: None,
+          tcp_max_hop,
           person_proof_clearance_hash: None,
         }))
   {
@@ -226,7 +229,7 @@ pub(crate) async fn prepare_webtransport(
           received_at_unix_ms,
           method: &request_method,
           uri: &request_uri,
-          version: http::Version::HTTP_3,
+          version: request.version(),
           headers: request.headers(),
           body: None,
           peer_addr: client_addr,
@@ -234,10 +237,14 @@ pub(crate) async fn prepare_webtransport(
           downstream_host: &host,
           downstream_scheme: "https",
           route_name: &resolved.route.name,
-          tcp_max_hop: None,
+          tcp_max_hop,
           tls,
           protocol: WafProtocol::Webtransport,
-          transport_network: WafTransportNetwork::Udp,
+          transport_network: if request.version() == http::Version::HTTP_2 {
+            WafTransportNetwork::Tcp
+          } else {
+            WafTransportNetwork::Udp
+          },
           transport_metadata,
           tags: tags_ref(&tags),
           dynamic_policy: &DynamicPolicyContext::default(),
@@ -260,7 +267,7 @@ pub(crate) async fn prepare_webtransport(
           headers: Some(request.headers()),
           tls_fingerprint: tls.fingerprint.as_deref(),
           client_asn,
-          tcp_max_hop: None,
+          tcp_max_hop,
           person_proof_clearance_hash,
         },
         &state.limits,
@@ -305,7 +312,7 @@ pub(crate) async fn prepare_webtransport(
                 received_at_unix_ms,
                 method: &request_method,
                 uri: &request_uri,
-                version: http::Version::HTTP_3,
+                version: request.version(),
                 headers: request.headers(),
                 body: None,
                 peer_addr: client_addr,
@@ -313,10 +320,14 @@ pub(crate) async fn prepare_webtransport(
                 downstream_host: &host,
                 downstream_scheme: "https",
                 route_name: &resolved.route.name,
-                tcp_max_hop: None,
+                tcp_max_hop,
                 tls,
                 protocol: WafProtocol::Webtransport,
-                transport_network: WafTransportNetwork::Udp,
+                transport_network: if request.version() == http::Version::HTTP_2 {
+                  WafTransportNetwork::Tcp
+                } else {
+                  WafTransportNetwork::Udp
+                },
                 transport_metadata,
                 tags: tags_ref(&tags),
                 dynamic_policy: &dynamic_policy_context,
@@ -451,7 +462,7 @@ pub(crate) async fn prepare_webtransport(
           received_at_unix_ms,
           method: &request_method,
           uri: &request_uri,
-          version: http::Version::HTTP_3,
+          version: request.version(),
           headers: &request_headers,
           body: None,
           peer_addr: client_addr,
@@ -459,10 +470,14 @@ pub(crate) async fn prepare_webtransport(
           downstream_host: &host,
           downstream_scheme: "https",
           route_name: &resolved.route.name,
-          tcp_max_hop: None,
+          tcp_max_hop,
           tls,
           protocol: WafProtocol::Webtransport,
-          transport_network: WafTransportNetwork::Udp,
+          transport_network: if request.version() == http::Version::HTTP_2 {
+            WafTransportNetwork::Tcp
+          } else {
+            WafTransportNetwork::Udp
+          },
           transport_metadata,
           tags: tags_ref(&tags),
           dynamic_policy: &dynamic_policy_context,
@@ -521,16 +536,20 @@ pub(crate) async fn prepare_webtransport(
         received_at_unix_ms,
         method: request_method.clone(),
         uri: request_uri.clone(),
-        version: http::Version::HTTP_3,
+        version: request.version(),
         headers: request_headers.clone(),
         peer_addr,
         downstream_host: host.to_string(),
         downstream_scheme: "https",
         route_name: resolved.route.name.clone(),
-        tcp_max_hop: None,
+        tcp_max_hop,
         tls: Arc::new(tls.clone()),
         protocol: WafProtocol::Webtransport,
-        transport_network: WafTransportNetwork::Udp,
+        transport_network: if request.version() == http::Version::HTTP_2 {
+          WafTransportNetwork::Tcp
+        } else {
+          WafTransportNetwork::Udp
+        },
         tcp_mss: transport_metadata.tcp_mss,
         tcp_rtt_ms: transport_metadata.tcp_rtt_ms,
         udp_datagram_size: transport_metadata.udp_datagram_size,
@@ -633,11 +652,11 @@ pub(crate) async fn prepare_webtransport(
     state.config.proxy.auto_upgrade.max_http_version,
     upstream.max_http_version,
   );
-  if upstream_version != HttpVersion::H3 {
+  if !matches!(upstream_version, HttpVersion::H2 | HttpVersion::H3) {
     return Err(preparation_error!(with_route_security_headers(
       text_response(
         StatusCode::BAD_GATEWAY,
-        "WebTransport forwarding requires HTTP/3 upstream",
+        "WebTransport forwarding requires HTTP/2 or HTTP/3 upstream",
       ),
       &state.config.security,
       resolved.route,
@@ -738,6 +757,7 @@ pub(crate) async fn prepare_webtransport(
   let protocols = parse_webtransport_protocols(&headers);
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
   Ok(PreparedWebTransport {
+    downstream_http2: request.version() == http::Version::HTTP_2,
     status_headers,
     bandwidth: resolved.bandwidth.clone(),
     client_addr,
@@ -748,6 +768,7 @@ pub(crate) async fn prepare_webtransport(
     headers,
     protocols,
     upstream: upstream.clone(),
+    upstream_version,
     timeouts,
     stream_waf,
     _pool_selection: pool_selection,

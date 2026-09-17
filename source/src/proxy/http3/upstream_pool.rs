@@ -445,6 +445,7 @@ impl UpstreamH3Pool {
   pub(super) async fn connect_webtransport(
     &self,
     prepared: &crate::proxy::http::PreparedWebTransport,
+    headers: http::HeaderMap,
     global_roots: &[PathBuf],
     metrics: &Arc<Metrics>,
   ) -> anyhow::Result<(
@@ -476,10 +477,10 @@ impl UpstreamH3Pool {
     // WebTransport CONNECT so long-lived sessions are never duplicated.
     let session = tokio::time::timeout_at(
       deadlines.request,
-      super::webtransport_bridge::UpstreamWebTransportSession::connect(
+      super::webtransport_bridge::UpstreamWebTransportSession::connect_h3(
         connection,
         prepared.target_url.clone(),
-        prepared.headers.clone(),
+        headers,
         prepared.protocols.clone(),
       ),
     )

@@ -2,11 +2,11 @@ use anyhow::{Context, bail};
 use serde_json::Value;
 
 use super::{
-  GeneratedClientIdentity, GeneratedExternalAuth, GeneratedKubernetesDiscovery, GeneratedPool,
-  GeneratedRoute, GeneratedServer, NamedExactMatch, ObjectKey, TranslationState, backend_port,
-  backend_service_port, endpoint_slice_discovery_port, exact_service_backend_ref,
-  filters::ParsedRouteFilters, filters::parse_route_filters, intersect_hosts, sanitize_name,
-  string_at,
+  GeneratedClientIdentity, GeneratedExternalAuth, GeneratedHttpVersion,
+  GeneratedKubernetesDiscovery, GeneratedPool, GeneratedRoute, GeneratedServer, NamedExactMatch,
+  ObjectKey, TranslationState, backend_port, backend_service_port, endpoint_slice_discovery_port,
+  exact_service_backend_ref, filters::ParsedRouteFilters, filters::parse_route_filters,
+  intersect_hosts, sanitize_name, string_at,
 };
 use crate::cli::BackendResolution;
 use crate::model::{KubernetesObject, object_ref as model_object_ref};
@@ -100,6 +100,14 @@ impl TranslationState {
             continue;
           }
           if generated.redirect.is_some() {
+            if generated.webtransport_upstream_http_version.is_some() {
+              let failure = self.fail_closed_error(
+                model_object_ref(route),
+                "OxiBeltRoutePolicy webTransport requires a non-redirecting HTTPRoute rule",
+              );
+              self.complete_fail_closed_tombstone(tombstone_checkpoint, tombstone_route, failure);
+              continue;
+            }
             if tombstone {
               self.restore_generated(tombstone_checkpoint);
               self.push_fail_closed_tombstone(tombstone_route);
@@ -115,6 +123,7 @@ impl TranslationState {
             &generated.name,
             &source,
             client_identity.as_identity(),
+            None,
           ) {
             Ok(pool) => pool,
             Err(failure) => {
@@ -129,12 +138,41 @@ impl TranslationState {
           }
           generated.upstream_pool = Some(pool.name.clone());
           self.pools.insert(pool.name.clone(), pool);
+          let webtransport_version = generated.webtransport_upstream_http_version.take();
+          if let Some(version) = webtransport_version {
+            let mut webtransport = generated.clone();
+            webtransport.name = sanitize_name(&format!("{}-webtransport", generated.name));
+            webtransport.priority = webtransport.priority.saturating_add(1);
+            webtransport.protocols = vec!["webtransport".to_string()];
+            webtransport.upstream_http_version = Some(version);
+            let pool = match self.backend_pool(
+              route,
+              "HTTPRoute",
+              rule.get("backendRefs").and_then(Value::as_array),
+              &webtransport.name,
+              &source,
+              client_identity.as_identity(),
+              Some(version),
+            ) {
+              Ok(pool) => pool,
+              Err(failure) => {
+                self.complete_fail_closed_tombstone(tombstone_checkpoint, tombstone_route, failure);
+                continue;
+              }
+            };
+            webtransport.upstream_pool = Some(pool.name.clone());
+            self.pools.insert(pool.name.clone(), pool);
+            self.routes.push(generated);
+            self.routes.push(webtransport);
+            continue;
+          }
           self.routes.push(generated);
         }
       }
     }
   }
 
+  #[allow(clippy::too_many_arguments)]
   pub(super) fn backend_pool(
     &mut self,
     route: &KubernetesObject,
@@ -143,6 +181,7 @@ impl TranslationState {
     route_name: &str,
     source: &str,
     client_identity: Option<&GeneratedClientIdentity>,
+    max_http_version: Option<GeneratedHttpVersion>,
   ) -> Result<GeneratedPool, super::TranslationFailure> {
     let Some(backend_refs) = backend_refs else {
       return Err(self.preserve_last_good_error(
@@ -183,10 +222,21 @@ impl TranslationState {
         )?;
         discoveries.push(discovery);
       }
+      if max_http_version == Some(GeneratedHttpVersion::H3)
+        && discoveries
+          .iter()
+          .any(|discovery| discovery.scheme != "https")
+      {
+        return Err(self.fail_closed_error(
+          model_object_ref(route),
+          "OxiBeltRoutePolicy webTransport upstreamHttpVersion h3 requires HTTPS backend services",
+        ));
+      }
       let name = sanitize_name(&format!("{route_name}-pool"));
       return Ok(GeneratedPool {
         source: source.to_string(),
         name,
+        max_http_version,
         servers: Vec::new(),
         discoveries,
       });
@@ -198,10 +248,21 @@ impl TranslationState {
         self.backend_server(route, from_kind, backend, index, weight, client_identity)?;
       servers.push(server);
     }
+    if max_http_version == Some(GeneratedHttpVersion::H3)
+      && servers
+        .iter()
+        .any(|server| !server.origin.starts_with("https://"))
+    {
+      return Err(self.fail_closed_error(
+        model_object_ref(route),
+        "OxiBeltRoutePolicy webTransport upstreamHttpVersion h3 requires HTTPS backend services",
+      ));
+    }
     let name = sanitize_name(&format!("{route_name}-pool"));
     Ok(GeneratedPool {
       source: source.to_string(),
       name,
+      max_http_version,
       servers,
       discoveries: Vec::new(),
     })
@@ -409,6 +470,7 @@ impl TranslationState {
         &route_name,
         source,
         client_identity,
+        None,
       )?;
       let mut action = mirror.action;
       action.max_body_bytes = self.request_mirror_max_body_bytes;
@@ -675,8 +737,11 @@ fn http_match_route(
       methods,
       headers,
       queries,
+      protocols: Vec::new(),
       priority: 10_000 - (context.rule_index as i32 * 100) - context.match_index as i32,
       upstream_pool: None,
+      upstream_http_version: None,
+      webtransport_upstream_http_version: None,
       direct_response_status: None,
       rewrite: None,
       redirect: None,

@@ -118,6 +118,19 @@ spec:
                     enum:
                     - url_encoded_pem
                     - rfc9440
+              webTransport:
+                description: >-
+                  Adds a WebTransport-only sibling route with the required exact
+                  upstream HTTP version.
+                type: object
+                required:
+                - upstreamHttpVersion
+                properties:
+                  upstreamHttpVersion:
+                    type: string
+                    enum:
+                    - h2
+                    - h3
               resumableUpload:
                 description: >-
                   References an operator-admitted upload profile. Tenants cannot
@@ -132,7 +145,7 @@ spec:
                     maxLength: 253
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
             x-kubernetes-validations:
-            - rule: has(self.waf) || has(self.limits) || has(self.timeouts) || has(self.clientCertificateForwarding) || has(self.resumableUpload)
+            - rule: has(self.waf) || has(self.limits) || has(self.timeouts) || has(self.clientCertificateForwarding) || has(self.webTransport) || has(self.resumableUpload)
               message: at least one bounded route policy field is required
           status:
             type: object

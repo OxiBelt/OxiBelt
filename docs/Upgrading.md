@@ -5,6 +5,33 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## WebTransport over HTTP/2
+
+WebTransport now supports both HTTP/2 and HTTP/3 on either proxy leg. The selected
+upstream version remains exact; sessions do not fall back to another transport.
+HTTP/2 WebTransport requires TLS 1.3 and uses the pinned draft-15 wire contract.
+Existing H3 draft02 sessions and ordinary HTTP TLS policy retain their behavior.
+
+The optional `proxy.http2.webtransport` limits bound stream concurrency and buffer
+reservations. Native pools can now explicitly select `max_http_version`; H3 pools
+require HTTPS members. Gateway RoutePolicy's optional
+`webTransport.upstreamHttpVersion` creates a separate WebTransport route and pool
+without changing the ordinary HTTP route. Apply the updated RoutePolicy CRD
+before using that field. Native configuration remains schema epoch 1.
+
+Admin TLS now negotiates HTTP/2 alongside HTTP/1.1; plaintext Admin remains
+HTTP/1.1. The enabled operation-event WebTransport endpoint is available over
+TLS 1.3 H2 using the existing authorization and shared session limit. Optional
+`admin.http2.webtransport` queue limits default to 65,536 bytes per session and
+4,194,304 bytes total. No persisted-state migration is required.
+
+Validate with `tests/scripts/run-webtransport-h2-integration.sh`. Before rollback,
+drain active WebTransport sessions, remove the new native settings and Gateway
+policy field from the target configuration, and validate with the older binary.
+Clients relying on H2 WebTransport must reconnect using a transport supported by
+the rollback version. See [WebTransport](WebTransport.md) for limits and protocol
+compatibility details.
+
 ## Resumable uploads
 
 The unprofiled Helm Deployment now permits `workload.deployment.maxSurge = 0`

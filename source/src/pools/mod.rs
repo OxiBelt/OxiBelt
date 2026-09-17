@@ -277,13 +277,15 @@ impl PoolState {
               &upstream_pool_server_id(index, server),
             ),
             origin: server.origin.clone(),
-            max_http_version: if server.origin.scheme() == "http"
-              && pool.health_check.protocol != HealthCheckProtocol::Grpc
-            {
-              HttpVersion::H1
-            } else {
-              HttpVersion::H2
-            },
+            max_http_version: pool.max_http_version.unwrap_or_else(|| {
+              if server.origin.scheme() == "http"
+                && pool.health_check.protocol != HealthCheckProtocol::Grpc
+              {
+                HttpVersion::H1
+              } else {
+                HttpVersion::H2
+              }
+            }),
             happy_eyeballs_mode: Default::default(),
             svcb_allowed_ports: Vec::new(),
             connect_timeout_ms: 3_000,

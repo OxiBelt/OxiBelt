@@ -146,6 +146,123 @@ fn http_route_generates_weighted_pool_and_route() {
 }
 
 #[test]
+fn webtransport_policy_emits_exact_sibling_route_and_distinct_pool() {
+  let route = HTTP_FIXTURE.replace(
+    "  - matches:\n",
+    "  - filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: webtransport\n    matches:\n",
+  );
+  let policy = r#"
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltRoutePolicy
+metadata:
+  name: webtransport
+  namespace: default
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: app
+  webTransport:
+    upstreamHttpVersion: h2
+"#;
+
+  let rendered =
+    translate_objects(&objects(&format!("{route}\n---\n{policy}")), &args()).expect("translate");
+
+  assert!(
+    rendered.diagnostics.is_empty(),
+    "{:?}",
+    rendered.diagnostics
+  );
+  assert_eq!(rendered.disposition, TranslationDisposition::Clean);
+  assert_eq!(rendered.toml.matches("[[routes]]").count(), 2);
+  assert_eq!(rendered.toml.matches("[[upstream_pools]]").count(), 2);
+  assert!(rendered.toml.contains("upstream_http_version = \"h2\""));
+  assert!(
+    rendered
+      .toml
+      .contains("upstream_http_version_mode = \"exact\"")
+  );
+  assert!(rendered.toml.contains("protocols = [\"webtransport\"]"));
+  assert!(rendered.toml.contains("max_http_version = \"h2\""));
+  assert!(
+    rendered
+      .toml
+      .contains("gwapi-http-default-app-0-0-webtransport")
+  );
+}
+
+#[test]
+fn webtransport_h3_rejects_plaintext_static_and_discovered_backends() {
+  let route = HTTP_FIXTURE.replace(
+    "  - matches:\n",
+    "  - filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: webtransport\n    matches:\n",
+  );
+  let policy = r#"
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltRoutePolicy
+metadata:
+  name: webtransport
+  namespace: default
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: app
+  webTransport:
+    upstreamHttpVersion: h3
+"#;
+  let raw = format!("{route}\n---\n{policy}");
+
+  for controller_args in [args(), endpoint_slice_args()] {
+    let rendered = translate_objects(&objects(&raw), &controller_args).expect("translate");
+    assert_eq!(
+      rendered.disposition,
+      TranslationDisposition::FailClosedDeprogram
+    );
+    assert!(has_error_containing(
+      &rendered,
+      "upstreamHttpVersion h3 requires HTTPS backend services"
+    ));
+    assert!(!rendered.toml.contains("origin = \"http://app.default"));
+  }
+}
+
+#[test]
+fn webtransport_policy_rejects_unsupported_version() {
+  let route = HTTP_FIXTURE.replace(
+    "  - matches:\n",
+    "  - filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: webtransport\n    matches:\n",
+  );
+  let policy = r#"
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltRoutePolicy
+metadata:
+  name: webtransport
+  namespace: default
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: app
+  webTransport:
+    upstreamHttpVersion: h1
+"#;
+
+  let rendered =
+    translate_objects(&objects(&format!("{route}\n---\n{policy}")), &args()).expect("translate");
+
+  assert_eq!(
+    rendered.disposition,
+    TranslationDisposition::FailClosedDeprogram
+  );
+  assert!(has_error_containing(
+    &rendered,
+    "spec.webTransport.upstreamHttpVersion must be h2 or h3"
+  ));
+}
+
+#[test]
 fn route_hostnames_are_narrowed_to_listener_ownership_and_disjoint_routes_are_omitted() {
   let wildcard_route = HTTP_FIXTURE.replace("  - api.example.com", "  - '*.example.com'");
   let rendered = translate_objects(&objects(&wildcard_route), &args()).expect("translate");

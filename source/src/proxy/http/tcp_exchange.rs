@@ -372,7 +372,11 @@ where
   }
 }
 
-pub(super) async fn connect_upstream_tcp(
+/// Opens an admitted TCP candidate using the shared HTTP resolver policy.
+///
+/// Long-lived protocol adapters retain the returned I/O inside their driver so
+/// its connection-admission lease lasts for the connection lifetime.
+pub(crate) async fn connect_upstream_tcp(
   upstream: &UpstreamConfig,
   resolution_config: &crate::config::UpstreamResolutionConfig,
   timeouts: EffectiveTimeouts,

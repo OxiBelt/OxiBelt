@@ -72,6 +72,8 @@ mod admin_dispatch;
 #[cfg(feature = "admin-runtime")]
 mod admin_error;
 #[cfg(feature = "admin-runtime")]
+mod admin_h2;
+#[cfg(feature = "admin-runtime")]
 mod admin_h3;
 #[cfg(feature = "admin-runtime")]
 mod admin_ipm;
@@ -113,6 +115,9 @@ mod admin_stream_pool_scope_tests;
 mod admin_stream_pools;
 #[cfg(feature = "admin-runtime")]
 mod admin_upstream_pools;
+#[cfg(feature = "admin-runtime")]
+#[path = "server/admin_h3_webtransport.rs"]
+mod admin_webtransport;
 mod connection_errors;
 #[cfg(feature = "admin-runtime")]
 mod file_sync_path;
@@ -218,8 +223,10 @@ pub const ADMIN_CAPABILITY_FEATURE_KEYS: &[&str] = &[
   "upstream_pool_runtime_control",
   "stream_pool_runtime_control",
   "admin_operations",
+  "admin_http2",
   "admin_http3",
   "admin_operation_webtransport",
+  "admin_operation_webtransport_h2",
   "admin_audit",
   "admin_audit_anchoring",
   "admin_mutation_replay",

@@ -17,6 +17,7 @@ use crate::waf::WafConfig;
 mod access_log;
 mod admin_audit;
 mod admin_audit_anchor;
+mod admin_http2;
 mod admin_legacy;
 mod admin_mutations;
 mod admin_operations;
@@ -99,6 +100,7 @@ mod workers;
 pub(crate) fn fuzz_native_config(input: &[u8]) {
   loader::fuzz_virtual_toml_documents(input);
 }
+pub use admin_http2::*;
 use admin_legacy::{LegacyAdminRbacConfig, LegacyAdminTokenStoreConfig};
 pub use admin_workload_identity::*;
 pub use cache_external::{

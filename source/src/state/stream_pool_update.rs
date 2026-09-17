@@ -35,6 +35,7 @@ impl AppSnapshot {
     );
 
     Ok(Self {
+      webtransport_h2_budget: previous.webtransport_h2_budget.clone(),
       config,
       runtime_topology: previous.runtime_topology.clone(),
       hardening,

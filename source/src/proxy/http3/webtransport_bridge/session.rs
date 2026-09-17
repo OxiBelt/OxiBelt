@@ -62,7 +62,9 @@ use crate::metrics::Metrics;
 pub(super) use admin_commands::close_session_with_code;
 #[cfg(feature = "admin-runtime")]
 use admin_commands::spawn_admin_session_command_forwarder;
-use connection_limits::acquire_webtransport_session_permits;
+pub(crate) use connection_limits::{
+  WebTransportSessionPermits, acquire_webtransport_session_permits,
+};
 use datagram_pacing::{
   DatagramQueueOutcome, QueuedDatagram, bridge_upstream_datagrams, datagram_pacer_channel,
   pace_downstream_datagrams, try_queue_datagram,
@@ -101,6 +103,7 @@ pub(super) async fn accept_webtransport_session(
   let mut prepared = match http_proxy::prepare_webtransport(
     &request,
     peer_addr,
+    None,
     crate::waf::WafTransportMetadataInput {
       udp_connection_id: Some(udp_connection_id.as_ref()),
       ..crate::waf::WafTransportMetadataInput::default()

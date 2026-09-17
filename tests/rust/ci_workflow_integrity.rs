@@ -115,6 +115,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "docker-alpine-musl-image-riscv64",
   "docker-image-trivy-scan",
   "docker-integration-helper-images",
+  "webtransport-h2-integration",
   "admin-mutation-postgres",
   "admin-operation-postgres",
   "admin-audit-anchor-postgres",
@@ -7664,15 +7665,15 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     workflow
       .matches("name: Download Docker integration helper image artifact")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 5,
-    "Docker integration/security-fuzz, Admin PostgreSQL durability, isolated Firefox, and Kubernetes rollout should download the helper artifact"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 6,
+    "Docker integration/security-fuzz, WebTransport HTTP/2, Admin PostgreSQL durability, isolated Firefox, and Kubernetes rollout should download the helper artifact"
   );
   assert_eq!(
     workflow
       .matches("name: Load Docker integration helper images")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 2,
-    "Docker integration/security-fuzz, isolated Firefox, and Kubernetes rollout should load the helper image tar"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3,
+    "Docker integration/security-fuzz, WebTransport HTTP/2, isolated Firefox, and Kubernetes rollout should load the helper image tar"
   );
   for value in [
     "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
@@ -7688,10 +7689,11 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
   ] {
     let expected_count = if value == "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci" {
       DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3
+    } else if value == "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci" {
+      DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 2
     } else if matches!(
       value,
       "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci"
-        | "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci"
         | "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\""
     ) {
       DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 1

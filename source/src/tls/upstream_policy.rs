@@ -13,7 +13,8 @@ use crate::config::{
 use super::outbound_revocation::OutboundRevocationRuntime;
 use super::resumption::TlsResumptionState;
 use super::upstream_client::{
-  build_upstream_client_config_with_trust, build_upstream_quic_client_config_with_trust,
+  build_upstream_client_config_with_trust, build_upstream_h2_webtransport_client_config_with_trust,
+  build_upstream_quic_client_config_with_trust,
 };
 
 pub(crate) fn build_upstream_client_config_with_policy(
@@ -26,6 +27,32 @@ pub(crate) fn build_upstream_client_config_with_policy(
 ) -> anyhow::Result<ClientConfig> {
   let root_certificates = effective_policy_roots(inherited_root_certificates, tls);
   build_upstream_client_config_with_trust(
+    crypto,
+    tls.enable_secp256r1mlkem768,
+    &root_certificates,
+    tls.trust,
+    &tls.subject_alt_names,
+    tls.client_identity.as_ref(),
+    &tls.ech,
+    &tls.resumption,
+    state,
+    upstream_name,
+    revocation,
+  )
+}
+
+/// Builds the dedicated TLS 1.3-only HTTP/2 WebTransport client while retaining
+/// the configured trust, SAN, identity, ECH, revocation, and resumption policy.
+pub(crate) fn build_upstream_h2_webtransport_client_config_with_policy(
+  crypto: &CryptoConfig,
+  inherited_root_certificates: &[std::path::PathBuf],
+  tls: &UpstreamTlsConfig,
+  state: Option<&TlsResumptionState>,
+  upstream_name: &str,
+  revocation: Option<(&OutboundRevocationRuntime, Arc<OutboundTlsRevocationConfig>)>,
+) -> anyhow::Result<ClientConfig> {
+  let root_certificates = effective_policy_roots(inherited_root_certificates, tls);
+  build_upstream_h2_webtransport_client_config_with_trust(
     crypto,
     tls.enable_secp256r1mlkem768,
     &root_certificates,

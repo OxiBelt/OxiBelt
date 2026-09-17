@@ -190,7 +190,9 @@ fn insert_origin(headers: &mut HeaderMap, cors: &RouteCorsActionConfig, origin: 
   insert_header_value(headers, ACCESS_CONTROL_ALLOW_ORIGIN, value);
 }
 
-fn origin_allowed(cors: &RouteCorsActionConfig, origin: &str) -> bool {
+/// Route CORS origin matching is shared by the HTTP/2 WebTransport handshake
+/// before its CONNECT response is committed.
+pub(crate) fn origin_allowed(cors: &RouteCorsActionConfig, origin: &str) -> bool {
   cors
     .allow_origins
     .iter()

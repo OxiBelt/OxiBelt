@@ -3,14 +3,15 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::config::{
-  UpstreamPoolHealthCheckConfig, UpstreamPoolKeepaliveConfig, UpstreamPoolOutlierEjectionConfig,
-  UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState,
-  UpstreamPoolSlowStartConfig,
+  HttpVersion, UpstreamPoolHealthCheckConfig, UpstreamPoolKeepaliveConfig,
+  UpstreamPoolOutlierEjectionConfig, UpstreamPoolServerConfig, UpstreamPoolServerSource,
+  UpstreamPoolServerState, UpstreamPoolSlowStartConfig,
 };
 
 pub(super) fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig {
   UpstreamPoolConfig {
     name: "app-pool".to_string(),
+    max_http_version: None,
     algorithm,
     hash_key: None,
     sticky_cookie: Default::default(),
@@ -77,6 +78,28 @@ fn synthetic_upstreams_preserve_keepalive_pool_cap() {
     assert_eq!(upstream.pool_max_idle_per_host, 7);
     assert_eq!(upstream.idle_timeout_ms, 12_345);
   }
+}
+
+#[test]
+fn synthetic_upstreams_honor_explicit_pool_http3_cap() {
+  let mut pool = test_pool(LoadBalancingAlgorithm::PowerOfTwoChoices);
+  pool.max_http_version = Some(HttpVersion::H3);
+  for server in &mut pool.servers {
+    server.origin = server
+      .origin
+      .as_str()
+      .replacen("http://", "https://", 1)
+      .parse()
+      .unwrap();
+  }
+
+  let upstreams = PoolState::synthetic_upstreams(&[pool]);
+
+  assert!(
+    upstreams
+      .iter()
+      .all(|upstream| upstream.max_http_version == HttpVersion::H3)
+  );
 }
 
 #[test]

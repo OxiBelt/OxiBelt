@@ -4,6 +4,7 @@ use super::*;
 
 impl Config {
   pub(super) fn validate_proxy(&self) -> anyhow::Result<()> {
+    self.proxy.http2.webtransport.validate()?;
     self.proxy.status_headers.validate("proxy.status_headers")?;
     for (index, route) in self.routes.iter().enumerate() {
       route

@@ -231,6 +231,13 @@ namespace in the operator's `routePolicy.resumableUploadProfiles` allowlist. It 
 stores, object buckets/endpoints, destination settings, or owner bindings, and
 it cannot alter `OxiBeltDataPlaneTarget` assignment. See [ResumableUploads.md](ResumableUploads.md).
 
+`OxiBeltRoutePolicy.spec.webTransport.upstreamHttpVersion` accepts `h2` or
+`h3`. It retains the ordinary translated HTTPRoute and adds a higher-priority,
+WebTransport-only sibling with a distinct upstream pool and an exact upstream
+version. The controller preserves the selected version without fallback. An
+`h3` selection requires every backend to use HTTPS, including discovered
+members; the data plane must independently be configured for HTTP/3.
+
 Supported matches:
 
 - hostname intersection between `Gateway` listener and `HTTPRoute`
@@ -304,7 +311,9 @@ GRPCRoute. The initial bounded fields are:
 - `timeouts.upstreamRequestMilliseconds`, capped by the operator and 300-second
   schema maximum; and
 - `clientCertificateForwarding`, which projects only the downstream TLS-verified
-  client leaf to one operator-admitted backend request header.
+  client leaf to one operator-admitted backend request header; and
+- `webTransport.upstreamHttpVersion`, which selects exact `h2` or `h3` for a
+  WebTransport-only sibling of an HTTPRoute rule.
 
 `clientCertificateForwarding.header` is a valid HTTP field name and must be
 listed in the controller's repeated

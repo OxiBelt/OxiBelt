@@ -8,8 +8,11 @@ pub(super) struct GeneratedRoute {
   pub(super) methods: Vec<String>,
   pub(super) headers: Vec<NamedExactMatch>,
   pub(super) queries: Vec<NamedExactMatch>,
+  pub(super) protocols: Vec<String>,
   pub(super) priority: i32,
   pub(super) upstream_pool: Option<String>,
+  pub(super) upstream_http_version: Option<GeneratedHttpVersion>,
+  pub(super) webtransport_upstream_http_version: Option<GeneratedHttpVersion>,
   pub(super) direct_response_status: Option<u16>,
   pub(super) rewrite: Option<RewriteAction>,
   pub(super) redirect: Option<RedirectAction>,
@@ -24,6 +27,21 @@ pub(super) struct GeneratedRoute {
   pub(super) upstream_request_timeout_ms: Option<u64>,
   pub(super) client_certificate_forwarding: Option<ClientCertificateForwarding>,
   pub(super) resumable_upload: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum GeneratedHttpVersion {
+  H2,
+  H3,
+}
+
+impl GeneratedHttpVersion {
+  pub(super) const fn as_str(self) -> &'static str {
+    match self {
+      Self::H2 => "h2",
+      Self::H3 => "h3",
+    }
+  }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -51,6 +69,7 @@ impl ClientCertificateForwardFormat {
 pub(super) struct GeneratedPool {
   pub(super) source: String,
   pub(super) name: String,
+  pub(super) max_http_version: Option<GeneratedHttpVersion>,
   pub(super) servers: Vec<GeneratedServer>,
   pub(super) discoveries: Vec<GeneratedKubernetesDiscovery>,
 }

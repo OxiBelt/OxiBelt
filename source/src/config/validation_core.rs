@@ -216,6 +216,17 @@ impl Config {
           pool.name
         );
       }
+      if pool.max_http_version == Some(HttpVersion::H3)
+        && pool
+          .servers
+          .iter()
+          .any(|server| server.origin.scheme() != "https")
+      {
+        bail!(
+          "upstream pool {} max_http_version = \"h3\" requires every server to use an https:// origin",
+          pool.name
+        );
+      }
       if pool.keepalive.idle_timeout_ms == 0 || pool.keepalive.max_lifetime_ms == 0 {
         bail!(
           "upstream pool {} keepalive timeout values must be greater than 0",
@@ -581,11 +592,24 @@ impl Config {
               );
             }
           }
-          (None, Some(_)) if route_version == HttpVersion::H3 => {
-            bail!(
-              "route {} cannot set upstream_http_version = \"h3\" for upstream_pool routes",
-              route.name
-            );
+          (None, Some(pool_name)) if route_version == HttpVersion::H3 => {
+            let Some(pool) = self
+              .upstream_pools
+              .iter()
+              .find(|pool| pool.name == *pool_name)
+            else {
+              bail!(
+                "route {} references unknown upstream pool {pool_name}",
+                route.name
+              );
+            };
+            if pool.max_http_version != Some(HttpVersion::H3) {
+              bail!(
+                "route {} upstream_http_version cannot exceed upstream pool {} max_http_version",
+                route.name,
+                pool.name
+              );
+            }
           }
           _ => {}
         }

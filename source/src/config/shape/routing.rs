@@ -64,6 +64,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "upstreams.tls.upstream_revocation.crlite" => crlite::CRLITE_CONFIG_KEYS,
     "upstreams.tls.upstream_revocation.crlite.managed" => crlite::CRLITE_MANAGED_CONFIG_KEYS,
     "upstream_pools" => &[
+      "max_http_version",
       "algorithm",
       "discovery",
       "hash_key",

@@ -10420,8 +10420,10 @@
               "upstream_pool_runtime_control",
               "stream_pool_runtime_control",
               "admin_operations",
+              "admin_http2",
               "admin_http3",
               "admin_operation_webtransport",
+              "admin_operation_webtransport_h2",
               "admin_audit",
               "admin_audit_anchoring",
               "admin_mutation_replay",
@@ -10461,11 +10463,19 @@
               "admin_operations": {
                 "type": "boolean"
               },
+              "admin_http2": {
+                "type": "boolean",
+                "description": "True when the enabled Admin TLS listener accepts HTTP/2."
+              },
               "admin_http3": {
                 "type": "boolean"
               },
               "admin_operation_webtransport": {
                 "type": "boolean"
+              },
+              "admin_operation_webtransport_h2": {
+                "type": "boolean",
+                "description": "True when Admin operation WebTransport subscriptions are available over TLS 1.3 HTTP/2."
               },
               "admin_audit": {
                 "type": "boolean"

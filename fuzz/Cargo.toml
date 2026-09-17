@@ -73,6 +73,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "http2_webtransport"
+path = "fuzz_targets/http2_webtransport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "upstream_dns_resolution"
 path = "fuzz_targets/upstream_dns_resolution.rs"
 test = false

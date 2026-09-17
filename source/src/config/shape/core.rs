@@ -360,6 +360,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "errors",
     ][..],
     "proxy.http2" => &[
+      "webtransport",
       "adaptive_window",
       "initial_connection_window_bytes",
       "initial_stream_window_bytes",
@@ -369,6 +370,13 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "max_frame_size_bytes",
       "max_concurrent_streams",
       "max_send_buf_size",
+    ][..],
+    "proxy.http2.webtransport" => &[
+      "max_concurrent_uni_streams",
+      "max_concurrent_bidi_streams",
+      "max_stream_buffer_bytes",
+      "max_session_buffer_bytes",
+      "max_total_buffer_bytes",
     ][..],
     "proxy.http3" => &["inline_bodyless_fast_path"][..],
     "proxy.http.grpc" => &["enabled", "respect_grpc_timeout", "retry"][..],

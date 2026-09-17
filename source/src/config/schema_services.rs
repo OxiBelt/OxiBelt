@@ -27,6 +27,8 @@ pub struct AdminConfig {
   #[serde(default)]
   pub mutations: AdminMutationsConfig,
   #[serde(default)]
+  pub http2: AdminHttp2Config,
+  #[serde(default)]
   pub http3: AdminHttp3Config,
   #[serde(default)]
   pub tls: AdminTlsConfig,
@@ -50,6 +52,7 @@ impl Default for AdminConfig {
       audit: AdminAuditConfig::default(),
       operations: AdminOperationsConfig::default(),
       mutations: AdminMutationsConfig::default(),
+      http2: AdminHttp2Config::default(),
       http3: AdminHttp3Config::default(),
       tls: AdminTlsConfig::default(),
       legacy_rbac: None,
@@ -242,6 +245,10 @@ pub struct ProxyProtocolTlsConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct UpstreamPoolConfig {
   pub name: String,
+  /// Optional forwarding protocol cap for every current and future member.
+  /// Omission preserves the established origin-derived H1/H2 behavior.
+  #[serde(default)]
+  pub max_http_version: Option<HttpVersion>,
   #[serde(default)]
   pub algorithm: LoadBalancingAlgorithm,
   #[serde(default)]

@@ -1223,6 +1223,50 @@
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
         },
+        "http2": {
+          "additionalProperties": false,
+          "description": "OxiBelt native field `admin.http2`. Production Rust validation is authoritative.",
+          "properties": {
+            "webtransport": {
+              "additionalProperties": false,
+              "description": "OxiBelt native field `admin.http2.webtransport`. Production Rust validation is authoritative.",
+              "properties": {
+                "outbound_queue_bytes_per_session": {
+                  "default": 65536,
+                  "description": "OxiBelt native field `admin.http2.webtransport.outbound_queue_bytes_per_session`. Production Rust validation is authoritative.",
+                  "maximum": 4294967295,
+                  "minimum": 4,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "outbound_queue_bytes_total": {
+                  "default": 4194304,
+                  "description": "OxiBelt native field `admin.http2.webtransport.outbound_queue_bytes_total`. Production Rust validation is authoritative.",
+                  "maximum": 4294967295,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                }
+              },
+              "type": "object",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            }
+          },
+          "type": "object",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
         "http3": {
           "additionalProperties": false,
           "description": "OxiBelt native field `admin.http3`. Production Rust validation is authoritative.",
@@ -14024,6 +14068,72 @@
               "description": "OxiBelt native field `proxy.http2.max_send_buf_size`. Production Rust validation is authoritative.",
               "minimum": 0,
               "type": "integer",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "webtransport": {
+              "additionalProperties": false,
+              "description": "OxiBelt native field `proxy.http2.webtransport`. Production Rust validation is authoritative.",
+              "properties": {
+                "max_concurrent_bidi_streams": {
+                  "default": 100,
+                  "description": "OxiBelt native field `proxy.http2.webtransport.max_concurrent_bidi_streams`. Production Rust validation is authoritative.",
+                  "maximum": 4294967295,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "max_concurrent_uni_streams": {
+                  "default": 100,
+                  "description": "OxiBelt native field `proxy.http2.webtransport.max_concurrent_uni_streams`. Production Rust validation is authoritative.",
+                  "maximum": 4294967295,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "max_session_buffer_bytes": {
+                  "default": 1048576,
+                  "description": "OxiBelt native field `proxy.http2.webtransport.max_session_buffer_bytes`. Production Rust validation is authoritative.",
+                  "maximum": 4294967295,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "max_stream_buffer_bytes": {
+                  "default": 65536,
+                  "description": "OxiBelt native field `proxy.http2.webtransport.max_stream_buffer_bytes`. Production Rust validation is authoritative.",
+                  "maximum": 4294967295,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "max_total_buffer_bytes": {
+                  "default": 67108864,
+                  "description": "OxiBelt native field `proxy.http2.webtransport.max_total_buffer_bytes`. Production Rust validation is authoritative.",
+                  "maximum": 4294967295,
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                }
+              },
+              "type": "object",
               "x-oxibelt-config-activation": "full_reload",
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
@@ -30046,6 +30156,19 @@
               }
             },
             "type": "object",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_http_version": {
+            "description": "OxiBelt native field `upstream_pools[].max_http_version`. Production Rust validation is authoritative.",
+            "enum": [
+              "h1",
+              "h2",
+              "h3"
+            ],
+            "type": "string",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
             "x-oxibelt-reference-activation": "none",

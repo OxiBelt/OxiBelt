@@ -37,6 +37,11 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "admin.mutations.rollout" => allowed_keys::ADMIN_MUTATION_ROLLOUT_CONFIG_KEYS,
     "admin.mutations.signers" => allowed_keys::ADMIN_MUTATION_SIGNER_CONFIG_KEYS,
     "admin.http3" => &["bind", "enabled"][..],
+    "admin.http2" => &["webtransport"][..],
+    "admin.http2.webtransport" => &[
+      "outbound_queue_bytes_per_session",
+      "outbound_queue_bytes_total",
+    ][..],
     "admin.cache_purge_signing" => &[
       "enabled",
       "key_env",

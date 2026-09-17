@@ -86,6 +86,7 @@ pub mod upstream_discovery;
 pub(crate) mod upstream_failure;
 pub(crate) mod upstream_resolution;
 pub mod waf;
+pub(crate) mod webtransport;
 #[cfg(feature = "admin-runtime")]
 pub mod webtransport_admin;
 

@@ -173,7 +173,7 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     docker_case(
       "security",
       "webtransport-session-limit",
-      "multiplexed WebTransport sessions are limited per client on one HTTP/3 connection",
+      "WebTransport session limits and independent TLS H2/H3 stream and datagram matrix",
       ExpectStart::Success,
       Needs {
         protocol_probe: true,

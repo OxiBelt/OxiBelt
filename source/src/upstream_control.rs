@@ -241,6 +241,15 @@ pub(crate) fn replace_discovered_servers(
     })
     .ok_or_else(|| anyhow::anyhow!("upstream pool {pool_name} has no matching discovery policy"))?;
   let discovery_tls = discovery.tls.clone();
+  if candidate.max_http_version == Some(crate::config::HttpVersion::H3)
+    && servers
+      .iter()
+      .any(|server| server.origin.scheme() != "https")
+  {
+    bail!(
+      "upstream pool {pool_name} max_http_version = \"h3\" requires discovered servers to use https:// origins"
+    );
+  }
   let previous_states = candidate
     .servers
     .iter()
@@ -717,6 +726,7 @@ pub(crate) fn stable_generated_server_id(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::config::HttpVersion;
 
   #[test]
   fn rational_weight_scaling_survives_common_denominator_overflow() {
@@ -820,5 +830,64 @@ weight = 1
     assert_eq!(pool.servers.len(), 1);
     assert_eq!(pool.servers[0].id.as_deref(), Some("static-a"));
     assert_eq!(pool.servers[0].source, UpstreamPoolServerSource::Static);
+  }
+
+  #[test]
+  fn http3_pool_rejects_plaintext_discovery_members_before_mutation() {
+    let mut config: Config = toml::from_str(
+      r#"
+[runtime]
+worker_threads = 1
+
+[runtime.accept]
+workers = 1
+reuse_port = false
+backlog = 1024
+accept_error_backoff_ms = 50
+
+[listeners]
+https_bind = "127.0.0.1:8443"
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[[upstream_pools]]
+name = "pool"
+max_http_version = "h3"
+
+[[upstream_pools.servers]]
+origin = "https://configured.example.test"
+
+[[upstream_pools.discovery]]
+provider = "dns"
+name = "discovery.example.test"
+scheme = "https"
+"#,
+    )
+    .expect("test config should parse");
+    assert_eq!(
+      config.upstream_pools[0].max_http_version,
+      Some(HttpVersion::H3)
+    );
+    let mut discovered = config.upstream_pools[0].servers[0].clone();
+    discovered.id = Some("discovered".to_string());
+    discovered.origin = "http://discovered.example.test".parse().unwrap();
+
+    let error = replace_discovered_servers(
+      &mut config,
+      "pool",
+      UpstreamPoolServerSource::Dns,
+      "dns",
+      vec![discovered],
+    )
+    .expect_err("HTTP/3 pools must reject plaintext discovery members");
+
+    assert!(
+      error
+        .to_string()
+        .contains("requires discovered servers to use https")
+    );
+    assert_eq!(config.upstream_pools[0].servers.len(), 1);
   }
 }

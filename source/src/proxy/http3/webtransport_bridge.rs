@@ -40,7 +40,11 @@ use session::{
   close_all_sessions, close_expired_sessions, close_session, handle_downstream_bidi_stream,
   handle_downstream_datagram, handle_downstream_uni_stream,
 };
-pub(in crate::proxy::http3) use upstream_adapter::UpstreamWebTransportSession;
+pub(crate) use session::{WebTransportSessionPermits, acquire_webtransport_session_permits};
+pub(crate) use upstream_adapter::{
+  UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream, UpstreamWebTransportSession,
+  h3_application_code_from_wire, h3_application_code_to_wire,
+};
 
 type H3OpenStreams = <crate::quic::h3::Connection as H3QuicConnection<Bytes>>::OpenStreams;
 type DownstreamBidiStream = BufRecvStream<H3BidiStream, Bytes>;

@@ -54,9 +54,14 @@ mod upstream_pool;
 mod webtransport_bridge;
 
 use tls_metadata::{downstream_quic_forwarded_client_certificate, downstream_quic_tls_metadata};
-use upstream_connection::connect_upstream_webtransport;
-pub(crate) use upstream_connection::forward_request;
+pub(crate) use upstream_connection::{
+  UpstreamWebTransportConnectionGuard, connect_upstream_webtransport, forward_request,
+};
 pub(crate) use upstream_pool::UpstreamH3Pools;
+pub(crate) use webtransport_bridge::{
+  UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream, UpstreamWebTransportSession,
+  WebTransportSessionPermits, acquire_webtransport_session_permits,
+};
 
 #[cfg(test)]
 use crate::proxy::http::body::{InlinedKnownSmallResponseBody, KNOWN_SMALL_BODY_MAX_BYTES};

@@ -132,6 +132,7 @@ pub struct AppSnapshot {
   pub external_auth: ExternalAuthRuntime,
   pub client_identity: ClientIdentityRuntime,
   pub runtime_introspection: Arc<RuntimeIntrospectionState>,
+  pub(crate) webtransport_h2_budget: Arc<crate::webtransport::Budget>,
   #[cfg(feature = "admin-runtime")]
   pub webtransport_admin: Arc<WebTransportAdminRegistry>,
   pub lifecycle: Arc<LifecycleState>,
@@ -524,6 +525,9 @@ impl AppSnapshot {
       .map(|snapshot| snapshot.runtime_introspection.clone())
       .unwrap_or_default();
     runtime_introspection.set_enabled(config.admin.enabled);
+    let webtransport_h2_budget = previous
+      .map(|snapshot| snapshot.webtransport_h2_budget.clone())
+      .unwrap_or_else(crate::webtransport::Budget::new);
     #[cfg(feature = "admin-runtime")]
     let webtransport_admin = previous
       .map(|snapshot| snapshot.webtransport_admin.clone())
@@ -786,6 +790,7 @@ impl AppSnapshot {
       external_auth,
       client_identity,
       runtime_introspection,
+      webtransport_h2_budget,
       #[cfg(feature = "admin-runtime")]
       webtransport_admin,
       lifecycle,
@@ -1040,6 +1045,7 @@ impl AppSnapshot {
       external_auth,
       client_identity,
       runtime_introspection: previous.runtime_introspection.clone(),
+      webtransport_h2_budget: previous.webtransport_h2_budget.clone(),
       #[cfg(feature = "admin-runtime")]
       webtransport_admin: previous.webtransport_admin.clone(),
       lifecycle: previous.lifecycle.clone(),

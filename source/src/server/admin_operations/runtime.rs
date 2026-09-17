@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use crate::admin_audit::AdminAuditRuntime;
 use crate::config::{AdminOperationsConfig, Config};
 use crate::state::AppHandle;
+use crate::webtransport::Budget;
 
 use super::id::new_operation_id;
 use super::runtime_durable::DurableOperationRuntime;
@@ -36,6 +37,7 @@ struct AdminOperationRuntimeInner {
   durable: Option<DurableOperationRuntime>,
   running: Arc<Semaphore>,
   webtransport_sessions: Arc<Semaphore>,
+  webtransport_h2_budget: Arc<Budget>,
   store: Mutex<AdminOperationStore>,
 }
 
@@ -118,6 +120,7 @@ impl AdminOperationRuntime {
       inner: Arc::new(AdminOperationRuntimeInner {
         running: Arc::new(Semaphore::new(config.max_running)),
         webtransport_sessions: Arc::new(Semaphore::new(config.webtransport_max_sessions)),
+        webtransport_h2_budget: Budget::new(),
         config,
         durable: None,
         store: Mutex::new(AdminOperationStore {
@@ -138,6 +141,7 @@ impl AdminOperationRuntime {
       inner: Arc::new(AdminOperationRuntimeInner {
         running: Arc::new(Semaphore::new(operations.max_running)),
         webtransport_sessions: Arc::new(Semaphore::new(operations.webtransport_max_sessions)),
+        webtransport_h2_budget: Budget::new(),
         config: operations,
         durable,
         store: Mutex::new(AdminOperationStore {
@@ -193,6 +197,11 @@ impl AdminOperationRuntime {
         TryAcquireError::NoPermits => AdminOperationError::QueueFull,
         TryAcquireError::Closed => AdminOperationError::Disabled,
       })
+  }
+
+  /// The budget is runtime-owned so reservations survive listener and snapshot reloads.
+  pub(in crate::server) fn webtransport_h2_budget(&self) -> Arc<Budget> {
+    self.inner.webtransport_h2_budget.clone()
   }
 
   pub(in crate::server) async fn enqueue<F, Fut>(

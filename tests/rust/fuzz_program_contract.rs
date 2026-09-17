@@ -15,6 +15,7 @@ const EXPECTED_TARGETS: &[&str] = &[
   "config_policy_normalization",
   "downstream_ct",
   "gateway_api_translation",
+  "http2_webtransport",
   "http3_webtransport",
   "http_body_coding",
   "http_semantics",

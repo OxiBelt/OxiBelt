@@ -334,3 +334,15 @@ seed_dir = "fuzz/seeds/proxy_protocol_tls"
 coverage_landmarks = ["source/src/proxy_protocol.rs:parse_v2_payload", "source/src/proxy_protocol.rs:decode_ssl_tlv"]
 regression_path = "tests/fixtures/fuzz-regressions/proxy_protocol_tls"
 leak_policy = "enabled"
+
+[[target]]
+name = "http2_webtransport"
+owner = "HTTP/2 and WebTransport maintainers"
+max_input_bytes = 4096
+input_contract = "Untrusted raw capsule bytes decoded with independently fragmented headers and stream payloads."
+invariants = ["malformed capsules never panic", "retained payload and partial headers stay bounded", "oversized and unknown capsules are discarded incrementally", "truncated frames never become a clean session close"]
+unsupported_states = ["live HTTP/2 sockets", "TLS handshakes", "virtual stream task scheduling"]
+seed_dir = "fuzz/seeds/http2_webtransport"
+coverage_landmarks = ["source/src/fuzzing.rs:exercise_http2_webtransport", "source/src/webtransport/codec.rs:Decoder"]
+regression_path = "tests/fixtures/fuzz-regressions/http2_webtransport"
+leak_policy = "enabled"

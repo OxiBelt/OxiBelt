@@ -4,3 +4,4 @@
 pub mod http;
 pub(crate) mod http3;
 pub(crate) mod stream_waf;
+pub(crate) mod webtransport_h2;

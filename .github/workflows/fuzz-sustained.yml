@@ -33,6 +33,7 @@ jobs:
           - http_semantics
           - compio_h1_response
           - http3_webtransport
+          - http2_webtransport
           - upstream_dns_resolution
           - websocket_frame
           - webrtc_turn

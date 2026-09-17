@@ -362,6 +362,11 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     "quic.upstream.resolution.cooldown_max_ms",
     "proxy.upstream_resolution.cooldown_max_ms",
   ),
+  full_reload("proxy.http2.webtransport"),
+  full_reload("proxy.http2.webtransport.*"),
+  full_reload("admin.http2.webtransport"),
+  full_reload("admin.http2.webtransport.*"),
+  full_reload("upstream_pools[].max_http_version"),
   full_reload("proxy.upstream_resolution"),
   full_reload("proxy.upstream_resolution.*"),
   full_reload("proxy.real_ip"),
@@ -913,6 +918,14 @@ fn scalar_schema(path: &str) -> Value {
 
 #[cfg(feature = "config-tooling")]
 fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
+  if path == "admin.http2.webtransport.outbound_queue_bytes_per_session" {
+    return Some((4, u64::from(u32::MAX)));
+  }
+  if path.starts_with("proxy.http2.webtransport.") || path.starts_with("admin.http2.webtransport.")
+  {
+    return Some((1, u64::from(u32::MAX)));
+  }
+
   let range = match path {
     "proxy.upstream_resolution.max_endpoint_count" => (1, 64),
     "proxy.upstream_resolution.min_ttl_ms" | "proxy.upstream_resolution.max_ttl_ms" => {
@@ -1252,6 +1265,7 @@ fn is_upstream_client_identity_path(path: &str) -> bool {
 #[cfg(feature = "config-tooling")]
 fn enum_values(path: &str) -> Option<Vec<&'static str>> {
   let values = BTreeMap::from([
+    ("upstream_pools.max_http_version", vec!["h1", "h2", "h3"]),
     ("upload_stores.kind", vec!["local", "postgres_s3"]),
     (
       "upload_profiles.destination.kind",
@@ -1442,6 +1456,17 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
 
 #[cfg(feature = "config-tooling")]
 fn default_value(path: &str) -> Option<Value> {
+  match path {
+    "proxy.http2.webtransport.max_concurrent_uni_streams"
+    | "proxy.http2.webtransport.max_concurrent_bidi_streams" => return Some(json!(100)),
+    "proxy.http2.webtransport.max_stream_buffer_bytes"
+    | "admin.http2.webtransport.outbound_queue_bytes_per_session" => return Some(json!(65_536)),
+    "proxy.http2.webtransport.max_session_buffer_bytes" => return Some(json!(1_048_576)),
+    "proxy.http2.webtransport.max_total_buffer_bytes" => return Some(json!(67_108_864)),
+    "admin.http2.webtransport.outbound_queue_bytes_total" => return Some(json!(4_194_304)),
+    _ => {}
+  }
+
   let value = match path {
     "access_log.otlp.schema" | "access_log.stdout.schema" => json!("ocsf"),
     "certificate_transparency.enabled" => json!(false),
