@@ -143,7 +143,7 @@ async fn group_get_stale_entry_preserves_membership_in_memory_and_after_disk_rec
   }
 }
 
-async fn store(
+pub(super) async fn store(
   cache: &ResponseCache,
   request: Option<&CacheGroupRequest>,
   method: &Method,
@@ -159,7 +159,7 @@ async fn store(
     .await
 }
 
-async fn hit(
+pub(super) async fn hit(
   cache: &ResponseCache,
   request: Option<&CacheGroupRequest>,
   method: &Method,
@@ -171,7 +171,7 @@ async fn hit(
     .await
 }
 
-async fn origin_response(
+pub(super) async fn origin_response(
   cache: &ResponseCache,
   request: &CacheGroupRequest,
   method: &Method,

@@ -20,7 +20,10 @@ After response rules have run, OxiBelt preserves both `Cache-Groups` and
 `Cache-Group-Invalidation` response fields in a cached response. Invalidation
 executes only from a live final origin response, never a synthetic,
 informational, trailer, or cached response. A non-safe request whose final
-response is a 2xx or 3xx invalidates its exact target. Any other final status
+response is a 2xx or 3xx invalidates its exact target. Exact target identity is
+the origin-relative path and query, so matching origin-form and absolute-form
+request targets select the same representation. Query ordering, duplicate
+parameters, and percent-encoding remain byte-exact. Any other final status
 invalidates only when its `Cache-Group-Invalidation` field supplies valid
 members. GET, HEAD, OPTIONS, TRACE, and exact-uppercase QUERY do not trigger
 this response-driven invalidation. Directly selected memberships are applied
@@ -69,6 +72,12 @@ bypasses further admission rather than dropping generation history.
 Activation establishes enabled and disabled remote generations before the new
 runtime snapshot is published. An ordinary cache hit does not reactivate a
 disabled authority generation.
+
+Authority state version 2 records canonical exact-target identity. Activation
+replaces a bounded version 1 authority at the same local, shared, or external
+state key with a fresh incarnation. This one-time rotation makes every entry
+from the previous target representation cold without rewriting cache objects
+or invalidation hashes.
 
 There is no pre-request barrier across disconnected nodes. The node that
 receives an invalidating origin response preserves that origin response but
@@ -120,12 +129,16 @@ failed-fill suppression window still applies. Frequent invalidations can
 therefore produce substantial origin traffic even when cached reuse resumes
 normally after the invalidations stop.
 
-The configuration and native-schema epochs are unchanged. During a
-mixed-version rollout, explicitly set `[cache.groups] enabled = false` on
-upgraded nodes, complete the binary upgrade across every cache participant,
-then enable it. The new namespace produces cold misses for legacy entries, so
-an ordinary upgrade does not require a manual cache clear; clear failed
-authority state when recovery requires it. Before returning to an older binary,
-remove `[cache.groups]` and every policy `groups` value, remove group-only
-Admin/API values from automation, and cold-clear all cache tiers and group
-authority state before starting the old binary.
+The configuration and native-schema epochs are unchanged. The first version 2
+participant atomically rotates each version 1 authority at the same shared or
+capable external state key. Older participants that continuously use that
+reachable authority then reject it and bypass group-aware reuse, so those
+rolling upgrades fail closed while upgraded nodes begin with cold group
+generations. Local-only and disconnected participants do not observe another
+node's rotation: drain them before upgrading, or disable groups and cold-clear
+every cache tier and local authority record before returning them to service.
+Complete the upgrade across every cache participant before relying on normal
+hit rates. Returning to an authority-version-1 binary requires disabling groups
+and cold-clearing every cache tier and group authority record. Before returning
+to a binary that predates cache groups, also remove `[cache.groups]`, every
+policy `groups` value, and group-only Admin/API values from automation.

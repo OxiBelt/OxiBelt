@@ -735,6 +735,13 @@ mod tests {
         .validate_versions(crate::cache::key::GROUP_EXTERNAL_CACHE_KEY_VERSION)
         .is_ok()
     );
+    let mut absolute_stamp = metadata.clone();
+    absolute_stamp.group_stamp.as_mut().unwrap().target = "https://example.test/asset".to_string();
+    assert!(
+      absolute_stamp
+        .validate_versions(crate::cache::key::GROUP_EXTERNAL_CACHE_KEY_VERSION)
+        .is_err()
+    );
     assert!(
       ExternalCacheEntryMetadata {
         capabilities: Vec::new(),

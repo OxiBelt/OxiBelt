@@ -5075,7 +5075,8 @@
                   "type": "string"
                 },
                 "uri": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Exact cache URI. Group-aware policies accept origin-form or an absolute URI whose origin matches scheme and host; exact identity is the canonical path and query. Other policies retain raw URI identity."
                 },
                 "headers": {
                   "type": "object",

@@ -195,6 +195,16 @@ async fn group_enabled_cache_purges_require_group_permission_before_mutating_ent
     group_cache_entry_is_fresh(&denied_state.snapshot(), "/groups/exact").await,
     "the denied exact purge must leave the group entry current"
   );
+  let response = admin_json_purge_response(
+    denied_addr,
+    r#"{"type":"exact","policy":"default","scheme":"http","host":"example.com","uri":"http://other.example/groups/exact"}"#,
+  )
+  .await;
+  assert!(
+    response.starts_with("HTTP/1.1 403 Forbidden"),
+    "authorization must reject a cross-origin target before semantic validation: {}",
+    log_safe_text(&response)
+  );
   let _ = denied_shutdown.send(true);
   denied_task.abort();
 
@@ -214,6 +224,10 @@ async fn group_enabled_cache_purges_require_group_permission_before_mutating_ent
   .await
   .expect("group-enabled allowed snapshot should initialize");
   seed_group_cache_entry(&allowed_snapshot, "/groups/exact", "exact").await;
+  seed_group_cache_entry(&allowed_snapshot, "/groups/absolute", "absolute").await;
+  seed_group_cache_entry(&allowed_snapshot, "/groups/mismatch", "mismatch").await;
+  seed_group_cache_entry(&allowed_snapshot, "/groups/default-port", "default-port").await;
+  seed_group_cache_entry(&allowed_snapshot, "/groups/query", "query").await;
   seed_group_cache_entry(&allowed_snapshot, "/groups/empty", "").await;
   seed_group_cache_entry(&allowed_snapshot, "/groups/string", "release-1").await;
   let allowed_state = AppHandle::new(allowed_snapshot);
@@ -231,6 +245,14 @@ async fn group_enabled_cache_purges_require_group_permission_before_mutating_ent
     (
       r#"{"type":"exact","policy":"default","scheme":"http","host":"example.com","uri":"/groups/exact"}"#,
       "/groups/exact",
+    ),
+    (
+      r#"{"type":"exact","policy":"default","scheme":"http","host":"example.com","uri":"http://example.com/groups/absolute"}"#,
+      "/groups/absolute",
+    ),
+    (
+      r#"{"type":"exact","policy":"default","scheme":"http","host":"example.com","uri":"http://example.com:80/groups/default-port"}"#,
+      "/groups/default-port",
     ),
     (
       r#"{"type":"group","policy":"default","origin":"http://example.com","group":""}"#,
@@ -252,6 +274,39 @@ async fn group_enabled_cache_purges_require_group_permission_before_mutating_ent
       "authorized group purge should make {uri} unavailable"
     );
   }
+
+  for body in [
+    r#"{"type":"exact","policy":"default","scheme":"http","host":"example.com","uri":"http://other.example/groups/mismatch"}"#,
+    r#"{"type":"exact","policy":"default","scheme":"http","host":"example.com","uri":"https://example.com/groups/mismatch"}"#,
+    r#"{"type":"exact","policy":"default","scheme":"http","host":"example.com","uri":"*"}"#,
+  ] {
+    let response = admin_json_purge_response(allowed_addr, body).await;
+    assert!(
+      response.starts_with("HTTP/1.1 400 Bad Request")
+        && response.contains("invalid cache group exact target"),
+      "invalid group-aware exact target should be rejected: {}",
+      log_safe_text(&response)
+    );
+  }
+  assert!(
+    group_cache_entry_is_fresh(&allowed_state.snapshot(), "/groups/mismatch").await,
+    "a mismatched absolute origin must not invalidate the scoped entry"
+  );
+
+  let response = admin_query_purge_response(
+    allowed_addr,
+    "/cache/purge?policy=default&scheme=http&host=example.com&uri=http%3A%2F%2Fexample.com%2Fgroups%2Fquery",
+  )
+  .await;
+  assert!(
+    response.starts_with("HTTP/1.1 200 OK") && response.contains("purged=1"),
+    "public exact purge should accept a same-origin absolute target: {}",
+    log_safe_text(&response)
+  );
+  assert!(
+    !group_cache_entry_is_fresh(&allowed_state.snapshot(), "/groups/query").await,
+    "public absolute-form exact purge should invalidate the canonical target"
+  );
   let _ = allowed_shutdown.send(true);
   allowed_task.abort();
 }

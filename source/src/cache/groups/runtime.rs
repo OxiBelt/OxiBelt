@@ -5,7 +5,7 @@ use http::{HeaderMap, Method, StatusCode};
 use std::sync::{Arc, Mutex};
 
 use super::fields::{GroupField, parse_groups, parse_invalidation};
-use super::model::{Seed, Selector, digest};
+use super::model::{Seed, Selector, canonical_target, digest};
 use super::{CacheGroupOrigin, CacheGroupStamp};
 use crate::cache::{CacheInsertContext, CacheLookupContext, CachePreparedInsert, ResponseCache};
 
@@ -165,7 +165,7 @@ impl ResponseCache {
       stamp.policy == policy && stamp.origin == request.origin && stamp.partition == partition,
       "cache group scope mismatch"
     );
-    stamp.target = ctx.uri.to_string();
+    stamp.target = canonical_target(ctx.uri)?;
     stamp.groups = match parse_groups(headers) {
       GroupField::Absent => Vec::new(),
       GroupField::Valid(groups) => groups,
@@ -220,15 +220,20 @@ impl ResponseCache {
     let Some(stamp) = &entry.group_stamp else {
       return false;
     };
+    let Ok(target) = canonical_target(ctx.uri) else {
+      return false;
+    };
     stamp.policy == snapshot.policy
       && stamp.origin == snapshot.origin
       && stamp.partition == snapshot.partition
-      && (stamp.target == ctx.uri.to_string()
+      && (stamp.target == target
         || entry.nvs_alias
           && entry
             .no_vary_search
             .as_ref()
-            .is_some_and(|nvs| nvs.owner_uri == stamp.target))
+            .and_then(|nvs| nvs.owner_uri.parse().ok())
+            .and_then(|owner| canonical_target(&owner).ok())
+            .is_some_and(|owner| owner == stamp.target))
   }
 
   pub(in crate::cache) fn group_entry_current_local(
@@ -537,7 +542,15 @@ impl ResponseCache {
       _ => Vec::new(),
     };
     let selector = if status.is_success() || status.is_redirection() {
-      Selector::Exact(ctx.uri.to_string())
+      let target = match canonical_target(ctx.uri) {
+        Ok(target) => target,
+        Err(error) => {
+          self.groups.fence(policy);
+          tracing::warn!(error = %error, "cache group invalidation target invalid; cache reuse fenced while preserving origin response");
+          return;
+        }
+      };
+      Selector::Exact(target)
     } else {
       Selector::Groups(explicit.clone())
     };

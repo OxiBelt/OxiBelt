@@ -100,6 +100,42 @@ fn authority_host_consistency_accepts_default_port_equivalence() {
 }
 
 #[test]
+fn request_target_forms_reject_non_path_targets() {
+  let unsafe_asterisk = Request::builder()
+    .method(Method::POST)
+    .uri("*")
+    .body(())
+    .unwrap();
+  assert_eq!(
+    validate_authority_host_consistency(&unsafe_asterisk),
+    Err(HostConsistencyError)
+  );
+
+  let options_asterisk = Request::builder()
+    .method(Method::OPTIONS)
+    .uri("*")
+    .body(())
+    .unwrap();
+  assert!(validate_authority_host_consistency(&options_asterisk).is_ok());
+
+  let authority = Uri::builder()
+    .authority("example.test:443")
+    .build()
+    .unwrap();
+  let non_connect_authority = Request::builder()
+    .method(Method::GET)
+    .uri(authority)
+    .header(HOST, "example.test:443")
+    .body(())
+    .unwrap();
+  assert_eq!(non_connect_authority.uri().path(), "");
+  assert_eq!(
+    validate_authority_host_consistency(&non_connect_authority),
+    Err(HostConsistencyError)
+  );
+}
+
+#[test]
 fn authority_host_consistency_rejects_duplicate_host_headers() {
   let mut request = Request::builder()
     .uri("http://example.test/path")

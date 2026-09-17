@@ -186,10 +186,15 @@ impl ResponseCache {
     if operation.policy.groups_enabled {
       let stamp = hit.metadata.group_stamp.as_ref()?;
       let request_stamp = ctx.group_request?.snapshot()?;
+      let target = operation
+        .uri
+        .parse::<Uri>()
+        .ok()
+        .and_then(|uri| groups::model::canonical_target(&uri).ok())?;
       if stamp.policy != operation.policy.name
         || stamp.origin != request_stamp.origin
         || stamp.partition != request_stamp.partition
-        || stamp.target != operation.uri
+        || stamp.target != target
         || !self
           .group_entry_current(&operation.policy.name, Some(stamp))
           .await

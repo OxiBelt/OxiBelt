@@ -49,6 +49,7 @@ mod policy;
 mod proxy_protocol_identity;
 pub use proxy_protocol_identity::CacheProxyProtocolIdentity;
 mod purge;
+pub(crate) use purge::InvalidCacheGroupExactTarget;
 mod query_cleanup;
 mod query_epoch_disk;
 mod range;

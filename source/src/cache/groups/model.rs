@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use super::origin::CacheGroupOrigin;
 
 pub(in crate::cache) const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
+pub(in crate::cache) const AUTHORITY_VERSION: u8 = 2;
+pub(in crate::cache) const LEGACY_AUTHORITY_VERSION: u8 = 1;
 const MAX_SCOPES: usize = 1024;
 const MAX_NAMES: usize = 4096;
 const MAX_ENTRIES: usize = 4096;
@@ -38,7 +40,7 @@ impl CacheGroupStamp {
       && valid_group_names(&self.groups)
       && self.tags.len() <= MAX_NAMES
       && valid_names(&self.tags)
-      && self.target.len() <= MAX_STRING_BYTES
+      && valid_target(&self.target)
       && self.partition.len() <= MAX_STRING_BYTES
       && self.equivalent_path.as_deref().is_none_or(valid_path)
       && CacheGroupOrigin::new(&self.origin.scheme, &self.origin.authority())
@@ -146,7 +148,7 @@ impl Selector {
 impl Authority {
   pub fn new(incarnation: String) -> Self {
     Self {
-      version: 1,
+      version: AUTHORITY_VERSION,
       incarnation,
       enabled: true,
       scopes: BTreeMap::new(),
@@ -154,12 +156,20 @@ impl Authority {
   }
 
   pub fn decode(bytes: &[u8]) -> Result<Self> {
+    Self::decode_version(bytes, AUTHORITY_VERSION, true)
+  }
+
+  pub fn decode_legacy_v1(bytes: &[u8]) -> Result<Self> {
+    Self::decode_version(bytes, LEGACY_AUTHORITY_VERSION, false)
+  }
+
+  fn decode_version(bytes: &[u8], version: u8, canonical_targets: bool) -> Result<Self> {
     ensure!(
       bytes.len() <= MAX_STATE_BYTES,
       "cache group state exceeds byte bound"
     );
     let state: Self = serde_json::from_slice(bytes)?;
-    state.validate()?;
+    state.validate_version(version, canonical_targets)?;
     ensure!(
       state.scopes.len() <= MAX_SCOPES,
       "cache group scope bound exceeded"
@@ -169,7 +179,7 @@ impl Authority {
         *key == scope_key(&scope.origin, &scope.partition),
         "cache group scope identity mismatch"
       );
-      scope.validate()?;
+      scope.validate(canonical_targets)?;
     }
     Ok(state)
   }
@@ -327,6 +337,10 @@ impl Authority {
     now_ms: u64,
   ) -> Result<usize> {
     ensure!(self.enabled, "cache group authority disabled");
+    ensure!(
+      !matches!(selector, Selector::Exact(target) if !valid_target(target)),
+      "cache group exact selector target is not canonical"
+    );
     let enumeration = self
       .scopes
       .values()
@@ -358,8 +372,12 @@ impl Authority {
   }
 
   fn validate(&self) -> Result<()> {
+    self.validate_version(AUTHORITY_VERSION, true)
+  }
+
+  fn validate_version(&self, version: u8, canonical_targets: bool) -> Result<()> {
     ensure!(
-      self.version == 1 && valid_digest(&self.incarnation),
+      self.version == version && valid_digest(&self.incarnation),
       "invalid cache group state version"
     );
     ensure!(
@@ -371,14 +389,14 @@ impl Authority {
         *key == scope_key(&scope.origin, &scope.partition),
         "cache group scope identity mismatch"
       );
-      scope.validate()?;
+      scope.validate(canonical_targets)?;
     }
     Ok(())
   }
 }
 
 impl Scope {
-  fn validate(&self) -> Result<()> {
+  fn validate(&self, canonical_targets: bool) -> Result<()> {
     ensure!(
       self.floor <= self.sequence,
       "invalid cache group sequence floor"
@@ -426,10 +444,9 @@ impl Scope {
       "cache group state has a future generation"
     );
     ensure!(
-      self
-        .entries
-        .iter()
-        .all(|(variant, seed)| variant.len() <= MAX_STRING_BYTES && seed.valid(self.sequence)),
+      self.entries.iter().all(|(variant, seed)| {
+        variant.len() <= MAX_STRING_BYTES && seed.valid(self.sequence, canonical_targets)
+      }),
       "invalid cache group state seed"
     );
     Ok(())
@@ -534,7 +551,7 @@ impl Scope {
       self.groups.insert(digest(group.as_bytes()), sequence);
     }
     self.sequence = sequence;
-    if self.validate().is_err() {
+    if self.validate(true).is_err() {
       bail!("cache group invalidation state exhausted");
     }
     self.entries.retain(|_, seed| seed.expires_ms > now_ms);
@@ -543,9 +560,12 @@ impl Scope {
 }
 
 impl Seed {
-  fn valid(&self, scope_sequence: u64) -> bool {
-    self.target.len() <= MAX_STRING_BYTES
-      && self.groups.len() <= MAX_GROUP_MEMBERS
+  fn valid(&self, scope_sequence: u64, canonical_targets: bool) -> bool {
+    (if canonical_targets {
+      valid_target(&self.target)
+    } else {
+      self.target.len() <= MAX_STRING_BYTES
+    }) && self.groups.len() <= MAX_GROUP_MEMBERS
       && valid_group_names(&self.groups)
       && self.tags.len() <= MAX_NAMES
       && valid_names(&self.tags)
@@ -580,166 +600,32 @@ fn valid_path(path: &str) -> bool {
     && !path.contains('#')
 }
 
+pub(in crate::cache) fn canonical_target(uri: &http::Uri) -> Result<String> {
+  let target = match uri.path_and_query() {
+    Some(target) => target.as_str(),
+    None if uri.authority().is_some() => "/",
+    None => bail!("cache group target must be origin-form, absolute-form, or authority-form"),
+  };
+  ensure!(
+    target.len() <= MAX_STRING_BYTES && target.starts_with('/'),
+    "cache group target must be a bounded origin-form path and query"
+  );
+  Ok(target.to_string())
+}
+
+fn valid_target(target: &str) -> bool {
+  target
+    .parse::<http::Uri>()
+    .ok()
+    .and_then(|uri| canonical_target(&uri).ok())
+    .as_deref()
+    == Some(target)
+}
+
 fn target_path(target: &str) -> Option<String> {
   target
     .parse::<http::Uri>()
     .ok()
     .map(|uri| uri.path().to_string())
     .filter(|path| path.starts_with('/'))
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn origin() -> CacheGroupOrigin {
-    CacheGroupOrigin::new("https", "cache.example.test").unwrap()
-  }
-
-  fn stamp(
-    authority: &mut Authority,
-    target: &str,
-    groups: &[&str],
-    equivalent_path: Option<&str>,
-  ) -> CacheGroupStamp {
-    let origin = origin();
-    let mut stamp = authority.snapshot("default", &origin, "").unwrap();
-    stamp.target = target.to_string();
-    stamp.groups = groups.iter().map(|group| (*group).to_string()).collect();
-    stamp.equivalent_path = equivalent_path.map(str::to_string);
-    stamp
-  }
-
-  fn publish(authority: &mut Authority, stamp: &CacheGroupStamp, variant: &str) {
-    authority
-      .publish(stamp, variant, 100, 0, &"b".repeat(64))
-      .unwrap();
-  }
-
-  #[test]
-  fn exact_invalidation_stops_after_one_membership_hop() {
-    let mut authority = Authority::new("a".repeat(64));
-    let first = stamp(&mut authority, "/one", &["first"], None);
-    let second = stamp(&mut authority, "/two", &["first", "second"], None);
-    let third = stamp(&mut authority, "/three", &["second"], None);
-    publish(&mut authority, &first, "first");
-    publish(&mut authority, &second, "second");
-    publish(&mut authority, &third, "third");
-
-    assert_eq!(
-      authority
-        .invalidate(
-          None,
-          None,
-          None,
-          None,
-          &Selector::Exact("/one".to_string()),
-          &[],
-          0
-        )
-        .unwrap(),
-      2
-    );
-    assert!(!authority.current(&first));
-    assert!(!authority.current(&second));
-    assert!(authority.current(&third));
-  }
-
-  #[test]
-  fn failed_publication_rollback_cannot_seed_later_expansion() {
-    let mut authority = Authority::new("a".repeat(64));
-    let owner = stamp(&mut authority, "/owner", &["linked"], None);
-    let publication = "b".repeat(64);
-    let previous = authority
-      .publish(&owner, "owner-variant", 100, 0, &publication)
-      .unwrap();
-    authority
-      .rollback_publish(&owner, "owner-variant", &publication, previous)
-      .unwrap();
-
-    let member = stamp(&mut authority, "/member", &["linked"], None);
-    publish(&mut authority, &member, "member-variant");
-    authority
-      .invalidate(
-        Some(&origin()),
-        Some(""),
-        None,
-        None,
-        &Selector::Exact("/owner".to_string()),
-        &[],
-        1,
-      )
-      .unwrap();
-    assert!(authority.current(&member));
-  }
-
-  #[test]
-  fn exact_invalidation_matches_only_nvs_seeds_by_equivalent_path() {
-    let mut authority = Authority::new("a".repeat(64));
-    let first = stamp(&mut authority, "/item?old", &[], Some("/item"));
-    let second = stamp(&mut authority, "/item?new", &[], Some("/item"));
-    let plain = stamp(&mut authority, "/item?plain", &[], None);
-    publish(&mut authority, &first, "first");
-    publish(&mut authority, &second, "second");
-    publish(&mut authority, &plain, "plain");
-
-    assert_eq!(
-      authority
-        .invalidate(
-          None,
-          None,
-          None,
-          None,
-          &Selector::Exact("/item?mutate".to_string()),
-          &[],
-          0
-        )
-        .unwrap(),
-      2
-    );
-    assert!(!authority.current(&first));
-    assert!(!authority.current(&second));
-    assert!(authority.current(&plain));
-  }
-
-  #[test]
-  fn equivalent_path_selection_unions_old_and_new_nvs_memberships() {
-    let mut authority = Authority::new("a".repeat(64));
-    let old = stamp(&mut authority, "/item?old", &["old"], Some("/item"));
-    let new = stamp(&mut authority, "/item?new", &["new"], Some("/item"));
-    let old_member = stamp(&mut authority, "/old-member", &["old"], None);
-    let new_member = stamp(&mut authority, "/new-member", &["new"], None);
-    publish(&mut authority, &old, "old");
-    publish(&mut authority, &new, "new");
-    publish(&mut authority, &old_member, "old-member");
-    publish(&mut authority, &new_member, "new-member");
-
-    assert_eq!(
-      authority
-        .invalidate(
-          None,
-          None,
-          None,
-          None,
-          &Selector::Exact("/item?mutate".to_string()),
-          &[],
-          0
-        )
-        .unwrap(),
-      4
-    );
-    assert!(!authority.current(&old));
-    assert!(!authority.current(&new));
-    assert!(!authority.current(&old_member));
-    assert!(!authority.current(&new_member));
-  }
-
-  #[test]
-  fn older_state_without_enabled_decodes_as_enabled() {
-    let state = Authority::new("a".repeat(64));
-    let mut encoded = serde_json::to_value(&state).unwrap();
-    encoded.as_object_mut().unwrap().remove("enabled");
-    let decoded = Authority::decode(&serde_json::to_vec(&encoded).unwrap()).unwrap();
-    assert!(decoded.enabled);
-  }
 }

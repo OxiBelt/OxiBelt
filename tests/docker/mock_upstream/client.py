@@ -409,6 +409,7 @@ def main() -> int:
   parser.add_argument("--target-host", default=TARGET_HOST)
   parser.add_argument("--server-name")
   parser.add_argument("--path")
+  parser.add_argument("--absolute-form", action="store_true")
   parser.add_argument("--method", default="GET")
   parser.add_argument("--body", default="")
   parser.add_argument("--body-base64")
@@ -454,6 +455,8 @@ def main() -> int:
       raise ValueError("--signal-upgrade-ready cannot be combined with --connect-tunnel")
     if args.optimistic_connect_tunnel and not args.connect_tunnel:
       raise ValueError("--optimistic-connect-tunnel requires --connect-tunnel")
+    if args.absolute_form and args.connect_tunnel:
+      raise ValueError("--absolute-form cannot be combined with --connect-tunnel")
     if args.upgrade_headers_only and not args.upgrade_token:
       raise ValueError("--upgrade-headers-only requires --upgrade-token")
     if args.upgrade_headers_only and args.signal_upgrade_ready:
@@ -464,13 +467,15 @@ def main() -> int:
       args.upgrade_token = validate_upgrade_offer(args.upgrade_token)
     if args.proxy_protocol_line:
       args.proxy_protocol_line = validate_proxy_protocol_line(args.proxy_protocol_line)
+    host_header = validate_host_header(args.host)
     if args.path:
       target_path = validate_origin_form_path(args.path)
     elif args.target:
       target_path = TARGET_PATHS[args.target]
     else:
       raise ValueError("either --target or --path is required")
-    host_header = validate_host_header(args.host)
+    if args.absolute_form:
+      target_path = f"{args.scheme}://{host_header}{target_path}"
   except ValueError as error:
     sys.stderr.write(f"{error}\n")
     return 2

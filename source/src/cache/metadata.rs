@@ -216,10 +216,14 @@ pub(super) fn decode_metadata_text(
         bail!("invalid cache group metadata envelope");
       }
       let stamp: super::CacheGroupStamp = serde_json::from_str(&unb64(&items[0])?)?;
+      let target = uri
+        .parse::<http::Uri>()
+        .map_err(|_| anyhow!("invalid cache group metadata URI"))
+        .and_then(|uri| super::groups::model::canonical_target(&uri))?;
       if !stamp.valid()
         || stamp.policy != policy
         || stamp.partition != partition
-        || stamp.target != uri
+        || stamp.target != target
       {
         bail!("cache group metadata scope mismatch");
       }
@@ -361,5 +365,58 @@ mod tests {
       .expect("bounded metadata should decode");
     assert_eq!(decoded.variant_key, variant_key);
     assert!(decode_metadata_text(&raw, &"f".repeat(64), Path::new("/cache")).is_err());
+  }
+
+  #[test]
+  fn group_stamp_matches_an_absolute_stored_uri_by_canonical_target() {
+    let variant_key = "absolute-variant";
+    let stem = cache_file_name(variant_key);
+    let stamp = super::super::CacheGroupStamp {
+      policy: "default".to_string(),
+      origin: super::super::CacheGroupOrigin::new("https", "cache.example.test").unwrap(),
+      partition: "tenant".to_string(),
+      incarnation: "a".repeat(64),
+      sequence: 0,
+      target: "/item?version=one".to_string(),
+      groups: Vec::new(),
+      tags: Vec::new(),
+      equivalent_path: None,
+    };
+    let raw = [
+      "version=1".to_string(),
+      format!("group_stamp={}", b64(&serde_json::to_vec(&stamp).unwrap())),
+      format!("policy={}", b64(b"default")),
+      format!("partition={}", b64(b"tenant")),
+      format!("base_key={}", b64(b"https://cache.example.test/item")),
+      format!("variant_key={}", b64(variant_key.as_bytes())),
+      format!("scheme={}", b64(b"https")),
+      format!("host={}", b64(b"cache.example.test")),
+      format!(
+        "uri={}",
+        b64(b"https://cache.example.test/item?version=one")
+      ),
+      "status=200".to_string(),
+      "expires_at=1893456000".to_string(),
+      "stored_at=1767225600".to_string(),
+      "size=4".to_string(),
+      "security_headers_neutral=true".to_string(),
+    ]
+    .join("\n");
+
+    let decoded = decode_metadata_text(&raw, &stem, Path::new("/cache")).unwrap();
+    assert_eq!(decoded.group_stamp.unwrap().target, "/item?version=one");
+
+    let encoded_stamp = b64(&serde_json::to_vec(&stamp).unwrap());
+    let mut legacy_stamp = stamp;
+    legacy_stamp.target = "https://cache.example.test/item?version=one".to_string();
+    let legacy_raw = raw.replacen(
+      &format!("group_stamp={encoded_stamp}"),
+      &format!(
+        "group_stamp={}",
+        b64(&serde_json::to_vec(&legacy_stamp).unwrap())
+      ),
+      1,
+    );
+    assert!(decode_metadata_text(&legacy_raw, &stem, Path::new("/cache")).is_err());
   }
 }

@@ -43,7 +43,7 @@ impl GroupRuntime {
       let mut states = runtime.guard()?;
       let mut state = Authority::new(incarnation()?);
       if let Some(path) = runtime.path(policy) {
-        let loaded = (|| -> Result<Option<Authority>> {
+        let loaded = (|| -> Result<Option<(Authority, bool)>> {
           let file = match std::fs::File::open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -57,10 +57,24 @@ impl GroupRuntime {
           file
             .take((MAX_STATE_BYTES + 1) as u64)
             .read_to_end(&mut bytes)?;
-          Ok(Some(Authority::decode(&bytes)?))
+          Ok(Some(decode_activation_authority(&bytes)?))
         })();
         match loaded {
-          Ok(Some(loaded)) if enabled && loaded.enabled => state = loaded,
+          Ok(Some((loaded, migrated))) if enabled && loaded.enabled => {
+            if migrated {
+              tracing::info!(
+                policy,
+                "cache group authority migrated to canonical target identity"
+              );
+            }
+            state = loaded;
+          }
+          Ok(Some((_, true))) => {
+            tracing::info!(
+              policy,
+              "retired cache group authority migrated to canonical target identity"
+            );
+          }
           Ok(_) => {}
           Err(error) => {
             tracing::warn!(error = %error, "cache group state unavailable; previous entries will not be reused");
@@ -312,6 +326,20 @@ pub(in crate::cache) fn incarnation() -> Result<String> {
   crate::crypto::random_fill(&mut bytes)
     .map_err(|error| anyhow::anyhow!("cache group identity generation failed: {error}"))?;
   Ok(digest(&bytes))
+}
+
+fn decode_activation_authority(bytes: &[u8]) -> Result<(Authority, bool)> {
+  match Authority::decode(bytes) {
+    Ok(state) => Ok((state, false)),
+    Err(current_error) => match Authority::decode_legacy_v1(bytes) {
+      Ok(legacy) => {
+        let mut replacement = Authority::new(incarnation()?);
+        replacement.enabled = legacy.enabled;
+        Ok((replacement, true))
+      }
+      Err(_) => Err(current_error),
+    },
+  }
 }
 
 fn ensure_state_budget(
@@ -593,9 +621,10 @@ impl ResponseCache {
           let key = digest(policy.as_bytes());
           for _ in 0..16 {
             let previous = self.external_cache.group_read(handler, &key).await?;
-            let mut state = match previous.as_deref() {
-              Some(bytes) => Authority::decode(bytes)?,
-              None => Authority::new(incarnation()?),
+            let (mut state, migrated) = match previous.as_deref() {
+              Some(bytes) if allow_disabled => decode_activation_authority(bytes)?,
+              Some(bytes) => (Authority::decode(bytes)?, false),
+              None => (Authority::new(incarnation()?), false),
             };
             if !allow_disabled && !state.enabled {
               self.groups.observe(policy, state)?;
@@ -608,6 +637,12 @@ impl ResponseCache {
               .await?
             {
               self.groups.observe(policy, state)?;
+              if migrated {
+                tracing::info!(
+                  policy,
+                  "cache group authority migrated to canonical target identity"
+                );
+              }
               return Ok(result);
             }
             tokio::task::yield_now().await;
@@ -624,9 +659,10 @@ impl ResponseCache {
       let key = digest(policy.as_bytes());
       for _ in 0..16 {
         let previous = shared.cache_group_read(&key).await?;
-        let mut state = match previous.as_deref() {
-          Some(bytes) => Authority::decode(bytes)?,
-          None => Authority::new(incarnation()?),
+        let (mut state, migrated) = match previous.as_deref() {
+          Some(bytes) if allow_disabled => decode_activation_authority(bytes)?,
+          Some(bytes) => (Authority::decode(bytes)?, false),
+          None => (Authority::new(incarnation()?), false),
         };
         if !allow_disabled && !state.enabled {
           self.groups.observe(policy, state)?;
@@ -638,6 +674,12 @@ impl ResponseCache {
           .await?
         {
           self.groups.observe(policy, state)?;
+          if migrated {
+            tracing::info!(
+              policy,
+              "cache group authority migrated to canonical target identity"
+            );
+          }
           return Ok(result);
         }
         tokio::time::sleep(Duration::from_millis(1)).await;

@@ -2,6 +2,41 @@
 
 use super::*;
 
+#[derive(Debug)]
+pub(crate) struct InvalidCacheGroupExactTarget;
+
+impl std::fmt::Display for InvalidCacheGroupExactTarget {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("invalid cache group exact target")
+  }
+}
+
+impl std::error::Error for InvalidCacheGroupExactTarget {}
+
+fn cache_group_exact_target(
+  scheme: &str,
+  host: &str,
+  value: &str,
+) -> anyhow::Result<(CacheGroupOrigin, String)> {
+  let origin = CacheGroupOrigin::new(scheme, host).map_err(|_| InvalidCacheGroupExactTarget)?;
+  let uri = value
+    .parse::<Uri>()
+    .map_err(|_| InvalidCacheGroupExactTarget)?;
+  match (uri.scheme_str(), uri.authority()) {
+    (None, None) => {}
+    (Some(scheme), Some(authority)) => {
+      let target_origin = CacheGroupOrigin::new(scheme, authority.as_str())
+        .map_err(|_| InvalidCacheGroupExactTarget)?;
+      if target_origin != origin {
+        return Err(InvalidCacheGroupExactTarget.into());
+      }
+    }
+    _ => return Err(InvalidCacheGroupExactTarget.into()),
+  }
+  let target = groups::model::canonical_target(&uri).map_err(|_| InvalidCacheGroupExactTarget)?;
+  Ok((origin, target))
+}
+
 impl ResponseCache {
   /// Invalidates only Q1 variants of one target after a successful unsafe or
   /// unknown-method origin response.  Administrative purges deliberately stay
@@ -189,14 +224,15 @@ impl ResponseCache {
     partition: Option<&str>,
   ) -> anyhow::Result<usize> {
     if self.groups_enabled(policy) {
+      let (origin, target) = cache_group_exact_target(scheme, host, uri)?;
       return self
         .invalidate_groups(
           policy,
-          None,
+          Some(&origin),
           partition,
-          Some(host),
-          Some(scheme),
-          groups::model::Selector::Exact(uri.to_string()),
+          None,
+          None,
+          groups::model::Selector::Exact(target),
           &[],
         )
         .await;

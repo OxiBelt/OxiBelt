@@ -563,6 +563,16 @@ client_request_with_headers_body_base64() {
 }
 
 client_request_with_headers_to_target() {
+  client_request_with_headers_to_target_form "origin" "$@"
+}
+
+client_request_absolute_with_headers_to_target() {
+  client_request_with_headers_to_target_form "absolute" "$@"
+}
+
+client_request_with_headers_to_target_form() {
+  local request_form="$1"
+  shift
   local target_host="$1"
   local proxy_port="$2"
   shift 2
@@ -581,6 +591,10 @@ client_request_with_headers_to_target() {
   if [[ "${expect_status}" != *,* ]]; then
     expect_args+=(--expect-status "${expect_status}")
   fi
+  local request_form_args=()
+  if [[ "${request_form}" == "absolute" ]]; then
+    request_form_args+=(--absolute-form)
+  fi
 
   local output=""
   local status=0
@@ -597,6 +611,7 @@ client_request_with_headers_to_target() {
       /opt/mock_upstream/client.py \
       --target-host "${target_host}" \
       --path "${path}" \
+      "${request_form_args[@]}" \
       --host "${host}" \
       --port "${proxy_port}" \
       --method "${method}" \

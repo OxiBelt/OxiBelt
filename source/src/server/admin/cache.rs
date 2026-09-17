@@ -450,7 +450,7 @@ pub(in crate::server) async fn cache_purge_json_response(
       {
         Ok(purged) => purged,
         Err(error) => {
-          return cache_purge_unavailable_response(
+          return cache_purge_exact_error_response(
             peer_addr,
             authorization.actor,
             "cache_purge_json",
@@ -740,6 +740,24 @@ fn cache_purge_unavailable_response(
   )
 }
 
+fn cache_purge_exact_error_response(
+  peer_addr: SocketAddr,
+  actor: &AdminActor,
+  operation: &'static str,
+  error: anyhow::Error,
+) -> Response<ProxyBody> {
+  if error.is::<crate::cache::InvalidCacheGroupExactTarget>() {
+    audit_rejected_cache_purge(
+      peer_addr,
+      actor,
+      operation,
+      "invalid cache group exact target",
+    );
+    return text_response(StatusCode::BAD_REQUEST, "invalid cache group exact target");
+  }
+  cache_purge_unavailable_response(peer_addr, actor, operation, error)
+}
+
 fn header_map_from_strings(
   headers: std::collections::HashMap<String, String>,
 ) -> Result<HeaderMap, &'static str> {
@@ -818,7 +836,7 @@ pub(in crate::server) async fn cache_purge_response(
       {
         Ok(purged) => purged,
         Err(error) => {
-          return cache_purge_unavailable_response(
+          return cache_purge_exact_error_response(
             peer_addr,
             authorization.actor,
             operation,

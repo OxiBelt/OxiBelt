@@ -165,7 +165,12 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
 
 #[tokio::test]
 async fn external_group_generation_round_trips_and_rejects_a_changed_variant() {
-  for membership in [None, Some("\"alpha\"")] {
+  for (uri_value, membership) in [
+    ("/grouped.css", None),
+    ("/grouped.css", Some("\"alpha\"")),
+    ("https://example.test/grouped.css", None),
+    ("https://example.test/grouped.css", Some("\"alpha\"")),
+  ] {
     let cache = ResponseCache::new(
       &CacheConfig {
         enabled: true,
@@ -174,7 +179,7 @@ async fn external_group_generation_round_trips_and_rejects_a_changed_variant() {
       None,
     )
     .unwrap();
-    let uri: Uri = "/grouped.css".parse().unwrap();
+    let uri: Uri = uri_value.parse().unwrap();
     let headers = HeaderMap::new();
     let request =
       CacheGroupRequest::new(CacheGroupOrigin::new("https", "example.test:8443").unwrap());
@@ -234,12 +239,7 @@ async fn external_group_generation_round_trips_and_rejects_a_changed_variant() {
     ) else {
       panic!("group-aware response should be admitted")
     };
-    let mut hit = external_hit(
-      &operation,
-      Bytes::from_static(b"body"),
-      "/grouped.css",
-      vec![],
-    );
+    let mut hit = external_hit(&operation, Bytes::from_static(b"body"), uri_value, vec![]);
     hit.metadata.cache_key_version = key::GROUP_EXTERNAL_CACHE_KEY_VERSION.into();
     hit.metadata.capabilities = vec!["cache-groups-v1".into()];
     hit.metadata.variant_key = prepared.variant_key;

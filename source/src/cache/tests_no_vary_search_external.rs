@@ -4,12 +4,13 @@ use super::*;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use base64::Engine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::cache::external_handler::{
-  CACHE_KEY_VERSION, ExternalCacheEntryMetadata, ExternalCacheHeader, ExternalCacheLookupRequest,
-  ExternalCacheVary, PROTOCOL_VERSION,
+  ExternalCacheEntryMetadata, ExternalCacheHeader, ExternalCacheLookupRequest, ExternalCacheVary,
+  PROTOCOL_VERSION,
 };
 use crate::config::Config;
 use crate::runtime_health::RuntimeHealth;
@@ -28,6 +29,7 @@ const OWNER_EFFECTIVE_URI: &str = "https://origin.test/page?ignored=owner&requir
 #[derive(Clone, Copy)]
 enum HandlerMode {
   Capable,
+  GroupedAbsoluteOwner,
   MismatchedOwner,
   LegacyAfterBootstrap,
 }
@@ -37,6 +39,8 @@ struct HandlerState {
   candidate: CacheNvsCandidate,
   nvs_epoch_requests: usize,
   lookup_requests: usize,
+  group_authority: Option<Vec<u8>>,
+  group_stamp: Option<CacheGroupStamp>,
 }
 
 fn no_vary_headers() -> HeaderMap {
@@ -50,7 +54,7 @@ fn no_vary_headers() -> HeaderMap {
   headers
 }
 
-fn external_cache(endpoint: &str) -> Arc<ResponseCache> {
+fn external_cache(endpoint: &str, groups_enabled: bool) -> Arc<ResponseCache> {
   let temp_dir = common::TempDir::new("cache-nvs-external");
   let (certificate, key) = common::create_self_signed_cert(temp_dir.path(), "cache-nvs-external");
   let raw = format!(
@@ -59,9 +63,7 @@ fn external_cache(endpoint: &str) -> Arc<ResponseCache> {
   );
   let mut config: Config =
     toml::from_str(&raw).expect("external cache fixture config should parse");
-  // This handler exercises the independent legacy NVS protocol and supplies
-  // no group authority or downstream-origin request token.
-  config.cache.groups.enabled = false;
+  config.cache.groups.enabled = groups_enabled;
   let metrics = crate::metrics::Metrics::new();
   let runtime = ExternalCacheRuntime::new(&config, metrics.clone())
     .expect("external cache runtime should build");
@@ -110,23 +112,68 @@ async fn owner_candidate(cache: &ResponseCache) -> CacheNvsCandidate {
   CacheNvsCandidate::from_parts(metadata, &headers, 1).expect("candidate should be bounded")
 }
 
+async fn grouped_owner_candidate(cache: &ResponseCache) -> CacheNvsCandidate {
+  let uri = Uri::from_static("https://example.test/page?ignored=owner&required=1");
+  let request = CacheNvsRequest::new(
+    OWNER_EFFECTIVE_URI.parse().unwrap(),
+    b"nvs-external-route-v1",
+  )
+  .unwrap();
+  let group = CacheGroupRequest::new(CacheGroupOrigin::new("https", "example.test").unwrap());
+  let headers = no_vary_headers();
+  let lookup = CacheLookupContext {
+    group_request: Some(&group),
+    ..context(&uri, &request, &headers)
+  };
+  assert!(cache.bind_group_request(lookup.clone()).await);
+  cache.bind_nvs_epoch(lookup).await;
+  request.capture_origin(&headers);
+  let metadata = cache
+    .prepare_nvs(
+      &CacheInsertContext {
+        group_request: Some(&group),
+        no_vary_search: Some(&request),
+        policy_name: None,
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &headers,
+        query_identity: None,
+        certificate_identity: None,
+        proxy_protocol_identity: None,
+      },
+      &headers,
+    )
+    .unwrap();
+  CacheNvsCandidate::from_parts(metadata, &headers, 1).unwrap()
+}
+
 fn framed_owner_response(
   request: ExternalCacheLookupRequest,
   candidate: &CacheNvsCandidate,
   mode: HandlerMode,
+  group_stamp: Option<CacheGroupStamp>,
 ) -> Vec<u8> {
   let mut no_vary_search = candidate.metadata.clone();
   if matches!(mode, HandlerMode::MismatchedOwner) {
     no_vary_search.owner_uri = "/other?ignored=owner&required=1".to_string();
   }
   let body = b"external owner";
+  let mut variant = variant_key(&request.partition, &request.base_key, &[]);
+  if let Some(stamp) = &group_stamp {
+    variant.push_str(&format!(
+      "\ngroup-generation={}:{}",
+      stamp.incarnation, stamp.sequence
+    ));
+  }
   let metadata = ExternalCacheEntryMetadata {
     protocol_version: PROTOCOL_VERSION.to_string(),
-    cache_key_version: CACHE_KEY_VERSION.to_string(),
+    cache_key_version: request.cache_key_version,
     policy: request.policy,
     partition: request.partition.clone(),
     base_key: request.base_key.clone(),
-    variant_key: variant_key(&request.partition, &request.base_key, &[]),
+    variant_key: variant,
     scheme: request.scheme,
     host: request.host,
     uri: request.uri,
@@ -147,8 +194,12 @@ fn framed_owner_response(
     tags: Vec::new(),
     query_target_epoch: None,
     no_vary_search: Some(no_vary_search),
-    group_stamp: None,
-    capabilities: Vec::new(),
+    group_stamp,
+    capabilities: if matches!(mode, HandlerMode::GroupedAbsoluteOwner) {
+      vec!["cache-groups-v1".to_string()]
+    } else {
+      Vec::new()
+    },
   };
   let metadata = serde_json::to_vec(&metadata).expect("external metadata should serialize");
   let mut response = Vec::with_capacity(8 + metadata.len() + body.len());
@@ -244,8 +295,52 @@ async fn serve_connection(mut stream: TcpStream, state: Arc<Mutex<HandlerState>>
             serde_json::from_slice(&body).expect("lookup request should decode");
           (
             "200 OK",
-            framed_owner_response(request, &state.candidate, state.mode),
+            framed_owner_response(
+              request,
+              &state.candidate,
+              state.mode,
+              state.group_stamp.clone(),
+            ),
           )
+        }
+        "cache-group-state" => {
+          let request: serde_json::Value =
+            serde_json::from_slice(&body).expect("group request should decode");
+          let Some(current) = state.group_authority.clone() else {
+            return;
+          };
+          match request["mode"].as_str() {
+            Some("read") => (
+              "200 OK",
+              serde_json::to_vec(&serde_json::json!({
+                "value_base64": base64::engine::general_purpose::STANDARD.encode(current),
+                "capabilities": ["cache-groups-v1"],
+              }))
+              .unwrap(),
+            ),
+            Some("compare_exchange") => {
+              let expected = request["expected_base64"]
+                .as_str()
+                .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok());
+              let replacement = request["replacement_base64"]
+                .as_str()
+                .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
+                .unwrap();
+              let exchanged = expected.as_deref() == Some(current.as_slice());
+              if exchanged {
+                state.group_authority = Some(replacement);
+              }
+              (
+                "200 OK",
+                serde_json::to_vec(&serde_json::json!({
+                  "exchanged": exchanged,
+                  "capabilities": ["cache-groups-v1"],
+                }))
+                .unwrap(),
+              )
+            }
+            _ => ("400 Bad Request", Vec::new()),
+          }
         }
         _ => ("404 Not Found", Vec::new()),
       }
@@ -299,10 +394,51 @@ async fn external_fixture(mode: HandlerMode) -> (Arc<ResponseCache>, Arc<Mutex<H
     candidate: placeholder,
     nvs_epoch_requests: 0,
     lookup_requests: 0,
+    group_authority: None,
+    group_stamp: None,
   })
   .await;
-  let cache = external_cache(&endpoint);
+  let cache = external_cache(&endpoint, false);
   let candidate = owner_candidate(&cache).await;
+  state
+    .lock()
+    .expect("handler state should not be poisoned")
+    .candidate = candidate;
+  (cache, state)
+}
+
+async fn grouped_external_fixture() -> (Arc<ResponseCache>, Arc<Mutex<HandlerState>>) {
+  let absolute_owner = format!("https://example.test{OWNER_URI}");
+  let placeholder = CacheNvsCandidate {
+    metadata: CacheNvsMetadata {
+      version: 1,
+      scope: "0".repeat(64),
+      owner_uri: absolute_owner.clone(),
+      effective_uri: OWNER_EFFECTIVE_URI.to_string(),
+      epoch: 0,
+      policy_epoch: 0,
+      candidate_limit: 1,
+    },
+    fields: vec![NVS_FIELD.as_bytes().to_vec()],
+    date_ms: 1,
+  };
+  let mut authority = crate::cache::groups::model::Authority::new("a".repeat(64));
+  let origin = CacheGroupOrigin::new("https", "example.test").unwrap();
+  let mut stamp = authority.snapshot("default", &origin, "").unwrap();
+  stamp.target = OWNER_URI.to_string();
+  stamp.equivalent_path = Some("/page".to_string());
+  let (endpoint, state) = handler(HandlerState {
+    mode: HandlerMode::GroupedAbsoluteOwner,
+    candidate: placeholder,
+    nvs_epoch_requests: 0,
+    lookup_requests: 0,
+    group_authority: Some(authority.encode().unwrap()),
+    group_stamp: Some(stamp),
+  })
+  .await;
+  let cache = external_cache(&endpoint, true);
+  let candidate = grouped_owner_candidate(&cache).await;
+  assert_eq!(candidate.metadata.owner_uri, absolute_owner);
   state
     .lock()
     .expect("handler state should not be poisoned")
@@ -364,6 +500,63 @@ async fn capable_external_handler_supplies_a_verified_nvs_alias_owner() {
     1,
     "the alias must reload its exact owner from L3"
   );
+}
+
+#[tokio::test]
+async fn grouped_l3_nvs_alias_accepts_an_absolute_owner_with_a_canonical_stamp() {
+  let (cache, state) = grouped_external_fixture().await;
+  let alias_uri = Uri::from_static("https://example.test/page?ignored=alias&required=1");
+  let request = CacheNvsRequest::new(
+    Uri::from_static("https://origin.test/page?ignored=alias&required=1"),
+    b"nvs-external-route-v1",
+  )
+  .unwrap();
+  let group = CacheGroupRequest::new(CacheGroupOrigin::new("https", "example.test").unwrap());
+  let headers = HeaderMap::new();
+  let initial_context = CacheLookupContext {
+    group_request: Some(&group),
+    ..context(&alias_uri, &request, &headers)
+  };
+  assert!(cache.bind_group_request(initial_context.clone()).await);
+  let CacheLookup::Fresh(entry) = cache
+    .lookup_nvs_async(initial_context, None)
+    .await
+    .expect("the grouped L3 alias should be reusable")
+  else {
+    panic!("fresh grouped L3 alias expected")
+  };
+  assert!(entry.nvs_alias);
+  assert_eq!(entry.group_stamp.unwrap().target, OWNER_URI);
+  assert_eq!(state.lock().unwrap().lookup_requests, 1);
+
+  let mutation_uri = Uri::from_static("/page?ignored=alias&required=1");
+  let mutation_group =
+    CacheGroupRequest::new(CacheGroupOrigin::new("https", "example.test").unwrap());
+  let mutation_context = CacheLookupContext {
+    group_request: Some(&mutation_group),
+    no_vary_search: None,
+    proxy_protocol_identity: None,
+    policy_name: None,
+    scheme: "https",
+    host: "example.test",
+    method: &Method::POST,
+    uri: &mutation_uri,
+    request_headers: &headers,
+    query_identity: None,
+    certificate_identity: None,
+  };
+  assert!(cache.bind_group_request(mutation_context.clone()).await);
+  cache
+    .groups_after_origin_response(mutation_context, StatusCode::OK, &HeaderMap::new())
+    .await;
+
+  let after_group = CacheGroupRequest::new(CacheGroupOrigin::new("https", "example.test").unwrap());
+  let after = CacheLookupContext {
+    group_request: Some(&after_group),
+    ..context(&alias_uri, &request, &headers)
+  };
+  assert!(cache.bind_group_request(after.clone()).await);
+  assert!(cache.lookup_nvs_async(after, None).await.is_none());
 }
 
 #[tokio::test]

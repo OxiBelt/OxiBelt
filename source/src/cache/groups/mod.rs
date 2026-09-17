@@ -25,4 +25,13 @@ mod tests;
 mod lifecycle_tests;
 
 #[cfg(test)]
+mod model_tests;
+
+#[cfg(test)]
 mod activation_tests;
+
+#[cfg(test)]
+mod external_activation_tests;
+
+#[cfg(test)]
+mod canonical_tests;

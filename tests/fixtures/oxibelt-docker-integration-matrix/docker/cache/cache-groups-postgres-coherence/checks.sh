@@ -1,5 +1,5 @@
 run_case_checks() {
-  local ordinary grouped cross_node safe ignored mutation invalidated port_seed port_other swr_first swr_stale swr_refreshed chain_a chain_b chain_c chain_a_hit chain_b_hit chain_c_hit chain_mutated chain_a_after chain_b_after chain_c_after
+  local ordinary grouped cross_node absolute_path absolute_sibling absolute_peer absolute_chain absolute_seed absolute_sibling_seed absolute_peer_seed absolute_chain_seed absolute_hit absolute_sibling_hit absolute_peer_hit absolute_chain_hit absolute_mutation absolute_after absolute_sibling_after absolute_peer_after absolute_chain_after safe ignored mutation invalidated port_seed port_other swr_first swr_stale swr_refreshed chain_a chain_b chain_c chain_a_hit chain_b_hit chain_c_hit chain_mutated chain_a_after chain_b_after chain_c_after
 
   ordinary="/app/ordinary?sequence_key=groups-ordinary&body_sequence=ordinary-one%7Cordinary-two&cache_control=public&content_type=text/plain"
   grouped="/app/grouped?sequence_key=groups-alpha&body_sequence=alpha-one%7Calpha-two&cache_control=public&content_type=text/plain&cache_groups=%22alpha%22"
@@ -15,6 +15,38 @@ run_case_checks() {
   sleep 1
   cross_node="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "/app/grouped?sequence_key=groups-alpha&body_sequence=alpha-one%7Calpha-two&cache_control=public&content_type=text/plain&cache_groups=%22alpha%22" 200 "GET" "")"
   assert_response_jq "${cross_node}" '.body == "alpha-one" and .headers["x-oxibelt-cache"] == "hit"'
+
+  absolute_path="/app/absolute?sequence_key=groups-absolute&body_sequence=absolute-one%7Cabsolute-two&cache_control=public&content_type=text/plain&cache_groups=%22absolute-seed%22"
+  absolute_sibling="/app/absolute?sequence_key=groups-absolute-sibling&body_sequence=sibling-one%7Csibling-two&cache_control=public&content_type=text/plain&variant=two"
+  absolute_peer="/app/absolute-peer?sequence_key=groups-absolute-peer&body_sequence=peer-one%7Cpeer-two&cache_control=public&content_type=text/plain&cache_groups=%22absolute-seed%22%2C%20%22absolute-leaf%22"
+  absolute_chain="/app/absolute-chain?sequence_key=groups-absolute-chain&body_sequence=chain-one%7Cchain-two&cache_control=public&content_type=text/plain&cache_groups=%22absolute-leaf%22"
+  absolute_seed="$(client_request "example.test" "${absolute_path}" 200)"
+  absolute_sibling_seed="$(client_request "example.test" "${absolute_sibling}" 200)"
+  absolute_peer_seed="$(client_request "example.test" "${absolute_peer}" 200)"
+  absolute_chain_seed="$(client_request "example.test" "${absolute_chain}" 200)"
+  assert_response_jq "${absolute_seed}" '.body == "absolute-one" and .headers["x-oxibelt-cache"] == "miss"'
+  assert_response_jq "${absolute_sibling_seed}" '.body == "sibling-one" and .headers["x-oxibelt-cache"] == "miss"'
+  assert_response_jq "${absolute_peer_seed}" '.body == "peer-one" and .headers["x-oxibelt-cache"] == "miss"'
+  assert_response_jq "${absolute_chain_seed}" '.body == "chain-one" and .headers["x-oxibelt-cache"] == "miss"'
+  sleep 1
+  absolute_hit="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${absolute_path}" 200 "GET" "")"
+  absolute_sibling_hit="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${absolute_sibling}" 200 "GET" "")"
+  absolute_peer_hit="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${absolute_peer}" 200 "GET" "")"
+  absolute_chain_hit="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${absolute_chain}" 200 "GET" "")"
+  assert_response_jq "${absolute_hit}" '.body == "absolute-one" and .headers["x-oxibelt-cache"] == "hit"'
+  assert_response_jq "${absolute_sibling_hit}" '.body == "sibling-one" and .headers["x-oxibelt-cache"] == "hit"'
+  assert_response_jq "${absolute_peer_hit}" '.body == "peer-one" and .headers["x-oxibelt-cache"] == "hit"'
+  assert_response_jq "${absolute_chain_hit}" '.body == "chain-one" and .headers["x-oxibelt-cache"] == "hit"'
+  absolute_mutation="$(client_request_absolute_with_headers_to_target "proxy" 8443 "example.test" "${absolute_path}" 200 "POST" "")"
+  assert_response_jq "${absolute_mutation}" '.body == "absolute-two"'
+  absolute_after="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${absolute_path}" 200 "GET" "")"
+  absolute_sibling_after="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${absolute_sibling}" 200 "GET" "")"
+  absolute_peer_after="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${absolute_peer}" 200 "GET" "")"
+  absolute_chain_after="$(client_request_with_headers_to_target "proxy-b" 8443 "example.test" "${absolute_chain}" 200 "GET" "")"
+  assert_response_jq "${absolute_after}" '.body == "absolute-two" and .headers["x-oxibelt-cache"] == "miss"'
+  assert_response_jq "${absolute_sibling_after}" '.body == "sibling-one" and .headers["x-oxibelt-cache"] == "hit"'
+  assert_response_jq "${absolute_peer_after}" '.body == "peer-two" and .headers["x-oxibelt-cache"] == "miss"'
+  assert_response_jq "${absolute_chain_after}" '.body == "chain-one" and .headers["x-oxibelt-cache"] == "hit"'
 
   safe="$(client_request "example.test" "/app/safe-ignore?body=safe&cache_control=public&content_type=text/plain&cache_group_invalidation=%22alpha%22" 200)"
   assert_response_jq "${safe}" '.body == "safe"'

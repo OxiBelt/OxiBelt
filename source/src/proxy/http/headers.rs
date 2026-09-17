@@ -80,6 +80,16 @@ pub(crate) fn build_forwarded_header_cache(
 pub(crate) fn validate_authority_host_consistency<B>(
   request: &Request<B>,
 ) -> Result<(), HostConsistencyError> {
+  let uri = request.uri();
+  if request.method() != Method::CONNECT {
+    if uri.path() == "*" {
+      if request.method() != Method::OPTIONS {
+        return Err(HostConsistencyError);
+      }
+    } else if !uri.path().starts_with('/') {
+      return Err(HostConsistencyError);
+    }
+  }
   let mut hosts = request.headers().get_all(HOST).iter();
   let host = hosts.next();
   if hosts.next().is_some() {
@@ -91,14 +101,14 @@ pub(crate) fn validate_authority_host_consistency<B>(
     return validate_http1_connect_authority(request, host);
   }
 
-  let Some(authority) = request.uri().authority() else {
+  let Some(authority) = uri.authority() else {
     return Ok(());
   };
   let Some(host) = host else {
     return Ok(());
   };
   let host = host.to_str().map_err(|_| HostConsistencyError)?;
-  let scheme = request.uri().scheme_str();
+  let scheme = uri.scheme_str();
   if effective_authority(authority.as_str(), scheme)? == effective_authority(host, scheme)? {
     Ok(())
   } else {

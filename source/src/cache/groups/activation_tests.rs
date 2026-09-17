@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::model::{Authority, digest};
+use super::model::{AUTHORITY_VERSION, Authority, LEGACY_AUTHORITY_VERSION, digest};
 use super::tests::{insert_context, lookup_context, request, response};
 use super::{CacheGroupOrigin, CacheGroupRequest};
 use crate::cache::{CacheInsertOutcome, ExternalCacheRuntime, ResponseCache};
@@ -97,6 +97,159 @@ async fn fresh_activation_replaces_a_retired_shared_authority_once() {
   let activated = cache.group_authority_read("default").await.unwrap();
   assert!(activated.enabled);
   assert_ne!(activated.incarnation, retired.incarnation);
+}
+
+#[tokio::test]
+async fn activation_rotates_a_legacy_shared_authority_exactly_once() {
+  let shared = crate::shared_state::SharedState::test_memory("group-activation-v1-migration");
+  let mut legacy = Authority::new("a".repeat(64));
+  legacy.version = LEGACY_AUTHORITY_VERSION;
+  let key = digest(b"default");
+  assert!(
+    shared
+      .cache_group_compare_exchange(&key, None, &serde_json::to_vec(&legacy).unwrap())
+      .await
+      .unwrap()
+  );
+
+  let cache = ResponseCache::new(&config(true), Some(shared)).unwrap();
+  assert!(cache.group_authority_read("default").await.is_err());
+  cache.initialize_group_activation(None).await.unwrap();
+  let migrated = cache.group_authority_read("default").await.unwrap();
+  assert_eq!(migrated.version, AUTHORITY_VERSION);
+  assert_ne!(migrated.incarnation, legacy.incarnation);
+
+  cache.initialize_group_activation(None).await.unwrap();
+  assert_eq!(
+    cache
+      .group_authority_read("default")
+      .await
+      .unwrap()
+      .incarnation,
+    migrated.incarnation
+  );
+}
+
+#[test]
+fn startup_rotates_a_legacy_local_authority_in_place() {
+  let directory = tempfile::tempdir().unwrap();
+  let mut cache_config = config(true);
+  cache_config.store = crate::config::CacheStore::Disk;
+  cache_config.disk_dir = Some(directory.path().to_path_buf());
+  let mut legacy = Authority::new("a".repeat(64));
+  legacy.version = LEGACY_AUTHORITY_VERSION;
+  let path = directory
+    .path()
+    .join(format!(".oxibelt-groups-{}-v1", digest(b"default")));
+  std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+  let cache = ResponseCache::new(&cache_config, None).unwrap();
+  let migrated = cache.groups.local_read("default").unwrap();
+  assert_eq!(migrated.version, AUTHORITY_VERSION);
+  assert_ne!(migrated.incarnation, legacy.incarnation);
+  assert_eq!(
+    Authority::decode(&std::fs::read(path).unwrap())
+      .unwrap()
+      .incarnation,
+    migrated.incarnation
+  );
+}
+
+#[tokio::test]
+async fn disk_entry_from_a_legacy_authority_cold_misses_after_rotation() {
+  let directory = tempfile::tempdir().unwrap();
+  let mut cache_config = config(true);
+  cache_config.store = crate::config::CacheStore::Disk;
+  cache_config.disk_dir = Some(directory.path().to_path_buf());
+  let cache = ResponseCache::new(&cache_config, None).unwrap();
+  let origin = CacheGroupOrigin::new("https", "cache.example.test").unwrap();
+  let uri = Uri::from_static("/legacy-disk");
+  let headers = HeaderMap::new();
+  let fill = request(&cache, origin.clone(), &Method::GET, &uri, &headers).await;
+  assert_eq!(
+    cache
+      .insert_async(
+        insert_context(Some(&fill), &Method::GET, &uri, &headers),
+        response(Some("\"legacy\"")),
+      )
+      .await,
+    CacheInsertOutcome::Stored
+  );
+  let mut legacy = cache.groups.local_read("default").unwrap();
+  legacy.version = LEGACY_AUTHORITY_VERSION;
+  let old_incarnation = legacy.incarnation.clone();
+  drop(cache);
+  let authority_path = directory
+    .path()
+    .join(format!(".oxibelt-groups-{}-v1", digest(b"default")));
+  std::fs::write(&authority_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+  let migrated = ResponseCache::new(&cache_config, None).unwrap();
+  assert_ne!(
+    migrated.groups.local_read("default").unwrap().incarnation,
+    old_incarnation
+  );
+  let lookup = request(&migrated, origin, &Method::GET, &uri, &headers).await;
+  assert!(
+    migrated
+      .lookup_async(lookup_context(Some(&lookup), &Method::GET, &uri, &headers))
+      .await
+      .is_none()
+  );
+}
+
+#[tokio::test]
+async fn shared_entry_from_a_legacy_authority_cold_misses_after_rotation() {
+  let shared = crate::shared_state::SharedState::test_memory("group-v1-entry-migration");
+  let cache_config = config(true);
+  let first = ResponseCache::new(&cache_config, Some(shared.clone())).unwrap();
+  first.initialize_group_activation(None).await.unwrap();
+  let origin = CacheGroupOrigin::new("https", "cache.example.test").unwrap();
+  let uri = Uri::from_static("/legacy-shared");
+  let headers = HeaderMap::new();
+  let fill = request(&first, origin.clone(), &Method::GET, &uri, &headers).await;
+  assert_eq!(
+    first
+      .insert_async(
+        insert_context(Some(&fill), &Method::GET, &uri, &headers),
+        response(Some("\"legacy\"")),
+      )
+      .await,
+    CacheInsertOutcome::Stored
+  );
+  let current = first.group_authority_read("default").await.unwrap();
+  let mut legacy = current.clone();
+  legacy.version = LEGACY_AUTHORITY_VERSION;
+  let key = digest(b"default");
+  assert!(
+    shared
+      .cache_group_compare_exchange(
+        &key,
+        Some(&current.encode().unwrap()),
+        &serde_json::to_vec(&legacy).unwrap(),
+      )
+      .await
+      .unwrap()
+  );
+  assert!(first.group_authority_read("default").await.is_err());
+
+  let migrated = ResponseCache::new(&cache_config, Some(shared)).unwrap();
+  migrated.initialize_group_activation(None).await.unwrap();
+  assert_ne!(
+    migrated
+      .group_authority_read("default")
+      .await
+      .unwrap()
+      .incarnation,
+    current.incarnation
+  );
+  let lookup = request(&migrated, origin, &Method::GET, &uri, &headers).await;
+  assert!(
+    migrated
+      .lookup_async(lookup_context(Some(&lookup), &Method::GET, &uri, &headers))
+      .await
+      .is_none()
+  );
 }
 
 #[tokio::test]

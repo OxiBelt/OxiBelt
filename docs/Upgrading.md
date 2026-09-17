@@ -96,19 +96,27 @@ Cache groups add the default-on `[cache.groups]` table and optional nested
 authority state, so enabling them produces cold misses for existing cache
 objects. The configuration and native-schema epochs do not change.
 
-For a mixed-version deployment, explicitly set `[cache.groups] enabled = false`
-on upgraded nodes, upgrade every cache participant, and then enable it. The
-group namespace gives legacy cache entries cold misses, so a normal upgrade
-does not require a cache clear. Clear failed authority state only when recovery
-requires it. A disconnected node has no pre-request invalidation barrier; a
-node that did not receive an invalidation can reuse its local entry until
-recovery or expiry.
+Cache-group authority state version 2 canonicalizes exact targets to path and
+query. The first upgraded participant atomically replaces a version 1 authority
+at the same shared or external state key with a fresh incarnation. Old entries
+therefore cold-miss without an object rewrite, and version 1 participants that
+continuously use that reachable authority reject the new state and bypass
+group-aware reuse.
 
-Before rollback to a binary that predates cache groups, disable the feature,
-remove `[cache.groups]` and each policy `groups` override, and remove
-`cache:PurgeGroup` and group-purge API values from automation. Cold-clear all
-cache tiers and group authority records before starting the older binary. The
-older binary must not read the group namespace or persisted generation state.
+A rolling upgrade may keep cache groups enabled only when every participant
+continuously uses the same reachable shared or capable external authority.
+Drain traffic from local-only or disconnected participants before upgrading;
+alternatively disable groups and cold-clear every cache tier and local authority
+record before returning them to service. A node that does not observe the new
+authority has no pre-request invalidation barrier and can reuse a local entry
+until it reconnects, recovers, or expires. Complete the upgrade across every
+participant before relying on normal hit rates.
+
+Before rollback to an authority-version-1 binary, disable the feature and
+cold-clear all cache tiers and group authority records. Before rollback to a
+binary that predates cache groups, also remove `[cache.groups]` and each policy
+`groups` override, and remove `cache:PurgeGroup` and group-purge API values from
+automation. The older binary must not read the version 2 authority state.
 
 ## Admin QUERY cache operations
 
