@@ -36,7 +36,13 @@ pub(super) fn spawn_request_mirrors(
   host: &str,
   downstream_scheme: &str,
 ) {
-  if super::incremental::request_marked(outbound) {
+  if super::incremental::request_marked(outbound)
+    || super::informational::candidate(outbound.headers())
+    || outbound
+      .extensions()
+      .get::<super::resumable::NoReplayRequest>()
+      .is_some()
+  {
     for _ in route_action_runtime::enabled_mirrors(route) {
       state.metrics.record_request_mirror_skip();
     }

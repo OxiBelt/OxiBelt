@@ -83,6 +83,8 @@ pub struct RouteConfig {
   #[serde(default)]
   pub external_auth: Option<String>,
   #[serde(default)]
+  pub resumable_upload: Option<String>,
+  #[serde(default)]
   pub client_certificate_forwarding: Option<ClientCertificateForwardingConfig>,
   #[serde(default)]
   pub ipm: RouteIpmConfig,

@@ -664,8 +664,12 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
       {
         let version = version.as_str().expect("version must be a string");
         assert!(
-          locked_registry_packages.contains(&(name.clone(), version.to_owned())),
-          "critical dependency {name}@{version} is not a crates.io package"
+          locked_registry_packages.contains(&(name.clone(), version.to_owned()))
+            || (name == "hyper" && version == "1.11.1" && {
+              assert_hyper_vendor_admission();
+              true
+            }),
+          "critical dependency {name}@{version} is not an approved registry or byte-locked vendored package"
         );
       }
     }
@@ -951,6 +955,76 @@ fn cargo_lock_uses_only_the_approved_registry() {
   }
 }
 
+fn assert_hyper_vendor_admission() {
+  const VENDOR: &str = "source/third_party/hyper";
+  let root = toml_document("Cargo.toml");
+  let patches = root["patch"]["crates-io"]
+    .as_table()
+    .expect("reviewed Hyper patch");
+  assert_eq!(root["patch"].as_table().expect("patch table").len(), 1);
+  assert_eq!(patches.len(), 1, "unreviewed Cargo patch");
+  assert_eq!(patches["hyper"]["path"].as_str(), Some(VENDOR));
+  assert_eq!(patches["hyper"].as_table().expect("patch").len(), 1);
+  assert_eq!(
+    string_array(&root["workspace"]["exclude"], "exclusions"),
+    vec![VENDOR]
+  );
+  let manifest = toml_document(&format!("{VENDOR}/Cargo.toml"));
+  assert_eq!(manifest["package"]["name"].as_str(), Some("hyper"));
+  assert_eq!(manifest["package"]["version"].as_str(), Some("1.11.1"));
+  assert_eq!(manifest["package"]["license"].as_str(), Some("MIT"));
+  assert_eq!(manifest["package"]["build"].as_bool(), Some(false));
+  let lock = toml_document("Cargo.lock");
+  let hyper = lock["package"]
+    .as_array()
+    .expect("packages")
+    .iter()
+    .filter(|package| package["name"].as_str() == Some("hyper"))
+    .collect::<Vec<_>>();
+  assert_eq!(hyper.len(), 1);
+  assert_eq!(hyper[0]["version"].as_str(), Some("1.11.1"));
+  assert!(hyper[0].get("source").is_none());
+  assert!(hyper[0].get("checksum").is_none());
+  let policy = json_policy();
+  let sources = policy["rust"]["vendoredRustSources"]
+    .as_array()
+    .expect("vendor inventory");
+  assert_eq!(sources.len(), 1);
+  let source = &sources[0];
+  assert_eq!(source["name"], "hyper");
+  assert_eq!(source["version"], "1.11.1");
+  assert_eq!(source["path"], VENDOR);
+  assert_eq!(source["license"], "MIT");
+  assert_eq!(source["owner"], "@piquark6046");
+  assert_eq!(
+    source["trackingIssue"],
+    "https://github.com/OxiBelt/OxiBelt/issues/194"
+  );
+  assert_eq!(
+    source["upstreamArchiveSha256"],
+    "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
+  );
+  assert_eq!(source["manifestPath"], "supply-chain/hyper-source.sha256");
+  assert_eq!(
+    sha256_hex(read("supply-chain/hyper-source.sha256").as_bytes()),
+    source["manifestSha256"]
+  );
+  let expected = checksum_manifest("supply-chain/hyper-source.sha256");
+  let mut actual = hash_regular_tree(&repo_root().join(VENDOR));
+  // An independently run upstream unit suite creates this untracked lockfile;
+  // the production dependency graph is exclusively the root Cargo.lock.
+  actual.remove("Cargo.lock");
+  assert_eq!(
+    actual, expected,
+    "vendored Hyper changed without source review"
+  );
+}
+
+#[test]
+fn hyper_transport_source_is_byte_locked_and_governed() {
+  assert_hyper_vendor_admission();
+}
+
 #[test]
 fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
   let runtime = toml_document("source/Cargo.toml");
@@ -1050,18 +1124,9 @@ fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
     2,
     "workspace allocator dependency gained an unreviewed setting"
   );
-  assert!(
-    root.get("patch").is_none(),
-    "the removed allocator package must not remain patched"
-  );
-  assert!(
-    root["workspace"]
-      .as_table()
-      .expect("workspace table")
-      .get("exclude")
-      .is_none(),
-    "the native source is not a Cargo package or workspace exclusion"
-  );
+  // Hyper is independently governed below. The removed allocator must not
+  // become a Cargo patch or workspace exclusion again.
+  assert_hyper_vendor_admission();
   assert!(
     string_array(&root["workspace"]["members"], "workspace members")
       .contains(&"source/crates/oxibelt-allocator")

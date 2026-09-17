@@ -73,6 +73,24 @@ impl Default for WafConfig {
   }
 }
 
+impl WafConfig {
+  /// Stable projection of effective WAF policy for durable upload bindings.
+  /// Runtime-resolved paths are excluded; externally loaded OxiRule content is
+  /// already expanded into the cloned rules and groups.
+  pub(crate) fn stable_policy_projection(&self) -> String {
+    let mut projected = self.clone();
+    projected.rulepack_base_dir = None;
+    projected.rulepack_files_resolved.clear();
+    projected.rulepack_files_logical.clear();
+    projected.loaded_rulepacks.clear();
+    projected.rule_group_files_resolved.clear();
+    projected.rule_group_files_logical.clear();
+    projected.crs.clear_runtime_paths();
+    clear_rule_runtime_paths(&mut projected.rules);
+    format!("{projected:?}")
+  }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteWafConfig {
   #[serde(default)]
@@ -99,6 +117,27 @@ pub struct RouteWafConfig {
   pub(super) rule_group_files_resolved: Vec<PathBuf>,
   #[serde(skip)]
   pub(super) rule_group_files_logical: Vec<PathBuf>,
+}
+
+impl RouteWafConfig {
+  pub(crate) fn stable_policy_projection(&self) -> String {
+    let mut projected = self.clone();
+    projected.rulepack_base_dir = None;
+    projected.rulepack_files_resolved.clear();
+    projected.rulepack_files_logical.clear();
+    projected.loaded_rulepacks.clear();
+    projected.rule_group_files_resolved.clear();
+    projected.rule_group_files_logical.clear();
+    clear_rule_runtime_paths(&mut projected.rules);
+    format!("{projected:?}")
+  }
+}
+
+fn clear_rule_runtime_paths(rules: &mut [WafRuleConfig]) {
+  for rule in rules {
+    rule.loaded_from_path = None;
+    rule.loaded_from_logical_path = None;
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]

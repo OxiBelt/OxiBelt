@@ -37,6 +37,9 @@ pub struct RouteFeaturePlan {
   pub grpc_web: bool,
   pub ipm: bool,
   pub redirect_action: bool,
+  /// Managed resumable uploads own their control methods even when a request
+  /// carries no upload negotiation header (for example DELETE).
+  pub resumable_upload: bool,
   pub rewrite_action: bool,
   pub static_files: bool,
   pub upstream_pool: bool,
@@ -166,6 +169,7 @@ fn route_feature_plan(config: &Config, route: &RouteConfig) -> RouteFeaturePlan 
     grpc_web: route.grpc_web,
     ipm: route.ipm.enabled,
     redirect_action: route.actions.redirect.is_some(),
+    resumable_upload: route.resumable_upload.is_some(),
     rewrite_action: route.actions.rewrite.is_some(),
     static_files: route.static_root.is_some(),
     upstream_pool: route.upstream_pool.is_some(),
@@ -177,6 +181,9 @@ fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
     && !config.dynamic_policy.enabled
     && !crate::waf::route_http_body_compression_transform_enabled(config, route)
     && route.external_auth.is_none()
+    // The managed handler owns both negotiated uploads and headerless control
+    // operations, so none may enter a direct plain-proxy path.
+    && route.resumable_upload.is_none()
     && (!config.compression.enabled || route.compression.as_deref() == Some("off"))
     && route.static_root.is_none()
     && !route.actions.has_actions()
@@ -317,6 +324,23 @@ sendfile = "auto"
     assert_eq!(plan.features, RouteFeaturePlan::default());
     assert_eq!(plan.waf.request, WafExecutionPlan::None);
     assert_eq!(plan.waf.response, WafExecutionPlan::None);
+  }
+
+  #[test]
+  fn resumable_upload_route_disables_all_plain_proxy_fast_paths() {
+    let mut config = minimal_proxy_config("");
+    config.routes[0].resumable_upload = Some("managed".to_owned());
+
+    let plan = route_execution_plan(
+      &config,
+      &config.routes[0],
+      RouteWafExecutionPlan::disabled(),
+    );
+
+    assert!(plan.features.resumable_upload);
+    assert!(!plan.fast_path.plain_proxy_h1);
+    assert!(!plan.fast_path.plain_proxy_h2);
+    assert!(!plan.fast_path.plain_proxy_h3);
   }
 
   #[test]

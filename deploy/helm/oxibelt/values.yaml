@@ -72,6 +72,8 @@ workload:
   kind: Deployment # Deployment | DaemonSet
   deployment:
     maxUnavailable: 0
+    # A single-instance durable upload store must set this to 0 and
+    # maxUnavailable to 1. Both values cannot be zero.
     maxSurge: 1
     minReadySeconds: 5
     progressDeadlineSeconds: 300

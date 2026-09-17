@@ -57,6 +57,8 @@ pub(crate) mod grpc_web;
 pub(crate) mod headers;
 pub(crate) mod incremental;
 pub(crate) mod incremental_exchange;
+pub(crate) mod informational;
+mod managed_upload;
 pub(crate) mod observability;
 mod overload;
 pub(crate) mod person_proof;
@@ -70,6 +72,7 @@ mod request_mirror;
 mod request_validation;
 pub(crate) mod response;
 mod response_timeout;
+mod resumable;
 mod retry;
 mod route_action_runtime;
 mod route_actions;
@@ -201,6 +204,7 @@ where
 {
   state.record_hot_path_request();
   incremental::latch_request(&mut request);
+  informational::latch_request(&mut request);
   client_certificate::strip_reserved(request.headers_mut(), state);
 
   if state.lifecycle.is_draining() {
@@ -439,7 +443,8 @@ where
       return route_security.text(status, message);
     }
 
-    if let Some(response) =
+    if !managed_upload::handles(&request, state.as_ref(), resolved.route)
+      && let Some(response) =
       route_runtime::cors_preflight_response(resolved.route, request.method(), request.headers())
     {
       return route_security.apply(response);
@@ -468,6 +473,7 @@ where
       if state.ipm.authorize(&actor, action, &resource, &context) != IpmDecision::Allow {
         return route_security.text(StatusCode::FORBIDDEN, "forbidden");
       }
+      request.extensions_mut().insert(managed_upload::VerifiedIpmActor(actor));
     }
 
     let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);

@@ -36,6 +36,9 @@ enabled = false
 [proxy]
 trusted_ca_certs = ["upstream-ca.pem"]
 
+[proxy.http]
+early_hints = "pass"
+
 [proxy.auto_upgrade]
 enabled = true
 max_http_version = "h3"

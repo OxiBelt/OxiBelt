@@ -118,8 +118,21 @@ spec:
                     enum:
                     - url_encoded_pem
                     - rfc9440
+              resumableUpload:
+                description: >-
+                  References an operator-admitted upload profile. Tenants cannot
+                  configure storage, credentials, owner bindings, or destinations.
+                type: object
+                required:
+                - profileRef
+                properties:
+                  profileRef:
+                    type: string
+                    minLength: 1
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
             x-kubernetes-validations:
-            - rule: has(self.waf) || has(self.limits) || has(self.timeouts) || has(self.clientCertificateForwarding)
+            - rule: has(self.waf) || has(self.limits) || has(self.timeouts) || has(self.clientCertificateForwarding) || has(self.resumableUpload)
               message: at least one bounded route policy field is required
           status:
             type: object

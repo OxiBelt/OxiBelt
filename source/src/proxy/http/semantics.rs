@@ -11,6 +11,7 @@ use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Body, Frame, SizeHint};
 use oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet;
+use tokio::sync::Notify;
 
 use crate::config::{
   Config, EarlyHintsMode, ErrorResponseMode, ExpectContinueMode, GrpcRetryMode, PriorityMode,
@@ -56,6 +57,49 @@ impl EarlyHintsCapture {
       .lock()
       .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::mem::take(&mut *inner)
+  }
+}
+
+/// Captures configured 103 responses and relays negotiated informational
+/// responses live. This retains arrival order for a 100, 103, 104 sequence.
+///
+/// The relay failure is deliberately retained for the request pipeline to turn
+/// into an exchange failure. Hyper's informational callback has no error return
+/// path, so silently ignoring a bounded-emitter failure would violate ordering.
+#[derive(Clone)]
+pub(crate) struct UpstreamInformationalCapture {
+  early_hints: EarlyHintsCapture,
+  relay_failure: Arc<Mutex<Option<super::informational::SendError>>>,
+  relay_failure_notify: Arc<Notify>,
+}
+
+impl UpstreamInformationalCapture {
+  pub(crate) fn take_early_hints(&self) -> InterimResponses {
+    self.early_hints.take()
+  }
+
+  pub(crate) fn take_relay_failure(&self) -> Option<super::informational::SendError> {
+    self
+      .relay_failure
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .take()
+  }
+
+  pub(crate) async fn relay_failed(&self) -> super::informational::SendError {
+    loop {
+      let notified = self.relay_failure_notify.notified();
+      tokio::pin!(notified);
+      notified.as_mut().enable();
+      if let Some(error) = *self
+        .relay_failure
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+      {
+        return error;
+      }
+      notified.await;
+    }
   }
 }
 
@@ -116,6 +160,7 @@ pub(super) fn apply_priority_policy(headers: &mut HeaderMap, mode: PriorityMode)
   }
 }
 
+#[cfg(test)]
 pub(crate) fn attach_early_hints_capture<B>(
   request: &mut Request<B>,
   mode: EarlyHintsMode,
@@ -141,6 +186,133 @@ pub(crate) fn attach_early_hints_capture<B>(
     );
   });
   Some(capture)
+}
+
+/// Attach the one upstream informational callback used for both existing 103
+/// capture and interop-9 live 104 relay.
+///
+/// An incompatible draft response is ignored as required by draft-12; it is
+/// not exposed as a final-response extension. The callback never changes
+/// `Incremental` state or request deadlines.
+pub(crate) fn attach_upstream_informational_capture<B>(
+  request: &mut Request<B>,
+  mode: EarlyHintsMode,
+) -> Option<UpstreamInformationalCapture> {
+  let relay_candidate = super::informational::negotiated(request.extensions())
+    && super::informational::candidate(request.headers());
+  let emitter = request
+    .extensions()
+    .get::<super::informational::Emitter>()
+    .cloned();
+  let incremental_exchange = request
+    .extensions()
+    .get::<super::incremental_exchange::IncrementalExchange>()
+    .cloned();
+  if mode == EarlyHintsMode::Drop && !relay_candidate {
+    return None;
+  }
+  let relay_failure = relay_candidate
+    .then_some(super::informational::SendError::MissingEmitter)
+    .filter(|_| emitter.is_none());
+  let capture = UpstreamInformationalCapture {
+    early_hints: EarlyHintsCapture::default(),
+    relay_failure: Arc::new(Mutex::new(relay_failure)),
+    relay_failure_notify: Arc::new(Notify::new()),
+  };
+  let callback_capture = capture.clone();
+  hyper::ext::on_informational(request, move |response| {
+    if callback_capture
+      .relay_failure
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner())
+      .is_some()
+    {
+      return;
+    }
+    if let Some(emitter) = emitter.as_ref()
+      && live_relay_eligible(mode, relay_candidate, response.status(), response.headers())
+    {
+      let mut interim = Response::new(());
+      *interim.status_mut() = response.status();
+      *interim.headers_mut() = live_relay_headers(response.status(), response.headers());
+      if let Err(error) = super::informational::send_via(emitter, interim) {
+        if let Some(exchange) = &incremental_exchange {
+          // The sender cannot return an error through Hyper's callback. Stop
+          // an in-flight upload immediately; the pipeline later converts the
+          // retained failure into the terminal exchange error.
+          exchange.cancel();
+        }
+        let mut relay_failure = callback_capture
+          .relay_failure
+          .lock()
+          .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let first_failure = relay_failure.is_none();
+        relay_failure.get_or_insert(error);
+        drop(relay_failure);
+        if first_failure {
+          callback_capture.relay_failure_notify.notify_waiters();
+        }
+      }
+      return;
+    }
+    // 104 is never a final response. An incompatible draft response is
+    // intentionally ignored, but must not fall through to legacy handling.
+    if response.status().as_u16() == 104 {
+      return;
+    }
+    let mut interim = callback_capture
+      .early_hints
+      .inner
+      .lock()
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = capture_early_hint(
+      &mut interim,
+      mode,
+      response.status(),
+      response.headers(),
+      usize::MAX,
+    );
+  });
+  Some(capture)
+}
+
+/// Identifies upstream informational heads that a negotiated request must
+/// deliver on the live downstream response path.  103 retains its configured
+/// pass/drop policy; 100 and 102 are protocol progress signals, while 104 is
+/// draft-gated by the matching interop version.
+pub(crate) fn live_relay_eligible(
+  mode: EarlyHintsMode,
+  relay_candidate: bool,
+  status: StatusCode,
+  headers: &HeaderMap,
+) -> bool {
+  relay_candidate
+    && match status.as_u16() {
+      100 | 102 => true,
+      103 => mode == EarlyHintsMode::Pass,
+      104 => super::informational::compatible_104(headers),
+      _ => false,
+    }
+}
+
+/// Preserves the existing 103 sanitization rule on the new live path. Progress
+/// statuses need no upstream metadata, while draft 104 headers carry the
+/// negotiated resumption metadata and remain subject to sender framing checks.
+pub(crate) fn live_relay_headers(status: StatusCode, headers: &HeaderMap) -> HeaderMap {
+  match status.as_u16() {
+    103 => match sanitize_interim_response(status, headers) {
+      Some(response) => response.headers,
+      None => HeaderMap::new(),
+    },
+    100 | 102 => HeaderMap::new(),
+    _ => headers.clone(),
+  }
+}
+
+pub(crate) fn sanitize_live_relay_response(mut response: Response<()>) -> Response<()> {
+  let headers = live_relay_headers(response.status(), response.headers());
+  *response.headers_mut() = headers;
+  response
 }
 
 pub(crate) fn capture_early_hint(
@@ -530,6 +702,74 @@ mod tests {
       EarlyHintCaptureOutcome::AtCapacity
     );
     assert_eq!(interim.responses.len(), 1);
+  }
+
+  #[test]
+  fn negotiated_live_relay_preserves_progress_ordering_contract() {
+    let mut compatible_104 = HeaderMap::new();
+    compatible_104.insert(
+      "upload-draft-interop-version",
+      HeaderValue::from_static("9"),
+    );
+    let empty = HeaderMap::new();
+
+    assert!(live_relay_eligible(
+      EarlyHintsMode::Pass,
+      true,
+      StatusCode::CONTINUE,
+      &empty
+    ));
+    assert!(live_relay_eligible(
+      EarlyHintsMode::Pass,
+      true,
+      StatusCode::EARLY_HINTS,
+      &empty
+    ));
+    assert!(live_relay_eligible(
+      EarlyHintsMode::Pass,
+      true,
+      StatusCode::from_u16(104).expect("104 status"),
+      &compatible_104
+    ));
+    assert!(!live_relay_eligible(
+      EarlyHintsMode::Drop,
+      true,
+      StatusCode::EARLY_HINTS,
+      &empty
+    ));
+    assert!(!live_relay_eligible(
+      EarlyHintsMode::Pass,
+      true,
+      StatusCode::from_u16(104).expect("104 status"),
+      &empty
+    ));
+    assert!(!live_relay_eligible(
+      EarlyHintsMode::Pass,
+      false,
+      StatusCode::CONTINUE,
+      &empty
+    ));
+  }
+
+  #[test]
+  fn live_relay_keeps_103_sanitized_and_104_metadata() {
+    let mut hints = HeaderMap::new();
+    hints.insert(LINK, HeaderValue::from_static("</upload.css>; rel=preload"));
+    hints.insert("x-origin-secret", HeaderValue::from_static("drop"));
+    let sanitized = live_relay_headers(StatusCode::EARLY_HINTS, &hints);
+    assert_eq!(sanitized.get(LINK), hints.get(LINK));
+    assert!(!sanitized.contains_key("x-origin-secret"));
+
+    let mut resume = HeaderMap::new();
+    resume.insert(
+      "upload-draft-interop-version",
+      HeaderValue::from_static("9"),
+    );
+    resume.insert("upload-offset", HeaderValue::from_static("4096"));
+    assert_eq!(
+      live_relay_headers(StatusCode::from_u16(104).expect("104 status"), &resume),
+      resume
+    );
   }
 
   #[test]

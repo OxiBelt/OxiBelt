@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use anyhow::{Context, anyhow, bail};
+use sha2::{Digest as _, Sha256};
 
 use super::super::WafLimits;
 use super::actions::parse_setvar;
@@ -19,19 +20,35 @@ use super::variables::CrsVariable;
 
 pub(super) struct CrsParser {
   pub(super) entries: Vec<CrsEntry>,
+  content_digest: Sha256,
 }
 
 impl CrsParser {
   pub(super) fn new() -> Self {
     Self {
       entries: Vec::new(),
+      content_digest: Sha256::new(),
     }
   }
 
   pub(super) fn load_file(&mut self, path: &Path, limits: &WafLimits) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(path)
       .with_context(|| format!("failed to read CRS file {}", path.display()))?;
+    self
+      .content_digest
+      .update(u64::try_from(raw.len()).unwrap_or(u64::MAX).to_be_bytes());
+    self.content_digest.update(raw.as_bytes());
     self.load_source(&raw, &format!("CRS {}", path.display()), limits)
+  }
+
+  pub(super) fn content_fingerprint(&self) -> String {
+    self
+      .content_digest
+      .clone()
+      .finalize()
+      .iter()
+      .map(|byte| format!("{byte:02x}"))
+      .collect()
   }
 
   /// Parse an in-memory CRS source without reaching the filesystem.

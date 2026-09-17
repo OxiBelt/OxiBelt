@@ -5,7 +5,7 @@ use super::*;
 
 mod ct;
 mod exchange;
-mod upstream;
+pub(super) mod upstream;
 
 pub(super) struct InitialContext<'state, 'request, 'access, 'transport, 'metadata, B> {
   pub(super) request: Request<B>,
@@ -452,6 +452,52 @@ where
   }
   // CT routes remain behind the same dynamic-policy and external-auth gates as
   // upstream routes. Dispatch only after both gates have accepted the request.
+  if managed_upload::handles(&request, state, resolved.route) {
+    let response = managed_upload::run(
+      UpstreamContext {
+        request,
+        state,
+        resolved,
+        host,
+        downstream_port,
+        client_addr,
+        forwarded_client_addr,
+        forwarded_header_cache,
+        tcp_max_hop,
+        tls,
+        protocol,
+        transport_network,
+        transport_metadata,
+        downstream_scheme,
+        request_version,
+        listener_bind,
+        access_log,
+        trace_context,
+        route_circuit_breaker_lease,
+        tags,
+        effective_buffering,
+        request_method,
+        request_uri,
+        client_asn,
+        response_waf_enabled,
+        response_body_need,
+        response_waf_body_compression_transform: false,
+        request_waf: Default::default(),
+        captured_body: None,
+        verified_early_data,
+      },
+      evaluated_person_proof.as_ref(),
+      dynamic_person_proof_mutation_added,
+    )
+    .await;
+    return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
+      response,
+      state.as_ref(),
+      evaluated_person_proof.as_ref(),
+      dynamic_person_proof_mutation_added,
+      &dynamic_challenge_response_mutations,
+    ));
+  }
   if let Some(log_name) = resolved.route.ct_log.as_deref() {
     if !ct::surface_allows(
       resolved.route.ct_surface,
@@ -551,6 +597,22 @@ where
   }
   let waf_body_compression_transform =
     crate::waf::route_http_body_compression_transform_enabled(&state.config, resolved.route);
+  // Resumable offsets count the original wire representation. Recompression
+  // during inspection must never silently change those octets.
+  if (informational::candidate(request.headers())
+    || request
+      .extensions()
+      .get::<resumable::NoReplayRequest>()
+      .is_some())
+    && waf_body_compression_transform
+    && request_body_need != BodyNeed::None
+    && waf_body_coding::has_non_identity_content_encoding(request.headers())
+  {
+    return route_security.text(
+      StatusCode::UNSUPPORTED_MEDIA_TYPE,
+      "encoded resumable bodies cannot be inspected without changing their representation",
+    );
+  }
   let request_waf_body_compression_transform =
     waf_body_compression_transform && request_body_need != BodyNeed::None;
   let response_waf_body_compression_transform =

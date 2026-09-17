@@ -80,6 +80,7 @@ mod tcp_socket;
 pub mod telemetry;
 pub mod tls;
 pub mod turn;
+pub(crate) mod uploads;
 pub mod upstream_control;
 pub mod upstream_discovery;
 pub(crate) mod upstream_failure;

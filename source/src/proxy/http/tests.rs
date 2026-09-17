@@ -8,6 +8,7 @@ mod alt_svc;
 mod incremental;
 mod incremental_capacity;
 mod incremental_capacity_wire;
+mod managed_upload;
 mod query;
 
 use pretty_assertions::assert_eq;

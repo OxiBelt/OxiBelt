@@ -76,6 +76,7 @@ fn snapshot(policies: Vec<DynamicPolicy>) -> DynamicPolicySnapshot {
   DynamicPolicySnapshot {
     generation: 1,
     fingerprint: 1,
+    content_fingerprint: 1,
     policies: Arc::from(policies),
   }
 }

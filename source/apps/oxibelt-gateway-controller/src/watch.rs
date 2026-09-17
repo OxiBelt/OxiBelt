@@ -807,7 +807,10 @@ async fn reconcile_once(
   let objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
   let initial_source_snapshot_digest = source_snapshot_digest(&objects);
   let target_set = TargetSet::from_objects(&objects, args, &shared.controller_name)?;
-  let rendered = translate::translate_objects(&objects, shared)?;
+  let rendered = match &target_set {
+    TargetSet::Legacy(target) => translate_for_rollout_target(&objects, shared, target)?,
+    TargetSet::StaticReplicated(_) => translate::translate_objects(&objects, shared)?,
+  };
   status::print_diagnostics(&rendered.diagnostics);
   let mut target_outcomes = Vec::new();
   let mut target_rollout_inputs = BTreeMap::new();
@@ -819,13 +822,15 @@ async fn reconcile_once(
         .map(|target| {
           let target_objects =
             objects_for_target(&objects, target, shared.status_service.as_deref());
-          let translation_succeeded = translate::translate_objects(&target_objects, shared)
-            .is_ok_and(|rendered| {
-              rendered.disposition.is_publishable()
-                && compatibility
-                  .validate_generated_capabilities(rendered.requires_exact_data_plane)
-                  .is_ok()
-            });
+          let translation_succeeded =
+            translate_for_rollout_target(&target_objects, shared, &target.rollout).is_ok_and(
+              |rendered| {
+                rendered.disposition.is_publishable()
+                  && compatibility
+                    .validate_generated_capabilities(rendered.requires_exact_data_plane)
+                    .is_ok()
+              },
+            );
           TargetOutcome {
             target: target.clone(),
             source_snapshot_digest: source_snapshot_digest(&target_objects),
@@ -912,7 +917,10 @@ async fn reconcile_once(
     )
   } else {
     let fresh_objects = rollout::canonicalize_objects(&kubernetes.snapshot().await?);
-    let fresh_rendered = translate::translate_objects(&fresh_objects, shared)?;
+    let fresh_rendered = match &target_set {
+      TargetSet::Legacy(target) => translate_for_rollout_target(&fresh_objects, shared, target)?,
+      TargetSet::StaticReplicated(_) => translate::translate_objects(&fresh_objects, shared)?,
+    };
     let digest = source_snapshot_digest(&fresh_objects);
     if rollout_status.phase.is_committed()
       && matches!(target_set, TargetSet::Legacy(_))
@@ -974,15 +982,16 @@ async fn reconcile_once(
         }
         continue;
       }
-      let fresh_inputs = translate::translate_objects(&fresh_target_objects, shared)
-        .ok()
-        .filter(|rendered| {
-          rendered.disposition.is_publishable()
-            && compatibility
-              .validate_generated_capabilities(rendered.requires_exact_data_plane)
-              .is_ok()
-        })
-        .map(|rendered| TargetRolloutInputs::from(&rendered));
+      let fresh_inputs =
+        translate_for_rollout_target(&fresh_target_objects, shared, &outcome.target.rollout)
+          .ok()
+          .filter(|rendered| {
+            rendered.disposition.is_publishable()
+              && compatibility
+                .validate_generated_capabilities(rendered.requires_exact_data_plane)
+                .is_ok()
+          })
+          .map(|rendered| TargetRolloutInputs::from(&rendered));
       let inputs_are_fresh = target_rollout_inputs
         .get(&outcome.target.identity())
         .zip(fresh_inputs.as_ref())
@@ -1084,6 +1093,31 @@ fn summarize_target_outcomes(assigned: usize, outcomes: &[TargetOutcome]) -> Rol
   RolloutStatus::from_targets(assigned, active, failed)
 }
 
+/// Operator profile admission is scoped to the actual workload receiving this
+/// artifact, including each member of a static multi-target topology. Merely
+/// naming a target in CLI arguments must not authorize a different workload.
+pub(crate) fn translate_for_rollout_target(
+  objects: &[KubernetesObject],
+  shared: &SharedArgs,
+  target: &rollout::RolloutTarget,
+) -> anyhow::Result<translate::RenderedConfig> {
+  let allowed = shared
+    .resumable_upload_target
+    .as_ref()
+    .is_some_and(|admitted| {
+      admitted.namespace == target.namespace
+        && admitted.kind == target.kind
+        && admitted.name == target.name
+    });
+  if allowed || shared.resumable_upload_profiles.is_empty() {
+    return translate::translate_objects(objects, shared);
+  }
+  let mut scoped = shared.clone();
+  scoped.resumable_upload_profiles.clear();
+  scoped.resumable_upload_target = None;
+  translate::translate_objects(objects, &scoped)
+}
+
 async fn reconcile_static_targets(
   kubernetes: &KubernetesPoller,
   shared: &SharedArgs,
@@ -1103,7 +1137,7 @@ async fn reconcile_static_targets(
       shared.status_service.as_deref(),
     ));
     let snapshot_digest = source_snapshot_digest(&target_objects);
-    let rendered = match translate::translate_objects(&target_objects, shared) {
+    let rendered = match translate_for_rollout_target(&target_objects, shared, &target.rollout) {
       Ok(rendered) if rendered.disposition.is_publishable() => rendered,
       Ok(_) | Err(_) => {
         outcomes.push(TargetOutcome {

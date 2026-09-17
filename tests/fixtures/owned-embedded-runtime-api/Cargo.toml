@@ -14,6 +14,12 @@ anyhow = "1.0.104"
 oxibelt = { path = "../../../source" }
 tokio = { version = "=1.53.1", features = ["sync"] }
 
+# This standalone downstream workspace must resolve the same reviewed Hyper
+# source as the repository workspace. Cargo patches are not inherited across
+# workspace roots.
+[patch.crates-io]
+hyper = { path = "../../../source/third_party/hyper" }
+
 [lints.rust]
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"

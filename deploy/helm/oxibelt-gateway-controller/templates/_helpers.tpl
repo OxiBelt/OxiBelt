@@ -83,6 +83,14 @@ oxibelt.dev/kubernetes-support-policy: {{ index .Chart.Annotations "oxibelt.dev/
 {{- fail "watchAllNamespaces=true cannot be combined with watchNamespace" -}}
 {{- end -}}
 {{- $sourceSecrets := dict -}}
+{{- $resumableProfiles := dict -}}
+{{- range $profile := .Values.routePolicy.resumableUploadProfiles -}}
+{{- $identity := printf "%s/%s" $profile.namespace $profile.profile -}}
+{{- if hasKey $resumableProfiles $identity -}}
+{{- fail (printf "routePolicy.resumableUploadProfiles contains duplicate %s" $identity) -}}
+{{- end -}}
+{{- $_ := set $resumableProfiles $identity true -}}
+{{- end -}}
 {{- range $secret := .Values.upstreamClientTls.sourceSecretAllowlist -}}
 {{- $identity := printf "%s/%s" $secret.namespace $secret.name -}}
 {{- if or (gt (len $secret.namespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $secret.namespace)) -}}

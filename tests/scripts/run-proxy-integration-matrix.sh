@@ -14,10 +14,14 @@ fi
 
 certificate_metadata_case=0
 client_certificate_mtls_case=0
+managed_upload_wire_case=0
+if [[ "${category}" == "http-semantics" && "${case_name}" == "managed-upload-real-wire" ]]; then
+  managed_upload_wire_case=1
+fi
 if [[ "${category}" == "protocol-proxying" && "${case_name}" == "client-certificate-forwarding-mtls-rfc9440" ]]; then
   client_certificate_mtls_case=1
 fi
-if [[ "${category}" == "protocol-proxying" && ( "${case_name}" == "certificate-metadata-real-protocols" || "${case_name}" == "client-certificate-forwarding-real-protocols" || "${client_certificate_mtls_case}" == "1" ) ]]; then
+if [[ ( "${category}" == "protocol-proxying" && ( "${case_name}" == "certificate-metadata-real-protocols" || "${case_name}" == "client-certificate-forwarding-real-protocols" || "${client_certificate_mtls_case}" == "1" ) ) || "${managed_upload_wire_case}" == "1" ]]; then
   certificate_metadata_case=1
 fi
 
@@ -2823,7 +2827,7 @@ if [[ "${certificate_metadata_case}" == "1" ]]; then
     -extensions req_ext \
     -out "${client_tls_dir}/client.pem" >/dev/null 2>&1
 
-  if [[ "${case_name}" == "client-certificate-forwarding-real-protocols" || "${client_certificate_mtls_case}" == "1" ]]; then
+  if [[ "${case_name}" == "client-certificate-forwarding-real-protocols" || "${client_certificate_mtls_case}" == "1" || "${managed_upload_wire_case}" == "1" ]]; then
     openssl req -newkey rsa:2048 -sha256 -nodes \
       -config "${work_dir}/client-leaf.cnf" \
       -keyout "${client_tls_dir}/client-second.key" \

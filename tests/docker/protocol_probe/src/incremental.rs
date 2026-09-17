@@ -67,6 +67,14 @@ struct ClientArgs {
   response_mode: ResponseMode,
   expected_proxy_status: Option<String>,
   expected_cache_status: Option<String>,
+  resumable_relay: bool,
+  resumable_relay_only: bool,
+}
+
+impl ClientArgs {
+  fn wants_resumable_relay(&self) -> bool {
+    self.resumable_relay || self.resumable_relay_only
+  }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -154,7 +162,17 @@ pub(crate) async fn client(mut values: impl Iterator<Item = String>) -> anyhow::
   let mut response_mode = ResponseMode::Duplex;
   let mut expected_proxy_status = None;
   let mut expected_cache_status = None;
+  let mut resumable_relay = false;
+  let mut resumable_relay_only = false;
   while let Some(flag) = values.next() {
+    if flag == "--resumable-relay" {
+      resumable_relay = true;
+      continue;
+    }
+    if flag == "--resumable-relay-only" {
+      resumable_relay_only = true;
+      continue;
+    }
     let value = values
       .next()
       .ok_or_else(|| anyhow!("missing value for {flag}"))?;
@@ -180,6 +198,9 @@ pub(crate) async fn client(mut values: impl Iterator<Item = String>) -> anyhow::
       _ => bail!("unknown Incremental client option: {flag}"),
     }
   }
+  if resumable_relay && resumable_relay_only {
+    bail!("--resumable-relay and --resumable-relay-only are mutually exclusive")
+  }
   let args = ClientArgs {
     protocol: protocol.ok_or_else(|| anyhow!("--protocol is required"))?,
     host: host.ok_or_else(|| anyhow!("--host is required"))?,
@@ -194,6 +215,8 @@ pub(crate) async fn client(mut values: impl Iterator<Item = String>) -> anyhow::
     response_mode,
     expected_proxy_status,
     expected_cache_status,
+    resumable_relay,
+    resumable_relay_only,
   };
   match args.protocol {
     Protocol::H1 => client_h1(&args).await,
@@ -213,6 +236,14 @@ fn response() -> anyhow::Result<Response<()>> {
     .body(())
     .context("build Incremental response")
 }
+fn resumable_response() -> anyhow::Result<Response<()>> {
+  Response::builder()
+    .status(StatusCode::OK)
+    .header("content-length", "2")
+    .header("content-type", "text/plain")
+    .body(())
+    .context("build resumable relay response")
+}
 fn request(args: &ClientArgs, version: Version) -> anyhow::Result<Request<()>> {
   let uri = http::Uri::builder()
     .scheme("https")
@@ -224,10 +255,17 @@ fn request(args: &ClientArgs, version: Version) -> anyhow::Result<Request<()>> {
     .method("POST")
     .version(version)
     .uri(uri)
-    .header("host", &args.authority)
-    .header("incremental", "?1");
+    .header("host", &args.authority);
+  if !args.resumable_relay_only {
+    builder = builder.header("incremental", "?1");
+  }
   if let Some(mode) = args.response_mode.header_value(args.expected_status) {
     builder = builder.header("x-incremental-probe-mode", mode);
+  }
+  if args.wants_resumable_relay() {
+    builder = builder
+      .header("upload-draft-interop-version", "9")
+      .header("x-resumable-relay-probe", "?1");
   }
   builder.body(()).context("build Incremental request")
 }
@@ -422,16 +460,47 @@ async fn h1_server_exchange<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> anyhow::Result<()> {
   let head = read_until(&mut stream, b"\r\n\r\n").await?;
   let head_text = std::str::from_utf8(&head).context("Incremental H1 head was not UTF-8")?;
-  if !head_text
+  let incremental = head_text
     .lines()
-    .any(|line| line.eq_ignore_ascii_case("incremental: ?1"))
-  {
-    bail!("Incremental H1 request header missing")
-  }
+    .any(|line| line.eq_ignore_ascii_case("incremental: ?1"));
   let early_no_content = head_text
     .lines()
     .any(|line| line.eq_ignore_ascii_case("x-incremental-probe-mode: early-204"));
+  let resumable_relay = head_text
+    .lines()
+    .any(|line| line.eq_ignore_ascii_case("x-resumable-relay-probe: ?1"));
+  if !incremental && !resumable_relay {
+    bail!("neither Incremental nor resumable H1 request header was present")
+  }
   expect_h1_marker(&mut stream, FIRST).await?;
+  if resumable_relay {
+    stream
+      .write_all(
+        b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </upload.css>; rel=preload\r\n\r\nHTTP/1.1 104 Upload Resumption Supported\r\nUpload-Draft-Interop-Version: 9\r\n\r\n",
+      )
+      .await
+      .context("send ordered resumable H1 informational responses")?;
+    stream
+      .flush()
+      .await
+      .context("flush ordered resumable H1 informational responses")?;
+  }
+  if resumable_relay && !incremental {
+    expect_h1_marker(&mut stream, SECOND).await?;
+    expect_h1_marker(&mut stream, LAST).await?;
+    expect_h1_end(&mut stream).await?;
+    stream
+      .write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\nok",
+      )
+      .await
+      .context("send final resumable H1 response")?;
+    stream
+      .flush()
+      .await
+      .context("flush final resumable H1 response")?;
+    return notify_completion(completions).await;
+  }
   if early_no_content {
     stream
       .write_all(b"HTTP/1.1 204 No Content\r\nIncremental: ?1\r\nConnection: keep-alive\r\n\r\n")
@@ -486,12 +555,68 @@ async fn client_h1(args: &ClientArgs) -> anyhow::Result<()> {
     .header_value(args.expected_status)
     .map(|mode| format!("X-Incremental-Probe-Mode: {mode}\r\n"))
     .unwrap_or_default();
+  let resumable_relay = args
+    .wants_resumable_relay()
+    .then_some("Upload-Draft-Interop-Version: 9\r\nX-Resumable-Relay-Probe: ?1\r\n")
+    .unwrap_or_default();
+  let incremental = (!args.resumable_relay_only)
+    .then_some("Incremental: ?1\r\n")
+    .unwrap_or_default();
   let head = format!(
-    "POST {} HTTP/1.1\r\nHost: {}\r\nIncremental: ?1\r\n{}Transfer-Encoding: chunked\r\n\r\n",
+    "POST {} HTTP/1.1\r\nHost: {}\r\n{incremental}{}{resumable_relay}Transfer-Encoding: chunked\r\n\r\n",
     args.path, args.authority, probe_mode
   );
   stream.write_all(head.as_bytes()).await?;
   write_h1_chunk(&mut stream, FIRST).await?;
+  if args.wants_resumable_relay() {
+    for (status, required_header) in [
+      ("100", None),
+      ("103", Some(("link", "</upload.css>; rel=preload"))),
+      ("104", Some(("upload-draft-interop-version", "9"))),
+    ] {
+      let head = read_until(&mut stream, b"\r\n\r\n").await?;
+      let head = std::str::from_utf8(&head).context("resumable H1 interim was not UTF-8")?;
+      if !head.starts_with(&format!("HTTP/1.1 {status} ")) {
+        bail!("resumable H1 interim order was {head:?}, expected {status}")
+      }
+      if let Some((name, value)) = required_header {
+        if !head
+          .lines()
+          .any(|line| line.eq_ignore_ascii_case(&format!("{name}: {value}")))
+        {
+          bail!("resumable H1 {status} interim did not preserve {name}")
+        }
+      }
+    }
+  }
+  if args.resumable_relay_only {
+    write_h1_chunk(&mut stream, SECOND).await?;
+    write_h1_chunk(&mut stream, LAST).await?;
+    finish_h1_upload(&mut stream).await?;
+    let response_head = read_until(&mut stream, b"\r\n\r\n").await?;
+    let response_text =
+      std::str::from_utf8(&response_head).context("resumable H1 response head was not UTF-8")?;
+    if !response_text.contains(" 200 ")
+      || response_text
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with("incremental:"))
+    {
+      bail!("resumable H1 final response was invalid or synthesized Incremental")
+    }
+    let mut body = [0; 2];
+    within(async {
+      stream
+        .read_exact(&mut body)
+        .await
+        .context("read resumable H1 final response body")
+    })
+    .await?;
+    if &body != b"ok" {
+      bail!("unexpected resumable H1 final response body")
+    }
+    wait_for_completion(args).await?;
+    return Ok(());
+  }
   let response_head = read_until(&mut stream, b"\r\n\r\n").await?;
   let response_text =
     std::str::from_utf8(&response_head).context("Incremental H1 response head was not UTF-8")?;
@@ -680,16 +805,50 @@ async fn h2_server_exchange(
   (request, mut respond): (Request<h2::RecvStream>, h2::server::SendResponse<Bytes>),
   completions: &mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
-  if request
+  let incremental = request
     .headers()
     .get("incremental")
     .and_then(|v| v.to_str().ok())
-    != Some("?1")
-  {
-    bail!("Incremental H2 request header missing")
+    == Some("?1");
+  let resumable_relay = request
+    .headers()
+    .get("x-resumable-relay-probe")
+    .and_then(|value| value.to_str().ok())
+    == Some("?1");
+  if !incremental && !resumable_relay {
+    bail!("neither Incremental nor resumable H2 request header was present")
   }
   let (_, mut body) = request.into_parts();
   expect_h2_data(&mut body, FIRST).await?;
+  if resumable_relay {
+    for response in [
+      Response::builder().status(100).body(()),
+      Response::builder()
+        .status(103)
+        .header("link", "</upload.css>; rel=preload")
+        .body(()),
+      Response::builder()
+        .status(104)
+        .header("upload-draft-interop-version", "9")
+        .body(()),
+    ] {
+      respond
+        .send_informational(response.context("build resumable H2 informational response")?)
+        .context("send resumable H2 informational response")?;
+    }
+  }
+  if resumable_relay && !incremental {
+    expect_h2_data(&mut body, SECOND).await?;
+    expect_h2_data(&mut body, LAST).await?;
+    expect_h2_end(&mut body, "resumable server request").await?;
+    let mut response = respond
+      .send_response(resumable_response()?, false)
+      .context("send final resumable H2 response")?;
+    response
+      .send_data(Bytes::from_static(b"ok"), true)
+      .context("finish final resumable H2 response")?;
+    return notify_completion(completions).await;
+  }
   let mut response = respond
     .send_response(response()?, false)
     .context("send Incremental H2 response")?;
@@ -773,12 +932,49 @@ async fn client_h2(args: &ClientArgs) -> anyhow::Result<()> {
   tokio::spawn(async move {
     let _ = connection.await;
   });
-  let (response_future, mut upload) = sender
+  let (mut response_future, mut upload) = sender
     .send_request(request(args, Version::HTTP_2)?, false)
     .context("send Incremental H2 headers")?;
   upload
     .send_data(Bytes::from_static(FIRST), false)
     .context("send first Incremental H2 marker")?;
+  if args.wants_resumable_relay() {
+    expect_h2_informational(&mut response_future, 100, None).await?;
+    expect_h2_informational(
+      &mut response_future,
+      103,
+      Some(("link", "</upload.css>; rel=preload")),
+    )
+    .await?;
+    expect_h2_informational(
+      &mut response_future,
+      104,
+      Some(("upload-draft-interop-version", "9")),
+    )
+    .await?;
+  }
+  if args.resumable_relay_only {
+    upload
+      .send_data(Bytes::from_static(SECOND), false)
+      .context("send second resumable H2 marker")?;
+    upload
+      .send_data(Bytes::from_static(LAST), true)
+      .context("finish resumable H2 upload")?;
+    let response = within(async {
+      response_future
+        .await
+        .context("receive final resumable H2 response")
+    })
+    .await?;
+    if response.status() != StatusCode::OK || response.headers().contains_key("incremental") {
+      bail!("resumable H2 final response was invalid or synthesized Incremental")
+    }
+    let (_, mut download) = response.into_parts();
+    expect_h2_data(&mut download, b"ok").await?;
+    expect_h2_end(&mut download, "resumable client response").await?;
+    wait_for_completion(args).await?;
+    return Ok(());
+  }
   let response = within(async {
     response_future
       .await
@@ -798,6 +994,37 @@ async fn client_h2(args: &ClientArgs) -> anyhow::Result<()> {
     .send_data(Bytes::from_static(LAST), true)
     .context("finish Incremental H2 upload")?;
   wait_for_completion(args).await?;
+  Ok(())
+}
+
+async fn expect_h2_informational(
+  response_future: &mut h2::client::ResponseFuture,
+  status: u16,
+  required_header: Option<(&str, &str)>,
+) -> anyhow::Result<()> {
+  let response = within(async {
+    futures_util::future::poll_fn(|cx| response_future.poll_informational(cx))
+      .await
+      .ok_or_else(|| anyhow!("H2 response completed before resumable {status} interim"))?
+      .context("receive resumable H2 informational response")
+  })
+  .await?;
+  if response.status().as_u16() != status {
+    bail!(
+      "resumable H2 interim order was {}, expected {status}",
+      response.status()
+    )
+  }
+  if let Some((name, value)) = required_header {
+    if response
+      .headers()
+      .get(name)
+      .and_then(|value| value.to_str().ok())
+      != Some(value)
+    {
+      bail!("resumable H2 {status} interim did not preserve {name}")
+    }
+  }
   Ok(())
 }
 
@@ -851,19 +1078,60 @@ async fn h3_server_exchange(
   mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
   completions: &mpsc::Sender<()>,
 ) -> anyhow::Result<()> {
-  if request
+  let incremental = request
     .headers()
     .get("incremental")
     .and_then(|v| v.to_str().ok())
-    != Some("?1")
-  {
-    bail!("Incremental H3 request header missing")
-  }
+    == Some("?1");
   let response_mode = request
     .headers()
     .get("x-incremental-probe-mode")
     .and_then(|value| value.to_str().ok());
+  let resumable_relay = request
+    .headers()
+    .get("x-resumable-relay-probe")
+    .and_then(|value| value.to_str().ok())
+    == Some("?1");
+  if !incremental && !resumable_relay {
+    bail!("neither Incremental nor resumable H3 request header was present")
+  }
   expect_h3_data(&mut stream, FIRST).await?;
+  if resumable_relay {
+    for response in [
+      Response::builder().status(100).body(()),
+      Response::builder()
+        .status(103)
+        .header("link", "</upload.css>; rel=preload")
+        .body(()),
+      Response::builder()
+        .status(104)
+        .header("upload-draft-interop-version", "9")
+        .body(()),
+    ] {
+      stream
+        .send_response(response.context("build resumable H3 informational response")?)
+        .await
+        .context("send resumable H3 informational response")?;
+    }
+  }
+  if resumable_relay && !incremental {
+    expect_h3_data(&mut stream, SECOND).await?;
+    expect_h3_data(&mut stream, LAST).await?;
+    expect_h3_server_end(&mut stream, "resumable request").await?;
+    stream
+      .send_response(resumable_response()?)
+      .await
+      .context("send final resumable H3 response")?;
+    stream
+      .send_data(Bytes::from_static(b"ok"))
+      .await
+      .context("send final resumable H3 response body")?;
+    stream
+      .finish()
+      .await
+      .context("finish final resumable H3 response")?;
+    return notify_completion(completions).await;
+  }
   if response_mode == Some("early-204") {
     let response = Response::builder()
       .status(StatusCode::NO_CONTENT)
@@ -1018,6 +1286,51 @@ async fn client_h3(args: &ClientArgs) -> anyhow::Result<()> {
     .send_data(Bytes::from_static(FIRST))
     .await
     .context("send first Incremental H3 marker")?;
+  if args.wants_resumable_relay() {
+    expect_h3_informational(&mut stream, 100, None).await?;
+    expect_h3_informational(
+      &mut stream,
+      103,
+      Some(("link", "</upload.css>; rel=preload")),
+    )
+    .await?;
+    expect_h3_informational(
+      &mut stream,
+      104,
+      Some(("upload-draft-interop-version", "9")),
+    )
+    .await?;
+  }
+  if args.resumable_relay_only {
+    stream
+      .send_data(Bytes::from_static(SECOND))
+      .await
+      .context("send second resumable H3 marker")?;
+    stream
+      .send_data(Bytes::from_static(LAST))
+      .await
+      .context("send final resumable H3 marker")?;
+    stream
+      .finish()
+      .await
+      .context("finish resumable H3 upload")?;
+    let response = within(async {
+      stream
+        .recv_response()
+        .await
+        .context("receive final resumable H3 response")
+    })
+    .await?;
+    if response.status() != StatusCode::OK || response.headers().contains_key("incremental") {
+      bail!("resumable H3 final response was invalid or synthesized Incremental")
+    }
+    expect_h3_client_data(&mut stream, b"ok").await?;
+    expect_h3_client_end(&mut stream, "resumable response").await?;
+    wait_for_completion(args).await?;
+    close.close(0u32.into(), b"resumable complete");
+    let _ = tokio::time::timeout(Duration::from_secs(1), driver_task).await;
+    return Ok(());
+  }
   let response = within(async {
     stream
       .recv_response()
@@ -1071,6 +1384,37 @@ async fn client_h3(args: &ClientArgs) -> anyhow::Result<()> {
   wait_for_completion(args).await?;
   close.close(0u32.into(), b"incremental complete");
   let _ = tokio::time::timeout(Duration::from_secs(1), driver_task).await;
+  Ok(())
+}
+
+async fn expect_h3_informational(
+  stream: &mut h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+  status: u16,
+  required_header: Option<(&str, &str)>,
+) -> anyhow::Result<()> {
+  let response = within(async {
+    stream
+      .recv_response()
+      .await
+      .context("receive resumable H3 informational response")
+  })
+  .await?;
+  if response.status().as_u16() != status {
+    bail!(
+      "resumable H3 interim order was {}, expected {status}",
+      response.status()
+    )
+  }
+  if let Some((name, value)) = required_header {
+    if response
+      .headers()
+      .get(name)
+      .and_then(|value| value.to_str().ok())
+      != Some(value)
+    {
+      bail!("resumable H3 {status} interim did not preserve {name}")
+    }
+  }
   Ok(())
 }
 async fn expect_h3_client_data(

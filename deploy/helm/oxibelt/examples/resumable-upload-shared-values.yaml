@@ -1,0 +1,66 @@
+# Deployment overlay only: supply the reviewed native TOML separately.
+# Pre-create Secret oxibelt-upload-credentials and ConfigMap upload-s3-ca.
+# Secret values must not be committed. Adjust peers to actual database/S3
+# identities and add explicit auth-provider/upstream egress when required.
+# This overlay is for the unprofiled chart, not operational-profile v2.
+replicaCount: 2
+extraEnv:
+  - name: UPLOAD_POSTGRES_URL
+    valueFrom:
+      secretKeyRef:
+        name: oxibelt-upload-credentials
+        key: postgres-url
+  - name: UPLOAD_S3_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: oxibelt-upload-credentials
+        key: s3-access-key
+  - name: UPLOAD_S3_SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: oxibelt-upload-credentials
+        key: s3-secret-key
+extraVolumes:
+  - name: upload-staging
+    emptyDir:
+      sizeLimit: 1Gi
+  - name: upload-s3-ca
+    configMap:
+      name: upload-s3-ca
+extraVolumeMounts:
+  - name: upload-staging
+    mountPath: /var/lib/oxibelt/upload-staging
+  - name: upload-s3-ca
+    mountPath: /etc/oxibelt/upload-s3-ca
+    readOnly: true
+networkPolicy:
+  enabled: true
+  ingress:
+    public:
+      allowAll: true
+  egress:
+    destinations:
+      - name: upload-postgres
+        category: shared-state
+        to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: storage
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: upload-postgres
+        ports:
+          - protocol: TCP
+            port: 5432
+      - name: upload-s3
+        category: shared-state
+        to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: storage
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: upload-s3
+        ports:
+          - protocol: TCP
+            port: 443

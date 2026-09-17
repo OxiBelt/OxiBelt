@@ -1,0 +1,54 @@
+# The Helm controller values must admit default/media-ingest. This tenant
+# resource references only that opaque, operator-provisioned profile.
+# Admit authorization credentials and x-auth-user through the controller's
+# filters.externalAuth allowlists. Set maxBodyBytes to 0. The native profile's
+# identity.source must equal this route's rendered external_auth provider name,
+# with subject_field = "x-auth-user"; inspect `render` output before provisioning.
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltRoutePolicy
+metadata:
+  name: media-uploads
+  namespace: default
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: media
+  resumableUpload:
+    profileRef: media-ingest
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: media
+  namespace: default
+spec:
+  parentRefs:
+  - name: edge
+  hostnames:
+  - uploads.example.com
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /media
+    filters:
+    - type: ExtensionRef
+      extensionRef:
+        group: gateway.oxibelt.dev
+        kind: OxiBeltRoutePolicy
+        name: media-uploads
+    - type: ExternalAuth
+      externalAuth:
+        protocol: HTTP
+        backendRef:
+          name: media-auth
+          port: 9000
+        http:
+          allowedHeaders:
+          - authorization
+          allowedResponseHeaders:
+          - x-auth-user
+    backendRefs:
+    - name: media-api
+      port: 8080

@@ -38,6 +38,9 @@ max_lifetime_ms = 600000
 [proxy]
 trusted_ca_certs = ["upstream-ca.pem"]
 
+[proxy.http]
+early_hints = "pass"
+
 [proxy.auto_upgrade]
 enabled = true
 max_http_version = "h3"

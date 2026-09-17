@@ -366,6 +366,7 @@ impl TranslationState {
         route,
         generated,
         &self.client_certificate_forward_allowed_headers,
+        &self.resumable_upload_profiles,
       )
     {
       let diagnostic = self.diagnostics.len();
@@ -689,6 +690,7 @@ fn http_match_route(
       max_request_body_bytes: None,
       upstream_request_timeout_ms: None,
       client_certificate_forwarding: None,
+      resumable_upload: None,
     },
     filters,
   ))

@@ -55,7 +55,11 @@ fn assert_matched(report: oxibelt::waf::OxiRuleDevtoolsReport) {
 
 #[test]
 fn certificate_names_use_existing_bounded_list_operators() {
-  let config = minimal_devtools_config("certificate-fields");
+  let mut config = minimal_devtools_config("certificate-fields");
+  // This checks certificate/list semantics, not wall-clock scheduling. Match
+  // the bounded scheduler headroom used by the other expression fixtures.
+  config.waf.limits.max_rule_runtime_ms = 500;
+  config.waf.limits.max_total_waf_runtime_ms = 1000;
   let expression = format!(
     "Request.Tls.ClientCertificate != null && Request.Tls.ClientCertificatePresent && Request.Tls.Fingerprint == 'hello-fingerprint' && Request.Tls.ClientCertificate.FingerprintSha256 == '{}' && Request.Tls.ClientCertificate.ParseStatus == 'complete' && Request.Tls.ClientCertificate.SubjectCommonNames.Count == 2 && Request.Tls.ClientCertificate.SubjectCommonNames.First == 'client.example' && Request.Tls.ClientCertificate.SubjectCommonNames.contains('second.example') && Request.Tls.ClientCertificate.SanDnsNames.contains('*.example') && !Request.Tls.ClientCertificate.SanDnsNames.contains('host.example') && Request.Tls.ClientCertificate.SanIpAddresses.contains('2001:db8::1') && Request.Tls.ClientCertificate.SanUriNames.contains('spiffe://example.test/workload') && Request.Tls.ClientCertificate.SanEmailAddresses.contains('User@Example.test') && !Request.Tls.ClientCertificate.SanEmailAddresses.contains('user@example.test') && !Request.Tls.ClientCertificate.SanDnsNames.IsTruncated",
     "a".repeat(64)

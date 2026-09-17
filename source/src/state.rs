@@ -45,6 +45,7 @@ use crate::shared_state::SharedState;
 use crate::sni_forward::SniForwardTable;
 use crate::stream::pools::StreamPoolState;
 use crate::turn::TurnPoolState;
+use crate::uploads::UploadRuntime;
 use crate::waf::WafEngine;
 #[cfg(feature = "admin-runtime")]
 use crate::webtransport_admin::WebTransportAdminRegistry;
@@ -118,6 +119,7 @@ pub struct AppSnapshot {
   pub(crate) compression: Arc<CompressionState>,
   pub(crate) waf_body_coding: Arc<WafBodyCodingState>,
   pub(crate) static_files: Arc<StaticFilesRuntime>,
+  pub(crate) uploads: UploadRuntime,
   pub(crate) certificate_transparency: CtRuntime,
   pub metrics: Arc<Metrics>,
   pub(crate) runtime_health: Arc<RuntimeHealth>,
@@ -515,6 +517,9 @@ impl AppSnapshot {
       .context("failed to build client identity runtime")?;
     let external_auth = ExternalAuthRuntime::new(&config, control_http.clone(), metrics.clone())
       .context("failed to build external auth runtime")?;
+    let uploads = UploadRuntime::new(&config, previous.map(|snapshot| &snapshot.uploads))
+      .await
+      .context("failed to build managed upload runtime")?;
     let runtime_introspection = previous
       .map(|snapshot| snapshot.runtime_introspection.clone())
       .unwrap_or_default();
@@ -768,6 +773,7 @@ impl AppSnapshot {
       compression,
       waf_body_coding,
       static_files: Arc::new(static_files),
+      uploads,
       certificate_transparency,
       metrics,
       runtime_health,
@@ -932,6 +938,9 @@ impl AppSnapshot {
       .context("failed to build client identity runtime")?;
     let external_auth = ExternalAuthRuntime::new(&config, control_http.clone(), metrics.clone())
       .context("failed to build external auth runtime")?;
+    let uploads = UploadRuntime::new(&config, Some(&previous.uploads))
+      .await
+      .context("failed to build managed upload runtime")?;
     let ipm = IpmRuntime::new(&config)
       .await
       .context("failed to build IPM runtime")?;
@@ -1018,6 +1027,7 @@ impl AppSnapshot {
       compression: previous.compression.clone(),
       waf_body_coding,
       static_files: Arc::new(static_files),
+      uploads,
       certificate_transparency: previous.certificate_transparency.clone(),
       metrics,
       runtime_health,

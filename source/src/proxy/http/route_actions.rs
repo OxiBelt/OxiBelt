@@ -440,6 +440,7 @@ mod tests {
 
   fn route_with_rewrite(path: Option<&str>, query: Option<&str>) -> RouteConfig {
     RouteConfig {
+      resumable_upload: None,
       client_certificate_forwarding: None,
       name: "route".to_string(),
       hosts: vec!["example.test".to_string()],

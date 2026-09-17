@@ -64,6 +64,8 @@ fn args() -> SharedArgs {
     route_policy_max_request_body_bytes: 10_485_760,
     route_policy_max_timeout_ms: 30_000,
     client_certificate_forward_allowed_headers: Vec::new(),
+    resumable_upload_profiles: Vec::new(),
+    resumable_upload_target: None,
     upstream_client_tls_source_secrets: Vec::new(),
     dry_run: false,
     health_bind: None,
@@ -642,6 +644,185 @@ fn oxibelt_route_policy_is_fail_closed_for_caps_targets_and_missing_objects() {
     TranslationDisposition::PreserveLastGood
   );
   assert!(!rendered.toml.contains("[[routes]]"));
+}
+
+#[test]
+fn resumable_upload_policy_requires_exact_operator_namespace_admission() {
+  let route = HTTP_FIXTURE.replace(
+    "  - matches:\n",
+    "  - filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: uploads\n    matches:\n",
+  ).replace("      method: GET\n", "");
+  let policy = r#"
+---
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltRoutePolicy
+metadata:
+  name: uploads
+  namespace: default
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: app
+  resumableUpload:
+    profileRef: media-ingest
+"#;
+  let denied = translate_objects(&objects(&format!("{route}{policy}")), &args())
+    .expect("translate denied policy");
+  assert!(has_error_containing(
+    &denied,
+    "not admitted for namespace default"
+  ));
+  assert_eq!(
+    denied.disposition,
+    TranslationDisposition::FailClosedDeprogram
+  );
+
+  let mut admitted_args = args();
+  admitted_args
+    .resumable_upload_profiles
+    .push(crate::cli::ResumableUploadProfileAllowlistEntry {
+      namespace: "default".to_string(),
+      profile: "media-ingest".to_string(),
+    });
+  admitted_args.resumable_upload_target = Some(crate::cli::ResumableUploadTarget {
+    namespace: "default".to_string(),
+    kind: crate::rollout::WorkloadKind::Deployment,
+    name: "oxibelt".to_string(),
+  });
+  let admitted = translate_objects(&objects(&format!("{route}{policy}")), &admitted_args)
+    .expect("translate admitted policy");
+  assert!(
+    admitted.diagnostics.is_empty(),
+    "{:?}",
+    admitted.diagnostics
+  );
+  assert!(
+    admitted
+      .toml
+      .contains("resumable_upload = \"media-ingest\"")
+  );
+  assert!(admitted.requires_exact_data_plane);
+  let method_bound = route.replace(
+    "        value: /api\n",
+    "        value: /api\n      method: GET\n",
+  );
+  let denied = translate_objects(&objects(&format!("{method_bound}{policy}")), &admitted_args)
+    .expect("conditional managed route");
+  assert!(has_error_containing(&denied, "unconditional prefix route"));
+  let mut target = crate::rollout::RolloutTarget {
+    namespace: "default".to_owned(),
+    kind: crate::rollout::WorkloadKind::Deployment,
+    name: "oxibelt".to_owned(),
+    container_name: "oxibelt".to_owned(),
+    volume_name: "gateway-config".to_owned(),
+    timeout: std::time::Duration::from_secs(30),
+    config_map_prefix: "test".to_owned(),
+    artifact_context: None,
+  };
+  let inputs = objects(&format!("{route}{policy}"));
+  let scoped = crate::watch::translate_for_rollout_target(&inputs, &admitted_args, &target)
+    .expect("admitted actual target");
+  assert!(scoped.toml.contains("resumable_upload = \"media-ingest\""));
+  target.kind = crate::rollout::WorkloadKind::DaemonSet;
+  let wrong_kind = crate::watch::translate_for_rollout_target(&inputs, &admitted_args, &target)
+    .expect("same-name different kind");
+  assert!(!wrong_kind.toml.contains("resumable_upload ="));
+  assert_eq!(
+    wrong_kind.disposition,
+    TranslationDisposition::FailClosedDeprogram
+  );
+  target.kind = crate::rollout::WorkloadKind::Deployment;
+  for (namespace, name) in [("other", "oxibelt"), ("default", "other")] {
+    target.namespace = namespace.to_owned();
+    target.name = name.to_owned();
+    let rejected = crate::watch::translate_for_rollout_target(&inputs, &admitted_args, &target)
+      .expect("mismatched actual target fails closed");
+    assert!(!rejected.toml.contains("resumable_upload ="));
+    assert_eq!(
+      rejected.disposition,
+      TranslationDisposition::FailClosedDeprogram
+    );
+    assert!(has_error_containing(
+      &rejected,
+      "not admitted for namespace"
+    ));
+  }
+
+  // Validate generated routes with the actual native typed owner contract.
+  let authenticated_route = route.replace(
+    "    matches:\n",
+    r#"    - type: ExternalAuth
+      externalAuth:
+        protocol: HTTP
+        backendRef:
+          name: app
+          port: 8080
+        http:
+          allowedHeaders:
+          - authorization
+          allowedResponseHeaders:
+          - x-auth-user
+    matches:
+"#,
+  );
+  admitted_args.external_auth_max_body_bytes = 0;
+  let authenticated = translate_objects(
+    &objects(&format!("{authenticated_route}{policy}")),
+    &admitted_args,
+  )
+  .expect("authenticated profile");
+  assert!(
+    authenticated.diagnostics.is_empty(),
+    "{:?}",
+    authenticated.diagnostics
+  );
+  let generated: toml::Value = toml::from_str(&authenticated.toml).expect("generated TOML");
+  let auth_name = generated["external_auth"][0]["name"]
+    .as_str()
+    .expect("provider name");
+  let temp = common::TempDir::new("gateway-managed-upload");
+  let (cert, key) = common::create_self_signed_cert(temp.path(), "gateway-managed-upload");
+  let raw = format!(
+    r#"{}
+[runtime.hardening.seccomp]
+expectation = "required"
+[[upload_stores]]
+name = "local"
+kind = "local"
+[upload_stores.local]
+root = "{root}/store"
+[[upload_profiles]]
+name = "media-ingest"
+store = "local"
+public_base_url = "https://api.example.com/"
+control_path_prefix = "/api/uploads"
+object_path_prefix = "/api/objects"
+staging_dir = "{root}"
+max_staging_bytes = 128
+max_upload_bytes = 64
+max_part_bytes = 16
+inspection_bytes = 64
+max_storage_bytes = 512
+max_sessions = 8
+max_parts = 8
+max_concurrent_uploads = 4
+max_concurrent_parts = 4
+ttl_seconds = 60
+object_ttl_seconds = 60
+destination = {{ kind = "object" }}
+identity = {{ kind = "external_auth", source = "{auth_name}", subject_field = "x-auth-user" }}
+{}
+"#,
+    common::minimal_config_toml(&cert, &key),
+    authenticated.toml,
+    root = temp.path().display()
+  );
+  let mut native: Config = toml::from_str(&raw).expect("native upload configuration");
+  native.runtime.memory_only_state = false;
+  native
+    .validate()
+    .expect("Gateway managed upload and provider satisfy native contracts");
 }
 
 #[test]

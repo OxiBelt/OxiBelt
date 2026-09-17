@@ -145,6 +145,22 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
     NativeConfigSecretClass::FileReference,
   ),
   secret(
+    "upload_stores[].postgres_s3.postgres_url_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "upload_stores[].postgres_s3.s3_access_key_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "upload_stores[].postgres_s3.s3_secret_key_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
+    "upload_stores[].postgres_s3.s3_session_token_env",
+    NativeConfigSecretClass::EnvironmentReference,
+  ),
+  secret(
     "database.mitigation.connection_url",
     NativeConfigSecretClass::CredentialBearingUrl,
   ),
@@ -966,6 +982,8 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
 #[cfg(feature = "config-tooling")]
 fn is_array_path(path: &str) -> bool {
   const ARRAYS: &[&str] = &[
+    "upload_stores",
+    "upload_profiles",
     "admin.mutations.signers",
     "admin.tls.certificates",
     "cache.external_handlers",
@@ -1074,6 +1092,11 @@ fn integer_path(path: &str) -> bool {
     "certificate_transparency.logs.shard.start_ms"
       | "certificate_transparency.logs.shard.end_ms"
       | "certificate_transparency.logs.signed_root.quorum"
+      | "upload_stores.postgres_s3.max_connections"
+      | "upload_profiles.max_sessions"
+      | "upload_profiles.max_parts"
+      | "upload_profiles.max_concurrent_uploads"
+      | "upload_profiles.max_concurrent_parts"
   ) {
     return true;
   }
@@ -1147,11 +1170,35 @@ fn string_path(path: &str) -> bool {
       | "certificate_transparency.logs.storage.s3_session_token_env"
       | "certificate_transparency.logs.storage.object_source_url"
       | "certificate_transparency.logs.storage.delete_denial_attestation_file"
+      | "upload_stores.name"
+      | "upload_stores.kind"
+      | "upload_stores.local.root"
+      | "upload_stores.postgres_s3.postgres_url_env"
+      | "upload_stores.postgres_s3.s3_bucket"
+      | "upload_stores.postgres_s3.s3_region"
+      | "upload_stores.postgres_s3.s3_endpoint"
+      | "upload_stores.postgres_s3.s3_root_certificate"
+      | "upload_stores.postgres_s3.s3_prefix"
+      | "upload_stores.postgres_s3.s3_access_key_env"
+      | "upload_stores.postgres_s3.s3_secret_key_env"
+      | "upload_stores.postgres_s3.s3_session_token_env"
+      | "upload_profiles.name"
+      | "upload_profiles.store"
+      | "upload_profiles.public_base_url"
+      | "upload_profiles.staging_dir"
+      | "upload_profiles.control_path_prefix"
+      | "upload_profiles.object_path_prefix"
+      | "upload_profiles.destination.kind"
+      | "upload_profiles.destination.upstream"
+      | "upload_profiles.identity.kind"
+      | "upload_profiles.identity.source"
+      | "upload_profiles.identity.subject_field"
       | "certificate_transparency.logs.signed_root.bundle_path"
       | "certificate_transparency.logs.signed_root.bundle_sha256"
       | "certificate_transparency.logs.gateway.origin_url"
       | "certificate_transparency.logs.gateway.static_origin_url"
       | "routes.ct_log"
+      | "routes.resumable_upload"
       | "proxy.real_ip.rules.name"
       | "upstream_pools.discovery.id"
       | "upstream_pools.discovery.tls.client_identity.cert_chain"
@@ -1205,6 +1252,15 @@ fn is_upstream_client_identity_path(path: &str) -> bool {
 #[cfg(feature = "config-tooling")]
 fn enum_values(path: &str) -> Option<Vec<&'static str>> {
   let values = BTreeMap::from([
+    ("upload_stores.kind", vec!["local", "postgres_s3"]),
+    (
+      "upload_profiles.destination.kind",
+      vec!["upstream", "object"],
+    ),
+    (
+      "upload_profiles.identity.kind",
+      vec!["ipm", "external_auth", "mtls"],
+    ),
     ("access_log.otlp.schema", vec!["ocsf", "ecs"]),
     ("access_log.stdout.schema", vec!["ocsf", "ecs"]),
     (

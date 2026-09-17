@@ -72,6 +72,7 @@ struct DynamicPolicyInner {
 pub struct DynamicPolicySnapshot {
   generation: i64,
   fingerprint: u64,
+  content_fingerprint: u64,
   policies: Arc<[DynamicPolicy]>,
 }
 
@@ -269,6 +270,13 @@ impl DynamicPolicyRuntime {
     self.inner.is_some()
   }
 
+  pub(crate) fn snapshot_identity(&self) -> Option<u64> {
+    self.inner.as_ref().map(|inner| {
+      let snapshot = inner.snapshot();
+      snapshot.content_fingerprint
+    })
+  }
+
   pub fn needs_person_proof_clearance_for_request(
     &self,
     request: DynamicPolicyRequest<'_>,
@@ -299,6 +307,7 @@ impl DynamicPolicySnapshot {
     Self {
       generation: 0,
       fingerprint: 0,
+      content_fingerprint: 0,
       policies: Arc::from([]),
     }
   }

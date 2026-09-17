@@ -73,6 +73,12 @@ routePolicy:
   # Certificate projection stays disabled until the data-plane operator admits
   # each destination header. Route authors cannot select arbitrary headers.
   allowedClientCertificateForwardHeaders: []
+  # Exact namespace/profile admissions. The matching profile is defined in
+  # operator-owned data-plane TOML; route authors cannot configure storage,
+  # credentials, upload owners, or object delivery.
+  resumableUploadProfiles: []
+  # - namespace: tenant-a
+  #   profile: media-ingest
 
 # Normal reconciliation requires the selected data-plane workload to carry
 # `oxibelt.dev/effective-version` equal to the controller build version.

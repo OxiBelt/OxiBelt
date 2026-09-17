@@ -51,6 +51,83 @@ fn test_argon2id_hash(secret: &str, memory_kib: u32) -> String {
     .to_string()
 }
 
+#[test]
+fn managed_upload_profiles_validate_identity_limits_and_route_boundaries() {
+  let temp = common::TempDir::new("managed-upload-config");
+  let (cert, key) = common::create_self_signed_cert(temp.path(), "managed-upload-config");
+  let raw = format!(
+    r#"{}
+[[upload_stores]]
+name = "local"
+kind = "local"
+[upload_stores.local]
+root = "{root}/store"
+[[upload_profiles]]
+name = "media"
+store = "local"
+public_base_url = "https://example.com/"
+staging_dir = "{root}"
+max_staging_bytes = 128
+control_path_prefix = "/uploads"
+object_path_prefix = "/objects"
+destination = {{ kind = "object" }}
+identity = {{ kind = "mtls", source = "test-ca" }}
+max_upload_bytes = 64
+max_part_bytes = 16
+max_storage_bytes = 512
+max_sessions = 8
+max_parts = 8
+inspection_bytes = 64
+ttl_seconds = 60
+object_ttl_seconds = 60
+max_concurrent_uploads = 4
+max_concurrent_parts = 4
+"#,
+    common::minimal_config_toml(&cert, &key),
+    root = temp.path().display()
+  );
+  let mut config: Config = toml::from_str(&raw).expect("upload configuration");
+  config.routes[0].resumable_upload = Some("media".to_owned());
+  config.routes[0].r#match.tls.client_cert.present = Some(true);
+  config.runtime.memory_only_state = false;
+  config
+    .validate()
+    .expect("ordinary backend remains fallback; whole inspection can exceed part cap");
+  let mut invalid = config.clone();
+  invalid.upload_profiles[0].inspection_bytes = 65;
+  assert!(
+    invalid
+      .validate()
+      .unwrap_err()
+      .to_string()
+      .contains("inspection_bytes")
+  );
+  let mut invalid = config.clone();
+  invalid.upload_profiles[0].max_sessions = 0;
+  assert!(invalid.validate().is_err());
+  let mut invalid = config.clone();
+  invalid.upload_profiles[0].public_base_url = "https://example.com/path".parse().unwrap();
+  assert!(invalid.validate().is_err());
+  let mut invalid = config.clone();
+  invalid.upload_profiles[0].object_path_prefix = "/uploads/objects".to_owned();
+  assert!(invalid.validate().is_err());
+  let mut invalid = config.clone();
+  invalid.routes[0].r#match.tls.client_cert.present = None;
+  assert!(invalid.validate().is_err());
+  let mut invalid = config.clone();
+  invalid.upload_profiles[0].identity.subject_field = Some("caller-header".to_owned());
+  assert!(invalid.validate().is_err());
+  let mut invalid = config.clone();
+  invalid.routes[0].resumable_upload = Some("tenant-selected-store".to_owned());
+  assert!(invalid.validate().is_err());
+  let mut duplicate = config.upload_profiles[0].clone();
+  duplicate.name = "overlap".to_owned();
+  duplicate.control_path_prefix = "/other".to_owned();
+  duplicate.object_path_prefix = "/uploads/other".to_owned();
+  config.upload_profiles.push(duplicate);
+  assert!(config.validate().is_err());
+}
+
 fn edge_secure_medium_config_toml(cert_path: &Path, key_path: &Path) -> String {
   let raw = common::minimal_config_toml(cert_path, key_path)
     .replacen(

@@ -983,7 +983,13 @@ fn selected_upstream_http_version(
 }
 
 fn retry_body_can_be_buffered(request: &Request<ProxyBody>, state: &AppSnapshot) -> bool {
-  if super::incremental::request_marked(request) {
+  if super::incremental::request_marked(request)
+    || super::informational::candidate(request.headers())
+    || request
+      .extensions()
+      .get::<super::resumable::NoReplayRequest>()
+      .is_some()
+  {
     return false;
   }
   request

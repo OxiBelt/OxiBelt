@@ -35,6 +35,7 @@ pub(crate) struct CrsEngine {
   rule_overrides: Vec<WafCrsRuleOverrideConfig>,
   allowlists: Vec<WafCrsAllowlistConfig>,
   latest_scores: Arc<std::sync::Mutex<CrsLatestScores>>,
+  content_fingerprint: String,
 }
 
 impl Default for CrsEngine {
@@ -54,6 +55,7 @@ impl Default for CrsEngine {
       rule_overrides: Vec::new(),
       allowlists: Vec::new(),
       latest_scores: Arc::new(std::sync::Mutex::new(CrsLatestScores::default())),
+      content_fingerprint: "disabled".to_string(),
     }
   }
 }
@@ -75,6 +77,7 @@ impl CrsEngine {
     for path in &config.rule_files_resolved {
       parser.load_file(path, limits)?;
     }
+    let content_fingerprint = parser.content_fingerprint();
     let mut rules = parser.entries;
     let mut counters = HashMap::new();
     let mut tuned_counters = HashMap::new();
@@ -117,7 +120,12 @@ impl CrsEngine {
       rule_overrides: config.rule_overrides.clone(),
       allowlists: config.allowlists.clone(),
       latest_scores: Arc::new(std::sync::Mutex::new(CrsLatestScores::default())),
+      content_fingerprint,
     })
+  }
+
+  pub(crate) fn content_fingerprint(&self) -> &str {
+    &self.content_fingerprint
   }
 
   pub(crate) fn has_request_rules(&self) -> bool {

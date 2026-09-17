@@ -25,6 +25,7 @@ default-members = [
   "source/crates/oxibelt-control-protocol",
   "source/crates/oxibelt-deployment-diagnostics",
 ]
+exclude = ["source/third_party/hyper"]
 resolver = "3"
 
 [workspace.package]
@@ -106,3 +107,6 @@ undocumented_unsafe_blocks = "deny"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+[patch.crates-io]
+hyper = { path = "source/third_party/hyper" }

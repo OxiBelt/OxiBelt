@@ -242,6 +242,7 @@ mod tests {
 
   fn route_with_actions(actions: RouteActionsConfig) -> RouteConfig {
     RouteConfig {
+      resumable_upload: None,
       client_certificate_forwarding: None,
       name: "edge".to_string(),
       hosts: vec!["*".to_string()],

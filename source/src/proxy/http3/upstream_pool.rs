@@ -292,11 +292,16 @@ impl H3PoolAttempt {
 }
 
 impl UpstreamH3Pool {
+  #[allow(
+    clippy::too_many_arguments,
+    reason = "the pool boundary keeps request policy, trust roots, metrics, and admission state explicit"
+  )]
   pub(super) async fn forward_request(
     self: Arc<Self>,
     request: Request<ProxyBody>,
     upstream: &UpstreamConfig,
     timeouts: EffectiveTimeouts,
+    early_hints: crate::config::EarlyHintsMode,
     global_roots: &[PathBuf],
     metrics: &Arc<Metrics>,
     overload: &Arc<OverloadRuntime>,
@@ -351,6 +356,7 @@ impl UpstreamH3Pool {
         request,
         &uri,
         timeouts,
+        early_hints,
         deadlines.request,
         upstream_certificate,
       )
@@ -397,6 +403,7 @@ impl UpstreamH3Pool {
       request,
       &uri,
       timeouts,
+      early_hints,
       deadlines.request,
       entry.connected.upstream_certificate.clone(),
     )

@@ -69,6 +69,13 @@ impl Default for WafCrsConfig {
 }
 
 impl WafCrsConfig {
+  pub(crate) fn clear_runtime_paths(&mut self) {
+    self.setup_file_resolved = None;
+    self.setup_file_logical = None;
+    self.rule_files_resolved.clear();
+    self.rule_files_logical.clear();
+  }
+
   pub(crate) fn resolve_relative_paths(&mut self, base_dir: &Path) -> anyhow::Result<()> {
     self.setup_file_resolved = None;
     self.setup_file_logical = None;

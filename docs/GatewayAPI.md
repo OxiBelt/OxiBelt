@@ -224,6 +224,13 @@ arbitrary filters are not approximated.
 
 ## HTTPRoute Mapping
 
+`OxiBeltRoutePolicy.spec.resumableUpload.profileRef` is the only Gateway API
+resumable-upload control. It is an exact reference to an operator-provisioned
+native upload profile and is accepted only for the controller target and
+namespace in the operator's `routePolicy.resumableUploadProfiles` allowlist. It cannot carry credentials,
+stores, object buckets/endpoints, destination settings, or owner bindings, and
+it cannot alter `OxiBeltDataPlaneTarget` assignment. See [ResumableUploads.md](ResumableUploads.md).
+
 Supported matches:
 
 - hostname intersection between `Gateway` listener and `HTTPRoute`

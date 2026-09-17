@@ -1,0 +1,83 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = false
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.client_auth]
+mode = "require"
+ca_certs = ["client-ca.pem"]
+
+[tls.ocsp]
+mode = "disabled"
+
+[quic.socket]
+reuse_port = true
+
+[proxy]
+trusted_ca_certs = []
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upload_stores]]
+name = "wire-local"
+kind = "local"
+
+[upload_stores.local]
+root = "/tmp/managed-upload-store"
+
+[[upload_profiles]]
+name = "wire-object"
+store = "wire-local"
+public_base_url = "https://example.test:8443/"
+control_path_prefix = "/uploads"
+object_path_prefix = "/objects"
+staging_dir = "/tmp/managed-upload-store/staging"
+max_staging_bytes = 128
+max_upload_bytes = 64
+max_part_bytes = 32
+inspection_bytes = 64
+max_storage_bytes = 1024
+max_sessions = 8
+max_parts = 8
+max_concurrent_uploads = 4
+max_concurrent_parts = 4
+ttl_seconds = 60
+object_ttl_seconds = 60
+destination = { kind = "object" }
+identity = { kind = "mtls", source = "matrix-client-root" }
+
+[[routes]]
+name = "managed-upload-wire"
+hosts = ["example.test"]
+path_prefix = "/"
+resumable_upload = "wire-object"
+
+[routes.match.tls.client_cert]
+present = true

@@ -105,6 +105,10 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     .extensions()
     .get::<incremental_exchange::IncrementalExchange>()
     .cloned();
+  let upstream_response_observed = outbound
+    .extensions()
+    .get::<resumable::UpstreamResponseObserved>()
+    .cloned();
   let proxy_tls_certificate = proxy_tls::has_certificate_identity(&outbound);
   let request_body = captured_body.as_ref().map(waf_body_input);
   let mut _cache_fill_guard = cache_fill_guard;
@@ -376,8 +380,10 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         );
         return route_security.text(StatusCode::BAD_GATEWAY, "upstream client is not configured");
       };
-      let early_hints_capture =
-        semantics::attach_early_hints_capture(&mut outbound, state.config.proxy.http.early_hints);
+      let upstream_informational_capture = semantics::attach_upstream_informational_capture(
+        &mut outbound,
+        state.config.proxy.http.early_hints,
+      );
       let retry_policy = if native_grpc_request {
         EffectiveRetryPolicy::for_grpc_request(
           &state.config,
@@ -393,83 +399,99 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           &request_method,
         )
       };
-      if let Some(selection) = pool_selection.take() {
-        pool_failures_reported = true;
-        send_pool_with_retry(
-          state.as_ref(),
-          outbound,
-          upstream_index,
-          selection,
-          resolved.route,
-          &request_uri,
-          &resolved.path_captures,
-          client_addr,
-          host,
-          downstream_scheme,
-          pool_retry_cookie.as_ref(),
-          &request_waf,
-          timeouts,
-          &retry_policy,
-        )
-        .await
-        .map(|success| {
-          if !success.cache_identity_unchanged {
-            no_vary_search = None;
-            // A pool retry selected a new effective origin target. Forward the
-            // response, but bypass QUERY cache insertion rather than binding it
-            // to the identity captured for the first target.
-            query_identity = None;
-            if query::is_query(&request_method) {
-              stale_on_error = None;
-              revalidation_entry = None;
-            }
-          }
-          upstream_index = success.upstream_index;
-          upstream = &state.upstreams[upstream_index];
-          access_log.set_upstream(&upstream.name, upstream.origin.scheme());
-          report_pool_success = success.report_success;
-          sticky_cookie = success.pool_selection.sticky_cookie();
-          pool_selection = Some(success.pool_selection);
-          let mut response = success.response;
-          if let Some(capture) = early_hints_capture {
-            semantics::attach_interim_responses(&mut response, capture.take());
-          }
-          response
-        })
-      } else {
-        let result = if retry_policy.enabled {
-          send_with_retry(
-            client,
-            outbound,
-            timeouts,
-            state,
-            &retry_policy,
-            Some(RetryAdmissionContext {
-              route_name: &resolved.route.name,
-              pool_name: None,
-            }),
-          )
-          .await
-        } else {
-          send_one_shot_with_state(
-            client,
-            outbound,
-            timeouts,
+      let upstream_request = async {
+        if let Some(selection) = pool_selection.take() {
+          pool_failures_reported = true;
+          send_pool_with_retry(
             state.as_ref(),
-            Some(RetryAdmissionContext {
-              route_name: &resolved.route.name,
-              pool_name: None,
-            }),
+            outbound,
+            upstream_index,
+            selection,
+            resolved.route,
+            &request_uri,
+            &resolved.path_captures,
+            client_addr,
+            host,
+            downstream_scheme,
+            pool_retry_cookie.as_ref(),
+            &request_waf,
+            timeouts,
+            &retry_policy,
           )
           .await
-        };
-        result.map(|mut response| {
-          if let Some(capture) = early_hints_capture {
-            semantics::attach_interim_responses(&mut response, capture.take());
+          .map(|success| {
+            if !success.cache_identity_unchanged {
+              no_vary_search = None;
+              // A pool retry selected a new effective origin target. Forward the
+              // response, but bypass QUERY cache insertion rather than binding it
+              // to the identity captured for the first target.
+              query_identity = None;
+              if query::is_query(&request_method) {
+                stale_on_error = None;
+                revalidation_entry = None;
+              }
+            }
+            upstream_index = success.upstream_index;
+            upstream = &state.upstreams[upstream_index];
+            access_log.set_upstream(&upstream.name, upstream.origin.scheme());
+            report_pool_success = success.report_success;
+            sticky_cookie = success.pool_selection.sticky_cookie();
+            pool_selection = Some(success.pool_selection);
+            success.response
+          })
+        } else {
+          let result = if retry_policy.enabled {
+            send_with_retry(
+              client,
+              outbound,
+              timeouts,
+              state,
+              &retry_policy,
+              Some(RetryAdmissionContext {
+                route_name: &resolved.route.name,
+                pool_name: None,
+              }),
+            )
+            .await
+          } else {
+            send_one_shot_with_state(
+              client,
+              outbound,
+              timeouts,
+              state.as_ref(),
+              Some(RetryAdmissionContext {
+                route_name: &resolved.route.name,
+                pool_name: None,
+              }),
+            )
+            .await
+          };
+          result.map(|response| response.map(|body| body.map_err(boxed_error).boxed()))
+        }
+      };
+      tokio::pin!(upstream_request);
+      let result = if let Some(capture) = upstream_informational_capture.as_ref() {
+        tokio::select! {
+          result = &mut upstream_request => result,
+          error = capture.relay_failed() => {
+            Err(anyhow::anyhow!("downstream informational response rejected: {error:?}"))
           }
-          response.map(|body| body.map_err(boxed_error).boxed())
-        })
-      }
+        }
+      } else {
+        upstream_request.await
+      };
+      result.and_then(|mut response| {
+        if let Some(observed) = &upstream_response_observed {
+          observed.mark();
+        }
+        if let Some(capture) = upstream_informational_capture {
+          if let Some(error) = capture.take_relay_failure() {
+            anyhow::bail!("downstream informational response rejected: {error:?}");
+          }
+          semantics::attach_interim_responses(&mut response, capture.take_early_hints());
+        }
+        Ok(response)
+      })
     } else {
       send_one_shot_with_proxy_protocol(
         outbound,
@@ -485,6 +507,9 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     };
     match result {
       Ok(mut response) => {
+        if let Some(observed) = &upstream_response_observed {
+          observed.mark();
+        }
         if let Some(exchange) = &incremental_exchange {
           response.extensions_mut().insert(exchange.clone());
         }

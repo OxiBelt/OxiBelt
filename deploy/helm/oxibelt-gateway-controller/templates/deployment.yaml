@@ -99,6 +99,12 @@ spec:
         {{- range $header := .Values.routePolicy.allowedClientCertificateForwardHeaders }}
         - "--client-certificate-forward-allowed-header={{ $header }}"
         {{- end }}
+        {{- range $profile := .Values.routePolicy.resumableUploadProfiles }}
+        - "--resumable-upload-profile={{ $profile.namespace }}/{{ $profile.profile }}"
+        {{- end }}
+        {{- if .Values.routePolicy.resumableUploadProfiles }}
+        - "--resumable-upload-target={{ default .Release.Namespace .Values.rollout.target.namespace }}/{{ .Values.rollout.target.kind }}/{{ required "rollout.target.name is required for resumable uploads" .Values.rollout.target.name }}"
+        {{- end }}
         {{- range $secret := .Values.upstreamClientTls.sourceSecretAllowlist }}
         - "--upstream-client-tls-source-secret={{ $secret.namespace }}/{{ $secret.name }}:{{ default "tls.crt" $secret.certificateKey }}:{{ default "tls.key" $secret.privateKeyKey }}"
         {{- end }}

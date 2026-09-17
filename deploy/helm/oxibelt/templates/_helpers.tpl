@@ -1267,6 +1267,9 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- fail "workload.kind must be Deployment or DaemonSet" -}}
 {{- end -}}
 {{- if eq .Values.workload.kind "Deployment" -}}
+{{- if and (eq (int .Values.workload.deployment.maxUnavailable) 0) (eq (int .Values.workload.deployment.maxSurge) 0) -}}
+{{- fail "workload.deployment.maxUnavailable and workload.deployment.maxSurge cannot both be zero" -}}
+{{- end -}}
 {{- if le (int .Values.workload.deployment.progressDeadlineSeconds) (int .Values.workload.deployment.minReadySeconds) -}}
 {{- fail "workload.deployment.progressDeadlineSeconds must be greater than workload.deployment.minReadySeconds" -}}
 {{- end -}}

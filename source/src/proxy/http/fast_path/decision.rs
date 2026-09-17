@@ -18,7 +18,13 @@ pub(crate) fn plain_proxy_fast_path_decision<B>(
 ) -> Result<(), PlainProxyFastPathMissReason> {
   // QUERY requires final Content-Type validation after all request mutations.
   if crate::proxy::http::query::is_query(request.method())
+    || resolved.execution_plan.features.resumable_upload
     || crate::proxy::http::incremental::request_marked(request)
+    || crate::proxy::http::informational::candidate(request.headers())
+    || request
+      .extensions()
+      .get::<crate::proxy::http::resumable::NoReplayRequest>()
+      .is_some()
   {
     return Err(PlainProxyFastPathMissReason::UnsupportedRoute);
   }

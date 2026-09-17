@@ -82,6 +82,14 @@ impl Config {
     self.database.validate()?;
     self.shared_state.validate()?;
     self.validate_external_auth()?;
+    uploads::validate_uploads(
+      &self.upload_stores,
+      &self.upload_profiles,
+      &self.routes,
+      &self.upstreams,
+      &self.external_auth,
+      &self.ipm,
+    )?;
     let client_certificate_forwarding_headers = self.client_certificate_forwarding_headers();
     let client_certificate_forwarding_header_aliases =
       oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet::new(
@@ -337,7 +345,7 @@ impl Config {
         + usize::from(route.ct_log.is_some())
         + usize::from(route.actions.redirect.is_some())
         + usize::from(route.actions.direct_response.is_some());
-      if target_count != 1 {
+      if target_count != 1 && !(route.resumable_upload.is_some() && target_count == 0) {
         bail!(
           "route {} must set exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response",
           route.name

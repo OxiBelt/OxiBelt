@@ -98,6 +98,12 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "crypto.primitives" => crypto::CRYPTO_PRIMITIVES_CONFIG_KEYS,
     "crypto.primitive_backends" => crypto::CRYPTO_PRIMITIVE_BACKENDS_CONFIG_KEYS,
     "certificate_transparency" => certificate_transparency::CERTIFICATE_TRANSPARENCY_CONFIG_KEYS,
+    "upload_stores" => uploads::UPLOAD_STORE_CONFIG_KEYS,
+    "upload_stores.local" => uploads::UPLOAD_STORE_LOCAL_CONFIG_KEYS,
+    "upload_stores.postgres_s3" => uploads::UPLOAD_STORE_POSTGRES_S3_CONFIG_KEYS,
+    "upload_profiles" => uploads::UPLOAD_PROFILE_CONFIG_KEYS,
+    "upload_profiles.destination" => uploads::UPLOAD_DESTINATION_CONFIG_KEYS,
+    "upload_profiles.identity" => uploads::UPLOAD_IDENTITY_CONFIG_KEYS,
     "certificate_transparency.logs" => {
       certificate_transparency::CERTIFICATE_TRANSPARENCY_LOG_CONFIG_KEYS
     }

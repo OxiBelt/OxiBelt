@@ -1960,14 +1960,14 @@ jobs:
         run: tests/scripts/run-admin-audit-anchor-postgres.sh
 
   ct-object-store-minio:
-    name: CT object-store TLS MinIO admission
+    name: CT and managed-upload TLS object-store admission
     runs-on: ubuntu-26.04
     needs:
       - test
       - rust-advisory-checks
     permissions:
       contents: read
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -1994,6 +1994,11 @@ jobs:
           path: ${{ runner.temp }}/ct-object-store-minio-receipt.json
           if-no-files-found: error
           retention-days: 0
+
+      - name: Qualify managed-upload PostgreSQL and TLS S3 storage
+        env:
+          OXIBELT_MANAGED_UPLOAD_ALLOW_HOSTED_DOCKER: "1"
+        run: tests/scripts/run-managed-upload-store.sh
 
   kubernetes-immutable-rollout:
     name: Kubernetes ${{ matrix.kubernetes }} immutable Gateway rollout

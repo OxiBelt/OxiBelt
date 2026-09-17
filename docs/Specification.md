@@ -237,6 +237,12 @@ Person proof challenges in OxiRule are anti-automation controls. They are not au
 
 ## Routing and Upstreams
 
+Resumable upload routes bind only to named operator-owned upload profiles.
+Profile-bound durable state is fenced by profile, store, and verified owner
+identity. Offsets advance only after complete-part inspection and durable
+commit; uncertain terminal upstream delivery is indeterminate and is not
+automatically replayed. See [ResumableUploads.md](ResumableUploads.md).
+
 Routes match by host and path prefix. Wildcard host routes such as `*.example.com` require at least one non-empty request-host label before the suffix. A route may rewrite the matched path prefix with legacy `replace_prefix_with`, or use `actions.rewrite` to render a bounded upstream path/query template before forwarding. A route may also use terminal `actions.redirect` with an origin-relative `Location`, or terminal `actions.direct_response` with a required `400`–`599` status and an empty body. Direct responses execute after route selection and global admission but before route-scoped policy, body, mirror, cache, static-file, or upstream work.
 
 Targets may be:

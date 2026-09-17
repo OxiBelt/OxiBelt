@@ -191,6 +191,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "path_prefix",
       "replace_prefix_with",
       "retry",
+      "resumable_upload",
       "circuit_breaker",
       "security_headers",
       "status_headers",

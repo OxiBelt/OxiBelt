@@ -577,7 +577,7 @@
           "type": "object",
           "properties": {
             "maxUnavailable": { "type": "integer", "minimum": 0 },
-            "maxSurge": { "type": "integer", "minimum": 1 },
+            "maxSurge": { "type": "integer", "minimum": 0 },
             "minReadySeconds": { "type": "integer", "minimum": 0 },
             "progressDeadlineSeconds": { "type": "integer", "minimum": 1 },
             "revisionHistoryLimit": { "type": "integer", "minimum": 0 }

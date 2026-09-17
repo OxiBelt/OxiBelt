@@ -136,7 +136,7 @@
     "routePolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["maxRequestBodyBytes", "maxTimeoutMs", "allowedClientCertificateForwardHeaders"],
+      "required": ["maxRequestBodyBytes", "maxTimeoutMs", "allowedClientCertificateForwardHeaders", "resumableUploadProfiles"],
       "properties": {
         "maxRequestBodyBytes": { "type": "integer", "minimum": 1, "maximum": 104857600 },
         "maxTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 300000 },
@@ -145,6 +145,19 @@
           "maxItems": 32,
           "uniqueItems": true,
           "items": { "type": "string", "pattern": "^[a-z0-9!#$%&'*+.^_`|~-]+$" }
+        },
+        "resumableUploadProfiles": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["namespace", "profile"],
+            "properties": {
+              "namespace": { "type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" },
+              "profile": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" }
+            }
+          }
         }
       }
     },

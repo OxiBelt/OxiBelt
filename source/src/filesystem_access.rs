@@ -94,6 +94,7 @@ pub enum FilesystemAccessPurpose {
   RuntimeDiagnostics,
   RuntimeData,
   CertificateTransparency,
+  ManagedUpload,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -629,6 +630,7 @@ impl ManifestBuilder {
     builder.collect_trust_and_credentials(config)?;
     builder.collect_certificate_transparency(config)?;
     builder.collect_cache_and_buffering(config)?;
+    builder.collect_managed_uploads(config)?;
     builder.collect_crlite(config)?;
     builder.collect_client_identity(config)?;
     builder.collect_audit(config)?;
@@ -1115,6 +1117,40 @@ impl ManifestBuilder {
         FilesystemAccessPurpose::RequestBuffer,
         "proxy.buffering.temp_dir",
         false,
+      )?;
+    }
+    Ok(())
+  }
+
+  fn collect_managed_uploads(&mut self, config: &Config) -> anyhow::Result<()> {
+    for (index, store) in config.upload_stores.iter().enumerate() {
+      if let Some(path) = store
+        .postgres_s3
+        .as_ref()
+        .and_then(|settings| settings.s3_root_certificate.as_ref())
+      {
+        self.add_read_file(
+          path,
+          FilesystemAccessPurpose::ManagedUpload,
+          format!("upload_stores[{index}].postgres_s3.s3_root_certificate"),
+          true,
+        )?;
+      }
+      if let Some(local) = &store.local {
+        self.add_write_directory(
+          &local.root,
+          FilesystemAccessPurpose::ManagedUpload,
+          format!("upload_stores[{index}].local.root"),
+          true,
+        )?;
+      }
+    }
+    for (index, profile) in config.upload_profiles.iter().enumerate() {
+      self.add_write_directory(
+        &profile.staging_dir,
+        FilesystemAccessPurpose::ManagedUpload,
+        format!("upload_profiles[{index}].staging_dir"),
+        true,
       )?;
     }
     Ok(())

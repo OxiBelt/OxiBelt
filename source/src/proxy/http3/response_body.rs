@@ -26,6 +26,13 @@ pub(super) fn upstream_h3_response_body(
   upstream_h3_response_body_inner(stream, timeout)
 }
 
+pub(super) fn upstream_h3_response_recv_body(
+  stream: H3ClientRequestRecvStream,
+  timeout: Duration,
+) -> ProxyBody {
+  upstream_h3_response_body_inner(stream, timeout)
+}
+
 pub(super) fn observe_incremental_h3_response_body(
   stream: H3ClientRequestRecvStream,
   timeout: Duration,

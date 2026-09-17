@@ -217,6 +217,11 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       out.push_str(&toml_string(external_auth));
       out.push('\n');
     }
+    if let Some(profile) = &route.resumable_upload {
+      out.push_str("resumable_upload = ");
+      out.push_str(&toml_string(profile));
+      out.push('\n');
+    }
     if let Some(forwarding) = &route.client_certificate_forwarding {
       out.push_str("[routes.client_certificate_forwarding]\nheader = ");
       out.push_str(&toml_string(&forwarding.header));

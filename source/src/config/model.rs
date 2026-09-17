@@ -38,6 +38,8 @@ pub struct Config {
   pub shared_state: SharedStateConfig,
   pub dynamic_policy: DynamicPolicyConfig,
   pub external_auth: Vec<ExternalAuthConfig>,
+  pub upload_stores: Vec<UploadStoreConfig>,
+  pub upload_profiles: Vec<UploadProfileConfig>,
   pub upstreams: Vec<UpstreamConfig>,
   pub upstream_pools: Vec<UpstreamPoolConfig>,
   pub turn_upstream_pools: Vec<TurnUpstreamPoolConfig>,
@@ -109,6 +111,10 @@ struct RawConfig {
   #[serde(default)]
   external_auth: Vec<ExternalAuthConfig>,
   #[serde(default)]
+  upload_stores: Vec<UploadStoreConfig>,
+  #[serde(default)]
+  upload_profiles: Vec<UploadProfileConfig>,
+  #[serde(default)]
   upstreams: Vec<UpstreamConfig>,
   #[serde(default)]
   upstream_pools: Vec<UpstreamPoolConfig>,
@@ -170,6 +176,8 @@ impl TryFrom<RawConfig> for Config {
       shared_state: raw.shared_state,
       dynamic_policy: raw.dynamic_policy,
       external_auth: raw.external_auth,
+      upload_stores: raw.upload_stores,
+      upload_profiles: raw.upload_profiles,
       upstreams: raw.upstreams,
       upstream_pools: raw.upstream_pools,
       turn_upstream_pools: raw.turn_upstream_pools,

@@ -9,6 +9,10 @@ feature lifecycle status, see [FeatureStatus.md](FeatureStatus.md). For OxiRule
 rule syntax, see [OxiRule.md](OxiRule.md). For metrics, tracing, access-log, and
 dashboard guidance, see [Observability.md](Observability.md).
 
+For opt-in `[[upload_stores]]`, `[[upload_profiles]]`, and
+`routes.resumable_upload`, including required limits and verified owner
+bindings, see [ResumableUploads.md](ResumableUploads.md).
+
 The repository example configuration is:
 
 ```sh
@@ -4497,6 +4501,11 @@ upstream = "app"
 [routes.bandwidth]
 # upload_bytes_per_second = 1048576
 # download_bytes_per_second = 4194304
+
+# Selects an operator-defined resumable upload profile. The profile owns the
+# store, destination, verified owner source, WAF coverage, and all finite
+# limits; a route cannot override any of them.
+# resumable_upload = "media-ingest"
 
 [routes.buffering]
 # request = "streaming"

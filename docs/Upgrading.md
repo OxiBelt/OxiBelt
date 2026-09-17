@@ -5,6 +5,28 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Resumable uploads
+
+The unprofiled Helm Deployment now permits `workload.deployment.maxSurge = 0`
+when `maxUnavailable` is nonzero, for single-instance local upload storage.
+Existing rollout defaults and secure operational-profile requirements are
+unchanged. The PostgreSQL/S3 upload store is required for multi-replica uploads.
+
+Negotiated draft-12/interop-9 relay is enabled by default, including live `104`
+informational responses. Resumable requests are not cached, mirrored, or
+automatically replayed; `104` does not opt a request into `Incremental` or extend
+its deadline. Unmarked traffic retains its existing behavior.
+
+Managed storage is an opt-in configuration surface. Before enabling it, deploy either a
+single-replica local PVC store or PostgreSQL plus S3-compatible immutable
+chunks, then configure the store/profile and explicit egress/trust inputs.
+Do not move active sessions between profiles, stores, or owner bindings:
+existing continuations are rejected by design. A rollback to a binary without
+the feature requires first draining active sessions and retained objects while
+their stores remain configured, then removing `resumable_upload`,
+`upload_profiles`, and `upload_stores` from the older binary's configuration.
+See [ResumableUploads.md](ResumableUploads.md).
+
 ## RFC 10024 SecP256r1MLKEM768
 
 Full reload compares configured PQ controls independently of runtime discovery

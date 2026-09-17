@@ -20180,6 +20180,14 @@
             "x-oxibelt-reference-activation": "none",
             "x-oxibelt-secret-class": "none"
           },
+          "resumable_upload": {
+            "description": "OxiBelt native field `routes[].resumable_upload`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
           "retry": {
             "additionalProperties": false,
             "description": "OxiBelt native field `routes[].retry`. Production Rust validation is authoritative.",
@@ -27434,6 +27442,391 @@
               "type": "object"
             },
             "type": "array",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "x-oxibelt-config-activation": "full_reload",
+      "x-oxibelt-introduced-epoch": 1,
+      "x-oxibelt-reference-activation": "none",
+      "x-oxibelt-secret-class": "none"
+    },
+    "upload_profiles": {
+      "description": "OxiBelt native field `upload_profiles`. Production Rust validation is authoritative.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "control_path_prefix": {
+            "description": "OxiBelt native field `upload_profiles[].control_path_prefix`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "destination": {
+            "additionalProperties": false,
+            "description": "OxiBelt native field `upload_profiles[].destination`. Production Rust validation is authoritative.",
+            "properties": {
+              "kind": {
+                "description": "OxiBelt native field `upload_profiles[].destination.kind`. Production Rust validation is authoritative.",
+                "enum": [
+                  "upstream",
+                  "object"
+                ],
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "upstream": {
+                "description": "OxiBelt native field `upload_profiles[].destination.upstream`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "type": "object",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "identity": {
+            "additionalProperties": false,
+            "description": "OxiBelt native field `upload_profiles[].identity`. Production Rust validation is authoritative.",
+            "properties": {
+              "kind": {
+                "description": "OxiBelt native field `upload_profiles[].identity.kind`. Production Rust validation is authoritative.",
+                "enum": [
+                  "ipm",
+                  "external_auth",
+                  "mtls"
+                ],
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "source": {
+                "description": "OxiBelt native field `upload_profiles[].identity.source`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "subject_field": {
+                "description": "OxiBelt native field `upload_profiles[].identity.subject_field`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "type": "object",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "inspection_bytes": {
+            "description": "OxiBelt native field `upload_profiles[].inspection_bytes`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_concurrent_parts": {
+            "description": "OxiBelt native field `upload_profiles[].max_concurrent_parts`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_concurrent_uploads": {
+            "description": "OxiBelt native field `upload_profiles[].max_concurrent_uploads`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_part_bytes": {
+            "description": "OxiBelt native field `upload_profiles[].max_part_bytes`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_parts": {
+            "description": "OxiBelt native field `upload_profiles[].max_parts`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_sessions": {
+            "description": "OxiBelt native field `upload_profiles[].max_sessions`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_staging_bytes": {
+            "description": "OxiBelt native field `upload_profiles[].max_staging_bytes`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_storage_bytes": {
+            "description": "OxiBelt native field `upload_profiles[].max_storage_bytes`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "max_upload_bytes": {
+            "description": "OxiBelt native field `upload_profiles[].max_upload_bytes`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "name": {
+            "description": "OxiBelt native field `upload_profiles[].name`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "object_path_prefix": {
+            "description": "OxiBelt native field `upload_profiles[].object_path_prefix`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "object_ttl_seconds": {
+            "description": "OxiBelt native field `upload_profiles[].object_ttl_seconds`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "public_base_url": {
+            "description": "OxiBelt native field `upload_profiles[].public_base_url`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "staging_dir": {
+            "description": "OxiBelt native field `upload_profiles[].staging_dir`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "store": {
+            "description": "OxiBelt native field `upload_profiles[].store`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "ttl_seconds": {
+            "description": "OxiBelt native field `upload_profiles[].ttl_seconds`. Production Rust validation is authoritative.",
+            "minimum": 0,
+            "type": "integer",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array",
+      "x-oxibelt-config-activation": "full_reload",
+      "x-oxibelt-introduced-epoch": 1,
+      "x-oxibelt-reference-activation": "none",
+      "x-oxibelt-secret-class": "none"
+    },
+    "upload_stores": {
+      "description": "OxiBelt native field `upload_stores`. Production Rust validation is authoritative.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "OxiBelt native field `upload_stores[].kind`. Production Rust validation is authoritative.",
+            "enum": [
+              "local",
+              "postgres_s3"
+            ],
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "local": {
+            "additionalProperties": false,
+            "description": "OxiBelt native field `upload_stores[].local`. Production Rust validation is authoritative.",
+            "properties": {
+              "root": {
+                "description": "OxiBelt native field `upload_stores[].local.root`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "type": "object",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "name": {
+            "description": "OxiBelt native field `upload_stores[].name`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "postgres_s3": {
+            "additionalProperties": false,
+            "description": "OxiBelt native field `upload_stores[].postgres_s3`. Production Rust validation is authoritative.",
+            "properties": {
+              "max_connections": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.max_connections`. Production Rust validation is authoritative.",
+                "minimum": 0,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "postgres_url_env": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.postgres_url_env`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "full_reload",
+                "x-oxibelt-secret-class": "environment_reference"
+              },
+              "s3_access_key_env": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.s3_access_key_env`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "full_reload",
+                "x-oxibelt-secret-class": "environment_reference"
+              },
+              "s3_bucket": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.s3_bucket`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "s3_endpoint": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.s3_endpoint`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "s3_prefix": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.s3_prefix`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "s3_region": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.s3_region`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "s3_root_certificate": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.s3_root_certificate`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "s3_secret_key_env": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.s3_secret_key_env`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "full_reload",
+                "x-oxibelt-secret-class": "environment_reference"
+              },
+              "s3_session_token_env": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.s3_session_token_env`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "full_reload",
+                "x-oxibelt-secret-class": "environment_reference"
+              },
+              "s3_virtual_hosted_style": {
+                "description": "OxiBelt native field `upload_stores[].postgres_s3.s3_virtual_hosted_style`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "type": "object",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
             "x-oxibelt-reference-activation": "none",

@@ -196,6 +196,7 @@ pub(crate) async fn forward_request(
       request,
       upstream,
       timeouts,
+      state.config.proxy.http.early_hints,
       &state.config.proxy.trusted_ca_certs,
       &state.metrics,
       &state.overload,
@@ -208,11 +209,21 @@ pub(super) async fn send_h3_request(
   request: Request<ProxyBody>,
   uri: &http::Uri,
   timeouts: EffectiveTimeouts,
+  early_hints: crate::config::EarlyHintsMode,
   request_deadline: tokio::time::Instant,
   upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
 ) -> anyhow::Result<Response<ProxyBody>> {
   let (mut parts, body) = request.into_parts();
   let request_method = parts.method.clone();
+  let resumable_candidate = crate::proxy::http::informational::negotiated(&parts.extensions)
+    && crate::proxy::http::informational::candidate(&parts.headers);
+  let downstream_emitter = parts
+    .extensions
+    .get::<crate::proxy::http::informational::Emitter>()
+    .cloned();
+  if resumable_candidate && downstream_emitter.is_none() {
+    anyhow::bail!("downstream informational response emitter is unavailable");
+  }
   let incremental = parts
     .extensions
     .remove::<crate::proxy::http::incremental_exchange::IncrementalExchange>();
@@ -245,6 +256,8 @@ pub(super) async fn send_h3_request(
       exchange,
       dispatch_guard,
       upstream_certificate,
+      resumable_candidate.then_some(downstream_emitter).flatten(),
+      early_hints,
     )
     .await;
   }
@@ -253,6 +266,19 @@ pub(super) async fn send_h3_request(
     .await
     .context("upstream HTTP/3 request stream wait timed out")?
     .with_context(|| format!("failed to send upstream HTTP/3 request {uri}"))?;
+
+  if resumable_candidate && let Some(downstream_emitter) = downstream_emitter {
+    return send_resumable_h3_request(
+      stream,
+      body,
+      timeouts,
+      request_deadline,
+      upstream_certificate,
+      downstream_emitter,
+      early_hints,
+    )
+    .await;
+  }
 
   let mut stream = stream;
   let mut body = body;
@@ -289,6 +315,17 @@ pub(super) async fn send_h3_request(
       .await
       .context("upstream HTTP/3 first byte timed out")?
       .context("failed to receive upstream HTTP/3 response")?;
+    // h3 exposes each informational HEADERS frame through recv_response().
+    // Do not misclassify an otherwise unsupported 1xx as a final response.
+    if response.status().is_informational() && response.status().as_u16() != 101 {
+      if let Some(response) = crate::proxy::http::semantics::sanitize_interim_response(
+        response.status(),
+        response.headers(),
+      ) {
+        interim.responses.push(response);
+      }
+      continue;
+    }
     if let Some(response) = crate::proxy::http::semantics::sanitize_interim_response(
       response.status(),
       response.headers(),
@@ -310,6 +347,126 @@ pub(super) async fn send_h3_request(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn send_resumable_h3_request(
+  stream: h3::client::RequestStream<h3_quinn::BidiStream<bytes::Bytes>, bytes::Bytes>,
+  body: ProxyBody,
+  timeouts: EffectiveTimeouts,
+  response_deadline: tokio::time::Instant,
+  upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+  downstream_emitter: crate::proxy::http::informational::Emitter,
+  early_hints: crate::config::EarlyHintsMode,
+) -> anyhow::Result<Response<ProxyBody>> {
+  let (send, mut recv) = stream.split();
+  let upload = async move {
+    let mut send = send;
+    upload_h3_body(&mut send, body, timeouts.upstream_send).await
+  };
+  tokio::pin!(upload);
+
+  let mut upload_complete = false;
+  let mut interim = crate::proxy::http::semantics::InterimResponses::default();
+  let mut final_parts = None;
+  while !upload_complete || final_parts.is_none() {
+    if final_parts.is_some() {
+      upload.as_mut().await?;
+      upload_complete = true;
+      continue;
+    }
+    let response = if upload_complete {
+      tokio::time::timeout_at(response_deadline, recv.recv_response())
+        .await
+        .context("upstream HTTP/3 first byte timed out")?
+        .context("failed to receive upstream HTTP/3 response")?
+    } else {
+      tokio::select! {
+        uploaded = upload.as_mut() => {
+          uploaded?;
+          upload_complete = true;
+          continue;
+        }
+        response = tokio::time::timeout_at(response_deadline, recv.recv_response()) => response
+          .context("upstream HTTP/3 first byte timed out")?
+          .context("failed to receive upstream HTTP/3 response")?,
+      }
+    };
+    if response.status().is_informational() && response.status().as_u16() != 101 {
+      let live_relay = crate::proxy::http::semantics::live_relay_eligible(
+        early_hints,
+        true,
+        response.status(),
+        response.headers(),
+      );
+      if live_relay {
+        let response = crate::proxy::http::semantics::sanitize_live_relay_response(response);
+        crate::proxy::http::informational::send_via(&downstream_emitter, response).map_err(
+          |error| anyhow::anyhow!("downstream informational response rejected: {error:?}"),
+        )?;
+      } else if let Some(response) = crate::proxy::http::semantics::sanitize_interim_response(
+        response.status(),
+        response.headers(),
+      ) {
+        interim.responses.push(response);
+      }
+      continue;
+    }
+    if let Some(response) = crate::proxy::http::semantics::sanitize_interim_response(
+      response.status(),
+      response.headers(),
+    ) {
+      interim.responses.push(response);
+      continue;
+    }
+    let (mut parts, _) = response.into_parts();
+    if !interim.responses.is_empty() {
+      parts.extensions.insert(std::mem::take(&mut interim));
+    }
+    final_parts = Some(parts);
+  }
+  let parts = final_parts.context("upstream HTTP/3 response completed without final headers")?;
+  let body = response_body::upstream_h3_response_recv_body(recv, timeouts.upstream_read);
+  Ok(attach_upstream_certificate(
+    Response::from_parts(parts, body),
+    upstream_certificate,
+  ))
+}
+
+async fn upload_h3_body(
+  send: &mut h3::client::RequestStream<
+    <h3_quinn::BidiStream<bytes::Bytes> as h3::quic::BidiStream<bytes::Bytes>>::SendStream,
+    bytes::Bytes,
+  >,
+  mut body: ProxyBody,
+  send_timeout: Duration,
+) -> anyhow::Result<()> {
+  while let Some(frame) = body.frame().await {
+    let frame = frame.map_err(|error| {
+      anyhow::anyhow!("failed to read request body for upstream HTTP/3: {error}")
+    })?;
+    match frame.into_data() {
+      Ok(data) => {
+        tokio::time::timeout(send_timeout, send.send_data(data))
+          .await
+          .context("upstream HTTP/3 request data send timed out")?
+          .context("failed to send upstream HTTP/3 request data")?;
+      }
+      Err(frame) => {
+        if let Ok(trailers) = frame.into_trailers() {
+          tokio::time::timeout(send_timeout, send.send_trailers(trailers))
+            .await
+            .context("upstream HTTP/3 request trailers send timed out")?
+            .context("failed to send upstream HTTP/3 request trailers")?;
+        }
+      }
+    }
+  }
+  tokio::time::timeout(send_timeout, send.finish())
+    .await
+    .context("failed to finish upstream HTTP/3 request")?
+    .context("failed to finish upstream HTTP/3 request")?;
+  Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn send_incremental_h3_request(
   stream: h3::client::RequestStream<h3_quinn::BidiStream<bytes::Bytes>, bytes::Bytes>,
   body: ProxyBody,
@@ -319,6 +476,8 @@ async fn send_incremental_h3_request(
   exchange: crate::proxy::http::incremental_exchange::IncrementalExchange,
   dispatch_guard: crate::proxy::http::incremental_exchange::IncrementalDispatchGuard,
   upstream_certificate: Option<Arc<crate::waf::metadata::WafCertificateMetadata>>,
+  downstream_emitter: Option<crate::proxy::http::informational::Emitter>,
+  early_hints: crate::config::EarlyHintsMode,
 ) -> anyhow::Result<Response<ProxyBody>> {
   let (send, mut recv) = stream.split();
   let upload_exchange = exchange.clone();
@@ -370,6 +529,34 @@ async fn send_incremental_h3_request(
         return Err(error);
       }
     };
+    if response.status().is_informational() && response.status().as_u16() != 101 {
+      let live_relay = downstream_emitter.as_ref().filter(|_| {
+        crate::proxy::http::semantics::live_relay_eligible(
+          early_hints,
+          true,
+          response.status(),
+          response.headers(),
+        )
+      });
+      if let Some(emitter) = live_relay {
+        let response = crate::proxy::http::semantics::sanitize_live_relay_response(response);
+        if let Err(error) = crate::proxy::http::informational::send_via(emitter, response) {
+          exchange.cancel();
+          exchange.mark_response_complete();
+          return Err(anyhow::anyhow!(
+            "downstream informational response rejected: {error:?}"
+          ));
+        }
+        continue;
+      }
+      if let Some(response) = crate::proxy::http::semantics::sanitize_interim_response(
+        response.status(),
+        response.headers(),
+      ) {
+        interim.responses.push(response);
+      }
+      continue;
+    }
     if let Some(response) = crate::proxy::http::semantics::sanitize_interim_response(
       response.status(),
       response.headers(),

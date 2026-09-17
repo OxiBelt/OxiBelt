@@ -2,7 +2,9 @@
 
 use super::*;
 
-pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Response<ProxyBody> {
+pub(in crate::proxy::http) async fn run(
+  context: UpstreamContext<'_, '_, '_, '_, '_>,
+) -> Response<ProxyBody> {
   let UpstreamContext {
     mut request,
     state,
@@ -35,6 +37,15 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     captured_body,
     verified_early_data,
   } = context;
+  // A resumable relay must observe the origin exchange itself: cache hits,
+  // fills, and stale/revalidation paths can neither forward live 1xx nor
+  // preserve the request's one-shot semantics. This is deliberately separate
+  // from Incremental, whose deadline and admission behavior is unchanged.
+  let resumable_cache_bypass = informational::candidate(request.headers())
+    || request
+      .extensions()
+      .get::<resumable::NoReplayRequest>()
+      .is_some();
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
   let pool_cookie_header = if request_waf.upstream_override.is_none()
     && (request_waf.upstream_pool_override.is_some() || resolved.route.upstream_pool.is_some())
@@ -151,7 +162,8 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   let cache_enabled_for_route = resolved.execution_plan.features.cache
     && state
       .cache
-      .policy_enabled(resolved.route.cache.as_deref(), &request_method);
+      .policy_enabled(resolved.route.cache.as_deref(), &request_method)
+    && !resumable_cache_bypass;
   let response_actions_need_request_headers =
     resolved.route.actions.response_headers.has_actions() || resolved.route.actions.cors.is_some();
   let mut request_headers = if cache_enabled_for_route
@@ -339,7 +351,8 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
   let mut revalidation_entry = None;
   let mut stale_on_error = None;
   let mut _cache_fill_guard = None;
-  let mut cache_store_allowed = !cache_enabled_for_route || !state.config.cache.lock;
+  let mut cache_store_allowed =
+    !resumable_cache_bypass && (!cache_enabled_for_route || !state.config.cache.lock);
   let nvs_original_headers = no_vary_search.as_ref().map(|_| outbound.headers().clone());
   let initial_cache_lookup = crate::cache::CacheLookupContext {
     group_request: group_request.as_ref(),
@@ -354,17 +367,21 @@ pub(super) async fn run(context: UpstreamContext<'_, '_, '_, '_, '_>) -> Respons
     uri: &request_uri,
     request_headers: &request_headers,
   };
-  let lookup = match state.cache.lookup_async(initial_cache_lookup.clone()).await {
-    Some(lookup) => Some(lookup),
-    None => {
-      state
-        .cache
-        .lookup_external(
-          initial_cache_lookup,
-          state.config.proxy.buffering.temp_dir.as_deref(),
-        )
-        .await
+  let lookup = if cache_enabled_for_route {
+    match state.cache.lookup_async(initial_cache_lookup.clone()).await {
+      Some(lookup) => Some(lookup),
+      None => {
+        state
+          .cache
+          .lookup_external(
+            initial_cache_lookup,
+            state.config.proxy.buffering.temp_dir.as_deref(),
+          )
+          .await
+      }
     }
+  } else {
+    None
   };
   let lookup = if lookup.is_some() {
     lookup

@@ -23,6 +23,7 @@ pub(super) struct GeneratedRoute {
   pub(super) max_request_body_bytes: Option<u64>,
   pub(super) upstream_request_timeout_ms: Option<u64>,
   pub(super) client_certificate_forwarding: Option<ClientCertificateForwarding>,
+  pub(super) resumable_upload: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

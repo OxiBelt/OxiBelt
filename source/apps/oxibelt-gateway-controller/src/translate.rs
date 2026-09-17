@@ -152,6 +152,7 @@ struct TranslationState {
   external_auth_allowed_terminal_headers: HashSet<String>,
   external_auth_allow_credentials: bool,
   client_certificate_forward_allowed_headers: HashSet<String>,
+  resumable_upload_profiles: Vec<crate::cli::ResumableUploadProfileAllowlistEntry>,
   client_certificate_forward_reserved_headers:
     oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet,
   pools: BTreeMap<String, GeneratedPool>,
@@ -230,6 +231,7 @@ pub fn translate_objects(
     client_certificate_forward_allowed_headers: normalized_policy_values(
       &args.client_certificate_forward_allowed_headers,
     ),
+    resumable_upload_profiles: args.resumable_upload_profiles.clone(),
     ..Default::default()
   };
   state.index_supporting_objects(objects, args)?;
@@ -332,7 +334,7 @@ impl TranslationState {
       || self
         .routes
         .iter()
-        .any(|route| route.direct_response_status.is_some())
+        .any(|route| route.direct_response_status.is_some() || route.resumable_upload.is_some())
   }
 
   fn push_fail_closed_tombstone(&mut self, mut route: GeneratedRoute) -> bool {

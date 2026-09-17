@@ -1,0 +1,19 @@
+# Deployment overlay only: supply the reviewed native TOML separately.
+# Pre-create an RWO PVC named oxibelt-uploads with capacity for store quotas
+# plus staging. Use the matching absolute paths in the upload profile/store.
+# This overlay is for the unprofiled chart, not operational-profile v2.
+replicaCount: 1
+autoscaling:
+  enabled: false
+workload:
+  kind: Deployment
+  deployment:
+    maxSurge: 0
+    maxUnavailable: 1
+extraVolumes:
+  - name: uploads
+    persistentVolumeClaim:
+      claimName: oxibelt-uploads
+extraVolumeMounts:
+  - name: uploads
+    mountPath: /var/lib/oxibelt

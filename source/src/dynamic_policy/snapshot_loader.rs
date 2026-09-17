@@ -36,10 +36,12 @@ pub(super) async fn load_snapshot(
 
   let mut hasher = std::collections::hash_map::DefaultHasher::new();
   generation.hash(&mut hasher);
+  let mut content_hasher = std::collections::hash_map::DefaultHasher::new();
   let mut policies = Vec::with_capacity(rows.len());
   for row in rows {
     let row = policy_row_from_pg(&row)?;
     hash_policy_row(&row, &mut hasher);
+    hash_policy_row(&row, &mut content_hasher);
     policies.push(validate_policy_row(
       row,
       config,
@@ -52,6 +54,7 @@ pub(super) async fn load_snapshot(
   Ok(DynamicPolicySnapshot {
     generation,
     fingerprint: hasher.finish(),
+    content_fingerprint: content_hasher.finish(),
     policies: Arc::from(policies),
   })
 }

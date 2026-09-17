@@ -371,6 +371,7 @@ fn activate_published_snapshot(snapshot: &AppSnapshot, previous: Option<&AppSnap
     previous.admin_audit.retire_runtime_generation();
   }
   snapshot.activate_compio_direct_h1_service();
+  snapshot.uploads.activate();
   snapshot
     .runtime_health
     .activate_generation(snapshot.runtime_generation);

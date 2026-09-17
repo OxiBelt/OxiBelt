@@ -29,6 +29,7 @@ pub(super) struct RoutePolicy {
   max_request_body_bytes: Option<u64>,
   upstream_request_timeout_ms: Option<u64>,
   client_certificate_forwarding: Option<ClientCertificateForwarding>,
+  resumable_upload_profile: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +133,7 @@ pub(super) fn apply_route_policy(
   source_route: &KubernetesObject,
   generated: &mut GeneratedRoute,
   allowed_client_certificate_forward_headers: &HashSet<String>,
+  allowed_resumable_upload_profiles: &[crate::cli::ResumableUploadProfileAllowlistEntry],
 ) -> Result<(), RoutePolicyApplyError> {
   let key = ObjectKey {
     namespace: source_route.namespace().to_string(),
@@ -216,6 +218,33 @@ pub(super) fn apply_route_policy(
     }
     generated.client_certificate_forwarding = Some(forwarding.clone());
   }
+  if let Some(profile) = &policy.resumable_upload_profile {
+    if generated.path_exact.is_some()
+      || !generated.methods.is_empty()
+      || !generated.headers.is_empty()
+      || !generated.queries.is_empty()
+      || generated.redirect.is_some()
+      || generated.direct_response_status.is_some()
+    {
+      return Err(RoutePolicyApplyError {
+        message: "OxiBeltRoutePolicy resumableUpload requires an unconditional prefix route"
+          .to_owned(),
+        covered_diagnostics: Some(Vec::new()),
+      });
+    }
+    if !allowed_resumable_upload_profiles.iter().any(|admission| {
+      admission.namespace == source_route.namespace() && admission.profile == *profile
+    }) {
+      return Err(RoutePolicyApplyError {
+        message: format!(
+          "OxiBeltRoutePolicy resumableUpload.profileRef {profile} is not admitted for namespace {} by operator policy",
+          source_route.namespace()
+        ),
+        covered_diagnostics: Some(Vec::new()),
+      });
+    }
+    generated.resumable_upload = Some(profile.clone());
+  }
   Ok(())
 }
 
@@ -250,6 +279,7 @@ fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::R
       "limits",
       "timeouts",
       "clientCertificateForwarding",
+      "resumableUpload",
     ],
   ) {
     bail!("spec.{field} is unsupported");
@@ -366,10 +396,33 @@ fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::R
     );
   }
 
+  let resumable_upload_profile = object
+    .spec
+    .get("resumableUpload")
+    .map(parse_resumable_upload)
+    .transpose()?;
+  if let Some(profile) = &resumable_upload_profile
+    && !args
+      .resumable_upload_profiles
+      .iter()
+      .any(|admission| admission.namespace == object.namespace() && admission.profile == *profile)
+  {
+    bail!(
+      "spec.resumableUpload.profileRef {profile} is not admitted for namespace {} by operator policy",
+      object.namespace()
+    );
+  }
+  if resumable_upload_profile.is_some() && args.resumable_upload_target.is_none() {
+    bail!(
+      "spec.resumableUpload.profileRef requires an operator-configured resumable-upload target"
+    );
+  }
+
   if request_rule_groups.is_empty()
     && max_request_body_bytes.is_none()
     && upstream_request_timeout_ms.is_none()
     && client_certificate_forwarding.is_none()
+    && resumable_upload_profile.is_none()
   {
     bail!("at least one bounded policy field is required");
   }
@@ -382,7 +435,18 @@ fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::R
     max_request_body_bytes,
     upstream_request_timeout_ms,
     client_certificate_forwarding,
+    resumable_upload_profile,
   })
+}
+
+fn parse_resumable_upload(value: &Value) -> anyhow::Result<String> {
+  if let Some(field) = unsupported_field(value, &["profileRef"]) {
+    bail!("spec.resumableUpload.{field} is unsupported");
+  }
+  let profile =
+    string_at(value, &["profileRef"]).context("spec.resumableUpload.profileRef is required")?;
+  validate_dns_subdomain("spec.resumableUpload.profileRef", profile)?;
+  Ok(profile.to_string())
 }
 
 fn parse_client_certificate_forwarding(

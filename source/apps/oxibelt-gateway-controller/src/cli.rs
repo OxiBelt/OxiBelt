@@ -9,6 +9,7 @@ pub const DEFAULT_CONTROLLER_NAME: &str = "oxibelt.dev/gateway-controller";
 pub const DEFAULT_MANAGED_CONFIG_PATH: &str = "conf.d/gateway-api.generated.toml";
 pub const MAX_REQUEST_MIRROR_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS: usize = 64;
+pub const MAX_RESUMABLE_UPLOAD_PROFILE_ALLOWLIST_ENTRIES: usize = 64;
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt-gateway-controller")]
@@ -24,7 +25,7 @@ pub struct Cli {
   pub command: Command,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct SharedArgs {
   #[arg(long, global = true, default_value = DEFAULT_CONTROLLER_NAME)]
   pub controller_name: String,
@@ -80,6 +81,13 @@ pub struct SharedArgs {
   pub route_policy_max_timeout_ms: u64,
   #[arg(long = "client-certificate-forward-allowed-header", global = true)]
   pub client_certificate_forward_allowed_headers: Vec<String>,
+  /// Operator-owned namespace/profile admissions for resumable uploads.
+  /// Route-policy authors can reference only a profile admitted for their namespace.
+  #[arg(long = "resumable-upload-profile", global = true)]
+  pub resumable_upload_profiles: Vec<ResumableUploadProfileAllowlistEntry>,
+  /// Exact operator-owned data-plane target for every resumable profile admission.
+  #[arg(long = "resumable-upload-target", global = true)]
+  pub resumable_upload_target: Option<ResumableUploadTarget>,
   #[arg(long = "upstream-client-tls-source-secret", global = true)]
   pub upstream_client_tls_source_secrets: Vec<SourceSecretAllowlistEntry>,
   #[arg(long, global = true)]
@@ -114,6 +122,20 @@ impl SharedArgs {
       &self.external_auth_allowed_request_headers,
       ExternalAuthHeaderScope::ProtectedRequest,
     )?;
+    if self.resumable_upload_profiles.len() > MAX_RESUMABLE_UPLOAD_PROFILE_ALLOWLIST_ENTRIES {
+      bail!(
+        "resumable-upload-profile may be repeated at most {MAX_RESUMABLE_UPLOAD_PROFILE_ALLOWLIST_ENTRIES} times"
+      );
+    }
+    let mut resumable_profiles = std::collections::HashSet::new();
+    for entry in &self.resumable_upload_profiles {
+      if !resumable_profiles.insert((&entry.namespace, &entry.profile)) {
+        bail!("resumable-upload-profile contains a duplicate namespace/profile");
+      }
+    }
+    if !self.resumable_upload_profiles.is_empty() && self.resumable_upload_target.is_none() {
+      bail!("resumable-upload-profile requires --resumable-upload-target namespace/kind/name");
+    }
     validate_header_allowlist(
       "external-auth-allowed-identity-header",
       &self.external_auth_allowed_identity_headers,
@@ -149,6 +171,76 @@ impl SharedArgs {
       }
     }
     Ok(())
+  }
+}
+
+/// Controller-owned target identity that completes the admission tuple:
+/// `(data-plane target, policy namespace, profile)`. It is global CLI state,
+/// never a tenant RoutePolicy field.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ResumableUploadTarget {
+  pub namespace: String,
+  pub kind: super::rollout::WorkloadKind,
+  pub name: String,
+}
+
+impl FromStr for ResumableUploadTarget {
+  type Err = String;
+
+  fn from_str(value: &str) -> Result<Self, Self::Err> {
+    let (namespace, workload) = value
+      .split_once('/')
+      .ok_or_else(|| "expected namespace/kind/name".to_string())?;
+    let (kind, name) = workload
+      .split_once('/')
+      .ok_or_else(|| "expected namespace/kind/name".to_string())?;
+    if name.contains('/') {
+      return Err("expected namespace/kind/name".to_string());
+    }
+    let kind = match kind {
+      "deployment" => super::rollout::WorkloadKind::Deployment,
+      "daemonset" => super::rollout::WorkloadKind::DaemonSet,
+      _ => return Err("kind must be deployment or daemonset".to_owned()),
+    };
+    super::rollout::validate_kubernetes_dns_label("namespace", namespace)
+      .map_err(|_| "namespace must be a Kubernetes DNS label".to_string())?;
+    super::rollout::validate_kubernetes_dns_subdomain("name", name)
+      .map_err(|_| "name must be a Kubernetes DNS subdomain".to_string())?;
+    Ok(Self {
+      namespace: namespace.to_string(),
+      kind,
+      name: name.to_string(),
+    })
+  }
+}
+
+/// Exact `namespace/profile` admission owned by the controller operator.
+/// The profile itself is defined in the selected data-plane's base TOML; this
+/// type deliberately carries no storage, credential, endpoint, or identity data.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ResumableUploadProfileAllowlistEntry {
+  pub namespace: String,
+  pub profile: String,
+}
+
+impl FromStr for ResumableUploadProfileAllowlistEntry {
+  type Err = String;
+
+  fn from_str(value: &str) -> Result<Self, Self::Err> {
+    let (namespace, profile) = value
+      .split_once('/')
+      .ok_or_else(|| "expected namespace/profile".to_string())?;
+    if profile.contains('/') {
+      return Err("expected namespace/profile".to_string());
+    }
+    super::rollout::validate_kubernetes_dns_label("namespace", namespace)
+      .map_err(|_| "namespace must be a Kubernetes DNS label".to_string())?;
+    super::rollout::validate_kubernetes_dns_subdomain("profile", profile)
+      .map_err(|_| "profile must be a Kubernetes DNS subdomain".to_string())?;
+    Ok(Self {
+      namespace: namespace.to_string(),
+      profile: profile.to_string(),
+    })
   }
 }
 

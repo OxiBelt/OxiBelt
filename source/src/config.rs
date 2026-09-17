@@ -83,6 +83,7 @@ mod telemetry;
 mod tls;
 mod turn;
 mod turn_queue;
+mod uploads;
 mod upstream_pool;
 mod upstream_tls;
 #[cfg(test)]
@@ -198,6 +199,7 @@ pub use telemetry::*;
 pub use tls::*;
 use turn::RawWebRtcTurnListenerConfig;
 pub use turn::*;
+pub use uploads::*;
 pub use upstream_pool::*;
 pub use upstream_tls::*;
 use validation_helpers::*;

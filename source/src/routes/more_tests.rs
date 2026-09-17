@@ -37,6 +37,7 @@ fn upstream(name: &str) -> UpstreamConfig {
 
 fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> RouteConfig {
   RouteConfig {
+    resumable_upload: None,
     name: name.into(),
     hosts: hosts.iter().map(|host| (*host).into()).collect(),
     path_prefix: path_prefix.into(),

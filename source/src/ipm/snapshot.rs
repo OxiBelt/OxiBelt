@@ -106,6 +106,14 @@ impl IpmCredentialRuntime {
   }
 }
 
+impl IpmSnapshot {
+  pub(crate) fn content_fingerprint(&self) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_snapshot_content(self, &mut hasher);
+    hasher.finish()
+  }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RedactedIpmCredential {
   pub name: String,
@@ -385,41 +393,45 @@ pub(crate) fn merge_store_snapshot(
 fn fingerprint_snapshot(snapshot: &IpmSnapshot) -> u64 {
   let mut hasher = std::collections::hash_map::DefaultHasher::new();
   snapshot.generation.hash(&mut hasher);
+  hash_snapshot_content(snapshot, &mut hasher);
+  hasher.finish()
+}
+
+fn hash_snapshot_content(snapshot: &IpmSnapshot, hasher: &mut impl Hasher) {
   for principal in sorted_keys(&snapshot.principals) {
-    principal.hash(&mut hasher);
+    principal.hash(hasher);
     if let Some(runtime) = snapshot.principals.get(&principal) {
-      runtime.actor.subject.hash(&mut hasher);
-      runtime.actor.groups.hash(&mut hasher);
-      runtime.enabled.hash(&mut hasher);
+      runtime.actor.subject.hash(hasher);
+      runtime.actor.groups.hash(hasher);
+      runtime.enabled.hash(hasher);
     }
   }
   for credential in &snapshot.credentials {
-    credential.name.hash(&mut hasher);
-    credential.principal.hash(&mut hasher);
-    credential.enabled.hash(&mut hasher);
-    credential.revoked.hash(&mut hasher);
-    credential.expires_at.hash(&mut hasher);
-    credential.token_hash.hash(&mut hasher);
-    credential.previous_token_hash.hash(&mut hasher);
-    credential.previous_token_overlap_until.hash(&mut hasher);
+    credential.name.hash(hasher);
+    credential.principal.hash(hasher);
+    credential.enabled.hash(hasher);
+    credential.revoked.hash(hasher);
+    credential.expires_at.hash(hasher);
+    credential.token_hash.hash(hasher);
+    credential.previous_token_hash.hash(hasher);
+    credential.previous_token_overlap_until.hash(hasher);
   }
   for policy in sorted_keys(&snapshot.policies) {
-    policy.hash(&mut hasher);
+    policy.hash(hasher);
     if let Some(runtime) = snapshot.policies.get(&policy) {
-      runtime.enabled.hash(&mut hasher);
+      runtime.enabled.hash(hasher);
       serde_json::to_string(&runtime.policy)
         .unwrap_or_default()
-        .hash(&mut hasher);
+        .hash(hasher);
     }
   }
   for binding in &snapshot.bindings {
-    binding.id.hash(&mut hasher);
-    binding.principal.hash(&mut hasher);
-    binding.group.hash(&mut hasher);
-    binding.policy.hash(&mut hasher);
-    binding.enabled.hash(&mut hasher);
+    binding.id.hash(hasher);
+    binding.principal.hash(hasher);
+    binding.group.hash(hasher);
+    binding.policy.hash(hasher);
+    binding.enabled.hash(hasher);
   }
-  hasher.finish()
 }
 
 fn sorted_keys<T>(map: &HashMap<String, T>) -> Vec<String> {

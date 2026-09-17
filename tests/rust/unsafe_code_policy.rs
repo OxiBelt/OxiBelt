@@ -11,6 +11,7 @@ const UNSAFE_ALLOWLIST: &[&str] = &[
   "source/src/hardening/syscalls.rs",
   "source/src/tcp_hop/syscalls.rs",
 ];
+const REVIEWED_THIRD_PARTY_ROOTS: &[&str] = &["source/third_party/hyper/"];
 const GOVERNED_LINTS: &[&str] = &[
   "unsafe_code",
   "unsafe_op_in_unsafe_fn",
@@ -137,6 +138,9 @@ fn manifests_apply_the_policy_to_every_first_party_workspace() {
     if manifest == "Cargo.toml" {
       continue;
     }
+    if is_reviewed_third_party(&manifest) {
+      continue;
+    }
     if members.contains(&manifest) {
       assert_contains_all(&root.join(manifest), &["[lints]", "workspace = true"]);
     } else {
@@ -169,6 +173,7 @@ fn build_configuration_does_not_lower_the_unsafe_policy() {
     ],
   )
   .into_iter()
+  .filter(|path| !is_reviewed_third_party(path))
   .map(|path| root.join(path))
   .collect::<Vec<_>>();
   for config in [root.join(".cargo/config"), root.join(".cargo/config.toml")] {
@@ -240,6 +245,21 @@ fn policy_inspection_rejects_bypasses_and_stale_entries() {
     .is_empty(),
     "the exact reasoned allowlist form should be accepted"
   );
+
+  assert!(is_reviewed_third_party(
+    "source/third_party/hyper/src/lib.rs"
+  ));
+  for first_party_lookalike in [
+    "source/third_party/hyper.rs",
+    "source/third_party/hyper-local/src/lib.rs",
+    "source/third_party/another-vendor/src/lib.rs",
+    "source/src/third_party/hyper/src/lib.rs",
+  ] {
+    assert!(
+      !is_reviewed_third_party(first_party_lookalike),
+      "{first_party_lookalike} must remain governed as first-party"
+    );
+  }
 }
 
 fn inspect_source(relative: &str, source: &str) -> Vec<String> {
@@ -372,6 +392,15 @@ fn permitted_file_allow(attribute: &AttributeUse) -> bool {
 
 fn rust_source_files(root: &Path) -> Vec<String> {
   repository_files(root, &["*.rs"])
+    .into_iter()
+    .filter(|path| !is_reviewed_third_party(path))
+    .collect()
+}
+
+fn is_reviewed_third_party(path: &str) -> bool {
+  REVIEWED_THIRD_PARTY_ROOTS
+    .iter()
+    .any(|root| path.starts_with(root))
 }
 
 fn repository_files(root: &Path, pathspecs: &[&str]) -> Vec<String> {

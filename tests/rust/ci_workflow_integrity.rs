@@ -7477,10 +7477,12 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
     "CT object-store integration should wait for Rust tests and advisory admission"
   );
   for expected in [
-    "name: CT object-store TLS MinIO admission",
+    "name: CT and managed-upload TLS object-store admission",
     "runs-on: ubuntu-26.04",
-    "timeout-minutes: 45",
+    "timeout-minutes: 90",
     "OXIBELT_CT_OBJECT_STORE_ALLOW_HOSTED_DOCKER: \"1\"",
+    "OXIBELT_MANAGED_UPLOAD_ALLOW_HOSTED_DOCKER: \"1\"",
+    "tests/scripts/run-managed-upload-store.sh",
     "tests/scripts/run-ct-object-store-minio.sh",
     "--receipt-output \"${RUNNER_TEMP}/ct-object-store-minio-receipt.json\"",
     "name: ct-object-store-minio-evidence",

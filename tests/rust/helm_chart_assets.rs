@@ -21,6 +21,48 @@ fn read_yaml(path: &str) -> Value {
     .unwrap_or_else(|error| panic!("{path} should parse as YAML: {error}"))
 }
 
+#[test]
+fn managed_upload_storage_overlays_preserve_instance_and_secret_boundaries() {
+  let local = read_yaml("deploy/helm/oxibelt/examples/resumable-upload-local-values.yaml");
+  assert_eq!(local["replicaCount"], 1);
+  assert_eq!(local["autoscaling"]["enabled"], false);
+  assert_eq!(local["workload"]["deployment"]["maxSurge"], 0);
+  assert_eq!(local["workload"]["deployment"]["maxUnavailable"], 1);
+  assert_eq!(
+    local["extraVolumes"][0]["persistentVolumeClaim"]["claimName"],
+    "oxibelt-uploads"
+  );
+  let shared = read_yaml("deploy/helm/oxibelt/examples/resumable-upload-shared-values.yaml");
+  assert_eq!(shared["replicaCount"], 2);
+  for variable in shared["extraEnv"]
+    .as_array()
+    .expect("credential references")
+  {
+    assert!(variable.get("value").is_none());
+    assert!(variable["valueFrom"]["secretKeyRef"].is_object());
+  }
+  assert_eq!(shared["extraVolumeMounts"][1]["readOnly"], true);
+  assert_eq!(shared["networkPolicy"]["enabled"], true);
+  assert_eq!(
+    shared["networkPolicy"]["egress"]["destinations"]
+      .as_array()
+      .expect("egress")
+      .len(),
+    2
+  );
+  let schema: Value =
+    serde_json::from_str(&read_repo("deploy/helm/oxibelt/values.schema.json")).expect("schema");
+  assert_eq!(
+    schema["properties"]["workload"]["properties"]["deployment"]["properties"]["maxSurge"]["minimum"],
+    0
+  );
+  assert!(
+    read_repo("deploy/helm/oxibelt/templates/_helpers.tpl").contains(
+      "workload.deployment.maxUnavailable and workload.deployment.maxSurge cannot both be zero"
+    )
+  );
+}
+
 fn assert_crd_schema_is_structural(value: &Value, path: &str) {
   match value {
     Value::Object(object) => {
@@ -1648,5 +1690,9 @@ fn gateway_controller_chart_exposes_controller_runtime_options() {
   assert_eq!(
     route_policy_spec["properties"]["timeouts"]["properties"]["upstreamRequestMilliseconds"]["maximum"],
     300_000
+  );
+  assert_eq!(
+    route_policy_spec["properties"]["resumableUpload"]["properties"]["profileRef"]["maxLength"],
+    253
   );
 }

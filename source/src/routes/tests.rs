@@ -32,6 +32,7 @@ fn upstream(name: &str) -> UpstreamConfig {
 
 fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> RouteConfig {
   RouteConfig {
+    resumable_upload: None,
     name: name.into(),
     hosts: hosts.iter().map(|host| (*host).into()).collect(),
     path_prefix: path_prefix.into(),
@@ -73,6 +74,7 @@ fn exact_host_beats_wildcard() {
   let routes = vec![
     RouteConfig {
       name: "wild".into(),
+      resumable_upload: None,
       hosts: vec!["*.example.com".into()],
       path_prefix: "/".into(),
       r#match: Default::default(),
@@ -108,6 +110,7 @@ fn exact_host_beats_wildcard() {
     },
     RouteConfig {
       name: "exact".into(),
+      resumable_upload: None,
       hosts: vec!["api.example.com".into()],
       path_prefix: "/".into(),
       r#match: Default::default(),
@@ -199,6 +202,7 @@ fn longer_path_prefix_wins() {
   let routes = vec![
     RouteConfig {
       name: "root".into(),
+      resumable_upload: None,
       hosts: vec!["example.com".into()],
       path_prefix: "/".into(),
       r#match: Default::default(),
@@ -234,6 +238,7 @@ fn longer_path_prefix_wins() {
     },
     RouteConfig {
       name: "api".into(),
+      resumable_upload: None,
       hosts: vec!["example.com".into()],
       path_prefix: "/api".into(),
       r#match: Default::default(),

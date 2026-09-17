@@ -26,6 +26,15 @@ The standalone probes declare the equivalent package-local policy. The
 repository test `unsafe_code_policy` scans tracked and non-ignored Rust source,
 checks every first-party manifest, and rejects attempts to lower these lints.
 
+The exact `source/third_party/hyper/` subtree is reviewed third-party dependency
+source, not a first-party unsafe-code allowance. Its upstream unsafe code is
+unchanged by OxiBelt's informational-response patch. Dependency admission
+checks the complete source inventory against `supply-chain/hyper-source.sha256`
+and the owned, time-bounded record in `supply-chain/dependency-policy.json`.
+Other or similarly named vendor directories remain subject to the first-party
+scan unless separately reviewed. See the subtree's `README.OXIBELT.md` for
+provenance, review evidence, and removal criteria.
+
 ## Allowlist
 
 Unsafe code is permitted only in these capability-isolated Linux modules:

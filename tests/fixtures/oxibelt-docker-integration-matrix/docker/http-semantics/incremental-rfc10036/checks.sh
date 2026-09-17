@@ -3,6 +3,8 @@ run_case_checks() {
   for downstream in h1 h2 h3; do
     for upstream in h1 h2 h3; do
       incremental_probe_client "${downstream}" "/${upstream}/duplex"
+      incremental_probe_client "${downstream}" "/${upstream}/duplex" 200 duplex --resumable-relay
+      incremental_probe_client "${downstream}" "/${upstream}/duplex" 200 duplex --resumable-relay-only
     done
   done
   incremental_probe_client h3 /h1/early204 204

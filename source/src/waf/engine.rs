@@ -165,6 +165,10 @@ impl WafEngine {
     self.person_proof_tcp_max_hop
   }
 
+  pub(crate) fn crs_content_fingerprint(&self) -> &str {
+    self.crs.content_fingerprint()
+  }
+
   #[cfg(feature = "admin-runtime")]
   pub fn person_proof_admin_status(&self) -> anyhow::Result<PersonProofAdminStatus> {
     self.person_proof.admin_status()

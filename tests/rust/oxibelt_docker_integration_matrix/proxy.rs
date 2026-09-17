@@ -105,6 +105,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "http-semantics",
+      "managed-upload-real-wire",
+      "managed uploads create, resume, publish, isolate owners, and delete over HTTP/1.1, HTTP/2, and HTTP/3",
+      ExpectStart::Success,
+      Needs {
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "http-semantics",
       "status-headers",
       "status headers preserve received chains and report every Incremental protocol pair",
       ExpectStart::Success,

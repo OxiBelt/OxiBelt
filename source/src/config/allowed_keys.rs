@@ -39,6 +39,8 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "turn_upstream_pools",
   "upstream_pools",
   "upstreams",
+  "upload_profiles",
+  "upload_stores",
   "waf",
   "webrtc_turn_listeners",
 ];

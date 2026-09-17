@@ -55,6 +55,15 @@ pub enum ExternalAuthOutcome {
   Denied(ExternalAuthTerminal),
 }
 
+/// Identity established by a successful provider response, never by request
+/// headers or the provider's fail-open policy. Consumers must select an exact
+/// configured provider and subject field.
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedExternalIdentity {
+  pub(crate) provider: String,
+  pub(crate) attributes: HashMap<String, String>,
+}
+
 pub struct ExternalAuthTerminal {
   pub status: StatusCode,
   pub headers: HeaderMap,
@@ -136,6 +145,9 @@ impl ExternalAuthRuntime {
     downstream_scheme: &str,
     route_name: &str,
   ) -> ExternalAuthOutcome {
+    request
+      .extensions_mut()
+      .remove::<VerifiedExternalIdentity>();
     let Some(inner) = &self.inner else {
       return ExternalAuthOutcome::Allowed;
     };
@@ -186,6 +198,9 @@ impl ExternalAuthRuntime {
     request_body_limit: usize,
     request_body_timeout: Option<Duration>,
   ) -> ExternalAuthOutcome {
+    request
+      .extensions_mut()
+      .remove::<VerifiedExternalIdentity>();
     let Some(inner) = &self.inner else {
       return ExternalAuthOutcome::Allowed;
     };
@@ -835,8 +850,15 @@ fn finish_auth_check<B>(
   metrics: &Metrics,
   result: anyhow::Result<AuthCheck>,
 ) -> ExternalAuthOutcome {
+  request
+    .extensions_mut()
+    .remove::<VerifiedExternalIdentity>();
   match result {
     Ok(AuthCheck::Allowed(identity)) => {
+      request.extensions_mut().insert(VerifiedExternalIdentity {
+        provider: provider.config.name.clone(),
+        attributes: identity.clone(),
+      });
       apply_identity_headers(request.headers_mut(), provider, identity);
       metrics.record_external_auth_allowed();
       ExternalAuthOutcome::Allowed

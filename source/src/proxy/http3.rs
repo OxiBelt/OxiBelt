@@ -715,7 +715,7 @@ async fn handle_h3_request(
 
 async fn handle_prepared_h3_request(
   mut request: Request<ProxyBody>,
-  send_stream: H3RequestSendStream,
+  mut send_stream: H3RequestSendStream,
   context: H3DownstreamRequestContext,
 ) -> anyhow::Result<StatusCode> {
   let state = context.state.clone();
@@ -724,6 +724,7 @@ async fn handle_prepared_h3_request(
   if let Some(evidence) = &context.proxy_tls_evidence {
     request.extensions_mut().insert(evidence.clone());
   }
+  let mut informational = http_proxy::informational::install_h3(request.extensions_mut());
   let response = http_proxy::handle_http3(
     request,
     context.peer_addr,
@@ -732,8 +733,33 @@ async fn handle_prepared_h3_request(
     context.connection_limit_context,
     context.state,
     context.drain,
-  )
-  .await;
+  );
+  tokio::pin!(response);
+  let mut informational_closed = false;
+  let response = loop {
+    tokio::select! {
+      response = &mut response => break response,
+      interim = informational.recv(), if !informational_closed => {
+        match interim {
+          Some(interim) => send_stream
+            .send_response(interim)
+            .await
+            .context("failed to send downstream HTTP/3 informational response")?,
+          None => informational_closed = true,
+        }
+      }
+    }
+  };
+  // `select!` may observe the completed final future after an earlier poll of
+  // the informational receiver returned Pending. Drain the bounded FIFO once
+  // more before committing final HEADERS so same-poll 104 responses retain
+  // their required ordering.
+  while let Some(interim) = informational.try_recv() {
+    send_stream
+      .send_response(interim)
+      .await
+      .context("failed to send downstream HTTP/3 informational response")?;
+  }
   if is_silent_close_response(&response) {
     reset_silent_h3_request(send_stream);
     return Ok(StatusCode::NO_CONTENT);

@@ -69,6 +69,43 @@ fn helm_inline_toml_points_to_the_same_native_schema_epoch() {
 }
 
 #[test]
+fn managed_upload_schema_has_typed_profiles_and_credential_references() {
+  let schema: serde_json::Value =
+    serde_json::from_str(&generate_native_config_schema().expect("schema generation"))
+      .expect("schema JSON");
+  for path in [
+    "routes[].resumable_upload",
+    "upload_profiles[].identity.subject_field",
+    "upload_stores[].postgres_s3.s3_root_certificate",
+    "upload_stores[].postgres_s3.postgres_url_env",
+  ] {
+    assert_eq!(
+      schema_node_for_metadata_path(&schema, path)["type"],
+      "string",
+      "{path}"
+    );
+  }
+  for path in [
+    "upload_profiles[].max_sessions",
+    "upload_profiles[].max_parts",
+    "upload_profiles[].max_concurrent_uploads",
+    "upload_profiles[].max_concurrent_parts",
+    "upload_profiles[].max_upload_bytes",
+    "upload_stores[].postgres_s3.max_connections",
+  ] {
+    assert_eq!(
+      schema_node_for_metadata_path(&schema, path)["type"],
+      "integer",
+      "{path}"
+    );
+  }
+  assert_eq!(
+    schema_node_for_metadata_path(&schema, "upload_profiles[].identity.kind")["enum"],
+    serde_json::json!(["ipm", "external_auth", "mtls"])
+  );
+}
+
+#[test]
 fn editor_and_documentation_surfaces_publish_the_epoch_one_contract() {
   let taplo = fs::read_to_string(repo_root().join(".taplo.toml"))
     .expect("Taplo configuration should be readable");
