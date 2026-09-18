@@ -193,40 +193,39 @@ pub(super) async fn handle_connection(
           "too many requests on this connection",
         ));
       }
-      if request.version() == ::http::Version::HTTP_2
+      let response = if request.version() == ::http::Version::HTTP_2
         && crate::proxy::webtransport_h2::ingress::is_webtransport_request(&request)
       {
-        return Ok(
-          crate::proxy::webtransport_h2::ingress::handle_request(
-            request,
-            peer_addr,
-            tcp_max_hop,
-            transport_metadata,
-            tls_metadata,
-            connection_limit_context,
-            state,
-            h2_webtransport_tls13,
-            drain,
-            webtransport_sessions,
-          )
-          .await,
-        );
-      }
-      let response = http::handle_with_forwarded_header_cache(
-        request,
-        peer_addr,
-        tcp_max_hop,
-        transport_metadata,
-        tls_metadata,
-        connection_limit_context.clone(),
-        forwarded_header_cache,
-        state,
-        "https",
-        drain,
-      )
-      .await;
+        crate::proxy::webtransport_h2::ingress::handle_request(
+          request,
+          peer_addr,
+          tcp_max_hop,
+          transport_metadata,
+          tls_metadata,
+          connection_limit_context,
+          state,
+          h2_webtransport_tls13,
+          drain,
+          webtransport_sessions,
+        )
+        .await
+      } else {
+        http::handle_with_forwarded_header_cache(
+          request,
+          peer_addr,
+          tcp_max_hop,
+          transport_metadata,
+          tls_metadata,
+          connection_limit_context,
+          forwarded_header_cache,
+          state,
+          "https",
+          drain,
+        )
+        .await
+      };
       if is_silent_close_response(&response) {
-        Err(SilentClose)
+        Err(SilentClose::h2_cancel())
       } else {
         Ok(response)
       }

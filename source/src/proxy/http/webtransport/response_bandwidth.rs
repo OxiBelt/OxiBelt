@@ -73,6 +73,28 @@ mod tests {
   use super::*;
   use crate::bandwidth::{BandwidthPolicy, BandwidthRate};
   use crate::metrics::Metrics;
+  use crate::proxy::http::response::{
+    is_silent_close_response, silent_close_response, text_response,
+  };
+
+  #[test]
+  fn setup_response_preserves_only_the_silent_close_marker() {
+    for bandwidth in [
+      None,
+      Some(RouteBandwidthLimiter::new(BandwidthPolicy::UNLIMITED)),
+    ] {
+      let silent =
+        shape_webtransport_response(silent_close_response(), bandwidth.clone(), Metrics::new());
+      assert!(is_silent_close_response(&silent));
+
+      let ordinary = shape_webtransport_response(
+        text_response(http::StatusCode::NO_CONTENT, ""),
+        bandwidth,
+        Metrics::new(),
+      );
+      assert!(!is_silent_close_response(&ordinary));
+    }
+  }
 
   #[tokio::test]
   async fn setup_response_materializes_inlined_known_small_body() {

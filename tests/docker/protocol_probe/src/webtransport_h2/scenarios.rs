@@ -6,19 +6,69 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use super::{
   acknowledge_data, capsule, control_capsule, data_payload, parse_settings, prepare_client_streams,
   read_frame_at, stream_capsule, validate_settings, validate_settings_ack, validate_window_update,
-  write_data, write_frame, CapsuleEvent, PeerCredit, ACK, DATA, GOAWAY, PING, RST_STREAM, SETTINGS,
-  WINDOW_UPDATE, WT_CLOSE_SESSION, WT_ENABLED, WT_RESET_STREAM,
+  write_data, write_frame, CapsuleEvent, PeerCredit, ACK, DATA, GOAWAY, HEADERS, PING, RST_STREAM,
+  SETTINGS, WINDOW_UPDATE, WT_CLOSE_SESSION, WT_ENABLED, WT_RESET_STREAM,
 };
 
 const EXPECTED_PROXY_STREAM_CREDIT: usize = 1024;
 const EXPECTED_PROXY_STREAM_LIMIT: u64 = 4;
 const PROTOCOL_ERROR: u32 = 1;
 const FLOW_CONTROL_ERROR: u32 = 3;
+const CANCEL: u32 = 8;
 const PING_PAYLOAD: &[u8; 8] = b"wt-sib-1";
 const WAF_CLOSE_CODE: u32 = 91;
 const WAF_CLOSE_REASON: &str = "blocked WebTransport payload";
 const SHAPED_BYTES: usize = 192;
 const SHAPED_MINIMUM: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+pub(super) async fn silent_close<T>(
+  io: &mut T,
+  deadline: tokio::time::Instant,
+) -> anyhow::Result<()>
+where
+  T: AsyncRead + AsyncWrite + Unpin,
+{
+  loop {
+    let frame = read_frame_at(io, deadline).await?;
+    match frame.kind {
+      RST_STREAM if frame.stream_id == 1 => {
+        let payload: [u8; 4] = frame
+          .payload
+          .as_slice()
+          .try_into()
+          .map_err(|_| anyhow!("silent-close RST_STREAM reason was not four bytes"))?;
+        let actual = u32::from_be_bytes(payload);
+        if actual != CANCEL {
+          bail!("silent-close reset reason was {actual}, expected {CANCEL}");
+        }
+        break;
+      }
+      HEADERS | DATA if frame.stream_id == 1 => {
+        bail!("silent-close WebTransport request emitted an HTTP response")
+      }
+      SETTINGS if frame.flags & ACK == 0 => {
+        validate_settings(&frame.payload)?;
+        write_frame(io, SETTINGS, ACK, 0, &[]).await?;
+      }
+      SETTINGS => validate_settings_ack(&frame)?,
+      PING if frame.flags & ACK == 0 => write_frame(io, PING, ACK, 0, &frame.payload).await?,
+      WINDOW_UPDATE => validate_window_update(&frame)?,
+      GOAWAY => bail!("silent-close WebTransport request closed its HTTP/2 connection"),
+      _ => {}
+    }
+  }
+
+  ping_roundtrip(io, deadline).await?;
+  println!(
+    "{}",
+    serde_json::json!({
+      "scenario": "silent-close",
+      "reset_reason": CANCEL,
+      "sibling_ping": "acknowledged",
+    })
+  );
+  Ok(())
+}
 
 pub(super) async fn run<T>(
   scenario: &str,

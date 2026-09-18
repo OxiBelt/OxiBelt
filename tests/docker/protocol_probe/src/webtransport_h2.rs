@@ -160,6 +160,9 @@ pub(crate) async fn client(args: impl Iterator<Item = String>) -> anyhow::Result
     &request_headers(&authority, &path, &args.headers)?,
   )
   .await?;
+  if args.scenario == "silent-close" {
+    return scenarios::silent_close(&mut io, deadline).await;
+  }
   let status = wait_for_response(&mut io, deadline).await?;
   if status != args.expect_status {
     bail!(

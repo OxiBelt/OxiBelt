@@ -91,6 +91,13 @@ type = "reject"
 status = 403
 body = "Blocked WebTransport request"
 [[waf.rules]]
+name = "silence-webtransport-request"
+phase = "request"
+priority = 11
+when = "Request.Protocol == 'webtransport' && Request.Http.Path.endsWith('/silent-close')"
+[[waf.rules.actions]]
+type = "silent_close"
+[[waf.rules]]
 name = "close-webtransport-blocked-payload"
 phase = "stream"
 priority = 20
@@ -320,6 +327,10 @@ echo "HTTP/2 WebTransport request WAF denial"
 probe webtransport-h2-client --host proxy --port 8443 --server-name proxy \
   --authority example.test --path /h2/blocked --ca-cert /tls/ca.pem \
   --scenario echo --expect-status 403
+echo "HTTP/2 WebTransport request WAF silent close"
+probe webtransport-h2-client --host proxy --port 8443 --server-name proxy \
+  --authority example.test --path /closed-h2/silent-close --ca-cert /tls/ca.pem \
+  --scenario silent-close
 echo "HTTP/2 WebTransport stream-phase WAF close"
 probe webtransport-h2-client --host proxy --port 8443 --server-name proxy \
   --authority example.test --path /h2/session --ca-cert /tls/ca.pem --scenario waf-payload

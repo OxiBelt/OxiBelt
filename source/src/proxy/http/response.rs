@@ -62,8 +62,18 @@ pub(crate) fn waf_http_terminal_response_with_route_security(
   }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SilentClose;
+#[derive(Debug)]
+pub(crate) struct SilentClose {
+  h2_reset: h2::Error,
+}
+
+impl SilentClose {
+  pub(crate) fn h2_cancel() -> Self {
+    Self {
+      h2_reset: h2::Error::from(h2::Reason::CANCEL),
+    }
+  }
+}
 
 impl fmt::Display for SilentClose {
   fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -71,7 +81,11 @@ impl fmt::Display for SilentClose {
   }
 }
 
-impl Error for SilentClose {}
+impl Error for SilentClose {
+  fn source(&self) -> Option<&(dyn Error + 'static)> {
+    Some(&self.h2_reset)
+  }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct SilentCloseResponse;
@@ -620,4 +634,22 @@ fn empty_response(status: StatusCode) -> Response<ProxyBody> {
     .extensions_mut()
     .insert(InlinedKnownSmallResponseBody::new(Bytes::new(), None));
   response
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn silent_close_carries_http2_cancel_reason() {
+    let silent_close = SilentClose::h2_cancel();
+    let source = silent_close
+      .source()
+      .expect("silent close should expose its HTTP/2 reset cause");
+    let h2_error = source
+      .downcast_ref::<h2::Error>()
+      .expect("silent close cause should be an h2 error");
+
+    assert_eq!(h2_error.reason(), Some(h2::Reason::CANCEL));
+  }
 }

@@ -184,7 +184,7 @@ pub(super) async fn handle_connection(
             )
             .await;
             if is_silent_close_response(&response) {
-              Err(SilentClose)
+              Err(SilentClose::h2_cancel())
             } else {
               Ok(response)
             }
