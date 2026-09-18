@@ -265,6 +265,7 @@ fn request(args: &ClientArgs, version: Version) -> anyhow::Result<Request<()>> {
   if args.wants_resumable_relay() {
     builder = builder
       .header("upload-draft-interop-version", "9")
+      .header("upload-complete", "?0")
       .header("x-resumable-relay-probe", "?1");
   }
   builder.body(()).context("build Incremental request")
@@ -468,7 +469,10 @@ async fn h1_server_exchange<S: AsyncRead + AsyncWrite + Unpin>(
     .any(|line| line.eq_ignore_ascii_case("x-incremental-probe-mode: early-204"));
   let resumable_relay = head_text
     .lines()
-    .any(|line| line.eq_ignore_ascii_case("x-resumable-relay-probe: ?1"));
+    .any(|line| line.eq_ignore_ascii_case("x-resumable-relay-probe: ?1"))
+    && head_text
+      .lines()
+      .any(|line| line.eq_ignore_ascii_case("upload-complete: ?0"));
   if !incremental && !resumable_relay {
     bail!("neither Incremental nor resumable H1 request header was present")
   }
@@ -557,7 +561,9 @@ async fn client_h1(args: &ClientArgs) -> anyhow::Result<()> {
     .unwrap_or_default();
   let resumable_relay = args
     .wants_resumable_relay()
-    .then_some("Upload-Draft-Interop-Version: 9\r\nX-Resumable-Relay-Probe: ?1\r\n")
+    .then_some(
+      "Upload-Draft-Interop-Version: 9\r\nUpload-Complete: ?0\r\nX-Resumable-Relay-Probe: ?1\r\n",
+    )
     .unwrap_or_default();
   let incremental = (!args.resumable_relay_only)
     .then_some("Incremental: ?1\r\n")
@@ -814,7 +820,12 @@ async fn h2_server_exchange(
     .headers()
     .get("x-resumable-relay-probe")
     .and_then(|value| value.to_str().ok())
-    == Some("?1");
+    == Some("?1")
+    && request
+      .headers()
+      .get("upload-complete")
+      .and_then(|value| value.to_str().ok())
+      == Some("?0");
   if !incremental && !resumable_relay {
     bail!("neither Incremental nor resumable H2 request header was present")
   }
@@ -1091,7 +1102,12 @@ async fn h3_server_exchange(
     .headers()
     .get("x-resumable-relay-probe")
     .and_then(|value| value.to_str().ok())
-    == Some("?1");
+    == Some("?1")
+    && request
+      .headers()
+      .get("upload-complete")
+      .and_then(|value| value.to_str().ok())
+      == Some("?0");
   if !incremental && !resumable_relay {
     bail!("neither Incremental nor resumable H3 request header was present")
   }

@@ -234,8 +234,11 @@ pub(super) async fn send_h3_request(
 ) -> anyhow::Result<Response<ProxyBody>> {
   let (mut parts, body) = request.into_parts();
   let request_method = parts.method.clone();
-  let resumable_candidate = crate::proxy::http::informational::negotiated(&parts.extensions)
-    && crate::proxy::http::informational::candidate(&parts.headers);
+  let resumable_candidate = crate::proxy::http::informational::relay_armed_parts(
+    &parts.extensions,
+    &parts.method,
+    &parts.headers,
+  );
   let downstream_emitter = parts
     .extensions
     .get::<crate::proxy::http::informational::Emitter>()

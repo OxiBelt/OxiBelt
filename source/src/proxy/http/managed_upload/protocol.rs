@@ -81,6 +81,42 @@ pub(super) fn compatible_interop(headers: &HeaderMap) -> bool {
   integer(headers, "upload-draft-interop-version") == Ok(Some(INTEROP_VERSION))
 }
 
+/// Whether an ordinary proxied request is a complete draft-12 creation or
+/// append tuple whose live informational responses must be preserved.
+///
+/// Keep this stricter than `compatible_interop`: that predicate also validates
+/// upstream 104 responses, which carry only the interop version.
+pub(super) fn relay_request(method: &Method, headers: &HeaderMap) -> bool {
+  if !creation_method(method)
+    || !compatible_interop(headers)
+    || completion(headers).is_err()
+    || integer(headers, "upload-length").is_err()
+  {
+    return false;
+  }
+
+  let append_shape = headers.contains_key("upload-offset")
+    || headers
+      .get_all(http::header::CONTENT_TYPE)
+      .iter()
+      .any(|value| partial_upload_media_type(value.as_bytes()));
+  if append_shape {
+    method == Method::PATCH && validate_append(headers).is_ok()
+  } else {
+    true
+  }
+}
+
+fn partial_upload_media_type(value: &[u8]) -> bool {
+  const TYPE: &[u8] = b"application/partial-upload";
+  value
+    .get(..TYPE.len())
+    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(TYPE))
+    && value
+      .get(TYPE.len())
+      .is_none_or(|next| next.is_ascii_whitespace() || *next == b';')
+}
+
 pub(super) fn identity_encoding(headers: &HeaderMap) -> Result<(), StatusCode> {
   let mut values = headers.get_all(http::header::CONTENT_ENCODING).iter();
   if let Some(value) = values.next()
@@ -244,5 +280,109 @@ mod tests {
       identity_encoding(&headers),
       Err(StatusCode::UNSUPPORTED_MEDIA_TYPE)
     );
+  }
+
+  fn relay_headers(complete: &'static str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      "upload-draft-interop-version",
+      HeaderValue::from_static("9"),
+    );
+    headers.insert("upload-complete", HeaderValue::from_static(complete));
+    headers
+  }
+
+  #[test]
+  fn relay_request_requires_a_complete_creation_tuple() {
+    for method in [Method::POST, Method::PUT, Method::PATCH] {
+      for complete in ["?0", "?1"] {
+        let headers = relay_headers(complete);
+        assert!(relay_request(&method, &headers), "{method} {complete}");
+      }
+    }
+
+    let mut with_length = relay_headers("?0");
+    with_length.insert("upload-length", HeaderValue::from_static("0"));
+    assert!(relay_request(&Method::POST, &with_length));
+
+    for method in [
+      Method::GET,
+      Method::HEAD,
+      Method::OPTIONS,
+      Method::DELETE,
+      Method::CONNECT,
+    ] {
+      assert!(!relay_request(&method, &relay_headers("?0")), "{method}");
+    }
+
+    let mut missing_complete = relay_headers("?0");
+    missing_complete.remove("upload-complete");
+    assert!(!relay_request(&Method::POST, &missing_complete));
+
+    for (name, value) in [
+      ("upload-draft-interop-version", "8"),
+      ("upload-draft-interop-version", "\"9\""),
+      ("upload-complete", "1"),
+      ("upload-complete", "maybe"),
+      ("upload-length", "-1"),
+    ] {
+      let mut headers = relay_headers("?0");
+      headers.insert(name, HeaderValue::from_static(value));
+      assert!(!relay_request(&Method::POST, &headers), "{name}: {value}");
+    }
+
+    for name in [
+      "upload-draft-interop-version",
+      "upload-complete",
+      "upload-length",
+    ] {
+      let mut headers = relay_headers("?0");
+      if name == "upload-length" {
+        headers.insert(name, HeaderValue::from_static("1"));
+      }
+      headers.append(name, HeaderValue::from_static("1"));
+      assert!(!relay_request(&Method::POST, &headers), "duplicate {name}");
+    }
+  }
+
+  #[test]
+  fn relay_request_requires_a_complete_append_tuple() {
+    let mut headers = relay_headers("?0");
+    headers.insert(
+      http::header::CONTENT_TYPE,
+      HeaderValue::from_static("application/partial-upload"),
+    );
+    headers.insert("upload-offset", HeaderValue::from_static("0"));
+    assert!(relay_request(&Method::PATCH, &headers));
+
+    for method in [Method::POST, Method::PUT] {
+      assert!(!relay_request(&method, &headers), "{method}");
+    }
+
+    for missing in ["upload-offset", "content-type"] {
+      let mut incomplete = headers.clone();
+      incomplete.remove(missing);
+      assert!(!relay_request(&Method::PATCH, &incomplete), "{missing}");
+    }
+
+    for value in ["-1", "?0", "1, 2"] {
+      let mut malformed = headers.clone();
+      malformed.insert("upload-offset", HeaderValue::from_static(value));
+      assert!(!relay_request(&Method::PATCH, &malformed), "{value}");
+    }
+
+    let mut parameterized = headers.clone();
+    parameterized.insert(
+      http::header::CONTENT_TYPE,
+      HeaderValue::from_static("application/partial-upload; charset=utf-8"),
+    );
+    assert!(!relay_request(&Method::PATCH, &parameterized));
+
+    let mut duplicate_type = headers;
+    duplicate_type.append(
+      http::header::CONTENT_TYPE,
+      HeaderValue::from_static("application/partial-upload"),
+    );
+    assert!(!relay_request(&Method::PATCH, &duplicate_type));
   }
 }

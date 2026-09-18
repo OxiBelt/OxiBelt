@@ -599,11 +599,7 @@ where
     crate::waf::route_http_body_compression_transform_enabled(&state.config, resolved.route);
   // Resumable offsets count the original wire representation. Recompression
   // during inspection must never silently change those octets.
-  if (informational::candidate(request.headers())
-    || request
-      .extensions()
-      .get::<resumable::NoReplayRequest>()
-      .is_some())
+  if resumable::request_marked(&request)
     && waf_body_compression_transform
     && request_body_need != BodyNeed::None
     && waf_body_coding::has_non_identity_content_encoding(request.headers())

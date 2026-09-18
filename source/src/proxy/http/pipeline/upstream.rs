@@ -41,11 +41,7 @@ pub(in crate::proxy::http) async fn run(
   // fills, and stale/revalidation paths can neither forward live 1xx nor
   // preserve the request's one-shot semantics. This is deliberately separate
   // from Incremental, whose deadline and admission behavior is unchanged.
-  let resumable_cache_bypass = informational::candidate(request.headers())
-    || request
-      .extensions()
-      .get::<resumable::NoReplayRequest>()
-      .is_some();
+  let resumable_cache_bypass = resumable::request_marked(&request);
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
   let pool_cookie_header = if request_waf.upstream_override.is_none()
     && (request_waf.upstream_pool_override.is_some() || resolved.route.upstream_pool.is_some())

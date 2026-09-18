@@ -137,6 +137,72 @@ fn request(version: Version, body: &'static [u8]) -> Request<ProxyBody> {
     .unwrap()
 }
 
+fn ordinary_get(uri: &'static str, headers: &[(&'static str, &'static str)]) -> Request<ProxyBody> {
+  let mut request = Request::builder()
+    .method(Method::GET)
+    .uri(uri)
+    .version(Version::HTTP_11)
+    .header("host", "example.com")
+    .body(full_body(bytes::Bytes::new()))
+    .unwrap();
+  for (name, value) in headers {
+    request
+      .headers_mut()
+      .append(*name, HeaderValue::from_static(value));
+  }
+  request
+}
+
+#[tokio::test]
+async fn ordinary_upload_headers_do_not_bypass_cache_or_prevent_storage() {
+  let fixture = fixture(crate::config::HttpVersion::H1, 4096).await;
+  let cached_uri = "/ordinary-upload-header-cache";
+
+  for expected in ["miss", "hit"] {
+    let response = send(&fixture, ordinary_get(cached_uri, &[])).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-oxibelt-cache"], expected);
+    assert_eq!(
+      response.into_body().collect().await.unwrap().to_bytes(),
+      "changed"
+    );
+  }
+  assert_eq!(fixture.received.load(Ordering::SeqCst), 1);
+
+  for headers in [
+    vec![("upload-offset", "invalid")],
+    vec![("upload-offset", "0")],
+    vec![("upload-length", "-1")],
+    vec![("upload-length", "11")],
+    vec![("upload-complete", "invalid")],
+    vec![("upload-complete", "?0")],
+    vec![("upload-draft-interop-version", "9")],
+    vec![
+      ("upload-draft-interop-version", "9"),
+      ("upload-complete", "?0"),
+    ],
+  ] {
+    let response = send(&fixture, ordinary_get(cached_uri, &headers)).await;
+    assert_eq!(response.status(), StatusCode::OK, "{headers:?}");
+    assert_eq!(response.headers()["x-oxibelt-cache"], "hit", "{headers:?}");
+    response.into_body().collect().await.unwrap();
+    assert_eq!(fixture.received.load(Ordering::SeqCst), 1, "{headers:?}");
+  }
+
+  let fresh_uri = "/ordinary-upload-header-cache-first-request";
+  for expected in ["miss", "hit"] {
+    let response = send(
+      &fixture,
+      ordinary_get(fresh_uri, &[("upload-offset", "invalid")]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-oxibelt-cache"], expected);
+    response.into_body().collect().await.unwrap();
+  }
+  assert_eq!(fixture.received.load(Ordering::SeqCst), 2);
+}
+
 #[tokio::test]
 async fn query_body_separates_cache_entries_across_request_versions_and_upstream_transports() {
   for upstream in [

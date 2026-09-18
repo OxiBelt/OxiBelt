@@ -11,6 +11,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NoReplayRequest;
 
+/// Whether ingress classified the request as a complete resumable relay tuple
+/// or a managed upload path explicitly marked it as one-shot.
+pub(crate) fn request_marked<B>(request: &http::Request<B>) -> bool {
+  request.extensions().get::<NoReplayRequest>().is_some()
+}
+
 /// Request-scoped evidence that the fixed upstream returned final response
 /// headers. This latch survives response-WAF replacement of the response.
 #[derive(Clone, Debug, Default)]

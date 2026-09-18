@@ -6,45 +6,27 @@ use std::sync::{
 };
 
 use http::header::{CONNECTION, CONTENT_LENGTH, TRANSFER_ENCODING, UPGRADE};
-use http::{Extensions, HeaderMap, Response, StatusCode};
+use http::{Extensions, HeaderMap, Method, Response, StatusCode};
 use tokio::sync::mpsc;
 
 const MAX_RESPONSES: usize = hyper::ext::MAX_INFORMATIONAL_RESPONSES;
 const MAX_HEADER_BYTES: usize = hyper::ext::MAX_INFORMATIONAL_HEADER_BYTES;
-const UPLOAD_DRAFT_INTEROP_VERSION: &str = "upload-draft-interop-version";
-
-/// Whether a request explicitly opts into draft-12 / interop-9 104 handling.
-///
-/// A duplicate, malformed, missing, or different Structured Fields integer is
-/// deliberately not a candidate. The caller must retain the original request
-/// headers through the upstream exchange and must never infer this from a
-/// response alone.
-pub(crate) fn candidate(headers: &HeaderMap) -> bool {
-  super::managed_upload::compatible_interop(headers)
-}
-
-/// Immutable evidence that the original downstream request negotiated
-/// interop-9. Header mutations later in the pipeline cannot create it.
+/// Immutable evidence that the original downstream request carried a complete
+/// draft-12 creation or append tuple. Header mutations cannot create it.
 #[derive(Clone, Copy, Debug)]
 struct ClientInterop;
+
+/// Whether the outbound method and headers still form a strict relay tuple.
+fn relay_request(method: &Method, headers: &HeaderMap) -> bool {
+  super::managed_upload::relay_request(method, headers)
+}
 
 /// Capture transport and replay-relevant request facts before WAF or route
 /// transformations can modify the headers. HTTP/3 has already installed its
 /// emitter when this runs; HTTP/1.1 and HTTP/2 expose Hyper's sender directly.
 pub(crate) fn latch_request<B>(request: &mut http::Request<B>) {
-  let negotiated = candidate(request.headers());
-  let resumable_header = [
-    "upload-complete",
-    "upload-offset",
-    "upload-length",
-    UPLOAD_DRAFT_INTEROP_VERSION,
-  ]
-  .into_iter()
-  .any(|name| request.headers().contains_key(name));
-  if negotiated {
+  if relay_request(request.method(), request.headers()) {
     request.extensions_mut().insert(ClientInterop);
-  }
-  if resumable_header {
     request
       .extensions_mut()
       .insert(super::resumable::NoReplayRequest);
@@ -64,9 +46,24 @@ pub(crate) fn negotiated(extensions: &Extensions) -> bool {
   extensions.get::<ClientInterop>().is_some()
 }
 
+/// Whether immutable ingress classification and current outbound headers both
+/// permit relaying live upload informational responses.
+pub(crate) fn relay_armed<B>(request: &http::Request<B>) -> bool {
+  relay_armed_parts(request.extensions(), request.method(), request.headers())
+}
+
+/// Parts-based form used after the HTTP/3 request body is split.
+pub(crate) fn relay_armed_parts(
+  extensions: &Extensions,
+  method: &Method,
+  headers: &HeaderMap,
+) -> bool {
+  negotiated(extensions) && relay_request(method, headers)
+}
+
 /// Whether a received 104 advertises the same draft interop version.
 pub(crate) fn compatible_104(headers: &HeaderMap) -> bool {
-  candidate(headers)
+  super::managed_upload::compatible_interop(headers)
 }
 
 #[derive(Clone)]
@@ -255,45 +252,46 @@ mod tests {
   use super::*;
 
   #[test]
-  fn candidate_requires_one_matching_interop_value() {
+  fn response_compatibility_requires_one_matching_interop_value() {
     let mut headers = HeaderMap::new();
     headers.insert(
-      UPLOAD_DRAFT_INTEROP_VERSION,
+      "upload-draft-interop-version",
       http::HeaderValue::from_static("9"),
     );
-    assert!(candidate(&headers));
+    assert!(compatible_104(&headers));
     headers.append(
-      UPLOAD_DRAFT_INTEROP_VERSION,
+      "upload-draft-interop-version",
       http::HeaderValue::from_static("9"),
     );
-    assert!(!candidate(&headers));
+    assert!(!compatible_104(&headers));
   }
 
   #[test]
-  fn candidate_uses_the_managed_structured_field_parser() {
+  fn response_compatibility_uses_the_managed_structured_field_parser() {
     let mut headers = HeaderMap::new();
     headers.insert(
-      UPLOAD_DRAFT_INTEROP_VERSION,
+      "upload-draft-interop-version",
       http::HeaderValue::from_static("9; relay=?1"),
     );
-    assert!(candidate(&headers));
+    assert!(compatible_104(&headers));
 
     headers.insert(
-      UPLOAD_DRAFT_INTEROP_VERSION,
+      "upload-draft-interop-version",
       http::HeaderValue::from_static("-9"),
     );
-    assert!(!candidate(&headers));
+    assert!(!compatible_104(&headers));
   }
 
   #[test]
   fn latch_preserves_initial_negotiation_and_no_replay_classification() {
-    let mut request = http::Request::new(());
-    request.headers_mut().insert(
-      UPLOAD_DRAFT_INTEROP_VERSION,
-      http::HeaderValue::from_static("9; relay=?1"),
-    );
+    let mut request = http::Request::builder()
+      .method(Method::POST)
+      .header("upload-draft-interop-version", "9; relay=?1")
+      .header("upload-complete", "?0")
+      .body(())
+      .unwrap();
     latch_request(&mut request);
-    request.headers_mut().remove(UPLOAD_DRAFT_INTEROP_VERSION);
+    request.headers_mut().remove("upload-draft-interop-version");
     assert!(negotiated(request.extensions()));
     assert!(
       request
@@ -301,5 +299,61 @@ mod tests {
         .get::<crate::proxy::http::resumable::NoReplayRequest>()
         .is_some()
     );
+    assert!(!relay_armed(&request));
+  }
+
+  #[test]
+  fn incomplete_or_inapplicable_headers_do_not_latch() {
+    for request in [
+      http::Request::builder()
+        .method(Method::POST)
+        .header("upload-draft-interop-version", "9")
+        .body(())
+        .unwrap(),
+      http::Request::builder()
+        .method(Method::GET)
+        .header("upload-draft-interop-version", "9")
+        .header("upload-complete", "?0")
+        .body(())
+        .unwrap(),
+      http::Request::builder()
+        .method(Method::POST)
+        .header("upload-draft-interop-version", "9")
+        .header("upload-complete", "invalid")
+        .body(())
+        .unwrap(),
+    ] {
+      let mut request = request;
+      latch_request(&mut request);
+      assert!(!negotiated(request.extensions()));
+      assert!(!super::super::resumable::request_marked(&request));
+    }
+  }
+
+  #[test]
+  fn outbound_mutations_cannot_create_or_preserve_live_relay_alone() {
+    let mut ordinary = http::Request::new(());
+    latch_request(&mut ordinary);
+    *ordinary.method_mut() = Method::POST;
+    ordinary.headers_mut().insert(
+      "upload-draft-interop-version",
+      http::HeaderValue::from_static("9"),
+    );
+    ordinary
+      .headers_mut()
+      .insert("upload-complete", http::HeaderValue::from_static("?0"));
+    assert!(!relay_armed(&ordinary));
+
+    let mut relay = http::Request::builder()
+      .method(Method::POST)
+      .header("upload-draft-interop-version", "9")
+      .header("upload-complete", "?0")
+      .body(())
+      .unwrap();
+    latch_request(&mut relay);
+    assert!(relay_armed(&relay));
+    relay.headers_mut().remove("upload-complete");
+    assert!(!relay_armed(&relay));
+    assert!(super::super::resumable::request_marked(&relay));
   }
 }

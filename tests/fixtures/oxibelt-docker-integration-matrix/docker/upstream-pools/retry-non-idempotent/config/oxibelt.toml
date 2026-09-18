@@ -63,6 +63,18 @@ origin = "http://mock-http:18080/status/503"
 id = "good"
 origin = "http://mock-alt:18081/alt"
 
+[[upstream_pools]]
+name = "resumable-post-pool"
+algorithm = "weighted_least_conn"
+
+[[upstream_pools.servers]]
+id = "bad"
+origin = "http://mock-http:18080/status/503"
+
+[[upstream_pools.servers]]
+id = "good"
+origin = "http://mock-alt:18081/alt"
+
 [[routes]]
 name = "default-post"
 hosts = ["default.example.test"]
@@ -74,6 +86,15 @@ name = "retry-post"
 hosts = ["retry.example.test"]
 path_prefix = "/"
 upstream_pool = "retry-pool"
+
+[routes.retry]
+retry_non_idempotent = true
+
+[[routes]]
+name = "resumable-post"
+hosts = ["resumable.example.test"]
+path_prefix = "/"
+upstream_pool = "resumable-post-pool"
 
 [routes.retry]
 retry_non_idempotent = true

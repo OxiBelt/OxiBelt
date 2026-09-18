@@ -36,13 +36,7 @@ pub(super) fn spawn_request_mirrors(
   host: &str,
   downstream_scheme: &str,
 ) {
-  if super::incremental::request_marked(outbound)
-    || super::informational::candidate(outbound.headers())
-    || outbound
-      .extensions()
-      .get::<super::resumable::NoReplayRequest>()
-      .is_some()
-  {
+  if request_mirroring_blocked(outbound) {
     for _ in route_action_runtime::enabled_mirrors(route) {
       state.metrics.record_request_mirror_skip();
     }
@@ -207,6 +201,10 @@ pub(super) fn spawn_request_mirrors(
       }
     });
   }
+}
+
+fn request_mirroring_blocked<B>(request: &Request<B>) -> bool {
+  super::incremental::request_marked(request) || super::resumable::request_marked(request)
 }
 
 struct PendingMirror {
@@ -531,5 +529,27 @@ mod tests {
         .is_none()
     );
     assert_eq!(request.headers()[http::header::CONTENT_LENGTH], "3");
+  }
+
+  #[test]
+  fn mirror_skip_uses_only_immutable_request_classification() {
+    let mut incomplete = Request::builder()
+      .method(Method::POST)
+      .header("upload-draft-interop-version", "9")
+      .header("upload-offset", "invalid")
+      .body(())
+      .expect("incomplete upload request builds");
+    super::super::informational::latch_request(&mut incomplete);
+    assert!(!request_mirroring_blocked(&incomplete));
+
+    let mut relay = Request::builder()
+      .method(Method::POST)
+      .header("upload-draft-interop-version", "9")
+      .header("upload-complete", "?0")
+      .body(())
+      .expect("relay upload request builds");
+    super::super::informational::latch_request(&mut relay);
+    relay.headers_mut().clear();
+    assert!(request_mirroring_blocked(&relay));
   }
 }

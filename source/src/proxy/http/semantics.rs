@@ -198,8 +198,7 @@ pub(crate) fn attach_upstream_informational_capture<B>(
   request: &mut Request<B>,
   mode: EarlyHintsMode,
 ) -> Option<UpstreamInformationalCapture> {
-  let relay_candidate = super::informational::negotiated(request.extensions())
-    && super::informational::candidate(request.headers());
+  let relay_candidate = super::informational::relay_armed(request);
   let emitter = request
     .extensions()
     .get::<super::informational::Emitter>()

@@ -15,6 +15,11 @@ pub(super) fn compatible_interop(headers: &http::HeaderMap) -> bool {
   protocol::compatible_interop(headers)
 }
 
+/// Strict creation or append tuple used by transparent relay classification.
+pub(super) fn relay_request(method: &Method, headers: &http::HeaderMap) -> bool {
+  protocol::relay_request(method, headers)
+}
+
 #[derive(Clone)]
 pub(super) struct VerifiedIpmActor(pub(crate) crate::ipm::IpmActor);
 

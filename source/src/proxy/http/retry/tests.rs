@@ -349,6 +349,8 @@ async fn h3_post_retries_a_status_only_when_retry_non_idempotent_is_enabled() {
     http::Request::builder()
       .method(Method::POST)
       .uri(format!("https://localhost:{}/retry", address.port()))
+      .header("upload-draft-interop-version", "9")
+      .header("upload-offset", "invalid")
       .body(super::super::full_body(Bytes::new()))
       .expect("HTTP/3 retry request builds"),
     &state.upstreams[0],
