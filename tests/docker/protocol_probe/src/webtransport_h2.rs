@@ -253,7 +253,12 @@ pub(crate) async fn upstream(mut args: impl Iterator<Item = String>) -> anyhow::
     Option<String>,
   ) = (None, None, None, None);
   let mut reset_prefix_required = true;
+  let mut close_before_connect = false;
   while let Some(flag) = args.next() {
+    if flag == "--close-before-connect" {
+      close_before_connect = true;
+      continue;
+    }
     let value = args
       .next()
       .ok_or_else(|| anyhow!("missing value for {flag}"))?;
@@ -282,7 +287,9 @@ pub(crate) async fn upstream(mut args: impl Iterator<Item = String>) -> anyhow::
     let name = name.clone();
     tokio::spawn(async move {
       let result = match tokio::time::timeout(TIMEOUT, acceptor.accept(tcp)).await {
-        Ok(Ok(mut io)) => serve_connection(&mut io, reset_prefix_required).await,
+        Ok(Ok(mut io)) => {
+          serve_connection(&mut io, reset_prefix_required, close_before_connect).await
+        }
         Ok(Err(error)) => Err(error.into()),
         Err(_) => Err(anyhow!("timed out negotiating H2 WebTransport TLS")),
       };
@@ -296,6 +303,7 @@ pub(crate) async fn upstream(mut args: impl Iterator<Item = String>) -> anyhow::
 async fn serve_connection<T: AsyncRead + AsyncWrite + Unpin>(
   io: &mut T,
   reset_prefix_required: bool,
+  close_before_connect: bool,
 ) -> anyhow::Result<()> {
   let deadline = tokio::time::Instant::now() + TIMEOUT;
   let mut preface = [0; PREFACE.len()];
@@ -303,8 +311,18 @@ async fn serve_connection<T: AsyncRead + AsyncWrite + Unpin>(
   if preface != PREFACE {
     bail!("missing HTTP/2 client preface");
   }
-  write_frame(io, SETTINGS, 0, 0, &settings()).await?;
+  // The failure fixture completes the HTTP/2 SETTINGS exchange without
+  // advertising WebTransport, then closes before the CONNECT request. This
+  // reproduces a peer that cleanly disappears while the client waits for the
+  // WebTransport capability receipt.
+  let server_settings = if close_before_connect {
+    Vec::new()
+  } else {
+    settings()
+  };
+  write_frame(io, SETTINGS, 0, 0, &server_settings).await?;
   let mut saw_settings = false;
+  let mut saw_server_settings_ack = false;
   let mut header_block = Vec::new();
   loop {
     let frame = read_frame_at(io, deadline).await?;
@@ -314,7 +332,13 @@ async fn serve_connection<T: AsyncRead + AsyncWrite + Unpin>(
         write_frame(io, SETTINGS, ACK, 0, &[]).await?;
         saw_settings = true;
       }
-      SETTINGS => validate_settings_ack(&frame)?,
+      SETTINGS => {
+        validate_settings_ack(&frame)?;
+        saw_server_settings_ack = true;
+      }
+      HEADERS if close_before_connect => {
+        bail!("CONNECT arrived before closed upstream fixture terminated");
+      }
       HEADERS if frame.stream_id == 1 => {
         append_header_fragment(&mut header_block, header_fragment(&frame)?)?;
         if frame.flags & END_HEADERS == 0 {
@@ -326,6 +350,11 @@ async fn serve_connection<T: AsyncRead + AsyncWrite + Unpin>(
       WINDOW_UPDATE => validate_window_update(&frame)?,
       GOAWAY => bail!("peer sent GOAWAY before CONNECT"),
       _ => {}
+    }
+    if close_before_connect && saw_settings && saw_server_settings_ack {
+      // The client ACK above completes both sides' initial SETTINGS exchange.
+      // Returning drops the TLS stream before any extended CONNECT HEADERS.
+      return Ok(());
     }
   }
   if !saw_settings {

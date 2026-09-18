@@ -11,8 +11,10 @@ The patch implements the WebTransport SETTINGS identifiers from
 settings when inbound CONNECT request/response HEADERS are processed and when
 outbound HEADERS are buffered in wire order. Queued requests are canceled
 locally if the peer withdraws support before emission. Existing sessions
-retain their snapshots when connection settings change. Capsule parsing and
-virtual streams are implemented in OxiBelt, outside this HTTP/2 dependency.
+retain their snapshots when connection settings change. Terminal-aware,
+per-waiter settings futures wake every pending request when settings change or
+the connection can no longer open streams. Capsule parsing and virtual streams
+are implemented in OxiBelt, outside this HTTP/2 dependency.
 
 There is no new build script, native dependency, or unsafe capability. The
 review compares changes with the checksum-matched archive and covers frame

@@ -34,6 +34,10 @@ impl Settings {
     self.webtransport.clone()
   }
 
+  pub(crate) fn close(&self) {
+    self.webtransport.close();
+  }
+
   pub(crate) fn new(
     local: frame::Settings,
     webtransport: crate::webtransport::SettingsHandle,

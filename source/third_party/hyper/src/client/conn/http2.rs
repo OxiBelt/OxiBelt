@@ -158,11 +158,10 @@ where
                 return Err(crate::Error::new_user_invalid_connect());
             }
 
-            crate::common::future::poll_fn(|cx| match settings.poll_peer_webtransport_settings(cx) {
-                Poll::Ready(_) => Poll::Ready(crate::Result::<()>::Ok(())),
-                Poll::Pending => Poll::Pending,
-            })
-            .await?;
+            settings
+                .wait_peer_webtransport_settings()
+                .await
+                .map_err(|_| crate::Error::new_closed())?;
 
             let sent = dispatch.send(req);
             let mut response = match sent {
@@ -925,6 +924,58 @@ mod tests {
         assert_ne!(session.peer_settings(), Some(updated));
 
         client_driver.abort();
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn webtransport_connect_returns_closed_when_peer_closes_before_settings() {
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct TokioExecutor;
+
+        impl<F> crate::rt::Executor<F> for TokioExecutor
+        where
+            F: std::future::Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            fn execute(&self, future: F) {
+                tokio::spawn(future);
+            }
+        }
+
+        let (server_io, client_io) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let builder = h2::server::Builder::new();
+            let connection = builder
+                .handshake::<_, bytes::Bytes>(server_io)
+                .await
+                .expect("HTTP/2 server handshake");
+            tokio::task::yield_now().await;
+            drop(connection);
+        });
+
+        let (mut client, connection) = Builder::new(TokioExecutor)
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(client_io))
+            .await
+            .expect("Hyper HTTP/2 client handshake");
+        let client_driver = tokio::spawn(async move { connection.await });
+        let request = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("https://example.test/webtransport")
+            .body(http_body_util::Empty::<bytes::Bytes>::new())
+            .expect("WebTransport request");
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.send_webtransport_request(request),
+        )
+        .await
+        .expect("closed peer must resolve WebTransport CONNECT")
+        .expect_err("closed peer must reject WebTransport CONNECT");
+        assert!(error.is_closed());
+
+        let _ = client_driver.await;
         server.await.expect("server task");
     }
 }

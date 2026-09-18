@@ -14,7 +14,7 @@ probe_image="${OXIBELT_PROTOCOL_PROBE_IMAGE:-oxibelt/protocol-probe:${run_id}}"
 cleanup() {
   local status=$?
   if ((status != 0)); then
-    for name in proxy upstream-h2 upstream-h2-quic upstream-h3 drain-target; do
+    for name in proxy upstream-h2 upstream-h2-closed upstream-h2-quic upstream-h3 drain-target; do
       if docker container inspect "${run_id}-${name}" >/dev/null 2>&1; then
         docker logs "${run_id}-${name}" 2>&1 | tail -100 || true
       fi
@@ -37,7 +37,7 @@ cat >"${work_dir}/extensions.cnf" <<'EOF'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature
 extendedKeyUsage=serverAuth
-subjectAltName=DNS:proxy,DNS:upstream-h2,DNS:upstream-h2-quic,DNS:upstream-h3
+subjectAltName=DNS:proxy,DNS:upstream-h2,DNS:upstream-h2-closed,DNS:upstream-h2-quic,DNS:upstream-h3
 EOF
 openssl x509 -req -in "${work_dir}/server.csr" -CA "${work_dir}/ca.pem" \
   -CAkey "${work_dir}/ca.key" -CAcreateserial -days 1 -sha256 \
@@ -133,6 +133,13 @@ webtransport = true
 [upstreams.tls.ech]
 mode = "disabled"
 [[upstreams]]
+name = "h2-closed"
+origin = "https://upstream-h2-closed:18443"
+max_http_version = "h2"
+webtransport = true
+[upstreams.tls.ech]
+mode = "disabled"
+[[upstreams]]
 name = "h3"
 origin = "https://upstream-h3:18443"
 max_http_version = "h3"
@@ -156,6 +163,24 @@ name = "h2"
 hosts = ["example.test"]
 path_prefix = "/h2"
 upstream = "h2"
+[[routes]]
+name = "closed-h2"
+hosts = ["example.test"]
+path_prefix = "/closed-h2"
+upstream = "h2-closed"
+
+[routes.timeouts]
+upstream_request_timeout_ms = 15000
+upstream_first_byte_timeout_ms = 15000
+[[routes]]
+name = "closed-h3"
+hosts = ["example.test"]
+path_prefix = "/closed-h3"
+upstream = "h2-closed"
+
+[routes.timeouts]
+upstream_request_timeout_ms = 15000
+upstream_first_byte_timeout_ms = 15000
 [[routes]]
 name = "h3"
 hosts = ["example.test"]
@@ -189,6 +214,14 @@ for version in h2 h3; do
   docker cp "${work_dir}/server.key" "${name}:/tls/server.key"
   docker start "${name}" >/dev/null
 done
+name="${run_id}-upstream-h2-closed"
+docker create --name "${name}" --label "${label}" --network "${network}" \
+  --network-alias upstream-h2-closed "${probe_image}" webtransport-h2-upstream \
+  --listen 0.0.0.0:18443 --cert /tls/server.pem --key /tls/server.key \
+  --name upstream-h2-closed --close-before-connect >/dev/null
+docker cp "${work_dir}/server.pem" "${name}:/tls/server.pem"
+docker cp "${work_dir}/server.key" "${name}:/tls/server.key"
+docker start "${name}" >/dev/null
 name="${run_id}-upstream-h2-quic"
 docker create --name "${name}" --label "${label}" --network "${network}" \
   --network-alias upstream-h2-quic "${probe_image}" webtransport-h2-upstream \
@@ -217,6 +250,30 @@ probe() {
   docker rm -f "${probe_name}" >/dev/null
   return "${status}"
 }
+
+prompt_probe() {
+  local description="$1"
+  local max_seconds="$2"
+  shift 2
+  local probe_name="${run_id}-prompt-probe-${BASHPID}-${RANDOM}"
+  local output status=0
+  docker create --name "${probe_name}" --label "${label}" --network "${network}" \
+    --entrypoint /bin/sleep "${probe_image}" 60 >/dev/null
+  docker cp "${work_dir}/ca.pem" "${probe_name}:/tls/ca.pem"
+  docker start "${probe_name}" >/dev/null
+  output="$(timeout --signal=KILL "${max_seconds}s" docker exec "${probe_name}" \
+    /usr/local/bin/protocol-probe "$@")" || status=$?
+  docker rm -f "${probe_name}" >/dev/null
+  if ((status != 0)); then
+    printf '%s\n' "${output}" >&2
+    if ((status == 124 || status == 137)); then
+      echo "${description} did not complete within ${max_seconds}s" >&2
+    fi
+    return "${status}"
+  fi
+  printf '%s\n' "${output}"
+}
+
 ready=0
 for ((attempt=0; attempt<30; attempt++)); do
   if probe webtransport-h2-client --host proxy --port 8443 --server-name proxy \
@@ -225,6 +282,24 @@ for ((attempt=0; attempt<30; attempt++)); do
   sleep 1
 done
 if [[ "${ready}" != 1 ]]; then cat "${work_dir}/ready.log"; exit 1; fi
+echo "HTTP/2 downstream to closed HTTP/2 upstream fails before first-byte timeout"
+prompt_probe "HTTP/2 downstream to closed HTTP/2 upstream" 5 \
+  webtransport-h2-client --host proxy --port 8443 --server-name proxy \
+  --authority example.test --path /closed-h2/session --ca-cert /tls/ca.pem --scenario echo \
+  --expect-status 502
+echo "HTTP/2 downstream to HTTP/2 upstream remains healthy after the closed route"
+probe webtransport-h2-client --host proxy --port 8443 --server-name proxy \
+  --authority example.test --path /h2/session --ca-cert /tls/ca.pem --scenario echo \
+  --reset-prefix required
+echo "HTTP/3 downstream to closed HTTP/2 upstream fails before first-byte timeout"
+prompt_probe "HTTP/3 downstream to closed HTTP/2 upstream" 5 \
+  webtransport-multiplex --host proxy --port 8443 --server-name proxy \
+  --authority example.test --path /closed-h3/session --ca-cert /tls/ca.pem \
+  --sessions 1 --expect-statuses 502
+echo "HTTP/3 downstream to HTTP/2 upstream remains healthy after the closed route"
+probe webtransport-multiplex --host proxy --port 8443 --server-name proxy \
+  --authority example.test --path /h2-quic/session --ca-cert /tls/ca.pem \
+  --sessions 1 --expect-statuses 200
 echo "HTTP/2 downstream to HTTP/2 upstream"
 probe webtransport-h2-client --host proxy --port 8443 --server-name proxy \
   --authority example.test --path /h2/session --ca-cert /tls/ca.pem --scenario echo \

@@ -322,10 +322,18 @@ where
               //
               // This will also handle flushing `self.codec`
               let webtransport = self.inner.settings.webtransport_settings();
-              ready!(self
+              match self
                 .inner
                 .streams
-                .poll_complete(cx, &mut self.codec, &webtransport))?;
+                .poll_complete(cx, &mut self.codec, &webtransport)
+              {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => {
+                  self.inner.settings.close();
+                  return Poll::Ready(Err(error.into()));
+                }
+                Poll::Pending => return Poll::Pending,
+              }
 
               if (self.inner.error.is_some() || self.inner.go_away.should_close_on_idle())
                 && !self.inner.streams.has_streams()
@@ -343,12 +351,20 @@ where
         State::Closing(reason, initiator) => {
           tracing::trace!("connection closing after flush");
           // Flush/shutdown the codec
-          ready!(self.codec.shutdown(cx))?;
+          match self.codec.shutdown(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(error)) => {
+              self.inner.settings.close();
+              return Poll::Ready(Err(error.into()));
+            }
+            Poll::Pending => return Poll::Pending,
+          }
 
           // Transition the state to error
           self.inner.state = State::Closed(reason, initiator);
         }
         State::Closed(reason, initiator) => {
+          self.inner.settings.close();
           return Poll::Ready(self.take_error(reason, initiator));
         }
       }
@@ -448,18 +464,21 @@ where
   }
 
   fn go_away_now(&mut self, e: Reason) {
+    self.settings.close();
     let last_processed_id = self.streams.last_processed_id();
     let frame = frame::GoAway::new(last_processed_id, e);
     self.go_away.go_away_now(frame);
   }
 
   fn go_away_now_data(&mut self, e: Reason, data: Bytes) {
+    self.settings.close();
     let last_processed_id = self.streams.last_processed_id();
     let frame = frame::GoAway::with_debug_data(last_processed_id, e, data);
     self.go_away.go_away_now(frame);
   }
 
   fn go_away_from_user(&mut self, e: Reason) {
+    self.settings.close();
     let last_processed_id = self.streams.last_processed_id();
     let frame = frame::GoAway::new(last_processed_id, e);
     self.go_away.go_away_from_user(frame);
@@ -507,6 +526,7 @@ where
       //
       // TODO: Are I/O errors recoverable?
       Err(Error::Io(kind, inner)) => {
+        self.settings.close();
         tracing::debug!(error = ?kind, "Connection::poll; IO error");
         let e = Error::Io(kind, inner);
 
@@ -535,6 +555,7 @@ where
   }
 
   fn handle_go_away(&mut self, reason: Reason, debug_data: Bytes, initiator: Initiator) {
+    self.settings.close();
     let e = Error::GoAway(debug_data.clone(), reason, initiator);
     tracing::debug!(error = ?e, "Connection::poll; connection error");
 
@@ -592,6 +613,7 @@ where
         // transition to GoAway.
         self.streams.recv_go_away(&frame)?;
         *self.error = Some(frame);
+        self.settings.close();
       }
       Some(Ping(frame)) => {
         tracing::trace!(?frame, "recv PING");
@@ -617,6 +639,7 @@ where
       None => {
         tracing::trace!("codec closed");
         self.streams.recv_eof(false).expect("mutex poisoned");
+        self.settings.close();
         return Ok(ReceivedFrame::Done);
       }
     }
@@ -681,6 +704,7 @@ where
   B: Buf,
 {
   fn drop(&mut self) {
+    self.inner.settings.close();
     // Ignore errors as this indicates that the mutex is poisoned.
     let _ = self.inner.streams.recv_eof(true);
   }

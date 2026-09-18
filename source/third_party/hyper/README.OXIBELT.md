@@ -54,7 +54,9 @@ handoff after response HEADERS enter wire order, immutable directional SETTINGS
 receipts supplied by the paired `h2` patch, and
 independent receive/send halves. The writer remains owned by Hyper, uses a
 bounded payload channel, and accepts an out-of-band reset so exhausted peer
-send credit cannot prevent session cancellation. Existing ordinary CONNECT,
+send credit cannot prevent session cancellation. Pending WebTransport CONNECT
+requests return Hyper's closed-connection error when the paired HTTP/2 driver
+terminates before the required settings arrive. Existing ordinary CONNECT,
 HTTP/1, and informational-response behavior must retain their regression tests.
 
 The additional source review covers `ext/webtransport.rs`, HTTP/2 connection
