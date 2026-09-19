@@ -1513,6 +1513,12 @@ criteria = "safe-to-deploy"
 delta = "1.1.2+spec-1.1.0 -> 1.1.3+spec-1.1.0"
 notes = "Reviewed the complete checksum-matched 1.1.2-to-1.1.3 source delta; token-vector preallocation now uses one slot per four input bytes instead of an input-length allocation, reducing attacker-controlled over-allocation. Parser bounds and the opt-in unsafe feature's checked UTF-8 and span invariants are unchanged, with no build or external IO side effects."
 
+[[audits.urlpattern]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.6.0"
+notes = "Reviewed the complete checksum-matched 0.6.0 archive (SHA-256 df16f50ef4cc145211879a3867ba757076b25dfee812040dcb0658bd9ae7904b) and its declared upstream commit e29804d15bdc60797c1c7f715d90480ace0bb451. The MIT-licensed safe-Rust URLPattern parser has build = false and no unsafe, FFI, filesystem, network, process, or ambient-environment capability. OxiBelt reaches it only from bounded RFC 9842 dictionary match validation and selection: fields are capped at 4 KiB, invalid construction fails closed, and every user regexp group is rejected before matching, leaving Rust regex's linear-time engine for generated literal and wildcard patterns. Its dependencies are already locked and reviewed; the public review records maintenance and alternatives."
+
 [[audits.wasm-bindgen]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"

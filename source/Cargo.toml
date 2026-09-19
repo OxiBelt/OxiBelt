@@ -84,6 +84,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std"] }
 unicode-normalization = "0.1.25"
 url = { version = "2.5.8", features = ["serde"] }
+urlpattern = "=0.6.0"
 webpki-roots = "1.0.9"
 web-transport-quinn = { version = "0.12.1", default-features = false, features = ["aws-lc-rs"] }
 quic-parser = { version = "0.1.5", default-features = false, features = ["aws-lc-rs"] }
