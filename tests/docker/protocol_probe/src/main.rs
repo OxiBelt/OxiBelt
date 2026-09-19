@@ -3792,7 +3792,10 @@ async fn run_webtransport_data_client(
     .context("timed out waiting for WebTransport STOP_SENDING")?
     .context("failed while waiting for WebTransport STOP_SENDING")?;
   if stopped != Some(0x5060_7080) {
-    bail!("WebTransport STOP_SENDING changed application error code");
+    bail!(
+      "WebTransport STOP_SENDING changed application error code: expected {:?}, observed {stopped:?}",
+      Some(0x5060_7080_u32)
+    );
   }
   let _ = stopped_send.reset(0x5060_7080);
 

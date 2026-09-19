@@ -351,27 +351,14 @@ where
 }
 
 pub(crate) struct RecvStream {
-  stream: Option<quinn::RecvStream>,
+  stream: quinn::RecvStream,
   stream_id: StreamId,
-  read_chunk_fut: ReadChunkFuture,
 }
-
-type ReadChunkFuture = ReusableBoxFuture<
-  'static,
-  (
-    quinn::RecvStream,
-    Result<Option<quinn::Chunk>, quinn::ReadError>,
-  ),
->;
 
 impl RecvStream {
   fn new(stream: quinn::RecvStream) -> Self {
     let stream_id = h3_stream_id(stream.id());
-    Self {
-      stream: Some(stream),
-      stream_id,
-      read_chunk_fut: ReusableBoxFuture::new(async { unreachable!() }),
-    }
+    Self { stream, stream_id }
   }
 }
 
@@ -382,15 +369,11 @@ impl quic::RecvStream for RecvStream {
     &mut self,
     cx: &mut task::Context<'_>,
   ) -> Poll<Result<Option<Self::Buf>, StreamErrorIncoming>> {
-    if let Some(mut stream) = self.stream.take() {
-      self.read_chunk_fut.set(async move {
-        let chunk = stream.read_chunk(usize::MAX, true).await;
-        (stream, chunk)
-      });
-    }
-
-    let (stream, chunk) = ready!(self.read_chunk_fut.poll(cx));
-    self.stream = Some(stream);
+    // `read_chunk` is cancel-safe, so dropping this borrowed future on Pending retains the stream
+    // for `stop_sending` instead of hiding it in an owning future.
+    let read_chunk = self.stream.read_chunk(usize::MAX, true);
+    tokio::pin!(read_chunk);
+    let chunk = ready!(read_chunk.as_mut().poll(cx));
     Poll::Ready(Ok(
       chunk
         .map_err(convert_read_error_to_stream_error)?
@@ -399,9 +382,9 @@ impl quic::RecvStream for RecvStream {
   }
 
   fn stop_sending(&mut self, error_code: u64) {
-    if let Some(stream) = self.stream.as_mut() {
-      let _ = stream.stop(VarInt::from_u64(error_code).unwrap_or(VarInt::MAX));
-    }
+    let _ = self
+      .stream
+      .stop(VarInt::from_u64(error_code).unwrap_or(VarInt::MAX));
   }
 
   fn recv_id(&self) -> StreamId {
@@ -666,22 +649,5 @@ fn convert_h3_connection_error_to_datagram_error(
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn early_data_tracker_only_records_early_streams_once() {
-    let tracker = EarlyDataTracker::default();
-    let stream_id = StreamId::try_from(0).unwrap();
-
-    tracker.note(stream_id, false);
-    assert!(!tracker.has_early_streams());
-    assert!(!tracker.take(stream_id));
-
-    tracker.note(stream_id, true);
-    assert!(tracker.has_early_streams());
-    assert!(tracker.take(stream_id));
-    assert!(!tracker.has_early_streams());
-    assert!(!tracker.take(stream_id));
-  }
-}
+#[path = "h3/tests.rs"]
+mod tests;
