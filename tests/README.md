@@ -11,6 +11,7 @@ grant denial, upstream credential rotation, and grant withdrawal.
 
 - `rust/`: repository-root Cargo integration tests linked from `source/Cargo.toml`
 - `docker/`: mock upstream image assets for end-to-end proxy verification
+- `scripts/run-compression-dictionary-integration.sh`: exercises dictionary coding across HTTP/1.1, HTTP/2, and HTTP/3, including managed uploads and decoded WAF rejection. Its non-root proxy uses a private, 16 MiB tmpfs for upload staging; the mount is removed with the test container.
 - `scripts/build-targets.sh`: adds the current Linux `gnu` and `musl` targets, then builds both
 - `scripts/check-tests-rustfmt.sh`: enforces `tests/rustfmt.toml` formatting for tracked Rust files under `tests/`, including Docker probe crates
 - `scripts/build-docker-image-artifact.sh`: builds an Alpine musl Docker image for a requested Docker platform (`linux/amd64`, `linux/arm64`, or `linux/riscv64`) and writes a loadable image tar, Buildx metadata, and a validated commit/role/architecture/digest contract. AMD64 builds accept `amd64v2`, `amd64`, and `amd64v4`; the default `amd64` artifact name remains `oxibelt-alpine-musl-amd64-image` and targets `x86-64-v3`. Release CI can override OCI metadata with one complete `OXIBELT_DOCKER_IMAGE_VERSION`, `OXIBELT_DOCKER_IMAGE_REVISION`, `OXIBELT_DOCKER_IMAGE_SOURCE_REF`, `OXIBELT_DOCKER_IMAGE_SOURCE_DIRTY`, and `OXIBELT_DOCKER_IMAGE_BUILD_KIND` tuple, plus created/source/ref-name label inputs.

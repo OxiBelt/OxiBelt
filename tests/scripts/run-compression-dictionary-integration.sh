@@ -308,6 +308,7 @@ origin h2 dcz
 origin h3 dcb
 
 docker create --name "${run_id}-proxy" --label "${label}" --network "${network}" --network-alias proxy \
+  --tmpfs /tmp/managed-dictionary-staging:rw,nosuid,nodev,noexec,size=16m,uid=10001,gid=10001,mode=0700 \
   --ulimit stack=67108864:67108864 "${proxy_image}" >/dev/null
 docker cp "${work_dir}/oxibelt.toml" "${run_id}-proxy:/etc/oxibelt/config/oxibelt.toml"
 docker cp "${fixture}" "${run_id}-proxy:/etc/oxibelt/config/raw-dictionary.txt"
