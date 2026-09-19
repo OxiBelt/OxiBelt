@@ -3,6 +3,33 @@ use crate::{DockerCase, ExpectStart, Needs, docker_case};
 pub(super) fn docker_cases() -> Vec<DockerCase> {
   vec![
     docker_case(
+      "http-semantics",
+      "response-digest-wire-matrix",
+      "RFC 9530 Content-Digest, Repr-Digest, and Unencoded-Digest negotiate across HTTP/1.1, HTTP/2, and HTTP/3 with real trailer framing",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        h2_upstream: true,
+        h2c_upstream: true,
+        h3_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "http-semantics",
+      "response-digest-trailers-drop",
+      "generated response digests respect proxy HTTP trailer drop policy on a streaming HTTP/1.1 response",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
       "protocol-operations",
       "generic-upgrade",
       "generic HTTP/1.1 upgrade tunnels bytes to the selected upstream",

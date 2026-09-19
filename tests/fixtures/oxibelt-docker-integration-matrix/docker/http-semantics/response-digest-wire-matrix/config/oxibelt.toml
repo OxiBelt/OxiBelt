@@ -1,0 +1,158 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[quic.socket]
+reuse_port = true
+
+[quic.upstream_pool]
+enabled = true
+max_connections_per_upstream = 1
+max_lifetime_ms = 600000
+
+[proxy]
+trusted_ca_certs = ["upstream-ca.pem"]
+
+[proxy.auto_upgrade]
+enabled = true
+max_http_version = "h3"
+
+[proxy.http]
+trailers = "pass"
+
+[proxy.static_files]
+open_file_cache_max_entries = 8
+open_file_cache_ttl_ms = 5000
+hot_object_cache_max_bytes = 65536
+hot_object_cache_max_file_bytes = 20
+
+[compression]
+enabled = true
+gzip = true
+deflate = false
+zstd = false
+br = false
+min_size_bytes = 1
+statuses = [200]
+mime_types = ["application/json", "text/plain"]
+max_concurrent_responses = 4
+
+[cache]
+enabled = true
+store = "memory"
+max_size_bytes = 1048576
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+respect_cache_control = true
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "digest-h1"
+origin = "http://mock-http:18080"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+
+[[upstreams]]
+name = "digest-h2"
+origin = "https://mock-h2:18444"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[upstreams]]
+name = "digest-h2c"
+origin = "http://mock-h2c:18082"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+
+[[upstreams]]
+name = "digest-h3"
+origin = "https://mock-h3:18445"
+max_http_version = "h3"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+idle_timeout_ms = 75000
+preserve_host = false
+
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "digest-h1"
+hosts = ["example.test"]
+path_prefix = "/h1"
+upstream = "digest-h1"
+
+[[routes]]
+name = "digest-h2"
+hosts = ["example.test"]
+path_prefix = "/h2"
+upstream = "digest-h2"
+
+[[routes]]
+name = "digest-h2c"
+hosts = ["example.test"]
+path_prefix = "/h2c"
+upstream = "digest-h2c"
+
+[[routes]]
+name = "digest-h3"
+hosts = ["example.test"]
+path_prefix = "/h3"
+upstream = "digest-h3"
+
+[[routes]]
+name = "digest-cache"
+hosts = ["example.test"]
+path_prefix = "/cache"
+upstream = "digest-h1"
+cache = "default"
+
+[[routes]]
+name = "digest-static"
+hosts = ["example.test", "static.example.test"]
+path_prefix = "/static"
+static_root = "public"
+
+[[routes]]
+name = "digest-static-disk"
+hosts = ["static-disk.example.test"]
+path_prefix = "/static"
+static_root = "public"

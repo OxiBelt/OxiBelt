@@ -51,6 +51,8 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("proxy-compression", "proxied-vary-and-upstream-encoding"),
   ("config-valid", "https-grease-trusted-ca"),
   ("http-semantics", "early-hints-pass"),
+  ("http-semantics", "response-digest-wire-matrix"),
+  ("http-semantics", "response-digest-trailers-drop"),
   ("http-semantics", "compio-response-engine"),
   ("http-semantics", "compio-transport-service"),
   ("http-semantics", "expect-priority"),

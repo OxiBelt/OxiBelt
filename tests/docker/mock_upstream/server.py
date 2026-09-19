@@ -265,6 +265,9 @@ class EchoHandler(BaseHTTPRequestHandler):
       cache_group_invalidation = _safe_header_value(
         "cache_group_invalidation", _query_header(query, "cache_group_invalidation")
       )
+      content_digest = _query_header(query, "content_digest")
+      repr_digest = _query_header(query, "repr_digest")
+      unencoded_digest = _query_header(query, "unencoded_digest")
     except ValueError as error:
       self.send_error(400, str(error))
       return
@@ -358,6 +361,12 @@ class EchoHandler(BaseHTTPRequestHandler):
       self.send_header("cache-groups", cache_groups)
     if cache_group_invalidation:
       self.send_header("cache-group-invalidation", cache_group_invalidation)
+    if content_digest:
+      self.send_header("content-digest", content_digest)
+    if repr_digest:
+      self.send_header("repr-digest", repr_digest)
+    if unencoded_digest:
+      self.send_header("unencoded-digest", unencoded_digest)
     if chunked_response:
       self.send_header("transfer-encoding", "chunked")
     else:

@@ -46,6 +46,7 @@ mod webtransport_h2;
 
 #[derive(Clone, Copy)]
 enum DownstreamProtocol {
+  H1,
   H2,
   H3,
 }
@@ -53,6 +54,7 @@ enum DownstreamProtocol {
 impl DownstreamProtocol {
   fn parse(raw: &str) -> anyhow::Result<Self> {
     match raw {
+      "h1" => Ok(Self::H1),
       "h2" => Ok(Self::H2),
       "h3" => Ok(Self::H3),
       _ => bail!("unsupported downstream protocol: {raw}"),
@@ -61,6 +63,7 @@ impl DownstreamProtocol {
 
   fn label(self) -> &'static str {
     match self {
+      Self::H1 => "h1",
       Self::H2 => "h2",
       Self::H3 => "h3",
     }
@@ -612,7 +615,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
   eprintln!(
-    "usage:\n  protocol-probe incremental-upstream --protocol <h1|h2|h3> --listen <addr:port> --completion-listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe incremental-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --completion-host <host> --completion-port <port>\n  protocol-probe managed-upload-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --creation-path <path> --ca-cert <pem> --client-cert <pem> --client-key <pem> --wrong-client-cert <pem> --wrong-client-key <pem>\n  protocol-probe h2-upstream|h3-upstream|webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name> [--client-ca <pem> --expect-client-cert-sha256 <lowercase-hex>]\n  protocol-probe websocket-echo-upstream --listen <addr:port> [--cert <pem> --key <pem>] [--client-ca <pem> --expect-client-cert-sha256 <lowercase-hex>]\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status> [--client-cert <pem> --client-key <pem>]\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected|allocate-success (UDP only)> [--mutation <name>] [--ca-cert <pem>] [--allocation-hold-ms <1..10000>]\n  protocol-probe downstream --protocol <h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--client-cert <pem> --client-key <pem>] [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-base64 <base64>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--h2-eager-body] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64> [--client-cert <pem> --client-key <pem>]\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n> [--client-cert <pem> --client-key <pem>] [--expect-upstream-header-value <name:value>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--client-cert <pem> --client-key <pem>] [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
+    "usage:\n  protocol-probe incremental-upstream --protocol <h1|h2|h3> --listen <addr:port> --completion-listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe incremental-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --completion-host <host> --completion-port <port>\n  protocol-probe managed-upload-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --creation-path <path> --ca-cert <pem> --client-cert <pem> --client-key <pem> --wrong-client-cert <pem> --wrong-client-key <pem>\n  protocol-probe h2-upstream|h3-upstream|webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name> [--client-ca <pem> --expect-client-cert-sha256 <lowercase-hex>]\n  protocol-probe websocket-echo-upstream --listen <addr:port> [--cert <pem> --key <pem>] [--client-ca <pem> --expect-client-cert-sha256 <lowercase-hex>]\n  protocol-probe h2c-upstream --listen <addr:port> --name <name>\n  protocol-probe h1-stall-upstream --listen <addr:port> --name <name> --read-delay-ms <ms>\n  protocol-probe websocket-client --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --payload <text> --expect-status <status> [--client-cert <pem> --client-key <pem>]\n  protocol-probe turn-upstream --transport <udp|tcp|tls> --listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe turn-client --transport <udp|tcp|tls> --host <host> --port <port> --server-name <sni> --username <name> --realm <realm> --password <password> --auth <valid|invalid|missing> --expect <echo|no-response|rejected|allocate-success (UDP only)> [--mutation <name>] [--ca-cert <pem>] [--allocation-hold-ms <1..10000>]\n  protocol-probe downstream --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--client-cert <pem> --client-key <pem>] [--tls-version <tls1.2|tls1.3>] [--quic-initial-alpn-padding <bytes>] [--body <text>|--body-base64 <base64>|--body-bytes <n>] [--body-chunk-size <n>] [--zero-length-body-end-delay-ms <ms>] [--h2-eager-body] [--omit-content-length] [--header <name:value>] [--expect-status <status>]\n  protocol-probe http-get --host <host> --port <port> --path <path>\n  protocol-probe raw-http --host <host> --port <port> --request-base64 <base64>\n  protocol-probe raw-tls-http --host <host> --port <port> --server-name <sni> --ca-cert <pem> --request-base64 <base64> [--client-cert <pem> --client-key <pem>]\n  protocol-probe raw-udp --host <host> --port <port> --payload-base64 <base64>\n  protocol-probe dpi-tls-client --profile <name> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--expect-status <status>]\n  protocol-probe tls-resumption-load --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --connections <n> --expect-resumed-min <n> [--client-cert <pem> --client-key <pem>] [--expect-upstream-header-value <name:value>]\n  protocol-probe webtransport-multiplex --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --sessions <n> --expect-statuses <csv> [--client-cert <pem> --client-key <pem>] [--header <name:value>]\n  protocol-probe webtransport-reload-gated --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --http-path <path> --ca-cert <pem> --first-ready-path <path> --resume-path <path> --expect-initial-status <status> --expect-drained-status <status> [--header <name:value>]\n  protocol-probe admin-operation-wt-events --host <host> --port <port> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-event <name>] [--expect-terminal-state <state>] [--timeout-ms <ms>]"
   );
   eprintln!("websocket-client also accepts repeated --header <name:value> options");
   eprintln!(
@@ -2956,6 +2959,7 @@ fn status_from_path(path: &str) -> Option<StatusCode> {
 
 async fn run_downstream_client(args: DownstreamArgs) -> anyhow::Result<()> {
   let output = match args.protocol {
+    DownstreamProtocol::H1 => h1_downstream_request(&args).await?,
     DownstreamProtocol::H2 => h2_downstream_request(&args).await?,
     DownstreamProtocol::H3 => h3_downstream_request(&args).await?,
   };
@@ -4560,6 +4564,251 @@ async fn wait_for_path(path: &str, timeout: Duration) -> anyhow::Result<()> {
   Ok(())
 }
 
+/// Sends an HTTP/1.1 request over TLS and retains the decoded body separately
+/// from the transfer framing. Digest integration cases use `wire` and
+/// `trailers` to prove that a generated field was emitted at the correct HTTP
+/// layer, rather than merely observing a merged header map.
+async fn h1_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
+  if args.h2_eager_body || args.h3_reset_after_body_prefix {
+    bail!("HTTP/1.1 downstream does not support HTTP/2 or HTTP/3 body modes");
+  }
+  let mut client_config = downstream_client_config_with_client_identity(
+    Path::new(&args.ca_cert),
+    b"http/1.1",
+    args.tls_version,
+    args.client_identity.as_ref(),
+  )?;
+  client_config.enable_sni = true;
+  let connector = TlsConnector::from(Arc::new(client_config));
+  let stream = TcpStream::connect((args.host.as_str(), args.port))
+    .await
+    .with_context(|| format!("failed to connect to {}:{}", args.host, args.port))?;
+  let server_name = ServerName::try_from(args.server_name.clone())
+    .map_err(|_| anyhow!("invalid server name: {}", args.server_name))?;
+  let mut tls_stream = connector
+    .connect(server_name, stream)
+    .await
+    .context("failed to establish downstream TLS")?;
+  let tls_version = tls_stream
+    .get_ref()
+    .1
+    .protocol_version()
+    .map(tls_version_label);
+  let negotiated = tls_stream
+    .get_ref()
+    .1
+    .alpn_protocol()
+    .map(|protocol| protocol.to_vec())
+    .unwrap_or_default();
+  if negotiated != b"http/1.1" {
+    bail!(
+      "expected downstream ALPN http/1.1, got {}",
+      String::from_utf8_lossy(&negotiated)
+    );
+  }
+
+  let body = if let Some(bytes) = args.body_bytes {
+    vec![b'x'; bytes]
+  } else {
+    args.body.clone()
+  };
+  let connection = if args.headers.contains_key("te") {
+    "close, TE"
+  } else {
+    "close"
+  };
+  let mut request = format!(
+    "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: {connection}\r\n",
+    args.method, args.path, args.authority
+  );
+  for (name, value) in &args.headers {
+    let value = value
+      .to_str()
+      .with_context(|| format!("HTTP/1.1 request header {} was not text", name.as_str()))?;
+    request.push_str(name.as_str());
+    request.push_str(": ");
+    request.push_str(value);
+    request.push_str("\r\n");
+  }
+  if !body.is_empty() && !args.omit_content_length {
+    request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+  }
+  request.push_str("\r\n");
+  tls_stream
+    .write_all(request.as_bytes())
+    .await
+    .context("failed to write downstream HTTP/1.1 request headers")?;
+  if !body.is_empty() {
+    tls_stream
+      .write_all(&body)
+      .await
+      .context("failed to write downstream HTTP/1.1 request body")?;
+  }
+  tls_stream
+    .flush()
+    .await
+    .context("failed to flush downstream HTTP/1.1 request")?;
+
+  const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+  let mut raw_response = Vec::new();
+  tokio::time::timeout(
+    Duration::from_secs(10),
+    tls_stream
+      .take(MAX_RESPONSE_BYTES.saturating_add(1))
+      .read_to_end(&mut raw_response),
+  )
+  .await
+  .context("timed out reading downstream HTTP/1.1 response")?
+  .context("failed to read downstream HTTP/1.1 response")?;
+  if raw_response.len() as u64 > MAX_RESPONSE_BYTES {
+    bail!("downstream HTTP/1.1 response exceeded {MAX_RESPONSE_BYTES} bytes");
+  }
+
+  let (status, headers, body, trailers, chunk_count) =
+    parse_h1_response_wire(&raw_response, args.method == Method::HEAD)?;
+  let mut output = response_json(
+    args.protocol.label(),
+    tls_version,
+    StatusCode::from_u16(status).context("invalid downstream HTTP/1.1 status")?,
+    &headers,
+    &body,
+  );
+  output["trailers"] = serde_json::json!(trailers);
+  output["wire"] = serde_json::json!({
+    "chunked": chunk_count.is_some(),
+    "chunk_count": chunk_count.unwrap_or(0),
+  });
+  Ok(output)
+}
+
+fn parse_h1_response_wire(
+  response: &[u8],
+  head_request: bool,
+) -> anyhow::Result<(
+  u16,
+  HeaderMap,
+  Vec<u8>,
+  BTreeMap<String, String>,
+  Option<usize>,
+)> {
+  let head_end = find_http1_head_end(response)
+    .ok_or_else(|| anyhow!("HTTP/1.1 response did not contain a complete header block"))?;
+  let head = std::str::from_utf8(&response[..head_end])
+    .context("HTTP/1.1 response headers were not UTF-8")?;
+  let status = parse_http_status(head)?;
+  let headers = parse_http_header_map(head)?;
+  if head_request || (100..200).contains(&status) || status == 204 || status == 304 {
+    return Ok((status, headers, Vec::new(), BTreeMap::new(), None));
+  }
+
+  let wire_body = &response[head_end + 4..];
+  let is_chunked = headers
+    .get("transfer-encoding")
+    .and_then(|value| value.to_str().ok())
+    .is_some_and(|value| {
+      value
+        .split(',')
+        .any(|item| item.trim().eq_ignore_ascii_case("chunked"))
+    });
+  if is_chunked {
+    let (body, trailers, chunk_count) = parse_h1_chunked_body(wire_body)?;
+    return Ok((status, headers, body, trailers, Some(chunk_count)));
+  }
+  let body = if let Some(content_length) = headers.get(CONTENT_LENGTH) {
+    let content_length = content_length
+      .to_str()
+      .context("HTTP/1.1 Content-Length was not text")?
+      .parse::<usize>()
+      .context("invalid HTTP/1.1 Content-Length")?;
+    if wire_body.len() < content_length {
+      bail!("HTTP/1.1 response ended before Content-Length bytes arrived");
+    }
+    wire_body[..content_length].to_vec()
+  } else {
+    wire_body.to_vec()
+  };
+  Ok((status, headers, body, BTreeMap::new(), None))
+}
+
+fn parse_http_header_map(head: &str) -> anyhow::Result<HeaderMap> {
+  let mut headers = HeaderMap::new();
+  for line in head.lines().skip(1) {
+    let (name, value) = line
+      .split_once(':')
+      .ok_or_else(|| anyhow!("malformed HTTP header line: {line}"))?;
+    headers.append(
+      HeaderName::from_bytes(name.trim().as_bytes()).context("invalid HTTP header name")?,
+      HeaderValue::from_str(value.trim()).context("invalid HTTP header value")?,
+    );
+  }
+  Ok(headers)
+}
+
+fn parse_h1_chunked_body(
+  wire_body: &[u8],
+) -> anyhow::Result<(Vec<u8>, BTreeMap<String, String>, usize)> {
+  const MAX_CHUNKS: usize = 1024;
+  let mut offset = 0usize;
+  let mut chunks = 0usize;
+  let mut body = Vec::new();
+  loop {
+    let line_end = wire_body[offset..]
+      .windows(2)
+      .position(|window| window == b"\r\n")
+      .map(|index| offset + index)
+      .ok_or_else(|| anyhow!("HTTP/1.1 chunk size line was incomplete"))?;
+    let size_text = std::str::from_utf8(&wire_body[offset..line_end])
+      .context("HTTP/1.1 chunk size was not ASCII")?
+      .split(';')
+      .next()
+      .unwrap_or_default();
+    let size =
+      usize::from_str_radix(size_text.trim(), 16).context("invalid HTTP/1.1 chunk size")?;
+    offset = line_end + 2;
+    if size == 0 {
+      // The terminal chunk already consumed its own CRLF. An empty trailer
+      // section is therefore one remaining CRLF, while fields end in CRLFCRLF.
+      if wire_body
+        .get(offset..)
+        .is_some_and(|remaining| remaining.starts_with(b"\r\n"))
+      {
+        return Ok((body, BTreeMap::new(), chunks));
+      }
+      let trailer_end = wire_body[offset..]
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| offset + index)
+        .ok_or_else(|| anyhow!("HTTP/1.1 trailer block was incomplete"))?;
+      let trailer_text = std::str::from_utf8(&wire_body[offset..trailer_end])
+        .context("HTTP/1.1 trailer block was not UTF-8")?;
+      return Ok((body, parse_http_trailer_lines(trailer_text), chunks));
+    }
+    let size_with_terminator = size
+      .checked_add(2)
+      .ok_or_else(|| anyhow!("HTTP/1.1 chunk size exceeded bounds"))?;
+    if chunks >= MAX_CHUNKS || wire_body.len().saturating_sub(offset) < size_with_terminator {
+      bail!("HTTP/1.1 chunked response exceeded bounds or was incomplete");
+    }
+    body.extend_from_slice(&wire_body[offset..offset + size]);
+    offset += size;
+    if &wire_body[offset..offset + 2] != b"\r\n" {
+      bail!("HTTP/1.1 chunk payload was missing its terminator");
+    }
+    offset += 2;
+    chunks += 1;
+  }
+}
+
+fn parse_http_trailer_lines(lines: &str) -> BTreeMap<String, String> {
+  lines
+    .lines()
+    .filter_map(|line| {
+      let (name, value) = line.split_once(':')?;
+      Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+    })
+    .collect()
+}
+
 async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_json::Value> {
   let mut client_config = downstream_client_config_with_client_identity(
     Path::new(&args.ca_cert),
@@ -4616,18 +4865,21 @@ async fn h2_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
     .await
     .context("failed to send downstream HTTP/2 request")?;
   let (parts, body) = response.into_parts();
-  let body = body
+  let collected = body
     .collect()
     .await
-    .context("failed to read downstream HTTP/2 response body")?
-    .to_bytes();
-  Ok(response_json(
+    .context("failed to read downstream HTTP/2 response body")?;
+  let trailers = collected.trailers().map(header_json).unwrap_or_default();
+  let body = collected.to_bytes();
+  let mut output = response_json(
     args.protocol.label(),
     tls_version,
     parts.status,
     &parts.headers,
     &body,
-  ))
+  );
+  output["trailers"] = serde_json::json!(trailers);
+  Ok(output)
 }
 
 async fn h2_eager_downstream_request(
@@ -4657,6 +4909,12 @@ async fn h2_eager_downstream_request(
       .release_capacity(len)
       .context("failed to release direct downstream HTTP/2 response capacity")?;
   }
+  let trailers = body
+    .trailers()
+    .await
+    .context("failed to read direct downstream HTTP/2 response trailers")?
+    .map(|trailers| header_json(&trailers))
+    .unwrap_or_default();
 
   let mut output = response_json(
     args.protocol.label(),
@@ -4665,6 +4923,7 @@ async fn h2_eager_downstream_request(
     &parts.headers,
     &response_body,
   );
+  output["trailers"] = serde_json::json!(trailers);
   // This flag is deliberately emitted only after every DATA frame and the
   // terminating END_STREAM frame have been accepted by the direct h2 sender.
   output["request_body_complete"] = serde_json::Value::Bool(true);
@@ -4789,6 +5048,11 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
     let len = chunk.remaining();
     response_body.extend_from_slice(&chunk.copy_to_bytes(len));
   }
+  let trailers = futures_util::future::poll_fn(|cx| stream.poll_recv_trailers(cx))
+    .await
+    .context("failed to read downstream HTTP/3 response trailers")?
+    .map(|trailers| header_json(&trailers))
+    .unwrap_or_default();
 
   close_connection.close(0u32.into(), b"probe complete");
   let _ = driver_task.await;
@@ -4801,6 +5065,7 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
     &parts.headers,
     &response_body.freeze(),
   );
+  output["trailers"] = serde_json::json!(trailers);
   if let Some(initial_packet_count) = initial_packet_count {
     output["quic_initial_udp_segments"] =
       serde_json::Value::from(initial_packet_count.load(Ordering::Relaxed));
@@ -5524,6 +5789,9 @@ fn response_json(
     "reason": status.canonical_reason().unwrap_or(""),
     "headers": header_json(headers),
     "body": String::from_utf8_lossy(body),
+    "body_base64": base64::engine::general_purpose::STANDARD.encode(body),
+    "body_bytes": body.len(),
+    "trailers": BTreeMap::<String, String>::new(),
   })
 }
 
@@ -5736,6 +6004,37 @@ mod tests {
   use super::*;
 
   const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+  #[test]
+  fn parses_h1_chunked_body_with_empty_trailer_section() {
+    let (body, trailers, chunks) =
+      parse_h1_chunked_body(b"4\r\ntest\r\n0\r\n\r\n").expect("empty trailers should parse");
+    assert_eq!(body, b"test");
+    assert!(trailers.is_empty());
+    assert_eq!(chunks, 1);
+  }
+
+  #[test]
+  fn parses_h1_chunked_body_with_trailer_fields() {
+    let (body, trailers, chunks) = parse_h1_chunked_body(
+      b"4\r\ntest\r\n0\r\nContent-Digest: sha-256=:AQ==:\r\nX-Probe: trailer\r\n\r\n",
+    )
+    .expect("trailer fields should parse");
+    assert_eq!(body, b"test");
+    assert_eq!(
+      trailers.get("content-digest").map(String::as_str),
+      Some("sha-256=:AQ==:")
+    );
+    assert_eq!(trailers.get("x-probe").map(String::as_str), Some("trailer"));
+    assert_eq!(chunks, 1);
+  }
+
+  #[test]
+  fn rejects_h1_chunked_body_with_truncated_trailer_section() {
+    let error = parse_h1_chunked_body(b"4\r\ntest\r\n0\r\nContent-Digest: sha-256=:AQ==:\r\n")
+      .expect_err("truncated trailers must be rejected");
+    assert!(error.to_string().contains("trailer block was incomplete"));
+  }
 
   #[test]
   fn client_auth_arguments_require_a_ca_and_lowercase_sha256_fingerprint() {

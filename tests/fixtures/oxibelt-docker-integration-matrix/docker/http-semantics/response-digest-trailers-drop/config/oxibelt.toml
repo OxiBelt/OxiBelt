@@ -1,0 +1,59 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[quic.socket]
+reuse_port = true
+
+[proxy]
+trusted_ca_certs = []
+
+[proxy.http]
+trailers = "drop"
+
+[compression]
+enabled = false
+
+[waf]
+enabled = false
+mode = "enforcing"
+fail_policy = "closed"
+
+[[upstreams]]
+name = "digest-h1"
+origin = "http://mock-http:18080"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+
+[[routes]]
+name = "digest-drop"
+hosts = ["example.test"]
+path_prefix = "/"
+upstream = "digest-h1"
