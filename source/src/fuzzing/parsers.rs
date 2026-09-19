@@ -14,6 +14,7 @@ pub fn exercise_waf_request_normalization(data: &[u8]) {
 
 pub fn exercise_http_body_coding(data: &[u8]) {
   crate::proxy::http::waf_body_coding::fuzz_body_coding(data);
+  super::dictionary::exercise(data);
 }
 
 pub fn exercise_cache_metadata_key(data: &[u8]) {

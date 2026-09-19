@@ -428,6 +428,7 @@ impl TranslationState {
         generated,
         &self.client_certificate_forward_allowed_headers,
         &self.resumable_upload_profiles,
+        &self.compression_dictionary_profiles,
       )
     {
       let diagnostic = self.diagnostics.len();
@@ -756,6 +757,7 @@ fn http_match_route(
       upstream_request_timeout_ms: None,
       client_certificate_forwarding: None,
       resumable_upload: None,
+      compression_dictionary_profile: None,
     },
     filters,
   ))

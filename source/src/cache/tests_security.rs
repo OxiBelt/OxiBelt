@@ -32,6 +32,7 @@ fn disk_cache_recovery_rejects_legacy_security_header_metadata() {
     vary: Vec::new(),
     tags: Vec::new(),
     query_target_epoch: None,
+    dictionary_identity: None,
     size: 4,
   };
   let legacy_metadata = encode_metadata(&stored)

@@ -1,0 +1,3 @@
+RFC 9842 integration dictionary fixture. This immutable raw byte sequence is
+intentionally shared by the origin and downstream probes so each side verifies
+the SHA-256-bound dcb and dcz prelude independently of the proxy runtime.

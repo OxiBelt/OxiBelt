@@ -40,6 +40,9 @@ pub struct Metrics {
   requests_total: StripedCounter,
   responses_total: StripedCounter,
   upstream_errors_total: StripedCounter,
+  dictionary_encode_jobs_total: AtomicU64,
+  dictionary_decode_jobs_total: AtomicU64,
+  dictionary_codec_errors_total: AtomicU64,
   cache_hits_total: AtomicU64,
   cache_misses_total: AtomicU64,
   cache_revalidations_total: AtomicU64,
@@ -353,6 +356,23 @@ impl Metrics {
       .fetch_add(1, Ordering::Relaxed);
   }
 
+  pub(crate) fn record_dictionary_codec_job(&self, decode: bool) {
+    if decode {
+      self
+        .dictionary_decode_jobs_total
+        .fetch_add(1, Ordering::Relaxed);
+    } else {
+      self
+        .dictionary_encode_jobs_total
+        .fetch_add(1, Ordering::Relaxed);
+    }
+  }
+  pub(crate) fn record_dictionary_codec_error(&self) {
+    self
+      .dictionary_codec_errors_total
+      .fetch_add(1, Ordering::Relaxed);
+  }
+
   pub fn record_cache_purge(&self) {
     self.cache_purges_total.fetch_add(1, Ordering::Relaxed);
   }
@@ -632,6 +652,27 @@ impl Metrics {
       "counter",
       self.cache_stale_served_total.load(Ordering::Relaxed),
     );
+    for (name, counter) in [
+      (
+        "oxibelt_dictionary_encode_jobs_total",
+        &self.dictionary_encode_jobs_total,
+      ),
+      (
+        "oxibelt_dictionary_decode_jobs_total",
+        &self.dictionary_decode_jobs_total,
+      ),
+      (
+        "oxibelt_dictionary_codec_errors_total",
+        &self.dictionary_codec_errors_total,
+      ),
+    ] {
+      append_metric(
+        &mut output,
+        name,
+        "counter",
+        counter.load(Ordering::Relaxed),
+      );
+    }
     append_metric(
       &mut output,
       "oxibelt_cache_purges_total",

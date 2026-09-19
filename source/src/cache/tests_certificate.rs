@@ -2,6 +2,114 @@ use super::*;
 use http::header::{HeaderValue, VARY};
 
 #[test]
+fn dictionary_identity_partitions_keys_and_uses_the_origin_vary_view() {
+  let mut identity_headers = HeaderMap::new();
+  identity_headers.insert("accept-encoding", HeaderValue::from_static("identity"));
+  let mut dictionary_headers = HeaderMap::new();
+  dictionary_headers.insert(
+    "accept-encoding",
+    HeaderValue::from_static("dcb, dcz, identity"),
+  );
+  dictionary_headers.insert(
+    "available-dictionary",
+    HeaderValue::from_static(":YWJjZA==:"),
+  );
+  let selected = "a3dcb4d229de6fde0db5686dee47145dcdc6a1a4ec5a7f5365e5a5df3caa4f4d";
+  let identity = CacheDictionaryIdentity::new(b"scope-a", None, &identity_headers).unwrap();
+  let dictionary =
+    CacheDictionaryIdentity::new(b"scope-a", Some(selected), &dictionary_headers).unwrap();
+  let other_scope =
+    CacheDictionaryIdentity::new(b"scope-b", Some(selected), &dictionary_headers).unwrap();
+  assert!(identity.valid());
+  assert!(dictionary.valid());
+  let plain = "logical-key".to_string();
+  assert_ne!(
+    dictionary_partitioned_base_key(plain.clone(), Some(&identity)),
+    dictionary_partitioned_base_key(plain.clone(), Some(&dictionary))
+  );
+  assert_ne!(
+    dictionary_partitioned_base_key(plain.clone(), Some(&dictionary)),
+    dictionary_partitioned_base_key(plain, Some(&other_scope))
+  );
+
+  let cache = ResponseCache::new(
+    &CacheConfig {
+      enabled: true,
+      groups: crate::config::CacheGroupsConfig { enabled: false },
+      ..CacheConfig::default()
+    },
+    None,
+  )
+  .unwrap();
+  let uri = "/asset.css".parse::<Uri>().unwrap();
+  let downstream_headers = HeaderMap::new();
+  let mut response_headers = HeaderMap::new();
+  response_headers.insert(VARY, HeaderValue::from_static("available-dictionary"));
+  assert_eq!(
+    cache.insert(
+      CacheInsertContext {
+        group_request: None,
+        no_vary_search: None,
+        proxy_protocol_identity: None,
+        policy_name: None,
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &downstream_headers,
+        query_identity: None,
+        certificate_identity: None,
+        dictionary_identity: Some(&dictionary),
+        origin_vary_headers: Some(&dictionary_headers),
+      },
+      CacheEntry::memory(
+        StatusCode::OK,
+        response_headers,
+        Bytes::from_static(b"dictionary representation"),
+      ),
+    ),
+    CacheInsertOutcome::Stored
+  );
+  assert!(matches!(
+    cache.lookup(CacheLookupContext {
+      group_request: None,
+      no_vary_search: None,
+      proxy_protocol_identity: None,
+      policy_name: None,
+      scheme: "https",
+      host: "example.test",
+      method: &Method::GET,
+      uri: &uri,
+      request_headers: &downstream_headers,
+      query_identity: None,
+      certificate_identity: None,
+      dictionary_identity: Some(&dictionary),
+      origin_vary_headers: Some(&dictionary_headers),
+    }),
+    Some(CacheLookup::Fresh(_))
+  ));
+  assert!(
+    cache
+      .lookup(CacheLookupContext {
+        group_request: None,
+        no_vary_search: None,
+        proxy_protocol_identity: None,
+        policy_name: None,
+        scheme: "https",
+        host: "example.test",
+        method: &Method::GET,
+        uri: &uri,
+        request_headers: &downstream_headers,
+        query_identity: None,
+        certificate_identity: None,
+        dictionary_identity: Some(&dictionary),
+        origin_vary_headers: Some(&identity_headers),
+      })
+      .is_none()
+  );
+}
+
+#[test]
 fn certificate_identity_uses_a_private_base_key_namespace() {
   let plain = certificate_partitioned_base_key("logical-key".to_string(), None);
   let absent = CacheCertificateIdentity::new("client-cert", "url_encoded_pem", None).unwrap();
@@ -106,6 +214,8 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
           request_headers: &request_headers,
           query_identity: None,
           certificate_identity: identity,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body),
       ),
@@ -162,6 +272,8 @@ fn certificate_identity_segregates_cache_entries_without_changing_partition() {
       request_headers: &request_headers,
       query_identity: None,
       certificate_identity: identity,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     }) {
       Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, expected),
       other => panic!("expected isolated cache hit, got {other:?}"),
@@ -210,6 +322,8 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
         request_headers: &inserted_headers,
         query_identity: None,
         certificate_identity: Some(&identity),
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -236,6 +350,8 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
       request_headers: &lookup_headers,
       query_identity: None,
       certificate_identity: Some(&identity),
+      dictionary_identity: None,
+      origin_vary_headers: None,
     }),
     Some(CacheLookup::Fresh(_))
   ));
@@ -253,6 +369,8 @@ fn certificate_vary_uses_identity_not_untrusted_header_values_or_explain_output(
       request_headers: &lookup_headers,
       query_identity: None,
       certificate_identity: Some(&identity),
+      dictionary_identity: None,
+      origin_vary_headers: None,
     },
     Some(&response_headers),
   );

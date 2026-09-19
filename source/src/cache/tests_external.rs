@@ -58,6 +58,7 @@ fn external_hit(
       vary,
       tags: Vec::new(),
       query_target_epoch: None,
+      dictionary_identity: None,
       no_vary_search: None,
       group_stamp: None,
       capabilities: Vec::new(),
@@ -83,6 +84,8 @@ fn external_memory_hit_is_promoted_after_validation() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let operation = cache
     .operation_context(
@@ -136,6 +139,8 @@ fn external_memory_hit_without_security_neutral_marker_is_safe_miss() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let operation = cache
     .operation_context(
@@ -195,6 +200,8 @@ async fn external_group_generation_round_trips_and_rejects_a_changed_variant() {
       request_headers: &headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     };
     assert!(cache.bind_group_request(ctx.clone()).await);
     let operation = cache
@@ -232,6 +239,8 @@ async fn external_group_generation_round_trips_and_rejects_a_changed_variant() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       StatusCode::OK,
       &response_headers,
@@ -279,6 +288,8 @@ fn external_mismatched_uri_is_safe_miss() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let operation = cache
     .operation_context(
@@ -327,6 +338,8 @@ fn external_sensitive_vary_is_safe_miss() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let operation = cache
     .operation_context(

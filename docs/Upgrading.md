@@ -5,6 +5,33 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Compression Dictionary Transport
+
+RFC 9842 support is opt-in through `compression_dictionary` and per-route
+profile references. Existing compression defaults and OxiRule syntax are
+unchanged. Native configuration remains schema epoch 1. Deploy the updated
+Gateway RoutePolicy CRD before using `compressionDictionary.profileRef`, and
+explicitly allow each namespace/profile reference in the controller.
+See [Compression Dictionary Transport](CompressionDictionary.md) for finite
+resource budgets, public dictionary provisioning, learning stores, Admin
+permissions, and Helm mounts.
+
+Managed upload persistence upgrades the local journal from v1 to v2 and the
+PostgreSQL schema from v3 to v4, retaining encoded offsets and pinning the
+dictionary used for final validation. Back up persistent upload stores before
+upgrading. Do not run older and newer upload writers against the same store.
+Before rollback, drain sessions and retained objects, remove dictionary
+configuration and Gateway references, and restore the pre-upgrade upload-store
+backup or use an empty store. Older binaries cannot consume the new persisted
+upload contract. Learned dictionaries may be discarded and relearned; immutable
+configured assets must remain available until requests using them have drained.
+
+Validate the protocol matrix with:
+
+```sh
+tests/scripts/run-compression-dictionary-integration.sh
+```
+
 ## HTTP digest negotiation
 
 Ordinary data-plane responses now generate negotiated RFC 9530 digest fields

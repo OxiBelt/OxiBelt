@@ -76,6 +76,7 @@ impl AppSnapshot {
       waf_body_coding: previous.waf_body_coding.clone(),
       static_files: previous.static_files.clone(),
       uploads: previous.uploads.clone(),
+      compression_dictionary: previous.compression_dictionary.clone(),
       certificate_transparency: previous.certificate_transparency.clone(),
       metrics: previous.metrics.clone(),
       overload: previous.overload.clone(),

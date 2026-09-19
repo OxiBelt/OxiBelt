@@ -1037,6 +1037,59 @@
         "mountPath": { "type": "string", "minLength": 1 }
       }
     },
+    "compressionDictionary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assets", "learnedDisk"],
+      "properties": {
+        "assets": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "mountPath", "digest", "revision"],
+            "properties": {
+              "name": { "type": "string", "maxLength": 63, "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+              "mountPath": { "type": "string", "pattern": "^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$" },
+              "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "revision": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "configMap": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "key"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+                  "key": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9._-]+$" }
+                }
+              },
+              "persistentVolumeClaim": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["claimName", "subPath"],
+                "properties": {
+                  "claimName": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+                  "subPath": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$" }
+                }
+              }
+            },
+            "oneOf": [
+              { "required": ["configMap"], "not": { "required": ["persistentVolumeClaim"] } },
+              { "required": ["persistentVolumeClaim"], "not": { "required": ["configMap"] } }
+            ]
+          }
+        },
+        "learnedDisk": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "writableVolumeName"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "writableVolumeName": { "type": "string", "maxLength": 63, "pattern": "^$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" }
+          }
+        }
+      }
+    },
     "runtimeHardening": {
       "type": "object",
       "additionalProperties": false,

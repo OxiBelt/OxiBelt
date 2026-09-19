@@ -10,6 +10,7 @@ pub const DEFAULT_MANAGED_CONFIG_PATH: &str = "conf.d/gateway-api.generated.toml
 pub const MAX_REQUEST_MIRROR_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS: usize = 64;
 pub const MAX_RESUMABLE_UPLOAD_PROFILE_ALLOWLIST_ENTRIES: usize = 64;
+pub const MAX_COMPRESSION_DICTIONARY_PROFILE_ALLOWLIST_ENTRIES: usize = 64;
 
 #[derive(Debug, Parser)]
 #[command(name = "oxibelt-gateway-controller")]
@@ -85,6 +86,10 @@ pub struct SharedArgs {
   /// Route-policy authors can reference only a profile admitted for their namespace.
   #[arg(long = "resumable-upload-profile", global = true)]
   pub resumable_upload_profiles: Vec<ResumableUploadProfileAllowlistEntry>,
+  /// Operator-owned namespace/profile admissions for RFC 9842 transport.
+  /// Route-policy authors can select only a named global profile.
+  #[arg(long = "compression-dictionary-profile", global = true)]
+  pub compression_dictionary_profiles: Vec<CompressionDictionaryProfileAllowlistEntry>,
   /// Exact operator-owned data-plane target for every resumable profile admission.
   #[arg(long = "resumable-upload-target", global = true)]
   pub resumable_upload_target: Option<ResumableUploadTarget>,
@@ -135,6 +140,19 @@ impl SharedArgs {
     }
     if !self.resumable_upload_profiles.is_empty() && self.resumable_upload_target.is_none() {
       bail!("resumable-upload-profile requires --resumable-upload-target namespace/kind/name");
+    }
+    if self.compression_dictionary_profiles.len()
+      > MAX_COMPRESSION_DICTIONARY_PROFILE_ALLOWLIST_ENTRIES
+    {
+      bail!(
+        "compression-dictionary-profile may be repeated at most {MAX_COMPRESSION_DICTIONARY_PROFILE_ALLOWLIST_ENTRIES} times"
+      );
+    }
+    let mut compression_dictionary_profiles = std::collections::HashSet::new();
+    for entry in &self.compression_dictionary_profiles {
+      if !compression_dictionary_profiles.insert((&entry.namespace, &entry.profile)) {
+        bail!("compression-dictionary-profile contains a duplicate namespace/profile");
+      }
     }
     validate_header_allowlist(
       "external-auth-allowed-identity-header",
@@ -221,6 +239,36 @@ impl FromStr for ResumableUploadTarget {
 pub struct ResumableUploadProfileAllowlistEntry {
   pub namespace: String,
   pub profile: String,
+}
+
+/// Exact `namespace/profile` admission for an operator-defined compression
+/// dictionary profile. It deliberately carries neither dictionary URLs nor
+/// storage policy; those remain in the data-plane base configuration.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CompressionDictionaryProfileAllowlistEntry {
+  pub namespace: String,
+  pub profile: String,
+}
+
+impl FromStr for CompressionDictionaryProfileAllowlistEntry {
+  type Err = String;
+
+  fn from_str(value: &str) -> Result<Self, Self::Err> {
+    let (namespace, profile) = value
+      .split_once('/')
+      .ok_or_else(|| "expected namespace/profile".to_string())?;
+    if profile.contains('/') {
+      return Err("expected namespace/profile".to_string());
+    }
+    super::rollout::validate_kubernetes_dns_label("namespace", namespace)
+      .map_err(|_| "namespace must be a Kubernetes DNS label".to_string())?;
+    super::rollout::validate_kubernetes_dns_subdomain("profile", profile)
+      .map_err(|_| "profile must be a Kubernetes DNS subdomain".to_string())?;
+    Ok(Self {
+      namespace: namespace.to_string(),
+      profile: profile.to_string(),
+    })
+  }
 }
 
 impl FromStr for ResumableUploadProfileAllowlistEntry {

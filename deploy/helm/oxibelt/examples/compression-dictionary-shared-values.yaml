@@ -1,0 +1,54 @@
+# A shared dictionary profile retains immutable local seed assets and stores
+# learned entries through an operator-configured shared-state backend.
+compressionDictionary:
+  assets:
+  - name: storefront-v1
+    mountPath: /etc/oxibelt/dictionaries/storefront-v1.bin
+    digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    revision: storefront-v1
+    persistentVolumeClaim:
+      claimName: storefront-dictionary-assets
+      subPath: storefront-v1.bin
+
+config:
+  inline: |
+    [shared_state]
+    enabled = true
+
+    [[shared_state.backends]]
+    name = "dictionary-state"
+    kind = "redis"
+    connection_url_env = "OXIBELT_DICTIONARY_REDIS_URL"
+
+    [compression_dictionary]
+    enabled = true
+
+    [[compression_dictionary.dictionaries]]
+    name = "storefront-v1"
+    path = "dictionaries/storefront-v1.bin"
+    sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    public = true
+    url = "https://store.example.test/dictionaries/storefront-v1.bin"
+
+    [[compression_dictionary.stores]]
+    name = "shared-dictionaries"
+    kind = "shared"
+    quota_bytes = 67108864
+    [compression_dictionary.stores.shared]
+    backend = "dictionary-state"
+
+    [[compression_dictionary.profiles]]
+    name = "storefront"
+    downstream = true
+    learn = true
+    store = "shared-dictionaries"
+    dictionaries = ["storefront-v1"]
+    max_dictionary_bytes = 16777200
+    max_dictionaries = 8
+    max_total_dictionary_bytes = 67108864
+    max_pending_dictionary_bytes = 16777216
+    max_codec_concurrency = 4
+    max_codec_memory_bytes = 536870912
+    max_decoded_size_bytes = 67108864
+    max_expansion_ratio = 100
+    codec_timeout_ms = 5000

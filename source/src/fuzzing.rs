@@ -11,6 +11,7 @@ use url::Url;
 #[cfg(feature = "admin-runtime")]
 mod admin;
 mod config_policy;
+mod dictionary;
 mod parsers;
 mod security_semantics;
 

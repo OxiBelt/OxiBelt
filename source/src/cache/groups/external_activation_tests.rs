@@ -123,6 +123,7 @@ async fn serve_connection(mut stream: TcpStream, state: Arc<Mutex<HandlerState>>
         vary: Vec::new(),
         tags: Vec::new(),
         query_target_epoch: None,
+        dictionary_identity: None,
         no_vary_search: None,
         group_stamp: Some(stamp),
         capabilities: vec!["cache-groups-v1".to_string()],
@@ -241,6 +242,8 @@ async fn activation_rotates_a_legacy_external_authority_and_old_reads_fail_close
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   assert!(cache.bind_group_request(context.clone()).await);
   assert!(
@@ -266,6 +269,8 @@ async fn activation_rotates_a_legacy_external_authority_and_old_reads_fail_close
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   assert!(cache.bind_group_request(current_context.clone()).await);
   assert!(cache.lookup_external(current_context, None).await.is_some());

@@ -549,6 +549,24 @@ oxirule:
   existingConfigMapDigest: ""
   mountPath: /etc/oxibelt/oxirule
 
+# Immutable RFC 9842 dictionary assets. Each asset is a named, read-only
+# ConfigMap key or PVC file. Digests and revisions force a rollout when an
+# operator changes the immutable input.
+compressionDictionary:
+  assets: []
+  # - name: storefront-v1
+  #   mountPath: /etc/oxibelt/dictionaries/storefront-v1.bin
+  #   digest: <64 lower-case SHA-256 hex characters>
+  #   revision: 20260919
+  #   configMap:
+  #     name: storefront-dictionaries
+  #     key: storefront-v1.bin
+  learnedDisk:
+    enabled: false
+    # Selects an existing typed `writableVolumes` item with purpose
+    # `compression-dictionary-learned`; arbitrary extra volumes are not used.
+    writableVolumeName: ""
+
 # Helm manages this config fragment only when `expectation` is nonempty. Empty
 # preserves authority for an existing ConfigMap or a manually authored
 # `[runtime.hardening.seccomp]` section in `config.inline`.

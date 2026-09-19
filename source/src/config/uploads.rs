@@ -29,6 +29,7 @@ pub(crate) const UPLOAD_STORE_POSTGRES_S3_CONFIG_KEYS: &[&str] = &[
 ];
 pub(crate) const UPLOAD_PROFILE_CONFIG_KEYS: &[&str] = &[
   "control_path_prefix",
+  "compression_dictionary",
   "destination",
   "identity",
   "inspection_bytes",
@@ -50,6 +51,7 @@ pub(crate) const UPLOAD_PROFILE_CONFIG_KEYS: &[&str] = &[
 ];
 pub(crate) const UPLOAD_DESTINATION_CONFIG_KEYS: &[&str] = &["kind", "upstream"];
 pub(crate) const UPLOAD_IDENTITY_CONFIG_KEYS: &[&str] = &["kind", "source", "subject_field"];
+pub(crate) const MANAGED_UPLOAD_DICTIONARY_CONFIG_KEYS: &[&str] = &["dictionary", "profile"];
 
 const MAX_STORES: usize = 64;
 const MAX_PROFILES: usize = 256;
@@ -130,6 +132,19 @@ pub struct UploadProfileConfig {
   pub object_ttl_seconds: u64,
   pub max_concurrent_uploads: u32,
   pub max_concurrent_parts: u32,
+  /// Optional RFC 9842 request decoding policy for this managed profile.
+  #[serde(default)]
+  pub compression_dictionary: Option<ManagedUploadDictionaryConfig>,
+}
+
+/// A managed upload can pin exactly one public configured dictionary.  The
+/// referenced dictionary profile controls decode limits and must explicitly
+/// allow request decoding.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedUploadDictionaryConfig {
+  pub profile: String,
+  pub dictionary: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -482,6 +497,70 @@ pub(crate) fn validate_uploads(
           right.name
         );
       }
+    }
+  }
+  Ok(())
+}
+
+/// Cross-validates opt-in managed dictionary decoding after the global
+/// compression-dictionary section is available.
+pub(crate) fn validate_upload_dictionary_references(
+  profiles: &[UploadProfileConfig],
+  dictionaries: &super::CompressionDictionaryConfig,
+) -> anyhow::Result<()> {
+  for profile in profiles {
+    let Some(reference) = &profile.compression_dictionary else {
+      continue;
+    };
+    if !dictionaries.enabled {
+      bail!(
+        "upload profile {} enables compression_dictionary while global compression_dictionary is disabled",
+        profile.name
+      );
+    }
+    let dictionary_profile = dictionaries
+      .profiles
+      .iter()
+      .find(|candidate| candidate.name == reference.profile)
+      .ok_or_else(|| {
+        anyhow::anyhow!(
+          "upload profile {} references unknown compression dictionary profile {}",
+          profile.name,
+          reference.profile
+        )
+      })?;
+    if !dictionary_profile.request_decode {
+      bail!(
+        "upload profile {} requires compression dictionary profile {} to enable request_decode",
+        profile.name,
+        reference.profile
+      );
+    }
+    if !dictionary_profile
+      .dictionaries
+      .iter()
+      .any(|name| name == &reference.dictionary)
+    {
+      bail!(
+        "upload profile {} dictionary {} is not configured by compression dictionary profile {}",
+        profile.name,
+        reference.dictionary,
+        reference.profile
+      );
+    }
+    let dictionary = dictionaries
+      .dictionaries
+      .iter()
+      .find(|candidate| candidate.name == reference.dictionary)
+      .ok_or_else(|| {
+        anyhow::anyhow!("compression dictionary {} is missing", reference.dictionary)
+      })?;
+    if !dictionary.public {
+      bail!(
+        "upload profile {} can only pin public compression dictionary {}",
+        profile.name,
+        reference.dictionary
+      );
     }
   }
   Ok(())

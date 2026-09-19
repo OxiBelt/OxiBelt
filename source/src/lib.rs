@@ -30,6 +30,7 @@ pub mod bandwidth;
 pub mod cache;
 pub mod circuit_breakers;
 pub mod client_identity;
+pub(crate) mod compression_dictionary;
 pub mod config;
 pub mod control_http;
 pub(crate) mod crypto;

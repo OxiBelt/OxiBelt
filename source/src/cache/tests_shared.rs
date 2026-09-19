@@ -77,6 +77,8 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -99,6 +101,8 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .await,
     Some(CacheLookup::Fresh(_))
@@ -124,6 +128,8 @@ async fn shared_cache_tag_purge_removes_l2_entry() {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .await
       .is_none()
@@ -154,6 +160,8 @@ async fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
 
   first
@@ -170,6 +178,8 @@ async fn shared_cache_entries_are_visible_across_instances_and_purgeable() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -237,6 +247,8 @@ async fn shared_cache_purge_propagates_an_enumeration_cap_error() {
             request_headers: &headers,
             query_identity: None,
             certificate_identity: None,
+            dictionary_identity: None,
+            origin_vary_headers: None,
           },
           CacheEntry::memory(
             StatusCode::OK,
@@ -293,6 +305,8 @@ async fn shared_cache_legacy_entry_without_index_is_a_safe_miss() {
           request_headers: &headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(
           StatusCode::OK,
@@ -323,6 +337,8 @@ async fn shared_cache_legacy_entry_without_index_is_a_safe_miss() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .await
       .is_none(),
@@ -368,6 +384,8 @@ async fn shared_cache_vary_lookup_uses_indexed_variant() {
           request_headers: &request_headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(
           StatusCode::OK,
@@ -396,6 +414,8 @@ async fn shared_cache_vary_lookup_uses_indexed_variant() {
       request_headers: &request_headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     })
     .await
   {
@@ -433,6 +453,8 @@ async fn shared_cache_large_body_uses_retrievable_chunks() {
           request_headers: &headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body.clone()),
       )
@@ -453,6 +475,8 @@ async fn shared_cache_large_body_uses_retrievable_chunks() {
       request_headers: &headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     })
     .await
   {
@@ -503,6 +527,8 @@ async fn shared_cache_streaming_disk_fill_writes_chunked_l2_entry() {
       request_headers: &headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     })
     .await
   {
@@ -545,6 +571,8 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body_len(), body.len());
@@ -566,6 +594,8 @@ async fn shared_cache_missing_streaming_chunk_is_safe_miss_without_losing_l1() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .await
       .is_none(),
@@ -602,6 +632,8 @@ async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -623,6 +655,8 @@ async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   assert!(second.lookup_async(other_ctx).await.is_none());
 
@@ -638,6 +672,8 @@ async fn shared_cache_requires_exact_uri_when_cache_key_collides() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   match second.lookup_async(secret_ctx).await {
     Some(CacheLookup::Fresh(entry)) => {
@@ -703,6 +739,8 @@ async fn stream_disk_fill(
       request_headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     },
     StatusCode::OK,
     &response_headers,
@@ -741,6 +779,8 @@ async fn wait_for_fresh(
         request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       }),
       Some(CacheLookup::Fresh(_))
     ) {

@@ -71,6 +71,8 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
           request_headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
       ),
@@ -94,6 +96,8 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
       request_headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     }) {
       Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body.as_ref(), expected),
       other => panic!("expected indexed cache hit, got {other:?}"),
@@ -118,6 +122,8 @@ fn indexed_lookup_preserves_vary_variants_and_purge() {
         request_headers: &english_request,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
@@ -159,6 +165,8 @@ fn vary_variant_count_updates_after_replace_and_purge() {
           request_headers: &first_headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
       ),
@@ -179,6 +187,8 @@ fn vary_variant_count_updates_after_replace_and_purge() {
         request_headers: &second_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -207,6 +217,8 @@ fn vary_variant_count_updates_after_replace_and_purge() {
         request_headers: &second_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"b")),
     ),
@@ -253,6 +265,8 @@ fn vary_variant_count_updates_after_eviction() {
         request_headers: &first_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -276,6 +290,8 @@ fn vary_variant_count_updates_after_eviction() {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -299,6 +315,8 @@ fn vary_variant_count_updates_after_eviction() {
         request_headers: &first_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
@@ -316,6 +334,8 @@ fn vary_variant_count_updates_after_eviction() {
         request_headers: &second_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -357,6 +377,8 @@ fn response_head_decision_rejects_uncacheable_or_unadmitted_heads() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let mut no_store = HeaderMap::new();
   no_store.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));

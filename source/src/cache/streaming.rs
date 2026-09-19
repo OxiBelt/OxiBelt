@@ -384,6 +384,7 @@ impl ResponseCache {
       vary: prepared.metadata.vary,
       tags,
       query_target_epoch: prepared.query_generation.as_ref().map(|bound| bound.value),
+      dictionary_identity: prepared.dictionary_identity,
       size,
     };
     let (shared_entry, external_entry) = {

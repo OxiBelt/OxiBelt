@@ -122,6 +122,8 @@ fn query_requires_exact_method_and_complete_identity() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
@@ -139,6 +141,8 @@ fn query_requires_exact_method_and_complete_identity() {
         request_headers: &headers,
         query_identity: Some(&identity),
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
@@ -272,6 +276,8 @@ fn query_origin_preconditions_bypass_cache_and_fill_lock() {
     request_headers: &headers,
     query_identity: Some(&identity),
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   assert!(cache.lookup(ctx.clone()).is_none());
   assert!(cache.begin_fill(ctx).is_none());
@@ -323,6 +329,8 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
         request_headers: &headers,
         query_identity: Some(&identity),
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -346,6 +354,8 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"get"))
     ),
@@ -368,6 +378,8 @@ fn query_entry_is_invalidated_without_touching_get_at_same_target() {
       request_headers: &headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     }),
     Some(CacheLookup::Fresh(_))
   ));
@@ -405,6 +417,8 @@ fn absent_query_target_does_not_examine_unrelated_cache_entries() {
           request_headers: &headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(
           StatusCode::OK,
@@ -446,6 +460,8 @@ async fn automatic_query_invalidation_returns_after_fencing_and_reclaims_in_back
         request_headers: &headers,
         query_identity: Some(&identity),
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -484,6 +500,8 @@ async fn automatic_query_invalidation_returns_after_fencing_and_reclaims_in_back
         request_headers: &headers,
         query_identity: Some(&fresh_identity),
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none(),
     "epoch fencing must make the stale entry unreachable before cleanup completes",
@@ -519,6 +537,8 @@ async fn shared_query_epoch_rejects_a_delayed_replica_publish() {
     request_headers: &headers,
     query_identity: Some(&old_identity),
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   assert!(first.lookup_async(old_ctx.clone()).await.is_none());
   let mut response_headers = HeaderMap::new();
@@ -536,6 +556,8 @@ async fn shared_query_epoch_rejects_a_delayed_replica_publish() {
       request_headers: &headers,
       query_identity: Some(&old_identity),
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     },
     StatusCode::OK,
     &response_headers,
@@ -604,6 +626,8 @@ fn query_invalidation_fences_active_fill_until_owner_finishes() {
     request_headers: &headers,
     query_identity: Some(&identity),
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let guard = match cache.begin_fill_decision(context).unwrap() {
     CacheFillDecision::Leader(guard) => guard,
@@ -627,6 +651,8 @@ fn query_invalidation_fences_active_fill_until_owner_finishes() {
         request_headers: &headers,
         query_identity: Some(&identity),
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       StatusCode::OK,
       &HeaderMap::new(),
@@ -674,6 +700,8 @@ fn failed_query_invalidation_bypasses_only_that_query_target() {
         request_headers: &headers,
         query_identity: Some(&identity),
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
@@ -728,6 +756,8 @@ fn query_disk_epoch_survives_invalidation_and_restart() {
         no_vary_search: None,
         proxy_protocol_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
         policy_name: Some("default"),
         scheme: "https",
         host: "example.test",
@@ -748,6 +778,8 @@ fn query_disk_epoch_survives_invalidation_and_restart() {
     no_vary_search: None,
     proxy_protocol_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
     policy_name: Some("default"),
     scheme: "https",
     host: "example.test",

@@ -18,6 +18,8 @@ use http::{Method, Uri};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::compression_dictionary::codec::DictionaryCoding;
+use crate::compression_dictionary::fields::DictionaryHash;
 use crate::config::{UploadIdentityKind, UploadProfileConfig, UploadStoreConfig, UploadStoreKind};
 
 pub use local::LocalUploadStore;
@@ -66,6 +68,42 @@ pub struct UploadCreate {
   /// Pre-filtered end-to-end request metadata for a one-shot upstream dispatch.
   pub safe_headers: Value,
   pub declared_total: Option<u64>,
+  /// Immutable RFC 9842 session binding, selected before any `104` response.
+  /// `None` retains ordinary identity-content managed-upload semantics.
+  pub dictionary: Option<UploadDictionaryPin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct UploadDictionaryPin {
+  pub coding: UploadDictionaryCoding,
+  pub profile: String,
+  pub dictionary: String,
+  pub hash: DictionaryHash,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadDictionaryCoding {
+  Dcb,
+  Dcz,
+}
+
+impl From<DictionaryCoding> for UploadDictionaryCoding {
+  fn from(value: DictionaryCoding) -> Self {
+    match value {
+      DictionaryCoding::Dcb => Self::Dcb,
+      DictionaryCoding::Dcz => Self::Dcz,
+    }
+  }
+}
+
+impl From<UploadDictionaryCoding> for DictionaryCoding {
+  fn from(value: UploadDictionaryCoding) -> Self {
+    match value {
+      UploadDictionaryCoding::Dcb => Self::Dcb,
+      UploadDictionaryCoding::Dcz => Self::Dcz,
+    }
+  }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -73,6 +111,10 @@ pub struct UploadCreate {
 pub enum UploadState {
   Active,
   Completing,
+  /// A compressed session has a durable completion fence while its encoded
+  /// parts are decoded and the complete decoded representation is inspected.
+  Validating,
+  ValidationFailed,
   Ready,
   Dispatching,
   Complete,
@@ -132,6 +174,7 @@ pub struct UploadRequestMetadata {
   pub method: Method,
   pub uri: Uri,
   pub safe_headers: Value,
+  pub dictionary: Option<UploadDictionaryPin>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -237,6 +280,36 @@ impl UploadStore {
     }
   }
 
+  /// Commits an RFC 9842 encoded part.  Its bytes are deliberately not
+  /// represented as WAF evidence: the complete decoded representation is
+  /// inspected under the validation fence at completion time.
+  pub async fn commit_encoded_part(
+    &self,
+    reservation: &AppendReservation,
+    bytes: u64,
+    sha256: String,
+    body: UploadByteStream,
+  ) -> anyhow::Result<UploadStatus> {
+    if bytes == 0 || bytes > reservation.length || !is_sha256_hex(&sha256) {
+      bail!("managed upload encoded part does not match reserved part");
+    }
+    // Backends still independently hash the stream and compare this durable
+    // staging evidence; it is not a WAF acceptance proof.
+    let staged = InspectedPart { bytes, sha256 };
+    match self {
+      Self::Local(store) => {
+        store
+          .commit_fully_inspected_part(reservation, &staged, body)
+          .await
+      }
+      Self::PostgresS3(store) => {
+        store
+          .commit_fully_inspected_part(reservation, &staged, body)
+          .await
+      }
+    }
+  }
+
   pub async fn abort_append(&self, reservation: &AppendReservation) -> anyhow::Result<()> {
     match self {
       Self::Local(store) => store.abort_append(reservation).await,
@@ -310,6 +383,51 @@ impl UploadStore {
     match self {
       Self::Local(store) => store.publish_object(id, owner, binding).await,
       Self::PostgresS3(store) => store.publish_object(id, owner, binding).await,
+    }
+  }
+
+  /// Publishes the already-decoded, fully inspected representation retained by
+  /// a `Validating` RFC 9842 session. The encoded chunks stay immutable for
+  /// audit/recovery; delivery always uses this distinct identity object.
+  pub async fn publish_decoded_object(
+    &self,
+    id: &str,
+    owner: &UploadOwner,
+    binding: &Value,
+    bytes: u64,
+    sha256: &str,
+    body: UploadByteStream,
+  ) -> anyhow::Result<UploadStatus> {
+    if !is_sha256_hex(sha256) {
+      bail!("managed upload decoded object digest is invalid");
+    }
+    match self {
+      Self::Local(store) => {
+        store
+          .publish_decoded_object(id, owner, binding, bytes, sha256, body)
+          .await
+      }
+      Self::PostgresS3(store) => {
+        store
+          .publish_decoded_object(id, owner, binding, bytes, sha256, body)
+          .await
+      }
+    }
+  }
+
+  /// Makes a compressed session terminal after its pinned dictionary cannot be
+  /// recovered, its prelude does not match, decoding exceeds a budget, or the
+  /// assembled decoded representation fails inspection.  It intentionally
+  /// never resets the offset or reopens delivery.
+  pub async fn fail_validation(
+    &self,
+    id: &str,
+    owner: &UploadOwner,
+    binding: &Value,
+  ) -> anyhow::Result<UploadStatus> {
+    match self {
+      Self::Local(store) => store.fail_validation(id, owner, binding).await,
+      Self::PostgresS3(store) => store.fail_validation(id, owner, binding).await,
     }
   }
 

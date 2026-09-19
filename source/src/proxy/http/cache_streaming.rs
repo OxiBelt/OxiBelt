@@ -71,6 +71,14 @@ pub(super) fn maybe_stream_cache_response(
   expected_body_len: usize,
   cache_fill_guard: Option<CacheFillGuard>,
 ) -> Result<Response<ProxyBody>, Box<(http::response::Parts, ProxyBody)>> {
+  let dictionary = parts
+    .extensions
+    .get::<super::dictionary::upstream::Negotiation>()
+    .cloned();
+  let dictionary_identity = dictionary
+    .as_ref()
+    .and_then(|value| value.representation_identity().ok());
+  let origin_vary_headers = dictionary.as_ref().map(|value| &value.request_headers);
   let stream_started = Instant::now();
   match state
     .cache
@@ -114,6 +122,8 @@ pub(super) fn maybe_stream_cache_response(
               certificate_identity,
               proxy_protocol_identity,
               query_identity,
+              dictionary_identity.as_ref(),
+              origin_vary_headers,
             ),
             crate::cache::CacheFillSuppressionReason::StoreFailed,
           );
@@ -140,6 +150,8 @@ pub(super) fn maybe_stream_cache_response(
               certificate_identity,
               proxy_protocol_identity,
               query_identity,
+              dictionary_identity.as_ref(),
+              origin_vary_headers,
             ),
             crate::cache::CacheFillSuppressionReason::AdmissionRejected,
           );
@@ -164,6 +176,8 @@ pub(super) fn maybe_stream_cache_response(
             certificate_identity,
             proxy_protocol_identity,
             query_identity,
+            dictionary_identity.as_ref(),
+            origin_vary_headers,
           ));
           (
             CacheReason::NotCacheable,
@@ -311,8 +325,12 @@ fn insert_ctx<'a>(
   certificate_identity: Option<&'a crate::cache::CacheCertificateIdentity>,
   proxy_protocol_identity: Option<&'a crate::cache::CacheProxyProtocolIdentity>,
   query_identity: Option<&'a crate::cache::CacheQueryIdentity>,
+  dictionary_identity: Option<&'a crate::cache::CacheDictionaryIdentity>,
+  origin_vary_headers: Option<&'a HeaderMap>,
 ) -> CacheInsertContext<'a> {
   CacheInsertContext {
+    dictionary_identity,
+    origin_vary_headers,
     group_request: None,
     no_vary_search: None,
     query_identity,

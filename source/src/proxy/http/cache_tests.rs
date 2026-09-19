@@ -127,6 +127,29 @@ fn error_body() -> super::body::ProxyBody {
   ErrorBody.boxed()
 }
 
+struct UnknownLengthBody {
+  frame: Option<Frame<bytes::Bytes>>,
+}
+
+impl Body for UnknownLengthBody {
+  type Data = bytes::Bytes;
+  type Error = super::body::BoxError;
+
+  fn poll_frame(
+    mut self: Pin<&mut Self>,
+    _cx: &mut Context<'_>,
+  ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+    Poll::Ready(self.frame.take().map(Ok))
+  }
+}
+
+fn unknown_length_body(bytes: bytes::Bytes) -> super::body::ProxyBody {
+  UnknownLengthBody {
+    frame: Some(Frame::data(bytes)),
+  }
+  .boxed()
+}
+
 #[tokio::test]
 async fn cache_fill_store_permission_false_skips_body_collection() {
   let temp_dir = common::TempDir::new("cache-fill-store-not-allowed");
@@ -298,6 +321,8 @@ min_hits = 2
         uri: &uri,
         request_headers: &request_headers,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_some()
   );
@@ -481,9 +506,97 @@ stream_large_objects = true
         uri: &uri,
         request_headers: &request_headers,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
+}
+
+#[tokio::test]
+async fn cache_fill_collects_bounded_decoded_body_without_content_length() {
+  let temp_dir = common::TempDir::new("cache-fill-decoded-unknown-length");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "cache-fill-decoded-unknown-length");
+  let raw = format!(
+    r#"
+{}
+
+[proxy.buffering]
+max_memory_body_bytes = 64
+
+[cache]
+enabled = true
+store = "memory"
+max_size_bytes = 1024
+default_ttl_seconds = 60
+cache_methods = ["GET"]
+respect_cache_control = true
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let state = AppSnapshot::new(parse_config(&raw))
+    .await
+    .expect("snapshot should initialize");
+  let method = Method::GET;
+  let uri: http::Uri = "/decoded?item=1".parse().expect("URI should parse");
+  let request_headers = HeaderMap::new();
+  let body = bytes::Bytes::from_static(b"decoded identity response");
+  let mut response = Response::new(unknown_length_body(body.clone()));
+  response.headers_mut().insert(
+    CACHE_CONTROL,
+    HeaderValue::from_static("public, max-age=60"),
+  );
+  response
+    .headers_mut()
+    .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+  response
+    .extensions_mut()
+    .insert(super::dictionary::DecodedUpstreamResponse {
+      max_decoded_bytes: 64,
+    });
+
+  let response = maybe_cache_response(
+    response,
+    &state,
+    Some("default"),
+    "https",
+    "example.com",
+    &method,
+    &uri,
+    &request_headers,
+    None,
+  )
+  .await;
+
+  assert_cache_status(&response, "miss", "stored");
+  assert_eq!(
+    response
+      .into_body()
+      .collect()
+      .await
+      .expect("response body should collect")
+      .to_bytes(),
+    body
+  );
+  assert!(matches!(
+    state.cache.lookup(crate::cache::CacheLookupContext {
+      group_request: None,
+      no_vary_search: None,
+      query_identity: None,
+      proxy_protocol_identity: None,
+      policy_name: Some("default"),
+      scheme: "https",
+      host: "example.com",
+      method: &method,
+      uri: &uri,
+      request_headers: &request_headers,
+      certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
+    }),
+    Some(crate::cache::CacheLookup::Fresh(_))
+  ));
 }
 
 #[tokio::test]
@@ -577,6 +690,8 @@ stream_large_objects = true
     uri: &uri,
     request_headers: &request_headers,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(crate::cache::CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, body);
@@ -760,6 +875,8 @@ respect_cache_control = true
     uri: &uri,
     request_headers: &request_headers,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(crate::cache::CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, body);

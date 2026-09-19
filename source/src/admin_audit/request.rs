@@ -23,6 +23,9 @@ pub(super) fn describe_request(method: &Method, path: &str) -> AdminAuditDescrip
 }
 
 fn service_for_path(path: &str) -> Option<&'static str> {
+  if path.starts_with("/admin/v1/compression-dictionaries") {
+    return Some("compression-dictionaries");
+  }
   if path.starts_with("/cache/purge") || path.starts_with("/admin/v1/cache/") {
     Some("cache")
   } else if path.starts_with("/admin/v1/config/")

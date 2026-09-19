@@ -25,6 +25,7 @@ pub struct Config {
   pub connection_limits: Vec<ConnectionLimitConfig>,
   pub client_identity: ClientIdentityConfig,
   pub compression: CompressionConfig,
+  pub compression_dictionary: CompressionDictionaryConfig,
   pub cache: CacheConfig,
   pub ipm: IpmConfig,
   pub admin: AdminConfig,
@@ -84,6 +85,8 @@ struct RawConfig {
   client_identity: ClientIdentityConfig,
   #[serde(default)]
   compression: CompressionConfig,
+  #[serde(default)]
+  compression_dictionary: CompressionDictionaryConfig,
   #[serde(default)]
   cache: CacheConfig,
   #[serde(default)]
@@ -163,6 +166,7 @@ impl TryFrom<RawConfig> for Config {
       connection_limits: raw.connection_limits,
       client_identity: raw.client_identity,
       compression: raw.compression,
+      compression_dictionary: raw.compression_dictionary,
       cache: raw.cache,
       ipm: raw.ipm,
       admin: raw.admin,

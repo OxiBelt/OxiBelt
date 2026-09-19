@@ -387,6 +387,14 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   mut cache_fill_guard: Option<crate::cache::CacheFillGuard>,
   applied_route_security_headers: Option<&AppliedRouteSecurityHeaders>,
 ) -> Response<ProxyBody> {
+  let dictionary = response
+    .extensions()
+    .get::<super::dictionary::upstream::Negotiation>()
+    .cloned();
+  let dictionary_identity = dictionary
+    .as_ref()
+    .and_then(|value| value.representation_identity().ok());
+  let origin_vary_headers = dictionary.as_ref().map(|value| &value.request_headers);
   let group_request = response
     .extensions()
     .get::<crate::cache::CacheGroupRequest>()
@@ -420,6 +428,10 @@ pub(super) async fn maybe_cache_response_with_store_permission(
     return response;
   }
   let (mut parts, mut body) = response.into_parts();
+  let decoded_body_max = parts
+    .extensions
+    .get::<super::dictionary::DecodedUpstreamResponse>()
+    .map(|decoded| decoded.max_decoded_bytes);
   super::status_headers::restore_received_headers(&mut parts);
   cache_status::strip_headers(&mut parts.headers);
   let mut cache_headers = parts.headers.clone();
@@ -448,6 +460,8 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   }
   let content_length = cache_streaming::exact_response_content_length(&cache_headers);
   let insert_ctx = || crate::cache::CacheInsertContext {
+    dictionary_identity: dictionary_identity.as_ref(),
+    origin_vary_headers,
     group_request: group_request.as_ref(),
     no_vary_search,
     query_identity: query_identity.as_ref(),
@@ -529,7 +543,14 @@ pub(super) async fn maybe_cache_response_with_store_permission(
   let body_size_hint = body.size_hint();
   let known_body_len =
     content_length.or_else(|| cache_streaming::exact_body_size_hint_len(&body_size_hint));
-  if known_body_len.is_none_or(|len| len > collect_limit) {
+  // A dictionary decoder removes the encoded Content-Length, because it does
+  // not describe the identity body.  It does, however, enforce its own output
+  // ceiling.  Collect that response only when the decoder's ceiling fits the
+  // cache collection budget; an arbitrary unknown-length origin stream keeps
+  // the established streaming/too-large path below.
+  let bounded_decoded_body = known_body_len.is_none()
+    && decoded_body_max.is_some_and(|max_decoded_bytes| max_decoded_bytes <= collect_limit);
+  if !bounded_decoded_body && known_body_len.is_none_or(|len| len > collect_limit) {
     if let Some(expected_body_len) = known_body_len {
       match cache_streaming::maybe_stream_cache_response(
         state,

@@ -117,6 +117,7 @@ pub struct AppSnapshot {
   pub turn_pools: Arc<TurnPoolState>,
   pub cache: Arc<ResponseCache>,
   pub(crate) compression: Arc<CompressionState>,
+  pub(crate) compression_dictionary: crate::compression_dictionary::runtime::DictionaryRuntime,
   pub(crate) waf_body_coding: Arc<WafBodyCodingState>,
   pub(crate) static_files: Arc<StaticFilesRuntime>,
   pub(crate) uploads: UploadRuntime,
@@ -518,6 +519,12 @@ impl AppSnapshot {
       .context("failed to build client identity runtime")?;
     let external_auth = ExternalAuthRuntime::new(&config, control_http.clone(), metrics.clone())
       .context("failed to build external auth runtime")?;
+    let compression_dictionary = crate::compression_dictionary::runtime::DictionaryRuntime::new(
+      &config,
+      previous.map(|snapshot| &snapshot.compression_dictionary),
+      shared_state.clone(),
+    )
+    .context("failed to build compression dictionary runtime")?;
     let uploads = UploadRuntime::new(&config, previous.map(|snapshot| &snapshot.uploads))
       .await
       .context("failed to build managed upload runtime")?;
@@ -778,6 +785,7 @@ impl AppSnapshot {
       waf_body_coding,
       static_files: Arc::new(static_files),
       uploads,
+      compression_dictionary,
       certificate_transparency,
       metrics,
       runtime_health,
@@ -943,6 +951,12 @@ impl AppSnapshot {
       .context("failed to build client identity runtime")?;
     let external_auth = ExternalAuthRuntime::new(&config, control_http.clone(), metrics.clone())
       .context("failed to build external auth runtime")?;
+    let compression_dictionary = crate::compression_dictionary::runtime::DictionaryRuntime::new(
+      &config,
+      Some(&previous.compression_dictionary),
+      previous.shared_state.clone(),
+    )
+    .context("failed to build compression dictionary runtime")?;
     let uploads = UploadRuntime::new(&config, Some(&previous.uploads))
       .await
       .context("failed to build managed upload runtime")?;
@@ -1033,6 +1047,7 @@ impl AppSnapshot {
       waf_body_coding,
       static_files: Arc::new(static_files),
       uploads,
+      compression_dictionary,
       certificate_transparency: previous.certificate_transparency.clone(),
       metrics,
       runtime_health,

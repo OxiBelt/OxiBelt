@@ -15,9 +15,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::{
-  BufferingMode, CacheStore, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode, Config,
-  CrliteConfig, CrliteManagedStorage, CrliteMode, DownstreamCtLogListMode, DownstreamCtMode,
-  RedisTrustStore, SharedStateBackendKind,
+  BufferingMode, CacheStore, ClientIdentityAsnManagedStorage, ClientIdentityAsnMode,
+  CompressionDictionaryStoreKind, Config, CrliteConfig, CrliteManagedStorage, CrliteMode,
+  DownstreamCtLogListMode, DownstreamCtMode, RedisTrustStore, SharedStateBackendKind,
 };
 use crate::hardening::{
   LandlockFilesystemRight, LandlockManifestProjection, LandlockManifestRule,
@@ -95,6 +95,7 @@ pub enum FilesystemAccessPurpose {
   RuntimeData,
   CertificateTransparency,
   ManagedUpload,
+  CompressionDictionary,
 }
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -630,6 +631,7 @@ impl ManifestBuilder {
     builder.collect_trust_and_credentials(config)?;
     builder.collect_certificate_transparency(config)?;
     builder.collect_cache_and_buffering(config)?;
+    builder.collect_compression_dictionaries(config)?;
     builder.collect_managed_uploads(config)?;
     builder.collect_crlite(config)?;
     builder.collect_client_identity(config)?;
@@ -1116,6 +1118,43 @@ impl ManifestBuilder {
         path,
         FilesystemAccessPurpose::RequestBuffer,
         "proxy.buffering.temp_dir",
+        false,
+      )?;
+    }
+    Ok(())
+  }
+
+  fn collect_compression_dictionaries(&mut self, config: &Config) -> anyhow::Result<()> {
+    let dictionaries = &config.compression_dictionary;
+    if !dictionaries.enabled {
+      return Ok(());
+    }
+
+    for (index, dictionary) in dictionaries.dictionaries.iter().enumerate() {
+      self.add_read_file(
+        &dictionary.path,
+        FilesystemAccessPurpose::CompressionDictionary,
+        format!("compression_dictionary.dictionaries[{index}].path"),
+        true,
+      )?;
+    }
+
+    for (index, store) in dictionaries.stores.iter().enumerate() {
+      if store.kind != CompressionDictionaryStoreKind::Disk
+        || !dictionaries
+          .profiles
+          .iter()
+          .any(|profile| profile.learn && profile.store == store.name)
+      {
+        continue;
+      }
+      let disk = store.disk.as_ref().with_context(|| {
+        format!("compression_dictionary.stores[{index}].disk is required for a disk store")
+      })?;
+      self.add_write_directory(
+        &disk.root,
+        FilesystemAccessPurpose::CompressionDictionary,
+        format!("compression_dictionary.stores[{index}].disk.root"),
         false,
       )?;
     }
@@ -2079,6 +2118,11 @@ mod tests {
   use std::fs;
   use std::os::unix::fs::symlink;
 
+  use crate::config::{
+    CompressionDictionaryDiskStoreConfig, CompressionDictionaryProfileConfig,
+    CompressionDictionaryStoreConfig, DictionaryConfig,
+  };
+
   use super::*;
 
   fn entry(path: &Path, access: &[FilesystemAccessMode]) -> FilesystemAccessEntry {
@@ -2395,6 +2439,78 @@ location_template = "/fixture"
     assert_eq!(
       snapshot_sources(&combined_manifest, &combined_sources),
       expected_combined
+    );
+  }
+
+  #[test]
+  fn compression_dictionary_manifest_reads_immutable_files_and_writes_learning_roots() {
+    let (temp, mut config) = resolved_config_fixture();
+    let dictionary_path = temp.path().join("dictionary.bin");
+    let store_root = temp.path().join("learned-dictionaries");
+    fs::write(&dictionary_path, b"immutable dictionary").expect("write dictionary");
+    fs::create_dir(&store_root).expect("create learned dictionary root");
+
+    config.compression_dictionary.enabled = true;
+    config.compression_dictionary.dictionaries = vec![DictionaryConfig {
+      name: "site".to_owned(),
+      path: dictionary_path
+        .canonicalize()
+        .expect("canonical dictionary"),
+      sha256: "00".repeat(32),
+      public: false,
+      url: url::Url::parse("https://fixture.oxibelt.test/dictionary.bin").expect("dictionary URL"),
+    }];
+    config.compression_dictionary.stores = vec![CompressionDictionaryStoreConfig {
+      name: "disk".to_owned(),
+      kind: CompressionDictionaryStoreKind::Disk,
+      quota_bytes: 1_024,
+      disk: Some(CompressionDictionaryDiskStoreConfig {
+        root: store_root.clone(),
+      }),
+      shared: None,
+      external: None,
+    }];
+    config.compression_dictionary.profiles = vec![CompressionDictionaryProfileConfig {
+      name: "learn".to_owned(),
+      downstream: false,
+      upstream: false,
+      learn: true,
+      request_decode: false,
+      prefetch: None,
+      advertise: None,
+      dictionaries: Vec::new(),
+      store: "disk".to_owned(),
+      max_dictionary_bytes: 1_024,
+      max_dictionaries: 1,
+      max_total_dictionary_bytes: 1_024,
+      max_pending_dictionary_bytes: 1_024,
+      max_codec_concurrency: 1,
+      max_codec_memory_bytes: crate::compression_dictionary::codec::maximum_working_set_bytes(),
+      max_decoded_size_bytes: 1_024,
+      max_expansion_ratio: 1,
+      codec_timeout_ms: 1,
+    }];
+
+    let manifest = FilesystemAccessManifest::from_config(&config).expect("dictionary manifest");
+    let mut expected = rotated_read_snapshot(
+      "compression_dictionary.dictionaries[0].path",
+      FilesystemAccessPurpose::CompressionDictionary,
+    );
+    expected.push(writable_directory_snapshot(
+      "compression_dictionary.stores[0].disk.root",
+      FilesystemAccessPurpose::CompressionDictionary,
+      false,
+    ));
+    expected.sort();
+    assert_eq!(
+      snapshot_sources(
+        &manifest,
+        &[
+          "compression_dictionary.dictionaries[0].path",
+          "compression_dictionary.stores[0].disk.root",
+        ],
+      ),
+      expected
     );
   }
 

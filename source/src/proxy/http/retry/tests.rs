@@ -511,38 +511,23 @@ fn pooled_transport_adapter_keeps_hyper_and_h3_attempts_separate() {
 }
 
 #[test]
-fn pool_reselection_restores_query_cache_view_validators() {
+fn pool_reselection_clears_revalidation_validators() {
   use http::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH};
 
-  let mut cache_view = http::HeaderMap::new();
-  cache_view.append(IF_NONE_MATCH, "\"client-a\"".parse().expect("validator"));
-  cache_view.append(IF_NONE_MATCH, "\"client-b\"".parse().expect("validator"));
-  cache_view.insert(
-    IF_MODIFIED_SINCE,
-    "Mon, 01 Jan 2024 00:00:00 GMT".parse().expect("validator"),
-  );
-  let mut retry_headers = cache_view.clone();
+  let mut retry_headers = http::HeaderMap::new();
   retry_headers.insert(
     IF_NONE_MATCH,
     "\"cache-injected\"".parse().expect("validator"),
   );
-  retry_headers.remove(IF_MODIFIED_SINCE);
   retry_headers.insert(
     IF_MODIFIED_SINCE,
     "Tue, 02 Jan 2024 00:00:00 GMT".parse().expect("validator"),
   );
 
-  restore_query_cache_view_validators(&mut retry_headers, &cache_view);
+  clear_revalidation_validators(&mut retry_headers);
 
-  assert_eq!(retry_headers.get_all(IF_NONE_MATCH).iter().count(), 2);
-  assert_eq!(
-    retry_headers.get_all(IF_NONE_MATCH).iter().next().unwrap(),
-    "\"client-a\""
-  );
-  assert_eq!(
-    retry_headers.get(IF_MODIFIED_SINCE).expect("restored date"),
-    "Mon, 01 Jan 2024 00:00:00 GMT"
-  );
+  assert!(retry_headers.get_all(IF_NONE_MATCH).iter().next().is_none());
+  assert!(retry_headers.get(IF_MODIFIED_SINCE).is_none());
 }
 
 #[tokio::test]

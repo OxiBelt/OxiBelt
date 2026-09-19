@@ -28,8 +28,10 @@ source: IPM, external authentication, or downstream mTLS. The runtime obtains
 fresh owner credentials for every operation and never persists bearer tokens
 or cookies.
 
-The runtime commits an offset only after the whole part passes configured WAF
-inspection and durable storage. An interrupted or rejected part leaves the
+For identity uploads, the runtime commits an offset only after the whole part
+passes configured WAF inspection and durable storage. Opt-in dictionary uploads
+acknowledge bounded, durably staged encoded bytes and inspect the complete decoded
+representation before publication. An interrupted or rejected part leaves the
 previous offset for retransmission. It enforces finite session, byte, storage,
 part-count, concurrent-session, concurrent-part, and TTL limits. Completion
 rechecks the same owner; an uncertain upstream delivery is terminal
@@ -90,9 +92,15 @@ or WAF can delay upstream discovery. Encoded relay bodies retain their original
 octets; an inspection policy that would require changing those octets is
 rejected instead. Ordinary, non-resumable compression behavior is unchanged.
 
-Managed uploads accept identity content encoding only (`415` otherwise).
+Managed uploads accept identity content encoding by default (`415` otherwise).
+An explicit public dictionary pin enables `dcb` or `dcz` as described in
+[Compression Dictionary Transport](CompressionDictionary.md). Such uploads keep
+encoded offsets during staging; final decoding and whole-body WAF inspection
+must succeed before a decoded object becomes available for delivery.
 Every wire request retains the ordinary route body-size and timeout limits;
-`max_upload_bytes` is an additional assembled-representation limit. If WAF
+`max_upload_bytes` is an additional assembled-representation limit and counts
+encoded bytes for dictionary uploads. Their decoded representation also obeys
+the dictionary profile's decoded-size limit and the upload staging budget. If WAF
 needs the body, `inspection_bytes` must cover the entire part and entire
 assembled representation. Exceeding it returns `413`; a prefix inspection
 never authorizes publication. Configure it to cover the intended assembled
@@ -104,8 +112,10 @@ Creation uses an ordinary `POST`, `PUT`, or `PATCH` target with
 `HEAD`/`GET` of that resource retrieve a durable offset; `PATCH` requires
 `Content-Type: application/partial-upload`, `Upload-Offset`, and
 `Upload-Complete`; `DELETE` cancels it. `GET` of the resource's `/status` suffix
-returns an authenticated status document without storage keys. Incomplete or
-uninspected parts do not advance the acknowledged offset. A lookup fences an
+returns an authenticated status document without storage keys. Incomplete parts
+do not advance the acknowledged offset. Identity parts also require inspection
+before acknowledgement; dictionary uploads defer decoded inspection until
+completion. A lookup fences an
 older pending append, so the returned offset can be used by the next request.
 
 The profile fixes the managed destination. A route's ordinary backend is only

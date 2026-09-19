@@ -235,6 +235,7 @@ impl ResponseCache {
       .any(|item| item.eq_ignore_ascii_case(method.as_str()))
   }
 
+  #[cfg(test)]
   #[allow(clippy::too_many_arguments)]
   pub(super) fn operation_context(
     &self,
@@ -246,6 +247,36 @@ impl ResponseCache {
     request_headers: &HeaderMap,
     query_identity: Option<&CacheQueryIdentity>,
     certificate_identity: Option<&CacheCertificateIdentity>,
+    proxy_protocol_identity: Option<&CacheProxyProtocolIdentity>,
+    group_request: Option<&CacheGroupRequest>,
+  ) -> Option<CacheOperationContext> {
+    self.operation_context_with_dictionary(
+      policy_name,
+      scheme,
+      host,
+      method,
+      uri,
+      request_headers,
+      query_identity,
+      certificate_identity,
+      None,
+      proxy_protocol_identity,
+      group_request,
+    )
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub(super) fn operation_context_with_dictionary(
+    &self,
+    policy_name: Option<&str>,
+    scheme: &str,
+    host: &str,
+    method: &Method,
+    uri: &Uri,
+    request_headers: &HeaderMap,
+    query_identity: Option<&CacheQueryIdentity>,
+    certificate_identity: Option<&CacheCertificateIdentity>,
+    dictionary_identity: Option<&CacheDictionaryIdentity>,
     proxy_protocol_identity: Option<&CacheProxyProtocolIdentity>,
     group_request: Option<&CacheGroupRequest>,
   ) -> Option<CacheOperationContext> {
@@ -266,6 +297,10 @@ impl ResponseCache {
       (true, None) => return None,
       (false, _) => base_key,
     };
+    // Keep this outermost so every persistence backend can recognize that a
+    // record requires dictionary-representation provenance, including QUERY
+    // and cache-group keys whose own encoding is opaque.
+    let base_key = dictionary_partitioned_base_key(base_key, dictionary_identity);
     let uri = uri.to_string();
     let query_target = is_query.then(|| {
       CacheQueryInvalidationTarget::new(&policy.name, scheme, host, &uri, Some(&partition))
@@ -290,6 +325,7 @@ impl ResponseCache {
       host: host.to_string(),
       uri,
       query_target,
+      dictionary_identity: dictionary_identity.cloned(),
     })
   }
 
@@ -306,7 +342,7 @@ impl ResponseCache {
       return None;
     }
     let request_headers = cache_view_headers(&ctx);
-    let operation = self.operation_context(
+    let operation = self.operation_context_with_dictionary(
       ctx.policy_name,
       ctx.scheme,
       ctx.host,
@@ -315,6 +351,7 @@ impl ResponseCache {
       request_headers,
       ctx.query_identity,
       ctx.certificate_identity,
+      ctx.dictionary_identity,
       ctx.proxy_protocol_identity,
       ctx.group_request,
     )?;
@@ -334,7 +371,8 @@ impl ResponseCache {
           candidates.into_iter().find(|key| {
             inner.entries.get(key).is_some_and(|entry| {
               self.group_entry_current_local(&entry.policy, entry.group_stamp.as_ref())
-                && vary_matches(&entry.vary, request_headers)
+                && entry.dictionary_identity.as_ref() == ctx.dictionary_identity
+                && vary_matches(&entry.vary, origin_vary_headers(&ctx))
                 && entry.no_vary_search.as_ref().is_none_or(|nvs| {
                   self.nvs_current_locked(&inner, &entry.policy, &entry.scheme, &entry.host, nvs)
                 })
@@ -503,7 +541,7 @@ impl ResponseCache {
     {
       return None;
     }
-    let operation = self.operation_context(
+    let operation = self.operation_context_with_dictionary(
       ctx.policy_name,
       ctx.scheme,
       ctx.host,
@@ -512,6 +550,7 @@ impl ResponseCache {
       cache_view_headers(&ctx),
       ctx.query_identity,
       ctx.certificate_identity,
+      ctx.dictionary_identity,
       ctx.proxy_protocol_identity,
       ctx.group_request,
     )?;
@@ -561,6 +600,8 @@ impl ResponseCache {
         request_headers: ctx.request_headers,
         query_identity: ctx.query_identity,
         certificate_identity: ctx.certificate_identity,
+        dictionary_identity: ctx.dictionary_identity,
+        origin_vary_headers: ctx.origin_vary_headers,
       },
       entry,
       false,
@@ -573,6 +614,12 @@ pub(super) fn cache_view_headers<'a>(ctx: &'a CacheLookupContext<'_>) -> &'a Hea
     .query_identity
     .map(CacheQueryIdentity::cache_view_headers)
     .unwrap_or(ctx.request_headers)
+}
+
+pub(in crate::cache) fn origin_vary_headers<'a>(ctx: &'a CacheLookupContext<'_>) -> &'a HeaderMap {
+  ctx
+    .origin_vary_headers
+    .unwrap_or_else(|| cache_view_headers(ctx))
 }
 
 pub(super) fn cache_request_bypassed(

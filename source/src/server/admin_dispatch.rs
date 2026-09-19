@@ -473,6 +473,17 @@ pub(super) async fn admin_response_inner(
     )
     .await;
   }
+  if path == "/admin/v1/compression-dictionaries"
+    || path == "/admin/v1/compression-dictionaries/purge"
+  {
+    return admin::dictionaries::response(
+      request,
+      snapshot.as_ref(),
+      &authorization,
+      path.ends_with("/purge"),
+    )
+    .await;
+  }
   if path == "/admin/v1/cache/key-explain" {
     return admin::cache_key_explain_response(request, snapshot.as_ref(), &authorization, &method)
       .await;

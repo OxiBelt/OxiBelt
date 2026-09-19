@@ -26,6 +26,8 @@ async fn wait_for_fresh_cache_entry(
         uri,
         request_headers,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
     {
       return entry;
@@ -365,6 +367,8 @@ stream_large_objects = true
         uri: &second_uri,
         request_headers: &request_headers,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );

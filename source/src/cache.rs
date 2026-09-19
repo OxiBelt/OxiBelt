@@ -16,7 +16,7 @@ use http::header::{
   IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, PRAGMA, VARY,
 };
 use http::{HeaderMap, Method, StatusCode, Uri};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
 
@@ -32,7 +32,7 @@ use crate::shared_state::SharedState;
 
 mod entry;
 mod external;
-mod external_handler;
+pub(crate) mod external_handler;
 mod file_clone;
 mod fill;
 mod groups;
@@ -84,6 +84,7 @@ pub(crate) const QUERY_IDENTITY_MAX_FIELDS: usize = 64;
 const MAX_CERTIFICATE_IDENTITY_HEADER_BYTES: usize = 128;
 const MAX_CERTIFICATE_IDENTITY_FORMAT_BYTES: usize = 64;
 const CERTIFICATE_FINGERPRINT_SHA256_BYTES: usize = 64;
+const DICTIONARY_IDENTITY_FINGERPRINT_SHA256_BYTES: usize = 64;
 /// Fixed Q1 invalidation buckets bound memory while conservatively coupling
 /// colliding targets (a miss/bypass is safe; a stale hit is not).
 pub(crate) const QUERY_EPOCH_BUCKETS: u16 = 256;
@@ -175,6 +176,96 @@ impl CacheCertificateIdentity {
   pub(crate) fn fingerprint_sha256(&self) -> Option<&str> {
     self.fingerprint_sha256.as_deref()
   }
+}
+
+/// Opaque upstream dictionary representation selection for one cache key.
+///
+/// Every component is a SHA-256 digest. This keeps dictionary URLs, IDs, and
+/// request header values out of cache metadata while ensuring an upstream
+/// dictionary representation can never share a response with `identity` or a
+/// different selected dictionary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CacheDictionaryIdentity {
+  upstream_scope_sha256: String,
+  selected_dictionary_sha256: Option<String>,
+  accept_encoding_sha256: String,
+}
+
+impl CacheDictionaryIdentity {
+  pub fn new(
+    upstream_scope: &[u8],
+    selected_dictionary_sha256: Option<&str>,
+    accept_encoding_headers: &HeaderMap,
+  ) -> anyhow::Result<Self> {
+    if upstream_scope.is_empty() || upstream_scope.len() > 16 * 1024 {
+      bail!("cache dictionary upstream scope is out of bounds");
+    }
+    let selected_dictionary_sha256 = selected_dictionary_sha256
+      .map(validate_dictionary_identity_digest)
+      .transpose()?;
+    Ok(Self {
+      upstream_scope_sha256: cache_dictionary_digest(b"scope", upstream_scope),
+      selected_dictionary_sha256,
+      accept_encoding_sha256: cache_dictionary_accept_encoding_digest(accept_encoding_headers),
+    })
+  }
+
+  pub(crate) fn upstream_scope_sha256(&self) -> &str {
+    &self.upstream_scope_sha256
+  }
+
+  pub(crate) fn selected_dictionary_sha256(&self) -> Option<&str> {
+    self.selected_dictionary_sha256.as_deref()
+  }
+
+  pub(crate) fn accept_encoding_sha256(&self) -> &str {
+    &self.accept_encoding_sha256
+  }
+
+  pub(crate) fn valid(&self) -> bool {
+    validate_dictionary_identity_digest(&self.upstream_scope_sha256).is_ok()
+      && validate_dictionary_identity_digest(&self.accept_encoding_sha256).is_ok()
+      && self
+        .selected_dictionary_sha256
+        .as_deref()
+        .is_none_or(|value| validate_dictionary_identity_digest(value).is_ok())
+  }
+}
+
+fn validate_dictionary_identity_digest(value: &str) -> anyhow::Result<String> {
+  if value.len() != DICTIONARY_IDENTITY_FINGERPRINT_SHA256_BYTES
+    || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+  {
+    bail!("cache dictionary identity must use a SHA-256 hex digest");
+  }
+  Ok(value.to_ascii_lowercase())
+}
+
+fn cache_dictionary_digest(domain: &[u8], value: &[u8]) -> String {
+  let mut material = Vec::with_capacity(domain.len() + value.len() + 32);
+  material.extend_from_slice(b"\0oxibelt-cache-dictionary-v1\0");
+  material.extend_from_slice(domain);
+  material.push(0);
+  material.extend_from_slice(value);
+  hex_digest(&crate::crypto::sha256(&material))
+}
+
+fn cache_dictionary_accept_encoding_digest(headers: &HeaderMap) -> String {
+  let mut material = Vec::new();
+  for value in headers.get_all(http::header::ACCEPT_ENCODING) {
+    material.extend_from_slice(value.as_bytes());
+    material.push(0);
+  }
+  cache_dictionary_digest(b"accept-encoding", &material)
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+  let mut output = String::with_capacity(bytes.len() * 2);
+  for byte in bytes {
+    use std::fmt::Write as _;
+    let _ = write!(output, "{byte:02x}");
+  }
+  output
 }
 
 #[cfg(feature = "fuzzing")]
@@ -289,6 +380,10 @@ pub struct CacheInsertContext<'a> {
   pub query_identity: Option<&'a CacheQueryIdentity>,
   /// `None` means client-certificate forwarding is off for this request.
   pub certificate_identity: Option<&'a CacheCertificateIdentity>,
+  /// Upstream dictionary representation selected after outbound negotiation.
+  pub dictionary_identity: Option<&'a CacheDictionaryIdentity>,
+  /// Headers actually presented to the origin for response Vary evaluation.
+  pub origin_vary_headers: Option<&'a HeaderMap>,
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +402,10 @@ pub struct CacheLookupContext<'a> {
   pub query_identity: Option<&'a CacheQueryIdentity>,
   /// `None` means client-certificate forwarding is off for this request.
   pub certificate_identity: Option<&'a CacheCertificateIdentity>,
+  /// Upstream dictionary representation selected after outbound negotiation.
+  pub dictionary_identity: Option<&'a CacheDictionaryIdentity>,
+  /// Headers actually presented to the origin for response Vary evaluation.
+  pub origin_vary_headers: Option<&'a HeaderMap>,
 }
 
 /// The target and representation of one side of a QUERY transformation.
@@ -549,6 +648,7 @@ pub(crate) struct CachePreparedInsert {
   fill_key: String,
   query_target: Option<CacheQueryInvalidationTarget>,
   query_generation: Option<CacheQueryGeneration>,
+  dictionary_identity: Option<CacheDictionaryIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -575,6 +675,7 @@ pub(in crate::cache) struct StoredEntry {
   tags: Vec<String>,
   /// Persisted Q1 target epoch. `None` is reserved for legacy methods.
   query_target_epoch: Option<u64>,
+  dictionary_identity: Option<CacheDictionaryIdentity>,
   size: usize,
 }
 
@@ -596,6 +697,7 @@ struct CacheOperationContext {
   host: String,
   uri: String,
   query_target: Option<CacheQueryInvalidationTarget>,
+  dictionary_identity: Option<CacheDictionaryIdentity>,
 }
 
 /// Identifies the equivalent resource whose QUERY variants are invalidated.

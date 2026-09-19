@@ -475,6 +475,7 @@ mod tests {
       object_ttl_seconds: 60,
       max_concurrent_uploads: max_uploads,
       max_concurrent_parts: max_parts,
+      compression_dictionary: None,
     }
   }
 

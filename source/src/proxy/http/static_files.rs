@@ -32,7 +32,7 @@ pub(crate) use self::hot_object::cached_hot_object_plan;
 use self::open::open_verified_file_with_openat2_for_tests;
 #[cfg(test)]
 use self::open::verify_opened_file;
-use self::open::{OpenedStaticFile, StaticOpenError, open_verified_file};
+pub(crate) use self::open::{OpenedStaticFile, StaticOpenError, open_verified_file};
 pub(crate) use self::path::{StaticPathError, resolve_request_path};
 pub(crate) use self::response_plan::StaticBodySource;
 use self::response_plan::{
@@ -45,6 +45,7 @@ use self::route_options::{
   render_try_file_path, response_metadata_for_path, root_relative_config_path,
   select_precompressed_file, should_use_spa_fallback,
 };
+pub(crate) use self::runtime::StaticRootHandle;
 pub(crate) use self::runtime::{CachedStaticObject, StaticFilesRuntime, StaticRootPathStatus};
 
 #[derive(Debug)]

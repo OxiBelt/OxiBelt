@@ -1,0 +1,56 @@
+# Layer this overlay after `edge-secure-medium-v2-values.yaml`. Pre-create
+# ConfigMap `storefront-dictionaries` with key `storefront-v1.bin`.
+# The digest pins both the Helm projection and the base configuration asset.
+compressionDictionary:
+  assets:
+  - name: storefront-v1
+    mountPath: /etc/oxibelt/dictionaries/storefront-v1.bin
+    digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    revision: storefront-v1
+    configMap:
+      name: storefront-dictionaries
+      key: storefront-v1.bin
+  learnedDisk:
+    enabled: true
+    writableVolumeName: dictionary-learned
+
+writableVolumes:
+- name: dictionary-learned
+  mountPath: /var/lib/oxibelt/dictionaries
+  purpose: compression-dictionary-learned
+  emptyDir:
+    sizeLimit: 64Mi
+
+config:
+  inline: |
+    [compression_dictionary]
+    enabled = true
+
+    [[compression_dictionary.dictionaries]]
+    name = "storefront-v1"
+    path = "dictionaries/storefront-v1.bin"
+    sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    public = true
+    url = "https://store.example.test/dictionaries/storefront-v1.bin"
+
+    [[compression_dictionary.stores]]
+    name = "local-dictionaries"
+    kind = "disk"
+    quota_bytes = 67108864
+    [compression_dictionary.stores.disk]
+    root = "/var/lib/oxibelt/dictionaries"
+
+    [[compression_dictionary.profiles]]
+    name = "storefront"
+    downstream = true
+    store = "local-dictionaries"
+    dictionaries = ["storefront-v1"]
+    max_dictionary_bytes = 16777200
+    max_dictionaries = 8
+    max_total_dictionary_bytes = 67108864
+    max_pending_dictionary_bytes = 16777216
+    max_codec_concurrency = 4
+    max_codec_memory_bytes = 536870912
+    max_decoded_size_bytes = 67108864
+    max_expansion_ratio = 100
+    codec_timeout_ms = 5000

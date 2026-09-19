@@ -55,6 +55,8 @@ async fn all_policy_query_invalidation_fences_grouped_shared_partitions_and_recl
         request_headers: &headers,
         query_identity: Some(&identity),
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       };
       assert!(cache.lookup_async(context.clone()).await.is_none());
       let operation = cache
@@ -87,6 +89,8 @@ async fn all_policy_query_invalidation_fences_grouped_shared_partitions_and_recl
               request_headers: &headers,
               query_identity: Some(&identity),
               certificate_identity: None,
+              dictionary_identity: None,
+              origin_vary_headers: None,
             },
             CacheEntry::memory(
               StatusCode::OK,
@@ -122,6 +126,8 @@ async fn all_policy_query_invalidation_fences_grouped_shared_partitions_and_recl
     request_headers: &delayed_headers,
     query_identity: Some(&delayed_identity),
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   assert!(cache.lookup_async(delayed_context.clone()).await.is_none());
   let delayed = match cache.prepare_insert(
@@ -137,6 +143,8 @@ async fn all_policy_query_invalidation_fences_grouped_shared_partitions_and_recl
       request_headers: &delayed_headers,
       query_identity: Some(&delayed_identity),
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     },
     StatusCode::OK,
     &response_headers,

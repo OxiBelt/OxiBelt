@@ -131,6 +131,43 @@ return 0
     }
   }
 
+  pub(super) async fn put_if_manifest_matches(
+    &self,
+    manifest_key: &str,
+    expected: &[u8],
+    key: &str,
+    value: &[u8],
+    ttl: Duration,
+  ) -> anyhow::Result<bool> {
+    let script = r#"
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('PSETEX', KEYS[2], ARGV[3], ARGV[2])
+return 1
+"#;
+    match self
+      .command(&[
+        b"EVAL".to_vec(),
+        script.as_bytes().to_vec(),
+        b"2".to_vec(),
+        manifest_key.as_bytes().to_vec(),
+        key.as_bytes().to_vec(),
+        expected.to_vec(),
+        value.to_vec(),
+        ttl
+          .as_millis()
+          .min(i64::MAX as u128)
+          .to_string()
+          .into_bytes(),
+      ])
+      .await?
+      .into_i64()?
+    {
+      0 => Ok(false),
+      1 => Ok(true),
+      outcome => bail!("unexpected Redis dictionary fenced-write outcome {outcome}"),
+    }
+  }
+
   pub(super) async fn delete(&self, key: &str) -> anyhow::Result<()> {
     let _ = self
       .command(&[b"DEL".to_vec(), key.as_bytes().to_vec()])

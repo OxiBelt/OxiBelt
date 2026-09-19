@@ -753,6 +753,8 @@ fn seed_cache_entry(snapshot: &AppSnapshot, uri: &str, tag: Option<&str>) {
         uri: &uri,
         request_headers: &HeaderMap::new(),
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       crate::cache::CacheEntry::memory(
         StatusCode::OK,
@@ -784,6 +786,8 @@ async fn seed_group_cache_entry(snapshot: &AppSnapshot, uri: &str, group: &str) 
     uri: &uri,
     request_headers: &request_headers,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   assert!(snapshot.cache.bind_group_request(lookup).await);
   let mut headers = HeaderMap::new();
@@ -812,6 +816,8 @@ async fn seed_group_cache_entry(snapshot: &AppSnapshot, uri: &str, group: &str) 
           uri: &uri,
           request_headers: &request_headers,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         crate::cache::CacheEntry::memory(
           StatusCode::OK,
@@ -847,6 +853,8 @@ async fn group_cache_entry_is_fresh(snapshot: &AppSnapshot, uri: &str) -> bool {
         uri: &uri,
         request_headers: &request_headers,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .await,
     Some(crate::cache::CacheLookup::Fresh(_))

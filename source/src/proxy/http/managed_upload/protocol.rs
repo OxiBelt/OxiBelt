@@ -117,14 +117,38 @@ fn partial_upload_media_type(value: &[u8]) -> bool {
       .is_none_or(|next| next.is_ascii_whitespace() || *next == b';')
 }
 
-pub(super) fn identity_encoding(headers: &HeaderMap) -> Result<(), StatusCode> {
+/// Strictly accepts one identity coding or one RFC 9842 dictionary coding.
+/// Managed callers decide whether their operator-owned profile permits the
+/// dictionary variants; every other body transform remains rejected.
+pub(super) fn managed_content_coding(
+  headers: &HeaderMap,
+) -> Result<ManagedContentCoding, StatusCode> {
   let mut values = headers.get_all(http::header::CONTENT_ENCODING).iter();
-  if let Some(value) = values.next()
-    && (values.next().is_some() || !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-  {
+  let Some(value) = values.next() else {
+    return Ok(ManagedContentCoding::Identity);
+  };
+  if values.next().is_some() {
     return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
   }
-  Ok(())
+  if value.as_bytes().eq_ignore_ascii_case(b"identity") {
+    Ok(ManagedContentCoding::Identity)
+  } else if value.as_bytes().eq_ignore_ascii_case(b"dcb") {
+    Ok(ManagedContentCoding::Dictionary(
+      crate::compression_dictionary::codec::DictionaryCoding::Dcb,
+    ))
+  } else if value.as_bytes().eq_ignore_ascii_case(b"dcz") {
+    Ok(ManagedContentCoding::Dictionary(
+      crate::compression_dictionary::codec::DictionaryCoding::Dcz,
+    ))
+  } else {
+    Err(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ManagedContentCoding {
+  Identity,
+  Dictionary(crate::compression_dictionary::codec::DictionaryCoding),
 }
 
 pub(super) fn validate_append(headers: &HeaderMap) -> Result<u64, StatusCode> {
@@ -238,6 +262,42 @@ mod tests {
   }
 
   #[test]
+  fn managed_content_coding_only_accepts_one_rfc9842_coding() {
+    let mut headers = HeaderMap::new();
+    assert_eq!(
+      managed_content_coding(&headers),
+      Ok(ManagedContentCoding::Identity)
+    );
+    headers.insert(
+      http::header::CONTENT_ENCODING,
+      HeaderValue::from_static("dCb"),
+    );
+    assert!(matches!(
+      managed_content_coding(&headers),
+      Ok(ManagedContentCoding::Dictionary(
+        crate::compression_dictionary::codec::DictionaryCoding::Dcb
+      ))
+    ));
+    headers.append(
+      http::header::CONTENT_ENCODING,
+      HeaderValue::from_static("dcz"),
+    );
+    assert_eq!(
+      managed_content_coding(&headers),
+      Err(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+    );
+    headers.clear();
+    headers.insert(
+      http::header::CONTENT_ENCODING,
+      HeaderValue::from_static("gzip"),
+    );
+    assert_eq!(
+      managed_content_coding(&headers),
+      Err(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+    );
+  }
+
+  #[test]
   fn control_paths_accept_only_opaque_ids() {
     let id = "a".repeat(64);
     let path = format!("/uploads/{id}/status");
@@ -277,7 +337,7 @@ mod tests {
       HeaderValue::from_static("gzip"),
     );
     assert_eq!(
-      identity_encoding(&headers),
+      managed_content_coding(&headers),
       Err(StatusCode::UNSUPPORTED_MEDIA_TYPE)
     );
   }

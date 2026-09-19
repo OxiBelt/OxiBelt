@@ -78,6 +78,8 @@ fn lookup_context<'a>(
     request_headers: headers,
     query_identity: None,
     certificate_identity,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }
 }
 
@@ -99,6 +101,8 @@ fn insert_context<'a>(
     request_headers: headers,
     query_identity: None,
     certificate_identity,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }
 }
 
@@ -482,6 +486,7 @@ fn external_hit(operation: &CacheOperationContext, body: Bytes) -> ExternalCache
       vary: Vec::new(),
       tags: Vec::new(),
       query_target_epoch: None,
+      dictionary_identity: None,
       no_vary_search: None,
       group_stamp: None,
       capabilities: Vec::new(),

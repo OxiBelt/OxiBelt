@@ -20,6 +20,7 @@ use crate::state::AppHandle;
 use super::{AdminAuthorization, admin_error, admin_operations, admin_resource};
 
 mod cache;
+pub(super) mod dictionaries;
 mod dynamic_policy_query;
 pub(super) use cache::{
   cache_key_explain_response, cache_purge_json_response, cache_purge_response, cache_warm_response,

@@ -146,6 +146,9 @@ pub(super) fn mutation_durability_scope(
     }
     (&Method::POST, "/admin/v1/cache/warm") => Some(("cache.warm", "cache")),
     (&Method::POST, "/admin/v1/cache/purge") => Some(("cache.purge", "cache")),
+    (&Method::POST, "/admin/v1/compression-dictionaries/purge") => {
+      Some(("compression_dictionary.purge", "compression-dictionaries"))
+    }
     (&Method::POST, "/admin/v1/waf/person-proof/clearances/revoke") => {
       Some(("person_proof.revoke", "waf/person-proof"))
     }

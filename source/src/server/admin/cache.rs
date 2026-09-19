@@ -287,6 +287,8 @@ pub(in crate::server) async fn cache_key_explain_response(
       no_vary_search: no_vary_search.as_ref(),
       proxy_protocol_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
       policy_name: body.policy.as_deref(),
       scheme: &body.scheme,
       host: &body.host,

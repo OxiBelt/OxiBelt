@@ -163,6 +163,7 @@ fn grpc_match_route(
       upstream_request_timeout_ms: None,
       client_certificate_forwarding: None,
       resumable_upload: None,
+      compression_dictionary_profile: None,
     },
     filters,
   ))

@@ -30,6 +30,12 @@ pub(super) fn encode_metadata(entry: &StoredEntry) -> anyhow::Result<String> {
   if let Some(nvs) = &entry.no_vary_search {
     lines.push(format!("no_vary_search={}", b64(&serde_json::to_vec(nvs)?)));
   }
+  if let Some(identity) = &entry.dictionary_identity {
+    lines.push(format!(
+      "dictionary_identity={}",
+      b64(&serde_json::to_vec(identity)?)
+    ));
+  }
   for (key, value) in [
     ("policy", entry.policy.as_str()),
     ("partition", entry.partition.as_str()),
@@ -209,6 +215,22 @@ pub(super) fn decode_metadata_text(
   if super::is_query_v1_base_key(&base_key) && query_target_epoch.is_none() {
     bail!("legacy Q1 disk metadata is missing its target epoch");
   }
+  let dictionary_identity = values
+    .get("dictionary_identity")
+    .filter(|items| items.len() == 1)
+    .and_then(|items| items.first())
+    .filter(|value| value.len() <= 1024)
+    .map(|value| -> anyhow::Result<super::CacheDictionaryIdentity> {
+      let identity = serde_json::from_str::<super::CacheDictionaryIdentity>(&unb64(value)?)?;
+      if !identity.valid() {
+        bail!("invalid cache dictionary identity");
+      }
+      Ok(identity)
+    })
+    .transpose()?;
+  if super::is_dictionary_v1_base_key(&base_key) && dictionary_identity.is_none() {
+    bail!("dictionary-partitioned disk metadata is missing its identity");
+  }
   let group_stamp = values
     .get("group_stamp")
     .map(|items| -> anyhow::Result<super::CacheGroupStamp> {
@@ -267,6 +289,7 @@ pub(super) fn decode_metadata_text(
     vary,
     tags,
     query_target_epoch,
+    dictionary_identity,
     size,
   })
 }

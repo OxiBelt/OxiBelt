@@ -541,3 +541,222 @@ status = 403
   .await;
   assert_eq!(large.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
+
+#[tokio::test]
+async fn managed_dictionary_ready_retry_uses_published_decoded_object() {
+  managed_dictionary_completion(
+    true,
+    crate::compression_dictionary::codec::DictionaryCoding::Dcz,
+  )
+  .await;
+}
+
+#[tokio::test]
+async fn managed_dictionary_fresh_completion_publishes_decoded_object() {
+  use crate::compression_dictionary::codec::DictionaryCoding;
+  for coding in [DictionaryCoding::Dcb, DictionaryCoding::Dcz] {
+    managed_dictionary_completion(false, coding).await;
+  }
+}
+
+async fn managed_dictionary_completion(
+  ready_retry: bool,
+  coding: crate::compression_dictionary::codec::DictionaryCoding,
+) {
+  use crate::compression_dictionary::fields::DictionaryHash;
+  use sha2::{Digest, Sha256};
+  let origin = origin(StatusCode::OK).await;
+  let (initial, temp) = snapshot_with_destination(
+    "",
+    if ready_retry {
+      "{ kind = \"upstream\", upstream = \"app\" }"
+    } else {
+      "{ kind = \"object\" }"
+    },
+    Some(origin.address),
+  )
+  .await;
+  let mut config = initial.config.clone();
+  drop(initial);
+  let dictionary = b"public dictionary";
+  let dictionary_path = temp.path().join("dictionary");
+  std::fs::write(&dictionary_path, dictionary).unwrap();
+  let digest: String = Sha256::digest(dictionary)
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect();
+  config.compression_dictionary = toml::from_str(&format!(
+    r#"
+enabled = true
+[[dictionaries]]
+name = "public"
+path = "dictionary"
+sha256 = "{digest}"
+public = true
+url = "https://example.com/dictionary"
+[[stores]]
+name = "memory"
+kind = "memory"
+quota_bytes = 1024
+[[profiles]]
+name = "decode"
+request_decode = true
+dictionaries = ["public"]
+store = "memory"
+max_dictionary_bytes = 128
+max_dictionaries = 4
+max_total_dictionary_bytes = 1024
+max_pending_dictionary_bytes = 128
+max_codec_concurrency = 1
+max_codec_memory_bytes = 536870912
+max_decoded_size_bytes = 128
+max_expansion_ratio = 10
+codec_timeout_ms = 1000
+"#
+  ))
+  .unwrap();
+  config.upload_profiles[0].max_upload_bytes = 64;
+  config.upload_profiles[0].max_part_bytes = 64;
+  config.upload_profiles[0].compression_dictionary =
+    Some(crate::config::ManagedUploadDictionaryConfig {
+      profile: "decode".into(),
+      dictionary: "public".into(),
+    });
+  config.validate().unwrap();
+  // As after the ordinary config loader has resolved the validated path.
+  config.compression_dictionary.dictionaries[0].path = dictionary_path;
+  let state = Arc::new(AppSnapshot::new(config).await.unwrap());
+  let plain: &[u8] = if ready_retry { b"plain" } else { &[b'a'; 96] };
+  let mut encoded = Vec::new();
+  if ready_retry {
+    encoded.extend_from_slice(b"wire");
+  } else {
+    crate::compression_dictionary::codec::encode(coding, dictionary, plain, &mut encoded).unwrap();
+  }
+  let coding_name = match coding {
+    crate::compression_dictionary::codec::DictionaryCoding::Dcb => "dcb",
+    crate::compression_dictionary::codec::DictionaryCoding::Dcz => "dcz",
+  };
+  let encoded_length = encoded.len().to_string();
+  let (created, _) = send_body(
+    state.clone(),
+    "POST",
+    "/submit",
+    body::known_small_no_trailers_body(bytes::Bytes::copy_from_slice(&encoded)),
+    &[
+      ("upload-draft-interop-version", "9"),
+      ("upload-complete", "?0"),
+      ("content-encoding", coding_name),
+      ("upload-length", &encoded_length),
+    ],
+    "owner-a",
+    Some(encoded.len()),
+  )
+  .await;
+  assert_eq!(created.status(), StatusCode::CREATED);
+  let path = created.headers()["location"]
+    .to_str()
+    .unwrap()
+    .parse::<http::Uri>()
+    .unwrap()
+    .path()
+    .to_owned();
+  let id = path.rsplit('/').next().unwrap();
+  let journal: serde_json::Value = serde_json::from_slice(
+    &std::fs::read(temp.path().join("store/journal/upload-state-v2.json")).unwrap(),
+  )
+  .unwrap();
+  let persisted = &journal["uploads"][id];
+  let owner: crate::uploads::UploadOwner =
+    serde_json::from_value(persisted["owner"].clone()).unwrap();
+  let binding = persisted["binding"].clone();
+  let pin = state
+    .uploads
+    .profile("media")
+    .unwrap()
+    .store()
+    .request_metadata(id, &owner, &binding)
+    .await
+    .unwrap()
+    .dictionary
+    .unwrap();
+  assert_eq!(
+    pin.hash,
+    DictionaryHash::from_slice(&Sha256::digest(dictionary)).unwrap()
+  );
+  let store = state.uploads.profile("media").unwrap().store();
+  if ready_retry {
+    store.claim_complete(id, &owner, &binding, 4).await.unwrap();
+    let plain_digest: String = Sha256::digest(b"plain")
+      .iter()
+      .map(|byte| format!("{byte:02x}"))
+      .collect();
+    let published = store
+      .publish_decoded_object(
+        id,
+        &owner,
+        &binding,
+        5,
+        &plain_digest,
+        Box::pin(futures_util::stream::once(async {
+          Ok(bytes::Bytes::from_static(b"plain"))
+        })),
+      )
+      .await
+      .unwrap();
+    assert_eq!(published.state, crate::uploads::UploadState::Ready);
+    // The encoded fragments deliberately are not a valid dcz stream. A retry
+    // must use the already inspected decoded object instead of decoding again.
+  }
+  let (completed, _) = send(
+    state.clone(),
+    "PATCH",
+    &path,
+    b"",
+    &[
+      ("upload-draft-interop-version", "9"),
+      ("upload-complete", "?1"),
+      ("upload-offset", &encoded_length),
+      ("content-type", "application/partial-upload"),
+      ("content-encoding", coding_name),
+    ],
+    "owner-a",
+  )
+  .await;
+  if ready_retry {
+    assert_eq!(completed.status(), StatusCode::OK);
+    assert_eq!(origin.requests.load(Ordering::SeqCst), 1);
+  } else {
+    assert_eq!(completed.status(), StatusCode::CREATED);
+    assert_eq!(completed.headers()["upload-offset"], encoded_length);
+    let object = completed.headers()["location"]
+      .to_str()
+      .unwrap()
+      .parse::<http::Uri>()
+      .unwrap();
+    let (head, _) = send(state.clone(), "HEAD", object.path(), b"", &[], "owner-a").await;
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()["content-length"], plain.len().to_string());
+    assert!(
+      head
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .is_empty()
+    );
+    let (get, _) = send(state.clone(), "GET", object.path(), b"", &[], "owner-a").await;
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(get.headers()["content-length"], plain.len().to_string());
+    assert_eq!(
+      get.into_body().collect().await.unwrap().to_bytes().as_ref(),
+      plain
+    );
+    assert_eq!(origin.requests.load(Ordering::SeqCst), 0);
+  }
+  assert_eq!(
+    store.lookup(id, &owner, &binding).await.unwrap().state,
+    crate::uploads::UploadState::Complete
+  );
+}

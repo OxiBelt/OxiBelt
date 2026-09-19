@@ -79,6 +79,11 @@ routePolicy:
   resumableUploadProfiles: []
   # - namespace: tenant-a
   #   profile: media-ingest
+  # Exact namespace/profile admissions for RFC 9842 compression dictionaries.
+  # Profiles and all dictionary assets remain operator-owned base TOML state.
+  compressionDictionaryProfiles: []
+  # - namespace: tenant-a
+  #   profile: storefront
 
 # Normal reconciliation requires the selected data-plane workload to carry
 # `oxibelt.dev/effective-version` equal to the controller build version.

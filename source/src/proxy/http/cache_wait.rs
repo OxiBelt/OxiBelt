@@ -60,6 +60,15 @@ pub(super) async fn wait_for_shared_fill(
     .extensions()
     .get::<crate::cache::CacheQueryIdentity>()
     .cloned();
+  // This path runs after upstream dictionary negotiation. A collapsed
+  // follower must use the same opaque representation partition and final
+  // upstream headers as the leader; downstream request headers cannot stand
+  // in for the forced upstream Accept-Encoding value.
+  let dictionary = outbound
+    .extensions()
+    .get::<super::dictionary::upstream::Negotiation>();
+  let dictionary_identity = dictionary.and_then(|value| value.representation_identity().ok());
+  let origin_vary_headers = dictionary.map(|value| &value.request_headers);
   state.metrics.record_cache_fill_lock_conflict();
   record_route_cache_event(state, resolved.route, "miss", "shared_lock_conflict");
   let started = Instant::now();
@@ -83,6 +92,8 @@ pub(super) async fn wait_for_shared_fill(
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: proxy_protocol_identity.as_ref(),
         certificate_identity: certificate_identity.as_ref(),
+        dictionary_identity: dictionary_identity.as_ref(),
+        origin_vary_headers,
         policy_name: resolved.route.cache.as_deref(),
         scheme: downstream_scheme,
         host,

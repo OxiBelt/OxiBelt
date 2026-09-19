@@ -9,6 +9,7 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "circuit_breakers",
   "client_identity",
   "compression",
+  "compression_dictionary",
   "config",
   "connection_limits",
   "crypto",

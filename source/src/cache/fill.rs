@@ -295,7 +295,7 @@ impl ResponseCache {
     {
       return None;
     }
-    let operation = self.operation_context(
+    let operation = self.operation_context_with_dictionary(
       ctx.policy_name,
       ctx.scheme,
       ctx.host,
@@ -304,6 +304,7 @@ impl ResponseCache {
       super::lookup::cache_view_headers(&ctx),
       ctx.query_identity,
       ctx.certificate_identity,
+      ctx.dictionary_identity,
       ctx.proxy_protocol_identity,
       ctx.group_request,
     )?;

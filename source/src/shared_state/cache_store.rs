@@ -130,6 +130,7 @@ impl SharedState {
     if let Some(bytes) = backend.get(&direct_key).await?
       && let Ok(entry) = serde_json::from_slice::<SharedCacheEntry>(&bytes)
       && entry.vary.is_empty()
+      && (!crate::cache::is_dictionary_v1_base_key(base_key) || entry.dictionary_identity.is_some())
       && shared_entry_matches(
         &entry,
         SharedCacheMatch {
@@ -214,6 +215,11 @@ impl SharedState {
           cleanup.push(index_key);
           continue;
         };
+        if crate::cache::is_dictionary_v1_base_key(base_key) && entry.dictionary_identity.is_none()
+        {
+          cleanup.push(index_key);
+          continue;
+        }
         if !shared_entry_matches(
           &entry,
           SharedCacheMatch {
@@ -814,6 +820,7 @@ impl SharedState {
     );
     cache_entry.no_vary_search = entry.no_vary_search.clone();
     cache_entry.group_stamp = entry.group_stamp.clone();
+    cache_entry.dictionary_identity = entry.dictionary_identity.clone();
     Some(cache_entry)
   }
 }
@@ -838,6 +845,7 @@ impl SharedCacheEntry {
     .with_expires_at(shared_entry_expires_at(self));
     cache_entry.no_vary_search = self.no_vary_search.clone();
     cache_entry.group_stamp = self.group_stamp.clone();
+    cache_entry.dictionary_identity = self.dictionary_identity.clone();
     Some(cache_entry)
   }
 }
@@ -978,6 +986,7 @@ mod tests {
       vary: Vec::new(),
       tags: Vec::new(),
       query_target_epoch,
+      dictionary_identity: None,
       no_vary_search: None,
       group_stamp: None,
     }

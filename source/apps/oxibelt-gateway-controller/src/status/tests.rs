@@ -30,6 +30,7 @@ fn args() -> SharedArgs {
     route_policy_max_timeout_ms: 30_000,
     client_certificate_forward_allowed_headers: Vec::new(),
     resumable_upload_profiles: Vec::new(),
+    compression_dictionary_profiles: Vec::new(),
     resumable_upload_target: None,
     upstream_client_tls_source_secrets: Vec::new(),
     dry_run: false,

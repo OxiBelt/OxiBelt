@@ -120,6 +120,8 @@ async fn insert_stale_revalidate_entry(
           request_headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(StatusCode::OK, headers, body),
       )
@@ -146,6 +148,8 @@ async fn assert_stale_background_refresh_disabled(
       request_headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     })
     .await
   {

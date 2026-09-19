@@ -56,6 +56,8 @@ async fn shared_not_modified_update_republishes_l2_entry() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let mut response_headers = HeaderMap::new();
   response_headers.insert(
@@ -92,6 +94,8 @@ async fn shared_not_modified_update_republishes_l2_entry() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => entry,
     other => panic!("expected local cache entry before revalidation, got {other:?}"),
@@ -122,6 +126,8 @@ async fn shared_not_modified_update_republishes_l2_entry() {
       request_headers: &request_headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     })
     .await
   {
@@ -166,6 +172,8 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -188,6 +196,8 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => entry,
     other => panic!("expected fresh file-backed cache hit, got {other:?}"),
@@ -214,6 +224,8 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
       request_headers: &request_headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     },
     &cached_entry,
     &not_modified_headers,
@@ -231,6 +243,8 @@ fn assert_not_modified_update_preserves_file_backed_body(config: CacheConfig) {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
       assert_eq!(
@@ -292,6 +306,8 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: Some(&identity),
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   assert_eq!(
     cache.insert(
@@ -312,6 +328,8 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: Some(&identity),
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => entry,
     other => panic!("expected certificate-aware cache entry, got {other:?}"),
@@ -343,6 +361,8 @@ fn certificate_identity_survives_not_modified_revalidation_without_raw_vary() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: Some(&identity),
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => assert_eq!(
       entry.headers.get("etag"),

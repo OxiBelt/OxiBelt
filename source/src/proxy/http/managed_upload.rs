@@ -3,10 +3,14 @@
 
 mod protocol;
 mod staging;
+#[cfg(test)]
+mod validation_guard_tests;
 
 use super::*;
 use crate::config::{UploadDestinationConfig, UploadIdentityKind, UploadProfileConfig};
-use crate::uploads::{UploadCreate, UploadOwner, UploadState, UploadStatus, UploadStore};
+use crate::uploads::{
+  UploadCreate, UploadDictionaryPin, UploadOwner, UploadState, UploadStatus, UploadStore,
+};
 use sha2::{Digest as _, Sha256};
 
 /// Shared draft-12 parser predicate used when deciding whether transport must
@@ -158,6 +162,48 @@ fn binding(
 
 fn hex_digest(bytes: &[u8]) -> String {
   bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Resolves the only dictionary an upload profile may pin.  This happens
+/// before the create response so resumptions never select a different byte
+/// sequence after the client has observed its upload URL.
+fn dictionary_pin(
+  state: &AppSnapshot,
+  profile: &UploadProfileConfig,
+  coding: crate::compression_dictionary::codec::DictionaryCoding,
+) -> Result<UploadDictionaryPin, StatusCode> {
+  let reference = profile
+    .compression_dictionary
+    .as_ref()
+    .ok_or(StatusCode::UNSUPPORTED_MEDIA_TYPE)?;
+  let dictionary_profile = state
+    .compression_dictionary
+    .profile(&reference.profile)
+    .filter(|runtime| runtime.config.request_decode)
+    .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+  if !dictionary_profile
+    .config
+    .dictionaries
+    .iter()
+    .any(|name| name == &reference.dictionary)
+  {
+    return Err(StatusCode::SERVICE_UNAVAILABLE);
+  }
+  let dictionary = state
+    .compression_dictionary
+    .configured(&reference.dictionary)
+    .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+  // Validation already restricts uploads to public configured dictionaries;
+  // retain this defensive check so a bad runtime snapshot fails closed.
+  if !dictionary.public || dictionary.name.as_deref() != Some(reference.dictionary.as_str()) {
+    return Err(StatusCode::SERVICE_UNAVAILABLE);
+  }
+  Ok(UploadDictionaryPin {
+    coding: coding.into(),
+    profile: reference.profile.clone(),
+    dictionary: reference.dictionary.clone(),
+    hash: dictionary.hash,
+  })
 }
 
 fn url(
@@ -413,6 +459,33 @@ impl Drop for DispatchCancellationGuard {
   }
 }
 
+struct DictionaryValidationGuard {
+  store: Arc<UploadStore>,
+  id: String,
+  owner: UploadOwner,
+  binding: serde_json::Value,
+  armed: bool,
+}
+
+impl Drop for DictionaryValidationGuard {
+  fn drop(&mut self) {
+    if !self.armed {
+      return;
+    }
+    let (store, id, owner, binding) = (
+      self.store.clone(),
+      self.id.clone(),
+      self.owner.clone(),
+      self.binding.clone(),
+    );
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+      runtime.spawn(async move {
+        let _ = store.fail_validation(&id, &owner, &binding).await;
+      });
+    }
+  }
+}
+
 impl From<Response<ProxyBody>> for Outcome {
   fn from(value: Response<ProxyBody>) -> Self {
     Self::Response(value)
@@ -498,7 +571,13 @@ async fn execute(
     reject!(StatusCode::METHOD_NOT_ALLOWED);
   }
   checked!(protocol::negotiate(context.request.headers()));
-  checked!(protocol::identity_encoding(context.request.headers()));
+  let content_coding = checked!(protocol::managed_content_coding(context.request.headers()));
+  let requested_dictionary = match content_coding {
+    protocol::ManagedContentCoding::Identity => None,
+    protocol::ManagedContentCoding::Dictionary(coding) => {
+      Some(checked!(dictionary_pin(context.state, profile, coding)))
+    }
+  };
   let complete = checked!(protocol::completion(context.request.headers()));
   let declared = checked!(protocol::integer(
     context.request.headers(),
@@ -536,7 +615,11 @@ async fn execute(
   {
     reject!(StatusCode::BAD_REQUEST);
   }
-  let need = context.resolved.execution_plan.waf.request.body_need() != BodyNeed::None;
+  // Encoded fragments are opaque.  They receive the normal header decision
+  // below, while the body decision is deferred until the whole pinned stream
+  // has been decoded under its validation fence.
+  let need = requested_dictionary.is_none()
+    && context.resolved.execution_plan.waf.request.body_need() != BodyNeed::None;
   let _inspection_admission = if need {
     match context
       .state
@@ -574,6 +657,7 @@ async fn execute(
         uri: context.request.uri().clone(),
         safe_headers,
         declared_total: declared,
+        dictionary: requested_dictionary.clone(),
       })
       .await
     {
@@ -589,6 +673,19 @@ async fn execute(
       Err(error) => reject!(storage_status(&error)),
     }
   };
+  let persisted_dictionary = if creation {
+    requested_dictionary.clone()
+  } else {
+    match store.request_metadata(&upload.id, &owner, &binding).await {
+      Ok(metadata) => metadata.dictionary,
+      Err(error) => reject!(storage_status(&error)),
+    }
+  };
+  if persisted_dictionary != requested_dictionary {
+    // A compressed session must carry its original coding on every body
+    // fragment. Identity sessions may never be upgraded in place.
+    reject!(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+  }
   let resume_completion = complete
     && (length == Some(0) || context.request.body().is_end_stream())
     && matches!(upload.state, UploadState::Completing | UploadState::Ready);
@@ -693,15 +790,21 @@ async fn execute(
         reject!(StatusCode::SERVICE_UNAVAILABLE);
       }
     } else {
-      let evidence = crate::uploads::InspectedPart {
-        bytes: staged.bytes,
-        sha256: staged.digest.clone(),
-      };
       let stream = checked!(staged.stream().await);
-      upload = match store
-        .commit_fully_inspected_part(reservation, &evidence, stream)
-        .await
-      {
+      let committed = if persisted_dictionary.is_some() {
+        store
+          .commit_encoded_part(reservation, staged.bytes, staged.digest.clone(), stream)
+          .await
+      } else {
+        let evidence = crate::uploads::InspectedPart {
+          bytes: staged.bytes,
+          sha256: staged.digest.clone(),
+        };
+        store
+          .commit_fully_inspected_part(reservation, &evidence, stream)
+          .await
+      };
+      upload = match committed {
         Ok(upload) => upload,
         Err(_) => {
           let _ = store.abort_append(reservation).await;
@@ -819,8 +922,11 @@ async fn control(
     {
       return response(StatusCode::NOT_FOUND, None);
     }
+    let Some(object) = upload.object.as_ref() else {
+      return response(StatusCode::SERVICE_UNAVAILABLE, None);
+    };
     let mut result = response(StatusCode::OK, None);
-    protocol::set_integer(result.headers_mut(), "content-length", upload.offset);
+    protocol::set_integer(result.headers_mut(), "content-length", object.bytes);
     result.headers_mut().insert(
       http::header::CONTENT_TYPE,
       http::HeaderValue::from_static("application/octet-stream"),
@@ -837,18 +943,19 @@ async fn control(
       let Ok(runtime) = context.state.uploads.profile(&profile.name) else {
         return response(StatusCode::SERVICE_UNAVAILABLE, None);
       };
-      let Ok(_admission) = runtime.try_admit_part(upload.offset.max(1)) else {
+      let Ok(_admission) = runtime.try_admit_part(object.bytes.max(1)) else {
         return response(StatusCode::SERVICE_UNAVAILABLE, None);
       };
       let stream = match store.read_object(id, owner, binding).await {
         Ok(stream) => stream,
         Err(_) => return response(StatusCode::SERVICE_UNAVAILABLE, None),
       };
-      let spool = match staging::Spool::read_stream(stream, profile, false).await {
-        Ok(spool) if spool.bytes == upload.offset => spool,
-        Ok(_) => return response(StatusCode::SERVICE_UNAVAILABLE, None),
-        Err(status) => return response(status, None),
-      };
+      let spool =
+        match staging::Spool::read_stream_bounded(stream, profile, false, object.bytes).await {
+          Ok(spool) if spool.bytes == object.bytes && spool.digest == object.sha256 => spool,
+          Ok(_) => return response(StatusCode::SERVICE_UNAVAILABLE, None),
+          Err(status) => return response(status, None),
+        };
       // Keep disk quota reserved until the response body is retired.
       *result.body_mut() = staging::hold_admission(spool.into_body(), _admission);
     }
@@ -912,6 +1019,7 @@ async fn complete_upload(
   let Ok(admission) = runtime.try_admit_part(upload.offset.max(1)) else {
     reject!(StatusCode::SERVICE_UNAVAILABLE);
   };
+  let mut admission = Some(admission);
   let metadata = match store.request_metadata(&upload.id, &owner, &binding).await {
     Ok(metadata) => metadata,
     Err(error) => reject!(storage_status(&error)),
@@ -1025,17 +1133,159 @@ async fn complete_upload(
       .insert(VerifiedIpmActor(actor));
   }
   let need = context.resolved.execution_plan.waf.request.body_need() != BodyNeed::None;
-  let stream = match store.read_assembled(&upload.id, &owner, &binding).await {
+  let dictionary = metadata.dictionary.as_ref().and_then(|pin| {
+    let runtime = context.state.compression_dictionary.profile(&pin.profile)?;
+    let configured = context
+      .state
+      .compression_dictionary
+      .configured(&pin.dictionary)?;
+    (runtime.config.request_decode
+      && configured.public
+      && configured.hash == pin.hash
+      && runtime.config.dictionaries.contains(&pin.dictionary))
+    .then_some((runtime, configured))
+  });
+  if metadata.dictionary.is_some() && dictionary.is_none() {
+    let _ = store.fail_validation(&upload.id, &owner, &binding).await;
+    reject!(StatusCode::SERVICE_UNAVAILABLE);
+  }
+  // A Ready object already contains the inspected decoded representation.
+  // Retry dispatch from that object, never reinterpret its encoded parts.
+  let dictionary_ready = dictionary.is_some() && upload.state == UploadState::Ready;
+  if dictionary.is_some() && !dictionary_ready {
+    if upload.state != UploadState::Active {
+      reject!(StatusCode::CONFLICT);
+    }
+    upload = match store
+      .claim_complete(&upload.id, &owner, &binding, upload.offset)
+      .await
+    {
+      Ok(upload) => upload,
+      Err(error) => reject!(storage_status(&error)),
+    };
+  }
+  let mut validation_guard =
+    dictionary
+      .as_ref()
+      .filter(|_| !dictionary_ready)
+      .map(|_| DictionaryValidationGuard {
+        store: store.clone(),
+        id: upload.id.clone(),
+        owner: owner.clone(),
+        binding: binding.clone(),
+        armed: true,
+      });
+  let stream_result = if dictionary_ready {
+    store.read_object(&upload.id, &owner, &binding).await
+  } else {
+    store.read_assembled(&upload.id, &owner, &binding).await
+  };
+  let stream = match stream_result {
     Ok(stream) => stream,
-    Err(_) => reject!(StatusCode::SERVICE_UNAVAILABLE),
+    Err(_) => {
+      if dictionary.is_some() {
+        let _ = store.fail_validation(&upload.id, &owner, &binding).await;
+      }
+      reject!(StatusCode::SERVICE_UNAVAILABLE)
+    }
   };
-  let spool = match staging::Spool::read_stream(stream, profile, need).await {
-    Ok(spool) if spool.bytes == upload.offset => spool,
-    Ok(_) => reject!(StatusCode::SERVICE_UNAVAILABLE),
-    Err(status) => reject!(status),
+  let mut spool = if dictionary_ready {
+    let maximum = dictionary
+      .as_ref()
+      .map(|(runtime, _)| runtime.config.max_decoded_size_bytes)
+      .unwrap_or(0)
+      .min(profile.max_staging_bytes);
+    match staging::Spool::read_body(staging::body_from_stream(stream), profile, need, maximum).await
+    {
+      Ok(spool)
+        if upload
+          .object
+          .as_ref()
+          .is_some_and(|object| object.bytes == spool.bytes && object.sha256 == spool.digest) =>
+      {
+        spool
+      }
+      Ok(_) => reject!(StatusCode::SERVICE_UNAVAILABLE),
+      Err(status) => reject!(status),
+    }
+  } else if let Some((dictionary_profile, configured)) = dictionary.as_ref() {
+    let permit = match dictionary_profile.codec_permits.clone().try_acquire_owned() {
+      Ok(permit) => permit,
+      Err(_) => {
+        let _ = store.fail_validation(&upload.id, &owner, &binding).await;
+        reject!(StatusCode::SERVICE_UNAVAILABLE);
+      }
+    };
+    let encoded = staging::body_from_stream(stream);
+    let decoded = super::dictionary_body::transform(
+      encoded,
+      configured.bytes.clone(),
+      super::dictionary_body::CodecBodyOptions {
+        metrics: Some(context.state.metrics.clone()),
+        coding: match metadata.dictionary.as_ref() {
+          Some(pin) => pin.coding.into(),
+          None => {
+            let _ = store.fail_validation(&upload.id, &owner, &binding).await;
+            reject!(StatusCode::SERVICE_UNAVAILABLE);
+          }
+        },
+        decode: true,
+        level: 3,
+        timeout: std::time::Duration::from_millis(dictionary_profile.config.codec_timeout_ms),
+        max_decoded_bytes: usize::try_from(dictionary_profile.config.max_decoded_size_bytes)
+          .unwrap_or(usize::MAX),
+        max_expansion_ratio: usize::try_from(dictionary_profile.config.max_expansion_ratio)
+          .unwrap_or(usize::MAX),
+      },
+      permit,
+    );
+    match staging::Spool::read_body(
+      decoded,
+      profile,
+      need,
+      dictionary_profile
+        .config
+        .max_decoded_size_bytes
+        .min(profile.max_staging_bytes),
+    )
+    .await
+    {
+      Ok(spool) => spool,
+      Err(status) => {
+        let _ = store.fail_validation(&upload.id, &owner, &binding).await;
+        reject!(status);
+      }
+    }
+  } else {
+    match staging::Spool::read_stream(stream, profile, need).await {
+      Ok(spool) if spool.bytes == upload.offset => spool,
+      Ok(_) => reject!(StatusCode::SERVICE_UNAVAILABLE),
+      Err(status) => reject!(status),
+    }
   };
+  if dictionary.is_some() {
+    protocol::set_integer(context.request.headers_mut(), "content-length", spool.bytes);
+  }
   let captured = spool.capture.clone();
-  *context.request.body_mut() = staging::hold_admission(spool.into_body(), admission);
+  if dictionary.is_some() {
+    let stream = match spool.stream().await {
+      Ok(stream) => stream,
+      Err(status) => reject!(status),
+    };
+    *context.request.body_mut() = staging::body_from_stream(stream);
+  } else {
+    let stream = match spool.stream().await {
+      Ok(stream) => stream,
+      Err(status) => reject!(status),
+    };
+    *context.request.body_mut() = staging::hold_admission(
+      staging::body_from_stream(stream),
+      match admission.take() {
+        Some(admission) => admission,
+        None => reject!(StatusCode::SERVICE_UNAVAILABLE),
+      },
+    );
+  }
   if let Some(provider) = context.resolved.route.external_auth.as_deref() {
     match context
       .state
@@ -1063,7 +1313,12 @@ async fn complete_upload(
   context.request_waf =
     match inspect(context, captured.as_ref(), person_proof, mutation_added).await {
       Ok(decision) => decision,
-      Err(result) => return result.into(),
+      Err(result) => {
+        if dictionary.is_some() {
+          let _ = store.fail_validation(&upload.id, &owner, &binding).await;
+        }
+        return result.into();
+      }
     };
   context.captured_body = captured;
   context
@@ -1083,12 +1338,56 @@ async fn complete_upload(
       Err(error) => reject!(storage_status(&error)),
     };
   }
+  if dictionary.is_some() && !dictionary_ready {
+    let stream = match spool.stream().await {
+      Ok(stream) => stream,
+      Err(_) => {
+        let _ = store.fail_validation(&upload.id, &owner, &binding).await;
+        reject!(StatusCode::SERVICE_UNAVAILABLE);
+      }
+    };
+    upload = match store
+      .publish_decoded_object(
+        &upload.id,
+        &owner,
+        &binding,
+        spool.bytes,
+        &spool.digest,
+        stream,
+      )
+      .await
+    {
+      Ok(upload) => upload,
+      Err(_) => {
+        let _ = store.fail_validation(&upload.id, &owner, &binding).await;
+        reject!(StatusCode::SERVICE_UNAVAILABLE);
+      }
+    };
+    if let Some(guard) = &mut validation_guard {
+      guard.armed = false;
+    }
+  }
+  if dictionary.is_some() {
+    let object_stream = match store.read_object(&upload.id, &owner, &binding).await {
+      Ok(stream) => stream,
+      Err(_) => reject!(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    *context.request.body_mut() = staging::hold_admission(
+      staging::body_from_stream(object_stream),
+      match admission.take() {
+        Some(admission) => admission,
+        None => reject!(StatusCode::SERVICE_UNAVAILABLE),
+      },
+    );
+  }
   match profile.destination {
     UploadDestinationConfig::Object => {
-      upload = match store.publish_object(&upload.id, &owner, &binding).await {
-        Ok(upload) => upload,
-        Err(_) => reject!(StatusCode::SERVICE_UNAVAILABLE),
-      };
+      if dictionary.is_none() {
+        upload = match store.publish_object(&upload.id, &owner, &binding).await {
+          Ok(upload) => upload,
+          Err(_) => reject!(StatusCode::SERVICE_UNAVAILABLE),
+        };
+      }
       let mut result = response(StatusCode::CREATED, Some(&upload));
       if let Ok(location) = url(profile, &profile.object_path_prefix, &upload.id) {
         result

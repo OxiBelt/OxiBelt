@@ -8,11 +8,41 @@ struct NvsAliasReplay {
   uri: http::Uri,
   version: http::Version,
   headers: HeaderMap,
+  dictionary_authenticated: bool,
   query_snapshot: Option<query::capture::QueryReplaySnapshot>,
   query_identity: Option<crate::cache::CacheQueryIdentity>,
 }
 
+fn revalidation_dictionary_identity_matches(
+  cached: Option<&crate::cache::CacheDictionaryIdentity>,
+  current: Option<&crate::cache::CacheDictionaryIdentity>,
+) -> bool {
+  cached == current
+}
+
 pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<ProxyBody> {
+  // Capture the selected configured transport before `run_inner` can consume
+  // the request or select a retry target. A response `Link` cannot redirect a
+  // prefetch onto a new route or client.
+  let prefetch = context
+    .outbound
+    .extensions()
+    .get::<super::super::dictionary::upstream::Negotiation>()
+    .cloned()
+    .and_then(|negotiation| {
+      super::super::dictionary::prefetch::Plan::capture(
+        std::sync::Arc::clone(context.state),
+        negotiation,
+        context.upstream.clone(),
+        context.upstream_version,
+        context.timeouts,
+        context.outbound.uri().clone(),
+        context.outbound.method().clone(),
+        context.outbound.version(),
+        context.outbound.headers().get(http::header::HOST).cloned(),
+      )
+    });
+  let dictionary_state = context.state;
   let incremental_request = incremental::request_marked(&context.outbound);
   let request_version = context.request_version;
   let exchange = context
@@ -22,6 +52,22 @@ pub(super) async fn run(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Respons
     .cloned();
   let response_guard = exchange.as_ref().map(|exchange| exchange.begin_response());
   let mut response = run_inner(context).await;
+  if let Some(prefetch) = prefetch {
+    prefetch.schedule(&response);
+  }
+  if let Some(dictionary) = response
+    .extensions()
+    .get::<super::super::dictionary::upstream::Negotiation>()
+    .cloned()
+  {
+    response = super::super::dictionary::learning::attach(
+      response,
+      dictionary_state,
+      &dictionary.scope,
+      &dictionary.url,
+    )
+    .await;
+  }
   incremental::adapt_admission_rejection(&mut response, incremental_request, request_version);
   if let Some(exchange) = exchange {
     if response
@@ -96,6 +142,26 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     mut cache_store_allowed,
     cache_fill_guard,
   } = context;
+  let mut dictionary_negotiation = outbound
+    .extensions()
+    .get::<super::super::dictionary::upstream::Negotiation>()
+    .cloned();
+  let mut dictionary_identity = dictionary_negotiation
+    .as_ref()
+    .and_then(|value| value.representation_identity().ok());
+  let mut origin_vary_headers = dictionary_negotiation
+    .as_ref()
+    .map(|value| &value.request_headers);
+  let dictionary_managed = resolved
+    .route
+    .compression_dictionary_profile
+    .as_deref()
+    .and_then(|name| state.compression_dictionary.profile(name))
+    .is_some_and(|profile| profile.config.upstream);
+  let dictionary_authenticated = outbound
+    .extensions()
+    .get::<super::super::dictionary::upstream::RetryContext>()
+    .is_some_and(|context| context.authenticated);
   let digest_request = outbound
     .extensions()
     .get::<integrity_digest::DigestRequest>()
@@ -188,6 +254,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       uri: request_uri.clone(),
       version: outbound.version(),
       headers,
+      dictionary_authenticated,
       query_snapshot: outbound
         .extensions()
         .get::<query::capture::QueryReplaySnapshot>()
@@ -211,6 +278,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         uri: request.effective_uri.clone(),
         version: outbound.version(),
         headers,
+        dictionary_authenticated,
         query_snapshot: outbound
           .extensions()
           .get::<query::capture::QueryReplaySnapshot>()
@@ -222,6 +290,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       }
     });
   let mut report_pool_success = true;
+  let mut pool_retry_target_changed = false;
   let upstream_response = if upstream_version == HttpVersion::H3 {
     let retry_policy = if native_grpc_request {
       EffectiveRetryPolicy::for_grpc_request(
@@ -254,15 +323,14 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       .await
       .map(|success| {
         if !success.cache_identity_unchanged {
+          pool_retry_target_changed = true;
           no_vary_search = None;
           // A pool retry selected a new effective origin target. Forward the
           // response, but bypass QUERY cache insertion rather than binding it
           // to the identity captured for the first target.
           query_identity = None;
-          if query::is_query(&request_method) {
-            stale_on_error = None;
-            revalidation_entry = None;
-          }
+          stale_on_error = None;
+          revalidation_entry = None;
         }
         upstream_index = success.upstream_index;
         upstream = &state.upstreams[upstream_index];
@@ -425,15 +493,14 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           .await
           .map(|success| {
             if !success.cache_identity_unchanged {
+              pool_retry_target_changed = true;
               no_vary_search = None;
               // A pool retry selected a new effective origin target. Forward the
               // response, but bypass QUERY cache insertion rather than binding it
               // to the identity captured for the first target.
               query_identity = None;
-              if query::is_query(&request_method) {
-                stale_on_error = None;
-                revalidation_entry = None;
-              }
+              stale_on_error = None;
+              revalidation_entry = None;
             }
             upstream_index = success.upstream_index;
             upstream = &state.upstreams[upstream_index];
@@ -607,6 +674,42 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       }
     }
   };
+  // A pool retry may have selected a different upstream. Its response carries
+  // the fresh negotiation constructed for that target; never decode, learn,
+  // or cache it using the initial target's dictionary selection.
+  if let Some(negotiation) = upstream_response
+    .extensions()
+    .get::<super::super::dictionary::upstream::Negotiation>()
+    .cloned()
+  {
+    dictionary_identity = negotiation.representation_identity().ok();
+    dictionary_negotiation = Some(negotiation);
+    origin_vary_headers = dictionary_negotiation
+      .as_ref()
+      .map(|value| &value.request_headers);
+  } else if pool_retry_target_changed {
+    // A reselected target that could not negotiate dictionaries must not
+    // inherit the initial target's representation partition or decoder.
+    dictionary_negotiation = None;
+    dictionary_identity = None;
+    origin_vary_headers = None;
+    if dictionary_managed {
+      cache_store_allowed = false;
+    }
+  }
+  if upstream_response.status() == StatusCode::NOT_MODIFIED
+    && revalidation_entry.as_ref().is_some_and(|entry| {
+      !revalidation_dictionary_identity_matches(
+        entry.dictionary_identity.as_ref(),
+        dictionary_identity.as_ref(),
+      )
+    })
+  {
+    return route_security.text(
+      StatusCode::BAD_GATEWAY,
+      "upstream revalidation representation changed",
+    );
+  }
   query::invalidate_after_origin_response(
     state.as_ref(),
     &request_method,
@@ -678,7 +781,26 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
   } else {
     upstream_response
   };
+  let upstream_response = match super::super::dictionary::upstream::decode(
+    upstream_response,
+    dictionary_negotiation.as_ref(),
+    dictionary_managed,
+    state.metrics.clone(),
+  ) {
+    Ok(response) => response,
+    Err(status) => {
+      return route_security.text(status, "upstream dictionary representation unavailable");
+    }
+  };
   let (mut parts, mut body) = upstream_response.into_parts();
+  if dictionary_authenticated {
+    parts
+      .extensions
+      .insert(super::super::dictionary::PrivateRequest);
+  }
+  if let Some(negotiation) = &dictionary_negotiation {
+    parts.extensions.insert(negotiation.clone());
+  }
   if let Some(request) = &group_request {
     parts.extensions.insert(request.clone());
   }
@@ -804,6 +926,8 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
             request_headers: &request_headers,
             query_identity: query_identity.as_ref(),
             certificate_identity: certificate_identity.as_ref(),
+            dictionary_identity: dictionary_identity.as_ref(),
+            origin_vary_headers,
             proxy_protocol_identity: proxy_protocol_identity.as_ref(),
           },
           entry,
@@ -869,6 +993,8 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           request_headers: &request_headers,
           query_identity: query_identity.as_ref(),
           certificate_identity: certificate_identity.as_ref(),
+          dictionary_identity: dictionary_identity.as_ref(),
+          origin_vary_headers,
           proxy_protocol_identity: proxy_protocol_identity.as_ref(),
         },
         entry,
@@ -893,6 +1019,8 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
             proxy_protocol_identity: proxy_protocol_identity.as_ref(),
             query_identity: query_identity.as_ref(),
             certificate_identity: certificate_identity.as_ref(),
+            dictionary_identity: dictionary_identity.as_ref(),
+            origin_vary_headers,
             policy_name: resolved.route.cache.as_deref(),
             scheme: downstream_scheme,
             host,
@@ -928,6 +1056,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       selected_pool_name.as_deref(),
       client_addr,
       &resolved.route.name,
+      resolved.route,
     )
     .await
     {
@@ -940,6 +1069,26 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         );
       }
     };
+    if let Some(negotiation) = response
+      .extensions()
+      .get::<super::super::dictionary::upstream::Negotiation>()
+      .cloned()
+    {
+      dictionary_identity = negotiation.representation_identity().ok();
+      dictionary_negotiation = Some(negotiation);
+      origin_vary_headers = dictionary_negotiation
+        .as_ref()
+        .map(|value| &value.request_headers);
+    } else {
+      // The replayed request did not negotiate a dictionary (for example,
+      // because it became ineligible). It cannot inherit the owner request's
+      // representation partition or origin Vary view.
+      dictionary_identity = None;
+      origin_vary_headers = None;
+      if dictionary_managed {
+        cache_store_allowed = false;
+      }
+    }
     let (mut replay_parts, replay_body) = response.into_parts();
     if let Some(request) = &group_request {
       replay_parts.extensions.insert(request.clone());
@@ -1004,6 +1153,8 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
             proxy_protocol_identity: proxy_protocol_identity.as_ref(),
             query_identity: query_identity.as_ref(),
             certificate_identity: certificate_identity.as_ref(),
+            dictionary_identity: dictionary_identity.as_ref(),
+            origin_vary_headers,
             policy_name: resolved.route.cache.as_deref(),
             scheme: downstream_scheme,
             host,
@@ -1035,6 +1186,7 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         selected_pool_name.as_deref(),
         client_addr,
         &resolved.route.name,
+        resolved.route,
       )
       .await
       {
@@ -1044,6 +1196,23 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           return route_security.text(StatusCode::BAD_GATEWAY, "cache revalidation failed");
         }
       };
+      if let Some(negotiation) = response
+        .extensions()
+        .get::<super::super::dictionary::upstream::Negotiation>()
+        .cloned()
+      {
+        dictionary_identity = negotiation.representation_identity().ok();
+        dictionary_negotiation = Some(negotiation);
+        origin_vary_headers = dictionary_negotiation
+          .as_ref()
+          .map(|value| &value.request_headers);
+      } else {
+        dictionary_identity = None;
+        origin_vary_headers = None;
+        if dictionary_managed {
+          cache_store_allowed = false;
+        }
+      }
       let (mut replay_parts, replay_body) = response.into_parts();
       if replay_parts.status == StatusCode::NOT_MODIFIED {
         return route_security.text(
@@ -1125,7 +1294,11 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
           response,
           &request_method,
           &request_headers,
-          resolved.route.compression.as_deref(),
+          if resolved.route.compression_dictionary_profile.is_some() {
+            Some("off")
+          } else {
+            resolved.route.compression.as_deref()
+          },
           &state.config.compression,
           &state.compression,
         )
@@ -1299,6 +1472,8 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
             query_identity: query_identity.as_ref(),
             proxy_protocol_identity: proxy_protocol_identity.as_ref(),
             certificate_identity: certificate_identity.as_ref(),
+            dictionary_identity: dictionary_identity.as_ref(),
+            origin_vary_headers,
             policy_name: resolved.route.cache.as_deref(),
             scheme: downstream_scheme,
             host,
@@ -1340,6 +1515,8 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: proxy_protocol_identity.as_ref(),
         certificate_identity: certificate_identity.as_ref(),
+        dictionary_identity: dictionary_identity.as_ref(),
+        origin_vary_headers,
         policy_name: resolved.route.cache.as_deref(),
         scheme: downstream_scheme,
         host,
@@ -1440,7 +1617,11 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       response,
       &request_method,
       &request_headers,
-      resolved.route.compression.as_deref(),
+      if resolved.route.compression_dictionary_profile.is_some() {
+        Some("off")
+      } else {
+        resolved.route.compression.as_deref()
+      },
       &state.config.compression,
       &state.compression,
     )
@@ -1464,6 +1645,7 @@ async fn replay_nvs_alias_request(
   pool_name: Option<&str>,
   client_addr: SocketAddr,
   route_name: &str,
+  route: &crate::config::RouteConfig,
 ) -> anyhow::Result<Response<ProxyBody>> {
   let timeouts = timeouts.cap_upstream_to_deadline(deadline);
   let mut builder = Request::builder()
@@ -1486,16 +1668,31 @@ async fn replay_nvs_alias_request(
         anyhow::anyhow!("No-Vary-Search alias replay exhausted its upstream deadline")
       })??;
   }
+  super::super::dictionary::upstream::prepare(
+    &mut request,
+    route,
+    upstream,
+    state,
+    replay.dictionary_authenticated,
+  )
+  .await;
+  let dictionary = request
+    .extensions()
+    .get::<super::super::dictionary::upstream::Negotiation>()
+    .cloned();
+  let dictionary_private = request
+    .extensions()
+    .get::<super::super::dictionary::upstream::RetryContext>()
+    .is_some_and(|context| context.authenticated);
   let policy = EffectiveRetryPolicy::disabled_direct();
   let admission = Some(RetryAdmissionContext {
     route_name,
     pool_name,
   });
-  if upstream_version == HttpVersion::H3 {
-    return send_h3_with_retry(request, upstream, timeouts, state, &policy, admission).await;
-  }
-  if upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off {
-    return send_one_shot_with_proxy_protocol(
+  let response = if upstream_version == HttpVersion::H3 {
+    send_h3_with_retry(request, upstream, timeouts, state, &policy, admission).await?
+  } else if upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off {
+    send_one_shot_with_proxy_protocol(
       request,
       upstream,
       state,
@@ -1505,13 +1702,73 @@ async fn replay_nvs_alias_request(
       timeouts,
     )
     .await
-    .map(|response| response.map(|body| body.map_err(boxed_error).boxed()));
+    .map(|response| response.map(|body| body.map_err(boxed_error).boxed()))?
+  } else {
+    let client = state
+      .clients
+      .for_upstream_version(&upstream.name, upstream.origin.scheme(), upstream_version)
+      .ok_or_else(|| anyhow::anyhow!("upstream client is not configured"))?;
+    send_with_retry(client, request, timeouts, state, &policy, admission)
+      .await
+      .map(|response| response.map(|body| body.map_err(boxed_error).boxed()))?
+  };
+  let dictionary_managed = route
+    .compression_dictionary_profile
+    .as_deref()
+    .and_then(|name| state.compression_dictionary.profile(name))
+    .is_some_and(|profile| profile.config.upstream);
+  let mut response = super::super::dictionary::upstream::decode(
+    response,
+    dictionary.as_ref(),
+    dictionary_managed,
+    state.metrics.clone(),
+  )
+  .map_err(|status| anyhow::anyhow!("upstream dictionary response rejected with {status}"))?;
+  if dictionary_private {
+    response
+      .extensions_mut()
+      .insert(super::super::dictionary::PrivateRequest);
   }
-  let client = state
-    .clients
-    .for_upstream_version(&upstream.name, upstream.origin.scheme(), upstream_version)
-    .ok_or_else(|| anyhow::anyhow!("upstream client is not configured"))?;
-  send_with_retry(client, request, timeouts, state, &policy, admission)
-    .await
-    .map(|response| response.map(|body| body.map_err(boxed_error).boxed()))
+  if let Some(dictionary) = dictionary {
+    response.extensions_mut().insert(dictionary);
+  }
+  Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn revalidation_requires_the_same_dictionary_representation_identity() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      http::header::ACCEPT_ENCODING,
+      http::HeaderValue::from_static("dcb, dcz, identity"),
+    );
+    let first = crate::cache::CacheDictionaryIdentity::new(
+      b"upstream-a",
+      Some("a3dcb4d229de6fde0db5686dee47145dcdc6a1a4ec5a7f5365e5a5df3caa4f4d"),
+      &headers,
+    )
+    .unwrap();
+    let second = crate::cache::CacheDictionaryIdentity::new(
+      b"upstream-b",
+      Some("a3dcb4d229de6fde0db5686dee47145dcdc6a1a4ec5a7f5365e5a5df3caa4f4d"),
+      &headers,
+    )
+    .unwrap();
+    assert!(revalidation_dictionary_identity_matches(
+      Some(&first),
+      Some(&first)
+    ));
+    assert!(!revalidation_dictionary_identity_matches(
+      Some(&first),
+      Some(&second)
+    ));
+    assert!(!revalidation_dictionary_identity_matches(
+      Some(&first),
+      None
+    ));
+  }
 }

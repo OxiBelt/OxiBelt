@@ -298,6 +298,8 @@ pub(super) fn routes_without_waf_are_equivalent(
         && left.external_auth == right.external_auth
         && left.cache == right.cache
         && left.compression == right.compression
+        && left.compression_dictionary_profile == right.compression_dictionary_profile
+        && left.dictionary == right.dictionary
         && left.buffering == right.buffering
         && left.limits == right.limits
     })

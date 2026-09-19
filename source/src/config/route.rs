@@ -93,6 +93,10 @@ pub struct RouteConfig {
   #[serde(default)]
   pub compression: Option<String>,
   #[serde(default)]
+  pub compression_dictionary_profile: Option<String>,
+  #[serde(default)]
+  pub dictionary: Option<String>,
+  #[serde(default)]
   pub security_headers: Option<String>,
   #[serde(default)]
   pub status_headers: RouteStatusHeadersConfig,

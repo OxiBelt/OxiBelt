@@ -477,7 +477,7 @@ impl ResponseCache {
     let (policy_name, partition, base_key, vary_fields, variant_key) = if let Some(policy) = policy
     {
       let request_headers = super::lookup::cache_view_headers(&ctx);
-      let operation = self.operation_context(
+      let operation = self.operation_context_with_dictionary(
         ctx.policy_name,
         ctx.scheme,
         ctx.host,
@@ -486,6 +486,7 @@ impl ResponseCache {
         request_headers,
         ctx.query_identity,
         ctx.certificate_identity,
+        ctx.dictionary_identity,
         ctx.proxy_protocol_identity,
         ctx.group_request,
       );

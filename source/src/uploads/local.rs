@@ -17,12 +17,13 @@ use tokio::sync::Mutex;
 
 use super::{
   AppendReservation, DispatchClaim, DispatchTerminal, InspectedPart, UploadByteStream,
-  UploadCreate, UploadObject, UploadOwner, UploadRejection, UploadRequestMetadata, UploadState,
-  UploadStatus, is_sha256_hex,
+  UploadCreate, UploadDictionaryPin, UploadObject, UploadOwner, UploadRejection,
+  UploadRequestMetadata, UploadState, UploadStatus, is_sha256_hex,
 };
 use crate::config::{UploadDestinationConfig, UploadStoreConfig, UploadStoreKind};
 
-const STATE_FILE: &str = "journal/upload-state-v1.json";
+const STATE_FILE: &str = "journal/upload-state-v2.json";
+const LEGACY_STATE_FILE: &str = "journal/upload-state-v1.json";
 const LOCK_FILE: &str = ".oxibelt-upload-store.lock";
 const MAX_STATE_BYTES: u64 = 64 * 1024 * 1024;
 const RESERVATION_LEASE_MS: u64 = 60_000;
@@ -34,8 +35,34 @@ pub struct LocalUploadStore {
   instance_id: String,
   _lock: Flock<std::fs::File>,
   state: Arc<Mutex<LocalState>>,
-  assembly: Mutex<()>,
+  assembly: Arc<Mutex<()>>,
   poisoned: AtomicBool,
+}
+
+// Keep filesystem exclusion until the last detached write has actually closed
+// its file. Field order closes the descriptor before releasing the lease.
+struct DecodedFile {
+  file: std::fs::File,
+  _assembly: Arc<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl DecodedFile {
+  async fn write(mut self, bytes: bytes::Bytes) -> anyhow::Result<Self> {
+    tokio::task::spawn_blocking(move || {
+      std::io::Write::write_all(&mut self.file, &bytes)?;
+      Ok(self)
+    })
+    .await?
+  }
+
+  async fn sync(self) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || {
+      self.file.sync_all()?;
+      drop(self);
+      Ok(())
+    })
+    .await?
+  }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -52,12 +79,17 @@ struct LocalUpload {
   method: String,
   uri: String,
   safe_headers: serde_json::Value,
+  #[serde(default)]
+  dictionary: Option<UploadDictionaryPin>,
   offset: u64,
   declared_total: Option<u64>,
   expires_at_ms: u64,
   state: UploadState,
   parts: Vec<LocalPart>,
   reservation: Option<LocalReservation>,
+  /// Durable charge for decoded assembly, retained on failure until GC.
+  #[serde(default)]
+  decoded_reservation_bytes: u64,
   #[serde(default)]
   dispatch_expires_at_ms: Option<u64>,
   object: Option<UploadObject>,
@@ -142,7 +174,7 @@ impl LocalUploadStore {
       instance_id: random_id()?,
       _lock: lock,
       state: Arc::new(Mutex::new(state)),
-      assembly: Mutex::new(()),
+      assembly: Arc::new(Mutex::new(())),
       poisoned: AtomicBool::new(false),
     })
   }
@@ -179,12 +211,14 @@ impl LocalUploadStore {
       method: request.method.as_str().to_string(),
       uri: request.uri.to_string(),
       safe_headers: request.safe_headers,
+      dictionary: request.dictionary,
       offset: 0,
       declared_total: request.declared_total,
       expires_at_ms,
       state: UploadState::Active,
       parts: Vec::new(),
       reservation: None,
+      decoded_reservation_bytes: 0,
       dispatch_expires_at_ms: None,
       object: None,
       epoch: 1,
@@ -458,7 +492,11 @@ impl LocalUploadStore {
       return Err(UploadRejection::Capacity.into());
     }
     let upload = checked_mut(&mut next, id, owner, binding)?;
-    upload.state = UploadState::Completing;
+    upload.state = if upload.dictionary.is_some() {
+      UploadState::Validating
+    } else {
+      UploadState::Completing
+    };
     upload.epoch = upload
       .epoch
       .checked_add(1)
@@ -501,6 +539,7 @@ impl LocalUploadStore {
       method: upload.method.parse()?,
       uri: upload.uri.parse()?,
       safe_headers: upload.safe_headers.clone(),
+      dictionary: upload.dictionary.clone(),
     })
   }
 
@@ -535,7 +574,7 @@ impl LocalUploadStore {
     let upload = checked(&state, id, owner, binding)?;
     if !matches!(
       upload.state,
-      UploadState::Active | UploadState::Completing | UploadState::Ready
+      UploadState::Active | UploadState::Completing | UploadState::Validating | UploadState::Ready
     ) {
       return Err(UploadRejection::Conflict.into());
     }
@@ -741,6 +780,148 @@ impl LocalUploadStore {
         Err(error)
       }
     }
+  }
+
+  pub async fn publish_decoded_object(
+    &self,
+    id: &str,
+    owner: &UploadOwner,
+    binding: &serde_json::Value,
+    expected_bytes: u64,
+    expected_sha256: &str,
+    mut body: UploadByteStream,
+  ) -> anyhow::Result<UploadStatus> {
+    self.ensure_healthy()?;
+    let assembly = Arc::new(self.assembly.clone().lock_owned().await);
+    let (object_key, claimed_epoch, destination, max_storage) = {
+      let mut state = self.state.lock().await;
+      let mut next = state.clone();
+      let upload = checked(&next, id, owner, binding)?;
+      if upload.state != UploadState::Validating
+        || upload.dictionary.is_none()
+        || upload.decoded_reservation_bytes != 0
+      {
+        return Err(UploadRejection::Conflict.into());
+      }
+      if profile_usage(&state, &upload.profile.name).saturating_add(expected_bytes)
+        > upload.profile.max_storage_bytes
+      {
+        return Err(UploadRejection::Capacity.into());
+      }
+      let publication = (
+        format!("objects/{id}/{}", random_id()?),
+        upload.epoch,
+        upload.profile.destination.clone(),
+        upload.profile.max_storage_bytes,
+      );
+      checked_mut(&mut next, id, owner, binding)?.decoded_reservation_bytes = expected_bytes;
+      self.commit_locked(&mut state, next)?;
+      publication
+    };
+    let temporary_path = self
+      .root
+      .join("objects")
+      .join(id)
+      .join(format!(".decoded-{}.tmp", random_id()?));
+    let object_path = self.root.join(&object_key);
+    let parent = object_path
+      .parent()
+      .ok_or_else(|| anyhow::anyhow!("managed upload object has no parent"))?
+      .to_path_buf();
+    ensure_private_directory(&parent)?;
+    let (target, mut temporary) = create_private_temporary(temporary_path).await?;
+    let mut target = DecodedFile {
+      file: target.into_std().await,
+      _assembly: assembly.clone(),
+    };
+    let mut digest = Sha256::new();
+    let mut total = 0_u64;
+    while let Some(frame) = body.next().await {
+      let bytes = frame?;
+      total = total
+        .checked_add(u64::try_from(bytes.len())?)
+        .ok_or_else(|| anyhow::anyhow!("managed decoded object length overflow"))?;
+      if total > expected_bytes || total > max_storage {
+        bail!("managed decoded object exceeds its bounded publication size");
+      }
+      digest.update(&bytes);
+      target = target.write(bytes).await?;
+    }
+    target.sync().await?;
+    let actual = hex_digest(digest.finalize());
+    if total != expected_bytes || actual != expected_sha256 {
+      bail!("managed decoded object differs from inspected representation");
+    }
+    let mut cleanup = rename_with_cleanup(temporary.path().to_path_buf(), object_path).await?;
+    temporary.disarm();
+    sync_directory(&parent).await?;
+    let object = UploadObject {
+      key: object_key,
+      sha256: actual,
+      bytes: total,
+      version: None,
+    };
+    let now = now_ms()?;
+    let mut state = self.state.lock().await;
+    let mut next = state.clone();
+    let update = (|| {
+      let upload = checked_mut(&mut next, id, owner, binding)?;
+      if upload.state != UploadState::Validating || upload.epoch != claimed_epoch {
+        return Err(UploadRejection::Conflict.into());
+      }
+      upload.object = Some(object);
+      upload.decoded_reservation_bytes = 0;
+      upload.state = match destination {
+        UploadDestinationConfig::Object => UploadState::Complete,
+        UploadDestinationConfig::Upstream { .. } => UploadState::Ready,
+      };
+      upload.expires_at_ms = retention_expiry(now, upload.profile.object_ttl_seconds)?;
+      upload.epoch = upload
+        .epoch
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("managed upload fence epoch overflow"))?;
+      Ok::<_, anyhow::Error>(status(id, upload))
+    })();
+    match update {
+      Ok(result) => {
+        if let Err(error) = self.commit_locked(&mut state, next) {
+          if is_uncertain_publication(&error) {
+            cleanup.disarm();
+          }
+          return Err(error);
+        }
+        cleanup.disarm();
+        Ok(result)
+      }
+      Err(error) => Err(error),
+    }
+  }
+
+  pub async fn fail_validation(
+    &self,
+    id: &str,
+    owner: &UploadOwner,
+    binding: &serde_json::Value,
+  ) -> anyhow::Result<UploadStatus> {
+    self.ensure_healthy()?;
+    let mut state = self.state.lock().await;
+    let mut next = state.clone();
+    let upload = checked_mut(&mut next, id, owner, binding)?;
+    if !matches!(upload.state, UploadState::Active | UploadState::Validating)
+      || upload.dictionary.is_none()
+    {
+      return Err(UploadRejection::Conflict.into());
+    }
+    upload.state = UploadState::ValidationFailed;
+    upload.reservation = None;
+    upload.dispatch_expires_at_ms = None;
+    upload.epoch = upload
+      .epoch
+      .checked_add(1)
+      .ok_or_else(|| anyhow::anyhow!("managed upload fence epoch overflow"))?;
+    let result = status(id, upload);
+    self.commit_locked(&mut state, next)?;
+    Ok(result)
   }
 
   pub async fn begin_dispatch(
@@ -1090,6 +1271,7 @@ fn profile_usage(state: &LocalState, profile: &str) -> u64 {
           .offset
           .saturating_add(item.reservation.as_ref().map_or(0, |value| value.bytes))
           .saturating_add(item.object.as_ref().map_or(0, |object| object.bytes))
+          .saturating_add(item.decoded_reservation_bytes)
           .saturating_add(
             if item.state == UploadState::Completing && item.object.is_none() {
               item.offset
@@ -1205,27 +1387,41 @@ fn open_state(root: &Path) -> anyhow::Result<(Flock<std::fs::File>, LocalState)>
   let lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock)
     .map_err(|(_, error)| anyhow::anyhow!("managed upload local root is already owned: {error}"))?;
   let state_path = root.join(STATE_FILE);
+  let legacy_state_path = root.join(LEGACY_STATE_FILE);
   reject_unsafe_existing_file(&state_path)?;
-  let mut state = if state_path.exists() {
-    let metadata = std::fs::symlink_metadata(&state_path)?;
-    reject_broad_permissions(&state_path, &metadata)?;
+  reject_unsafe_existing_file(&legacy_state_path)?;
+  let source_path = if state_path.exists() {
+    &state_path
+  } else {
+    &legacy_state_path
+  };
+  let mut migrated = false;
+  let mut state = if source_path.exists() {
+    let metadata = std::fs::symlink_metadata(source_path)?;
+    reject_broad_permissions(source_path, &metadata)?;
     if metadata.len() > MAX_STATE_BYTES {
       bail!("managed upload local journal exceeds its bound");
     }
-    let state: LocalState = serde_json::from_slice(&std::fs::read(&state_path)?)?;
-    if state.schema_version != 1 {
+    let mut state: LocalState = serde_json::from_slice(&std::fs::read(source_path)?)?;
+    if state.schema_version == 1 {
+      state.schema_version = 2;
+      migrated = true;
+    } else if state.schema_version != 2 {
       bail!("managed upload local journal schema is unsupported");
     }
     state
   } else {
     let state = LocalState {
-      schema_version: 1,
+      schema_version: 2,
       uploads: BTreeMap::new(),
     };
     persist_state(root, &serde_json::to_vec(&state)?)?;
     state
   };
   recover_state(root, &mut state)?;
+  if migrated {
+    persist_state(root, &serde_json::to_vec(&state)?)?;
+  }
   validate_referenced_files(root, &state)?;
   cleanup_orphan_data(root, &state, STARTUP_STAGING_CLEANUP_LIMIT)?;
   cleanup_staging(root, STARTUP_STAGING_CLEANUP_LIMIT, None)?;
@@ -1276,6 +1472,15 @@ fn recover_state(root: &Path, state: &mut LocalState) -> anyhow::Result<()> {
   let now = now_ms()?;
   let mut changed = false;
   for upload in state.uploads.values_mut() {
+    if upload.state == UploadState::Validating {
+      upload.state = UploadState::ValidationFailed;
+      upload.reservation = None;
+      upload.epoch = upload
+        .epoch
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("managed upload fence epoch overflow"))?;
+      changed = true;
+    }
     if upload.state == UploadState::Dispatching {
       upload.state = UploadState::Indeterminate;
       upload.dispatch_expires_at_ms = None;
@@ -1760,6 +1965,7 @@ mod tests {
       object_ttl_seconds: 60,
       max_concurrent_uploads: 4,
       max_concurrent_parts: 4,
+      compression_dictionary: None,
     }
   }
 
@@ -1784,6 +1990,7 @@ mod tests {
       uri: Uri::from_static("/target"),
       safe_headers: json!({"content-type":"application/octet-stream"}),
       declared_total: total,
+      dictionary: None,
     }
   }
 
@@ -1812,6 +2019,226 @@ mod tests {
       result.extend_from_slice(&frame?);
     }
     Ok(result)
+  }
+
+  #[tokio::test]
+  async fn pinned_dictionary_session_keeps_encoded_offset_and_publishes_decoded_object() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = LocalUploadStore::open(&new_store_config(directory.path()))
+      .await
+      .expect("open store");
+    let mut request = create_request(profile(UploadDestinationConfig::Object, 64), Some(4));
+    request.dictionary = Some(UploadDictionaryPin {
+      coding: super::super::UploadDictionaryCoding::Dcz,
+      profile: "decode".to_string(),
+      dictionary: "public".to_string(),
+      hash: crate::compression_dictionary::fields::DictionaryHash::from_slice(&[7; 32])
+        .expect("SHA-256 digest"),
+    });
+    let upload = store.create(request).await.expect("create pinned upload");
+    let reservation = store
+      .begin_append(&upload.id, &owner(), &binding(), 0, 4)
+      .await
+      .expect("reserve encoded part");
+    let staged = store
+      .commit_fully_inspected_part(&reservation, &evidence(b"wire"), body(b"wire"))
+      .await
+      .expect("stage encoded bytes");
+    assert_eq!(staged.offset, 4);
+    let validating = store
+      .claim_complete(&upload.id, &owner(), &binding(), 4)
+      .await
+      .expect("claim validation fence");
+    assert_eq!(validating.state, UploadState::Validating);
+    assert!(
+      store
+        .claim_complete(&upload.id, &owner(), &binding(), 4)
+        .await
+        .is_err(),
+      "only one completion owns dictionary validation"
+    );
+    let digest = hex_digest(Sha256::digest(b"plain"));
+    let published = store
+      .publish_decoded_object(&upload.id, &owner(), &binding(), 5, &digest, body(b"plain"))
+      .await
+      .expect("publish decoded object");
+    assert_eq!(published.offset, 4, "Upload-Offset remains encoded");
+    assert_eq!(published.state, UploadState::Complete);
+    assert_eq!(
+      collect(
+        store
+          .read_object(&upload.id, &owner(), &binding())
+          .await
+          .expect("read decoded object")
+      )
+      .await
+      .expect("decoded object stream"),
+      b"plain"
+    );
+  }
+
+  #[tokio::test]
+  async fn validation_failure_is_terminal_for_pinned_uploads() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = LocalUploadStore::open(&new_store_config(directory.path()))
+      .await
+      .expect("open store");
+    let mut request = create_request(profile(UploadDestinationConfig::Object, 64), Some(4));
+    request.dictionary = Some(UploadDictionaryPin {
+      coding: super::super::UploadDictionaryCoding::Dcb,
+      profile: "decode".to_string(),
+      dictionary: "public".to_string(),
+      hash: crate::compression_dictionary::fields::DictionaryHash::from_slice(&[8; 32])
+        .expect("SHA-256 digest"),
+    });
+    let upload = store.create(request).await.expect("create pinned upload");
+    let reservation = store
+      .begin_append(&upload.id, &owner(), &binding(), 0, 4)
+      .await
+      .expect("reserve encoded part");
+    store
+      .commit_fully_inspected_part(&reservation, &evidence(b"wire"), body(b"wire"))
+      .await
+      .expect("stage encoded bytes");
+    store
+      .claim_complete(&upload.id, &owner(), &binding(), 4)
+      .await
+      .expect("claim validation");
+    let failed = store
+      .fail_validation(&upload.id, &owner(), &binding())
+      .await
+      .expect("persist validation failure");
+    assert_eq!(failed.state, UploadState::ValidationFailed);
+    assert!(
+      store
+        .claim_complete(&upload.id, &owner(), &binding(), 4)
+        .await
+        .is_err()
+    );
+  }
+
+  #[tokio::test]
+  async fn decoded_publication_reserves_quota_during_io_and_retains_failed_debt() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+      LocalUploadStore::open(&new_store_config(directory.path()))
+        .await
+        .unwrap(),
+    );
+    let profile = profile(UploadDestinationConfig::Object, 12);
+    let mut request = create_request(profile.clone(), Some(4));
+    request.dictionary = Some(UploadDictionaryPin {
+      coding: super::super::UploadDictionaryCoding::Dcz,
+      profile: "decode".into(),
+      dictionary: "public".into(),
+      hash: crate::compression_dictionary::fields::DictionaryHash::from_slice(&[7; 32]).unwrap(),
+    });
+    let first = store.create(request).await.unwrap();
+    let part = store
+      .begin_append(&first.id, &owner(), &binding(), 0, 4)
+      .await
+      .unwrap();
+    store
+      .commit_fully_inspected_part(&part, &evidence(b"wire"), body(b"wire"))
+      .await
+      .unwrap();
+    store
+      .claim_complete(&first.id, &owner(), &binding(), 4)
+      .await
+      .unwrap();
+    let second = store.create(create_request(profile, None)).await.unwrap();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let stream: UploadByteStream = Box::pin(futures_util::stream::once(async move {
+      started.send(()).unwrap();
+      released.await.unwrap();
+      Err(anyhow::anyhow!("injected decoded stream failure"))
+    }));
+    let publishing = store.clone();
+    let id = first.id.clone();
+    let task = tokio::spawn(async move {
+      publishing
+        .publish_decoded_object(
+          &id,
+          &owner(),
+          &binding(),
+          5,
+          &hex_digest(Sha256::digest(b"plain")),
+          stream,
+        )
+        .await
+    });
+    ready.await.unwrap();
+    let blocked = store
+      .begin_append(&second.id, &owner(), &binding(), 0, 4)
+      .await
+      .unwrap_err();
+    assert!(is_rejection(&blocked, UploadRejection::Capacity));
+    release.send(()).unwrap();
+    assert!(task.await.unwrap().is_err());
+    store
+      .fail_validation(&first.id, &owner(), &binding())
+      .await
+      .unwrap();
+    assert!(is_rejection(
+      &store
+        .begin_append(&second.id, &owner(), &binding(), 0, 4)
+        .await
+        .unwrap_err(),
+      UploadRejection::Capacity
+    ));
+    store.delete(&first.id, &owner(), &binding()).await.unwrap();
+    let admitted = store
+      .begin_append(&second.id, &owner(), &binding(), 0, 4)
+      .await
+      .unwrap();
+    store.abort_append(&admitted).await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn v1_restart_fails_closed_when_a_validating_session_lacks_its_pin() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let config = new_store_config(directory.path());
+    let store = LocalUploadStore::open(&config).await.expect("open store");
+    let upload = store
+      .create(create_request(
+        profile(UploadDestinationConfig::Object, 64),
+        None,
+      ))
+      .await
+      .expect("create legacy upload");
+    let journal = {
+      let mut state = store.state.lock().await;
+      let legacy = state.uploads.get_mut(&upload.id).expect("stored upload");
+      legacy.state = UploadState::Validating;
+      legacy.dictionary = None;
+      state.schema_version = 1;
+      serde_json::to_vec(&*state).expect("serialize legacy journal")
+    };
+    drop(store);
+    let root = store_root(&config);
+    std::fs::remove_file(root.join(STATE_FILE)).expect("remove v2 journal");
+    let mut legacy_file = std::fs::OpenOptions::new()
+      .write(true)
+      .create_new(true)
+      .mode(0o600)
+      .open(root.join(LEGACY_STATE_FILE))
+      .expect("create private v1 journal");
+    std::io::Write::write_all(&mut legacy_file, &journal).expect("write v1 journal");
+    legacy_file.sync_all().expect("persist v1 fixture");
+    drop(legacy_file);
+    let reopened = LocalUploadStore::open(&config)
+      .await
+      .expect("migrate v1 journal");
+    assert_eq!(
+      reopened
+        .lookup(&upload.id, &owner(), &binding())
+        .await
+        .expect("recover upload")
+        .state,
+      UploadState::ValidationFailed
+    );
+    assert!(root.join(STATE_FILE).exists(), "v2 journal was persisted");
   }
 
   #[tokio::test]

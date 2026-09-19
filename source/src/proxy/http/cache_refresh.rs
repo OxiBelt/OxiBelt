@@ -47,6 +47,18 @@ pub(super) fn spawn_background_refresh(
   stale: crate::cache::StaleEntry,
 ) -> bool {
   let certificate_identity = super::client_certificate::cache_identity(outbound).cloned();
+  let expected_dictionary_identity = outbound
+    .extensions()
+    .get::<super::dictionary::upstream::Negotiation>()
+    .and_then(|negotiation| negotiation.representation_identity().ok());
+  let expected_origin_vary_headers = outbound
+    .extensions()
+    .get::<super::dictionary::upstream::Negotiation>()
+    .map(|negotiation| negotiation.request_headers.clone());
+  let dictionary_authenticated = outbound
+    .extensions()
+    .get::<super::dictionary::upstream::RetryContext>()
+    .is_some_and(|context| context.authenticated);
   let mut query_identity = outbound
     .extensions()
     .get::<crate::cache::CacheQueryIdentity>()
@@ -119,6 +131,8 @@ pub(super) fn spawn_background_refresh(
       query_identity: query_identity.as_ref(),
       proxy_protocol_identity: None,
       certificate_identity: certificate_identity.as_ref(),
+      dictionary_identity: expected_dictionary_identity.as_ref(),
+      origin_vary_headers: expected_origin_vary_headers.as_ref(),
       policy_name: route_cache.as_deref(),
       scheme,
       host: &host,
@@ -163,6 +177,8 @@ pub(super) fn spawn_background_refresh(
       uri,
       request_headers,
       certificate_identity,
+      expected_dictionary_identity,
+      dictionary_authenticated,
       query_identity,
       no_vary_search,
       group_request,
@@ -193,11 +209,36 @@ async fn background_refresh(
   uri: http::Uri,
   request_headers: HeaderMap,
   certificate_identity: Option<crate::cache::CacheCertificateIdentity>,
+  expected_dictionary_identity: Option<crate::cache::CacheDictionaryIdentity>,
+  dictionary_authenticated: bool,
   query_identity: Option<crate::cache::CacheQueryIdentity>,
   no_vary_search: Option<crate::cache::CacheNvsRequest>,
   group_request: Option<crate::cache::CacheGroupRequest>,
   cached_entry: crate::cache::CacheEntry,
 ) -> anyhow::Result<()> {
+  let mut outbound = outbound;
+  super::dictionary::upstream::prepare(
+    &mut outbound,
+    &route,
+    &upstream,
+    &state,
+    dictionary_authenticated,
+  )
+  .await;
+  let dictionary = outbound
+    .extensions()
+    .get::<super::dictionary::upstream::Negotiation>()
+    .cloned();
+  let dictionary_identity = dictionary
+    .as_ref()
+    .and_then(|negotiation| negotiation.representation_identity().ok());
+  let origin_vary_headers = dictionary.as_ref().map(|value| &value.request_headers);
+  if dictionary_identity != expected_dictionary_identity
+    || dictionary_identity != cached_entry.dictionary_identity
+  {
+    state.metrics.record_cache_background_refresh_skip();
+    return Ok(());
+  }
   let retry_policy = EffectiveRetryPolicy::disabled_direct();
   let response = if upstream_version == HttpVersion::H3 {
     super::retry::send_h3_with_retry(outbound, &upstream, timeouts, &state, &retry_policy, None)
@@ -215,6 +256,18 @@ async fn background_refresh(
       .await?
       .map(|body| body.map_err(boxed_error).boxed())
   };
+  let dictionary_managed = route
+    .compression_dictionary_profile
+    .as_deref()
+    .and_then(|name| state.compression_dictionary.profile(name))
+    .is_some_and(|profile| profile.config.upstream);
+  let response = super::dictionary::upstream::decode(
+    response,
+    dictionary.as_ref(),
+    dictionary_managed,
+    state.metrics.clone(),
+  )
+  .map_err(|status| anyhow::anyhow!("upstream dictionary response rejected with {status}"))?;
   if super::incremental::response_marked(&response) {
     state.metrics.record_cache_background_refresh_skip();
     return Ok(());
@@ -238,6 +291,8 @@ async fn background_refresh(
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,
         certificate_identity: certificate_identity.as_ref(),
+        dictionary_identity: dictionary_identity.as_ref(),
+        origin_vary_headers,
         policy_name: route_cache.as_deref(),
         scheme,
         host: &host,
@@ -262,6 +317,8 @@ async fn background_refresh(
           query_identity: query_identity.as_ref(),
           proxy_protocol_identity: None,
           certificate_identity: certificate_identity.as_ref(),
+          dictionary_identity: dictionary_identity.as_ref(),
+          origin_vary_headers,
           policy_name: route_cache.as_deref(),
           scheme,
           host: &host,
@@ -288,6 +345,14 @@ async fn background_refresh(
     route_security_headers.as_deref(),
   );
   super::route_runtime::apply_response_actions(&mut parts.headers, &route, &request_headers);
+  let response = http::Response::from_parts(parts, body);
+  let response = if let Some(negotiation) = dictionary.as_ref() {
+    super::dictionary::learning::attach(response, &state, &negotiation.scope, &negotiation.url)
+      .await
+  } else {
+    response
+  };
+  let (parts, body) = response.into_parts();
   if body
     .size_hint()
     .upper()
@@ -319,6 +384,8 @@ async fn background_refresh(
         query_identity: query_identity.as_ref(),
         proxy_protocol_identity: None,
         certificate_identity: certificate_identity.as_ref(),
+        dictionary_identity: dictionary_identity.as_ref(),
+        origin_vary_headers,
         policy_name: route_cache.as_deref(),
         scheme,
         host: &host,

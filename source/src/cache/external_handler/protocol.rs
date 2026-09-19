@@ -17,6 +17,10 @@ pub(crate) const QUERY_CLEANUP_BEFORE_EPOCH_CAPABILITY: &str =
 /// Required for entries and authority exchanges that participate in RFC 9875
 /// cache-group coherence. Handlers must echo it before their state is trusted.
 pub(crate) const CACHE_GROUPS_CAPABILITY: &str = "cache-groups-v1";
+/// Required when a cache record is partitioned by an upstream dictionary
+/// representation. A handler that cannot preserve this opaque provenance is
+/// not eligible for those records.
+pub(crate) const CACHE_DICTIONARY_REPRESENTATION_CAPABILITY: &str = "dictionary-representation-v1";
 pub(crate) const FRAME_PREFIX_BYTES: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,6 +76,8 @@ pub(crate) struct ExternalCacheEntryMetadata {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub query_target_epoch: Option<u64>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub dictionary_identity: Option<crate::cache::CacheDictionaryIdentity>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub no_vary_search: Option<crate::cache::CacheNvsMetadata>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub group_stamp: Option<crate::cache::CacheGroupStamp>,
@@ -89,6 +95,22 @@ impl ExternalCacheEntryMetadata {
     }
     if self.cache_key_version != expected_cache_key_version {
       bail!("unsupported external cache key version");
+    }
+    let dictionary_key = crate::cache::is_dictionary_v1_base_key(&self.base_key);
+    if dictionary_key
+      && (!self
+        .capabilities
+        .iter()
+        .any(|capability| capability == CACHE_DICTIONARY_REPRESENTATION_CAPABILITY)
+        || !self
+          .dictionary_identity
+          .as_ref()
+          .is_some_and(crate::cache::CacheDictionaryIdentity::valid))
+    {
+      bail!("external cache dictionary metadata is missing provenance or capability");
+    }
+    if !dictionary_key && self.dictionary_identity.is_some() {
+      bail!("external cache dictionary provenance has an incompatible cache key");
     }
     if query_epoch_required(expected_cache_key_version) && self.query_target_epoch.is_none() {
       bail!("Q1 external cache metadata is missing its target epoch");
@@ -275,8 +297,11 @@ impl ExternalCacheLookupRequest {
     request_no_cache: bool,
     query_target_epoch: Option<u64>,
   ) -> Self {
-    let required_capabilities =
+    let mut required_capabilities =
       required_capabilities_for_cache_key_version(&cache_key_version, query_target_epoch.is_some());
+    if crate::cache::is_dictionary_v1_base_key(&base_key) {
+      required_capabilities.push(CACHE_DICTIONARY_REPRESENTATION_CAPABILITY.to_string());
+    }
     Self {
       protocol_version: PROTOCOL_VERSION.to_string(),
       cache_key_version,
@@ -639,6 +664,7 @@ mod tests {
       vary: Vec::new(),
       tags: Vec::new(),
       query_target_epoch: None,
+      dictionary_identity: None,
       no_vary_search: None,
       group_stamp: None,
       capabilities: Vec::new(),
@@ -677,6 +703,7 @@ mod tests {
       vary: Vec::new(),
       tags: vec!["tag".to_string()],
       query_target_epoch: None,
+      dictionary_identity: None,
       no_vary_search: None,
       group_stamp: None,
       capabilities: Vec::new(),
@@ -726,6 +753,7 @@ mod tests {
       vary: Vec::new(),
       tags: Vec::new(),
       query_target_epoch: None,
+      dictionary_identity: None,
       no_vary_search: None,
       group_stamp: Some(stamp),
       capabilities: vec![CACHE_GROUPS_CAPABILITY.to_string()],

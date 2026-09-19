@@ -3,6 +3,7 @@
 use super::*;
 
 const CACHE_CERTIFICATE_DOMAIN: &str = "\0oxibelt-cache-certificate-v1\0";
+const CACHE_DICTIONARY_DOMAIN: &str = "\0oxibelt-cache-dictionary-v1\0";
 const CACHE_PLAIN_KEY_ESCAPE_DOMAIN: &str = "\0oxibelt-cache-plain-key-v1\0";
 pub(super) const CACHE_QUERY_DOMAIN: &str = "\0oxibelt-cache-query-v1\0";
 pub(crate) const GROUP_EXTERNAL_CACHE_KEY_VERSION: &str = "oxibelt-cache-groups-key-v1";
@@ -39,6 +40,36 @@ pub(super) fn certificate_partitioned_base_key(
   )
 }
 
+/// Partitions internal cache storage by the representation negotiated with an
+/// upstream dictionary-capable origin. The representation is typed cache
+/// state, never a client-controlled synthetic header.
+pub(super) fn dictionary_partitioned_base_key(
+  base_key: String,
+  identity: Option<&CacheDictionaryIdentity>,
+) -> String {
+  let Some(identity) = identity else {
+    return base_key;
+  };
+  format!(
+    "{CACHE_DICTIONARY_DOMAIN}base:{}:{}scope:{}:{}dictionary:{}:{}accept-encoding:{}:{}",
+    base_key.len(),
+    base_key,
+    identity.upstream_scope_sha256().len(),
+    identity.upstream_scope_sha256(),
+    identity
+      .selected_dictionary_sha256()
+      .unwrap_or("identity")
+      .len(),
+    identity.selected_dictionary_sha256().unwrap_or("identity"),
+    identity.accept_encoding_sha256().len(),
+    identity.accept_encoding_sha256(),
+  )
+}
+
+pub(crate) fn is_dictionary_v1_base_key(base_key: &str) -> bool {
+  base_key.contains(CACHE_DICTIONARY_DOMAIN)
+}
+
 /// Applies the QUERY namespace after every existing identity partition.
 /// Keeping this outermost makes Query entries distinguishable for targeted
 /// invalidation even when certificate or PROXY-TLS partitioning is enabled.
@@ -66,13 +97,13 @@ pub(super) fn query_partitioned_base_key(
 }
 
 pub(crate) fn is_query_v1_base_key(base_key: &str) -> bool {
-  base_key.starts_with(CACHE_QUERY_DOMAIN) || base_key.starts_with(GROUP_QUERY_DOMAIN)
+  base_key.contains(CACHE_QUERY_DOMAIN) || base_key.contains(GROUP_QUERY_DOMAIN)
 }
 
 pub(crate) fn external_cache_key_version(base_key: &str) -> &'static str {
-  if base_key.starts_with(GROUP_QUERY_DOMAIN) {
+  if base_key.contains(GROUP_QUERY_DOMAIN) {
     GROUP_QUERY_EXTERNAL_CACHE_KEY_VERSION
-  } else if base_key.starts_with("\0oxibelt-cache-groups-v1\0") {
+  } else if base_key.contains("\0oxibelt-cache-groups-v1\0") {
     GROUP_EXTERNAL_CACHE_KEY_VERSION
   } else if is_query_v1_base_key(base_key) {
     QUERY_EXTERNAL_CACHE_KEY_VERSION

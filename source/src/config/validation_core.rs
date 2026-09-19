@@ -47,6 +47,15 @@ impl Config {
     self.validate_limits()?;
     self.validate_proxy()?;
     self.validate_compression()?;
+    compression_dictionary::validate_compression_dictionary(
+      &self.compression_dictionary,
+      &self.shared_state,
+      &self.cache,
+    )?;
+    uploads::validate_upload_dictionary_references(
+      &self.upload_profiles,
+      &self.compression_dictionary,
+    )?;
     self.validate_cache()?;
     self.validate_ipm()?;
     self.validate_admin()?;
@@ -351,6 +360,7 @@ impl Config {
       )?;
       route_static_files::validate_route_static_files_config(&route.name, &route.static_files)?;
       let target_count = usize::from(route.upstream.is_some())
+        + usize::from(route.dictionary.is_some())
         + usize::from(route.upstream_pool.is_some())
         + usize::from(route.static_root.is_some())
         + usize::from(route.ct_log.is_some())
@@ -358,7 +368,7 @@ impl Config {
         + usize::from(route.actions.direct_response.is_some());
       if target_count != 1 && !(route.resumable_upload.is_some() && target_count == 0) {
         bail!(
-          "route {} must set exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response",
+          "route {} must set exactly one of upstream, upstream_pool, static_root, dictionary, ct_log, actions.redirect, or actions.direct_response",
           route.name
         );
       }
@@ -366,6 +376,70 @@ impl Config {
         && route.ct_surface != CertificateTransparencyRouteSurface::Submission
       {
         bail!("route {} cannot set ct_surface without ct_log", route.name);
+      }
+      if let Some(profile) = &route.compression_dictionary_profile {
+        if !self.compression_dictionary.enabled
+          || !self
+            .compression_dictionary
+            .profiles
+            .iter()
+            .any(|p| &p.name == profile)
+        {
+          bail!(
+            "route {} references an unavailable compression dictionary profile",
+            route.name
+          );
+        }
+        if route.generic_http_upgrade
+          || route.connect_tunneling
+          || route.grpc_web
+          || route.ct_log.is_some()
+        {
+          bail!(
+            "route {} has an incompatible compression dictionary target",
+            route.name
+          );
+        }
+      }
+      if let Some(name) = &route.dictionary {
+        let dictionary = self
+          .compression_dictionary
+          .dictionaries
+          .iter()
+          .find(|d| &d.name == name)
+          .with_context(|| format!("route {} references an unknown dictionary", route.name))?;
+        let profile = route
+          .compression_dictionary_profile
+          .as_ref()
+          .and_then(|name| {
+            self
+              .compression_dictionary
+              .profiles
+              .iter()
+              .find(|p| &p.name == name)
+          })
+          .with_context(|| format!("dictionary route {} requires a profile", route.name))?;
+        if !dictionary.public
+          || !profile.downstream
+          || !profile.dictionaries.contains(name)
+          || profile.advertise.is_none()
+        {
+          bail!(
+            "dictionary route {} requires a public catalog entry and downstream advertisement",
+            route.name
+          );
+        }
+        if route.cache.is_some()
+          || route.replace_prefix_with.is_some()
+          || route.actions.rewrite.is_some()
+          || route.resumable_upload.is_some()
+          || route.actions.response_headers.has_actions()
+        {
+          bail!(
+            "dictionary route {} cannot rewrite, cache, or manage uploads",
+            route.name
+          );
+        }
       }
       if let Some(ct_log) = &route.ct_log {
         validate_runtime_identifier(&format!("route {} ct_log", route.name), ct_log)?;

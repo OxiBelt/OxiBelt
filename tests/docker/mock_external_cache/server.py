@@ -10,11 +10,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 CAPABILITY = "cache-groups-v1"
+DICTIONARY_CAPABILITY = "compression-dictionaries-v1"
 MAX_STARTUP_DELAY_SECONDS = 5.0
 STATE_LIMIT = 16 * 1024 * 1024
 LOCK = threading.Lock()
 ENTRIES = {}
 GROUP_STATE = {}
+DICTIONARY_STATE = {}
 
 
 def framed(metadata, body):
@@ -54,6 +56,8 @@ class Handler(BaseHTTPRequestHandler):
         self.revalidate(body)
       elif operation == "cache-group-state":
         self.group_state(body)
+      elif operation == "compression-dictionaries":
+        self.dictionary_storage(body)
       else:
         self.respond(404)
     except (ValueError, KeyError, UnicodeDecodeError):
@@ -133,6 +137,82 @@ class Handler(BaseHTTPRequestHandler):
       else:
         raise ValueError("mode")
     self.respond(200, json.dumps(response, separators=(",", ":")).encode("utf-8"))
+
+  def dictionary_storage(self, body):
+    self.respond(200, dictionary_storage_response(body))
+
+
+def dictionary_storage_response(body):
+  request = json.loads(body)
+  if request.get("capability") != DICTIONARY_CAPABILITY:
+    raise ValueError("dictionary capability")
+  key = request.get("key")
+  if (
+      not isinstance(key, str)
+      or not key
+      or len(key) > 256
+      or any(not (char.isascii() and (char.isalnum() or char in ":-")) for char in key)
+  ):
+    raise ValueError("dictionary key")
+  operation = request.get("operation")
+  if operation not in ("read", "compare_exchange", "write_if_manifest_matches", "delete"):
+    raise ValueError("dictionary operation")
+
+  with LOCK:
+    current = dictionary_value(key)
+    response = {
+      "capability": DICTIONARY_CAPABILITY,
+      "key": key,
+      "matched": True,
+      "value_base64": None,
+    }
+    if operation == "read":
+      if current is not None:
+        response["value_base64"] = base64.b64encode(current).decode("ascii")
+    elif operation == "compare_exchange":
+      expected = dictionary_request_value(request, "expected_base64", allow_none=True)
+      replacement = dictionary_request_value(request, "value_base64")
+      response["matched"] = current == expected
+      if response["matched"]:
+        DICTIONARY_STATE[key] = (replacement, None)
+    elif operation == "write_if_manifest_matches":
+      replacement = dictionary_request_value(request, "value_base64")
+      ttl_ms = request.get("ttl_ms")
+      if isinstance(ttl_ms, bool) or not isinstance(ttl_ms, int) or ttl_ms <= 0:
+        raise ValueError("dictionary ttl")
+      manifest_key = request.get("manifest_key")
+      if not isinstance(manifest_key, str) or manifest_key == key:
+        raise ValueError("dictionary manifest fence")
+      expected = dictionary_request_value(request, "expected_base64")
+      response["matched"] = dictionary_value(manifest_key) == expected
+      if response["matched"]:
+        DICTIONARY_STATE[key] = (replacement, time.monotonic() + ttl_ms / 1000.0)
+    else:
+      DICTIONARY_STATE.pop(key, None)
+  return json.dumps(response, separators=(",", ":")).encode("utf-8")
+
+
+def dictionary_value(key):
+  entry = DICTIONARY_STATE.get(key)
+  if entry is None:
+    return None
+  value, expires_at = entry
+  if expires_at is not None and expires_at <= time.monotonic():
+    del DICTIONARY_STATE[key]
+    return None
+  return value
+
+
+def dictionary_request_value(request, field, allow_none=False):
+  encoded = request.get(field)
+  if encoded is None and allow_none:
+    return None
+  if not isinstance(encoded, str):
+    raise ValueError(f"dictionary {field}")
+  value = base64.b64decode(encoded, validate=True)
+  if len(value) > STATE_LIMIT:
+    raise ValueError("dictionary state bound")
+  return value
 
 
 if __name__ == "__main__":

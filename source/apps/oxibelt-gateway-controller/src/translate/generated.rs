@@ -27,6 +27,7 @@ pub(super) struct GeneratedRoute {
   pub(super) upstream_request_timeout_ms: Option<u64>,
   pub(super) client_certificate_forwarding: Option<ClientCertificateForwarding>,
   pub(super) resumable_upload: Option<String>,
+  pub(super) compression_dictionary_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

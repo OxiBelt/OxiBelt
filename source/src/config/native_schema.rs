@@ -378,6 +378,11 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
   full_reload("certificate_transparency.*"),
   full_reload("routes[].ct_log"),
   full_reload("routes[].ct_surface"),
+  reference_full_reload("compression_dictionary.dictionaries[].path"),
+  full_reload("compression_dictionary"),
+  full_reload("compression_dictionary.*"),
+  full_reload("routes[].compression_dictionary_profile"),
+  full_reload("routes[].dictionary"),
   restart("admin.tls.enable_secp256r1mlkem768"),
   restart("upstreams[].tls.enable_secp256r1mlkem768"),
   restart("upstream_pools[].servers[].tls.enable_secp256r1mlkem768"),
@@ -530,6 +535,18 @@ const fn full_reload(path: &'static str) -> NativeConfigFieldMetadata {
     secret_class: NativeConfigSecretClass::None,
     config_activation: NativeConfigActivation::FullReload,
     reference_activation: NativeConfigActivation::None,
+  }
+}
+
+const fn reference_full_reload(path: &'static str) -> NativeConfigFieldMetadata {
+  NativeConfigFieldMetadata {
+    path,
+    introduced_epoch: 1,
+    deprecated_epoch: None,
+    replacement: None,
+    secret_class: NativeConfigSecretClass::None,
+    config_activation: NativeConfigActivation::FullReload,
+    reference_activation: NativeConfigActivation::FullReload,
   }
 }
 
@@ -743,7 +760,41 @@ fn object_schema(shape_path: &str, metadata_path: &str) -> Value {
   {
     object.insert("required".to_string(), json!(["name"]));
   }
+  if let Some(required) = required_fields(shape_path)
+    && let Some(object) = schema.as_object_mut()
+  {
+    object.insert("required".to_string(), json!(required));
+  }
   schema
+}
+
+#[cfg(feature = "config-tooling")]
+fn required_fields(path: &str) -> Option<&'static [&'static str]> {
+  match path {
+    "compression_dictionary.dictionaries" => Some(&["name", "path", "sha256", "url"]),
+    "compression_dictionary.stores" => Some(&["kind", "name", "quota_bytes"]),
+    "compression_dictionary.profiles" => Some(&[
+      "codec_timeout_ms",
+      "max_codec_concurrency",
+      "max_codec_memory_bytes",
+      "max_decoded_size_bytes",
+      "max_dictionaries",
+      "max_dictionary_bytes",
+      "max_expansion_ratio",
+      "max_pending_dictionary_bytes",
+      "max_total_dictionary_bytes",
+      "name",
+      "store",
+    ]),
+    "compression_dictionary.profiles.prefetch" => {
+      Some(&["max_bytes", "max_concurrent", "timeout_ms"])
+    }
+    "compression_dictionary.profiles.advertise" => Some(&["match"]),
+    "compression_dictionary.stores.disk" => Some(&["root"]),
+    "compression_dictionary.stores.shared" => Some(&["backend"]),
+    "compression_dictionary.stores.external" => Some(&["handler"]),
+    _ => None,
+  }
 }
 
 #[cfg(feature = "config-tooling")]
@@ -821,6 +872,13 @@ fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
   if shape_path == "certificate_transparency.logs.signed_root.trusted_ed25519_keys" {
     object.insert("maxItems".to_string(), json!(64));
   }
+  if shape_path == "compression_dictionary.profiles.dictionaries" {
+    object.insert("maxItems".to_string(), json!(4_096));
+    object.insert("uniqueItems".to_string(), json!(true));
+  }
+  if shape_path == "compression_dictionary.profiles.advertise.match_dest" {
+    object.insert("uniqueItems".to_string(), json!(true));
+  }
   if is_subject_alt_name_value_path(shape_path) {
     object.insert("minLength".to_string(), json!(1));
     object.insert("maxLength".to_string(), json!(253));
@@ -830,6 +888,24 @@ fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
 
 #[cfg(feature = "config-tooling")]
 fn scalar_schema(path: &str) -> Value {
+  if path == "compression_dictionary.dictionaries.sha256" {
+    return json!({"type": "string", "pattern": "^[0-9a-f]{64}$"});
+  }
+  if path == "compression_dictionary.dictionaries.url" {
+    return json!({"type": "string", "format": "uri", "pattern": "^https://"});
+  }
+  if path == "compression_dictionary.profiles.advertise.match" {
+    return json!({"type": "string", "minLength": 1, "maxLength": 2_048, "pattern": "^/"});
+  }
+  if path == "compression_dictionary.profiles.advertise.id" {
+    return json!({"type": "string", "maxLength": 1_024});
+  }
+  if path == "compression_dictionary.profiles.advertise.match_dest" {
+    return json!({
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9-]+$"}
+    });
+  }
   if matches!(
     path,
     "proxy.status_headers.identifier" | "routes.status_headers.identifier"
@@ -987,6 +1063,19 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
     "cache.query_cleanup.queue_capacity" => (1, 1_024),
     "cache.query_cleanup.batch_size" => (1, 512),
     "cache.query_cleanup.max_concurrent" => (1, 4),
+    "compression_dictionary.stores.quota_bytes"
+    | "compression_dictionary.profiles.max_total_dictionary_bytes"
+    | "compression_dictionary.profiles.max_pending_dictionary_bytes"
+    | "compression_dictionary.profiles.prefetch.max_bytes" => (1, 1 << 40),
+    "compression_dictionary.profiles.max_dictionary_bytes" => (1, 16 * 1024 * 1024 - 16),
+    "compression_dictionary.profiles.max_dictionaries" => (1, 4_096),
+    "compression_dictionary.profiles.max_codec_concurrency" => (1, 1_024),
+    "compression_dictionary.profiles.max_codec_memory_bytes" => (512 * 1024 * 1024, 1 << 30),
+    "compression_dictionary.profiles.max_decoded_size_bytes" => (1, 1 << 40),
+    "compression_dictionary.profiles.max_expansion_ratio" => (1, 1_000),
+    "compression_dictionary.profiles.codec_timeout_ms"
+    | "compression_dictionary.profiles.prefetch.timeout_ms" => (1, 300_000),
+    "compression_dictionary.profiles.prefetch.max_concurrent" => (1, 256),
     _ => return None,
   };
   Some(range)
@@ -1004,6 +1093,9 @@ fn is_array_path(path: &str) -> bool {
     "cache.policies.rules",
     "certificate_transparency.logs",
     "compression.policies",
+    "compression_dictionary.dictionaries",
+    "compression_dictionary.stores",
+    "compression_dictionary.profiles",
     "connection_limits",
     "external_auth",
     "ipm.bindings",
@@ -1063,6 +1155,12 @@ fn boolean_path(path: &str) -> bool {
       | "routes.status_headers.cache_status"
       | "cache.no_vary_search"
       | "cache.groups.enabled"
+      | "compression_dictionary.enabled"
+      | "compression_dictionary.dictionaries.public"
+      | "compression_dictionary.profiles.downstream"
+      | "compression_dictionary.profiles.upstream"
+      | "compression_dictionary.profiles.learn"
+      | "compression_dictionary.profiles.request_decode"
   ) {
     return true;
   }
@@ -1143,6 +1241,7 @@ fn string_array_path(path: &str) -> bool {
       | "listeners.http_proxy_protocol.trusted_sources"
       | "runtime.hardening.filesystem_manifest.expected_writable_paths"
       | "certificate_transparency.logs.signed_root.trusted_ed25519_keys"
+      | "compression_dictionary.profiles.dictionaries"
       | "proxy.real_ip.trusted_proxies"
       | "proxy.real_ip.rules.hosts"
       | "proxy.real_ip.rules.server_names"
@@ -1204,8 +1303,21 @@ fn string_path(path: &str) -> bool {
       | "upload_profiles.destination.kind"
       | "upload_profiles.destination.upstream"
       | "upload_profiles.identity.kind"
+      | "upload_profiles.compression_dictionary.profile"
+      | "upload_profiles.compression_dictionary.dictionary"
+      | "routes.static_files.dictionary_manifest"
       | "upload_profiles.identity.source"
       | "upload_profiles.identity.subject_field"
+      | "compression_dictionary.dictionaries.name"
+      | "compression_dictionary.dictionaries.path"
+      | "compression_dictionary.stores.name"
+      | "compression_dictionary.stores.disk.root"
+      | "compression_dictionary.stores.shared.backend"
+      | "compression_dictionary.stores.external.handler"
+      | "compression_dictionary.profiles.name"
+      | "compression_dictionary.profiles.store"
+      | "routes.compression_dictionary_profile"
+      | "routes.dictionary"
       | "certificate_transparency.logs.signed_root.bundle_path"
       | "certificate_transparency.logs.signed_root.bundle_sha256"
       | "certificate_transparency.logs.gateway.origin_url"
@@ -1267,6 +1379,10 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
   let values = BTreeMap::from([
     ("upstream_pools.max_http_version", vec!["h1", "h2", "h3"]),
     ("upload_stores.kind", vec!["local", "postgres_s3"]),
+    (
+      "compression_dictionary.stores.kind",
+      vec!["memory", "disk", "shared", "external"],
+    ),
     (
       "upload_profiles.destination.kind",
       vec!["upstream", "object"],
@@ -1469,6 +1585,12 @@ fn default_value(path: &str) -> Option<Value> {
 
   let value = match path {
     "access_log.otlp.schema" | "access_log.stdout.schema" => json!("ocsf"),
+    "compression_dictionary.enabled"
+    | "compression_dictionary.dictionaries.public"
+    | "compression_dictionary.profiles.downstream"
+    | "compression_dictionary.profiles.upstream"
+    | "compression_dictionary.profiles.learn"
+    | "compression_dictionary.profiles.request_decode" => json!(false),
     "certificate_transparency.enabled" => json!(false),
     "certificate_transparency.profile" => json!("local"),
     "certificate_transparency.logs.role" => json!("retired_read_only"),
@@ -1597,6 +1719,12 @@ fn default_value(path: &str) -> Option<Value> {
 
 #[cfg(feature = "config-tooling")]
 fn path_kind(path: &str) -> Option<&'static str> {
+  if path == "compression_dictionary.dictionaries.path" {
+    return Some("config_relative");
+  }
+  if path == "compression_dictionary.stores.disk.root" {
+    return Some("absolute_directory");
+  }
   if path == "tls.cert_chain"
     || path == "tls.private_key"
     || path.starts_with("tls.certificates.")

@@ -263,11 +263,11 @@ leak_policy = "enabled"
 name = "http_body_coding"
 owner = "HTTP WAF body coding maintainers"
 max_input_bytes = 16384
-input_contract = "Untrusted bytes selected for bounded gzip, deflate, Brotli, and Zstandard encode/decode operations."
+input_contract = "Untrusted bytes selected for bounded gzip, deflate, Brotli, Zstandard, RFC 9842 dictionary decoding and dictionary Structured Fields parsing."
 invariants = ["decoded output never exceeds 64 KiB", "expansion-ratio limits fail closed", "valid bounded round trips preserve bytes"]
 unsupported_states = ["streaming request bodies", "background blocking tasks", "network I/O"]
 seed_dir = "fuzz/seeds/http_body_coding"
-coverage_landmarks = ["source/src/proxy/http/waf_body_coding.rs:decode_body_sync", "source/src/proxy/http/waf_body_coding.rs:expansion_ratio_exceeded"]
+coverage_landmarks = ["source/src/proxy/http/waf_body_coding.rs:decode_body_sync", "source/src/proxy/http/waf_body_coding.rs:expansion_ratio_exceeded", "source/src/compression_dictionary/codec.rs:decode_bounded", "source/src/compression_dictionary/fields.rs:parse_use_as_dictionary"]
 regression_path = "tests/fixtures/fuzz-regressions/http_body_coding"
 leak_policy = "enabled"
 

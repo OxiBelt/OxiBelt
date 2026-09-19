@@ -48,6 +48,8 @@ fn lookup_context<'a>(
     request_headers,
     query_identity: None,
     certificate_identity,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }
 }
 
@@ -79,6 +81,8 @@ fn insert_certificate_variants(
           request_headers,
           query_identity: None,
           certificate_identity: identity,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body),
       ),
@@ -197,6 +201,8 @@ async fn shared_cache_keeps_certificate_identity_variants_separate_and_purgeable
             request_headers: &request_headers,
             query_identity: None,
             certificate_identity: identity,
+            dictionary_identity: None,
+            origin_vary_headers: None,
           },
           CacheEntry::memory(StatusCode::OK, HeaderMap::new(), body),
         )

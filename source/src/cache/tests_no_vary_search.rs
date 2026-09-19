@@ -35,6 +35,8 @@ fn context<'a>(
     request_headers: headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
     proxy_protocol_identity: None,
   }
 }
@@ -60,6 +62,8 @@ async fn seed(cache: &ResponseCache, uri: &Uri, effective: &str, field: &str) {
           request_headers: &headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
           proxy_protocol_identity: None
         },
         entry
@@ -97,6 +101,8 @@ fn context_with_options<'a>(
     request_headers: headers,
     query_identity,
     certificate_identity,
+    dictionary_identity: None,
+    origin_vary_headers: None,
     proxy_protocol_identity: None,
   }
 }
@@ -140,6 +146,8 @@ async fn seed_with_options(
           request_headers: headers,
           query_identity,
           certificate_identity,
+          dictionary_identity: None,
+          origin_vary_headers: None,
           proxy_protocol_identity: None,
         },
         entry
@@ -378,6 +386,8 @@ async fn exact_purge_fences_equivalent_objects_and_inflight_fills() {
           request_headers: &headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
           proxy_protocol_identity: None
         },
         entry
@@ -440,6 +450,8 @@ async fn invalid_headers_and_changed_origin_fields_never_authorize_aliases() {
           request_headers: &headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
           proxy_protocol_identity: None
         },
         entry
@@ -566,6 +578,8 @@ async fn same_process_config_toggle_disables_nvs_aliases_but_keeps_exact_cache()
         request_headers: &empty_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
         proxy_protocol_identity: None,
       })
       .is_some()

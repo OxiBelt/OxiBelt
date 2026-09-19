@@ -573,3 +573,7 @@ The current implementation reserves or defers this work:
 
 See [FeatureStatus.md](FeatureStatus.md) for the canonical supported,
 experimental, reserved, and removed feature matrix.
+
+RFC 9842 dictionary transport is explicitly opt-in. See
+[Compression Dictionary Transport](CompressionDictionary.md) for profile budgets,
+public dictionary scope, upload validation, and deployment configuration.

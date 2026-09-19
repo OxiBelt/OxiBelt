@@ -118,6 +118,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "docker-image-trivy-scan",
   "docker-integration-helper-images",
   "webtransport-h2-integration",
+  "compression-dictionary-integration",
   "admin-mutation-postgres",
   "admin-operation-postgres",
   "admin-audit-anchor-postgres",
@@ -7660,6 +7661,56 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
 }
 
 #[test]
+fn compression_dictionary_integration_is_required_and_uses_prebuilt_artifacts() {
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("compression-dictionary-integration")
+    .expect("workflow should define Compression Dictionary integration");
+  let job_text = workflow_job_text(&workflow, "compression-dictionary-integration");
+
+  assert_eq!(
+    job.needs,
+    expected_needs(&[
+      "docker-alpine-musl-image-amd64",
+      "docker-integration-helper-images",
+    ]),
+    "Compression Dictionary integration should consume the exact-revision proxy and helper image artifacts"
+  );
+  for expected in [
+    "runs-on: ubuntu-26.04",
+    "actions: read",
+    "contents: read",
+    "timeout-minutes: 30",
+    "ref: ${{ github.sha }}",
+    "tests/scripts/select-amd64-docker-image-artifact.sh auto",
+    "name: ${{ steps.select-amd64-image.outputs.artifact_name }}",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}\"",
+    "name: oxibelt-docker-integration-helper-images",
+    "docker load --input \"${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar\"",
+    "OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}",
+    "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci",
+    "tests/scripts/run-compression-dictionary-integration.sh",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "Compression Dictionary integration should include {expected}"
+    );
+  }
+
+  let jobs = parse_jobs(&workflow);
+  let summary = jobs
+    .get("pr-non-benchmark-summary")
+    .expect("workflow should define the aggregate qualification gate");
+  assert!(
+    summary
+      .needs
+      .contains(&"compression-dictionary-integration".to_owned()),
+    "the aggregate qualification gate should require Compression Dictionary integration"
+  );
+}
+
+#[test]
 fn docker_integration_jobs_use_prebuilt_helper_images() {
   let workflow = workflow_text();
 
@@ -7667,15 +7718,15 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     workflow
       .matches("name: Download Docker integration helper image artifact")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 6,
-    "Docker integration/security-fuzz, WebTransport HTTP/2, Admin PostgreSQL durability, isolated Firefox, and Kubernetes rollout should download the helper artifact"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 7,
+    "Docker integration/security-fuzz, WebTransport HTTP/2, Compression Dictionary, Admin PostgreSQL durability, isolated Firefox, and Kubernetes rollout should download the helper artifact"
   );
   assert_eq!(
     workflow
       .matches("name: Load Docker integration helper images")
       .count(),
-    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3,
-    "Docker integration/security-fuzz, WebTransport HTTP/2, isolated Firefox, and Kubernetes rollout should load the helper image tar"
+    DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 4,
+    "Docker integration/security-fuzz, WebTransport HTTP/2, Compression Dictionary, isolated Firefox, and Kubernetes rollout should load the helper image tar"
   );
   for value in [
     "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
@@ -7689,10 +7740,12 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
     "OXIBELT_COTURN_IMAGE: oxibelt/coturn:ci",
     "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"",
   ] {
-    let expected_count = if value == "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci" {
+    let expected_count = if matches!(
+      value,
+      "OXIBELT_POSTGRES_IMAGE: oxibelt/postgres:ci"
+        | "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci"
+    ) {
       DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3
-    } else if value == "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci" {
-      DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 2
     } else if matches!(
       value,
       "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci"

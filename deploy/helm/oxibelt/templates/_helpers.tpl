@@ -1041,6 +1041,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- define "oxibelt.validateAdmin" -}}
 {{- include "oxibelt.validateImageRole" . -}}
 {{- include "oxibelt.validateCacheVolume" . -}}
+{{- include "oxibelt.validateCompressionDictionary" . -}}
 {{- $admin := .Values.admin -}}
 {{- $address := $admin.bindAddress -}}
 {{- $isLoopback := or (eq $address "127.0.0.1") (eq $address "::1") -}}
@@ -1055,6 +1056,7 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- if or $admin.enabled $admin.service.enabled $admin.insecureDevelopmentMode.enabled $admin.tls.enabled $admin.mtls.enabled -}}
 {{- fail "image.role=dataplane-strict does not support Admin enablement, service exposure, TLS, mTLS, or insecure development mode" -}}
 {{- end -}}
+
 {{- if or (ne $admin.bindAddress "127.0.0.1") (ne (int $admin.service.port) 9092) (ne $admin.service.type "ClusterIP") $admin.service.annotations $admin.tokenSecretName (ne $admin.tokenSecretKey "token") $admin.tls.secretName (ne $admin.tls.certKey "tls.crt") (ne $admin.tls.privateKeyKey "tls.key") $admin.tls.serverNames (ne $admin.mtls.enforcement "required_non_loopback") $admin.mtls.clientCaSecretName (ne $admin.mtls.clientCaSecretKey "ca.crt") (ne (int $admin.mtls.verifyDepth) 4) -}}
 {{- fail "image.role=dataplane-strict rejects Admin listener settings and Admin secret or certificate projections" -}}
 {{- end -}}
@@ -1151,6 +1153,42 @@ verify_depth = {{ .Values.admin.mtls.verifyDepth }}
 {{- fail "admin.mtls.enabled is required for NodePort or LoadBalancer Admin Services by the required_external policy" -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.validateCompressionDictionary" -}}
+{{- $assets := .Values.compressionDictionary.assets | default (list) -}}
+{{- if gt (len $assets) 64 -}}{{- fail "compressionDictionary.assets must contain at most 64 entries" -}}{{- end -}}
+{{- $names := dict -}}{{- $paths := dict -}}
+{{- range $index, $asset := $assets -}}
+{{- if or (not $asset.name) (not (regexMatch "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" $asset.name)) -}}{{- fail (printf "compressionDictionary.assets[%d].name must be a safe DNS label" $index) -}}{{- end -}}
+{{- if hasKey $names $asset.name -}}{{- fail "compressionDictionary.assets names must be unique" -}}{{- end -}}{{- $_ := set $names $asset.name true -}}
+{{- if or (not $asset.mountPath) (eq $asset.mountPath "/") (ne (clean $asset.mountPath) $asset.mountPath) (not (regexMatch "^/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$" $asset.mountPath)) -}}{{- fail (printf "compressionDictionary.assets[%d].mountPath must be a normalized absolute file path" $index) -}}{{- end -}}
+{{- if hasKey $paths $asset.mountPath -}}{{- fail "compressionDictionary.assets mountPath values must be unique" -}}{{- end -}}{{- $_ := set $paths $asset.mountPath true -}}
+{{- if not (regexMatch "^[a-f0-9]{64}$" $asset.digest) -}}{{- fail (printf "compressionDictionary.assets[%d].digest must be a lower-case SHA-256 digest" $index) -}}{{- end -}}
+{{- if or (not $asset.revision) (gt (len $asset.revision) 128) -}}{{- fail (printf "compressionDictionary.assets[%d].revision is required and bounded" $index) -}}{{- end -}}
+{{- $hasConfigMap := hasKey $asset "configMap" -}}{{- $hasPvc := hasKey $asset "persistentVolumeClaim" -}}
+{{- if eq $hasConfigMap $hasPvc -}}{{- fail (printf "compressionDictionary.assets[%d] must select exactly one ConfigMap or PVC source" $index) -}}{{- end -}}
+{{- if $hasConfigMap -}}{{- if or (not $asset.configMap.name) (not $asset.configMap.key) -}}{{- fail (printf "compressionDictionary.assets[%d].configMap requires name and key" $index) -}}{{- end -}}{{- end -}}
+{{- if $hasPvc -}}{{- if or (not $asset.persistentVolumeClaim.claimName) (not $asset.persistentVolumeClaim.subPath) -}}{{- fail (printf "compressionDictionary.assets[%d].persistentVolumeClaim requires claimName and subPath" $index) -}}{{- end -}}{{- end -}}
+{{- end -}}
+{{- $learned := .Values.compressionDictionary.learnedDisk -}}
+{{- if $learned.enabled -}}
+{{- if not $learned.writableVolumeName -}}{{- fail "compressionDictionary.learnedDisk.writableVolumeName is required when learnedDisk is enabled" -}}{{- end -}}
+{{- $matched := false -}}{{- range $volume := .Values.writableVolumes -}}{{- if and (eq $volume.name $learned.writableVolumeName) (eq $volume.purpose "compression-dictionary-learned") -}}{{- $matched = true -}}{{- end -}}{{- end -}}
+{{- if not $matched -}}{{- fail "compressionDictionary.learnedDisk requires a typed writableVolumes entry with purpose compression-dictionary-learned" -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "oxibelt.compressionDictionaryAssetsDigest" -}}
+{{- printf "oxibelt-compression-dictionary-assets-v1\n%s" (.Values.compressionDictionary.assets | toJson) | sha256sum -}}
+{{- end -}}
+
+{{- define "oxibelt.compressionDictionaryAssetRevisions" -}}
+{{- $revisions := list -}}
+{{- range $asset := .Values.compressionDictionary.assets -}}
+{{- $revisions = append $revisions (printf "%s=%s" $asset.name $asset.revision) -}}
+{{- end -}}
+{{- join "," $revisions -}}
 {{- end -}}
 
 {{- define "oxibelt.validateStrictPodSecurity" -}}

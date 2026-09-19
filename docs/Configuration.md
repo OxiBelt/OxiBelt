@@ -5097,3 +5097,7 @@ Admin queue budgets require at least four per-session bytes, with per-session by
 total bytes and total bytes no greater than `4294967295`. They are independent of
 the public proxy budget and retained across reloads. See [WebTransport](WebTransport.md)
 for the pinned wire contract and interoperability limitations.
+
+RFC 9842 dictionary transport is explicitly opt-in. See
+[Compression Dictionary Transport](CompressionDictionary.md) for profile budgets,
+public dictionary scope, upload validation, and deployment configuration.

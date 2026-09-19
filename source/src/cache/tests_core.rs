@@ -66,6 +66,8 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
         request_headers: &HeaderMap::new(),
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -88,6 +90,8 @@ fn surrogate_control_overrides_origin_cache_control_and_strips_header() {
     request_headers: &HeaderMap::new(),
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
       assert_eq!(entry.body, Bytes::from_static(b"surrogate"));
@@ -126,6 +130,8 @@ fn cache_key_explain_includes_partition_and_variant() {
       request_headers: &request_headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     },
     Some(&response_headers),
   );
@@ -168,6 +174,8 @@ fn cache_key_explain_reports_vary_rejection_reason() {
       request_headers: &request_headers,
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     },
     Some(&response_headers),
   );
@@ -211,6 +219,8 @@ fn vary_variant_cap_rejects_exploding_variants() {
         request_headers: &first_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -234,6 +244,8 @@ fn vary_variant_cap_rejects_exploding_variants() {
         request_headers: &second_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"b")),
     ),
@@ -271,6 +283,8 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
         request_headers: &HeaderMap::new(),
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"gz")),
     ),
@@ -298,6 +312,8 @@ fn encoded_response_without_accept_encoding_vary_is_not_cacheable() {
         request_headers: &HeaderMap::new(),
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(StatusCode::OK, response_headers, Bytes::from_static(b"gz")),
     ),
@@ -334,6 +350,8 @@ fn cookie_requests_bypass_cache_by_default() {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -357,6 +375,8 @@ fn cookie_requests_bypass_cache_by_default() {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
@@ -387,6 +407,8 @@ fn named_policy_can_define_negative_cache_defaults() {
         request_headers: &HeaderMap::new(),
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::NOT_FOUND,
@@ -409,6 +431,8 @@ fn named_policy_can_define_negative_cache_defaults() {
       request_headers: &HeaderMap::new(),
       query_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
     }),
     Some(CacheLookup::Fresh(_))
   ));
@@ -473,6 +497,8 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
           request_headers: &request_headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers.clone(), body),
       ),
@@ -492,6 +518,8 @@ fn assert_file_backed_replacement_preserves_new_body(config: CacheConfig, disk_d
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => {
       let body = if let Some(file) = entry.body_file {
@@ -538,6 +566,8 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -565,6 +595,8 @@ fn disk_cache_lookup_removes_entry_when_body_file_disappears() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
@@ -609,6 +641,8 @@ fn cache_tag_purge_removes_matching_entries_only() {
           request_headers: &headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(StatusCode::OK, response_headers, body),
       ),
@@ -629,6 +663,8 @@ fn cache_tag_purge_removes_matching_entries_only() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let second = CacheLookupContext {
     group_request: None,
@@ -667,6 +703,8 @@ fn admission_min_hits_rejects_until_threshold() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let entry = CacheEntry::memory(
     StatusCode::OK,
@@ -691,6 +729,8 @@ fn admission_min_hits_rejects_until_threshold() {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
@@ -756,6 +796,8 @@ fn disk_cache_recovers_entries_and_removes_orphan_bodies() {
           request_headers: &HeaderMap::new(),
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         CacheEntry::memory(
           StatusCode::OK,
@@ -809,6 +851,7 @@ fn disk_cache_recovery_does_not_trust_metadata_body_path() {
     vary: Vec::new(),
     tags: Vec::new(),
     query_target_epoch: None,
+    dictionary_identity: None,
     size: 4,
   };
   std::fs::write(&meta_path, encode_metadata(&stored).unwrap()).unwrap();

@@ -7813,6 +7813,486 @@
       "x-oxibelt-reference-activation": "none",
       "x-oxibelt-secret-class": "none"
     },
+    "compression_dictionary": {
+      "additionalProperties": false,
+      "description": "OxiBelt native field `compression_dictionary`. Production Rust validation is authoritative.",
+      "properties": {
+        "dictionaries": {
+          "description": "OxiBelt native field `compression_dictionary.dictionaries`. Production Rust validation is authoritative.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "description": "OxiBelt native field `compression_dictionary.dictionaries[].name`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "path": {
+                "description": "OxiBelt native field `compression_dictionary.dictionaries[].path`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-path-kind": "config_relative",
+                "x-oxibelt-reference-activation": "full_reload",
+                "x-oxibelt-secret-class": "none"
+              },
+              "public": {
+                "default": false,
+                "description": "OxiBelt native field `compression_dictionary.dictionaries[].public`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "sha256": {
+                "description": "OxiBelt native field `compression_dictionary.dictionaries[].sha256`. Production Rust validation is authoritative.",
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "url": {
+                "description": "OxiBelt native field `compression_dictionary.dictionaries[].url`. Production Rust validation is authoritative.",
+                "format": "uri",
+                "pattern": "^https://",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "required": [
+              "name",
+              "path",
+              "sha256",
+              "url"
+            ],
+            "type": "object"
+          },
+          "type": "array",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "enabled": {
+          "default": false,
+          "description": "OxiBelt native field `compression_dictionary.enabled`. Production Rust validation is authoritative.",
+          "type": "boolean",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "profiles": {
+          "description": "OxiBelt native field `compression_dictionary.profiles`. Production Rust validation is authoritative.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "advertise": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `compression_dictionary.profiles[].advertise`. Production Rust validation is authoritative.",
+                "properties": {
+                  "id": {
+                    "description": "OxiBelt native field `compression_dictionary.profiles[].advertise.id`. Production Rust validation is authoritative.",
+                    "maxLength": 1024,
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "match": {
+                    "description": "OxiBelt native field `compression_dictionary.profiles[].advertise.match`. Production Rust validation is authoritative.",
+                    "maxLength": 2048,
+                    "minLength": 1,
+                    "pattern": "^/",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "match_dest": {
+                    "description": "OxiBelt native field `compression_dictionary.profiles[].advertise.match_dest`. Production Rust validation is authoritative.",
+                    "items": {
+                      "maxLength": 128,
+                      "minLength": 1,
+                      "pattern": "^[A-Za-z0-9-]+$",
+                      "type": "string"
+                    },
+                    "type": "array",
+                    "uniqueItems": true,
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "required": [
+                  "match"
+                ],
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "codec_timeout_ms": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].codec_timeout_ms`. Production Rust validation is authoritative.",
+                "maximum": 300000,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "dictionaries": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].dictionaries`. Production Rust validation is authoritative.",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 4096,
+                "type": "array",
+                "uniqueItems": true,
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "downstream": {
+                "default": false,
+                "description": "OxiBelt native field `compression_dictionary.profiles[].downstream`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "learn": {
+                "default": false,
+                "description": "OxiBelt native field `compression_dictionary.profiles[].learn`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "max_codec_concurrency": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].max_codec_concurrency`. Production Rust validation is authoritative.",
+                "maximum": 1024,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "max_codec_memory_bytes": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].max_codec_memory_bytes`. Production Rust validation is authoritative.",
+                "maximum": 1073741824,
+                "minimum": 536870912,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "max_decoded_size_bytes": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].max_decoded_size_bytes`. Production Rust validation is authoritative.",
+                "maximum": 1099511627776,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "max_dictionaries": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].max_dictionaries`. Production Rust validation is authoritative.",
+                "maximum": 4096,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "max_dictionary_bytes": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].max_dictionary_bytes`. Production Rust validation is authoritative.",
+                "maximum": 16777200,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "max_expansion_ratio": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].max_expansion_ratio`. Production Rust validation is authoritative.",
+                "maximum": 1000,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "max_pending_dictionary_bytes": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].max_pending_dictionary_bytes`. Production Rust validation is authoritative.",
+                "maximum": 1099511627776,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "max_total_dictionary_bytes": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].max_total_dictionary_bytes`. Production Rust validation is authoritative.",
+                "maximum": 1099511627776,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "name": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].name`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "prefetch": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `compression_dictionary.profiles[].prefetch`. Production Rust validation is authoritative.",
+                "properties": {
+                  "max_bytes": {
+                    "description": "OxiBelt native field `compression_dictionary.profiles[].prefetch.max_bytes`. Production Rust validation is authoritative.",
+                    "maximum": 1099511627776,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "max_concurrent": {
+                    "description": "OxiBelt native field `compression_dictionary.profiles[].prefetch.max_concurrent`. Production Rust validation is authoritative.",
+                    "maximum": 256,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "timeout_ms": {
+                    "description": "OxiBelt native field `compression_dictionary.profiles[].prefetch.timeout_ms`. Production Rust validation is authoritative.",
+                    "maximum": 300000,
+                    "minimum": 1,
+                    "type": "integer",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "required": [
+                  "max_bytes",
+                  "max_concurrent",
+                  "timeout_ms"
+                ],
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "request_decode": {
+                "default": false,
+                "description": "OxiBelt native field `compression_dictionary.profiles[].request_decode`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "store": {
+                "description": "OxiBelt native field `compression_dictionary.profiles[].store`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "upstream": {
+                "default": false,
+                "description": "OxiBelt native field `compression_dictionary.profiles[].upstream`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "required": [
+              "codec_timeout_ms",
+              "max_codec_concurrency",
+              "max_codec_memory_bytes",
+              "max_decoded_size_bytes",
+              "max_dictionaries",
+              "max_dictionary_bytes",
+              "max_expansion_ratio",
+              "max_pending_dictionary_bytes",
+              "max_total_dictionary_bytes",
+              "name",
+              "store"
+            ],
+            "type": "object"
+          },
+          "type": "array",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "stores": {
+          "description": "OxiBelt native field `compression_dictionary.stores`. Production Rust validation is authoritative.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "disk": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `compression_dictionary.stores[].disk`. Production Rust validation is authoritative.",
+                "properties": {
+                  "root": {
+                    "description": "OxiBelt native field `compression_dictionary.stores[].disk.root`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-path-kind": "absolute_directory",
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "required": [
+                  "root"
+                ],
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "external": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `compression_dictionary.stores[].external`. Production Rust validation is authoritative.",
+                "properties": {
+                  "handler": {
+                    "description": "OxiBelt native field `compression_dictionary.stores[].external.handler`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "required": [
+                  "handler"
+                ],
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "kind": {
+                "description": "OxiBelt native field `compression_dictionary.stores[].kind`. Production Rust validation is authoritative.",
+                "enum": [
+                  "memory",
+                  "disk",
+                  "shared",
+                  "external"
+                ],
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "name": {
+                "description": "OxiBelt native field `compression_dictionary.stores[].name`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "quota_bytes": {
+                "description": "OxiBelt native field `compression_dictionary.stores[].quota_bytes`. Production Rust validation is authoritative.",
+                "maximum": 1099511627776,
+                "minimum": 1,
+                "type": "integer",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "shared": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `compression_dictionary.stores[].shared`. Production Rust validation is authoritative.",
+                "properties": {
+                  "backend": {
+                    "description": "OxiBelt native field `compression_dictionary.stores[].shared.backend`. Production Rust validation is authoritative.",
+                    "type": "string",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "required": [
+                  "backend"
+                ],
+                "type": "object",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "required": [
+              "kind",
+              "name",
+              "quota_bytes"
+            ],
+            "type": "object"
+          },
+          "type": "array",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        }
+      },
+      "type": "object",
+      "x-oxibelt-config-activation": "full_reload",
+      "x-oxibelt-introduced-epoch": 1,
+      "x-oxibelt-reference-activation": "none",
+      "x-oxibelt-secret-class": "none"
+    },
     "config": {
       "additionalProperties": false,
       "description": "OxiBelt native field `config`. Production Rust validation is authoritative.",
@@ -18597,6 +19077,14 @@
             "x-oxibelt-reference-activation": "none",
             "x-oxibelt-secret-class": "none"
           },
+          "compression_dictionary_profile": {
+            "description": "OxiBelt native field `routes[].compression_dictionary_profile`. Production Rust validation is authoritative.",
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
           "connect_tunneling": {
             "anyOf": [
               {
@@ -18639,6 +19127,14 @@
               "submission",
               "monitoring"
             ],
+            "type": "string",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "dictionary": {
+            "description": "OxiBelt native field `routes[].dictionary`. Production Rust validation is authoritative.",
             "type": "string",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
@@ -20622,6 +21118,14 @@
                   }
                 ],
                 "description": "OxiBelt native field `routes[].static_files.cache_control_by_extension`. Production Rust validation is authoritative.",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "dictionary_manifest": {
+                "description": "OxiBelt native field `routes[].static_files.dictionary_manifest`. Production Rust validation is authoritative.",
+                "type": "string",
                 "x-oxibelt-config-activation": "full_reload",
                 "x-oxibelt-introduced-epoch": 1,
                 "x-oxibelt-reference-activation": "none",
@@ -27571,6 +28075,33 @@
       "items": {
         "additionalProperties": false,
         "properties": {
+          "compression_dictionary": {
+            "additionalProperties": false,
+            "description": "OxiBelt native field `upload_profiles[].compression_dictionary`. Production Rust validation is authoritative.",
+            "properties": {
+              "dictionary": {
+                "description": "OxiBelt native field `upload_profiles[].compression_dictionary.dictionary`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "profile": {
+                "description": "OxiBelt native field `upload_profiles[].compression_dictionary.profile`. Production Rust validation is authoritative.",
+                "type": "string",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              }
+            },
+            "type": "object",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
           "control_path_prefix": {
             "description": "OxiBelt native field `upload_profiles[].control_path_prefix`. Production Rust validation is authoritative.",
             "type": "string",

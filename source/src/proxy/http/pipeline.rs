@@ -117,7 +117,42 @@ pub(super) struct ExchangeContext<'state, 'request, 'access, 'transport, 'metada
   pub(super) cache_fill_guard: Option<crate::cache::CacheFillGuard>,
 }
 
-pub(super) async fn run<B>(context: InitialContext<'_, '_, '_, '_, '_, B>) -> Response<ProxyBody>
+pub(super) async fn run<B>(
+  mut context: InitialContext<'_, '_, '_, '_, '_, B>,
+) -> Response<ProxyBody>
+where
+  B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
+  B::Error: Into<super::body::BoxError> + Send + Sync + Unpin + 'static,
+{
+  let state = context.state;
+  let route = context.resolved.route;
+  if route.compression_dictionary_profile.is_some()
+    && (!super::dictionary::upstream::public_headers(context.request.headers())
+      || route.external_auth.is_some())
+  {
+    context
+      .request
+      .extensions_mut()
+      .insert(super::dictionary::PrivateRequest);
+  }
+  let dictionary = route.compression_dictionary_profile.as_ref().and_then(|_| {
+    super::dictionary::Downstream::new(
+      &context.request,
+      context.host,
+      context.downstream_port,
+      context.downstream_scheme,
+      context.tls,
+      context.client_addr,
+    )
+  });
+  let response = run_inner(context).await;
+  match dictionary {
+    Some(dictionary) => dictionary.finish(response, route, state).await,
+    None => response,
+  }
+}
+
+async fn run_inner<B>(context: InitialContext<'_, '_, '_, '_, '_, B>) -> Response<ProxyBody>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
   B::Error: Into<super::body::BoxError> + Send + Sync + Unpin + 'static,
@@ -613,6 +648,37 @@ where
     waf_body_compression_transform && request_body_need != BodyNeed::None;
   let response_waf_body_compression_transform =
     waf_body_compression_transform && response_body_need != BodyNeed::None;
+  let request = request.map(|request_body| {
+    if upload_bandwidth_limited {
+      request_body
+    } else {
+      body::with_read_timeout(
+        Limited::new(request_body, max_request_body_bytes as usize).boxed(),
+        client_body_timeout,
+        BodyTimeoutKind::DownstreamRequestRead,
+      )
+    }
+  });
+  let request = match dictionary_request::decode(
+    request,
+    resolved.route,
+    state.as_ref(),
+    tls.as_ref(),
+    client_addr,
+  )
+  .await
+  {
+    Ok(request) => request,
+    Err(error) => {
+      return route_security.apply(with_pending_dynamic_person_proof_response_mutations(
+        text_response(error.status, error.message),
+        state.as_ref(),
+        evaluated_person_proof.as_ref(),
+        dynamic_person_proof_mutation_added,
+        &dynamic_challenge_response_mutations,
+      ));
+    }
+  };
   if incremental::request_marked(&request)
     && request_method != Method::CONNECT
     && !headers::is_upgrade_request(&request)
@@ -627,17 +693,6 @@ where
   {
     return route_security.apply(incremental::refused(request_version));
   }
-  let request = request.map(|request_body| {
-    if upload_bandwidth_limited {
-      request_body
-    } else {
-      body::with_read_timeout(
-        Limited::new(request_body, max_request_body_bytes as usize).boxed(),
-        client_body_timeout,
-        BodyTimeoutKind::DownstreamRequestRead,
-      )
-    }
-  });
   let request_inspection_lease =
     if request_method != Method::CONNECT && request_body_need != BodyNeed::None {
       match state
@@ -773,7 +828,7 @@ where
     return route_security.waf_http_terminal(terminal, &request_waf.response_header_mutations);
   }
 
-  if let Some(static_root) = resolved.route.static_root.as_deref() {
+  if resolved.route.static_root.is_some() || resolved.route.dictionary.is_some() {
     let digest_request = request
       .extensions()
       .get::<integrity_digest::DigestRequest>()
@@ -790,16 +845,32 @@ where
       );
     }
     access_log.set_upstream("static", "file");
-    let response = static_files::serve(
-      &request,
-      &resolved.route.name,
-      resolved.route.effective_path_prefix(),
-      static_root,
-      &resolved.route.static_files,
-      &state.static_files,
-      state.config.proxy.static_files.inline_max_bytes,
-    )
-    .await;
+    let response = if let Some(name) = resolved.route.dictionary.as_deref() {
+      let context = super::dictionary::Downstream::new(
+        &request,
+        host,
+        downstream_port,
+        downstream_scheme,
+        tls,
+        client_addr,
+      );
+      super::dictionary::serve(&request, name, resolved.route, state, context)
+    } else {
+      static_files::serve(
+        &request,
+        &resolved.route.name,
+        resolved.route.effective_path_prefix(),
+        resolved
+          .route
+          .static_root
+          .as_deref()
+          .unwrap_or_else(|| std::path::Path::new("")),
+        &resolved.route.static_files,
+        &state.static_files,
+        state.config.proxy.static_files.inline_max_bytes,
+      )
+      .await
+    };
     let response = static_files::finalize_response(
       status_headers::origin(response),
       state.as_ref(),

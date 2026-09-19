@@ -16572,7 +16572,7 @@ fn route_actions_parse_bounded_exclusive_direct_response_target() {
     ),
     (
       "upstream = \"app\"\n[routes.actions.direct_response]\nstatus = 503",
-      "must set exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response",
+      "must set exactly one of upstream, upstream_pool, static_root, dictionary, ct_log, actions.redirect, or actions.direct_response",
     ),
     (
       "external_auth = \"auth\"\n[routes.actions.direct_response]\nstatus = 503",
@@ -16836,7 +16836,7 @@ path = "/edge{path_suffix}""#,
 status = 302
 location_template = "/new{path_suffix}""#,
       ),
-      "must set exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response",
+      "must set exactly one of upstream, upstream_pool, static_root, dictionary, ct_log, actions.redirect, or actions.direct_response",
     ),
     (
       base.replace(
@@ -17920,7 +17920,7 @@ fn static_route_rejects_multiple_targets() {
   assert!(
     error
       .to_string()
-      .contains("exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response"),
+      .contains("exactly one of upstream, upstream_pool, static_root, dictionary, ct_log, actions.redirect, or actions.direct_response"),
     "unexpected error: {error}"
   );
 }

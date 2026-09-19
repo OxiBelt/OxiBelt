@@ -66,6 +66,14 @@ pub const UPLOAD_POSTGRES_MIGRATION_V3: &[&str] = &[
   "INSERT INTO oxibelt_upload_schema_migrations(component,version) VALUES ('managed_uploads',3) ON CONFLICT(component) DO UPDATE SET version=GREATEST(oxibelt_upload_schema_migrations.version,EXCLUDED.version),applied_at=clock_timestamp()",
 ];
 
+/// Persists immutable RFC 9842 session pins independently of mutable headers
+/// and profile reloads.
+pub const UPLOAD_POSTGRES_MIGRATION_V4: &[&str] = &[
+  "ALTER TABLE oxibelt_uploads ADD COLUMN IF NOT EXISTS dictionary_pin_json JSONB",
+  "UPDATE oxibelt_uploads SET state='validation_failed',reservation_token=NULL,reservation_offset_bytes=NULL,reservation_bytes=NULL,lease_holder=NULL,lease_until=NULL,fence_epoch=fence_epoch+1 WHERE state='validating' AND dictionary_pin_json IS NULL",
+  "INSERT INTO oxibelt_upload_schema_migrations(component,version) VALUES ('managed_uploads',4) ON CONFLICT(component) DO UPDATE SET version=GREATEST(oxibelt_upload_schema_migrations.version,EXCLUDED.version),applied_at=clock_timestamp()",
+];
+
 pub struct PostgresS3UploadStore {
   pool: PgPool,
   objects: Arc<AmazonS3>,
@@ -366,10 +374,11 @@ impl PostgresS3UploadStore {
     if sessions >= u64::from(request.profile.max_sessions) {
       return Err(UploadRejection::Capacity.into());
     }
-    let row = sqlx::query("INSERT INTO oxibelt_uploads(id,profile_name,profile_json,owner_json,binding_json,method,uri,safe_headers,declared_total_bytes,expires_at_ms,state) VALUES($1,$2,$3::jsonb,$4::jsonb,$5::jsonb,$6,$7,$8::jsonb,$9,db_now_ms()+$10*1000,'active') RETURNING id,profile_name,offset_bytes,declared_total_bytes,expires_at_ms,state,object_key,object_sha256,object_bytes,object_version")
+    let row = sqlx::query("INSERT INTO oxibelt_uploads(id,profile_name,profile_json,owner_json,binding_json,method,uri,safe_headers,dictionary_pin_json,declared_total_bytes,expires_at_ms,state) VALUES($1,$2,$3::jsonb,$4::jsonb,$5::jsonb,$6,$7,$8::jsonb,$9::jsonb,$10,db_now_ms()+$11*1000,'active') RETURNING id,profile_name,offset_bytes,declared_total_bytes,expires_at_ms,state,object_key,object_sha256,object_bytes,object_version")
       .bind(&id).bind(&request.profile.name).bind(serde_json::to_string(&request.profile)?)
       .bind(serde_json::to_string(&request.owner)?).bind(request.binding.to_string()).bind(request.method.as_str())
       .bind(request.uri.to_string()).bind(request.safe_headers.to_string())
+      .bind(request.dictionary.as_ref().map(serde_json::to_string).transpose()?)
       .bind(request.declared_total.map(to_i64).transpose()?).bind(to_i64(request.profile.ttl_seconds)?)
       .fetch_one(&mut *tx).await?;
     let status = status_row(&row)?;
@@ -385,7 +394,7 @@ impl PostgresS3UploadStore {
   ) -> anyhow::Result<UploadStatus> {
     // Draft 12 offset discovery is an exclusive recovery point: fence any
     // in-flight append before returning an offset that the client may reuse.
-    let row = sqlx::query("UPDATE oxibelt_uploads SET state=CASE WHEN state='dispatching' AND lease_until<=clock_timestamp() THEN 'indeterminate' ELSE state END,fence_epoch=fence_epoch+CASE WHEN reservation_token IS NOT NULL OR (state='dispatching' AND lease_until<=clock_timestamp()) THEN 1 ELSE 0 END,lease_holder=CASE WHEN reservation_token IS NOT NULL OR (state='dispatching' AND lease_until<=clock_timestamp()) THEN NULL ELSE lease_holder END,lease_until=CASE WHEN reservation_token IS NOT NULL OR (state='dispatching' AND lease_until<=clock_timestamp()) THEN NULL ELSE lease_until END,reservation_bytes=CASE WHEN reservation_token IS NULL THEN reservation_bytes ELSE NULL END,reservation_token=NULL,reservation_offset_bytes=NULL WHERE id=$1 AND owner_json=$2::jsonb AND binding_json=$3::jsonb AND state<>'deleted' AND expires_at_ms>db_now_ms() RETURNING id,profile_name,offset_bytes,declared_total_bytes,expires_at_ms,state,object_key,object_sha256,object_bytes,object_version")
+    let row = sqlx::query("UPDATE oxibelt_uploads SET state=CASE WHEN state='dispatching' AND lease_until<=clock_timestamp() THEN 'indeterminate' WHEN state='validating' AND (lease_until IS NULL OR lease_until<=clock_timestamp()) THEN 'validation_failed' ELSE state END,fence_epoch=fence_epoch+CASE WHEN reservation_token IS NOT NULL OR (state='dispatching' AND lease_until<=clock_timestamp()) OR (state='validating' AND (lease_until IS NULL OR lease_until<=clock_timestamp())) THEN 1 ELSE 0 END,lease_holder=CASE WHEN reservation_token IS NOT NULL OR (state='dispatching' AND lease_until<=clock_timestamp()) OR (state='validating' AND (lease_until IS NULL OR lease_until<=clock_timestamp())) THEN NULL ELSE lease_holder END,lease_until=CASE WHEN reservation_token IS NOT NULL OR (state='dispatching' AND lease_until<=clock_timestamp()) OR (state='validating' AND (lease_until IS NULL OR lease_until<=clock_timestamp())) THEN NULL ELSE lease_until END,reservation_bytes=CASE WHEN state='validating' AND (lease_until IS NULL OR lease_until<=clock_timestamp()) THEN NULL WHEN reservation_token IS NULL THEN reservation_bytes ELSE NULL END,reservation_token=NULL,reservation_offset_bytes=NULL WHERE id=$1 AND owner_json=$2::jsonb AND binding_json=$3::jsonb AND state<>'deleted' AND expires_at_ms>db_now_ms() RETURNING id,profile_name,offset_bytes,declared_total_bytes,expires_at_ms,state,object_key,object_sha256,object_bytes,object_version")
       .bind(id).bind(serde_json::to_string(owner)?).bind(binding.to_string()).fetch_optional(&self.pool).await?
       .ok_or(UploadRejection::NotFound)?;
     status_row(&row)
@@ -583,12 +592,16 @@ impl PostgresS3UploadStore {
     owner: &UploadOwner,
     binding: &serde_json::Value,
   ) -> anyhow::Result<UploadRequestMetadata> {
-    let row = sqlx::query("SELECT method,uri,safe_headers::text AS safe_headers_text FROM oxibelt_uploads WHERE id=$1 AND owner_json=$2::jsonb AND binding_json=$3::jsonb AND state<>'deleted' AND expires_at_ms>db_now_ms()")
+    let row = sqlx::query("SELECT method,uri,safe_headers::text AS safe_headers_text,dictionary_pin_json::text AS dictionary_pin_json_text FROM oxibelt_uploads WHERE id=$1 AND owner_json=$2::jsonb AND binding_json=$3::jsonb AND state<>'deleted' AND expires_at_ms>db_now_ms()")
       .bind(id).bind(serde_json::to_string(owner)?).bind(binding.to_string()).fetch_optional(&self.pool).await?.ok_or(UploadRejection::NotFound)?;
     Ok(UploadRequestMetadata {
       method: row.try_get::<String, _>("method")?.parse()?,
       uri: row.try_get::<String, _>("uri")?.parse()?,
       safe_headers: serde_json::from_str(&row.try_get::<String, _>("safe_headers_text")?)?,
+      dictionary: row
+        .try_get::<Option<String>, _>("dictionary_pin_json_text")?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?,
     })
   }
 
@@ -632,7 +645,10 @@ impl PostgresS3UploadStore {
     let Some(state) = state else {
       return Err(UploadRejection::NotFound.into());
     };
-    if !matches!(state.as_str(), "active" | "completing" | "ready") {
+    if !matches!(
+      state.as_str(),
+      "active" | "completing" | "validating" | "ready"
+    ) {
       return Err(UploadRejection::Conflict.into());
     }
     let parts = load_parts(&self.pool, id).await?;
@@ -706,8 +722,8 @@ impl PostgresS3UploadStore {
     binding: &serde_json::Value,
     expected_offset: u64,
   ) -> anyhow::Result<UploadStatus> {
-    let row = sqlx::query("UPDATE oxibelt_uploads SET state='completing',fence_epoch=fence_epoch+1 WHERE id=$1 AND owner_json=$2::jsonb AND binding_json=$3::jsonb AND state='active' AND expires_at_ms>db_now_ms() AND reservation_token IS NULL AND offset_bytes=$4 AND (declared_total_bytes IS NULL OR declared_total_bytes=$4) RETURNING id,profile_name,offset_bytes,declared_total_bytes,expires_at_ms,state,object_key,object_sha256,object_bytes,object_version")
-      .bind(id).bind(serde_json::to_string(owner)?).bind(binding.to_string()).bind(to_i64(expected_offset)?).fetch_optional(&self.pool).await?
+    let row = sqlx::query("UPDATE oxibelt_uploads SET state=CASE WHEN dictionary_pin_json IS NULL THEN 'completing' ELSE 'validating' END,fence_epoch=fence_epoch+1,lease_holder=CASE WHEN dictionary_pin_json IS NULL THEN lease_holder ELSE 'dictionary-validation' END,lease_until=CASE WHEN dictionary_pin_json IS NULL THEN lease_until ELSE clock_timestamp()+make_interval(secs=>$5) END WHERE id=$1 AND owner_json=$2::jsonb AND binding_json=$3::jsonb AND state='active' AND expires_at_ms>db_now_ms() AND reservation_token IS NULL AND offset_bytes=$4 AND (declared_total_bytes IS NULL OR declared_total_bytes=$4) RETURNING id,profile_name,offset_bytes,declared_total_bytes,expires_at_ms,state,object_key,object_sha256,object_bytes,object_version")
+      .bind(id).bind(serde_json::to_string(owner)?).bind(binding.to_string()).bind(to_i64(expected_offset)?).bind(LEASE_SECONDS).fetch_optional(&self.pool).await?
       .ok_or(UploadRejection::Conflict)?;
     status_row(&row)
   }
@@ -854,6 +870,106 @@ impl PostgresS3UploadStore {
     Ok(status)
   }
 
+  pub async fn publish_decoded_object(
+    &self,
+    id: &str,
+    owner: &UploadOwner,
+    binding: &serde_json::Value,
+    expected_bytes: u64,
+    expected_sha256: &str,
+    mut body: UploadByteStream,
+  ) -> anyhow::Result<UploadStatus> {
+    let token = random_id()?;
+    let key = self.object_key("objects", id)?;
+    let (profile, epoch) = self
+      .claim_decoded_publish(id, owner, binding, expected_bytes, (&token, &key))
+      .await?;
+    let (path, multipart_id) = self.begin_multipart(&key).await?;
+    let api: Arc<dyn ManagedMultipartApi> = self.objects.clone();
+    let mut writer = Some(ManagedMultipartWriter::new(
+      api,
+      path,
+      multipart_id,
+      expected_bytes,
+      self.pool.clone(),
+      key.clone(),
+    )?);
+    let mut digest = Sha256::new();
+    let mut total = 0_u64;
+    let mut renew = tokio::time::interval(Duration::from_secs(RENEW_SECONDS));
+    renew.tick().await;
+    loop {
+      tokio::select! {
+        frame = body.next() => match frame {
+          Some(Ok(bytes)) => {
+            total = total.checked_add(u64::try_from(bytes.len())?).ok_or_else(|| anyhow::anyhow!("managed decoded object length overflow"))?;
+            if total > expected_bytes { abort_writer(writer.take()).await; bail!("managed decoded object exceeds inspected size"); }
+            digest.update(&bytes);
+            if let Err(error) = writer.as_mut().ok_or_else(|| anyhow::anyhow!("managed upload writer disappeared"))?.put(bytes).await {
+              abort_writer(writer.take()).await; return Err(error);
+            }
+          }
+          Some(Err(error)) => { abort_writer(writer.take()).await; return Err(error).context("managed decoded object stream failed"); }
+          None => break,
+        },
+        _ = renew.tick() => {
+          if let Err(error) = self.renew_publish(id, epoch, &token).await { abort_writer(writer.take()).await; return Err(error); }
+          if let Err(error) = self.refresh_orphan_intent(&key).await { abort_writer(writer.take()).await; return Err(error); }
+        },
+      }
+    }
+    let actual = hex_digest(digest.finalize());
+    if total != expected_bytes || actual != expected_sha256 {
+      abort_writer(writer.take()).await;
+      bail!("managed decoded object differs from inspected representation");
+    }
+    self.renew_publish(id, epoch, &token).await?;
+    self.refresh_orphan_intent(&key).await?;
+    let put = writer
+      .take()
+      .ok_or_else(|| anyhow::anyhow!("managed upload writer disappeared"))?
+      .finish()
+      .await?;
+    self
+      .complete_orphan_intent(&key, total, put.version.as_deref())
+      .await?;
+    let published_state = match profile.destination {
+      UploadDestinationConfig::Object => "complete",
+      UploadDestinationConfig::Upstream { .. } => "ready",
+    };
+    let status = self
+      .finalize_publish(
+        id,
+        epoch,
+        &token,
+        published_state,
+        &key,
+        &actual,
+        total,
+        put.version.as_deref(),
+        profile.object_ttl_seconds,
+      )
+      .await?;
+    self.untrack_orphan(&key).await?;
+    Ok(status)
+  }
+
+  pub async fn fail_validation(
+    &self,
+    id: &str,
+    owner: &UploadOwner,
+    binding: &serde_json::Value,
+  ) -> anyhow::Result<UploadStatus> {
+    let row = sqlx::query("UPDATE oxibelt_uploads SET state='validation_failed',reservation_token=NULL,reservation_offset_bytes=NULL,reservation_bytes=NULL,lease_holder=NULL,lease_until=NULL,fence_epoch=fence_epoch+1 WHERE id=$1 AND owner_json=$2::jsonb AND binding_json=$3::jsonb AND state IN ('active','validating') AND dictionary_pin_json IS NOT NULL AND expires_at_ms>db_now_ms() RETURNING id,profile_name,offset_bytes,declared_total_bytes,expires_at_ms,state,object_key,object_sha256,object_bytes,object_version")
+      .bind(id)
+      .bind(serde_json::to_string(owner)?)
+      .bind(binding.to_string())
+      .fetch_optional(&self.pool)
+      .await?
+      .ok_or(UploadRejection::Conflict)?;
+    status_row(&row)
+  }
+
   pub async fn begin_dispatch(
     &self,
     id: &str,
@@ -974,6 +1090,51 @@ impl PostgresS3UploadStore {
     Ok((profile, epoch, parts, total))
   }
 
+  async fn claim_decoded_publish(
+    &self,
+    id: &str,
+    owner: &UploadOwner,
+    binding: &serde_json::Value,
+    decoded_bytes: u64,
+    publication: (&str, &str),
+  ) -> anyhow::Result<(UploadProfileConfig, u64)> {
+    let (token, object_key) = publication;
+    let mut tx = self.pool.begin().await?;
+    let row = sqlx::query("SELECT profile_json::text AS profile_json_text,fence_epoch,lease_holder,(lease_until IS NOT NULL AND lease_until>clock_timestamp()) lease_valid FROM oxibelt_uploads WHERE id=$1 AND owner_json=$2::jsonb AND binding_json=$3::jsonb AND state='validating' AND dictionary_pin_json IS NOT NULL AND expires_at_ms>db_now_ms() FOR UPDATE")
+      .bind(id).bind(serde_json::to_string(owner)?).bind(binding.to_string()).fetch_optional(&mut *tx).await?
+      .ok_or(UploadRejection::Conflict)?;
+    let profile: UploadProfileConfig =
+      serde_json::from_str(&row.try_get::<String, _>("profile_json_text")?)?;
+    lock_profile(&mut tx, &profile.name).await?;
+    if row.try_get::<Option<String>, _>("lease_holder")?.as_deref() != Some("dictionary-validation")
+      || !row.try_get::<bool, _>("lease_valid")?
+    {
+      return Err(UploadRejection::Conflict.into());
+    }
+    if profile_usage(&mut tx, &profile.name)
+      .await?
+      .saturating_add(decoded_bytes)
+      > profile.max_storage_bytes
+    {
+      return Err(UploadRejection::Capacity.into());
+    }
+    let epoch = from_i64(row.try_get::<i64, _>("fence_epoch")?)?
+      .checked_add(1)
+      .ok_or_else(|| anyhow::anyhow!("managed upload fence epoch overflow"))?;
+    let updated = sqlx::query("UPDATE oxibelt_uploads SET fence_epoch=$2,lease_holder=$3,lease_until=clock_timestamp()+make_interval(secs=>$4),reservation_bytes=NULL WHERE id=$1 AND state='validating' AND dictionary_pin_json IS NOT NULL AND lease_holder='dictionary-validation' AND lease_until>clock_timestamp() AND expires_at_ms>db_now_ms()")
+      .bind(id).bind(to_i64(epoch)?).bind(token).bind(LEASE_SECONDS).execute(&mut *tx).await?;
+    if updated.rows_affected() != 1 {
+      return Err(UploadRejection::Conflict.into());
+    }
+    // Reserve physical output through the orphan ledger in this same
+    // profile-locked transaction. The charge must survive lease expiry and
+    // cancellation before the S3 writer has even been constructed.
+    sqlx::query("INSERT INTO oxibelt_upload_orphan_objects(object_key,profile_name,bytes,intent_state) VALUES($1,$2,$3,'pending')")
+      .bind(object_key).bind(&profile.name).bind(to_i64(decoded_bytes)?).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok((profile, epoch))
+  }
+
   async fn renew_append(&self, r: &AppendReservation) -> anyhow::Result<()> {
     let result=sqlx::query("UPDATE oxibelt_uploads SET lease_until=clock_timestamp()+make_interval(secs=>$4) WHERE id=$1 AND state='active' AND fence_epoch=$2 AND reservation_token=$3 AND lease_holder=$3 AND lease_until>clock_timestamp() AND expires_at_ms>db_now_ms()")
       .bind(&r.id).bind(to_i64(r.fence_epoch)?).bind(r.backend_token()).bind(LEASE_SECONDS).execute(&self.pool).await?;
@@ -1042,7 +1203,7 @@ impl PostgresS3UploadStore {
   }
 
   async fn renew_publish(&self, id: &str, epoch: u64, token: &str) -> anyhow::Result<()> {
-    let result=sqlx::query("UPDATE oxibelt_uploads SET lease_until=clock_timestamp()+make_interval(secs=>$4) WHERE id=$1 AND state='completing' AND fence_epoch=$2 AND lease_holder=$3 AND lease_until>clock_timestamp() AND expires_at_ms>db_now_ms()")
+    let result=sqlx::query("UPDATE oxibelt_uploads SET lease_until=clock_timestamp()+make_interval(secs=>$4) WHERE id=$1 AND state IN ('completing','validating') AND fence_epoch=$2 AND lease_holder=$3 AND lease_until>clock_timestamp() AND expires_at_ms>db_now_ms()")
       .bind(id).bind(to_i64(epoch)?).bind(token).bind(LEASE_SECONDS).execute(&self.pool).await?;
     if result.rows_affected() != 1 {
       return Err(UploadRejection::Conflict.into());
@@ -1063,7 +1224,7 @@ impl PostgresS3UploadStore {
     version: Option<&str>,
     object_ttl_seconds: u64,
   ) -> anyhow::Result<UploadStatus> {
-    let row=sqlx::query("UPDATE oxibelt_uploads SET state=$4,object_key=$5,object_sha256=$6,object_bytes=$7,object_version=$8,object_expires_at_ms=db_now_ms()+$9*1000,expires_at_ms=db_now_ms()+$9*1000,lease_holder=NULL,lease_until=NULL,reservation_bytes=NULL,fence_epoch=fence_epoch+1 WHERE id=$1 AND state='completing' AND fence_epoch=$2 AND lease_holder=$3 AND lease_until>clock_timestamp() AND expires_at_ms>db_now_ms() RETURNING id,profile_name,offset_bytes,declared_total_bytes,expires_at_ms,state,object_key,object_sha256,object_bytes,object_version")
+    let row=sqlx::query("UPDATE oxibelt_uploads SET state=$4,object_key=$5,object_sha256=$6,object_bytes=$7,object_version=$8,object_expires_at_ms=db_now_ms()+$9*1000,expires_at_ms=db_now_ms()+$9*1000,lease_holder=NULL,lease_until=NULL,reservation_bytes=NULL,fence_epoch=fence_epoch+1 WHERE id=$1 AND state IN ('completing','validating') AND fence_epoch=$2 AND lease_holder=$3 AND lease_until>clock_timestamp() AND expires_at_ms>db_now_ms() RETURNING id,profile_name,offset_bytes,declared_total_bytes,expires_at_ms,state,object_key,object_sha256,object_bytes,object_version")
       .bind(id).bind(to_i64(epoch)?).bind(token).bind(state).bind(key).bind(sha256).bind(to_i64(bytes)?).bind(version).bind(to_i64(object_ttl_seconds)?)
       .fetch_optional(&self.pool).await?.ok_or(UploadRejection::Conflict)?;
     status_row(&row)
@@ -1200,7 +1361,7 @@ impl PostgresS3UploadStore {
 }
 
 async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
-  const LATEST_SCHEMA_VERSION: i32 = 3;
+  const LATEST_SCHEMA_VERSION: i32 = 4;
   let mut tx = pool.begin().await?;
   sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('oxibelt-managed-upload-schema',0))")
     .execute(&mut *tx)
@@ -1224,6 +1385,7 @@ async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
     .skip(1)
     .chain(UPLOAD_POSTGRES_MIGRATION_V2.iter())
     .chain(UPLOAD_POSTGRES_MIGRATION_V3.iter())
+    .chain(UPLOAD_POSTGRES_MIGRATION_V4.iter())
   {
     sqlx::query(*statement).execute(&mut *tx).await?;
   }
@@ -1444,6 +1606,8 @@ fn status_row(row: &PgRow) -> anyhow::Result<UploadStatus> {
   let state = match row.try_get::<String, _>("state")?.as_str() {
     "active" => UploadState::Active,
     "completing" => UploadState::Completing,
+    "validating" => UploadState::Validating,
+    "validation_failed" => UploadState::ValidationFailed,
     "ready" => UploadState::Ready,
     "dispatching" => UploadState::Dispatching,
     "complete" => UploadState::Complete,
@@ -1606,6 +1770,7 @@ mod tests {
       object_ttl_seconds: 300,
       max_concurrent_uploads: 1,
       max_concurrent_parts: 1,
+      compression_dictionary: None,
     };
     let owner = UploadOwner {
       kind: crate::config::UploadIdentityKind::Ipm,
@@ -1621,6 +1786,7 @@ mod tests {
       uri: "https://origin.example.test/upload".parse().unwrap(),
       safe_headers: serde_json::json!({"content-type": "text/plain"}),
       declared_total: Some(5),
+      dictionary: None,
     };
     let status = store.create(create()).await.unwrap();
     let mut second_request = create();
@@ -1897,6 +2063,71 @@ mod tests {
       .delete(&replacement.id, &owner, &binding)
       .await
       .unwrap();
+    // An interrupted initial claim, or an expired decoded publisher, must
+    // never leave a reusable validation fence or release physical output debt.
+    for publication_claimed in [false, true] {
+      let mut request = create();
+      request.declared_total = Some(0);
+      request.dictionary = Some(crate::uploads::UploadDictionaryPin {
+        coding: crate::uploads::UploadDictionaryCoding::Dcz,
+        profile: "decode".into(),
+        dictionary: "public".into(),
+        hash: crate::compression_dictionary::fields::DictionaryHash::from_slice(&[7; 32]).unwrap(),
+      });
+      let pinned = store.create(request).await.unwrap();
+      store
+        .claim_complete(&pinned.id, &owner, &binding, 0)
+        .await
+        .unwrap();
+      assert_eq!(
+        store
+          .lookup(&pinned.id, &owner, &binding)
+          .await
+          .unwrap()
+          .state,
+        UploadState::Validating
+      );
+      let key = store.object_key("objects", &pinned.id).unwrap();
+      if publication_claimed {
+        store
+          .claim_decoded_publish(&pinned.id, &owner, &binding, 5, ("test-publisher", &key))
+          .await
+          .unwrap();
+      }
+      sqlx::query(
+        "UPDATE oxibelt_uploads SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
+      )
+      .bind(&pinned.id)
+      .execute(&store.pool)
+      .await
+      .unwrap();
+      assert_eq!(
+        store
+          .lookup(&pinned.id, &owner, &binding)
+          .await
+          .unwrap()
+          .state,
+        UploadState::ValidationFailed
+      );
+      assert!(
+        store
+          .claim_decoded_publish(&pinned.id, &owner, &binding, 5, ("stale-publisher", &key))
+          .await
+          .is_err()
+      );
+      let mut tx = store.pool.begin().await.unwrap();
+      assert_eq!(
+        profile_usage(&mut tx, &profile.name).await.unwrap(),
+        if publication_claimed { 5 } else { 0 }
+      );
+      tx.rollback().await.unwrap();
+      // No S3 write was started by this fixture, so this test-owned intent
+      // can be removed directly after proving its retained quota charge.
+      if publication_claimed {
+        store.untrack_orphan(&key).await.unwrap();
+      }
+      store.delete(&pinned.id, &owner, &binding).await.unwrap();
+    }
     second_store
       .delete(&second_status.id, &owner, &binding)
       .await
@@ -1910,7 +2141,7 @@ mod tests {
       Some(&UploadRejection::NotFound)
     ));
     sqlx::query(
-      "UPDATE oxibelt_upload_schema_migrations SET version=4 WHERE component='managed_uploads'",
+      "UPDATE oxibelt_upload_schema_migrations SET version=5 WHERE component='managed_uploads'",
     )
     .execute(&store.pool)
     .await
@@ -1918,7 +2149,7 @@ mod tests {
     let future_schema = migrate(&store.pool).await.unwrap_err();
     assert!(future_schema.to_string().contains("newer than this binary"));
     sqlx::query(
-      "UPDATE oxibelt_upload_schema_migrations SET version=3 WHERE component='managed_uploads'",
+      "UPDATE oxibelt_upload_schema_migrations SET version=4 WHERE component='managed_uploads'",
     )
     .execute(&store.pool)
     .await
@@ -1943,6 +2174,7 @@ mod tests {
       .iter()
       .chain(UPLOAD_POSTGRES_MIGRATION_V2)
       .chain(UPLOAD_POSTGRES_MIGRATION_V3)
+      .chain(UPLOAD_POSTGRES_MIGRATION_V4)
       .copied()
       .collect::<Vec<_>>()
       .join("\n");
@@ -1950,6 +2182,7 @@ mod tests {
     assert!(sql.contains("fence_epoch"));
     assert!(sql.contains("object_expires_at_ms"));
     assert!(sql.contains("intent_state"));
+    assert!(sql.contains("dictionary_pin_json"));
   }
 
   #[test]

@@ -1,9 +1,10 @@
 //! External cache L3 integration built on top of local cache policy decisions.
 
 use super::external_handler::{
-  ExternalCacheBody, ExternalCacheEntryMetadata, ExternalCacheHeader, ExternalCacheLookupHit,
-  ExternalCacheLookupRequest, ExternalCacheNvsCandidatesRequest, ExternalCacheNvsEpochRequest,
-  ExternalCachePublishBody, ExternalCacheQueryCleanupReport, ExternalCacheQueryCleanupRequest,
+  CACHE_DICTIONARY_REPRESENTATION_CAPABILITY, ExternalCacheBody, ExternalCacheEntryMetadata,
+  ExternalCacheHeader, ExternalCacheLookupHit, ExternalCacheLookupRequest,
+  ExternalCacheNvsCandidatesRequest, ExternalCacheNvsEpochRequest, ExternalCachePublishBody,
+  ExternalCacheQueryCleanupReport, ExternalCacheQueryCleanupRequest,
   ExternalCacheQueryEpochRequest, ExternalCacheVary, PROTOCOL_VERSION,
   required_capabilities_for_cache_key_version,
 };
@@ -130,7 +131,7 @@ impl ResponseCache {
     if !self.bind_group_request(ctx.clone()).await {
       return None;
     }
-    let operation = self.operation_context(
+    let operation = self.operation_context_with_dictionary(
       ctx.policy_name,
       ctx.scheme,
       ctx.host,
@@ -139,6 +140,7 @@ impl ResponseCache {
       super::lookup::cache_view_headers(&ctx),
       ctx.query_identity,
       ctx.certificate_identity,
+      ctx.dictionary_identity,
       ctx.proxy_protocol_identity,
       ctx.group_request,
     )?;
@@ -247,6 +249,7 @@ impl ResponseCache {
       || metadata.scheme != operation.scheme
       || metadata.host != operation.host
       || metadata.uri != operation.uri
+      || metadata.dictionary_identity != operation.dictionary_identity
     {
       return None;
     }
@@ -260,7 +263,7 @@ impl ResponseCache {
     let headers = external_headers(&metadata.headers)?;
     let vary = external_vary_matchers(&metadata.vary, ctx.certificate_identity)?;
     if !external_vary_allowed(&vary)
-      || !vary_matches(&vary, super::lookup::cache_view_headers(&ctx))
+      || !vary_matches(&vary, super::lookup::origin_vary_headers(&ctx))
     {
       return None;
     }
@@ -329,6 +332,7 @@ impl ResponseCache {
           vary,
           tags,
           query_target_epoch: metadata.query_target_epoch,
+          dictionary_identity: metadata.dictionary_identity.clone(),
           size,
         };
         let entry = stored.to_cache_entry()?;
@@ -524,11 +528,13 @@ impl ResponseCache {
           .collect(),
         tags: entry.tags.clone(),
         query_target_epoch: entry.query_target_epoch,
+        dictionary_identity: entry.dictionary_identity.clone(),
         no_vary_search: entry.no_vary_search.clone(),
         group_stamp: entry.group_stamp.clone(),
-        capabilities: required_capabilities_for_cache_key_version(
+        capabilities: external_entry_capabilities(
           cache_key_version,
           entry.query_target_epoch.is_some(),
+          entry.dictionary_identity.is_some(),
         ),
       },
     ))
@@ -725,6 +731,19 @@ impl ResponseCache {
     };
     vec![self.external_cache.purge(handler, purge).await]
   }
+}
+
+fn external_entry_capabilities(
+  cache_key_version: &str,
+  query_target_epoch: bool,
+  dictionary_identity: bool,
+) -> Vec<String> {
+  let mut capabilities =
+    required_capabilities_for_cache_key_version(cache_key_version, query_target_epoch);
+  if dictionary_identity {
+    capabilities.push(CACHE_DICTIONARY_REPRESENTATION_CAPABILITY.to_string());
+  }
+  capabilities
 }
 
 fn external_cache_retention_until_ms(metadata: &ExternalCacheEntryMetadata) -> i64 {

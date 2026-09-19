@@ -251,6 +251,7 @@ impl Config {
       && self.connection_limits == other.connection_limits
       && self.client_identity == other.client_identity
       && self.compression == other.compression
+      && self.compression_dictionary == other.compression_dictionary
       && self.cache == other.cache
       && self.ipm == other.ipm
       && self.admin == other.admin

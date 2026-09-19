@@ -104,6 +104,8 @@ async fn owner_candidate(cache: &ResponseCache) -> CacheNvsCandidate {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
         proxy_protocol_identity: None,
       },
       &headers,
@@ -141,6 +143,8 @@ async fn grouped_owner_candidate(cache: &ResponseCache) -> CacheNvsCandidate {
         request_headers: &headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
         proxy_protocol_identity: None,
       },
       &headers,
@@ -193,6 +197,7 @@ fn framed_owner_response(
     vary: Vec::<ExternalCacheVary>::new(),
     tags: Vec::new(),
     query_target_epoch: None,
+    dictionary_identity: None,
     no_vary_search: Some(no_vary_search),
     group_stamp,
     capabilities: if matches!(mode, HandlerMode::GroupedAbsoluteOwner) {
@@ -544,6 +549,8 @@ async fn grouped_l3_nvs_alias_accepts_an_absolute_owner_with_a_canonical_stamp()
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   assert!(cache.bind_group_request(mutation_context.clone()).await);
   cache

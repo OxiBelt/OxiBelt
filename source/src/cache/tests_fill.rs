@@ -22,6 +22,8 @@ async fn fill_permit_coalesces_followers_until_leader_drops() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let guard = match cache.begin_fill(ctx.clone()).unwrap() {
     CacheFillPermit::Leader(guard) => guard,
@@ -71,6 +73,8 @@ async fn fill_waiter_times_out_without_leader_drop() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let _guard = match cache.begin_fill(ctx.clone()).unwrap() {
     CacheFillPermit::Leader(guard) => guard,
@@ -124,6 +128,8 @@ fn certificate_identity_uses_a_separate_fill_lock() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: Some(identity),
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
 
   let _first_guard = match cache.begin_fill(context(&first)).unwrap() {
@@ -158,6 +164,8 @@ fn not_stored_fill_suppression_skips_short_lived_locks() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let lookup_ctx = CacheLookupContext {
     group_request: None,
@@ -171,6 +179,8 @@ fn not_stored_fill_suppression_skips_short_lived_locks() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
 
   cache.note_fill_not_stored(insert_ctx.clone());
@@ -214,6 +224,8 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
   let lookup_ctx = CacheLookupContext {
     group_request: None,
@@ -227,6 +239,8 @@ fn not_stored_fill_suppression_uses_long_ttl_for_semantic_rejections() {
     request_headers: &headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   };
 
   cache.note_fill_not_stored_reason(insert_ctx, CacheFillSuppressionReason::ResponseNoStore);

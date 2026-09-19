@@ -34,6 +34,7 @@ mod cache_group;
 mod cache_lock;
 mod cache_nvs;
 mod cache_store;
+mod compression_dictionary;
 mod enumeration;
 mod failure_epoch;
 mod failure_policy;
@@ -350,6 +351,10 @@ pub struct SharedCacheEntry {
   /// Q1 target epoch. Absent legacy records are never usable for QUERY.
   #[serde(default)]
   pub query_target_epoch: Option<u64>,
+  /// Opaque upstream dictionary representation provenance. Dictionary-keyed
+  /// records without this evidence are rejected during shared-cache lookup.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub dictionary_identity: Option<crate::cache::CacheDictionaryIdentity>,
   /// Response-owned No-Vary-Search evidence.  It is an optional discovery
   /// hint only; the owning cache object is rechecked before reuse.
   #[serde(default, skip_serializing_if = "Option::is_none")]

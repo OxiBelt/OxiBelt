@@ -1714,6 +1714,86 @@
         }
       }
     },
+    "/admin/v1/compression-dictionaries": {
+      "get": {
+        "tags": [
+          "compression-dictionaries"
+        ],
+        "operationId": "listCompressionDictionaries",
+        "summary": "Read bounded dictionary inventory for one authorized profile.",
+        "parameters": [
+          {
+            "name": "profile",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 256
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/admin/v1/compression-dictionaries/purge": {
+      "post": {
+        "tags": [
+          "compression-dictionaries"
+        ],
+        "operationId": "purgeCompressionDictionaries",
+        "summary": "Fence and purge learned dictionaries for one authorized profile.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "profile"
+                ],
+                "properties": {
+                  "profile": {
+                    "type": "string"
+                  },
+                  "origin": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JsonObject"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/admin/v1/cache/key-explain": {
       "post": {
         "tags": [

@@ -186,6 +186,8 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "ct_log",
       "ct_surface",
       "compression",
+      "compression_dictionary_profile",
+      "dictionary",
       "hosts",
       "match",
       "name",
@@ -253,6 +255,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "routes.static_files" => &[
       "cache_control",
       "cache_control_by_extension",
+      "dictionary_manifest",
       "directory_index",
       "error_pages",
       "mime_overrides",

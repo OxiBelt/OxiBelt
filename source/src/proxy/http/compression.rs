@@ -259,6 +259,47 @@ pub(crate) fn maybe_compress_response(
   Response::from_parts(parts, compress_body(body, encoding, policy.level, permit))
 }
 
+/// Applies the same response policy gates to an explicitly selected dictionary.
+pub(super) fn dictionary_level(
+  response: &Response<ProxyBody>,
+  method: &Method,
+  headers: &HeaderMap,
+  route: Option<&str>,
+  config: &CompressionConfig,
+  state: &CompressionState,
+) -> Option<u32> {
+  if !config.enabled
+    || method == Method::HEAD
+    || super::incremental::response_marked(response)
+    || headers.contains_key(RANGE)
+    || request_has_sensitive_credentials(headers)
+  {
+    return None;
+  }
+  let mut policy = policy_for_route(config, route)?;
+  if !policy.enabled
+    || !response_is_eligible(response.headers(), response.status(), &policy)
+    || !proxied_response_allowed(headers, response.headers(), &policy)
+  {
+    return None;
+  }
+  if let Some(cap) = state.level_cap() {
+    if cap == 0 {
+      return None;
+    }
+    policy.level = policy.level.min(cap);
+  }
+  Some(u32::from(policy.level))
+}
+
+pub(super) fn dictionary_invalidate(headers: &mut HeaderMap) {
+  headers.remove(CONTENT_LENGTH);
+  weaken_strong_etag(headers);
+  integrity_digest::invalidate(headers, true);
+  append_vary_accept_encoding(headers);
+  headers.append(VARY, HeaderValue::from_static("Available-Dictionary"));
+}
+
 pub(crate) fn request_header_subset(headers: &HeaderMap) -> HeaderMap {
   let mut subset = HeaderMap::new();
   append_all(&mut subset, headers, RANGE);
@@ -528,7 +569,7 @@ fn append_vary_accept_encoding(headers: &mut HeaderMap) {
   }
 }
 
-fn weaken_strong_etag(headers: &mut HeaderMap) {
+pub(super) fn weaken_strong_etag(headers: &mut HeaderMap) {
   let Some(etag) = headers.get(ETAG).and_then(|value| value.to_str().ok()) else {
     return;
   };

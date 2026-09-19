@@ -155,14 +155,15 @@ pub(in crate::proxy::http) async fn run(
       }
     }
   };
-  let cache_enabled_for_route = resolved.execution_plan.features.cache
+  let mut cache_enabled_for_route = resolved.execution_plan.features.cache
     && state
       .cache
       .policy_enabled(resolved.route.cache.as_deref(), &request_method)
     && !resumable_cache_bypass;
   let response_actions_need_request_headers =
     resolved.route.actions.response_headers.has_actions() || resolved.route.actions.cors.is_some();
-  let mut request_headers = if cache_enabled_for_route
+  let mut request_headers = if resolved.route.compression_dictionary_profile.is_some()
+    || cache_enabled_for_route
     || response_waf_enabled
     || native_grpc_request
     || response_actions_need_request_headers
@@ -275,6 +276,52 @@ pub(in crate::proxy::http) async fn run(
   let certificate_identity = client_certificate::cache_identity(&outbound).cloned();
   proxy_tls::apply_upstream(&mut outbound);
   let proxy_protocol_identity = proxy_tls::cache_identity(&outbound).cloned();
+  let dictionary_authenticated = tls.client_certificate.is_some()
+    || tls.client_certificate_details.is_some()
+    || proxy_tls::has_certificate_identity(&outbound)
+    || outbound
+      .extensions()
+      .get::<super::super::dictionary::PrivateRequest>()
+      .is_some()
+    || resolved.route.external_auth.is_some();
+  super::super::dictionary::upstream::prepare(
+    &mut outbound,
+    resolved.route,
+    upstream,
+    state,
+    dictionary_authenticated,
+  )
+  .await;
+  let dictionary_negotiation = outbound
+    .extensions()
+    .get::<super::super::dictionary::upstream::Negotiation>()
+    .cloned();
+  let dictionary_managed = resolved
+    .route
+    .compression_dictionary_profile
+    .as_deref()
+    .and_then(|name| state.compression_dictionary.profile(name))
+    .is_some_and(|profile| profile.config.upstream);
+  let dictionary_cache_bypass =
+    !dictionary_cache_allowed(dictionary_managed, dictionary_negotiation.is_some())
+      || (resolved.route.compression_dictionary_profile.is_some()
+        && outbound
+          .extensions()
+          .get::<super::super::dictionary::upstream::RetryContext>()
+          .is_some_and(|context| context.authenticated));
+  if dictionary_cache_bypass {
+    // Managed upstream dictionary handling always forces its own
+    // Accept-Encoding value. An ineligible request has no Negotiation and
+    // therefore no final-origin Vary view or representation identity. Do not
+    // evaluate or populate a cache entry using downstream headers instead.
+    cache_enabled_for_route = false;
+  }
+  let dictionary_identity = dictionary_negotiation
+    .as_ref()
+    .and_then(|value| value.representation_identity().ok());
+  let origin_vary_headers = dictionary_negotiation
+    .as_ref()
+    .map(|value| &value.request_headers);
   if let Err(message) = query::validate_content_type(outbound.method(), outbound.headers()) {
     return route_security.text(StatusCode::BAD_REQUEST, message);
   }
@@ -320,6 +367,8 @@ pub(in crate::proxy::http) async fn run(
     state
       .cache
       .bind_nvs_epoch(crate::cache::CacheLookupContext {
+        dictionary_identity: dictionary_identity.as_ref(),
+        origin_vary_headers,
         group_request: group_request.as_ref(),
         no_vary_search: Some(no_vary_search),
         query_identity: query_identity.as_ref(),
@@ -347,10 +396,13 @@ pub(in crate::proxy::http) async fn run(
   let mut revalidation_entry = None;
   let mut stale_on_error = None;
   let mut _cache_fill_guard = None;
-  let mut cache_store_allowed =
-    !resumable_cache_bypass && (!cache_enabled_for_route || !state.config.cache.lock);
+  let mut cache_store_allowed = !dictionary_cache_bypass
+    && !resumable_cache_bypass
+    && (!cache_enabled_for_route || !state.config.cache.lock);
   let nvs_original_headers = no_vary_search.as_ref().map(|_| outbound.headers().clone());
   let initial_cache_lookup = crate::cache::CacheLookupContext {
+    dictionary_identity: dictionary_identity.as_ref(),
+    origin_vary_headers,
     group_request: group_request.as_ref(),
     no_vary_search: None,
     query_identity: query_identity.as_ref(),
@@ -386,6 +438,8 @@ pub(in crate::proxy::http) async fn run(
       .cache
       .lookup_nvs_async(
         crate::cache::CacheLookupContext {
+          dictionary_identity: dictionary_identity.as_ref(),
+          origin_vary_headers,
           group_request: group_request.as_ref(),
           no_vary_search: Some(no_vary_search),
           query_identity: query_identity.as_ref(),
@@ -456,6 +510,8 @@ pub(in crate::proxy::http) async fn run(
       let Some(permit) = state
         .cache
         .begin_fill_decision_async(crate::cache::CacheLookupContext {
+          dictionary_identity: dictionary_identity.as_ref(),
+          origin_vary_headers,
           group_request: group_request.as_ref(),
           no_vary_search: None,
           query_identity: fill_query_identity,
@@ -479,6 +535,8 @@ pub(in crate::proxy::http) async fn run(
           let lookup = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              dictionary_identity: dictionary_identity.as_ref(),
+              origin_vary_headers,
               group_request: group_request.as_ref(),
               no_vary_search: None,
               query_identity: query_identity.as_ref(),
@@ -508,6 +566,8 @@ pub(in crate::proxy::http) async fn run(
               &request_uri,
               &request_headers,
               group_request.as_ref(),
+              dictionary_identity.as_ref(),
+              origin_vary_headers,
             )
             .await
           };
@@ -569,6 +629,8 @@ pub(in crate::proxy::http) async fn run(
           let lookup = state
             .cache
             .lookup_async(crate::cache::CacheLookupContext {
+              dictionary_identity: dictionary_identity.as_ref(),
+              origin_vary_headers,
               group_request: group_request.as_ref(),
               no_vary_search: None,
               query_identity: query_identity.as_ref(),
@@ -598,6 +660,8 @@ pub(in crate::proxy::http) async fn run(
               &request_uri,
               &request_headers,
               group_request.as_ref(),
+              dictionary_identity.as_ref(),
+              origin_vary_headers,
             )
             .await
           };
@@ -648,6 +712,8 @@ pub(in crate::proxy::http) async fn run(
               &request_uri,
               &request_headers,
               group_request.as_ref(),
+              dictionary_identity.as_ref(),
+              origin_vary_headers,
             )
             .await
               && let Some(response) = handle_cache_lookup_result(
@@ -712,6 +778,8 @@ pub(in crate::proxy::http) async fn run(
             &request_uri,
             &request_headers,
             group_request.as_ref(),
+            dictionary_identity.as_ref(),
+            origin_vary_headers,
           )
           .await
             && let Some(response) = handle_cache_lookup_result(
@@ -754,6 +822,8 @@ pub(in crate::proxy::http) async fn run(
       .cache
       .nvs_owner_current(
         crate::cache::CacheLookupContext {
+          dictionary_identity: dictionary_identity.as_ref(),
+          origin_vary_headers,
           group_request: group_request.as_ref(),
           no_vary_search: no_vary_search.as_ref(),
           policy_name: resolved.route.cache.as_deref(),
@@ -872,6 +942,8 @@ async fn wait_for_shared_nvs_alias_fill(
   uri: &http::Uri,
   request_headers: &HeaderMap,
   group_request: Option<&crate::cache::CacheGroupRequest>,
+  dictionary_identity: Option<&crate::cache::CacheDictionaryIdentity>,
+  origin_vary_headers: Option<&HeaderMap>,
 ) -> Option<crate::cache::CacheLookup> {
   state.metrics.record_cache_fill_lock_conflict();
   record_route_cache_event(state, resolved.route, "miss", "shared_lock_conflict");
@@ -889,6 +961,8 @@ async fn wait_for_shared_nvs_alias_fill(
     let exact = state
       .cache
       .lookup_async(crate::cache::CacheLookupContext {
+        dictionary_identity,
+        origin_vary_headers,
         group_request,
         no_vary_search: None,
         query_identity,
@@ -918,6 +992,8 @@ async fn wait_for_shared_nvs_alias_fill(
         uri,
         request_headers,
         group_request,
+        dictionary_identity,
+        origin_vary_headers,
       )
       .await
     };
@@ -942,11 +1018,15 @@ async fn lookup_nvs_for_original_alias(
   uri: &http::Uri,
   request_headers: &HeaderMap,
   group_request: Option<&crate::cache::CacheGroupRequest>,
+  dictionary_identity: Option<&crate::cache::CacheDictionaryIdentity>,
+  origin_vary_headers: Option<&HeaderMap>,
 ) -> Option<crate::cache::CacheLookup> {
   state
     .cache
     .lookup_nvs_async(
       crate::cache::CacheLookupContext {
+        dictionary_identity,
+        origin_vary_headers,
         group_request,
         no_vary_search: Some(no_vary_search?),
         query_identity,
@@ -962,4 +1042,21 @@ async fn lookup_nvs_for_original_alias(
       state.config.proxy.buffering.temp_dir.as_deref(),
     )
     .await
+}
+
+fn dictionary_cache_allowed(managed: bool, negotiated: bool) -> bool {
+  !managed || negotiated
+}
+
+#[cfg(test)]
+mod tests {
+  use super::dictionary_cache_allowed;
+
+  #[test]
+  fn managed_dictionary_requests_without_negotiation_bypass_cache() {
+    assert!(dictionary_cache_allowed(false, false));
+    assert!(dictionary_cache_allowed(false, true));
+    assert!(dictionary_cache_allowed(true, true));
+    assert!(!dictionary_cache_allowed(true, false));
+  }
 }

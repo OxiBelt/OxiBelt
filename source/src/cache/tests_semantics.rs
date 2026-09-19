@@ -127,6 +127,8 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -149,6 +151,8 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Fresh(entry)) => assert_eq!(entry.body, Bytes::from_static(b"head-safe")),
     other => panic!("expected HEAD lookup to reuse GET entry, got {other:?}"),
@@ -168,6 +172,8 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -191,6 +197,8 @@ fn head_can_read_get_cache_but_head_miss_does_not_store() {
         request_headers: &request_headers,
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       })
       .is_none()
   );
@@ -261,6 +269,8 @@ fn rfc9111_freshness_directives_are_stable() {
           request_headers: &request_headers,
           query_identity: None,
           certificate_identity: None,
+          dictionary_identity: None,
+          origin_vary_headers: None,
         },
         StatusCode::OK,
         &response_headers,
@@ -302,6 +312,8 @@ fn pragma_no_cache_request_revalidates_fresh_entry() {
         request_headers: &HeaderMap::new(),
         query_identity: None,
         certificate_identity: None,
+        dictionary_identity: None,
+        origin_vary_headers: None,
       },
       CacheEntry::memory(
         StatusCode::OK,
@@ -326,6 +338,8 @@ fn pragma_no_cache_request_revalidates_fresh_entry() {
     request_headers: &request_headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }) {
     Some(CacheLookup::Revalidate(revalidation)) => {
       assert_eq!(

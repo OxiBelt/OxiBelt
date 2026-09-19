@@ -8,6 +8,11 @@ impl Config {
     path_roots: &ConfigPathRoots,
   ) -> anyhow::Result<()> {
     self.source_paths.config_dir = Some(path_roots.config_dir.clone());
+    compression_dictionary::resolve_compression_dictionary_paths(
+      &mut self.compression_dictionary,
+      &path_roots.config_dir,
+      &mut self.source_paths,
+    )?;
     self.source_paths.cert_dir = Some(path_roots.cert_dir.clone());
     self.source_paths.oxirule_dir = Some(path_roots.oxirule_dir.clone());
     self.resolve_admin_mutation_signer_paths(&path_roots.config_dir)?;
@@ -315,7 +320,17 @@ impl Config {
       self.source_paths.remember_runtime_file(path);
     }
     self.waf.resolve_relative_paths(&path_roots.oxirule_dir)?;
-    for route in &mut self.routes {
+    for (index, route) in self.routes.iter_mut().enumerate() {
+      if let Some(manifest) = route.static_files.dictionary_manifest.take() {
+        let field = format!("routes[{index}].static_files.dictionary_manifest");
+        let (resolved, logical) = resolve_existing_local_config_file_path_with_logical(
+          &field,
+          &path_roots.config_dir,
+          &manifest,
+        )?;
+        self.source_paths.remember_runtime_file(logical);
+        route.static_files.dictionary_manifest = Some(resolved);
+      }
       if let Some(static_root) = route.static_root.as_ref() {
         let resolved = if static_root.is_absolute() {
           static_root.clone()

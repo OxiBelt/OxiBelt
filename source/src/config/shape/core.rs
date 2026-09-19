@@ -99,11 +99,37 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "crypto.primitive_backends" => crypto::CRYPTO_PRIMITIVE_BACKENDS_CONFIG_KEYS,
     "certificate_transparency" => certificate_transparency::CERTIFICATE_TRANSPARENCY_CONFIG_KEYS,
     "upload_stores" => uploads::UPLOAD_STORE_CONFIG_KEYS,
+    "compression_dictionary" => compression_dictionary::COMPRESSION_DICTIONARY_CONFIG_KEYS,
+    "compression_dictionary.dictionaries" => {
+      compression_dictionary::COMPRESSION_DICTIONARY_ENTRY_CONFIG_KEYS
+    }
+    "compression_dictionary.stores" => {
+      compression_dictionary::COMPRESSION_DICTIONARY_STORE_CONFIG_KEYS
+    }
+    "compression_dictionary.stores.disk" => {
+      compression_dictionary::COMPRESSION_DICTIONARY_STORE_DISK_CONFIG_KEYS
+    }
+    "compression_dictionary.stores.shared" => {
+      compression_dictionary::COMPRESSION_DICTIONARY_STORE_SHARED_CONFIG_KEYS
+    }
+    "compression_dictionary.stores.external" => {
+      compression_dictionary::COMPRESSION_DICTIONARY_STORE_EXTERNAL_CONFIG_KEYS
+    }
+    "compression_dictionary.profiles" => {
+      compression_dictionary::COMPRESSION_DICTIONARY_PROFILE_CONFIG_KEYS
+    }
+    "compression_dictionary.profiles.prefetch" => {
+      compression_dictionary::COMPRESSION_DICTIONARY_PREFETCH_CONFIG_KEYS
+    }
+    "compression_dictionary.profiles.advertise" => {
+      compression_dictionary::COMPRESSION_DICTIONARY_ADVERTISEMENT_CONFIG_KEYS
+    }
     "upload_stores.local" => uploads::UPLOAD_STORE_LOCAL_CONFIG_KEYS,
     "upload_stores.postgres_s3" => uploads::UPLOAD_STORE_POSTGRES_S3_CONFIG_KEYS,
     "upload_profiles" => uploads::UPLOAD_PROFILE_CONFIG_KEYS,
     "upload_profiles.destination" => uploads::UPLOAD_DESTINATION_CONFIG_KEYS,
     "upload_profiles.identity" => uploads::UPLOAD_IDENTITY_CONFIG_KEYS,
+    "upload_profiles.compression_dictionary" => uploads::MANAGED_UPLOAD_DICTIONARY_CONFIG_KEYS,
     "certificate_transparency.logs" => {
       certificate_transparency::CERTIFICATE_TRANSPARENCY_LOG_CONFIG_KEYS
     }

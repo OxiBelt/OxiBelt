@@ -353,6 +353,7 @@ impl StoredEntry {
     }?;
     entry.group_stamp = self.group_stamp.clone();
     entry.no_vary_search = self.no_vary_search.clone();
+    entry.dictionary_identity = self.dictionary_identity.clone();
     Some(entry)
   }
 

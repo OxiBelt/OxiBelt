@@ -259,3 +259,110 @@ fn declares_cache_groups_with_only_an_enabled_switch() {
       .is_some_and(|keys| keys.len() == 1 && keys.contains("enabled"))
   );
 }
+
+#[cfg(feature = "config-tooling")]
+#[test]
+fn declares_compression_dictionary_schema_bounds_references_and_paths() {
+  assert_eq!(
+    enum_values("compression_dictionary.stores.kind"),
+    Some(vec!["memory", "disk", "shared", "external"])
+  );
+  for (path, minimum, maximum) in [
+    (
+      "compression_dictionary.profiles.max_dictionary_bytes",
+      1,
+      16 * 1024 * 1024 - 16,
+    ),
+    ("compression_dictionary.profiles.max_dictionaries", 1, 4_096),
+    (
+      "compression_dictionary.profiles.max_codec_concurrency",
+      1,
+      1_024,
+    ),
+    (
+      "compression_dictionary.profiles.codec_timeout_ms",
+      1,
+      300_000,
+    ),
+    (
+      "compression_dictionary.profiles.prefetch.max_concurrent",
+      1,
+      256,
+    ),
+  ] {
+    assert_eq!(
+      bounded_integer_range(path),
+      Some((minimum, maximum)),
+      "{path}"
+    );
+  }
+  for path in [
+    "compression_dictionary.enabled",
+    "compression_dictionary.dictionaries.public",
+    "compression_dictionary.profiles.downstream",
+    "compression_dictionary.profiles.upstream",
+    "compression_dictionary.profiles.learn",
+    "compression_dictionary.profiles.request_decode",
+  ] {
+    assert!(boolean_path(path), "{path}");
+    assert_eq!(default_value(path), Some(json!(false)), "{path}");
+  }
+  assert_eq!(
+    path_kind("compression_dictionary.dictionaries.path"),
+    Some("config_relative")
+  );
+  assert_eq!(
+    path_kind("compression_dictionary.stores.disk.root"),
+    Some("absolute_directory")
+  );
+  assert_eq!(
+    native_config_field_metadata("compression_dictionary.dictionaries[0].path")
+      .reference_activation,
+    NativeConfigActivation::FullReload
+  );
+  assert_eq!(
+    native_config_field_metadata("routes[0].compression_dictionary_profile").config_activation,
+    NativeConfigActivation::FullReload
+  );
+
+  let dictionary = schema_for_path(
+    "compression_dictionary.dictionaries",
+    "compression_dictionary.dictionaries",
+  );
+  assert_eq!(
+    dictionary["items"]["required"],
+    json!(["name", "path", "sha256", "url"])
+  );
+  assert_eq!(
+    dictionary["items"]["properties"]["sha256"]["pattern"],
+    json!("^[0-9a-f]{64}$")
+  );
+  assert_eq!(
+    dictionary["items"]["properties"]["url"]["pattern"],
+    json!("^https://")
+  );
+
+  let profiles = schema_for_path(
+    "compression_dictionary.profiles",
+    "compression_dictionary.profiles",
+  );
+  assert_eq!(
+    profiles["items"]["properties"]["dictionaries"]["maxItems"],
+    json!(4_096)
+  );
+  assert_eq!(
+    profiles["items"]["properties"]["dictionaries"]["uniqueItems"],
+    json!(true)
+  );
+  assert_eq!(
+    profiles["items"]["properties"]["advertise"]["properties"]["match"]["pattern"],
+    json!("^/")
+  );
+  assert_eq!(
+    schema_for_path(
+      "routes.compression_dictionary_profile",
+      "routes[].compression_dictionary_profile"
+    )["type"],
+    json!("string")
+  );
+}

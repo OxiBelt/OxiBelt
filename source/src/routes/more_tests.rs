@@ -60,6 +60,8 @@ fn route(name: &str, hosts: &[&str], path_prefix: &str, upstream: &str) -> Route
     ipm: Default::default(),
     cache: None,
     compression: None,
+    compression_dictionary_profile: None,
+    dictionary: None,
     security_headers: None,
     status_headers: Default::default(),
     priority_class: Default::default(),

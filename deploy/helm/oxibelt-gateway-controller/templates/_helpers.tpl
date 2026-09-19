@@ -91,6 +91,14 @@ oxibelt.dev/kubernetes-support-policy: {{ index .Chart.Annotations "oxibelt.dev/
 {{- end -}}
 {{- $_ := set $resumableProfiles $identity true -}}
 {{- end -}}
+{{- $compressionDictionaryProfiles := dict -}}
+{{- range $profile := .Values.routePolicy.compressionDictionaryProfiles -}}
+{{- $identity := printf "%s/%s" $profile.namespace $profile.profile -}}
+{{- if hasKey $compressionDictionaryProfiles $identity -}}
+{{- fail (printf "routePolicy.compressionDictionaryProfiles contains duplicate %s" $identity) -}}
+{{- end -}}
+{{- $_ := set $compressionDictionaryProfiles $identity true -}}
+{{- end -}}
 {{- range $secret := .Values.upstreamClientTls.sourceSecretAllowlist -}}
 {{- $identity := printf "%s/%s" $secret.namespace $secret.name -}}
 {{- if or (gt (len $secret.namespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $secret.namespace)) -}}

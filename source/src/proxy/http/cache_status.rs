@@ -276,7 +276,11 @@ pub(crate) fn cached_downstream_response(
       response,
       request_method,
       request_headers,
-      route.compression.as_deref(),
+      if route.compression_dictionary_profile.is_some() {
+        Some("off")
+      } else {
+        route.compression.as_deref()
+      },
       &state.config.compression,
       &state.compression,
     )

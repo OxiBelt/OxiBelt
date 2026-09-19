@@ -33,7 +33,7 @@ impl ResponseCache {
     self: &Arc<Self>,
     ctx: CacheLookupContext<'_>,
   ) -> Option<CacheFillDecision> {
-    let operation = self.operation_context(
+    let operation = self.operation_context_with_dictionary(
       ctx.policy_name,
       ctx.scheme,
       ctx.host,
@@ -42,6 +42,7 @@ impl ResponseCache {
       super::lookup::cache_view_headers(&ctx),
       ctx.query_identity,
       ctx.certificate_identity,
+      ctx.dictionary_identity,
       ctx.proxy_protocol_identity,
       ctx.group_request,
     )?;
@@ -98,7 +99,7 @@ impl ResponseCache {
       return;
     }
     let Some(key) = self
-      .operation_context(
+      .operation_context_with_dictionary(
         ctx.policy_name,
         ctx.scheme,
         ctx.host,
@@ -107,6 +108,7 @@ impl ResponseCache {
         cache_insert_view_headers(&ctx),
         ctx.query_identity,
         ctx.certificate_identity,
+        ctx.dictionary_identity,
         ctx.proxy_protocol_identity,
         ctx.group_request,
       )
@@ -127,7 +129,7 @@ impl ResponseCache {
     entry: CacheEntry,
   ) -> CacheInsertOutcome {
     if ctx.method.as_str() == "QUERY" {
-      let Some(operation) = self.operation_context(
+      let Some(operation) = self.operation_context_with_dictionary(
         ctx.policy_name,
         ctx.scheme,
         ctx.host,
@@ -136,6 +138,7 @@ impl ResponseCache {
         cache_insert_view_headers(&ctx),
         ctx.query_identity,
         ctx.certificate_identity,
+        ctx.dictionary_identity,
         ctx.proxy_protocol_identity,
         ctx.group_request,
       ) else {
@@ -309,6 +312,7 @@ impl ResponseCache {
         vary: prepared.metadata.vary,
         tags,
         query_target_epoch: prepared.query_generation.as_ref().map(|bound| bound.value),
+        dictionary_identity: prepared.dictionary_identity,
         size,
       };
       if let Err(error) = self.persist_metadata(&stored) {
@@ -493,7 +497,7 @@ impl ResponseCache {
     if cache_insert_request_bypassed(&ctx, &self.bypass_request_headers) {
       return CachePreparedInsertDecision::NotCacheable(CacheFillSuppressionReason::Unknown);
     }
-    let Some(operation) = self.operation_context(
+    let Some(operation) = self.operation_context_with_dictionary(
       ctx.policy_name,
       ctx.scheme,
       ctx.host,
@@ -502,6 +506,7 @@ impl ResponseCache {
       cache_insert_view_headers(&ctx),
       ctx.query_identity,
       ctx.certificate_identity,
+      ctx.dictionary_identity,
       ctx.proxy_protocol_identity,
       ctx.group_request,
     ) else {
@@ -519,7 +524,7 @@ impl ResponseCache {
     let metadata = match cache_metadata(
       &self.config,
       &operation.policy,
-      cache_insert_view_headers(&ctx),
+      cache_insert_origin_vary_headers(&ctx),
       ctx.certificate_identity,
       status,
       response_headers,
@@ -580,6 +585,7 @@ impl ResponseCache {
       status,
       stored_headers,
       metadata,
+      dictionary_identity: operation.dictionary_identity,
       header_bytes,
       fill_key: operation.fill_key,
       query_target: operation.query_target,
@@ -601,6 +607,14 @@ pub(in crate::cache) fn cache_insert_view_headers<'a>(
     .query_identity
     .map(CacheQueryIdentity::cache_view_headers)
     .unwrap_or(ctx.request_headers)
+}
+
+pub(in crate::cache) fn cache_insert_origin_vary_headers<'a>(
+  ctx: &'a CacheInsertContext<'_>,
+) -> &'a HeaderMap {
+  ctx
+    .origin_vary_headers
+    .unwrap_or_else(|| cache_insert_view_headers(ctx))
 }
 
 fn cache_insert_request_bypassed(

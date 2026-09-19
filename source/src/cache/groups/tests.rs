@@ -36,6 +36,8 @@ pub(super) fn lookup_context<'a>(
     request_headers: headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }
 }
 
@@ -57,6 +59,8 @@ pub(super) fn insert_context<'a>(
     request_headers: headers,
     query_identity: None,
     certificate_identity: None,
+    dictionary_identity: None,
+    origin_vary_headers: None,
   }
 }
 

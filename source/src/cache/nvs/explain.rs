@@ -130,6 +130,8 @@ mod tests {
       no_vary_search,
       proxy_protocol_identity: None,
       certificate_identity: None,
+      dictionary_identity: None,
+      origin_vary_headers: None,
       policy_name: Some("default"),
       scheme: "https",
       host: "example.test",

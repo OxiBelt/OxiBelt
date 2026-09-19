@@ -2,6 +2,7 @@
 //! Validation keeps candidate paths simple before the static resolver applies root confinement.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use http::HeaderValue;
@@ -9,6 +10,9 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouteStaticFilesConfig {
+  /// JSON manifest authorizing dictionary-compressed static sidecars.
+  #[serde(default)]
+  pub dictionary_manifest: Option<PathBuf>,
   #[serde(default)]
   pub directory_index: Vec<String>,
   #[serde(default)]
@@ -29,7 +33,8 @@ pub struct RouteStaticFilesConfig {
 
 impl RouteStaticFilesConfig {
   pub fn has_convenience_options(&self) -> bool {
-    !self.directory_index.is_empty()
+    self.dictionary_manifest.is_some()
+      || !self.directory_index.is_empty()
       || !self.try_files.is_empty()
       || self.spa_fallback.is_some()
       || !self.precompressed.is_empty()
@@ -85,6 +90,14 @@ pub(crate) fn validate_route_static_files_config(
   config: &RouteStaticFilesConfig,
 ) -> anyhow::Result<()> {
   let label = |field: &str| format!("route {route_name} static_files.{field}");
+
+  if config
+    .dictionary_manifest
+    .as_ref()
+    .is_some_and(|path| path.as_os_str().is_empty())
+  {
+    bail!("{} must not be empty", label("dictionary_manifest"));
+  }
 
   for value in &config.directory_index {
     validate_simple_filename(&label("directory_index"), value)?;

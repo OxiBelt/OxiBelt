@@ -124,6 +124,32 @@ impl MemoryBackend {
     Ok(true)
   }
 
+  pub(super) fn put_if_manifest_matches(
+    &self,
+    manifest_key: &str,
+    expected: &[u8],
+    key: &str,
+    value: &[u8],
+    ttl: Duration,
+  ) -> anyhow::Result<bool> {
+    let mut values = self
+      .values
+      .lock()
+      .expect("memory shared state lock poisoned");
+    purge_expired_values(&mut values, now_unix_ms());
+    if values.get(manifest_key).map(|value| value.value.as_slice()) != Some(expected) {
+      return Ok(false);
+    }
+    values.insert(
+      key.to_owned(),
+      MemoryValue {
+        value: value.to_vec(),
+        expires_at_ms: Some(atomic_updates::expiry_after(now_unix_ms(), ttl)),
+      },
+    );
+    Ok(true)
+  }
+
   pub(super) fn delete(&self, key: &str) -> anyhow::Result<()> {
     self
       .values

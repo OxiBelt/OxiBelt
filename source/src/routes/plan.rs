@@ -184,6 +184,8 @@ fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
     // The managed handler owns both negotiated uploads and headerless control
     // operations, so none may enter a direct plain-proxy path.
     && route.resumable_upload.is_none()
+    && route.compression_dictionary_profile.is_none()
+    && route.dictionary.is_none()
     && (!config.compression.enabled || route.compression.as_deref() == Some("off"))
     && route.static_root.is_none()
     && !route.actions.has_actions()
@@ -199,6 +201,7 @@ fn can_plain_proxy_fast_path(config: &Config, route: &RouteConfig) -> bool {
 
 fn can_static_sendfile_fast_path(config: &Config, route: &RouteConfig) -> bool {
   config.proxy.static_files.sendfile == StaticFilesSendfileMode::Auto
+    && route.compression_dictionary_profile.is_none()
     && config.rate_limits.is_empty()
     && !config.dynamic_policy.enabled
     && !crate::waf::route_http_body_compression_transform_enabled(config, route)

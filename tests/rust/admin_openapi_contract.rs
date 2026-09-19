@@ -1583,6 +1583,8 @@ fn expected_operations() -> BTreeSet<(String, String)> {
     ("post", "/admin/v1/cache/key-explain"),
     ("post", "/admin/v1/cache/warm"),
     ("post", "/admin/v1/cache/purge"),
+    ("get", "/admin/v1/compression-dictionaries"),
+    ("post", "/admin/v1/compression-dictionaries/purge"),
     ("get", "/admin/v1/waf/rule-hits"),
     ("get", "/admin/v1/waf/rule-costs"),
     ("get", "/admin/v1/waf/crs/compatibility"),

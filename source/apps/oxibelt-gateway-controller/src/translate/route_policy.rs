@@ -31,6 +31,7 @@ pub(super) struct RoutePolicy {
   client_certificate_forwarding: Option<ClientCertificateForwarding>,
   webtransport_upstream_http_version: Option<GeneratedHttpVersion>,
   resumable_upload_profile: Option<String>,
+  compression_dictionary_profile: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +136,7 @@ pub(super) fn apply_route_policy(
   generated: &mut GeneratedRoute,
   allowed_client_certificate_forward_headers: &HashSet<String>,
   allowed_resumable_upload_profiles: &[crate::cli::ResumableUploadProfileAllowlistEntry],
+  allowed_compression_dictionary_profiles: &[crate::cli::CompressionDictionaryProfileAllowlistEntry],
 ) -> Result<(), RoutePolicyApplyError> {
   let key = ObjectKey {
     namespace: source_route.namespace().to_string(),
@@ -247,6 +249,30 @@ pub(super) fn apply_route_policy(
     }
     generated.resumable_upload = Some(profile.clone());
   }
+  if let Some(profile) = &policy.compression_dictionary_profile {
+    if policy.target_kind != "HTTPRoute" || source_route.kind != "HTTPRoute" {
+      return Err(RoutePolicyApplyError {
+        message: "OxiBeltRoutePolicy compressionDictionary is supported only for HTTPRoute targets"
+          .to_owned(),
+        covered_diagnostics: Some(Vec::new()),
+      });
+    }
+    if !allowed_compression_dictionary_profiles
+      .iter()
+      .any(|admission| {
+        admission.namespace == source_route.namespace() && admission.profile == *profile
+      })
+    {
+      return Err(RoutePolicyApplyError {
+        message: format!(
+          "OxiBeltRoutePolicy compressionDictionary.profileRef {profile} is not admitted for namespace {} by operator policy",
+          source_route.namespace()
+        ),
+        covered_diagnostics: Some(Vec::new()),
+      });
+    }
+    generated.compression_dictionary_profile = Some(profile.clone());
+  }
   Ok(())
 }
 
@@ -283,6 +309,7 @@ fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::R
       "clientCertificateForwarding",
       "webTransport",
       "resumableUpload",
+      "compressionDictionary",
     ],
   ) {
     bail!("spec.{field} is unsupported");
@@ -413,6 +440,25 @@ fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::R
     .get("resumableUpload")
     .map(parse_resumable_upload)
     .transpose()?;
+  let compression_dictionary_profile = object
+    .spec
+    .get("compressionDictionary")
+    .map(parse_compression_dictionary)
+    .transpose()?;
+  if compression_dictionary_profile.is_some() && target_kind != "HTTPRoute" {
+    bail!("spec.compressionDictionary is supported only for HTTPRoute targets");
+  }
+  if let Some(profile) = &compression_dictionary_profile
+    && !args
+      .compression_dictionary_profiles
+      .iter()
+      .any(|admission| admission.namespace == object.namespace() && admission.profile == *profile)
+  {
+    bail!(
+      "spec.compressionDictionary.profileRef {profile} is not admitted for namespace {} by operator policy",
+      object.namespace()
+    );
+  }
   if let Some(profile) = &resumable_upload_profile
     && !args
       .resumable_upload_profiles
@@ -436,6 +482,7 @@ fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::R
     && client_certificate_forwarding.is_none()
     && webtransport_upstream_http_version.is_none()
     && resumable_upload_profile.is_none()
+    && compression_dictionary_profile.is_none()
   {
     bail!("at least one bounded policy field is required");
   }
@@ -450,6 +497,7 @@ fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::R
     client_certificate_forwarding,
     webtransport_upstream_http_version,
     resumable_upload_profile,
+    compression_dictionary_profile,
   })
 }
 
@@ -473,6 +521,16 @@ fn parse_resumable_upload(value: &Value) -> anyhow::Result<String> {
   let profile =
     string_at(value, &["profileRef"]).context("spec.resumableUpload.profileRef is required")?;
   validate_dns_subdomain("spec.resumableUpload.profileRef", profile)?;
+  Ok(profile.to_string())
+}
+
+fn parse_compression_dictionary(value: &Value) -> anyhow::Result<String> {
+  if let Some(field) = unsupported_field(value, &["profileRef"]) {
+    bail!("spec.compressionDictionary.{field} is unsupported");
+  }
+  let profile = string_at(value, &["profileRef"])
+    .context("spec.compressionDictionary.profileRef is required")?;
+  validate_dns_subdomain("spec.compressionDictionary.profileRef", profile)?;
   Ok(profile.to_string())
 }
 

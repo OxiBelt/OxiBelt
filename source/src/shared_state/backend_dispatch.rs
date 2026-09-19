@@ -444,6 +444,37 @@ impl Backend {
     }
   }
 
+  pub(super) async fn put_if_manifest_matches(
+    &self,
+    manifest_key: &str,
+    expected: &[u8],
+    key: &str,
+    value: &[u8],
+    ttl: Duration,
+  ) -> anyhow::Result<bool> {
+    match self {
+      Self::Redis(redis) => {
+        redis
+          .runtime
+          .execute("dictionary_fenced_write", || {
+            redis.put_if_manifest_matches(manifest_key, expected, key, value, ttl)
+          })
+          .await
+      }
+      Self::Postgres(pg) => {
+        pg.runtime
+          .execute("dictionary_fenced_write", || {
+            pg.put_if_manifest_matches(manifest_key, expected, key, value, ttl)
+          })
+          .await
+      }
+      #[cfg(test)]
+      Self::Memory(memory) => {
+        memory.put_if_manifest_matches(manifest_key, expected, key, value, ttl)
+      }
+    }
+  }
+
   pub(super) async fn delete(&self, key: &str) -> anyhow::Result<()> {
     match self {
       Self::Redis(redis) => {

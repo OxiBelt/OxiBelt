@@ -65,6 +65,7 @@ fn args() -> SharedArgs {
     route_policy_max_timeout_ms: 30_000,
     client_certificate_forward_allowed_headers: Vec::new(),
     resumable_upload_profiles: Vec::new(),
+    compression_dictionary_profiles: Vec::new(),
     resumable_upload_target: None,
     upstream_client_tls_source_secrets: Vec::new(),
     dry_run: false,
@@ -1882,4 +1883,59 @@ fn generated_toml_validates_with_waf_group(rendered_toml: &str, group: &str) {
 
 fn generated_toml_parses(rendered_toml: &str) {
   toml::from_str::<toml::Value>(rendered_toml).expect("generated TOML should parse");
+}
+
+#[test]
+fn compression_dictionary_policy_requires_namespace_admission_and_renders_profile_only() {
+  let route = HTTP_FIXTURE.replace(
+    "  - matches:\n",
+    "  - filters:\n    - type: ExtensionRef\n      extensionRef:\n        group: gateway.oxibelt.dev\n        kind: OxiBeltRoutePolicy\n        name: dictionaries\n    matches:\n",
+  );
+  let policy = r#"
+---
+apiVersion: gateway.oxibelt.dev/v1alpha1
+kind: OxiBeltRoutePolicy
+metadata:
+  name: dictionaries
+  namespace: default
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: app
+  compressionDictionary:
+    profileRef: storefront
+"#;
+  let denied = translate_objects(&objects(&format!("{route}{policy}")), &args())
+    .expect("translate denied policy");
+  assert!(has_error_containing(
+    &denied,
+    "compressionDictionary.profileRef storefront is not admitted"
+  ));
+  assert_eq!(
+    denied.disposition,
+    TranslationDisposition::FailClosedDeprogram
+  );
+
+  let mut admitted_args = args();
+  admitted_args.compression_dictionary_profiles.push(
+    crate::cli::CompressionDictionaryProfileAllowlistEntry {
+      namespace: "default".to_string(),
+      profile: "storefront".to_string(),
+    },
+  );
+  let admitted = translate_objects(&objects(&format!("{route}{policy}")), &admitted_args)
+    .expect("translate admitted policy");
+  assert!(
+    admitted.diagnostics.is_empty(),
+    "{:?}",
+    admitted.diagnostics
+  );
+  assert!(
+    admitted
+      .toml
+      .contains("compression_dictionary_profile = \"storefront\"")
+  );
+  assert!(!admitted.toml.contains("compression_dictionary ="));
+  assert!(!admitted.toml.contains("dictionary_url"));
 }

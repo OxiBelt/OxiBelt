@@ -144,8 +144,22 @@ spec:
                     minLength: 1
                     maxLength: 253
                     pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+              compressionDictionary:
+                description: >-
+                  References an operator-admitted RFC 9842 compression-dictionary
+                  profile. Tenants cannot configure dictionary files, URLs,
+                  storage, or codec limits.
+                type: object
+                required:
+                - profileRef
+                properties:
+                  profileRef:
+                    type: string
+                    minLength: 1
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
             x-kubernetes-validations:
-            - rule: has(self.waf) || has(self.limits) || has(self.timeouts) || has(self.clientCertificateForwarding) || has(self.webTransport) || has(self.resumableUpload)
+            - rule: has(self.waf) || has(self.limits) || has(self.timeouts) || has(self.clientCertificateForwarding) || has(self.webTransport) || has(self.resumableUpload) || has(self.compressionDictionary)
               message: at least one bounded route policy field is required
           status:
             type: object

@@ -62,6 +62,41 @@ struct Args {
   ca_cert: String,
   owner: ClientIdentity,
   wrong_owner: ClientIdentity,
+  dictionary: Option<Vec<u8>>,
+  coding: Option<crate::dictionary::Coding>,
+  expect_terminal_waf: bool,
+}
+
+struct UploadPayload {
+  first: Vec<u8>,
+  second: Vec<u8>,
+  total: Vec<u8>,
+  content_coding: Option<&'static str>,
+}
+
+impl UploadPayload {
+  fn build(args: &Args) -> anyhow::Result<Self> {
+    let (Some(dictionary), Some(coding)) = (&args.dictionary, args.coding) else {
+      return Ok(Self {
+        first: FIRST_PART.to_vec(),
+        second: SECOND_PART.to_vec(),
+        total: COMPLETE_BODY.to_vec(),
+        content_coding: None,
+      });
+    };
+    let total = crate::dictionary::encode_frame(coding, dictionary, COMPLETE_BODY)
+      .context("encode complete managed dictionary upload")?;
+    if total.len() < 2 {
+      bail!("encoded managed dictionary upload was too short to split");
+    }
+    let split = (total.len() / 2).clamp(1, total.len() - 1);
+    Ok(Self {
+      first: total[..split].to_vec(),
+      second: total[split..].to_vec(),
+      total,
+      content_coding: Some(coding.name()),
+    })
+  }
 }
 
 struct WireResponse {
@@ -82,8 +117,10 @@ impl WireResponse {
   fn expect_status(&self, expected: StatusCode, operation: &str) -> anyhow::Result<()> {
     if self.status != expected {
       bail!(
-        "managed-upload {operation} returned {}, expected {expected}",
-        self.status
+        "managed-upload {operation} returned {}, expected {expected}; headers={:?}; body={:?}",
+        self.status,
+        self.headers,
+        String::from_utf8_lossy(&self.body),
       );
     }
     Ok(())
@@ -92,9 +129,10 @@ impl WireResponse {
 
 pub(crate) async fn client(args: impl Iterator<Item = String>) -> anyhow::Result<()> {
   let args = parse(args)?;
-  let created = create_after_live_104(&args).await?;
+  let payload = UploadPayload::build(&args)?;
+  let created = create_after_live_104(&args, &payload).await?;
   created.expect_status(StatusCode::CREATED, "create")?;
-  expect_header(&created, "upload-offset", "5")?;
+  expect_header(&created, "upload-offset", &payload.first.len().to_string())?;
   expect_header(&created, "upload-complete", "?0")?;
   let control_path = location_path(created.header("location")?)?;
 
@@ -111,25 +149,44 @@ pub(crate) async fn client(args: impl Iterator<Item = String>) -> anyhow::Result
 
   let head = request(&args, &args.owner, Method::HEAD, &control_path, &[], &[]).await?;
   head.expect_status(StatusCode::NO_CONTENT, "HEAD")?;
-  expect_header(&head, "upload-offset", "5")?;
+  expect_header(&head, "upload-offset", &payload.first.len().to_string())?;
   expect_header(&head, "upload-complete", "?0")?;
 
+  let append = append_headers(&payload);
+  let append_refs = header_refs(&append);
   let completed = request(
     &args,
     &args.owner,
     Method::PATCH,
     &control_path,
-    &[
-      ("upload-draft-interop-version", "9"),
-      ("upload-complete", "?1"),
-      ("upload-offset", "5"),
-      ("content-type", "application/partial-upload"),
-    ],
-    SECOND_PART,
+    &append_refs,
+    &payload.second,
   )
   .await?;
+  if args.expect_terminal_waf {
+    completed.expect_status(StatusCode::FORBIDDEN, "terminal decoded WAF rejection")?;
+    let terminal = request(
+      &args,
+      &args.owner,
+      Method::PATCH,
+      &control_path,
+      &append_refs,
+      &payload.second,
+    )
+    .await?;
+    terminal.expect_status(StatusCode::CONFLICT, "terminal upload state")?;
+    println!(
+      "managed-upload-dictionary-waf-terminal-ok protocol={}",
+      args.protocol.label()
+    );
+    return Ok(());
+  }
   completed.expect_status(StatusCode::CREATED, "completion")?;
-  expect_header(&completed, "upload-offset", "11")?;
+  expect_header(
+    &completed,
+    "upload-offset",
+    &payload.total.len().to_string(),
+  )?;
   expect_header(&completed, "upload-complete", "?1")?;
   let object_path = location_path(completed.header("location")?)?;
 
@@ -146,7 +203,7 @@ pub(crate) async fn client(args: impl Iterator<Item = String>) -> anyhow::Result
 
   let object = request(&args, &args.owner, Method::GET, &object_path, &[], &[]).await?;
   object.expect_status(StatusCode::OK, "object GET")?;
-  expect_header(&object, "content-length", "11")?;
+  expect_header(&object, "content-length", &COMPLETE_BODY.len().to_string())?;
   expect_header(&object, "content-disposition", "attachment")?;
   expect_header(&object, "x-content-type-options", "nosniff")?;
   expect_header(&object, "cache-control", "private, no-store")?;
@@ -159,7 +216,14 @@ pub(crate) async fn client(args: impl Iterator<Item = String>) -> anyhow::Result
   let missing = request(&args, &args.owner, Method::GET, &object_path, &[], &[]).await?;
   missing.expect_status(StatusCode::NOT_FOUND, "post-delete GET")?;
 
-  println!("managed-upload-wire-ok protocol={}", args.protocol.label());
+  if payload.content_coding.is_some() {
+    println!(
+      "managed-upload-dictionary-ok protocol={}",
+      args.protocol.label()
+    );
+  } else {
+    println!("managed-upload-wire-ok protocol={}", args.protocol.label());
+  }
   Ok(())
 }
 
@@ -175,7 +239,14 @@ fn parse(mut values: impl Iterator<Item = String>) -> anyhow::Result<Args> {
   let mut client_key = None;
   let mut wrong_client_cert = None;
   let mut wrong_client_key = None;
+  let mut dictionary = None;
+  let mut coding = None;
+  let mut expect_terminal_waf = false;
   while let Some(flag) = values.next() {
+    if flag == "--expect-terminal-waf" {
+      expect_terminal_waf = true;
+      continue;
+    }
     let value = values
       .next()
       .ok_or_else(|| anyhow!("missing value for {flag}"))?;
@@ -191,12 +262,30 @@ fn parse(mut values: impl Iterator<Item = String>) -> anyhow::Result<Args> {
       "--client-key" => client_key = Some(value),
       "--wrong-client-cert" => wrong_client_cert = Some(value),
       "--wrong-client-key" => wrong_client_key = Some(value),
+      "--dictionary" => {
+        dictionary =
+          Some(std::fs::read(&value).with_context(|| format!("read dictionary {value}"))?)
+      }
+      "--coding" => coding = Some(crate::dictionary::Coding::parse(&value)?),
       _ => bail!("unknown managed-upload-client argument: {flag}"),
     }
   }
   let creation_path = creation_path.ok_or_else(|| anyhow!("missing --creation-path"))?;
   if !creation_path.starts_with('/') {
     bail!("--creation-path must be origin-relative");
+  }
+  if dictionary.as_ref().is_some_and(Vec::is_empty)
+    || dictionary
+      .as_ref()
+      .is_some_and(|bytes| bytes.len() > 16 * 1024 * 1024 - 16)
+  {
+    bail!("--dictionary must be within 1..=16777200 bytes");
+  }
+  if dictionary.is_some() != coding.is_some() {
+    bail!("--dictionary and --coding must be supplied together");
+  }
+  if expect_terminal_waf && dictionary.is_none() {
+    bail!("--expect-terminal-waf requires --dictionary and --coding");
   }
   Ok(Args {
     protocol: protocol.ok_or_else(|| anyhow!("missing --protocol"))?,
@@ -214,7 +303,30 @@ fn parse(mut values: impl Iterator<Item = String>) -> anyhow::Result<Args> {
       cert: wrong_client_cert.ok_or_else(|| anyhow!("missing --wrong-client-cert"))?,
       key: wrong_client_key.ok_or_else(|| anyhow!("missing --wrong-client-key"))?,
     },
+    dictionary,
+    coding,
+    expect_terminal_waf,
   })
+}
+
+fn append_headers(payload: &UploadPayload) -> Vec<(&'static str, String)> {
+  let mut headers = vec![
+    ("upload-draft-interop-version", "9".to_owned()),
+    ("upload-complete", "?1".to_owned()),
+    ("upload-offset", payload.first.len().to_string()),
+    ("content-type", "application/partial-upload".to_owned()),
+  ];
+  if let Some(coding) = payload.content_coding {
+    headers.push(("content-encoding", coding.to_owned()));
+  }
+  headers
+}
+
+fn header_refs<'a>(headers: &'a [(&'static str, String)]) -> Vec<(&'a str, &'a str)> {
+  headers
+    .iter()
+    .map(|(name, value)| (*name, value.as_str()))
+    .collect()
 }
 
 fn expect_header(response: &WireResponse, name: &str, expected: &str) -> anyhow::Result<()> {
@@ -233,18 +345,28 @@ fn location_path(location: &str) -> anyhow::Result<String> {
   Ok(url.path().to_owned())
 }
 
-async fn create_after_live_104(args: &Args) -> anyhow::Result<WireResponse> {
-  let headers = [
-    ("upload-draft-interop-version", "9"),
-    ("upload-complete", "?0"),
-    ("upload-length", "11"),
-    ("content-type", "text/plain"),
-  ];
+async fn create_after_live_104(
+  args: &Args,
+  payload: &UploadPayload,
+) -> anyhow::Result<WireResponse> {
   match args.protocol {
-    Protocol::H1 => h1_create(args, &headers).await,
-    Protocol::H2 => h2_create(args, &headers).await,
-    Protocol::H3 => h3_create(args, &headers).await,
+    Protocol::H1 => h1_create(args, payload).await,
+    Protocol::H2 => h2_create(args, payload).await,
+    Protocol::H3 => h3_create(args, payload).await,
   }
+}
+
+fn create_headers(payload: &UploadPayload) -> Vec<(&'static str, String)> {
+  let mut headers = vec![
+    ("upload-draft-interop-version", "9".to_owned()),
+    ("upload-complete", "?0".to_owned()),
+    ("upload-length", payload.total.len().to_string()),
+    ("content-type", "text/plain".to_owned()),
+  ];
+  if let Some(coding) = payload.content_coding {
+    headers.push(("content-encoding", coding.to_owned()));
+  }
+  headers
 }
 
 async fn request(
@@ -317,14 +439,16 @@ async fn tls_stream(
     .context("establish managed-upload downstream TLS")
 }
 
-async fn h1_create(args: &Args, headers: &[(&str, &str)]) -> anyhow::Result<WireResponse> {
+async fn h1_create(args: &Args, payload: &UploadPayload) -> anyhow::Result<WireResponse> {
   let mut stream = tls_stream(args, b"http/1.1", &args.owner).await?;
+  let headers = create_headers(payload);
+  let header_refs = header_refs(&headers);
   let head = h1_head(
     args,
     &Method::POST,
     &args.creation_path,
-    headers,
-    FIRST_PART.len(),
+    &header_refs,
+    payload.first.len(),
   );
   within(stream.write_all(head.as_bytes())).await??;
   within(stream.flush()).await??;
@@ -336,7 +460,7 @@ async fn h1_create(args: &Args, headers: &[(&str, &str)]) -> anyhow::Result<Wire
     );
   }
   expect_header(&interim, "upload-offset", "0")?;
-  within(stream.write_all(FIRST_PART)).await??;
+  within(stream.write_all(&payload.first)).await??;
   within(stream.flush()).await??;
   read_h1_response(&mut stream, false).await
 }
@@ -426,19 +550,21 @@ async fn read_h1_response<S: AsyncRead + Unpin>(
   Ok(response)
 }
 
-async fn h2_create(args: &Args, headers: &[(&str, &str)]) -> anyhow::Result<WireResponse> {
+async fn h2_create(args: &Args, payload: &UploadPayload) -> anyhow::Result<WireResponse> {
   let tls = tls_stream(args, b"h2", &args.owner).await?;
   let (mut sender, connection) = within(h2::client::handshake(tls))
     .await?
     .context("handshake managed-upload H2")?;
   let connection_task = tokio::spawn(async move { connection.await });
+  let headers = create_headers(payload);
+  let header_refs = header_refs(&headers);
   let request = request_head(
     args,
     Method::POST,
     &args.creation_path,
     Version::HTTP_2,
-    headers,
-    FIRST_PART.len(),
+    &header_refs,
+    payload.first.len(),
   )?;
   let (mut response, mut upload) = sender
     .send_request(request, false)
@@ -463,14 +589,16 @@ async fn h2_create(args: &Args, headers: &[(&str, &str)]) -> anyhow::Result<Wire
     bail!("managed-upload H2 live 104 omitted offset zero");
   }
   upload
-    .send_data(Bytes::from_static(FIRST_PART), true)
+    .send_data(Bytes::copy_from_slice(&payload.first), true)
     .context("send managed-upload H2 create body after 104")?;
   let final_response = within(response)
     .await?
     .context("receive managed-upload H2 create")?;
   let result = collect_h2(final_response).await;
+  drop(upload);
   drop(sender);
-  let _ = within(connection_task).await;
+  connection_task.abort();
+  let _ = connection_task.await;
   result
 }
 
@@ -500,8 +628,10 @@ async fn h2_request(
     .await?
     .context("receive managed-upload H2 response")?;
   let result = collect_h2(response).await;
+  drop(upload);
   drop(sender);
-  let _ = within(connection_task).await;
+  connection_task.abort();
+  let _ = connection_task.await;
   result
 }
 
@@ -523,15 +653,17 @@ async fn collect_h2(response: http::Response<h2::RecvStream>) -> anyhow::Result<
   })
 }
 
-async fn h3_create(args: &Args, headers: &[(&str, &str)]) -> anyhow::Result<WireResponse> {
+async fn h3_create(args: &Args, payload: &UploadPayload) -> anyhow::Result<WireResponse> {
   let (endpoint, close, driver_task, mut sender) = h3_connection(args, &args.owner).await?;
+  let headers = create_headers(payload);
+  let header_refs = header_refs(&headers);
   let request = request_head(
     args,
     Method::POST,
     &args.creation_path,
     Version::HTTP_3,
-    headers,
-    FIRST_PART.len(),
+    &header_refs,
+    payload.first.len(),
   )?;
   let mut stream = sender
     .send_request(request)
@@ -555,7 +687,7 @@ async fn h3_create(args: &Args, headers: &[(&str, &str)]) -> anyhow::Result<Wire
     bail!("managed-upload H3 live 104 omitted offset zero");
   }
   stream
-    .send_data(Bytes::from_static(FIRST_PART))
+    .send_data(Bytes::copy_from_slice(&payload.first))
     .await
     .context("send managed-upload H3 create body after 104")?;
   stream

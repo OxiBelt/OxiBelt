@@ -51,6 +51,11 @@ if an update cannot preserve the bounded wrapper and this audit criteria.
 
 ## Admission evidence
 
+The RFC 9842 protocol fixture uses the already reviewed `sha2` 0.11.0
+release for independent dictionary prelude validation. Its HTTP/1 support is
+the existing Hyper 1.x feature flag required by the fixture's real-wire H1
+coverage; neither addition expands the production runtime dependency graph.
+
 `cargo vet --locked` initially reported only `urlpattern:0.6.0` as missing
 `safe-to-deploy`. The local audit in `supply-chain/audits.toml` certifies this
 exact version. The dependency-policy entry records it as an untrusted-input

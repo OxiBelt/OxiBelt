@@ -176,6 +176,8 @@ impl ResponseCache {
       request_headers: ctx.request_headers,
       query_identity: ctx.query_identity,
       certificate_identity: ctx.certificate_identity,
+      dictionary_identity: ctx.dictionary_identity,
+      origin_vary_headers: ctx.origin_vary_headers,
       proxy_protocol_identity: ctx.proxy_protocol_identity,
     };
     Some(CacheNvsMetadata {

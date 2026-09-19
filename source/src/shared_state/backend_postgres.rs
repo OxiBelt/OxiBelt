@@ -86,6 +86,37 @@ impl PostgresBackend {
     Ok(result.rows_affected() == 1)
   }
 
+  pub(super) async fn put_if_manifest_matches(
+    &self,
+    manifest_key: &str,
+    expected: &[u8],
+    key: &str,
+    value: &[u8],
+    ttl: Duration,
+  ) -> anyhow::Result<bool> {
+    // The row lock also serializes with the UPDATE used by manifest CAS.
+    // A cancelled request either rolls back or commits before a reclaim CAS
+    // can proceed, so a late commit cannot resurrect an already collected key.
+    let mut transaction = self.pool.begin().await?;
+    let current: Option<Vec<u8>> = sqlx::query_scalar(
+      "SELECT value FROM oxibelt_shared_state WHERE key = $1 AND expires_at_ms IS NULL FOR UPDATE",
+    )
+    .bind(manifest_key)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if current.as_deref() != Some(expected) {
+      transaction.rollback().await?;
+      return Ok(false);
+    }
+    sqlx::query(
+      "INSERT INTO oxibelt_shared_state (key, value, expires_at_ms) VALUES ($1, $2, $3)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, expires_at_ms = EXCLUDED.expires_at_ms",
+    ).bind(key).bind(value).bind(atomic_updates::expiry_after(now_unix_ms(), ttl))
+      .execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(true)
+  }
+
   pub(super) async fn delete(&self, key: &str) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM oxibelt_shared_state WHERE key = $1")
       .bind(key)

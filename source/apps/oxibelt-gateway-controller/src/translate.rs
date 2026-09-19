@@ -153,6 +153,7 @@ struct TranslationState {
   external_auth_allow_credentials: bool,
   client_certificate_forward_allowed_headers: HashSet<String>,
   resumable_upload_profiles: Vec<crate::cli::ResumableUploadProfileAllowlistEntry>,
+  compression_dictionary_profiles: Vec<crate::cli::CompressionDictionaryProfileAllowlistEntry>,
   client_certificate_forward_reserved_headers:
     oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet,
   pools: BTreeMap<String, GeneratedPool>,
@@ -232,6 +233,7 @@ pub fn translate_objects(
       &args.client_certificate_forward_allowed_headers,
     ),
     resumable_upload_profiles: args.resumable_upload_profiles.clone(),
+    compression_dictionary_profiles: args.compression_dictionary_profiles.clone(),
     ..Default::default()
   };
   state.index_supporting_objects(objects, args)?;

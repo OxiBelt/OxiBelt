@@ -18,6 +18,9 @@ pub struct CacheBodyFile {
 pub struct CacheEntry {
   pub group_stamp: Option<super::CacheGroupStamp>,
   pub no_vary_search: Option<super::CacheNvsMetadata>,
+  /// Internal upstream representation evidence used to refuse a 304 that
+  /// belongs to a different negotiated dictionary variant.
+  pub(crate) dictionary_identity: Option<super::CacheDictionaryIdentity>,
   pub(crate) nvs_alias: bool,
   pub status: StatusCode,
   pub headers: HeaderMap,
@@ -36,6 +39,7 @@ impl CacheEntry {
     Self {
       group_stamp: None,
       no_vary_search: None,
+      dictionary_identity: None,
       nvs_alias: false,
       status,
       headers,
@@ -69,6 +73,7 @@ impl CacheEntry {
     Self {
       group_stamp: None,
       no_vary_search: None,
+      dictionary_identity: None,
       nvs_alias: false,
       status,
       headers,
@@ -97,6 +102,7 @@ impl CacheEntry {
     Self {
       group_stamp: None,
       no_vary_search: None,
+      dictionary_identity: None,
       nvs_alias: false,
       status,
       headers,

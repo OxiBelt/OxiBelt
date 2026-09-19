@@ -166,7 +166,7 @@ fn header_map_bytes(headers: &HeaderMap) -> anyhow::Result<usize> {
 struct ReplayableRequest {
   parts: http::request::Parts,
   body: ReplayableBody,
-  query_identity: Option<crate::cache::CacheQueryIdentity>,
+  dictionary_authenticated: bool,
   _buffered_body: WorkLease,
 }
 
@@ -175,10 +175,10 @@ async fn capture_replayable_request(
   state: &AppSnapshot,
   deadline: Instant,
 ) -> anyhow::Result<ReplayableRequest> {
-  let query_identity = request
+  let dictionary_authenticated = request
     .extensions()
-    .get::<crate::cache::CacheQueryIdentity>()
-    .cloned();
+    .get::<super::dictionary::upstream::RetryContext>()
+    .is_some_and(|context| context.authenticated);
   let (mut parts, body) = request.into_parts();
   let replay = ReplayableBody::capture(
     body,
@@ -199,21 +199,16 @@ async fn capture_replayable_request(
   Ok(ReplayableRequest {
     parts,
     body: replay,
-    query_identity,
+    dictionary_authenticated,
     _buffered_body: buffered_body,
   })
 }
 
-/// Cache revalidation can add validators after the cache view is captured.
-/// A pool reselection may change the effective origin target, so restore the
-/// cache-view conditional fields before sending that later attempt. This
-/// retains client-provided conditionals and removes only cache-injected ones.
-fn restore_query_cache_view_validators(headers: &mut HeaderMap, cache_view: &HeaderMap) {
+/// A pool reselection can change the effective origin. No conditional
+/// validator from the former origin is safe to send to the new target.
+fn clear_revalidation_validators(headers: &mut HeaderMap) {
   for name in [IF_NONE_MATCH, IF_MODIFIED_SINCE] {
     headers.remove(&name);
-    for value in cache_view.get_all(&name) {
-      headers.append(name.clone(), value.clone());
-    }
   }
 }
 
@@ -839,13 +834,29 @@ pub(super) async fn send_pool_with_retry(
     let mut attempt_parts = parts_clone(&replay.parts);
     attempt_parts.uri = target_uri;
     attempt_parts.version = upstream_request_version(upstream_version);
-    if !cache_identity_unchanged && let Some(identity) = replay.query_identity.as_ref() {
-      restore_query_cache_view_validators(
-        &mut attempt_parts.headers,
-        identity.cache_view_headers(),
-      );
+    if !cache_identity_unchanged {
+      clear_revalidation_validators(&mut attempt_parts.headers);
     }
-    let outbound = Request::from_parts(attempt_parts, replay.body.replay_body());
+    let mut outbound = Request::from_parts(attempt_parts, replay.body.replay_body());
+    // `parts_clone` intentionally drops request extensions. Re-negotiate for
+    // this selected target so an old origin can never donate its dictionary
+    // advertisement or representation identity to a pool retry.
+    super::dictionary::upstream::prepare(
+      &mut outbound,
+      route,
+      upstream,
+      state,
+      replay.dictionary_authenticated,
+    )
+    .await;
+    let negotiation = outbound
+      .extensions()
+      .get::<super::dictionary::upstream::Negotiation>()
+      .cloned();
+    let dictionary_private = outbound
+      .extensions()
+      .get::<super::dictionary::upstream::RetryContext>()
+      .is_some_and(|context| context.authenticated);
     match send_transport_attempt(
       state,
       upstream,
@@ -863,7 +874,15 @@ pub(super) async fn send_pool_with_retry(
     )
     .await
     {
-      Ok(response) => {
+      Ok(mut response) => {
+        if dictionary_private {
+          response
+            .extensions_mut()
+            .insert(super::dictionary::PrivateRequest);
+        }
+        if let Some(negotiation) = negotiation {
+          response.extensions_mut().insert(negotiation);
+        }
         let failure = AttemptFailure::Status(response.status());
         if policy.matches_failure(failure) {
           report_pool_attempt_failure(
