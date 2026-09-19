@@ -475,7 +475,7 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       ExpectStart::Failure,
       Needs::default(),
       Some(
-        "must set exactly one of upstream, upstream_pool, static_root, ct_log, actions.redirect, or actions.direct_response",
+        "must set exactly one of upstream, upstream_pool, static_root, dictionary, ct_log, actions.redirect, or actions.direct_response",
       ),
     ),
     docker_case(
