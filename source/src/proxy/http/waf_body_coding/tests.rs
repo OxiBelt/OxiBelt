@@ -19,6 +19,85 @@ fn config_for_tests() -> WafHttpBodyCompressionConfig {
   }
 }
 
+#[tokio::test]
+async fn coding_transforms_invalidate_encoded_digests_in_heads_and_trailers() {
+  for encoding in [
+    WafHttpBodyEncoding::Gzip,
+    WafHttpBodyEncoding::Deflate,
+    WafHttpBodyEncoding::Br,
+    WafHttpBodyEncoding::Zstd,
+  ] {
+    let encoded = encode_body_sync(Bytes::from_static(b"digest transform evidence"), encoding)
+      .expect("encode fixture");
+    let mut fields = HeaderMap::new();
+    fields.insert(
+      "content-digest",
+      http::HeaderValue::from_static("sha-256=:AA==:"),
+    );
+    fields.insert(
+      "repr-digest",
+      http::HeaderValue::from_static("sha-256=:AA==:"),
+    );
+    fields.insert(
+      "unencoded-digest",
+      http::HeaderValue::from_static("sha-256=:AQ==:"),
+    );
+    fields.insert("x-kept", http::HeaderValue::from_static("yes"));
+    let coding = match encoding {
+      WafHttpBodyEncoding::Gzip => "gzip",
+      WafHttpBodyEncoding::Deflate => "deflate",
+      WafHttpBodyEncoding::Br => "br",
+      WafHttpBodyEncoding::Zstd => "zstd",
+    };
+    let config = config_for_tests();
+    let state = WafBodyCodingState::new(&config);
+    let mut request = Request::new(body_from_bytes_and_trailers(
+      encoded.clone(),
+      Some(fields.clone()),
+    ));
+    *request.headers_mut() = fields.clone();
+    request
+      .headers_mut()
+      .insert(CONTENT_ENCODING, http::HeaderValue::from_static(coding));
+    let (request, _) = transform_request_body_for_waf(request, config.clone(), state.clone(), 32)
+      .await
+      .expect("request transform")
+      .expect("coded request");
+    for name in ["content-digest", "repr-digest"] {
+      assert!(!request.headers().contains_key(name));
+    }
+    assert_eq!(request.headers()["unencoded-digest"], "sha-256=:AQ==:");
+    let collected = request.into_body().collect().await.expect("request frames");
+    let trailers = collected.trailers().expect("preserved trailer frame");
+    assert!(!trailers.contains_key("content-digest"));
+    assert!(!trailers.contains_key("repr-digest"));
+    assert_eq!(trailers["unencoded-digest"], "sha-256=:AQ==:");
+    assert_eq!(trailers["x-kept"], "yes");
+
+    let mut headers = fields.clone();
+    headers.insert(CONTENT_ENCODING, http::HeaderValue::from_static(coding));
+    let (decoded, _) = transform_response_body_for_waf(
+      &mut headers,
+      body_from_bytes_and_trailers(encoded, Some(fields)),
+      config,
+      state,
+      32,
+    )
+    .await
+    .expect("response transform")
+    .expect("coded response");
+    assert!(!headers.contains_key("content-digest"));
+    assert!(!headers.contains_key("repr-digest"));
+    assert_eq!(headers["unencoded-digest"], "sha-256=:AQ==:");
+    let collected = decoded.collect().await.expect("response frames");
+    let trailers = collected.trailers().expect("preserved response trailers");
+    assert!(!trailers.contains_key("content-digest"));
+    assert!(!trailers.contains_key("repr-digest"));
+    assert_eq!(trailers["unencoded-digest"], "sha-256=:AQ==:");
+    assert_eq!(collected.to_bytes(), "digest transform evidence");
+  }
+}
+
 fn body(bytes: impl Into<Bytes>) -> ProxyBody {
   Full::new(bytes.into())
     .map_err(|never| -> body::BoxError { match never {} })

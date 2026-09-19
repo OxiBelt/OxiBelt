@@ -125,6 +125,22 @@ where
   B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
 {
   let request_version = request.version();
+  // Capture the downstream request before forwarding or request-side policy
+  // can change headers. The context also lets compression preserve a source
+  // Unencoded-Digest when no new field was negotiated. CONNECT and upgrades
+  // leave the HTTP response data plane after their handshake.
+  let digest_request =
+    (!is_upgrade_request(&request) && request.method() != Method::CONNECT).then(|| {
+      integrity_digest::DigestRequest::new(
+        request.method(),
+        request_version,
+        request.headers(),
+        state.config.proxy.http.trailers,
+      )
+    });
+  if let Some(digest_request) = digest_request.as_ref() {
+    request.extensions_mut().insert(digest_request.clone());
+  }
   let incremental_request = incremental::request_marked(&request);
   let downstream_receive_started =
     fast_path::stage_timing::start(state.request_path_features.stage_timing_metrics);
@@ -165,6 +181,11 @@ where
     Err(_) => {
       let response = overload_response(state.as_ref(), request_version);
       let response = super::status_headers::finalize(response, &state.config.proxy.status_headers);
+      let response = if let Some(context) = digest_request.as_ref() {
+        integrity_digest::finalize(response, context)
+      } else {
+        response
+      };
       emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
       record_request_observability(
         &state,
@@ -198,6 +219,11 @@ where
       let mut response = circuit_breaker_rejection_response(state.as_ref(), rejection);
       incremental::adapt_admission_rejection(&mut response, incremental_request, request_version);
       let response = super::status_headers::finalize(response, &state.config.proxy.status_headers);
+      let response = if let Some(context) = digest_request.as_ref() {
+        integrity_digest::finalize(response, context)
+      } else {
+        response
+      };
       emit_system_access_log(state.as_ref(), &mut access_log, &response).await;
       record_request_observability(
         &state,
@@ -238,6 +264,11 @@ where
   // particular, Hyper's H1 encoder cannot serialize an HTTP/3 response head.
   let response = super::status_headers::finalize(response, &state.config.proxy.status_headers);
   let response = normalize_downstream_response_version(response, request_version);
+  let response = if let Some(context) = digest_request.as_ref() {
+    integrity_digest::finalize(response, context)
+  } else {
+    response
+  };
   let response = if let Some(limiter) = selected_bandwidth {
     with_final_response_bandwidth(response, limiter, state.metrics.clone(), transport_network)
   } else {

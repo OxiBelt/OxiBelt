@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use http::header::{CONTENT_TYPE, EXPECT, HeaderMap, HeaderName, HeaderValue, LINK};
 use http::{Request, Response, StatusCode};
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::body::{Body, Frame, SizeHint};
 use oxibelt_control_protocol::HyphenUnderscoreHeaderNameSet;
 use tokio::sync::Notify;
@@ -495,11 +495,7 @@ fn plain_response(
   message: &str,
   content_type: Option<&'static str>,
 ) -> Response<ProxyBody> {
-  let body = Full::new(Bytes::copy_from_slice(message.as_bytes()))
-    .map_err(|never| -> BoxError { match never {} })
-    .boxed();
-  let mut response = Response::new(body);
-  *response.status_mut() = status;
+  let mut response = super::response::text_response(status, message);
   if let Some(content_type) = content_type {
     response
       .headers_mut()

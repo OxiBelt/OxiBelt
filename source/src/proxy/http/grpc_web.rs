@@ -33,6 +33,9 @@ pub(crate) fn request_mode(headers: &HeaderMap) -> Option<GrpcWebMode> {
 }
 
 pub(crate) fn rewrite_request_headers(headers: &mut HeaderMap, mode: GrpcWebMode) {
+  if mode == GrpcWebMode::Text {
+    super::integrity_digest::invalidate(headers, false);
+  }
   let content_type = grpc_content_type(headers, mode);
   headers.insert(header::CONTENT_TYPE, content_type);
   headers.insert(header::TE, HeaderValue::from_static("trailers"));
@@ -76,7 +79,7 @@ pub(crate) async fn decode_request_body(
       let (sender, decoded) = channel_body(16);
       tokio::spawn(async move {
         let mut decoder = TextDecoder::new(incremental);
-        let mut body = body;
+        let mut body = super::integrity_digest::invalidate_body(body, false);
         loop {
           let frame = tokio::select! {
             biased;
@@ -145,6 +148,22 @@ pub(crate) fn encode_response(
   mode: GrpcWebMode,
   incremental: bool,
 ) -> Response<ProxyBody> {
+  super::integrity_digest::invalidate(response.headers_mut(), false);
+  response
+    .extensions_mut()
+    .remove::<super::integrity_digest::UnencodedDigestState>();
+  response
+    .extensions_mut()
+    .remove::<super::body::CompiledKnownSmallNoopResponse>();
+  response
+    .extensions_mut()
+    .remove::<super::integrity_digest::AvailableRepresentation>();
+  response
+    .extensions_mut()
+    .remove::<super::body::InlinedKnownSmallResponseBody>();
+  response
+    .extensions_mut()
+    .remove::<super::body::KnownSmallResponseBody>();
   response.headers_mut().insert(
     header::CONTENT_TYPE,
     match mode {
@@ -158,7 +177,7 @@ pub(crate) fn encode_response(
   let (sender, encoded) = channel_body(16);
   tokio::spawn(async move {
     let mut encoder = TextEncoder::default();
-    let mut body = body;
+    let mut body = super::integrity_digest::invalidate_body(body, false);
     let mut saw_trailers = false;
     loop {
       let frame = tokio::select! {
@@ -400,6 +419,61 @@ impl std::fmt::Display for TextDecodeError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn grpc_web_conversions_remove_digests_for_the_original_bytes() {
+    let mut fields = HeaderMap::new();
+    for name in ["content-digest", "repr-digest", "unencoded-digest"] {
+      fields.insert(name, HeaderValue::from_static("sha-256=:AA==:"));
+    }
+    fields.insert("grpc-status", HeaderValue::from_static("0"));
+    let mut headers = fields.clone();
+    rewrite_request_headers(&mut headers, GrpcWebMode::Text);
+    assert!(!headers.contains_key("content-digest"));
+    assert!(!headers.contains_key("repr-digest"));
+    assert!(!headers.contains_key("unencoded-digest"));
+    let request = http_body_util::Full::new(Bytes::from_static(b"YQ=="))
+      .with_trailers(std::future::ready(Some(Ok::<_, std::convert::Infallible>(
+        fields.clone(),
+      ))))
+      .map_err(|never| -> super::super::body::BoxError { match never {} })
+      .boxed();
+    let decoded = decode_request_body(request, GrpcWebMode::Text, false)
+      .await
+      .unwrap()
+      .collect()
+      .await
+      .unwrap();
+    let trailers = decoded.trailers().unwrap();
+    for name in ["content-digest", "repr-digest", "unencoded-digest"] {
+      assert!(!trailers.contains_key(name));
+    }
+    assert_eq!(decoded.to_bytes(), "a");
+
+    let body = http_body_util::Full::new(Bytes::from_static(b"\0\0\0\0\0"))
+      .with_trailers(std::future::ready(Some(Ok::<_, std::convert::Infallible>(
+        fields.clone(),
+      ))))
+      .map_err(|never| -> super::super::body::BoxError { match never {} })
+      .boxed();
+    let mut response = Response::new(body);
+    *response.headers_mut() = fields;
+    let response = encode_response(response, GrpcWebMode::Binary, false);
+    for name in ["content-digest", "repr-digest", "unencoded-digest"] {
+      assert!(!response.headers().contains_key(name));
+    }
+    let encoded = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+      !encoded
+        .windows(b"digest".len())
+        .any(|window| window == b"digest")
+    );
+    assert!(
+      encoded
+        .windows(b"grpc-status: 0".len())
+        .any(|window| window == b"grpc-status: 0")
+    );
+  }
 
   #[tokio::test]
   async fn incremental_codecs_cancel_pending_sources() {

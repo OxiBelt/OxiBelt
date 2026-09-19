@@ -177,7 +177,13 @@ pub(crate) async fn transform_request_body_for_waf(
   let captured = captured_decoded_body(&decoded, inspection_limit);
   let reencoded = encode_body(decoded, encoding, permit).await?;
   parts.headers.remove(CONTENT_LENGTH);
-  let body = body_from_bytes_and_trailers(reencoded, collected.trailers);
+  // Re-encoding can change the encoded bytes even with the same coding name.
+  super::integrity_digest::invalidate(&mut parts.headers, true);
+  let mut trailers = collected.trailers;
+  if let Some(trailers) = &mut trailers {
+    super::integrity_digest::invalidate(trailers, true);
+  }
+  let body = body_from_bytes_and_trailers(reencoded, trailers);
   Ok(Some((Request::from_parts(parts, body), captured)))
 }
 
@@ -214,7 +220,12 @@ pub(crate) async fn transform_response_body_for_waf(
   headers.remove(CONTENT_ENCODING);
   headers.remove(CONTENT_LENGTH);
   weaken_strong_etag(headers);
-  let body = body_from_bytes_and_trailers(decoded, collected.trailers);
+  super::integrity_digest::invalidate(headers, true);
+  let mut trailers = collected.trailers;
+  if let Some(trailers) = &mut trailers {
+    super::integrity_digest::invalidate(trailers, true);
+  }
+  let body = body_from_bytes_and_trailers(decoded, trailers);
   drop(permit);
   Ok(Some((body, captured)))
 }

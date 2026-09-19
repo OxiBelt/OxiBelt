@@ -50,6 +50,37 @@ async fn plain_fast_path_decision_reports_plan_disabled_inner() {
 }
 
 #[test]
+fn plain_fast_path_decision_routes_supported_digest_request_to_full_pipeline() {
+  run_async_on_larger_stack("plain-fast-path-integrity-digest", || async {
+    let temp_dir = common::TempDir::new("plain-fast-path-integrity-digest");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "plain-fast-path-integrity-digest");
+    let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+      "[compression]\nenabled = true",
+      "[compression]\nenabled = false",
+    );
+    let state = AppSnapshot::new(parse_config(&raw))
+      .await
+      .expect("snapshot should initialize");
+    let resolved = resolved_route(&state);
+    assert_eq!(
+      plain_proxy_fast_path_decision(&request(), &state, &resolved),
+      Ok(())
+    );
+    let request = Request::builder()
+      .uri("https://example.com/")
+      .header("want-content-digest", "sha-256=1")
+      .body(empty_proxy_body())
+      .expect("request should build");
+
+    assert_eq!(
+      plain_proxy_fast_path_decision(&request, &state, &resolved),
+      Err(PlainProxyFastPathMissReason::IntegrityDigest)
+    );
+  });
+}
+
+#[test]
 fn plain_fast_path_decision_reports_upgrade_miss() {
   run_async_on_larger_stack("plain-fast-path-upgrade-miss", || async {
     plain_fast_path_decision_reports_upgrade_miss_inner().await;

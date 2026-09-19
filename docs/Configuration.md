@@ -1241,6 +1241,70 @@ QUIC Initial inspection diagnostics are sampled per logical listener. DEBUG reco
 
 ## Proxy Sections
 
+### HTTP digest negotiation
+
+Digest negotiation is built in for ordinary data-plane responses, including
+proxied, cached, static, and locally generated responses. There is no enable
+setting or new route-policy field. Clients request individual fields with
+`Want-Content-Digest`, `Want-Repr-Digest`, and `Want-Unencoded-Digest`, for example:
+
+```http
+Want-Content-Digest: sha-256=10, sha-512=5
+Want-Unencoded-Digest: sha-256=10
+TE: trailers
+```
+
+OxiBelt accepts integer preferences from 0 through 10 and selects the supported
+algorithm with the highest positive preference for each requested field;
+SHA-256 wins ties with SHA-512. Zero excludes an
+algorithm. Invalid or unsupported preferences do not reject the exchange and
+do not trigger generation. Parsing combines repeated field lines and is bounded
+to 8 KiB and 64 dictionary members per preference field. Duplicate keys follow
+Structured Fields semantics; unknown parameters are ignored. Legacy `Digest`
+and `Want-Digest` do not activate this feature.
+
+Existing digest fields are preserved when their covered bytes remain applicable,
+including unsupported algorithms. OxiBelt does not verify them or claim origin
+authenticity. An existing field in a header or late origin trailer takes
+precedence over generation of that field. Effective explicit route/WAF removals
+suppress generation; a later explicit set/append follows existing mutation order.
+Coding changes remove stale `Content-Digest` and `Repr-Digest` from headers and
+trailers, while preserving `Unencoded-Digest` when decoded bytes are unchanged.
+Other body conversions remove every affected digest field.
+
+Small bodies already materialized in memory (up to 16 KiB) can receive digest
+headers. Other eligible bodies are hashed as they stream and receive a single
+terminal trailer section after successful completion. HTTP/1.1 generation of
+trailers requires downstream `TE: trailers`; HTTP/2 and HTTP/3 do not require
+that signal. HTTP/1.0 uses headers only. `[proxy.http].trailers = "drop"`
+suppresses generated trailers, including on native gRPC exchanges. Missing
+trailer support does not cause buffering or rejection. Interrupted or failed
+streams do not receive generated completion digests.
+
+`Content-Digest` covers final content-coded message bytes, including single or
+multipart range content. Representation digests are generated only when the
+complete selected representation is known. HEAD, 304, and partial responses can
+reuse applicable metadata or bounded complete bytes already held in memory;
+they never trigger a full-resource read. HEAD/304 content digests cover empty
+content. Upstream mutation-method responses do not receive newly generated
+representation digests unless completeness is explicitly established internally.
+Informational responses, 204 responses, tunnels, protocol upgrades, and Admin
+responses do not receive generated digests.
+
+`Unencoded-Digest` generation uses identity bytes already available before local
+compression or after an existing decode operation. It never triggers additional
+decoding, including for upstream-compressed or encrypted content. Requests and
+upstream responses are not rejected for digest mismatches. Generation happens
+per delivery after cache selection; generated fields do not change cache keys or
+persist client preferences. Existing cache trailer-storage limits remain in
+effect. No storage migration is required.
+
+The unencoded fields implement
+[`draft-ietf-httpbis-unencoded-digest-05`](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-unencoded-digest-05),
+which is an experimental draft contract rather than part of RFC 9530.
+
+### Proxy settings
+
 ```toml
 [proxy]
 trusted_ca_certs = []

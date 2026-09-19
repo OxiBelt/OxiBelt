@@ -24,6 +24,7 @@ mod response_plan;
 mod route_options;
 mod runtime;
 pub(in crate::proxy::http) use self::finalize::finalize_response;
+pub(in crate::proxy::http) use self::finalize::record_route_digest_removals;
 pub(crate) use self::finalize::static_response_send_timeout;
 pub(crate) use self::head_bytes::StaticResponseHeadBytes;
 pub(crate) use self::hot_object::cached_hot_object_plan;
@@ -52,6 +53,7 @@ pub(crate) struct StaticResponsePlan {
   pub(crate) headers: HeaderMap,
   pub(crate) body: StaticBodyPlan,
   pub(crate) response_heads: Option<StaticResponseHeadBytes>,
+  pub(crate) available_representation: Option<Bytes>,
 }
 
 #[derive(Debug)]

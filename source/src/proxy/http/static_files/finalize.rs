@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use http::{HeaderMap, Method, Response};
+use http::{HeaderMap, HeaderName, Method, Response};
 use tracing::warn;
 
-use super::super::body::ProxyBody;
+use super::super::body::{InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody};
+use super::super::integrity_digest::AvailableRepresentation;
+use super::super::integrity_digest::DigestRequest;
 use super::super::response::{
   apply_route_security_headers, text_response, waf_http_terminal_response_with_route_security,
   with_route_security_headers,
@@ -33,6 +35,7 @@ pub(in crate::proxy::http) async fn finalize_response(
   request_uri: &http::Uri,
   request_version: http::Version,
   request_headers: &HeaderMap,
+  digest_request: Option<&DigestRequest>,
   peer_addr: std::net::SocketAddr,
   downstream_host: &str,
   tcp_max_hop: Option<u8>,
@@ -48,11 +51,18 @@ pub(in crate::proxy::http) async fn finalize_response(
 ) -> Response<ProxyBody> {
   let (mut parts, body) = response.into_parts();
   apply_route_security_headers(&mut parts.headers, &state.config.security, route);
+  if let Some(digest_request) = digest_request {
+    digest_request
+      .suppression()
+      .record_mutations(&request_waf.response_header_mutations);
+  }
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
   let response_waf_body_compression_transform =
     crate::waf::route_http_body_compression_transform_enabled(&state.config, route)
       && response_body_need != BodyNeed::None;
+  let response_waf_reencoded_body = response_waf_body_compression_transform
+    && crate::proxy::http::waf_body_coding::has_non_identity_content_encoding(&parts.headers);
   let (body, captured_response_body) = if response_body_need != BodyNeed::None {
     match capture_response_body_for_waf(
       parts.version,
@@ -70,6 +80,7 @@ pub(in crate::proxy::http) async fn finalize_response(
       Err(error) => {
         let (status, message) = response_body_capture_error_response(&error);
         warn!(error = %error, route = %route.name, status = status.as_u16(), "failed to read static response body for WAF inspection");
+        record_route_digest_removals(digest_request, route);
         return with_route_security_headers(
           text_response(status, message),
           &state.config.security,
@@ -80,6 +91,14 @@ pub(in crate::proxy::http) async fn finalize_response(
   } else {
     (body, None)
   };
+  if response_waf_reencoded_body {
+    // The WAF coding transform replaces the bytes after static planning. Any
+    // known-small or complete-representation marker still describes the
+    // original coded payload and must not seed a later digest header.
+    parts.extensions.remove::<AvailableRepresentation>();
+    parts.extensions.remove::<InlinedKnownSmallResponseBody>();
+    parts.extensions.remove::<KnownSmallResponseBody>();
+  }
   let response_body = captured_response_body.as_ref().map(waf_body_input);
 
   if response_waf_enabled {
@@ -109,6 +128,7 @@ pub(in crate::proxy::http) async fn finalize_response(
     };
     let Some(person_proof) = access_log.person_proof_snapshot() else {
       tracing::error!(route = %route.name, "static response WAF request context is unavailable");
+      record_route_digest_removals(digest_request, route);
       return with_route_security_headers(
         text_response(
           http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -143,6 +163,10 @@ pub(in crate::proxy::http) async fn finalize_response(
     if let Some(terminal) = response_waf.terminal {
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
+      if let Some(digest_request) = digest_request {
+        digest_request.suppression().record_mutations(&mutations);
+      }
+      record_route_digest_removals(digest_request, route);
       return waf_http_terminal_response_with_route_security(
         terminal,
         &mutations,
@@ -150,8 +174,15 @@ pub(in crate::proxy::http) async fn finalize_response(
         route,
       );
     }
+    if let Some(digest_request) = digest_request {
+      digest_request
+        .suppression()
+        .record_mutations(&response_waf.response_header_mutations);
+    }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }
+
+  record_route_digest_removals(digest_request, route);
 
   apply_alt_svc_header(
     &mut parts.headers,
@@ -180,6 +211,27 @@ pub(in crate::proxy::http) async fn finalize_response(
   response
 }
 
+/// Static routes intentionally do not apply ordinary response-header actions.
+/// Digest generation still honors an explicit route removal as the final
+/// effective policy decision, including terminal static outcomes.
+pub(in crate::proxy::http) fn record_route_digest_removals(
+  digest_request: Option<&DigestRequest>,
+  route: &RouteConfig,
+) {
+  let Some(digest_request) = digest_request else {
+    return;
+  };
+  let removals = route
+    .actions
+    .response_headers
+    .remove
+    .iter()
+    .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+    .map(|name| crate::waf::HeaderMutation::Remove { name })
+    .collect::<Vec<_>>();
+  digest_request.suppression().record_mutations(&removals);
+}
+
 pub(crate) fn static_response_send_timeout(state: &AppSnapshot, route: &RouteConfig) -> Duration {
   Duration::from_millis(
     route
@@ -195,7 +247,7 @@ mod tests {
   use std::path::Path;
   use std::sync::Arc;
 
-  use http::{HeaderMap, Request, StatusCode};
+  use http::{HeaderMap, HeaderValue, Request, StatusCode};
 
   use super::*;
   use crate::config::Config;
@@ -278,6 +330,7 @@ mod tests {
       request.uri(),
       request.version(),
       request.headers(),
+      None,
       peer_addr,
       "example.com",
       None,
@@ -331,5 +384,50 @@ referrer_policy = "same-origin"
     );
     assert_eq!(named_headers.get("referrer-policy").unwrap(), "same-origin");
     assert!(named_headers.get("x-content-type-options").is_none());
+  }
+
+  #[test]
+  fn static_route_digest_removal_suppresses_late_generation() {
+    let temp_dir = common::TempDir::new("static-route-digest-removal");
+    let (cert_path, key_path) =
+      common::create_self_signed_cert(temp_dir.path(), "static-route-digest-removal");
+    let config = config_with_route_security(
+      &cert_path,
+      &key_path,
+      None,
+      r#"
+
+[routes.actions.response_headers]
+remove = ["content-digest"]
+"#,
+    );
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert("want-content-digest", HeaderValue::from_static("sha-256=1"));
+    let context = DigestRequest::new(
+      &Method::GET,
+      http::Version::HTTP_2,
+      &request_headers,
+      config.proxy.http.trailers,
+    );
+    record_route_digest_removals(Some(&context), &config.routes[0]);
+    let response = crate::proxy::http::integrity_digest::finalize(
+      text_response(StatusCode::OK, "static"),
+      &context,
+    );
+    assert!(!response.headers().contains_key("content-digest"));
+
+    let context = DigestRequest::new(
+      &Method::GET,
+      http::Version::HTTP_2,
+      &request_headers,
+      config.proxy.http.trailers,
+    );
+    let response = crate::proxy::http::response::with_route_security_headers(
+      text_response(StatusCode::OK, "local"),
+      &config.security,
+      &config.routes[0],
+    );
+    let response = crate::proxy::http::integrity_digest::finalize(response, &context);
+    assert!(!response.headers().contains_key("content-digest"));
   }
 }

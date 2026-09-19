@@ -28,6 +28,10 @@ pub(super) fn handle_cache_lookup_result(
   revalidation_entry: &mut Option<crate::cache::CacheEntry>,
   record_events: bool,
 ) -> Option<Response<ProxyBody>> {
+  let digest_request = outbound
+    .extensions()
+    .get::<integrity_digest::DigestRequest>()
+    .cloned();
   if query::is_query(request_method) {
     let entry = match &lookup {
       crate::cache::CacheLookup::Fresh(entry) => entry,
@@ -77,6 +81,9 @@ pub(super) fn handle_cache_lookup_result(
             ..cache_status::StandardCacheStatus::default()
           },
         );
+      }
+      if let Some(context) = &digest_request {
+        context.suppression().record_route(resolved.route);
       }
       route_runtime::apply_response_actions(
         response.headers_mut(),
@@ -152,6 +159,9 @@ pub(super) fn handle_cache_lookup_result(
             },
           );
         }
+        if let Some(context) = &digest_request {
+          context.suppression().record_route(resolved.route);
+        }
         route_runtime::apply_response_actions(
           response.headers_mut(),
           resolved.route,
@@ -218,6 +228,9 @@ pub(super) fn handle_cache_lookup_result(
               ..cache_status::StandardCacheStatus::default()
             },
           );
+        }
+        if let Some(context) = &digest_request {
+          context.suppression().record_route(resolved.route);
         }
         route_runtime::apply_response_actions(
           response.headers_mut(),
@@ -631,7 +644,12 @@ pub(super) async fn maybe_cache_response_with_store_permission(
         }
       };
       let body_len = bytes.len();
+      let inlined = body::is_known_small_response_body_len(body_len)
+        .then(|| body::InlinedKnownSmallResponseBody::new(bytes.clone(), None));
       let mut response = Response::from_parts(parts, full_body(bytes));
+      if let Some(inlined) = inlined {
+        response.extensions_mut().insert(inlined);
+      }
       cache_status::apply(&mut response, CacheOutcome::Miss, reason);
       cache_status::attach_standard_status(
         &mut response,
@@ -718,7 +736,13 @@ pub(super) async fn collect_cache_response_body(
 }
 
 pub(super) fn merge_not_modified_headers(headers: &mut HeaderMap, not_modified: &HeaderMap) {
-  for name in ["no-vary-search", "cache-groups", "cache-group-invalidation"] {
+  for name in [
+    "no-vary-search",
+    "cache-groups",
+    "cache-group-invalidation",
+    "repr-digest",
+    "unencoded-digest",
+  ] {
     if not_modified.contains_key(name) {
       headers.remove(name);
       for value in not_modified.get_all(name) {

@@ -324,10 +324,24 @@ pub(crate) async fn handle_downstream_connection(
     }
 
     if !request_admission.try_admit() {
+      // This response is emitted before the shared HTTP request entrypoint.
+      // Capture the original H3 negotiation here so admission rejection has
+      // the same digest behavior as an ordinary data-plane response.
       let response = http_proxy::status_headers::finalize(
         request_tasks::too_many_requests_response(),
         &snapshot.config.proxy.status_headers,
       );
+      let response = if http_proxy::integrity_digest::DigestRequest::requested(request.headers()) {
+        let digest_request = http_proxy::integrity_digest::DigestRequest::new(
+          request.method(),
+          request.version(),
+          request.headers(),
+          snapshot.config.proxy.http.trailers,
+        );
+        http_proxy::integrity_digest::finalize(response, &digest_request)
+      } else {
+        response
+      };
       respond_to_h3_request(stream, response).await?;
       continue;
     }

@@ -17,6 +17,7 @@ pub(super) fn update_from_not_modified(
     }
   }
   merge_nvs_not_modified_headers(&mut headers, not_modified_headers);
+  merge_digest_not_modified_headers(&mut headers, not_modified_headers);
   let body_len = cached_entry.body_len();
   let old_prepared = match cache.prepare_insert(
     ctx.clone(),
@@ -131,5 +132,42 @@ pub(super) fn merge_nvs_not_modified_headers(headers: &mut HeaderMap, update: &H
     for value in update.get_all("no-vary-search") {
       headers.append("no-vary-search", value.clone());
     }
+  }
+}
+
+pub(super) fn merge_digest_not_modified_headers(headers: &mut HeaderMap, update: &HeaderMap) {
+  // A 304's content digest describes empty message content, not the stored
+  // response body. Only whole-representation metadata can update that body.
+  for name in ["repr-digest", "unencoded-digest"] {
+    if update.contains_key(name) {
+      headers.remove(name);
+      for value in update.get_all(name) {
+        headers.append(name, value.clone());
+      }
+    }
+  }
+}
+
+#[cfg(test)]
+mod digest_tests {
+  use super::*;
+
+  #[test]
+  fn not_modified_updates_representation_digests_without_replacing_content_digest() {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-digest", HeaderValue::from_static("sha-256=:AQ==:"));
+    headers.insert("repr-digest", HeaderValue::from_static("sha-256=:AA==:"));
+    let mut update = HeaderMap::new();
+    update.insert("content-digest", HeaderValue::from_static("sha-256=:Ag==:"));
+    update.append("repr-digest", HeaderValue::from_static("sha-256=:Aw==:"));
+    update.append("repr-digest", HeaderValue::from_static("sha-512=:BA==:"));
+    update.insert(
+      "unencoded-digest",
+      HeaderValue::from_static("sha-256=:BQ==:"),
+    );
+    merge_digest_not_modified_headers(&mut headers, &update);
+    assert_eq!(headers["content-digest"], "sha-256=:AQ==:");
+    assert_eq!(headers.get_all("repr-digest").iter().count(), 2);
+    assert_eq!(headers["unencoded-digest"], "sha-256=:BQ==:");
   }
 }

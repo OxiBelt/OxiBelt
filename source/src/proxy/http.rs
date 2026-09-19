@@ -58,6 +58,7 @@ pub(crate) mod headers;
 pub(crate) mod incremental;
 pub(crate) mod incremental_exchange;
 pub(crate) mod informational;
+pub(crate) mod integrity_digest;
 mod managed_upload;
 pub(crate) mod observability;
 mod overload;

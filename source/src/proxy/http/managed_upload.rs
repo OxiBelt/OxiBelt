@@ -284,6 +284,7 @@ pub(super) async fn run(
   person_proof: Option<&crate::waf::EvaluatedPersonProofRequest>,
   mutation_added: bool,
 ) -> Response<ProxyBody> {
+  let route = context.resolved.route;
   let Some(profile) = context
     .resolved
     .route
@@ -322,6 +323,7 @@ pub(super) async fn run(
           http::HeaderValue::from_static("close"),
         );
       }
+      super::response::record_route_digest_removals(&mut result, route);
       with_circuit_breaker_request_lease(result, context.route_circuit_breaker_lease)
     }
     Outcome::Dispatch { store, claim } => {
@@ -339,7 +341,11 @@ pub(super) async fn run(
       };
       let status = match dispatch.finish(terminal).await {
         Ok(status) => status,
-        Err(_) => return response(StatusCode::SERVICE_UNAVAILABLE, None),
+        Err(_) => {
+          let mut response = response(StatusCode::SERVICE_UNAVAILABLE, None);
+          super::response::record_route_digest_removals(&mut response, route);
+          return response;
+        }
       };
       protocol::state_headers(
         result.headers_mut(),
@@ -724,7 +730,10 @@ async fn execute(
       );
     }
     limit_headers(result.headers_mut(), profile, Some(&upload));
-    apply_header_mutations(result.headers_mut(), &decision.response_header_mutations);
+    super::response::apply_response_header_mutations(
+      &mut result,
+      &decision.response_header_mutations,
+    );
     protocol::state_headers(
       result.headers_mut(),
       upload.offset,
@@ -1086,8 +1095,8 @@ async fn complete_upload(
           .headers_mut()
           .insert(http::header::LOCATION, location);
       }
-      apply_header_mutations(
-        result.headers_mut(),
+      super::response::apply_response_header_mutations(
+        &mut result,
         &context.request_waf.response_header_mutations,
       );
       protocol::state_headers(

@@ -142,6 +142,14 @@ pub(crate) async fn prepare_plain_fast_path_waf<B>(
   access_log.set_tags(&tags);
 
   if let Some(terminal) = request_waf.terminal.take() {
+    if let Some(digest_request) = request
+      .extensions()
+      .get::<crate::proxy::http::integrity_digest::DigestRequest>()
+    {
+      digest_request
+        .suppression()
+        .record_mutations(&request_waf.response_header_mutations);
+    }
     return Err(Box::new(waf_http_terminal_response_with_route_security(
       terminal,
       &request_waf.response_header_mutations,

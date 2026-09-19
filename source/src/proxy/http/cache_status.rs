@@ -150,14 +150,35 @@ pub(crate) fn cached_entry_response(
   if let Some(response) = conditional_not_modified_response(&entry, method, request_headers) {
     return response;
   }
+  let representation = available_digest_representation(&entry);
   let entry = crate::cache::range_entry(entry, method, request_headers);
+  let partial = entry.status == StatusCode::PARTIAL_CONTENT;
   let body_len = entry.body_len();
   let Some(body) = body_from_entry(&entry) else {
     return unavailable_cached_body_response();
   };
   let mut response = Response::new(body);
+  if entry.body_file.is_none() && body::is_known_small_response_body_len(entry.body.len()) {
+    response
+      .extensions_mut()
+      .insert(body::InlinedKnownSmallResponseBody::new(
+        entry.body.clone(),
+        None,
+      ));
+  }
   *response.status_mut() = entry.status;
   *response.headers_mut() = entry.headers;
+  if method == Method::HEAD || partial || response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+    super::integrity_digest::invalidate_content(response.headers_mut());
+  }
+  response.extensions_mut().insert(if partial {
+    super::integrity_digest::Representation::Partial
+  } else {
+    super::integrity_digest::Representation::Complete
+  });
+  if let Some(representation) = representation {
+    response.extensions_mut().insert(representation);
+  }
   super::status_headers::capture_cached(&mut response);
   apply_age_header(response.headers_mut(), entry.stored_at);
   if body::is_known_small_response_body_len(body_len) {
@@ -166,6 +187,16 @@ pub(crate) fn cached_entry_response(
       .insert(body::KnownSmallResponseBody);
   }
   response
+}
+
+fn available_digest_representation(
+  entry: &CacheEntry,
+) -> Option<super::integrity_digest::AvailableRepresentation> {
+  (entry.body_file.is_none()
+    && entry.status == StatusCode::OK
+    && !entry.headers.contains_key(http::header::CONTENT_RANGE)
+    && body::is_known_small_response_body_len(entry.body.len()))
+  .then(|| super::integrity_digest::AvailableRepresentation(entry.body.clone()))
 }
 
 pub(crate) fn cached_status_response(
@@ -326,6 +357,9 @@ fn conditional_not_modified_response(
     VARY,
     HeaderName::from_static("cache-status"),
     HeaderName::from_static("proxy-status"),
+    HeaderName::from_static("repr-digest"),
+    HeaderName::from_static("unencoded-digest"),
+    http::header::CONTENT_ENCODING,
   ] {
     for value in entry.headers.get_all(&name) {
       headers.append(name.clone(), value.clone());
@@ -335,6 +369,9 @@ fn conditional_not_modified_response(
   let mut response = Response::new(full_body(bytes::Bytes::new()));
   *response.status_mut() = StatusCode::NOT_MODIFIED;
   *response.headers_mut() = headers;
+  if let Some(representation) = available_digest_representation(entry) {
+    response.extensions_mut().insert(representation);
+  }
   super::status_headers::capture_cached(&mut response);
   Some(response)
 }
@@ -394,3 +431,7 @@ fn apply_age_header(headers: &mut HeaderMap, stored_at: SystemTime) {
     headers.insert(AGE_HEADER, value);
   }
 }
+
+#[cfg(test)]
+#[path = "cache_digest_tests.rs"]
+mod digest_tests;

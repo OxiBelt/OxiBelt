@@ -34,6 +34,10 @@ impl PlainProxyFastPath {
     B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
     B::Error: Into<body::BoxError> + Send + Sync + Unpin + 'static,
   {
+    let digest_request = request
+      .extensions()
+      .get::<crate::proxy::http::integrity_digest::DigestRequest>()
+      .cloned();
     let listener_bind = request
       .extensions()
       .get::<DownstreamListenerBind>()
@@ -754,6 +758,7 @@ impl PlainProxyFastPath {
       upstream,
       upstream_first_byte_time_ms,
       &request_waf,
+      digest_request.as_ref(),
       response_waf_enabled,
       request_context.as_ref(),
       request_headers.as_ref(),

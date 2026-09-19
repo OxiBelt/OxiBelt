@@ -26,6 +26,7 @@ use crate::config::{CompressionConfig, CompressionPolicyConfig, CompressionProxi
 use crate::overload::{OverloadRuntime, WorkKind, WorkLease};
 
 use super::body::{InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody, boxed_error};
+use super::integrity_digest::{self, AvailableRepresentation};
 
 const ENCODING_PREFERENCE: [CompressionEncoding; 4] = [
   CompressionEncoding::Br,
@@ -232,6 +233,8 @@ pub(crate) fn maybe_compress_response(
 
   parts.extensions.remove::<KnownSmallResponseBody>();
   parts.extensions.remove::<InlinedKnownSmallResponseBody>();
+  // The encoded body no longer represents a materialized identity response.
+  parts.extensions.remove::<AvailableRepresentation>();
 
   parts.headers.insert(
     CONTENT_ENCODING,
@@ -239,6 +242,19 @@ pub(crate) fn maybe_compress_response(
   );
   parts.headers.remove(CONTENT_LENGTH);
   weaken_strong_etag(&mut parts.headers);
+
+  // This runs only after the response has passed every eligibility gate and
+  // acquired its permit.  Hash identity bytes while the encoder consumes them;
+  // keep an upstream Unencoded-Digest trailer in shared state because encoders
+  // cannot forward arbitrary source trailer frames.
+  integrity_digest::invalidate(&mut parts.headers, true);
+  let body = integrity_digest::invalidate_body(body, true);
+  let unencoded_algorithm = (!parts.headers.contains_key("unencoded-digest"))
+    .then(|| integrity_digest::unencoded_algorithm(request_headers))
+    .flatten();
+  let (body, unencoded_digest) =
+    integrity_digest::prehash_unencoded_body(body, unencoded_algorithm);
+  parts.extensions.insert(unencoded_digest);
 
   Response::from_parts(parts, compress_body(body, encoding, policy.level, permit))
 }
@@ -250,6 +266,11 @@ pub(crate) fn request_header_subset(headers: &HeaderMap) -> HeaderMap {
   append_all(&mut subset, headers, AUTHORIZATION);
   append_all(&mut subset, headers, PROXY_AUTHORIZATION);
   append_all(&mut subset, headers, ACCEPT_ENCODING);
+  append_all(
+    &mut subset,
+    headers,
+    HeaderName::from_static("want-unencoded-digest"),
+  );
   append_all(&mut subset, headers, HeaderName::from_static("via"));
   subset
 }

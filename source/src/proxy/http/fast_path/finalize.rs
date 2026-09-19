@@ -5,6 +5,7 @@ use crate::pools::PoolSelection;
 use crate::proxy::http::SystemAccessLogContext;
 use crate::proxy::http::body::{self, ProxyBody};
 use crate::proxy::http::headers::strip_hop_by_hop_headers;
+use crate::proxy::http::integrity_digest::DigestRequest;
 use crate::proxy::http::response::{
   apply_route_security_headers, apply_sticky_cookie, text_response,
   waf_http_terminal_response_with_route_security, with_route_security_headers,
@@ -51,6 +52,7 @@ pub(super) fn finalize_response(
   upstream: &UpstreamConfig,
   upstream_first_byte_time_ms: Option<u64>,
   request_waf: &RequestWafDecision,
+  digest_request: Option<&DigestRequest>,
   response_waf_enabled: bool,
   request_context: Option<&(Method, Uri)>,
   request_headers: Option<&HeaderMap>,
@@ -124,6 +126,11 @@ pub(super) fn finalize_response(
   );
   apply_fast_path_priority_policy(&mut parts.headers, state.config.proxy.http.priority);
   apply_route_security_headers(&mut parts.headers, &state.config.security, resolved.route);
+  if let Some(digest_request) = digest_request {
+    digest_request
+      .suppression()
+      .record_mutations(&request_waf.response_header_mutations);
+  }
   if !request_waf.response_header_mutations.is_empty() {
     apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
   }
@@ -181,6 +188,9 @@ pub(super) fn finalize_response(
     if let Some(terminal) = response_waf.terminal {
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
+      if let Some(digest_request) = digest_request {
+        digest_request.suppression().record_mutations(&mutations);
+      }
       let response = waf_http_terminal_response_with_route_security(
         terminal,
         &mutations,
@@ -191,6 +201,11 @@ pub(super) fn finalize_response(
         state.record_hot_path_response(response.status());
       }
       return response;
+    }
+    if let Some(digest_request) = digest_request {
+      digest_request
+        .suppression()
+        .record_mutations(&response_waf.response_header_mutations);
     }
     if !response_waf.response_header_mutations.is_empty() {
       apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);

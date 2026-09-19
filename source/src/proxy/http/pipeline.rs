@@ -762,15 +762,28 @@ where
   access_log.set_tags(&tags);
 
   if let Some(terminal) = request_waf.terminal {
+    if resolved.route.static_root.is_some() {
+      static_files::record_route_digest_removals(
+        request
+          .extensions()
+          .get::<integrity_digest::DigestRequest>(),
+        resolved.route,
+      );
+    }
     return route_security.waf_http_terminal(terminal, &request_waf.response_header_mutations);
   }
 
   if let Some(static_root) = resolved.route.static_root.as_deref() {
+    let digest_request = request
+      .extensions()
+      .get::<integrity_digest::DigestRequest>()
+      .cloned();
     if request_waf.upstream_override.is_some() || request_waf.upstream_pool_override.is_some() {
       warn!(
         route = %resolved.route.name,
         "WAF selected an upstream target for a static route"
       );
+      static_files::record_route_digest_removals(digest_request.as_ref(), resolved.route);
       return route_security.text(
         StatusCode::BAD_GATEWAY,
         "WAF selected an upstream target for a static route",
@@ -798,6 +811,7 @@ where
       &request_uri,
       request_version,
       request.headers(),
+      digest_request.as_ref(),
       client_addr,
       host,
       tcp_max_hop,

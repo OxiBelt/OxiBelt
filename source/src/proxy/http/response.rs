@@ -35,6 +35,9 @@ pub(crate) fn text_response(status: StatusCode, message: &str) -> Response<Proxy
     .boxed();
   let mut response = Response::new(body);
   *response.status_mut() = status;
+  response
+    .extensions_mut()
+    .insert(super::integrity_digest::Representation::Complete);
   if is_known_small_response_body_len(body_len) {
     response.extensions_mut().insert(KnownSmallResponseBody);
     response
@@ -54,11 +57,58 @@ pub(crate) fn waf_http_terminal_response_with_route_security(
     WafHttpTerminal::Response(terminal) => {
       let mut response = text_response(terminal.status, &terminal.body);
       apply_route_security_headers(response.headers_mut(), security, route);
-      apply_header_mutations(response.headers_mut(), &terminal.headers);
-      apply_header_mutations(response.headers_mut(), mutations);
+      apply_response_header_mutations(&mut response, &terminal.headers);
+      apply_response_header_mutations(&mut response, mutations);
+      record_route_digest_removals(&mut response, route);
       response
     }
     WafHttpTerminal::SilentClose => silent_close_response(),
+  }
+}
+
+/// Keep explicit field removals authoritative when late digest generation runs.
+pub(crate) fn apply_response_header_mutations(
+  response: &mut Response<ProxyBody>,
+  mutations: &[HeaderMutation],
+) {
+  record_response_digest_mutations(response, mutations);
+  apply_header_mutations(response.headers_mut(), mutations);
+}
+
+/// Record route removals for digest generation without changing headers.
+pub(crate) fn record_route_digest_removals(
+  response: &mut Response<ProxyBody>,
+  route: &RouteConfig,
+) {
+  let removals = route
+    .actions
+    .response_headers
+    .remove
+    .iter()
+    .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+    .map(|name| HeaderMutation::Remove { name })
+    .collect::<Vec<_>>();
+  record_response_digest_mutations(response, &removals);
+}
+
+fn record_response_digest_mutations(
+  response: &mut Response<ProxyBody>,
+  mutations: &[HeaderMutation],
+) {
+  if mutations.iter().any(|mutation| {
+    let name = match mutation {
+      HeaderMutation::Set { name, .. }
+      | HeaderMutation::Append { name, .. }
+      | HeaderMutation::Remove { name } => name.as_str(),
+    };
+    matches!(name, "content-digest" | "repr-digest" | "unencoded-digest")
+  }) {
+    let suppression = response
+      .extensions_mut()
+      .remove::<super::integrity_digest::DigestFieldSuppression>()
+      .unwrap_or_default();
+    suppression.record_mutations(mutations);
+    response.extensions_mut().insert(suppression);
   }
 }
 
@@ -170,12 +220,22 @@ pub(super) fn upstream_selection_error_response(
 }
 
 pub(super) fn external_auth_response(terminal: ExternalAuthTerminal) -> Response<ProxyBody> {
+  let materialized =
+    is_known_small_response_body_len(terminal.body.len()).then(|| terminal.body.clone());
   let body = Full::new(terminal.body)
     .map_err(|never| -> BoxError { match never {} })
     .boxed();
   let mut response = Response::new(body);
   *response.status_mut() = terminal.status;
   *response.headers_mut() = terminal.headers;
+  response
+    .extensions_mut()
+    .insert(super::integrity_digest::Representation::Complete);
+  if let Some(bytes) = materialized {
+    response
+      .extensions_mut()
+      .insert(InlinedKnownSmallResponseBody::new(bytes, None));
+  }
   response
 }
 
@@ -186,7 +246,7 @@ pub(super) fn with_pending_dynamic_person_proof_response_mutations(
   dynamic_person_proof_mutation_added: bool,
   dynamic_challenge_response_mutations: &[HeaderMutation],
 ) -> Response<ProxyBody> {
-  apply_header_mutations(response.headers_mut(), dynamic_challenge_response_mutations);
+  apply_response_header_mutations(&mut response, dynamic_challenge_response_mutations);
   if dynamic_person_proof_mutation_added || !dynamic_challenge_response_mutations.is_empty() {
     return response;
   }
@@ -198,7 +258,7 @@ pub(super) fn with_pending_dynamic_person_proof_response_mutations(
     .person_proof_clearance_response_mutation(evaluated)
   {
     Ok(Some(mutation)) => {
-      apply_header_mutations(response.headers_mut(), std::slice::from_ref(&mutation));
+      apply_response_header_mutations(&mut response, std::slice::from_ref(&mutation));
     }
     Ok(None) => {}
     Err(error) => {
@@ -444,6 +504,7 @@ pub(crate) fn with_route_security_headers(
   route: &RouteConfig,
 ) -> Response<ProxyBody> {
   apply_route_security_headers(response.headers_mut(), security, route);
+  record_route_digest_removals(&mut response, route);
   response
 }
 
@@ -539,8 +600,9 @@ pub(super) fn upstream_error_response(
     response = super::status_headers::error(response, token);
   }
   apply_route_security_headers(response.headers_mut(), &state.config.security, route);
-  apply_header_mutations(response.headers_mut(), request_response_mutations);
+  apply_response_header_mutations(&mut response, request_response_mutations);
   if !state.waf.has_response_rules(route_name) {
+    record_route_digest_removals(&mut response, route);
     return response;
   }
 
@@ -615,10 +677,8 @@ pub(super) fn upstream_error_response(
     );
   }
 
-  apply_header_mutations(
-    response.headers_mut(),
-    &response_waf.response_header_mutations,
-  );
+  apply_response_header_mutations(&mut response, &response_waf.response_header_mutations);
+  record_route_digest_removals(&mut response, route);
   response
 }
 
@@ -639,6 +699,27 @@ fn empty_response(status: StatusCode) -> Response<ProxyBody> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn response_mutation_removal_suppresses_late_digest_generation() {
+    let mut headers = HeaderMap::new();
+    headers.insert("want-content-digest", HeaderValue::from_static("sha-256=1"));
+    let context = crate::proxy::http::integrity_digest::DigestRequest::new(
+      &Method::GET,
+      http::Version::HTTP_2,
+      &headers,
+      crate::config::TrailerMode::Pass,
+    );
+    let mut response = text_response(StatusCode::OK, "local");
+    apply_response_header_mutations(
+      &mut response,
+      &[HeaderMutation::Remove {
+        name: HeaderName::from_static("content-digest"),
+      }],
+    );
+    let response = crate::proxy::http::integrity_digest::finalize(response, &context);
+    assert!(!response.headers().contains_key("content-digest"));
+  }
 
   #[test]
   fn silent_close_carries_http2_cancel_reason() {

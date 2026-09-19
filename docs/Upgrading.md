@@ -5,6 +5,22 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## HTTP digest negotiation
+
+Ordinary data-plane responses now generate negotiated RFC 9530 digest fields
+and draft-05 `Unencoded-Digest` fields when the necessary bytes and delivery
+mechanism are available. Existing request/response fields that become stale
+through body transformations are removed. This includes request re-encoding
+for WAF inspection even when the content-coding name does not change.
+Explicit response-field removals remain authoritative. No configuration,
+OxiRule grammar, persisted-state, or schema migration is needed.
+
+Clients using HTTP/1.1 streaming digests must send `TE: trailers`; trailer-drop
+policy remains authoritative. Rollback removes local negotiation/generation and
+restores the older transformation behavior, so applications requiring digest
+metadata should retain origin generation and account for transformed responses.
+See [HTTP digest negotiation](Configuration.md#http-digest-negotiation).
+
 ## WebTransport over HTTP/2
 
 WebTransport now supports both HTTP/2 and HTTP/3 on either proxy leg. The selected

@@ -16,6 +16,12 @@ pub(crate) fn plain_proxy_fast_path_decision<B>(
   state: &AppSnapshot,
   resolved: &ResolvedRoute<'_>,
 ) -> Result<(), PlainProxyFastPathMissReason> {
+  // Digest finalization observes the final downstream representation. Keep
+  // supported requests on the full path; malformed or unsupported hints are
+  // intentionally a no-op and retain the normal fast-path eligibility.
+  if crate::proxy::http::integrity_digest::DigestRequest::requested(request.headers()) {
+    return Err(PlainProxyFastPathMissReason::IntegrityDigest);
+  }
   // QUERY requires final Content-Type validation after all request mutations.
   if crate::proxy::http::query::is_query(request.method())
     || resolved.execution_plan.features.resumable_upload

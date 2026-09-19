@@ -18,7 +18,7 @@ mod typed;
 const PATH_PLAIN_PROXY: &str = "plain_proxy";
 const HIT_REASON: &str = "eligible";
 const PROTOCOLS: [&str; 4] = ["h1", "h2", "h3", "other"];
-const MISS_REASONS: [&str; 8] = [
+const MISS_REASONS: [&str; 9] = [
   "plan_disabled",
   "unsupported_version",
   "unsupported_route",
@@ -27,6 +27,7 @@ const MISS_REASONS: [&str; 8] = [
   "native_grpc",
   "upgrade",
   "connect",
+  "integrity_digest",
 ];
 const OUTCOMES_PER_PROTOCOL: usize = 1 + MISS_REASONS.len();
 const DECISION_COUNTER_COUNT: usize = PROTOCOLS.len() * OUTCOMES_PER_PROTOCOL;

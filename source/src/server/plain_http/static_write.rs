@@ -41,6 +41,7 @@ pub(super) async fn write_static_plan(
     headers,
     body,
     response_heads,
+    available_representation: _,
   } = response;
   let response_send_timeout = *response_send_timeout;
   let mut bandwidth = StaticResponseBandwidth::new(bandwidth.as_ref(), snapshot.metrics.clone());

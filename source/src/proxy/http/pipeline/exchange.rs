@@ -96,6 +96,10 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     mut cache_store_allowed,
     cache_fill_guard,
   } = context;
+  let digest_request = outbound
+    .extensions()
+    .get::<integrity_digest::DigestRequest>()
+    .cloned();
   let group_request = outbound
     .extensions()
     .get::<crate::cache::CacheGroupRequest>()
@@ -701,6 +705,11 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       &state.config.security,
       resolved.route,
     );
+    if let Some(digest_request) = digest_request.as_ref() {
+      digest_request
+        .suppression()
+        .record_mutations(&request_waf.response_header_mutations);
+    }
     apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
     if response_waf_enabled {
       access_log.ensure_response_ids();
@@ -762,9 +771,20 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       if let Some(terminal) = response_waf.terminal {
         let mut mutations = request_waf.response_header_mutations.clone();
         mutations.extend(response_waf.response_header_mutations);
+        if let Some(digest_request) = digest_request.as_ref() {
+          digest_request.suppression().record_mutations(&mutations);
+        }
         return route_security.waf_http_terminal(terminal, &mutations);
       }
+      if let Some(digest_request) = digest_request.as_ref() {
+        digest_request
+          .suppression()
+          .record_mutations(&response_waf.response_header_mutations);
+      }
       apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
+    }
+    if let Some(digest_request) = digest_request.as_ref() {
+      digest_request.suppression().record_route(resolved.route);
     }
     route_runtime::apply_response_actions(&mut parts.headers, resolved.route, &request_headers);
   }
@@ -1057,6 +1077,9 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
         response.extensions_mut().insert(exchange.clone());
       }
       cache_status::reconcile_cached_security(&mut response, state, resolved.route);
+      if let Some(digest_request) = digest_request.as_ref() {
+        digest_request.suppression().record_route(resolved.route);
+      }
       route_runtime::apply_response_actions(
         response.headers_mut(),
         resolved.route,
@@ -1130,6 +1153,11 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
     &state.config.security,
     resolved.route,
   );
+  if let Some(digest_request) = digest_request.as_ref() {
+    digest_request
+      .suppression()
+      .record_mutations(&request_waf.response_header_mutations);
+  }
   apply_header_mutations(&mut parts.headers, &request_waf.response_header_mutations);
 
   if (upstream_incremental || incremental::requested(&parts.headers))
@@ -1285,12 +1313,23 @@ async fn run_inner(context: ExchangeContext<'_, '_, '_, '_, '_>) -> Response<Pro
       origin_response_guard.disarm();
       let mut mutations = request_waf.response_header_mutations.clone();
       mutations.extend(response_waf.response_header_mutations);
+      if let Some(digest_request) = digest_request.as_ref() {
+        digest_request.suppression().record_mutations(&mutations);
+      }
       return route_security.waf_http_terminal(terminal, &mutations);
+    }
+    if let Some(digest_request) = digest_request.as_ref() {
+      digest_request
+        .suppression()
+        .record_mutations(&response_waf.response_header_mutations);
     }
     apply_header_mutations(&mut parts.headers, &response_waf.response_header_mutations);
   }
   drop(response_decompression_lease);
   drop(response_inspection_lease);
+  if let Some(digest_request) = digest_request.as_ref() {
+    digest_request.suppression().record_route(resolved.route);
+  }
   route_runtime::apply_response_actions(&mut parts.headers, resolved.route, &request_headers);
   state
     .cache

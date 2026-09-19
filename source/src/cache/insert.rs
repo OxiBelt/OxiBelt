@@ -419,6 +419,8 @@ impl ResponseCache {
         "cache-groups",
         "cache-group-invalidation",
         "no-vary-search",
+        "repr-digest",
+        "unencoded-digest",
       ] {
         if not_modified_headers.contains_key(name) {
           headers.remove(name);
@@ -454,6 +456,7 @@ impl ResponseCache {
       }
     }
     revalidation::merge_nvs_not_modified_headers(&mut headers, not_modified_headers);
+    revalidation::merge_digest_not_modified_headers(&mut headers, not_modified_headers);
     self
       .write_shared_entry_for_insert(ctx, cached_entry.status, &headers, cached_entry.body_len())
       .await;

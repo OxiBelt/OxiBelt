@@ -188,9 +188,13 @@ pub(super) async fn handle_connection(
       }
       let _request_guard = state.runtime_introspection_guard(request_counter);
       if request_index >= state.config.limits.max_requests_per_connection {
-        return Ok(text_response(
-          StatusCode::TOO_MANY_REQUESTS,
-          "too many requests on this connection",
+        return Ok(finalize_tls_listener_response(
+          &request,
+          state.config.proxy.http.trailers,
+          text_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many requests on this connection",
+          ),
         ));
       }
       let response = if request.version() == ::http::Version::HTTP_2
@@ -365,6 +369,28 @@ pub(super) fn redirect_to_https(request: &hyper::Request<Incoming>) -> Response<
   response
 }
 
+fn finalize_tls_listener_response<B>(
+  request: &::http::Request<B>,
+  trailer_mode: crate::config::TrailerMode,
+  response: Response<ProxyBody>,
+) -> Response<ProxyBody> {
+  if request.method() == ::http::Method::CONNECT
+    || http::headers::is_upgrade_request(request)
+    || (request.version() == ::http::Version::HTTP_2
+      && crate::proxy::webtransport_h2::ingress::is_webtransport_request(request))
+    || !http::integrity_digest::DigestRequest::requested(request.headers())
+  {
+    return response;
+  }
+  let digest_request = http::integrity_digest::DigestRequest::new(
+    request.method(),
+    request.version(),
+    request.headers(),
+    trailer_mode,
+  );
+  http::integrity_digest::finalize(response, &digest_request)
+}
+
 pub(super) async fn acquire_global_connection_permit(
   snapshot: &AppSnapshot,
 ) -> anyhow::Result<ConnectionPermit> {
@@ -388,4 +414,35 @@ pub(super) async fn acquire_ip_connection_permit(
     )
     .await
     .map_err(|status| anyhow::anyhow!("connection rejected with status {status}"))
+}
+
+#[cfg(test)]
+mod tests {
+  use http_body_util::BodyExt;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn tls_request_limit_response_honors_supported_digest_want() {
+    let request = ::http::Request::builder()
+      .method(::http::Method::GET)
+      .version(::http::Version::HTTP_2)
+      .header("want-content-digest", "sha-256=1")
+      .body(())
+      .unwrap();
+    let response = finalize_tls_listener_response(
+      &request,
+      crate::config::TrailerMode::Pass,
+      text_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too many requests on this connection",
+      ),
+    );
+    assert_eq!(
+      response.headers()["content-digest"],
+      "sha-256=:FfYXpYxJXwGR+pyuI4gOdL82btGUq1cztEcFHIBFNfk=:"
+    );
+    let collected = response.into_body().collect().await.unwrap();
+    assert_eq!(collected.to_bytes(), "too many requests on this connection");
+  }
 }

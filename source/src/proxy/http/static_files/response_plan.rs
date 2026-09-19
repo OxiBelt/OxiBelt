@@ -81,6 +81,7 @@ pub(crate) async fn response_from_plan(
     headers,
     body,
     response_heads: _,
+    available_representation,
   } = plan;
   let mut response = match body {
     StaticBodyPlan::Empty => Response::new(empty_body()),
@@ -123,6 +124,20 @@ pub(crate) async fn response_from_plan(
     }
   };
   *response.status_mut() = status;
+  response
+    .extensions_mut()
+    .insert(if status == StatusCode::PARTIAL_CONTENT {
+      super::super::integrity_digest::Representation::Partial
+    } else {
+      super::super::integrity_digest::Representation::Complete
+    });
+  if let Some(bytes) = available_representation {
+    response
+      .extensions_mut()
+      .insert(super::super::integrity_digest::AvailableRepresentation(
+        bytes,
+      ));
+  }
   for (name, value) in headers {
     if let Some(name) = name {
       response.headers_mut().insert(name, value);
@@ -138,7 +153,11 @@ pub(in crate::proxy::http::static_files) fn cached_object_plan(
 ) -> StaticResponsePlan {
   let len = cached.body.len() as u64;
   if conditional_not_modified(headers, &cached.etag, cached.modified) {
-    return not_modified_plan(&cached.etag, cached.modified, &cached.response_metadata);
+    let mut plan = not_modified_plan(&cached.etag, cached.modified, &cached.response_metadata);
+    if is_known_small_response_body_len(cached.body.len()) {
+      plan.available_representation = Some(cached.body.clone());
+    }
+    return plan;
   }
 
   let range = match headers.get(RANGE) {
@@ -186,6 +205,8 @@ fn cached_full_bytes_plan(method: &Method, cached: Arc<CachedStaticObject>) -> S
     headers,
     body,
     response_heads,
+    available_representation: is_known_small_response_body_len(cached.body.len())
+      .then(|| cached.body.clone()),
   }
 }
 
@@ -234,6 +255,7 @@ pub(super) fn file_plan(
     headers,
     body,
     response_heads: None,
+    available_representation: None,
   }
 }
 
@@ -261,6 +283,8 @@ fn bytes_plan(
   {
     headers.insert(CONTENT_RANGE, value);
   }
+  let available_representation =
+    is_known_small_response_body_len(bytes.len()).then(|| bytes.clone());
   let body = if method == Method::HEAD || content.body_len == 0 {
     StaticBodyPlan::Empty
   } else if content.offset == 0 && content.body_len == bytes.len() as u64 {
@@ -283,6 +307,7 @@ fn bytes_plan(
     headers,
     body,
     response_heads: None,
+    available_representation,
   }
 }
 
@@ -424,6 +449,7 @@ pub(super) fn not_modified_plan(
     headers,
     body: StaticBodyPlan::Empty,
     response_heads: None,
+    available_representation: None,
   }
 }
 
@@ -456,6 +482,7 @@ pub(super) fn range_not_satisfiable_plan(len: u64) -> StaticResponsePlan {
     headers,
     body: StaticBodyPlan::Empty,
     response_heads: None,
+    available_representation: None,
   }
 }
 
@@ -474,6 +501,7 @@ pub(crate) fn text_plan(status: StatusCode, message: impl Into<String>) -> Stati
     headers,
     body: StaticBodyPlan::Text(message),
     response_heads: None,
+    available_representation: None,
   }
 }
 

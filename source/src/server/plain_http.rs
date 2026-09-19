@@ -162,13 +162,21 @@ pub(super) async fn handle_connection(
       }
       let _request_guard = state.runtime_introspection_guard(RuntimeCounter::Http1Request);
       match state.config.listeners.http_mode {
-        HttpListenerMode::RedirectToHttps => Ok(super::redirect_to_https(&request)),
+        HttpListenerMode::RedirectToHttps => Ok(finalize_listener_response(
+          &request,
+          state.as_ref(),
+          super::redirect_to_https(&request),
+        )),
         HttpListenerMode::Proxy => {
           if request_index.unwrap_or(usize::MAX) >= state.config.limits.max_requests_per_connection
           {
-            Ok(text_response(
-              StatusCode::TOO_MANY_REQUESTS,
-              "too many requests on this connection",
+            Ok(finalize_listener_response(
+              &request,
+              state.as_ref(),
+              text_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many requests on this connection",
+              ),
             ))
           } else {
             let response = http::handle(
@@ -190,9 +198,10 @@ pub(super) async fn handle_connection(
             }
           }
         }
-        HttpListenerMode::Off => Ok(text_response(
-          StatusCode::NOT_FOUND,
-          "HTTP listener is disabled",
+        HttpListenerMode::Off => Ok(finalize_listener_response(
+          &request,
+          state.as_ref(),
+          text_response(StatusCode::NOT_FOUND, "HTTP listener is disabled"),
         )),
       }
     }
@@ -241,6 +250,27 @@ pub(super) async fn handle_connection(
   };
   result.map_err(|error| anyhow::anyhow!(error))?;
   Ok(())
+}
+
+fn finalize_listener_response<B>(
+  request: &::http::Request<B>,
+  snapshot: &AppSnapshot,
+  response: ::http::Response<http::body::ProxyBody>,
+) -> ::http::Response<http::body::ProxyBody> {
+  if request.method() == Method::CONNECT
+    || (request.headers().contains_key(UPGRADE)
+      && header_has_token(request.headers(), CONNECTION, "upgrade"))
+    || !http::integrity_digest::DigestRequest::requested(request.headers())
+  {
+    return response;
+  }
+  let digest_request = http::integrity_digest::DigestRequest::new(
+    request.method(),
+    request.version(),
+    request.headers(),
+    snapshot.config.proxy.http.trailers,
+  );
+  http::integrity_digest::finalize(response, &digest_request)
 }
 
 async fn try_sendfile_fast_path(
@@ -419,6 +449,12 @@ async fn eligible_static_plan(
   peer_addr: SocketAddr,
   transport_metadata: WafTransportMetadataInput<'_>,
 ) -> Option<TimedStaticResponsePlan> {
+  // A supported digest request needs the common response finalizer, which
+  // owns content framing and trailers. Invalid/unsupported hints remain a
+  // no-op and can still use sendfile.
+  if http::integrity_digest::DigestRequest::requested(&request.headers) {
+    return None;
+  }
   if request.version != 1
     || (request.method != Method::GET && request.method != Method::HEAD)
     || !request.target.starts_with('/')

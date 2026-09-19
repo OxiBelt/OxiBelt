@@ -158,6 +158,7 @@ pub(crate) enum FastPathPlainProxyMissReason {
   NativeGrpc = 5,
   Upgrade = 6,
   Connect = 7,
+  IntegrityDigest = 8,
 }
 
 impl FastPathPlainProxyMissReason {
