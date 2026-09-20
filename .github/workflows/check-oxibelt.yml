@@ -966,7 +966,7 @@ jobs:
             --platform linux/riscv64 \
             --target riscv64-musl-check \
             --build-arg OXIBELT_RUST_BUILDER_STAGE=builder-riscv64 \
-            --build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-61233364 \
+            --build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-8241e7a9 \
             --progress plain \
             -f source/ops/Dockerfile.alpine \
             .

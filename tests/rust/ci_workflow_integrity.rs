@@ -1386,7 +1386,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   );
 
   for expected in [
-    "FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:6123336467138e0bdc18fc7032032bd5772036ea5f48e91da49895b266fc3298 AS riscv64-cross-toolchain",
+    "FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:8241e7a99f52bc51345fafb286533a8c436a039f71704000f4c26d52cd9d77f9 AS riscv64-cross-toolchain",
     "8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27",
     "FROM builder-base AS builder-riscv64",
     "COPY --from=riscv64-cross-toolchain /x-tools /x-tools",
@@ -1394,7 +1394,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
     "14.3.0",
     "riscv64-unknown-linux-musl",
     "GNU ld (crosstool-NG UNKNOWN) 2.45",
-    "8c94c9705057a062899d4a0acaf732bfe9b3fa29483f5ab3dd21594c4aa1a00d",
+    "82d68882344b09c547b01dad4ea8c5ec989ea165b50387845a86a09dc18013d5",
     "AS riscv64-musl-check",
   ] {
     assert!(
@@ -8340,7 +8340,7 @@ fn riscv64_cross_checks_and_image_build_run_without_emulation() {
     "Cargo check for RISC-V musl target",
     "--platform linux/riscv64",
     "--target riscv64-musl-check",
-    "--build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-61233364",
+    "--build-arg OXIBELT_RUST_CACHE_ID=riscv64gc-musl-cross-rs-8241e7a9",
     "--build-arg OXIBELT_RUST_BUILDER_STAGE=builder-riscv64",
   ] {
     assert!(

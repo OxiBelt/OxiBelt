@@ -43,7 +43,7 @@ FROM builder-base AS builder-native
 # cross-rs source revision: 8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27
 # Copy only the compiler/sysroot. In particular, do not inherit the cross-rs
 # emulator helpers or its Cargo runner environment.
-FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:6123336467138e0bdc18fc7032032bd5772036ea5f48e91da49895b266fc3298 AS riscv64-cross-toolchain
+FROM --platform=${OXIBELT_RISCV64_TOOLCHAIN_PLATFORM} ghcr.io/cross-rs/riscv64gc-unknown-linux-musl@sha256:8241e7a99f52bc51345fafb286533a8c436a039f71704000f4c26d52cd9d77f9 AS riscv64-cross-toolchain
 
 FROM builder-base AS builder-riscv64
 
@@ -70,7 +70,7 @@ RUN if [ "${BUILDARCH}" != "amd64" ]; then \
     test "$("${compiler}" -dumpmachine)" = "riscv64-unknown-linux-musl" && \
     test "$("${linker}" --version | sed -n '1p')" = "GNU ld (crosstool-NG UNKNOWN) 2.45" && \
     test "$(sha256sum "${compiler}" | awk '{print $1}')" = \
-      "8c94c9705057a062899d4a0acaf732bfe9b3fa29483f5ab3dd21594c4aa1a00d"
+      "82d68882344b09c547b01dad4ea8c5ec989ea165b50387845a86a09dc18013d5"
 
 FROM ${OXIBELT_RUST_BUILDER_STAGE} AS builder
 
