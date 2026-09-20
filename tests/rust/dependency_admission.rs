@@ -1138,7 +1138,7 @@ fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
     vec!["dep:cc"]
   );
   let cc = &allocator["build-dependencies"]["cc"];
-  assert_eq!(cc["version"].as_str(), Some("=1.4.5"));
+  assert_eq!(cc["version"].as_str(), Some("=1.4.7"));
   assert_eq!(cc["optional"].as_bool(), Some(true));
   assert!(
     runtime["dependencies"].get("oxibelt-allocator").is_none(),
