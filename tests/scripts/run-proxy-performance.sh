@@ -13,7 +13,7 @@ Environment:
   OXIBELT_NGINX_IMAGE              nginx comparator image (default: nginx:mainline-alpine)
   OXIBELT_NGINX_H3_MODE            auto, required, optional, or disabled (default: auto)
   OXIBELT_CADDY_IMAGE              Caddy comparator image (default: caddy:2-alpine)
-  OXIBELT_OPENRESTY_IMAGE          OpenResty comparator image (default: openresty/openresty:1.31.1.1-2-alpine)
+  OXIBELT_OPENRESTY_IMAGE          OpenResty comparator image (default: openresty/openresty:1.31.1.1-3-alpine)
   OXIBELT_PERF_PROBE_IMAGE         prebuilt perf-probe image to reuse; built locally when unset
   OXIBELT_EXTERNAL_BENCHMARKS      run h2load/oha/wrk validation rows, 1 or 0 (default: 1)
   OXIBELT_EXTERNAL_BENCHMARK_TOOLS comma-separated h2load,oha,wrk subset (default: h2load,oha,wrk)
@@ -181,7 +181,7 @@ oxibelt_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/perf-proxy:${run_id}}"
 keysigner_image="${OXIBELT_KEYSIGNER_DOCKER_IMAGE:-${oxibelt_image}}"
 nginx_image="${OXIBELT_NGINX_IMAGE:-nginx:mainline-alpine}"
 caddy_image="${OXIBELT_CADDY_IMAGE:-caddy:2-alpine}"
-openresty_image="${OXIBELT_OPENRESTY_IMAGE:-openresty/openresty:1.31.1.1-2-alpine}"
+openresty_image="${OXIBELT_OPENRESTY_IMAGE:-openresty/openresty:1.31.1.1-3-alpine}"
 source_sha="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || printf 'unknown')"
 source_dirty=false
 if [[ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null || true)" ]]; then
@@ -646,7 +646,7 @@ build_perf_probe_image() {
   fi
 
   remove_perf_probe_image=1
-  for base_image in rust:1.98.1-trixie@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132; do
+  for base_image in rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a; do
     retry_command 3 docker pull "${base_image}" \
       || fail_with_diagnostics "failed to pull performance probe base image ${base_image}"
   done
@@ -667,7 +667,7 @@ build_external_benchmark_image() {
 
   remove_external_benchmark_image=1
   local base_image
-  for base_image in rust:1.98.1-trixie@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1 debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132; do
+  for base_image in rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a; do
     retry_command 3 docker pull "${base_image}" >/dev/null \
       || fail_with_diagnostics "failed to pull external benchmark base image ${base_image}"
   done

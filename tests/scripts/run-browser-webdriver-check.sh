@@ -531,7 +531,7 @@ elif [[ "${isolated_firefox_turn}" == "true" ]]; then
   turn_untrusted_tls_url="turns:turn-v6-untrusted.oxibelt.test:${turn_v6_tls_port}?transport=tcp"
 fi
 
-firefox_webdriver_image="${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:154.0-geckodriver-0.37.1}"
+firefox_webdriver_image="${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1}"
 mock_upstream_image="${OXIBELT_MOCK_UPSTREAM_IMAGE:-oxibelt/mock-upstream:ci}"
 
 case "${browser}" in

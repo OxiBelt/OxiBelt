@@ -760,7 +760,7 @@ fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
     "/CN=OxiBelt WebDriver Test CA",
     "subjectAltName=DNS:localhost,DNS:proxy.oxibelt.test,DNS:turn-v4.oxibelt.test,DNS:turn-v6.oxibelt.test,IP:127.0.0.1,IP:::1",
     "extendedKeyUsage=serverAuth",
-    "firefox_webdriver_image=\"${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:154.0-geckodriver-0.37.1}\"",
+    "firefox_webdriver_image=\"${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1}\"",
     "certutil -N --empty-password -d sql:/tmp/firefox-profile",
     "certutil -A",
     "-t \"C,,\"",
@@ -871,9 +871,9 @@ fn firefox_webdriver_helper_image_is_pinned_nonroot_and_nss_ready() {
 
   for expected in [
     "FROM ${DEBIAN_IMAGE} AS fetch",
-    "docker.io/library/debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132",
-    "ARG FIREFOX_VERSION=154.0",
-    "ARG FIREFOX_SHA256=7665cd49ab13417270748325838e565136adbc76d41bbd76fb24d15a0cc7792b",
+    "docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a",
+    "ARG FIREFOX_VERSION=156.0",
+    "ARG FIREFOX_SHA256=1d44cd02351c307c3e19061ea2a4d18a30f236e6be862b94f2282564afdb0167",
     "ARG GECKODRIVER_VERSION=0.37.1",
     "ARG GECKODRIVER_SHA256=e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e",
     "https://archive.mozilla.org/pub/firefox/releases/${FIREFOX_VERSION}/linux-x86_64/en-US/firefox-${FIREFOX_VERSION}.tar.xz",
@@ -898,8 +898,8 @@ fn firefox_webdriver_helper_image_is_pinned_nonroot_and_nss_ready() {
     "Firefox and geckodriver archives must each be checksum verified"
   );
   for expected in [
-    "firefox_version=\"154.0\"",
-    "firefox_sha256=\"7665cd49ab13417270748325838e565136adbc76d41bbd76fb24d15a0cc7792b\"",
+    "firefox_version=\"156.0\"",
+    "firefox_sha256=\"1d44cd02351c307c3e19061ea2a4d18a30f236e6be862b94f2282564afdb0167\"",
     "geckodriver_version=\"0.37.1\"",
     "geckodriver_sha256=\"e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e\"",
     "retry_command 3 docker pull --platform \"${platform}\" \"${base_image}\"",
@@ -977,7 +977,7 @@ fn firefox_webdriver_turn_jobs_are_required_and_use_exact_artifacts() {
     "docker load --input \"${RUNNER_TEMP}/oxibelt-firefox-webdriver/oxibelt-firefox-webdriver-image.tar\"",
     "OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}",
     "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
-    "OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:154.0-geckodriver-0.37.1",
+    "OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1",
     "run: tests/scripts/run-browser-webdriver-check.sh firefox webrtc-turn isolated",
     "if: failure()",
     "name: oxibelt-browser-firefox-webrtc-turn-isolated-diagnostics",
@@ -1337,7 +1337,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   }
 
   for expected in [
-    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf\"",
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546\"",
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",
@@ -1553,7 +1553,7 @@ fn python_docker_helpers_track_the_supported_alpine_base() {
     let contents = fs::read_to_string(repo_root().join(dockerfile))
       .unwrap_or_else(|error| panic!("{dockerfile} should be readable: {error}"));
     assert!(
-      contents.starts_with("FROM python:3.14-alpine3.24@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc\n"),
+      contents.starts_with("FROM python:3.14-alpine3.24@sha256:016508ba505da24f7139765bc4bb669df4e88eb2f12eeadd571bf2f88d7533df\n"),
       "{dockerfile} should use the supported Python 3.14 and Alpine 3.24 base"
     );
   }
@@ -3203,7 +3203,7 @@ fn admin_audit_anchor_postgres_harness_is_dual_database_bounded_and_rootless() {
 
   for expected in [
     "set -euo pipefail",
-    "postgres:18.6-alpine3.24@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
+    "postgres:18.6-alpine3.24@sha256:6c538e7206ea40ff740ef27883529390a690b6ead6ba96b44c67a9f7c638e8fd",
     "local_container=",
     "authority_container=",
     "docker_publish_args=(--publish 127.0.0.1::5432)",
@@ -7503,8 +7503,8 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
     "RELEASE.2025-10-15T17-29-55Z",
     "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a",
     "45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841",
-    "golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125",
-    "alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+    "golang:1.27.1-alpine3.24@sha256:4cb7ac979db5fcc41cae44b2227ba5ab8a51e8807f40d9ba4dee20a0ad960b5b",
+    "alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
   ] {
     assert!(
       script.contains(expected),
@@ -8429,7 +8429,7 @@ fn qemu_runtime_emulation_is_confined_to_the_release_smoke_job() {
     }
   }
   for expected in [
-    "docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0",
+    "docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0",
     "docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0",
     "platforms: riscv64",
     "reset: false",
@@ -8478,7 +8478,7 @@ fn qemu_runtime_emulation_is_confined_to_the_release_smoke_job() {
     "\"no-new-privileges\"",
     "\"logs\", \"--timestamps\", \"--tail\", \"200\"",
     "docker.io/library/alpine:3.24@",
-    "sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b",
+    "sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
   ] {
     assert!(
       smoke_helper.contains(expected),
@@ -10335,7 +10335,7 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   for expected in [
     "Checkout release revision",
     "Validate immutable release checkout",
-    "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
+    "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0",
     "version: v29.8.0",
     "rootless: true",
     "daemon-config: |",
@@ -11134,7 +11134,7 @@ fn release_workflows_cover_oxibelt_image_artifact_pipeline() {
     "OXIBELT_DOCKER_IMAGE_CREATED",
     "OXIBELT_DOCKER_IMAGE_REF_NAME",
     "OXIBELT_DOCKER_IMAGE_SOURCE",
-    "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0",
+    "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
     "release-image-arch",
     "Publish canonical GHCR image",
@@ -11493,7 +11493,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "runner: runner",
     "runs-on: ${{ matrix.runner }}",
     "persist-credentials: false",
-    "docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0",
+    "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0",
     "version: v29.8.0",
     "rootless: true",
     "daemon-config: |",
@@ -11504,7 +11504,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "docker info --format '{{.CgroupDriver}}'",
     "rootless verifier must use no host cgroup resource controller",
     "moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8",
-    "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0",
+    "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1",
     "aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1",
     "pnpm install --frozen-lockfile --ignore-scripts",
     "tests/scripts/retry-docker-pull.sh",
@@ -12862,7 +12862,7 @@ fn stable_alias_mapping_validator_rejects_producer_controlled_variants() {
 fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let workflow = workflow_text();
   let script = docker_pull_retry_script_text();
-  let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0";
+  let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1";
   let prepull_step_name = "name: Pre-pull Docker BuildKit image";
   let prepull_command = "tests/scripts/retry-docker-pull.sh \"${OXIBELT_BUILDKIT_IMAGE}\"";
   let pinned_image = "OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8";
@@ -12914,7 +12914,7 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
 
 #[test]
 fn release_buildx_setups_precede_with_pinned_buildkit_retry_pull() {
-  let setup_action = "docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e";
+  let setup_action = "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069";
   let prepull_name = "Pre-pull Docker BuildKit image";
   let prepull_command = "bash \"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh\" \"${OXIBELT_BUILDKIT_IMAGE}\"";
   let driver_opts = "image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
@@ -13119,11 +13119,11 @@ fn local_amd64_comparator_images_preserve_cpu_targets_and_hardening() {
     "comparator build script should produce deterministic tags and tar names"
   );
   assert!(
-    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.5")
+    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.6")
       && nginx_dockerfile.contains(
-        "ARG NGINX_SHA256=e951607d534836624bd36b6b45a71dbfb055237deae3738da6bbf3270dada279"
+        "ARG NGINX_SHA256=974ed5298a5e398e008704ed5db284e655fc270c596493dbccada452448fc9f1"
       )
-      && script.contains("--build-arg \"NGINX_VERSION=1.31.5\"")
+      && script.contains("--build-arg \"NGINX_VERSION=1.31.6\"")
       && nginx_dockerfile.contains("ARG NGINX_RUNTIME_IMAGE=alpine:3.24")
       && nginx_dockerfile.contains("FROM alpine:3.24 AS builder")
       && nginx_dockerfile.contains("sha256sum -c -")
@@ -13168,8 +13168,8 @@ fn local_amd64_comparator_images_preserve_cpu_targets_and_hardening() {
   );
   assert!(
     openresty_dockerfile.contains("ARG OPENRESTY_VERSION=1.31.1.1")
-      && openresty_dockerfile.contains("ARG OPENRESTY_IMAGE_VERSION=2")
-      && script.contains("--build-arg \"OPENRESTY_IMAGE_VERSION=2\"")
+      && openresty_dockerfile.contains("ARG OPENRESTY_IMAGE_VERSION=3")
+      && script.contains("--build-arg \"OPENRESTY_IMAGE_VERSION=3\"")
       && openresty_dockerfile.contains(
         "FROM openresty/openresty:${OPENRESTY_VERSION}-${OPENRESTY_IMAGE_VERSION}-alpine"
       )

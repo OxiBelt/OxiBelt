@@ -160,7 +160,7 @@ OXIBELT_AMD64_TARGET_CPU=x86-64-v3
 OXIBELT_NGINX_IMAGE=nginx:mainline-alpine
 OXIBELT_NGINX_H3_MODE=auto
 OXIBELT_CADDY_IMAGE=caddy:2-alpine
-OXIBELT_OPENRESTY_IMAGE=openresty/openresty:1.31.1.1-2-alpine
+OXIBELT_OPENRESTY_IMAGE=openresty/openresty:1.31.1.1-3-alpine
 OXIBELT_PERF_DURATION_SECONDS=30
 OXIBELT_PERF_WARMUP_SECONDS=5
 OXIBELT_PERF_CONCURRENCY=64
@@ -221,7 +221,7 @@ version rewrite, exact role label and binary inventory, Docker target,
 entrypoint, runtime UID, exposed ports, embedded-asset metadata, source URL,
 and checked-out revision.
 
-The runner builds the probe and optional external-benchmark images locally unless `OXIBELT_PERF_PROBE_IMAGE` or `OXIBELT_EXTERNAL_BENCHMARK_IMAGE` is set. It defaults to the official Alpine nginx (`nginx:mainline-alpine`), Caddy (`caddy:2-alpine`), and OpenResty (`openresty/openresty:1.31.1.1-2-alpine`) images unless `OXIBELT_NGINX_IMAGE`, `OXIBELT_CADDY_IMAGE`, or `OXIBELT_OPENRESTY_IMAGE` is set. Select an AMD64 target appropriate to the host with `OXIBELT_AMD64_TARGET_CPU`; an unsupported target is a local configuration error, not an uploaded `unsupported-cpu.json` result.
+The runner builds the probe and optional external-benchmark images locally unless `OXIBELT_PERF_PROBE_IMAGE` or `OXIBELT_EXTERNAL_BENCHMARK_IMAGE` is set. It defaults to the official Alpine nginx (`nginx:mainline-alpine`), Caddy (`caddy:2-alpine`), and OpenResty (`openresty/openresty:1.31.1.1-3-alpine`) images unless `OXIBELT_NGINX_IMAGE`, `OXIBELT_CADDY_IMAGE`, or `OXIBELT_OPENRESTY_IMAGE` is set. Select an AMD64 target appropriate to the host with `OXIBELT_AMD64_TARGET_CPU`; an unsupported target is a local configuration error, not an uploaded `unsupported-cpu.json` result.
 
 External benchmark validation runs by default for `reverse-proxy` and `all` serving types after the primary `perf-probe` common load rows for each active OxiBelt, nginx, Caddy, and OpenResty comparator. It reuses the same generated TLS material, Docker network, upstream containers, static fixtures, active comparator container, and cleanup label as the main harness. The external layer does not replace `tests/docker/perf_probe`, does not add rows to `results.json`, and does not participate in primary quorum, regression gates, baseline deltas, or comparator ratio decisions. Disable it with `OXIBELT_EXTERNAL_BENCHMARKS=0`, or limit the tool set with `OXIBELT_EXTERNAL_BENCHMARK_TOOLS=h2load,oha,wrk`.
 

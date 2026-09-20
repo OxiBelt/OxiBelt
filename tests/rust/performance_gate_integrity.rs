@@ -3914,7 +3914,7 @@ fn local_performance_probe_build_retries_base_pulls_and_build() {
   let script = performance_script_text();
 
   assert!(
-    script.contains("for base_image in rust:1.98.1-trixie@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132; do")
+    script.contains("for base_image in rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a; do")
       && script.contains("retry_command 3 docker pull \"${base_image}\"")
       && script.contains("retry_command 3 docker build"),
     "local probe image builds should retry Docker Hub base-image pulls and the Docker build"
@@ -3934,7 +3934,7 @@ fn local_external_benchmark_build_retries_base_pulls_and_build() {
   let script = performance_script_text();
 
   assert!(
-    script.contains("for base_image in rust:1.98.1-trixie@sha256:462a9af3c54fb4718850d3c602fc0e54452c20b1c12a4e4080fdb001d4b9acbf debian:trixie@sha256:f324c7ff54321e8d9c588493a20244965938ce0aa50bbd1022d38010e9ffc4b1 debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132; do")
+    script.contains("for base_image in rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a; do")
       && script.contains("retry_command 3 docker pull \"${base_image}\"")
       && script.contains("retry_command 3 docker build")
       && script.contains("tests/docker/external_benchmarks/Dockerfile"),
@@ -4291,7 +4291,7 @@ fn mandatory_and_optional_call_sites_are_explicit() {
   );
   assert!(
     script.contains("OXIBELT_OPENRESTY_IMAGE")
-      && script.contains("openresty/openresty:1.31.1.1-2-alpine"),
+      && script.contains("openresty/openresty:1.31.1.1-3-alpine"),
     "OpenResty comparator image should be configurable"
   );
   assert!(

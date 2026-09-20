@@ -102,7 +102,7 @@ jobs:
           cp -R "${RUNNER_TEMP}/oxibelt-release-metadata/workspace/." .
 
       - name: Start isolated rootless Docker
-        uses: docker/setup-docker-action@77e84dbf09b47d1e29270283c22f16145aa85ca1 # v5.4.0
+        uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
         with:
           version: v29.8.0
           rootless: true
@@ -132,7 +132,7 @@ jobs:
         run: tests/scripts/retry-docker-pull.sh "${OXIBELT_BUILDKIT_IMAGE}"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # 4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
           version: v0.37.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
@@ -909,7 +909,7 @@ jobs:
 
       - name: Setup pinned RISC-V runtime emulation
         id: qemu
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           # tonistiigi/binfmt source revision e29e7d72c9672c8c8bf846655ab149b50e1a62bd
           image: docker.io/tonistiigi/binfmt:qemu-v10.2.3-68@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
