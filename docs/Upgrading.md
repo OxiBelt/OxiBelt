@@ -1164,13 +1164,15 @@ mixing dependency generations.
 
 Development after the `0.9.2` source cut refreshes the locked Rust and pnpm
 dependency graphs, including `oxibeltctl`'s `der` dependency from `0.8.1` to
-`0.8.2`, the hash-pinned pnpm toolchain to `11.26.0`, and oxlint to `1.82.0`.
-This refresh preserves executable names, command-line contracts, image roles,
-and the native configuration schema; it requires no configuration or
-persisted-state migration. Build each target from its complete source revision
-and lockfiles, and retain the previous complete immutable artifacts for
-rollback. These development changes do not amend the historical `0.9.2`
-release entry or establish a new supported release target.
+`0.8.2`, the hash-pinned pnpm toolchain to `12.5.1`, and oxlint to `1.83.0`.
+The digest-pinned Rust `1.98.1` builder, Node `24` on Alpine `3.24`, and Alpine
+`3.24` runtime inputs also advance without changing their selected versions or
+image roles. This refresh preserves executable names, command-line contracts,
+image roles, and the native configuration schema; it requires no configuration
+or persisted-state migration. Build each target from its complete source
+revision, lockfiles, and pinned image inputs, and retain the previous complete
+immutable artifacts for rollback. These development changes do not amend the
+historical `0.9.2` release entry or establish a new supported release target.
 
 The Gateway API graduation target advances from `v1.6.1` to `v1.6.2`, standard
 channel, with required resources still served as `v1`. Before rolling out a
@@ -1184,8 +1186,11 @@ the CRDs as an implicit Helm rollback. The integration remains `experimental`,
 with the same Kubernetes `1.34`–`1.37` graduation range and the current Helm
 `3.22.0`/`4.3.0` targets described in [KubernetesSupport.md](KubernetesSupport.md).
 
-The NGINX `1.31.5` update applies only to the benchmark comparator image. It
-does not change an OxiBelt release-image role or require an operator migration.
+The NGINX `1.31.6` and OpenResty `1.31.1.1-3-alpine` updates apply only to
+benchmark comparator images. Firefox `156.0` and the refreshed sanitizer,
+database, object-store, and test-helper images remain validation inputs. These
+updates do not change an OxiBelt release-image role or require an operator
+migration.
 
 ### AWS-LC feature selection for mutation signing
 
@@ -1721,13 +1726,19 @@ effective leaf in both locations. Resolver-policy changes require `full_reload`;
 existing draining connections retain their bounded lifetime. Roll back by restoring
 the retained epoch-1 legacy table or the prior canonical values and reloading.
 
-Post-beta.2 development also refreshes the pinned RISC-V `cross-rs` builder
-source and image together with the rootless Docker input used for independent
-release rebuilds. The compiler version, target, linker, compiler-file hash,
-`/x-tools`-only copy boundary, executable and image roles, repositories,
-packaging layout, runtime capabilities, configuration, and persisted state are
-unchanged, so this maintenance update requires no configuration or state
-migration.
+Post-beta.2 development also refreshes the pinned RISC-V `cross-rs` builder image
+and the rootless Docker input used for independent release rebuilds. The
+current `cross-rs` image advances to digest
+`sha256:8241e7a99f52bc51345fafb286533a8c436a039f71704000f4c26d52cd9d77f9`,
+and the admitted compiler-file SHA-256 advances to
+`82d68882344b09c547b01dad4ea8c5ec989ea165b50387845a86a09dc18013d5`.
+The recorded `cross-rs` source revision
+`8c1a8aa4b661711f4b7b6ac07c2e8929ce2f7d27`, GCC `14.3.0`, the
+`riscv64-unknown-linux-musl` target, GNU binutils `2.45`, and the
+`/x-tools`-only copy boundary remain unchanged. Executable and image roles,
+repositories, packaging layout, runtime capabilities, configuration, and
+persisted state are also unchanged, so this maintenance update requires no
+configuration or state migration.
 
 A later release candidate must rebuild every official artifact and produce
 fresh exact-revision vulnerability, attestation, provenance, and independent-
