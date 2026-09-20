@@ -76,6 +76,16 @@ unidirectional NDJSON stream. Client application-stream credit is zero;
 valid control capsules are processed and datagrams are discarded with bounded
 storage. Plaintext Admin does not enable h2c.
 
+When `[admin.operations.event_compression].enabled = true`, Admin WebTransport
+clients can select the event stream coding with
+`OxiBelt-Event-Stream: ndjson-v1; coding=<br|zstd|gzip|deflate|identity>`.
+An absent header preserves raw NDJSON. A malformed value returns `400`, a
+valid coding that is disabled or unavailable returns `406`, and exhausted
+compression capacity returns `503`. `identity` selects raw NDJSON. The same
+contract applies to Admin H2 and H3 WebTransport; it does not change public
+WebTransport forwarding. See [Admin API](AdminAPI.md) for the other event
+transports and [Configuration](Configuration.md) for the full settings.
+
 Gateway's `webTransport.upstreamHttpVersion` policy creates a higher-priority
 WebTransport-only sibling route and a separate pool while keeping the ordinary
 route. Optional native pool `max_http_version` makes that transport selection

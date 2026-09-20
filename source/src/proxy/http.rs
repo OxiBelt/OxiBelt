@@ -81,6 +81,7 @@ mod retry;
 mod route_action_runtime;
 mod route_actions;
 pub(crate) mod semantics;
+pub(crate) mod sse_compression;
 pub(crate) mod static_files;
 pub(crate) mod status_headers;
 mod tcp_exchange;

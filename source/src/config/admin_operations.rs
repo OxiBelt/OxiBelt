@@ -22,6 +22,38 @@ pub enum AdminOperationsPersistence {
   Postgres,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AdminEventCompressionConfig {
+  #[serde(default)]
+  pub enabled: bool,
+  #[serde(default = "super::default_true")]
+  pub gzip: bool,
+  #[serde(default = "super::default_true")]
+  pub deflate: bool,
+  #[serde(default = "super::default_true")]
+  pub zstd: bool,
+  #[serde(default = "super::default_true")]
+  pub br: bool,
+  #[serde(default = "default_event_compression_level")]
+  pub level: u8,
+  #[serde(default)]
+  pub max_concurrent_streams: usize,
+}
+
+impl Default for AdminEventCompressionConfig {
+  fn default() -> Self {
+    Self {
+      enabled: false,
+      gzip: true,
+      deflate: true,
+      zstd: true,
+      br: true,
+      level: default_event_compression_level(),
+      max_concurrent_streams: 0,
+    }
+  }
+}
+
 impl AdminOperationsPersistence {
   pub const fn as_str(self) -> &'static str {
     match self {
@@ -64,6 +96,8 @@ pub struct AdminOperationsConfig {
   pub event_buffer: usize,
   #[serde(default = "default_result_max_bytes")]
   pub result_max_bytes: usize,
+  #[serde(default)]
+  pub event_compression: AdminEventCompressionConfig,
   #[serde(default = "super::default_true")]
   pub websocket: bool,
   #[serde(default = "super::default_true")]
@@ -90,6 +124,7 @@ impl Default for AdminOperationsConfig {
       retention_seconds: default_retention_seconds(),
       event_buffer: default_event_buffer(),
       result_max_bytes: default_result_max_bytes(),
+      event_compression: AdminEventCompressionConfig::default(),
       websocket: true,
       webtransport: true,
       webtransport_max_sessions: default_webtransport_max_sessions(),
@@ -129,6 +164,17 @@ impl Config {
     }
     if operations.result_max_bytes == 0 {
       bail!("admin.operations.result_max_bytes must be greater than 0");
+    }
+    if !(1..=9).contains(&operations.event_compression.level) {
+      bail!("admin.operations.event_compression.level must be between 1 and 9");
+    }
+    if operations.event_compression.enabled
+      && !operations.event_compression.br
+      && !operations.event_compression.zstd
+      && !operations.event_compression.gzip
+      && !operations.event_compression.deflate
+    {
+      bail!("admin.operations.event_compression requires at least one enabled coding");
     }
     if operations.webtransport_max_sessions == 0 {
       bail!("admin.operations.webtransport_max_sessions must be greater than 0");
@@ -259,6 +305,10 @@ impl Config {
     }
     Ok(())
   }
+}
+
+fn default_event_compression_level() -> u8 {
+  1
 }
 
 fn validate_environment_name(field: &str, value: &str) -> anyhow::Result<()> {

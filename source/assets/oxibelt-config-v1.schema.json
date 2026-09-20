@@ -1865,6 +1865,187 @@
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
             },
+            "event_compression": {
+              "additionalProperties": false,
+              "description": "OxiBelt native field `admin.operations.event_compression`. Production Rust validation is authoritative.",
+              "properties": {
+                "br": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `admin.operations.event_compression.br`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "deflate": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `admin.operations.event_compression.deflate`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "enabled": {
+                  "description": "OxiBelt native field `admin.operations.event_compression.enabled`. Production Rust validation is authoritative.",
+                  "type": "boolean",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "gzip": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `admin.operations.event_compression.gzip`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "level": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `admin.operations.event_compression.level`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "max_concurrent_streams": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `admin.operations.event_compression.max_concurrent_streams`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "zstd": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array"
+                    },
+                    {
+                      "type": "object"
+                    }
+                  ],
+                  "description": "OxiBelt native field `admin.operations.event_compression.zstd`. Production Rust validation is authoritative.",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                }
+              },
+              "type": "object",
+              "x-oxibelt-config-activation": "restart_required",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
             "lease_renew_seconds": {
               "description": "OxiBelt native field `admin.operations.lease_renew_seconds`. Production Rust validation is authoritative.",
               "minimum": 0,
@@ -7348,6 +7529,22 @@
           "items": {
             "additionalProperties": false,
             "properties": {
+              "allow_authenticated_sse": {
+                "description": "OxiBelt native field `compression.policies[].allow_authenticated_sse`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "allow_no_store_sse": {
+                "description": "OxiBelt native field `compression.policies[].allow_no_store_sse`. Production Rust validation is authoritative.",
+                "type": "boolean",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
               "br": {
                 "anyOf": [
                   {

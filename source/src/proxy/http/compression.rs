@@ -27,6 +27,7 @@ use crate::overload::{OverloadRuntime, WorkKind, WorkLease};
 
 use super::body::{InlinedKnownSmallResponseBody, KnownSmallResponseBody, ProxyBody, boxed_error};
 use super::integrity_digest::{self, AvailableRepresentation};
+use super::sse_compression::{self, SseCompressionCoding, SseFlushBoundary};
 
 const ENCODING_PREFERENCE: [CompressionEncoding; 4] = [
   CompressionEncoding::Br,
@@ -130,6 +131,8 @@ struct EffectiveCompressionPolicy<'a> {
   proxied: &'a [CompressionProxiedPredicate],
   statuses: &'a [u16],
   mime_types: &'a [String],
+  allow_authenticated_sse: bool,
+  allow_no_store_sse: bool,
 }
 
 impl<'a> EffectiveCompressionPolicy<'a> {
@@ -146,6 +149,9 @@ impl<'a> EffectiveCompressionPolicy<'a> {
       proxied: &config.proxied,
       statuses: &config.statuses,
       mime_types: &config.mime_types,
+      // SSE exceptions are deliberately named-policy-only opt-ins.
+      allow_authenticated_sse: false,
+      allow_no_store_sse: false,
     }
   }
 
@@ -162,6 +168,8 @@ impl<'a> EffectiveCompressionPolicy<'a> {
       proxied: &policy.proxied,
       statuses: &policy.statuses,
       mime_types: &policy.mime_types,
+      allow_authenticated_sse: policy.allow_authenticated_sse,
+      allow_no_store_sse: policy.allow_no_store_sse,
     }
   }
 
@@ -208,10 +216,13 @@ pub(crate) fn maybe_compress_response(
   if request_headers.contains_key(RANGE) {
     return response;
   }
-  if request_has_sensitive_credentials(request_headers) {
-    return response;
-  }
   let (mut parts, body) = response.into_parts();
+  let is_sse = response_is_sse(&parts.headers);
+  if request_has_sensitive_credentials(request_headers)
+    && !(is_sse && policy.allow_authenticated_sse)
+  {
+    return Response::from_parts(parts, body);
+  }
   if !response_is_eligible(&parts.headers, parts.status, &policy) {
     return Response::from_parts(parts, body);
   }
@@ -256,7 +267,10 @@ pub(crate) fn maybe_compress_response(
     integrity_digest::prehash_unencoded_body(body, unencoded_algorithm);
   parts.extensions.insert(unencoded_digest);
 
-  Response::from_parts(parts, compress_body(body, encoding, policy.level, permit))
+  Response::from_parts(
+    parts,
+    compress_body(body, encoding, policy.level, permit, is_sse),
+  )
 }
 
 /// Applies the same response policy gates to an explicitly selected dictionary.
@@ -273,6 +287,7 @@ pub(super) fn dictionary_level(
     || super::incremental::response_marked(response)
     || headers.contains_key(RANGE)
     || request_has_sensitive_credentials(headers)
+    || response_is_sse(response.headers())
   {
     return None;
   }
@@ -351,7 +366,7 @@ fn response_is_eligible(
   if headers.contains_key(CONTENT_RANGE) || headers.contains_key(TRAILER) {
     return false;
   }
-  if has_no_transform(headers) || response_has_sensitive_context(headers) {
+  if has_no_transform(headers) || headers.contains_key(SET_COOKIE) {
     return false;
   }
   if known_content_length(headers).is_some_and(|length| length < policy.min_size_bytes) {
@@ -360,6 +375,14 @@ fn response_is_eligible(
   let Some(content_type) = normalized_content_type(headers) else {
     return false;
   };
+  if has_cache_control_directive(headers, "private") {
+    return false;
+  }
+  if has_cache_control_directive(headers, "no-store")
+    && !(content_type == "text/event-stream" && policy.allow_no_store_sse)
+  {
+    return false;
+  }
   policy
     .mime_types
     .iter()
@@ -423,10 +446,8 @@ fn request_has_sensitive_credentials(headers: &HeaderMap) -> bool {
     || headers.contains_key(PROXY_AUTHORIZATION)
 }
 
-fn response_has_sensitive_context(headers: &HeaderMap) -> bool {
-  headers.contains_key(SET_COOKIE)
-    || has_cache_control_directive(headers, "private")
-    || has_cache_control_directive(headers, "no-store")
+fn response_is_sse(headers: &HeaderMap) -> bool {
+  normalized_content_type(headers).as_deref() == Some("text/event-stream")
 }
 
 fn negotiate_encoding(
@@ -587,7 +608,22 @@ fn compress_body(
   encoding: CompressionEncoding,
   level: u8,
   permit: CompressionPermit,
+  is_sse: bool,
 ) -> ProxyBody {
+  if is_sse {
+    return sse_compression::compress_body(
+      body,
+      match encoding {
+        CompressionEncoding::Br => SseCompressionCoding::Br,
+        CompressionEncoding::Zstd => SseCompressionCoding::Zstd,
+        CompressionEncoding::Gzip => SseCompressionCoding::Gzip,
+        CompressionEncoding::Deflate => SseCompressionCoding::Deflate,
+      },
+      level,
+      SseFlushBoundary::Event,
+      permit,
+    );
+  }
   let reader = BufReader::new(ProxyBodyReader::new(body, permit));
   let level = CompressionLevel::Precise(i32::from(level));
   match encoding {

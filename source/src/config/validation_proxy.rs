@@ -205,6 +205,29 @@ impl Config {
         &format!("compression policy {} mime_types", policy.name),
         &policy.mime_types,
       )?;
+      if (policy.allow_authenticated_sse || policy.allow_no_store_sse)
+        && !policy_mime_types_match_sse(&policy.mime_types)
+      {
+        bail!(
+          "compression policy {} SSE exceptions require mime_types matching text/event-stream",
+          policy.name
+        );
+      }
+      if policy.allow_authenticated_sse {
+        for required in ["cookie", "authorization", "proxy-authorization"] {
+          if !self
+            .cache
+            .bypass_request_headers
+            .iter()
+            .any(|header| header.eq_ignore_ascii_case(required))
+          {
+            bail!(
+              "compression policy {} allow_authenticated_sse requires cache.bypass_request_headers to contain {required}",
+              policy.name
+            );
+          }
+        }
+      }
     }
 
     Ok(())
@@ -485,6 +508,15 @@ impl Config {
     }
     Ok(())
   }
+}
+
+fn policy_mime_types_match_sse(mime_types: &[String]) -> bool {
+  mime_types.iter().any(|mime_type| {
+    matches!(
+      mime_type.trim().to_ascii_lowercase().as_str(),
+      "text/event-stream" | "text/*" | "*/*"
+    )
+  })
 }
 
 fn validate_real_ip_policy_cidrs(field: &str, policy: &RealIpConfig) -> anyhow::Result<()> {

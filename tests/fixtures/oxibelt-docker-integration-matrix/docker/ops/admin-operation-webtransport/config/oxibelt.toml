@@ -49,6 +49,15 @@ transport = "auto"
 webtransport = true
 webtransport_max_sessions = 8
 
+[admin.operations.event_compression]
+enabled = true
+br = true
+zstd = true
+gzip = true
+deflate = true
+level = 1
+max_concurrent_streams = 1
+
 [admin.http3]
 enabled = true
 

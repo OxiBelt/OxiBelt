@@ -27,6 +27,7 @@ const FIRST: &[u8] = b"one";
 const SECOND: &[u8] = b"two";
 const LAST: &[u8] = b"fin";
 const COMPLETION_CHANNEL_CAPACITY: usize = 16;
+const SSE_EVENT_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 enum Protocol {
@@ -461,6 +462,9 @@ async fn h1_server_exchange<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> anyhow::Result<()> {
   let head = read_until(&mut stream, b"\r\n\r\n").await?;
   let head_text = std::str::from_utf8(&head).context("Incremental H1 head was not UTF-8")?;
+  if head_text.starts_with("GET /origin/sse-compression") {
+    return h1_sse_exchange(&mut stream).await;
+  }
   let incremental = head_text
     .lines()
     .any(|line| line.eq_ignore_ascii_case("incremental: ?1"));
@@ -536,6 +540,56 @@ async fn h1_server_exchange<S: AsyncRead + AsyncWrite + Unpin>(
   expect_h1_marker(&mut stream, LAST).await?;
   expect_h1_end(&mut stream).await?;
   notify_completion(completions).await
+}
+
+/// Sends the first SSE event across several transfer chunks.  The client must
+/// not see an event until the blank line arrives, and must see that event
+/// before this deliberate upstream delay and EOF.
+async fn h1_sse_exchange<S: AsyncWrite + Unpin>(stream: &mut S) -> anyhow::Result<()> {
+  stream
+    .write_all(
+      b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n",
+    )
+    .await
+    .context("send SSE H1 response headers")?;
+  for fragment in [
+    b"data: fir".as_slice(),
+    b"st\r\n".as_slice(),
+    b"\r\n".as_slice(),
+  ] {
+    stream
+      .write_all(format!("{:x}\r\n", fragment.len()).as_bytes())
+      .await
+      .context("send SSE H1 chunk size")?;
+    stream
+      .write_all(fragment)
+      .await
+      .context("send SSE H1 first-event fragment")?;
+    stream
+      .write_all(b"\r\n")
+      .await
+      .context("send SSE H1 chunk terminator")?;
+    stream
+      .flush()
+      .await
+      .context("flush SSE H1 first-event fragment")?;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  tokio::time::sleep(SSE_EVENT_DELAY).await;
+  let second = b"data: second\r\n\r\n";
+  stream
+    .write_all(format!("{:x}\r\n", second.len()).as_bytes())
+    .await
+    .context("send SSE H1 second-event chunk size")?;
+  stream
+    .write_all(second)
+    .await
+    .context("send SSE H1 second event")?;
+  stream
+    .write_all(b"\r\n0\r\n\r\n")
+    .await
+    .context("finish SSE H1 response")?;
+  stream.flush().await.context("flush SSE H1 response")
 }
 async fn client_h1(args: &ClientArgs) -> anyhow::Result<()> {
   let config = crate::downstream_client_config(Path::new(&args.ca_cert), b"http/1.1", None)?;

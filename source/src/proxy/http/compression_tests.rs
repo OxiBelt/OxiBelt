@@ -4,7 +4,9 @@ use http::header::{
 };
 use http_body_util::Full;
 use tokio::io::AsyncReadExt;
+use tokio::time::{Duration, timeout};
 
+use crate::config::CompressionUpstreamAcceptEncodingMode;
 use crate::proxy::http::body::BoxError;
 
 use super::*;
@@ -35,6 +37,38 @@ fn gzip_request_headers() -> HeaderMap {
   let mut request_headers = HeaderMap::new();
   request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
   request_headers
+}
+
+fn eligible_sse_response() -> Response<ProxyBody> {
+  let mut response = eligible_response();
+  response.headers_mut().insert(
+    CONTENT_TYPE,
+    HeaderValue::from_static("Text/Event-Stream ; charset=utf-8"),
+  );
+  response
+}
+
+fn named_sse_policy(allow_authenticated_sse: bool, allow_no_store_sse: bool) -> CompressionConfig {
+  CompressionConfig {
+    policies: vec![CompressionPolicyConfig {
+      name: "sse".to_string(),
+      enabled: true,
+      gzip: true,
+      deflate: true,
+      zstd: true,
+      br: true,
+      min_size_bytes: 1_024,
+      statuses: vec![200],
+      mime_types: vec!["text/event-stream".to_string()],
+      level: 1,
+      vary: true,
+      proxied: vec![CompressionProxiedPredicate::Any],
+      upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode::Strip,
+      allow_authenticated_sse,
+      allow_no_store_sse,
+    }],
+    ..CompressionConfig::default()
+  }
 }
 
 #[test]
@@ -302,6 +336,114 @@ fn compression_skips_authenticated_requests() {
     &state,
   );
   assert_response_is_not_compressed(&response);
+}
+
+#[tokio::test]
+async fn sse_exceptions_are_exact_named_policy_opt_ins() {
+  let default = CompressionConfig::default();
+  let default_state = CompressionState::new(&default);
+  let mut authenticated = gzip_request_headers();
+  authenticated.insert(COOKIE, HeaderValue::from_static("session=secret"));
+  let response = maybe_compress_response(
+    eligible_sse_response(),
+    &Method::GET,
+    &authenticated,
+    None,
+    &default,
+    &default_state,
+  );
+  assert_response_is_not_compressed(&response);
+
+  let config = named_sse_policy(true, true);
+  let state = CompressionState::new(&config);
+  let mut response = eligible_sse_response();
+  response.headers_mut().insert(
+    CACHE_CONTROL,
+    HeaderValue::from_static("no-store, max-age=0"),
+  );
+  let response = maybe_compress_response(
+    response,
+    &Method::GET,
+    &authenticated,
+    Some("sse"),
+    &config,
+    &state,
+  );
+  assert_eq!(response.headers()[CONTENT_ENCODING], "gzip");
+
+  for (header, value) in [
+    (CACHE_CONTROL, "private"),
+    (SET_COOKIE, "session=present"),
+    (CACHE_CONTROL, "no-transform"),
+  ] {
+    let mut response = eligible_sse_response();
+    response
+      .headers_mut()
+      .insert(header, HeaderValue::from_static(value));
+    let response = maybe_compress_response(
+      response,
+      &Method::GET,
+      &authenticated,
+      Some("sse"),
+      &config,
+      &state,
+    );
+    assert_response_is_not_compressed(&response);
+  }
+
+  let mut response = eligible_sse_response();
+  response.headers_mut().insert(
+    CONTENT_TYPE,
+    HeaderValue::from_static("text/event-streaming"),
+  );
+  response
+    .headers_mut()
+    .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+  let mut non_sse_config = config.clone();
+  non_sse_config.policies[0].mime_types = vec!["text/*".to_string()];
+  let non_sse_state = CompressionState::new(&non_sse_config);
+  let response = maybe_compress_response(
+    response,
+    &Method::GET,
+    &gzip_request_headers(),
+    Some("sse"),
+    &non_sse_config,
+    &non_sse_state,
+  );
+  assert_response_is_not_compressed(&response);
+}
+
+#[tokio::test]
+async fn sse_gzip_flushes_blank_lines_split_across_frames_and_preserves_bytes() {
+  let (mut reader, writer) = tokio::io::duplex(64 * 1024);
+  let mut encoder = crate::proxy::http::sse_compression::SseCompressionEncoder::new(
+    writer,
+    crate::proxy::http::sse_compression::SseCompressionCoding::Gzip,
+    1,
+  );
+
+  encoder.write_all(b"data: first\r").await.unwrap();
+  encoder.write_all(b"\n\r").await.unwrap();
+  encoder.write_all(b"\n").await.unwrap();
+
+  let mut compressed = vec![0; 4_096];
+  let first_read = timeout(Duration::from_millis(250), reader.read(&mut compressed))
+    .await
+    .expect("complete SSE event should flush before EOF")
+    .expect("compressed pipe should remain readable");
+  assert!(first_read > 0);
+  compressed.truncate(first_read);
+
+  encoder.write_all(b"data: second\n\n").await.unwrap();
+  encoder.shutdown().await.unwrap();
+  drop(encoder);
+  reader.read_to_end(&mut compressed).await.unwrap();
+
+  let mut decoder =
+    async_compression::tokio::bufread::GzipDecoder::new(BufReader::new(compressed.as_slice()));
+  let mut decoded = Vec::new();
+  decoder.read_to_end(&mut decoded).await.unwrap();
+  assert_eq!(decoded, b"data: first\r\n\r\ndata: second\n\n");
 }
 
 #[tokio::test]

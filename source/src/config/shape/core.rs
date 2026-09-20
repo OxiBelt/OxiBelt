@@ -456,6 +456,8 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "zstd",
     ][..],
     "compression.policies" => &[
+      "allow_authenticated_sse",
+      "allow_no_store_sse",
       "br",
       "deflate",
       "enabled",

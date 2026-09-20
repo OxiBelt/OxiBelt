@@ -72,6 +72,8 @@ mod admin_dispatch;
 #[cfg(feature = "admin-runtime")]
 mod admin_error;
 #[cfg(feature = "admin-runtime")]
+mod admin_event_compression;
+#[cfg(feature = "admin-runtime")]
 mod admin_h2;
 #[cfg(feature = "admin-runtime")]
 mod admin_h3;

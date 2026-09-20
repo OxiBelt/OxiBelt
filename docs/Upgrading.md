@@ -32,6 +32,33 @@ Validate the protocol matrix with:
 tests/scripts/run-compression-dictionary-integration.sh
 ```
 
+## SSE-aware compression
+
+Named `[[compression.policies]]` entries now accept the default-false
+`allow_authenticated_sse` and `allow_no_store_sse` options. Both must be enabled
+to compress credentialed SSE responses marked `Cache-Control: no-store`;
+`Set-Cookie`, `Cache-Control: private`, and `Cache-Control: no-transform` remain
+excluded. Review the security implications before enabling compression for
+authenticated event data.
+
+`[admin.operations.event_compression]` adds opt-in compression for Admin H1/H2
+SSE and NDJSON, H1 WebSocket event frames, and H2/H3 WebTransport event streams.
+It defaults to `enabled = false`; existing Admin event transports and their
+availability rules are unchanged. HTTP negotiation uses `Accept-Encoding`,
+`Content-Encoding`, and `Vary: Accept-Encoding`; WebSocket uses RFC 7692
+`permessage-deflate` with `server_no_context_takeover`; WebTransport uses the
+`OxiBelt-Event-Stream` request header. HTTP and WebSocket fall back to uncompressed
+delivery when compression capacity is full. A WebTransport request for a
+compressed coding returns `503` if capacity is unavailable; malformed and
+unavailable codings return `400` and `406` respectively.
+
+Native configuration remains at schema epoch `1`, and no persisted-state
+migration is required. Before rolling back to a binary that predates these
+fields, remove `allow_authenticated_sse` and `allow_no_store_sse` from named
+compression policies and remove the `[admin.operations.event_compression]`
+table. The Admin event protocols remain available under their existing
+configuration and authorization rules.
+
 ## HTTP digest negotiation
 
 Ordinary data-plane responses now generate negotiated RFC 9530 digest fields

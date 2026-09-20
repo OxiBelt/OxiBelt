@@ -41,8 +41,10 @@ use tokio::net::{lookup_host, TcpListener, TcpStream, UdpSocket};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 mod dictionary;
+mod event_stream;
 mod incremental;
 mod managed_upload;
+mod sse;
 mod webtransport_h2;
 
 #[derive(Clone, Copy)]
@@ -412,9 +414,11 @@ struct AdminOperationWtEventsArgs {
   port: u16,
   path: String,
   headers: HeaderMap,
+  event_coding: event_stream::EventStreamCoding,
   ca_cert: String,
   expect_events: Vec<String>,
   expect_terminal_state: Option<String>,
+  expect_status: u16,
   timeout_ms: u64,
 }
 
@@ -575,6 +579,7 @@ async fn main() -> anyhow::Result<()> {
     "h3-upstream" => serve_h3_upstream(parse_h3_upstream_args(args)?).await,
     "incremental-upstream" => incremental::serve(args).await,
     "incremental-client" => incremental::client(args).await,
+    "sse-client" => sse::client(args).await,
     "dictionary-origin" => dictionary::serve_origin(args).await,
     "dictionary-client" => dictionary::client(args).await,
     "managed-upload-client" => managed_upload::client(args).await,
@@ -618,7 +623,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn usage() {
   eprintln!(
-    "usage:\n  protocol-probe dictionary-origin --protocol <h1|h2|h3> --listen <addr:port> --cert <pem> --key <pem> --dictionary <raw-file> --coding <dcb|dcz>\n  protocol-probe dictionary-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --dictionary <raw-file> --expect-body <text> [--expect-coding <dcb|dcz>|--expect-plain] [--missing-dictionary] [--expect-origin-count <n>]\n  protocol-probe incremental-upstream --protocol <h1|h2|h3> --listen <addr:port> --completion-listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe incremental-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --completion-host <host> --completion-port <port>\n  protocol-probe managed-upload-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --creation-path <path> --ca-cert <pem> --client-cert <pem> --client-key <pem> --wrong-client-cert <pem> --wrong-client-key <pem>\n  protocol-probe h2-upstream|h3-upstream|webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name> [--client-ca <pem> --expect-client-cert-sha256 <lowercase-hex>]\n  protocol-probe downstream --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-status <status>]"
+    "usage:\n  protocol-probe dictionary-origin --protocol <h1|h2|h3> --listen <addr:port> --cert <pem> --key <pem> --dictionary <raw-file> --coding <dcb|dcz>\n  protocol-probe dictionary-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --dictionary <raw-file> --expect-body <text> [--expect-coding <dcb|dcz>|--expect-plain] [--missing-dictionary] [--expect-origin-count <n>]\n  protocol-probe incremental-upstream --protocol <h1|h2|h3> --listen <addr:port> --completion-listen <addr:port> [--cert <pem> --key <pem>]\n  protocol-probe incremental-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --completion-host <host> --completion-port <port>\n  protocol-probe sse-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> --coding <br|zstd|gzip|deflate>\n  protocol-probe managed-upload-client --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --creation-path <path> --ca-cert <pem> --client-cert <pem> --client-key <pem> --wrong-client-cert <pem> --wrong-client-key <pem>\n  protocol-probe h2-upstream|h3-upstream|webtransport-upstream --listen <addr:port> --cert <pem> --key <pem> --name <name> [--client-ca <pem> --expect-client-cert-sha256 <lowercase-hex>]\n  protocol-probe downstream --protocol <h1|h2|h3> --host <host> --port <port> --server-name <sni> --authority <authority> --path <path> --ca-cert <pem> [--header <name:value>] [--expect-status <status>]"
   );
   eprintln!("websocket-client also accepts repeated --header <name:value> options");
   eprintln!(
@@ -1139,9 +1144,11 @@ fn parse_admin_operation_wt_events_args(
   let mut port = None;
   let mut path = None;
   let mut headers = HeaderMap::new();
+  let mut event_coding = None;
   let mut ca_cert = None;
   let mut expect_events = Vec::new();
   let mut expect_terminal_state = None;
+  let mut expect_status = 200;
   let mut timeout_ms = 10_000;
 
   while let Some(flag) = args.next() {
@@ -1153,9 +1160,21 @@ fn parse_admin_operation_wt_events_args(
       "--port" => port = Some(value.parse().context("invalid --port value")?),
       "--path" => path = Some(validate_origin_form_path(&value)?),
       "--header" => insert_header(&mut headers, &value)?,
+      "--event-coding" => {
+        event_coding = Some(match value.as_str() {
+          "br" => event_stream::EventStreamCoding::Br,
+          "zstd" => event_stream::EventStreamCoding::Zstd,
+          "gzip" => event_stream::EventStreamCoding::Gzip,
+          "deflate" => event_stream::EventStreamCoding::Deflate,
+          _ => bail!("--event-coding must be br, zstd, gzip, or deflate"),
+        });
+      }
       "--ca-cert" => ca_cert = Some(value),
       "--expect-event" => expect_events.push(value),
       "--expect-terminal-state" => expect_terminal_state = Some(value),
+      "--expect-status" => {
+        expect_status = value.parse().context("invalid --expect-status value")?
+      }
       "--timeout-ms" => {
         timeout_ms = value.parse().context("invalid --timeout-ms value")?;
         if timeout_ms == 0 {
@@ -1166,14 +1185,21 @@ fn parse_admin_operation_wt_events_args(
     }
   }
 
+  let event_coding = event_coding.unwrap_or_else(|| event_stream::requested_coding(headers.iter()));
+  if let Some(value) = event_coding.request_value() {
+    headers.insert("oxibelt-event-stream", HeaderValue::from_static(value));
+  }
+
   Ok(AdminOperationWtEventsArgs {
     host: host.ok_or_else(|| anyhow!("--host is required"))?,
     port: port.ok_or_else(|| anyhow!("--port is required"))?,
     path: path.ok_or_else(|| anyhow!("--path is required"))?,
     headers,
+    event_coding,
     ca_cert: ca_cert.ok_or_else(|| anyhow!("--ca-cert is required"))?,
     expect_events,
     expect_terminal_state,
+    expect_status,
     timeout_ms,
   })
 }
@@ -4264,6 +4290,9 @@ async fn run_admin_operation_wt_events_client(
   args: AdminOperationWtEventsArgs,
 ) -> anyhow::Result<()> {
   let timeout = Duration::from_millis(args.timeout_ms);
+  if args.expect_status != 200 {
+    return run_admin_operation_wt_rejection_client(&args, timeout).await;
+  }
   let certs = load_certs(Path::new(&args.ca_cert))?;
   let client = web_transport_quinn::ClientBuilder::new()
     .with_server_certificates(certs)
@@ -4273,16 +4302,32 @@ async fn run_admin_operation_wt_events_client(
   let request = web_transport_quinn::proto::ConnectRequest::new(url).with_headers(args.headers);
   let session = tokio::time::timeout(timeout, client.connect(request))
     .await
-    .context("timed out connecting to Admin WebTransport operation events")?
-    .context("failed to connect to Admin WebTransport operation events")?;
+    .context("timed out connecting to Admin WebTransport operation events")?;
+  let session = match session {
+    Ok(session) if args.expect_status == 200 => session,
+    Ok(_) => bail!("Admin WebTransport operation events unexpectedly connected with 200"),
+    Err(web_transport_quinn::ClientError::HttpError(
+      web_transport_quinn::ConnectError::ErrorStatus(status),
+    )) if status.as_u16() == args.expect_status => {
+      println!("{}", serde_json::json!({"status": status.as_u16()}));
+      return Ok(());
+    }
+    Err(error) => {
+      return Err(error).context("failed to connect to Admin WebTransport operation events")
+    }
+  };
   let mut stream = tokio::time::timeout(timeout, session.accept_uni())
     .await
     .context("timed out waiting for Admin WebTransport event stream")?
     .context("failed to accept Admin WebTransport event stream")?;
-  let bytes = read_admin_webtransport_event_stream(&mut stream, timeout)
-    .await
-    .context("failed to read Admin WebTransport event stream")?;
+  let (bytes, observed_records, observed_terminal) =
+    read_admin_webtransport_event_stream(&mut stream, timeout, args.event_coding)
+      .await
+      .context("failed to read Admin WebTransport event stream")?;
   let body = String::from_utf8(bytes).context("Admin WebTransport event stream was not UTF-8")?;
+  if observed_records == 0 {
+    bail!("Admin WebTransport event stream closed before a complete NDJSON record was observable");
+  }
 
   let mut events = Vec::new();
   let mut terminal_state = None;
@@ -4328,6 +4373,9 @@ async fn run_admin_operation_wt_events_client(
       );
       bail!("Admin WebTransport event stream terminal state did not match");
     }
+    if observed_terminal.as_deref() != Some(expected.as_str()) {
+      bail!("Admin WebTransport event stream closed before its terminal record was observable");
+    }
   }
 
   println!(
@@ -4336,38 +4384,169 @@ async fn run_admin_operation_wt_events_client(
       "events": events,
       "terminal_state": terminal_state,
       "body_bytes": body.len(),
+      "observed_records": observed_records,
     })
   );
+  Ok(())
+}
+
+async fn run_admin_operation_wt_rejection_client(
+  args: &AdminOperationWtEventsArgs,
+  timeout: Duration,
+) -> anyhow::Result<()> {
+  let client_config = downstream_client_config(Path::new(&args.ca_cert), b"h3", None)?;
+  let quic_crypto =
+    QuicClientConfig::try_from(client_config).context("failed to build Admin QUIC TLS client")?;
+  let quic_config = QuinnClientConfig::new(Arc::new(quic_crypto));
+  let remote_addr = resolve_remote_addr(&args.host, args.port).await?;
+  let endpoint = Endpoint::client(client_bind_addr(remote_addr))
+    .context("failed to create Admin QUIC endpoint")?;
+  let connection = endpoint
+    .connect_with(quic_config, remote_addr, &args.host)
+    .context("failed to start Admin HTTP/3 connection")?
+    .await
+    .context("failed to connect Admin HTTP/3 client")?;
+  let close_connection = connection.clone();
+  let h3_connection = h3_quinn::Connection::new(connection);
+  let (mut driver, mut send_request) = h3::client::builder()
+    .enable_extended_connect(true)
+    .enable_datagram(true)
+    .build::<_, _, Bytes>(h3_connection)
+    .await
+    .context("failed to establish Admin HTTP/3 client")?;
+  let driver_task = tokio::spawn(async move {
+    let _ = futures_util::future::poll_fn(|cx| driver.poll_close(cx)).await;
+  });
+
+  let uri: Uri = format!("https://{}:{}{}", args.host, args.port, args.path)
+    .parse()
+    .context("failed to build Admin WebTransport CONNECT URI")?;
+  let mut request = Request::builder()
+    .method(Method::CONNECT)
+    .uri(uri)
+    .version(Version::HTTP_3)
+    .header("sec-webtransport-http3-draft", "draft02")
+    .body(())
+    .context("failed to build Admin WebTransport CONNECT request")?;
+  request.headers_mut().extend(args.headers.clone());
+  request
+    .extensions_mut()
+    .insert(h3::ext::Protocol::WEB_TRANSPORT);
+  let mut stream = tokio::time::timeout(timeout, send_request.send_request(request))
+    .await
+    .context("timed out sending Admin WebTransport CONNECT")?
+    .context("failed to send Admin WebTransport CONNECT")?;
+  let response = tokio::time::timeout(timeout, stream.recv_response())
+    .await
+    .context("timed out receiving Admin WebTransport rejection")?
+    .context("failed to receive Admin WebTransport rejection")?;
+  let status = response.status().as_u16();
+  if status != args.expect_status {
+    bail!(
+      "Admin WebTransport rejection returned {status}, expected {}",
+      args.expect_status
+    );
+  }
+  drain_h3_response_body(&mut stream).await?;
+  close_connection.close(0u32.into(), b"Admin rejection probe complete");
+  drop(stream);
+  let _ = tokio::time::timeout(timeout, driver_task).await;
+  println!("{}", serde_json::json!({"status": status}));
   Ok(())
 }
 
 async fn read_admin_webtransport_event_stream<R>(
   stream: &mut R,
   timeout: Duration,
-) -> anyhow::Result<Vec<u8>>
+  coding: event_stream::EventStreamCoding,
+) -> anyhow::Result<(Vec<u8>, usize, Option<String>)>
 where
   R: tokio::io::AsyncRead + Unpin,
 {
-  let mut bytes = Vec::new();
+  let mut encoded_bytes = 0usize;
+  let mut decoded_bytes = Vec::new();
+  let mut decoder = event_stream::EventStreamDecoder::new(coding);
+  let mut pending = Vec::new();
+  let mut observed_records = 0;
+  let mut observed_terminal = None;
   let mut chunk = [0u8; 4096];
   loop {
     let read = tokio::time::timeout(timeout, stream.read(&mut chunk))
       .await
       .context("timed out reading Admin WebTransport event stream")?;
     match read {
-      Ok(0) => return Ok(bytes),
+      Ok(0) => {
+        let decoded = decoder.finish()?;
+        decoded_bytes.extend_from_slice(&decoded);
+        observe_admin_webtransport_records(
+          &decoded,
+          &mut pending,
+          &mut observed_records,
+          &mut observed_terminal,
+        )?;
+        if !pending.is_empty() {
+          bail!("Admin WebTransport event stream ended with an incomplete NDJSON record");
+        }
+        return Ok((decoded_bytes, observed_records, observed_terminal));
+      }
       Ok(len) => {
-        bytes.extend_from_slice(&chunk[..len]);
-        if bytes.len() > 1024 * 1024 {
+        encoded_bytes += len;
+        if encoded_bytes > 1024 * 1024 {
           bail!("Admin WebTransport event stream exceeded 1 MiB");
         }
+        let decoded = decoder.push(&chunk[..len])?;
+        decoded_bytes.extend_from_slice(&decoded);
+        if decoded_bytes.len() > 1024 * 1024 {
+          bail!("Admin WebTransport event stream decoded body exceeded 1 MiB");
+        }
+        observe_admin_webtransport_records(
+          &decoded,
+          &mut pending,
+          &mut observed_records,
+          &mut observed_terminal,
+        )?;
       }
-      Err(error) if !bytes.is_empty() && is_admin_webtransport_terminal_read_error(&error) => {
-        return Ok(bytes);
+      Err(error) if encoded_bytes != 0 && is_admin_webtransport_terminal_read_error(&error) => {
+        let decoded = decoder.finish()?;
+        decoded_bytes.extend_from_slice(&decoded);
+        observe_admin_webtransport_records(
+          &decoded,
+          &mut pending,
+          &mut observed_records,
+          &mut observed_terminal,
+        )?;
+        if !pending.is_empty() {
+          bail!("Admin WebTransport event stream ended with an incomplete NDJSON record");
+        }
+        return Ok((decoded_bytes, observed_records, observed_terminal));
       }
       Err(error) => return Err(error).context("failed to read Admin WebTransport event stream"),
     }
   }
+}
+
+fn observe_admin_webtransport_records(
+  decoded: &[u8],
+  pending: &mut Vec<u8>,
+  observed_records: &mut usize,
+  observed_terminal: &mut Option<String>,
+) -> anyhow::Result<()> {
+  pending.extend_from_slice(decoded);
+  while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+    let value: serde_json::Value = serde_json::from_slice(&pending[..end])
+      .context("Admin WebTransport event stream record was not valid NDJSON")?;
+    pending.drain(..=end);
+    *observed_records += 1;
+    if let Some(state) = value
+      .pointer("/operation/state")
+      .and_then(|value| value.as_str())
+    {
+      if matches!(state, "succeeded" | "failed" | "cancelled" | "expired") {
+        *observed_terminal = Some(state.to_owned());
+      }
+    }
+  }
+  Ok(())
 }
 
 fn is_admin_webtransport_terminal_read_error(error: &io::Error) -> bool {

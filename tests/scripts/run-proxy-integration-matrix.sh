@@ -1558,6 +1558,35 @@ incremental_probe_client() {
   docker rm -f "${client_container}" >/dev/null 2>&1 || true
 }
 
+sse_probe_client() {
+  local protocol="$1"
+  local path="$2"
+  local coding="$3"
+  local client_container
+  client_container="$(unique_docker_container_name "oxibelt-sse-${protocol}-${coding}" 1)"
+  docker create \
+    --name "${client_container}" \
+    --label "${test_label}" \
+    --network "${network_name}" \
+    "${protocol_probe_image}" \
+    sse-client \
+    --protocol "${protocol}" \
+    --host proxy \
+    --port 8443 \
+    --server-name proxy \
+    --authority example.test \
+    --path "${path}" \
+    --ca-cert /tmp/proxy-ca.pem \
+    --coding "${coding}" >/dev/null
+  docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
+  if ! docker_start_stdout_only "${client_container}"; then
+    append_container_stderr "${client_container}"
+    docker rm -f "${client_container}" >/dev/null 2>&1 || true
+    fail_with_diagnostics "SSE ${protocol}/${coding} client failed for ${path}"
+  fi
+  docker rm -f "${client_container}" >/dev/null 2>&1 || true
+}
+
 protocol_probe_client_with_client_identity() {
   local protocol="$1"
   local authority="$2"
@@ -2415,9 +2444,21 @@ protocol_probe_admin_operation_wt_events() {
   local path="$1"
   local expect_event="$2"
   local expect_terminal_state="$3"
+  local event_coding="${4:-}"
+  local expect_status="${5:-200}"
+  local event_stream_header="${6:-}"
   local output=""
   local status=0
   local client_container=""
+  local event_coding_args=()
+  local event_stream_header_args=()
+
+  if [[ -n "${event_coding}" ]]; then
+    event_coding_args=(--event-coding "${event_coding}")
+  fi
+  if [[ -n "${event_stream_header}" ]]; then
+    event_stream_header_args=(--header "OxiBelt-Event-Stream: ${event_stream_header}")
+  fi
 
   for attempt in $(seq 1 30); do
     client_container="$(unique_docker_container_name "oxibelt-admin-wt-client" "${attempt}")"
@@ -2433,7 +2474,10 @@ protocol_probe_admin_operation_wt_events() {
       --ca-cert /tmp/proxy-ca.pem \
       --header "Authorization: Bearer matrix-admin-token" \
       --expect-event "${expect_event}" \
-      --expect-terminal-state "${expect_terminal_state}" >/dev/null
+      --expect-terminal-state "${expect_terminal_state}" \
+      --expect-status "${expect_status}" \
+      "${event_stream_header_args[@]}" \
+      "${event_coding_args[@]}" >/dev/null
     docker cp "${cert_dir}/fullchain.pem" "${client_container}:/tmp/proxy-ca.pem"
 
     if output="$(docker_start_stdout_only "${client_container}")"; then

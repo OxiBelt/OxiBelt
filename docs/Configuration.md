@@ -253,6 +253,8 @@ profile_version = 1
 [[compression.policies]]
 [cache]
 [admin]
+[admin.operations]
+[admin.operations.event_compression]
 [admin.tls]
 [[admin.tls.certificates]]
 [admin.tls.client_auth]
@@ -2218,7 +2220,7 @@ max_concurrent_responses = 0
 
 `[security.headers]` is the default global response header policy. `[[security.header_policies]]` entries accept the same fields plus a unique `name`, and route `security_headers` selects `default`, `off`, or a named policy. Omitted route values preserve the current default behavior. Policy names must not be `default` or `off` because those exact lowercase values are reserved for route selection. Cached proxy responses store route-security-neutral metadata and reconcile OxiBelt-managed security headers at delivery time, so configured fields reflect the currently matched route policy while origin-provided values remain intact for fields that the current route policy leaves unset or disables.
 
-Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate`. OxiBelt only compresses downstream responses when the client permits an enabled encoding, the request does not carry `Cookie`, `Authorization`, or `Proxy-Authorization`, the response is not already encoded or secret-bearing, the status/MIME/size policy matches, and HTTP semantics such as `Cache-Control: no-transform` and range responses allow transformation. Responses with `Set-Cookie`, `Cache-Control: private`, or `Cache-Control: no-store` are not compressed. `level` is an nginx-style `1..9` compression level applied to all enabled encoders. `vary = true` adds `Vary: Accept-Encoding` for dynamic compression decisions; static precompressed file variants always vary on `Accept-Encoding`. `proxied` applies only to requests carrying `Via` and accepts `off`, `expired`, `no-cache`, `no-store`, `private`, `no-last-modified`, `no-etag`, `auth`, or `any`; `off` and `any` cannot be combined with other predicates. These proxied predicates are an additional gate and do not override OxiBelt's credential, `Set-Cookie`, private, or no-store skips. `upstream_accept_encoding = "strip"` preserves the default identity-upstream behavior; `preserve` forwards the downstream header when safe, and `configured` sends the enabled encoding list intersected with the downstream request. Response body WAF transforms and credential-bearing requests always strip upstream `Accept-Encoding`. `max_concurrent_responses = 0` uses an automatic CPU budget. Named `[[compression.policies]]` entries can override these fields and be selected with route `compression`; policy names must not be `default` or `off` because those exact lowercase values are reserved for route selection.
+Compression support is enabled by default for `br`, `zstd`, `gzip`, and `deflate`. For ordinary downstream responses, OxiBelt compresses only when the client permits an enabled encoding, the request does not carry `Cookie`, `Authorization`, or `Proxy-Authorization`, the response is not already encoded or secret-bearing, the status/MIME/size policy matches, and HTTP semantics such as `Cache-Control: no-transform` and range responses allow transformation. `Set-Cookie` and `Cache-Control: private` always prevent compression. `Cache-Control: no-store` prevents compression except for SSE explicitly allowed by a named compression policy. Named `[[compression.policies]]` entries add `allow_authenticated_sse = false` and `allow_no_store_sse = false` by default. These SSE-only controls allow that named policy to compress authenticated SSE and no-store SSE respectively; a credentialed, no-store SSE stream requires both to be enabled. They do not override `Set-Cookie`, `Cache-Control: private`, `Cache-Control: no-transform`, or other response eligibility rules, and do not affect non-SSE traffic. Compressing authenticated SSE can expose response-size side channels when attacker-controlled and sensitive event data share a stream, so enable it only after reviewing the event contents and threat model. `level` is an nginx-style `1..9` compression level applied to all enabled encoders. `vary = true` adds `Vary: Accept-Encoding` for dynamic compression decisions; static precompressed file variants always vary on `Accept-Encoding`. `proxied` applies only to requests carrying `Via` and accepts `off`, `expired`, `no-cache`, `no-store`, `private`, `no-last-modified`, `no-etag`, `auth`, or `any`; `off` and `any` cannot be combined with other predicates. These proxied predicates are an additional gate and do not override the credential, `Set-Cookie`, private-response, or SSE-specific no-store rules. `upstream_accept_encoding = "strip"` preserves the default identity-upstream behavior; `preserve` forwards the downstream header when safe, and `configured` sends the enabled encoding list intersected with the downstream request. Response body WAF transforms and credential-bearing requests always strip upstream `Accept-Encoding`. `max_concurrent_responses = 0` uses an automatic CPU budget. Named `[[compression.policies]]` entries can override these fields and be selected with route `compression`; policy names must not be `default` or `off` because those exact lowercase values are reserved for route selection.
 
 `cache.store = "tmpfs"` validates `tmpfs_dir` under `/dev/shm` when cache is enabled. `disk` and `memory_then_disk` require an explicit writable `disk_dir` and `disk_max_size_bytes`; OxiBelt does not choose a disk path implicitly. If `memory_then_disk` omits `memory_max_size_bytes`, OxiBelt uses `memory_auto_fraction` of the detected cgroup/container memory limit, falling back to system memory. `copy_file_range = "auto"` lets Linux cache/object file materialization clone bytes with `copy_file_range(2)` before falling back to userspace copying; `required` is Linux-only and fails the materialization when the kernel copy cannot be used. `cache_key` and `partition_key` support `{scheme}`, `{host}`, `{uri}`, `{path}`, `{query}`, `{query:name}`, `{header:Name}`, and `{cookie:name}`. Named cache policies are selected by `routes.cache`; `default` refers to the top-level `[cache]` policy. Policy rules select storage after the upstream response MIME type is known. When `cache_backend` maps to a shared backend, the configured local cache remains L1 and the shared backend stores collected full cacheable objects, disk-streamed objects, metadata, fill locks, and purge-visible L2 entries. Disk streaming fills commit to local L1 first, then publish the shared L2 body as bounded chunks using `cache.stream_chunk_bytes`; shared chunk hits are copied into bounded temporary files before downstream streaming instead of materializing the full object in memory.
 
@@ -2297,6 +2299,15 @@ result_max_bytes = 16777216
 websocket = true
 webtransport = true
 webtransport_max_sessions = 64
+
+[admin.operations.event_compression]
+enabled = false
+br = true
+zstd = true
+gzip = true
+deflate = true
+level = 1
+max_concurrent_streams = 0
 ```
 
 `persistence = "ephemeral"` retains the process-local store, rejects `backend`,
@@ -2341,6 +2352,32 @@ HTTP/3 clients may use WebTransport `CONNECT
 newline-delimited JSON operation events on one server-initiated unidirectional
 stream. The server replays history, emits heartbeats, and closes the stream
 after a terminal operation event.
+
+`[admin.operations.event_compression]` is off by default and applies to Admin
+H1/H2 SSE and NDJSON event responses, H1 WebSocket event frames, and H2/H3
+WebTransport event streams. The coding switches default to `true` for `br`,
+`zstd`, `gzip`, and `deflate` once `enabled = true`; `level = 1` sets the
+compression level, and `max_concurrent_streams = 0` selects an automatic limit.
+Admin HTTP event responses negotiate with `Accept-Encoding`, send
+`Content-Encoding` when compressed, and vary on `Accept-Encoding`. H1 WebSocket
+uses RFC 7692 `permessage-deflate` with `server_no_context_takeover`. If the
+compression limit is full, Admin HTTP stays available with identity encoding
+and WebSocket continues without the optional compression extension. A
+WebTransport request selecting a compressed coding receives `503` when that
+capacity is unavailable.
+
+For Admin WebTransport, the client selects the event-stream coding with
+`OxiBelt-Event-Stream: ndjson-v1; coding=<br|zstd|gzip|deflate|identity>`.
+Omitting this header preserves raw NDJSON. A malformed value returns `400`, a
+valid coding that is disabled or unavailable returns `406`, and exhausted
+compression capacity returns `503`. Selecting `identity` requests the raw
+NDJSON stream. Disabling event compression does not change Admin protocol or
+endpoint availability; the existing event transports remain available with
+uncompressed output.
+
+Admin operation events can contain authenticated data. Compression can expose
+length side channels when attacker-controlled and sensitive values share an
+event stream; review event contents and access patterns before enabling it.
 
 The `webtransport_snapshot` and `webtransport_drain` operation kinds inspect
 and control active data-plane WebTransport sessions tracked in the local

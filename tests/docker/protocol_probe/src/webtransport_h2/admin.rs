@@ -5,8 +5,10 @@ use super::*;
 pub(super) async fn events<T: AsyncRead + AsyncWrite + Unpin>(
   io: &mut T,
   deadline: tokio::time::Instant,
+  coding: super::super::event_stream::EventStreamCoding,
 ) -> anyhow::Result<()> {
   let mut decoder = CapsuleDecoder::default();
+  let mut event_decoder = super::super::event_stream::EventStreamDecoder::new(coding);
   let mut pending = Vec::new();
   let mut received = 0u64;
   let mut previous_sequence = None;
@@ -30,7 +32,8 @@ pub(super) async fn events<T: AsyncRead + AsyncWrite + Unpin>(
                 bail!("Admin sent data after its event stream FIN");
               }
               received += data.len() as u64;
-              append_bounded(&mut pending, &data, MAX_CAPSULE)?;
+              let decoded = event_decoder.push(&data)?;
+              append_bounded(&mut pending, &decoded, MAX_CAPSULE)?;
               while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
                 let value: serde_json::Value = serde_json::from_slice(&pending[..end])
                   .context("Admin event was not valid NDJSON")?;
@@ -65,6 +68,12 @@ pub(super) async fn events<T: AsyncRead + AsyncWrite + Unpin>(
                 events += 1;
               }
               finished = fin;
+              if finished {
+                let trailing = event_decoder.finish()?;
+                if !trailing.is_empty() {
+                  bail!("Admin event stream emitted decoded bytes only after its FIN");
+                }
+              }
               if !finished {
                 let mut credit = control_capsule(
                   WT_MAX_STREAM_DATA,

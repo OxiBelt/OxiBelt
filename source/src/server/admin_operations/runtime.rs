@@ -36,6 +36,7 @@ struct AdminOperationRuntimeInner {
   config: AdminOperationsConfig,
   durable: Option<DurableOperationRuntime>,
   running: Arc<Semaphore>,
+  event_compression_streams: Arc<Semaphore>,
   webtransport_sessions: Arc<Semaphore>,
   webtransport_h2_budget: Arc<Budget>,
   store: Mutex<AdminOperationStore>,
@@ -119,6 +120,7 @@ impl AdminOperationRuntime {
     Self {
       inner: Arc::new(AdminOperationRuntimeInner {
         running: Arc::new(Semaphore::new(config.max_running)),
+        event_compression_streams: Arc::new(Semaphore::new(event_compression_limit(&config))),
         webtransport_sessions: Arc::new(Semaphore::new(config.webtransport_max_sessions)),
         webtransport_h2_budget: Budget::new(),
         config,
@@ -140,6 +142,7 @@ impl AdminOperationRuntime {
     Ok(Self {
       inner: Arc::new(AdminOperationRuntimeInner {
         running: Arc::new(Semaphore::new(operations.max_running)),
+        event_compression_streams: Arc::new(Semaphore::new(event_compression_limit(&operations))),
         webtransport_sessions: Arc::new(Semaphore::new(operations.webtransport_max_sessions)),
         webtransport_h2_budget: Budget::new(),
         config: operations,
@@ -191,6 +194,23 @@ impl AdminOperationRuntime {
     self
       .inner
       .webtransport_sessions
+      .clone()
+      .try_acquire_owned()
+      .map_err(|error| match error {
+        TryAcquireError::NoPermits => AdminOperationError::QueueFull,
+        TryAcquireError::Closed => AdminOperationError::Disabled,
+      })
+  }
+
+  pub(in crate::server) fn try_acquire_event_compression(
+    &self,
+  ) -> Result<OwnedSemaphorePermit, AdminOperationError> {
+    if !self.inner.config.event_compression.enabled {
+      return Err(AdminOperationError::Disabled);
+    }
+    self
+      .inner
+      .event_compression_streams
       .clone()
       .try_acquire_owned()
       .map_err(|error| match error {
@@ -641,6 +661,17 @@ impl AdminOperationRuntime {
     record.history.push_back(event.clone());
     let _ = record.events.send(event);
   }
+}
+
+fn event_compression_limit(config: &AdminOperationsConfig) -> usize {
+  if config.event_compression.max_concurrent_streams == 0 {
+    std::thread::available_parallelism()
+      .map(|parallelism| parallelism.get().saturating_mul(2))
+      .unwrap_or(2)
+  } else {
+    config.event_compression.max_concurrent_streams
+  }
+  .max(1)
 }
 
 fn operation_is_expired(record: &AdminOperationRecord, cutoff: u64) -> bool {

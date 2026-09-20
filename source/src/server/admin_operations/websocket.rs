@@ -15,21 +15,39 @@ use crate::proxy::http::body::{BoxError, ProxyBody};
 use crate::proxy::http::response::text_response;
 
 use super::types::AdminOperationEvent;
+pub(super) use super::websocket_compression::WebSocketCompressionSettings;
+use super::websocket_compression::{
+  PerMessageDeflate, RESPONSE_EXTENSION, negotiate_permessage_deflate,
+};
 
 const WEBSOCKET_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-pub(super) fn websocket_response(
+/// Builds an Admin operation WebSocket response with optional outbound
+/// permessage-deflate. This deliberately accepts a plain settings value so
+/// configuration ownership stays at the caller boundary.
+pub(super) fn websocket_response_with_compression(
   mut request: hyper::Request<Incoming>,
   history: Vec<AdminOperationEvent>,
   mut receiver: broadcast::Receiver<AdminOperationEvent>,
+  settings: WebSocketCompressionSettings,
 ) -> Response<ProxyBody> {
   let Some(accept) = websocket_accept_key(&request) else {
     return text_response(StatusCode::BAD_REQUEST, "invalid WebSocket upgrade request");
   };
+  let compression = match negotiate_permessage_deflate(request.headers(), settings) {
+    Ok(compression) => compression,
+    Err(_) => {
+      return text_response(
+        StatusCode::BAD_REQUEST,
+        "invalid Sec-WebSocket-Extensions header",
+      );
+    }
+  };
+  let compression_negotiated = compression.is_some();
   tokio::spawn(async move {
     match hyper::upgrade::on(&mut request).await {
       Ok(upgraded) => {
-        let _ = send_events(upgraded, history, &mut receiver).await;
+        let _ = send_events(upgraded, history, &mut receiver, compression).await;
       }
       Err(error) => {
         tracing::warn!(error = %error, "admin operation WebSocket upgrade failed");
@@ -54,6 +72,12 @@ pub(super) fn websocket_response(
     ::http::HeaderName::from_static("sec-websocket-accept"),
     accept,
   );
+  if compression_negotiated {
+    response.headers_mut().insert(
+      ::http::HeaderName::from_static("sec-websocket-extensions"),
+      ::http::HeaderValue::from_static(RESPONSE_EXTENSION),
+    );
+  }
   response
 }
 
@@ -104,11 +128,12 @@ async fn send_events(
   upgraded: Upgraded,
   history: Vec<AdminOperationEvent>,
   receiver: &mut broadcast::Receiver<AdminOperationEvent>,
+  compression: Option<PerMessageDeflate>,
 ) -> anyhow::Result<()> {
   let mut io = TokioIo::new(upgraded);
   for event in history {
     let terminal = event.operation.state.is_terminal();
-    write_text_frame(&mut io, &serde_json::to_vec(&event)?).await?;
+    write_text_frame(&mut io, &serde_json::to_vec(&event)?, compression.as_ref()).await?;
     if terminal {
       let _ = write_close_frame(&mut io).await;
       return Ok(());
@@ -118,7 +143,7 @@ async fn send_events(
     match receiver.recv().await {
       Ok(event) => {
         let terminal = event.operation.state.is_terminal();
-        write_text_frame(&mut io, &serde_json::to_vec(&event)?).await?;
+        write_text_frame(&mut io, &serde_json::to_vec(&event)?, compression.as_ref()).await?;
         if terminal {
           let _ = write_close_frame(&mut io).await;
           return Ok(());
@@ -128,6 +153,7 @@ async fn send_events(
         write_text_frame(
           &mut io,
           br#"{"event":"operation.error","error":"event stream lagged"}"#,
+          compression.as_ref(),
         )
         .await?;
         let _ = write_close_frame(&mut io).await;
@@ -138,26 +164,43 @@ async fn send_events(
   }
 }
 
-async fn write_text_frame<W>(writer: &mut W, payload: &[u8]) -> std::io::Result<()>
+async fn write_text_frame<W>(
+  writer: &mut W,
+  payload: &[u8],
+  compression: Option<&PerMessageDeflate>,
+) -> std::io::Result<()>
 where
   W: tokio::io::AsyncWrite + Unpin,
 {
-  write_frame(writer, 0x1, payload).await
+  match compression {
+    Some(compression) => {
+      let payload = compression.compress(payload)?;
+      write_frame(writer, 0x1, true, &payload).await
+    }
+    None => write_frame(writer, 0x1, false, payload).await,
+  }
 }
 
 async fn write_close_frame<W>(writer: &mut W) -> std::io::Result<()>
 where
   W: tokio::io::AsyncWrite + Unpin,
 {
-  write_frame(writer, 0x8, &[]).await
+  // RFC 7692 reserves RSV1 for compressed data messages; close is a control
+  // frame and is always sent uncompressed.
+  write_frame(writer, 0x8, false, &[]).await
 }
 
-async fn write_frame<W>(writer: &mut W, opcode: u8, payload: &[u8]) -> std::io::Result<()>
+async fn write_frame<W>(
+  writer: &mut W,
+  opcode: u8,
+  rsv1: bool,
+  payload: &[u8],
+) -> std::io::Result<()>
 where
   W: tokio::io::AsyncWrite + Unpin,
 {
   let mut header = Vec::with_capacity(10);
-  header.push(0x80 | opcode);
+  header.push(0x80 | u8::from(rsv1) << 6 | opcode);
   match payload.len() {
     len if len < 126 => header.push(len as u8),
     len if len <= u16::MAX as usize => {
@@ -177,6 +220,8 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use tokio::io::AsyncReadExt;
+  use tokio::sync::Semaphore;
 
   #[test]
   fn websocket_accept_requires_full_upgrade_handshake() {
@@ -214,6 +259,41 @@ mod tests {
       ]));
       assert!(accept.is_none(), "key should be rejected: {key}");
     }
+  }
+
+  #[tokio::test]
+  async fn compressed_text_frames_set_rsv1() {
+    let permit = std::sync::Arc::new(Semaphore::new(1))
+      .try_acquire_owned()
+      .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+      "sec-websocket-extensions",
+      "permessage-deflate".parse().unwrap(),
+    );
+    let compression = negotiate_permessage_deflate(
+      &headers,
+      WebSocketCompressionSettings::new(true, 6, Some(permit)).unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    let (mut writer, mut reader) = tokio::io::duplex(4096);
+    write_text_frame(
+      &mut writer,
+      br#"{"event":"operation.progress"}"#,
+      Some(&compression),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reader.read_u8().await.unwrap(), 0xc1);
+  }
+
+  #[tokio::test]
+  async fn close_frame_never_sets_rsv1() {
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+    write_close_frame(&mut writer).await.unwrap();
+    assert_eq!(reader.read_u8().await.unwrap(), 0x88);
+    assert_eq!(reader.read_u8().await.unwrap(), 0);
   }
 
   fn websocket_request<const N: usize>(

@@ -11,8 +11,8 @@ use http_body_util::{BodyExt, Empty};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use tokio::io::AsyncWriteExt;
 
+use super::admin_event_compression::EventStreamWriter;
 use super::admin_listener::AdminConnectionContext;
 use super::{AdminOperationRuntime, admin_response};
 use crate::proxy::http::body::ProxyBody;
@@ -256,8 +256,19 @@ async fn operation_event_webtransport_response(
       history,
       receiver,
       permit,
+      event_stream,
     } = subscription;
-    if let Err(error) = write_operation_events(session.clone(), history, receiver, options).await {
+    let compression_level = operations.config().event_compression.level;
+    if let Err(error) = write_operation_events(
+      session.clone(),
+      history,
+      receiver,
+      options,
+      event_stream,
+      compression_level,
+    )
+    .await
+    {
       tracing::debug!(error = %error, "admin HTTP/2 WebTransport operation event stream ended");
       session.silent_close();
     }
@@ -272,11 +283,14 @@ async fn write_operation_events(
   history: Vec<super::admin_operations::AdminOperationEvent>,
   receiver: tokio::sync::broadcast::Receiver<super::admin_operations::AdminOperationEvent>,
   options: SessionOptions,
+  event_stream: Option<super::admin_event_compression::EventStreamCompression>,
+  compression_level: u8,
 ) -> anyhow::Result<()> {
-  let mut stream = session
+  let stream = session
     .open_uni()
     .await
     .context("failed to open Admin HTTP/2 WebTransport event stream")?;
+  let mut stream = EventStreamWriter::new(stream, event_stream, compression_level);
   let (sender, mut chunks) = tokio::sync::mpsc::channel(1);
   let producer = tokio::spawn(produce_operation_events(
     history,
@@ -289,31 +303,38 @@ async fn write_operation_events(
       producer.abort();
       return Err(error).context("failed to write Admin HTTP/2 WebTransport event");
     }
+    if chunk.record_end
+      && let Err(error) = stream.flush_record().await
+    {
+      producer.abort();
+      return Err(error).context("failed to flush Admin HTTP/2 WebTransport event");
+    }
     if chunk.terminal {
+      producer
+        .await
+        .context("Admin HTTP/2 event producer stopped")??;
       if let Err(error) = stream.shutdown().await {
-        producer.abort();
         return Err(error).context("failed to close Admin HTTP/2 WebTransport event stream");
       }
       session.drain();
       session.close(0, b"");
       tokio::time::sleep(webtransport::TERMINAL_EVENT_DRAIN_DELAY).await;
-      return producer
-        .await
-        .context("Admin HTTP/2 event producer stopped")?;
+      return Ok(());
     }
   }
+  producer
+    .await
+    .context("Admin HTTP/2 event producer stopped")??;
   if let Err(error) = stream.shutdown().await {
-    producer.abort();
     return Err(error).context("failed to close Admin HTTP/2 WebTransport event stream");
   }
   session.close(0, b"");
-  producer
-    .await
-    .context("Admin HTTP/2 event producer stopped")?
+  Ok(())
 }
 
 struct EventChunk {
   bytes: Bytes,
+  record_end: bool,
   terminal: bool,
 }
 
@@ -345,7 +366,9 @@ async fn produce_operation_events(
       },
       _ = heartbeat.tick() => {
         sender.send(EventChunk {
-          bytes: Bytes::from_static(b"{\"event\":\"heartbeat\"}\n"), terminal: false,
+          bytes: Bytes::from_static(b"{\"event\":\"heartbeat\"}\n"),
+          record_end: true,
+          terminal: false,
         }).await.map_err(|_| anyhow::anyhow!("Admin HTTP/2 event consumer closed"))?;
       }
     }
@@ -383,14 +406,18 @@ struct EventChunkWriter {
 }
 
 impl EventChunkWriter {
-  fn flush_chunk(&mut self, terminal: bool) -> std::io::Result<()> {
+  fn flush_chunk(&mut self, record_end: bool, terminal: bool) -> std::io::Result<()> {
     if self.buffer.is_empty() {
       return Ok(());
     }
     let bytes = Bytes::from(std::mem::take(&mut self.buffer));
     self
       .sender
-      .blocking_send(EventChunk { bytes, terminal })
+      .blocking_send(EventChunk {
+        bytes,
+        record_end,
+        terminal,
+      })
       .map_err(|_| {
         std::io::Error::new(
           std::io::ErrorKind::BrokenPipe,
@@ -400,12 +427,13 @@ impl EventChunkWriter {
   }
 
   fn finish(&mut self) -> std::io::Result<()> {
-    if self.buffer.is_empty() && self.terminal {
+    if self.buffer.is_empty() {
       return self
         .sender
         .blocking_send(EventChunk {
           bytes: Bytes::new(),
-          terminal: true,
+          record_end: true,
+          terminal: self.terminal,
         })
         .map_err(|_| {
           std::io::Error::new(
@@ -414,7 +442,7 @@ impl EventChunkWriter {
           )
         });
     }
-    self.flush_chunk(self.terminal)
+    self.flush_chunk(true, self.terminal)
   }
 }
 
@@ -427,7 +455,7 @@ impl std::io::Write for EventChunkWriter {
       self.buffer.extend_from_slice(&bytes[..take]);
       bytes = &bytes[take..];
       if self.buffer.len() == self.chunk_bytes {
-        self.flush_chunk(false)?;
+        self.flush_chunk(false, false)?;
       }
     }
     Ok(written)
@@ -524,6 +552,30 @@ fn supplied_origin_is_same_origin<B>(request: &Request<B>) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn exact_chunk_boundary_still_marks_the_record_terminal() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+    let task = tokio::task::spawn_blocking(move || {
+      let mut writer = EventChunkWriter {
+        sender,
+        terminal: true,
+        buffer: Vec::with_capacity(4),
+        chunk_bytes: 4,
+      };
+      std::io::Write::write_all(&mut writer, b"1234")?;
+      writer.finish()
+    });
+    let data = receiver.recv().await.unwrap();
+    assert_eq!(data.bytes, Bytes::from_static(b"1234"));
+    assert!(!data.record_end);
+    assert!(!data.terminal);
+    let marker = receiver.recv().await.unwrap();
+    assert!(marker.bytes.is_empty());
+    assert!(marker.record_end);
+    assert!(marker.terminal);
+    task.await.unwrap().unwrap();
+  }
 
   #[test]
   fn successful_connect_response_declares_capsule_protocol_without_body_framing() {

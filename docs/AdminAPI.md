@@ -350,6 +350,30 @@ events, replays stored history, emits heartbeat records, and closes the stream
 after a terminal operation event. Datagrams and client-created WebTransport
 streams are ignored in v1.
 
+Admin operation-event compression is opt-in through
+`[admin.operations.event_compression]` and is disabled by default. This setting
+does not change the existing HTTP, WebSocket, or WebTransport availability
+rules. H1/H2 SSE and NDJSON responses negotiate `Accept-Encoding`, return
+`Content-Encoding` when compressed, and include `Vary: Accept-Encoding`. H1
+WebSocket uses RFC 7692 `permessage-deflate` with
+`server_no_context_takeover`. If compression capacity is exhausted, HTTP event
+streams use identity encoding and WebSocket omits the optional compression
+extension while continuing the event stream.
+
+For Admin WebTransport, clients select a coding with
+`OxiBelt-Event-Stream: ndjson-v1; coding=<br|zstd|gzip|deflate|identity>`.
+Omitting the header preserves raw NDJSON. A malformed value returns `400`, a
+valid coding that is disabled or unavailable returns `406`, and unavailable
+compression capacity returns `503`. `identity` explicitly selects raw NDJSON.
+The compression capacity limit does not disable or reduce the existing event
+session limits.
+
+Authenticated operation events may contain sensitive data. Compressing a stream
+that combines attacker-controlled text with secrets can expose length side
+channels; review event contents and access patterns before enabling compression.
+See [Configuration](Configuration.md) for the compression policy opt-ins and
+Admin event-compression settings.
+
 The creator may read their own operation over any event transport. Other
 callers need `admin:ReadOperation` on `operation/<kind>/<id>` or
 `operation/*`.

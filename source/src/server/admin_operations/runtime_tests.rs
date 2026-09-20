@@ -21,6 +21,29 @@ fn config() -> AdminOperationsConfig {
 }
 
 #[test]
+fn event_compression_capacity_is_bounded_and_default_off() {
+  let disabled = AdminOperationRuntime::new(config());
+  assert!(matches!(
+    disabled.try_acquire_event_compression(),
+    Err(AdminOperationError::Disabled)
+  ));
+
+  let mut enabled_config = config();
+  enabled_config.event_compression.enabled = true;
+  enabled_config.event_compression.max_concurrent_streams = 1;
+  let enabled = AdminOperationRuntime::new(enabled_config);
+  let permit = enabled
+    .try_acquire_event_compression()
+    .expect("first compression stream should acquire capacity");
+  assert!(matches!(
+    enabled.try_acquire_event_compression(),
+    Err(AdminOperationError::QueueFull)
+  ));
+  drop(permit);
+  assert!(enabled.try_acquire_event_compression().is_ok());
+}
+
+#[test]
 fn unprepared_auto_runtime_reports_visible_ephemeral_fallback() {
   let runtime = AdminOperationRuntime::new(config());
   assert_eq!(

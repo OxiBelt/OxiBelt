@@ -8,7 +8,6 @@ use ::http::{Request, Response, StatusCode};
 use anyhow::Context;
 use bytes::Bytes;
 use h3_webtransport::server::WebTransportSession;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -24,6 +23,7 @@ use crate::runtime_health::RuntimeTaskKind;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminAuthorization, admin_authentication, admin_request_context};
+use super::admin_event_compression::EventStreamWriter;
 use super::admin_operations::{AdminOperationRuntime, can_access_operation, encode_ndjson_event};
 use super::{admin_error, connection_errors};
 
@@ -340,16 +340,21 @@ async fn handle_admin_http3_connection(
         .await?;
         continue;
       };
-      return handle_operation_event_webtransport(
+      h3_connection = match handle_operation_event_webtransport(
         request,
         stream,
         h3_connection,
         listener_bind,
         peer_addr,
-        state,
-        admin_operations,
+        &state,
+        &admin_operations,
       )
-      .await;
+      .await?
+      {
+        OperationWebTransportOutcome::Rejected(connection) => *connection,
+        OperationWebTransportOutcome::SessionComplete => return Ok(()),
+      };
+      continue;
     }
 
     let response = admin_http3_response(
@@ -477,27 +482,34 @@ async fn admin_http3_response_inner(
   text_response(StatusCode::BAD_REQUEST, "WebTransport CONNECT required")
 }
 
+enum OperationWebTransportOutcome {
+  Rejected(Box<AdminH3Connection>),
+  SessionComplete,
+}
+
 async fn handle_operation_event_webtransport(
   mut request: Request<()>,
   stream: AdminH3RequestStream,
   h3_connection: AdminH3Connection,
   listener_bind: SocketAddr,
   peer_addr: SocketAddr,
-  state: AppHandle,
-  operations: AdminOperationRuntime,
-) -> anyhow::Result<()> {
+  state: &AppHandle,
+  operations: &AdminOperationRuntime,
+) -> anyhow::Result<OperationWebTransportOutcome> {
   let (audit, reservation) =
-    match super::admin_audit_gate::reserve_or_reject(&mut request, &state, peer_addr, "https") {
+    match super::admin_audit_gate::reserve_or_reject(&mut request, state, peer_addr, "https") {
       Ok(value) => value,
       Err(response) => {
         respond_to_h3_request(stream, *response).await?;
-        return Ok(());
+        return Ok(OperationWebTransportOutcome::Rejected(Box::new(
+          h3_connection,
+        )));
       }
     };
   let subscription = match webtransport::prepare_operation_event_subscription(
     &request,
-    &state,
-    &operations,
+    state,
+    operations,
     peer_addr,
     admin_http3_listener_current(&state.snapshot(), listener_bind),
   )
@@ -507,7 +519,9 @@ async fn handle_operation_event_webtransport(
     Err(response) => {
       let response = finalize_admin_h3_response(response, audit, reservation).await;
       respond_to_h3_request(stream, response).await?;
-      return Ok(());
+      return Ok(OperationWebTransportOutcome::Rejected(Box::new(
+        h3_connection,
+      )));
     }
   };
 
@@ -527,28 +541,37 @@ async fn handle_operation_event_webtransport(
   reservation
     .commit(&audit, audit.finish(StatusCode::OK))
     .await?;
-  write_operation_events(session, subscription).await
+  let compression_level = operations.config().event_compression.level;
+  write_operation_events(session, subscription, compression_level).await?;
+  Ok(OperationWebTransportOutcome::SessionComplete)
 }
 
 async fn write_operation_events(
   session: AdminWebTransportSession,
   subscription: webtransport::OperationEventSubscription,
+  compression_level: u8,
 ) -> anyhow::Result<()> {
   let webtransport::OperationEventSubscription {
     history,
     mut receiver,
     permit: _permit,
+    event_stream,
   } = subscription;
-  let mut stream = session
+  let stream = session
     .open_uni(session.session_id())
     .await
     .context("failed to open admin WebTransport event stream")?;
+  let mut stream = EventStreamWriter::new(stream, event_stream, compression_level);
   for event in history {
     let terminal = event.operation.state.is_terminal();
     stream
       .write_all(&encode_ndjson_event(&event))
       .await
       .context("failed to write admin WebTransport operation history")?;
+    stream
+      .flush_record()
+      .await
+      .context("failed to flush admin WebTransport operation history")?;
     if terminal {
       stream
         .shutdown()
@@ -571,6 +594,10 @@ async fn write_operation_events(
               .write_all(&encode_ndjson_event(&event))
               .await
               .context("failed to write admin WebTransport operation event")?;
+            stream
+              .flush_record()
+              .await
+              .context("failed to flush admin WebTransport operation event")?;
             if terminal {
               stream
                 .shutdown()
@@ -602,6 +629,10 @@ async fn write_operation_events(
           .write_all(b"\n")
           .await
           .context("failed to write admin WebTransport heartbeat newline")?;
+        stream
+          .flush_record()
+          .await
+          .context("failed to flush admin WebTransport heartbeat")?;
       }
     }
   }

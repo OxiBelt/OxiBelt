@@ -49,6 +49,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
     "route-compression-off-overrides-default",
   ),
   ("proxy-compression", "proxied-vary-and-upstream-encoding"),
+  ("proxy-compression", "sse-streaming-boundaries"),
   ("config-valid", "https-grease-trusted-ca"),
   ("http-semantics", "early-hints-pass"),
   ("http-semantics", "response-digest-wire-matrix"),

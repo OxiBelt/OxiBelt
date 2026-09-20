@@ -422,6 +422,26 @@
         ],
         "operationId": "watchAdminOperationEvents",
         "summary": "Stream operation events as SSE or NDJSON.",
+        "x-oxibelt-event-compression": {
+          "configuration": {
+            "table": "[admin.operations.event_compression]",
+            "enabled": false,
+            "br": true,
+            "zstd": true,
+            "gzip": true,
+            "deflate": true,
+            "level": 1,
+            "max_concurrent_streams": 0
+          },
+          "protocols": [
+            "HTTP/1.1",
+            "HTTP/2"
+          ],
+          "request_header": "Accept-Encoding",
+          "response_header": "Content-Encoding",
+          "vary": "Accept-Encoding",
+          "capacity_fallback": "Continue with identity encoding."
+        },
         "parameters": [
           {
             "$ref": "#/components/parameters/AdminOperationId"
@@ -474,6 +494,22 @@
         ],
         "operationId": "watchAdminOperationEventsWebSocket",
         "summary": "Subscribe to operation events with WebSocket JSON text frames.",
+        "x-oxibelt-event-compression": {
+          "configuration": {
+            "table": "[admin.operations.event_compression]",
+            "enabled": false,
+            "br": true,
+            "zstd": true,
+            "gzip": true,
+            "deflate": true,
+            "level": 1,
+            "max_concurrent_streams": 0
+          },
+          "transport": "HTTP/1.1 WebSocket",
+          "extension": "RFC 7692 permessage-deflate",
+          "server_no_context_takeover": true,
+          "capacity_fallback": "Continue the event stream without the compression extension."
+        },
         "parameters": [
           {
             "$ref": "#/components/parameters/AdminOperationId"
@@ -521,6 +557,27 @@
           "history_replay": true,
           "heartbeat": true,
           "terminal_event_closes_stream": true
+        },
+        "event_compression": {
+          "configuration": {
+            "table": "[admin.operations.event_compression]",
+            "enabled": false,
+            "br": true,
+            "zstd": true,
+            "gzip": true,
+            "deflate": true,
+            "level": 1,
+            "max_concurrent_streams": 0
+          },
+          "request_header": "OxiBelt-Event-Stream",
+          "request_value": "ndjson-v1; coding=<br|zstd|gzip|deflate|identity>",
+          "absent_header": "Raw NDJSON",
+          "identity_behavior": "Raw NDJSON",
+          "errors": {
+            "400": "Malformed OxiBelt-Event-Stream value.",
+            "406": "The valid requested coding is disabled or unavailable.",
+            "503": "The requested compressed stream cannot be admitted because compression capacity is exhausted."
+          }
         },
         "datagrams": false,
         "client_streams": false

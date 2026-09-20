@@ -800,6 +800,15 @@ websocket = true
 webtransport = true
 webtransport_max_sessions = 64
 
+[admin.operations.event_compression]
+enabled = false
+br = true
+zstd = true
+gzip = true
+deflate = true
+level = 1
+max_concurrent_streams = 0
+
 [admin.http3]
 enabled = false
 # bind = "127.0.0.1:9092" # UDP; defaults to admin.bind when omitted

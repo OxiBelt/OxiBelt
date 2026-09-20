@@ -47,6 +47,18 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
       None,
     ),
     docker_case(
+      "proxy-compression",
+      "sse-streaming-boundaries",
+      "SSE compression flushes complete events before upstream EOF over HTTP/1.1, HTTP/2, and HTTP/3",
+      ExpectStart::Success,
+      Needs {
+        protocol_probe: true,
+        incremental_upstreams: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
       "http-semantics",
       "early-hints-pass",
       "HTTP semantics accepts early hints pass mode and forwards final responses",

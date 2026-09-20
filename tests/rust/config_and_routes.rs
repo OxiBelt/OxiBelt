@@ -15475,10 +15475,70 @@ mime_types = ["application/json", "application/*+json"]
   let policy = &config.compression.policies[0];
   assert_eq!(policy.level, 4);
   assert!(!policy.vary);
+  assert!(!policy.allow_authenticated_sse);
+  assert!(!policy.allow_no_store_sse);
   assert_eq!(policy.proxied, vec![CompressionProxiedPredicate::Any]);
   assert_eq!(
     policy.upstream_accept_encoding,
     CompressionUpstreamAcceptEncodingMode::Configured
+  );
+}
+
+#[test]
+fn named_sse_compression_exceptions_require_sse_and_cache_safety() {
+  let temp_dir = common::TempDir::new("compression-sse-exceptions");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "compression-sse-exceptions");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+
+  let valid = base.clone()
+    + r#"
+
+[[compression.policies]]
+name = "events"
+mime_types = ["text/event-stream"]
+allow_authenticated_sse = true
+allow_no_store_sse = true
+"#;
+  let config: Config = toml::from_str(&valid).expect("config should parse");
+  config.validate().expect("SSE policy should validate");
+
+  let missing_sse_mime = base.clone()
+    + r#"
+
+[[compression.policies]]
+name = "events"
+mime_types = ["application/json"]
+allow_no_store_sse = true
+"#;
+  let config: Config = toml::from_str(&missing_sse_mime).expect("config should parse");
+  let error = config.validate().expect_err("SSE mismatch should fail");
+  assert!(
+    error
+      .to_string()
+      .contains("SSE exceptions require mime_types matching text/event-stream"),
+    "unexpected error: {error}"
+  );
+
+  let missing_cache_bypass = base.replace(
+    "upstream = \"app\"",
+    "upstream = \"app\"\n\n[cache]\nbypass_request_headers = [\"Authorization\", \"Cookie\"]",
+  ) + r#"
+
+[[compression.policies]]
+name = "events"
+mime_types = ["text/event-stream"]
+allow_authenticated_sse = true
+"#;
+  let config: Config = toml::from_str(&missing_cache_bypass).expect("config should parse");
+  let error = config
+    .validate()
+    .expect_err("missing proxy authorization bypass should fail");
+  assert!(
+    error.to_string().contains(
+      "allow_authenticated_sse requires cache.bypass_request_headers to contain proxy-authorization"
+    ),
+    "unexpected error: {error}"
   );
 }
 

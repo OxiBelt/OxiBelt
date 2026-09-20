@@ -47,17 +47,21 @@ wait_operation_state() {
 }
 
 run_case_checks() {
-  local drain_body drain drain_id events events_file events_pid rejected terminal
+  local coding drain_body drain drain_id events events_file events_pid rejected terminal
 
   drain_body='{"kind":"webtransport_drain","request":{"scope":{"route":"webtransport-route"},"grace_ms":8000,"close_code":0,"reason":"matrix drain"}}'
   drain="$(client_request_with_headers_on_port 9092 "proxy" "/admin/v1/operations" 202 "POST" "${drain_body}" "Authorization: Bearer matrix-admin-token" "Content-Type: application/json")"
   drain_id="$(jq -r '.body | fromjson | .id' <<<"${drain}")"
   wait_operation_phase "${drain_id}" "grace"
 
+  protocol_probe_admin_operation_wt_events "/admin/v1/operations/${drain_id}/events/wt" "operation.result" "succeeded" "" 400 "ndjson-v1; coding=unsupported" >/dev/null
+
   events_file="${work_dir}/admin-operation-wt-events.json"
-  protocol_probe_admin_operation_wt_events "/admin/v1/operations/${drain_id}/events/wt" "operation.result" "succeeded" >"${events_file}" &
+  protocol_probe_admin_operation_wt_events "/admin/v1/operations/${drain_id}/events/wt" "operation.result" "succeeded" gzip >"${events_file}" &
   events_pid="$!"
   sleep 1
+
+  protocol_probe_admin_operation_wt_events "/admin/v1/operations/${drain_id}/events/wt" "operation.result" "succeeded" br 503 >/dev/null
 
   rejected="$(protocol_probe_webtransport_multiplex "example.test" "/wt/session" 1 "503")"
   jq -e '.statuses == [503]' <<<"${rejected}" >/dev/null
@@ -68,6 +72,11 @@ run_case_checks() {
   fi
   events="$(cat "${events_file}")"
   jq -e '.events | index("operation.result") != null' <<<"${events}" >/dev/null
+  jq -e '.observed_records > 0' <<<"${events}" >/dev/null
+
+  for coding in br zstd deflate; do
+    protocol_probe_admin_operation_wt_events "/admin/v1/operations/${drain_id}/events/wt" "operation.result" "succeeded" "${coding}" >/dev/null
+  done
 
   terminal="$(wait_operation_state "${drain_id}" "succeeded")"
   jq -e '.result.grace_ms == 8000 and (.result.close_sent | type == "number")' <<<"${terminal}" >/dev/null

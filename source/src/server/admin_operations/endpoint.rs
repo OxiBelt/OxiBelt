@@ -17,7 +17,7 @@ use super::id::parse_operation_id;
 use super::runtime::{AdminOperationError, AdminOperationRuntime};
 use super::stream::{AdminOperationEventFormat, event_stream_response};
 use super::types::{AdminOperationKind, AdminOperationSnapshot};
-use super::websocket::websocket_response;
+use super::websocket::{WebSocketCompressionSettings, websocket_response_with_compression};
 use crate::server::admin::json_response;
 use crate::server::admin_auth::AdminAuthorization;
 use crate::server::admin_control::AdminControlHandle;
@@ -201,10 +201,26 @@ async fn watch_operation(
     Err(error) => return super::enqueue_error_response(error),
   };
   if websocket {
-    return websocket_response(request, history, receiver);
+    let compression = &operations.config().event_compression;
+    let compression_enabled = compression.enabled && compression.deflate;
+    let settings = WebSocketCompressionSettings::new(
+      compression_enabled,
+      compression.level,
+      compression_enabled
+        .then(|| operations.try_acquire_event_compression().ok())
+        .flatten(),
+    )
+    .unwrap_or(WebSocketCompressionSettings::DISABLED);
+    return websocket_response_with_compression(request, history, receiver, settings);
   }
+  let request_headers = request.headers().clone();
   let format = event_format(request.uri().query());
-  event_stream_response(history, receiver, format)
+  let response = event_stream_response(history, receiver, format);
+  crate::server::admin_event_compression::compress_http_event_response(
+    response,
+    &request_headers,
+    operations,
+  )
 }
 
 async fn create_operation(

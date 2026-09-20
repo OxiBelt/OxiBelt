@@ -176,7 +176,16 @@ pub(crate) async fn client(args: impl Iterator<Item = String>) -> anyhow::Result
   }
   let reset_echo_bytes = match args.scenario.as_str() {
     "echo" => run_client_echo(&mut io, deadline, peer_credit, args.reset_prefix_required).await?,
-    "admin-events" => return admin::events(&mut io, deadline).await,
+    "admin-events" => {
+      return admin::events(
+        &mut io,
+        deadline,
+        super::event_stream::requested_coding(
+          args.headers.iter().map(|(name, value)| (name, value)),
+        ),
+      )
+      .await;
+    }
     scenario => return scenarios::run(scenario, &mut io, deadline, peer_credit).await,
   };
   println!(
@@ -219,6 +228,22 @@ fn parse_client_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<C
         parsed.expect_status = value.parse().context("invalid --expect-status")?
       }
       "--header" => parsed.headers.push(parse_header(&value)?),
+      "--event-coding" => {
+        let coding = match value.as_str() {
+          "br" => super::event_stream::EventStreamCoding::Br,
+          "zstd" => super::event_stream::EventStreamCoding::Zstd,
+          "gzip" => super::event_stream::EventStreamCoding::Gzip,
+          "deflate" => super::event_stream::EventStreamCoding::Deflate,
+          _ => bail!("--event-coding must be br, zstd, gzip, or deflate"),
+        };
+        let value = coding
+          .request_value()
+          .expect("compressed coding has a header value");
+        parsed.headers.push((
+          HeaderName::from_static("oxibelt-event-stream"),
+          HeaderValue::from_static(value),
+        ));
+      }
       "--tls-version" => parsed.tls_version = Some(super::DownstreamTlsVersion::parse(&value)?),
       "--reset-prefix" => parsed.reset_prefix_required = parse_reset_prefix(&value)?,
       _ => bail!("unknown webtransport-h2-client flag: {flag}"),

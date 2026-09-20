@@ -14,6 +14,9 @@ use crate::proxy::http::response::text_response;
 use crate::state::{AppHandle, AppSnapshot};
 
 use super::admin_auth::{AdminAuthorization, admin_authentication, admin_request_context};
+use super::admin_event_compression::{
+  EventCoding, EventStreamCompression, WebTransportEventStreamError, webtransport_event_coding,
+};
 use super::admin_operations::{
   AdminOperationError, AdminOperationEvent, AdminOperationRuntime, can_access_operation,
   parse_operation_id,
@@ -25,6 +28,7 @@ pub(super) struct OperationEventSubscription {
   pub(super) history: Vec<AdminOperationEvent>,
   pub(super) receiver: broadcast::Receiver<AdminOperationEvent>,
   pub(super) permit: OwnedSemaphorePermit,
+  pub(super) event_stream: Option<EventStreamCompression>,
 }
 
 pub(super) async fn require_break_glass_activation(
@@ -169,6 +173,40 @@ pub(super) async fn prepare_operation_event_subscription<B>(
   if !can_access_operation(&authorization, &operation, "admin:ReadOperation") {
     return Err(text_response(StatusCode::FORBIDDEN, "forbidden"));
   }
+  let event_stream =
+    match webtransport_event_coding(request.headers(), &operations.config().event_compression) {
+      Ok(None) => None,
+      Ok(Some(coding)) => {
+        let permit = if coding == EventCoding::Identity {
+          None
+        } else {
+          Some(
+            operations
+              .try_acquire_event_compression()
+              .map_err(|error| {
+                let message = match error {
+                  AdminOperationError::QueueFull => "event compression capacity exhausted",
+                  _ => "event compression is unavailable",
+                };
+                text_response(StatusCode::SERVICE_UNAVAILABLE, message)
+              })?,
+          )
+        };
+        Some(EventStreamCompression { coding, permit })
+      }
+      Err(WebTransportEventStreamError::Invalid) => {
+        return Err(text_response(
+          StatusCode::BAD_REQUEST,
+          "invalid OxiBelt-Event-Stream header",
+        ));
+      }
+      Err(WebTransportEventStreamError::Unavailable) => {
+        return Err(text_response(
+          StatusCode::NOT_ACCEPTABLE,
+          "requested event stream coding is unavailable",
+        ));
+      }
+    };
   let permit = operations
     .try_acquire_webtransport_session()
     .map_err(error_response)?;
@@ -176,6 +214,7 @@ pub(super) async fn prepare_operation_event_subscription<B>(
     history,
     receiver,
     permit,
+    event_stream,
   })
 }
 

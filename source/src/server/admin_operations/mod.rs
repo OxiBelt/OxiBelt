@@ -15,6 +15,7 @@ mod store;
 mod stream;
 mod types;
 mod websocket;
+mod websocket_compression;
 mod webtransport;
 
 pub(super) use artifact::{OperationArtifactBinding, OperationArtifactCipher};

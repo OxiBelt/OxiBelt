@@ -129,6 +129,14 @@ private_key = "server.key"
 default = true
 [admin.operations]
 webtransport = true
+[admin.operations.event_compression]
+enabled = true
+br = true
+zstd = true
+gzip = true
+deflate = true
+level = 1
+max_concurrent_streams = 4
 [limits]
 max_webtransport_sessions = 16
 max_webtransport_sessions_per_connection = 4
@@ -368,6 +376,17 @@ for auth in missing valid; do
     --authority proxy:9092 --path "/admin/v1/operations/${operation_id}/events/wt" \
     --ca-cert /tls/ca.pem --scenario admin-events --expect-status "${expected}" "${auth_args[@]}"
 done
+for coding in br zstd gzip deflate; do
+  probe webtransport-h2-client --host proxy --port 9092 --server-name proxy \
+    --authority proxy:9092 --path "/admin/v1/operations/${operation_id}/events/wt" \
+    --ca-cert /tls/ca.pem --scenario admin-events --expect-status 200 \
+    --header 'authorization:Bearer webtransport-integration-only' --event-coding "${coding}"
+done
+probe webtransport-h2-client --host proxy --port 9092 --server-name proxy \
+  --authority proxy:9092 --path "/admin/v1/operations/${operation_id}/events/wt" \
+  --ca-cert /tls/ca.pem --scenario admin-events --expect-status 400 \
+  --header 'authorization:Bearer webtransport-integration-only' \
+  --header 'oxibelt-event-stream:ndjson-v1; coding=unsupported'
 probe webtransport-h2-client --host proxy --port 9092 --server-name proxy \
   --authority proxy:9092 --path "/admin/v1/operations/${operation_id}/events/wt" \
   --ca-cert /tls/ca.pem --scenario admin-events --expect-status 403 \

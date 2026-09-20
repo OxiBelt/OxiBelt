@@ -59,6 +59,10 @@ pub struct CompressionPolicyConfig {
   pub proxied: Vec<CompressionProxiedPredicate>,
   #[serde(default)]
   pub upstream_accept_encoding: CompressionUpstreamAcceptEncodingMode,
+  #[serde(default)]
+  pub allow_authenticated_sse: bool,
+  #[serde(default)]
+  pub allow_no_store_sse: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq)]
