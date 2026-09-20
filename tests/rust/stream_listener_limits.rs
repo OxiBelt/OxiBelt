@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use oxibelt::config::{Config, RuntimeOverrides};
-use oxibelt::server;
+use oxibelt::server::{self, BoundListenerKind, BoundListenerTransport, ShutdownOutcome};
 use oxibelt::state::{AppHandle, AppSnapshot};
+use oxibelt::{OxiBelt, ProcessGlobalHooks, ProcessPolicy, RuntimePolicy};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Notify;
@@ -93,11 +94,6 @@ idle_timeout_ms = 5000
 async fn udp_stream_listener_proxies_datagrams_to_default_target() {
   let temp_dir = common::TempDir::new("udp-stream-echo");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "udp-stream-echo");
-  let https_port = unused_loopback_port().await;
-  let stream_port = unused_udp_loopback_port().await;
-  let stream_addr: SocketAddr = format!("127.0.0.1:{stream_port}")
-    .parse()
-    .expect("UDP stream listener address should parse");
 
   let upstream_socket = UdpSocket::bind("127.0.0.1:0")
     .await
@@ -109,7 +105,7 @@ async fn udp_stream_listener_proxies_datagrams_to_default_target() {
 
   let mut raw = common::minimal_config_toml(&cert_path, &key_path).replace(
     "https_bind = \"127.0.0.1:8443\"",
-    &format!("https_bind = \"127.0.0.1:{https_port}\""),
+    "https_bind = \"127.0.0.1:0\"",
   );
   raw.push_str(&format!(
     r#"
@@ -117,7 +113,7 @@ async fn udp_stream_listener_proxies_datagrams_to_default_target() {
 [[stream_listeners]]
 name = "udp"
 network = "udp"
-bind = "{stream_addr}"
+bind = "127.0.0.1:0"
 target = "{upstream_addr}"
 connect_timeout_ms = 1000
 idle_timeout_ms = 1000
@@ -126,20 +122,63 @@ max_udp_flows = 32
   ));
 
   let config = parse_config(&raw);
-  let snapshot = AppSnapshot::new(config)
+  let mut server = OxiBelt::builder(config)
+    .runtime_policy(RuntimePolicy::CurrentRuntime)
+    .process_policy(ProcessPolicy::Embedded(ProcessGlobalHooks::CallerManaged))
+    .build_embedded()
+    .expect("embedded UDP test server policy should build")
+    .start()
     .await
-    .expect("application snapshot should initialize");
-  let state = AppHandle::new(snapshot);
-  let server_task = tokio::spawn(server::serve(state, None, RuntimeOverrides::default()));
+    .expect("embedded UDP test server should bind ephemeral listeners");
+  let readiness = server
+    .wait_ready(Instant::now() + Duration::from_secs(2))
+    .await
+    .expect("embedded UDP test server should become ready");
+  assert!(
+    readiness.is_ready(),
+    "embedded UDP test server should be ready"
+  );
+  let stream_addr = {
+    let mut udp_stream_listeners = server
+      .bound_listeners()
+      .iter()
+      .filter(|listener| {
+        listener.kind == BoundListenerKind::Stream
+          && listener.transport == BoundListenerTransport::Udp
+      })
+      .map(|listener| listener.address);
+    let address = udp_stream_listeners
+      .next()
+      .expect("embedded server should publish its UDP stream listener");
+    assert!(
+      udp_stream_listeners.next().is_none(),
+      "embedded server should publish exactly one UDP stream listener"
+    );
+    address
+  };
 
   let client = UdpSocket::bind("127.0.0.1:0")
     .await
     .expect("UDP client should bind");
-  let response = udp_exchange_with_retry(&client, stream_addr, b"hello", &server_task).await;
+  let response = udp_exchange_with_retry(&client, stream_addr, b"hello").await;
   assert_eq!(&response, b"hello");
 
-  server_task.abort();
+  server
+    .cancel()
+    .expect("embedded UDP test server should accept cancellation");
+  let result = server
+    .wait()
+    .await
+    .expect("embedded UDP test server should join after cancellation");
+  assert_eq!(result.outcome, ShutdownOutcome::Cancelled);
   upstream_task.abort();
+  let upstream_error = upstream_task
+    .await
+    .expect_err("aborted UDP echo upstream should not complete successfully");
+  assert!(
+    upstream_error.is_cancelled(),
+    "UDP echo upstream should stop by cancellation"
+  );
 }
 
 #[tokio::test]
@@ -248,16 +287,6 @@ async fn unused_loopback_port() -> u16 {
   listener
     .local_addr()
     .expect("ephemeral listener address should be available")
-    .port()
-}
-
-async fn unused_udp_loopback_port() -> u16 {
-  let socket = UdpSocket::bind("127.0.0.1:0")
-    .await
-    .expect("ephemeral UDP port should bind");
-  socket
-    .local_addr()
-    .expect("ephemeral UDP listener address should be available")
     .port()
 }
 
@@ -451,15 +480,10 @@ async fn udp_exchange_with_retry(
   socket: &UdpSocket,
   target: SocketAddr,
   payload: &[u8],
-  server_task: &JoinHandle<anyhow::Result<()>>,
 ) -> Vec<u8> {
   let deadline = Instant::now() + Duration::from_secs(2);
   let mut buffer = [0u8; 2048];
   loop {
-    assert!(
-      !server_task.is_finished(),
-      "server exited before UDP stream listener responded"
-    );
     socket
       .send_to(payload, target)
       .await
