@@ -518,12 +518,89 @@ be used as a supported production upgrade source or target.
 | `0.9.2-beta.1` | `0.9.2-beta.2` | Recovery source only | Beta.1 was published but unqualified. Its artifacts and evidence are not reusable; beta.2's completed qualification uses fresh exact-revision evidence. No configuration or state migration is needed for recovery. |
 | `0.9.1` | `0.9.2` | Stable candidate | Follow [Upgrade from 0.9.1 to the 0.9.2 line](#upgrade-from-091-to-the-092-line). The stable ledger is cumulative from `0.9.1`; deployment requires person-reviewed publication and newly qualified stable artifacts. No configuration, schema, or state migration is required. |
 | `0.9.2-beta.2` | `0.9.2` | Stable candidate | Exactly one documentation-only commit follows the qualified beta.2 revision. Draft preparation may occur during soak; stable publication requires at least 24 hours from the later of beta publication and successful automatic verifier completion. Stable's own qualification must pass before mutable aliases move. |
+| `0.9.2` | `0.10.0-beta.1` | Beta candidate | Follow [Upgrade from 0.9.2 to the 0.10.0 line](#upgrade-from-092-to-the-0100-line). The beta requires fresh exact-revision publication and qualification evidence; the 0.9.2 artifacts and receipts are upgrade history, not reusable release evidence. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
 `Recovery candidate` or `Conditional`. A tag cannot prepare a GitHub draft
 release until the matching entry and upgrade link pass the repository
 release-contract checker.
+
+## Upgrade from 0.9.2 to the 0.10.0 line
+
+`0.10.0-beta.1` is the cumulative candidate for changes after `0.9.2`. The
+supported beta upgrade source is `0.9.2`. This guide does not claim that the
+beta is published or qualified; deploy only after its person-reviewed release,
+30 platform images, two charts, 12 manifests, zero-alias aggregate, vulnerability
+decisions, attestations, and complete automatic independent verifier all bind
+to the exact signed beta revision.
+
+Existing configurations remain native schema epoch `1`, but the line adds
+strictly validated opt-in surfaces for Host/SNI Real-IP policy, verified client
+certificate forwarding, PROXY v2 TLS metadata, RFC 10024 post-quantum key
+exchange, status headers, QUERY cleanup, No-Vary-Search, cache groups, resumable
+uploads, H2 WebTransport, RFC 9842 compression dictionaries, SSE policy, and
+Admin event compression. Remove unsupported new fields before starting an older
+binary. Apply the updated Gateway RoutePolicy CRD before creating resources that
+use client-certificate forwarding, WebTransport upstream-version selection, or
+compression-dictionary profile references, and keep controller and data-plane
+roles on one exact revision.
+
+The persistent migration boundary is managed uploads: local journal v1 becomes
+v2 and PostgreSQL schema v3 becomes v4 so encoded offsets and dictionary
+identity remain durable. Back up these stores before rollout, do not mix old and
+new writers, and retain immutable configured dictionary assets while dependent
+requests drain. QUERY adds namespaced Redis/PostgreSQL target indexes, and cache
+groups replace reachable authority version 1 with version 2 while preserving
+cached response objects as cold misses. A rolling cache-group deployment is
+safe only when every participant continuously uses the same reachable shared or
+capable external authority. Otherwise disable groups, drain disconnected or
+local-only participants, and cold-clear every cache tier before resuming.
+
+HTTP/2 WebTransport uses TLS 1.3 and the pinned draft-15 carrier; exact upstream
+version selection does not fall back. Resumable uploads and Compression
+Dictionary Transport remain experimental and require their documented storage,
+capacity, namespace, trust, and cleanup controls. Credentialed SSE marked
+`no-store` is compressed only when both policy opt-ins are enabled. Admin event
+compression is disabled by default and preserves the existing authentication,
+IPM authorization, audit, operation ownership, and session limits. Because
+compressed authenticated streams can expose length side channels, enable them
+only after reviewing event contents and attacker-controlled reflection.
+
+Before rollout, validate the complete configuration and the exact cumulative
+range, then run the affected wire and storage matrices:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+candidate_revision="$(git rev-parse HEAD)"
+pnpm run release-contract:check
+pnpm run release-contract:check \
+  --change-base a096ce1ff49936d65f057ca33413037b6f4a0f67 \
+  --change-head "${candidate_revision}"
+tests/scripts/run-webtransport-h2-integration.sh
+tests/scripts/run-compression-dictionary-integration.sh
+```
+
+For rollback to `0.9.2`, first stop new resumable uploads and QUERY warming and
+drain long-lived HTTP, WebSocket, WebTransport, SSE, dictionary, and upload work.
+Remove every new native and Gateway field, disable cache groups and equivalent
+No-Vary-Search reuse, and cold-clear cache tiers that cannot share the upgraded
+authority/index contract. Restore managed-upload persistence from the retained
+pre-upgrade backup or an empty compatible store; `0.9.2` cannot consume the new
+journal/schema contract. Learned dictionaries may be discarded, but keep
+configured assets and upgraded shared-state records until all new-version work
+has drained. Validate the resulting `0.9.2` configuration before restoring its
+controller and data-plane images together by approved immutable digest.
+
+The six-hour stable eligibility interval begins at the later of beta publication
+and successful completion of the accepted automatic beta verifier. Stable must
+be exactly one documentation-only commit after the final beta, and its complete
+beta-to-stable delta may change only `CHANGELOG.md` and this guide. Any runtime,
+configuration, workflow, dependency, schema, chart, or other tracked change
+requires another beta with fresh publication, qualification, and soak evidence.
+Published tags, releases, artifacts, attestations, and qualification records are
+irreversible or attributable history; repair a failed cut by advancing the
+version rather than moving, deleting, or reusing evidence.
 
 ## Upgrade from 0.8.1 to the 0.9.0 line
 
