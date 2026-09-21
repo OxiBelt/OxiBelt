@@ -518,7 +518,9 @@ be used as a supported production upgrade source or target.
 | `0.9.2-beta.1` | `0.9.2-beta.2` | Recovery source only | Beta.1 was published but unqualified. Its artifacts and evidence are not reusable; beta.2's completed qualification uses fresh exact-revision evidence. No configuration or state migration is needed for recovery. |
 | `0.9.1` | `0.9.2` | Stable candidate | Follow [Upgrade from 0.9.1 to the 0.9.2 line](#upgrade-from-091-to-the-092-line). The stable ledger is cumulative from `0.9.1`; deployment requires person-reviewed publication and newly qualified stable artifacts. No configuration, schema, or state migration is required. |
 | `0.9.2-beta.2` | `0.9.2` | Stable candidate | Exactly one documentation-only commit follows the qualified beta.2 revision. Draft preparation may occur during soak; stable publication requires at least 24 hours from the later of beta publication and successful automatic verifier completion. Stable's own qualification must pass before mutable aliases move. |
-| `0.9.2` | `0.10.0-beta.1` | Beta candidate | Follow [Upgrade from 0.9.2 to the 0.10.0 line](#upgrade-from-092-to-the-0100-line). The beta requires fresh exact-revision publication and qualification evidence; the 0.9.2 artifacts and receipts are upgrade history, not reusable release evidence. |
+| `0.9.2` | `0.10.0-beta.1` | Published, qualified | Follow [Upgrade from 0.9.2 to the 0.10.0 line](#upgrade-from-092-to-the-0100-line). The immutable beta release has fresh exact-revision artifacts and complete automatic qualification; its accepted verifier completion starts the stable eligibility interval. |
+| `0.9.2` | `0.10.0` | Stable candidate | Follow [Upgrade from 0.9.2 to the 0.10.0 line](#upgrade-from-092-to-the-0100-line). The stable ledger is cumulative from `0.9.2`; deployment requires person-reviewed publication and newly qualified stable artifacts. |
+| `0.10.0-beta.1` | `0.10.0` | Stable candidate | Exactly one documentation-only commit follows the qualified beta.1 revision. Draft preparation may occur during the six-hour soak, but stable publication must wait until at least six hours after the later of beta publication and successful automatic verifier completion. Stable's own qualification must pass before mutable aliases move. |
 | `X.Y.Z-beta.N` | `X.Y.Z-beta.(N+1)` | Conditional | The later beta entry must name both the preceding beta and preceding stable release as supported sources. |
 
 The release-specific changelog entry is authoritative when a row is marked
@@ -528,12 +530,13 @@ release-contract checker.
 
 ## Upgrade from 0.9.2 to the 0.10.0 line
 
-`0.10.0-beta.1` is the cumulative candidate for changes after `0.9.2`. The
-supported beta upgrade source is `0.9.2`. This guide does not claim that the
-beta is published or qualified; deploy only after its person-reviewed release,
-30 platform images, two charts, 12 manifests, zero-alias aggregate, vulnerability
-decisions, attestations, and complete automatic independent verifier all bind
-to the exact signed beta revision.
+`0.10.0` is the stable candidate based on the published and independently
+qualified `0.10.0-beta.1` source. Its supported upgrade sources are `0.9.2`
+and `0.10.0-beta.1`. The stable source must be exactly one documentation-only
+commit after beta.1, changing only `CHANGELOG.md` and this guide. Stable
+publication remains gated by the six-hour beta eligibility interval and person
+review; stable deployment requires newly published and independently qualified
+stable artifacts rather than reuse of beta artifacts or receipts.
 
 Existing configurations remain native schema epoch `1`, but the line adds
 strictly validated opt-in surfaces for Host/SNI Real-IP policy, verified client

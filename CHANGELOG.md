@@ -12,6 +12,202 @@ entries. See the
 [contributor release contract](CONTRIBUTING.md#release-changelog-and-upgrade-contract)
 for the governed entry format.
 
+## [0.10.0] - 2026-09-21
+
+> Stable candidate for the cumulative `0.9.2` to `0.10.0` development
+> lineage, based on the published and independently qualified
+> `0.10.0-beta.1` source. Exactly one documentation-only commit prepares
+> this transition. Draft preparation may occur during the six-hour beta soak;
+> stable publication requires person review and eligibility measured from the
+> later of beta publication and successful automatic verifier completion.
+> This entry does not claim stable publication, stable artifact availability,
+> stable qualification, or mutable-alias promotion.
+
+- Changes since: `0.9.2`
+- Supported upgrade sources: `0.9.2`, `0.10.0-beta.1`
+- Upgrade guide: [Upgrade from 0.9.2 to the 0.10.0 line](docs/Upgrading.md#upgrade-from-092-to-the-0100-line)
+
+### Configuration
+
+- Add opt-in Host/SNI-scoped `real_ip`, verified downstream client-certificate
+  forwarding, inbound and outbound PROXY v2 TLS metadata, RFC 10024
+  `SecP256r1MLKEM768`, per-route status-header controls, HTTP/2 WebTransport,
+  resumable-upload stores and profiles, RFC 9842 compression-dictionary
+  profiles, and Admin operation-event compression. Existing configurations
+  retain their prior behavior unless one of these surfaces is enabled.
+- Add bounded QUERY cleanup, default-on No-Vary-Search and cache-group policy,
+  managed-upload staging, HTTP/2 WebTransport queues, and SSE-specific
+  compression controls. Credentialed or `no-store` SSE compression requires
+  both explicit route opt-ins; Admin event compression remains default-off.
+- Keep the native configuration schema at epoch `1`. The JSON schema matches
+  the existing shared-backend array contract, and new settings retain strict
+  validation, redacted effective-configuration behavior, and documented reload
+  or restart ownership.
+
+### Schema epochs
+
+- Keep native configuration at epoch `1`; no native epoch migration is
+  required. Apply the updated Gateway RoutePolicy CRD before using client
+  certificate forwarding, WebTransport upstream-version selection, or
+  compression-dictionary profile references.
+- Upgrade managed-upload persistence from local journal v1 to v2 and
+  PostgreSQL schema v3 to v4 so encoded offsets and dictionary validation
+  identity remain durable. Back up the store first and do not mix old and new
+  writers.
+- Add the PostgreSQL QUERY target-index table and Redis namespace index data,
+  and advance cache-group authority records to version 2. These are additive
+  or cold-replacement contracts rather than rewrites of cached response
+  objects.
+
+### Deprecations and removals
+
+- No configuration key, protocol, executable, image role, rule syntax, or
+  supported upgrade source is removed. New protocol and deployment features
+  are additive and retain their documented default-off or compatibility
+  defaults.
+
+### Admin API
+
+- Add authorized compression-dictionary inventory and purge operations,
+  exact-uppercase QUERY cache warm and key-explain shapes, and group-aware
+  cache purge values. Durable QUERY warming seals request context and
+  reauthorizes remaining work after restart.
+- Add TLS HTTP/2 and pinned draft-15 WebTransport operation-event transport
+  while retaining H1 and H3 behavior. Optional event compression covers H1/H2
+  SSE or NDJSON, H1 WebSocket `permessage-deflate`, and H2/H3 WebTransport with
+  one shared capacity budget and explicit fallback or rejection semantics.
+- Preserve bearer, mTLS workload identity, IPM authorization, audit, event
+  ownership, and shared session-limit requirements on every new Admin path.
+
+### Feature lifecycle
+
+- Add `http-compression-dictionary` and `http-resumable-uploads` as
+  `experimental`. Neither is promoted by this stable release, and their
+  Kubernetes and production-capacity gates remain unmet.
+- Keep Gateway API, Helm integration, allocator, direct-H1 Compio, and other
+  previously experimental surfaces at their documented lifecycle states.
+  HTTP/2 WebTransport extends the supported HTTP data plane but uses its
+  explicitly pinned draft-15 carrier contract.
+
+### Rulepack compatibility
+
+- Preserve OxiRule and CRS grammar and rulepack schema compatibility. Add
+  bounded verified peer-certificate fields for downstream clients and upstream
+  servers; absence, truncation, phase, and logging rules remain explicit.
+- Keep client-provided certificate or forwarding headers untrusted. Only
+  locally verified certificate state or validated PROXY v2 metadata from an
+  allowed direct proxy can populate protected identity fields.
+
+### Executables and images
+
+- Preserve executable names, package ownership, six official image roles,
+  five platform variants, 30 platform images, 12 release manifests, two
+  published Helm charts, and the committed `0.0.0` package-version sentinels.
+- Select the repository-owned mimalloc package by default for supported AMD64
+  builds while retaining the system allocator elsewhere. Keep the native FFI,
+  heap-padding, source-hash, sanitizer, and package-boundary checks governed.
+- Refresh the reviewed Rust, Node/pnpm, Gateway API, compiler, Helm, Buildx,
+  QEMU, browser, Kubernetes, and infrastructure inputs. Upgrade `rustls` to
+  `0.23.45` for the public `RUSTSEC-2026-0285` fix without weakening dependency
+  admission, Cargo vet, or frozen-lock requirements.
+- Require fresh stable evidence for all 30 platform images, two charts, 12
+  manifests, vulnerability decisions, provenance, CycloneDX SBOMs, rebuild
+  recipes, and a complete independent verifier. Beta evidence supplies the
+  soak binding but cannot replace stable artifacts or receipts. Mutable alias
+  promotion remains a separate operation after stable qualification succeeds.
+
+### Storage and state
+
+- Treat managed-upload journal/schema changes as rollback-significant. Drain
+  uploads before rollback and restore a pre-upgrade backup or an empty store;
+  older binaries cannot consume the new persisted contract.
+- QUERY invalidation fences reuse before bounded physical cleanup. Shared
+  Redis/PostgreSQL target indexes are additive and remain namespaced; disable
+  QUERY caching and wait through retention before optional cleanup on rollback.
+- Cache groups use authority version 2 and a new cache namespace. Mixed-version
+  participants require one continuously reachable shared or capable external
+  authority; otherwise disable groups and cold-clear every tier before rollout
+  or rollback. Learned dictionaries may be discarded, but configured immutable
+  dictionaries must remain available while dependent requests drain.
+
+### Upgrade validation
+
+- Require the stable revision's canonical non-benchmark validation and
+  release-contract checks. Verify that its parent is exactly
+  `0.10.0-beta.1` and that the complete beta-to-stable delta changes only
+  `CHANGELOG.md` and `docs/Upgrading.md`.
+- Before stable publication, reauthenticate beta.1's exact published release,
+  successful automatic verifier attempt, and sealed 30-image, two-chart,
+  12-manifest, zero-alias aggregate. At least six hours must have elapsed from
+  the later of beta publication and successful verifier completion.
+- After person-reviewed publication, require fresh stable-revision image,
+  chart, manifest, vulnerability, provenance, SBOM, attestation, and complete
+  independent-verifier evidence. Only then may the governed workflow promote
+  stable mutable aliases.
+- Validate the complete target configuration and both supported-source ranges:
+
+```sh
+oxibeltctl config validate /etc/oxibelt/oxibelt.toml --local-only
+stable_revision="$(git rev-parse 'refs/tags/0.10.0^{commit}')"
+pnpm run release-contract:check
+pnpm run release-contract:check \
+  --change-base a096ce1ff49936d65f057ca33413037b6f4a0f67 \
+  --change-head "${stable_revision}"
+pnpm run release-contract:check \
+  --change-base a535d528d7e0fadae734963a3e2ccf1ce1eeac9c \
+  --change-head "${stable_revision}"
+```
+
+### Rollback and irreversible steps
+
+- Before returning to `0.9.2`, stop new resumable uploads and QUERY warming,
+  drain long-lived HTTP, WebSocket, WebTransport, SSE, upload, and dictionary
+  work, remove every new configuration and Gateway field, and validate the
+  complete `0.9.2` configuration. Restore upload persistence from the retained
+  pre-upgrade backup or start with an empty compatible store.
+- Disable cache groups and No-Vary-Search reuse and cold-clear every cache tier
+  when the older participants cannot share the upgraded authority and index
+  contracts. Retain immutable dictionary assets and new shared-state records
+  until all upgraded participants have drained.
+- Published tags, releases, artifacts, attestations, qualification records,
+  and trusted timestamps are irreversible or attributable history. Never move,
+  delete, overwrite, relabel, or reuse them to repair a failed cut; advance to
+  another governed release.
+
+### Known issues
+
+- Compression Dictionary Transport and resumable uploads remain experimental;
+  functional interoperability does not establish production capacity or
+  Kubernetes graduation.
+- HTTP/2 WebTransport uses the pinned draft-15 carrier and exact upstream
+  version selection. It does not fall back to another transport.
+- Cache-group authority version 2 and managed-upload persistence require the
+  coordinated rollout and rollback steps above. Local-only or disconnected
+  cache participants cannot safely assume they observed the invalidation
+  fence.
+- Authenticated SSE and Admin event compression can expose length side
+  channels when secrets and attacker-controlled text share a compressed
+  stream; both surfaces remain explicit opt-ins.
+
+### Security
+
+- Preserve exact Host/SNI identity selection, verified certificate provenance,
+  protected forwarding-header aliases, direct-proxy allowlists, and cache-key
+  partitioning. Client-supplied metadata never becomes trusted identity by
+  itself.
+- Fail closed for rejected HTTP/1 CONNECT framing, invalid resumable relay
+  requests, HTTP/2 WebTransport silent-close policy, stale digest metadata,
+  cache-group target canonicalization, QUERY generation cleanup, and ambiguous
+  shared-state mutations.
+- Require a clean EOF before completion digests, preserve cancellation and
+  STOP_SENDING semantics, bound decompression/compression and event-stream
+  capacity, and keep credentialed or private response compression disabled
+  unless its exact policy permits it.
+- Keep stable publication blocked for every `CRITICAL` image finding and every
+  `HIGH` finding with a fixed version. Bind vulnerability evidence, provenance,
+  SBOMs, rebuild recipes, manifests, and qualification receipts to the exact
+  source revision and producer/verifier attempts.
+
 ## [0.9.2] - 2026-09-08
 
 > Stable candidate for the cumulative `0.9.1` to `0.9.2` development
