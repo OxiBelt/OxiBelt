@@ -320,11 +320,11 @@ fn catalog_defines_the_complete_bounded_program() {
   );
   assert_eq!(
     table_integer(&program, "max_working_corpus_files_per_target"),
-    16_384
+    32_768
   );
   assert_eq!(
     table_integer(&program, "max_cached_corpus_files_per_target"),
-    8_192
+    16_384
   );
   assert_eq!(
     table_integer(&program, "max_cached_corpus_bytes_per_target"),
@@ -871,8 +871,8 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "cargo \"+$fuzz_toolchain\" fuzz run --sanitizer \"$fuzz_sanitizer\"",
       "readonly MAX_SEED_FILES=128",
       "readonly MAX_SEED_BYTES=524288",
-      "readonly MAX_WORKING_CORPUS_FILES=16384",
-      "readonly MAX_CACHED_CORPUS_FILES=8192",
+      "readonly MAX_WORKING_CORPUS_FILES=32768",
+      "readonly MAX_CACHED_CORPUS_FILES=16384",
       "readonly MAX_CORPUS_BYTES=67108864",
       "readonly MAX_ARTIFACT_FILES=8",
       "readonly FUZZ_TIMEOUT_SECONDS=10",
@@ -1472,9 +1472,26 @@ fn cmin_accepts_the_exact_admin_json_mutations_regression() {
 
 #[cfg(unix)]
 #[test]
+fn cmin_accepts_the_exact_gateway_api_translation_regression() {
+  let harness = CminHarness::new(9_518);
+  let output = harness.run("reduce", 8_260);
+  assert!(
+    output.status.success(),
+    "cmin should retain the complete minimized Gateway API corpus: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(harness.called_marker.is_file(), "fake cmin should run");
+  assert_eq!(
+    harness.corpus_snapshot(),
+    CminHarness::expected_snapshot(8_260)
+  );
+}
+
+#[cfg(unix)]
+#[test]
 fn cmin_accepts_inclusive_working_and_cached_file_limits() {
-  let harness = CminHarness::new(16_384);
-  let output = harness.run("reduce", 8_192);
+  let harness = CminHarness::new(32_768);
+  let output = harness.run("reduce", 16_384);
   assert!(
     output.status.success(),
     "cmin should accept both inclusive corpus file limits: {}",
@@ -1483,23 +1500,23 @@ fn cmin_accepts_inclusive_working_and_cached_file_limits() {
   assert!(harness.called_marker.is_file(), "fake cmin should run");
   assert_eq!(
     harness.corpus_snapshot(),
-    CminHarness::expected_snapshot(8_192)
+    CminHarness::expected_snapshot(16_384)
   );
 }
 
 #[cfg(unix)]
 #[test]
 fn cmin_rejects_result_above_cached_limit_without_replacing_working_corpus() {
-  let harness = CminHarness::new(8_193);
+  let harness = CminHarness::new(16_385);
   let original = harness.corpus_snapshot();
-  let output = harness.run("noop", 8_193);
+  let output = harness.run("noop", 16_385);
   assert!(harness.called_marker.is_file(), "fake cmin should run");
   assert!(
     !output.status.success(),
     "a result above the cached corpus limit must fail"
   );
   assert!(
-    String::from_utf8_lossy(&output.stderr).contains("cached corpus exceeds 8192 files"),
+    String::from_utf8_lossy(&output.stderr).contains("cached corpus exceeds 16384 files"),
     "cmin should explain the retained cache bound: {}",
     String::from_utf8_lossy(&output.stderr)
   );
@@ -1509,9 +1526,9 @@ fn cmin_rejects_result_above_cached_limit_without_replacing_working_corpus() {
 #[cfg(unix)]
 #[test]
 fn cmin_rejects_working_corpus_above_limit_before_invoking_cargo() {
-  let harness = CminHarness::new(16_385);
+  let harness = CminHarness::new(32_769);
   let original = harness.corpus_snapshot();
-  let output = harness.run("noop", 16_385);
+  let output = harness.run("noop", 32_769);
   assert!(
     !harness.called_marker.exists(),
     "fake cmin must not run for an oversized working corpus"
@@ -1521,7 +1538,7 @@ fn cmin_rejects_working_corpus_above_limit_before_invoking_cargo() {
     "a corpus above the working limit must fail"
   );
   assert!(
-    String::from_utf8_lossy(&output.stderr).contains("working corpus exceeds 16384 files"),
+    String::from_utf8_lossy(&output.stderr).contains("working corpus exceeds 32768 files"),
     "cmin should explain the transient working bound: {}",
     String::from_utf8_lossy(&output.stderr)
   );
