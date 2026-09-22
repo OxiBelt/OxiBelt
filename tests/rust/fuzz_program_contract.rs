@@ -816,7 +816,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     campaign,
     &[
       "permissions:\n      contents: read",
-      "timeout-minutes: 120",
+      "timeout-minutes: 180",
       "nightly-2026-09-20",
       "cargo-fuzz --version 0.13.2",
       "tests/scripts/run-fuzz-target.sh campaign",

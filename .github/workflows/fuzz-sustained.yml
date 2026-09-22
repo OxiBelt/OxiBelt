@@ -21,7 +21,7 @@ jobs:
     name: Sustained fuzz (${{ matrix.fuzz_target }})
     if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-26.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
     strategy:
