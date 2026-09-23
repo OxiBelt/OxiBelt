@@ -5,6 +5,7 @@ use std::time::Duration;
 fn rate_limit_config(name: &str, key: RateLimitKey) -> RateLimitConfig {
   RateLimitConfig {
     name: name.to_string(),
+    policy_id: None,
     key,
     ipv4_prefix_bits: default_rate_limit_ipv4_prefix_bits(),
     ipv6_prefix_bits: default_rate_limit_ipv6_prefix_bits(),
@@ -18,6 +19,94 @@ fn rate_limit_config(name: &str, key: RateLimitKey) -> RateLimitConfig {
     max_buckets: default_rate_limit_max_buckets(),
     mode: LimitMode::Enforcing,
     status: 429,
+  }
+}
+
+#[tokio::test]
+async fn advertised_local_rate_snapshot_is_post_decision_and_stops_on_denial() {
+  let state = LimitState::new(None);
+  let ip = "203.0.113.42".parse().unwrap();
+  let mut first = rate_limit_config("first", RateLimitKey::Global);
+  first.rate = "1r/h".to_string();
+  first.burst = 2;
+  let second = rate_limit_config("second", RateLimitKey::Global);
+  let limits = [first, second];
+
+  let allowed = state
+    .evaluate_pre_route_rate_limits_async(ip, &limits)
+    .await;
+  assert_eq!(allowed.status, None);
+  assert!(!allowed.suppress_all);
+  assert_eq!(allowed.checked.len(), 2);
+  assert_eq!(allowed.checked[0].name, "first");
+  assert_eq!(allowed.checked[0].remaining, Some(1));
+  assert_eq!(allowed.checked[1].name, "second");
+  assert_eq!(allowed.checked[1].remaining, Some(0));
+  let next_token_at = allowed.checked[1]
+    .next_token_at
+    .expect("empty bucket has refill deadline");
+  let remaining = next_token_at
+    .saturating_duration_since(Instant::now())
+    .as_secs();
+  assert!((3598..=3600).contains(&remaining));
+
+  let denied = state
+    .evaluate_pre_route_rate_limits_async(ip, &limits)
+    .await;
+  assert_eq!(denied.status, Some(StatusCode::TOO_MANY_REQUESTS));
+  assert_eq!(denied.checked.len(), 2);
+  assert_eq!(denied.checked[0].remaining, Some(0));
+  assert_eq!(denied.checked[1].outcome, RateLimitOutcome::RateLimited);
+  assert_eq!(denied.checked[1].remaining, Some(0));
+  assert!(!denied.suppress_all);
+}
+
+#[tokio::test]
+async fn shared_memory_rate_snapshot_and_bucket_cap_are_atomic() {
+  let shared = SharedState::test_memory("shared-rate-snapshot");
+  let state = LimitState::new(Some(shared));
+  let ip = "203.0.113.42".parse().unwrap();
+  let mut limit = rate_limit_config("per-path", RateLimitKey::ClientIpPath);
+  limit.max_buckets = 1;
+  let limits = [limit];
+  let headers = HeaderMap::new();
+
+  let first = state
+    .evaluate_route_rate_limits_async(
+      RateLimitContext::route(ip, "app", "/one", &headers),
+      &limits,
+    )
+    .await;
+  assert_eq!(first.status, None);
+  assert_eq!(first.checked[0].remaining, Some(0));
+  assert_eq!(first.checked[0].outcome, RateLimitOutcome::Allowed);
+
+  let repeat = state
+    .evaluate_route_rate_limits_async(
+      RateLimitContext::route(ip, "app", "/one", &headers),
+      &limits,
+    )
+    .await;
+  assert_eq!(repeat.status, Some(StatusCode::TOO_MANY_REQUESTS));
+  assert_eq!(repeat.checked[0].remaining, Some(0));
+  assert_eq!(repeat.checked[0].outcome, RateLimitOutcome::RateLimited);
+
+  let cap = state
+    .evaluate_route_rate_limits_async(
+      RateLimitContext::route(ip, "app", "/two", &headers),
+      &limits,
+    )
+    .await;
+  assert_eq!(cap.status, Some(StatusCode::TOO_MANY_REQUESTS));
+  assert_eq!(cap.checked[0].outcome, RateLimitOutcome::BucketCapExceeded);
+  assert_eq!(cap.checked[0].remaining, None);
+  assert_eq!(cap.checked[0].next_token_at, None);
+}
+
+#[test]
+fn parsed_rate_rejects_non_finite_or_underflowed_rates() {
+  for rate in ["NaNr/s", "infr/s", "1e-324r/h"] {
+    assert!(parse_rate(rate).is_err(), "{rate}");
   }
 }
 

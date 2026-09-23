@@ -11,7 +11,8 @@ use crate::shared_state::{
 };
 
 use super::{
-  ConnectionAcquireSpec, ConnectionPermit, LimitState, LocalConnectionRelease, RateLimitBucketSpec,
+  ConnectionAcquireSpec, ConnectionPermit, LimitState, LocalConnectionRelease,
+  RateLimitBucketDecision, RateLimitBucketSpec, RateLimitOutcome,
 };
 
 impl LimitState {
@@ -87,30 +88,42 @@ impl LimitState {
     self.acquire_scopes_local(specs)
   }
 
-  pub(super) async fn check_rate_limit_bucket(
+  pub(super) async fn check_rate_limit_bucket_with_snapshot(
     &self,
     spec: RateLimitBucketSpec<'_>,
-  ) -> Option<StatusCode> {
+  ) -> RateLimitBucketDecision {
     if let Some(shared) = &self.shared_state
       && shared.has_rate_limits()
     {
       let result = if spec.key.is_empty() {
         shared
-          .take_rate_token_bucket(spec.name, spec.rate, spec.burst)
+          .take_rate_token_bucket_snapshot(spec.name, spec.rate, spec.burst)
           .await
       } else {
         shared
-          .take_rate_token(spec.name, spec.key, spec.rate, spec.burst, spec.max_buckets)
+          .take_rate_token_snapshot(spec.name, spec.key, spec.rate, spec.burst, spec.max_buckets)
           .await
       };
       match result {
-        Ok(SharedRateLimitOutcome::Allowed) => {}
-        Ok(SharedRateLimitOutcome::RateLimited | SharedRateLimitOutcome::BucketCapExceeded) => {
-          if spec.mode == LimitMode::Enforcing {
-            return Some(
-              StatusCode::from_u16(spec.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS),
-            );
-          }
+        Ok(decision) => {
+          let outcome = match decision.outcome {
+            SharedRateLimitOutcome::Allowed => RateLimitOutcome::Allowed,
+            SharedRateLimitOutcome::RateLimited => RateLimitOutcome::RateLimited,
+            SharedRateLimitOutcome::BucketCapExceeded => RateLimitOutcome::BucketCapExceeded,
+          };
+          let status = if outcome != RateLimitOutcome::Allowed && spec.mode == LimitMode::Enforcing
+          {
+            Some(StatusCode::from_u16(spec.status).unwrap_or(StatusCode::TOO_MANY_REQUESTS))
+          } else {
+            None
+          };
+          return RateLimitBucketDecision {
+            status,
+            outcome: Some(outcome),
+            tokens: decision.tokens,
+            suppress_all: decision.tokens.is_none()
+              && outcome != RateLimitOutcome::BucketCapExceeded,
+          };
         }
         Err(error) => {
           let mode = shared.backend_failure_mode(SharedStateFeature::RateLimits);
@@ -120,25 +133,26 @@ impl LimitState {
             "shared rate limit backend failed"
           );
           return match mode {
-            BackendFailureMode::FailOpen => None,
+            BackendFailureMode::FailOpen => RateLimitBucketDecision::unavailable(None),
             BackendFailureMode::LocalFallback => {
               shared.record_backend_local_fallback(SharedStateFeature::RateLimits);
-              self.check_rate_limit_bucket_local(spec)
+              let mut decision = self.check_rate_limit_bucket_local_with_snapshot(spec);
+              decision.suppress_all = true;
+              decision
             }
             BackendFailureMode::StaleSnapshot => {
               // Rate decisions are consumptive. Reusing a prior result could
               // double-spend a token, so this mode remains conservative here.
               shared.record_backend_stale_snapshot(SharedStateFeature::RateLimits);
-              Some(StatusCode::SERVICE_UNAVAILABLE)
+              RateLimitBucketDecision::unavailable(Some(StatusCode::SERVICE_UNAVAILABLE))
             }
             BackendFailureMode::FailClosed | BackendFailureMode::RejectNewOnly => {
-              Some(StatusCode::SERVICE_UNAVAILABLE)
+              RateLimitBucketDecision::unavailable(Some(StatusCode::SERVICE_UNAVAILABLE))
             }
           };
         }
       }
-      return None;
     }
-    self.check_rate_limit_bucket_local(spec)
+    self.check_rate_limit_bucket_local_with_snapshot(spec)
   }
 }

@@ -8256,8 +8256,113 @@ burst = 40
   let config: Config = toml::from_str(&raw).expect("config should parse");
   config.validate().expect("config should validate");
   assert_eq!(config.rate_limits[0].key, RateLimitKey::Global);
+  assert_eq!(config.rate_limits[0].policy_id, None);
   assert_eq!(config.rate_limits[1].key, RateLimitKey::Route);
   assert_eq!(config.rate_limits[1].routes, ["app-root"]);
+}
+
+#[test]
+fn rate_limit_policy_id_is_optional_and_validated() {
+  let temp_dir = common::TempDir::new("rate-limit-policy-id");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "rate-limit-policy-id");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let valid = format!(
+    "{base}\n[[rate_limits]]\nname = \"public-api\"\npolicy_id = \"api.v1_public-1\"\nrate = \"10r/s\"\nburst = 50\n"
+  );
+  let config: Config = toml::from_str(&valid).expect("policy_id parses");
+  config.validate().expect("safe policy_id validates");
+  assert_eq!(
+    config.rate_limits[0].policy_id.as_deref(),
+    Some("api.v1_public-1")
+  );
+
+  for (case, id) in [
+    ("empty", ""),
+    ("space", "public api"),
+    ("slash", "public/api"),
+    ("non-ascii", "api-é"),
+    (
+      "too-long",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ),
+  ] {
+    let raw = format!(
+      "{base}\n[[rate_limits]]\nname = \"{case}\"\npolicy_id = \"{id}\"\nrate = \"10r/s\"\n"
+    );
+    let config: Config = toml::from_str(&raw).expect("invalid policy_id still parses");
+    let error = config.validate().expect_err("invalid policy_id must fail");
+    assert!(
+      error.to_string().contains("policy_id must contain"),
+      "{case}: {error:#}"
+    );
+  }
+}
+
+#[test]
+fn rate_limit_policy_id_rejects_duplicates_monitor_and_nonfinite_rates() {
+  let temp_dir = common::TempDir::new("rate-limit-policy-constraints");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "rate-limit-policy-constraints");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let cases = [
+    (
+      "duplicate",
+      "[[rate_limits]]\nname = \"one\"\npolicy_id = \"same\"\nrate = \"1r/s\"\n[[rate_limits]]\nname = \"two\"\npolicy_id = \"same\"\nrate = \"1r/s\"\n",
+      "duplicate rate limit policy_id same",
+    ),
+    (
+      "monitor",
+      "[[rate_limits]]\nname = \"one\"\npolicy_id = \"one\"\nmode = \"monitor\"\nrate = \"1r/s\"\n",
+      "policy_id requires enforcing mode",
+    ),
+    (
+      "infinite",
+      "[[rate_limits]]\nname = \"one\"\npolicy_id = \"one\"\nrate = \"infr/s\"\n",
+      "invalid rate_limits one rate",
+    ),
+    (
+      "underflow",
+      "[[rate_limits]]\nname = \"one\"\npolicy_id = \"one\"\nrate = \"5e-324r/h\"\n",
+      "invalid rate_limits one rate",
+    ),
+  ];
+  for (case, limits, expected) in cases {
+    let config: Config =
+      toml::from_str(&format!("{base}\n{limits}")).expect("rate limit fixture parses");
+    let error = config
+      .validate()
+      .expect_err("invalid advertised policy must fail");
+    assert!(error.to_string().contains(expected), "{case}: {error:#}");
+  }
+}
+
+#[test]
+fn rate_limit_policy_id_caps_enabled_policies_at_sixteen() {
+  let temp_dir = common::TempDir::new("rate-limit-policy-count");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "rate-limit-policy-count");
+  let mut raw = common::minimal_config_toml(&cert_path, &key_path);
+  for index in 0..16 {
+    raw.push_str(&format!(
+      "\n[[rate_limits]]\nname = \"limit-{index}\"\npolicy_id = \"policy-{index}\"\nrate = \"1r/s\"\n"
+    ));
+  }
+  let config: Config = toml::from_str(&raw).expect("sixteen policy IDs parse");
+  config.validate().expect("sixteen policy IDs validate");
+  raw.push_str(
+    "\n[[rate_limits]]\nname = \"limit-16\"\npolicy_id = \"policy-16\"\nrate = \"1r/s\"\n",
+  );
+  let config: Config = toml::from_str(&raw).expect("seventeen policy IDs parse");
+  let error = config
+    .validate()
+    .expect_err("seventeenth policy ID must fail");
+  assert!(
+    error
+      .to_string()
+      .contains("at most 16 rate limit policy_id"),
+    "{error:#}"
+  );
 }
 
 #[test]

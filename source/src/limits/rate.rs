@@ -14,7 +14,7 @@ pub fn parse_rate(raw: &str) -> anyhow::Result<ParsedRate> {
   let amount: f64 = amount
     .parse()
     .with_context(|| format!("invalid rate amount {raw}"))?;
-  if amount <= 0.0 {
+  if !amount.is_finite() || amount <= 0.0 {
     bail!("rate amount must be greater than 0");
   }
   let divisor = match unit {
@@ -23,9 +23,11 @@ pub fn parse_rate(raw: &str) -> anyhow::Result<ParsedRate> {
     "h" => 3600.0,
     _ => bail!("rate unit must be s, m, or h"),
   };
-  Ok(ParsedRate {
-    per_second: amount / divisor,
-  })
+  let per_second = amount / divisor;
+  if !per_second.is_finite() || per_second <= 0.0 {
+    bail!("rate must remain finite and positive after unit conversion");
+  }
+  Ok(ParsedRate { per_second })
 }
 
 impl ParsedRate {
@@ -45,22 +47,32 @@ pub(super) fn rate_limit_applies_after_route(limit: &RateLimitConfig, route_name
   limit.routes.is_empty() || limit.routes.iter().any(|route| route == route_name)
 }
 
-pub(super) fn take_local_rate_token(
+pub(super) fn take_local_rate_token_with_snapshot(
   bucket: &mut TokenBucket,
   now: Instant,
   rate: ParsedRate,
   burst: f64,
   mode: LimitMode,
   status: u16,
-) -> Option<StatusCode> {
+) -> RateLimitBucketDecision {
   let elapsed = now.duration_since(bucket.last).as_secs_f64();
   bucket.tokens = (bucket.tokens + elapsed * rate.per_second).min(burst);
   bucket.last = now;
   if bucket.tokens < 1.0 && mode == LimitMode::Enforcing {
-    return Some(rate_limit_status(status));
+    return RateLimitBucketDecision {
+      status: Some(rate_limit_status(status)),
+      outcome: Some(RateLimitOutcome::RateLimited),
+      tokens: Some(bucket.tokens),
+      suppress_all: false,
+    };
   }
   bucket.tokens -= 1.0;
-  None
+  RateLimitBucketDecision {
+    status: None,
+    outcome: Some(RateLimitOutcome::Allowed),
+    tokens: Some(bucket.tokens),
+    suppress_all: false,
+  }
 }
 
 pub(super) fn prune_refilled_rate_buckets(

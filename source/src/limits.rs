@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use http::header::{AUTHORIZATION, HeaderName};
@@ -134,6 +134,72 @@ struct RateLimitBucketSpec<'a> {
   max_buckets: usize,
   mode: LimitMode,
   status: u16,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RateLimitOutcome {
+  Allowed,
+  RateLimited,
+  BucketCapExceeded,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RateLimitSnapshot {
+  pub name: String,
+  pub burst: u32,
+  pub remaining: Option<u32>,
+  pub next_token_at: Option<Instant>,
+  pub outcome: RateLimitOutcome,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RateLimitEvaluation {
+  pub status: Option<StatusCode>,
+  pub checked: Vec<RateLimitSnapshot>,
+  pub suppress_all: bool,
+}
+
+#[derive(Debug)]
+struct RateLimitBucketDecision {
+  status: Option<StatusCode>,
+  outcome: Option<RateLimitOutcome>,
+  tokens: Option<f64>,
+  suppress_all: bool,
+}
+
+impl RateLimitBucketDecision {
+  fn unavailable(status: Option<StatusCode>) -> Self {
+    Self {
+      status,
+      outcome: None,
+      tokens: None,
+      suppress_all: true,
+    }
+  }
+
+  fn snapshot(&self, name: &str, burst: u32, rate: ParsedRate) -> Option<RateLimitSnapshot> {
+    let outcome = self.outcome?;
+    let tokens = self
+      .tokens
+      .filter(|tokens| tokens.is_finite() && *tokens >= 0.0);
+    let next_token_at = tokens.and_then(|tokens| {
+      if tokens >= 1.0 {
+        return None;
+      }
+      let seconds = (1.0 - tokens) / rate.per_second();
+      if !seconds.is_finite() || seconds < 0.0 || seconds >= i64::MAX as f64 {
+        return None;
+      }
+      Instant::now().checked_add(Duration::from_secs_f64(seconds))
+    });
+    Some(RateLimitSnapshot {
+      name: name.to_string(),
+      burst: burst.max(1),
+      remaining: tokens.map(|tokens| tokens.floor().min(u32::MAX as f64) as u32),
+      next_token_at,
+      outcome,
+    })
+  }
 }
 
 impl<'a> From<&'a RateLimitConfig> for RateLimitCheck<'a> {
@@ -439,19 +505,38 @@ impl LimitState {
     ip: IpAddr,
     rate_limits: &[RateLimitConfig],
   ) -> Option<StatusCode> {
+    self
+      .evaluate_pre_route_rate_limits_async(ip, rate_limits)
+      .await
+      .status
+  }
+
+  pub(crate) async fn evaluate_pre_route_rate_limits_async(
+    &self,
+    ip: IpAddr,
+    rate_limits: &[RateLimitConfig],
+  ) -> RateLimitEvaluation {
     let context = RateLimitContext::pre_route(ip);
+    let mut evaluation = RateLimitEvaluation::default();
     for limit in rate_limits
       .iter()
       .filter(|limit| rate_limit_applies_before_route(limit))
     {
-      if let Some(status) = self
-        .check_rate_limit_async(context, RateLimitCheck::from(limit))
-        .await
+      let decision = self
+        .check_rate_limit_with_snapshot_async(context, RateLimitCheck::from(limit))
+        .await;
+      evaluation.suppress_all |= decision.suppress_all;
+      if let Ok(rate) = parse_rate(&limit.rate)
+        && let Some(snapshot) = decision.snapshot(&limit.name, limit.burst, rate)
       {
-        return Some(status);
+        evaluation.checked.push(snapshot);
+      }
+      if decision.status.is_some() {
+        evaluation.status = decision.status;
+        break;
       }
     }
-    None
+    evaluation
   }
 
   pub async fn check_route_rate_limits_async(
@@ -459,18 +544,37 @@ impl LimitState {
     context: RateLimitContext<'_>,
     rate_limits: &[RateLimitConfig],
   ) -> Option<StatusCode> {
+    self
+      .evaluate_route_rate_limits_async(context, rate_limits)
+      .await
+      .status
+  }
+
+  pub(crate) async fn evaluate_route_rate_limits_async(
+    &self,
+    context: RateLimitContext<'_>,
+    rate_limits: &[RateLimitConfig],
+  ) -> RateLimitEvaluation {
+    let mut evaluation = RateLimitEvaluation::default();
     for limit in rate_limits
       .iter()
       .filter(|limit| rate_limit_applies_after_route(limit, context.route_name.unwrap_or_default()))
     {
-      if let Some(status) = self
-        .check_rate_limit_async(context, RateLimitCheck::from(limit))
-        .await
+      let decision = self
+        .check_rate_limit_with_snapshot_async(context, RateLimitCheck::from(limit))
+        .await;
+      evaluation.suppress_all |= decision.suppress_all;
+      if let Ok(rate) = parse_rate(&limit.rate)
+        && let Some(snapshot) = decision.snapshot(&limit.name, limit.burst, rate)
       {
-        return Some(status);
+        evaluation.checked.push(snapshot);
+      }
+      if decision.status.is_some() {
+        evaluation.status = decision.status;
+        break;
       }
     }
-    None
+    evaluation
   }
 
   pub async fn check_rate_limit_async(
@@ -478,12 +582,23 @@ impl LimitState {
     context: RateLimitContext<'_>,
     limit: RateLimitCheck<'_>,
   ) -> Option<StatusCode> {
+    self
+      .check_rate_limit_with_snapshot_async(context, limit)
+      .await
+      .status
+  }
+
+  async fn check_rate_limit_with_snapshot_async(
+    &self,
+    context: RateLimitContext<'_>,
+    limit: RateLimitCheck<'_>,
+  ) -> RateLimitBucketDecision {
     let Ok(rate) = parse_rate(limit.rate) else {
-      return Some(StatusCode::INTERNAL_SERVER_ERROR);
+      return RateLimitBucketDecision::unavailable(Some(StatusCode::INTERNAL_SERVER_ERROR));
     };
     let key = rate_limit_key(context, &limit);
     self
-      .check_rate_limit_bucket(RateLimitBucketSpec {
+      .check_rate_limit_bucket_with_snapshot(RateLimitBucketSpec {
         name: limit.name,
         key: &key,
         rate,
@@ -506,7 +621,7 @@ impl LimitState {
       return Some(StatusCode::INTERNAL_SERVER_ERROR);
     };
     self
-      .check_rate_limit_bucket(RateLimitBucketSpec {
+      .check_rate_limit_bucket_with_snapshot(RateLimitBucketSpec {
         name: bucket,
         key: "",
         rate,
@@ -516,6 +631,7 @@ impl LimitState {
         status,
       })
       .await
+      .status
   }
 
   pub fn check_rate_limits(
@@ -594,15 +710,17 @@ impl LimitState {
     {
       return Some(StatusCode::SERVICE_UNAVAILABLE);
     }
-    self.check_rate_limit_bucket_local(RateLimitBucketSpec {
-      name: bucket,
-      key: "",
-      rate,
-      burst,
-      max_buckets: 1,
-      mode: LimitMode::Enforcing,
-      status,
-    })
+    self
+      .check_rate_limit_bucket_local_with_snapshot(RateLimitBucketSpec {
+        name: bucket,
+        key: "",
+        rate,
+        burst,
+        max_buckets: 1,
+        mode: LimitMode::Enforcing,
+        status,
+      })
+      .status
   }
 
   pub(crate) fn check_rate_limit_local(
@@ -621,45 +739,67 @@ impl LimitState {
       return Some(StatusCode::SERVICE_UNAVAILABLE);
     }
     let key = rate_limit_key(context, &limit);
-    self.check_rate_limit_bucket_local(RateLimitBucketSpec {
-      name: limit.name,
-      key: &key,
-      rate,
-      burst: limit.burst,
-      max_buckets: limit.max_buckets,
-      mode: limit.mode,
-      status: limit.status,
-    })
+    self
+      .check_rate_limit_bucket_local_with_snapshot(RateLimitBucketSpec {
+        name: limit.name,
+        key: &key,
+        rate,
+        burst: limit.burst,
+        max_buckets: limit.max_buckets,
+        mode: limit.mode,
+        status: limit.status,
+      })
+      .status
   }
 
-  fn check_rate_limit_bucket_local(&self, spec: RateLimitBucketSpec<'_>) -> Option<StatusCode> {
+  fn check_rate_limit_bucket_local_with_snapshot(
+    &self,
+    spec: RateLimitBucketSpec<'_>,
+  ) -> RateLimitBucketDecision {
     let burst = f64::from(spec.burst.max(1));
     let now = Instant::now();
     let mut buckets = match self.rates.lock() {
       Ok(buckets) => buckets,
       Err(_) => {
         self.mark_unavailable();
-        return Some(StatusCode::SERVICE_UNAVAILABLE);
+        return RateLimitBucketDecision::unavailable(Some(StatusCode::SERVICE_UNAVAILABLE));
       }
     };
     let bucket_key = (spec.name.to_string(), spec.key.to_string());
     if let Some(bucket) = buckets.get_mut(&bucket_key) {
-      return take_local_rate_token(bucket, now, spec.rate, burst, spec.mode, spec.status);
+      return take_local_rate_token_with_snapshot(
+        bucket,
+        now,
+        spec.rate,
+        burst,
+        spec.mode,
+        spec.status,
+      );
     }
 
     prune_refilled_rate_buckets(&mut buckets, spec.name, now, spec.rate.per_second(), burst);
     if rate_limit_bucket_count(&buckets, spec.name) >= spec.max_buckets.max(1) {
       if spec.mode == LimitMode::Enforcing {
-        return Some(rate_limit_status(spec.status));
+        return RateLimitBucketDecision {
+          status: Some(rate_limit_status(spec.status)),
+          outcome: Some(RateLimitOutcome::BucketCapExceeded),
+          tokens: None,
+          suppress_all: false,
+        };
       }
-      return None;
+      return RateLimitBucketDecision {
+        status: None,
+        outcome: Some(RateLimitOutcome::BucketCapExceeded),
+        tokens: None,
+        suppress_all: false,
+      };
     }
 
     let bucket = buckets.entry(bucket_key).or_insert(TokenBucket {
       tokens: burst,
       last: now,
     });
-    take_local_rate_token(bucket, now, spec.rate, burst, spec.mode, spec.status)
+    take_local_rate_token_with_snapshot(bucket, now, spec.rate, burst, spec.mode, spec.status)
   }
 
   fn release_connection(&self, release: &LocalConnectionRelease) {

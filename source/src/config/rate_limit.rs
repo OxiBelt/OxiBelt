@@ -9,6 +9,9 @@ use crate::waf::PersonProofTokenBinding;
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RateLimitConfig {
   pub name: String,
+  /// Public identifier used to opt into downstream RateLimit field generation.
+  #[serde(default)]
+  pub policy_id: Option<String>,
   #[serde(default)]
   pub key: RateLimitKey,
   #[serde(default = "crate::limits::default_rate_limit_ipv4_prefix_bits")]

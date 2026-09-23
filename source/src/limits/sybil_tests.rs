@@ -3,6 +3,7 @@ use super::*;
 fn rate_limit_config(name: &str, key: RateLimitKey) -> RateLimitConfig {
   RateLimitConfig {
     name: name.to_string(),
+    policy_id: None,
     key,
     ipv4_prefix_bits: default_rate_limit_ipv4_prefix_bits(),
     ipv6_prefix_bits: default_rate_limit_ipv6_prefix_bits(),

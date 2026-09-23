@@ -4,7 +4,8 @@ use anyhow::bail;
 use sqlx::Postgres;
 
 use super::{
-  PostgresBackend, RedisBackend, SharedRateLimitOutcome, now_unix_ms, parse_rate_bucket,
+  PostgresBackend, RedisBackend, Resp, SharedRateLimitDecision, SharedRateLimitOutcome,
+  now_unix_ms, parse_rate_bucket,
 };
 
 #[cfg(test)]
@@ -23,7 +24,7 @@ impl MemoryBackend {
     burst: u32,
     max_buckets: usize,
     bucket_ttl: Duration,
-  ) -> anyhow::Result<SharedRateLimitOutcome> {
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     let mut values = self
       .values
       .lock()
@@ -37,7 +38,7 @@ impl MemoryBackend {
     purge_expired_rate_indexes(&mut rate_indexes, now);
     let index = rate_indexes.entry(limit_name.to_string()).or_default();
     if !index.contains_key(key) && index.len() >= max_buckets.max(1) {
-      return Ok(SharedRateLimitOutcome::BucketCapExceeded);
+      return Ok(cap_exceeded());
     }
     let expires_at_ms = expires_at_ms(now, bucket_ttl);
     index.insert(key.to_string(), expires_at_ms);
@@ -58,7 +59,7 @@ impl MemoryBackend {
     rate: f64,
     burst: u32,
     bucket_ttl: Duration,
-  ) -> anyhow::Result<SharedRateLimitOutcome> {
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     let mut values = self
       .values
       .lock()
@@ -86,7 +87,7 @@ impl RedisBackend {
     burst: u32,
     max_buckets: usize,
     bucket_ttl: Duration,
-  ) -> anyhow::Result<SharedRateLimitOutcome> {
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     let script = r#"
 local raw = redis.call('GET', KEYS[1])
 local now = tonumber(ARGV[1])
@@ -98,7 +99,7 @@ local member = ARGV[6]
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
 local known = redis.call('ZSCORE', KEYS[2], member)
 if not known and redis.call('ZCARD', KEYS[2]) >= max_buckets then
-  return 2
+  return {2}
 end
 local tokens = burst
 local last = now
@@ -115,13 +116,13 @@ if tokens < 1.0 then
   redis.call('PSETEX', KEYS[1], ttl, tostring(tokens) .. ':' .. tostring(now))
   redis.call('ZADD', KEYS[2], now + ttl, member)
   redis.call('PEXPIRE', KEYS[2], ttl)
-  return 0
+  return {0, tostring(tokens)}
 end
 tokens = tokens - 1.0
 redis.call('PSETEX', KEYS[1], ttl, tostring(tokens) .. ':' .. tostring(now))
 redis.call('ZADD', KEYS[2], now + ttl, member)
 redis.call('PEXPIRE', KEYS[2], ttl)
-return 1
+return {1, tostring(tokens)}
 "#;
     let ttl = ttl_ms(bucket_ttl);
     let resp = self
@@ -139,7 +140,7 @@ return 1
         key.as_bytes().to_vec(),
       ])
       .await?;
-    shared_rate_limit_outcome(resp.into_i64()?)
+    shared_rate_limit_decision(resp)
   }
 
   pub(super) async fn rate_take_bucket(
@@ -148,7 +149,7 @@ return 1
     rate: f64,
     burst: u32,
     bucket_ttl: Duration,
-  ) -> anyhow::Result<SharedRateLimitOutcome> {
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     let script = r#"
 local raw = redis.call('GET', KEYS[1])
 local now = tonumber(ARGV[1])
@@ -168,11 +169,11 @@ local elapsed = math.max(0, now - last)
 tokens = math.min(burst, tokens + (elapsed / 1000.0) * rate)
 if tokens < 1.0 then
   redis.call('PSETEX', KEYS[1], ttl, tostring(tokens) .. ':' .. tostring(now))
-  return 0
+  return {0, tostring(tokens)}
 end
 tokens = tokens - 1.0
 redis.call('PSETEX', KEYS[1], ttl, tostring(tokens) .. ':' .. tostring(now))
-return 1
+return {1, tostring(tokens)}
 "#;
     let ttl = ttl_ms(bucket_ttl);
     let resp = self
@@ -187,7 +188,7 @@ return 1
         ttl.to_string().into_bytes(),
       ])
       .await?;
-    shared_rate_limit_outcome(resp.into_i64()?)
+    shared_rate_limit_decision(resp)
   }
 }
 
@@ -200,7 +201,7 @@ impl PostgresBackend {
     burst: u32,
     max_buckets: usize,
     bucket_ttl: Duration,
-  ) -> anyhow::Result<SharedRateLimitOutcome> {
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     let mut tx = self.pool.begin().await?;
     let now = now_unix_ms();
     let expires_at_ms = expires_at_ms(now, bucket_ttl);
@@ -231,7 +232,7 @@ impl PostgresBackend {
       .await?;
       if active >= max_buckets {
         tx.rollback().await?;
-        return Ok(SharedRateLimitOutcome::BucketCapExceeded);
+        return Ok(cap_exceeded());
       }
     }
     let outcome = postgres_rate_take_in_tx(&mut tx, key, rate, burst, now, expires_at_ms).await?;
@@ -256,7 +257,7 @@ impl PostgresBackend {
     rate: f64,
     burst: u32,
     bucket_ttl: Duration,
-  ) -> anyhow::Result<SharedRateLimitOutcome> {
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     let mut tx = self.pool.begin().await?;
     let now = now_unix_ms();
     postgres_lock_rate_limit(&mut tx, key).await?;
@@ -301,7 +302,7 @@ async fn postgres_rate_take_in_tx(
   burst: u32,
   now: i64,
   expires_at_ms: i64,
-) -> anyhow::Result<SharedRateLimitOutcome> {
+) -> anyhow::Result<SharedRateLimitDecision> {
   let raw: Option<Vec<u8>> = sqlx::query_scalar(
     "SELECT value FROM oxibelt_shared_state
      WHERE key = $1 AND (expires_at_ms IS NULL OR expires_at_ms > $2) FOR UPDATE",
@@ -329,20 +330,84 @@ async fn postgres_rate_take_in_tx(
   .bind(expires_at_ms)
   .execute(&mut **tx)
   .await?;
-  Ok(if allowed {
-    SharedRateLimitOutcome::Allowed
-  } else {
-    SharedRateLimitOutcome::RateLimited
+  Ok(SharedRateLimitDecision {
+    outcome: if allowed {
+      SharedRateLimitOutcome::Allowed
+    } else {
+      SharedRateLimitOutcome::RateLimited
+    },
+    tokens: Some(tokens),
   })
 }
 
-fn shared_rate_limit_outcome(value: i64) -> anyhow::Result<SharedRateLimitOutcome> {
-  match value {
-    0 => Ok(SharedRateLimitOutcome::RateLimited),
-    1 => Ok(SharedRateLimitOutcome::Allowed),
-    2 => Ok(SharedRateLimitOutcome::BucketCapExceeded),
-    other => bail!("unexpected shared rate limit outcome {other}"),
+fn cap_exceeded() -> SharedRateLimitDecision {
+  SharedRateLimitDecision {
+    outcome: SharedRateLimitOutcome::BucketCapExceeded,
+    tokens: None,
   }
+}
+
+fn shared_rate_limit_decision(response: Resp) -> anyhow::Result<SharedRateLimitDecision> {
+  let Resp::Array(values) = response else {
+    bail!("unexpected shared rate limit response: {response:?}");
+  };
+  let mut values = values.into_iter();
+  let outcome = values
+    .next()
+    .ok_or_else(|| anyhow::anyhow!("missing shared rate limit outcome"))?
+    .into_i64()?;
+  let tokens = match values.next() {
+    Some(Resp::Bulk(Some(bytes))) => Some(std::str::from_utf8(&bytes)?.parse::<f64>()?),
+    None => None,
+    other => bail!("unexpected shared rate limit balance: {other:?}"),
+  };
+  if values.next().is_some() {
+    bail!("unexpected extra shared rate limit response values");
+  }
+  let outcome = match outcome {
+    0 => SharedRateLimitOutcome::RateLimited,
+    1 => SharedRateLimitOutcome::Allowed,
+    2 => SharedRateLimitOutcome::BucketCapExceeded,
+    other => bail!("unexpected shared rate limit outcome {other}"),
+  };
+  if (outcome == SharedRateLimitOutcome::BucketCapExceeded) != tokens.is_none()
+    || tokens.is_some_and(|tokens| !tokens.is_finite() || tokens < 0.0)
+  {
+    bail!("invalid shared rate limit balance");
+  }
+  Ok(SharedRateLimitDecision { outcome, tokens })
+}
+
+#[cfg(test)]
+#[test]
+fn redis_rate_reply_decodes_balance_and_bucket_cap() {
+  let allowed = shared_rate_limit_decision(Resp::Array(vec![
+    Resp::Int(1),
+    Resp::Bulk(Some(b"2.75".to_vec())),
+  ]))
+  .unwrap();
+  assert_eq!(allowed.outcome, SharedRateLimitOutcome::Allowed);
+  assert_eq!(allowed.tokens, Some(2.75));
+
+  let denied = shared_rate_limit_decision(Resp::Array(vec![
+    Resp::Int(0),
+    Resp::Bulk(Some(b"0.25".to_vec())),
+  ]))
+  .unwrap();
+  assert_eq!(denied.outcome, SharedRateLimitOutcome::RateLimited);
+  assert_eq!(denied.tokens, Some(0.25));
+
+  let cap = shared_rate_limit_decision(Resp::Array(vec![Resp::Int(2)])).unwrap();
+  assert_eq!(cap.outcome, SharedRateLimitOutcome::BucketCapExceeded);
+  assert_eq!(cap.tokens, None);
+  assert!(shared_rate_limit_decision(Resp::Array(vec![Resp::Int(1)])).is_err());
+  assert!(
+    shared_rate_limit_decision(Resp::Array(vec![
+      Resp::Int(2),
+      Resp::Bulk(Some(b"0".to_vec())),
+    ]))
+    .is_err()
+  );
 }
 
 fn expires_at_ms(now: i64, ttl: Duration) -> i64 {
@@ -372,7 +437,7 @@ fn memory_rate_take_value(
   burst: u32,
   now: i64,
   expires_at_ms: i64,
-) -> SharedRateLimitOutcome {
+) -> SharedRateLimitDecision {
   let (mut tokens, last) = values
     .get(key)
     .and_then(|value| parse_rate_bucket(&value.value))
@@ -389,9 +454,12 @@ fn memory_rate_take_value(
       expires_at_ms: Some(expires_at_ms),
     },
   );
-  if allowed {
-    SharedRateLimitOutcome::Allowed
-  } else {
-    SharedRateLimitOutcome::RateLimited
+  SharedRateLimitDecision {
+    outcome: if allowed {
+      SharedRateLimitOutcome::Allowed
+    } else {
+      SharedRateLimitOutcome::RateLimited
+    },
+    tokens: Some(tokens),
   }
 }

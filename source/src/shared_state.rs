@@ -319,6 +319,12 @@ pub enum SharedRateLimitOutcome {
   BucketCapExceeded,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SharedRateLimitDecision {
+  pub outcome: SharedRateLimitOutcome,
+  pub tokens: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedCacheEntry {
   pub policy: String,
@@ -635,8 +641,25 @@ impl SharedState {
     burst: u32,
     max_buckets: usize,
   ) -> anyhow::Result<SharedRateLimitOutcome> {
+    self
+      .take_rate_token_snapshot(name, key, rate, burst, max_buckets)
+      .await
+      .map(|decision| decision.outcome)
+  }
+
+  pub(crate) async fn take_rate_token_snapshot(
+    &self,
+    name: &str,
+    key: &str,
+    rate: ParsedRate,
+    burst: u32,
+    max_buckets: usize,
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     let Some(backend) = &self.rate_limits else {
-      return Ok(SharedRateLimitOutcome::Allowed);
+      return Ok(SharedRateLimitDecision {
+        outcome: SharedRateLimitOutcome::Allowed,
+        tokens: None,
+      });
     };
     let bucket_key = self.key(&format!("rate:{name}:{key}"));
     let index_key = self.key(&format!("rate-index:{name}"));
@@ -660,8 +683,23 @@ impl SharedState {
     rate: ParsedRate,
     burst: u32,
   ) -> anyhow::Result<SharedRateLimitOutcome> {
+    self
+      .take_rate_token_bucket_snapshot(bucket, rate, burst)
+      .await
+      .map(|decision| decision.outcome)
+  }
+
+  pub(crate) async fn take_rate_token_bucket_snapshot(
+    &self,
+    bucket: &str,
+    rate: ParsedRate,
+    burst: u32,
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     let Some(backend) = &self.rate_limits else {
-      return Ok(SharedRateLimitOutcome::Allowed);
+      return Ok(SharedRateLimitDecision {
+        outcome: SharedRateLimitOutcome::Allowed,
+        tokens: None,
+      });
     };
     let key = self.key(&format!("rate:{bucket}"));
     let result = backend

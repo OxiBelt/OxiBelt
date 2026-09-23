@@ -135,7 +135,7 @@ impl Backend {
     burst: u32,
     max_buckets: usize,
     bucket_ttl: Duration,
-  ) -> anyhow::Result<SharedRateLimitOutcome> {
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     match self {
       Self::Redis(redis) => {
         redis
@@ -189,7 +189,7 @@ impl Backend {
     rate_per_second: f64,
     burst: u32,
     bucket_ttl: Duration,
-  ) -> anyhow::Result<SharedRateLimitOutcome> {
+  ) -> anyhow::Result<SharedRateLimitDecision> {
     match self {
       Self::Redis(redis) => {
         redis

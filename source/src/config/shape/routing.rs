@@ -473,6 +473,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "max_buckets",
       "mode",
       "name",
+      "policy_id",
       "rate",
       "routes",
       "status",

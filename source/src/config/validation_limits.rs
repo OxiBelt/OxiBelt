@@ -32,6 +32,7 @@ impl Config {
       .map(|route| route.name.as_str())
       .collect::<HashSet<_>>();
     let mut names = HashSet::new();
+    let mut policy_ids = HashSet::new();
     for rate_limit in &self.rate_limits {
       if rate_limit.name.trim().is_empty() {
         bail!("rate limit name must not be empty");
@@ -39,8 +40,39 @@ impl Config {
       if !names.insert(rate_limit.name.as_str()) {
         bail!("duplicate rate limit name {}", rate_limit.name);
       }
-      crate::limits::parse_rate(&rate_limit.rate)
+      let parsed_rate = crate::limits::parse_rate(&rate_limit.rate)
         .with_context(|| format!("invalid rate_limits {} rate", rate_limit.name))?;
+      if let Some(policy_id) = &rate_limit.policy_id {
+        if policy_id.is_empty()
+          || policy_id.len() > 64
+          || !policy_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+          bail!(
+            "rate limit {} policy_id must contain 1..=64 ASCII letters, digits, dots, underscores, or hyphens",
+            rate_limit.name
+          );
+        }
+        if !policy_ids.insert(policy_id.as_str()) {
+          bail!("duplicate rate limit policy_id {policy_id}");
+        }
+        if policy_ids.len() > 16 {
+          bail!("at most 16 rate limit policy_id values may be enabled");
+        }
+        if rate_limit.mode != LimitMode::Enforcing {
+          bail!(
+            "rate limit {} policy_id requires enforcing mode",
+            rate_limit.name
+          );
+        }
+        if !parsed_rate.per_second().is_finite() || parsed_rate.per_second() <= 0.0 {
+          bail!(
+            "rate limit {} policy_id requires a finite positive per-second rate",
+            rate_limit.name
+          );
+        }
+      }
       if rate_limit.max_buckets == 0 {
         bail!(
           "rate limit {} max_buckets must be greater than 0",
