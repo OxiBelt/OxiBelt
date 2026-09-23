@@ -42,6 +42,8 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 mod dictionary;
 mod event_stream;
+#[cfg(test)]
+mod h3_early_response;
 mod incremental;
 mod managed_upload;
 mod sse;
@@ -5215,10 +5217,15 @@ async fn h3_downstream_request(args: &DownstreamArgs) -> anyhow::Result<serde_js
       "request_body_prefix_bytes": args.body.len(),
     }));
   }
-  stream
-    .finish()
-    .await
-    .context("failed to finish downstream HTTP/3 request")?;
+  match stream.finish().await {
+    Ok(()) => {}
+    // A server can reject an empty request from its headers and drop its
+    // receive half before this FIN. Quinn then sends STOP_SENDING(0), but the
+    // response remains readable on the other half of the stream.
+    Err(h3::error::StreamError::RemoteTerminate { code, .. })
+      if args.body_bytes.unwrap_or(args.body.len()) == 0 && code.value() == 0 => {}
+    Err(error) => return Err(error).context("failed to finish downstream HTTP/3 request"),
+  }
 
   let response = stream
     .recv_response()
