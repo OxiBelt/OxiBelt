@@ -35,6 +35,7 @@ pub(super) struct InitialContext<'state, 'request, 'access, 'transport, 'metadat
   pub(super) upload_bandwidth_limited: bool,
   pub(super) max_request_body_bytes: u64,
   pub(super) verified_early_data: bool,
+  pub(super) rate_limit_report: &'access mut rate_limit_headers::Report,
 }
 
 pub(super) struct UpstreamContext<'state, 'request, 'access, 'transport, 'metadata> {
@@ -185,6 +186,7 @@ where
     upload_bandwidth_limited,
     max_request_body_bytes,
     verified_early_data,
+    rate_limit_report,
   } = context;
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
   let request_method = request.method().clone();
@@ -205,11 +207,13 @@ where
     .with_tls_fingerprint(tls.fingerprint.as_deref())
     .with_client_asn(client_asn)
     .with_tcp_max_hop(tcp_max_hop);
-    if let Some(status) = state
+    let evaluation = state
       .limits
-      .check_route_rate_limits_async(rate_limit_context, &state.config.rate_limits)
-      .await
-    {
+      .evaluate_route_rate_limits_async(rate_limit_context, &state.config.rate_limits)
+      .await;
+    let status = evaluation.status;
+    rate_limit_report.absorb(evaluation, &state.config.rate_limits);
+    if let Some(status) = status {
       return route_security.text(status, "rate limit exceeded");
     }
   }

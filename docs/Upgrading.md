@@ -5,6 +5,19 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Rate limit response fields
+
+Top-level `[[rate_limits]]` entries can opt into downstream `RateLimit` and
+`RateLimit-Policy` fields with a unique `policy_id`. Existing configurations
+remain silent and retain their token-bucket enforcement. Review each ID and
+bucket capacity before enabling public advertisement; per-client balances make
+the downstream response private for caching. The native schema epoch and
+persisted rate-limit state are unchanged. Before rolling back to a binary that
+predates this option, remove every `policy_id` setting; the older binary will
+then continue enforcing the existing limits without generating these fields.
+See [rate limits](Configuration.md#limits-cache-and-ops) for the surrounding
+configuration and cache behavior.
+
 ## Compression Dictionary Transport
 
 RFC 9842 support is opt-in through `compression_dictionary` and per-route

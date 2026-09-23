@@ -70,6 +70,7 @@ mod pipeline;
 mod priority_admission;
 mod proxy_tls;
 pub(crate) mod query;
+mod rate_limit_headers;
 pub(crate) mod request;
 pub(crate) mod request_framing;
 mod request_mirror;
@@ -204,6 +205,7 @@ pub(super) async fn handle_inner_impl<B>(
   request_connection_permit: &mut Option<ConnectionPermit>,
   selected_bandwidth: &mut Option<Arc<RouteBandwidthLimiter>>,
   trace_context: Option<TraceContext>,
+  rate_limit_report: &mut rate_limit_headers::Report,
 ) -> Response<ProxyBody>
 where
   B: Body<Data = bytes::Bytes> + Send + Sync + Unpin + 'static,
@@ -340,13 +342,16 @@ where
     }
   }
 
-  if state.request_path_features.rate_limits
-    && let Some(status) = state
+  if state.request_path_features.rate_limits {
+    let evaluation = state
       .limits
-      .check_pre_route_rate_limits_async(client_addr.ip(), &state.config.rate_limits)
-      .await
-  {
-    return text_response(status, "rate limit exceeded");
+      .evaluate_pre_route_rate_limits_async(client_addr.ip(), &state.config.rate_limits)
+      .await;
+    let status = evaluation.status;
+    rate_limit_report.absorb(evaluation, &state.config.rate_limits);
+    if let Some(status) = status {
+      return text_response(status, "rate limit exceeded");
+    }
   }
 
   let route_resolution_started =
@@ -601,6 +606,7 @@ where
       upload_bandwidth_limited: true,
       max_request_body_bytes,
       verified_early_data,
+      rate_limit_report,
     })
     .await
   }
@@ -618,6 +624,8 @@ mod body_capture_tests;
 mod cache_tests;
 #[cfg(test)]
 mod early_data_rate_limit_tests;
+#[cfg(test)]
+mod rate_limit_header_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

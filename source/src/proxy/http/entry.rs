@@ -237,6 +237,7 @@ where
   };
   let mut request_connection_permit = None;
   let mut selected_bandwidth = None;
+  let mut rate_limit_report = super::rate_limit_headers::Report::default();
   let request_is_head = request.method() == Method::HEAD;
   let mut response = handle_inner_impl(
     request,
@@ -256,6 +257,7 @@ where
     &mut request_connection_permit,
     &mut selected_bandwidth,
     trace_context,
+    &mut rate_limit_report,
   )
   .await;
   incremental::adapt_admission_rejection(&mut response, incremental_request, request_version);
@@ -264,11 +266,12 @@ where
   // particular, Hyper's H1 encoder cannot serialize an HTTP/3 response head.
   let response = super::status_headers::finalize(response, &state.config.proxy.status_headers);
   let response = normalize_downstream_response_version(response, request_version);
-  let response = if let Some(context) = digest_request.as_ref() {
+  let mut response = if let Some(context) = digest_request.as_ref() {
     integrity_digest::finalize(response, context)
   } else {
     response
   };
+  super::rate_limit_headers::apply(&mut response, &rate_limit_report);
   let response = if let Some(limiter) = selected_bandwidth {
     with_final_response_bandwidth(response, limiter, state.metrics.clone(), transport_network)
   } else {
