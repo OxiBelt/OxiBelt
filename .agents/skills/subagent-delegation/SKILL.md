@@ -1,6 +1,6 @@
 ---
 name: subagent-delegation
-description: Route, delegate, and supervise Codex subagents for software-engineering work. Use when a task benefits from parallel exploration, repetitive implementation, test/log/document processing, semantic diagnosis, correctness or security review, or other bounded delegated work. Prefer cost-efficient gpt-5.6-terra and gpt-5.6-luna workers and escalate only when evidence requires it. For authorized defensive security work, gpt-daybreak-blue-latest may be used when available, but its subagent reasoning effort must never exceed xhigh. Do not use this skill merely to choose or modify the primary agent's normal/plan mode, and do not spawn subagents for trivial work whose delegation overhead exceeds the task.
+description: Route, delegate, and supervise Codex subagents for software-engineering work. Use when a task benefits from parallel exploration, repetitive implementation, test/log/document processing, semantic diagnosis, correctness or security review, or other bounded delegated work. Prefer gpt-6-sol and gpt-6-luna workers and escalate only when evidence requires it. For authorized defensive security work, gpt-daybreak-blue-latest may be used when available, but its subagent reasoning effort must never exceed xhigh. Do not use this skill merely to choose or modify the primary agent's normal/plan mode, and do not spawn subagents for trivial work whose delegation overhead exceeds the task.
 ---
 
 # Subagent Delegation
@@ -31,7 +31,7 @@ Do not choose a more expensive model merely because the overall project is large
 
 ### 1. Exploration Subagent
 
-**Default:** `gpt-5.6-terra`, reasoning effort `medium`
+**Default:** `gpt-6-sol`, reasoning effort `medium`
 
 Use for read-heavy repository investigation where the expected output is evidence rather than a final architectural decision.
 
@@ -54,7 +54,7 @@ Expected output:
 - Uncertainties or conflicting evidence.
 - A compact summary suitable for consumption by another agent.
 
-#### Escalate exploration to `gpt-5.6-terra high` when:
+#### Escalate exploration to `gpt-6-sol high` when:
 
 - The repository structure is highly indirect or generated.
 - Control flow crosses asynchronous, concurrent, macro-generated, FFI, unsafe, or protocol state-machine boundaries.
@@ -62,7 +62,7 @@ Expected output:
 - Several plausible implementations exist and distinguishing them requires more than search and local code reading.
 - The investigation itself concerns a security boundary or correctness invariant.
 
-#### Prefer `gpt-5.6-luna` instead when:
+#### Prefer `gpt-6-luna` instead when:
 
 - The task is essentially exhaustive enumeration.
 - Search criteria are precise.
@@ -80,7 +80,7 @@ Examples:
 
 ### 2. Correctness and Security Subagent
 
-**Default:** `gpt-5.6-terra`, reasoning effort `high`
+**Default:** `gpt-6-sol`, reasoning effort `high`
 
 Use when delegated work requires adversarial thinking, invariant checking, semantic validation, or reasoning about failure modes.
 
@@ -152,7 +152,7 @@ Reasoning-effort policy for Daybreak Blue subagents:
 
 Do not infer that Daybreak Blue is always more accurate than Terra or Sol for every security task. Route based on the actual security question, available evidence, cost, and validation needs. For example, a large exhaustive call-site inventory should still go to Luna, while a nuanced authorization bypass investigation may justify Daybreak Blue `high` or `xhigh`.
 
-If `gpt-daybreak-blue-latest` is unavailable, unsupported, or rejected by the active runtime, fall back to `gpt-5.6-terra high` for ordinary security review and escalate to `gpt-5.6 high/xhigh` only when the existing escalation rules justify it.
+If `gpt-daybreak-blue-latest` is unavailable, unsupported, or rejected by the active runtime, fall back to `gpt-6-sol high` for ordinary security review and escalate to `gpt-6 high/xhigh` only when the existing escalation rules justify it.
 
 The availability of Daybreak Blue must **not** be used as a reason to widen security scope automatically. In particular, do not turn release preparation into a monolithic full-repository review merely because a stronger security-capable model is available. Apply the Security Review Scope Policy below unchanged.
 
@@ -160,7 +160,7 @@ The availability of Daybreak Blue must **not** be used as a reason to widen secu
 
 ### 3. Mechanical and Repetitive Work Subagent
 
-**Default:** `gpt-5.6-luna`, reasoning effort `max`
+**Default:** `gpt-6-luna`, reasoning effort `max`
 
 Use for clearly specified transformations whose correctness can be checked through compilation, tests, diffs, formatting, or deterministic inspection.
 
@@ -203,7 +203,7 @@ A useful rule:
 
 ### 4. Tests, Logs, Documentation, and Evidence Subagent
 
-**Default:** `gpt-5.6-luna`, reasoning effort `high` or `max`
+**Default:** `gpt-6-luna`, reasoning effort `high` or `max`
 
 Use Luna for high-volume evidence processing when the interpretation criteria are well specified.
 
@@ -246,7 +246,7 @@ Do not let a log-processing subagent turn correlation into causation. It should 
 
 When a separate final integration or review subagent is appropriate, prefer:
 
-**Default:** `gpt-5.6`, reasoning effort `high` or `xhigh`
+**Default:** `gpt-6`, reasoning effort `high` or `xhigh`
 
 This is the exception to the general preference for cheaper subagents. A strong reviewer is useful when independent work from several subagents must be reconciled.
 
@@ -272,7 +272,7 @@ Use `xhigh` only when integration itself is difficult, such as:
 - Significant public API compatibility concerns.
 - Multiple independently modified subsystems with subtle interactions.
 
-Do not use a `gpt-5.6` subagent as a routine formatter, grep worker, test runner, or bulk migration agent.
+Do not use a `gpt-6` subagent as a routine formatter, grep worker, test runner, or bulk migration agent.
 
 ---
 
@@ -645,8 +645,8 @@ Prefer approximately:
 | Semantic diagnosis | Terra high |
 | Correctness / ordinary security review | Terra high |
 | Authorized defensive security investigation / review | `gpt-daybreak-blue-latest` high; `xhigh` only when justified |
-| Complex cross-agent integration | `gpt-5.6` high |
-| Exceptional high-risk integration | `gpt-5.6` xhigh |
+| Complex cross-agent integration | `gpt-6` high |
+| Exceptional high-risk integration | `gpt-6` xhigh |
 
 Do not promote an agent solely because:
 
@@ -689,7 +689,7 @@ Exploration
                  |
                  v
        final cross-cutting review
-         gpt-5.6 high/xhigh
+         gpt-6 high/xhigh
        only when warranted
 ```
 
@@ -703,7 +703,7 @@ Remove stages that do not add meaningful confidence.
 
 Do not:
 
-- Use `gpt-5.6` subagents for routine repository search.
+- Use `gpt-6` subagents for routine repository search.
 - Use Terra high for trivial rename work.
 - Ask Luna to make novel security or architectural decisions.
 - Spawn several agents with the same broad prompt and merge their patches blindly.
