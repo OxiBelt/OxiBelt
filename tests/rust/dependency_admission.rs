@@ -672,6 +672,10 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
             || (name == "h2" && version == "0.4.19" && {
               assert_h2_vendor_admission();
               true
+            })
+            || (name == "rustls" && version == "0.23.45" && {
+              assert_rustls_vendor_admission();
+              true
             }),
           "critical dependency {name}@{version} is not an approved registry or byte-locked vendored package"
         );
@@ -966,7 +970,7 @@ fn assert_hyper_vendor_admission() {
     .as_table()
     .expect("reviewed Hyper patch");
   assert_eq!(root["patch"].as_table().expect("patch table").len(), 1);
-  assert_eq!(patches.len(), 2, "unreviewed Cargo patch");
+  assert_eq!(patches.len(), 3, "unreviewed Cargo patch");
   assert_eq!(
     patches["h2"]["path"].as_str(),
     Some("source/third_party/h2")
@@ -975,8 +979,13 @@ fn assert_hyper_vendor_admission() {
   assert_eq!(patches["hyper"]["path"].as_str(), Some(VENDOR));
   assert_eq!(patches["hyper"].as_table().expect("patch").len(), 1);
   assert_eq!(
+    patches["rustls"]["path"].as_str(),
+    Some("source/third_party/rustls")
+  );
+  assert_eq!(patches["rustls"].as_table().expect("patch").len(), 1);
+  assert_eq!(
     string_array(&root["workspace"]["exclude"], "exclusions"),
-    vec![VENDOR, "source/third_party/h2"]
+    vec![VENDOR, "source/third_party/h2", "source/third_party/rustls"]
   );
   let manifest = toml_document(&format!("{VENDOR}/Cargo.toml"));
   assert_eq!(manifest["package"]["name"].as_str(), Some("hyper"));
@@ -998,7 +1007,7 @@ fn assert_hyper_vendor_admission() {
   let sources = policy["rust"]["vendoredRustSources"]
     .as_array()
     .expect("vendor inventory");
-  assert_eq!(sources.len(), 2);
+  assert_eq!(sources.len(), 3);
   let source = sources
     .iter()
     .find(|source| source["name"] == "hyper")
@@ -1035,6 +1044,81 @@ fn assert_hyper_vendor_admission() {
 #[test]
 fn hyper_transport_source_is_byte_locked_and_governed() {
   assert_hyper_vendor_admission();
+}
+
+fn assert_rustls_vendor_admission() {
+  const VENDOR: &str = "source/third_party/rustls";
+  let root = toml_document("Cargo.toml");
+  let patches = root["patch"]["crates-io"]
+    .as_table()
+    .expect("reviewed Cargo patches");
+  assert_eq!(patches["rustls"]["path"].as_str(), Some(VENDOR));
+  assert_eq!(patches["rustls"].as_table().expect("patch").len(), 1);
+  let manifest = toml_document(&format!("{VENDOR}/Cargo.toml"));
+  assert_eq!(manifest["package"]["name"].as_str(), Some("rustls"));
+  assert_eq!(manifest["package"]["version"].as_str(), Some("0.23.45"));
+  assert_eq!(
+    manifest["package"]["license"].as_str(),
+    Some("Apache-2.0 OR ISC OR MIT")
+  );
+  assert_eq!(manifest["package"]["build"].as_str(), Some("build.rs"));
+
+  let lock = toml_document("Cargo.lock");
+  let rustls = lock["package"]
+    .as_array()
+    .expect("packages")
+    .iter()
+    .filter(|package| package["name"].as_str() == Some("rustls"))
+    .collect::<Vec<_>>();
+  assert_eq!(rustls.len(), 1);
+  assert_eq!(rustls[0]["version"].as_str(), Some("0.23.45"));
+  assert!(rustls[0].get("source").is_none());
+  assert!(rustls[0].get("checksum").is_none());
+
+  let policy = json_policy();
+  let sources = policy["rust"]["vendoredRustSources"]
+    .as_array()
+    .expect("vendor inventory");
+  assert_eq!(sources.len(), 3);
+  let source = sources
+    .iter()
+    .find(|source| source["name"] == "rustls")
+    .expect("rustls source inventory");
+  assert_eq!(source["version"], "0.23.45");
+  assert_eq!(source["path"], VENDOR);
+  assert_eq!(source["license"], "Apache-2.0 OR ISC OR MIT");
+  assert_eq!(source["owner"], "@piquark6046");
+  assert_eq!(
+    source["trackingIssue"],
+    "https://github.com/OxiBelt/OxiBelt/issues/209"
+  );
+  assert_eq!(
+    source["upstreamRepository"],
+    "https://github.com/rustls/rustls"
+  );
+  assert_eq!(
+    source["upstreamArchiveSha256"],
+    "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+  );
+  assert_eq!(source["manifestPath"], "supply-chain/rustls-source.sha256");
+  assert_eq!(
+    source["manifestSha256"],
+    "3e32be07eb6fc6716dad12a819ac77d9986718b0011f1d0ebcd1dec7cce41265"
+  );
+  assert_eq!(
+    sha256_hex(read("supply-chain/rustls-source.sha256").as_bytes()),
+    source["manifestSha256"]
+  );
+  assert_eq!(
+    hash_regular_tree(&repo_root().join(VENDOR)),
+    checksum_manifest("supply-chain/rustls-source.sha256"),
+    "vendored rustls changed without source review"
+  );
+}
+
+#[test]
+fn rustls_tls_source_is_byte_locked_and_governed() {
+  assert_rustls_vendor_admission();
 }
 
 fn assert_h2_vendor_admission() {

@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "de8720b1942d803be03ebf52e54d69069cacdd8ed903b67a425ffd49989f19e1",
+      "lockfileSha256": "b399a6f6d9ce6076bf7e8363903d49e3c36d4ffaa4af13e553651a674bbf83a1",
       "exemptionInventorySha256": "bd21e1575dce0d01e19bb0741a9e09da3f666de87814c5740a645fe920d5ee5a",
       "exemptedPackageVersions": 456
     },
@@ -105,6 +105,21 @@
         "reviewedOn": "2026-09-18",
         "maintenanceReviewIntervalDays": 30,
         "removalCriteria": "Replace this exact patch with an upstream release once bounded HTTP/1 and HTTP/2 server informational sending and HTTP/2 client callbacks pass the OxiBelt cross-protocol matrix. Also require equivalent typed WebTransport CONNECT handoff, acknowledged settings snapshots, and bounded independently driven send/reset semantics tracked in issue #195. Review every Hyper update and preserve upstream framing, ownership, and unsafe invariants."
+      },
+      {
+        "name": "rustls",
+        "version": "0.23.45",
+        "path": "source/third_party/rustls",
+        "upstreamRepository": "https://github.com/rustls/rustls",
+        "upstreamArchiveSha256": "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634",
+        "manifestPath": "supply-chain/rustls-source.sha256",
+        "manifestSha256": "3e32be07eb6fc6716dad12a819ac77d9986718b0011f1d0ebcd1dec7cce41265",
+        "license": "Apache-2.0 OR ISC OR MIT",
+        "owner": "@piquark6046",
+        "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/209",
+        "reviewedOn": "2026-09-24",
+        "maintenanceReviewIntervalDays": 30,
+        "removalCriteria": "Replace the local RFC 9846 patch when an upstream rustls release provides equivalent bounded key-update epochs, post-close write rejection, disabled-resumption ticket handling, general_error support, and an explicit TLS 1.2 downgrade sentinel setting. Review each rustls update and rerun the TLS and dependency admission suites."
       }
     ],
     "nativeSources": [
@@ -312,7 +327,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:de8720b1942d803be03ebf52e54d69069cacdd8ed903b67a425ffd49989f19e1",
+      "subject": "Cargo.lock@sha256:b399a6f6d9ce6076bf7e8363903d49e3c36d4ffaa4af13e553651a674bbf83a1",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. The development-only proptest graph adds exact rand 0.9, rand_chacha 0.9, and rand_core 0.9 lines tracked by https://github.com/OxiBelt/OxiBelt/issues/172; any further line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -324,7 +339,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:de8720b1942d803be03ebf52e54d69069cacdd8ed903b67a425ffd49989f19e1",
+      "subject": "Cargo.lock@sha256:b399a6f6d9ce6076bf7e8363903d49e3c36d4ffaa4af13e553651a674bbf83a1",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,

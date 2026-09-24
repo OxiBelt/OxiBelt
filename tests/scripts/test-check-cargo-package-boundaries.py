@@ -305,6 +305,11 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                         "1.11.1",
                         str(repo_root / "source/third_party/hyper"),
                     ),
+                    local_identity(
+                        "rustls",
+                        "0.23.45",
+                        str(repo_root / "source/third_party/rustls"),
+                    ),
                 }
             ),
         )
