@@ -5,6 +5,21 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Web Bot Auth
+
+Web Bot Auth verification is opt-in through `[web_bot_auth]` and defaults to
+disabled. Existing configurations and request processing are unchanged until
+it is enabled. When enabled, a verified signature supplies identity to OxiRule;
+verification does not establish that a request is benign. Invalid and
+unverified requests continue through normal routing and WAF rules. See
+[Web Bot Auth](Configuration.md#web-bot-auth) for verifier limits and discovery
+requirements.
+
+Native configuration remains at schema epoch `1`, and no persisted-state
+migration is required. Before rolling back to a binary that predates Web Bot
+Auth, remove the `[web_bot_auth]` table and any OxiRule conditions that depend
+on verified Web Bot Auth identity, then validate the target configuration.
+
 ## Rate limit response fields
 
 Top-level `[[rate_limits]]` entries can opt into downstream `RateLimit` and
