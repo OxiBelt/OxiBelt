@@ -41,7 +41,7 @@ use super::plain_http::response_head::response_head_bytes;
 use super::prefixed_io::PrefixedIo;
 mod admission;
 mod io;
-use io::{shutdown_timeout, write_all_timeout};
+use io::{close_tls_stream, shutdown_timeout, write_all_timeout};
 pub(super) enum H1FastProxyPreflight {
   Done,
   Continue {
@@ -84,6 +84,7 @@ pub(super) async fn try_handle_connection(
   let mut buffer = Vec::new();
   let mut head_buffer = Vec::with_capacity(512);
   let mut served_requests = 0_usize;
+  let close_timeout = Duration::from_millis(snapshot.config.limits.response_send_timeout_ms);
   loop {
     if snapshot.overload.state() != OverloadState::Normal {
       return Ok(H1FastProxyPreflight::Continue {
@@ -99,7 +100,7 @@ pub(super) async fn try_handle_connection(
       });
     }
     if *shutdown.borrow() || *data_plane_drain.borrow() {
-      return Ok(H1FastProxyPreflight::Done);
+      return Ok(close_tls_stream(stream, close_timeout).await);
     }
 
     let downstream_receive_started = proxy_http::fast_path::stage_timing::start(
@@ -131,7 +132,7 @@ pub(super) async fn try_handle_connection(
       downstream_receive_started,
     );
     let parsed = match read_outcome {
-      ReadRequestOutcome::Closed => return Ok(H1FastProxyPreflight::Done),
+      ReadRequestOutcome::Closed => return Ok(close_tls_stream(stream, close_timeout).await),
       ReadRequestOutcome::Fallback { prefix, reason } => {
         trace!(reason, "TLS H1 pre-Hyper proxy parser fell back");
         return Ok(H1FastProxyPreflight::Continue {
@@ -248,7 +249,7 @@ pub(super) async fn try_handle_connection(
     let Some(write_plan) =
       response_write_plan(&response, &request_method, close_after_request, timeout)
     else {
-      return Ok(H1FastProxyPreflight::Done);
+      return Ok(close_tls_stream(stream, close_timeout).await);
     };
     if let Err(error) = write_response(
       &mut stream,
@@ -261,11 +262,11 @@ pub(super) async fn try_handle_connection(
     .await
     {
       debug!(error = %error, peer = %peer_addr, "TLS H1 pre-Hyper proxy response failed");
-      return Ok(H1FastProxyPreflight::Done);
+      return Ok(close_tls_stream(stream, close_timeout).await);
     }
     served_requests += 1;
     if !write_plan.keep_alive {
-      return Ok(H1FastProxyPreflight::Done);
+      return Ok(close_tls_stream(stream, close_timeout).await);
     }
     buffer = next_buffer;
   }

@@ -956,7 +956,10 @@ mod tests {
 
     let (_, second_kind, first_tickets) =
       run_two_handshakes(&server_tls, client, server_name).await;
-    assert!(first_tickets > 0, "server should offer TLS 1.3 tickets");
+    assert_eq!(
+      first_tickets, 0,
+      "a client identity disables resumption and must ignore TLS 1.3 tickets"
+    );
     assert!(
       matches!(
         second_kind,

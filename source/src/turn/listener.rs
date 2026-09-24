@@ -38,6 +38,7 @@ use super::pools::TurnPoolSelection;
 use super::protocol::*;
 
 static NEXT_TURN_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+pub(super) const TURN_NORMAL_CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub struct TurnListenerTask {
   key: TurnListenerKey,
@@ -628,6 +629,7 @@ async fn serve_proxy_stream(
   )
   .await?;
   if !proxy_auth_allows(&config, &first)? {
+    let _ = tokio::time::timeout(TURN_NORMAL_CLOSE_TIMEOUT, downstream.shutdown()).await;
     return Ok(());
   }
   let pool = stream_pool
@@ -849,46 +851,38 @@ pub(super) async fn copy_bidirectional_with_idle(
   let (mut left_read, mut left_write) = tokio::io::split(left);
   let (mut right_read, mut right_write) = tokio::io::split(right);
   let (activity_tx, mut activity_rx) = mpsc::channel(16);
-  let left_activity = activity_tx.clone();
-  let mut left_to_right = tokio::spawn(async move {
-    copy_with_activity(&mut left_read, &mut right_write, left_activity).await
-  });
-  let mut right_to_left =
-    tokio::spawn(
-      async move { copy_with_activity(&mut right_read, &mut left_write, activity_tx).await },
-    );
-  let idle = tokio::time::sleep(idle_timeout);
-  tokio::pin!(idle);
-  let drain_close = drain.close_delay_elapsed();
-  tokio::pin!(drain_close);
-  loop {
-    tokio::select! {
-      result = &mut left_to_right => {
-        right_to_left.abort();
-        return result.context("TURN copy task panicked")?;
-      }
-      result = &mut right_to_left => {
-        left_to_right.abort();
-        return result.context("TURN copy task panicked")?;
-      }
-      activity = activity_rx.recv() => {
-        if activity.is_none() {
-          return Ok(());
+  let result = {
+    let left_to_right = copy_with_activity(&mut left_read, &mut right_write, activity_tx.clone());
+    let right_to_left = copy_with_activity(&mut right_read, &mut left_write, activity_tx);
+    tokio::pin!(left_to_right, right_to_left);
+    let idle = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle);
+    let drain_close = drain.close_delay_elapsed();
+    tokio::pin!(drain_close);
+    loop {
+      tokio::select! {
+        result = &mut left_to_right => break result,
+        result = &mut right_to_left => break result,
+        activity = activity_rx.recv() => {
+          if activity.is_none() {
+            break Ok(());
+          }
+          idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
         }
-        idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
-      }
-      _ = &mut idle => {
-        left_to_right.abort();
-        right_to_left.abort();
-        return Ok(());
-      }
-      _ = &mut drain_close => {
-        left_to_right.abort();
-        right_to_left.abort();
-        return Ok(());
+        _ = &mut idle => break Ok(()),
+        _ = &mut drain_close => break Ok(()),
       }
     }
+  };
+  if result.is_ok() {
+    // Both directions must close their TLS write sides before the streams drop.
+    // One direction may already have done so after reading EOF.
+    let _ = tokio::join!(
+      tokio::time::timeout(TURN_NORMAL_CLOSE_TIMEOUT, left_write.shutdown()),
+      tokio::time::timeout(TURN_NORMAL_CLOSE_TIMEOUT, right_write.shutdown()),
+    );
   }
+  result
 }
 
 async fn copy_with_activity<R, W>(

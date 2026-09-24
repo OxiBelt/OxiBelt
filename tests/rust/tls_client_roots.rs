@@ -8,7 +8,7 @@ mod pq;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
@@ -165,6 +165,59 @@ fn tls13_rejects_complete_handshake_message_after_server_hello() {
       .expect_err("TLS 1.3 must reject EncryptedExtensions in the ServerHello record"),
     PeerMisbehaved::KeyEpochWithPendingFragment.into(),
   );
+}
+
+#[derive(Debug)]
+struct ToggleTimeProvider(Arc<AtomicBool>);
+
+impl rustls::time_provider::TimeProvider for ToggleTimeProvider {
+  fn current_time(&self) -> Option<rustls::pki_types::UnixTime> {
+    self
+      .0
+      .load(Ordering::Relaxed)
+      .then(rustls::pki_types::UnixTime::now)
+  }
+}
+
+#[test]
+fn tls13_client_without_resumption_silently_ignores_new_session_tickets() {
+  let clock_available = Arc::new(AtomicBool::new(true));
+  let (mut client, mut server) = tls13_connection_pair_with_client_config(|config| {
+    config.resumption = rustls::client::Resumption::disabled();
+    config.time_provider = Arc::new(ToggleTimeProvider(clock_available.clone()));
+  });
+
+  let mut client_hello = Vec::new();
+  client.write_tls(&mut client_hello).unwrap();
+  server.read_tls(&mut client_hello.as_slice()).unwrap();
+  server.process_new_packets().unwrap();
+
+  let mut server_flight = Vec::new();
+  while server.wants_write() {
+    server.write_tls(&mut server_flight).unwrap();
+  }
+  client.read_tls(&mut server_flight.as_slice()).unwrap();
+  client.process_new_packets().unwrap();
+
+  let mut client_finish = Vec::new();
+  while client.wants_write() {
+    client.write_tls(&mut client_finish).unwrap();
+  }
+  server.read_tls(&mut client_finish.as_slice()).unwrap();
+  server.process_new_packets().unwrap();
+  assert!(!client.is_handshaking() && !server.is_handshaking());
+
+  clock_available.store(false, Ordering::Relaxed);
+  let mut tickets = Vec::new();
+  while server.wants_write() {
+    server.write_tls(&mut tickets).unwrap();
+  }
+  assert!(!tickets.is_empty(), "server must emit NewSessionTicket");
+  client.read_tls(&mut tickets.as_slice()).unwrap();
+  client
+    .process_new_packets()
+    .expect("disabled resumption must ignore tickets even when the clock fails");
+  assert_eq!(client.tls13_tickets_received(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -862,6 +915,12 @@ fn downstream_tls_config(
 }
 
 fn tls13_connection_pair() -> (ClientConnection, ServerConnection) {
+  tls13_connection_pair_with_client_config(|_| {})
+}
+
+fn tls13_connection_pair_with_client_config(
+  configure_client: impl FnOnce(&mut rustls::ClientConfig),
+) -> (ClientConnection, ServerConnection) {
   let temp_dir = common::TempDir::new("tls13-key-epoch");
   let (ca_cert_path, ca_key_path) =
     common::create_self_signed_cert(temp_dir.path(), "tls13-key-epoch-ca");
@@ -886,9 +945,10 @@ fn tls13_connection_pair() -> (ClientConnection, ServerConnection) {
   };
   let server_config =
     tls::build_server_config(&tls_config, &listeners).expect("server config should build");
-  let client_config =
+  let mut client_config =
     tls::build_upstream_client_config(&[ca_cert_path], &UpstreamEchConfig::default())
       .expect("client config should build");
+  configure_client(&mut client_config);
   let client = ClientConnection::new(
     Arc::new(client_config),
     "tls13-key-epoch.test".try_into().unwrap(),

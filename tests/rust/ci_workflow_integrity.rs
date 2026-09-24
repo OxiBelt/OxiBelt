@@ -7746,11 +7746,9 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
         | "OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci"
     ) {
       DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 3
-    } else if matches!(
-      value,
-      "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci"
-        | "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\""
-    ) {
+    } else if value == "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci" {
+      DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 2
+    } else if value == "OXIBELT_REQUIRE_PRELOADED_HELPER_IMAGES: \"1\"" {
       DOCKER_INTEGRATION_JOBS.len() + DOCKER_SECURITY_FUZZ_JOB_COUNT + 1
     } else {
       DOCKER_INTEGRATION_JOBS.len()
@@ -7761,6 +7759,12 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
       "each Docker integration job should pass {value}"
     );
   }
+  let webtransport_job = workflow_job_text(&workflow, "webtransport-h2-integration");
+  assert!(
+    webtransport_job.contains("run: tests/scripts/run-tls13-tlsfuzzer.sh")
+      && webtransport_job.contains("OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci"),
+    "the TLS 1.3 protocol probes must use the prebuilt mock upstream image",
+  );
   let cache_job = workflow_job_text(&workflow, "docker-integration-cache");
   assert!(
     cache_job.contains("OXIBELT_EXTERNAL_CACHE_HANDLER_IMAGE: oxibelt/mock-external-cache:ci"),

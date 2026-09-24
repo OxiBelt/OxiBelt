@@ -1899,6 +1899,12 @@ jobs:
           OXIBELT_PROTOCOL_PROBE_IMAGE: oxibelt/protocol-probe:ci
         run: tests/scripts/run-webtransport-h2-integration.sh
 
+      - name: Run focused TLS 1.3 TLSfuzzer probes
+        env:
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
+        run: tests/scripts/run-tls13-tlsfuzzer.sh
+
   compression-dictionary-integration:
     name: Compression Dictionary integration
     runs-on: ubuntu-26.04

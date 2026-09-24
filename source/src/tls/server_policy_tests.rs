@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
-use rustls::{ClientConfig, ProtocolVersion, RootCertStore};
+use rustls::{ClientConfig, ClientConnection, ProtocolVersion, RootCertStore, ServerConnection};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{LazyConfigAcceptor, TlsConnector};
 
@@ -84,6 +84,102 @@ async fn sni_version_policy_selects_tcp_tls_versions() {
 
   assert_eq!(legacy_version, ProtocolVersion::TLSv1_2);
   assert_eq!(default_version, ProtocolVersion::TLSv1_3);
+}
+
+#[test]
+fn dual_version_tls12_server_hello_contains_downgrade_protection() {
+  let temp_dir = common::TempDir::new("tls12-downgrade-sentinel");
+  let (cert, key) = common::create_self_signed_cert(temp_dir.path(), "example.com");
+  let raw = common::minimal_config_toml(&cert, &key).replace(
+    "[tls]\n",
+    "[tls]\nmin_version = \"tls1.2\"\nmax_version = \"tls1.3\"\n",
+  );
+  let config: crate::config::Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let server_config = downstream_tls_server_config(&config);
+  let config_set = server_config
+    .configs
+    .get(&server_config.default_key)
+    .expect("default TLS policy should exist");
+  assert!(
+    config_set.tls13.is_some(),
+    "listener should also support TLS 1.3"
+  );
+  let tls12 = config_set
+    .tls12
+    .as_ref()
+    .expect("TLS 1.2 should be enabled");
+
+  let random = tls12_server_hello_random(tls12.config.clone(), &cert);
+  assert_eq!(
+    &random[24..],
+    b"DOWNGRD\x01",
+    "TLS 1.3-capable listener must mark a TLS 1.2 ServerHello"
+  );
+}
+
+#[test]
+fn dual_version_turn_tls12_server_hello_contains_downgrade_protection() {
+  let temp_dir = common::TempDir::new("turn-tls12-downgrade-sentinel");
+  let (cert, key) = common::create_self_signed_cert(temp_dir.path(), "example.com");
+  let raw = common::minimal_config_toml(&cert, &key).replace(
+    "[tls]\n",
+    "[tls]\nmin_version = \"tls1.2\"\nmax_version = \"tls1.3\"\n",
+  );
+  let config: crate::config::Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let turn = build_turn_tls_server_config_with_resumption(
+    &config.crypto,
+    &crate::config::TurnListenerTlsConfig::default(),
+    &config.tls,
+    None,
+  )
+  .expect("TURN TLS config should build");
+  assert!(turn.config_set.tls13.is_some());
+  let tls12 = turn
+    .config_set
+    .tls12
+    .as_ref()
+    .expect("TLS 1.2 should be enabled");
+
+  let random = tls12_server_hello_random(tls12.config.clone(), &cert);
+  assert_eq!(&random[24..], b"DOWNGRD\x01");
+}
+
+fn tls12_server_hello_random(server_config: Arc<rustls::ServerConfig>, cert: &Path) -> [u8; 32] {
+  let client_config = Arc::new(tcp_client_config(cert, &[&rustls::version::TLS12]));
+  let mut client = ClientConnection::new(
+    client_config,
+    ServerName::try_from("example.com").expect("server name should be valid"),
+  )
+  .expect("TLS 1.2 client should build");
+  let mut server = ServerConnection::new(server_config).expect("server should build");
+  let mut client_hello = Vec::new();
+  client
+    .write_tls(&mut client_hello)
+    .expect("ClientHello should serialize");
+  server
+    .read_tls(&mut client_hello.as_slice())
+    .expect("server should read ClientHello");
+  server
+    .process_new_packets()
+    .expect("server should accept ClientHello");
+  let mut server_flight = Vec::new();
+  server
+    .write_tls(&mut server_flight)
+    .expect("ServerHello should serialize");
+  assert!(
+    server_flight.len() >= 43,
+    "ServerHello should contain a random"
+  );
+  assert_eq!(
+    server_flight[0], 22,
+    "first record must contain a handshake"
+  );
+  assert_eq!(server_flight[5], 2, "first handshake must be ServerHello");
+  server_flight[11..43]
+    .try_into()
+    .expect("ServerHello.random should contain 32 bytes")
 }
 
 fn sni_version_policy_config(temp_dir: &common::TempDir) -> (crate::config::Config, PathBuf) {

@@ -210,6 +210,7 @@ pub(super) fn remove_all_expired_client_state(clients: &mut HashMap<EdgeClient, 
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::{AtomicBool, Ordering};
   use std::time::Duration;
 
   use crate::config::{
@@ -220,6 +221,46 @@ mod tests {
 
   use super::super::{EdgeChannelBinding, EdgeSender};
   use super::*;
+
+  struct ShutdownProbe {
+    io: tokio::io::DuplexStream,
+    called: Arc<AtomicBool>,
+  }
+
+  impl tokio::io::AsyncRead for ShutdownProbe {
+    fn poll_read(
+      mut self: std::pin::Pin<&mut Self>,
+      cx: &mut std::task::Context<'_>,
+      buffer: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+      tokio::io::AsyncRead::poll_read(std::pin::Pin::new(&mut self.io), cx, buffer)
+    }
+  }
+
+  impl tokio::io::AsyncWrite for ShutdownProbe {
+    fn poll_write(
+      mut self: std::pin::Pin<&mut Self>,
+      cx: &mut std::task::Context<'_>,
+      bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+      tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(&mut self.io), cx, bytes)
+    }
+
+    fn poll_flush(
+      mut self: std::pin::Pin<&mut Self>,
+      cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+      tokio::io::AsyncWrite::poll_flush(std::pin::Pin::new(&mut self.io), cx)
+    }
+
+    fn poll_shutdown(
+      mut self: std::pin::Pin<&mut Self>,
+      cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+      self.called.store(true, Ordering::SeqCst);
+      tokio::io::AsyncWrite::poll_shutdown(std::pin::Pin::new(&mut self.io), cx)
+    }
+  }
 
   fn test_authenticated_context() -> Arc<crate::turn::auth::AuthenticatedContext> {
     use sha2::{Digest, Sha256};
@@ -512,6 +553,11 @@ mod tests {
     let stream_id = 18;
     insert_stream_allocation(&edge, &runtime, stream_id).await;
     let (_client, server) = tokio::io::duplex(64);
+    let shutdown_called = Arc::new(AtomicBool::new(false));
+    let server = ShutdownProbe {
+      io: server,
+      called: shutdown_called.clone(),
+    };
     let (listener_tx, listener_rx) = tokio::sync::watch::channel(false);
     let lifecycle = crate::lifecycle::LifecycleState::default();
     let drain =
@@ -532,6 +578,7 @@ mod tests {
     .expect("drain should close the TURN stream cleanly");
 
     assert_eq!(runtime.connections().turn.allocations_active, 0);
+    assert!(shutdown_called.load(Ordering::SeqCst));
   }
 
   #[test]

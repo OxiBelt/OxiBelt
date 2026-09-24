@@ -282,16 +282,20 @@ pub(crate) fn build_turn_tls_server_config_with_resumption(
     None
   };
   let tls12 = if default_tls.min_version <= TlsVersion::Tls12 {
+    let mut config = super::build_turn_server_config_for_tls12(
+      listener_tls,
+      default_tls,
+      crypto,
+      &policy.tls12.key_exchange_groups,
+      &policy.tls12.groups,
+      &[&rustls::version::TLS12],
+      resumption_state,
+    )?;
+    if tls13.is_some() {
+      mark_tls13_capable_tls12_config(&mut config)?;
+    }
     Some(TlsServerVersionConfig {
-      config: super::build_turn_server_config_for_tls12(
-        listener_tls,
-        default_tls,
-        crypto,
-        &policy.tls12.key_exchange_groups,
-        &policy.tls12.groups,
-        &[&rustls::version::TLS12],
-        resumption_state,
-      )?,
+      config,
       key_exchange_groups: policy.tls12.key_exchange_groups.clone(),
       cipher_suites: tls12_cipher_suites(crypto, &policy.tls12.groups)?,
     })
@@ -502,13 +506,17 @@ fn build_tcp_policy(
   };
   let tls12 = if policy.allows_tls12() {
     let cipher_suites = tls12_cipher_suites(build.crypto, &policy.tls12.groups)?;
+    let mut config = super::build_downstream_tcp_server_config_for_tls12(
+      build.with_max_early_data_size(0),
+      &policy.tls12.key_exchange_groups,
+      &policy.tls12.groups,
+      &[&rustls::version::TLS12],
+    )?;
+    if tls13.is_some() {
+      mark_tls13_capable_tls12_config(&mut config)?;
+    }
     Some(TlsServerVersionConfig {
-      config: super::build_downstream_tcp_server_config_for_tls12(
-        build.with_max_early_data_size(0),
-        &policy.tls12.key_exchange_groups,
-        &policy.tls12.groups,
-        &[&rustls::version::TLS12],
-      )?,
+      config,
       key_exchange_groups: policy.tls12.key_exchange_groups.clone(),
       cipher_suites,
     })
@@ -519,6 +527,16 @@ fn build_tcp_policy(
     bail!("TLS policy must allow at least one protocol version");
   }
   Ok(TlsServerConfigSet { tls13, tls12 })
+}
+
+fn mark_tls13_capable_tls12_config(config: &mut Arc<ServerConfig>) -> anyhow::Result<()> {
+  // Version-specific negotiation uses a TLS 1.2-only rustls config even when
+  // the listener also permits TLS 1.3. Preserve that fallback while emitting
+  // the required downgrade sentinel in ServerHello.
+  Arc::get_mut(config)
+    .context("new TLS 1.2 server configuration is unexpectedly shared")?
+    .send_tls13_downgrade_sentinel_on_tls12 = true;
+  Ok(())
 }
 
 fn tls13_cipher_suites(

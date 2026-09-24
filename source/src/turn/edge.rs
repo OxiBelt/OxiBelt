@@ -26,7 +26,7 @@ use crate::runtime_introspection::{
 };
 
 use super::auth::{self, AuthenticatedContext, AuthenticatedContextDecision, NonceSourceBinding};
-use super::listener::BoxedIo;
+use super::listener::{BoxedIo, TURN_NORMAL_CLOSE_TIMEOUT};
 use super::protocol::*;
 use allocation::{ExistingAllocate, create_allocation, existing_allocate};
 use operations::process_frame;
@@ -239,18 +239,19 @@ pub(super) async fn serve_stream(
   .await;
   edge.remove_client(client).await;
   let bound_peer = bound_peer?;
-  if let Some(connection) = bound_peer {
-    let downstream = reader.unsplit(writer);
-    relay_bound_tcp_connection(
-      downstream,
-      edge,
-      connection,
-      drain,
-      Duration::from_millis(config.idle_timeout_ms),
-    )
-    .await?;
-  }
-  Ok(())
+  let Some(connection) = bound_peer else {
+    let _ = tokio::time::timeout(TURN_NORMAL_CLOSE_TIMEOUT, writer.shutdown()).await;
+    return Ok(());
+  };
+  let downstream = reader.unsplit(writer);
+  relay_bound_tcp_connection(
+    downstream,
+    edge,
+    connection,
+    drain,
+    Duration::from_millis(config.idle_timeout_ms),
+  )
+  .await
 }
 
 pub(super) async fn handle_udp_packet(

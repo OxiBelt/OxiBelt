@@ -180,6 +180,7 @@ the complete contract and boundaries.
 - [Upgrade guide](docs/Upgrading.md): supported upgrade paths, validation,
   rollback, and irreversible-step contracts.
 - [Technical specification](docs/Specification.md): proxy behavior, request pipeline, runtime model, security posture, and non-goals.
+- [TLS 1.3 conformance](docs/TLS13Conformance.md): RFC 9846 integration scope, implementation evidence, and protocol checks.
 - [Configuration reference](docs/Configuration.md): TOML sections, includes, path rules, machine-readable schema, validation, migration, and examples.
 - [Rust embedding guide](docs/Embedding.md): owned and current-runtime APIs,
   process-global hook policy, readiness, and bounded shutdown.

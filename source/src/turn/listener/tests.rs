@@ -127,6 +127,59 @@ impl Drop for DropFlag {
   }
 }
 
+struct ShutdownProbe {
+  inner: tokio::io::DuplexStream,
+  called: Arc<AtomicBool>,
+}
+
+impl ShutdownProbe {
+  fn new(inner: tokio::io::DuplexStream) -> (Self, Arc<AtomicBool>) {
+    let called = Arc::new(AtomicBool::new(false));
+    (
+      Self {
+        inner,
+        called: called.clone(),
+      },
+      called,
+    )
+  }
+}
+
+impl tokio::io::AsyncRead for ShutdownProbe {
+  fn poll_read(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buffer: &mut tokio::io::ReadBuf<'_>,
+  ) -> std::task::Poll<std::io::Result<()>> {
+    std::pin::Pin::new(&mut self.inner).poll_read(cx, buffer)
+  }
+}
+
+impl tokio::io::AsyncWrite for ShutdownProbe {
+  fn poll_write(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    bytes: &[u8],
+  ) -> std::task::Poll<std::io::Result<usize>> {
+    std::pin::Pin::new(&mut self.inner).poll_write(cx, bytes)
+  }
+
+  fn poll_flush(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<std::io::Result<()>> {
+    std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+  }
+
+  fn poll_shutdown(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<std::io::Result<()>> {
+    self.called.store(true, Ordering::SeqCst);
+    std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+  }
+}
+
 async fn spawn_tracked_reader() -> (Arc<AtomicBool>, JoinHandle<()>) {
   let dropped = Arc::new(AtomicBool::new(false));
   let task_dropped = dropped.clone();
@@ -340,6 +393,64 @@ async fn proxy_stream_idle_timeout_tracks_active_bytes() -> anyhow::Result<()> {
   drop(left_client);
   drop(right_client);
   tokio::time::timeout(Duration::from_secs(1), task).await???;
+  Ok(())
+}
+
+#[tokio::test]
+async fn proxy_stream_idle_timeout_closes_both_write_sides() -> anyhow::Result<()> {
+  let (mut left_client, left_server) = tokio::io::duplex(64);
+  let (mut right_client, right_server) = tokio::io::duplex(64);
+  let (left_server, left_shutdown) = ShutdownProbe::new(left_server);
+  let (right_server, right_shutdown) = ShutdownProbe::new(right_server);
+  let (_listener_tx, listener_rx) = tokio::sync::watch::channel(false);
+  let lifecycle = crate::lifecycle::LifecycleState::default();
+  let drain =
+    crate::lifecycle::ConnectionDrain::new(listener_rx, lifecycle.subscribe(), Duration::ZERO);
+
+  tokio::time::timeout(
+    Duration::from_secs(1),
+    copy_bidirectional_with_idle(
+      Box::new(left_server),
+      Box::new(right_server),
+      Duration::from_millis(10),
+      drain,
+    ),
+  )
+  .await??;
+
+  assert!(left_shutdown.load(Ordering::SeqCst));
+  assert!(right_shutdown.load(Ordering::SeqCst));
+
+  let mut byte = [0u8; 1];
+  assert_eq!(left_client.read(&mut byte).await?, 0);
+  assert_eq!(right_client.read(&mut byte).await?, 0);
+  Ok(())
+}
+
+#[tokio::test]
+async fn proxy_stream_peer_half_close_closes_other_write_side() -> anyhow::Result<()> {
+  let (mut left_client, left_server) = tokio::io::duplex(64);
+  let (mut right_client, right_server) = tokio::io::duplex(64);
+  let (left_server, left_shutdown) = ShutdownProbe::new(left_server);
+  let (right_server, right_shutdown) = ShutdownProbe::new(right_server);
+  let (_listener_tx, listener_rx) = tokio::sync::watch::channel(false);
+  let lifecycle = crate::lifecycle::LifecycleState::default();
+  let drain =
+    crate::lifecycle::ConnectionDrain::new(listener_rx, lifecycle.subscribe(), Duration::ZERO);
+  let relay = tokio::spawn(copy_bidirectional_with_idle(
+    Box::new(left_server),
+    Box::new(right_server),
+    Duration::from_secs(1),
+    drain,
+  ));
+
+  left_client.shutdown().await?;
+  tokio::time::timeout(Duration::from_secs(1), relay).await???;
+  assert!(left_shutdown.load(Ordering::SeqCst));
+  assert!(right_shutdown.load(Ordering::SeqCst));
+  let mut byte = [0u8; 1];
+  assert_eq!(left_client.read(&mut byte).await?, 0);
+  assert_eq!(right_client.read(&mut byte).await?, 0);
   Ok(())
 }
 

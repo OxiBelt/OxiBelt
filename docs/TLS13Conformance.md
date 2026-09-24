@@ -1,0 +1,28 @@
+# TLS 1.3 conformance to RFC 9846
+
+OxiBelt uses TLS 1.3 as specified by [RFC 9846](https://www.rfc-editor.org/info/rfc9846), which supersedes RFC 8446 without changing the TLS wire version. This page records the OxiBelt-owned integration points and the protocol changes introduced by RFC 9846. The TLS implementation is the workspace-patched `rustls` 0.23.45 crate in `source/third_party/rustls/`; its source provenance and patch scope are recorded in [README.OXIBELT.md](../source/third_party/rustls/README.OXIBELT.md). The implementation still permits configured TLS 1.2 on TCP listeners and clients.
+
+## Scope
+
+The patched crate is shared by public and Admin TCP TLS servers, TURN TLS servers, HTTPS and TURN upstream clients, and the TLS layer used by QUIC. The public, Admin, and TURN configuration builders select certificates, protocol versions, cipher suites, key exchange groups, resumption, and client authentication. Redis TLS uses the same patched crate with resumption disabled. TLS created inside other libraries, such as PostgreSQL or Kubernetes clients, remains owned by those libraries and their configured transports.
+
+HTTP/3 and Admin QUIC use TLS 1.3 inside QUIC. [RFC 9001](https://www.rfc-editor.org/rfc/rfc9001) replaces TLS record protection and closure with QUIC mechanisms; TLS record `close_notify`, TLS `KeyUpdate`, and TLS 1.2 negotiation do not apply to those connections. The patched `rustls` handshake rules still apply where QUIC uses them.
+
+## RFC 9846 changes and evidence
+
+| RFC section | Requirement or clarification | OxiBelt implementation and verification |
+| --- | --- | --- |
+| [1.2](https://www.rfc-editor.org/rfc/rfc9846.html#section-1.2), [4.3.8](https://www.rfc-editor.org/rfc/rfc9846.html#section-4.3.8) | Do not reuse a key share between connections. | `rustls` creates a new key exchange value for each handshake. The focused protocol probes cover fresh TLS 1.3 connections; existing handshake tests cover HelloRetryRequest behavior. |
+| [4.2.3](https://www.rfc-editor.org/rfc/rfc9846.html#section-4.2.3) | A TLS 1.3-capable server negotiating TLS 1.2 must put `DOWNGRD\x01` at the end of `ServerHello.random`. | `source/src/tls/server_policy.rs` enables the patched `rustls` sentinel on its separate TLS 1.2 config when the same TCP or TURN policy also offers TLS 1.3. `source/src/tls/server_policy_tests.rs` checks the wire bytes. TLS 1.2-only policies retain their existing behavior. |
+| [4.7.1](https://www.rfc-editor.org/rfc/rfc9846.html#section-4.7.1) | A client with no resumption support silently ignores `NewSessionTicket`. | Patched `rustls` skips ticket processing when `Resumption::disabled()` is selected; `tests/rust/tls_client_roots.rs` exercises the disabled-resumption path. Server resumption modes and ticket counts remain configurable. |
+| [4.7.3](https://www.rfc-editor.org/rfc/rfc9846.html#section-4.7.3), [5.5](https://www.rfc-editor.org/rfc/rfc9846.html#section-5.5) | Limit sent key updates to epoch `2^48-1`, avoid a second `update_requested` before a peer update, and refresh traffic keys before their usage limit. | Patched `rustls` tracks the sending epoch and outstanding requested update. Its existing record-layer usage accounting initiates automatic refresh. The patch tests the epoch boundary as a unit boundary because a wire test cannot perform that many updates. The receiving side does not enforce the sender limit. |
+| [6](https://www.rfc-editor.org/rfc/rfc9846.html#section-6) | Send `close_notify` at warning level on normal TLS stream closure, ignore `user_canceled` as specified, and recognize `general_error`. | `rustls` supplies alert semantics and the patch adds `general_error`; OxiBelt's HTTP/1.1 fast path and TURN relay now request bounded TLS shutdown before dropping a stream. Protocol probes check the HTTP/1.1 close alert. A broken or stalled underlying transport can prevent delivery of an alert. |
+| [9.1](https://www.rfc-editor.org/rfc/rfc9846.html#section-9.1), [E.5](https://www.rfc-editor.org/rfc/rfc9846.html#appendix-E.5) | Implement the mandatory TLS 1.3 cipher suite and key exchange group; do not negotiate TLS 1.0 or 1.1. | The `aws-lc-rs` and supported `ring` provider configurations include `TLS_AES_128_GCM_SHA256` and `secp256r1`; policy can restrict what a listener offers. Configuration permits TLS 1.2 and 1.3 only. |
+
+The default TLS 1.3 ticket count remains two, as configured by `tls.resumption.tls13_ticket_count`. RFC 9846 recommends that servers issue enough tickets for expected parallel connections. Two is the existing bounded default; operators with more parallel resumed connections can raise the count. This preserves ticket exposure and memory behavior for existing deployments while still allowing the recommendation to be met for a particular workload.
+
+## Reproduce the protocol checks
+
+Run the focused TLSfuzzer suite with `tests/scripts/run-tls13-tlsfuzzer.sh`. It builds a disposable OxiBelt listener and pinned TLSfuzzer image, probes version negotiation, invalid ciphers and change-cipher-spec handling, uses OpenSSL to check TLS 1.3 and TLS 1.2 negotiation, then checks HTTP/1.1 `close_notify`. The script generates a short-lived certificate and cleans up its Docker resources. The same script is run by `check-oxibelt.yml` in CI. Run `cargo test --locked -p oxibelt --lib tls::server_policy_tests` and `cargo test --locked -p oxibelt --test tls_client_roots` for the local Rust regression coverage.
+
+These checks target known RFC 9846 integration gaps; they are not a certification of every possible TLS message sequence or an audit of dependency-owned TLS stacks.
