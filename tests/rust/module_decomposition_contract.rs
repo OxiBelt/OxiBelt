@@ -716,6 +716,7 @@ fn root_public_modules_match_the_reviewed_compatibility_surface() {
     "upstream_control",
     "upstream_discovery",
     "waf",
+    "web_bot_auth",
     "webtransport_admin",
   ]
   .into_iter()
