@@ -36,6 +36,7 @@ pub(crate) struct ReloadManager {
   mode: HotReloadMode,
   poll_interval: Duration,
   last_fingerprints: Vec<FileFingerprint>,
+  last_downstream_tls_fingerprints: Vec<FileFingerprint>,
 }
 
 impl ReloadManager {
@@ -47,12 +48,15 @@ impl ReloadManager {
     let mode = snapshot.config.runtime.hot_reload.mode;
     let poll_interval = Duration::from_millis(snapshot.config.runtime.hot_reload.poll_interval_ms);
     let last_fingerprints = fingerprint_files(relevant_files(mode, &snapshot.config));
+    let last_downstream_tls_fingerprints =
+      fingerprint_files(snapshot.config.source_paths.downstream_tls_reload_files());
     Ok(Self {
       config_path,
       runtime_overrides,
       mode,
       poll_interval,
       last_fingerprints,
+      last_downstream_tls_fingerprints,
     })
   }
 
@@ -76,6 +80,11 @@ impl ReloadManager {
     let result = match self.mode {
       HotReloadMode::Off => Ok(false),
       HotReloadMode::OxiRule => self.reload_oxirule(trigger, state).await,
+      HotReloadMode::OxiRuleDownstreamTls => {
+        self
+          .reload_oxirule_downstream_tls(trigger, state, listeners)
+          .await
+      }
       HotReloadMode::Full => self.reload_full(trigger, state, listeners).await,
       HotReloadMode::DownstreamTls => self.reload_downstream_tls(trigger, state, listeners).await,
     };
@@ -108,6 +117,16 @@ impl ReloadManager {
       self.last_fingerprints = fingerprints;
       return Ok(false);
     }
+    let snapshot = Self::prepare_oxirule_snapshot(config, active.as_ref()).await?;
+    state.replace(snapshot);
+    self.last_fingerprints = fingerprints;
+    Ok(true)
+  }
+
+  async fn prepare_oxirule_snapshot(
+    config: Config,
+    active: &AppSnapshot,
+  ) -> anyhow::Result<AppSnapshot> {
     let hardening = active.admitted_reload_hardening(&config)?;
 
     let waf = WafEngine::new_with_previous_limits_and_mitigation(
@@ -239,9 +258,7 @@ impl ReloadManager {
       alt_svc_header_values,
       http1_upgrades_possible: active.http1_upgrades_possible,
     };
-    state.replace(snapshot);
-    self.last_fingerprints = fingerprints;
-    Ok(true)
+    Ok(snapshot)
   }
 
   async fn reload_full(
@@ -286,6 +303,19 @@ impl ReloadManager {
 
     let mut config = active.config.clone();
     reload_downstream_tls_paths(&mut config)?;
+    let snapshot = Self::prepare_downstream_tls_snapshot(config, active.as_ref()).await?;
+    let pending = listeners.prepare(&snapshot).await?;
+    state.replace(snapshot);
+    let active = state.snapshot();
+    listeners.commit(pending, active.as_ref(), state.clone());
+    self.last_fingerprints = fingerprints;
+    Ok(true)
+  }
+
+  async fn prepare_downstream_tls_snapshot(
+    config: Config,
+    active: &AppSnapshot,
+  ) -> anyhow::Result<AppSnapshot> {
     let hardening = active.admitted_reload_hardening(&config)?;
     let crlite = tls::CrliteRuntime::new_with_auxiliary_tls(
       &config.tls,
@@ -458,11 +488,94 @@ impl ReloadManager {
       alt_svc_header_values,
       http1_upgrades_possible: active.http1_upgrades_possible,
     };
-    let pending = listeners.prepare(&snapshot).await?;
-    state.replace(snapshot);
+    Ok(snapshot)
+  }
+
+  async fn reload_oxirule_downstream_tls(
+    &mut self,
+    trigger: ReloadTrigger,
+    state: &AppHandle,
+    listeners: &mut ListenerSupervisor,
+  ) -> anyhow::Result<bool> {
     let active = state.snapshot();
-    listeners.commit(pending, active.as_ref(), state.clone());
+    let active_paths = relevant_files(self.mode, &active.config);
+    let watched_before_load = fingerprint_files(active_paths.clone());
+    let mut config = self.load_config()?;
+    let mut fingerprints = fingerprint_files(relevant_files(self.mode, &config));
+    if fingerprint_files(active_paths) != watched_before_load {
+      bail!("OxiRule and downstream TLS files changed while loading hot reload");
+    }
+    if !watched_before_load
+      .iter()
+      .map(|fingerprint| &fingerprint.path)
+      .eq(fingerprints.iter().map(|fingerprint| &fingerprint.path))
+    {
+      // A new WAF include path was not in the active watch set. Load once
+      // more with the candidate watch set established before trusting it.
+      let confirmed = self.load_config()?;
+      let confirmed_fingerprints = fingerprint_files(relevant_files(self.mode, &confirmed));
+      if config != confirmed || fingerprints != confirmed_fingerprints {
+        bail!("OxiRule and downstream TLS files changed while loading hot reload");
+      }
+      config = confirmed;
+      fingerprints = confirmed_fingerprints;
+    }
+    if matches!(trigger, ReloadTrigger::Poll) && fingerprints == self.last_fingerprints {
+      return Ok(false);
+    }
+
+    // Compare against the active policy with only its already configured TLS
+    // files re-resolved. This admits projected Secret rotations without
+    // admitting TLS policy, file-path, or other non-WAF TOML changes.
+    let mut refreshed_active = active.config.clone();
+    reload_downstream_tls_paths(&mut refreshed_active)?;
+    reload_downstream_tls_paths(&mut config)?;
+    if !refreshed_active.non_waf_equivalent(&config)
+      || !same_downstream_tls_sources(&active.config, &config)
+    {
+      bail!(
+        "OxiRule and downstream TLS hot reload rejected because out-of-scope OxiBelt configuration changed"
+      );
+    }
+
+    let tls_fingerprints = fingerprint_files(config.source_paths.downstream_tls_reload_files());
+    let waf_changed = !active.config.waf_equivalent(&config);
+    let tls_changed = matches!(trigger, ReloadTrigger::Signal)
+      || tls_fingerprints != self.last_downstream_tls_fingerprints;
+    if !waf_changed && !tls_changed {
+      if fingerprint_files(relevant_files(self.mode, &config)) != fingerprints {
+        bail!("OxiRule and downstream TLS files changed while preparing hot reload");
+      }
+      self.last_fingerprints = fingerprints;
+      self.last_downstream_tls_fingerprints = tls_fingerprints;
+      return Ok(false);
+    }
+
+    let snapshot = if waf_changed {
+      let waf_snapshot = Self::prepare_oxirule_snapshot(config, active.as_ref()).await?;
+      if tls_changed {
+        Self::prepare_downstream_tls_snapshot(waf_snapshot.config.clone(), &waf_snapshot).await?
+      } else {
+        waf_snapshot
+      }
+    } else {
+      Self::prepare_downstream_tls_snapshot(config, active.as_ref()).await?
+    };
+    let pending = if tls_changed {
+      Some(listeners.prepare(&snapshot).await?)
+    } else {
+      None
+    };
+    if fingerprint_files(relevant_files(self.mode, &snapshot.config)) != fingerprints {
+      bail!("OxiRule and downstream TLS files changed while preparing hot reload");
+    }
+    state.replace(snapshot);
+    if let Some(pending) = pending {
+      let active = state.snapshot();
+      listeners.commit(pending, active.as_ref(), state.clone());
+    }
     self.last_fingerprints = fingerprints;
+    self.last_downstream_tls_fingerprints = tls_fingerprints;
     Ok(true)
   }
 
@@ -475,6 +588,25 @@ impl ReloadManager {
     config.validate()?;
     Ok(config)
   }
+}
+
+fn same_downstream_tls_sources(active: &Config, candidate: &Config) -> bool {
+  let active = &active.source_paths;
+  let candidate = &candidate.source_paths;
+  active.cert_dir == candidate.cert_dir
+    && active.downstream_tls_files == candidate.downstream_tls_files
+    && active.downstream_tls_cert_chain == candidate.downstream_tls_cert_chain
+    && active.downstream_tls_private_key == candidate.downstream_tls_private_key
+    && active.downstream_tls_certificates == candidate.downstream_tls_certificates
+    && active.downstream_turn_listener_tls == candidate.downstream_turn_listener_tls
+    && active.downstream_tls_remote_signer_token_file
+      == candidate.downstream_tls_remote_signer_token_file
+    && active.downstream_tls_ocsp_response_file == candidate.downstream_tls_ocsp_response_file
+    && active.downstream_tls_crlite_filter_file == candidate.downstream_tls_crlite_filter_file
+    && active.downstream_tls_ct_log_list_file == candidate.downstream_tls_ct_log_list_file
+    && active.downstream_tls_ct_log_list_signature_file
+      == candidate.downstream_tls_ct_log_list_signature_file
+    && active.quic_host_key_file == candidate.quic_host_key_file
 }
 
 pub(crate) fn validate_full_reload_runtime_compatibility(
@@ -863,6 +995,11 @@ fn relevant_files(mode: HotReloadMode, config: &Config) -> Vec<PathBuf> {
   match mode {
     HotReloadMode::Off => Vec::new(),
     HotReloadMode::OxiRule => config.source_paths.oxirule_reload_files(),
+    HotReloadMode::OxiRuleDownstreamTls => {
+      let mut files = config.source_paths.oxirule_reload_files();
+      files.extend(config.source_paths.downstream_tls_reload_files());
+      files
+    }
     HotReloadMode::Full => config.source_paths.all_reload_files(),
     HotReloadMode::DownstreamTls => config.source_paths.downstream_tls_reload_files(),
   }

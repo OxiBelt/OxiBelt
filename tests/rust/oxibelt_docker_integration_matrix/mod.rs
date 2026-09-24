@@ -186,6 +186,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("dynamic-policy", "automation-api"),
   ("hot-reload", "oxirule-config"),
   ("hot-reload", "downstream-tls-only"),
+  ("hot-reload", "oxirule-downstream-tls"),
   ("hot-reload", "full-config-tls-listener-rebind"),
   ("hot-reload", "full-reload-after-pq-discovery"),
   ("hot-reload", "telemetry-tracing-disable"),

@@ -239,6 +239,160 @@ async fn torn_full_reload_keeps_active_generation_then_complete_candidate_recove
 }
 
 #[tokio::test]
+async fn combined_waf_tls_reload_rejects_torn_pair_then_recovers_atomically() {
+  let temp_dir = common::TempDir::new("combined-waf-tls-reload");
+  let config_dir = temp_dir.path().join("config");
+  let cert_dir = temp_dir.path().join("cert");
+  std::fs::create_dir_all(&config_dir).expect("config directory should be created");
+  std::fs::create_dir_all(&cert_dir).expect("certificate directory should be created");
+  let (cert_path, key_path) = common::create_self_signed_cert(&cert_dir, "initial.example");
+  let config_path = config_dir.join("oxibelt.toml");
+  let initial_raw = full_reload_config(
+    &cert_path,
+    &key_path,
+    "127.0.0.1:0".parse().expect("HTTPS bind should parse"),
+    "127.0.0.1:0".parse().expect("HTTP bind should parse"),
+    "127.0.0.1:9"
+      .parse()
+      .expect("upstream address should parse"),
+  )
+  .replace("mode = \"full\"", "mode = \"oxirule_downstream_tls\"");
+  std::fs::write(&config_path, &initial_raw).expect("initial config should write");
+  let initial_config = Config::load(&config_path).expect("initial config should load");
+  initial_config
+    .validate()
+    .expect("initial config should validate");
+  let state = AppHandle::new(
+    AppSnapshot::new(initial_config)
+      .await
+      .expect("initial snapshot should initialize"),
+  );
+  let (error_tx, _error_rx) = mpsc::unbounded_channel();
+  let mut supervisor = ListenerSupervisor::start(
+    state.clone(),
+    error_tx,
+    test_admin_control(),
+    test_admin_operations(),
+  )
+  .await
+  .expect("listener supervisor should start");
+  let mut reload = ReloadManager::new(
+    config_path.clone(),
+    RuntimeOverrides::default(),
+    state.snapshot().as_ref(),
+  )
+  .expect("reload manager should initialize");
+
+  let active = state.snapshot();
+  let (new_cert, new_key) = common::create_self_signed_cert(&cert_dir, "renewed.example");
+  std::fs::copy(&new_cert, &cert_path).expect("renewed certificate should replace old file");
+  let waf_raw = initial_raw.replace(
+    "[[upstreams]]",
+    r#"[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "block-reloaded-path"
+phase = "request"
+priority = 10
+when = "Request.Http.Path == '/blocked'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "reloaded"
+
+[[upstreams]]"#,
+  );
+  std::fs::write(&config_path, &waf_raw).expect("WAF candidate should write");
+  reload
+    .reload_if_changed(ReloadTrigger::Signal, &state, &mut supervisor)
+    .await;
+  assert!(
+    Arc::ptr_eq(&active, &state.snapshot()),
+    "a mismatched certificate and key must retain both prior WAF and TLS state"
+  );
+
+  std::fs::copy(&new_key, &key_path).expect("renewed key should replace old file");
+  reload
+    .reload_if_changed(ReloadTrigger::Poll, &state, &mut supervisor)
+    .await;
+  let replacement = state.snapshot();
+  assert!(
+    !Arc::ptr_eq(&active, &replacement),
+    "a complete WAF and TLS candidate should publish one replacement"
+  );
+  assert!(
+    !active.config.waf_equivalent(&replacement.config),
+    "replacement should contain the new WAF policy"
+  );
+
+  let unrelated_raw = waf_raw.replace("http://127.0.0.1:9/origin", "http://127.0.0.1:10/origin");
+  std::fs::write(&config_path, unrelated_raw).expect("out-of-scope config should write");
+  reload
+    .reload_if_changed(ReloadTrigger::Signal, &state, &mut supervisor)
+    .await;
+  assert!(
+    Arc::ptr_eq(&replacement, &state.snapshot()),
+    "an unrelated TOML change must not publish a combined reload"
+  );
+
+  let alias_path = cert_dir.join("certificate-alias.pem");
+  std::os::unix::fs::symlink(&cert_path, &alias_path).expect("certificate alias should be created");
+  let cert_name = cert_path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .expect("certificate filename should be UTF-8");
+  let alias_raw = waf_raw.replace(
+    &format!("cert_chain = \"{cert_name}\""),
+    "cert_chain = \"certificate-alias.pem\"",
+  );
+  std::fs::write(&config_path, alias_raw).expect("TLS alias candidate should write");
+  reload
+    .reload_if_changed(ReloadTrigger::Signal, &state, &mut supervisor)
+    .await;
+  assert!(
+    Arc::ptr_eq(&replacement, &state.snapshot()),
+    "a changed logical TLS source must be rejected even when its target is unchanged"
+  );
+
+  let waf_only_raw = waf_raw.replace("body = \"reloaded\"", "body = \"reloaded again\"");
+  std::fs::write(&config_path, &waf_only_raw).expect("WAF-only candidate should write");
+  reload
+    .reload_if_changed(ReloadTrigger::Poll, &state, &mut supervisor)
+    .await;
+  let waf_only = state.snapshot();
+  assert!(
+    !Arc::ptr_eq(&replacement, &waf_only) && !replacement.config.waf_equivalent(&waf_only.config),
+    "a WAF-only change should activate in the combined mode"
+  );
+
+  let (third_cert, third_key) = common::create_self_signed_cert(&cert_dir, "projected.example");
+  std::fs::remove_file(&cert_path).expect("old certificate should be removed");
+  std::fs::remove_file(&key_path).expect("old key should be removed");
+  std::os::unix::fs::symlink(&third_cert, &cert_path)
+    .expect("projected certificate link should be created");
+  std::os::unix::fs::symlink(&third_key, &key_path).expect("projected key link should be created");
+  reload
+    .reload_if_changed(ReloadTrigger::Poll, &state, &mut supervisor)
+    .await;
+  let tls_only = state.snapshot();
+  assert!(
+    !Arc::ptr_eq(&waf_only, &tls_only) && waf_only.config.waf_equivalent(&tls_only.config),
+    "a TLS-only projected-file rotation should activate without changing WAF policy"
+  );
+  assert_eq!(
+    tls_only.config.tls.cert_chain,
+    third_cert
+      .canonicalize()
+      .expect("new certificate should resolve")
+  );
+  supervisor.shutdown(state.snapshot().as_ref()).await;
+}
+
+#[tokio::test]
 async fn same_listener_reload_drains_keepalive_and_new_connections_use_new_snapshot() {
   let temp_dir = common::TempDir::new("plain-http-same-listener-drain");
   let (cert_path, key_path) =

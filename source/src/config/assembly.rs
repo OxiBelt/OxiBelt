@@ -236,7 +236,8 @@ impl Config {
   }
 
   pub fn non_waf_equivalent(&self, other: &Self) -> bool {
-    self.logging == other.logging
+    self.access_log == other.access_log
+      && self.logging == other.logging
       && self.config == other.config
       && self.operational_profile == other.operational_profile
       && self.runtime == other.runtime
@@ -250,6 +251,7 @@ impl Config {
       && self.rate_limits == other.rate_limits
       && self.connection_limits == other.connection_limits
       && self.client_identity == other.client_identity
+      && self.web_bot_auth == other.web_bot_auth
       && self.compression == other.compression
       && self.compression_dictionary == other.compression_dictionary
       && self.cache == other.cache
@@ -265,6 +267,8 @@ impl Config {
       && self.shared_state == other.shared_state
       && self.dynamic_policy == other.dynamic_policy
       && self.external_auth == other.external_auth
+      && self.upload_stores == other.upload_stores
+      && self.upload_profiles == other.upload_profiles
       && self.certificate_transparency == other.certificate_transparency
       && self.upstreams == other.upstreams
       && self.upstream_pools == other.upstream_pools

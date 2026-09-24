@@ -5,6 +5,15 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Combined WAF and downstream TLS hot reload
+
+`runtime.hot_reload.mode = "oxirule_downstream_tls"` is an opt-in mode that
+activates WAF-owned configuration, external OxiRule files, and already configured
+downstream TLS material in one snapshot. Existing modes keep their behavior.
+The native configuration schema remains at epoch `1`, and no persisted-state
+migration is required. Before rolling back to a binary without this mode, select
+an older supported hot reload mode or `off` and validate the configuration.
+
 ## Web Bot Auth
 
 Web Bot Auth verification is opt-in through `[web_bot_auth]` and defaults to

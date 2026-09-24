@@ -1459,7 +1459,13 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
     ),
     (
       "runtime.hot_reload.mode",
-      vec!["off", "oxirule", "downstream_tls", "full"],
+      vec![
+        "off",
+        "oxirule",
+        "oxirule_downstream_tls",
+        "downstream_tls",
+        "full",
+      ],
     ),
     (
       "runtime.main_runtime",

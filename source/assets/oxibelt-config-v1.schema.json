@@ -22407,6 +22407,7 @@
               "enum": [
                 "off",
                 "oxirule",
+                "oxirule_downstream_tls",
                 "downstream_tls",
                 "full"
               ],

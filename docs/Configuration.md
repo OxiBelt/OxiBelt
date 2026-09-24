@@ -675,7 +675,7 @@ long_connection_close_delay_ms = 300000
 shutdown_delay_ms = 0
 
 [runtime.hot_reload]
-mode = "off" # off | oxirule | downstream_tls | full
+mode = "off" # off | oxirule | oxirule_downstream_tls | downstream_tls | full
 poll_interval_ms = 2000
 
 [runtime.netport_switcher]
@@ -799,12 +799,13 @@ Reload modes:
 
 - `off`: no reload.
 - `oxirule`: reload only WAF-owned configuration and external rule files.
+- `oxirule_downstream_tls`: reload WAF-owned configuration, external OxiRule files, and configured downstream TLS material as one replacement snapshot.
 - `downstream_tls`: reload the current downstream certificate, key, static OCSP response, or live OCSP runtime.
 - `full`: reload OxiRule policy, TOML configuration, upstream clients, access-log sinks, downstream TLS material, downstream listener bind/protocol settings, and admin listener enable/bind settings.
 
 Reload failures keep the previous active state.
 
-Successful full reloads start replacement listeners before draining old listener generations. Successful OxiRule, downstream TLS, full, and runtime pool snapshot replacements drain previous HTTP connection generations as well. Local readiness stays OK for a successful reload because the active replacement snapshot is serving; existing requests on the old generation finish within `graceful_timeout_ms`, and long-lived upgraded or stream connections keep their drain grace from `long_connection_close_delay_ms`. Full reload and admin config load rebuild telemetry tracing from the replacement configuration, though old-generation connections may keep the previous telemetry runtime until their captured snapshot drains. During that grace period, new WebTransport CONNECT or ordinary HTTP/3 request streams on a drained WebTransport connection are rejected with `503` instead of using the previous snapshot.
+Successful full reloads start replacement listeners before draining old listener generations. Successful OxiRule, combined OxiRule and downstream TLS, downstream TLS, full, and runtime pool snapshot replacements drain previous HTTP connection generations as well. Local readiness stays OK for a successful reload because the active replacement snapshot is serving; existing requests on the old generation finish within `graceful_timeout_ms`, and long-lived upgraded or stream connections keep their drain grace from `long_connection_close_delay_ms`. Full reload and admin config load rebuild telemetry tracing from the replacement configuration, though old-generation connections may keep the previous telemetry runtime until their captured snapshot drains. During that grace period, new WebTransport CONNECT or ordinary HTTP/3 request streams on a drained WebTransport connection are rejected with `503` instead of using the previous snapshot.
 
 ## Crypto Providers
 
@@ -1070,7 +1071,7 @@ Managed Log-list mode downloads the fixed Chromium v3 JSON list and detached sig
 
 Authenticated `GET /admin/v1/tls/upstream`, `POST /admin/v1/tls/upstream/refresh`, runtime snapshots, and support bundles expose only bounded upstream revocation status: enabled flag, default modes, cache counts, fetch counts, managed-filter counts, and compact error codes. They do not expose responder URLs, SNI, issuer names, certificate serial numbers, fingerprints, filter paths, cache paths, or Remote Settings URLs. Public Prometheus metrics use fixed aggregate names: `oxibelt_tls_upstream_ocsp_success_total`, `oxibelt_tls_upstream_ocsp_errors_total`, `oxibelt_tls_upstream_crlite_checks_total`, `oxibelt_tls_upstream_crlite_revoked_total`, and `oxibelt_tls_upstream_crlite_errors_total`.
 
-OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, certificate renewal, or private key rotation itself. OCSP live fetch is revocation-status stapling for already provisioned downstream certificates or outbound revocation checking for already provisioned upstream certificates; CRLite enforcement is a local or managed filter check for already provisioned downstream and upstream certificates. Neither changes private key handling, remote signer isolation, or certificate renewal. Provision and renew TLS files with external automation such as Certbot/Lego or the `certbot/certbot`/`goacme/lego` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"` or `full` when renewed TLS material should be picked up without a process restart.
+OxiBelt does not perform ACME issuance, HTTP-01 or DNS-01 challenge handling, certificate renewal, or private key rotation itself. OCSP live fetch is revocation-status stapling for already provisioned downstream certificates or outbound revocation checking for already provisioned upstream certificates; CRLite enforcement is a local or managed filter check for already provisioned downstream and upstream certificates. Neither changes private key handling, remote signer isolation, or certificate renewal. Provision and renew TLS files with external automation such as Certbot/Lego or the `certbot/certbot`/`goacme/lego` Docker image, then point `cert_chain` and `private_key` at the generated files under the cert directory. Use `runtime.hot_reload.mode = "downstream_tls"`, `oxirule_downstream_tls`, or `full` when renewed TLS material should be picked up without a process restart.
 
 Keep ACME credentials, DNS-01 provider tokens, renewal state, and private signing keys out of the OxiBelt process/container when possible. This limits blast radius if a proxy vulnerability ever exposes process memory or permits remote code execution: the running proxy may have access to certificate chains and remote signing capability, but it should not also contain private keys or the DNS/ACME credentials needed to mint arbitrary new certificates. A compromised OxiBelt process that still has signer socket and token access may request signatures while that access remains valid, so socket permissions, peer UID/GID allowlists, token rotation, and process isolation remain important.
 

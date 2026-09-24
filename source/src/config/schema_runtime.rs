@@ -67,6 +67,8 @@ pub enum HotReloadMode {
   Off,
   #[serde(rename = "oxirule")]
   OxiRule,
+  #[serde(rename = "oxirule_downstream_tls")]
+  OxiRuleDownstreamTls,
   Full,
   DownstreamTls,
 }
@@ -82,6 +84,7 @@ impl std::fmt::Display for HotReloadMode {
     formatter.write_str(match self {
       Self::Off => "off",
       Self::OxiRule => "oxirule",
+      Self::OxiRuleDownstreamTls => "oxirule_downstream_tls",
       Self::Full => "full",
       Self::DownstreamTls => "downstream_tls",
     })
@@ -95,10 +98,13 @@ impl FromStr for HotReloadMode {
     match value {
       "off" => Ok(Self::Off),
       "oxirule" => Ok(Self::OxiRule),
+      "oxirule_downstream_tls" => Ok(Self::OxiRuleDownstreamTls),
       "full" => Ok(Self::Full),
       "downstream_tls" => Ok(Self::DownstreamTls),
       _ => {
-        bail!("unsupported hot reload mode {value}; expected off, oxirule, full, or downstream_tls")
+        bail!(
+          "unsupported hot reload mode {value}; expected off, oxirule, oxirule_downstream_tls, downstream_tls, or full"
+        )
       }
     }
   }

@@ -325,6 +325,7 @@ Hot reload modes:
 
 - `off`: no runtime reload.
 - `oxirule`: reload WAF-owned configuration and external OxiRule files only.
+- `oxirule_downstream_tls`: reload WAF-owned configuration, external OxiRule files, and configured downstream TLS material as one replacement snapshot.
 - `downstream_tls`: reload the current downstream certificate, private key, static OCSP response, or live OCSP runtime.
 - `full`: reload OxiRule, TOML configuration, upstream clients, access-log sinks, downstream TLS material, downstream listener bind/protocol settings, and admin listener enable/bind settings.
 

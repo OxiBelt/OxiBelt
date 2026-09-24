@@ -16050,6 +16050,33 @@ fn hot_reload_config_parses_modes_and_poll_interval() {
 }
 
 #[test]
+fn hot_reload_config_parses_combined_oxirule_downstream_tls_mode() {
+  let temp_dir = common::TempDir::new("hot-reload-combined-parse");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "unprivileged_mode = true",
+    "unprivileged_mode = true\n\n[runtime.hot_reload]\nmode = \"oxirule_downstream_tls\"\npoll_interval_ms = 500",
+  );
+
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+
+  assert_eq!(
+    config.runtime.hot_reload.mode,
+    HotReloadMode::OxiRuleDownstreamTls
+  );
+  assert_eq!(config.runtime.hot_reload.poll_interval_ms, 500);
+  assert_eq!(
+    config.runtime.hot_reload.mode.to_string(),
+    "oxirule_downstream_tls"
+  );
+  assert_eq!(
+    "oxirule_downstream_tls".parse::<HotReloadMode>().unwrap(),
+    HotReloadMode::OxiRuleDownstreamTls
+  );
+  config.validate().expect("config should validate");
+}
+
+#[test]
 fn hot_reload_config_rejects_zero_poll_interval() {
   let temp_dir = common::TempDir::new("hot-reload-zero");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "hot-reload");
@@ -16089,6 +16116,17 @@ fn hot_reload_cli_overrides_config_and_reports_conflicts() {
   assert_eq!(warnings.len(), 2);
   assert!(warnings[0].contains("--hot-reload-mode=full"));
   assert!(warnings[1].contains("--hot-reload-poll-interval-ms=1000"));
+
+  let warnings = config.apply_runtime_overrides(&RuntimeOverrides {
+    hot_reload_mode: Some(HotReloadMode::OxiRuleDownstreamTls),
+    hot_reload_poll_interval_ms: None,
+  });
+  assert_eq!(
+    config.runtime.hot_reload.mode,
+    HotReloadMode::OxiRuleDownstreamTls
+  );
+  assert_eq!(warnings.len(), 1);
+  assert!(warnings[0].contains("--hot-reload-mode=oxirule_downstream_tls"));
 }
 
 #[test]
@@ -16421,6 +16459,29 @@ fn oxirule_reload_equivalence_rejects_non_waf_changes() {
   let changed: Config = toml::from_str(&changed_raw).expect("changed config should parse");
 
   assert!(!base.non_waf_equivalent(&changed));
+}
+
+#[test]
+fn oxirule_reload_equivalence_rejects_access_log_and_web_bot_auth_changes() {
+  let temp_dir = common::TempDir::new("hot-reload-non-waf-services");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "hot-reload-non-waf-services");
+  let base: Config = toml::from_str(&common::minimal_config_toml(&cert_path, &key_path))
+    .expect("base config should parse");
+
+  let mut access_log_changed = base.clone();
+  access_log_changed.access_log.stdout.enabled = !base.access_log.stdout.enabled;
+  access_log_changed
+    .validate()
+    .expect("access-log config should validate");
+  assert!(!base.non_waf_equivalent(&access_log_changed));
+
+  let mut web_bot_auth_changed = base.clone();
+  web_bot_auth_changed.web_bot_auth.max_signature_age_seconds = 60;
+  web_bot_auth_changed
+    .validate()
+    .expect("Web Bot Auth config should validate");
+  assert!(!base.non_waf_equivalent(&web_bot_auth_changed));
 }
 
 #[test]

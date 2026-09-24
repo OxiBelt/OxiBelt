@@ -280,6 +280,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "hot-reload",
+      "oxirule-downstream-tls",
+      "combined OxiRule and downstream TLS reload activates both together and retains both on failure",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "hot-reload",
       "full-config-tls-listener-rebind",
       "full hot reload updates configuration, TLS material, and listener bind port",
       ExpectStart::Success,
