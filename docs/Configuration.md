@@ -1340,7 +1340,11 @@ cannot be skipped by a fast path.
 
 The verifier supports `directory`, `jwks_uri`, and `cimd` discovery from the
 typed `Signature-Agent` field, plus the legacy bare-string field when that
-field is itself signed. It accepts `ed25519`, `ecdsa-p256-sha256`,
+field is itself signed. Discovery references with a query string, including an
+empty query, are invalid; use a query-free URL for each signing identity. A
+`jwks_uri` inside a CIMD document may still contain a query because it is a
+key-fetch URL, not the signed discovery reference. The verifier accepts
+`ed25519`, `ecdsa-p256-sha256`,
 `ecdsa-p384-sha384`, `rsa-pss-sha512`, and `rsa-v1_5-sha256` with matching
 public keys. Verification succeeds only for HTTPS requests. Discovery uses
 bounded inline fetches, follows no redirects, and rejects private or special

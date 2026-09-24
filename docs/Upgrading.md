@@ -24,6 +24,11 @@ unverified requests continue through normal routing and WAF rules. See
 [Web Bot Auth](Configuration.md#web-bot-auth) for verifier limits and discovery
 requirements.
 
+Builds that accepted query-bearing `jwks_uri` or `cimd` `Signature-Agent`
+references now mark those signatures invalid and expose no identity from them.
+Use query-free discovery URLs for signers that need a verified identity; review
+any OxiRule conditions that depend on those signers before upgrading.
+
 Native configuration remains at schema epoch `1`, and no persisted-state
 migration is required. Before rolling back to a binary that predates Web Bot
 Auth, remove the `[web_bot_auth]` table and any OxiRule conditions that depend

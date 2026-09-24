@@ -54,6 +54,123 @@ fn refuses_unsigned_or_wrong_dictionary_member() {
   assert!(parsed.candidates.is_empty());
 }
 
+#[tokio::test]
+async fn rejects_query_bearing_discovery_references_before_attribution() {
+  let config = WebBotAuthConfig {
+    enabled: true,
+    ..WebBotAuthConfig::default()
+  };
+  let runtime = WebBotAuthRuntime::new(&config).unwrap();
+  for (kind, discovery_kind) in [
+    ("jwks_uri", DiscoveryKind::JwksUri),
+    ("cimd", DiscoveryKind::Cimd),
+  ] {
+    for query in ["?tenant=trusted", "?tenant=attacker", "?"] {
+      let url = format!("https://keys.example.test/client{query}");
+      let request = signed_request(
+        &format!("sig=\"{url}\";type={kind}"),
+        "\"@authority\" \"signature-agent\";key=\"sig\"",
+      );
+      let parsed = parse_request(&request, "https", config.max_signature_age_seconds, 60);
+      assert!(parsed.had_invalid, "{kind} {query}");
+      assert!(parsed.candidates.is_empty(), "{kind} {query}");
+      let result = runtime.verify(&request, "https", &config, true).await;
+      assert_eq!(result.status, VerificationStatus::Invalid, "{kind} {query}");
+      assert!(result.verified_urls.is_empty(), "{kind} {query}");
+
+      let reference = DiscoveryReference {
+        url: Url::parse(&url).unwrap(),
+        kind: discovery_kind,
+      };
+      assert_eq!(
+        runtime.discovery.resolve(&reference).await.unwrap_err(),
+        super::super::discovery::DiscoveryFailure::UnsafeUrl,
+        "{kind} {query}"
+      );
+    }
+  }
+
+  let legacy = signed_request(
+    "\"https://keys.example.test/?tenant=attacker\"",
+    "\"@authority\" \"signature-agent\"",
+  );
+  let parsed = parse_request(&legacy, "https", config.max_signature_age_seconds, 60);
+  assert!(parsed.had_invalid);
+  assert!(parsed.candidates.is_empty());
+
+  let encoded_path = signed_request(
+    "sig=\"https://keys.example.test/client%3Ftenant=attacker\";type=jwks_uri",
+    "\"@authority\" \"signature-agent\";key=\"sig\"",
+  );
+  let parsed = parse_request(&encoded_path, "https", config.max_signature_age_seconds, 60);
+  assert!(!parsed.had_invalid);
+  assert_eq!(parsed.candidates.len(), 1);
+  assert!(parsed.candidates[0].reference.url.query().is_none());
+}
+
+#[tokio::test]
+async fn query_free_typed_signatures_verify_without_attributing_query_siblings() {
+  let config = WebBotAuthConfig {
+    enabled: true,
+    ..WebBotAuthConfig::default()
+  };
+  let runtime = WebBotAuthRuntime::new(&config).unwrap();
+  for (kind, discovery_kind) in [
+    ("jwks_uri", DiscoveryKind::JwksUri),
+    ("cimd", DiscoveryKind::Cimd),
+  ] {
+    let key = Ed25519KeyPair::generate().unwrap();
+    let jwk = serde_json::json!({
+      "kty": "OKP", "crv": "Ed25519", "use": "sig",
+      "x": URL_SAFE_NO_PAD.encode(key.public_key().as_ref()),
+    });
+    let keyid = super::super::crypto::jwk_thumbprint(&jwk).unwrap();
+    let now = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .unwrap()
+      .as_secs();
+    let agents = format!(
+      "good=\"https://keys.example.test/client\";type={kind}, bad=\"https://keys.example.test/client?tenant=attacker\";type={kind}"
+    );
+    let inputs = format!(
+      "good=(\"@authority\" \"signature-agent\";key=\"good\");created={now};expires={};keyid=\"{keyid}\";alg=\"ed25519\";tag=\"web-bot-auth\", bad=(\"@authority\" \"signature-agent\";key=\"bad\");created={now};expires={};keyid=\"bad\";tag=\"web-bot-auth\"",
+      now + 60,
+      now + 60,
+    );
+    let build = |signatures: &str| {
+      Request::builder()
+        .uri("/resource")
+        .header("host", "origin.example.test")
+        .header("signature-agent", agents.as_str())
+        .header("signature-input", inputs.as_str())
+        .header("signature", signatures)
+        .body(())
+        .unwrap()
+    };
+    let unsigned = build("good=:AA==:, bad=:AQID:");
+    let parsed = parse_request(&unsigned, "https", config.max_signature_age_seconds, 60);
+    assert!(parsed.had_invalid, "{kind}");
+    assert_eq!(parsed.candidates.len(), 1, "{kind}");
+    assert_eq!(parsed.candidates[0].reference.kind, discovery_kind);
+    runtime
+      .discovery
+      .seed_for_test(&parsed.candidates[0].reference, vec![jwk]);
+    let signatures = format!(
+      "good=:{}:, bad=:AQID:",
+      STANDARD.encode(key.sign(&parsed.candidates[0].signature_base).as_ref())
+    );
+    let result = runtime
+      .verify(&build(&signatures), "https", &config, true)
+      .await;
+    assert_eq!(result.status, VerificationStatus::Verified, "{kind}");
+    assert_eq!(
+      result.verified_urls,
+      vec!["https://keys.example.test/client"],
+      "{kind}"
+    );
+  }
+}
+
 #[test]
 fn query_parameter_uses_rfc9421_percent_encoding() {
   let request = Request::builder()

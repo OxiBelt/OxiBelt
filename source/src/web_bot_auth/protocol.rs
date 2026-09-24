@@ -78,7 +78,7 @@ fn reference(member: &Member) -> Option<DiscoveryReference> {
     Some(BareItem::Token(value)) if value.as_str() == "cimd" => DiscoveryKind::Cimd,
     _ => return None,
   };
-  if kind == DiscoveryKind::Directory && (url.query().is_some() || url.path() != "/") {
+  if url.query().is_some() || (kind == DiscoveryKind::Directory && url.path() != "/") {
     return None;
   }
   Some(DiscoveryReference { url, kind })

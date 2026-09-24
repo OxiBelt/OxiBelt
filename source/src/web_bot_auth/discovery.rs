@@ -60,7 +60,6 @@ impl std::error::Error for DiscoveryFailure {}
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct CacheKey {
   kind: u8,
-  // Keep the query: it is sent on the wire even though attribution omits it.
   url: String,
 }
 
@@ -176,13 +175,13 @@ impl DiscoveryRuntime {
     &self,
     reference: &DiscoveryReference,
   ) -> Result<Vec<Value>, DiscoveryFailure> {
+    if reference.url.query().is_some() {
+      return Err(DiscoveryFailure::UnsafeUrl);
+    }
     let (url, kind) = match &reference.kind {
       DiscoveryKind::Directory => {
         self.check_url(&reference.url)?;
-        if reference.url.path() != "/"
-          || reference.url.query().is_some()
-          || reference.url.fragment().is_some()
-        {
+        if reference.url.path() != "/" || reference.url.fragment().is_some() {
           return Err(DiscoveryFailure::UnsafeUrl);
         }
         let mut url = reference.url.clone();
