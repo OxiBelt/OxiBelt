@@ -16,6 +16,9 @@ pub(crate) fn plain_proxy_fast_path_decision<B>(
   state: &AppSnapshot,
   resolved: &ResolvedRoute<'_>,
 ) -> Result<(), PlainProxyFastPathMissReason> {
+  if state.config.web_bot_auth.enabled {
+    return Err(PlainProxyFastPathMissReason::PlanDisabled);
+  }
   // Digest finalization observes the final downstream representation. Keep
   // supported requests on the full path; malformed or unsupported hints are
   // intentionally a no-op and retain the normal fast-path eligibility.

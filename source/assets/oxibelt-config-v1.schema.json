@@ -17901,6 +17901,33 @@
             "x-oxibelt-reference-activation": "none",
             "x-oxibelt-secret-class": "none"
           },
+          "policy_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "array"
+              },
+              {
+                "type": "object"
+              }
+            ],
+            "description": "OxiBelt native field `rate_limits[].policy_id`. Production Rust validation is authoritative.",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
           "rate": {
             "anyOf": [
               {
@@ -32934,6 +32961,82 @@
       "x-oxibelt-config-activation": "oxi_rule_reload",
       "x-oxibelt-introduced-epoch": 1,
       "x-oxibelt-reference-activation": "oxi_rule_reload",
+      "x-oxibelt-secret-class": "none"
+    },
+    "web_bot_auth": {
+      "additionalProperties": false,
+      "description": "OxiBelt native field `web_bot_auth`. Production Rust validation is authoritative.",
+      "properties": {
+        "discovery_timeout_ms": {
+          "default": 3000,
+          "description": "OxiBelt native field `web_bot_auth.discovery_timeout_ms`. Production Rust validation is authoritative.",
+          "maximum": 3000,
+          "minimum": 1,
+          "type": "integer",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "enabled": {
+          "default": false,
+          "description": "OxiBelt native field `web_bot_auth.enabled`. Production Rust validation is authoritative.",
+          "type": "boolean",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "max_body_digest_bytes": {
+          "default": 1048576,
+          "description": "OxiBelt native field `web_bot_auth.max_body_digest_bytes`. Production Rust validation is authoritative.",
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "max_signature_age_seconds": {
+          "default": 86400,
+          "description": "OxiBelt native field `web_bot_auth.max_signature_age_seconds`. Production Rust validation is authoritative.",
+          "maximum": 86400,
+          "minimum": 1,
+          "type": "integer",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "nonstandard_port_origins": {
+          "default": [],
+          "description": "OxiBelt native field `web_bot_auth.nonstandard_port_origins`. Production Rust validation is authoritative.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
+        "stale_if_error_seconds": {
+          "default": 300,
+          "description": "OxiBelt native field `web_bot_auth.stale_if_error_seconds`. Production Rust validation is authoritative.",
+          "maximum": 300,
+          "minimum": 0,
+          "type": "integer",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        }
+      },
+      "type": "object",
+      "x-oxibelt-config-activation": "full_reload",
+      "x-oxibelt-introduced-epoch": 1,
+      "x-oxibelt-reference-activation": "none",
       "x-oxibelt-secret-class": "none"
     },
     "webrtc_turn_listeners": {

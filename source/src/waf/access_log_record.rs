@@ -342,7 +342,15 @@ impl AccessLogJsonValue {
       ),
       ObjectRef::RequestClientAgent => object_members_json(
         object,
-        &["Verified", "Kind", "Provider", "Model", "AuthMethod"],
+        &[
+          "Verified",
+          "VerificationStatus",
+          "VerifiedUrls",
+          "Kind",
+          "Provider",
+          "Model",
+          "AuthMethod",
+        ],
         ctx,
       ),
       ObjectRef::RequestClientBot => object_members_json(

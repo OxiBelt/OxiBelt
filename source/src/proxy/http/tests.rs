@@ -656,6 +656,7 @@ impl PersonProofRequestFixture {
       body: None,
       peer_addr: self.peer_addr,
       client_asn: None,
+      web_bot_auth: None,
       downstream_host: "example.com",
       downstream_scheme: "https",
       route_name: "app",

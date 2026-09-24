@@ -24,6 +24,7 @@ pub struct Config {
   pub rate_limits: Vec<RateLimitConfig>,
   pub connection_limits: Vec<ConnectionLimitConfig>,
   pub client_identity: ClientIdentityConfig,
+  pub web_bot_auth: WebBotAuthConfig,
   pub compression: CompressionConfig,
   pub compression_dictionary: CompressionDictionaryConfig,
   pub cache: CacheConfig,
@@ -83,6 +84,8 @@ struct RawConfig {
   connection_limits: Vec<ConnectionLimitConfig>,
   #[serde(default)]
   client_identity: ClientIdentityConfig,
+  #[serde(default)]
+  web_bot_auth: WebBotAuthConfig,
   #[serde(default)]
   compression: CompressionConfig,
   #[serde(default)]
@@ -165,6 +168,7 @@ impl TryFrom<RawConfig> for Config {
       rate_limits: raw.rate_limits,
       connection_limits: raw.connection_limits,
       client_identity: raw.client_identity,
+      web_bot_auth: raw.web_bot_auth,
       compression: raw.compression,
       compression_dictionary: raw.compression_dictionary,
       cache: raw.cache,

@@ -291,6 +291,7 @@ async fn inspect(
         body: captured.map(waf_body_input),
         peer_addr: context.client_addr,
         client_asn: context.client_asn,
+        web_bot_auth: context.access_log.web_bot_auth.as_ref(),
         downstream_host: context.host,
         downstream_scheme: context.downstream_scheme,
         route_name: &context.resolved.route.name,

@@ -234,6 +234,9 @@ pub(crate) async fn prepare_webtransport(
           body: None,
           peer_addr: client_addr,
           client_asn,
+          web_bot_auth: request
+            .extensions()
+            .get::<crate::web_bot_auth::WebBotAuthResult>(),
           downstream_host: &host,
           downstream_scheme: "https",
           route_name: &resolved.route.name,
@@ -317,6 +320,9 @@ pub(crate) async fn prepare_webtransport(
                 body: None,
                 peer_addr: client_addr,
                 client_asn,
+                web_bot_auth: request
+                  .extensions()
+                  .get::<crate::web_bot_auth::WebBotAuthResult>(),
                 downstream_host: &host,
                 downstream_scheme: "https",
                 route_name: &resolved.route.name,
@@ -467,6 +473,9 @@ pub(crate) async fn prepare_webtransport(
           body: None,
           peer_addr: client_addr,
           client_asn,
+          web_bot_auth: request
+            .extensions()
+            .get::<crate::web_bot_auth::WebBotAuthResult>(),
           downstream_host: &host,
           downstream_scheme: "https",
           route_name: &resolved.route.name,
@@ -538,6 +547,10 @@ pub(crate) async fn prepare_webtransport(
         uri: request_uri.clone(),
         version: request.version(),
         headers: request_headers.clone(),
+        web_bot_auth: request
+          .extensions()
+          .get::<crate::web_bot_auth::WebBotAuthResult>()
+          .cloned(),
         peer_addr,
         downstream_host: host.to_string(),
         downstream_scheme: "https",

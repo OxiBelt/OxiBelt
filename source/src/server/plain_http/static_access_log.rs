@@ -153,6 +153,7 @@ pub(super) async fn emit_system_access_log(
             .client_identity
             .asn
             .lookup(access_log.client_addr.ip()),
+          web_bot_auth: None,
           downstream_host: &access_log.downstream_host,
           downstream_scheme: "http",
           route_name: &access_log.route_name,

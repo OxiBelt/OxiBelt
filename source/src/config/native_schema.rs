@@ -1003,6 +1003,10 @@ fn bounded_integer_range(path: &str) -> Option<(u64, u64)> {
   }
 
   let range = match path {
+    "web_bot_auth.max_signature_age_seconds" => (1, 86_400),
+    "web_bot_auth.max_body_digest_bytes" => (1, u64::MAX),
+    "web_bot_auth.discovery_timeout_ms" => (1, 3_000),
+    "web_bot_auth.stale_if_error_seconds" => (0, 300),
     "proxy.upstream_resolution.max_endpoint_count" => (1, 64),
     "proxy.upstream_resolution.min_ttl_ms" | "proxy.upstream_resolution.max_ttl_ms" => {
       (1, 3_600_000)
@@ -1237,7 +1241,8 @@ fn integer_path(path: &str) -> bool {
 fn string_array_path(path: &str) -> bool {
   if matches!(
     path,
-    "external_auth.allowed_content_types"
+    "web_bot_auth.nonstandard_port_origins"
+      | "external_auth.allowed_content_types"
       | "listeners.http_proxy_protocol.trusted_sources"
       | "runtime.hardening.filesystem_manifest.expected_writable_paths"
       | "certificate_transparency.logs.signed_root.trusted_ed25519_keys"
@@ -1584,6 +1589,12 @@ fn default_value(path: &str) -> Option<Value> {
   }
 
   let value = match path {
+    "web_bot_auth.enabled" => json!(false),
+    "web_bot_auth.max_signature_age_seconds" => json!(86_400),
+    "web_bot_auth.max_body_digest_bytes" => json!(1_048_576),
+    "web_bot_auth.discovery_timeout_ms" => json!(3_000),
+    "web_bot_auth.stale_if_error_seconds" => json!(300),
+    "web_bot_auth.nonstandard_port_origins" => json!([]),
     "access_log.otlp.schema" | "access_log.stdout.schema" => json!("ocsf"),
     "compression_dictionary.enabled"
     | "compression_dictionary.dictionaries.public"

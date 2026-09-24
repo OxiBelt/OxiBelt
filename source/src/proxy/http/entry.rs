@@ -239,27 +239,55 @@ where
   let mut selected_bandwidth = None;
   let mut rate_limit_report = super::rate_limit_headers::Report::default();
   let request_is_head = request.method() == Method::HEAD;
-  let mut response = handle_inner_impl(
-    request,
-    peer_addr,
-    tcp_max_hop,
-    transport_metadata,
-    tls,
-    connection_limit_context,
-    forwarded_header_cache,
-    &state,
-    protocol,
-    transport_network,
-    reject_connect,
-    downstream_scheme,
-    drain,
-    &mut access_log,
-    &mut request_connection_permit,
-    &mut selected_bandwidth,
-    trace_context,
-    &mut rate_limit_report,
-  )
-  .await;
+  macro_rules! forward {
+    ($request:expr) => {
+      handle_inner_impl(
+        $request,
+        peer_addr,
+        tcp_max_hop,
+        transport_metadata,
+        tls,
+        connection_limit_context,
+        forwarded_header_cache,
+        &state,
+        protocol,
+        transport_network,
+        reject_connect,
+        downstream_scheme,
+        drain,
+        &mut access_log,
+        &mut request_connection_permit,
+        &mut selected_bandwidth,
+        trace_context,
+        &mut rate_limit_report,
+      )
+      .await
+    };
+  }
+  let mut response = if let Some(verifier) = state.web_bot_auth.as_ref() {
+    let request = crate::web_bot_auth::prepare_request(
+      request,
+      downstream_scheme,
+      verifier,
+      &state.config.web_bot_auth,
+    )
+    .await;
+    if let Some(result) = request
+      .extensions()
+      .get::<crate::web_bot_auth::WebBotAuthResult>()
+    {
+      state.metrics.record_web_bot_auth(result.status);
+    }
+    access_log.set_web_bot_auth_result(
+      request
+        .extensions()
+        .get::<crate::web_bot_auth::WebBotAuthResult>()
+        .cloned(),
+    );
+    forward!(request)
+  } else {
+    forward!(request)
+  };
   incremental::adapt_admission_rejection(&mut response, incremental_request, request_version);
   // Upstream HTTP versions are useful to exchange/WAF policy, but the final
   // response must describe the protocol of the downstream writer. In

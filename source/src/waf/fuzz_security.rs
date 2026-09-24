@@ -70,6 +70,7 @@ pub(super) fn evaluate(
     }),
     peer_addr: std::net::SocketAddr::from(([203, 0, 113, 7], 44321)),
     client_asn: None,
+    web_bot_auth: None,
     downstream_host: "fuzz.example.test",
     downstream_scheme: "https",
     route_name: "app-root",

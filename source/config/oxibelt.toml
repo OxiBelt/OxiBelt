@@ -388,6 +388,14 @@ max_lifetime_ms = 600000
 # idle_timeout_ms = 75000
 # tcp_proxy_protocol_egress = "off"
 
+[web_bot_auth]
+enabled = false
+max_signature_age_seconds = 86400
+max_body_digest_bytes = 1048576
+discovery_timeout_ms = 3000
+stale_if_error_seconds = 300
+nonstandard_port_origins = []
+
 [proxy]
 trusted_ca_certs = []
 

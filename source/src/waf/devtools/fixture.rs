@@ -254,6 +254,7 @@ impl BuiltFixture {
       }),
       peer_addr: self.peer_addr,
       client_asn: None,
+      web_bot_auth: None,
       downstream_host: &self.downstream_host,
       downstream_scheme: &self.downstream_scheme,
       route_name: &self.route_name,

@@ -47,6 +47,7 @@ use crate::stream::pools::StreamPoolState;
 use crate::turn::TurnPoolState;
 use crate::uploads::UploadRuntime;
 use crate::waf::WafEngine;
+use crate::web_bot_auth::WebBotAuthRuntime;
 #[cfg(feature = "admin-runtime")]
 use crate::webtransport_admin::WebTransportAdminRegistry;
 use crate::{telemetry::TelemetryRuntime, tls};
@@ -132,6 +133,7 @@ pub struct AppSnapshot {
   pub dynamic_policy: DynamicPolicyRuntime,
   pub external_auth: ExternalAuthRuntime,
   pub client_identity: ClientIdentityRuntime,
+  pub(crate) web_bot_auth: Option<Arc<WebBotAuthRuntime>>,
   pub runtime_introspection: Arc<RuntimeIntrospectionState>,
   pub(crate) webtransport_h2_budget: Arc<crate::webtransport::Budget>,
   #[cfg(feature = "admin-runtime")]
@@ -747,6 +749,11 @@ impl AppSnapshot {
     );
 
     let secret_references = secret_references::build(&config, previous)?;
+    let web_bot_auth = if config.web_bot_auth.enabled {
+      Some(Arc::new(WebBotAuthRuntime::new(&config.web_bot_auth)?))
+    } else {
+      None
+    };
     config.rollout.mark_applied();
     Ok(Self {
       config,
@@ -797,6 +804,7 @@ impl AppSnapshot {
       dynamic_policy,
       external_auth,
       client_identity,
+      web_bot_auth,
       runtime_introspection,
       webtransport_h2_budget,
       #[cfg(feature = "admin-runtime")]
@@ -1010,6 +1018,15 @@ impl AppSnapshot {
     );
 
     let secret_references = secret_references::build(&config, Some(previous))?;
+    let web_bot_auth = if config.web_bot_auth.enabled {
+      if config.web_bot_auth == previous.config.web_bot_auth {
+        previous.web_bot_auth.clone()
+      } else {
+        Some(Arc::new(WebBotAuthRuntime::new(&config.web_bot_auth)?))
+      }
+    } else {
+      None
+    };
     Ok(Self {
       config,
       runtime_topology,
@@ -1059,6 +1076,7 @@ impl AppSnapshot {
       dynamic_policy: previous.dynamic_policy.clone(),
       external_auth,
       client_identity,
+      web_bot_auth,
       runtime_introspection: previous.runtime_introspection.clone(),
       webtransport_h2_budget: previous.webtransport_h2_budget.clone(),
       #[cfg(feature = "admin-runtime")]

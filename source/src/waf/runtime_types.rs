@@ -14,6 +14,7 @@ pub struct WafRequestInput<'a> {
   pub body: Option<WafBodyInput<'a>>,
   pub peer_addr: std::net::SocketAddr,
   pub client_asn: Option<u32>,
+  pub web_bot_auth: Option<&'a crate::web_bot_auth::WebBotAuthResult>,
   pub downstream_host: &'a str,
   pub downstream_scheme: &'a str,
   pub route_name: &'a str,

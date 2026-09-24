@@ -1218,6 +1218,8 @@ PersonProofMetadata.Weight: Int
 PersonProofMetadata.Allowed: Bool
 
 AgentMetadata.Verified: Bool
+AgentMetadata.VerificationStatus: 'absent' | 'verified' | 'invalid' | 'unverified'
+AgentMetadata.VerifiedUrls: BoundedStringList
 AgentMetadata.Kind: String | Null
 AgentMetadata.Provider: String | Null
 AgentMetadata.Model: String | Null
@@ -1237,7 +1239,11 @@ PersonProofTokenBindingView.directPeerIpNetworkPrefix(Ipv4PrefixBits, Ipv6Prefix
 PersonProofTokenBindingView.tcpMaxHop(ConfiguredMaxHop): String
 ```
 
-`Request.Client.Bot` is derived from local request signals such as URI shape, query/path anomalies, suspicious headers, automation User-Agent strings, and any request body prefix already captured for WAF evaluation. `Score` is `0..100`; `Disposition` becomes `malicious` for high-confidence local automation or attack signals and otherwise remains `unknown` unless a future trusted bot identity source marks traffic as normal. `Request.Client.Agent.Verified` remains `false` unless an explicitly trusted agent authentication mechanism is configured; client-supplied AI/LLM or crawler claims are not trusted. `Request.Client.Asn` is populated only by `[client_identity.asn]` prefix-to-ASN lookup. The IANA AS Numbers registry is optional ASN metadata, not an IP prefix-to-origin-ASN source. `Request.Client.GeoCountry` is currently always `null`.
+`Request.Client.Bot` is derived from local request signals such as URI shape, query/path anomalies, suspicious headers, automation User-Agent strings, and any request body prefix already captured for WAF evaluation. `Score` is `0..100`; `Disposition` becomes `malicious` for high-confidence local automation or attack signals and otherwise remains `unknown`. Web Bot Auth does not change the bot disposition. With `[web_bot_auth]` enabled, `Request.Client.Agent.Verified` is true only after Web Bot Auth verification succeeds. `VerificationStatus` distinguishes absent credentials, valid credentials, invalid credentials, and requests whose verification could not complete. `VerifiedUrls` contains only URLs bound to verified signatures and is empty for all other statuses; it uses the normal bounded string-list interface (`Count`, `First`, `IsTruncated`, `contains`). `AuthMethod` is `web-bot-auth` only when verified and is otherwise `null`; `Kind`, `Provider`, and `Model` remain `null`. These values are available in request and response OxiRule phases. Client-supplied AI/LLM or crawler claims are never trusted by themselves. `Request.Client.Asn` is populated only by `[client_identity.asn]` prefix-to-ASN lookup. The IANA AS Numbers registry is optional ASN metadata, not an IP prefix-to-origin-ASN source. `Request.Client.GeoCountry` is currently always `null`.
+
+For directory based discovery, `VerifiedUrls` uses the resolved
+`/.well-known/http-message-signatures-directory` URL as the identity. A
+client-declared directory origin does not become a verified identity by itself.
 
 ```text
 TransportMetadata.Network: 'tcp' | 'udp'

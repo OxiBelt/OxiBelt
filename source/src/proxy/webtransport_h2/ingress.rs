@@ -76,6 +76,13 @@ pub(crate) async fn handle_request(
   if drain.is_draining() {
     return text_response(StatusCode::SERVICE_UNAVAILABLE, "draining");
   }
+  if let Some(verifier) = state.web_bot_auth.as_ref() {
+    let result = verifier
+      .verify(&request, "https", &state.config.web_bot_auth, false)
+      .await;
+    state.metrics.record_web_bot_auth(result.status);
+    request.extensions_mut().insert(result);
+  }
   let on_session = hyper::ext::on_webtransport(&mut request);
   let (parts, _) = request.into_parts();
   let request = Request::from_parts(parts, ());

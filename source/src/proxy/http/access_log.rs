@@ -44,6 +44,7 @@ pub(crate) struct SystemAccessLogContext<'a> {
   pub(super) transport_network: WafTransportNetwork,
   pub(super) transport_metadata: WafTransportMetadataInput<'a>,
   pub(super) tags: Option<HashMap<String, String>>,
+  pub(super) web_bot_auth: Option<crate::web_bot_auth::WebBotAuthResult>,
   person_proof: Option<PersonProofRequestSnapshot>,
   pub(super) dynamic_policy: DynamicPolicyContext,
   pub(super) upstream_name: String,
@@ -97,6 +98,7 @@ impl<'a> SystemAccessLogContext<'a> {
       transport_network,
       transport_metadata,
       tags: None,
+      web_bot_auth: None,
       person_proof: None,
       dynamic_policy: DynamicPolicyContext::default(),
       upstream_name: String::new(),
@@ -197,6 +199,13 @@ impl<'a> SystemAccessLogContext<'a> {
     self.transaction_id.as_deref().unwrap_or("unavailable")
   }
 
+  pub(super) fn set_web_bot_auth_result(
+    &mut self,
+    result: Option<crate::web_bot_auth::WebBotAuthResult>,
+  ) {
+    self.web_bot_auth = result;
+  }
+
   pub(super) fn response_input<'b>(
     &'b mut self,
     response: &'b Response<ProxyBody>,
@@ -230,6 +239,7 @@ impl<'a> SystemAccessLogContext<'a> {
         body: None,
         peer_addr: self.client_addr,
         client_asn: None,
+        web_bot_auth: self.web_bot_auth.as_ref(),
         downstream_host: &self.downstream_host,
         downstream_scheme: self.downstream_scheme,
         route_name: &self.route_name,

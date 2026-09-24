@@ -618,6 +618,7 @@ pub(super) fn upstream_error_response(
     body: request_body,
     peer_addr,
     client_asn: state.client_identity.asn.lookup(peer_addr.ip()),
+    web_bot_auth: access_log.web_bot_auth.as_ref(),
     downstream_host,
     downstream_scheme: access_log.downstream_scheme,
     route_name,

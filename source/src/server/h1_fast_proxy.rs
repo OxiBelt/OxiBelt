@@ -272,6 +272,9 @@ pub(super) async fn try_handle_connection(
 }
 
 fn fast_proxy_preflight_disabled_reason(snapshot: &AppSnapshot) -> Option<&'static str> {
+  if snapshot.config.web_bot_auth.enabled {
+    return Some("Web Bot Auth requires the common request path");
+  }
   if snapshot.config.listeners.proxy_protocol.tls_tlvs
     || snapshot
       .config

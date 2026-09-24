@@ -88,6 +88,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       &["enabled", "tls_tlvs", "trusted_sources", "version"][..]
     }
     "client_identity" => client_identity::CLIENT_IDENTITY_CONFIG_KEYS,
+    "web_bot_auth" => web_bot_auth::WEB_BOT_AUTH_CONFIG_KEYS,
     "client_identity.asn" => client_identity::CLIENT_IDENTITY_ASN_CONFIG_KEYS,
     "client_identity.asn.managed" => client_identity::CLIENT_IDENTITY_ASN_MANAGED_CONFIG_KEYS,
     "client_identity.asn.iana_registry" => {

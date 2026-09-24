@@ -46,6 +46,9 @@ impl Config {
       .validate(&self.source_paths, self.runtime.hot_reload.mode)?;
     self.validate_limits()?;
     self.validate_proxy()?;
+    self
+      .web_bot_auth
+      .validate(self.proxy.buffering.max_memory_body_bytes)?;
     self.validate_compression()?;
     compression_dictionary::validate_compression_dictionary(
       &self.compression_dictionary,

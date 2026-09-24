@@ -74,6 +74,9 @@ where
     body: None,
     peer_addr: client_addr,
     client_asn: state.client_identity.asn.lookup(client_addr.ip()),
+    web_bot_auth: parts
+      .extensions
+      .get::<crate::web_bot_auth::WebBotAuthResult>(),
     downstream_host: host,
     downstream_scheme,
     route_name,

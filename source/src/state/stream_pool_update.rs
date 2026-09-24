@@ -37,6 +37,7 @@ impl AppSnapshot {
     Ok(Self {
       webtransport_h2_budget: previous.webtransport_h2_budget.clone(),
       config,
+      web_bot_auth: previous.web_bot_auth.clone(),
       runtime_topology: previous.runtime_topology.clone(),
       hardening,
       secret_references: previous.secret_references.clone(),

@@ -1305,6 +1305,59 @@ The unencoded fields implement
 [`draft-ietf-httpbis-unencoded-digest-05`](https://datatracker.ietf.org/doc/html/draft-ietf-httpbis-unencoded-digest-05),
 which is an experimental draft contract rather than part of RFC 9530.
 
+### Web Bot Auth
+
+Web Bot Auth verification is opt-in. Configure the global verifier limits with
+`[web_bot_auth]`:
+
+```toml
+[web_bot_auth]
+enabled = false
+max_signature_age_seconds = 86400
+max_body_digest_bytes = 1048576
+discovery_timeout_ms = 3000
+stale_if_error_seconds = 300
+nonstandard_port_origins = []
+```
+
+`max_signature_age_seconds` accepts 1 through 86400 seconds.
+`max_body_digest_bytes` must be positive and, when Web Bot Auth is enabled, no
+greater than `proxy.buffering.max_memory_body_bytes`; increase the proxy
+in-memory body cap before increasing the digest cap. `discovery_timeout_ms`
+accepts 1 through 3000 milliseconds and caps the total key verification attempt
+as well as each fetch. `stale_if_error_seconds` accepts 0 through 300 seconds;
+zero disables stale discovery data after an error.
+`nonstandard_port_origins` accepts canonical HTTPS origins with explicit ports
+other than 443, such as `"https://bot.example.com:8443"`. Paths, queries,
+fragments, credentials, and duplicate origins are rejected. This setting only
+permits the port; production discovery still requires the separate public DNS
+guard. Directory identity is the resolved
+`/.well-known/http-message-signatures-directory` URL, not a client-declared
+origin. Disabling Web Bot Auth leaves request processing unchanged.
+Enabling it sends HTTP requests through the common proxy path so verification
+cannot be skipped by a fast path.
+
+The verifier supports `directory`, `jwks_uri`, and `cimd` discovery from the
+typed `Signature-Agent` field, plus the legacy bare-string field when that
+field is itself signed. It accepts `ed25519`, `ecdsa-p256-sha256`,
+`ecdsa-p384-sha384`, `rsa-pss-sha512`, and `rsa-v1_5-sha256` with matching
+public keys. Verification succeeds only for HTTPS requests. Discovery uses
+bounded inline fetches, follows no redirects, and rejects private or special
+use IP addresses both before and after DNS resolution. A signed
+`Content-Digest` is checked against the full request body up to
+`max_body_digest_bytes`; a mismatch or oversized body cannot establish
+verified identity. The signature-age setting has a 24-hour maximum; there is
+no nonce replay ledger. Invalid and unverified requests continue through
+normal routing and WAF rules. A verified signature identifies its key source;
+it does not establish that the agent or request is benign.
+The low-cardinality `oxibelt_web_bot_auth_{absent,verified,invalid,unverified}_total`
+counters report verifier outcomes without identity labels.
+
+The wire behavior follows the
+[Web Bot Auth protocol draft-00](https://datatracker.ietf.org/doc/html/draft-ietf-webbotauth-httpsig-protocol-00),
+[RFC 9421 HTTP Message Signatures](https://www.rfc-editor.org/rfc/rfc9421),
+and [RFC 9530 Digest Fields](https://www.rfc-editor.org/rfc/rfc9530).
+
 ### Proxy settings
 
 ```toml

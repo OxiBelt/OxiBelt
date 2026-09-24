@@ -43,6 +43,7 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
   "upload_profiles",
   "upload_stores",
   "waf",
+  "web_bot_auth",
   "webrtc_turn_listeners",
 ];
 

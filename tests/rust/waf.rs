@@ -22,6 +22,7 @@ use oxibelt::waf::{
   compile_access_log_fields, cost_oxirule, crs_compatibility_matrix, explain_oxirule,
   plan_oxirule_hardening, replay_oxirule, test_oxirule,
 };
+use oxibelt::web_bot_auth::{VerificationStatus, WebBotAuthResult};
 use sha2::{Digest, Sha256};
 
 static TEST_DYNAMIC_POLICY: OnceLock<DynamicPolicyContext> = OnceLock::new();
@@ -570,6 +571,93 @@ type = "silent_close"
       .as_ref()
       .is_some_and(|terminal| terminal.is_silent_close())
   );
+}
+
+#[test]
+fn web_bot_auth_projection_is_trusted_in_request_and_response_rules() {
+  let engine = compile_waf_fragment(
+    "waf-web-bot-auth-projection",
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+
+[[waf.rules]]
+name = "verified-request"
+phase = "request"
+priority = 10
+when = "Request.Client.Agent.Verified && Request.Client.Agent.VerificationStatus == 'verified' && Request.Client.Agent.AuthMethod == 'web-bot-auth' && Request.Client.Agent.VerifiedUrls.contains('https://agent.example/key')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+
+[[waf.rules]]
+name = "verified-response"
+phase = "response"
+priority = 10
+when = "Request.Client.Agent.Verified && Request.Client.Agent.VerifiedUrls.Count == 1"
+
+[[waf.rules.actions]]
+type = "emit_access_log"
+
+[[waf.rules.actions.fields]]
+name = "web_bot_auth"
+value = "Request.Client.Agent.VerificationStatus"
+"#,
+  );
+  let method = Method::GET;
+  let uri: Uri = "/resource".parse().unwrap();
+  let headers = HeaderMap::new();
+  let tags = HashMap::new();
+  let peer_addr = "203.0.113.10:49152".parse().unwrap();
+  let verified = WebBotAuthResult {
+    status: VerificationStatus::Verified,
+    verified_urls: vec!["https://agent.example/key".to_string()],
+  };
+  let base = request_input(&method, &uri, &headers, &tags, peer_addr);
+  let request = WafRequestInput {
+    web_bot_auth: Some(&verified),
+    ..base
+  };
+  assert_eq!(
+    engine.evaluate_request(request).terminal.unwrap().status,
+    StatusCode::FORBIDDEN
+  );
+
+  let response = WafResponseInput {
+    upstream_certificate: None,
+    request,
+    response_id: "test-response-id",
+    received_at_unix_ms: 1_700_000_000_123,
+    version: http::Version::HTTP_11,
+    status: StatusCode::OK,
+    headers: &headers,
+    body: None,
+    upstream_name: "app",
+    upstream_pool: None,
+    upstream_scheme: "http",
+    upstream_connect_time_ms: None,
+    upstream_first_byte_time_ms: None,
+    upstream_error: None,
+  };
+  let response_decision = engine.evaluate_response(response);
+  assert_eq!(response_decision.access_logs.len(), 1);
+  assert!(
+    response_decision.access_logs[0]
+      .to_json_line()
+      .contains("\"web_bot_auth\":\"verified\"")
+  );
+
+  let invalid = WebBotAuthResult {
+    status: VerificationStatus::Invalid,
+    verified_urls: verified.verified_urls.clone(),
+  };
+  let untrusted = WafRequestInput {
+    web_bot_auth: Some(&invalid),
+    ..base
+  };
+  assert!(engine.evaluate_request(untrusted).terminal.is_none());
 }
 
 #[test]
@@ -12315,6 +12403,7 @@ fn request_input_with_transport<'a>(
     body: None,
     peer_addr,
     client_asn: None,
+    web_bot_auth: None,
     downstream_host: "example.com",
     downstream_scheme: "https",
     route_name: "app-root",
@@ -12350,6 +12439,7 @@ fn request_input_with_protocol_and_network<'a>(
     body: None,
     peer_addr,
     client_asn: None,
+    web_bot_auth: None,
     downstream_host: "example.com",
     downstream_scheme: "https",
     route_name: "app-root",

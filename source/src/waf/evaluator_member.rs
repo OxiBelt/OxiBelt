@@ -302,11 +302,39 @@ pub(super) fn eval_member(
     ),
     (ObjectRef::RequestClientPersonProof, "Weight") => Ok(Value::Int(ctx.person_proof.weight)),
     (ObjectRef::RequestClientPersonProof, "Allowed") => Ok(Value::Bool(ctx.person_proof.allowed)),
-    (ObjectRef::RequestClientAgent, "Verified") => Ok(Value::Bool(false)),
+    (ObjectRef::RequestClientAgent, "Verified") => Ok(Value::Bool(
+      ctx
+        .request
+        .web_bot_auth
+        .is_some_and(|result| result.verified()),
+    )),
+    (ObjectRef::RequestClientAgent, "VerificationStatus") => Ok(Value::String(
+      ctx
+        .request
+        .web_bot_auth
+        .map_or("absent", |result| result.status.as_str())
+        .to_string(),
+    )),
+    (ObjectRef::RequestClientAgent, "VerifiedUrls") => Ok(Value::StringList(bounded_string_list(
+      ctx
+        .request
+        .web_bot_auth
+        .filter(|result| result.verified())
+        .into_iter()
+        .flat_map(|result| result.verified_urls.iter().cloned()),
+      ctx.limits,
+    ))),
+    (ObjectRef::RequestClientAgent, "AuthMethod") => Ok(
+      ctx
+        .request
+        .web_bot_auth
+        .filter(|result| result.verified())
+        .map(|_| Value::String("web-bot-auth".to_string()))
+        .unwrap_or(Value::Null),
+    ),
     (ObjectRef::RequestClientAgent, "Kind")
     | (ObjectRef::RequestClientAgent, "Provider")
-    | (ObjectRef::RequestClientAgent, "Model")
-    | (ObjectRef::RequestClientAgent, "AuthMethod") => Ok(Value::Null),
+    | (ObjectRef::RequestClientAgent, "Model") => Ok(Value::Null),
     (ObjectRef::RequestClientBot, "Disposition") => Ok(Value::String(
       mi_score::request_bot_assessment(ctx.request)
         .disposition

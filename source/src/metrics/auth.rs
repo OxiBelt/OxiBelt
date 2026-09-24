@@ -3,6 +3,16 @@ use std::sync::atomic::Ordering;
 use super::{Metrics, append_metric};
 
 impl Metrics {
+  pub fn record_web_bot_auth(&self, status: crate::web_bot_auth::VerificationStatus) {
+    let counter = match status {
+      crate::web_bot_auth::VerificationStatus::Absent => &self.web_bot_auth_absent_total,
+      crate::web_bot_auth::VerificationStatus::Verified => &self.web_bot_auth_verified_total,
+      crate::web_bot_auth::VerificationStatus::Invalid => &self.web_bot_auth_invalid_total,
+      crate::web_bot_auth::VerificationStatus::Unverified => &self.web_bot_auth_unverified_total,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+  }
+
   pub fn record_external_auth_allowed(&self) {
     self
       .external_auth_allowed_total
@@ -41,6 +51,26 @@ impl Metrics {
 }
 
 pub(super) fn append_auth_and_mirror_metrics(output: &mut String, metrics: &Metrics) {
+  for (name, counter) in [
+    (
+      "oxibelt_web_bot_auth_absent_total",
+      &metrics.web_bot_auth_absent_total,
+    ),
+    (
+      "oxibelt_web_bot_auth_verified_total",
+      &metrics.web_bot_auth_verified_total,
+    ),
+    (
+      "oxibelt_web_bot_auth_invalid_total",
+      &metrics.web_bot_auth_invalid_total,
+    ),
+    (
+      "oxibelt_web_bot_auth_unverified_total",
+      &metrics.web_bot_auth_unverified_total,
+    ),
+  ] {
+    append_metric(output, name, "counter", counter.load(Ordering::Relaxed));
+  }
   append_metric(
     output,
     "oxibelt_external_auth_allowed_total",

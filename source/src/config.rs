@@ -95,6 +95,7 @@ mod validation_helpers;
 mod validation_limits;
 mod validation_proxy;
 mod validation_services;
+mod web_bot_auth;
 mod workers;
 
 #[cfg(feature = "fuzzing")]
@@ -210,6 +211,7 @@ use validation_helpers::*;
 pub(crate) use validation_helpers::{
   turn_upstream_pool_server_id, upstream_pool_server_id, validate_runtime_identifier,
 };
+pub use web_bot_auth::*;
 pub use workers::*;
 pub use {
   access_log::*, admin_audit::*, admin_audit_anchor::*, admin_mutations::*, admin_operations::*,

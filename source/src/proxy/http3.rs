@@ -302,6 +302,13 @@ pub(crate) async fn handle_downstream_connection(
           continue;
         }
       };
+      if let Some(verifier) = snapshot.web_bot_auth.as_ref() {
+        let result = verifier
+          .verify(&request, "https", &snapshot.config.web_bot_auth, false)
+          .await;
+        snapshot.metrics.record_web_bot_auth(result.status);
+        request.extensions_mut().insert(result);
+      }
       request_tasks.wait_all().await;
       webtransport_bridge::serve_webtransport_connection(
         h3_connection,
@@ -590,6 +597,9 @@ fn h3_inline_fast_path_candidate(
   request: &Request<()>,
   context: &H3DownstreamRequestContext,
 ) -> bool {
+  if context.state.config.web_bot_auth.enabled {
+    return false;
+  }
   // The H3 inline path does not own the explicit TCP upstream transport. Keep
   // it out of TLS-TLV egress routes until that transport can consume the
   // connection-owned evidence without an extension boundary.

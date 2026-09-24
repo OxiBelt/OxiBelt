@@ -35,6 +35,9 @@ pub(super) fn sendfile_disabled_reason(
   snapshot: &AppSnapshot,
   kernel_sendfile_available: bool,
 ) -> Option<&'static str> {
+  if snapshot.config.web_bot_auth.enabled {
+    return Some("Web Bot Auth requires the common request path");
+  }
   if !snapshot.client_certificate_forwarding_headers.is_empty() {
     return Some("client certificate forwarding header ownership");
   }
