@@ -421,6 +421,12 @@ criteria = "safe-to-deploy"
 delta = "0.8.40 -> 0.8.41"
 notes = "Reviewed the checksum-matched source and manifest delta. Production code and the build script are unchanged; the multiversion constraint now also permits 0.9. OxiBelt selects alloc/default without simd-accel or std, so its annotations continue to use multiversion_no_op rather than newly generated CPU dispatch."
 
+[[audits.encoding_rs]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.8.41 -> 0.8.42"
+notes = "Reviewed the complete checksum-matched 0.8.41-to-0.8.42 source and manifest delta. Production code and build script are unchanged; the std feature now activates optional multiversion while OxiBelt selects neither std nor simd-accel. The update removes two unused proc-macro dependencies from this graph, adds no unsafe code or ambient capability, preserves the declared license and Rust 1.88 floor, and changes no decoding behavior."
+
 [[audits.encoding_rs_io]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -696,6 +702,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "1.11.0 -> 1.11.1"
 notes = "Reviewed the complete checksum-matched 1.11.0-to-1.11.1 source delta. HTTP/1 head completion now accepts mixed LF and CRLF in the same cases as the parser, while OxiBelt's bounded pre-parser remains authoritative for stricter framing rejection. ReadBuf, header, body-length, client-dispatch, HTTP/2, and upgrade changes preserve initialized-length, index, ownership, and wakeup invariants; no build script or external capability was added."
+
+[[audits.hyper-rustls]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.27.9 -> 0.27.10"
+notes = "Reviewed the complete checksum-matched 0.27.9-to-0.27.10 source and manifest delta. Runtime changes are an equivalent Arc spelling and explicit lifetime annotations; remaining changes affect lint and documentation cfgs only. TLS connector construction, verification, protocol selection, crate features, dependencies, and unsafe boundaries are unchanged. No build script or new ambient capability was introduced; license and Rust 1.85 floor are unchanged."
 
 [[audits.indexmap]]
 who = "OpenAI Codex"
@@ -1579,6 +1591,12 @@ criteria = "safe-to-deploy"
 delta = "2.0.19 -> 2.0.20"
 notes = "Reviewed the complete checksum-matched 2.0.19-to-2.0.20 source delta. Runtime behavior remains a safe derive facade; the private-version marker advances with the separately audited proc macro, and other production changes are documentation-only. Existing compiler probes and OUT_DIR writes are unchanged."
 
+[[audits.thiserror]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "2.0.20 -> 2.0.21"
+notes = "Reviewed the checksum-matched 2.0.20-to-2.0.21 source and manifest delta for the standalone probes. The runtime library only changes its documentation URL; the existing build script is byte-for-byte unchanged. The private derive dependency advances with the separately audited macro fix, and the higher Rust 1.77 floor remains below the probes Rust 1.98 floor. No unsafe code, new build capability, license change, or network/filesystem/process behavior was introduced."
+
 [[audits.thiserror-impl]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -1590,6 +1608,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "2.0.19 -> 2.0.20"
 notes = "Reviewed the complete checksum-matched 2.0.19-to-2.0.20 proc-macro delta. Generated initializers add only targeted lint allowances for explicit field names; derive parsing, validation, output semantics, unsafe boundaries, and external side effects are unchanged."
+
+[[audits.thiserror-impl]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "2.0.20 -> 2.0.21"
+notes = "Reviewed the complete checksum-matched 2.0.20-to-2.0.21 proc-macro source and manifest delta. The new token parser tracks nested turbofish delimiters to keep generic expressions inside generated Display arguments; affected forms have regression tests. Derive output for other forms and the no-unsafe/no-ambient-I/O boundary remain unchanged. There is no build script or license change, and Rust 1.77 remains below the probes Rust 1.98 floor."
 
 [[audits.tinyvec]]
 who = "OpenAI Codex"

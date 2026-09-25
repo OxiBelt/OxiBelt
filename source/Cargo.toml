@@ -52,7 +52,7 @@ hkdf = "0.13.0"
 hmac = "0.13.0"
 httparse = "1.10.1"
 hyper = { version = "1.11.1", features = ["client", "http1", "http2", "server"] }
-hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["aws-lc-rs", "http1", "http2", "webpki-tokio"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "http2", "server", "service", "tokio"] }
 libc = "0.2.189"
 md-5 = "0.11.0"
