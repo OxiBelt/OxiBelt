@@ -36,6 +36,9 @@ case "$1" in
     exit 1
     ;;
   run)
+    if [[ " $* " == *" --version "* ]]; then
+      printf '%s\n' 'mc version RELEASE.2025-08-13T08-35-41Z (commit-id=7394ce0dd2a80935aded936b09fa12cbb3cb8096)'
+    fi
     if [[ " $* " == *" --entrypoint id "* ]]; then
       printf '%s\n' 1000
     fi

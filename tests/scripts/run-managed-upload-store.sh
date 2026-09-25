@@ -12,7 +12,9 @@ minio_version="2025-10-15T17:29:55Z"
 minio_commit="9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a"
 minio_sha256="45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841"
 runtime_image="alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
-mc_image="quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
+mc_release="RELEASE.2025-08-13T08-35-41Z"
+mc_commit="7394ce0dd2a80935aded936b09fa12cbb3cb8096"
+mc_image=""
 
 die(){ echo "managed upload store check: $*" >&2; exit 1; }
 while (($#)); do case "$1" in
@@ -37,6 +39,7 @@ cleanup(){ status=$?; set +e
   [[ -n "$cert_volume" ]]&&docker volume rm "$cert_volume" >/dev/null 2>&1
   [[ -n "$data_volume" ]]&&docker volume rm "$data_volume" >/dev/null 2>&1
   [[ -n "$image" ]]&&docker image rm -f "$image" >/dev/null 2>&1
+  [[ -n "$mc_image" ]]&&docker image rm -f "$mc_image" >/dev/null 2>&1
   [[ -n "$work_dir" ]]&&rm -rf -- "$work_dir"
   exit "$status"
 }; trap cleanup EXIT
@@ -46,6 +49,7 @@ work_dir="$(mktemp -d "$repo_root/target/managed-upload-store.XXXXXX")"
 run_id="$(printf '%s' "$$:${RANDOM}:$(date +%s%N)"|sha256sum|cut -c1-16)"
 network="oxibelt-upload-${run_id}"; pg="oxibelt-upload-pg-${run_id}"; minio="oxibelt-upload-s3-${run_id}"
 image="oxibelt/managed-upload-minio:${run_id}"; label="oxibelt.test.run=managed-upload-${run_id}"
+mc_image="oxibelt/managed-upload-mc:${run_id}"
 cert_volume="oxibelt-upload-certs-${run_id}"; data_volume="oxibelt-upload-data-${run_id}"
 docker_root="$repo_root"
 if mounts="$(docker inspect "$(hostname)" --format '{{json .Mounts}}' 2>/dev/null)"; then
@@ -62,6 +66,9 @@ openssl x509 -req -sha256 -days 1 -CA "$ca" -CAkey "$cakey" -CAcreateserial -in 
 chmod 0600 "$cakey" "$key"; cp "$ca" "$work_dir/mc-ca/upload-ca.crt"
 
 docker build --pull=false --label "$label" --build-arg MINIO_SOURCE_RELEASE="$minio_release" --build-arg MINIO_SOURCE_VERSION="$minio_version" --build-arg MINIO_SOURCE_COMMIT="$minio_commit" --build-arg MINIO_SOURCE_SHA256="$minio_sha256" -t "$image" "$repo_root/tests/docker/ct_object_store_minio"
+docker build --pull=false --label "$label" -t "$mc_image" "$repo_root/tests/docker/minio_mc"
+mc_version="$(docker run --rm "$mc_image" --version)"
+[[ "$mc_version" == *"$mc_release"* && "$mc_version" == *"$mc_commit"* ]]||die "pinned mc release identity did not match"
 docker network create --label "$label" "$network" >/dev/null
 docker volume create --label "$label" "$cert_volume" >/dev/null
 docker volume create --label "$label" "$data_volume" >/dev/null

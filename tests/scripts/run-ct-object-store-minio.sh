@@ -14,6 +14,7 @@ network_name=""
 minio_container=""
 mc_container=""
 image_name=""
+mc_image=""
 client_container=""
 client_network_connected="false"
 
@@ -23,7 +24,9 @@ minio_source_commit="9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a"
 minio_source_sha256="45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841"
 minio_builder_image="golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414"
 minio_runtime_image="alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
-mc_image="quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
+mc_release="RELEASE.2025-08-13T08-35-41Z"
+mc_commit="7394ce0dd2a80935aded936b09fa12cbb3cb8096"
+mc_sha256="01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891"
 mc_timeout_seconds=30
 
 die() {
@@ -52,6 +55,9 @@ cleanup() {
   fi
   if [[ -n "${image_name}" ]]; then
     docker image rm --force "${image_name}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${mc_image}" ]]; then
+    docker image rm --force "${mc_image}" >/dev/null 2>&1 || true
   fi
   if [[ -n "${work_dir}" ]]; then
     rm -rf -- "${work_dir}"
@@ -134,6 +140,7 @@ run_id="$(printf '%s' "${source_revision}:${BASHPID}:${RANDOM}:$(date +%s%N)" | 
 network_name="oxibelt-ct-object-store-${run_id}"
 minio_container="oxibelt-ct-minio-${run_id}"
 image_name="oxibelt/ct-object-store-minio:${run_id}"
+mc_image="oxibelt/ct-object-store-mc:${run_id}"
 test_label="oxibelt.test.run=ct-object-store-minio-${run_id}"
 cert_dir="${work_dir}/certs"
 data_dir="${work_dir}/data"
@@ -174,6 +181,11 @@ docker build --pull=false --label "${test_label}" \
   --build-arg "MINIO_SOURCE_COMMIT=${minio_source_commit}" \
   --build-arg "MINIO_SOURCE_SHA256=${minio_source_sha256}" \
   --tag "${image_name}" "${repo_root}/tests/docker/ct_object_store_minio"
+docker build --pull=false --label "${test_label}" \
+  --tag "${mc_image}" "${repo_root}/tests/docker/minio_mc"
+mc_version="$(docker run --rm "${mc_image}" --version)"
+[[ "${mc_version}" == *"${mc_release}"* && "${mc_version}" == *"${mc_commit}"* ]] \
+  || die "pinned mc release identity did not match"
 docker network create --label "${test_label}" "${network_name}" >/dev/null
 if [[ -n "${client_container}" ]]; then
   docker network connect "${network_name}" "${client_container}"
@@ -414,7 +426,10 @@ jq --null-input \
   --arg minio_builder_image "${minio_builder_image}" \
   --arg minio_runtime_image "${minio_runtime_image}" \
   --arg mc_image "${mc_image}" \
-  '{schemaVersion: 1, kind: "ct-object-store-minio", source: {revision: $revision, tree: $tree, worktreeState: $worktree_state}, minio: {release: $minio_release, commit: $minio_commit, sourceSha256: $minio_source_sha256, builderImage: $minio_builder_image, runtimeImage: $minio_runtime_image}, mcImage: $mc_image, transport: "tls", clientTrust: "test-only ClientOptions::with_root_certificate", retention: {mode: "COMPLIANCE", validity: "1DAYS"}, deleteDenial: {object: true, objectVersion: true}}' \
+  --arg mc_release "${mc_release}" \
+  --arg mc_commit "${mc_commit}" \
+  --arg mc_sha256 "${mc_sha256}" \
+  '{schemaVersion: 1, kind: "ct-object-store-minio", source: {revision: $revision, tree: $tree, worktreeState: $worktree_state}, minio: {release: $minio_release, commit: $minio_commit, sourceSha256: $minio_source_sha256, builderImage: $minio_builder_image, runtimeImage: $minio_runtime_image}, mcImage: $mc_image, mc: {release: $mc_release, commit: $mc_commit, assetSha256: $mc_sha256, image: $mc_image}, transport: "tls", clientTrust: "test-only ClientOptions::with_root_certificate", retention: {mode: "COMPLIANCE", validity: "1DAYS"}, deleteDenial: {object: true, objectVersion: true}}' \
   >"${receipt_temporary}"
 chmod 0600 "${receipt_temporary}"
 mv -- "${receipt_temporary}" "${receipt_output}"

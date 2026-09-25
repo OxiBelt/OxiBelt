@@ -7472,6 +7472,11 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
   let dockerfile =
     fs::read_to_string(repo_root().join("tests/docker/ct_object_store_minio/Dockerfile"))
       .expect("CT object-store MinIO Dockerfile should be readable");
+  let mc_dockerfile = fs::read_to_string(repo_root().join("tests/docker/minio_mc/Dockerfile"))
+    .expect("MinIO client Dockerfile should be readable");
+  let managed_upload_script =
+    fs::read_to_string(repo_root().join("tests/scripts/run-managed-upload-store.sh"))
+      .expect("managed-upload MinIO harness should be readable");
   let object_store = fs::read_to_string(repo_root().join("source/src/ct_runtime/object_store.rs"))
     .expect("CT object-store adapter should be readable");
 
@@ -7515,9 +7520,44 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
       "MinIO Dockerfile should pin {expected}"
     );
   }
-  assert!(script.contains(
-    "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727"
-  ));
+  for expected in [
+    "alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+    "--checksum=sha256:01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891",
+    "https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z",
+    "ENTRYPOINT [\"/usr/local/bin/mc\"]",
+  ] {
+    assert!(
+      mc_dockerfile.contains(expected),
+      "mc Dockerfile should pin {expected}"
+    );
+  }
+  for harness in [&script, &managed_upload_script] {
+    for expected in [
+      "tests/docker/minio_mc",
+      "mc_release=\"RELEASE.2025-08-13T08-35-41Z\"",
+      "mc_commit=\"7394ce0dd2a80935aded936b09fa12cbb3cb8096\"",
+      "pinned mc release identity did not match",
+      "docker image rm",
+    ] {
+      assert!(
+        harness.contains(expected),
+        "MinIO harness should enforce {expected}"
+      );
+    }
+    assert!(!harness.contains("quay.io/minio/mc:"));
+  }
+  for expected in [
+    "mc_sha256=\"01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891\"",
+    "assetSha256: $mc_sha256",
+    "mcImage: $mc_image",
+    "image: $mc_image",
+    "commit: $mc_commit",
+  ] {
+    assert!(
+      script.contains(expected),
+      "CT receipt should record {expected}"
+    );
+  }
   for expected in [
     "name=rootless",
     "${GITHUB_ACTIONS:-}",
