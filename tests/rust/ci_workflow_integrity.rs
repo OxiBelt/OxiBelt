@@ -1553,7 +1553,7 @@ fn python_docker_helpers_track_the_supported_alpine_base() {
     let contents = fs::read_to_string(repo_root().join(dockerfile))
       .unwrap_or_else(|error| panic!("{dockerfile} should be readable: {error}"));
     assert!(
-      contents.starts_with("FROM python:3.14-alpine3.24@sha256:016508ba505da24f7139765bc4bb669df4e88eb2f12eeadd571bf2f88d7533df\n"),
+      contents.starts_with("FROM python:3.14-alpine3.24@sha256:9e9fde4d32eedce0b661d9ab91e826b62dddf28e928c230ec55f1866cac66b01\n"),
       "{dockerfile} should use the supported Python 3.14 and Alpine 3.24 base"
     );
   }
@@ -3203,7 +3203,7 @@ fn admin_audit_anchor_postgres_harness_is_dual_database_bounded_and_rootless() {
 
   for expected in [
     "set -euo pipefail",
-    "postgres:18.6-alpine3.24@sha256:6c538e7206ea40ff740ef27883529390a690b6ead6ba96b44c67a9f7c638e8fd",
+    "postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
     "local_container=",
     "authority_container=",
     "docker_publish_args=(--publish 127.0.0.1::5432)",
@@ -4277,7 +4277,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "kind load docker-image",
     "gateway-api-l4-values.yaml",
     "registry.k8s.io/gateway-api/echo-basic:v1.6.0@sha256:bc7c534613a36defdbf9303567c67a234120bf77e70102fe5ff068c219f90e66",
-    "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:b2c234ceca8ab66d00074c63ddeb4a81193f489311fbd17f680155ab5cdd22ed\"",
+    "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:3b83b0b6a598bb390c8186a408a69949772f439548a81c5ea0ab7ccf102c248d\"",
     "redis_source_digest=\"${redis_source_image##*@sha256:}\"",
     "redis_kind_image=\"docker.io/oxibelt-ci/valkey:sha256-${redis_source_digest}-${run_id}\"",
     "redis_kind_image_created=0",
@@ -4420,7 +4420,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
   }
   assert!(
     !script.contains(
-      "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b\""
+      "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11\""
     ),
     "Kind must import the reviewed AMD64 manifest, not its partially pulled parent index"
   );
@@ -7503,7 +7503,7 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
     "RELEASE.2025-10-15T17-29-55Z",
     "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a",
     "45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841",
-    "golang:1.27.1-alpine3.24@sha256:4cb7ac979db5fcc41cae44b2227ba5ab8a51e8807f40d9ba4dee20a0ad960b5b",
+    "golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414",
     "alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
   ] {
     assert!(
@@ -7625,7 +7625,7 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
     "oxibelt/pq-probe:ci",
     "oxibelt/protocol-probe:ci",
     "oxibelt/postgres:ci",
-    "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b\"",
+    "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11\"",
     "redis_image=\"oxibelt/valkey:ci\"",
     "ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e",
     "oxibelt/coturn:ci",
@@ -7917,8 +7917,8 @@ fi
     String::from_utf8_lossy(&success.stderr)
   );
   let log = fs::read_to_string(&docker_log).expect("stubbed Docker calls should be recorded");
-  let redis_source = "valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b";
-  let redis_tag = "tag valkey/valkey:9.1.2-alpine@sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b oxibelt/valkey:ci";
+  let redis_source = "valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11";
+  let redis_tag = "tag valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11 oxibelt/valkey:ci";
   let save = "save --output";
   let redis_pull = format!("pull --platform linux/amd64 {redis_source}");
   assert!(log.contains(&redis_pull));

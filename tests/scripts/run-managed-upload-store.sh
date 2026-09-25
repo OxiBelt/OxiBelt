@@ -6,7 +6,7 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 test_binary=""
-postgres_image="${OXIBELT_POSTGRES_IMAGE:-postgres:18.6-alpine3.24@sha256:6c538e7206ea40ff740ef27883529390a690b6ead6ba96b44c67a9f7c638e8fd}"
+postgres_image="${OXIBELT_POSTGRES_IMAGE:-postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873}"
 minio_release="RELEASE.2025-10-15T17-29-55Z"
 minio_version="2025-10-15T17:29:55Z"
 minio_commit="9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a"

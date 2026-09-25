@@ -13,10 +13,10 @@ gateway_api_version="v1.6.2"
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
 gateway_api_sha256="faede450fa178126aba41337737b97d351ebe87d93c910237ce1e072d1ca40d9"
 # Pin the linux/amd64 manifest from the reviewed 9.1.2-alpine index
-# sha256:a0dbf4c1d5708782907c10e2c72deff317518518b5288a58416981d9db95d30b.
+# sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11.
 # Kind imports all referenced platforms, so a partially pulled index cannot be
 # used here; the CRI verification below also requires a manifest/config chain.
-redis_source_image="valkey/valkey:9.1.2-alpine@sha256:b2c234ceca8ab66d00074c63ddeb4a81193f489311fbd17f680155ab5cdd22ed"
+redis_source_image="valkey/valkey:9.1.2-alpine@sha256:3b83b0b6a598bb390c8186a408a69949772f439548a81c5ea0ab7ccf102c248d"
 redis_source_digest="${redis_source_image##*@sha256:}"
 redis_kind_image=""
 # The scheduled qualification matrix may select only these reviewed Kind node
