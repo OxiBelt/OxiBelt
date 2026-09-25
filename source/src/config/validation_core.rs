@@ -147,6 +147,14 @@ impl Config {
           upstream.name
         );
       }
+      if upstream.webtransport_http3_draft == WebTransportH3Draft::Draft16
+        && (upstream.max_http_version != HttpVersion::H3 || !upstream.webtransport)
+      {
+        bail!(
+          "upstream {} webtransport_http3_draft = \"draft16\" requires webtransport = true and max_http_version = \"h3\"",
+          upstream.name
+        );
+      }
       if upstream.max_http_version == HttpVersion::H3
         && upstream.proxy_protocol_egress != ProxyProtocolEgressMode::Off
       {
@@ -236,6 +244,21 @@ impl Config {
       {
         bail!(
           "upstream pool {} max_http_version = \"h3\" requires every server to use an https:// origin",
+          pool.name
+        );
+      }
+      if pool.max_http_version != Some(HttpVersion::H3)
+        && (pool
+          .servers
+          .iter()
+          .any(|server| server.webtransport_http3_draft == WebTransportH3Draft::Draft16)
+          || pool
+            .discovery
+            .iter()
+            .any(|discovery| discovery.webtransport_http3_draft == WebTransportH3Draft::Draft16))
+      {
+        bail!(
+          "upstream pool {} webtransport_http3_draft = \"draft16\" requires max_http_version = \"h3\"",
           pool.name
         );
       }

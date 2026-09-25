@@ -6,11 +6,11 @@ use std::time::Instant;
 
 use tokio::task::JoinHandle;
 
-use super::super::super::H3RequestStream;
 use super::super::super::UpstreamWebTransportConnectionGuard;
 use super::super::upstream_adapter::UpstreamWebTransportSession;
 use super::connection_limits::WebTransportSessionPermits;
 use super::datagram_pacing::DatagramPacerSender;
+use super::flow::{ConnectStream, SessionFlow};
 use crate::bandwidth::RouteBandwidthLimiter;
 use crate::proxy::http::EffectiveTimeouts;
 use crate::proxy::stream_waf::StreamWafRequestContext;
@@ -21,12 +21,15 @@ use crate::telemetry::{TelemetryStart, TraceContext};
 use crate::webtransport_admin::WebTransportSessionGuard;
 
 pub(in crate::proxy::http3::webtransport_bridge) struct ActiveWebTransportSession {
-  pub(super) upstream: Arc<UpstreamWebTransportSession>,
+  pub(in crate::proxy::http3::webtransport_bridge) upstream: Arc<UpstreamWebTransportSession>,
   pub(super) _upstream_connection_guard: UpstreamWebTransportConnectionGuard,
-  pub(super) connect_stream: H3RequestStream,
+  pub(super) connect_stream: ConnectStream,
+  pub(super) client_reader_done: Option<tokio::sync::oneshot::Receiver<()>>,
+  pub(super) flow: Option<Arc<SessionFlow>>,
   #[cfg(feature = "admin-runtime")]
   pub(super) admin_guard: WebTransportSessionGuard,
   pub(super) _connection_permits: WebTransportSessionPermits,
+  pub(super) _buffer_reservation: Option<crate::webtransport::Reservation>,
   pub(super) _introspection_guard: RuntimeCounterGuard,
   pub(super) bandwidth: Arc<RouteBandwidthLimiter>,
   pub(super) downstream_datagrams: DatagramPacerSender,
@@ -40,6 +43,9 @@ pub(in crate::proxy::http3::webtransport_bridge) struct ActiveWebTransportSessio
   pub(super) started_at: TelemetryStart,
   pub(in crate::proxy::http3::webtransport_bridge) last_activity: Instant,
   pub(super) bandwidth_waiters: usize,
+  pub(in crate::proxy::http3::webtransport_bridge) peer_close_pending: bool,
+  pub(super) abrupt_reset_tx: tokio::sync::watch::Sender<bool>,
+  pub(in crate::proxy::http3::webtransport_bridge) unassociated_uni_resets: u32,
   pub(in crate::proxy::http3::webtransport_bridge) tasks: Vec<JoinHandle<()>>,
 }
 

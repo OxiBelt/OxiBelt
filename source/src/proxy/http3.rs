@@ -11,6 +11,7 @@ use std::time::Duration;
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::Context;
 use bytes::Bytes;
+use h3::ConnectionState;
 use h3::ext::Protocol;
 use http_body_util::BodyExt;
 use tokio::task::JoinHandle;
@@ -41,6 +42,12 @@ type H3ServerConnection = h3::server::Connection<crate::quic::h3::Connection, By
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 const H3_MAX_FIELD_SECTION_SIZE: u64 = (1_u64 << 62) - 1;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebTransportWireDraft {
+  Draft02,
+  Draft16,
+}
+
 mod fast_response;
 mod request_body;
 mod request_tasks;
@@ -61,6 +68,7 @@ pub(crate) use upstream_pool::UpstreamH3Pools;
 pub(crate) use webtransport_bridge::{
   UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream, UpstreamWebTransportSession,
   WebTransportSessionPermits, acquire_webtransport_session_permits,
+  append_upstream_response_headers, selected_protocol_header,
 };
 
 #[cfg(test)]
@@ -155,6 +163,8 @@ pub(crate) async fn handle_downstream_connection(
     .enable_extended_connect(true)
     .enable_datagram(true)
     .enable_webtransport(true)
+    .enable_webtransport_h3(snapshot.config.proxy.http3.webtransport_draft16)
+    .webtransport_h3_initial_credit(0, 0, 0)
     .max_webtransport_sessions(max_webtransport_sessions_per_connection as u64)
     .build(quic_connection)
     .await
@@ -285,6 +295,22 @@ pub(crate) async fn handle_downstream_connection(
     }
 
     if is_webtransport_request(&request) {
+      let Some(wire_draft) = negotiated_webtransport_draft(
+        &h3_connection,
+        &downstream_connection,
+        &request,
+        snapshot.config.proxy.http3.webtransport_draft16,
+      ) else {
+        respond_to_h3_request(
+          stream,
+          text_response(
+            StatusCode::BAD_REQUEST,
+            "WebTransport H3 dialect or capability mismatch",
+          ),
+        )
+        .await?;
+        continue;
+      };
       let _overload_request = match snapshot.overload.try_admit_request(::http::Version::HTTP_3) {
         Ok(lease) => lease,
         Err(_) => {
@@ -312,6 +338,7 @@ pub(crate) async fn handle_downstream_connection(
       request_tasks.wait_all().await;
       webtransport_bridge::serve_webtransport_connection(
         h3_connection,
+        wire_draft,
         request,
         stream,
         peer_addr,
@@ -328,6 +355,18 @@ pub(crate) async fn handle_downstream_connection(
       )
       .await?;
       return Ok(());
+    }
+
+    if snapshot.config.proxy.http3.webtransport_only_connections {
+      respond_to_h3_request(
+        stream,
+        text_response(
+          StatusCode::MISDIRECTED_REQUEST,
+          "This HTTP/3 listener accepts only WebTransport sessions",
+        ),
+      )
+      .await?;
+      continue;
     }
 
     if !request_admission.try_admit() {
@@ -836,7 +875,82 @@ pub(crate) fn is_webtransport_request(request: &Request<()>) -> bool {
     && request
       .extensions()
       .get::<Protocol>()
-      .is_some_and(|protocol| protocol == &Protocol::WEB_TRANSPORT)
+      .is_some_and(|protocol| {
+        protocol == &Protocol::WEB_TRANSPORT || protocol == &Protocol::WEB_TRANSPORT_H3
+      })
+}
+
+fn negotiated_webtransport_draft(
+  connection: &H3ServerConnection,
+  transport: &h3_quinn::quinn::Connection,
+  request: &Request<()>,
+  allow_draft16: bool,
+) -> Option<WebTransportWireDraft> {
+  if !connection.settings_received()
+    || request.uri().scheme_str() != Some("https")
+    || request.uri().authority().is_none()
+    || !request.uri().path().starts_with('/')
+    || http_proxy::early_data::is_verified(request)
+  {
+    return None;
+  }
+  let peer = connection.settings();
+  if !peer.enable_datagram() || transport.max_datagram_size().is_none() {
+    return None;
+  }
+  if peer.wt_initial_max_streams_uni() > webtransport_bridge::MAX_WEBTRANSPORT_STREAMS
+    || peer.wt_initial_max_streams_bidi() > webtransport_bridge::MAX_WEBTRANSPORT_STREAMS
+  {
+    return None;
+  }
+  let selected = match request.extensions().get::<Protocol>() {
+    Some(protocol)
+      if protocol == &Protocol::WEB_TRANSPORT_H3
+        && allow_draft16
+        && peer.enable_webtransport_h3()
+        && transport.peer_supports_reset_stream_at() =>
+    {
+      Some(WebTransportWireDraft::Draft16)
+    }
+    Some(protocol)
+      if protocol == &Protocol::WEB_TRANSPORT
+        && peer.enable_webtransport()
+        && draft02_is_highest_common(allow_draft16, peer.enable_webtransport_h3()) =>
+    {
+      Some(WebTransportWireDraft::Draft02)
+    }
+    _ => None,
+  };
+  selected.filter(|draft| webtransport_request_matches_draft(request, *draft))
+}
+
+fn draft02_is_highest_common(local_draft16: bool, peer_draft16: bool) -> bool {
+  !local_draft16 || !peer_draft16
+}
+
+fn webtransport_request_matches_draft(request: &Request<()>, draft: WebTransportWireDraft) -> bool {
+  let draft02_headers = request.headers().get_all("sec-webtransport-http3-draft02");
+  let mut draft02_values = draft02_headers.iter();
+  let valid_draft02_marker =
+    draft02_values.next().is_some_and(|value| value == "1") && draft02_values.next().is_none();
+  request.method() == Method::CONNECT
+    && request.uri().scheme_str() == Some("https")
+    && request.uri().authority().is_some()
+    && request.uri().path().starts_with('/')
+    && matches!(
+      (draft, request.extensions().get::<Protocol>()),
+      (
+        WebTransportWireDraft::Draft02,
+        Some(&Protocol::WEB_TRANSPORT)
+      ) | (
+        WebTransportWireDraft::Draft16,
+        Some(&Protocol::WEB_TRANSPORT_H3)
+      )
+    )
+    && !request
+      .headers()
+      .contains_key("sec-webtransport-http3-draft")
+    && (draft != WebTransportWireDraft::Draft02 || valid_draft02_marker)
 }
 
 #[cfg(any(test, feature = "fuzzing"))]

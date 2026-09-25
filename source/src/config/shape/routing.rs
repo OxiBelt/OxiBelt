@@ -24,6 +24,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "webrtc",
       "websocket",
       "webtransport",
+      "webtransport_http3_draft",
     ][..],
     "upstreams.proxy_protocol_tls" | "sni_forward.rules.tcp_proxy_protocol_tls" => {
       &["client_certificate", "source"][..]
@@ -102,6 +103,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "watch",
       "watch_timeout_seconds",
       "weight_multiplier",
+      "webtransport_http3_draft",
     ][..],
     "upstream_pools.sticky_cookie" => &[
       "cookie_name",
@@ -167,6 +169,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "state",
       "tls",
       "weight",
+      "webtransport_http3_draft",
     ][..],
     "upstream_pools.circuit_breaker" | "routes.circuit_breaker" => &[
       "max_active_requests",

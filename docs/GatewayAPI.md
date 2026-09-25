@@ -237,6 +237,10 @@ WebTransport-only sibling with a distinct upstream pool and an exact upstream
 version. The controller preserves the selected version without fallback. An
 `h3` selection requires every backend to use HTTPS, including discovered
 members; the data plane must independently be configured for HTTP/3.
+For H3, `spec.webTransport.upstreamHttp3Draft` optionally selects `draft02`
+(the default) or `draft16` for every member of the WebTransport pool. It is
+rejected with `upstreamHttpVersion: h2`. The dialect must match the downstream
+H3 session; a mismatch fails before downstream session acceptance.
 
 Supported matches:
 
@@ -313,7 +317,9 @@ GRPCRoute. The initial bounded fields are:
 - `clientCertificateForwarding`, which projects only the downstream TLS-verified
   client leaf to one operator-admitted backend request header; and
 - `webTransport.upstreamHttpVersion`, which selects exact `h2` or `h3` for a
-  WebTransport-only sibling of an HTTPRoute rule.
+  WebTransport-only sibling of an HTTPRoute rule; and
+- `webTransport.upstreamHttp3Draft`, which selects `draft02` or `draft16` for
+  every backend of an `h3` WebTransport sibling.
 
 `clientCertificateForwarding.header` is a valid HTTP field name and must be
 listed in the controller's repeated

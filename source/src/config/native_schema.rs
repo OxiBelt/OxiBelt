@@ -1383,6 +1383,18 @@ fn is_upstream_client_identity_path(path: &str) -> bool {
 fn enum_values(path: &str) -> Option<Vec<&'static str>> {
   let values = BTreeMap::from([
     ("upstream_pools.max_http_version", vec!["h1", "h2", "h3"]),
+    (
+      "upstreams.webtransport_http3_draft",
+      vec!["draft02", "draft16"],
+    ),
+    (
+      "upstream_pools.servers.webtransport_http3_draft",
+      vec!["draft02", "draft16"],
+    ),
+    (
+      "upstream_pools.discovery.webtransport_http3_draft",
+      vec!["draft02", "draft16"],
+    ),
     ("upload_stores.kind", vec!["local", "postgres_s3"]),
     (
       "compression_dictionary.stores.kind",

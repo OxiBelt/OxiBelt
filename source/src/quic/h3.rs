@@ -278,6 +278,12 @@ where
   recv: RecvStream,
 }
 
+impl<B: Buf> BidiStream<B> {
+  pub(crate) fn set_webtransport_reliable_prefix(&mut self, bytes: u64) {
+    self.send.set_webtransport_reliable_prefix(bytes);
+  }
+}
+
 impl<B> quic::BidiStream<B> for BidiStream<B>
 where
   B: Buf,
@@ -360,6 +366,10 @@ impl RecvStream {
     let stream_id = h3_stream_id(stream.id());
     Self { stream, stream_id }
   }
+
+  pub(crate) fn reset_info(&self) -> Option<quinn::ResetInfo> {
+    self.stream.reset_info()
+  }
 }
 
 impl quic::RecvStream for RecvStream {
@@ -395,6 +405,7 @@ impl quic::RecvStream for RecvStream {
 pub(crate) struct SendStream<B: Buf> {
   stream: quinn::SendStream,
   writing: Option<WriteBuf<B>>,
+  webtransport_reliable_prefix: Option<u64>,
 }
 
 impl<B> SendStream<B>
@@ -405,6 +416,23 @@ where
     Self {
       stream,
       writing: None,
+      webtransport_reliable_prefix: None,
+    }
+  }
+
+  pub(crate) fn set_webtransport_reliable_prefix(&mut self, bytes: u64) {
+    self.webtransport_reliable_prefix = Some(bytes);
+  }
+
+  pub(crate) fn reset_webtransport(&mut self, code: u64) -> std::io::Result<()> {
+    let code = VarInt::from_u64(code)
+      .map_err(|_| std::io::Error::other("invalid WebTransport reset code"))?;
+    match self.webtransport_reliable_prefix {
+      Some(bytes) => self
+        .stream
+        .reset_at(code, bytes)
+        .map_err(std::io::Error::other),
+      None => self.stream.reset(code).map_err(std::io::Error::other),
     }
   }
 }

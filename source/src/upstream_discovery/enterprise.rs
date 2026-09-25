@@ -227,6 +227,7 @@ fn parse_etcd_server(
       source: UpstreamPoolServerSource::Etcd,
       discovery_instance_id: None,
       discovered_weight: None,
+      webtransport_http3_draft: Default::default(),
     });
   }
   let server: EtcdDiscoveryServer =
@@ -253,6 +254,7 @@ fn parse_etcd_server(
     state: server.state,
     tls: Default::default(),
     source: UpstreamPoolServerSource::Etcd,
+    webtransport_http3_draft: Default::default(),
     discovery_instance_id: None,
     discovered_weight: None,
   })
@@ -286,6 +288,7 @@ fn discovered_host_server(
     state: UpstreamPoolServerState::Ready,
     tls: Default::default(),
     source,
+    webtransport_http3_draft: Default::default(),
     discovery_instance_id: None,
     discovered_weight: None,
   })

@@ -482,6 +482,7 @@ impl UpstreamH3Pool {
         prepared.target_url.clone(),
         headers,
         prepared.protocols.clone(),
+        prepared.upstream.webtransport_http3_draft,
       ),
     )
     .await

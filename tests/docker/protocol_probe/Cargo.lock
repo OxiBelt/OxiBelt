@@ -494,8 +494,6 @@ dependencies = [
 [[package]]
 name = "h3"
 version = "0.0.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be"
 dependencies = [
  "bytes",
  "fastrand",
@@ -1036,8 +1034,6 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4051e23e9185c255a7e33ef59cdbca87a22d359052eecd22fc6b901fb37d9d11"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1057,8 +1053,6 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -1814,8 +1808,6 @@ dependencies = [
 [[package]]
 name = "web-transport-proto"
 version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a81bcc79bf48ad0b819bfa51ec28524ee7c356056d43c316727d6b505dcc71e"
 dependencies = [
  "bytes",
  "http",
@@ -1828,8 +1820,6 @@ dependencies = [
 [[package]]
 name = "web-transport-quinn"
 version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63a239cba370789ab705c39b66d223e3b8aef85e2762046fd6b59e560f156756"
 dependencies = [
  "bytes",
  "futures",

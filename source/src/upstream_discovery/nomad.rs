@@ -155,6 +155,7 @@ fn nomad_service_entry_to_server(
     state: UpstreamPoolServerState::Ready,
     tls: Default::default(),
     source: UpstreamPoolServerSource::Nomad,
+    webtransport_http3_draft: Default::default(),
     discovery_instance_id: None,
     discovered_weight: None,
   })
@@ -245,6 +246,7 @@ mod tests {
       refresh_interval_ms: 30_000,
       min_ttl_ms: 1_000,
       tls: Default::default(),
+      webtransport_http3_draft: Default::default(),
     }
   }
 

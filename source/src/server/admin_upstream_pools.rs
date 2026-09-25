@@ -9,7 +9,9 @@ use hyper::body::Incoming;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::config::{UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState};
+use crate::config::{
+  UpstreamPoolServerConfig, UpstreamPoolServerSource, UpstreamPoolServerState, WebTransportH3Draft,
+};
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
 use crate::state::{AppHandle, AppSnapshot};
@@ -190,6 +192,8 @@ struct AdminAddPoolServerRequest {
   backup: bool,
   #[serde(default)]
   state: UpstreamPoolServerState,
+  #[serde(default)]
+  webtransport_http3_draft: WebTransportH3Draft,
 }
 
 fn default_admin_pool_server_weight() -> u32 {
@@ -206,6 +210,8 @@ struct AdminPatchPoolServerRequest {
   max_conns: Option<usize>,
   #[serde(default)]
   backup: Option<bool>,
+  #[serde(default)]
+  webtransport_http3_draft: Option<WebTransportH3Draft>,
 }
 
 async fn admin_add_pool_server(
@@ -231,6 +237,7 @@ async fn admin_add_pool_server(
       source: UpstreamPoolServerSource::Admin,
       discovery_instance_id: None,
       discovered_weight: None,
+      webtransport_http3_draft: body.webtransport_http3_draft,
     };
     if server.weight == 0 {
       bail!("upstream pool server weight must be greater than 0");
@@ -317,6 +324,9 @@ async fn admin_patch_pool_server(
     }
     if let Some(backup) = body.backup {
       server.backup = backup;
+    }
+    if let Some(draft) = body.webtransport_http3_draft {
+      server.webtransport_http3_draft = draft;
     }
     Ok(())
   })

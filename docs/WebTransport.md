@@ -8,10 +8,20 @@ on another transport. Upstream establishment precedes downstream acceptance.
 HTTP/2 legs implement
 [draft-ietf-webtrans-http2-15](https://www.ietf.org/archive/id/draft-ietf-webtrans-http2-15.html)
 and require TLS 1.3 with ALPN `h2`. Ordinary HTTP TLS policy is unaffected. HTTP/3
-retains the existing `sec-webtransport-http3-draft: draft02` contract. Transport
+defaults to the existing draft02 dialect. Draft02 requests send
+`Sec-WebTransport-HTTP3-Draft02: 1`, and successful responses send
+`Sec-WebTransport-HTTP3-Draft: draft02`. The H3 upstream may explicitly select
+`draft16`; downstream draft16 advertisement requires
+`proxy.http3.webtransport_draft16 = true`. Transport
 negotiation fields are regenerated for each leg rather than forwarded as
-application metadata. This is a pinned draft implementation, not a claim that
-every browser or third-party WebTransport implementation supports HTTP/2.
+application metadata. H3 ingress and egress dialects must match; H2 ingress or
+egress can translate to the selected H3 dialect. This is a pinned draft
+implementation, not a claim that every browser or third-party WebTransport
+implementation supports HTTP/2.
+The [W3C WebTransport Candidate Recommendation](https://www.w3.org/TR/2026/CR-webtransport-20260730/)
+provides the browser interoperability target. The H3 draft16 wire contract is
+[draft-ietf-webtrans-http3-16](https://datatracker.ietf.org/doc/html/draft-ietf-webtrans-http3-16)
+with [reliable stream reset](https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-09).
 
 ## Handshake and flow control
 
@@ -56,16 +66,28 @@ OxiBelt therefore uses standard HTTP/2 RST_STREAM reasons on the CONNECT stream:
 Application close codes and UTF-8 close reasons remain application data. H3
 transport errors are mapped separately from these H2 fallback reasons. H2 forwarding
 preserves buffered stream bytes before sending a RESET capsule and its reliable
-size. HTTP/3 retains ordinary QUIC reset semantics: resetting a stream may discard
-unread or unacknowledged bytes. Cross-transport resets preserve application error
-codes, but do not add reliable-prefix delivery to HTTP/3. A stream that is reset
-before its HTTP/3 WebTransport association header reaches the peer might never
-become visible as an application stream. Such cancellation does not close
+size. H3 draft02 retains ordinary QUIC reset semantics: resetting a stream may
+discard unread or unacknowledged bytes, including its association header. H3
+draft16 sends `RESET_STREAM_AT` with a reliable prefix that covers the
+WebTransport data-stream header. Cross-transport resets preserve application
+error codes. For draft02, an unassociated unidirectional reset is relayed only
+when its code is a valid WebTransport error, exactly one downstream session has
+ever been established on the connection and is still active, its upstream is H3,
+and the configured stream limit is not exhausted;
+ambiguous resets are discarded. Such cancellation does not close
 unrelated streams or the connection. A malformed session is reset independently
 of unrelated H2 requests or sessions. Cancellation
 can interrupt a writer even when the peer grants no H2 send credit. Session and
 identity permits remain held through transport cleanup; reload budgets count
 sessions from older snapshots until they release their reservations.
+
+For strict browser close-event parity, set
+`proxy.http3.webtransport_only_connections = true` on a dedicated H3 endpoint.
+Each downstream QUIC connection then admits at most one WebTransport session;
+ordinary H3 requests and later CONNECTs on that connection are rejected. A
+WebTransport session may close its dedicated QUIC connection without terminating
+unrelated H3 traffic on another endpoint. The default `false` retains shared H3
+connections, where a session close does not terminate the whole connection.
 
 ## Admin and Gateway
 
@@ -89,4 +111,25 @@ transports and [Configuration](Configuration.md) for the full settings.
 Gateway's `webTransport.upstreamHttpVersion` policy creates a higher-priority
 WebTransport-only sibling route and a separate pool while keeping the ordinary
 route. Optional native pool `max_http_version` makes that transport selection
-explicit; H3 pool members must use HTTPS. See [Gateway API](GatewayAPI.md).
+explicit; H3 pool members must use HTTPS. The optional
+`webTransport.upstreamHttp3Draft` sets the pool member dialect (`draft02` by
+default). Native upstreams and discovery sources use
+`webtransport_http3_draft`. See [Gateway API](GatewayAPI.md).
+
+## Interoperability gate
+
+The required CI gate runs every WebTransport test from pinned web-platform-tests
+revision `ece2d7fdc436d4b9a3856877163b07ec15c05354` in Chrome for Testing
+`154.0.8037.57` and Firefox `156.0`. It compares direct WPT-server results
+with OxiBelt-proxied results using the same browser URL and certificate. Each
+path must pass session, bidirectional stream, unidirectional stream, datagram,
+and close controls. The gate fails if any test or subtest is missing, or if a
+direct and proxied test or subtest status differs. Run it with a prebuilt OxiBelt
+image and `tests/scripts/run-webtransport-wpt-gate.sh`; see the
+[test harness README](../tests/docker/webtransport_wpt/README.md) for the exact
+command and artifact path.
+
+The pinned WPT server uses draft02. The Docker
+`tests/scripts/run-webtransport-h2-integration.sh` matrix separately exercises
+draft16 H3 SETTINGS and CONNECT, H2↔H3 forwarding, streams, datagrams, and
+reliable reset delivery against a draft16 upstream probe.

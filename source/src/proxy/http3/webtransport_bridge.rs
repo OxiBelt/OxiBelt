@@ -18,8 +18,9 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 
 use super::{
-  H3BidiStream, H3DownstreamRequestContext, H3RequestStream, H3ServerConnection, handle_h3_request,
-  is_webtransport_request, request_tasks, respond_to_h3_request,
+  H3BidiStream, H3DownstreamRequestContext, H3RequestStream, H3ServerConnection,
+  WebTransportWireDraft, handle_h3_request, is_webtransport_request, request_tasks,
+  respond_to_h3_request,
 };
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
@@ -41,9 +42,10 @@ use session::{
   handle_downstream_datagram, handle_downstream_uni_stream,
 };
 pub(crate) use session::{WebTransportSessionPermits, acquire_webtransport_session_permits};
+pub(crate) use session::{append_upstream_response_headers, selected_protocol_header};
 pub(crate) use upstream_adapter::{
-  UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream, UpstreamWebTransportSession,
-  h3_application_code_from_wire, h3_application_code_to_wire,
+  MAX_WEBTRANSPORT_STREAMS, UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream,
+  UpstreamWebTransportSession, h3_application_code_from_wire, h3_application_code_to_wire,
 };
 
 type H3OpenStreams = <crate::quic::h3::Connection as H3QuicConnection<Bytes>>::OpenStreams;
@@ -59,32 +61,44 @@ type H3DatagramSender = DatagramSender<
 >;
 
 enum DispatcherEvent {
-  DownstreamBidi(SessionId, DownstreamBidiStream),
+  DownstreamBidi(SessionId, Box<DownstreamBidiStream>),
   DownstreamUni(SessionId, DownstreamUniRecvStream),
+  UnassociatedUniReset(StreamId, u64),
   DownstreamDatagram(StreamId, Bytes),
   DownstreamRequest(Request<()>, Box<H3RequestStream>),
   Activity(SessionId),
   BandwidthWaitStarted(SessionId),
   BandwidthWaitEnded(SessionId),
-  RegisterStreamTask(SessionId, tokio::task::JoinHandle<()>),
+  RegisterStreamTask(
+    SessionId,
+    tokio::task::JoinHandle<()>,
+    Option<tokio::sync::watch::Receiver<bool>>,
+  ),
   #[cfg(feature = "admin-runtime")]
   AdminClose(SessionId, u32, String),
   Blocked(SessionId, WafStreamClose),
   SilentBlocked(SessionId),
+  ClientCloseStarted(SessionId),
+  ClientCloseFinished(SessionId, u32, String),
+  ClientFinished(SessionId),
   SessionEnded(SessionId),
+  SessionClosed(SessionId, u32, String),
+  FlowError(SessionId),
+  ProtocolError(SessionId),
   ConnectionClosed,
   Fatal(anyhow::Error),
 }
 
 enum DownstreamBidiEvent {
-  WebTransport(SessionId, DownstreamBidiStream),
-  Request(Request<()>, Box<H3RequestStream>),
+  WebTransport(SessionId, Box<DownstreamBidiStream>),
+  Request(Box<Request<()>>, Box<H3RequestStream>),
   Closed,
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn serve_webtransport_connection(
   h3_connection: H3ServerConnection,
+  wire_draft: WebTransportWireDraft,
   initial_request: Request<()>,
   initial_stream: H3RequestStream,
   peer_addr: SocketAddr,
@@ -99,11 +113,15 @@ pub(super) async fn serve_webtransport_connection(
   drain: ConnectionDrain,
   mut request_admission: request_tasks::RequestAdmission,
 ) -> anyhow::Result<()> {
-  let downstream = Arc::new(DownstreamWebTransportConnection::new(h3_connection));
+  let downstream = Arc::new(DownstreamWebTransportConnection::new(
+    h3_connection,
+    wire_draft,
+  ));
   let (events_tx, mut events_rx) = mpsc::channel(256);
   let mut downstream_tasks = spawn_downstream_reader_tasks(downstream.clone(), events_tx.clone());
   let mut sessions = HashMap::new();
   let mut session_index = WebTransportSessionIndex::default();
+  let webtransport_only_connections = state.config.proxy.http3.webtransport_only_connections;
 
   handle_downstream_request(
     downstream.clone(),
@@ -170,10 +188,19 @@ pub(super) async fn serve_webtransport_connection(
       event = events_rx.recv() => {
         match event {
           Some(DispatcherEvent::DownstreamBidi(session_id, stream)) => {
-            handle_downstream_bidi_stream(&mut sessions, session_id, stream, events_tx.clone());
+            handle_downstream_bidi_stream(&mut sessions, session_id, *stream, events_tx.clone());
           }
           Some(DispatcherEvent::DownstreamUni(session_id, stream)) => {
             handle_downstream_uni_stream(&mut sessions, session_id, stream, events_tx.clone());
+          }
+          Some(DispatcherEvent::UnassociatedUniReset(stream_id, code)) => {
+            session::handle_unassociated_uni_reset(
+              &mut sessions,
+              &session_index,
+              wire_draft,
+              stream_id,
+              code,
+            );
           }
           Some(DispatcherEvent::DownstreamDatagram(stream_id, payload)) => {
             handle_downstream_datagram(
@@ -219,11 +246,11 @@ pub(super) async fn serve_webtransport_connection(
               session.end_bandwidth_wait();
             }
           }
-          Some(DispatcherEvent::RegisterStreamTask(session_id, task)) => {
+          Some(DispatcherEvent::RegisterStreamTask(session_id, task, abrupt_reset_rx)) => {
             if let Some(session) = sessions.get_mut(&session_id) {
               session.tasks.push(task);
             } else {
-              task.abort();
+              session::retire_late_stream_task(task, abrupt_reset_rx);
             }
           }
           #[cfg(feature = "admin-runtime")]
@@ -248,29 +275,118 @@ pub(super) async fn serve_webtransport_connection(
           Some(DispatcherEvent::SilentBlocked(session_id)) => {
             session::close_session_silent(&mut sessions, &mut session_index, session_id);
           }
-          Some(DispatcherEvent::SessionEnded(session_id)) => {
-            close_session(
+          Some(DispatcherEvent::ClientCloseStarted(session_id)) => {
+            debug!(?session_id, "downstream WebTransport CLOSE capsule started");
+            if let Some(session) = sessions.get_mut(&session_id) {
+              session.peer_close_pending = true;
+            }
+          }
+          Some(DispatcherEvent::ClientCloseFinished(session_id, code, reason)) => {
+            debug!(?session_id, code, "downstream WebTransport CLOSE capsule finished");
+            if let Some(session) = sessions.get(&session_id) {
+              session.upstream.close(code, reason.as_bytes());
+            }
+            session::close_session_from_peer(
               &mut sessions,
               &mut session_index,
               session_id,
-              None,
-              b"WebTransport session ended",
+              code,
+              reason.as_bytes(),
             );
           }
-          Some(DispatcherEvent::ConnectionClosed) | None => {
-            close_all_sessions(
+          Some(DispatcherEvent::ClientFinished(session_id)) => {
+            debug!(?session_id, "downstream WebTransport CONNECT finished without CLOSE capsule");
+            if let Some(session) = sessions.get(&session_id) {
+              let upstream = session.upstream.clone();
+              let events = events_tx.clone();
+              tokio::spawn(async move {
+                if session::client_fin_needs_upstream_close(upstream.closed()).await {
+                  let _ = events
+                    .send(DispatcherEvent::ClientCloseFinished(session_id, 0, String::new()))
+                    .await;
+                }
+              });
+            }
+          }
+          Some(DispatcherEvent::SessionEnded(session_id)) => {
+            debug!(?session_id, "WebTransport session ended without a validated CLOSE capsule");
+            if sessions.get(&session_id).is_some_and(|session| session.peer_close_pending) {
+              continue;
+            }
+            if sessions
+              .get(&session_id)
+              .is_some_and(|session| session.upstream.abrupt_h3_close())
+            {
+              if webtransport_only_connections {
+                // This opt-in listener admits only one WebTransport session
+                // and no ordinary H3 requests. Closing the physical QUIC
+                // connection preserves the browser's one error across its
+                // session and child streams.
+                downstream.abort_connection();
+                close_all_sessions(
+                  &mut sessions,
+                  &mut session_index,
+                  Some(b"upstream WebTransport QUIC connection lost"),
+                );
+                abort_tasks(&mut downstream_tasks);
+                return Ok(());
+              }
+              session::close_session_abrupt(&mut sessions, &mut session_index, session_id);
+              continue;
+            }
+            if let Some((code, reason)) = sessions
+              .get(&session_id)
+              .and_then(|session| session.upstream.remote_close())
+            {
+              session::close_session_from_peer(
+                &mut sessions,
+                &mut session_index,
+                session_id,
+                code,
+                &reason,
+              );
+            } else {
+              session::close_session_after_client_reader(
+                &mut sessions,
+                &mut session_index,
+                session_id,
+                b"WebTransport session ended",
+              );
+            }
+          }
+          Some(DispatcherEvent::SessionClosed(session_id, code, reason)) => {
+            debug!(?session_id, code, "upstream WebTransport session closed");
+            if sessions.get(&session_id).is_some_and(|session| session.peer_close_pending) {
+              continue;
+            }
+            session::close_session_from_peer(
               &mut sessions,
               &mut session_index,
-              Some(b"downstream HTTP/3 connection closed"),
+              session_id,
+              code,
+              reason.as_bytes(),
+            );
+          }
+          Some(DispatcherEvent::FlowError(session_id)) => {
+            session::close_flow_error(&mut sessions, &mut session_index, session_id).await;
+          }
+          Some(DispatcherEvent::ProtocolError(session_id)) => {
+            session::close_protocol_error(&mut sessions, &mut session_index, session_id).await;
+          }
+          Some(DispatcherEvent::ConnectionClosed) | None => {
+            session::close_all_sessions_after_downstream_loss(
+              &mut sessions,
+              &mut session_index,
+              b"downstream HTTP/3 connection closed",
             );
             abort_tasks(&mut downstream_tasks);
             return Ok(());
           }
           Some(DispatcherEvent::Fatal(error)) => {
-            close_all_sessions(
+            session::close_all_sessions_after_downstream_loss(
               &mut sessions,
               &mut session_index,
-              Some(b"downstream HTTP/3 connection failed"),
+              b"downstream HTTP/3 connection failed",
             );
             abort_tasks(&mut downstream_tasks);
             return Err(error);
@@ -319,7 +435,31 @@ async fn handle_downstream_request(
     request.extensions_mut().insert(certificate);
   }
 
-  if is_webtransport_request(&request) {
+  let is_webtransport = is_webtransport_request(&request);
+  if let Some(status) = dedicated_request_rejection(
+    state.config.proxy.http3.webtransport_only_connections,
+    is_webtransport,
+    session_index,
+  ) {
+    respond_to_h3_request(
+      stream,
+      text_response(status, "WebTransport-only connection"),
+    )
+    .await?;
+    return Ok(());
+  }
+
+  if is_webtransport {
+    if !super::webtransport_request_matches_draft(&request, downstream.wire_draft())
+      || http_early_data::is_verified(&request)
+    {
+      respond_to_h3_request(
+        stream,
+        text_response(StatusCode::BAD_REQUEST, "WebTransport H3 dialect mismatch"),
+      )
+      .await?;
+      return Ok(());
+    }
     accept_webtransport_session(
       downstream,
       sessions,
@@ -363,6 +503,22 @@ async fn handle_downstream_request(
   Ok(())
 }
 
+fn dedicated_request_rejection(
+  webtransport_only_connections: bool,
+  is_webtransport: bool,
+  session_index: &WebTransportSessionIndex,
+) -> Option<StatusCode> {
+  if !webtransport_only_connections {
+    return None;
+  }
+  if !is_webtransport {
+    return Some(StatusCode::MISDIRECTED_REQUEST);
+  }
+  session_index
+    .has_accepted_session()
+    .then_some(StatusCode::TOO_MANY_REQUESTS)
+}
+
 fn next_idle_deadline(
   sessions: &HashMap<SessionId, ActiveWebTransportSession>,
 ) -> Option<tokio::time::Instant> {
@@ -376,5 +532,36 @@ fn next_idle_deadline(
 fn abort_tasks(tasks: &mut Vec<JoinHandle<()>>) {
   for task in tasks.drain(..) {
     task.abort();
+  }
+}
+
+#[cfg(test)]
+mod dedicated_connection_tests {
+  use h3::quic::StreamId;
+  use http::StatusCode;
+
+  use super::{WebTransportSessionIndex, dedicated_request_rejection};
+
+  #[test]
+  fn dedicated_connection_rejects_ordinary_and_second_webtransport_request() {
+    let mut index = WebTransportSessionIndex::default();
+    assert_eq!(dedicated_request_rejection(false, false, &index), None);
+    assert_eq!(dedicated_request_rejection(false, true, &index), None);
+    assert_eq!(
+      dedicated_request_rejection(true, false, &index),
+      Some(StatusCode::MISDIRECTED_REQUEST)
+    );
+    assert_eq!(dedicated_request_rejection(true, true, &index), None);
+
+    let first = index.insert(StreamId::try_from(0).expect("valid stream id"));
+    assert_eq!(
+      dedicated_request_rejection(true, true, &index),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    index.remove(first);
+    assert_eq!(
+      dedicated_request_rejection(true, true, &index),
+      Some(StatusCode::TOO_MANY_REQUESTS)
+    );
   }
 }

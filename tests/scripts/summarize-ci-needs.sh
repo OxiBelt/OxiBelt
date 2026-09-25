@@ -35,6 +35,7 @@ required_jobs=(
   docker-image-trivy-scan
   docker-integration-helper-images
   webtransport-h2-integration
+  webtransport-wpt
   compression-dictionary-integration
   admin-mutation-postgres
   admin-operation-postgres

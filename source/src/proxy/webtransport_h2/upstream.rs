@@ -233,6 +233,8 @@ pub(crate) async fn connect_upstream_webtransport(
     .context("invalid upstream HTTP/2 WebTransport response capsule headers")?;
   let peer_stream_limits = crate::webtransport::handshake::peer_stream_limits(response.headers())
     .context("invalid upstream HTTP/2 WebTransport-Init header")?;
+  let selected_protocol = selected_h2_protocol(response.headers(), &prepared.protocols);
+  let response_headers = response_header_pairs(response.headers());
   let mut options =
     crate::webtransport::SessionOptions::proxy(limits, crate::webtransport::Role::Client);
   options.peer_stream_limits = peer_stream_limits;
@@ -249,10 +251,33 @@ pub(crate) async fn connect_upstream_webtransport(
     }
   };
   Ok((
-    UpstreamWebTransportSession::from_h2(session),
+    UpstreamWebTransportSession::from_h2(session, selected_protocol, response_headers),
     H2WebTransportConnectionGuard::new(driver.task.take(), actor),
     upstream_certificate,
   ))
+}
+
+fn response_header_pairs(headers: &http::HeaderMap) -> Vec<(http::HeaderName, HeaderValue)> {
+  headers
+    .iter()
+    .map(|(name, value)| (name.clone(), value.clone()))
+    .collect()
+}
+
+fn selected_h2_protocol(headers: &http::HeaderMap, offered: &[String]) -> Option<String> {
+  let mut values = headers.get_all("wt-protocol").iter();
+  let value = values.next()?;
+  if values.next().is_some() {
+    return None;
+  }
+  let item = sfv::Parser::new(value.as_bytes())
+    .with_version(sfv::Version::Rfc8941)
+    .parse::<sfv::Item>()
+    .ok()?;
+  let selected = item.bare_item.as_string()?.as_str();
+  offered
+    .contains(&selected.to_string())
+    .then(|| selected.to_string())
 }
 
 fn h2_connect_request(prepared: &PreparedWebTransport) -> anyhow::Result<Request<Empty<Bytes>>> {
@@ -260,6 +285,7 @@ fn h2_connect_request(prepared: &PreparedWebTransport) -> anyhow::Result<Request
   // These fields describe the existing H3 CONNECT wire and cannot be replayed
   // over the HTTP/2 draft.  The HTTP/2 capsule contract is regenerated below.
   headers.remove("sec-webtransport-http3-draft");
+  headers.remove("sec-webtransport-http3-draft02");
   headers.remove(http::header::CONTENT_LENGTH);
   headers.remove(http::header::CONTENT_TYPE);
   headers.remove(http::header::TRANSFER_ENCODING);
@@ -289,6 +315,38 @@ fn request_deadline(timeouts: EffectiveTimeouts) -> anyhow::Result<tokio::time::
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn h2_selected_protocol_is_forwarded_only_when_valid_and_offered() {
+    let offered = vec!["a".to_string(), "b".to_string()];
+    let mut headers = http::HeaderMap::new();
+    headers.insert("wt-protocol", HeaderValue::from_static("\"b\";v=1"));
+    assert_eq!(
+      selected_h2_protocol(&headers, &offered).as_deref(),
+      Some("b")
+    );
+
+    headers.insert("wt-protocol", HeaderValue::from_static("\"c\""));
+    assert_eq!(selected_h2_protocol(&headers, &offered), None);
+
+    headers.insert("wt-protocol", HeaderValue::from_static("\"unterminated"));
+    assert_eq!(selected_h2_protocol(&headers, &offered), None);
+
+    headers.insert("wt-protocol", HeaderValue::from_static("\"b\""));
+    headers.append("wt-protocol", HeaderValue::from_static("\"a\""));
+    assert_eq!(selected_h2_protocol(&headers, &offered), None);
+  }
+
+  #[test]
+  fn h2_connect_response_retains_duplicate_application_headers() {
+    let mut headers = http::HeaderMap::new();
+    headers.append("x-webtransport-test", HeaderValue::from_static("one"));
+    headers.append("x-webtransport-test", HeaderValue::from_static("two"));
+    let pairs = response_header_pairs(&headers);
+    assert_eq!(pairs.len(), 2);
+    assert_eq!(pairs[0].1, "one");
+    assert_eq!(pairs[1].1, "two");
+  }
 
   #[tokio::test]
   async fn cleanup_retains_admission_until_actor_and_driver_retire() {

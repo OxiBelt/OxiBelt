@@ -43,3 +43,10 @@ tokio-rustls = { version = "0.26.5", default-features = false, features = ["aws-
 url = "2.5.8"
 web-transport-quinn = { version = "0.12.1", default-features = false, features = ["aws-lc-rs"] }
 zstd = "0.14.0"
+
+[patch.crates-io]
+h3 = { path = "../../../source/third_party/h3" }
+quinn = { path = "../../../source/third_party/quinn" }
+quinn-proto = { path = "../../../source/third_party/quinn-proto" }
+web-transport-proto = { path = "../../../source/third_party/web-transport-proto" }
+web-transport-quinn = { path = "../../../source/third_party/web-transport-quinn" }

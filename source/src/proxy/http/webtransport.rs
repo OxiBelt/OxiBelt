@@ -2,8 +2,10 @@
 //! Session setup validates route and upstream capabilities before handing off to HTTP/3.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
+use http::uri::Authority;
 use http::{Request, Response, StatusCode};
 use tracing::warn;
 
@@ -23,8 +25,8 @@ use crate::waf::{
 
 use super::body::ProxyBody;
 use super::headers::{
-  add_forwarded_headers, extract_downstream_port, extract_host, set_effective_host_header,
-  strip_hop_by_hop_headers, validate_authority_host_consistency,
+  add_forwarded_headers, extract_downstream_port, extract_host, strip_hop_by_hop_headers,
+  validate_authority_host_consistency,
 };
 use super::response::{
   silent_close_response, text_response, waf_http_terminal_response_with_route_security,
@@ -163,6 +165,13 @@ pub(crate) async fn prepare_webtransport(
     .for_route(Some(resolved.route));
   response_bandwidth = Some(resolved.bandwidth.clone());
   certificate_forwarding_enabled = resolved.route.client_certificate_forwarding.is_some();
+  if !webtransport_origin_is_allowed(request, &resolved.route.name, state) {
+    return Err(preparation_error!(with_route_security_headers(
+      text_response(StatusCode::FORBIDDEN, "WebTransport Origin is not allowed"),
+      &state.config.security,
+      resolved.route,
+    )));
+  }
   let certificate_forwarding =
     super::client_certificate::PreparedCertificateForwarding::prepare(request, resolved.route)
       .map_err(|status| {
@@ -713,6 +722,26 @@ pub(crate) async fn prepare_webtransport(
       resolved.route,
     ))
   })?;
+  let rewrite_authority = resolved
+    .route
+    .actions
+    .rewrite
+    .as_ref()
+    .is_some_and(|rewrite| rewrite.authority.is_some());
+  let (target_uri, _) = preserve_webtransport_authority(
+    target_uri,
+    request,
+    upstream.preserve_host,
+    rewrite_authority,
+  )
+  .map_err(|error| {
+    warn!(error, route = %resolved.route.name, "rejected downstream WebTransport authority");
+    preparation_error!(with_route_security_headers(
+      text_response(StatusCode::BAD_REQUEST, "invalid WebTransport authority"),
+      &state.config.security,
+      resolved.route,
+    ))
+  })?;
   let target_url = url::Url::parse(&target_uri.to_string()).map_err(|error| {
     warn!(error = %error, uri = %target_uri, "failed to convert WebTransport target URI");
     preparation_error!(with_route_security_headers(
@@ -724,11 +753,6 @@ pub(crate) async fn prepare_webtransport(
 
   let mut headers = request_headers;
   strip_hop_by_hop_headers(&mut headers);
-  if upstream.preserve_host {
-    set_effective_host_header(&mut headers, &host);
-  } else {
-    headers.remove(http::header::HOST);
-  }
   add_forwarded_headers(
     &mut headers,
     forwarded_client_addr,
@@ -739,15 +763,6 @@ pub(crate) async fn prepare_webtransport(
     None,
   );
   apply_header_mutations(&mut headers, &request_waf.request_header_mutations);
-  if resolved
-    .route
-    .actions
-    .rewrite
-    .as_ref()
-    .is_some_and(|rewrite| rewrite.authority.is_some())
-  {
-    headers.remove(http::header::HOST);
-  }
   super::early_data::apply_verified_upstream_header(
     &mut headers,
     super::early_data::is_verified(request),
@@ -767,7 +782,17 @@ pub(crate) async fn prepare_webtransport(
       })?;
   }
 
-  let protocols = parse_webtransport_protocols(&headers);
+  // Extended CONNECT carries its authority in the pseudo-header derived from
+  // target_url. An ordinary Host header is redundant and can contradict it.
+  headers.remove(http::header::HOST);
+
+  let protocols = parse_webtransport_protocols(&headers).map_err(|error| {
+    warn!(error, "rejected invalid WebTransport protocol offer");
+    preparation_error!(text_response(
+      StatusCode::BAD_REQUEST,
+      "invalid WebTransport protocol offer",
+    ))
+  })?;
   let timeouts = EffectiveTimeouts::new(&state.config, resolved.route, upstream);
   Ok(PreparedWebTransport {
     downstream_http2: request.version() == http::Version::HTTP_2,
@@ -788,17 +813,208 @@ pub(crate) async fn prepare_webtransport(
   })
 }
 
-pub(crate) fn parse_webtransport_protocols(headers: &http::HeaderMap) -> Vec<String> {
-  headers
-    .get("wt-available-protocols")
-    .and_then(|value| value.to_str().ok())
-    .map(|value| {
-      value
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.trim_matches('"').to_string())
-        .collect()
+/// The upstream connection still uses its configured endpoint and TLS server name.
+/// This only changes the CONNECT request target when Host preservation is selected.
+fn preserve_webtransport_authority(
+  target_uri: http::Uri,
+  request: &Request<()>,
+  preserve_host: bool,
+  rewrite_authority: bool,
+) -> Result<(http::Uri, Option<Authority>), &'static str> {
+  if !preserve_host || rewrite_authority {
+    return Ok((target_uri, None));
+  }
+  let authority = if let Some(authority) = request.uri().authority() {
+    authority.clone()
+  } else {
+    let host = request
+      .headers()
+      .get(http::header::HOST)
+      .ok_or("missing authority")?
+      .to_str()
+      .map_err(|_| "invalid Host header")?;
+    Authority::from_str(host).map_err(|_| "invalid Host authority")?
+  };
+  let parsed =
+    url::Url::parse(&format!("https://{authority}/")).map_err(|_| "invalid authority URL")?;
+  if authority.as_str().ends_with(':')
+    || parsed.host_str().is_none()
+    || !parsed.username().is_empty()
+    || parsed.password().is_some()
+    || parsed.port() == Some(0)
+  {
+    return Err("invalid authority host or port");
+  }
+  let mut parts = target_uri.into_parts();
+  parts.authority = Some(authority.clone());
+  let target_uri = http::Uri::from_parts(parts).map_err(|_| "invalid target authority")?;
+  Ok((target_uri, Some(authority)))
+}
+
+/// A WebTransport Origin is a serialized origin, never a URL with credentials,
+/// path, query, or fragment. Both H2 and H3 use the same route CORS policy.
+pub(crate) fn webtransport_origin_is_allowed(
+  request: &Request<()>,
+  route_name: &str,
+  state: &AppSnapshot,
+) -> bool {
+  let mut origins = request.headers().get_all(http::header::ORIGIN).iter();
+  let Some(origin) = origins.next() else {
+    return true;
+  };
+  if origins.next().is_some() {
+    return false;
+  }
+  let Ok(origin) = origin.to_str() else {
+    return false;
+  };
+  let Ok(origin_url) = url::Url::parse(origin) else {
+    return false;
+  };
+  if !matches!(origin_url.scheme(), "http" | "https")
+    || !origin_url.username().is_empty()
+    || origin_url.password().is_some()
+    || origin_url.path() != "/"
+    || origin_url.query().is_some()
+    || origin_url.fragment().is_some()
+  {
+    return false;
+  }
+  if origin != origin_url.origin().ascii_serialization() {
+    return false;
+  }
+  let Some(authority) = request.uri().authority() else {
+    return false;
+  };
+  let Ok(request_url) = url::Url::parse(&format!("https://{authority}")) else {
+    return false;
+  };
+  if origin_url.origin() == request_url.origin() {
+    return true;
+  }
+  state
+    .config
+    .routes
+    .iter()
+    .find(|route| route.name == route_name)
+    .and_then(|route| route.actions.cors.as_ref())
+    .is_some_and(|cors| super::cors_origin_allowed(cors, origin))
+}
+
+pub(crate) fn parse_webtransport_protocols(
+  headers: &http::HeaderMap,
+) -> Result<Vec<String>, &'static str> {
+  let mut values = Vec::new();
+  for value in headers.get_all("wt-available-protocols") {
+    if values.len().saturating_add(value.len()).saturating_add(2) > 16 * 1024 {
+      return Err("WebTransport protocol offer exceeds 16 KiB");
+    }
+    if !values.is_empty() {
+      values.extend_from_slice(b", ");
+    }
+    values.extend_from_slice(value.as_bytes());
+  }
+  if values.is_empty() {
+    return Ok(Vec::new());
+  }
+  let list = sfv::Parser::new(&values)
+    .with_version(sfv::Version::Rfc8941)
+    .parse::<sfv::List>()
+    .map_err(|_| "invalid WebTransport protocol list")?;
+  list
+    .iter()
+    .map(|entry| match entry {
+      sfv::ListEntry::Item(item) => item
+        .bare_item
+        .as_string()
+        .map(|value| value.as_str().to_string())
+        .ok_or("WebTransport protocol is not a string"),
+      sfv::ListEntry::InnerList(_) => Err("WebTransport protocol is an inner list"),
     })
-    .unwrap_or_default()
+    .collect()
+}
+
+#[cfg(test)]
+mod authority_tests {
+  use super::*;
+
+  #[test]
+  fn preserved_authority_keeps_downstream_port_without_changing_path_or_query() {
+    let request = Request::builder()
+      .uri("https://web-platform.test:11000/connect?token=7")
+      .body(())
+      .unwrap();
+    let target: http::Uri = "https://127.0.0.1:11000/base/connect?token=7"
+      .parse()
+      .unwrap();
+    let (target, authority) = preserve_webtransport_authority(target, &request, true, false)
+      .expect("valid downstream authority");
+    assert_eq!(
+      target.to_string(),
+      "https://web-platform.test:11000/base/connect?token=7"
+    );
+    assert_eq!(authority.unwrap().as_str(), "web-platform.test:11000");
+  }
+
+  #[test]
+  fn explicit_rewrite_authority_takes_precedence() {
+    let request = Request::builder()
+      .uri("https://web-platform.test:11000/connect")
+      .body(())
+      .unwrap();
+    let target: http::Uri = "https://rewrite.example:9443/connect".parse().unwrap();
+    let (target, authority) =
+      preserve_webtransport_authority(target, &request, true, true).unwrap();
+    assert_eq!(target.to_string(), "https://rewrite.example:9443/connect");
+    assert!(authority.is_none());
+  }
+
+  #[test]
+  fn preserved_target_canonicalizes_default_https_port() {
+    let request = Request::builder()
+      .uri("https://EXAMPLE.test:443/connect")
+      .body(())
+      .unwrap();
+    let target: http::Uri = "https://127.0.0.1:11000/connect".parse().unwrap();
+    let (target, _) = preserve_webtransport_authority(target, &request, true, false).unwrap();
+    let target_url = url::Url::parse(&target.to_string()).unwrap();
+    assert_eq!(target_url.as_str(), "https://example.test/connect");
+  }
+
+  #[test]
+  fn rejects_invalid_preserved_authority() {
+    let request = Request::builder()
+      .uri("/connect")
+      .header(http::header::HOST, "user@web-platform.test:11000")
+      .body(())
+      .unwrap();
+    let target: http::Uri = "https://127.0.0.1:11000/connect".parse().unwrap();
+    assert!(preserve_webtransport_authority(target, &request, true, false).is_err());
+
+    let request = Request::builder()
+      .uri("/connect")
+      .header(http::header::HOST, "example.test:")
+      .body(())
+      .unwrap();
+    let target: http::Uri = "https://127.0.0.1:11000/connect".parse().unwrap();
+    assert!(preserve_webtransport_authority(target, &request, true, false).is_err());
+  }
+
+  #[test]
+  fn offered_protocols_decode_escaped_strings_and_reject_malformed_lists() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+      "wt-available-protocols",
+      http::HeaderValue::from_static(r#""a\"b", "c\\d""#),
+    );
+    assert_eq!(
+      parse_webtransport_protocols(&headers).unwrap(),
+      vec!["a\"b", "c\\d"]
+    );
+    headers.insert(
+      "wt-available-protocols",
+      http::HeaderValue::from_static("token"),
+    );
+    assert!(parse_webtransport_protocols(&headers).is_err());
+  }
 }

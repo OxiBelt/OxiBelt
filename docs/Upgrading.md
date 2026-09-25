@@ -144,6 +144,26 @@ Clients relying on H2 WebTransport must reconnect using a transport supported by
 the rollback version. See [WebTransport](WebTransport.md) for limits and protocol
 compatibility details.
 
+## HTTP/3 WebTransport draft16 opt-in
+
+H3 WebTransport upstreams continue to default to `draft02`. Set
+`webtransport_http3_draft = "draft16"` on a direct H3 upstream, pool server, or
+pool discovery source to opt into the draft16 upstream dialect. Gateway
+RoutePolicy uses `webTransport.upstreamHttp3Draft: draft16` with
+`upstreamHttpVersion: h3`. Apply the updated CRD before using the Gateway field.
+Set `proxy.http3.webtransport_draft16 = true` to advertise draft16 to downstream
+H3 clients; its default remains `false` for draft02 compatibility. A downstream
+H3 draft and upstream H3 draft mismatch is rejected before session acceptance.
+H2 WebTransport remains draft-15. Remove the new fields before rolling back to
+an older binary or controller; existing draft02 configurations need no change.
+
+For strict browser close-event parity, opt into
+`proxy.http3.webtransport_only_connections = true` on a dedicated H3 endpoint.
+It requires `listeners.http3 = true`, reserves each QUIC connection for one
+WebTransport session, and rejects ordinary H3 requests there. The default
+`false` preserves shared H3 behavior. Remove the setting before rolling back to
+a binary without it; no persisted-state migration is required.
+
 ## Resumable uploads
 
 The unprofiled Helm Deployment now permits `workload.deployment.maxSurge = 0`

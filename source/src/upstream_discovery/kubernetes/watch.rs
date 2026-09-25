@@ -474,6 +474,7 @@ mod tests {
       refresh_interval_ms: 30_000,
       min_ttl_ms: 1_000,
       tls: Default::default(),
+      webtransport_http3_draft: Default::default(),
     }
   }
 

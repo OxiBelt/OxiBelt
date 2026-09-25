@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ::http as http_types;
 use bytes::Bytes;
 use http_types::{HeaderValue, Request, Response, StatusCode};
+#[cfg(feature = "admin-runtime")]
 use tokio::sync::mpsc;
 
 use super::bridge;
@@ -99,13 +100,6 @@ pub(crate) async fn handle_request(
     Ok(prepared) => prepared,
     Err(response) => return prepared_error(*response, &state),
   };
-  if !origin_is_allowed(&request, &prepared, state.as_ref()) {
-    return prepared_response_error(
-      text_response(StatusCode::FORBIDDEN, "WebTransport Origin is not allowed"),
-      &prepared,
-      state.as_ref(),
-    );
-  }
   #[cfg(feature = "admin-runtime")]
   let registration = crate::webtransport_admin::WebTransportSessionRegistration {
     route: prepared.route_name.clone(),
@@ -212,7 +206,7 @@ pub(crate) async fn handle_request(
     &route_name,
     &upstream_name,
   );
-  let response = accepted_response(&prepared, state.as_ref());
+  let response = accepted_response(&prepared, state.as_ref(), &upstream);
   tokio::spawn(run_after_accept(
     on_session,
     reservation,
@@ -368,6 +362,7 @@ async fn run_after_accept(
 fn accepted_response(
   prepared: &http::PreparedWebTransport,
   state: &AppSnapshot,
+  upstream: &UpstreamWebTransportSession,
 ) -> Response<ProxyBody> {
   let body = http::body::materialized_known_small_body(Bytes::new(), None);
   let mut response = Response::new(body);
@@ -375,6 +370,13 @@ fn accepted_response(
   response
     .headers_mut()
     .insert("capsule-protocol", HeaderValue::from_static("?1"));
+  http3::append_upstream_response_headers(response.headers_mut(), upstream.response_headers());
+  if let Some(protocol) = upstream.selected_protocol()
+    && let Ok(serialized) = http3::selected_protocol_header(protocol)
+    && let Ok(value) = HeaderValue::from_str(&serialized)
+  {
+    response.headers_mut().insert("wt-protocol", value);
+  }
   crate::proxy::http::client_certificate::finalize_response(
     &mut response,
     prepared.client_certificate_forwarding,
@@ -416,45 +418,4 @@ fn prepared_response_error(
     state,
   );
   http::status_headers::finalize(response, &prepared.status_headers)
-}
-
-fn origin_is_allowed(
-  request: &Request<()>,
-  prepared: &http::PreparedWebTransport,
-  state: &AppSnapshot,
-) -> bool {
-  let Some(origin) = request.headers().get(http_types::header::ORIGIN) else {
-    return true;
-  };
-  let Ok(origin) = origin.to_str() else {
-    return false;
-  };
-  let Ok(origin_url) = url::Url::parse(origin) else {
-    return false;
-  };
-  if !matches!(origin_url.scheme(), "http" | "https")
-    || !origin_url.username().is_empty()
-    || origin_url.password().is_some()
-    || origin_url.path() != "/"
-    || origin_url.query().is_some()
-    || origin_url.fragment().is_some()
-  {
-    return false;
-  }
-  let Some(authority) = request.uri().authority() else {
-    return false;
-  };
-  let Ok(request_url) = url::Url::parse(&format!("https://{authority}")) else {
-    return false;
-  };
-  if origin_url.origin() == request_url.origin() {
-    return true;
-  }
-  state
-    .config
-    .routes
-    .iter()
-    .find(|route| route.name == prepared.route_name)
-    .and_then(|route| route.actions.cors.as_ref())
-    .is_some_and(|cors| http::cors_origin_allowed(cors, origin))
 }

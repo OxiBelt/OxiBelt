@@ -66,6 +66,11 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
       out.push_str("weight = ");
       out.push_str(&server.weight.to_string());
       out.push('\n');
+      if let Some(draft) = server.webtransport_http3_draft {
+        out.push_str("webtransport_http3_draft = ");
+        out.push_str(&toml_string(draft.as_str()));
+        out.push('\n');
+      }
       if let Some(tls) = &server.tls {
         render_backend_tls(&mut out, "upstream_pools.servers.tls", tls);
       }
@@ -107,6 +112,11 @@ pub(super) fn render_toml(state: &TranslationState, args: &SharedArgs) -> String
         }
       }
       out.push_str("kubernetes_resource = \"endpoint_slice\"\n");
+      if let Some(draft) = discovery.webtransport_http3_draft {
+        out.push_str("webtransport_http3_draft = ");
+        out.push_str(&toml_string(draft.as_str()));
+        out.push('\n');
+      }
       out.push_str("watch = true\n");
       out.push_str("token_file = \"/var/run/secrets/kubernetes.io/serviceaccount/token\"\n");
       if let Some(tls) = &discovery.tls {

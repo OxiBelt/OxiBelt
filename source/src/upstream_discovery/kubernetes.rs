@@ -441,6 +441,7 @@ fn discovered_ip_server(
     backup: false,
     state: UpstreamPoolServerState::Ready,
     tls: Default::default(),
+    webtransport_http3_draft: Default::default(),
     source,
     discovery_instance_id: None,
     discovered_weight: None,

@@ -1,5 +1,5 @@
 //! HTTP/3 proxy scheduling configuration.
-//! Defaults keep optimized request scheduling opt-in until an operator enables it.
+//! Defaults keep scheduling, draft16 advertisement, and dedicated sessions opt-in.
 
 use serde::Deserialize;
 
@@ -7,4 +7,8 @@ use serde::Deserialize;
 pub struct ProxyHttp3Config {
   #[serde(default)]
   pub inline_bodyless_fast_path: bool,
+  #[serde(default)]
+  pub webtransport_draft16: bool,
+  #[serde(default)]
+  pub webtransport_only_connections: bool,
 }

@@ -7,8 +7,9 @@ use serde_json::Value;
 
 use super::super::model::{Diagnostic, KubernetesObject, ObjectKey, object_ref};
 use super::{
-  ClientCertificateForwardFormat, ClientCertificateForwarding, GeneratedHttpVersion,
-  GeneratedRoute, SharedArgs, string_array_at, string_at, u64_at, unsupported_field,
+  ClientCertificateForwardFormat, ClientCertificateForwarding, GeneratedH3Draft,
+  GeneratedHttpVersion, GeneratedRoute, SharedArgs, string_array_at, string_at, u64_at,
+  unsupported_field,
 };
 
 pub(super) const ROUTE_POLICY_API_VERSION: &str = "gateway.oxibelt.dev/v1alpha1";
@@ -30,6 +31,7 @@ pub(super) struct RoutePolicy {
   upstream_request_timeout_ms: Option<u64>,
   client_certificate_forwarding: Option<ClientCertificateForwarding>,
   webtransport_upstream_http_version: Option<GeneratedHttpVersion>,
+  webtransport_upstream_http3_draft: Option<GeneratedH3Draft>,
   resumable_upload_profile: Option<String>,
   compression_dictionary_profile: Option<String>,
 }
@@ -210,6 +212,7 @@ pub(super) fn apply_route_policy(
   generated.max_request_body_bytes = policy.max_request_body_bytes;
   generated.upstream_request_timeout_ms = policy.upstream_request_timeout_ms;
   generated.webtransport_upstream_http_version = policy.webtransport_upstream_http_version;
+  generated.webtransport_upstream_http3_draft = policy.webtransport_upstream_http3_draft;
   if let Some(forwarding) = &policy.client_certificate_forwarding {
     if !allowed_client_certificate_forward_headers.contains(&forwarding.header) {
       return Err(RoutePolicyApplyError {
@@ -426,11 +429,13 @@ fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::R
     );
   }
 
-  let webtransport_upstream_http_version = object
+  let webtransport = object
     .spec
     .get("webTransport")
     .map(parse_webtransport)
     .transpose()?;
+  let webtransport_upstream_http_version = webtransport.map(|(version, _)| version);
+  let webtransport_upstream_http3_draft = webtransport.and_then(|(_, draft)| draft);
   if webtransport_upstream_http_version.is_some() && target_kind != "HTTPRoute" {
     bail!("spec.webTransport is supported only for HTTPRoute targets");
   }
@@ -496,22 +501,35 @@ fn parse_route_policy(object: &KubernetesObject, args: &SharedArgs) -> anyhow::R
     upstream_request_timeout_ms,
     client_certificate_forwarding,
     webtransport_upstream_http_version,
+    webtransport_upstream_http3_draft,
     resumable_upload_profile,
     compression_dictionary_profile,
   })
 }
 
-fn parse_webtransport(value: &Value) -> anyhow::Result<GeneratedHttpVersion> {
-  if let Some(field) = unsupported_field(value, &["upstreamHttpVersion"]) {
+fn parse_webtransport(
+  value: &Value,
+) -> anyhow::Result<(GeneratedHttpVersion, Option<GeneratedH3Draft>)> {
+  if let Some(field) = unsupported_field(value, &["upstreamHttpVersion", "upstreamHttp3Draft"]) {
     bail!("spec.webTransport.{field} is unsupported");
   }
-  match string_at(value, &["upstreamHttpVersion"])
+  let version = match string_at(value, &["upstreamHttpVersion"])
     .context("spec.webTransport.upstreamHttpVersion is required")?
   {
-    "h2" => Ok(GeneratedHttpVersion::H2),
-    "h3" => Ok(GeneratedHttpVersion::H3),
+    "h2" => GeneratedHttpVersion::H2,
+    "h3" => GeneratedHttpVersion::H3,
     _ => bail!("spec.webTransport.upstreamHttpVersion must be h2 or h3"),
+  };
+  let draft = match value.get("upstreamHttp3Draft") {
+    None => None,
+    Some(Value::String(draft)) if draft == "draft02" => Some(GeneratedH3Draft::Draft02),
+    Some(Value::String(draft)) if draft == "draft16" => Some(GeneratedH3Draft::Draft16),
+    Some(_) => bail!("spec.webTransport.upstreamHttp3Draft must be draft02 or draft16"),
+  };
+  if draft.is_some() && version != GeneratedHttpVersion::H3 {
+    bail!("spec.webTransport.upstreamHttp3Draft requires upstreamHttpVersion h3");
   }
+  Ok((version, draft))
 }
 
 fn parse_resumable_upload(value: &Value) -> anyhow::Result<String> {

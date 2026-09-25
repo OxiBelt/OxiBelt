@@ -9,19 +9,33 @@ use h3_webtransport::SessionId;
 #[derive(Default)]
 pub(in crate::proxy::http3::webtransport_bridge) struct WebTransportSessionIndex {
   connect_stream_ids: HashMap<SessionId, StreamId>,
+  ever_accepted_sessions: u8,
 }
 
 impl WebTransportSessionIndex {
-  pub(super) fn insert(&mut self, connect_stream_id: StreamId) -> SessionId {
+  pub(in crate::proxy::http3::webtransport_bridge) fn insert(
+    &mut self,
+    connect_stream_id: StreamId,
+  ) -> SessionId {
     let session_id = session_id_for_stream_id(connect_stream_id);
+    // Two is enough to permanently disable attribution of a headerless reset.
+    self.ever_accepted_sessions = self.ever_accepted_sessions.saturating_add(1).min(2);
     self
       .connect_stream_ids
       .insert(session_id, connect_stream_id);
     session_id
   }
 
-  pub(super) fn remove(&mut self, session_id: SessionId) {
+  pub(in crate::proxy::http3::webtransport_bridge) fn remove(&mut self, session_id: SessionId) {
     self.connect_stream_ids.remove(&session_id);
+  }
+
+  pub(super) fn only_one_session_ever(&self) -> bool {
+    self.ever_accepted_sessions == 1
+  }
+
+  pub(in crate::proxy::http3::webtransport_bridge) fn has_accepted_session(&self) -> bool {
+    self.ever_accepted_sessions != 0
   }
 
   pub(in crate::proxy::http3::webtransport_bridge) fn contains(

@@ -1462,6 +1462,8 @@ keep_alive_while_idle = false
 
 [proxy.http3]
 inline_bodyless_fast_path = false
+webtransport_draft16 = false
+webtransport_only_connections = false
 
 [proxy.http.grpc]
 enabled = true
@@ -1495,6 +1497,23 @@ Static hot-object caching is opt-in. Set `open_file_cache_max_entries`, `open_fi
 `proxy.http` controls HTTP compatibility details. `early_hints = "pass"` relays upstream `103 Early Hints` where the downstream transport supports interim responses, after applying the shared sanitizer that preserves only `Link` fields; `drop` captures no Early Hints. Upstream `100 Continue` and `102 Processing` remain interim and are never exposed as the final response, while `101 Switching Protocols` stays on the established upgrade path rather than entering ordinary response-body handling. `trailers = "drop"` removes body trailer frames for ordinary HTTP traffic while preserving native gRPC trailers; `pass` retains parsed trailer frames for downstream transports that support them. `expect_continue = "auto"` accepts `Expect: 100-continue` and rejects unsupported `Expect` values with `417`; `reject` rejects all `Expect` values. `priority = "ignore"` strips RFC 9218 `Priority` headers instead of forwarding them. `sse_auto_streaming = true` keeps `text/event-stream` responses streaming even when response buffering is enabled. `direct_h1_small_request_body_max_bytes` is the maximum `Content-Length` that the guarded direct-H1 fast path may read into memory before sending as an exact-size upstream request body; route/global request body limits, downstream body read timeouts, WAF body planning, retry replay gates, and trailer handling still apply.
 
 `proxy.http3.inline_bodyless_fast_path = true` lets HTTP/3 requests that are already plain-proxy fast-path eligible skip per-request task spawning after OxiBelt proves the downstream request body is empty. The optimization is limited to HTTP/3 `GET` and `HEAD` requests without request-body framing headers; unsafe methods, DATA, trailers, delayed bodies, cache policies, body-inspecting WAF rules, dynamic policy, external auth, buffering, upgrades, CONNECT, WebTransport, and non-fast-path routes remain on the general spawned path. The default is `false`.
+
+`proxy.http3.webtransport_draft16 = true` advertises draft16 on downstream
+HTTP/3 connections. It defaults to `false` to preserve draft02 negotiation for
+existing browser clients and WPT servers. H3 clients use the highest common
+dialect, so a listener advertising draft16 must route those sessions to H3
+draft16 upstreams or H2 upstreams. An H3 upstream draft mismatch is rejected
+before accepting the downstream session. Serve H3 routes with different
+upstream dialects from separate deployments with corresponding advertisement
+settings.
+
+`proxy.http3.webtransport_only_connections = true` reserves downstream H3
+connections for one WebTransport session each. It requires
+`listeners.http3 = true` and rejects ordinary H3 requests and additional WebTransport CONNECTs on
+the same QUIC connection. Run this opt-in mode on a dedicated H3 endpoint; use a
+separate deployment for ordinary H3 traffic. It lets a single session's
+connection-level close propagate without affecting unrelated H3 requests. The
+default is `false`, preserving shared H3 connection behavior.
 
 `proxy.http2` applies to downstream HTTP/2 connections and upstream HTTP/2 clients. `adaptive_window = true` lets Hyper tune flow-control windows dynamically and is the default recommended performance path. Manual `initial_stream_window_bytes`, `initial_connection_window_bytes`, and `max_frame_size_bytes` values are accepted only when `adaptive_window = false`; they are intended as an escape hatch for controlled deployments that need fixed HTTP/2 windows. `max_concurrent_streams` is the advertised remote-initiated stream cap for downstream H2 and the initial locally initiated stream cap for upstream H2. `max_send_buf_size` caps the per-stream HTTP/2 send buffer. `keep_alive_interval_ms = 0` disables HTTP/2 ping keep-alives; when set, `keep_alive_timeout_ms` is the ping acknowledgement timeout and `keep_alive_while_idle` also allows upstream clients to ping idle pooled H2 connections.
 
@@ -4182,6 +4201,7 @@ preserve_host = false
 websocket = true
 webrtc = true
 webtransport = true
+webtransport_http3_draft = "draft02" # draft02 | draft16; meaningful with h3
 proxy_protocol_egress = "off" # off | v1 | v2
 
 # Optional TLS metadata in a PROXY v2 preface for this named upstream.
@@ -4299,6 +4319,7 @@ weight = 1
 max_conns = 1024
 backup = false
 state = "ready" # ready | drain | down | maintenance
+# webtransport_http3_draft = "draft16" # requires pool max_http_version = "h3"
 
 [upstream_pools.servers.tls]
 server_name = "app.internal.example"
@@ -4314,6 +4335,7 @@ private_key = "upstream-client/app/tls.key"
 provider = "file"
 file = "discovery/app-pool.json"
 refresh_interval_ms = 5000
+# webtransport_http3_draft = "draft16" # copied to discovered members
 
 [[upstream_pools.discovery]]
 provider = "dns"
@@ -5177,6 +5199,12 @@ static, discovered, and Admin-added members. This setting controls forwarding;
 health-check transport retains its existing configuration. Gateway's
 `OxiBeltRoutePolicy.spec.webTransport.upstreamHttpVersion` selects `h2` or `h3`
 for a separate WebTransport-only sibling route and pool; see [Gateway API](GatewayAPI.md).
+The optional `webtransport_http3_draft` on a direct upstream, pool server, or
+discovery source selects `draft02` (default) or `draft16` for its H3 WebTransport
+leg. `draft16` requires exact H3 selection; a direct upstream also requires
+`webtransport = true`. Discovery copies the configured draft to every generated
+member. H3 client and upstream draft mismatches are rejected before accepting
+the downstream session. H2 legs continue to use draft-15 independently.
 
 TLS Admin listeners advertise HTTP/2 and HTTP/1.1. Ordinary Admin HTTP/2 APIs keep
 the configured TLS policy; WebTransport requires TLS 1.3. Plaintext Admin listeners

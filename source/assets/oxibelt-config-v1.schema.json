@@ -14853,6 +14853,60 @@
               "x-oxibelt-introduced-epoch": 1,
               "x-oxibelt-reference-activation": "none",
               "x-oxibelt-secret-class": "none"
+            },
+            "webtransport_draft16": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array"
+                },
+                {
+                  "type": "object"
+                }
+              ],
+              "description": "OxiBelt native field `proxy.http3.webtransport_draft16`. Production Rust validation is authoritative.",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "webtransport_only_connections": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array"
+                },
+                {
+                  "type": "object"
+                }
+              ],
+              "description": "OxiBelt native field `proxy.http3.webtransport_only_connections`. Production Rust validation is authoritative.",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
             }
           },
           "type": "object",
@@ -29799,6 +29853,18 @@
                   "x-oxibelt-reference-activation": "none",
                   "x-oxibelt-secret-class": "none"
                 },
+                "webtransport_http3_draft": {
+                  "description": "OxiBelt native field `upstream_pools[].discovery[].webtransport_http3_draft`. Production Rust validation is authoritative.",
+                  "enum": [
+                    "draft02",
+                    "draft16"
+                  ],
+                  "type": "string",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
                 "weight_multiplier": {
                   "default": 1,
                   "description": "OxiBelt native field `upstream_pools[].discovery[].weight_multiplier`. Production Rust validation is authoritative.",
@@ -31514,6 +31580,18 @@
                   "x-oxibelt-reference-activation": "none",
                   "x-oxibelt-secret-class": "none"
                 },
+                "webtransport_http3_draft": {
+                  "description": "OxiBelt native field `upstream_pools[].servers[].webtransport_http3_draft`. Production Rust validation is authoritative.",
+                  "enum": [
+                    "draft02",
+                    "draft16"
+                  ],
+                  "type": "string",
+                  "x-oxibelt-config-activation": "full_reload",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
                 "weight": {
                   "anyOf": [
                     {
@@ -32923,6 +33001,18 @@
               }
             ],
             "description": "OxiBelt native field `upstreams[].webtransport`. Production Rust validation is authoritative.",
+            "x-oxibelt-config-activation": "full_reload",
+            "x-oxibelt-introduced-epoch": 1,
+            "x-oxibelt-reference-activation": "none",
+            "x-oxibelt-secret-class": "none"
+          },
+          "webtransport_http3_draft": {
+            "description": "OxiBelt native field `upstreams[].webtransport_http3_draft`. Production Rust validation is authoritative.",
+            "enum": [
+              "draft02",
+              "draft16"
+            ],
+            "type": "string",
             "x-oxibelt-config-activation": "full_reload",
             "x-oxibelt-introduced-epoch": 1,
             "x-oxibelt-reference-activation": "none",

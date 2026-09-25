@@ -14,7 +14,7 @@ probe_image="${OXIBELT_PROTOCOL_PROBE_IMAGE:-oxibelt/protocol-probe:${run_id}}"
 cleanup() {
   local status=$?
   if ((status != 0)); then
-    for name in proxy upstream-h2 upstream-h2-closed upstream-h2-quic upstream-h3 drain-target; do
+    for name in proxy proxy-d16 upstream-h2 upstream-h2-closed upstream-h2-quic upstream-h3 upstream-h3-d16 drain-target; do
       if docker container inspect "${run_id}-${name}" >/dev/null 2>&1; then
         docker logs "${run_id}-${name}" 2>&1 | tail -100 || true
       fi
@@ -37,8 +37,9 @@ cat >"${work_dir}/extensions.cnf" <<'EOF'
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature
 extendedKeyUsage=serverAuth
-subjectAltName=DNS:proxy,DNS:upstream-h2,DNS:upstream-h2-closed,DNS:upstream-h2-quic,DNS:upstream-h3
+subjectAltName=DNS:proxy,DNS:upstream-h2,DNS:upstream-h2-closed,DNS:upstream-h2-quic,DNS:upstream-h3,DNS:upstream-h3-d16
 EOF
+
 openssl x509 -req -in "${work_dir}/server.csr" -CA "${work_dir}/ca.pem" \
   -CAkey "${work_dir}/ca.key" -CAcreateserial -days 1 -sha256 \
   -extfile "${work_dir}/extensions.cnf" -out "${work_dir}/server.pem" >/dev/null 2>&1
@@ -211,20 +212,45 @@ upload_bytes_per_second = 64
 download_bytes_per_second = 64
 EOF
 
+cp "${work_dir}/oxibelt.toml" "${work_dir}/oxibelt-d16.toml"
+cat >>"${work_dir}/oxibelt-d16.toml" <<'EOF'
+
+[proxy.http3]
+webtransport_draft16 = true
+
+[[upstreams]]
+name = "h3-d16"
+origin = "https://upstream-h3-d16:18443"
+max_http_version = "h3"
+webtransport = true
+webtransport_http3_draft = "draft16"
+[upstreams.tls.ech]
+mode = "disabled"
+
+[[routes]]
+name = "h3-d16"
+hosts = ["example.test"]
+path_prefix = "/h3-d16"
+upstream = "h3-d16"
+EOF
+
 if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   docker build --target standalone -t "${proxy_image}" -f "${repo_root}/source/ops/Dockerfile.alpine" "${repo_root}"
 fi
 if [[ -z "${OXIBELT_PROTOCOL_PROBE_IMAGE:-}" ]]; then
-  docker build -t "${probe_image}" "${repo_root}/tests/docker/protocol_probe"
+  docker build -t "${probe_image}" -f "${repo_root}/tests/docker/protocol_probe/Dockerfile" "${repo_root}"
 fi
 docker network create "${network}" >/dev/null
-for version in h2 h3; do
+for version in h2 h3 h3-d16; do
   command=webtransport-upstream
   if [[ "${version}" == h2 ]]; then command=webtransport-h2-upstream; fi
+  draft_args=()
+  if [[ "${version}" == h3-d16 ]]; then draft_args=(--draft draft16); fi
   name="${run_id}-upstream-${version}"
   docker create --name "${name}" --label "${label}" --network "${network}" \
     --network-alias "upstream-${version}" "${probe_image}" "${command}" \
-    --listen 0.0.0.0:18443 --cert /tls/server.pem --key /tls/server.key --name "upstream-${version}" >/dev/null
+    --listen 0.0.0.0:18443 --cert /tls/server.pem --key /tls/server.key --name "upstream-${version}" \
+    "${draft_args[@]}" >/dev/null
   docker cp "${work_dir}/server.pem" "${name}:/tls/server.pem"
   docker cp "${work_dir}/server.key" "${name}:/tls/server.key"
   docker start "${name}" >/dev/null
@@ -254,6 +280,15 @@ for file in server.pem server.key ca.pem; do
     | docker cp -a - "${run_id}-proxy:/etc/oxibelt/cert/"
 done
 docker start "${run_id}-proxy" >/dev/null
+docker create --name "${run_id}-proxy-d16" --label "${label}" --network "${network}" \
+  --network-alias proxy-d16 -e OXIBELT_ADMIN_TOKEN=webtransport-integration-only \
+  "${proxy_image}" >/dev/null
+docker cp "${work_dir}/oxibelt-d16.toml" "${run_id}-proxy-d16:/etc/oxibelt/config/oxibelt.toml"
+for file in server.pem server.key ca.pem; do
+  tar --create --file - --owner=10001 --group=10001 --mode=0440 -C "${work_dir}" "${file}" \
+    | docker cp -a - "${run_id}-proxy-d16:/etc/oxibelt/cert/"
+done
+docker start "${run_id}-proxy-d16" >/dev/null
 
 probe() {
   local probe_name="${run_id}-probe-${BASHPID}-${RANDOM}"
@@ -331,6 +366,61 @@ echo "HTTP/3 downstream to HTTP/3 upstream"
 probe webtransport-multiplex --host proxy --port 8443 --server-name proxy \
   --authority example.test --path /h3/session --ca-cert /tls/ca.pem \
   --sessions 1 --expect-statuses 200
+echo "Draft02 HTTP/3 client close preserves application code and reason"
+probe webtransport-multiplex --host proxy --port 8443 --server-name proxy \
+  --authority example.test --path /h3/session --ca-cert /tls/ca.pem \
+  --sessions 1 --expect-statuses 200 --header x-probe-wt-client-close:1
+draft02_client_close_observed=false
+for _ in {1..20}; do
+  if docker logs "${run_id}-upstream-h3" 2>&1 | grep -Fq 'WebTransport client close code and reason preserved'; then
+    draft02_client_close_observed=true
+    break
+  fi
+  sleep 0.1
+done
+if [[ "${draft02_client_close_observed}" != true ]]; then
+  echo 'Draft02 upstream did not observe the client application close code and reason' >&2
+  exit 1
+fi
+echo "Draft02 HTTP/3 upstream close preserves application code and reason"
+probe webtransport-multiplex --host proxy --port 8443 --server-name proxy \
+  --authority example.test --path /h3/session --ca-cert /tls/ca.pem \
+  --sessions 1 --expect-statuses 200 --header x-probe-wt-upstream-close:1
+echo "HTTP/2 downstream to draft16 HTTP/3 upstream"
+probe webtransport-h2-client --host proxy-d16 --port 8443 --server-name proxy \
+  --authority example.test --path /h3-d16/session --ca-cert /tls/ca.pem --scenario echo \
+  --reset-prefix required
+echo "Draft16 HTTP/3 downstream to HTTP/2 upstream"
+probe webtransport-multiplex --host proxy-d16 --port 8443 --server-name proxy \
+  --authority example.test --path /h2-quic/session --ca-cert /tls/ca.pem \
+  --sessions 1 --expect-statuses 200 --draft draft16
+echo "Draft16 HTTP/3 downstream to draft16 HTTP/3 upstream"
+probe webtransport-multiplex --host proxy-d16 --port 8443 --server-name proxy \
+  --authority example.test --path /h3-d16/session --ca-cert /tls/ca.pem \
+  --sessions 1 --expect-statuses 200 --draft draft16 \
+  --header x-probe-d16-reset-ack:1
+echo "Draft16 HTTP/3 client close preserves application code and reason"
+probe webtransport-multiplex --host proxy-d16 --port 8443 --server-name proxy \
+  --authority example.test --path /h3-d16/session --ca-cert /tls/ca.pem \
+  --sessions 1 --expect-statuses 200 --draft draft16 \
+  --header x-probe-wt-client-close:1
+client_close_observed=false
+for _ in {1..20}; do
+  if docker logs "${run_id}-upstream-h3-d16" 2>&1 | grep -Fq 'WebTransport client close code and reason preserved'; then
+    client_close_observed=true
+    break
+  fi
+  sleep 0.1
+done
+if [[ "${client_close_observed}" != true ]]; then
+  echo 'Draft16 upstream did not observe the client application close code and reason' >&2
+  exit 1
+fi
+echo "Draft16 HTTP/3 upstream close preserves application code and reason"
+probe webtransport-multiplex --host proxy-d16 --port 8443 --server-name proxy \
+  --authority example.test --path /h3-d16/session --ca-cert /tls/ca.pem \
+  --sessions 1 --expect-statuses 200 --draft draft16 \
+  --header x-probe-wt-upstream-close:1
 echo "HTTP/2 WebTransport request WAF denial"
 probe webtransport-h2-client --host proxy --port 8443 --server-name proxy \
   --authority example.test --path /h2/blocked --ca-cert /tls/ca.pem \

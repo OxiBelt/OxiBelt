@@ -25,7 +25,7 @@ default-members = [
   "source/crates/oxibelt-control-protocol",
   "source/crates/oxibelt-deployment-diagnostics",
 ]
-exclude = ["source/third_party/hyper", "source/third_party/h2", "source/third_party/rustls"]
+exclude = ["source/third_party/hyper", "source/third_party/h2", "source/third_party/rustls", "source/third_party/quinn", "source/third_party/quinn-proto", "source/third_party/h3", "source/third_party/web-transport-quinn", "source/third_party/web-transport-proto"]
 resolver = "3"
 
 [workspace.package]
@@ -112,3 +112,8 @@ strip = "debuginfo"
 h2 = { path = "source/third_party/h2" }
 hyper = { path = "source/third_party/hyper" }
 rustls = { path = "source/third_party/rustls" }
+quinn = { path = "source/third_party/quinn" }
+quinn-proto = { path = "source/third_party/quinn-proto" }
+h3 = { path = "source/third_party/h3" }
+web-transport-quinn = { path = "source/third_party/web-transport-quinn" }
+web-transport-proto = { path = "source/third_party/web-transport-proto" }

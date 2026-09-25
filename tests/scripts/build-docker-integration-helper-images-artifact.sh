@@ -117,7 +117,7 @@ build_helper_image \
 build_helper_image \
   "${protocol_probe_image}" \
   "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
-  "${repo_root}/tests/docker/protocol_probe"
+  "${repo_root}"
 
 build_helper_image \
   "${postgres_image}" \

@@ -518,6 +518,8 @@ keep_alive_while_idle = false
 
 [proxy.http3]
 inline_bodyless_fast_path = false
+webtransport_draft16 = false
+webtransport_only_connections = false
 
 [proxy.http.grpc]
 enabled = true
@@ -1511,6 +1513,7 @@ preserve_host = false
 websocket = true
 webrtc = true
 webtransport = true
+# webtransport_http3_draft = "draft16" # requires max_http_version = "h3"; default draft02
 proxy_protocol_egress = "off"
 
 # Optional PROXY v2 TLS metadata relay for this named upstream only.
@@ -1578,11 +1581,13 @@ tls12 = "session_id_or_tickets" # disabled | session_id_only | session_id_or_tic
 # max_conns = 1024
 # backup = false
 # state = "ready" # ready | drain | down | maintenance
+# webtransport_http3_draft = "draft16" # requires pool max_http_version = "h3"
 #
 #[[upstream_pools.discovery]]
 # provider = "file"
 # file = "discovery/app-pool.json"
 # refresh_interval_ms = 5000
+# webtransport_http3_draft = "draft16" # copied to discovered members
 #
 #[[upstream_pools.discovery]]
 # provider = "dns"

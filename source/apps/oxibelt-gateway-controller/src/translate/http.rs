@@ -2,7 +2,7 @@ use anyhow::{Context, bail};
 use serde_json::Value;
 
 use super::{
-  GeneratedClientIdentity, GeneratedExternalAuth, GeneratedHttpVersion,
+  GeneratedClientIdentity, GeneratedExternalAuth, GeneratedH3Draft, GeneratedHttpVersion,
   GeneratedKubernetesDiscovery, GeneratedPool, GeneratedRoute, GeneratedServer, NamedExactMatch,
   ObjectKey, TranslationState, backend_port, backend_service_port, endpoint_slice_discovery_port,
   exact_service_backend_ref, filters::ParsedRouteFilters, filters::parse_route_filters,
@@ -124,6 +124,7 @@ impl TranslationState {
             &source,
             client_identity.as_identity(),
             None,
+            None,
           ) {
             Ok(pool) => pool,
             Err(failure) => {
@@ -139,6 +140,7 @@ impl TranslationState {
           generated.upstream_pool = Some(pool.name.clone());
           self.pools.insert(pool.name.clone(), pool);
           let webtransport_version = generated.webtransport_upstream_http_version.take();
+          let webtransport_draft = generated.webtransport_upstream_http3_draft.take();
           if let Some(version) = webtransport_version {
             let mut webtransport = generated.clone();
             webtransport.name = sanitize_name(&format!("{}-webtransport", generated.name));
@@ -153,6 +155,7 @@ impl TranslationState {
               &source,
               client_identity.as_identity(),
               Some(version),
+              webtransport_draft,
             ) {
               Ok(pool) => pool,
               Err(failure) => {
@@ -182,6 +185,7 @@ impl TranslationState {
     source: &str,
     client_identity: Option<&GeneratedClientIdentity>,
     max_http_version: Option<GeneratedHttpVersion>,
+    webtransport_http3_draft: Option<GeneratedH3Draft>,
   ) -> Result<GeneratedPool, super::TranslationFailure> {
     let Some(backend_refs) = backend_refs else {
       return Err(self.preserve_last_good_error(
@@ -213,13 +217,14 @@ impl TranslationState {
     if self.backend_resolution == BackendResolution::EndpointSliceWatch {
       let mut discoveries = Vec::with_capacity(nonzero_backends.len());
       for (index, backend, weight) in nonzero_backends {
-        let discovery = self.backend_discovery(
+        let mut discovery = self.backend_discovery(
           route,
           from_kind,
           (backend, index, weight),
           route_name,
           client_identity,
         )?;
+        discovery.webtransport_http3_draft = webtransport_http3_draft;
         discoveries.push(discovery);
       }
       if max_http_version == Some(GeneratedHttpVersion::H3)
@@ -244,8 +249,9 @@ impl TranslationState {
 
     let mut servers = Vec::new();
     for (index, backend, weight) in nonzero_backends {
-      let server =
+      let mut server =
         self.backend_server(route, from_kind, backend, index, weight, client_identity)?;
+      server.webtransport_http3_draft = webtransport_http3_draft;
       servers.push(server);
     }
     if max_http_version == Some(GeneratedHttpVersion::H3)
@@ -328,6 +334,7 @@ impl TranslationState {
       origin,
       weight,
       tls,
+      webtransport_http3_draft: None,
     })
   }
 
@@ -400,6 +407,7 @@ impl TranslationState {
       },
       port,
       tls,
+      webtransport_http3_draft: None,
     })
   }
 
@@ -471,6 +479,7 @@ impl TranslationState {
         &route_name,
         source,
         client_identity,
+        None,
         None,
       )?;
       let mut action = mirror.action;
@@ -743,6 +752,7 @@ fn http_match_route(
       upstream_pool: None,
       upstream_http_version: None,
       webtransport_upstream_http_version: None,
+      webtransport_upstream_http3_draft: None,
       direct_response_status: None,
       rewrite: None,
       redirect: None,

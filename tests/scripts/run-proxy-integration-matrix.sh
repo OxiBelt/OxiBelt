@@ -3059,7 +3059,7 @@ if [[ "${CASE_NEED_PROTOCOL_PROBE}" == "1" || "${CASE_NEED_H2_UPSTREAM}" == "1" 
     "${protocol_probe_image}" \
     remove_protocol_probe_image \
     "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
-    "${repo_root}/tests/docker/protocol_probe"
+    "${repo_root}"
 fi
 
 if [[ "${CASE_NEED_POSTGRES}" == "1" ]]; then

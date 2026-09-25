@@ -13,6 +13,7 @@ pub(super) struct GeneratedRoute {
   pub(super) upstream_pool: Option<String>,
   pub(super) upstream_http_version: Option<GeneratedHttpVersion>,
   pub(super) webtransport_upstream_http_version: Option<GeneratedHttpVersion>,
+  pub(super) webtransport_upstream_http3_draft: Option<GeneratedH3Draft>,
   pub(super) direct_response_status: Option<u16>,
   pub(super) rewrite: Option<RewriteAction>,
   pub(super) redirect: Option<RedirectAction>,
@@ -41,6 +42,21 @@ impl GeneratedHttpVersion {
     match self {
       Self::H2 => "h2",
       Self::H3 => "h3",
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum GeneratedH3Draft {
+  Draft02,
+  Draft16,
+}
+
+impl GeneratedH3Draft {
+  pub(super) const fn as_str(self) -> &'static str {
+    match self {
+      Self::Draft02 => "draft02",
+      Self::Draft16 => "draft16",
     }
   }
 }
@@ -81,6 +97,7 @@ pub(super) struct GeneratedServer {
   pub(super) origin: String,
   pub(super) weight: u32,
   pub(super) tls: Option<GeneratedBackendTls>,
+  pub(super) webtransport_http3_draft: Option<GeneratedH3Draft>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +110,7 @@ pub(super) struct GeneratedKubernetesDiscovery {
   pub(super) scheme: String,
   pub(super) port: GeneratedKubernetesDiscoveryPort,
   pub(super) tls: Option<GeneratedBackendTls>,
+  pub(super) webtransport_http3_draft: Option<GeneratedH3Draft>,
 }
 
 #[derive(Debug, Clone)]

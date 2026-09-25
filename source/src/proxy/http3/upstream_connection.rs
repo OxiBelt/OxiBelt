@@ -713,7 +713,11 @@ pub(crate) async fn connect_upstream_webtransport(
             prepared.upstream.name
           )
         })?;
-      let headers = h3_connect_headers(&prepared.headers, prepared.downstream_http2);
+      let headers = h3_connect_headers(
+        &prepared.headers,
+        prepared.downstream_http2,
+        prepared.upstream.webtransport_http3_draft,
+      );
       let (session, guard, certificate) = client
         .connect_webtransport(
           prepared,
@@ -722,6 +726,9 @@ pub(crate) async fn connect_upstream_webtransport(
           &state.metrics,
         )
         .await?;
+      if prepared.upstream.webtransport_http3_draft == crate::config::WebTransportH3Draft::Draft16 {
+        session.grant_h3_receive_credit(&state.config.proxy.http2.webtransport)?;
+      }
       Ok((
         session,
         UpstreamWebTransportConnectionGuard {
@@ -750,7 +757,11 @@ pub(crate) async fn connect_upstream_webtransport(
   }
 }
 
-fn h3_connect_headers(headers: &http::HeaderMap, downstream_http2: bool) -> http::HeaderMap {
+fn h3_connect_headers(
+  headers: &http::HeaderMap,
+  downstream_http2: bool,
+  draft: crate::config::WebTransportH3Draft,
+) -> http::HeaderMap {
   let mut headers = headers.clone();
   if downstream_http2 {
     // These are the HTTP/2 capsule representation, not H3 WebTransport
@@ -758,9 +769,13 @@ fn h3_connect_headers(headers: &http::HeaderMap, downstream_http2: bool) -> http
     // H3-to-H3 contract on the other branch.
     headers.remove("capsule-protocol");
     headers.remove("webtransport-init");
+  }
+  headers.remove("sec-webtransport-http3-draft");
+  headers.remove("sec-webtransport-http3-draft02");
+  if draft == crate::config::WebTransportH3Draft::Draft02 {
     headers.insert(
-      "sec-webtransport-http3-draft",
-      http::HeaderValue::from_static("draft02"),
+      "sec-webtransport-http3-draft02",
+      http::HeaderValue::from_static("1"),
     );
   }
   headers
@@ -820,21 +835,22 @@ mod tests {
     headers.insert("capsule-protocol", http::HeaderValue::from_static("?1"));
     headers.insert("webtransport-init", http::HeaderValue::from_static("a=?0"));
     headers.insert("x-route-header", http::HeaderValue::from_static("kept"));
-    let headers = h3_connect_headers(&headers, true);
+    let headers = h3_connect_headers(&headers, true, crate::config::WebTransportH3Draft::Draft02);
     assert!(!headers.contains_key("capsule-protocol"));
     assert!(!headers.contains_key("webtransport-init"));
-    assert_eq!(headers["sec-webtransport-http3-draft"], "draft02");
+    assert_eq!(headers["sec-webtransport-http3-draft02"], "1");
     assert_eq!(headers["x-route-header"], "kept");
   }
 
   #[test]
-  fn h3_connect_headers_preserve_the_h3_to_h3_contract() {
+  fn h3_connect_headers_regenerate_the_selected_draft() {
     let mut headers = http::HeaderMap::new();
     headers.insert(
       "sec-webtransport-http3-draft",
       http::HeaderValue::from_static("existing"),
     );
-    let headers = h3_connect_headers(&headers, false);
-    assert_eq!(headers["sec-webtransport-http3-draft"], "existing");
+    let headers = h3_connect_headers(&headers, false, crate::config::WebTransportH3Draft::Draft16);
+    assert!(!headers.contains_key("sec-webtransport-http3-draft"));
+    assert!(!headers.contains_key("sec-webtransport-http3-draft02"));
   }
 }

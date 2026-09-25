@@ -647,6 +647,10 @@ impl Session {
       notified.await;
     }
   }
+
+  pub(crate) fn remote_close(&self) -> Option<(u32, Bytes)> {
+    self.shared.lock().ok()?.remote_close.clone()
+  }
 }
 
 pub(super) fn pending(waker: &mut Option<Waker>, cx: &Context<'_>) -> Poll<io::Result<usize>> {

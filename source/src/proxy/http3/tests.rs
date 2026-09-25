@@ -27,6 +27,106 @@ fn parse_config(raw: &str) -> Config {
   config
 }
 
+#[tokio::test]
+async fn webtransport_origin_policy_is_shared_by_h2_and_h3() {
+  let context = inline_candidate_context("", false).await;
+  for version in [::http::Version::HTTP_2, ::http::Version::HTTP_3] {
+    let request = |origins: &[&str]| {
+      let mut request = Request::builder()
+        .method(Method::CONNECT)
+        .uri("https://example.com:8443/transport")
+        .version(version)
+        .body(())
+        .unwrap();
+      for origin in origins {
+        request.headers_mut().append(
+          ::http::header::ORIGIN,
+          ::http::HeaderValue::from_str(origin).unwrap(),
+        );
+      }
+      request
+    };
+    assert!(http_proxy::webtransport::webtransport_origin_is_allowed(
+      &request(&["https://example.com:8443"]),
+      "app-root",
+      context.state.as_ref()
+    ));
+    for origins in [
+      vec!["https://elsewhere.example"],
+      vec!["https://example.com:8443", "https://example.com:8443"],
+      vec!["https://example.com:8443/"],
+      vec!["https://example.com:8443/."],
+      vec!["null"],
+    ] {
+      assert!(
+        !http_proxy::webtransport::webtransport_origin_is_allowed(
+          &request(&origins),
+          "app-root",
+          context.state.as_ref()
+        ),
+        "accepted {origins:?} for {version:?}"
+      );
+    }
+  }
+}
+
+#[test]
+fn webtransport_request_requires_the_selected_h3_dialect_marker() {
+  let mut draft02 = Request::builder()
+    .method(Method::CONNECT)
+    .uri("https://example.com/transport")
+    .body(())
+    .unwrap();
+  draft02.extensions_mut().insert(Protocol::WEB_TRANSPORT);
+  assert!(!webtransport_request_matches_draft(
+    &draft02,
+    WebTransportWireDraft::Draft02
+  ));
+  draft02
+    .headers_mut()
+    .insert("sec-webtransport-http3-draft02", "1".parse().unwrap());
+  assert!(webtransport_request_matches_draft(
+    &draft02,
+    WebTransportWireDraft::Draft02
+  ));
+  draft02
+    .headers_mut()
+    .append("sec-webtransport-http3-draft02", "1".parse().unwrap());
+  assert!(!webtransport_request_matches_draft(
+    &draft02,
+    WebTransportWireDraft::Draft02
+  ));
+
+  let mut draft16 = Request::builder()
+    .method(Method::CONNECT)
+    .uri("https://example.com/transport")
+    .body(())
+    .unwrap();
+  draft16.extensions_mut().insert(Protocol::WEB_TRANSPORT_H3);
+  assert!(webtransport_request_matches_draft(
+    &draft16,
+    WebTransportWireDraft::Draft16
+  ));
+  assert!(!webtransport_request_matches_draft(
+    &draft16,
+    WebTransportWireDraft::Draft02
+  ));
+  draft16
+    .headers_mut()
+    .insert("sec-webtransport-http3-draft", "draft02".parse().unwrap());
+  assert!(!webtransport_request_matches_draft(
+    &draft16,
+    WebTransportWireDraft::Draft16
+  ));
+}
+
+#[test]
+fn default_h3_listener_keeps_draft02_with_dual_capability_peers() {
+  assert!(draft02_is_highest_common(false, true));
+  assert!(draft02_is_highest_common(true, false));
+  assert!(!draft02_is_highest_common(true, true));
+}
+
 async fn inline_candidate_context(
   extra: &str,
   plain_proxy_fast_path_enabled: bool,

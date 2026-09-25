@@ -26,7 +26,7 @@ fn webtransport_request() -> Request<()> {
     .version(http::Version::HTTP_3)
     .uri("https://example.com/session?token=1")
     .header(HOST, "example.com")
-    .header("wt-available-protocols", "\"chat\", data")
+    .header("wt-available-protocols", "\"chat\", \"data\"")
     .body(())
     .expect("request should build")
 }
@@ -99,6 +99,30 @@ upstream = "app"
     "https://app.example/origin/session?token=1"
   );
   assert_eq!(prepared.protocols, vec!["chat", "data"]);
+  assert!(!prepared.headers.contains_key(HOST));
+
+  let preserved_raw = raw.replace(
+    "webtransport = true",
+    "webtransport = true\npreserve_host = true",
+  );
+  let preserved_state = AppSnapshot::new(parse_config(&preserved_raw))
+    .await
+    .expect("host-preserving snapshot should initialize");
+  let preserved = prepare_webtransport(
+    &webtransport_request(),
+    "203.0.113.10:45678".parse().unwrap(),
+    None,
+    WafTransportMetadataInput::default(),
+    &WafTlsMetadata::default(),
+    &preserved_state,
+  )
+  .await
+  .expect("host-preserving WebTransport route should prepare");
+  assert_eq!(
+    preserved.target_url.as_str(),
+    "https://example.com/origin/session?token=1"
+  );
+  assert!(!preserved.headers.contains_key(HOST));
 }
 
 #[tokio::test]

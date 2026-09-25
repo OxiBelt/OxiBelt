@@ -1,0 +1,293 @@
+use std::{
+    io,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    task::{ready, Context, Poll},
+};
+
+use bytes::Bytes;
+use tokio::io::AsyncWriteExt;
+use crate::flow::SessionFlow;
+
+use crate::{ClosedStream, SessionError, WriteError};
+
+/// A stream that can be used to send bytes. See [`quinn::SendStream`].
+///
+/// This wrapper is mainly needed for error codes, which is unfortunate.
+/// WebTransport uses u32 error codes and they're mapped in a reserved HTTP/3 error space.
+#[derive(Debug)]
+pub struct SendStream {
+    stream: quinn::SendStream,
+    error: Arc<OnceLock<SessionError>>,
+    reliable_prefix: Option<u64>,
+    flow: Option<Arc<SessionFlow>>,
+
+    // Retains the `stopped()` future across `poll_closed` calls.
+    closed: crate::op::Op<Result<(), WriteError>>,
+}
+
+impl SendStream {
+    pub(crate) fn new(stream: quinn::SendStream, error: Arc<OnceLock<SessionError>>) -> Self {
+        Self {
+            stream,
+            error,
+            reliable_prefix: None,
+            flow: None,
+            closed: Default::default(),
+        }
+    }
+
+    /// Replace connection-level errors with the stored session error if available.
+    fn map_error(&self, e: impl Into<WriteError>) -> WriteError {
+        let e = e.into();
+        if let Some(err) = self.error.get() {
+            if matches!(
+                &e,
+                WriteError::SessionError(_) | WriteError::InvalidStopped(_)
+            ) {
+                return WriteError::SessionError(err.clone());
+            }
+        }
+        e
+    }
+
+    /// Abruptly reset the stream with the provided error code. See [`quinn::SendStream::reset`].
+    /// This is a u32 with WebTransport because we share the error space with HTTP/3.
+    pub fn reset(&mut self, code: u32) -> Result<(), io::Error> {
+        let code = web_transport_proto::error_to_http3(code);
+        let code = quinn::VarInt::try_from(code).unwrap();
+        match self.reliable_prefix {
+            Some(bytes) => self.stream.reset_at(code, bytes).map_err(io::Error::other),
+            None => self.stream.reset(code).map_err(io::Error::other),
+        }
+    }
+
+    pub(crate) fn set_reliable_prefix(&mut self, bytes: u64) {
+        self.reliable_prefix = Some(bytes);
+    }
+
+    pub(crate) fn set_flow(&mut self, flow: Arc<SessionFlow>) {
+        self.flow = Some(flow);
+    }
+
+    /// Wait until the stream has been stopped and return the error code. See [`quinn::SendStream::stopped`].
+    ///
+    /// Unlike Quinn, this returns None if the code is not a valid WebTransport error code.
+    /// Also unlike Quinn, this returns a SessionError, not a StoppedError, because 0-RTT is not supported.
+    pub async fn stopped(&self) -> Result<Option<u32>, SessionError> {
+        match self.stream.stopped().await {
+            Ok(Some(code)) => Ok(web_transport_proto::error_from_http3(code.into_inner())),
+            Ok(None) => Ok(None),
+            Err(quinn::StoppedError::ConnectionLost(conn_err)) => {
+                Err(self.error.get().cloned().unwrap_or_else(|| conn_err.into()))
+            }
+            Err(quinn::StoppedError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
+        }
+    }
+
+    // Unfortunately, we have to wrap WriteError for a bunch of functions.
+
+    /// Write some data to the stream, returning the size written. See [`quinn::SendStream::write`].
+    pub async fn write(&mut self, buf: &[u8]) -> Result<usize, WriteError> {
+        if self.flow.is_some() {
+            AsyncWriteExt::write(self, buf).await.map_err(|_| WriteError::SessionError(quinn::ConnectionError::LocallyClosed.into()))
+        } else {
+            self.stream.write(buf).await.map_err(|e| self.map_error(e))
+        }
+    }
+
+    /// Write all of the data to the stream. See [`quinn::SendStream::write_all`].
+    pub async fn write_all(&mut self, buf: &[u8]) -> Result<(), WriteError> {
+        if self.flow.is_some() {
+            AsyncWriteExt::write_all(self, buf).await.map_err(|_| WriteError::SessionError(quinn::ConnectionError::LocallyClosed.into()))
+        } else {
+            self.stream.write_all(buf).await.map_err(|e| self.map_error(e))
+        }
+    }
+
+    /// Write chunks of data to the stream. See [`quinn::SendStream::write_chunks`].
+    pub async fn write_chunks(&mut self, bufs: &mut [Bytes]) -> Result<quinn::Written, WriteError> {
+        if self.flow.is_some() {
+            for (index, chunk) in bufs.iter_mut().enumerate() {
+                if chunk.is_empty() { continue; }
+                let written = self.write(chunk).await?;
+                *chunk = chunk.slice(written..);
+                return Ok(quinn::Written { bytes: written, chunks: index + usize::from(chunk.is_empty()) });
+            }
+            Ok(quinn::Written { bytes: 0, chunks: bufs.len() })
+        } else {
+            self.stream.write_chunks(bufs).await.map_err(|e| self.map_error(e))
+        }
+    }
+
+    /// Write a chunk of data to the stream. See [`quinn::SendStream::write_chunk`].
+    pub async fn write_chunk(&mut self, buf: Bytes) -> Result<(), WriteError> {
+        self.write_all(&buf).await
+    }
+
+    /// Write all of the chunks of data to the stream. See [`quinn::SendStream::write_all_chunks`].
+    pub async fn write_all_chunks(&mut self, bufs: &mut [Bytes]) -> Result<(), WriteError> {
+        for chunk in bufs.iter_mut() {
+            self.write_all(chunk).await?;
+            *chunk = Bytes::new();
+        }
+        Ok(())
+    }
+
+    /// Mark the stream as finished, such that no more data can be written. See [`quinn::SendStream::finish`].
+    ///
+    /// WARNING: This is implicitly called on Drop, but it's a common footgun in Quinn.
+    /// If you cancel futures by dropping them you'll get incomplete writes.
+    pub fn finish(&mut self) -> Result<(), ClosedStream> {
+        self.stream.finish().map_err(Into::into)
+    }
+
+    pub fn set_priority(&self, order: i32) -> Result<(), ClosedStream> {
+        self.stream.set_priority(order).map_err(Into::into)
+    }
+
+    pub fn priority(&self) -> Result<i32, ClosedStream> {
+        self.stream.priority().map_err(Into::into)
+    }
+
+    /// Return the underlying QUIC stream ID.
+    ///
+    /// > **Warning**
+    /// >
+    /// > WebTransport sessions share the QUIC connection with HTTP/3 and potentially other sessions.
+    /// > The [quinn::StreamId::index] might not increment by 1 like expected when using [quinn].
+    /// > This is why the Javascript WebTransport API does not expose the Stream ID.
+    pub fn quic_id(&self) -> quinn::StreamId {
+        self.stream.id()
+    }
+}
+
+impl tokio::io::AsyncWrite for SendStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        // We have to use this syntax because quinn added its own poll_write method.
+        let Some(flow) = self.flow.clone() else {
+            return tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.stream), cx, buf);
+        };
+        if buf.is_empty() { return Poll::Ready(Ok(0)); }
+        let mut outgoing = flow.outgoing.lock().unwrap();
+        let available = outgoing.max_data.saturating_sub(outgoing.used_data);
+        if available == 0 {
+            flow.register_outgoing(cx.waker());
+            if outgoing.max_data == outgoing.used_data { return Poll::Pending; }
+        }
+        let limit = usize::try_from(available).unwrap_or(usize::MAX).min(buf.len());
+        let result = tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.stream), cx, &buf[..limit]);
+        if let Poll::Ready(Ok(written)) = result {
+            if outgoing.use_data(written as u64).is_err() {
+                flow.fail();
+                return Poll::Ready(Err(io::Error::other("WebTransport flow control accounting failed")));
+            }
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+impl web_transport_trait::SendStream for SendStream {
+    type Error = WriteError;
+
+    fn set_priority(&mut self, order: u8) {
+        Self::set_priority(self, order.into()).ok();
+    }
+
+    fn reset(&mut self, code: u32) {
+        Self::reset(self, code).ok();
+    }
+
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        Self::finish(self).map_err(|_| WriteError::ClosedStream)
+    }
+
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        Self::write(self, buf).await
+    }
+
+    // `write_buf` is deliberately left to the trait's default, which writes out of
+    // `buf.chunk()` and advances only by what Quinn accepted. Overriding it to
+    // `copy_to_bytes` up front and then await the zero-copy `write_chunk` would be
+    // faster but loses data: `write_chunk` is not cancel safe, so a caller that
+    // drops the future (moq re-prioritizes a stream mid-write) strands the chunk —
+    // gone from `buf` but never sent, a silent hole in the stream.
+
+    async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), Self::Error> {
+        // Sound to keep zero-copy here: the caller hands over ownership, so there is
+        // no buffer position to get out of sync with a cancelled write.
+        self.write_chunk(chunk).await
+    }
+
+    async fn closed(&mut self) -> Result<(), Self::Error> {
+        // NOTE: This used to require &mut in an older version of Quinn.
+        match self.stopped().await? {
+            Some(code) => Err(WriteError::Stopped(code)),
+            None => Ok(()),
+        }
+    }
+}
+
+impl web_transport_trait::poll::SendStream for SendStream {
+    type Error = WriteError;
+
+    fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+        let size = ready!(tokio::io::AsyncWrite::poll_write(Pin::new(self), cx, buf))
+            .map_err(|_| WriteError::SessionError(quinn::ConnectionError::LocallyClosed.into()))?;
+        Poll::Ready(Ok(size))
+    }
+
+    // `poll_write_buf` is deliberately left to the trait's default, which writes out
+    // of `buf.chunk()` and advances only by what Quinn accepted. Overriding it to
+    // `copy_to_bytes` up front and then write the zero-copy `write_chunk` would be
+    // faster but loses data: the chunk would be gone from `buf` before Quinn
+    // accepted it, a silent hole in the stream if the write does not complete.
+
+    fn set_priority(&mut self, order: u8) {
+        Self::set_priority(self, order.into()).ok();
+    }
+
+    fn reset(&mut self, code: u32) {
+        Self::reset(self, code).ok();
+    }
+
+    fn finish(&mut self) -> Result<(), Self::Error> {
+        Self::finish(self).map_err(|_| WriteError::ClosedStream)
+    }
+
+    fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // `stopped()` registers with the connection's notifier on its first poll, so
+        // the future has to be retained — rebuilding it every poll would drop that
+        // registration and we would never be woken.
+        let stopped = self.stream.stopped();
+        let error = self.error.clone();
+
+        self.closed.poll(cx, move || async move {
+            match stopped.await {
+                Ok(Some(code)) => match web_transport_proto::error_from_http3(code.into_inner()) {
+                    Some(code) => Err(WriteError::Stopped(code)),
+                    None => Err(WriteError::InvalidStopped(code)),
+                },
+                Ok(None) => Ok(()),
+                Err(quinn::StoppedError::ConnectionLost(conn_err)) => {
+                    Err(WriteError::SessionError(
+                        error.get().cloned().unwrap_or_else(|| conn_err.into()),
+                    ))
+                }
+                Err(quinn::StoppedError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
+            }
+        })
+    }
+}

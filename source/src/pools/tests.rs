@@ -31,6 +31,7 @@ pub(super) fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig
         source: Default::default(),
         discovery_instance_id: None,
         discovered_weight: None,
+        webtransport_http3_draft: Default::default(),
       },
       UpstreamPoolServerConfig {
         id: None,
@@ -43,6 +44,7 @@ pub(super) fn test_pool(algorithm: LoadBalancingAlgorithm) -> UpstreamPoolConfig
         source: Default::default(),
         discovery_instance_id: None,
         discovered_weight: None,
+        webtransport_http3_draft: Default::default(),
       },
     ],
     discovery: Vec::new(),
@@ -334,6 +336,7 @@ fn slow_start_scales_weight_for_new_servers_after_rebuild() {
     source: UpstreamPoolServerSource::Admin,
     discovery_instance_id: None,
     discovered_weight: None,
+    webtransport_http3_draft: Default::default(),
   });
   let rebuilt = PoolState::new_with_previous(&[pool], None, Some(initial.as_ref()));
   let snapshot = rebuilt.snapshot("app-pool").unwrap();

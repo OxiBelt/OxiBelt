@@ -13,8 +13,13 @@ const UNSAFE_ALLOWLIST: &[&str] = &[
 ];
 const REVIEWED_THIRD_PARTY_ROOTS: &[&str] = &[
   "source/third_party/h2/",
+  "source/third_party/h3/",
   "source/third_party/hyper/",
+  "source/third_party/quinn/",
+  "source/third_party/quinn-proto/",
   "source/third_party/rustls/",
+  "source/third_party/web-transport-proto/",
+  "source/third_party/web-transport-quinn/",
 ];
 const GOVERNED_LINTS: &[&str] = &[
   "unsafe_code",
@@ -254,16 +259,34 @@ fn policy_inspection_rejects_bypasses_and_stale_entries() {
     "source/third_party/hyper/src/lib.rs"
   ));
   assert!(is_reviewed_third_party("source/third_party/h2/src/lib.rs"));
+  assert!(is_reviewed_third_party("source/third_party/h3/src/lib.rs"));
+  assert!(is_reviewed_third_party(
+    "source/third_party/quinn/src/lib.rs"
+  ));
+  assert!(is_reviewed_third_party(
+    "source/third_party/quinn-proto/src/lib.rs"
+  ));
   assert!(is_reviewed_third_party(
     "source/third_party/rustls/src/lib.rs"
+  ));
+  assert!(is_reviewed_third_party(
+    "source/third_party/web-transport-proto/src/lib.rs"
+  ));
+  assert!(is_reviewed_third_party(
+    "source/third_party/web-transport-quinn/src/lib.rs"
   ));
   for first_party_lookalike in [
     "source/third_party/hyper.rs",
     "source/third_party/hyper-local/src/lib.rs",
     "source/third_party/h2-local/src/lib.rs",
     "source/third_party/h2.rs",
+    "source/third_party/h3-local/src/lib.rs",
+    "source/third_party/quinn-local/src/lib.rs",
+    "source/third_party/quinn-proto-local/src/lib.rs",
     "source/third_party/rustls.rs",
     "source/third_party/rustls-local/src/lib.rs",
+    "source/third_party/web-transport-proto-local/src/lib.rs",
+    "source/third_party/web-transport-quinn-local/src/lib.rs",
     "source/third_party/another-vendor/src/lib.rs",
     "source/src/third_party/hyper/src/lib.rs",
     "source/src/third_party/rustls/src/lib.rs",

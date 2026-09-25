@@ -320,7 +320,7 @@ async fn webtransport_preparation_uses_scoped_client_identity() {
     .version(http::Version::HTTP_3)
     .uri("https://tenant.example.test/session")
     .header(http::header::HOST, "tenant.example.test")
-    .header("wt-available-protocols", "chat")
+    .header("wt-available-protocols", "\"chat\"")
     .header("x-forwarded-for", "203.0.113.24")
     .body(())
     .expect("WebTransport request should build");

@@ -63,6 +63,7 @@ pub(super) async fn discover_file_servers(
         source: UpstreamPoolServerSource::File,
         discovery_instance_id: None,
         discovered_weight: None,
+        webtransport_http3_draft: Default::default(),
       })
     })
     .collect::<anyhow::Result<Vec<_>>>()?;

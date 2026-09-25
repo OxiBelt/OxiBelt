@@ -7,6 +7,7 @@
 //! depend on the H3 implementation.
 
 use std::io;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -14,7 +15,10 @@ use anyhow::{Context as _, ensure};
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+pub(super) use web_transport_quinn::proto as web_transport_proto;
+
 const MAX_WEBTRANSPORT_DATAGRAM_BYTES: usize = 65_535;
+pub(crate) const MAX_WEBTRANSPORT_STREAMS: u64 = web_transport_proto::MAX_STREAMS;
 
 /// Translate a WebTransport application code for the HTTP/3/QUIC wire.
 pub(crate) fn h3_application_code_to_wire(code: u32) -> u64 {
@@ -35,23 +39,99 @@ pub(crate) fn h3_application_code_from_wire(code: u64) -> Option<u32> {
 #[derive(Clone)]
 pub(crate) enum UpstreamWebTransportSession {
   H3(Box<H3WebTransportSession>),
-  H2(crate::webtransport::Session),
+  H2(H2WebTransportSession),
+}
+
+#[derive(Clone)]
+pub(crate) struct H2WebTransportSession {
+  inner: crate::webtransport::Session,
+  selected_protocol: Option<String>,
+  response_headers: Vec<(http::HeaderName, http::HeaderValue)>,
+}
+
+impl Deref for H2WebTransportSession {
+  type Target = crate::webtransport::Session;
+
+  fn deref(&self) -> &Self::Target {
+    &self.inner
+  }
 }
 
 impl UpstreamWebTransportSession {
+  pub(crate) fn response_headers(&self) -> &[(http::HeaderName, http::HeaderValue)] {
+    match self {
+      Self::H3(session) => session
+        .inner
+        .response()
+        .map_or(&[], |response| response.headers.as_slice()),
+      Self::H2(session) => &session.response_headers,
+    }
+  }
+
+  pub(crate) async fn draining(&self) {
+    match self {
+      Self::H3(session) => session.inner.draining().await,
+      Self::H2(_) => std::future::pending().await,
+    }
+  }
+
+  pub(crate) fn selected_protocol(&self) -> Option<&str> {
+    match self {
+      Self::H3(session) => session.inner.protocol(),
+      Self::H2(session) => session.selected_protocol.as_deref(),
+    }
+  }
+
+  pub(crate) fn abrupt_h3_close(&self) -> bool {
+    match self {
+      Self::H3(session) => is_abrupt_h3_close(session.inner.close_reason()),
+      Self::H2(_) => false,
+    }
+  }
+
+  pub(crate) fn supports_unassociated_uni_reset(&self) -> bool {
+    matches!(self, Self::H3(_))
+  }
+
+  pub(in crate::proxy::http3) fn grant_h3_receive_credit(
+    &self,
+    limits: &crate::config::H2WebTransportConfig,
+  ) -> anyhow::Result<()> {
+    if let Self::H3(session) = self {
+      session
+        .inner
+        .grant_receive_credit(
+          u64::from(limits.max_concurrent_uni_streams),
+          u64::from(limits.max_concurrent_bidi_streams),
+          limits.max_session_buffer_bytes as u64,
+        )
+        .context("invalid upstream draft16 receive credit")?;
+    }
+    Ok(())
+  }
+
   pub(in crate::proxy::http3) async fn connect_h3(
     connection: web_transport_quinn::quinn::Connection,
     target_url: url::Url,
     headers: http::HeaderMap,
     protocols: Vec<String>,
+    draft: crate::config::WebTransportH3Draft,
   ) -> anyhow::Result<Self> {
-    H3WebTransportSession::connect(connection, target_url, headers, protocols)
+    H3WebTransportSession::connect(connection, target_url, headers, protocols, draft)
       .await
       .map(|session| Self::H3(Box::new(session)))
   }
 
-  pub(crate) fn from_h2(session: crate::webtransport::Session) -> Self {
-    Self::H2(session)
+  pub(crate) fn from_h2(
+    session: crate::webtransport::Session,
+    selected_protocol: Option<String>,
+    response_headers: Vec<(http::HeaderName, http::HeaderValue)>,
+  ) -> Self {
+    Self::H2(H2WebTransportSession {
+      inner: session,
+      selected_protocol,
+      response_headers,
+    })
   }
 
   pub(crate) async fn accept_uni(&self) -> anyhow::Result<UpstreamWebTransportRecvStream> {
@@ -66,6 +146,24 @@ impl UpstreamWebTransportSession {
         .map(UpstreamWebTransportRecvStream::H2)
         .context("failed to accept an upstream HTTP/2 WebTransport unidirectional stream"),
     }
+  }
+
+  pub(crate) async fn relay_unassociated_uni_reset(&self, code: u32) -> anyhow::Result<()> {
+    let Self::H3(session) = self else {
+      anyhow::bail!("unassociated draft02 reset requires an HTTP/3 upstream");
+    };
+    let mut stream = tokio::time::timeout(
+      std::time::Duration::from_secs(5),
+      session.inner.deref().open_uni(),
+    )
+    .await
+    .context("timed out opening raw upstream QUIC stream for draft02 reset")?
+    .context("failed to open raw upstream QUIC stream for draft02 reset")?;
+    let wire_code = web_transport_quinn::quinn::VarInt::try_from(h3_application_code_to_wire(code))
+      .context("invalid WebTransport reset code")?;
+    stream
+      .reset(wire_code)
+      .context("failed to relay unassociated draft02 reset")
   }
 
   pub(crate) async fn accept_bi(
@@ -186,17 +284,86 @@ impl UpstreamWebTransportSession {
     }
   }
 
-  /// H2 capsule peers expose the close capsule.  Quinn reports an H3 session
-  /// close through its I/O tasks, so the H3 arm deliberately stays pending and
-  /// lets the existing bridge error path retain its wire behavior.
   pub(crate) async fn closed(&self) -> anyhow::Result<(u32, Bytes)> {
     match self {
       Self::H2(session) => session
         .closed()
         .await
         .context("upstream HTTP/2 WebTransport session close failed"),
-      Self::H3(_) => std::future::pending().await,
+      Self::H3(session) => h3_close_result(session.inner.closed().await),
     }
+  }
+
+  pub(crate) fn remote_close(&self) -> Option<(u32, Bytes)> {
+    match self {
+      Self::H2(session) => session.remote_close(),
+      Self::H3(session) => match session.inner.close_reason()? {
+        web_transport_quinn::SessionError::WebTransportError(
+          web_transport_quinn::WebTransportError::Closed(code, reason),
+        ) => Some((code, Bytes::from(reason))),
+        _ => None,
+      },
+    }
+  }
+}
+
+fn h3_close_result(error: web_transport_quinn::SessionError) -> anyhow::Result<(u32, Bytes)> {
+  match error {
+    web_transport_quinn::SessionError::WebTransportError(
+      web_transport_quinn::WebTransportError::Closed(code, reason),
+    ) => Ok((code, Bytes::from(reason))),
+    error => {
+      Err(anyhow::anyhow!(error).context("upstream HTTP/3 WebTransport session close failed"))
+    }
+  }
+}
+
+fn is_abrupt_h3_close(error: Option<web_transport_quinn::SessionError>) -> bool {
+  error.is_some_and(|error| {
+    !matches!(
+      error,
+      web_transport_quinn::SessionError::WebTransportError(
+        web_transport_quinn::WebTransportError::Closed(_, _)
+      )
+    )
+  })
+}
+
+#[cfg(test)]
+mod close_tests {
+  use super::{h3_close_result, is_abrupt_h3_close};
+
+  #[test]
+  fn clean_fin_has_default_close_info_but_transport_loss_is_an_error() {
+    let clean = web_transport_quinn::WebTransportError::Closed(0, String::new()).into();
+    assert_eq!(
+      h3_close_result(clean).expect("clean FIN"),
+      (0, bytes::Bytes::new())
+    );
+
+    let with_capsule = web_transport_quinn::WebTransportError::Closed(32, "abc".into()).into();
+    assert_eq!(
+      h3_close_result(with_capsule).expect("close capsule"),
+      (32, bytes::Bytes::from_static(b"abc"))
+    );
+
+    let failed = web_transport_quinn::SessionError::ConnectionError(
+      web_transport_quinn::quinn::ConnectionError::LocallyClosed,
+    );
+    assert!(h3_close_result(failed).is_err());
+  }
+
+  #[test]
+  fn only_transport_loss_aborts_the_downstream_h3_connection() {
+    assert!(!is_abrupt_h3_close(None));
+    assert!(!is_abrupt_h3_close(Some(
+      web_transport_quinn::WebTransportError::Closed(0, String::new()).into()
+    )));
+    assert!(is_abrupt_h3_close(Some(
+      web_transport_quinn::SessionError::ConnectionError(
+        web_transport_quinn::quinn::ConnectionError::LocallyClosed,
+      )
+    )));
   }
 }
 
@@ -211,13 +378,22 @@ impl H3WebTransportSession {
     target_url: url::Url,
     headers: http::HeaderMap,
     protocols: Vec<String>,
+    draft: crate::config::WebTransportH3Draft,
   ) -> anyhow::Result<Self> {
+    let draft = match draft {
+      crate::config::WebTransportH3Draft::Draft02 => {
+        web_transport_quinn::proto::WebTransportDraft::Draft02
+      }
+      crate::config::WebTransportH3Draft::Draft16 => {
+        web_transport_quinn::proto::WebTransportDraft::Draft16
+      }
+    };
     let mut request =
       web_transport_quinn::proto::ConnectRequest::new(target_url).with_headers(headers);
     if !protocols.is_empty() {
       request = request.with_protocols(protocols);
     }
-    let inner = web_transport_quinn::Session::connect(connection, request)
+    let inner = web_transport_quinn::Session::connect_with_draft(connection, request, draft)
       .await
       .context("failed to establish the selected upstream WebTransport session")?;
     Ok(Self { inner })

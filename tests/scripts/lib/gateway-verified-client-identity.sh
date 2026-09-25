@@ -266,7 +266,7 @@ verify_gateway_verified_client_identity() {
     gateway_identity_protocol_probe_image="oxibelt/gateway-identity-protocol-probe:${run_id}"
     docker build --tag "${gateway_identity_protocol_probe_image}" \
       --file "${repo_root}/tests/docker/protocol_probe/Dockerfile" \
-      "${repo_root}/tests/docker/protocol_probe" >/dev/null
+      "${repo_root}" >/dev/null
     gateway_identity_protocol_probe_image_created=1
   fi
   kind load docker-image --name "${cluster_name}" "${gateway_identity_protocol_probe_image}"

@@ -22,7 +22,7 @@ use h3_quinn::quinn::{
   ServerConfig as QuinnServerConfig, TokioRuntime, UdpPoller,
 };
 use hmac::{Hmac, KeyInit, Mac};
-use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
+use http::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, ORIGIN};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
@@ -147,6 +147,7 @@ struct WebTransportUpstreamArgs {
   expected_client_cert_sha256: Option<String>,
   require_header: Option<HeaderName>,
   require_header_values: Vec<(HeaderName, HeaderValue)>,
+  draft: web_transport_quinn::proto::WebTransportDraft,
 }
 
 struct DownstreamArgs {
@@ -376,6 +377,7 @@ struct WebTransportMultiplexArgs {
   expect_statuses: Vec<u16>,
   extended_protocol: WebTransportProbeProtocol,
   expect_rejected: bool,
+  draft: web_transport_quinn::proto::WebTransportDraft,
 }
 
 #[derive(Clone, Copy)]
@@ -743,6 +745,7 @@ fn parse_webtransport_upstream_args(
   let mut expected_client_cert_sha256 = None;
   let mut require_header = None;
   let mut require_header_values = Vec::new();
+  let mut draft = web_transport_quinn::proto::WebTransportDraft::Draft02;
   while let Some(flag) = args.next() {
     let value = args
       .next()
@@ -758,6 +761,13 @@ fn parse_webtransport_upstream_args(
         require_header = Some(HeaderName::try_from(value).context("invalid --require-header")?)
       }
       "--require-header-value" => require_header_values.push(parse_required_header_value(&value)?),
+      "--draft" => {
+        draft = match value.as_str() {
+          "draft02" => web_transport_quinn::proto::WebTransportDraft::Draft02,
+          "draft16" => web_transport_quinn::proto::WebTransportDraft::Draft16,
+          _ => bail!("--draft must be draft02 or draft16"),
+        };
+      }
       _ => bail!("unknown webtransport-upstream flag: {flag}"),
     }
   }
@@ -771,6 +781,7 @@ fn parse_webtransport_upstream_args(
     expected_client_cert_sha256,
     require_header,
     require_header_values,
+    draft,
   })
 }
 
@@ -1006,6 +1017,7 @@ fn parse_webtransport_multiplex_args(
   let mut expect_statuses = None;
   let mut extended_protocol = WebTransportProbeProtocol::WebTransport;
   let mut expect_rejected = false;
+  let mut draft = web_transport_quinn::proto::WebTransportDraft::Draft02;
 
   while let Some(flag) = args.next() {
     if flag == "--expect-rejected" {
@@ -1042,6 +1054,13 @@ fn parse_webtransport_multiplex_args(
       "--extended-protocol" => {
         extended_protocol = WebTransportProbeProtocol::parse(&value)?;
       }
+      "--draft" => {
+        draft = match value.as_str() {
+          "draft02" => web_transport_quinn::proto::WebTransportDraft::Draft02,
+          "draft16" => web_transport_quinn::proto::WebTransportDraft::Draft16,
+          _ => bail!("--draft must be draft02 or draft16"),
+        };
+      }
       _ => bail!("unknown webtransport-multiplex flag: {flag}"),
     }
   }
@@ -1055,10 +1074,21 @@ fn parse_webtransport_multiplex_args(
     bail!("--expect-statuses count must match --sessions");
   }
   let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
+  let authority = authority.unwrap_or_else(|| server_name.clone());
+  if !headers.contains_key(ORIGIN) {
+    let origin = url::Url::parse(&format!("https://{authority}"))
+      .context("invalid WebTransport authority for Origin")?
+      .origin()
+      .ascii_serialization();
+    headers.insert(
+      ORIGIN,
+      HeaderValue::from_str(&origin).context("invalid WebTransport Origin")?,
+    );
+  }
   Ok(WebTransportMultiplexArgs {
     host: host.ok_or_else(|| anyhow!("--host is required"))?,
     port: port.ok_or_else(|| anyhow!("--port is required"))?,
-    authority: authority.unwrap_or_else(|| server_name.clone()),
+    authority,
     server_name,
     path: path.ok_or_else(|| anyhow!("--path is required"))?,
     headers,
@@ -1068,6 +1098,7 @@ fn parse_webtransport_multiplex_args(
     expect_statuses,
     extended_protocol,
     expect_rejected,
+    draft,
   })
 }
 
@@ -2265,11 +2296,48 @@ async fn serve_webtransport_upstream(args: WebTransportUpstreamArgs) -> anyhow::
   let quic = QuicServerConfig::try_from(tls).context("failed to configure WebTransport TLS")?;
   let endpoint = Endpoint::server(QuinnServerConfig::with_crypto(Arc::new(quic)), args.listen)
     .with_context(|| format!("failed to bind WebTransport upstream to {}", args.listen))?;
-  let mut server = web_transport_quinn::Server::new(endpoint);
   let upstream_name = Arc::<str>::from(args.name);
   let require_header = args.require_header;
   let require_header_values = args.require_header_values;
   let expected_client_cert_sha256 = args.expected_client_cert_sha256;
+
+  if args.draft == web_transport_quinn::proto::WebTransportDraft::Draft16 {
+    while let Some(connecting) = endpoint.accept().await {
+      let upstream_name = upstream_name.clone();
+      let require_header = require_header.clone();
+      let require_header_values = require_header_values.clone();
+      let expected_client_cert_sha256 = expected_client_cert_sha256.clone();
+      tokio::spawn(async move {
+        let result: anyhow::Result<()> = async {
+          let connection = connecting
+            .await
+            .context("failed to accept draft16 QUIC connection")?;
+          let request = web_transport_quinn::Request::accept_with_draft(
+            connection,
+            web_transport_quinn::proto::WebTransportDraft::Draft16,
+          )
+          .await
+          .context("failed to accept draft16 WebTransport CONNECT")?;
+          handle_webtransport_upstream_request(
+            request,
+            upstream_name,
+            require_header,
+            require_header_values,
+            expected_client_cert_sha256.as_deref(),
+            true,
+          )
+          .await
+        }
+        .await;
+        if let Err(error) = result {
+          eprintln!("draft16 WebTransport upstream session failed: {error:#}");
+        }
+      });
+    }
+    return Ok(());
+  }
+
+  let mut server = web_transport_quinn::Server::new(endpoint);
 
   while let Some(request) = server.accept().await {
     let upstream_name = upstream_name.clone();
@@ -2283,6 +2351,7 @@ async fn serve_webtransport_upstream(args: WebTransportUpstreamArgs) -> anyhow::
         require_header,
         require_header_values,
         expected_client_cert_sha256.as_deref(),
+        false,
       )
       .await
       {
@@ -2300,6 +2369,7 @@ async fn handle_webtransport_upstream_request(
   require_header: Option<HeaderName>,
   require_header_values: Vec<(HeaderName, HeaderValue)>,
   expected_client_cert_sha256: Option<&str>,
+  draft16: bool,
 ) -> anyhow::Result<()> {
   verify_quic_peer_certificate(request.conn(), expected_client_cert_sha256)?;
   if let Some(header) = require_header {
@@ -2309,12 +2379,47 @@ async fn handle_webtransport_upstream_request(
     }
   }
   require_exact_headers(&request.headers, &require_header_values, "WebTransport")?;
+  let require_reset_ack = draft16
+    && request
+      .headers
+      .get("x-probe-d16-reset-ack")
+      .and_then(|value| value.to_str().ok())
+      == Some("1");
+  let require_client_close = request
+    .headers
+    .get("x-probe-wt-client-close")
+    .and_then(|value| value.to_str().ok())
+    == Some("1");
+  let require_upstream_close = request
+    .headers
+    .get("x-probe-wt-upstream-close")
+    .and_then(|value| value.to_str().ok())
+    == Some("1");
   let session = request
     .ok()
     .await
     .with_context(|| format!("failed to accept {upstream_name} WebTransport session"))?;
+  if draft16 {
+    session
+      .grant_receive_credit(4, 4, 65_536)
+      .context("failed to grant draft16 upstream receive credit")?;
+  }
   loop {
     tokio::select! {
+        biased;
+        closed = session.closed() => {
+            if require_client_close {
+              match closed {
+                web_transport_quinn::SessionError::WebTransportError(
+                  web_transport_quinn::WebTransportError::Closed(0x1122_3344, reason)
+                ) if reason == "client close through proxy" => {
+                  eprintln!("WebTransport client close code and reason preserved");
+                }
+                other => bail!("WebTransport client close changed application code or reason: {other:?}"),
+              }
+            }
+            return Ok(());
+        }
         result = session.accept_bi() => {
             let (mut send, mut recv) = result.context("failed to accept WebTransport bidi stream")?;
             let mut received = Vec::new();
@@ -2336,6 +2441,14 @@ async fn handle_webtransport_upstream_request(
                   if code != 0x1020_3040 || !b"h2-reset-prefix".starts_with(&received) {
                     bail!("WebTransport reset changed its error code or delivered a non-prefix payload");
                   }
+                  if require_reset_ack {
+                    let ack = if received.is_empty() {
+                      Bytes::from_static(b"d16-reset-ack-header")
+                    } else {
+                      Bytes::from_static(b"d16-reset-ack-prefix")
+                    };
+                    session.send_datagram(ack).context("failed to acknowledge draft16 reset")?;
+                  }
                   send.finish().context("failed to finish reset WebTransport peer stream")?;
                   break;
                 }
@@ -2352,6 +2465,11 @@ async fn handle_webtransport_upstream_request(
         }
         result = session.read_datagram() => {
             let bytes = result.context("failed to read WebTransport datagram")?;
+            if require_upstream_close && bytes == Bytes::from_static(b"wt-trigger-upstream-close") {
+              session.close(0x4455_6677, b"upstream close through proxy");
+              let _ = session.closed().await;
+              return Ok(());
+            }
             session.send_datagram(bytes.clone()).context("failed to echo WebTransport datagram")?;
             if bytes == Bytes::from_static(b"h2-webtransport-datagram-echo") {
               let (mut send, mut recv) = session.open_bi().await.context("failed to open WebTransport stop probe")?;
@@ -2361,9 +2479,6 @@ async fn handle_webtransport_upstream_request(
               // Quinn cannot report a peer RESET through received_reset() after
               // local stop(); the peer probe asserts the exact STOP code.
             }
-        }
-        _ = session.closed() => {
-            return Ok(());
         }
     }
   }
@@ -3624,11 +3739,15 @@ async fn run_webtransport_multiplex_client(args: WebTransportMultiplexArgs) -> a
   if should_run_webtransport_data_client(&args) {
     return run_webtransport_data_client(&args, quinn_connection).await;
   }
+  if args.draft == web_transport_quinn::proto::WebTransportDraft::Draft16 {
+    bail!("--draft draft16 requires a single successful WebTransport data session");
+  }
   let close_connection = quinn_connection.clone();
   let h3_connection = h3_quinn::Connection::new(quinn_connection);
   let (mut driver, mut send_request) = h3::client::builder()
     .enable_extended_connect(true)
     .enable_datagram(true)
+    .enable_webtransport(true)
     .build::<_, _, Bytes>(h3_connection)
     .await
     .context("failed to establish downstream HTTP/3 client")?;
@@ -3705,11 +3824,16 @@ async fn run_webtransport_data_client(
     web_transport_quinn::proto::ConnectRequest::new(url).with_headers(args.headers.clone());
   let session = tokio::time::timeout(
     Duration::from_secs(2),
-    web_transport_quinn::Session::connect(quinn_connection, request),
+    web_transport_quinn::Session::connect_with_draft(quinn_connection, request, args.draft),
   )
   .await
   .context("timed out establishing WebTransport data session")?
   .context("failed to establish WebTransport data session")?;
+  if args.draft == web_transport_quinn::proto::WebTransportDraft::Draft16 {
+    session
+      .grant_receive_credit(4, 4, 65_536)
+      .context("failed to grant draft16 receive credit")?;
+  }
 
   let stream_payload = format!("stream:{}", args.path).into_bytes();
   let (mut send, mut recv) = tokio::time::timeout(Duration::from_secs(2), session.open_bi())
@@ -3791,6 +3915,24 @@ async fn run_webtransport_data_client(
     .reset(0x1020_3040)
     .context("failed to issue pre-header WebTransport reset")?;
 
+  if args.draft == web_transport_quinn::proto::WebTransportDraft::Draft16
+    && args.headers.contains_key("x-probe-d16-reset-ack")
+  {
+    let mut acknowledgements = Vec::new();
+    for _ in 0..2 {
+      let ack = tokio::time::timeout(Duration::from_secs(5), session.read_datagram())
+        .await
+        .context("timed out waiting for draft16 reset acknowledgement")?
+        .context("failed to read draft16 reset acknowledgement")?;
+      acknowledgements.push(ack);
+    }
+    if !acknowledgements.contains(&Bytes::from_static(b"d16-reset-ack-prefix"))
+      || !acknowledgements.contains(&Bytes::from_static(b"d16-reset-ack-header"))
+    {
+      bail!("draft16 reset did not reliably deliver both body prefix and association header");
+    }
+  }
+
   let datagram_payload = Bytes::from_static(b"h2-webtransport-datagram-echo");
   session
     .send_datagram(datagram_payload.clone())
@@ -3827,8 +3969,29 @@ async fn run_webtransport_data_client(
   }
   let _ = stopped_send.reset(0x5060_7080);
 
-  session.close(0, b"probe complete");
-  let _ = session.closed().await;
+  let client_close = args.headers.contains_key("x-probe-wt-client-close");
+  let upstream_close = args.headers.contains_key("x-probe-wt-upstream-close");
+  if upstream_close {
+    session
+      .send_datagram(Bytes::from_static(b"wt-trigger-upstream-close"))
+      .context("failed to trigger WebTransport upstream application close")?;
+    let closed = tokio::time::timeout(Duration::from_secs(5), session.closed())
+      .await
+      .context("timed out waiting for WebTransport upstream close")?;
+    match closed {
+      web_transport_quinn::SessionError::WebTransportError(
+        web_transport_quinn::WebTransportError::Closed(0x4455_6677, reason),
+      ) if reason == "upstream close through proxy" => {}
+      other => bail!("WebTransport upstream close changed application code or reason: {other:?}"),
+    }
+  } else {
+    if client_close {
+      session.close(0x1122_3344, b"client close through proxy");
+    } else {
+      session.close(0, b"probe complete");
+    }
+    let _ = session.closed().await;
+  }
   println!(
     "{}",
     serde_json::json!({
@@ -3840,6 +4003,8 @@ async fn run_webtransport_data_client(
       "mapped_reset_prefix_bytes": echoed_reset_prefix.len(),
       "pre_header_reset_survived": true,
       "stop_code": 0x5060_7080_u32,
+      "client_close_preserved": client_close,
+      "upstream_close_preserved": upstream_close,
     })
   );
   Ok(())
@@ -4427,7 +4592,7 @@ async fn run_admin_operation_wt_rejection_client(
     .method(Method::CONNECT)
     .uri(uri)
     .version(Version::HTTP_3)
-    .header("sec-webtransport-http3-draft", "draft02")
+    .header("sec-webtransport-http3-draft02", "1")
     .body(())
     .context("failed to build Admin WebTransport CONNECT request")?;
   request.headers_mut().extend(args.headers.clone());
@@ -4664,7 +4829,7 @@ fn webtransport_connect_request(
     .method(Method::CONNECT)
     .uri(uri)
     .version(Version::HTTP_3)
-    .header("sec-webtransport-http3-draft", "draft02")
+    .header("sec-webtransport-http3-draft02", "1")
     .body(())
     .context("failed to build WebTransport CONNECT request")?;
   request.headers_mut().extend(args.headers.clone());
@@ -4699,7 +4864,7 @@ fn webtransport_reload_connect_request(
     .method(Method::CONNECT)
     .uri(uri)
     .version(Version::HTTP_3)
-    .header("sec-webtransport-http3-draft", "draft02")
+    .header("sec-webtransport-http3-draft02", "1")
     .body(())
     .context("failed to build WebTransport CONNECT request")?;
   request.headers_mut().extend(args.headers.clone());
@@ -6536,6 +6701,7 @@ mod tests {
       expect_statuses,
       extended_protocol,
       expect_rejected,
+      draft: web_transport_quinn::proto::WebTransportDraft::Draft02,
     }
   }
 

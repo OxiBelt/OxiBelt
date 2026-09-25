@@ -180,6 +180,7 @@ async fn install_runtime_discovered_https_server(state: &AppHandle) {
         source: UpstreamPoolServerSource::File,
         discovery_instance_id: None,
         discovered_weight: None,
+        webtransport_http3_draft: Default::default(),
       }],
     )
   })

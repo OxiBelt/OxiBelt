@@ -1,16 +1,221 @@
 //! WebTransport stream forwarding with WAF and bandwidth enforcement.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use h3_webtransport::SessionId;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
+use super::flow::SessionFlow;
 use super::traffic_shaping::{acquire_stream_bandwidth, bandwidth_direction};
 use super::{
-  DispatcherEvent, UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream, report_activity,
+  DispatcherEvent, UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream,
+  UpstreamWebTransportSession, report_activity,
 };
+
+pub(super) struct FlowRecv {
+  inner: super::super::DownstreamUniRecvStream,
+  flow: Option<Arc<SessionFlow>>,
+  events: mpsc::Sender<DispatcherEvent>,
+  session_id: SessionId,
+  header_size: u64,
+  body_seen: u64,
+  bidi: bool,
+  complete: bool,
+}
+
+impl FlowRecv {
+  pub fn new(
+    inner: super::super::DownstreamUniRecvStream,
+    flow: Option<Arc<SessionFlow>>,
+    events: mpsc::Sender<DispatcherEvent>,
+    session_id: SessionId,
+    bidi: bool,
+  ) -> Self {
+    let header_size = inner.webtransport_header_size().unwrap_or(u64::MAX);
+    Self {
+      inner,
+      flow,
+      events,
+      session_id,
+      header_size,
+      body_seen: 0,
+      bidi,
+      complete: false,
+    }
+  }
+
+  fn fail(&self) {
+    if self
+      .events
+      .try_send(DispatcherEvent::FlowError(self.session_id))
+      .is_err()
+    {
+      let events = self.events.clone();
+      let session_id = self.session_id;
+      tokio::spawn(async move {
+        let _ = events.send(DispatcherEvent::FlowError(session_id)).await;
+      });
+    }
+  }
+
+  fn complete(&mut self, reset: bool) -> std::io::Result<()> {
+    if self.complete {
+      return Ok(());
+    }
+    let Some(flow) = self.flow.as_ref() else {
+      self.complete = true;
+      return Ok(());
+    };
+    if reset {
+      let Some(info) = self.inner.inner_mut().reset_info() else {
+        return Ok(());
+      };
+      if let Err(error) = flow.incoming_reset(self.body_seen, info.final_size, self.header_size) {
+        self.fail();
+        return Err(std::io::Error::other(format!(
+          "WebTransport reset final size: {error:?}"
+        )));
+      }
+    }
+    if let Err(error) = flow.incoming_closed(self.bidi) {
+      self.fail();
+      return Err(std::io::Error::other(format!(
+        "WebTransport stream count: {error:?}"
+      )));
+    }
+    self.complete = true;
+    Ok(())
+  }
+}
+
+impl AsyncRead for FlowRecv {
+  fn poll_read(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &mut tokio::io::ReadBuf<'_>,
+  ) -> Poll<std::io::Result<()>> {
+    if buf.remaining() == 0 {
+      return Poll::Ready(Ok(()));
+    }
+    let before = buf.filled().len();
+    match Pin::new(&mut self.inner).poll_read(cx, buf) {
+      Poll::Ready(Ok(())) => {
+        let n = buf.filled().len() - before;
+        if n == 0 {
+          if let Some(reset) = self.inner.inner_mut().reset_info() {
+            let result = self.complete(true);
+            return Poll::Ready(result.and_then(|()| Err(reset_error_at_eof(reset))));
+          }
+          return Poll::Ready(self.complete(false));
+        }
+        if let Some(flow) = self.flow.clone() {
+          self.body_seen = match self.body_seen.checked_add(n as u64) {
+            Some(value) => value,
+            None => {
+              self.fail();
+              return Poll::Ready(Err(std::io::Error::other(
+                "WebTransport body size overflow",
+              )));
+            }
+          };
+          if let Err(error) = flow.incoming_data(n as u64) {
+            self.fail();
+            return Poll::Ready(Err(std::io::Error::other(format!(
+              "WebTransport data credit: {error:?}"
+            ))));
+          }
+        }
+        Poll::Ready(Ok(()))
+      }
+      Poll::Ready(Err(error)) => {
+        if let Err(flow_error) = self.complete(true) {
+          Poll::Ready(Err(flow_error))
+        } else {
+          Poll::Ready(Err(error))
+        }
+      }
+      Poll::Pending => Poll::Pending,
+    }
+  }
+}
+
+impl StoppableRecv for FlowRecv {
+  fn stop(&mut self, code: u32) -> std::io::Result<()> {
+    self.inner.stop(code)
+  }
+}
+
+pub(super) struct FlowSend {
+  inner: super::super::DownstreamUniSendStream,
+  flow: Option<Arc<SessionFlow>>,
+}
+
+impl FlowSend {
+  pub fn new(inner: super::super::DownstreamUniSendStream, flow: Option<Arc<SessionFlow>>) -> Self {
+    Self { inner, flow }
+  }
+}
+
+impl AsyncWrite for FlowSend {
+  fn poll_write(
+    mut self: Pin<&mut Self>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+  ) -> Poll<std::io::Result<usize>> {
+    let Some(flow) = self.flow.clone() else {
+      return Pin::new(&mut self.inner).poll_write(cx, buf);
+    };
+    if buf.is_empty() {
+      return Poll::Ready(Ok(0));
+    }
+    let mut outgoing = flow
+      .outgoing
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let available = outgoing.max_data.saturating_sub(outgoing.used_data);
+    if available == 0 {
+      flow.register_outgoing(cx.waker());
+      if outgoing.max_data == outgoing.used_data {
+        return Poll::Pending;
+      }
+    }
+    let max = usize::try_from(available)
+      .unwrap_or(usize::MAX)
+      .min(buf.len());
+    let result = Pin::new(&mut self.inner).poll_write(cx, &buf[..max]);
+    if let Poll::Ready(Ok(written)) = result
+      && outgoing.use_data(written as u64).is_err()
+    {
+      return Poll::Ready(Err(std::io::Error::other(
+        "WebTransport send credit accounting failed",
+      )));
+    }
+    result
+  }
+
+  fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    Pin::new(&mut self.inner).poll_flush(cx)
+  }
+
+  fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    Pin::new(&mut self.inner).poll_shutdown(cx)
+  }
+}
+
+impl ResettableSend for FlowSend {
+  fn reset(&mut self, code: u32) -> std::io::Result<()> {
+    self.inner.reset(code)
+  }
+}
+
+impl StopAwareSend for FlowSend {
+  fn poll_stopped(&mut self, context: &mut Context<'_>) -> Poll<std::io::Result<u32>> {
+    self.inner.poll_stopped(context)
+  }
+}
 use crate::bandwidth::{BandwidthDirection, RouteBandwidthLimiter};
 use crate::metrics::Metrics;
 use crate::proxy::stream_waf::{self as stream_waf_bridge, StreamWafRequestContext};
@@ -69,8 +274,9 @@ impl ResettableSend for UpstreamWebTransportSendStream {
 
 impl ResettableSend for super::super::DownstreamUniSendStream {
   fn reset(&mut self, code: u32) -> std::io::Result<()> {
-    h3::quic::SendStream::reset(self, super::super::h3_application_code_to_wire(code));
-    Ok(())
+    self
+      .inner_mut()
+      .reset_webtransport(super::super::h3_application_code_to_wire(code))
   }
 }
 
@@ -120,6 +326,9 @@ impl StopAwareSend for super::super::DownstreamUniSendStream {
 pub(super) async fn copy_bidi_stream(
   session_id: SessionId,
   downstream: super::super::DownstreamBidiStream,
+  upstream: Arc<UpstreamWebTransportSession>,
+  mut abrupt_reset_rx: watch::Receiver<bool>,
+  flow: Option<Arc<SessionFlow>>,
   mut upstream_send: UpstreamWebTransportSendStream,
   mut upstream_recv: UpstreamWebTransportRecvStream,
   activity: mpsc::Sender<DispatcherEvent>,
@@ -132,7 +341,10 @@ pub(super) async fn copy_bidi_stream(
   // send half still implements h3::quic::SendStream, so a reset received from
   // an H2 capsule stream can retain its WebTransport application code when it
   // is forwarded to the downstream H3 stream.
-  let (mut downstream_send, mut downstream_recv) = h3::quic::BidiStream::split(downstream);
+  let (downstream_send, downstream_recv) = h3::quic::BidiStream::split(downstream);
+  let mut downstream_send = FlowSend::new(downstream_send, flow.clone());
+  let mut downstream_recv =
+    FlowRecv::new(downstream_recv, flow, activity.clone(), session_id, true);
   let downstream_to_upstream = copy_one_way(
     session_id,
     &mut downstream_recv,
@@ -149,7 +361,7 @@ pub(super) async fn copy_bidi_stream(
     session_id,
     &mut upstream_recv,
     &mut downstream_send,
-    activity,
+    activity.clone(),
     WafStreamDirection::UpstreamToDownstream,
     WafWebTransportStreamKind::Bidi,
     stream_waf_state,
@@ -157,8 +369,51 @@ pub(super) async fn copy_bidi_stream(
     bandwidth,
     metrics,
   );
-  tokio::try_join!(downstream_to_upstream, upstream_to_downstream)?;
-  Ok(())
+  let result = tokio::try_join!(downstream_to_upstream, upstream_to_downstream);
+  if let Err(error) = &result
+    && (upstream.abrupt_h3_close() || is_upstream_quic_connection_loss(error))
+  {
+    // The upstream QUIC connection can fail before the session control task
+    // publishes its CONNECT reset. Keep the downstream receive half alive;
+    // Quinn would otherwise send STOP_SENDING(0) on Drop and browsers would
+    // surface a stream error instead of the session failure.
+    let _ = activity
+      .send(DispatcherEvent::SessionEnded(session_id))
+      .await;
+    wait_for_abrupt_reset(&mut abrupt_reset_rx).await;
+    let mut buffer = [0; 1024];
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+      while matches!(downstream_recv.read(&mut buffer).await, Ok(1..)) {}
+    })
+    .await;
+  }
+  result.map(|_| ())
+}
+
+pub(super) async fn wait_for_abrupt_reset(reset: &mut watch::Receiver<bool>) {
+  let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    while !*reset.borrow() {
+      if reset.changed().await.is_err() {
+        return;
+      }
+    }
+  })
+  .await;
+}
+
+fn is_upstream_quic_connection_loss(error: &anyhow::Error) -> bool {
+  let cause = error
+    .downcast_ref::<std::io::Error>()
+    .and_then(std::io::Error::get_ref);
+  cause.is_some_and(|cause| {
+    matches!(
+      cause.downcast_ref::<h3_quinn::quinn::ReadError>(),
+      Some(h3_quinn::quinn::ReadError::ConnectionLost(_))
+    ) || matches!(
+      cause.downcast_ref::<h3_quinn::quinn::WriteError>(),
+      Some(h3_quinn::quinn::WriteError::ConnectionLost(_))
+    )
+  })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -300,6 +555,12 @@ fn received_reset_code(error: &std::io::Error) -> Option<u32> {
   })
 }
 
+fn reset_error_at_eof(reset: h3_quinn::quinn::ResetInfo) -> std::io::Error {
+  std::io::Error::other(h3::quic::StreamErrorIncoming::StreamTerminated {
+    error_code: reset.error_code.into_inner(),
+  })
+}
+
 async fn write_or_stop<W>(send: &mut W, bytes: &[u8]) -> std::io::Result<SendProgress<usize>>
 where
   W: AsyncWrite + StopAwareSend + Unpin,
@@ -361,7 +622,26 @@ mod tests {
 
   use tokio::io::AsyncWrite;
 
-  use super::{SendProgress, StopAwareSend, received_reset_code, write_or_stop};
+  use super::{
+    SendProgress, StopAwareSend, received_reset_code, reset_error_at_eof, wait_for_abrupt_reset,
+    write_or_stop,
+  };
+
+  #[tokio::test]
+  async fn abrupt_child_waits_until_connect_reset_is_published() {
+    let (published, mut observer) = tokio::sync::watch::channel(false);
+    let mut child = tokio::spawn(async move { wait_for_abrupt_reset(&mut observer).await });
+    assert!(
+      tokio::time::timeout(std::time::Duration::from_millis(20), &mut child)
+        .await
+        .is_err()
+    );
+    published.send_replace(true);
+    tokio::time::timeout(std::time::Duration::from_secs(1), child)
+      .await
+      .expect("child did not observe CONNECT reset")
+      .expect("child task panicked");
+  }
 
   #[derive(Default)]
   struct StopState {
@@ -448,6 +728,20 @@ mod tests {
       error_code: super::super::super::h3_application_code_to_wire(code),
     });
 
+    assert_eq!(received_reset_code(&error), Some(code));
+  }
+
+  #[test]
+  fn reset_at_eof_is_forwarded_as_reset_instead_of_fin() {
+    let code = 95;
+    let error = reset_error_at_eof(h3_quinn::quinn::ResetInfo {
+      error_code: h3_quinn::quinn::VarInt::from_u64(
+        super::super::super::h3_application_code_to_wire(code),
+      )
+      .expect("valid WebTransport error code"),
+      final_size: 2,
+      reliable_size: None,
+    });
     assert_eq!(received_reset_code(&error), Some(code));
   }
 }

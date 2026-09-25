@@ -7,6 +7,7 @@ use std::task::Poll;
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use futures_util::{future::poll_fn, ready};
+use h3::ConnectionState;
 use h3::frame::{FrameStream, FrameStreamError};
 use h3::proto::frame::Frame;
 use h3::quic::{OpenStreams, SendStreamUnframed, StreamErrorIncoming, StreamId};
@@ -16,15 +17,19 @@ use h3_webtransport::SessionId;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
+use super::session::flow::SessionFlow;
 use super::{
   DispatcherEvent, DownstreamBidiEvent, DownstreamBidiStream, DownstreamUniRecvStream,
   DownstreamUniSendStream, H3BidiStream, H3DatagramReader, H3DatagramSender, H3OpenStreams,
   H3ServerConnection,
 };
+use crate::proxy::http3::WebTransportWireDraft;
 
 pub(super) struct DownstreamWebTransportConnection {
   conn: Arc<StdMutex<H3ServerConnection>>,
   opener: StdMutex<H3OpenStreams>,
+  wire_draft: WebTransportWireDraft,
+  peer_initial_credit: (u64, u64, u64),
 }
 
 impl DownstreamWebTransportConnection {
@@ -42,19 +47,54 @@ impl DownstreamWebTransportConnection {
       .map_err(|_| anyhow::anyhow!("downstream HTTP/3 opener state is unavailable"))
   }
 
-  pub(super) fn new(conn: H3ServerConnection) -> Self {
+  pub(super) fn new(conn: H3ServerConnection, wire_draft: WebTransportWireDraft) -> Self {
+    let peer = conn.settings();
+    let peer_initial_credit = (
+      peer.wt_initial_max_streams_uni(),
+      peer.wt_initial_max_streams_bidi(),
+      peer.wt_initial_max_data(),
+    );
     let opener =
       <crate::quic::h3::Connection as h3::quic::Connection<Bytes>>::opener(&conn.inner.conn);
     Self {
       conn: Arc::new(StdMutex::new(conn)),
       opener: StdMutex::new(opener),
+      wire_draft,
+      peer_initial_credit,
     }
+  }
+
+  pub(super) fn wire_draft(&self) -> WebTransportWireDraft {
+    self.wire_draft
+  }
+
+  pub(super) fn peer_initial_credit(&self) -> (u64, u64, u64) {
+    self.peer_initial_credit
+  }
+
+  pub(super) fn abort_connection(&self) {
+    let mut conn = match self.conn.lock() {
+      Ok(conn) => conn,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    <crate::quic::h3::Connection as h3::quic::OpenStreams<Bytes>>::close(
+      &mut conn.inner.conn,
+      h3::error::Code::H3_INTERNAL_ERROR,
+      b"upstream WebTransport QUIC connection lost",
+    );
   }
 
   pub(super) async fn open_bi(
     &self,
     session_id: SessionId,
+    flow: Option<&Arc<SessionFlow>>,
   ) -> anyhow::Result<DownstreamBidiStream> {
+    if let Some(flow) = flow {
+      flow
+        .open(true)
+        .await
+        .context("WebTransport bidi stream credit unavailable")?;
+    }
     let stream = poll_fn(|cx| {
       let mut opener = match self.opener_guard() {
         Ok(opener) => opener,
@@ -67,14 +107,28 @@ impl DownstreamWebTransportConnection {
     })
     .await?;
     let mut stream = BufRecvStream::new(stream);
-    send_webtransport_header(&mut stream, BidiStreamHeader::WebTransportBidi(session_id)).await?;
+    let wire_id = webtransport_stream_wire_id(self.wire_draft, session_id)?;
+    let header_len =
+      send_webtransport_header(&mut stream, BidiStreamHeader::WebTransportBidi(wire_id)).await?;
+    if self.wire_draft == WebTransportWireDraft::Draft16 {
+      stream
+        .inner_mut()
+        .set_webtransport_reliable_prefix(header_len);
+    }
     Ok(stream)
   }
 
   pub(super) async fn open_uni(
     &self,
     session_id: SessionId,
+    flow: Option<&Arc<SessionFlow>>,
   ) -> anyhow::Result<DownstreamUniSendStream> {
+    if let Some(flow) = flow {
+      flow
+        .open(false)
+        .await
+        .context("WebTransport uni stream credit unavailable")?;
+    }
     let stream = poll_fn(|cx| {
       let mut opener = match self.opener_guard() {
         Ok(opener) => opener,
@@ -87,7 +141,14 @@ impl DownstreamWebTransportConnection {
     })
     .await?;
     let mut stream = BufRecvStream::new(stream);
-    send_webtransport_header(&mut stream, UniStreamHeader::WebTransportUni(session_id)).await?;
+    let wire_id = webtransport_stream_wire_id(self.wire_draft, session_id)?;
+    let header_len =
+      send_webtransport_header(&mut stream, UniStreamHeader::WebTransportUni(wire_id)).await?;
+    if self.wire_draft == WebTransportWireDraft::Draft16 {
+      stream
+        .inner_mut()
+        .set_webtransport_reliable_prefix(header_len);
+    }
     Ok(stream)
   }
 
@@ -97,6 +158,37 @@ impl DownstreamWebTransportConnection {
 
   pub(super) fn datagram_sender(&self, stream_id: StreamId) -> anyhow::Result<H3DatagramSender> {
     Ok(self.connection_guard()?.get_datagram_sender(stream_id))
+  }
+}
+
+fn webtransport_stream_wire_id(
+  draft: WebTransportWireDraft,
+  session_id: SessionId,
+) -> anyhow::Result<SessionId> {
+  match draft {
+    WebTransportWireDraft::Draft02 => Ok(session_id),
+    WebTransportWireDraft::Draft16 => SessionId::try_from(
+      session_id
+        .wire_value()
+        .checked_mul(4)
+        .context("WebTransport session ID overflow")?,
+    )
+    .map_err(|_| anyhow::anyhow!("WebTransport session ID overflow")),
+  }
+}
+
+fn webtransport_stream_internal_id(
+  draft: WebTransportWireDraft,
+  wire_id: SessionId,
+) -> anyhow::Result<SessionId> {
+  match draft {
+    WebTransportWireDraft::Draft02 => Ok(wire_id),
+    WebTransportWireDraft::Draft16 => {
+      let full_id = wire_id.wire_value();
+      anyhow::ensure!(full_id & 3 == 0, "invalid WebTransport session ID");
+      SessionId::try_from(full_id / 4)
+        .map_err(|_| anyhow::anyhow!("invalid WebTransport session ID"))
+    }
   }
 }
 
@@ -146,8 +238,24 @@ async fn read_downstream_streams_task(
             resolvers.spawn(async move { resolve_downstream_bidi(&downstream, stream).await });
           }
           Ok(AcceptedDownstreamStream::Uni(session_id, stream)) => {
+            let session_id = match webtransport_stream_internal_id(downstream.wire_draft, session_id) {
+              Ok(session_id) => session_id,
+              Err(error) => {
+                let _ = events.send(DispatcherEvent::Fatal(error)).await;
+                return;
+              }
+            };
             if events
               .send(DispatcherEvent::DownstreamUni(session_id, stream))
+              .await
+              .is_err()
+            {
+              return;
+            }
+          }
+          Ok(AcceptedDownstreamStream::UnassociatedUniReset(stream_id, code)) => {
+            if events
+              .send(DispatcherEvent::UnassociatedUniReset(stream_id, code))
               .await
               .is_err()
             {
@@ -177,7 +285,7 @@ async fn send_downstream_bidi_event(
       DispatcherEvent::DownstreamBidi(session_id, stream)
     }
     DownstreamBidiEvent::Request(request, stream) => {
-      DispatcherEvent::DownstreamRequest(request, stream)
+      DispatcherEvent::DownstreamRequest(*request, stream)
     }
     DownstreamBidiEvent::Closed => return true,
   };
@@ -187,6 +295,7 @@ async fn send_downstream_bidi_event(
 enum AcceptedDownstreamStream<U = DownstreamUniRecvStream, B = H3BidiStream> {
   Bidi(B),
   Uni(SessionId, U),
+  UnassociatedUniReset(StreamId, u64),
   ConnectionClosed,
 }
 
@@ -195,6 +304,7 @@ trait DownstreamStreamSource {
   type Bidi;
 
   fn pop_uni(&mut self) -> Option<(SessionId, Self::Uni)>;
+  fn pop_unassociated_uni_reset(&mut self) -> Option<(StreamId, u64)>;
   fn poll_bidi(
     &mut self,
     context: &mut std::task::Context<'_>,
@@ -207,6 +317,14 @@ impl DownstreamStreamSource for H3ServerConnection {
 
   fn pop_uni(&mut self) -> Option<(SessionId, Self::Uni)> {
     self.inner.accepted_streams_mut().wt_uni_streams.pop()
+  }
+
+  fn pop_unassociated_uni_reset(&mut self) -> Option<(StreamId, u64)> {
+    self
+      .inner
+      .accepted_streams_mut()
+      .wt_unassociated_uni_resets
+      .pop()
   }
 
   fn poll_bidi(
@@ -229,6 +347,11 @@ fn poll_downstream_stream<S>(
 where
   S: DownstreamStreamSource,
 {
+  if let Some((stream_id, code)) = source.pop_unassociated_uni_reset() {
+    return Poll::Ready(Ok(AcceptedDownstreamStream::UnassociatedUniReset(
+      stream_id, code,
+    )));
+  }
   if let Some((session_id, stream)) = source.pop_uni() {
     return Poll::Ready(Ok(AcceptedDownstreamStream::Uni(session_id, stream)));
   }
@@ -236,12 +359,17 @@ where
     Poll::Ready(Ok(Some(stream))) => Poll::Ready(Ok(AcceptedDownstreamStream::Bidi(stream))),
     Poll::Ready(Ok(None)) => Poll::Ready(Ok(AcceptedDownstreamStream::ConnectionClosed)),
     Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-    Poll::Pending => match source.pop_uni() {
-      Some((session_id, stream)) => {
+    Poll::Pending => {
+      if let Some((stream_id, code)) = source.pop_unassociated_uni_reset() {
+        Poll::Ready(Ok(AcceptedDownstreamStream::UnassociatedUniReset(
+          stream_id, code,
+        )))
+      } else if let Some((session_id, stream)) = source.pop_uni() {
         Poll::Ready(Ok(AcceptedDownstreamStream::Uni(session_id, stream)))
+      } else {
+        Poll::Pending
       }
-      None => Poll::Pending,
-    },
+    }
   }
 }
 
@@ -267,10 +395,17 @@ async fn resolve_downstream_bidi(
   let frame = poll_fn(|cx| resolver.frame_stream.poll_next(cx)).await;
 
   match frame {
-    Ok(Some(Frame::WebTransportStream(session_id))) => Ok(DownstreamBidiEvent::WebTransport(
-      session_id,
-      resolver.frame_stream.into_inner(),
-    )),
+    Ok(Some(Frame::WebTransportStream(session_id))) => {
+      let session_id = webtransport_stream_internal_id(downstream.wire_draft, session_id)?;
+      let mut stream = resolver.frame_stream.into_inner();
+      if downstream.wire_draft == WebTransportWireDraft::Draft16 {
+        stream.inner_mut().set_webtransport_reliable_prefix(0);
+      }
+      Ok(DownstreamBidiEvent::WebTransport(
+        session_id,
+        Box::new(stream),
+      ))
+    }
     Ok(None) => Ok(DownstreamBidiEvent::Closed),
     Err(error) if first_frame_stream_terminated(&error) => Ok(DownstreamBidiEvent::Closed),
     frame => {
@@ -280,7 +415,10 @@ async fn resolve_downstream_bidi(
         .resolve()
         .await
         .context("failed to resolve downstream HTTP/3 request")?;
-      Ok(DownstreamBidiEvent::Request(request, Box::new(stream)))
+      Ok(DownstreamBidiEvent::Request(
+        Box::new(request),
+        Box::new(stream),
+      ))
     }
   }
 }
@@ -329,19 +467,21 @@ async fn read_downstream_datagrams_task(
 async fn send_webtransport_header<S, H>(
   stream: &mut BufRecvStream<S, Bytes>,
   header: H,
-) -> anyhow::Result<()>
+) -> anyhow::Result<u64>
 where
   BufRecvStream<S, Bytes>: SendStreamUnframed<Bytes>,
   H: Into<WriteBuf<Bytes>>,
 {
   let mut header = header.into();
+  let len = header.remaining() as u64;
   poll_fn(|cx| {
     while header.has_remaining() {
       ready!(stream.poll_send(cx, &mut header)).map_err(downstream_stream_error)?;
     }
-    Poll::Ready(Ok(()))
+    Poll::Ready(Ok::<(), anyhow::Error>(()))
   })
-  .await
+  .await?;
+  Ok(len)
 }
 
 fn downstream_stream_error(error: StreamErrorIncoming) -> anyhow::Error {
@@ -355,7 +495,7 @@ mod tests {
 
   use futures_util::task::noop_waker_ref;
   use h3::frame::{FrameProtocolError, FrameStreamError};
-  use h3::quic::{ConnectionErrorIncoming, StreamErrorIncoming};
+  use h3::quic::{ConnectionErrorIncoming, StreamErrorIncoming, StreamId};
   use h3_webtransport::SessionId;
 
   use super::{
@@ -365,6 +505,7 @@ mod tests {
 
   struct UniQueuedByBidiPoll {
     uni: VecDeque<(SessionId, &'static str)>,
+    early_resets: VecDeque<(StreamId, u64)>,
     bidi_polls: usize,
   }
 
@@ -374,6 +515,10 @@ mod tests {
 
     fn pop_uni(&mut self) -> Option<(SessionId, Self::Uni)> {
       self.uni.pop_front()
+    }
+
+    fn pop_unassociated_uni_reset(&mut self) -> Option<(StreamId, u64)> {
+      self.early_resets.pop_front()
     }
 
     fn poll_bidi(&mut self, _: &mut Context<'_>) -> Poll<anyhow::Result<Option<Self::Bidi>>> {
@@ -387,6 +532,7 @@ mod tests {
   fn uni_queued_while_polling_bidi_does_not_need_another_wake() {
     let mut source = UniQueuedByBidiPoll {
       uni: VecDeque::new(),
+      early_resets: VecDeque::new(),
       bidi_polls: 0,
     };
     let mut context = Context::from_waker(noop_waker_ref());
@@ -399,6 +545,24 @@ mod tests {
     }
     assert_eq!(source.bidi_polls, 1);
     assert!(source.uni.is_empty());
+  }
+
+  #[test]
+  fn early_uni_reset_queued_while_polling_is_delivered() {
+    let mut source = UniQueuedByBidiPoll {
+      uni: VecDeque::new(),
+      early_resets: VecDeque::new(),
+      bidi_polls: 0,
+    };
+    let stream_id = StreamId::try_from(2).expect("valid client uni stream id");
+    source.early_resets.push_back((stream_id, 0x52e4a40f));
+    let mut context = Context::from_waker(noop_waker_ref());
+    assert!(matches!(
+      poll_downstream_stream(&mut source, &mut context),
+      Poll::Ready(Ok(AcceptedDownstreamStream::UnassociatedUniReset(id, 0x52e4a40f)))
+        if id == stream_id
+    ));
+    assert_eq!(source.bidi_polls, 0);
   }
 
   #[test]

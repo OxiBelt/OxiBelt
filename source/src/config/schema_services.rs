@@ -201,6 +201,8 @@ pub struct UpstreamConfig {
   #[serde(default = "default_true")]
   pub webtransport: bool,
   #[serde(default)]
+  pub webtransport_http3_draft: WebTransportH3Draft,
+  #[serde(default)]
   pub proxy_protocol_egress: ProxyProtocolEgressMode,
   #[serde(default)]
   pub proxy_protocol_tls: Option<ProxyProtocolTlsConfig>,
@@ -208,6 +210,23 @@ pub struct UpstreamConfig {
   pub tls: UpstreamTlsConfig,
   #[serde(skip)]
   pub extra_trusted_ca_certs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTransportH3Draft {
+  #[default]
+  Draft02,
+  Draft16,
+}
+
+impl WebTransportH3Draft {
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Draft02 => "draft02",
+      Self::Draft16 => "draft16",
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
@@ -406,6 +425,8 @@ pub struct UpstreamPoolServerConfig {
   pub state: UpstreamPoolServerState,
   #[serde(default)]
   pub tls: UpstreamTlsConfig,
+  #[serde(default)]
+  pub webtransport_http3_draft: WebTransportH3Draft,
   #[serde(skip)]
   pub source: UpstreamPoolServerSource,
   #[serde(skip)]

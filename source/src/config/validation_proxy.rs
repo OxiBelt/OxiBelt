@@ -5,6 +5,9 @@ use super::*;
 impl Config {
   pub(super) fn validate_proxy(&self) -> anyhow::Result<()> {
     self.proxy.http2.webtransport.validate()?;
+    if self.proxy.http3.webtransport_only_connections && !self.listeners.http3 {
+      bail!("proxy.http3.webtransport_only_connections requires listeners.http3 = true");
+    }
     self.proxy.status_headers.validate("proxy.status_headers")?;
     for (index, route) in self.routes.iter().enumerate() {
       route

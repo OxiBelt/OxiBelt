@@ -405,7 +405,11 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "max_session_buffer_bytes",
       "max_total_buffer_bytes",
     ][..],
-    "proxy.http3" => &["inline_bodyless_fast_path"][..],
+    "proxy.http3" => &[
+      "inline_bodyless_fast_path",
+      "webtransport_draft16",
+      "webtransport_only_connections",
+    ][..],
     "proxy.http.grpc" => &["enabled", "respect_grpc_timeout", "retry"][..],
     "proxy.http.errors" => &["mode"][..],
     "proxy.static_files" => &[

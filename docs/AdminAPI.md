@@ -1053,6 +1053,10 @@ remain protected by the existing upstream-pool IPM actions and include runtime
 server details such as `health_reason`, `last_health_check_ms`,
 `ejected_until_ms`, `ejection_count`, `slow_start_remaining_ms`, and
 `effective_weight_percent`.
+The server snapshot also includes `webtransport_http3_draft`.
+An upstream-pool server `POST` may set `webtransport_http3_draft` to `draft02`
+(default) or `draft16`; `PATCH` may change it. `draft16` requires the pool's
+`max_http_version` to be `h3`. Active sessions keep their existing upstream leg.
 `GET /admin/v1/stream-pools/status` returns the stream-pool runtime generation
 and ETag required by TCP/UDP stream server mutations. `GET
 /admin/v1/stream-pools` and `GET /admin/v1/stream-pools/{pool}` are protected

@@ -1905,6 +1905,63 @@ jobs:
           OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
         run: tests/scripts/run-tls13-tlsfuzzer.sh
 
+  webtransport-wpt:
+    name: WebTransport WPT (${{ github.sha }})
+    runs-on: ubuntu-26.04
+    needs:
+      - docker-alpine-musl-image-amd64
+      - firefox-webdriver-helper-image
+    permissions:
+      actions: read
+      contents: read
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Select AMD64 Docker image artifact
+        id: select-amd64-image
+        run: tests/scripts/select-amd64-docker-image-artifact.sh auto
+
+      - name: Download AMD64 Docker image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: ${{ steps.select-amd64-image.outputs.artifact_name }}
+          path: ${{ runner.temp }}/oxibelt-image
+
+      - name: Load OxiBelt Docker image
+        env:
+          OXIBELT_IMAGE_TAR: ${{ steps.select-amd64-image.outputs.image_tar }}
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
+
+      - name: Download Firefox WebDriver helper image artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        with:
+          name: oxibelt-firefox-webdriver-helper-image
+          path: ${{ runner.temp }}/oxibelt-firefox-webdriver
+
+      - name: Load Firefox WebDriver helper image
+        run: docker load --input "${RUNNER_TEMP}/oxibelt-firefox-webdriver/oxibelt-firefox-webdriver-image.tar"
+
+      - name: Run full pinned WebTransport WPT direct and proxy comparison
+        env:
+          OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
+          OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1
+          OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-webtransport-wpt
+        run: tests/scripts/run-webtransport-wpt-gate.sh
+
+      - name: Upload WebTransport WPT diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: oxibelt-webtransport-wpt-diagnostics
+          path: ${{ runner.temp }}/oxibelt-webtransport-wpt
+          if-no-files-found: ignore
+          retention-days: 0
+
   compression-dictionary-integration:
     name: Compression Dictionary integration
     runs-on: ubuntu-26.04
@@ -3372,6 +3429,7 @@ jobs:
       - docker-image-trivy-scan
       - docker-integration-helper-images
       - webtransport-h2-integration
+      - webtransport-wpt
       - compression-dictionary-integration
       - admin-mutation-postgres
       - admin-operation-postgres

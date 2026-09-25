@@ -16536,6 +16536,119 @@ fn upstream_http3_https_origin_validates() {
 }
 
 #[test]
+fn upstream_webtransport_http3_draft16_requires_h3() {
+  let temp_dir = common::TempDir::new("upstream-webtransport-draft16");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "upstream-draft16");
+  let raw = common::minimal_config_toml(&cert_path, &key_path).replace(
+    "webtransport = true",
+    "webtransport = true\nwebtransport_http3_draft = \"draft16\"",
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  assert!(
+    config
+      .validate()
+      .unwrap_err()
+      .to_string()
+      .contains("requires webtransport = true and max_http_version = \"h3\"")
+  );
+
+  let raw = raw.replace("max_http_version = \"h2\"", "max_http_version = \"h3\"");
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config
+    .validate()
+    .expect("draft16 H3 upstream should validate");
+}
+
+#[test]
+fn pool_webtransport_http3_draft16_requires_h3_for_static_and_discovered_members() {
+  let temp_dir = common::TempDir::new("pool-webtransport-draft16");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "pool-draft16");
+  let raw = format!(
+    r#"{}
+[[upstream_pools]]
+name = "webtransport-pool"
+max_http_version = "h2"
+
+[[upstream_pools.servers]]
+id = "static"
+origin = "https://static.example.test"
+webtransport_http3_draft = "draft16"
+
+[[upstream_pools.discovery]]
+id = "discovered"
+provider = "dns"
+name = "discovered.example.test"
+scheme = "https"
+port = 443
+webtransport_http3_draft = "draft16"
+"#,
+    common::minimal_config_toml(&cert_path, &key_path)
+  );
+  let config: Config = toml::from_str(&raw).expect("pool config should parse");
+  assert!(
+    config
+      .validate()
+      .unwrap_err()
+      .to_string()
+      .contains("webtransport_http3_draft = \"draft16\" requires max_http_version = \"h3\"")
+  );
+
+  let raw = raw.replace("max_http_version = \"h2\"", "max_http_version = \"h3\"");
+  let config: Config = toml::from_str(&raw).expect("H3 pool config should parse");
+  config.validate().expect("draft16 H3 pool should validate");
+}
+
+#[test]
+fn downstream_webtransport_draft16_advertisement_is_opt_in() {
+  let temp_dir = common::TempDir::new("downstream-webtransport-draft16");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "downstream-draft16");
+  let raw = common::minimal_config_toml(&cert_path, &key_path);
+  let default: Config = toml::from_str(&raw).expect("default config should parse");
+  assert!(!default.proxy.http3.webtransport_draft16);
+
+  let enabled: Config = toml::from_str(&format!(
+    "{raw}\n[proxy.http3]\nwebtransport_draft16 = true\n"
+  ))
+  .expect("opt-in config should parse");
+  assert!(enabled.proxy.http3.webtransport_draft16);
+  enabled
+    .validate()
+    .expect("draft16 advertisement opt-in should validate");
+}
+
+#[test]
+fn downstream_webtransport_only_connections_require_http3() {
+  let temp_dir = common::TempDir::new("downstream-webtransport-only");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "downstream-webtransport-only");
+  let raw = common::minimal_config_toml(&cert_path, &key_path);
+  let default: Config = toml::from_str(&raw).expect("default config should parse");
+  assert!(!default.proxy.http3.webtransport_only_connections);
+
+  let dedicated = format!("{raw}\n[proxy.http3]\nwebtransport_only_connections = true\n");
+  let disabled_h3: Config = toml::from_str(&dedicated).expect("opt-in config should parse");
+  let error = disabled_h3
+    .validate()
+    .expect_err("dedicated WebTransport requires HTTP/3 listener");
+  assert!(
+    error
+      .to_string()
+      .contains("proxy.http3.webtransport_only_connections requires listeners.http3 = true")
+  );
+
+  let enabled_h3: Config = toml::from_str(&dedicated.replace(
+    "http3 = false",
+    "http3 = true\n\n[quic.socket]\nreuse_port = true",
+  ))
+  .expect("dedicated H3 config should parse");
+  assert!(enabled_h3.proxy.http3.webtransport_only_connections);
+  enabled_h3
+    .validate()
+    .expect("dedicated WebTransport listener should validate with HTTP/3 enabled");
+}
+
+#[test]
 fn upstream_http3_requires_https_origin() {
   let temp_dir = common::TempDir::new("upstream-http3-http");
   let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "upstream-h3-http");

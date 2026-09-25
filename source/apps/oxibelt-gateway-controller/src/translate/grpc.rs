@@ -91,6 +91,7 @@ impl TranslationState {
             &source,
             client_identity.as_identity(),
             None,
+            None,
           ) {
             Ok(pool) => pool,
             Err(failure) => {
@@ -149,6 +150,7 @@ fn grpc_match_route(
       upstream_pool: None,
       upstream_http_version: None,
       webtransport_upstream_http_version: None,
+      webtransport_upstream_http3_draft: None,
       direct_response_status: None,
       rewrite: None,
       redirect: None,

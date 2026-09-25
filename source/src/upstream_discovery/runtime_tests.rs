@@ -245,6 +245,7 @@ upstream_pool = "app-pool"
     source: UpstreamPoolServerSource::File,
     discovery_instance_id: None,
     discovered_weight: None,
+    webtransport_http3_draft: Default::default(),
   }];
   let discovery = state.snapshot().config.upstream_pools[0].discovery[0].clone();
 
@@ -291,6 +292,7 @@ fn file_discovered_server(id: &str, weight: u32) -> UpstreamPoolServerConfig {
     source: UpstreamPoolServerSource::File,
     discovery_instance_id: None,
     discovered_weight: None,
+    webtransport_http3_draft: Default::default(),
   }
 }
 

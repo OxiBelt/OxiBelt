@@ -58,8 +58,11 @@ async fn apply_discovered_servers(
   state: &AppHandle,
   pool_name: &str,
   discovery: &UpstreamPoolDiscoveryConfig,
-  servers: Vec<UpstreamPoolServerConfig>,
+  mut servers: Vec<UpstreamPoolServerConfig>,
 ) -> anyhow::Result<()> {
+  for server in &mut servers {
+    server.webtransport_http3_draft = discovery.webtransport_http3_draft;
+  }
   let source = discovery_source(discovery.provider);
   if discovered_servers_unchanged(state, pool_name, discovery, &servers)? {
     return Ok(());
@@ -250,6 +253,7 @@ fn dns_ip_server(
     backup: false,
     state: UpstreamPoolServerState::Ready,
     tls: Default::default(),
+    webtransport_http3_draft: Default::default(),
     source: UpstreamPoolServerSource::Dns,
     discovery_instance_id: None,
     discovered_weight: None,

@@ -1122,6 +1122,7 @@ fn upstream(origin: &str) -> UpstreamConfig {
     proxy_protocol_tls: None,
     tls: Default::default(),
     extra_trusted_ca_certs: Vec::new(),
+    webtransport_http3_draft: Default::default(),
   }
 }
 

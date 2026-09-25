@@ -131,6 +131,15 @@ spec:
                     enum:
                     - h2
                     - h3
+                  upstreamHttp3Draft:
+                    description: Selects the HTTP/3 WebTransport draft for upstream connections; requires upstreamHttpVersion h3.
+                    type: string
+                    enum:
+                    - draft02
+                    - draft16
+                x-kubernetes-validations:
+                - rule: '!has(self.upstreamHttp3Draft) || self.upstreamHttpVersion == "h3"'
+                  message: upstreamHttp3Draft requires upstreamHttpVersion h3
               resumableUpload:
                 description: >-
                   References an operator-admitted upload profile. Tenants cannot

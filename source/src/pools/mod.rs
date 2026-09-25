@@ -164,6 +164,7 @@ pub struct PoolServerRuntimeSnapshot {
   pub weight: u32,
   pub max_conns: usize,
   pub backup: bool,
+  pub webtransport_http3_draft: &'static str,
   pub active: usize,
   pub healthy: bool,
   pub health_reason: String,
@@ -300,6 +301,7 @@ impl PoolState {
             websocket: true,
             webrtc: true,
             webtransport: true,
+            webtransport_http3_draft: server.webtransport_http3_draft,
             proxy_protocol_egress: ProxyProtocolEgressMode::Off,
             proxy_protocol_tls: None,
             tls: server.tls.clone(),
@@ -344,6 +346,7 @@ impl PoolState {
             websocket: true,
             webrtc: true,
             webtransport: true,
+            webtransport_http3_draft: server.webtransport_http3_draft,
             proxy_protocol_egress: ProxyProtocolEgressMode::Off,
             proxy_protocol_tls: None,
             tls: UpstreamTlsConfig {
@@ -730,6 +733,7 @@ fn pool_snapshot(pool: &Arc<PoolRuntime>) -> PoolRuntimeSnapshot {
         weight: config.weight,
         max_conns: config.max_conns,
         backup: config.backup,
+        webtransport_http3_draft: config.webtransport_http3_draft.as_str(),
         active: active_count(pool, server),
         healthy: server_healthy(pool, server),
         health_reason: health_reason_label(server.health_reason.load(Ordering::Relaxed))

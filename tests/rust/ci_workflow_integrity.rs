@@ -118,6 +118,7 @@ const REQUIRED_NON_BENCHMARK_JOBS: &[&str] = &[
   "docker-image-trivy-scan",
   "docker-integration-helper-images",
   "webtransport-h2-integration",
+  "webtransport-wpt",
   "compression-dictionary-integration",
   "admin-mutation-postgres",
   "admin-operation-postgres",
@@ -918,6 +919,123 @@ fn firefox_webdriver_helper_image_is_pinned_nonroot_and_nss_ready() {
     !dockerfile.contains("USER root") && !dockerfile.contains("--privileged"),
     "Firefox WebDriver helper image must remain nonroot and unprivileged"
   );
+}
+
+#[test]
+fn webtransport_wpt_gate_is_pinned_complete_and_required() {
+  let root = repo_root();
+  let workflow = workflow_text();
+  let jobs = parse_jobs(&workflow);
+  let job = jobs
+    .get("webtransport-wpt")
+    .expect("WebTransport WPT job is required");
+  for need in [
+    "docker-alpine-musl-image-amd64",
+    "firefox-webdriver-helper-image",
+  ] {
+    assert!(job.needs.contains(&need.to_owned()), "WPT job needs {need}");
+  }
+  let job_text = workflow_job_text(&workflow, "webtransport-wpt");
+  for expected in [
+    "run: tests/scripts/run-webtransport-wpt-gate.sh",
+    "name: oxibelt-firefox-webdriver-helper-image",
+    "name: oxibelt-webtransport-wpt-diagnostics",
+  ] {
+    assert!(
+      job_text.contains(expected),
+      "WPT job must contain {expected}"
+    );
+  }
+  let dockerfile = fs::read_to_string(root.join("tests/docker/webtransport_wpt/Dockerfile"))
+    .expect("pinned WPT Dockerfile should be readable");
+  for expected in [
+    "ece2d7fdc436d4b9a3856877163b07ec15c05354",
+    "git -C /opt/wpt rev-parse HEAD",
+    "git -C /opt/wpt status --porcelain",
+    "154.0.8037.57",
+    "156.0",
+    "sha256sum --check --strict",
+    "python3 -m venv /opt/wpt/_venv3",
+    "requirements_firefox.txt",
+    "3bf8f468258c2181f455e23d4ffcd6acb8f4cdb1",
+    "COPY firefox-profiles.sha256 /opt/wpt/firefox-profiles.sha256",
+  ] {
+    assert!(
+      dockerfile.contains(expected),
+      "WPT image must contain {expected}"
+    );
+  }
+  let firefox_profiles =
+    fs::read_to_string(root.join("tests/docker/webtransport_wpt/firefox-profiles.sha256"))
+      .expect("pinned Firefox WPT profile hashes should be readable");
+  for expected in [
+    "0a402bd731b9740c5750e8d9bc250f62ba97e42c2268d988fbaa1dfec5b04eab  profiles.json",
+    "bd8c5b3c8693ff0b308fad887637a86145f0f5cc5ce5008615df04f649ae24eb  base/user.js",
+    "6fa8bbb1c10b3b372d5c9fb9c9932ba5edb105d0d0762d70d01f459bf0aff685  common/user.js",
+    "1797a68dcdfe25a997a58ccf9b8f5d59d23e51869a49c8d2c9250cc9e44c17fd  unittest-required/user.js",
+    "73f7c530d1ca92e3f831c0215a1c4f3ff66225dd904c24fff7d65a05736287f9  unittest-features/user.js",
+    "7d403e4883fc26dc071db1c15064bc0204722edd782417a8edd2b4432a171657  web-platform/user.js",
+  ] {
+    assert!(
+      firefox_profiles.contains(expected),
+      "Firefox WPT profile manifest must contain {expected}"
+    );
+  }
+  let script = fs::read_to_string(root.join("tests/scripts/run-webtransport-wpt-gate.sh"))
+    .expect("WPT gate script should be readable");
+  for expected in [
+    "webtransport/",
+    "oxibelt/webtransport-wpt:ece2d7fdc436-git-prefs156",
+    "test \"$(cat /opt/wpt/.source-revision)\" = \"ece2d7fdc436d4b9a3856877163b07ec15c05354\"",
+    "--enable-webtransport-h3",
+    "--test-types testharness crashtest",
+    "--no-fail-on-unexpected",
+    "--prefs-root=/opt/wpt/firefox-profiles",
+    "sha256sum --check --strict /opt/wpt/firefox-profiles.sha256",
+    "run_wpt \"${browser}\" direct",
+    "run_wpt \"${browser}\" proxied",
+    "--uid-owner 10002",
+    "/usr/sbin/iptables",
+    "proxy_nat_packets()",
+    "packets_before=\"$(proxy_nat_packets)\"",
+    "packets_after=\"$(proxy_nat_packets)\"",
+    "packets_after <= packets_before",
+    "--to-destination 127.0.0.2:11000",
+    "max_connections_per_ip = 8192",
+    "max_webtransport_sessions_per_ip = 8192",
+    "max_total_buffer_bytes = 536870912",
+    "webtransport_only_connections = true",
+    "http1 = false",
+    "http2 = false",
+    "origin = \"https://127.0.0.1:11000\"",
+    "preserve_host = true",
+    "server_name = \"web-platform.test\"",
+    "trusted_ca_sha256 = [\"${ca_sha256}\"]",
+    "allow_origins = [\"https://web-platform.test:8443\"]",
+    "check-webtransport-wpt-report.py",
+  ] {
+    assert!(
+      script.contains(expected),
+      "WPT gate must contain {expected}"
+    );
+  }
+  let report = fs::read_to_string(root.join("tests/scripts/check-webtransport-wpt-report.py"))
+    .expect("WPT parity checker should be readable");
+  for expected in [
+    "set(direct) != set(proxied)",
+    "status != after_subtests[name]",
+    "duplicate subtest name",
+    "EXPECTED_CASE_COUNT = 103",
+    "ba9e567c8331d61352899f0463df184820b280dab2fe24a79a255a8b371f58c7",
+    "result.get(\"status\") == \"OK\"",
+    "WebTransportDatagramsWritable can write and receive datagrams",
+    "bidirectional stream",
+  ] {
+    assert!(
+      report.contains(expected),
+      "WPT parity checker must contain {expected}"
+    );
+  }
 }
 
 #[test]

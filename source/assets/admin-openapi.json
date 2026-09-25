@@ -6070,6 +6070,10 @@
                 },
                 "backup": {
                   "type": "boolean"
+                },
+                "webtransport_http3_draft": {
+                  "type": "string",
+                  "enum": ["draft02", "draft16"]
                 }
               },
               "additionalProperties": false
@@ -6097,6 +6101,10 @@
                 },
                 "backup": {
                   "type": "boolean"
+                },
+                "webtransport_http3_draft": {
+                  "type": "string",
+                  "enum": ["draft02", "draft16"]
                 }
               },
               "additionalProperties": false

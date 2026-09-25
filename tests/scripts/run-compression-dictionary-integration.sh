@@ -288,7 +288,7 @@ if [[ -z "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
   docker build --target standalone -t "${proxy_image}" -f "${repo_root}/source/ops/Dockerfile.alpine" "${repo_root}"
 fi
 if [[ -z "${OXIBELT_PROTOCOL_PROBE_IMAGE:-}" ]]; then
-  docker build -t "${probe_image}" "${repo_root}/tests/docker/protocol_probe"
+  docker build -t "${probe_image}" -f "${repo_root}/tests/docker/protocol_probe/Dockerfile" "${repo_root}"
 fi
 docker network create "${network}" >/dev/null
 

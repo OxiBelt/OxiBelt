@@ -7,3 +7,5 @@ node_modules
 source/target
 target
 tests/.tmp
+fuzz/coverage
+fuzz/.cmin-*

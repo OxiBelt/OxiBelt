@@ -10,7 +10,8 @@ use url::Url;
 
 use super::{
   DiscoveryUpstreamScheme, DnsDiscoveryRecordType, HttpVersion, LoadBalancingAlgorithm,
-  UpstreamDiscoveryProvider, UpstreamPoolConfig, UpstreamTlsConfig, validate_optional_non_empty,
+  UpstreamDiscoveryProvider, UpstreamPoolConfig, UpstreamTlsConfig, WebTransportH3Draft,
+  validate_optional_non_empty,
 };
 
 pub(super) const MAX_DISCOVERY_INSTANCES_PER_POOL: usize = 64;
@@ -107,6 +108,8 @@ pub struct UpstreamPoolDiscoveryConfig {
   pub min_ttl_ms: u64,
   #[serde(default)]
   pub tls: UpstreamTlsConfig,
+  #[serde(default)]
+  pub webtransport_http3_draft: WebTransportH3Draft,
 }
 
 impl UpstreamPoolDiscoveryConfig {
