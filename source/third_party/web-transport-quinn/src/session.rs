@@ -103,6 +103,7 @@ pub struct Session {
     datagram_id: Option<VarInt>,
     draft16: bool,
     flow: Option<Arc<SessionFlow>>,
+    credit_writer: Option<Arc<CreditWriterTask>>,
 
     // The accept logic is stateful, so use an Arc<Mutex> to share it.
     accept: Option<Arc<Mutex<SessionAccept>>>,
@@ -166,6 +167,16 @@ pub struct Session {
     parked_accept_bi: Parked,
 }
 
+// A session can be cloned, so the final clone owns cancellation of the writer.
+// The task itself does not retain this guard.
+struct CreditWriterTask(tokio::task::JoinHandle<()>);
+
+impl Drop for CreditWriterTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl Session {
     /// Grant draft-16 receive credit after the caller has reserved capacity for
     /// this session. The HTTP/3 SETTINGS credit remains zero until this call.
@@ -219,13 +230,14 @@ impl Session {
         let accept = SessionAccept::new(conn.clone(), session_id, error.clone());
 
         let connect_send = Arc::new(tokio::sync::Mutex::new(connect.send));
-        let this = Self {
+        let mut this = Self {
             conn,
             accept: Some(Arc::new(Mutex::new(accept))),
             session_id: Some(session_id),
             datagram_id: Some(datagram_id),
             draft16,
             flow: flow.clone(),
+            credit_writer: None,
             header_uni: header_uni.into(),
             header_bi: header_bi.into(),
             header_datagram: header_datagram.into(),
@@ -257,12 +269,8 @@ impl Session {
             draining,
         ));
         if let Some(flow) = flow {
-            tokio::spawn(Self::run_credit_writer(
-                conn2,
-                connect_send,
-                error,
-                flow.clone(),
-            ));
+            let writer = tokio::spawn(Self::run_credit_writer(conn2, connect_send, error, flow));
+            this.credit_writer = Some(Arc::new(CreditWriterTask(writer)));
         }
 
         this
@@ -293,7 +301,11 @@ impl Session {
         match close_info {
             Ok(Some((code, reason))) => {
                 let err = WebTransportError::Closed(code, reason.clone());
-                if error.set(err.into()).is_err() {
+                let recorded = error.set(err.into()).is_ok();
+                if let Some(flow) = &flow {
+                    flow.incoming_notify.notify_one();
+                }
+                if !recorded {
                     return;
                 }
                 conn.close(http3_code, reason.as_bytes());
@@ -301,17 +313,24 @@ impl Session {
             Ok(None) => {
                 // A clean CONNECT FIN without a close capsule is the default
                 // WebTransport application close, with code zero and no reason.
-                if error
+                let recorded = error
                     .set(WebTransportError::Closed(0, String::new()).into())
-                    .is_err()
-                {
+                    .is_ok();
+                if let Some(flow) = &flow {
+                    flow.incoming_notify.notify_one();
+                }
+                if !recorded {
                     return;
                 }
                 conn.close(http3_code, b"");
             }
             Err(error_code) => {
                 let err = quinn::ConnectionError::LocallyClosed.into();
-                if error.set(err).is_err() {
+                let recorded = error.set(err).is_ok();
+                if let Some(flow) = &flow {
+                    flow.incoming_notify.notify_one();
+                }
+                if !recorded {
                     return;
                 }
                 conn.close(
@@ -582,7 +601,11 @@ impl Session {
         // task already set a remote close error, or close() was already called,
         // this is a no-op.
         let err = SessionError::ConnectionError(quinn::ConnectionError::LocallyClosed);
-        if self.error.set(err).is_err() {
+        let recorded = self.error.set(err).is_ok();
+        if let Some(flow) = &self.flow {
+            flow.incoming_notify.notify_one();
+        }
+        if !recorded {
             return;
         }
 
@@ -596,9 +619,6 @@ impl Session {
             let conn = self.conn.clone();
             let capsule = web_transport_proto::Capsule::CloseWebTransportSession { code, reason };
             let timeout = (self.rtt() * 3).max(Duration::from_millis(100));
-            if let Some(flow) = &self.flow {
-                flow.incoming_notify.notify_one();
-            }
             tokio::spawn(async move {
                 Self::close_with_capsule(conn, send, capsule, code, timeout).await;
             });
@@ -674,11 +694,21 @@ impl Session {
         flow: Arc<SessionFlow>,
     ) {
         loop {
-            flow.incoming_notify.notified().await;
+            if error.get().is_some() {
+                return;
+            }
+            tokio::select! {
+                biased;
+                _ = conn.closed() => return,
+                _ = flow.incoming_notify.notified() => {},
+            }
             if error.get().is_some() {
                 return;
             }
             while let Some((kind, value, capsule)) = flow.next_capsule() {
+                if error.get().is_some() || conn.close_reason().is_some() {
+                    return;
+                }
                 let mut encoded = Vec::new();
                 capsule.encode(&mut encoded);
                 let mut frame = Vec::new();
@@ -773,6 +803,7 @@ impl Session {
             datagram_id: None,
             draft16: false,
             flow: None,
+            credit_writer: None,
             header_uni: Default::default(),
             header_bi: Default::default(),
             header_datagram: Default::default(),
@@ -1309,7 +1340,10 @@ mod remote_close_tests {
             typ: VarInt::from_u64(WT_DRAIN_SESSION).expect("valid drain type"),
             payload: bytes::Bytes::from_static(b"x"),
         };
-        assert_eq!(record_drain_capsule(&malformed, &draining), Err(H3_MESSAGE_ERROR));
+        assert_eq!(
+            record_drain_capsule(&malformed, &draining),
+            Err(H3_MESSAGE_ERROR)
+        );
     }
 
     #[tokio::test]
@@ -1341,6 +1375,9 @@ mod remote_close_tests {
         );
     }
 }
+
+#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
+mod credit_writer_lifetime_tests;
 
 impl Session {
     // Open plus stream-header write, over owned arguments so the result can live in

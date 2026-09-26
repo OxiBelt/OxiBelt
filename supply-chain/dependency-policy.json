@@ -188,11 +188,11 @@
         "upstreamRepository": "https://github.com/moq-dev/web-transport",
         "upstreamArchiveSha256": "63a239cba370789ab705c39b66d223e3b8aef85e2762046fd6b59e560f156756",
         "manifestPath": "supply-chain/web-transport-quinn-source.sha256",
-        "manifestSha256": "882b17fd20c1a8c235e306df3c98f46029fddc8d366f4a6affffb3eb20f17f6f",
+        "manifestSha256": "9e3e83e2d6cb077a2921574bcc32593499f6791a6b50081fef35d3289b43451d",
         "license": "MIT OR Apache-2.0",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/220",
-        "reviewedOn": "2026-09-25",
+        "reviewedOn": "2026-09-26",
         "maintenanceReviewIntervalDays": 30,
         "removalCriteria": "Replace this patch when upstream web-transport-quinn supports draft 16 CONNECT negotiation, session flow control, stream resets, and draft 02 compatibility. Review every update and rerun WebTransport and dependency admission suites."
       }
