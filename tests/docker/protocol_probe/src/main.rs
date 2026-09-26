@@ -4349,6 +4349,7 @@ async fn run_webtransport_reload_gated_client(
   let (mut driver, mut send_request) = h3::client::builder()
     .enable_extended_connect(true)
     .enable_datagram(true)
+    .enable_webtransport(true)
     .build::<_, _, Bytes>(h3_connection)
     .await
     .context("failed to establish downstream HTTP/3 client")?;
