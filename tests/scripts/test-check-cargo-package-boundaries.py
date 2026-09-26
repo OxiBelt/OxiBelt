@@ -310,6 +310,29 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                         "0.23.45",
                         str(repo_root / "source/third_party/rustls"),
                     ),
+                    local_identity(
+                        "h3", "0.0.8", str(repo_root / "source/third_party/h3")
+                    ),
+                    local_identity(
+                        "quinn",
+                        "0.11.12",
+                        str(repo_root / "source/third_party/quinn"),
+                    ),
+                    local_identity(
+                        "quinn-proto",
+                        "0.11.18",
+                        str(repo_root / "source/third_party/quinn-proto"),
+                    ),
+                    local_identity(
+                        "web-transport-proto",
+                        "0.6.2",
+                        str(repo_root / "source/third_party/web-transport-proto"),
+                    ),
+                    local_identity(
+                        "web-transport-quinn",
+                        "0.12.1",
+                        str(repo_root / "source/third_party/web-transport-quinn"),
+                    ),
                 }
             ),
         )
