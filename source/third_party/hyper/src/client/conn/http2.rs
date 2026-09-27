@@ -132,6 +132,25 @@ impl<B> SendRequest<B> {
     pub fn is_closed(&self) -> bool {
         self.dispatch.is_closed()
     }
+
+    /// Returns whether the peer has acknowledged
+    /// `SETTINGS_ENABLE_CONNECT_PROTOCOL` on this connection.
+    pub fn is_extended_connect_protocol_enabled(&self) -> bool {
+        self.webtransport_settings.peer_extended_connect_protocol_enabled()
+    }
+
+    /// Waits until the peer acknowledges `SETTINGS_ENABLE_CONNECT_PROTOCOL`.
+    ///
+    /// The wait resolves with a closed-connection error if the HTTP/2 driver
+    /// terminates. A peer may enable the capability in a later SETTINGS frame;
+    /// callers should impose a request-specific deadline.
+    pub async fn wait_for_extended_connect_protocol(&self) -> crate::Result<()> {
+        self.webtransport_settings
+            .wait_peer_extended_connect_protocol()
+            .await
+            .map(|_| ())
+            .map_err(|_| crate::Error::new_closed())
+    }
 }
 
 impl<B> SendRequest<B>
@@ -646,6 +665,93 @@ where
 #[cfg(test)]
 mod tests {
     use super::Builder;
+
+    #[tokio::test]
+    async fn extended_connect_wait_observes_peer_settings_without_webtransport() {
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct TokioExecutor;
+
+        impl<F> crate::rt::Executor<F> for TokioExecutor
+        where
+            F: std::future::Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            fn execute(&self, future: F) {
+                tokio::spawn(future);
+            }
+        }
+
+        let (server_io, client_io) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut builder = h2::server::Builder::new();
+            builder.enable_connect_protocol();
+            let mut connection = builder
+                .handshake::<_, bytes::Bytes>(server_io)
+                .await
+                .expect("HTTP/2 server handshake");
+            let _ = connection.accept().await;
+        });
+        let (client, connection) = Builder::new(TokioExecutor)
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(client_io))
+            .await
+            .expect("Hyper HTTP/2 client handshake");
+        let client_driver = tokio::spawn(async move { connection.await });
+
+        tokio::time::timeout(Duration::from_secs(1), client.wait_for_extended_connect_protocol())
+            .await
+            .expect("peer SETTINGS deadline")
+            .expect("extended CONNECT should be enabled");
+        assert!(client.is_extended_connect_protocol_enabled());
+
+        client_driver.abort();
+        server.abort();
+        let _ = client_driver.await;
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn extended_connect_wait_reports_closed_peer() {
+        use std::time::Duration;
+
+        #[derive(Clone)]
+        struct TokioExecutor;
+
+        impl<F> crate::rt::Executor<F> for TokioExecutor
+        where
+            F: std::future::Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            fn execute(&self, future: F) {
+                tokio::spawn(future);
+            }
+        }
+
+        let (server_io, client_io) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let connection = h2::server::handshake(server_io)
+                .await
+                .expect("HTTP/2 server handshake");
+            tokio::task::yield_now().await;
+            drop(connection);
+        });
+        let (client, connection) = Builder::new(TokioExecutor)
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(client_io))
+            .await
+            .expect("Hyper HTTP/2 client handshake");
+        let client_driver = tokio::spawn(async move { connection.await });
+
+        let error = tokio::time::timeout(Duration::from_secs(1), client.wait_for_extended_connect_protocol())
+            .await
+            .expect("closed peer should resolve SETTINGS wait")
+            .expect_err("closed peer cannot enable extended CONNECT");
+        assert!(error.is_closed());
+        assert!(!client.is_extended_connect_protocol_enabled());
+
+        let _ = client_driver.await;
+        server.await.expect("server task");
+    }
 
     #[tokio::test]
     #[ignore] // only compilation is checked

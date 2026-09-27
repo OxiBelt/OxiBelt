@@ -1,4 +1,5 @@
 use std::{hint::black_box, time::Duration};
+use std::str::FromStr;
 
 use assert_matches::assert_matches;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -8,6 +9,7 @@ use http::{request, HeaderMap, Request, Response, StatusCode};
 use crate::{
     client,
     config::Settings,
+    ext::Protocol,
     error::{Code, ConnectionError, LocalError, StreamError},
     proto::{
         coding::Encode,
@@ -25,6 +27,64 @@ use crate::{
 
 use super::h3_quinn;
 use super::{init_tracing, Pair};
+
+#[tokio::test]
+async fn peer_extended_connect_settings_are_observed_before_request() {
+    for advertised in [false, true] {
+        let mut pair = Pair::default();
+        let mut server = pair.server();
+        let client_fut = async {
+            let (mut driver, client) = client::new(pair.client().await).await.unwrap();
+            tokio::select! {
+                ready = client.wait_for_peer_extended_connect() => assert_eq!(ready.unwrap(), advertised),
+                closed = driver.wait_idle() => panic!("closed before SETTINGS: {closed:?}"),
+            }
+        };
+        let server_fut = async {
+            let conn = server.next().await;
+            let mut builder = server::builder();
+            builder.enable_extended_connect(advertised);
+            let _connection = builder.build(conn).await.unwrap();
+            future::pending::<()>().await;
+        };
+        tokio::select! {
+            _ = client_fut => (),
+            _ = server_fut => panic!("server unexpectedly returned"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn unknown_extended_connect_protocol_receives_501() {
+    let mut pair = Pair::default();
+    let mut server = pair.server();
+    let client_fut = async {
+        let (mut driver, mut client) = client::new(pair.client().await).await.unwrap();
+        let request_fut = async move {
+            let mut request = Request::builder()
+                .method(http::Method::CONNECT)
+                .uri("https://localhost/socket")
+                .body(())
+                .unwrap();
+            request.extensions_mut().insert(Protocol::from_str("future-protocol").unwrap());
+            let mut stream = client.send_request(request).await.unwrap();
+            assert_eq!(stream.recv_response().await.unwrap().status(), StatusCode::NOT_IMPLEMENTED);
+        };
+        tokio::select! {
+            _ = request_fut => (),
+            closed = driver.wait_idle() => panic!("closed before 501: {closed:?}"),
+        }
+    };
+    let server_fut = async {
+        let conn = server.next().await;
+        let mut builder = server::builder();
+        builder.enable_extended_connect(true);
+        let mut connection = builder.build(conn).await.unwrap();
+        let resolver = connection.accept().await.unwrap().unwrap();
+        assert_matches!(resolver.resolve_request().await, Err(StreamError::StreamError { code: Code::H3_REQUEST_REJECTED, .. }));
+    };
+    tokio::join!(client_fut, server_fut);
+}
 
 #[tokio::test]
 async fn get() {

@@ -64,3 +64,11 @@ builders, `proto/h2/{client,server,upgrade}.rs`, and their ownership boundaries.
 It adds no unsafe block or native capability. WebTransport capsule and stream
 flow control live in OxiBelt's common transport module. Keep both tracked patch
 requirements in the removal criteria when adopting a future upstream release.
+
+## HTTP/2 extended CONNECT capability wait
+
+The HTTP/2 request sender exposes the peer's acknowledged
+`SETTINGS_ENABLE_CONNECT_PROTOCOL` value and a close-aware wait for it. This
+lets a dedicated extended CONNECT client enforce its request deadline before
+dispatch. The wait uses the paired `h2` SETTINGS handle and does not require
+WebTransport SETTINGS. Existing CONNECT upgrade ownership stays in Hyper.

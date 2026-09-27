@@ -6,6 +6,7 @@ use std::{
 };
 
 use futures_util::task::AtomicWaker;
+use tokio::sync::Notify;
 
 use crate::{config::Settings, error::internal_error::ErrorOrigin};
 
@@ -20,6 +21,7 @@ pub struct SharedState {
     closing: AtomicBool,
     /// Waker for the connection
     waker: AtomicWaker,
+    peer_settings_notify: Notify,
 }
 
 impl Default for SharedState {
@@ -29,6 +31,7 @@ impl Default for SharedState {
             connection_error: OnceLock::new(),
             closing: AtomicBool::new(false),
             waker: AtomicWaker::new(),
+            peer_settings_notify: Notify::new(),
         }
     }
 }
@@ -56,6 +59,7 @@ pub trait ConnectionState {
             .shared_state()
             .connection_error
             .get_or_init(move || error);
+        self.shared_state().peer_settings_notify.notify_waiters();
         err.clone()
     }
 
@@ -88,6 +92,7 @@ pub trait ConnectionState {
         self.shared_state()
             .closing
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.shared_state().peer_settings_notify.notify_waiters();
     }
     /// Check if the connection is closing
     fn is_closing(&self) -> bool {
@@ -98,10 +103,16 @@ pub trait ConnectionState {
     /// Set the settings
     fn set_settings(&self, settings: Settings) {
         let _ = self.shared_state().settings.set(settings);
+        self.shared_state().peer_settings_notify.notify_waiters();
     }
 
     /// Returns the waker for the connection
     fn waker(&self) -> &AtomicWaker {
         &self.shared_state().waker
+    }
+
+    /// Notification for peer SETTINGS arrival or a terminal connection event.
+    fn peer_settings_notify(&self) -> &Notify {
+        &self.shared_state().peer_settings_notify
     }
 }

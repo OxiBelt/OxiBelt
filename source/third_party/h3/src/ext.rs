@@ -15,6 +15,13 @@ impl Protocol {
     pub const WEB_TRANSPORT_H3: Protocol = Protocol(ProtocolInner::WebTransportH3);
     /// RFC 9298 protocol
     pub const CONNECT_UDP: Protocol = Protocol(ProtocolInner::ConnectUdp);
+    /// RFC 9220 WebSocket over HTTP/3 protocol.
+    pub const WEBSOCKET: Protocol = Protocol(ProtocolInner::WebSocket);
+
+    /// Whether this crate recognizes the extended CONNECT protocol.
+    pub fn is_supported(&self) -> bool {
+        self.0 != ProtocolInner::Unsupported
+    }
 
     /// Return a &str representation of the `:protocol` pseudo-header value
     #[inline]
@@ -23,6 +30,8 @@ impl Protocol {
             ProtocolInner::WebTransport => "webtransport",
             ProtocolInner::WebTransportH3 => "webtransport-h3",
             ProtocolInner::ConnectUdp => "connect-udp",
+            ProtocolInner::WebSocket => "websocket",
+            ProtocolInner::Unsupported => "unsupported",
         }
     }
 }
@@ -32,6 +41,8 @@ enum ProtocolInner {
     WebTransport,
     WebTransportH3,
     ConnectUdp,
+    WebSocket,
+    Unsupported,
 }
 
 /// Error when parsing the protocol
@@ -45,7 +56,37 @@ impl FromStr for Protocol {
             "webtransport" => Ok(Self(ProtocolInner::WebTransport)),
             "webtransport-h3" => Ok(Self(ProtocolInner::WebTransportH3)),
             "connect-udp" => Ok(Self(ProtocolInner::ConnectUdp)),
+            "websocket" => Ok(Self(ProtocolInner::WebSocket)),
+            // A syntactically valid but unrecognized token is not malformed.
+            _ if !s.is_empty() && s.bytes().all(is_token_byte) => {
+                Ok(Self(ProtocolInner::Unsupported))
+            }
             _ => Err(InvalidProtocol),
         }
+    }
+}
+
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Protocol;
+    use std::str::FromStr;
+
+    #[test]
+    fn websocket_and_unknown_protocol_tokens() {
+        assert_eq!(Protocol::from_str("websocket").unwrap(), Protocol::WEBSOCKET);
+        assert_eq!(Protocol::WEBSOCKET.as_str(), "websocket");
+        assert!(!Protocol::from_str("unknown-protocol")
+            .unwrap()
+            .is_supported());
+        assert!(Protocol::from_str("bad protocol").is_err());
+        assert!(Protocol::from_str("").is_err());
     }
 }

@@ -28,3 +28,10 @@ Replace it with upstream APIs once acknowledged settings snapshots and the
 OxiBelt protocol matrix have equivalent coverage. Using an opaque CONNECT byte
 tunnel does not implement WebTransport stream or flow-control semantics;
 introducing another HTTP/2 implementation would duplicate transport ownership.
+
+## Extended CONNECT capability wait
+
+The shared SETTINGS handle also exposes a per-caller, close-aware wait for the
+peer's `SETTINGS_ENABLE_CONNECT_PROTOCOL` value. It reuses the existing waiter
+registry and does not require WebTransport SETTINGS. Callers supply a request
+deadline; a pending wait is removed on cancellation.

@@ -59,6 +59,23 @@ impl Header {
     pub fn into_request_parts(
         self,
     ) -> Result<(Method, Uri, Option<Protocol>, HeaderMap), HeaderError> {
+        let method = self.pseudo.method.ok_or(HeaderError::MissingMethod)?;
+        if self.pseudo.protocol.is_some() && method != Method::CONNECT {
+            return Err(HeaderError::InvalidHeaderValue(
+                ":protocol requires CONNECT".to_string(),
+            ));
+        }
+        if self.pseudo.protocol.is_some()
+            && (self.pseudo.len != 5
+                || self.pseudo.scheme.is_none()
+                || self.pseudo.authority.is_none()
+                || self.pseudo.path.is_none())
+        {
+            return Err(HeaderError::InvalidHeaderValue(
+                "extended CONNECT requires one method, scheme, authority, path, and protocol"
+                    .to_string(),
+            ));
+        }
         let mut uri = Uri::builder();
 
         if let Some(path) = self.pseudo.path {
@@ -93,7 +110,7 @@ impl Header {
         }
 
         Ok((
-            self.pseudo.method.ok_or(HeaderError::MissingMethod)?,
+            method,
             // When empty host field is built into an uri it fails
             //= https://www.rfc-editor.org/rfc/rfc9114#section-4.3.1
             //# If these fields are present, they MUST NOT be
@@ -234,7 +251,11 @@ impl TryFrom<Vec<HeaderField>> for Header {
                     fields.append(n, v);
                 }
                 Field::Protocol(p) => {
-                    pseudo.protocol = Some(p);
+                    if pseudo.protocol.replace(p).is_some() {
+                        return Err(HeaderError::InvalidHeaderValue(
+                            "duplicate :protocol pseudo-header".to_string(),
+                        ));
+                    }
                     pseudo.len += 1;
                 }
             }
@@ -632,6 +653,52 @@ mod tests {
                 name: std::borrow::Cow::Borrowed(b"other-header"),
                 value: std::borrow::Cow::Borrowed(b"other-header-value")
             },]
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_extended_connect_protocol() {
+        assert_matches!(
+            Header::try_from(vec![
+                (b":method", Method::CONNECT.as_str()).into(),
+                (b":scheme", b"https").into(),
+                (b":authority", b"example.test").into(),
+                (b":path", b"/ws").into(),
+                (b":protocol", b"websocket").into(),
+                (b":protocol", b"connect-udp").into(),
+            ]),
+            Err(HeaderError::InvalidHeaderValue(_))
+        );
+    }
+
+    #[test]
+    fn rejects_extended_connect_protocol_on_get() {
+        let header = Header::try_from(vec![
+            (b":method", Method::GET.as_str()).into(),
+            (b":scheme", b"https").into(),
+            (b":authority", b"example.test").into(),
+            (b":path", b"/ws").into(),
+            (b":protocol", b"websocket").into(),
+        ])
+        .unwrap();
+        assert_matches!(
+            header.into_request_parts(),
+            Err(HeaderError::InvalidHeaderValue(_))
+        );
+    }
+
+    #[test]
+    fn extended_connect_requires_complete_pseudo_headers() {
+        let header = Header::try_from(vec![
+            (b":method", Method::CONNECT.as_str()).into(),
+            (b":authority", b"example.test").into(),
+            (b":path", b"/ws").into(),
+            (b":protocol", b"websocket").into(),
+        ])
+        .unwrap();
+        assert_matches!(
+            header.into_request_parts(),
+            Err(HeaderError::InvalidHeaderValue(_))
         );
     }
 }

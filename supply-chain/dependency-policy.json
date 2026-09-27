@@ -83,13 +83,13 @@
         "upstreamRepository": "https://github.com/hyperium/h2",
         "upstreamArchiveSha256": "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16",
         "manifestPath": "supply-chain/h2-source.sha256",
-        "manifestSha256": "94c88e1e9d6218be07ae6c73b1ca08fb2385812fb144125a656229f541340a0e",
+        "manifestSha256": "2d6120617a0d4be36fd45e97a9bacc8f79c62d850febab48a5254afa1bd396f5",
         "license": "MIT",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/195",
         "reviewedOn": "2026-09-18",
         "maintenanceReviewIntervalDays": 30,
-        "removalCriteria": "Replace this patch when upstream acknowledged WebTransport SETTINGS snapshots satisfy the draft-15 transport and isolation matrix. Review every h2 update and retain HTTP/2 stream and unsafe invariants."
+        "removalCriteria": "Replace this patch when upstream acknowledged WebTransport SETTINGS snapshots satisfy the draft-15 transport and isolation matrix and a close-aware RFC 8441 peer extended CONNECT capability wait is available. Review every h2 update and retain HTTP/2 stream and unsafe invariants."
       },
       {
         "name": "hyper",
@@ -98,13 +98,13 @@
         "upstreamRepository": "https://github.com/hyperium/hyper",
         "upstreamArchiveSha256": "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43",
         "manifestPath": "supply-chain/hyper-source.sha256",
-        "manifestSha256": "8422a5e5fc96f34ec18b3fbe969f7e6488f06b85644393927abe3cb45ee4b7b3",
+        "manifestSha256": "3a98231bef51abd5211319bbc9047d8a4e43f1f675abd74ff2cf56587ffd506e",
         "license": "MIT",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/194",
         "reviewedOn": "2026-09-18",
         "maintenanceReviewIntervalDays": 30,
-        "removalCriteria": "Replace this exact patch with an upstream release once bounded HTTP/1 and HTTP/2 server informational sending and HTTP/2 client callbacks pass the OxiBelt cross-protocol matrix. Also require equivalent typed WebTransport CONNECT handoff, acknowledged settings snapshots, and bounded independently driven send/reset semantics tracked in issue #195. Review every Hyper update and preserve upstream framing, ownership, and unsafe invariants."
+        "removalCriteria": "Replace this exact patch with an upstream release once bounded HTTP/1 and HTTP/2 server informational sending and HTTP/2 client callbacks pass the OxiBelt cross-protocol matrix. Also require equivalent typed WebTransport CONNECT handoff, acknowledged settings snapshots, bounded independently driven send/reset semantics tracked in issue #195, and an HTTP/2 client wait for the peer extended CONNECT setting. Review every Hyper update and preserve upstream framing, ownership, and unsafe invariants."
       },
       {
         "name": "rustls",
@@ -128,13 +128,13 @@
         "upstreamRepository": "https://github.com/hyperium/h3",
         "upstreamArchiveSha256": "10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be",
         "manifestPath": "supply-chain/h3-source.sha256",
-        "manifestSha256": "1183d41d7d72a64a26821dfd4e58cec66d57ed22bf80978d2d60a71fd892f84f",
+        "manifestSha256": "3a9b696d1baf332930b26096e42d2a5a302f68e4f24cb02f9c2fea06e47efd6d",
         "license": "MIT",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/220",
         "reviewedOn": "2026-09-25",
         "maintenanceReviewIntervalDays": 30,
-        "removalCriteria": "Replace this patch when an upstream h3 release supports WebTransport over HTTP/3 draft 16 SETTINGS, session negotiation, and stream routing while preserving draft 02 compatibility. Review every h3 update and rerun the protocol and dependency admission suites."
+        "removalCriteria": "Replace this patch when an upstream h3 release supports WebTransport over HTTP/3 draft 16 SETTINGS, session negotiation, and stream routing while preserving draft 02 compatibility, plus RFC 9220 WebSocket extended CONNECT negotiation and stream-local rejection. Review every h3 update and rerun the protocol and dependency admission suites."
       },
       {
         "name": "quinn",

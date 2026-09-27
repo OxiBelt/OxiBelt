@@ -1,7 +1,7 @@
 use std::{convert::TryFrom, sync::Arc};
 
 use bytes::Buf;
-use http::{Request, StatusCode};
+use http::{Method, Request, StatusCode};
 
 use tokio::sync::mpsc::UnboundedSender;
 #[cfg(feature = "tracing")]
@@ -239,6 +239,26 @@ where
                 });
             }
         };
+
+        // RFC 9220 requires a response for a well-formed but unsupported
+        // extended CONNECT protocol. Malformed tokens take the existing
+        // H3_MESSAGE_ERROR path above.
+        if method == Method::CONNECT && protocol.is_some_and(|p| !p.is_supported()) {
+            self.request_stream
+                .send_response(
+                    http::Response::builder()
+                        .status(StatusCode::NOT_IMPLEMENTED)
+                        .body(())
+                        .expect("501 response"),
+                )
+                .await?;
+            self.request_stream.finish().await?;
+            self.request_stream.stop_sending(Code::H3_REQUEST_REJECTED);
+            return Err(StreamError::StreamError {
+                code: Code::H3_REQUEST_REJECTED,
+                reason: "unsupported extended CONNECT protocol".to_string(),
+            });
+        }
 
         //  request_stream.stop_stream(Code::H3_MESSAGE_ERROR).await;
 

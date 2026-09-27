@@ -151,6 +151,7 @@ impl std::error::Error for SettingsWaitError {}
 #[derive(Clone, Copy, Debug)]
 enum SettingsWaitKind {
   Peer,
+  PeerExtendedConnect,
   PeerWebTransport,
 }
 
@@ -314,6 +315,15 @@ impl SettingsHandle {
     SettingsWait::new(self.clone(), SettingsWaitKind::Peer)
   }
 
+  /// Waits until the peer acknowledges `SETTINGS_ENABLE_CONNECT_PROTOCOL`.
+  ///
+  /// The returned future fails if the HTTP/2 connection closes first. A peer
+  /// may enable the capability in a later SETTINGS update, so callers should
+  /// bound this wait according to their request deadline.
+  pub fn wait_peer_extended_connect_protocol(&self) -> SettingsWait {
+    SettingsWait::new(self.clone(), SettingsWaitKind::PeerExtendedConnect)
+  }
+
   /// Waits until the peer enables both WebTransport and extended CONNECT.
   ///
   /// The returned future fails if the HTTP/2 connection closes first. A peer
@@ -376,6 +386,10 @@ impl SettingsHandle {
       SettingsWaitKind::Peer => state
         .peer_acknowledged
         .then(|| SettingsSnapshot::new(state.peer)),
+      SettingsWaitKind::PeerExtendedConnect => {
+        (state.peer_acknowledged && state.peer_extended_connect_protocol)
+          .then(|| SettingsSnapshot::new(state.peer))
+      }
       SettingsWaitKind::PeerWebTransport => {
         (state.peer_acknowledged && state.peer.enabled && state.peer_extended_connect_protocol)
           .then(|| SettingsSnapshot::new(state.peer))
@@ -468,6 +482,46 @@ mod tests {
       Err(SettingsWaitError::Closed)
     );
     assert_eq!(closed.inner.waiter_count(), 0);
+  }
+
+  #[tokio::test]
+  async fn extended_connect_waits_for_capability_without_webtransport() {
+    let handle = SettingsHandle::new();
+    let first = tokio::spawn(handle.wait_peer_extended_connect_protocol());
+    let second = tokio::spawn(handle.wait_peer_extended_connect_protocol());
+    wait_for_waiter_count(&handle, 2).await;
+
+    handle.apply_peer(&crate::frame::Settings::default());
+    assert!(!handle.peer_extended_connect_protocol_enabled());
+    assert_eq!(handle.inner.waiter_count(), 2);
+
+    let mut enabled = crate::frame::Settings::default();
+    enabled.set_enable_connect_protocol(Some(1));
+    handle.apply_peer(&enabled);
+    assert!(handle.peer_extended_connect_protocol_enabled());
+    assert!(first.await.expect("first extended CONNECT waiter").is_ok());
+    assert!(second.await.expect("second extended CONNECT waiter").is_ok());
+    assert_eq!(handle.inner.waiter_count(), 0);
+    assert_eq!(handle.peer_webtransport_settings(), None);
+  }
+
+  #[tokio::test]
+  async fn extended_connect_wait_cleans_up_on_cancel_and_close() {
+    let handle = SettingsHandle::new();
+    let cancelled = tokio::spawn(handle.wait_peer_extended_connect_protocol());
+    wait_for_waiter_count(&handle, 1).await;
+    cancelled.abort();
+    let _ = cancelled.await;
+    assert_eq!(handle.inner.waiter_count(), 0);
+
+    let closed = tokio::spawn(handle.wait_peer_extended_connect_protocol());
+    wait_for_waiter_count(&handle, 1).await;
+    handle.close();
+    assert_eq!(
+      closed.await.expect("closed extended CONNECT waiter"),
+      Err(SettingsWaitError::Closed)
+    );
+    assert_eq!(handle.inner.waiter_count(), 0);
   }
 
   #[tokio::test]

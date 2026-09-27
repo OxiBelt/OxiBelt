@@ -142,6 +142,26 @@ where
     T: quic::OpenStreams<B>,
     B: Buf,
 {
+    /// Wait for the peer's SETTINGS before deciding whether extended CONNECT
+    /// is available. The caller should apply its own deadline to this wait.
+    /// A connection error or GOAWAY ends the wait without sending a request.
+    pub async fn wait_for_peer_extended_connect(&self) -> Result<bool, StreamError> {
+        loop {
+            // Enable before checking state to avoid missing a concurrent wake.
+            let notified = self.peer_settings_notify().notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            if self.is_closing() || self.get_conn_error().is_some() {
+                return Err(StreamError::RemoteClosing);
+            }
+            if self.settings_received() {
+                return Ok(self.settings().enable_extended_connect());
+            }
+            notified.await;
+        }
+    }
+
     /// Send an HTTP/3 request to the server
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub async fn send_request(
