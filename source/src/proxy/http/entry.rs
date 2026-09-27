@@ -55,7 +55,11 @@ pub(crate) async fn handle_with_forwarded_header_cache(
   downstream_scheme: &'static str,
   drain: ConnectionDrain,
 ) -> Response<ProxyBody> {
-  let protocol = request_protocol(request.headers());
+  let protocol = if is_extended_websocket_request(&request) {
+    WafProtocol::Websocket
+  } else {
+    request_protocol(request.headers())
+  };
   handle_inner(
     request,
     peer_addr,
@@ -83,6 +87,11 @@ pub(crate) async fn handle_http3(
   state: Arc<AppSnapshot>,
   drain: ConnectionDrain,
 ) -> Response<ProxyBody> {
+  let protocol = if is_extended_websocket_request(&request) {
+    WafProtocol::Websocket
+  } else {
+    WafProtocol::Http
+  };
   handle_inner(
     request,
     peer_addr,
@@ -95,7 +104,7 @@ pub(crate) async fn handle_http3(
     connection_limit_context,
     None,
     state,
-    WafProtocol::Http,
+    protocol,
     WafTransportNetwork::Udp,
     false,
     "https",

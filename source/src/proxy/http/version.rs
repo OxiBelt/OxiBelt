@@ -39,6 +39,18 @@ pub(crate) fn select_route_upstream_http_version(
   )
 }
 
+pub(crate) fn select_websocket_upstream_http_version(
+  route: &RouteConfig,
+  auto_upgrade_enabled: bool,
+  configured_max: HttpVersion,
+  upstream_max: HttpVersion,
+) -> HttpVersion {
+  if route.upstream_http_version.is_none() {
+    return HttpVersion::H1;
+  }
+  select_route_upstream_http_version(route, auto_upgrade_enabled, configured_max, upstream_max)
+}
+
 fn select_route_version(
   route_version: Option<HttpVersion>,
   mode: UpstreamHttpVersionMode,

@@ -754,6 +754,27 @@ fn browser_webdriver_matrix_describes_native_turn_coverage_exactly() {
 }
 
 #[test]
+fn browser_webdriver_matrix_gates_websocket_extended_connect() {
+  let matrix = docker_integration_matrix_binary_text();
+  let script = browser_webdriver_script_text();
+  for expected in ["websocket-h2", "websocket-h3"] {
+    assert!(
+      matrix.contains(expected),
+      "browser matrix must include {expected}"
+    );
+    assert!(
+      script.contains(expected),
+      "WebDriver harness must implement {expected}"
+    );
+  }
+  assert!(
+    matrix.contains("browser == \"firefox\" && scenario.name == \"websocket-h3\""),
+    "Firefox H3 WebSocket must stay outside the hosted matrix until client support is established"
+  );
+  assert!(script.contains("EnableWebsocketsOverHttp3"));
+}
+
+#[test]
 fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
   let script = browser_webdriver_script_text();
 

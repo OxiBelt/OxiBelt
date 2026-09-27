@@ -58,6 +58,7 @@ mod tls_metadata;
 mod upstream_connection;
 mod upstream_endpoints;
 mod upstream_pool;
+mod websocket_upstream;
 mod webtransport_bridge;
 
 use tls_metadata::{downstream_quic_forwarded_client_certificate, downstream_quic_tls_metadata};
@@ -65,6 +66,9 @@ pub(crate) use upstream_connection::{
   UpstreamWebTransportConnectionGuard, connect_upstream_webtransport, forward_request,
 };
 pub(crate) use upstream_pool::UpstreamH3Pools;
+pub(crate) use websocket_upstream::{
+  UpstreamH3WebSocketConnectionGuard, connect_upstream_websocket,
+};
 pub(crate) use webtransport_bridge::{
   UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream, UpstreamWebTransportSession,
   WebTransportSessionPermits, acquire_webtransport_session_permits,
@@ -269,6 +273,15 @@ pub(crate) async fn handle_downstream_connection(
           );
         }
         resolved
+      }
+      Err(
+        h3::error::StreamError::StreamError { .. }
+        | h3::error::StreamError::RemoteTerminate { .. }
+        | h3::error::StreamError::HeaderTooBig { .. },
+      ) => {
+        // The resolver handled a stream-local error. Other requests on this
+        // QUIC connection, including active WebSockets, remain independent.
+        continue;
       }
       Err(error) => {
         if timing_enabled {

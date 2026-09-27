@@ -54,6 +54,21 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "protocol-operations",
+      "websocket-h1-h2-h3-matrix",
+      "RFC 8441 and RFC 9220 WebSockets echo frames across all nine downstream/upstream HTTP version pairings plus h2c and disabled-upstream rejection",
+      ExpectStart::Success,
+      Needs {
+        websocket_upstream: true,
+        h2_upstream: true,
+        h2c_upstream: true,
+        h3_upstream: true,
+        protocol_probe: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "protocol-operations",
       "connect-tunnel",
       "HTTP/1.1 CONNECT tunnels only to the route-selected upstream origin",
       ExpectStart::Success,

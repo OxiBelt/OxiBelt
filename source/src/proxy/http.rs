@@ -94,6 +94,7 @@ pub(crate) mod uri;
 pub(crate) mod version;
 mod waf_body_capture;
 pub(crate) mod waf_body_coding;
+mod websocket_h2;
 pub(crate) mod webtransport;
 
 #[cfg(feature = "admin-runtime")]
@@ -168,6 +169,61 @@ use request_validation::*;
 pub(crate) use request_validation::{validate_request_body_size_limit, validate_request_limits};
 pub(crate) use tcp_exchange::connect_upstream_tcp;
 pub(super) use tcp_exchange::is_idempotent;
+
+pub(crate) fn is_extended_websocket_request<B>(request: &Request<B>) -> bool {
+  if request.method() != Method::CONNECT {
+    return false;
+  }
+  match request.version() {
+    http::Version::HTTP_2 => request
+      .extensions()
+      .get::<hyper::ext::Protocol>()
+      .is_some_and(|protocol| protocol.as_str() == "websocket"),
+    http::Version::HTTP_3 => request
+      .extensions()
+      .get::<h3::ext::Protocol>()
+      .is_some_and(|protocol| *protocol == h3::ext::Protocol::WEBSOCKET),
+    _ => false,
+  }
+}
+
+fn has_extended_connect_protocol<B>(request: &Request<B>) -> bool {
+  if request.method() != Method::CONNECT {
+    return false;
+  }
+  match request.version() {
+    http::Version::HTTP_2 => request.extensions().get::<hyper::ext::Protocol>().is_some(),
+    http::Version::HTTP_3 => request.extensions().get::<h3::ext::Protocol>().is_some(),
+    _ => false,
+  }
+}
+
+#[cfg(test)]
+mod extended_connect_tests {
+  use super::*;
+
+  #[test]
+  fn typed_connect_is_distinct_from_a_generic_tunnel() {
+    let mut h2 = Request::builder()
+      .method(Method::CONNECT)
+      .version(http::Version::HTTP_2)
+      .body(())
+      .unwrap();
+    h2.extensions_mut()
+      .insert(hyper::ext::Protocol::from_static("webtransport"));
+    assert!(has_extended_connect_protocol(&h2));
+    assert!(!is_extended_websocket_request(&h2));
+
+    let mut h3 = Request::builder()
+      .method(Method::CONNECT)
+      .version(http::Version::HTTP_3)
+      .body(())
+      .unwrap();
+    h3.extensions_mut().insert(h3::ext::Protocol::CONNECT_UDP);
+    assert!(has_extended_connect_protocol(&h3));
+    assert!(!is_extended_websocket_request(&h3));
+  }
+}
 use tcp_exchange::*;
 use tunnel::*;
 
@@ -404,7 +460,8 @@ where
       Err(status) => return text_response(status, "client certificate forwarding failed"),
     }
     let route_bandwidth = resolved.bandwidth.clone();
-    *selected_bandwidth = Some(route_bandwidth.clone());
+    let extended_websocket = is_extended_websocket_request(&request);
+    *selected_bandwidth = (!extended_websocket).then(|| route_bandwidth.clone());
     let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
     if state
       .overload
@@ -490,16 +547,17 @@ where
 
     let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
     let (request_parts, request_body) = request.into_parts();
-    let request_body = body::with_read_timeout(
-      Limited::new(
-        request_body,
-        usize::try_from(max_request_body_bytes).unwrap_or(usize::MAX),
-      ),
-      client_body_timeout,
-      BodyTimeoutKind::DownstreamRequestRead,
-    );
-    let request = Request::from_parts(
-      request_parts,
+    let request_body = if extended_websocket {
+      request_body.map_err(Into::into).boxed()
+    } else {
+      let request_body = body::with_read_timeout(
+        Limited::new(
+          request_body,
+          usize::try_from(max_request_body_bytes).unwrap_or(usize::MAX),
+        ),
+        client_body_timeout,
+        BodyTimeoutKind::DownstreamRequestRead,
+      );
       body::with_bandwidth(
         request_body,
         route_bandwidth,
@@ -507,11 +565,12 @@ where
         state.metrics.clone(),
         crate::metrics::BandwidthTrafficClass::Http,
         None,
-      ),
-    );
+      )
+    };
+    let request = Request::from_parts(request_parts, request_body);
     let verified_early_data = early_data::is_verified(&request);
-    let cl0_guard_required =
-      h2_or_h3_content_length_zero_guard_required(request_version, request.headers());
+    let cl0_guard_required = !extended_websocket
+      && h2_or_h3_content_length_zero_guard_required(request_version, request.headers());
     let request = if !cl0_guard_required {
       match fast_path::try_handle_plain_proxy(
         request,

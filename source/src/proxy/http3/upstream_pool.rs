@@ -292,6 +292,28 @@ impl H3PoolAttempt {
 }
 
 impl UpstreamH3Pool {
+  /// Select one dedicated, admitted transport for a WebSocket CONNECT. The
+  /// CONNECT itself is sent only after endpoint selection has completed.
+  pub(super) async fn connect_websocket_transport(
+    &self,
+    upstream: &UpstreamConfig,
+    global_roots: &[PathBuf],
+    deadline: tokio::time::Instant,
+    metrics: &Arc<Metrics>,
+  ) -> anyhow::Result<AdmittedUpstream<super::upstream_connection::ConnectedH3Upstream>> {
+    if !self.logical_origin.matches(upstream, global_roots) {
+      anyhow::bail!(
+        "upstream WebSocket HTTP/3 logical-origin identity changed for {}",
+        upstream.name
+      );
+    }
+    self
+      .endpoints
+      .resolve_and_connect_h3(deadline, metrics)
+      .await
+      .map_err(|failure| failure.into_error())
+  }
+
   #[allow(
     clippy::too_many_arguments,
     reason = "the pool boundary keeps request policy, trust roots, metrics, and admission state explicit"

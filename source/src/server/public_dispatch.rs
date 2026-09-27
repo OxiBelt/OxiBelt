@@ -242,6 +242,9 @@ pub(super) async fn handle_connection(
     let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     builder.timer(TokioTimer::new());
     crate::h2_tuning::apply_server_defaults(&mut builder, &handshake_state.config.proxy.http2);
+    if handshake_state.config.proxy.upgrades.websocket {
+      builder.enable_connect_protocol();
+    }
     if h2_webtransport_tls13 {
       builder.webtransport_settings(crate::proxy::webtransport_h2::ingress::server_settings());
     }

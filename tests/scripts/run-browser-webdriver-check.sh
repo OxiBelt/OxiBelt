@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <chromium|firefox> [basic-navigation|waf-request|waf-response|person-proof|hot-reload|webrtc-turn] [native|isolated]" >&2
+  echo "usage: $0 <chromium|firefox> [basic-navigation|waf-request|waf-response|person-proof|hot-reload|webrtc-turn|websocket-h2|websocket-h3] [native|isolated]" >&2
 }
 
 browser="${1:-}"
@@ -22,12 +22,16 @@ case "${browser}" in
 esac
 
 case "${scenario}" in
-  basic-navigation|waf-request|waf-response|person-proof|hot-reload|webrtc-turn) ;;
+  basic-navigation|waf-request|waf-response|person-proof|hot-reload|webrtc-turn|websocket-h2|websocket-h3) ;;
   *)
     usage
     exit 2
     ;;
 esac
+if [[ "${scenario}" == "websocket-h3" && "${browser}" != "chromium" ]]; then
+  echo "The websocket-h3 browser gate requires feature-flagged Chromium." >&2
+  exit 2
+fi
 
 case "${execution_mode}" in
   native|isolated) ;;
@@ -47,6 +51,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 runner_temp="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 upstream_port="${OXIBELT_BROWSER_UPSTREAM_PORT:-18080}"
+websocket_upstream_port="${OXIBELT_BROWSER_WEBSOCKET_UPSTREAM_PORT:-18081}"
 proxy_port="${OXIBELT_BROWSER_PROXY_PORT:-18443}"
 turn_udp_port="${OXIBELT_BROWSER_TURN_UDP_PORT:-13478}"
 turn_tcp_port="${OXIBELT_BROWSER_TURN_TCP_PORT:-13479}"
@@ -61,6 +66,7 @@ turn_v6_relay_end="${OXIBELT_BROWSER_TURN_V6_RELAY_END:-25031}"
 session_id=""
 driver_base_url=""
 upstream_pid=""
+websocket_upstream_pid=""
 upstream_container=""
 proxy_pid=""
 proxy_container=""
@@ -85,6 +91,7 @@ work_dir="$(mktemp -d "${runner_temp%/}/oxibelt-browser-${browser}-${scenario}.X
 config_dir="${work_dir}/config"
 cert_dir="${work_dir}/cert"
 upstream_log="${work_dir}/mock-upstream.log"
+websocket_upstream_log="${work_dir}/mock-websocket-upstream.log"
 proxy_log="${work_dir}/oxibelt.log"
 firefox_turn_log_dir="${work_dir}/firefox-turn-logs"
 firefox_turn_log_prefix="${firefox_turn_log_dir}/firefox-turn"
@@ -198,6 +205,7 @@ show_diagnostics() {
   fi
 
   show_log "Mock upstream log" "${upstream_log}"
+  show_log "Mock WebSocket upstream log" "${websocket_upstream_log}"
   show_log "OxiBelt log" "${proxy_log}"
   show_log "Driver log" "${driver_log:-}"
 
@@ -206,6 +214,9 @@ show_diagnostics() {
     copy_redacted_artifact \
       "${upstream_log}" \
       "${OXIBELT_TEST_ARTIFACT_DIR}/mock-upstream.log"
+    copy_redacted_artifact \
+      "${websocket_upstream_log}" \
+      "${OXIBELT_TEST_ARTIFACT_DIR}/mock-websocket-upstream.log"
     copy_redacted_artifact \
       "${proxy_log}" \
       "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.log"
@@ -462,6 +473,10 @@ cleanup() {
     kill "${upstream_pid}" >/dev/null 2>&1 || true
     wait "${upstream_pid}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${websocket_upstream_pid}" ]]; then
+    kill "${websocket_upstream_pid}" >/dev/null 2>&1 || true
+    wait "${websocket_upstream_pid}" >/dev/null 2>&1 || true
+  fi
 
   if [[ -n "${driver_pid}" ]]; then
     kill "${driver_pid}" >/dev/null 2>&1 || true
@@ -501,6 +516,14 @@ trap 'exit 143' TERM
 webrtc_turn_scenario=false
 if [[ "${scenario}" == "webrtc-turn" ]]; then
   webrtc_turn_scenario=true
+fi
+websocket_scenario=false
+websocket_h3_scenario=false
+if [[ "${scenario}" == "websocket-h2" || "${scenario}" == "websocket-h3" ]]; then
+  websocket_scenario=true
+fi
+if [[ "${scenario}" == "websocket-h3" ]]; then
+  websocket_h3_scenario=true
 fi
 
 isolated_firefox_turn=false
@@ -549,6 +572,9 @@ case "${browser}" in
       jq -n \
         --arg binary "${browser_binary}" \
         --argjson webrtc_turn_scenario "${webrtc_turn_scenario}" \
+        --argjson websocket_scenario "${websocket_scenario}" \
+        --argjson websocket_h3_scenario "${websocket_h3_scenario}" \
+        --arg proxy_port "${proxy_port}" \
         '{
         capabilities: {
           alwaysMatch: {
@@ -565,6 +591,10 @@ case "${browser}" in
                   ["--allow-loopback-in-peer-connection"]
                 else
                   []
+                end + if $websocket_h3_scenario then
+                  ["--enable-quic", "--enable-features=EnableWebsocketsOverHttp3", ("--origin-to-force-quic-on=localhost:" + $proxy_port)]
+                else
+                  if $websocket_scenario then ["--disable-quic"] else [] end
                 end)
             }
           }
@@ -690,6 +720,7 @@ if [[ "${browser}" == "firefox" ]]; then
       --arg binary "${browser_binary}" \
       --arg profile "${firefox_profile}" \
       --argjson webrtc_turn_scenario "${webrtc_turn_scenario}" \
+      --argjson websocket_scenario "${websocket_scenario}" \
       '{
       capabilities: {
         alwaysMatch: {
@@ -703,7 +734,14 @@ if [[ "${browser}" == "firefox" ]]; then
             ],
             prefs: ({
               "devtools.jsonview.enabled": false
-              } + if $webrtc_turn_scenario then
+              } + if $websocket_scenario then
+                {
+                  "network.http.spdy.websockets": true,
+                  "network.http.http3.enabled": false
+                }
+              else
+                {}
+              end + if $webrtc_turn_scenario then
                 {
                   "media.peerconnection.ice.loopback": true
                 }
@@ -838,7 +876,7 @@ poll_interval_ms = 2000
 https_bind = "${proxy_bind_addr}:${proxy_port}"
 http1 = true
 http2 = true
-http3 = false
+http3 = ${websocket_h3_scenario}
 
 [tls]
 cert_chain = "${cert_chain}"
@@ -953,6 +991,37 @@ path_prefix = "/app"
 upstream = "browser-upstream"
 EOF
 
+if [[ "${websocket_scenario}" == "true" ]]; then
+  cat >> "${config_dir}/oxibelt.toml" <<EOF
+
+[logging.access_log]
+enabled = true
+stdout = true
+
+[access_log.stdout]
+enabled = true
+schema = "ecs"
+
+[proxy.upgrades]
+websocket = true
+
+[[upstreams]]
+name = "browser-websocket-upstream"
+origin = "http://${proxy_origin_host}:${websocket_upstream_port}"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+
+[[routes]]
+name = "browser-websocket-route"
+hosts = ["localhost"]
+path_prefix = "/ws"
+upstream = "browser-websocket-upstream"
+EOF
+fi
+
 if [[ "${scenario}" == "webrtc-turn" ]]; then
   cat >> "${config_dir}/oxibelt.toml" <<EOF
 
@@ -1033,6 +1102,25 @@ if [[ "${isolated_firefox_turn}" != "true" ]]; then
   if ! curl --silent --fail "http://127.0.0.1:${upstream_port}/ready" >/dev/null; then
     fail_with_diagnostics "Mock upstream did not become ready."
   fi
+  if [[ "${websocket_scenario}" == "true" ]]; then
+    websocket_listen_host="127.0.0.1"
+    if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
+      websocket_listen_host="0.0.0.0"
+    fi
+    LISTEN_HOST="${websocket_listen_host}" LISTEN_PORT="${websocket_upstream_port}" \
+      python3 "${repo_root}/tests/scripts/browser-websocket-echo.py" \
+      >"${websocket_upstream_log}" 2>&1 &
+    websocket_upstream_pid="$!"
+    for _ in {1..30}; do
+      if curl --silent --fail "http://127.0.0.1:${websocket_upstream_port}/ready" >/dev/null; then
+        break
+      fi
+      sleep 1
+    done
+    if ! curl --silent --fail "http://127.0.0.1:${websocket_upstream_port}/ready" >/dev/null; then
+      fail_with_diagnostics "Mock WebSocket upstream did not become ready."
+    fi
+  fi
 fi
 
 if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
@@ -1050,6 +1138,9 @@ if [[ -n "${OXIBELT_DOCKER_IMAGE:-}" ]]; then
       --add-host host.docker.internal:host-gateway \
       -p "127.0.0.1:${proxy_port}:${proxy_port}"
     )
+    if [[ "${websocket_h3_scenario}" == "true" ]]; then
+      docker_create_args+=(-p "127.0.0.1:${proxy_port}:${proxy_port}/udp")
+    fi
     if [[ "${scenario}" == "webrtc-turn" ]]; then
       docker_create_args+=(
         --network "${proxy_network}"
@@ -1180,6 +1271,87 @@ case "${scenario}" in
       exit 1
     fi
     echo "${browser} WebDriver observed response-phase WAF behavior."
+    ;;
+  websocket-h2|websocket-h3)
+    expected_http_version="2"
+    expected_next_hop="h2"
+    if [[ "${scenario}" == "websocket-h3" ]]; then
+      expected_http_version="3"
+      expected_next_hop="h3"
+    fi
+    webdriver_navigate "https://localhost:${proxy_port}/app/webdriver?browser=${browser}&scenario=${scenario}"
+    wait_for_upstream_json "/origin/app/webdriver?browser=${browser}&scenario=${scenario}" "WebSocket session warmup" >/dev/null
+    webdriver_set_script_timeout 60000
+    warm_result="$(
+      webdriver_execute_async \
+        "const done = arguments[arguments.length - 1];
+         (async () => {
+           let observed = [];
+           for (let i = 0; i < 20; i++) {
+             const url = '/app/webdriver?browser=${browser}&ws_warm=' + i;
+             const response = await fetch(url, {cache: 'no-store'});
+             if (!response.ok) throw new Error('warmup fetch returned ' + response.status);
+             const timing = performance.getEntriesByName(new URL(url, location.href).href).at(-1);
+             const protocol = timing?.nextHopProtocol || '';
+             observed.push(protocol);
+             if (protocol.startsWith('${expected_next_hop}')) {
+               done({ok: true, protocol, observed});
+               return;
+             }
+             await new Promise(resolve => setTimeout(resolve, 250));
+           }
+           done({ok: false, observed});
+         })().catch(error => done({ok: false, error: String(error)}));"
+    )"
+    if ! jq -e --arg protocol "${expected_next_hop}" \
+      '.ok == true and (.protocol | startswith($protocol))' <<<"${warm_result}" >/dev/null; then
+      echo "Expected ${browser} same-origin warmup over ${expected_next_hop}: ${warm_result}" >&2
+      show_diagnostics
+      exit 1
+    fi
+    websocket_payload="browser-ws-${browser}-${scenario}"
+    websocket_result="$(
+      webdriver_execute_async \
+        "const done = arguments[arguments.length - 1];
+         const payload = '${websocket_payload}';
+         const socket = new WebSocket('wss://localhost:${proxy_port}/ws/browser?browser=${browser}&scenario=${scenario}');
+         const timeout = setTimeout(() => { socket.close(); done({ok: false, error: 'WebSocket timeout'}); }, 15000);
+         let echoed = null;
+         socket.onopen = () => socket.send(payload);
+         socket.onmessage = event => { echoed = event.data; socket.close(1000); };
+         socket.onerror = () => { clearTimeout(timeout); done({ok: false, error: 'WebSocket error'}); };
+         socket.onclose = event => { clearTimeout(timeout); done({ok: echoed === payload, echoed, code: event.code}); };"
+    )"
+    if ! jq -e --arg payload "${websocket_payload}" \
+      '.ok == true and .echoed == $payload' <<<"${websocket_result}" >/dev/null; then
+      echo "Expected ${browser} WebSocket echo: ${websocket_result}" >&2
+      show_diagnostics
+      exit 1
+    fi
+    matched_access_log=false
+    for _ in {1..30}; do
+      refresh_proxy_log
+      if jq -R -s -e --arg version "${expected_http_version}" '
+        [split("\n")[] | fromjson?]
+        | any(.[];
+          .event.dataset == "oxibelt.access.system"
+          and .http.request.method == "CONNECT"
+          and .http.version == $version
+          and .url.path == "/ws/browser"
+          and .http.response.status_code == 200)
+      ' <"${proxy_log}" >/dev/null; then
+        matched_access_log=true
+        break
+      fi
+      sleep 1
+    done
+    if [[ "${matched_access_log}" != "true" ]]; then
+      fail_with_diagnostics "${browser} WebSocket echo lacked an authenticated HTTP/${expected_http_version} CONNECT access record."
+    fi
+    if ! grep -F '"event": "websocket-upstream-accepted"' "${websocket_upstream_log}" >/dev/null; then
+      fail_with_diagnostics "Mock WebSocket upstream did not record the accepted handshake."
+    fi
+    echo "${browser} WebDriver completed WebSocket over HTTP/${expected_http_version} with a matching proxy CONNECT record."
     ;;
   person-proof)
     protected_url="https://localhost:${proxy_port}/app/person-proof?browser=${browser}"

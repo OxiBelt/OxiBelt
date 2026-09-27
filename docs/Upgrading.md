@@ -117,6 +117,26 @@ restores the older transformation behavior, so applications requiring digest
 metadata should retain origin generation and account for transformed responses.
 See [HTTP digest negotiation](Configuration.md#http-digest-negotiation).
 
+## WebSocket over HTTP/2 and HTTP/3
+
+WebSockets now accept RFC 8441 HTTP/2 and RFC 9220 HTTP/3 extended CONNECT on
+downstream listeners when `proxy.upgrades.websocket = true`. HTTP/2 uses the
+existing TLS ALPN listener; plaintext h2c downstream is not added. HTTP/3 uses
+the shared HTTP/3 listener, not `webtransport_only_connections` mode. The
+selected upstream must still allow WebSockets.
+
+Existing routes without `upstream_http_version` keep HTTP/1.1 WebSocket
+upstreams. Set route `upstream_http_version = "h2"` or `"h3"` to opt into an
+extended CONNECT upstream, using the existing `exact` or `ceiling` selection
+mode and the selected upstream's version limit. HTTP/2 supports TLS ALPN `h2`
+and prior-knowledge h2c upstream; HTTP/3 requires HTTPS. Each extended CONNECT
+session has a dedicated upstream connection. Missing protocol capability or a
+failed handshake returns a gateway error without H1 fallback or CONNECT replay.
+No configuration-schema or persisted-state migration is needed. Before rolling
+back to a binary without this support, drain active WebSocket sessions and
+remove H2/H3 route overrides where WebSocket traffic needs to continue through
+an H1 upstream.
+
 ## WebTransport over HTTP/2
 
 WebTransport now supports both HTTP/2 and HTTP/3 on either proxy leg. The selected

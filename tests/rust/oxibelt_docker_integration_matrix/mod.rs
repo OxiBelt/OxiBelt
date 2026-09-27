@@ -120,6 +120,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("proxy-protocol", "connection-limit-source-ip"),
   ("protocol-operations", "generic-upgrade"),
   ("protocol-operations", "websocket-upgrade-echo"),
+  ("protocol-operations", "websocket-h1-h2-h3-matrix"),
   ("protocol-operations", "connect-tunnel"),
   ("protocol-operations", "stream-listener"),
   ("protocol-operations", "proxy-protocol-egress-v1"),

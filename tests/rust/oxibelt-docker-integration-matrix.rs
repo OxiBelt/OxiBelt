@@ -408,6 +408,9 @@ fn print_browser_matrix() -> Result<()> {
   let mut first = true;
   for browser in ["chromium", "firefox"] {
     for scenario in &scenarios {
+      if browser == "firefox" && scenario.name == "websocket-h3" {
+        continue;
+      }
       if !first {
         print!(",");
       }
@@ -834,6 +837,14 @@ fn browser_scenarios() -> Vec<BrowserScenario> {
     BrowserScenario {
       name: "webrtc-turn",
       description: "relay-only WebRTC data channels use OxiBelt TURN control endpoints",
+    },
+    BrowserScenario {
+      name: "websocket-h2",
+      description: "WebSocket echo uses HTTP/2 extended CONNECT after same-origin H2 prewarm",
+    },
+    BrowserScenario {
+      name: "websocket-h3",
+      description: "feature-flagged Chromium WebSocket echo uses HTTP/3 extended CONNECT",
     },
   ]
 }

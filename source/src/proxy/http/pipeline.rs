@@ -191,6 +191,7 @@ where
   let route_security = RouteSecurityHeaders::new(&state.config.security, resolved.route);
   let request_method = request.method().clone();
   let request_uri = request.uri().clone();
+  let extended_websocket = is_extended_websocket_request(&request);
   let client_asn = state.client_identity.asn.lookup(client_addr.ip());
   let request_waf_enabled = resolved.execution_plan.waf.request.enabled();
   let response_waf_enabled = resolved.execution_plan.waf.response.enabled();
@@ -448,7 +449,8 @@ where
   {
     request = query::capture::track_original(request, downstream_scheme, host);
   }
-  let auth_body_capture = !request.body().is_end_stream()
+  let auth_body_capture = !extended_websocket
+    && !request.body().is_end_stream()
     && state.config.external_auth.iter().any(|auth| {
       Some(auth.name.as_str()) == resolved.route.external_auth.as_deref()
         && auth.max_request_body_bytes > 0
@@ -493,7 +495,7 @@ where
   }
   // CT routes remain behind the same dynamic-policy and external-auth gates as
   // upstream routes. Dispatch only after both gates have accepted the request.
-  if managed_upload::handles(&request, state, resolved.route) {
+  if !extended_websocket && managed_upload::handles(&request, state, resolved.route) {
     let response = managed_upload::run(
       UpstreamContext {
         request,
@@ -655,7 +657,7 @@ where
   let response_waf_body_compression_transform =
     waf_body_compression_transform && response_body_need != BodyNeed::None;
   let request = request.map(|request_body| {
-    if upload_bandwidth_limited {
+    if upload_bandwidth_limited || extended_websocket {
       request_body
     } else {
       body::with_read_timeout(
@@ -907,7 +909,13 @@ where
     return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
   }
 
-  if request_method == Method::CONNECT {
+  if request_method == Method::CONNECT && !extended_websocket {
+    if has_extended_connect_protocol(&request) {
+      return route_security.text(
+        StatusCode::NOT_IMPLEMENTED,
+        "unsupported extended CONNECT protocol",
+      );
+    }
     let response = handle_connect_request(
       request,
       state,
@@ -926,7 +934,7 @@ where
     return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
   }
 
-  if is_upgrade_request(&request) {
+  if extended_websocket || is_upgrade_request(&request) {
     let stream_waf = if resolved.execution_plan.waf.stream_enabled {
       access_log.ensure_request_ids();
       StreamWafRequestContext::from_seed(
@@ -962,6 +970,27 @@ where
     } else {
       None
     };
+    if tunnel::websocket_extended::should_handle(&request, state, resolved.route) {
+      let response = tunnel::websocket_extended::handle(
+        request,
+        state,
+        &resolved,
+        forwarded_client_addr,
+        client_addr,
+        host,
+        downstream_scheme,
+        downstream_port,
+        &request_waf,
+        stream_waf,
+        connection_limit_context,
+        request_connection_permit,
+        drain,
+        access_log,
+        trace_context,
+      )
+      .await;
+      return with_circuit_breaker_request_lease(response, route_circuit_breaker_lease);
+    }
     if let Some(response) = handle_upgrade_request(
       request,
       state,

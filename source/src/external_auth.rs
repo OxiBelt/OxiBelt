@@ -217,7 +217,8 @@ impl ExternalAuthRuntime {
     };
 
     strip_identity_headers(request.headers_mut(), &provider.identity_headers);
-    let forwarded_body = if provider.config.provider == ExternalAuthProvider::GatewayExtAuthHttp
+    let forwarded_body = if !crate::proxy::http::is_extended_websocket_request(request)
+      && provider.config.provider == ExternalAuthProvider::GatewayExtAuthHttp
       && provider.config.max_request_body_bytes > 0
     {
       match capture_gateway_request_body(

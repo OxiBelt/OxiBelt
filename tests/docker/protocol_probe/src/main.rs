@@ -47,6 +47,7 @@ mod h3_early_response;
 mod incremental;
 mod managed_upload;
 mod sse;
+mod websocket_matrix;
 mod webtransport_h2;
 
 #[derive(Clone, Copy)]
@@ -437,6 +438,8 @@ struct WebSocketEchoArgs {
 }
 
 struct WebSocketClientArgs {
+  protocol: DownstreamProtocol,
+  probe_unsupported_connect: bool,
   host: String,
   port: u16,
   server_name: String,
@@ -836,6 +839,8 @@ fn parse_websocket_client_args(
   mut args: impl Iterator<Item = String>,
 ) -> anyhow::Result<WebSocketClientArgs> {
   let mut host = None;
+  let mut protocol = DownstreamProtocol::H1;
+  let mut probe_unsupported_connect = false;
   let mut port = None;
   let mut server_name = None;
   let mut authority = None;
@@ -852,6 +857,12 @@ fn parse_websocket_client_args(
       .next()
       .ok_or_else(|| anyhow!("missing value for {flag}"))?;
     match flag.as_str() {
+      "--protocol" => protocol = DownstreamProtocol::parse(&value)?,
+      "--probe-unsupported-connect" => {
+        probe_unsupported_connect = value
+          .parse()
+          .context("invalid --probe-unsupported-connect")?;
+      }
       "--host" => host = Some(value),
       "--port" => port = Some(value.parse().context("invalid --port value")?),
       "--server-name" => server_name = Some(value),
@@ -870,7 +881,12 @@ fn parse_websocket_client_args(
   }
 
   let server_name = server_name.ok_or_else(|| anyhow!("--server-name is required"))?;
+  if probe_unsupported_connect && matches!(protocol, DownstreamProtocol::H1) {
+    bail!("--probe-unsupported-connect requires h2 or h3");
+  }
   Ok(WebSocketClientArgs {
+    protocol,
+    probe_unsupported_connect,
     host: host.ok_or_else(|| anyhow!("--host is required"))?,
     port: port.ok_or_else(|| anyhow!("--port is required"))?,
     authority: authority.unwrap_or_else(|| server_name.clone()),
@@ -1913,10 +1929,16 @@ async fn handle_h2_upstream_connection(
   let service = service_fn(move |request| {
     let upstream_name = upstream_name.clone();
     let scheme = scheme.clone();
-    async move { Ok::<_, Infallible>(echo_upstream_request(request, upstream_name, scheme).await) }
+    async move {
+      if websocket_matrix::is_h2_websocket(&request) {
+        return Ok::<_, Infallible>(websocket_matrix::h2_echo_response(request));
+      }
+      Ok::<_, Infallible>(echo_upstream_request(request, upstream_name, scheme).await)
+    }
   });
 
   hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+    .enable_connect_protocol()
     .serve_connection(TokioIo::new(tls_stream), service)
     .await
     .context("failed to serve upstream HTTP/2 connection")?;
@@ -1950,10 +1972,16 @@ async fn handle_h2c_upstream_connection(
   let service = service_fn(move |request| {
     let upstream_name = upstream_name.clone();
     let scheme = scheme.clone();
-    async move { Ok::<_, Infallible>(echo_upstream_request(request, upstream_name, scheme).await) }
+    async move {
+      if websocket_matrix::is_h2_websocket(&request) {
+        return Ok::<_, Infallible>(websocket_matrix::h2_echo_response(request));
+      }
+      Ok::<_, Infallible>(echo_upstream_request(request, upstream_name, scheme).await)
+    }
   });
 
   hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+    .enable_connect_protocol()
     .serve_connection(TokioIo::new(stream), service)
     .await
     .context("failed to serve upstream cleartext HTTP/2 connection")?;
@@ -2586,12 +2614,22 @@ where
       write_websocket_frame(&mut stream, 0x8, &frame.payload, false).await?;
       return Ok(());
     }
-    write_websocket_frame(&mut stream, frame.opcode, &frame.payload, false).await?;
+    let response_opcode = if frame.opcode == 0x9 {
+      0xa
+    } else {
+      frame.opcode
+    };
+    write_websocket_frame(&mut stream, response_opcode, &frame.payload, false).await?;
   }
   Ok(())
 }
 
 async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
+  match args.protocol {
+    DownstreamProtocol::H2 => return websocket_matrix::h2_client(args).await,
+    DownstreamProtocol::H3 => return websocket_matrix::h3_client(args).await,
+    DownstreamProtocol::H1 => {}
+  }
   let mut client_config = downstream_client_config_with_client_identity(
     Path::new(&args.ca_cert),
     b"http/1.1",
@@ -2609,7 +2647,7 @@ async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
     .connect(server_name, stream)
     .await
     .context("failed to establish WebSocket downstream TLS")?;
-  let key = base64::engine::general_purpose::STANDARD.encode(b"oxibelt-probe-key");
+  let key = base64::engine::general_purpose::STANDARD.encode(b"oxibelt-probe-id");
   let mut request = format!(
     "GET {} HTTP/1.1\r\nhost: {}\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-key: {}\r\nsec-websocket-version: 13\r\n",
     args.path, args.authority, key
@@ -2651,6 +2689,15 @@ async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
     );
     return Ok(());
   }
+  if response_headers.get("sec-websocket-accept") != Some(&websocket_accept_key(&key)) {
+    bail!("HTTP/1 WebSocket response has an invalid Sec-WebSocket-Accept");
+  }
+  if response_headers
+    .get("upgrade")
+    .is_none_or(|value| !value.eq_ignore_ascii_case("websocket"))
+  {
+    bail!("HTTP/1 WebSocket response did not select websocket");
+  }
 
   write_websocket_frame(&mut stream, 0x2, &args.payload, true)
     .await
@@ -2660,6 +2707,13 @@ async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
     .ok_or_else(|| anyhow!("WebSocket closed before echo frame"))?;
   if echoed.opcode != 0x2 || echoed.payload != args.payload {
     bail!("unexpected WebSocket echo frame");
+  }
+  write_websocket_frame(&mut stream, 0x9, b"probe-ping", true).await?;
+  let pong = read_websocket_frame(&mut stream)
+    .await?
+    .ok_or_else(|| anyhow!("WebSocket closed before pong frame"))?;
+  if pong.opcode != 0xa || pong.payload != b"probe-ping" || pong.masked {
+    bail!("unexpected WebSocket pong frame");
   }
   write_websocket_frame(&mut stream, 0x8, &[], true)
     .await
@@ -2671,6 +2725,7 @@ async fn run_websocket_client(args: WebSocketClientArgs) -> anyhow::Result<()> {
       "status": status,
       "upgraded": true,
       "echoed_bytes": args.payload.len(),
+      "ping_pong": true,
       "headers": response_headers,
     }))?
   );
@@ -2920,6 +2975,7 @@ async fn handle_h3_upstream_connection(
 ) -> anyhow::Result<()> {
   let quic_connection = h3_quinn::Connection::new(connection);
   let mut h3_connection = h3::server::builder()
+    .enable_extended_connect(true)
     .build(quic_connection)
     .await
     .context("failed to establish upstream HTTP/3 connection")?;
@@ -2936,6 +2992,14 @@ async fn handle_h3_upstream_connection(
       .resolve_request()
       .await
       .context("failed to resolve upstream HTTP/3 request")?;
+    if websocket_matrix::is_h3_websocket(&request) {
+      tokio::spawn(async move {
+        if let Err(error) = websocket_matrix::h3_echo_response(request, &mut stream).await {
+          eprintln!("h3 WebSocket echo stream failed: {error:#}");
+        }
+      });
+      continue;
+    }
     let response = echo_h3_upstream_request(
       request,
       &mut stream,

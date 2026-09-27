@@ -6,6 +6,8 @@ use crate::bandwidth::{BandwidthDirection, RouteBandwidthLimiter};
 
 #[path = "tunnel/upgrade_protocol.rs"]
 mod upgrade_protocol;
+#[path = "tunnel/websocket_extended.rs"]
+pub(super) mod websocket_extended;
 #[path = "tunnel/websocket_wire.rs"]
 mod websocket_wire;
 

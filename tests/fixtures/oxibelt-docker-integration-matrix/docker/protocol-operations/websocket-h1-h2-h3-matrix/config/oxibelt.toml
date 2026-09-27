@@ -1,0 +1,137 @@
+[logging]
+level = "info"
+
+[runtime]
+linux_only = true
+read_only_rootfs_compatible = true
+memory_only_state = true
+unprivileged_mode = true
+worker_threads = "auto"
+
+[runtime.accept]
+workers = "auto"
+reuse_port = true
+backlog = 8192
+accept_error_backoff_ms = 10
+
+[listeners]
+https_bind = "0.0.0.0:8443"
+http1 = true
+http2 = true
+http3 = true
+
+[tls]
+cert_chain = "fullchain.pem"
+private_key = "privkey.pem"
+
+[tls.ocsp]
+mode = "disabled"
+
+[proxy]
+trusted_ca_certs = ["upstream-ca.pem"]
+
+[proxy.auto_upgrade]
+enabled = false
+
+[proxy.upgrades]
+websocket = true
+
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "websocket-handshake-block"
+phase = "request"
+priority = 10
+when = "Request.Http.Path.endsWith('/ws/blocked')"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "blocked websocket handshake"
+
+[[upstreams]]
+name = "ws-h1"
+origin = "http://mock-websocket:18081"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+
+[[upstreams]]
+name = "ws-h2"
+origin = "https://mock-h2:18444"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+
+[[upstreams]]
+name = "ws-h2c"
+origin = "http://mock-h2c:18082"
+max_http_version = "h2"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+
+[[upstreams]]
+name = "ws-h3"
+origin = "https://mock-h3:18445"
+max_http_version = "h3"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = true
+
+[[upstreams]]
+name = "ws-disabled"
+origin = "http://mock-websocket:18081"
+max_http_version = "h1"
+connect_timeout_ms = 3000
+request_timeout_ms = 30000
+preserve_host = false
+websocket = false
+
+[[routes]]
+name = "ws-h1-default"
+hosts = ["ws-h1.example.test"]
+path_prefix = "/ws"
+upstream = "ws-h1"
+
+[[routes]]
+name = "ws-h2-exact"
+hosts = ["ws-h2.example.test"]
+path_prefix = "/ws"
+upstream = "ws-h2"
+upstream_http_version = "h2"
+
+[[routes]]
+name = "ws-h2c-exact"
+hosts = ["ws-h2c.example.test"]
+path_prefix = "/ws"
+upstream = "ws-h2c"
+upstream_http_version = "h2"
+
+[[routes]]
+name = "ws-h3-exact"
+hosts = ["ws-h3.example.test"]
+path_prefix = "/ws"
+upstream = "ws-h3"
+upstream_http_version = "h3"
+
+[[routes]]
+name = "ws-disabled"
+hosts = ["ws-disabled.example.test"]
+path_prefix = "/ws"
+upstream = "ws-disabled"
+
+[quic.socket]
+receive_buffer_bytes = 16777216
+send_buffer_bytes = 16777216
+workers = "auto"
+reuse_port = true

@@ -199,7 +199,8 @@ Upstream protocol support:
 
 Upgrade and extended protocol behavior:
 
-- WebSocket tunneling is implemented for HTTP/1.1 upgrade routes.
+- WebSocket forwarding accepts HTTP/1.1 Upgrade and RFC 8441/RFC 9220 extended CONNECT on HTTP/2 and HTTP/3 downstream, subject to `proxy.upgrades.websocket` and the selected upstream's `websocket` permission. Downstream HTTP/2 uses the existing TLS/ALPN listener; plaintext h2c downstream is not added. HTTP/3 WebSockets use a shared HTTP/3 listener, not a listener configured with `proxy.http3.webtransport_only_connections = true`.
+- A WebSocket route without `upstream_http_version` keeps HTTP/1.1 upstream behavior. An explicit route version can select HTTP/2 or HTTP/3 within the selected upstream's capability using the existing `exact` or `ceiling` mode. HTTP/2 upstream permits HTTPS with ALPN `h2` or prior-knowledge h2c over `http://`; HTTP/3 upstream requires HTTPS. Each HTTP/2 or HTTP/3 WebSocket session owns a dedicated upstream connection. If the selected transport cannot use WebSocket extended CONNECT, the request fails without H1 fallback or CONNECT replay.
 - WebSocket stream-WAF routes reject individual frame payloads larger than `waf.limits.max_body_inspection_bytes` before forwarding.
 - Generic HTTP/1.1 upgrade and CONNECT tunneling are implemented when both global and route-level policy enables them.
 - CONNECT tunneling targets the selected route upstream origin, not the downstream request target.
