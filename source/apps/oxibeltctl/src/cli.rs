@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use oxibelt::admin_client::{BREAK_GLASS_TOKEN_ENV, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_ADMIN_URL};
+use oxibelt_tls_cert_compression::{Algorithm, CertificateCompressionPolicy};
 use url::Url;
 
 #[path = "audit_cli.rs"]
@@ -69,6 +70,26 @@ pub(crate) struct AdminArgs {
   /// Enable RFC 10024 SecP256r1MLKEM768 for owned auxiliary HTTPS clients.
   #[arg(long = "auxiliary-tls-secp256r1mlkem768")]
   pub(crate) auxiliary_tls_secp256r1mlkem768: bool,
+  /// Disable RFC 8879 certificate compression on the Admin TLS connection.
+  #[arg(long = "no-admin-tls-certificate-compression")]
+  pub(crate) no_admin_tls_certificate_compression: bool,
+  /// Preferred Admin TLS certificate-compression algorithms, in order.
+  #[arg(
+    long = "admin-tls-certificate-compression-algorithms",
+    value_delimiter = ',',
+    num_args = 1
+  )]
+  pub(crate) admin_tls_certificate_compression_algorithms: Vec<Algorithm>,
+  /// Disable RFC 8879 certificate compression on auxiliary HTTPS clients.
+  #[arg(long = "no-auxiliary-tls-certificate-compression")]
+  pub(crate) no_auxiliary_tls_certificate_compression: bool,
+  /// Preferred auxiliary TLS certificate-compression algorithms, in order.
+  #[arg(
+    long = "auxiliary-tls-certificate-compression-algorithms",
+    value_delimiter = ',',
+    num_args = 1
+  )]
+  pub(crate) auxiliary_tls_certificate_compression_algorithms: Vec<Algorithm>,
   #[arg(long, value_name = "FILE", requires = "client_key")]
   pub(crate) client_cert: Option<PathBuf>,
   #[arg(long, value_name = "FILE", requires = "client_cert")]
@@ -77,6 +98,44 @@ pub(crate) struct AdminArgs {
   pub(crate) timeout_ms: u64,
   #[arg(long, value_enum, default_value_t = OutputFormat::PrettyJson)]
   pub(crate) output: OutputFormat,
+}
+
+impl AdminArgs {
+  pub(crate) fn admin_certificate_compression(
+    &self,
+  ) -> anyhow::Result<CertificateCompressionPolicy> {
+    certificate_compression_policy(
+      self.no_admin_tls_certificate_compression,
+      &self.admin_tls_certificate_compression_algorithms,
+    )
+  }
+
+  pub(crate) fn auxiliary_certificate_compression(
+    &self,
+  ) -> anyhow::Result<CertificateCompressionPolicy> {
+    certificate_compression_policy(
+      self.no_auxiliary_tls_certificate_compression,
+      &self.auxiliary_tls_certificate_compression_algorithms,
+    )
+  }
+}
+
+fn certificate_compression_policy(
+  disabled: bool,
+  algorithms: &[Algorithm],
+) -> anyhow::Result<CertificateCompressionPolicy> {
+  let policy = CertificateCompressionPolicy {
+    enabled: !disabled,
+    algorithms: if algorithms.is_empty() {
+      CertificateCompressionPolicy::default().algorithms
+    } else {
+      algorithms.to_vec()
+    },
+  };
+  policy
+    .validate()
+    .map_err(|error| anyhow::anyhow!("invalid TLS certificate compression policy: {error}"))?;
+  Ok(policy)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -828,6 +887,56 @@ mod tests {
   }
 
   #[test]
+  fn certificate_compression_flags_set_each_client_policy() {
+    let default = Cli::try_parse_from(["oxibeltctl", "status"]).expect("default CLI");
+    assert!(
+      default
+        .admin
+        .admin_certificate_compression()
+        .expect("admin policy")
+        .enabled
+    );
+    assert!(
+      default
+        .admin
+        .auxiliary_certificate_compression()
+        .expect("aux policy")
+        .enabled
+    );
+
+    let selected = Cli::try_parse_from([
+      "oxibeltctl",
+      "--no-admin-tls-certificate-compression",
+      "--auxiliary-tls-certificate-compression-algorithms=zlib,zstd",
+      "status",
+    ])
+    .expect("compression flags should parse");
+    assert!(
+      !selected
+        .admin
+        .admin_certificate_compression()
+        .expect("admin policy")
+        .enabled
+    );
+    assert_eq!(
+      selected
+        .admin
+        .auxiliary_certificate_compression()
+        .expect("aux policy")
+        .algorithms,
+      vec![Algorithm::Zlib, Algorithm::Zstd]
+    );
+
+    let duplicate = Cli::try_parse_from([
+      "oxibeltctl",
+      "--admin-tls-certificate-compression-algorithms=zstd,zstd",
+      "status",
+    ])
+    .expect("CLI shape should parse");
+    assert!(duplicate.admin.admin_certificate_compression().is_err());
+  }
+
+  #[test]
   fn break_glass_access_selects_break_glass_token_env() {
     let args = test_admin_args(true);
     assert_eq!(selected_token_env(&args), BREAK_GLASS_TOKEN_ENV);
@@ -843,6 +952,10 @@ mod tests {
       ca_certs: Vec::new(),
       admin_tls_secp256r1mlkem768: false,
       auxiliary_tls_secp256r1mlkem768: false,
+      no_admin_tls_certificate_compression: false,
+      admin_tls_certificate_compression_algorithms: Vec::new(),
+      no_auxiliary_tls_certificate_compression: false,
+      auxiliary_tls_certificate_compression_algorithms: Vec::new(),
       client_cert: None,
       client_key: None,
       timeout_ms: 1000,

@@ -320,6 +320,7 @@ impl ReloadManager {
     let crlite = tls::CrliteRuntime::new_with_auxiliary_tls(
       &config.tls,
       config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+      &config.crypto.auxiliary_tls.certificate_compression,
       active.metrics.clone(),
     )
     .await
@@ -327,6 +328,7 @@ impl ReloadManager {
     let downstream_ct = tls::DownstreamCtRuntime::new_with_auxiliary_tls(
       &config.tls,
       config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+      &config.crypto.auxiliary_tls.certificate_compression,
       active.metrics.clone(),
     )
     .await
@@ -636,6 +638,7 @@ pub(crate) enum FullReloadRestartReason {
   NetportSwitcher,
   CryptoProvider,
   TlsKeyExchangeGroupControls,
+  CertificateCompressionPolicy,
   LoggingLevel,
   MetricsListener,
   HealthListener,
@@ -679,6 +682,10 @@ impl FullReloadRestartReason {
       }
       Self::TlsKeyExchangeGroupControls => {
         "full hot reload rejected because SecP256r1MLKEM768 TLS key-exchange policy is restart-only"
+          .to_string()
+      }
+      Self::CertificateCompressionPolicy => {
+        "full hot reload rejected because Admin, upstream, Redis, or auxiliary certificate compression policy is restart-only"
           .to_string()
       }
       Self::LoggingLevel => {
@@ -739,6 +746,11 @@ pub(crate) fn classify_full_reload_runtime_compatibility(
   if tls_policy::secp256r1_mlkem768_changed(active, replacement) {
     return FullReloadCompatibility::RestartRequired(
       FullReloadRestartReason::TlsKeyExchangeGroupControls,
+    );
+  }
+  if tls_policy::certificate_compression_changed(active, replacement) {
+    return FullReloadCompatibility::RestartRequired(
+      FullReloadRestartReason::CertificateCompressionPolicy,
     );
   }
   if replacement.crypto != active.crypto {
@@ -927,6 +939,7 @@ pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result
     session_tickets: old_tls.session_tickets,
     session_ticket_rotation_seconds: old_tls.session_ticket_rotation_seconds,
     resumption: old_tls.resumption,
+    certificate_compression: old_tls.certificate_compression,
     client_auth: old_tls.client_auth,
     ocsp: crate::config::OcspConfig {
       mode: old_tls.ocsp.mode,

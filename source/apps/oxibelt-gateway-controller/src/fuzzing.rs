@@ -222,6 +222,8 @@ fn translation_args(endpoint_slice_watch: bool) -> SharedArgs {
     dry_run: true,
     health_bind: None,
     auxiliary_tls_secp256r1mlkem768: false,
+    no_auxiliary_tls_certificate_compression: false,
+    auxiliary_tls_certificate_compression_algorithms: Vec::new(),
   }
 }
 

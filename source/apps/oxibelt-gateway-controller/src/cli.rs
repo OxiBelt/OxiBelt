@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use anyhow::bail;
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use oxibelt_tls_cert_compression::{Algorithm, CertificateCompressionPolicy};
 
 pub const DEFAULT_CONTROLLER_NAME: &str = "oxibelt.dev/gateway-controller";
 pub const DEFAULT_MANAGED_CONFIG_PATH: &str = "conf.d/gateway-api.generated.toml";
@@ -102,10 +103,42 @@ pub struct SharedArgs {
   /// Enable RFC 10024 SecP256r1MLKEM768 for Kubernetes API HTTPS.
   #[arg(long, global = true)]
   pub auxiliary_tls_secp256r1mlkem768: bool,
+  /// Disable RFC 8879 certificate compression for the controller's HTTPS client.
+  #[arg(long = "no-auxiliary-tls-certificate-compression", global = true)]
+  pub no_auxiliary_tls_certificate_compression: bool,
+  /// Preferred RFC 8879 algorithms, in order, for the controller's HTTPS client.
+  #[arg(
+    long = "auxiliary-tls-certificate-compression-algorithms",
+    global = true,
+    value_delimiter = ',',
+    num_args = 1
+  )]
+  pub auxiliary_tls_certificate_compression_algorithms: Vec<Algorithm>,
 }
 
 impl SharedArgs {
+  pub fn certificate_compression_policy(&self) -> anyhow::Result<CertificateCompressionPolicy> {
+    let policy = CertificateCompressionPolicy {
+      enabled: !self.no_auxiliary_tls_certificate_compression,
+      algorithms: if self
+        .auxiliary_tls_certificate_compression_algorithms
+        .is_empty()
+      {
+        CertificateCompressionPolicy::default().algorithms
+      } else {
+        self
+          .auxiliary_tls_certificate_compression_algorithms
+          .clone()
+      },
+    };
+    policy.validate().map_err(|error| {
+      anyhow::anyhow!("invalid auxiliary TLS certificate compression policy: {error}")
+    })?;
+    Ok(policy)
+  }
+
   pub fn validate(&self) -> anyhow::Result<()> {
+    self.certificate_compression_policy()?;
     if self.request_mirror_max_body_bytes > MAX_REQUEST_MIRROR_BODY_BYTES {
       bail!(
         "request-mirror-max-body-bytes must not exceed {}",
@@ -570,6 +603,56 @@ mod tests {
     Cli, Command, CompatibilityMode, MAX_UPSTREAM_CLIENT_TLS_SOURCE_SECRETS, UdpFlowState,
   };
   use clap::Parser;
+
+  #[test]
+  fn auxiliary_certificate_compression_is_default_on_and_configurable() {
+    let default = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "render",
+      "--input=objects.yaml",
+    ])
+    .expect("default CLI should parse");
+    let policy = default
+      .shared
+      .certificate_compression_policy()
+      .expect("default policy");
+    assert!(policy.enabled);
+    assert_eq!(
+      policy.algorithms,
+      vec![
+        super::Algorithm::Zstd,
+        super::Algorithm::Brotli,
+        super::Algorithm::Zlib
+      ]
+    );
+
+    let disabled = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "--no-auxiliary-tls-certificate-compression",
+      "--auxiliary-tls-certificate-compression-algorithms=zlib,zstd",
+      "render",
+      "--input=objects.yaml",
+    ])
+    .expect("compression CLI should parse");
+    let policy = disabled
+      .shared
+      .certificate_compression_policy()
+      .expect("valid policy");
+    assert!(!policy.enabled);
+    assert_eq!(
+      policy.algorithms,
+      vec![super::Algorithm::Zlib, super::Algorithm::Zstd]
+    );
+
+    let duplicate = Cli::try_parse_from([
+      "oxibelt-gateway-controller",
+      "--auxiliary-tls-certificate-compression-algorithms=zstd,zstd",
+      "render",
+      "--input=objects.yaml",
+    ])
+    .expect("CLI shape should parse");
+    assert!(duplicate.shared.validate().is_err());
+  }
 
   #[test]
   fn version_flag_reports_canonical_build_identity() {

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use oxibelt_tls_cert_compression::{Algorithm, CertificateCompressionPolicy};
 use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use rustls::{ClientConfig, ClientConnection, ProtocolVersion, RootCertStore, ServerConnection};
 use tokio::net::{TcpListener, TcpStream};
@@ -13,6 +14,74 @@ mod common {
     env!("CARGO_MANIFEST_DIR"),
     "/../tests/rust/common/mod.rs"
   ));
+}
+
+#[test]
+fn public_and_turn_tls_builders_apply_certificate_compression_policy() {
+  let temp_dir = common::TempDir::new("tls-certificate-compression-policy");
+  let (cert, key) = common::create_self_signed_cert(temp_dir.path(), "example.com");
+  let raw = common::minimal_config_toml(&cert, &key);
+  let mut config: crate::config::Config = toml::from_str(&raw).expect("config should parse");
+  config.tls.certificate_compression = CertificateCompressionPolicy {
+    enabled: true,
+    algorithms: vec![Algorithm::Brotli, Algorithm::Zlib],
+  };
+  let public = downstream_tls_server_config(&config);
+  let public_tls13 = &public.configs[&public.default_key]
+    .tls13
+    .as_ref()
+    .expect("public TLS 1.3 config")
+    .config;
+  assert_eq!(
+    public_tls13
+      .cert_compressors
+      .iter()
+      .map(|codec| codec.algorithm())
+      .collect::<Vec<_>>(),
+    vec![
+      rustls::CertificateCompressionAlgorithm::Brotli,
+      rustls::CertificateCompressionAlgorithm::Zlib,
+    ]
+  );
+
+  let turn_default = build_turn_tls_server_config_with_resumption(
+    &config.crypto,
+    &crate::config::TurnListenerTlsConfig::default(),
+    &config.tls,
+    None,
+  )
+  .expect("TURN should inherit public TLS policy");
+  assert_eq!(
+    turn_default
+      .config_set
+      .tls13
+      .as_ref()
+      .unwrap()
+      .config
+      .cert_compressors
+      .len(),
+    2
+  );
+  let turn_override = crate::config::TurnListenerTlsConfig {
+    certificate_compression: Some(CertificateCompressionPolicy {
+      enabled: false,
+      algorithms: vec![Algorithm::Zstd],
+    }),
+    ..Default::default()
+  };
+  let turn_disabled =
+    build_turn_tls_server_config_with_resumption(&config.crypto, &turn_override, &config.tls, None)
+      .expect("TURN compression override should build");
+  assert!(
+    turn_disabled
+      .config_set
+      .tls13
+      .as_ref()
+      .unwrap()
+      .config
+      .cert_compressors
+      .is_empty()
+  );
 }
 
 #[test]

@@ -24,6 +24,7 @@ oxibelt-build-identity.workspace = true
 oxibelt-control-http.workspace = true
 oxibelt-control-protocol.workspace = true
 rustls.workspace = true
+oxibelt-tls-cert-compression.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr.workspace = true

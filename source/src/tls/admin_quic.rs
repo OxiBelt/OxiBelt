@@ -76,6 +76,7 @@ pub(crate) fn build_admin_quic_server_config_with_crypto_and_resumption(
     None => builder.with_no_client_auth(),
   }
   .with_cert_resolver(Arc::new(resolver));
+  super::apply_server_certificate_compression(&mut server_config, &tls.certificate_compression)?;
   configure_server_resumption(
     &mut server_config,
     &tls.resumption,

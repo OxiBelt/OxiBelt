@@ -38,6 +38,7 @@ libc.workspace = true
 oxibelt = { workspace = true, features = ["admin-runtime", "config-tooling"] }
 oxibelt-build-identity.workspace = true
 oxibelt-deployment-diagnostics.workspace = true
+oxibelt-tls-cert-compression.workspace = true
 rustls.workspace = true
 sequoia-openpgp = { workspace = true, optional = true }
 serde.workspace = true

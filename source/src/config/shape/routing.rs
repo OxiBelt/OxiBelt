@@ -33,6 +33,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     | "upstream_pools.servers.tls"
     | "upstream_pools.discovery.tls"
     | "turn_upstream_pools.servers.tls" => &[
+      "certificate_compression",
       "ech",
       "enable_secp256r1mlkem768",
       "client_identity",
@@ -48,6 +49,11 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     | "upstream_pools.servers.tls.client_identity"
     | "upstream_pools.discovery.tls.client_identity"
     | "turn_upstream_pools.servers.tls.client_identity" => &["cert_chain", "private_key"][..],
+    "upstreams.tls.certificate_compression"
+    | "upstream_pools.servers.tls.certificate_compression"
+    | "upstream_pools.discovery.tls.certificate_compression"
+    | "turn_upstream_pools.servers.tls.certificate_compression"
+    | "webrtc_turn_listeners.tls.certificate_compression" => &["algorithms", "enabled"],
     "upstreams.tls.ech"
     | "upstream_pools.servers.tls.ech"
     | "upstream_pools.discovery.tls.ech"
@@ -455,6 +461,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "webrtc_turn_listeners.relay_families.relay_port_range" => &["end", "start"][..],
     "webrtc_turn_listeners.relay_port_range" => &["end", "start"][..],
     "webrtc_turn_listeners.tls" => &[
+      "certificate_compression",
       "cert_chain",
       "private_key",
       "remote_signer_key_id",

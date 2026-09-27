@@ -1,6 +1,8 @@
 //! Restart-only TLS controls are compared by configured identity, not runtime membership.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 
 use crate::config::{
   Config, UpstreamPoolServerSource, turn_upstream_pool_server_id, upstream_pool_server_id,
@@ -20,6 +22,89 @@ enum Secp256r1Mlkem768Control {
 
 pub(super) fn secp256r1_mlkem768_changed(active: &Config, replacement: &Config) -> bool {
   configured_opt_ins(active) != configured_opt_ins(replacement)
+}
+
+/// Certificate compression for process-owned clients and Admin listeners is
+/// fixed at startup. New or removed upstreams are handled by snapshot reload;
+/// a policy change on an existing upstream needs a process restart.
+pub(super) fn certificate_compression_changed(active: &Config, replacement: &Config) -> bool {
+  active.admin.tls.certificate_compression != replacement.admin.tls.certificate_compression
+    || active.crypto.auxiliary_tls.certificate_compression
+      != replacement.crypto.auxiliary_tls.certificate_compression
+    || shared_compression_policy_changed(
+      &configured_client_policies(active),
+      &configured_client_policies(replacement),
+    )
+}
+
+fn shared_compression_policy_changed(
+  active: &BTreeMap<CompressionControl, CertificateCompressionPolicy>,
+  replacement: &BTreeMap<CompressionControl, CertificateCompressionPolicy>,
+) -> bool {
+  active
+    .iter()
+    .any(|(name, policy)| replacement.get(name).is_some_and(|next| next != policy))
+}
+
+#[derive(Eq, PartialEq, Ord, PartialOrd)]
+enum CompressionControl {
+  Upstream(String),
+  PoolServer { pool: String, id: String },
+  Discovery { pool: String, id: String },
+  TurnServer { pool: String, id: String },
+  Redis(String),
+}
+
+fn configured_client_policies(
+  config: &Config,
+) -> BTreeMap<CompressionControl, CertificateCompressionPolicy> {
+  let mut policies = BTreeMap::new();
+  for upstream in &config.upstreams {
+    policies.insert(
+      CompressionControl::Upstream(upstream.name.clone()),
+      upstream.tls.certificate_compression.clone(),
+    );
+  }
+  for pool in &config.upstream_pools {
+    for (index, server) in pool.servers.iter().enumerate() {
+      if server.source == UpstreamPoolServerSource::Static {
+        policies.insert(
+          CompressionControl::PoolServer {
+            pool: pool.name.clone(),
+            id: upstream_pool_server_id(index, server),
+          },
+          server.tls.certificate_compression.clone(),
+        );
+      }
+    }
+    for discovery in &pool.discovery {
+      policies.insert(
+        CompressionControl::Discovery {
+          pool: pool.name.clone(),
+          id: discovery.effective_id().to_string(),
+        },
+        discovery.tls.certificate_compression.clone(),
+      );
+    }
+  }
+  for pool in &config.turn_upstream_pools {
+    for (index, server) in pool.servers.iter().enumerate() {
+      policies.insert(
+        CompressionControl::TurnServer {
+          pool: pool.name.clone(),
+          id: turn_upstream_pool_server_id(index, server),
+        },
+        server.tls.certificate_compression.clone(),
+      );
+    }
+  }
+  for backend in &config.shared_state.backends {
+    policies.insert(
+      CompressionControl::Redis(backend.name.clone()),
+      backend.redis_tls.certificate_compression.clone(),
+    );
+  }
+  policies
 }
 
 fn configured_opt_ins(config: &Config) -> BTreeSet<Secp256r1Mlkem768Control> {

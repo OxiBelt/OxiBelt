@@ -62,12 +62,19 @@ pub struct CrliteRuntimeStatus {
 impl CrliteRuntime {
   #[cfg(test)]
   pub(crate) async fn new(tls: &TlsConfig, metrics: Arc<Metrics>) -> anyhow::Result<Self> {
-    Self::new_with_auxiliary_tls(tls, false, metrics).await
+    Self::new_with_auxiliary_tls(
+      tls,
+      false,
+      &oxibelt_tls_cert_compression::CertificateCompressionPolicy::default(),
+      metrics,
+    )
+    .await
   }
 
   pub(crate) async fn new_with_auxiliary_tls(
     tls: &TlsConfig,
     enable_secp256r1mlkem768: bool,
+    certificate_compression: &oxibelt_tls_cert_compression::CertificateCompressionPolicy,
     metrics: Arc<Metrics>,
   ) -> anyhow::Result<Self> {
     if tls.crlite.mode == CrliteMode::Disabled {
@@ -86,7 +93,14 @@ impl CrliteRuntime {
       CrliteMode::Disabled => unreachable!("disabled CRLite returned above"),
       CrliteMode::Enforce => Self::from_local_filter(tls, metrics, checked_at),
       CrliteMode::Managed => {
-        Self::from_managed_filter(tls, enable_secp256r1mlkem768, metrics, checked_at).await
+        Self::from_managed_filter(
+          tls,
+          enable_secp256r1mlkem768,
+          certificate_compression,
+          metrics,
+          checked_at,
+        )
+        .await
       }
     }
   }
@@ -137,12 +151,15 @@ impl CrliteRuntime {
   async fn from_managed_filter(
     tls: &TlsConfig,
     enable_secp256r1mlkem768: bool,
+    certificate_compression: &oxibelt_tls_cert_compression::CertificateCompressionPolicy,
     metrics: Arc<Metrics>,
     checked_at: Option<u64>,
   ) -> anyhow::Result<Self> {
-    let remote_client =
-      ManagedCrliteRemoteClient::new_webpki_only_with_auxiliary_tls(enable_secp256r1mlkem768)
-        .context("failed to build managed CRLite HTTP client")?;
+    let remote_client = ManagedCrliteRemoteClient::new_webpki_only_with_auxiliary_tls_policy(
+      enable_secp256r1mlkem768,
+      certificate_compression,
+    )
+    .context("failed to build managed CRLite HTTP client")?;
     let reject_handshakes = Arc::new(AtomicBool::new(false));
     let loaded = super::crlite_managed::load_or_fetch_filter(tls, &remote_client).await;
     record_managed_load_metrics(&loaded, &metrics);

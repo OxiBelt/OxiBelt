@@ -179,6 +179,11 @@ impl Config {
   }
 
   pub(super) fn validate_tls(&self) -> anyhow::Result<()> {
+    self
+      .tls
+      .certificate_compression
+      .validate()
+      .map_err(|error| anyhow::anyhow!("tls.certificate_compression: {error}"))?;
     if self.tls.min_version > self.tls.max_version {
       bail!("tls.min_version must be less than or equal to tls.max_version");
     }

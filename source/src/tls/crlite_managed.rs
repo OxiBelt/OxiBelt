@@ -37,12 +37,24 @@ impl ManagedCrliteRemoteClient {
     Self::new_webpki_only_with_auxiliary_tls(false)
   }
 
+  #[cfg(test)]
   pub(super) fn new_webpki_only_with_auxiliary_tls(
     enable_secp256r1mlkem768: bool,
   ) -> anyhow::Result<Self> {
+    Self::new_webpki_only_with_auxiliary_tls_policy(
+      enable_secp256r1mlkem768,
+      &oxibelt_tls_cert_compression::CertificateCompressionPolicy::default(),
+    )
+  }
+
+  pub(super) fn new_webpki_only_with_auxiliary_tls_policy(
+    enable_secp256r1mlkem768: bool,
+    certificate_compression: &oxibelt_tls_cert_compression::CertificateCompressionPolicy,
+  ) -> anyhow::Result<Self> {
     Ok(Self {
-      control_http: ControlHttpClient::new_webpki_only_with_auxiliary_tls(
+      control_http: ControlHttpClient::new_webpki_only_with_auxiliary_tls_policy(
         enable_secp256r1mlkem768,
+        certificate_compression,
       )?,
     })
   }
@@ -530,6 +542,8 @@ mod tests {
       session_tickets: true,
       session_ticket_rotation_seconds: 86_400,
       resumption: crate::config::TlsServerResumptionConfig::default(),
+      certificate_compression: oxibelt_tls_cert_compression::CertificateCompressionPolicy::default(
+      ),
       client_auth: crate::config::TlsClientAuthConfig::default(),
       ocsp: crate::config::OcspConfig::default(),
       crlite: crate::config::CrliteConfig::default(),

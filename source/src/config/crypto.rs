@@ -2,6 +2,7 @@
 //! Defaults preserve the historical AWS-LC rustls provider and RustCrypto primitives.
 
 use anyhow::bail;
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use serde::Deserialize;
 
 use super::{Config, TlsKeyExchangeGroup, UpstreamEchMode};
@@ -15,7 +16,7 @@ pub(in crate::config) const CRYPTO_CONFIG_KEYS: &[&str] = &[
   "tls_provider",
 ];
 pub(in crate::config) const CRYPTO_AUXILIARY_TLS_CONFIG_KEYS: &[&str] =
-  &["enable_secp256r1mlkem768"];
+  &["certificate_compression", "enable_secp256r1mlkem768"];
 
 pub(in crate::config) const CRYPTO_PRIMITIVES_CONFIG_KEYS: &[&str] =
   &["aes_gcm", "chacha20poly1305", "hkdf", "hmac_sha256", "sha2"];
@@ -56,6 +57,8 @@ impl Default for CryptoConfig {
 /// This is intentionally separate from downstream, upstream, Admin, and Redis policies.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct AuxiliaryTlsConfig {
+  #[serde(default)]
+  pub certificate_compression: CertificateCompressionPolicy,
   #[serde(default)]
   pub enable_secp256r1mlkem768: bool,
 }
@@ -225,6 +228,12 @@ pub struct CryptoPrimitiveBackendOverrides {
 }
 
 pub(super) fn validate_crypto(config: &Config) -> anyhow::Result<()> {
+  config
+    .crypto
+    .auxiliary_tls
+    .certificate_compression
+    .validate()
+    .map_err(|error| anyhow::anyhow!("crypto.auxiliary_tls.certificate_compression: {error}"))?;
   validate_primitive_backends(&config.crypto)?;
   validate_tls_provider(config)?;
   Ok(())

@@ -853,6 +853,35 @@ Use `tests/scripts/build-crypto-backend-variant.sh` to run Cargo with the matchi
 
 ## Listeners and TLS
 
+### TLS certificate compression (RFC 8879)
+
+OxiBelt enables TLS 1.3 certificate compression by default on its public TCP
+and QUIC listeners, Admin TCP and QUIC listeners, TURN TLS listeners, named and
+pooled HTTPS upstreams, Redis TLS, and OxiBelt-owned auxiliary HTTPS clients.
+Each policy uses `enabled = true` and `algorithms = ["zstd", "brotli", "zlib"]`
+by default. The order is OxiBelt's preference when it sends a certificate;
+the peer chooses how it compresses a certificate sent to OxiBelt. TLS 1.2
+does not use certificate compression.
+
+Set `[tls.certificate_compression]`, `[admin.tls.certificate_compression]`,
+`[upstreams.tls.certificate_compression]`,
+`[upstream_pools.servers.tls.certificate_compression]`,
+`[upstream_pools.discovery.tls.certificate_compression]`,
+`[turn_upstream_pools.servers.tls.certificate_compression]`,
+`[shared_state.backends.redis_tls.certificate_compression]`, or
+`[crypto.auxiliary_tls.certificate_compression]` to configure an owned TLS
+surface. A TURN listener's `[webrtc_turn_listeners.tls.certificate_compression]`
+overrides the public TLS policy; omitting it inherits the public policy. Use
+`enabled = false` to disable compression on a surface, or provide a nonempty,
+duplicate-free ordered subset of `zstd`, `brotli`, and `zlib`. Unknown names,
+duplicates, and empty lists fail configuration validation. Each policy covers
+both certificates that OxiBelt sends and compressed certificates it accepts.
+
+Public and TURN policy changes require a full reload. Admin, upstream, Redis,
+and auxiliary policy changes require a restart. Certificate-file rotation keeps
+its existing hot reload behavior. TLS created internally by dependencies such
+as Kubernetes and PostgreSQL clients is outside these controls.
+
 ```toml
 [listeners]
 https_binds = ["0.0.0.0:8443", "[::]:8443"]

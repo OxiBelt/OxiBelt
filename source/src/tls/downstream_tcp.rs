@@ -201,6 +201,10 @@ fn build_downstream_tcp_server_config_with_provider(
       None => builder.with_no_client_auth(),
     }
     .with_cert_resolver(cert_resolver);
+  super::apply_server_certificate_compression(
+    &mut server_config,
+    &build.tls.certificate_compression,
+  )?;
   server_config.max_early_data_size = build.max_early_data_size;
   let enable_secp256r1mlkem768 = server_config
     .crypto_provider()

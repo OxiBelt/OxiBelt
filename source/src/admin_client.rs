@@ -15,6 +15,7 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore};
 use url::Url;
@@ -41,6 +42,10 @@ pub struct AdminClientOptions {
   pub admin_tls_secp256r1mlkem768: bool,
   /// Enable RFC 10024 SecP256r1MLKEM768 for owned auxiliary HTTPS clients.
   pub auxiliary_tls_secp256r1mlkem768: bool,
+  /// RFC 8879 policy for the Admin HTTPS connection.
+  pub certificate_compression: CertificateCompressionPolicy,
+  /// RFC 8879 policy for auxiliary HTTPS fetches initiated by this client.
+  pub auxiliary_certificate_compression: CertificateCompressionPolicy,
 }
 
 impl AdminClientOptions {
@@ -55,6 +60,8 @@ impl AdminClientOptions {
       max_body_bytes: DEFAULT_MAX_BODY_BYTES,
       admin_tls_secp256r1mlkem768: false,
       auxiliary_tls_secp256r1mlkem768: false,
+      certificate_compression: CertificateCompressionPolicy::default(),
+      auxiliary_certificate_compression: CertificateCompressionPolicy::default(),
     }
   }
 }
@@ -88,6 +95,7 @@ impl AdminClient {
       options.client_cert.as_deref(),
       options.client_key.as_deref(),
       options.admin_tls_secp256r1mlkem768,
+      &options.certificate_compression,
     )?;
     let mut http = HttpConnector::new();
     http.enforce_http(false);
@@ -115,6 +123,10 @@ impl AdminClient {
 
   pub fn auxiliary_tls_secp256r1mlkem768(&self) -> bool {
     self.options.auxiliary_tls_secp256r1mlkem768
+  }
+
+  pub fn auxiliary_certificate_compression(&self) -> &CertificateCompressionPolicy {
+    &self.options.auxiliary_certificate_compression
   }
 
   pub async fn request_json(
@@ -255,6 +267,7 @@ fn build_tls_config(
   client_cert: Option<&Path>,
   client_key: Option<&Path>,
   enable_secp256r1mlkem768: bool,
+  certificate_compression: &CertificateCompressionPolicy,
 ) -> anyhow::Result<ClientConfig> {
   let provider = if enable_secp256r1mlkem768 {
     crate::tls::aws_lc_provider_with_secp256r1mlkem768(true)
@@ -266,13 +279,15 @@ fn build_tls_config(
     .with_safe_default_protocol_versions()
     .context("failed to configure Admin TLS protocol versions")?
     .with_root_certificates(roots);
-  match (client_cert, client_key) {
+  let mut config = match (client_cert, client_key) {
     (Some(cert), Some(key)) => builder
       .with_client_auth_cert(load_certs(cert)?, load_private_key(key)?)
       .context("failed to configure Admin client certificate"),
     (None, None) => Ok(builder.with_no_client_auth()),
     _ => bail!("--client-cert and --client-key must be supplied together"),
-  }
+  }?;
+  crate::tls::apply_client_certificate_compression(&mut config, certificate_compression)?;
+  Ok(config)
 }
 
 fn load_root_store(extra_roots: &[PathBuf]) -> anyhow::Result<RootCertStore> {
@@ -365,6 +380,7 @@ fn full_body(bytes: Bytes) -> AdminBody {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use oxibelt_tls_cert_compression::Algorithm;
   use std::sync::Arc;
 
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -438,6 +454,37 @@ mod tests {
     );
     options.admin_tls_secp256r1mlkem768 = true;
     AdminClient::new(options).expect("field-enabled Admin client should build");
+  }
+
+  #[test]
+  fn admin_tls_certificate_compression_policy_controls_both_directions() {
+    let policy = CertificateCompressionPolicy {
+      enabled: true,
+      algorithms: vec![Algorithm::Zlib, Algorithm::Brotli],
+    };
+    let config = build_tls_config(&[], None, None, false, &policy)
+      .expect("Admin TLS client config should build");
+    assert_eq!(
+      config
+        .cert_decompressors
+        .iter()
+        .map(|codec| codec.algorithm())
+        .collect::<Vec<_>>(),
+      vec![
+        rustls::CertificateCompressionAlgorithm::Zlib,
+        rustls::CertificateCompressionAlgorithm::Brotli,
+      ]
+    );
+    assert_eq!(config.cert_compressors.len(), 2);
+
+    let disabled = CertificateCompressionPolicy {
+      enabled: false,
+      ..policy
+    };
+    let config = build_tls_config(&[], None, None, false, &disabled)
+      .expect("Admin TLS client with disabled compression should build");
+    assert!(config.cert_compressors.is_empty());
+    assert!(config.cert_decompressors.is_empty());
   }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

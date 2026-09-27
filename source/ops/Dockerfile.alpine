@@ -101,6 +101,7 @@ COPY source/crates/oxibelt-build-identity ./source/crates/oxibelt-build-identity
 COPY source/crates/oxibelt-control-http ./source/crates/oxibelt-control-http
 COPY source/crates/oxibelt-control-protocol ./source/crates/oxibelt-control-protocol
 COPY source/crates/oxibelt-deployment-diagnostics ./source/crates/oxibelt-deployment-diagnostics
+COPY source/crates/oxibelt-tls-cert-compression ./source/crates/oxibelt-tls-cert-compression
 COPY fuzz ./fuzz
 COPY tests/unsafe_harness ./tests/unsafe_harness
 

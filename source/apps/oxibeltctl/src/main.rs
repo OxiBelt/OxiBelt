@@ -1,8 +1,10 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::bail;
 use clap::Parser;
 use oxibelt::admin_client::{AdminClient, AdminClientOptions, read_token};
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 
 #[path = "audit_verify.rs"]
 mod audit_verify;
@@ -118,6 +120,12 @@ use cli::{AdminArgs, Cli, Command, selected_token_env};
 use output::{print_permission_hint, print_response};
 use plan::plan_command;
 
+static AUXILIARY_CERTIFICATE_COMPRESSION: OnceLock<CertificateCompressionPolicy> = OnceLock::new();
+
+pub(crate) fn auxiliary_certificate_compression_policy() -> &'static CertificateCompressionPolicy {
+  AUXILIARY_CERTIFICATE_COMPRESSION.get_or_init(CertificateCompressionPolicy::default)
+}
+
 #[tokio::main]
 async fn main() {
   match run().await {
@@ -132,6 +140,10 @@ async fn main() {
 
 async fn run() -> anyhow::Result<i32> {
   let cli = Cli::parse();
+  cli.admin.admin_certificate_compression()?;
+  AUXILIARY_CERTIFICATE_COMPRESSION
+    .set(cli.admin.auxiliary_certificate_compression()?)
+    .map_err(|_| anyhow::anyhow!("auxiliary TLS policy was already initialized"))?;
   oxibelt::tls::install_default_provider()?;
   if let Some(code) = config_schema::run_if_requested(&cli.command, cli.admin.output)? {
     return Ok(code);
@@ -266,5 +278,7 @@ fn build_client(args: &AdminArgs) -> anyhow::Result<AdminClient> {
   options.client_cert = args.client_cert.clone();
   options.client_key = args.client_key.clone();
   options.auxiliary_tls_secp256r1mlkem768 = args.auxiliary_tls_secp256r1mlkem768;
+  options.certificate_compression = args.admin_certificate_compression()?;
+  options.auxiliary_certificate_compression = args.auxiliary_certificate_compression()?;
   AdminClient::new_with_secp256r1mlkem768(options, args.admin_tls_secp256r1mlkem768)
 }

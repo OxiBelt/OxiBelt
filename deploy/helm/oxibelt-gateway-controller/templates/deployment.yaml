@@ -42,6 +42,10 @@ spec:
         {{- if .Values.auxiliaryTls.enableSecp256r1Mlkem768 }}
         - "--auxiliary-tls-secp256r1mlkem768"
         {{- end }}
+        {{- if not .Values.auxiliaryTls.certificateCompression.enabled }}
+        - "--no-auxiliary-tls-certificate-compression"
+        {{- end }}
+        - "--auxiliary-tls-certificate-compression-algorithms={{ join "," .Values.auxiliaryTls.certificateCompression.algorithms }}"
         - "run"
         - "--rollout-target-namespace={{ default .Release.Namespace .Values.rollout.target.namespace }}"
         - "--rollout-target-kind={{ .Values.rollout.target.kind }}"

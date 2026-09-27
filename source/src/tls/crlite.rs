@@ -643,6 +643,8 @@ mod tests {
       },
       key_exchange_groups: Vec::new(),
       session_tickets: true,
+      certificate_compression: oxibelt_tls_cert_compression::CertificateCompressionPolicy::default(
+      ),
       session_ticket_rotation_seconds: 86_400,
       resumption: crate::config::TlsServerResumptionConfig::default(),
       client_auth: crate::config::TlsClientAuthConfig::default(),

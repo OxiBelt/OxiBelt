@@ -95,6 +95,13 @@ const CargoPackages: CargoPackagePolicy[] = [
     versionSource: 'workspace'
   },
   {
+    name: 'oxibelt-tls-cert-compression',
+    manifestPath: 'source/crates/oxibelt-tls-cert-compression/Cargo.toml',
+    lockfilePath: 'Cargo.lock',
+    releaseRewrite: true,
+    versionSource: 'workspace'
+  },
+  {
     name: 'oxibelt-gateway-controller',
     manifestPath: 'source/apps/oxibelt-gateway-controller/Cargo.toml',
     lockfilePath: 'Cargo.lock',

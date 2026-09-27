@@ -67,6 +67,7 @@ RUNTIME_WORKSPACE_PACKAGES = frozenset(
         "oxibelt",
         "oxibelt-build-identity",
         "oxibelt-control-protocol",
+        "oxibelt-tls-cert-compression",
     }
 )
 COMPATIBILITY_DATA_PLANE_WORKSPACE_PACKAGES = RUNTIME_WORKSPACE_PACKAGES | {
@@ -87,6 +88,7 @@ CONTROLLER_WORKSPACE_PACKAGES = frozenset(
         "oxibelt-control-http",
         "oxibelt-control-protocol",
         "oxibelt-gateway-controller",
+        "oxibelt-tls-cert-compression",
     }
 )
 TOOLS_WORKSPACE_PACKAGES = RUNTIME_WORKSPACE_PACKAGES | {

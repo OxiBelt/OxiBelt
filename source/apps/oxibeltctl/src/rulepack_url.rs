@@ -139,8 +139,12 @@ pub(crate) async fn download_url_bytes_with_aux(
   label: &'static str,
   enable_secp256r1mlkem768: bool,
 ) -> anyhow::Result<Vec<u8>> {
-  let client = ControlHttpClient::new_with_secp256r1mlkem768(ca_certs, enable_secp256r1mlkem768)
-    .context("failed to build rulepack HTTP client")?;
+  let client = ControlHttpClient::new_with_auxiliary_tls_policy(
+    ca_certs,
+    enable_secp256r1mlkem768,
+    crate::auxiliary_certificate_compression_policy(),
+  )
+  .context("failed to build rulepack HTTP client")?;
   let uri = oxibelt::control_http::uri_from_url(&request_url(url))?;
   let mut builder = Request::builder()
     .method(Method::GET)

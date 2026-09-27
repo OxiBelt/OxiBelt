@@ -3208,6 +3208,7 @@ dependencies = [
  "oxibelt-allocator",
  "oxibelt-build-identity",
  "oxibelt-control-protocol",
+ "oxibelt-tls-cert-compression",
  "precis-profiles",
  "pretty_assertions",
  "proc-macro2",
@@ -3272,6 +3273,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "oxibelt-tls-cert-compression",
  "rustls",
  "tokio",
  "url",
@@ -3344,6 +3346,7 @@ dependencies = [
  "oxibelt-build-identity",
  "oxibelt-control-http",
  "oxibelt-control-protocol",
+ "oxibelt-tls-cert-compression",
  "pretty_assertions",
  "rustls",
  "serde",
@@ -3385,6 +3388,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxibelt-tls-cert-compression"
+version = "0.0.0"
+dependencies = [
+ "brotli 9.0.0",
+ "flate2",
+ "rustls",
+ "serde",
+ "toml",
+ "zstd",
+]
+
+[[package]]
 name = "oxibelt-unsafe-harness"
 version = "0.0.0"
 dependencies = [
@@ -3416,6 +3431,7 @@ dependencies = [
  "oxibelt",
  "oxibelt-build-identity",
  "oxibelt-deployment-diagnostics",
+ "oxibelt-tls-cert-compression",
  "rustls",
  "sequoia-openpgp",
  "serde",

@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -16,6 +17,8 @@ use super::{
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct UpstreamTlsConfig {
+  #[serde(default)]
+  pub certificate_compression: CertificateCompressionPolicy,
   /// Enables the RFC 10024 SecP256r1MLKEM768 TLS 1.3 key-exchange group for this upstream.
   #[serde(default)]
   pub enable_secp256r1mlkem768: bool,
@@ -114,6 +117,10 @@ impl UpstreamTlsConfig {
   }
 
   pub(in crate::config) fn validate(&self, upstream_name: &str) -> anyhow::Result<()> {
+    self
+      .certificate_compression
+      .validate()
+      .map_err(|error| anyhow!("upstream {upstream_name} tls.certificate_compression: {error}"))?;
     if let Some(server_name) = self.server_name.as_deref() {
       let server_name = server_name.trim();
       if server_name.is_empty() || server_name != self.server_name.as_deref().unwrap_or_default() {

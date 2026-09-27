@@ -594,6 +594,7 @@ impl AppSnapshot {
     let crlite = tls::CrliteRuntime::new_with_auxiliary_tls(
       &config.tls,
       config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+      &config.crypto.auxiliary_tls.certificate_compression,
       metrics.clone(),
     )
     .await
@@ -601,6 +602,7 @@ impl AppSnapshot {
     let downstream_ct = tls::DownstreamCtRuntime::new_with_auxiliary_tls(
       &config.tls,
       config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+      &config.crypto.auxiliary_tls.certificate_compression,
       metrics.clone(),
     )
     .await
@@ -750,7 +752,10 @@ impl AppSnapshot {
 
     let secret_references = secret_references::build(&config, previous)?;
     let web_bot_auth = if config.web_bot_auth.enabled {
-      Some(Arc::new(WebBotAuthRuntime::new(&config.web_bot_auth)?))
+      Some(Arc::new(WebBotAuthRuntime::new_with_auxiliary_tls_policy(
+        &config.web_bot_auth,
+        &config.crypto.auxiliary_tls.certificate_compression,
+      )?))
     } else {
       None
     };
@@ -1022,7 +1027,10 @@ impl AppSnapshot {
       if config.web_bot_auth == previous.config.web_bot_auth {
         previous.web_bot_auth.clone()
       } else {
-        Some(Arc::new(WebBotAuthRuntime::new(&config.web_bot_auth)?))
+        Some(Arc::new(WebBotAuthRuntime::new_with_auxiliary_tls_policy(
+          &config.web_bot_auth,
+          &config.crypto.auxiliary_tls.certificate_compression,
+        )?))
       }
     } else {
       None

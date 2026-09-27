@@ -49,6 +49,7 @@ pub(super) const ROOT_CONFIG_KEYS: &[&str] = &[
 
 pub(super) const TLS_CONFIG_KEYS: &[&str] = &[
   "cert_chain",
+  "certificate_compression",
   "certificates",
   "client_auth",
   "crlite",

@@ -7,7 +7,8 @@ use bytes::Bytes;
 use http::Request;
 use http_body_util::BodyExt;
 use oxibelt_control_http::{
-  ControlHttpClient, ControlHttpResponseBodyLimitError, empty_body, full_body, uri_from_url,
+  ControlHttpClient, ControlHttpResponseBodyLimitError, ControlHttpTlsOptions, empty_body,
+  full_body, uri_from_url,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -87,9 +88,12 @@ impl KubernetesPoller {
       .into_iter()
       .collect::<Vec<_>>();
     Ok(Self {
-      client: ControlHttpClient::new_with_secp256r1mlkem768(
+      client: ControlHttpClient::new_with_tls_options(
         &ca_certs,
-        args.auxiliary_tls_secp256r1mlkem768,
+        &ControlHttpTlsOptions {
+          enable_secp256r1mlkem768: args.auxiliary_tls_secp256r1mlkem768,
+          certificate_compression: args.certificate_compression_policy()?,
+        },
       )?,
       base_url,
       service_account_token_path: token_path.to_path_buf(),

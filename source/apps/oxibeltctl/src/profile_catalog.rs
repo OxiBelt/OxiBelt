@@ -91,9 +91,12 @@ async fn download_profile_catalog(
     .as_str()
     .parse::<http::Uri>()
     .with_context(|| format!("invalid mitigation profile URL {diagnostic_url}"))?;
-  let client =
-    ControlHttpClient::new_with_secp256r1mlkem768(&args.profile_ca_certs, enable_secp256r1mlkem768)
-      .context("failed to build mitigation profile HTTP client")?;
+  let client = ControlHttpClient::new_with_auxiliary_tls_policy(
+    &args.profile_ca_certs,
+    enable_secp256r1mlkem768,
+    crate::auxiliary_certificate_compression_policy(),
+  )
+  .context("failed to build mitigation profile HTTP client")?;
   let mut builder = Request::builder()
     .method(http::Method::GET)
     .uri(uri)

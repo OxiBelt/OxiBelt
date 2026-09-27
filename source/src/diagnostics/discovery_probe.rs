@@ -45,6 +45,7 @@ pub(super) async fn probe_discovery(
       }
       let mut crypto = config.crypto.clone();
       crypto.auxiliary_tls.enable_secp256r1mlkem768 = discovery.tls.enable_secp256r1mlkem768;
+      crypto.auxiliary_tls.certificate_compression = discovery.tls.certificate_compression.clone();
       let client = match ControlHttpClient::new_with_crypto_and_revocation(
         &config.proxy.trusted_ca_certs,
         &crypto,

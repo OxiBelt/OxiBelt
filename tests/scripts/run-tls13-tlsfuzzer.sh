@@ -181,6 +181,46 @@ openssl_probe() {
 openssl_probe proxy TLSv1.3
 openssl_probe tls12.proxy TLSv1.2
 
+# OpenSSL 3.5 advertises its supported RFC 8879 algorithms by default. Verify
+# the received handshake type in OpenSSL's decrypted trace and the authenticated HTTP
+# response, then disable the extension to prove ordinary-certificate fallback.
+for compression_mode in enabled disabled; do
+  compression_args=(-tls1_3 -msg)
+  if [[ "${compression_mode}" == disabled ]]; then
+    compression_args+=(-no_rx_cert_comp)
+  fi
+  run_openssl_client proxy "${compression_args[@]}" \
+    >"${work_dir}/certificate-${compression_mode}-wire.log"
+  python3 - "${work_dir}/certificate-${compression_mode}-wire.log" "${compression_mode}" <<'PY'
+import pathlib
+import re
+import sys
+
+trace = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+mode = sys.argv[2]
+handshake_types = []
+for match in re.finditer(
+    r"^<<< TLS [^\n]+, Handshake \[length [^]]+\], [^\n]+\n"
+    r"((?:[ \t]+(?:[0-9a-f]{2}[ \t]*)+\n)+)",
+    trace,
+    re.MULTILINE,
+):
+    message = bytes.fromhex(match.group(1))
+    if len(message) >= 4 and int.from_bytes(message[1:4], "big") == len(message) - 4:
+        handshake_types.append(message[0])
+expected = 25 if mode == "enabled" else 11  # CompressedCertificate / Certificate
+unexpected = 11 if mode == "enabled" else 25
+if expected not in handshake_types or unexpected in handshake_types:
+    raise SystemExit(
+        f"OpenSSL {mode} RFC 8879 handshake had message types {handshake_types}, "
+        f"expected {expected} without {unexpected}"
+    )
+if "Verification: OK" not in trace or "HTTP/1.1 " not in trace:
+    raise SystemExit("OpenSSL RFC 8879 handshake lacked verified HTTP response")
+print(f"OpenSSL RFC 8879 {mode}: expected certificate message, verified HTTP response")
+PY
+done
+
 # Explicit names keep the run bounded even when upstream adds new scenarios.
 run_probe() {
   local script="$1"

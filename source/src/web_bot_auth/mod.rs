@@ -55,9 +55,20 @@ pub(crate) struct WebBotAuthRuntime {
 }
 
 impl WebBotAuthRuntime {
+  #[cfg(test)]
   pub fn new(config: &WebBotAuthConfig) -> anyhow::Result<Self> {
+    Self::new_with_auxiliary_tls_policy(
+      config,
+      &oxibelt_tls_cert_compression::CertificateCompressionPolicy::default(),
+    )
+  }
+
+  pub fn new_with_auxiliary_tls_policy(
+    config: &WebBotAuthConfig,
+    certificate_compression: &oxibelt_tls_cert_compression::CertificateCompressionPolicy,
+  ) -> anyhow::Result<Self> {
     Ok(Self {
-      discovery: Arc::new(DiscoveryRuntime::new(config)?),
+      discovery: Arc::new(DiscoveryRuntime::new(config, certificate_compression)?),
       admissions: Semaphore::new(32),
     })
   }

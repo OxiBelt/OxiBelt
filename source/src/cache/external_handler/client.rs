@@ -52,6 +52,7 @@ pub(crate) struct ExternalCacheHttpClient {
 }
 
 impl ExternalCacheHttpClient {
+  #[cfg(test)]
   pub(crate) fn new(
     config: &ExternalCacheHandlerConfig,
     trusted_ca_certs: &[PathBuf],
@@ -59,10 +60,29 @@ impl ExternalCacheHttpClient {
     memory_body_bytes: usize,
     max_body_bytes: usize,
   ) -> anyhow::Result<Self> {
+    Self::new_with_auxiliary_policy(
+      config,
+      trusted_ca_certs,
+      enable_auxiliary_tls_secp256r1mlkem768,
+      &oxibelt_tls_cert_compression::CertificateCompressionPolicy::default(),
+      memory_body_bytes,
+      max_body_bytes,
+    )
+  }
+
+  pub(crate) fn new_with_auxiliary_policy(
+    config: &ExternalCacheHandlerConfig,
+    trusted_ca_certs: &[PathBuf],
+    enable_auxiliary_tls_secp256r1mlkem768: bool,
+    certificate_compression: &oxibelt_tls_cert_compression::CertificateCompressionPolicy,
+    memory_body_bytes: usize,
+    max_body_bytes: usize,
+  ) -> anyhow::Result<Self> {
     // External cache is an auxiliary client. Keep the legacy default provider
     // and roots while selecting the optional auxiliary key-exchange group.
     let mut crypto = CryptoConfig::default();
     crypto.auxiliary_tls.enable_secp256r1mlkem768 = enable_auxiliary_tls_secp256r1mlkem768;
+    crypto.auxiliary_tls.certificate_compression = certificate_compression.clone();
     let tls_config = tls::build_upstream_client_config_with_crypto_resumption_and_revocation(
       &crypto,
       trusted_ca_certs,

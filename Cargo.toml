@@ -11,6 +11,7 @@ members = [
   "source/crates/oxibelt-control-http",
   "source/crates/oxibelt-control-protocol",
   "source/crates/oxibelt-deployment-diagnostics",
+  "source/crates/oxibelt-tls-cert-compression",
   "fuzz",
   "tests/unsafe_harness",
 ]
@@ -24,6 +25,7 @@ default-members = [
   "source/crates/oxibelt-control-http",
   "source/crates/oxibelt-control-protocol",
   "source/crates/oxibelt-deployment-diagnostics",
+  "source/crates/oxibelt-tls-cert-compression",
 ]
 exclude = ["source/third_party/hyper", "source/third_party/h2", "source/third_party/rustls", "source/third_party/quinn", "source/third_party/quinn-proto", "source/third_party/h3", "source/third_party/web-transport-quinn", "source/third_party/web-transport-proto"]
 resolver = "3"
@@ -38,6 +40,7 @@ publish = false
 [workspace.dependencies]
 anyhow = "1.0.104"
 aws-lc-rs = { version = "1.18.1", default-features = false }
+brotli = "9.0.0"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 crc32fast = "1.5.2"
@@ -61,6 +64,7 @@ oxibelt-build-identity = { path = "source/crates/oxibelt-build-identity" }
 oxibelt-control-http = { path = "source/crates/oxibelt-control-http" }
 oxibelt-control-protocol = { path = "source/crates/oxibelt-control-protocol" }
 oxibelt-deployment-diagnostics = { path = "source/crates/oxibelt-deployment-diagnostics" }
+oxibelt-tls-cert-compression = { path = "source/crates/oxibelt-tls-cert-compression" }
 openssl-sys = { version = "0.9.117", features = ["vendored"] }
 openssl-probe = "0.2.1"
 object_store = { version = "=0.14.2", default-features = false, features = ["aws", "fs"] }
@@ -85,6 +89,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std
 url = { version = "2.5.8", features = ["serde"] }
 webpki-roots = "1.0.9"
 zeroize = "1.9.0"
+zstd = "0.14.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

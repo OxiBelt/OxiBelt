@@ -36,6 +36,8 @@ fn args() -> SharedArgs {
     dry_run: false,
     health_bind: None,
     auxiliary_tls_secp256r1mlkem768: false,
+    no_auxiliary_tls_certificate_compression: false,
+    auxiliary_tls_certificate_compression_algorithms: Vec::new(),
   }
 }
 

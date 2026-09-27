@@ -104,6 +104,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     "ipm.trust" => &["claim", "group", "principal", "source", "value"][..],
     "admin.tls" => &[
       "certificates",
+      "certificate_compression",
       "client_auth",
       "enabled",
       "enable_secp256r1mlkem768",
@@ -115,6 +116,8 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
       "session_ticket_rotation_seconds",
       "session_tickets",
     ][..],
+    "admin.tls.certificate_compression"
+    | "shared_state.backends.redis_tls.certificate_compression" => &["algorithms", "enabled"],
     "admin.tls.resumption" => &[
       "mode",
       "rotation_seconds",
@@ -427,6 +430,7 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     ][..],
     "shared_state.backends.redis_tls" => &[
       "ca_cert",
+      "certificate_compression",
       "client_cert",
       "client_key",
       "enable_secp256r1mlkem768",

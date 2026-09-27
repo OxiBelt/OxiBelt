@@ -789,6 +789,7 @@ async fn turn_server_config_builds_with_remote_signer_override() {
     private_key: None,
     remote_signer_key_id: Some("turn-key".to_string()),
     resumption: None,
+    certificate_compression: None,
   };
   tls::build_turn_server_config(&listener_tls, &default_tls)
     .expect("TURN TLS config should build with remote signer override");
@@ -907,6 +908,7 @@ fn downstream_tls_config(
     session_tickets: true,
     session_ticket_rotation_seconds: 86_400,
     resumption: Default::default(),
+    certificate_compression: Default::default(),
     client_auth,
     ocsp: OcspConfig::default(),
     crlite: oxibelt::config::CrliteConfig::default(),
@@ -1122,6 +1124,7 @@ fn remote_tls_config(
     session_tickets: true,
     session_ticket_rotation_seconds: 86_400,
     resumption: Default::default(),
+    certificate_compression: Default::default(),
     client_auth: TlsClientAuthConfig::default(),
     ocsp: OcspConfig::default(),
     crlite: oxibelt::config::CrliteConfig::default(),

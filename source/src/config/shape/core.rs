@@ -164,6 +164,9 @@ pub(super) fn allowed_keys(path: &str) -> Option<&'static [&'static str]> {
     }
     "sni_forward.rules" => sni_forward::SNI_FORWARD_RULE_KEYS,
     "tls" => allowed_keys::TLS_CONFIG_KEYS,
+    "tls.certificate_compression" | "crypto.auxiliary_tls.certificate_compression" => {
+      &["algorithms", "enabled"]
+    }
     "tls.1_2" => allowed_keys::TLS12_NEGOTIATION_CONFIG_KEYS,
     "tls.1_3" => allowed_keys::TLS13_NEGOTIATION_CONFIG_KEYS,
     "tls.resumption" => allowed_keys::TLS_RESUMPTION_CONFIG_KEYS,

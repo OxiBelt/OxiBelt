@@ -9,6 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail};
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use serde::Deserialize;
 use url::Url;
 
@@ -486,6 +487,8 @@ pub struct TurnRelayPortRange {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct TurnListenerTlsConfig {
   #[serde(default)]
+  pub certificate_compression: Option<CertificateCompressionPolicy>,
+  #[serde(default)]
   pub cert_chain: Option<PathBuf>,
   #[serde(default)]
   pub private_key: Option<PathBuf>,
@@ -497,13 +500,19 @@ pub struct TurnListenerTlsConfig {
 
 impl TurnListenerTlsConfig {
   pub fn has_override(&self) -> bool {
-    self.cert_chain.is_some()
+    self.certificate_compression.is_some()
+      || self.cert_chain.is_some()
       || self.private_key.is_some()
       || self.remote_signer_key_id.is_some()
       || self.resumption.is_some()
   }
 
   fn validate(&self, listener_name: &str) -> anyhow::Result<()> {
+    if let Some(policy) = &self.certificate_compression {
+      policy.validate().map_err(|error| {
+        anyhow!("WebRTC TURN listener {listener_name} tls.certificate_compression: {error}")
+      })?;
+    }
     match (
       &self.cert_chain,
       &self.private_key,

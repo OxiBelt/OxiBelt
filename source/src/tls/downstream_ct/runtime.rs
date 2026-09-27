@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow, bail};
 use base64::Engine as _;
 use http::header::ACCEPT;
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use rustls::server::ResolvesServerCert;
 use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
@@ -130,6 +131,7 @@ impl DownstreamCtRuntime {
   pub(crate) async fn new_with_auxiliary_tls(
     tls: &TlsConfig,
     enable_secp256r1mlkem768: bool,
+    certificate_compression: &CertificateCompressionPolicy,
     metrics: Arc<Metrics>,
   ) -> anyhow::Result<Self> {
     let contexts = certificate_contexts(tls)?;
@@ -146,7 +148,8 @@ impl DownstreamCtRuntime {
     }
 
     let now = unix_now();
-    let initial_list = load_initial_list(tls, enable_secp256r1mlkem768, now).await;
+    let initial_list =
+      load_initial_list(tls, enable_secp256r1mlkem768, certificate_compression, now).await;
     let (list, cache_present, fetched_at, initial_error) = match initial_list {
       Ok(loaded) => (
         Some(loaded.snapshot),
@@ -186,6 +189,7 @@ impl DownstreamCtRuntime {
       Some(spawn_refresh_worker(
         tls.clone(),
         enable_secp256r1mlkem768,
+        certificate_compression,
         contexts,
         gates.clone(),
         list_stale_at.clone(),
@@ -626,6 +630,7 @@ fn disabled_status(tls: &TlsConfig, contexts: &[CertificateContext]) -> Downstre
 async fn load_initial_list(
   tls: &TlsConfig,
   enable_secp256r1mlkem768: bool,
+  certificate_compression: &CertificateCompressionPolicy,
   now: u64,
 ) -> anyhow::Result<LoadedList> {
   match tls.ct.log_list.mode {
@@ -635,6 +640,7 @@ async fn load_initial_list(
       match fetch_and_store_list(
         tls,
         enable_secp256r1mlkem768,
+        certificate_compression,
         now,
         cached.as_ref().map(|loaded| &loaded.snapshot),
       )
@@ -682,6 +688,7 @@ fn load_static_list(tls: &TlsConfig, now: u64) -> anyhow::Result<LoadedList> {
 fn spawn_refresh_worker(
   tls: TlsConfig,
   enable_secp256r1mlkem768: bool,
+  certificate_compression: &CertificateCompressionPolicy,
   contexts: Vec<CertificateContext>,
   gates: Arc<HashMap<String, Arc<AtomicBool>>>,
   list_stale_at: Arc<AtomicU64>,
@@ -690,8 +697,11 @@ fn spawn_refresh_worker(
   mut current: Option<CtLogListSnapshot>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
   // Build this before spawning so startup reports WebPKI bootstrap failures.
-  let client = ControlHttpClient::new_webpki_only_with_auxiliary_tls(enable_secp256r1mlkem768)
-    .context("failed to build managed CT WebPKI-only client")?;
+  let client = ControlHttpClient::new_webpki_only_with_auxiliary_tls_policy(
+    enable_secp256r1mlkem768,
+    certificate_compression,
+  )
+  .context("failed to build managed CT WebPKI-only client")?;
   Ok(tokio::spawn(async move {
     loop {
       let now = unix_now();
@@ -779,11 +789,15 @@ fn spawn_refresh_worker(
 async fn fetch_and_store_list(
   tls: &TlsConfig,
   enable_secp256r1mlkem768: bool,
+  certificate_compression: &CertificateCompressionPolicy,
   now: u64,
   previous: Option<&CtLogListSnapshot>,
 ) -> anyhow::Result<LoadedList> {
-  let client = ControlHttpClient::new_webpki_only_with_auxiliary_tls(enable_secp256r1mlkem768)
-    .context("failed to build managed CT WebPKI-only client")?;
+  let client = ControlHttpClient::new_webpki_only_with_auxiliary_tls_policy(
+    enable_secp256r1mlkem768,
+    certificate_compression,
+  )
+  .context("failed to build managed CT WebPKI-only client")?;
   let loaded = fetch_list(tls, &client, now).await?;
   if let Some(previous) = previous {
     reject_rollback(previous, &loaded.snapshot)?;

@@ -25,7 +25,7 @@ argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "pa
 async-compression = { version = "=0.4.48", features = ["brotli", "gzip", "tokio", "zlib", "zstd"] }
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
-brotli = "9.0.0"
+brotli.workspace = true
 bytes = "1.12.1"
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.7", features = ["derive"] }
@@ -59,6 +59,7 @@ md-5 = "0.11.0"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "net", "process", "signal", "socket", "zerocopy"] }
 object_store.workspace = true
 openssl-probe.workspace = true
+oxibelt-tls-cert-compression.workspace = true
 precis-profiles.workspace = true
 regex = "1.13.1"
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
@@ -93,7 +94,7 @@ x509-cert = "0.3.0"
 # Keep this alias isolated to the OCSP implementation until those crates converge.
 x509-cert-v2 = { package = "x509-cert", version = "0.2.5" }
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
-zstd = "0.14.0"
+zstd.workspace = true
 zeroize = "1.9.0"
 compio = { version = "0.19.2", default-features = false, features = ["bytes", "io-uring", "polling", "runtime", "time"] }
 compio-driver = { version = "0.12.5", default-features = false, features = ["io-uring", "polling"] }

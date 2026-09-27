@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow, bail};
 use h3_quinn::quinn::ServerConfig as QuinnServerConfig;
 use h3_quinn::quinn::crypto::rustls::QuicServerConfig;
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use rustls::pki_types::CertificateDer;
 use rustls::{RootCertStore, ServerConfig, sign::CertifiedKey};
 
@@ -139,6 +140,20 @@ pub fn install_configured_provider(config: &crate::config::CryptoConfig) -> anyh
 
 pub(crate) fn default_crypto_provider() -> rustls::crypto::CryptoProvider {
   provider::default_crypto_provider()
+}
+
+pub(crate) fn apply_server_certificate_compression(
+  config: &mut ServerConfig,
+  policy: &CertificateCompressionPolicy,
+) -> anyhow::Result<()> {
+  oxibelt_tls_cert_compression::apply_server(config, policy).map_err(anyhow::Error::msg)
+}
+
+pub(crate) fn apply_client_certificate_compression(
+  config: &mut rustls::ClientConfig,
+  policy: &CertificateCompressionPolicy,
+) -> anyhow::Result<()> {
+  oxibelt_tls_cert_compression::apply_client(config, policy).map_err(anyhow::Error::msg)
 }
 
 fn quic_initial_tls13_aes128_gcm_sha256_suite(
@@ -277,6 +292,7 @@ pub(super) fn build_downstream_quic_server_config_for_tls13(
     None => builder.with_no_client_auth(),
   }
   .with_cert_resolver(cert_resolver);
+  apply_server_certificate_compression(&mut server_config, &tls.certificate_compression)?;
   if quic.zero_rtt == QuicZeroRttMode::SafeMethods {
     server_config.max_early_data_size = u32::MAX;
   }
@@ -375,6 +391,7 @@ pub(crate) fn build_admin_server_config_with_crypto_and_resumption(
     None => builder.with_no_client_auth(),
   }
   .with_cert_resolver(Arc::new(resolver));
+  apply_server_certificate_compression(&mut server_config, &tls.certificate_compression)?;
   configure_server_resumption(
     &mut server_config,
     &tls.resumption,
@@ -517,6 +534,13 @@ fn build_turn_server_config_with_provider(
   let mut server_config = builder
     .with_no_client_auth()
     .with_cert_resolver(Arc::new(cert_resolver));
+  apply_server_certificate_compression(
+    &mut server_config,
+    listener_tls
+      .certificate_compression
+      .as_ref()
+      .unwrap_or(&default_tls.certificate_compression),
+  )?;
   let resumption = listener_tls
     .resumption
     .as_ref()

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use serde::{Deserialize, Deserializer};
 
 use super::{
@@ -55,6 +56,7 @@ pub struct TlsConfig {
   pub ocsp: OcspConfig,
   pub crlite: CrliteConfig,
   pub ct: DownstreamCtConfig,
+  pub certificate_compression: CertificateCompressionPolicy,
 }
 
 impl<'de> Deserialize<'de> for TlsConfig {
@@ -103,6 +105,8 @@ impl<'de> Deserialize<'de> for TlsConfig {
       crlite: CrliteConfig,
       #[serde(default)]
       ct: DownstreamCtConfig,
+      #[serde(default)]
+      certificate_compression: CertificateCompressionPolicy,
     }
 
     let raw = RawTlsConfig::deserialize(deserializer)?;
@@ -154,6 +158,7 @@ impl<'de> Deserialize<'de> for TlsConfig {
       ocsp: raw.ocsp,
       crlite: raw.crlite,
       ct: raw.ct,
+      certificate_compression: raw.certificate_compression,
     })
   }
 }
@@ -447,6 +452,7 @@ pub struct AdminTlsConfig {
   pub reject_unknown_sni: bool,
   pub certificates: Vec<AdminTlsCertificateConfig>,
   pub client_auth: TlsClientAuthConfig,
+  pub certificate_compression: CertificateCompressionPolicy,
 }
 
 impl Default for AdminTlsConfig {
@@ -464,6 +470,7 @@ impl Default for AdminTlsConfig {
       reject_unknown_sni: true,
       certificates: Vec::new(),
       client_auth: TlsClientAuthConfig::default(),
+      certificate_compression: CertificateCompressionPolicy::default(),
     }
   }
 }
@@ -497,6 +504,8 @@ impl<'de> Deserialize<'de> for AdminTlsConfig {
       certificates: Vec<AdminTlsCertificateConfig>,
       #[serde(default)]
       client_auth: TlsClientAuthConfig,
+      #[serde(default)]
+      certificate_compression: CertificateCompressionPolicy,
     }
 
     let raw = RawAdminTlsConfig::deserialize(deserializer)?;
@@ -520,6 +529,7 @@ impl<'de> Deserialize<'de> for AdminTlsConfig {
       reject_unknown_sni: raw.reject_unknown_sni,
       certificates: raw.certificates,
       client_auth: raw.client_auth,
+      certificate_compression: raw.certificate_compression,
     })
   }
 }
@@ -561,6 +571,10 @@ impl AdminTlsConfig {
   }
 
   pub(super) fn validate(&self) -> anyhow::Result<()> {
+    self
+      .certificate_compression
+      .validate()
+      .map_err(|error| anyhow::anyhow!("admin.tls.certificate_compression: {error}"))?;
     if self.min_version > self.max_version {
       bail!("admin.tls.min_version must be less than or equal to admin.tls.max_version");
     }

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::bail;
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use rustls::client::{Resumption, Tls12Resumption};
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, ServerConfig};
@@ -78,6 +79,7 @@ pub(super) struct TlsClientConfigKey {
   scope: &'static str,
   tls_provider: TlsCryptoProvider,
   enable_secp256r1mlkem768: bool,
+  certificate_compression: CertificateCompressionPolicy,
   upstream_name: String,
   roots_identity: String,
   subject_alt_names_identity: String,
@@ -445,6 +447,7 @@ pub(super) fn upstream_client_config_key(
   scope: &'static str,
   tls_provider: TlsCryptoProvider,
   enable_secp256r1mlkem768: bool,
+  certificate_compression: &CertificateCompressionPolicy,
   upstream_name: &str,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
@@ -456,6 +459,7 @@ pub(super) fn upstream_client_config_key(
     scope,
     tls_provider,
     enable_secp256r1mlkem768,
+    certificate_compression: certificate_compression.clone(),
     upstream_name: upstream_name.to_string(),
     roots_identity: upstream_roots_identity(extra_root_certificates, trust)?,
     subject_alt_names_identity: upstream_subject_alt_names_identity(subject_alt_names),
@@ -590,6 +594,7 @@ mod tests {
         "tcp",
         TlsCryptoProvider::default(),
         false,
+        &oxibelt_tls_cert_compression::CertificateCompressionPolicy::default(),
         "backend",
         &[],
         UpstreamTlsTrust::Inherit,

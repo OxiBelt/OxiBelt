@@ -244,6 +244,50 @@ fn full_reload_rejects_secp256r1_mlkem768_non_downstream_policy_changes() {
 }
 
 #[test]
+fn full_reload_rejects_non_downstream_certificate_compression_changes() {
+  let active = parse_secp256r1_mlkem768_reload_config();
+  let mut replacements = Vec::new();
+  let mut replacement = active.clone();
+  replacement.admin.tls.certificate_compression.enabled = false;
+  replacements.push(replacement);
+
+  let mut replacement = active.clone();
+  replacement
+    .crypto
+    .auxiliary_tls
+    .certificate_compression
+    .enabled = false;
+  replacements.push(replacement);
+
+  let mut replacement = active.clone();
+  replacement.upstreams[0].tls.certificate_compression.enabled = false;
+  replacements.push(replacement);
+
+  let mut replacement = active.clone();
+  replacement.shared_state.backends[0]
+    .redis_tls
+    .certificate_compression
+    .enabled = false;
+  replacements.push(replacement);
+
+  for replacement in replacements {
+    assert_eq!(
+      classify_full_reload_runtime_compatibility(&active, &replacement),
+      FullReloadCompatibility::RestartRequired(
+        FullReloadRestartReason::CertificateCompressionPolicy,
+      )
+    );
+  }
+
+  let mut downstream_only = active.clone();
+  downstream_only.tls.certificate_compression.enabled = false;
+  assert_eq!(
+    classify_full_reload_runtime_compatibility(&active, &downstream_only),
+    FullReloadCompatibility::InProcess
+  );
+}
+
+#[test]
 fn full_reload_accepts_pq_discovery_runtime_servers() {
   let mut configured = parse_secp256r1_mlkem768_reload_config();
   configured.upstream_pools[0].discovery[0]

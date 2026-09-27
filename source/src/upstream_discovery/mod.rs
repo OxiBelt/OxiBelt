@@ -37,12 +37,15 @@ pub(crate) fn build_discovery_control_http(
     .auxiliary_tls
     .enable_secp256r1mlkem768
     == discovery.tls.enable_secp256r1mlkem768
+    && snapshot.config.crypto.auxiliary_tls.certificate_compression
+      == discovery.tls.certificate_compression
   {
     // Preserve the existing connection pool and root-loading lifecycle when policies match.
     return Ok(snapshot.control_http.clone());
   }
   let mut crypto = snapshot.config.crypto.clone();
   crypto.auxiliary_tls.enable_secp256r1mlkem768 = discovery.tls.enable_secp256r1mlkem768;
+  crypto.auxiliary_tls.certificate_compression = discovery.tls.certificate_compression.clone();
   ControlHttpClient::new_with_crypto_and_revocation(
     &snapshot.config.proxy.trusted_ca_certs,
     &crypto,

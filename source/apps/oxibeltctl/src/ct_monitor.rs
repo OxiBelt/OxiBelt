@@ -17,6 +17,7 @@ use oxibelt::ct::rfc6962::{
   GetSthConsistencyResponseV1, GetSthResponseV1, HASH_ALGORITHM_SHA256, SIGNATURE_ALGORITHM_ECDSA,
   encode_sth_signed_input,
 };
+use oxibelt_tls_cert_compression::apply_client;
 use rustls::pki_types::{CertificateDer, pem::PemObject as _};
 use rustls::{ClientConfig, RootCertStore};
 use serde::{Deserialize, Serialize};
@@ -193,13 +194,15 @@ fn build_client(
       );
     }
   }
-  let tls = ClientConfig::builder_with_provider(
+  let mut tls = ClientConfig::builder_with_provider(
     oxibelt::tls::aws_lc_provider_with_secp256r1mlkem768(enable_secp256r1mlkem768).into(),
   )
   .with_safe_default_protocol_versions()
   .context("failed to configure CT monitor TLS versions")?
   .with_root_certificates(roots)
   .with_no_client_auth();
+  apply_client(&mut tls, crate::auxiliary_certificate_compression_policy())
+    .map_err(|error| anyhow!("invalid CT monitor certificate compression policy: {error}"))?;
   let mut http = HttpConnector::new();
   http.enforce_http(false);
   http.set_connect_timeout(Some(Duration::from_secs(5)));

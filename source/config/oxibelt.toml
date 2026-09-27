@@ -156,6 +156,10 @@ primitive_backend = "auto" # auto | hardware | software | soft | exact backend
 # This is separate from downstream, upstream, Admin, and Redis TLS policies.
 enable_secp256r1mlkem768 = false
 
+[crypto.auxiliary_tls.certificate_compression]
+enabled = true
+algorithms = ["zstd", "brotli", "zlib"]
+
 [crypto.primitives]
 aes_gcm = "rustcrypto" # rustcrypto | aws_lc_rs
 chacha20poly1305 = "rustcrypto" # rustcrypto | aws_lc_rs
@@ -183,6 +187,10 @@ max_version = "tls1.3"
 ssl_early_data = "off" # off | safe_methods | on
 session_tickets = true
 session_ticket_rotation_seconds = 86400
+
+[tls.certificate_compression]
+enabled = true
+algorithms = ["zstd", "brotli", "zlib"]
 
 [tls.1_3]
 # RFC 10024 SecP256r1MLKEM768 is intentionally excluded by default; add
@@ -1101,6 +1109,10 @@ session_tickets = false
 require_sni = true
 reject_unknown_sni = true
 
+[admin.tls.certificate_compression]
+enabled = true
+algorithms = ["zstd", "brotli", "zlib"]
+
 [admin.tls.resumption]
 mode = "off" # off | stateful | stateless
 session_cache_size = 1024
@@ -1316,6 +1328,9 @@ reload = "fail_open"
 # # client_cert = "redis/cluster/client.pem" # optional mTLS
 # # client_key = "redis/cluster/client-key.pem"
 # # server_spki_sha256 = ["sha256/<base64-encoded-32-byte-SPKI-hash>"]
+# [shared_state.backends.redis_tls.certificate_compression]
+# enabled = true
+# algorithms = ["zstd", "brotli", "zlib"]
 #
 # [shared_state.backends.redis_auth]
 # # username_file = "redis/cluster/username" # optional Redis ACL username
@@ -1524,6 +1539,10 @@ proxy_protocol_egress = "off"
 [upstreams.tls]
 # RFC 10024 SecP256r1MLKEM768 is disabled unless this upstream opts in.
 enable_secp256r1mlkem768 = false
+
+[upstreams.tls.certificate_compression]
+enabled = true
+algorithms = ["zstd", "brotli", "zlib"]
 
 [upstreams.tls.ech]
 mode = "disabled"

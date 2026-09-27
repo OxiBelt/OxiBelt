@@ -14,6 +14,7 @@ use hyper_rustls::{FixedServerNameResolver, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 
 use crate::config::{
   CryptoConfig, OutboundTlsRevocationConfig, UpstreamEchConfig, UpstreamTlsConfig,
@@ -54,7 +55,19 @@ impl ControlHttpClient {
     extra_root_certs: &[std::path::PathBuf],
     enabled: bool,
   ) -> anyhow::Result<Self> {
-    let crypto = auxiliary_crypto_config(enabled);
+    Self::new_with_auxiliary_tls_policy(
+      extra_root_certs,
+      enabled,
+      &CertificateCompressionPolicy::default(),
+    )
+  }
+
+  pub fn new_with_auxiliary_tls_policy(
+    extra_root_certs: &[std::path::PathBuf],
+    enabled: bool,
+    certificate_compression: &CertificateCompressionPolicy,
+  ) -> anyhow::Result<Self> {
+    let crypto = auxiliary_crypto_config(enabled, certificate_compression);
     Self::new_with_crypto(extra_root_certs, &crypto)
   }
 
@@ -130,8 +143,19 @@ impl ControlHttpClient {
     Self::new_webpki_only_with_crypto(&crypto)
   }
 
+  #[cfg(test)]
   pub(crate) fn new_webpki_only_with_auxiliary_tls(enabled: bool) -> anyhow::Result<Self> {
-    let crypto = auxiliary_crypto_config(enabled);
+    Self::new_webpki_only_with_auxiliary_tls_policy(
+      enabled,
+      &CertificateCompressionPolicy::default(),
+    )
+  }
+
+  pub(crate) fn new_webpki_only_with_auxiliary_tls_policy(
+    enabled: bool,
+    certificate_compression: &CertificateCompressionPolicy,
+  ) -> anyhow::Result<Self> {
+    let crypto = auxiliary_crypto_config(enabled, certificate_compression);
     Self::new_webpki_only_with_crypto(&crypto)
   }
 
@@ -212,9 +236,13 @@ impl ControlHttpClient {
   }
 }
 
-fn auxiliary_crypto_config(enabled: bool) -> CryptoConfig {
+fn auxiliary_crypto_config(
+  enabled: bool,
+  certificate_compression: &CertificateCompressionPolicy,
+) -> CryptoConfig {
   let mut crypto = CryptoConfig::default();
   crypto.auxiliary_tls.enable_secp256r1mlkem768 = enabled;
+  crypto.auxiliary_tls.certificate_compression = certificate_compression.clone();
   crypto
 }
 

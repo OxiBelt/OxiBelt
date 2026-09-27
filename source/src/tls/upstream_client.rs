@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, anyhow, bail};
 use h3_quinn::quinn::ClientConfig as QuinnClientConfig;
 use h3_quinn::quinn::crypto::rustls::QuicClientConfig;
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use rustls::ClientConfig;
 use rustls::client::{EchConfig, EchGreaseConfig, EchMode, Resumption};
 use rustls::crypto::hpke::Hpke;
@@ -172,6 +173,10 @@ pub(crate) fn build_webpki_client_config_with_crypto(
     .context("failed to configure WebPKI TLS versions")?;
   let mut client_config = builder.with_root_certificates(roots).with_no_client_auth();
   client_config.resumption = upstream_client_resumption(&UpstreamTlsResumptionConfig::default());
+  super::apply_client_certificate_compression(
+    &mut client_config,
+    &crypto.auxiliary_tls.certificate_compression,
+  )?;
   Ok(client_config)
 }
 
@@ -204,6 +209,7 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
 ) -> anyhow::Result<ClientConfig> {
   build_upstream_client_config_with_trust(
     crypto,
+    &crypto.auxiliary_tls.certificate_compression,
     crypto.auxiliary_tls.enable_secp256r1mlkem768,
     extra_root_certificates,
     UpstreamTlsTrust::Inherit,
@@ -220,6 +226,7 @@ pub(crate) fn build_upstream_client_config_with_crypto_resumption_and_revocation
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_upstream_client_config_with_trust(
   crypto: &CryptoConfig,
+  certificate_compression: &CertificateCompressionPolicy,
   enable_secp256r1mlkem768: bool,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
@@ -233,6 +240,7 @@ pub(super) fn build_upstream_client_config_with_trust(
 ) -> anyhow::Result<ClientConfig> {
   build_upstream_client_config_with_trust_scope(
     crypto,
+    certificate_compression,
     enable_secp256r1mlkem768,
     extra_root_certificates,
     trust,
@@ -256,6 +264,7 @@ pub(super) fn build_upstream_client_config_with_trust(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_upstream_h2_webtransport_client_config_with_trust(
   crypto: &CryptoConfig,
+  certificate_compression: &CertificateCompressionPolicy,
   enable_secp256r1mlkem768: bool,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
@@ -269,6 +278,7 @@ pub(super) fn build_upstream_h2_webtransport_client_config_with_trust(
 ) -> anyhow::Result<ClientConfig> {
   let mut config = build_upstream_client_config_with_trust_scope(
     crypto,
+    certificate_compression,
     enable_secp256r1mlkem768,
     extra_root_certificates,
     trust,
@@ -289,6 +299,7 @@ pub(super) fn build_upstream_h2_webtransport_client_config_with_trust(
 #[allow(clippy::too_many_arguments)]
 fn build_upstream_client_config_with_trust_scope(
   crypto: &CryptoConfig,
+  certificate_compression: &CertificateCompressionPolicy,
   enable_secp256r1mlkem768: bool,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
@@ -310,6 +321,7 @@ fn build_upstream_client_config_with_trust_scope(
   if client_identity.is_some() {
     return build_uncached_upstream_client_config(
       crypto,
+      certificate_compression,
       enable_secp256r1mlkem768,
       extra_root_certificates,
       trust,
@@ -325,6 +337,7 @@ fn build_upstream_client_config_with_trust_scope(
     scope,
     crypto.tls_provider,
     enable_secp256r1mlkem768,
+    certificate_compression,
     upstream_name,
     extra_root_certificates,
     trust,
@@ -338,6 +351,7 @@ fn build_upstream_client_config_with_trust_scope(
     return state.upstream_client_config(key, || {
       build_uncached_upstream_client_config(
         crypto,
+        certificate_compression,
         enable_secp256r1mlkem768,
         extra_root_certificates,
         trust,
@@ -352,6 +366,7 @@ fn build_upstream_client_config_with_trust_scope(
   }
   build_uncached_upstream_client_config(
     crypto,
+    certificate_compression,
     enable_secp256r1mlkem768,
     extra_root_certificates,
     trust,
@@ -367,6 +382,7 @@ fn build_upstream_client_config_with_trust_scope(
 #[allow(clippy::too_many_arguments)]
 fn build_uncached_upstream_client_config(
   crypto: &CryptoConfig,
+  certificate_compression: &CertificateCompressionPolicy,
   enable_secp256r1mlkem768: bool,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
@@ -440,6 +456,7 @@ fn build_uncached_upstream_client_config(
   } else {
     effective_upstream_client_resumption(resumption, revocation_enabled)
   };
+  super::apply_client_certificate_compression(&mut client_config, certificate_compression)?;
 
   Ok(client_config)
 }
@@ -545,6 +562,7 @@ pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revoc
 ) -> anyhow::Result<QuinnClientConfig> {
   build_upstream_quic_client_config_with_trust(
     crypto,
+    &crypto.auxiliary_tls.certificate_compression,
     false,
     extra_root_certificates,
     UpstreamTlsTrust::Inherit,
@@ -562,6 +580,7 @@ pub(crate) fn build_upstream_quic_client_config_with_crypto_resumption_and_revoc
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_upstream_quic_client_config_with_trust(
   crypto: &CryptoConfig,
+  certificate_compression: &CertificateCompressionPolicy,
   enable_secp256r1mlkem768: bool,
   extra_root_certificates: &[std::path::PathBuf],
   trust: UpstreamTlsTrust,
@@ -577,6 +596,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
   if client_identity.is_some() {
     let mut client_config = build_uncached_upstream_client_config(
       crypto,
+      certificate_compression,
       enable_secp256r1mlkem768,
       extra_root_certificates,
       trust,
@@ -594,6 +614,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
     "quic",
     crypto.tls_provider,
     enable_secp256r1mlkem768,
+    certificate_compression,
     upstream_name,
     extra_root_certificates,
     trust,
@@ -610,6 +631,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
     state.upstream_client_config(key, || {
       build_uncached_upstream_client_config(
         crypto,
+        certificate_compression,
         enable_secp256r1mlkem768,
         extra_root_certificates,
         trust,
@@ -624,6 +646,7 @@ pub(super) fn build_upstream_quic_client_config_with_trust(
   } else {
     build_uncached_upstream_client_config(
       crypto,
+      certificate_compression,
       enable_secp256r1mlkem768,
       extra_root_certificates,
       trust,
@@ -719,10 +742,58 @@ mod tests {
   };
   use crate::metrics::Metrics;
   use h3_quinn::quinn::Endpoint;
+  use oxibelt_tls_cert_compression::{Algorithm, CertificateCompressionPolicy};
   use rustls::HandshakeKind;
   use tokio::io::{AsyncReadExt, AsyncWriteExt};
   use tokio::net::{TcpListener, TcpStream};
   use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+  #[test]
+  fn upstream_client_cache_isolates_certificate_compression_policy() {
+    let crypto = CryptoConfig::default();
+    let state = TlsResumptionState::default();
+    let mut policy = UpstreamTlsConfig {
+      certificate_compression: CertificateCompressionPolicy {
+        enabled: true,
+        algorithms: vec![Algorithm::Brotli, Algorithm::Zstd],
+      },
+      ..Default::default()
+    };
+    let enabled = crate::tls::build_upstream_client_config_with_policy(
+      &crypto,
+      &[],
+      &policy,
+      Some(&state),
+      "certificate-compression-cache",
+      None,
+    )
+    .expect("enabled TLS client should build");
+    assert_eq!(
+      enabled
+        .cert_decompressors
+        .iter()
+        .map(|codec| codec.algorithm())
+        .collect::<Vec<_>>(),
+      vec![
+        rustls::CertificateCompressionAlgorithm::Brotli,
+        rustls::CertificateCompressionAlgorithm::Zstd,
+      ]
+    );
+
+    policy.certificate_compression.enabled = false;
+    let disabled = crate::tls::build_upstream_client_config_with_policy(
+      &crypto,
+      &[],
+      &policy,
+      Some(&state),
+      "certificate-compression-cache",
+      None,
+    )
+    .expect("disabled TLS client should build");
+    assert!(disabled.cert_compressors.is_empty());
+    assert!(disabled.cert_decompressors.is_empty());
+    assert_eq!(state.upstream_client_config_count(), 2);
+  }
 
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   async fn secp256r1mlkem768_upstream_and_auxiliary_policies_are_independent() {
@@ -936,6 +1007,7 @@ mod tests {
     let resumption = TlsResumptionState::default();
     let client = build_upstream_client_config_with_trust(
       &CryptoConfig::default(),
+      &policy.certificate_compression,
       false,
       std::slice::from_ref(&ca_cert),
       UpstreamTlsTrust::Inherit,
@@ -997,6 +1069,7 @@ mod tests {
     };
     let authenticated = build_upstream_client_config_with_trust(
       &CryptoConfig::default(),
+      &policy.certificate_compression,
       false,
       std::slice::from_ref(&ca_cert),
       UpstreamTlsTrust::Inherit,
@@ -1016,6 +1089,7 @@ mod tests {
 
     let unauthenticated = build_upstream_client_config_with_trust(
       &CryptoConfig::default(),
+      &policy.certificate_compression,
       false,
       std::slice::from_ref(&ca_cert),
       UpstreamTlsTrust::Inherit,
@@ -1114,6 +1188,7 @@ mod tests {
       };
       build_upstream_client_config_with_trust(
         &CryptoConfig::default(),
+        &policy.certificate_compression,
         false,
         roots,
         UpstreamTlsTrust::Inherit,
@@ -1407,6 +1482,7 @@ request_timeout_ms = 1
       session_tickets: true,
       session_ticket_rotation_seconds: 86_400,
       resumption: Default::default(),
+      certificate_compression: CertificateCompressionPolicy::default(),
       client_auth: TlsClientAuthConfig::default(),
       ocsp: OcspConfig::default(),
       crlite: crate::config::CrliteConfig::default(),

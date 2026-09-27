@@ -2459,6 +2459,50 @@
           "additionalProperties": false,
           "description": "OxiBelt native field `admin.tls`. Production Rust validation is authoritative.",
           "properties": {
+            "certificate_compression": {
+              "additionalProperties": false,
+              "description": "OxiBelt native field `admin.tls.certificate_compression`. Production Rust validation is authoritative.",
+              "properties": {
+                "algorithms": {
+                  "default": [
+                    "zstd",
+                    "brotli",
+                    "zlib"
+                  ],
+                  "description": "OxiBelt native field `admin.tls.certificate_compression.algorithms`. Production Rust validation is authoritative.",
+                  "items": {
+                    "enum": [
+                      "zstd",
+                      "brotli",
+                      "zlib"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true,
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "enabled": {
+                  "default": true,
+                  "description": "OxiBelt native field `admin.tls.certificate_compression.enabled`. Production Rust validation is authoritative.",
+                  "type": "boolean",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                }
+              },
+              "type": "object",
+              "x-oxibelt-config-activation": "restart_required",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
             "certificates": {
               "description": "OxiBelt native field `admin.tls.certificates`. Production Rust validation is authoritative.",
               "items": {
@@ -8682,6 +8726,50 @@
           "additionalProperties": false,
           "description": "OxiBelt native field `crypto.auxiliary_tls`. Production Rust validation is authoritative.",
           "properties": {
+            "certificate_compression": {
+              "additionalProperties": false,
+              "description": "OxiBelt native field `crypto.auxiliary_tls.certificate_compression`. Production Rust validation is authoritative.",
+              "properties": {
+                "algorithms": {
+                  "default": [
+                    "zstd",
+                    "brotli",
+                    "zlib"
+                  ],
+                  "description": "OxiBelt native field `crypto.auxiliary_tls.certificate_compression.algorithms`. Production Rust validation is authoritative.",
+                  "items": {
+                    "enum": [
+                      "zstd",
+                      "brotli",
+                      "zlib"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true,
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                },
+                "enabled": {
+                  "default": true,
+                  "description": "OxiBelt native field `crypto.auxiliary_tls.certificate_compression.enabled`. Production Rust validation is authoritative.",
+                  "type": "boolean",
+                  "x-oxibelt-config-activation": "restart_required",
+                  "x-oxibelt-introduced-epoch": 1,
+                  "x-oxibelt-reference-activation": "none",
+                  "x-oxibelt-secret-class": "none"
+                }
+              },
+              "type": "object",
+              "x-oxibelt-config-activation": "restart_required",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
             "enable_secp256r1mlkem768": {
               "default": false,
               "description": "OxiBelt native field `crypto.auxiliary_tls.enable_secp256r1mlkem768`. Production Rust validation is authoritative.",
@@ -23816,6 +23904,50 @@
                     "x-oxibelt-reference-activation": "none",
                     "x-oxibelt-secret-class": "none"
                   },
+                  "certificate_compression": {
+                    "additionalProperties": false,
+                    "description": "OxiBelt native field `shared_state.backends[].redis_tls.certificate_compression`. Production Rust validation is authoritative.",
+                    "properties": {
+                      "algorithms": {
+                        "default": [
+                          "zstd",
+                          "brotli",
+                          "zlib"
+                        ],
+                        "description": "OxiBelt native field `shared_state.backends[].redis_tls.certificate_compression.algorithms`. Production Rust validation is authoritative.",
+                        "items": {
+                          "enum": [
+                            "zstd",
+                            "brotli",
+                            "zlib"
+                          ],
+                          "type": "string"
+                        },
+                        "maxItems": 3,
+                        "minItems": 1,
+                        "type": "array",
+                        "uniqueItems": true,
+                        "x-oxibelt-config-activation": "restart_required",
+                        "x-oxibelt-introduced-epoch": 1,
+                        "x-oxibelt-reference-activation": "none",
+                        "x-oxibelt-secret-class": "none"
+                      },
+                      "enabled": {
+                        "default": true,
+                        "description": "OxiBelt native field `shared_state.backends[].redis_tls.certificate_compression.enabled`. Production Rust validation is authoritative.",
+                        "type": "boolean",
+                        "x-oxibelt-config-activation": "restart_required",
+                        "x-oxibelt-introduced-epoch": 1,
+                        "x-oxibelt-reference-activation": "none",
+                        "x-oxibelt-secret-class": "none"
+                      }
+                    },
+                    "type": "object",
+                    "x-oxibelt-config-activation": "restart_required",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
                   "client_cert": {
                     "anyOf": [
                       {
@@ -26220,6 +26352,50 @@
           "x-oxibelt-reference-activation": "none",
           "x-oxibelt-secret-class": "none"
         },
+        "certificate_compression": {
+          "additionalProperties": false,
+          "description": "OxiBelt native field `tls.certificate_compression`. Production Rust validation is authoritative.",
+          "properties": {
+            "algorithms": {
+              "default": [
+                "zstd",
+                "brotli",
+                "zlib"
+              ],
+              "description": "OxiBelt native field `tls.certificate_compression.algorithms`. Production Rust validation is authoritative.",
+              "items": {
+                "enum": [
+                  "zstd",
+                  "brotli",
+                  "zlib"
+                ],
+                "type": "string"
+              },
+              "maxItems": 3,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true,
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            },
+            "enabled": {
+              "default": true,
+              "description": "OxiBelt native field `tls.certificate_compression.enabled`. Production Rust validation is authoritative.",
+              "type": "boolean",
+              "x-oxibelt-config-activation": "full_reload",
+              "x-oxibelt-introduced-epoch": 1,
+              "x-oxibelt-reference-activation": "none",
+              "x-oxibelt-secret-class": "none"
+            }
+          },
+          "type": "object",
+          "x-oxibelt-config-activation": "full_reload",
+          "x-oxibelt-introduced-epoch": 1,
+          "x-oxibelt-reference-activation": "none",
+          "x-oxibelt-secret-class": "none"
+        },
         "certificates": {
           "description": "OxiBelt native field `tls.certificates`. Production Rust validation is authoritative.",
           "items": {
@@ -27955,6 +28131,50 @@
                   "additionalProperties": false,
                   "description": "OxiBelt native field `turn_upstream_pools[].servers[].tls`. Production Rust validation is authoritative.",
                   "properties": {
+                    "certificate_compression": {
+                      "additionalProperties": false,
+                      "description": "OxiBelt native field `turn_upstream_pools[].servers[].tls.certificate_compression`. Production Rust validation is authoritative.",
+                      "properties": {
+                        "algorithms": {
+                          "default": [
+                            "zstd",
+                            "brotli",
+                            "zlib"
+                          ],
+                          "description": "OxiBelt native field `turn_upstream_pools[].servers[].tls.certificate_compression.algorithms`. Production Rust validation is authoritative.",
+                          "items": {
+                            "enum": [
+                              "zstd",
+                              "brotli",
+                              "zlib"
+                            ],
+                            "type": "string"
+                          },
+                          "maxItems": 3,
+                          "minItems": 1,
+                          "type": "array",
+                          "uniqueItems": true,
+                          "x-oxibelt-config-activation": "restart_required",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        },
+                        "enabled": {
+                          "default": true,
+                          "description": "OxiBelt native field `turn_upstream_pools[].servers[].tls.certificate_compression.enabled`. Production Rust validation is authoritative.",
+                          "type": "boolean",
+                          "x-oxibelt-config-activation": "restart_required",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        }
+                      },
+                      "type": "object",
+                      "x-oxibelt-config-activation": "restart_required",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
                     "client_identity": {
                       "additionalProperties": false,
                       "description": "OxiBelt native field `turn_upstream_pools[].servers[].tls.client_identity`. Production Rust validation is authoritative.",
@@ -29405,6 +29625,50 @@
                   "additionalProperties": false,
                   "description": "OxiBelt native field `upstream_pools[].discovery[].tls`. Production Rust validation is authoritative.",
                   "properties": {
+                    "certificate_compression": {
+                      "additionalProperties": false,
+                      "description": "OxiBelt native field `upstream_pools[].discovery[].tls.certificate_compression`. Production Rust validation is authoritative.",
+                      "properties": {
+                        "algorithms": {
+                          "default": [
+                            "zstd",
+                            "brotli",
+                            "zlib"
+                          ],
+                          "description": "OxiBelt native field `upstream_pools[].discovery[].tls.certificate_compression.algorithms`. Production Rust validation is authoritative.",
+                          "items": {
+                            "enum": [
+                              "zstd",
+                              "brotli",
+                              "zlib"
+                            ],
+                            "type": "string"
+                          },
+                          "maxItems": 3,
+                          "minItems": 1,
+                          "type": "array",
+                          "uniqueItems": true,
+                          "x-oxibelt-config-activation": "restart_required",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        },
+                        "enabled": {
+                          "default": true,
+                          "description": "OxiBelt native field `upstream_pools[].discovery[].tls.certificate_compression.enabled`. Production Rust validation is authoritative.",
+                          "type": "boolean",
+                          "x-oxibelt-config-activation": "restart_required",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        }
+                      },
+                      "type": "object",
+                      "x-oxibelt-config-activation": "restart_required",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
                     "client_identity": {
                       "additionalProperties": false,
                       "description": "OxiBelt native field `upstream_pools[].discovery[].tls.client_identity`. Production Rust validation is authoritative.",
@@ -31231,6 +31495,50 @@
                   "additionalProperties": false,
                   "description": "OxiBelt native field `upstream_pools[].servers[].tls`. Production Rust validation is authoritative.",
                   "properties": {
+                    "certificate_compression": {
+                      "additionalProperties": false,
+                      "description": "OxiBelt native field `upstream_pools[].servers[].tls.certificate_compression`. Production Rust validation is authoritative.",
+                      "properties": {
+                        "algorithms": {
+                          "default": [
+                            "zstd",
+                            "brotli",
+                            "zlib"
+                          ],
+                          "description": "OxiBelt native field `upstream_pools[].servers[].tls.certificate_compression.algorithms`. Production Rust validation is authoritative.",
+                          "items": {
+                            "enum": [
+                              "zstd",
+                              "brotli",
+                              "zlib"
+                            ],
+                            "type": "string"
+                          },
+                          "maxItems": 3,
+                          "minItems": 1,
+                          "type": "array",
+                          "uniqueItems": true,
+                          "x-oxibelt-config-activation": "restart_required",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        },
+                        "enabled": {
+                          "default": true,
+                          "description": "OxiBelt native field `upstream_pools[].servers[].tls.certificate_compression.enabled`. Production Rust validation is authoritative.",
+                          "type": "boolean",
+                          "x-oxibelt-config-activation": "restart_required",
+                          "x-oxibelt-introduced-epoch": 1,
+                          "x-oxibelt-reference-activation": "none",
+                          "x-oxibelt-secret-class": "none"
+                        }
+                      },
+                      "type": "object",
+                      "x-oxibelt-config-activation": "restart_required",
+                      "x-oxibelt-introduced-epoch": 1,
+                      "x-oxibelt-reference-activation": "none",
+                      "x-oxibelt-secret-class": "none"
+                    },
                     "client_identity": {
                       "additionalProperties": false,
                       "description": "OxiBelt native field `upstream_pools[].servers[].tls.client_identity`. Production Rust validation is authoritative.",
@@ -32190,6 +32498,50 @@
             "additionalProperties": false,
             "description": "OxiBelt native field `upstreams[].tls`. Production Rust validation is authoritative.",
             "properties": {
+              "certificate_compression": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `upstreams[].tls.certificate_compression`. Production Rust validation is authoritative.",
+                "properties": {
+                  "algorithms": {
+                    "default": [
+                      "zstd",
+                      "brotli",
+                      "zlib"
+                    ],
+                    "description": "OxiBelt native field `upstreams[].tls.certificate_compression.algorithms`. Production Rust validation is authoritative.",
+                    "items": {
+                      "enum": [
+                        "zstd",
+                        "brotli",
+                        "zlib"
+                      ],
+                      "type": "string"
+                    },
+                    "maxItems": 3,
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true,
+                    "x-oxibelt-config-activation": "restart_required",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "enabled": {
+                    "default": true,
+                    "description": "OxiBelt native field `upstreams[].tls.certificate_compression.enabled`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "restart_required",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
+                "x-oxibelt-config-activation": "restart_required",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
               "client_identity": {
                 "additionalProperties": false,
                 "description": "OxiBelt native field `upstreams[].tls.client_identity`. Production Rust validation is authoritative.",
@@ -34252,6 +34604,44 @@
                   }
                 ],
                 "description": "OxiBelt native field `webrtc_turn_listeners[].tls.cert_chain`. Production Rust validation is authoritative.",
+                "x-oxibelt-config-activation": "full_reload",
+                "x-oxibelt-introduced-epoch": 1,
+                "x-oxibelt-reference-activation": "none",
+                "x-oxibelt-secret-class": "none"
+              },
+              "certificate_compression": {
+                "additionalProperties": false,
+                "description": "OxiBelt native field `webrtc_turn_listeners[].tls.certificate_compression`. Production Rust validation is authoritative.",
+                "properties": {
+                  "algorithms": {
+                    "description": "OxiBelt native field `webrtc_turn_listeners[].tls.certificate_compression.algorithms`. Production Rust validation is authoritative.",
+                    "items": {
+                      "enum": [
+                        "zstd",
+                        "brotli",
+                        "zlib"
+                      ],
+                      "type": "string"
+                    },
+                    "maxItems": 3,
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true,
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  },
+                  "enabled": {
+                    "description": "OxiBelt native field `webrtc_turn_listeners[].tls.certificate_compression.enabled`. Production Rust validation is authoritative.",
+                    "type": "boolean",
+                    "x-oxibelt-config-activation": "full_reload",
+                    "x-oxibelt-introduced-epoch": 1,
+                    "x-oxibelt-reference-activation": "none",
+                    "x-oxibelt-secret-class": "none"
+                  }
+                },
+                "type": "object",
                 "x-oxibelt-config-activation": "full_reload",
                 "x-oxibelt-introduced-epoch": 1,
                 "x-oxibelt-reference-activation": "none",

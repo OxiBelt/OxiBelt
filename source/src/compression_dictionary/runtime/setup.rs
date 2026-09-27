@@ -89,10 +89,11 @@ pub(super) fn build_storage(
         .iter()
         .find(|value| value.name == *name)
         .context("dictionary external handler is absent")?;
-      let client = ExternalCacheHttpClient::new(
+      let client = ExternalCacheHttpClient::new_with_auxiliary_policy(
         handler,
         &config.proxy.trusted_ca_certs,
         config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+        &config.crypto.auxiliary_tls.certificate_compression,
         config.proxy.buffering.max_memory_body_bytes,
         usize::try_from(store.quota_bytes)
           .context("dictionary external quota exceeds platform limit")?,

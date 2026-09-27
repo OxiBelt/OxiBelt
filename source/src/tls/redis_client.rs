@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, anyhow, bail};
+use oxibelt_tls_cert_compression::CertificateCompressionPolicy;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::{Resumption, WebPkiServerVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -73,6 +74,7 @@ impl fmt::Debug for RedisTlsClientConfig {
 pub(crate) struct RedisTlsIdentity {
   pub(crate) tls_provider: TlsCryptoProvider,
   pub(crate) enable_secp256r1mlkem768: bool,
+  pub(crate) certificate_compression: CertificateCompressionPolicy,
   pub(crate) trust_store: RedisTrustStore,
   pub(crate) server_name: String,
   pub(crate) ca_cert: Option<std::path::PathBuf>,
@@ -132,12 +134,14 @@ pub(crate) fn build_redis_tls_client_config(
   // Pooled Redis sockets make resumption savings negligible, and disabling it
   // ensures every new physical socket re-runs certificate and pin verification.
   config.resumption = Resumption::disabled();
+  super::apply_client_certificate_compression(&mut config, &tls.certificate_compression)?;
   Ok(RedisTlsClientConfig {
     config: Arc::new(config),
     server_name,
     identity: RedisTlsIdentity {
       tls_provider: crypto.tls_provider,
       enable_secp256r1mlkem768: tls.enable_secp256r1mlkem768,
+      certificate_compression: tls.certificate_compression.clone(),
       trust_store: tls.trust_store,
       server_name: server_name_text.to_string(),
       ca_cert: tls.ca_cert.clone(),

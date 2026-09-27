@@ -9,6 +9,28 @@ use super::{
   UpstreamTlsClientIdentityConfig, UpstreamTlsConfig, UpstreamTlsSubjectAltName, UpstreamTlsTrust,
 };
 
+#[test]
+fn certificate_compression_policy_validates_upstream_configuration() {
+  let default: UpstreamTlsConfig = toml::from_str("").expect("default policy parses");
+  assert_eq!(
+    default.certificate_compression.algorithms,
+    vec![
+      oxibelt_tls_cert_compression::Algorithm::Zstd,
+      oxibelt_tls_cert_compression::Algorithm::Brotli,
+      oxibelt_tls_cert_compression::Algorithm::Zlib,
+    ]
+  );
+  for algorithms in ["[]", "[\"zstd\", \"zstd\"]"] {
+    let source = format!("[certificate_compression]\nalgorithms = {algorithms}");
+    let policy: UpstreamTlsConfig = toml::from_str(&source).expect("known algorithms parse");
+    assert!(policy.validate("test").is_err());
+  }
+  assert!(
+    toml::from_str::<UpstreamTlsConfig>("[certificate_compression]\nalgorithms = [\"unknown\"]")
+      .is_err()
+  );
+}
+
 fn ca_file(label: &str, bytes: &[u8]) -> PathBuf {
   let path = std::env::temp_dir().join(format!(
     "oxibelt-upstream-tls-{label}-{}-{}",

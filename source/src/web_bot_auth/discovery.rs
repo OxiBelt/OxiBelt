@@ -101,7 +101,10 @@ pub struct DiscoveryRuntime {
 }
 
 impl DiscoveryRuntime {
-  pub fn new(config: &WebBotAuthConfig) -> anyhow::Result<Self> {
+  pub fn new(
+    config: &WebBotAuthConfig,
+    certificate_compression: &oxibelt_tls_cert_compression::CertificateCompressionPolicy,
+  ) -> anyhow::Result<Self> {
     let mut nonstandard_origins = HashSet::new();
     for origin in &config.nonstandard_port_origins {
       let parsed = Url::parse(origin)?;
@@ -120,13 +123,14 @@ impl DiscoveryRuntime {
     }
 
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
       rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
     .map_err(|_| anyhow::anyhow!("Web Bot Auth TLS protocol versions are unavailable"))?
     .with_root_certificates(roots)
     .with_no_client_auth();
+    crate::tls::apply_client_certificate_compression(&mut tls, certificate_compression)?;
     Ok(Self {
       tls: Arc::new(tls),
       nonstandard_origins,

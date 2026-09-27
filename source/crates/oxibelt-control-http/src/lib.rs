@@ -18,6 +18,7 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
+use oxibelt_tls_cert_compression::{CertificateCompressionPolicy, apply_client};
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 
@@ -27,6 +28,13 @@ pub type ControlBody = BoxBody<Bytes, BoxError>;
 #[derive(Clone)]
 pub struct ControlHttpClient {
   client: Client<hyper_rustls::HttpsConnector<HttpConnector>, ControlBody>,
+}
+
+/// TLS options for a control-plane HTTPS client.
+#[derive(Clone, Debug, Default)]
+pub struct ControlHttpTlsOptions {
+  pub enable_secp256r1mlkem768: bool,
+  pub certificate_compression: CertificateCompressionPolicy,
 }
 
 #[derive(Debug)]
@@ -81,6 +89,20 @@ impl ControlHttpClient {
     extra_root_certs: &[std::path::PathBuf],
     enable_secp256r1mlkem768: bool,
   ) -> anyhow::Result<Self> {
+    Self::new_with_tls_options(
+      extra_root_certs,
+      &ControlHttpTlsOptions {
+        enable_secp256r1mlkem768,
+        ..ControlHttpTlsOptions::default()
+      },
+    )
+  }
+
+  /// Build a client with explicit key-exchange and certificate-compression policy.
+  pub fn new_with_tls_options(
+    extra_root_certs: &[std::path::PathBuf],
+    options: &ControlHttpTlsOptions,
+  ) -> anyhow::Result<Self> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     for path in extra_root_certs {
@@ -97,7 +119,7 @@ impl ControlHttpClient {
       }
     }
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();
-    if enable_secp256r1mlkem768
+    if options.enable_secp256r1mlkem768
       && !provider
         .kx_groups
         .iter()
@@ -114,11 +136,13 @@ impl ControlHttpClient {
       );
     }
     let provider = Arc::new(provider);
-    let tls_config = rustls::ClientConfig::builder_with_provider(provider)
+    let mut tls_config = rustls::ClientConfig::builder_with_provider(provider)
       .with_safe_default_protocol_versions()
       .context("failed to configure control-plane TLS versions")?
       .with_root_certificates(roots)
       .with_no_client_auth();
+    apply_client(&mut tls_config, &options.certificate_compression)
+      .map_err(|error| anyhow!("invalid control-plane certificate compression policy: {error}"))?;
     Ok(Self::from_tls_config(tls_config))
   }
 

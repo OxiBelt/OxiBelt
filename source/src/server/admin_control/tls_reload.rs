@@ -16,6 +16,7 @@ pub(super) async fn build_downstream_tls_reload_configs(
   let crlite = crate::tls::CrliteRuntime::new_with_auxiliary_tls(
     &config.tls,
     config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+    &config.crypto.auxiliary_tls.certificate_compression,
     active.metrics.clone(),
   )
   .await
@@ -23,6 +24,7 @@ pub(super) async fn build_downstream_tls_reload_configs(
   let downstream_ct = crate::tls::DownstreamCtRuntime::new_with_auxiliary_tls(
     &config.tls,
     config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+    &config.crypto.auxiliary_tls.certificate_compression,
     active.metrics.clone(),
   )
   .await

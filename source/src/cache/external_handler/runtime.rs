@@ -67,10 +67,11 @@ impl ExternalCacheRuntime {
       let max_body_bytes = handler
         .max_body_bytes
         .unwrap_or(config.cache.max_size_bytes);
-      let client = ExternalCacheHttpClient::new(
+      let client = ExternalCacheHttpClient::new_with_auxiliary_policy(
         handler,
         &config.proxy.trusted_ca_certs,
         config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+        &config.crypto.auxiliary_tls.certificate_compression,
         config.proxy.buffering.max_memory_body_bytes,
         max_body_bytes,
       )?;

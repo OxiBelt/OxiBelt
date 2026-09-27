@@ -38,9 +38,25 @@
     "auxiliaryTls": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enableSecp256r1Mlkem768"],
+      "required": ["enableSecp256r1Mlkem768", "certificateCompression"],
       "properties": {
-        "enableSecp256r1Mlkem768": { "type": "boolean", "default": false }
+        "enableSecp256r1Mlkem768": { "type": "boolean", "default": false },
+        "certificateCompression": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "algorithms"],
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "algorithms": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 3,
+              "uniqueItems": true,
+              "items": { "enum": ["zstd", "brotli", "zlib"] },
+              "default": ["zstd", "brotli", "zlib"]
+            }
+          }
+        }
       }
     },
     "managedConfigPath": {

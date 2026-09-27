@@ -627,8 +627,9 @@ async fn load_managed_crlite_filters(
     return Ok((Vec::new(), None));
   }
   let remote_client =
-    crlite_managed::ManagedCrliteRemoteClient::new_webpki_only_with_auxiliary_tls(
+    crlite_managed::ManagedCrliteRemoteClient::new_webpki_only_with_auxiliary_tls_policy(
       config.crypto.auxiliary_tls.enable_secp256r1mlkem768,
+      &config.crypto.auxiliary_tls.certificate_compression,
     )
     .context("failed to build outbound managed CRLite HTTP client")?;
   let mut loaded = Vec::new();

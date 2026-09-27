@@ -14,6 +14,20 @@ The native configuration schema remains at epoch `1`, and no persisted-state
 migration is required. Before rolling back to a binary without this mode, select
 an older supported hot reload mode or `off` and validate the configuration.
 
+## TLS certificate compression
+
+RFC 8879 certificate compression is enabled by default for OxiBelt-owned TLS
+1.3 endpoints. The default preference is zstd, Brotli, then zlib. Peers that
+do not negotiate a shared algorithm continue using ordinary certificates.
+TLS 1.2 is unchanged. Review CPU and memory capacity for certificate-heavy
+handshakes, and set `certificate_compression.enabled = false` under any TLS
+policy that must retain uncompressed TLS 1.3 certificates. TURN TLS inherits
+the public policy unless a listener override is configured. The native schema
+remains at epoch `1`, and no persisted state migration is needed. Before
+rolling back to a binary without this feature, remove all
+`certificate_compression` tables from the native configuration and validate it
+with the target binary.
+
 ## Web Bot Auth
 
 Web Bot Auth verification is opt-in through `[web_bot_auth]` and defaults to

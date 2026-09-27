@@ -390,6 +390,24 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
   restart("turn_upstream_pools[].servers[].tls.enable_secp256r1mlkem768"),
   restart("shared_state.backends[].redis_tls.enable_secp256r1mlkem768"),
   restart("crypto.auxiliary_tls.enable_secp256r1mlkem768"),
+  full_reload("tls.certificate_compression"),
+  full_reload("tls.certificate_compression.*"),
+  full_reload("webrtc_turn_listeners[].tls.certificate_compression"),
+  full_reload("webrtc_turn_listeners[].tls.certificate_compression.*"),
+  restart("admin.tls.certificate_compression"),
+  restart("admin.tls.certificate_compression.*"),
+  restart("upstreams[].tls.certificate_compression"),
+  restart("upstreams[].tls.certificate_compression.*"),
+  restart("upstream_pools[].servers[].tls.certificate_compression"),
+  restart("upstream_pools[].servers[].tls.certificate_compression.*"),
+  restart("upstream_pools[].discovery[].tls.certificate_compression"),
+  restart("upstream_pools[].discovery[].tls.certificate_compression.*"),
+  restart("turn_upstream_pools[].servers[].tls.certificate_compression"),
+  restart("turn_upstream_pools[].servers[].tls.certificate_compression.*"),
+  restart("shared_state.backends[].redis_tls.certificate_compression"),
+  restart("shared_state.backends[].redis_tls.certificate_compression.*"),
+  restart("crypto.auxiliary_tls.certificate_compression"),
+  restart("crypto.auxiliary_tls.certificate_compression.*"),
   conditional("runtime.main_runtime"),
   conditional("runtime.topology_policy"),
   restart("runtime.worker_threads"),
@@ -888,6 +906,15 @@ fn schema_for_path(shape_path: &str, metadata_path: &str) -> Value {
 
 #[cfg(feature = "config-tooling")]
 fn scalar_schema(path: &str) -> Value {
+  if path.ends_with(".certificate_compression.algorithms") {
+    return json!({
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {"type": "string", "enum": ["zstd", "brotli", "zlib"]}
+    });
+  }
   if path == "compression_dictionary.dictionaries.sha256" {
     return json!({"type": "string", "pattern": "^[0-9a-f]{64}$"});
   }
@@ -1595,6 +1622,16 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
 
 #[cfg(feature = "config-tooling")]
 fn default_value(path: &str) -> Option<Value> {
+  if path.ends_with(".certificate_compression.enabled")
+    && !path.starts_with("webrtc_turn_listeners.")
+  {
+    return Some(json!(true));
+  }
+  if path.ends_with(".certificate_compression.algorithms")
+    && !path.starts_with("webrtc_turn_listeners.")
+  {
+    return Some(json!(["zstd", "brotli", "zlib"]));
+  }
   match path {
     "proxy.http2.webtransport.max_concurrent_uni_streams"
     | "proxy.http2.webtransport.max_concurrent_bidi_streams" => return Some(json!(100)),
