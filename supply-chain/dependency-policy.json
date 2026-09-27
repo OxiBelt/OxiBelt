@@ -128,7 +128,7 @@
         "upstreamRepository": "https://github.com/hyperium/h3",
         "upstreamArchiveSha256": "10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be",
         "manifestPath": "supply-chain/h3-source.sha256",
-        "manifestSha256": "155cd2ece930563f5e88adb8f72d535ea167675effbf8f706b60e3fc0edbaa0b",
+        "manifestSha256": "1183d41d7d72a64a26821dfd4e58cec66d57ed22bf80978d2d60a71fd892f84f",
         "license": "MIT",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/220",
