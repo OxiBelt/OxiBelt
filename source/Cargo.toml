@@ -102,6 +102,7 @@ crc32fast = "1.5.2"
 memchr = "2.8.3"
 online-dsl-forge = "0.3.3"
 oxibelt-build-identity.workspace = true
+oxibelt-admission-policy.workspace = true
 oxibelt-control-protocol.workspace = true
 oxibelt-ct.workspace = true
 

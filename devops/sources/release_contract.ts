@@ -177,6 +177,7 @@ const CompatibilitySurfaceSections: CompatibilitySurface[] = [
     section: 'Configuration',
     patterns: [
       /^source\/src\/config(?:\.rs|\/)/,
+      /^source\/crates\/oxibelt-admission-policy\//,
       /^source\/config\//,
       /^source\/assets\/oxibelt-config-v\d+\.schema\.json$/
     ]

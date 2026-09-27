@@ -3,7 +3,7 @@
 use anyhow::bail;
 use serde::{Deserialize, Deserializer};
 
-use crate::config::PriorityClass;
+use crate::PriorityClass;
 
 use super::CapacitySetting;
 
@@ -160,12 +160,12 @@ impl CircuitBreakerPriorityConfig {
 
 /// Fully resolved, process-local class policy used by the runtime.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PriorityClassPolicy {
-  pub(crate) reserved_requests: usize,
-  pub(crate) max_share: f64,
-  pub(crate) max_pending_requests: Option<CapacitySetting>,
-  pub(crate) pending_queue_timeout_ms: Option<u64>,
-  pub(crate) rejection_policy: PriorityRejectionPolicy,
+pub struct PriorityClassPolicy {
+  pub reserved_requests: usize,
+  pub max_share: f64,
+  pub max_pending_requests: Option<CapacitySetting>,
+  pub pending_queue_timeout_ms: Option<u64>,
+  pub rejection_policy: PriorityRejectionPolicy,
 }
 
 impl PriorityClassPolicy {
@@ -214,7 +214,7 @@ impl PriorityClassPolicy {
   }
 }
 
-pub(crate) const fn max_class_requests(global_capacity: usize, max_share: f64) -> usize {
+pub const fn max_class_requests(global_capacity: usize, max_share: f64) -> usize {
   if max_share >= 1.0 {
     return global_capacity;
   }

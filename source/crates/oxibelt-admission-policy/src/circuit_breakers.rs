@@ -12,7 +12,7 @@ mod priority;
 pub use priority::{
   CircuitBreakerPriorityClassConfig, CircuitBreakerPriorityConfig, PriorityRejectionPolicy,
 };
-pub(crate) use priority::{PriorityClassPolicy, max_class_requests};
+pub use priority::{PriorityClassPolicy, max_class_requests};
 
 /// A finite capacity or a process-local value resolved from available resources.
 ///

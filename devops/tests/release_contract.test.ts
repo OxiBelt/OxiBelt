@@ -440,6 +440,24 @@ test('rejects compatibility-surface changes without a release-contract document 
   }
 })
 
+test('requires documentation for admission-policy crate changes alone', () => {
+  const Fixture = CreateChangedWorkspace([
+    'source/crates/oxibelt-admission-policy/src/overload.rs'
+  ])
+  try {
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Fixture.root,
+        changeBase: Fixture.base,
+        changeHead: Fixture.head
+      }),
+      /compatibility surfaces changed \(Configuration\) without updating a changelog ledger or docs\/Upgrading\.md/
+    )
+  } finally {
+    RemoveWorkspace(Fixture.root)
+  }
+})
+
 test('rejects deleted compatibility surfaces without a release-contract document update', () => {
   const Root = CreateContractWorkspace()
   try {

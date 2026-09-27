@@ -64,8 +64,8 @@ impl Config {
     self.validate_admin()?;
     self.validate_admin_mutations()?;
     self.validate_metrics_and_health()?;
-    self.overload.validate()?;
-    self.circuit_breakers.validate()?;
+    oxibelt_admission_policy::validate_overload_config(&self.overload)?;
+    oxibelt_admission_policy::validate_circuit_breakers_config(&self.circuit_breakers)?;
     self.telemetry.validate()?;
     security_headers::validate_security_headers(self)?;
     crypto::validate_crypto(self)?;
@@ -270,7 +270,10 @@ impl Config {
       }
       upstream_pool::validate_pool_policy(pool)?;
       if let Some(circuit_breaker) = &pool.circuit_breaker {
-        circuit_breaker.validate(&format!("upstream_pools {} circuit_breaker", pool.name))?;
+        oxibelt_admission_policy::validate_circuit_breaker_scope_override(
+          circuit_breaker,
+          &format!("upstream_pools {} circuit_breaker", pool.name),
+        )?;
       }
       let mut server_ids = HashSet::new();
       for (index, server) in pool.servers.iter().enumerate() {
@@ -734,7 +737,10 @@ impl Config {
         }
       }
       if let Some(circuit_breaker) = &route.circuit_breaker {
-        circuit_breaker.validate(&format!("route {} circuit_breaker", route.name))?;
+        oxibelt_admission_policy::validate_circuit_breaker_scope_override(
+          circuit_breaker,
+          &format!("route {} circuit_breaker", route.name),
+        )?;
       }
     }
     route::validate_route_match_conflicts(&self.routes)?;

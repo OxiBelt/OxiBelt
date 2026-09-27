@@ -28,7 +28,6 @@ mod assembly;
 mod cache_external;
 mod cache_sections;
 mod certificate_transparency;
-mod circuit_breakers;
 mod client_certificate_forwarding;
 mod client_identity;
 mod compression;
@@ -53,7 +52,6 @@ mod native_config;
 mod native_schema;
 mod operational_profile;
 mod outbound_revocation;
-mod overload;
 mod path_helpers;
 mod path_resolution;
 mod provenance;
@@ -112,7 +110,6 @@ pub use cache_sections::{
   CacheAdmissionConfig, CachePolicyRuleConfig, CacheStaleIfErrorConfig, CacheSurrogateConfig,
 };
 pub use certificate_transparency::*;
-pub use circuit_breakers::*;
 pub use client_certificate_forwarding::*;
 pub use client_identity::*;
 pub use compression::*;
@@ -144,7 +141,14 @@ pub use native_config::*;
 pub use native_schema::*;
 pub use operational_profile::OperationalProfile;
 pub use outbound_revocation::*;
-pub use overload::*;
+pub use oxibelt_admission_policy::{
+  CapacitySetting, CircuitBreakerFailureConfig, CircuitBreakerPriorityClassConfig,
+  CircuitBreakerPriorityConfig, CircuitBreakerRetryBudgetConfig, CircuitBreakerScopeConfig,
+  CircuitBreakerScopeOverride, CircuitBreakersConfig, CircuitFailureCondition, OverloadActions,
+  OverloadConfig, OverloadHardActions, OverloadReservedCapacity, OverloadSoftActions,
+  OverloadThresholds, PriorityClass, PriorityRejectionPolicy,
+};
+pub(crate) use oxibelt_admission_policy::{PriorityClassPolicy, max_class_requests};
 use path_helpers::{ConfigPathRoots, config_path_roots};
 pub(crate) use path_helpers::{
   canonicalize_existing_file, canonicalize_local_config_file_target,

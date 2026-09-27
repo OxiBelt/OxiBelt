@@ -158,7 +158,10 @@ impl PriorityAdmissionState {
   pub(super) fn from_config(config: &CircuitBreakerPriorityConfig, global: ResourceLimit) -> Self {
     let policies = std::array::from_fn(|index| {
       let class = PriorityClass::ALL[index];
-      ResolvedPriorityPolicy::from_config(config.resolved_for_validation(class), global)
+      ResolvedPriorityPolicy::from_config(
+        oxibelt_admission_policy::resolved_priority_policy(config, class),
+        global,
+      )
     });
     let reserved = policies
       .iter()

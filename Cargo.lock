@@ -3205,6 +3205,7 @@ dependencies = [
  "object_store",
  "online-dsl-forge",
  "openssl-probe",
+ "oxibelt-admission-policy",
  "oxibelt-allocator",
  "oxibelt-build-identity",
  "oxibelt-control-protocol",
@@ -3249,6 +3250,15 @@ dependencies = [
  "x509-ocsp",
  "zeroize",
  "zstd",
+]
+
+[[package]]
+name = "oxibelt-admission-policy"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
 ]
 
 [[package]]

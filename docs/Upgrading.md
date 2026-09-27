@@ -5,6 +5,14 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Internal Rust crate layout
+
+Certificate Transparency protocol primitives and admission-policy configuration
+now compile in focused workspace crates. Existing `oxibelt::ct` and
+`oxibelt::config` Rust paths, configuration defaults, native schema, wire
+formats, image roles, and persisted state retain their prior contracts. This
+source-level refactor requires no operator migration or rollback action.
+
 ## Combined WAF and downstream TLS hot reload
 
 `runtime.hot_reload.mode = "oxirule_downstream_tls"` is an opt-in mode that

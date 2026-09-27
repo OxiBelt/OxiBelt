@@ -87,6 +87,12 @@ storage, or private-key dependency. The integrated crate retains the
 `oxibelt::ct` module as an explicit compatibility facade, so callers keep the
 same Rust paths and type identities.
 
+`oxibelt-admission-policy` owns the typed overload and circuit-breaker
+configuration, validation, and priority-capacity calculation. Its policy does
+not import request runtime, proxy state, or storage; the integrated config
+facade retains existing `oxibelt::config` names. Runtime admission still owns
+the process-local queues, leases, and request classification.
+
 ## Role feature matrix
 
 The workspace dependency on `oxibelt` disables default features. Every role

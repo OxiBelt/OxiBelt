@@ -7,7 +7,8 @@ use syn::visit::{self, Visit};
 const SOURCE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
 const CRATES_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/crates");
 // An extracted runtime crate keeps the boundary policy of its former module.
-const EXTRACTED_RUNTIME_CRATES: &[(&str, &str)] = &[("oxibelt-ct", "ct")];
+const EXTRACTED_RUNTIME_CRATES: &[(&str, &str)] =
+  &[("oxibelt-admission-policy", "config"), ("oxibelt-ct", "ct")];
 const FIXTURE_ROOT: &str = concat!(
   env!("CARGO_MANIFEST_DIR"),
   "/../tests/fixtures/rust-dependency-boundaries"
@@ -564,6 +565,12 @@ fn every_first_party_source_is_valid_rust_syntax() {
 
 #[test]
 fn extracted_runtime_sources_keep_their_logical_module_paths() {
+  let admission_root = Path::new(CRATES_ROOT).join("oxibelt-admission-policy/src");
+  assert_eq!(relative(&admission_root.join("lib.rs")), "config/mod.rs");
+  assert_eq!(
+    relative(&admission_root.join("circuit_breakers/priority.rs")),
+    "config/circuit_breakers/priority.rs"
+  );
   let crate_root = Path::new(CRATES_ROOT).join("oxibelt-ct/src");
   assert_eq!(relative(&crate_root.join("lib.rs")), "ct/mod.rs");
   assert_eq!(relative(&crate_root.join("nested.rs")), "ct/nested.rs");

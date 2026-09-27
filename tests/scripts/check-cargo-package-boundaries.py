@@ -65,6 +65,7 @@ class ParsedCargoTree:
 RUNTIME_WORKSPACE_PACKAGES = frozenset(
     {
         "oxibelt",
+        "oxibelt-admission-policy",
         "oxibelt-build-identity",
         "oxibelt-control-protocol",
         "oxibelt-ct",
