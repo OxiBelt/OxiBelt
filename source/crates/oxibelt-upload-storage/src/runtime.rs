@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::config::{Config, UploadProfileConfig, UploadStoreConfig, UploadStoreKind};
+use crate::config::{UploadProfileConfig, UploadStoreConfig, UploadStoreKind};
 use anyhow::{Context, bail};
 
 use super::UploadStore;
@@ -23,6 +23,13 @@ const GC_BATCH: usize = 64;
 #[derive(Clone)]
 pub struct UploadRuntime {
   inner: Arc<UploadRuntimeInner>,
+}
+
+/// Validated upload configuration prepared by the host before activation.
+#[derive(Clone, Debug)]
+pub struct UploadOptions {
+  pub upload_stores: Vec<UploadStoreConfig>,
+  pub upload_profiles: Vec<UploadProfileConfig>,
 }
 
 struct UploadRuntimeInner {
@@ -101,7 +108,7 @@ impl Drop for UploadPartAdmission {
 }
 
 impl UploadRuntime {
-  pub async fn new(config: &Config, previous: Option<&Self>) -> anyhow::Result<Self> {
+  pub async fn new(config: &UploadOptions, previous: Option<&Self>) -> anyhow::Result<Self> {
     if let Some(previous) = previous
       && previous.store_configs_match(config)
       && previous.profiles_match(config)
@@ -224,7 +231,7 @@ impl UploadRuntime {
 
   /// Starts effects that are valid only after this candidate snapshot has
   /// become the published application generation.
-  pub(crate) fn activate(&self) {
+  pub fn activate(&self) {
     if !self.inner.gc_started.swap(true, Ordering::AcqRel) {
       self.spawn_bounded_gc();
     }
@@ -269,7 +276,7 @@ impl UploadRuntime {
     Ok(())
   }
 
-  fn store_configs_match(&self, config: &Config) -> bool {
+  fn store_configs_match(&self, config: &UploadOptions) -> bool {
     self.inner.store_configs.len() == config.upload_stores.len()
       && config.upload_stores.iter().all(|candidate| {
         self
@@ -280,7 +287,7 @@ impl UploadRuntime {
       })
   }
 
-  fn profiles_match(&self, config: &Config) -> bool {
+  fn profiles_match(&self, config: &UploadOptions) -> bool {
     self.inner.profiles.len() == config.upload_profiles.len()
       && config.upload_profiles.iter().all(|candidate| {
         self

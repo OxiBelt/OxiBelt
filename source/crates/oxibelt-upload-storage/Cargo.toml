@@ -1,0 +1,30 @@
+[package]
+name = "oxibelt-upload-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+futures-util = "0.3.34"
+http.workspace = true
+nix = { version = "0.31.3", default-features = false, features = ["fs"] }
+object_store.workspace = true
+oxibelt-crypto-primitives.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres"] }
+tokio.workspace = true
+tracing.workspace = true
+url = { version = "2.5.8", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+toml = "1.1.6"
+
+[lints]
+workspace = true

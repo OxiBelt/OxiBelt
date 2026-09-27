@@ -681,8 +681,10 @@ codec_timeout_ms = 1000
     .dictionary
     .unwrap();
   assert_eq!(
-    pin.hash,
-    DictionaryHash::from_slice(&Sha256::digest(dictionary)).unwrap()
+    pin.hash.as_bytes(),
+    DictionaryHash::from_slice(&Sha256::digest(dictionary))
+      .unwrap()
+      .as_bytes()
   );
   let store = state.uploads.profile("media").unwrap().store();
   if ready_retry {

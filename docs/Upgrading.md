@@ -8,10 +8,11 @@ commands, known issues, and rollback constraints that supplement this guide.
 ## Internal Rust crate layout
 
 Certificate Transparency protocol primitives, admission-policy configuration,
-crypto primitives, and Admin mutation protocol and persistence code now compile
-in focused workspace crates. Existing `oxibelt::ct`, `oxibelt::config`, and
-`oxibelt::admin_mutation` Rust paths, configuration defaults, native schema,
-wire formats, image roles, and persisted state retain their prior contracts.
+crypto primitives, Admin mutation protocol and persistence code, and managed
+upload storage now compile in focused workspace crates. Existing `oxibelt::ct`,
+`oxibelt::config`, and `oxibelt::admin_mutation` Rust paths, configuration
+defaults, native schema, wire formats, image roles, and persisted state retain
+their prior contracts.
 This source-level refactor requires no operator migration or rollback action.
 
 ## Combined WAF and downstream TLS hot reload

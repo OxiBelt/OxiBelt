@@ -1307,7 +1307,7 @@ fn now_ms() -> anyhow::Result<u64> {
 
 fn random_id() -> anyhow::Result<String> {
   let mut bytes = [0_u8; 32];
-  crate::crypto::random_fill(&mut bytes)
+  oxibelt_crypto_primitives::random_fill(&mut bytes)
     .map_err(|_| anyhow::anyhow!("managed upload identifier generation failed"))?;
   Ok(hex_digest(bytes))
 }
@@ -2032,8 +2032,7 @@ mod tests {
       coding: super::super::UploadDictionaryCoding::Dcz,
       profile: "decode".to_string(),
       dictionary: "public".to_string(),
-      hash: crate::compression_dictionary::fields::DictionaryHash::from_slice(&[7; 32])
-        .expect("SHA-256 digest"),
+      hash: crate::UploadDictionaryHash::from_slice(&[7; 32]).expect("SHA-256 digest"),
     });
     let upload = store.create(request).await.expect("create pinned upload");
     let reservation = store
@@ -2088,8 +2087,7 @@ mod tests {
       coding: super::super::UploadDictionaryCoding::Dcb,
       profile: "decode".to_string(),
       dictionary: "public".to_string(),
-      hash: crate::compression_dictionary::fields::DictionaryHash::from_slice(&[8; 32])
-        .expect("SHA-256 digest"),
+      hash: crate::UploadDictionaryHash::from_slice(&[8; 32]).expect("SHA-256 digest"),
     });
     let upload = store.create(request).await.expect("create pinned upload");
     let reservation = store
@@ -2131,7 +2129,7 @@ mod tests {
       coding: super::super::UploadDictionaryCoding::Dcz,
       profile: "decode".into(),
       dictionary: "public".into(),
-      hash: crate::compression_dictionary::fields::DictionaryHash::from_slice(&[7; 32]).unwrap(),
+      hash: crate::UploadDictionaryHash::from_slice(&[7; 32]).unwrap(),
     });
     let first = store.create(request).await.unwrap();
     let part = store

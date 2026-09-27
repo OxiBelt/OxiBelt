@@ -130,6 +130,13 @@ const CargoPackages: CargoPackagePolicy[] = [
     versionSource: 'workspace'
   },
   {
+    name: 'oxibelt-upload-storage',
+    manifestPath: 'source/crates/oxibelt-upload-storage/Cargo.toml',
+    lockfilePath: 'Cargo.lock',
+    releaseRewrite: true,
+    versionSource: 'workspace'
+  },
+  {
     name: 'oxibelt-gateway-controller',
     manifestPath: 'source/apps/oxibelt-gateway-controller/Cargo.toml',
     lockfilePath: 'Cargo.lock',

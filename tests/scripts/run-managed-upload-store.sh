@@ -107,6 +107,13 @@ openssl s_client -connect "$s3_host:$s3_port" -verify_return_error "$verify_opti
 export TEST_UPLOAD_POSTGRES_URL="postgres://oxibelt:${pgpass}@${pg_host}:${pg_port}/oxibelt"
 export TEST_UPLOAD_S3_ENDPOINT="https://${s3_host}:${s3_port}" TEST_UPLOAD_S3_BUCKET="$bucket" TEST_UPLOAD_S3_BUCKET_2="$bucket2" TEST_UPLOAD_S3_REGION=us-east-1
 export TEST_UPLOAD_S3_ACCESS_KEY="$access" TEST_UPLOAD_S3_SECRET_KEY="$secret" TEST_UPLOAD_S3_ROOT_CERTIFICATE="$ca" OXIBELT_REQUIRE_UPLOAD_POSTGRES_S3_TESTS=1
-test_name='uploads::postgres_s3::tests::postgres_s3_lifecycle_fences_discovery_and_enforces_session_quota'
-if [[ -n "$test_binary" ]]; then "$test_binary" --exact "$test_name" --nocapture; else cargo test --locked -p oxibelt --lib "$test_name" -- --exact --nocapture; fi
+test_name='postgres_s3::tests::postgres_s3_lifecycle_fences_discovery_and_enforces_session_quota'
+if [[ -n "$test_binary" ]]; then
+  test_command=("$test_binary")
+else
+  test_command=(cargo test --locked -p oxibelt-upload-storage --lib "$test_name" --)
+fi
+listed_tests="$("${test_command[@]}" --list)"
+grep -Fxq -- "$test_name: test" <<<"$listed_tests" || die "required managed upload test was not found"
+"${test_command[@]}" --exact "$test_name" --nocapture
 echo "managed upload store check: PASS"

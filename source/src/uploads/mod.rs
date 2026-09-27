@@ -1,474 +1,216 @@
-//! Durable managed resumable-upload storage.
+//! Host adapters for durable managed-upload storage.
 //!
-//! HTTP framing, authentication, and WAF execution deliberately live above this
-//! module.  Callers obtain a reservation before accepting a body and may commit
-//! it only after the entire bounded part has passed inspection.
-
-mod local;
-mod postgres_s3;
-mod runtime;
-
-use std::pin::Pin;
-use std::sync::Arc;
-
-use anyhow::bail;
-use bytes::Bytes;
-use futures_util::Stream;
-use http::{Method, Uri};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+//! The storage crate owns journals and leases; the host supplies validated
+//! operator configuration and dictionary identities at the activation edge.
 
 use crate::compression_dictionary::codec::DictionaryCoding;
-use crate::compression_dictionary::fields::DictionaryHash;
-use crate::config::{UploadIdentityKind, UploadProfileConfig, UploadStoreConfig, UploadStoreKind};
+use crate::config;
 
-pub use local::LocalUploadStore;
-pub use postgres_s3::PostgresS3UploadStore;
-pub use runtime::{UploadPartAdmission, UploadRuntime};
+pub(crate) use oxibelt_upload_storage::{
+  DispatchClaim, DispatchTerminal, InspectedPart, UploadByteStream, UploadCreate,
+  UploadDictionaryCoding, UploadDictionaryHash, UploadDictionaryPin, UploadOptions, UploadOwner,
+  UploadPartAdmission, UploadRejection, UploadRuntime, UploadState, UploadStatus, UploadStore,
+};
 
-pub type UploadByteStream = Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>;
-
-/// Expected admission failures are distinguishable from I/O failures without
-/// exposing storage details or turning backend outages into false 404s.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum UploadRejection {
-  NotFound,
-  Conflict,
-  Capacity,
-}
-
-impl std::fmt::Display for UploadRejection {
-  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    formatter.write_str(match self {
-      Self::NotFound => "managed upload not found",
-      Self::Conflict => "managed upload state conflict",
-      Self::Capacity => "managed upload capacity exhausted",
-    })
+pub(crate) fn options(config: &config::Config) -> UploadOptions {
+  UploadOptions {
+    upload_stores: config.upload_stores.iter().map(store_config).collect(),
+    upload_profiles: config.upload_profiles.iter().map(profile_config).collect(),
   }
 }
 
-impl std::error::Error for UploadRejection {}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct UploadOwner {
-  pub kind: UploadIdentityKind,
-  pub source: String,
-  pub subject: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct UploadCreate {
-  pub profile: UploadProfileConfig,
-  pub owner: UploadOwner,
-  /// Opaque HTTP-layer route/auth/policy fingerprint.  It is compared exactly
-  /// on every continuation and never interpreted by storage.
-  pub binding: Value,
-  pub method: Method,
-  pub uri: Uri,
-  /// Pre-filtered end-to-end request metadata for a one-shot upstream dispatch.
-  pub safe_headers: Value,
-  pub declared_total: Option<u64>,
-  /// Immutable RFC 9842 session binding, selected before any `104` response.
-  /// `None` retains ordinary identity-content managed-upload semantics.
-  pub dictionary: Option<UploadDictionaryPin>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct UploadDictionaryPin {
-  pub coding: UploadDictionaryCoding,
-  pub profile: String,
-  pub dictionary: String,
-  pub hash: DictionaryHash,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum UploadDictionaryCoding {
-  Dcb,
-  Dcz,
-}
-
-impl From<DictionaryCoding> for UploadDictionaryCoding {
-  fn from(value: DictionaryCoding) -> Self {
-    match value {
-      DictionaryCoding::Dcb => Self::Dcb,
-      DictionaryCoding::Dcz => Self::Dcz,
-    }
-  }
-}
-
-impl From<UploadDictionaryCoding> for DictionaryCoding {
-  fn from(value: UploadDictionaryCoding) -> Self {
-    match value {
-      UploadDictionaryCoding::Dcb => Self::Dcb,
-      UploadDictionaryCoding::Dcz => Self::Dcz,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum UploadState {
-  Active,
-  Completing,
-  /// A compressed session has a durable completion fence while its encoded
-  /// parts are decoded and the complete decoded representation is inspected.
-  Validating,
-  ValidationFailed,
-  Ready,
-  Dispatching,
-  Complete,
-  Indeterminate,
-  Deleted,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub struct UploadObject {
-  pub key: String,
-  pub sha256: String,
-  pub bytes: u64,
-  pub version: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadStatus {
-  pub id: String,
-  pub profile: String,
-  pub offset: u64,
-  pub declared_total: Option<u64>,
-  pub state: UploadState,
-  pub expires_at_ms: u64,
-  pub object: Option<UploadObject>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AppendReservation {
-  pub id: String,
-  pub expected_offset: u64,
-  pub length: u64,
-  pub fence_epoch: u64,
-  pub(crate) backend_token: String,
-}
-
-impl AppendReservation {
-  pub fn backend_token(&self) -> &str {
-    &self.backend_token
-  }
-}
-
-/// Evidence from the HTTP/WAF layer that the exact complete part was accepted.
-#[derive(Debug, Clone)]
-pub struct InspectedPart {
-  pub bytes: u64,
-  pub sha256: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct DispatchClaim {
-  pub id: String,
-  pub fence_epoch: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct UploadRequestMetadata {
-  pub method: Method,
-  pub uri: Uri,
-  pub safe_headers: Value,
-  pub dictionary: Option<UploadDictionaryPin>,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum DispatchTerminal {
-  Complete,
-  Indeterminate,
-}
-
-#[derive(Clone)]
-pub enum UploadStore {
-  Local(Arc<LocalUploadStore>),
-  PostgresS3(Arc<PostgresS3UploadStore>),
-}
-
-impl UploadStore {
-  pub async fn open(config: &UploadStoreConfig) -> anyhow::Result<Arc<Self>> {
-    let store = match config.kind {
-      UploadStoreKind::Local => Self::Local(Arc::new(LocalUploadStore::open(config).await?)),
-      UploadStoreKind::PostgresS3 => {
-        Self::PostgresS3(Arc::new(PostgresS3UploadStore::open(config).await?))
+pub(crate) fn store_config(
+  value: &config::UploadStoreConfig,
+) -> oxibelt_upload_storage::config::UploadStoreConfig {
+  oxibelt_upload_storage::config::UploadStoreConfig {
+    name: value.name.clone(),
+    kind: match value.kind {
+      config::UploadStoreKind::Local => oxibelt_upload_storage::config::UploadStoreKind::Local,
+      config::UploadStoreKind::PostgresS3 => {
+        oxibelt_upload_storage::config::UploadStoreKind::PostgresS3
       }
+    },
+    local: value.local.as_ref().map(|local| {
+      oxibelt_upload_storage::config::LocalUploadStoreConfig {
+        root: local.root.clone(),
+      }
+    }),
+    postgres_s3: value.postgres_s3.as_ref().map(|store| {
+      oxibelt_upload_storage::config::PostgresS3UploadStoreConfig {
+        postgres_url_env: store.postgres_url_env.clone(),
+        max_connections: store.max_connections,
+        s3_bucket: store.s3_bucket.clone(),
+        s3_region: store.s3_region.clone(),
+        s3_root_certificate: store.s3_root_certificate.clone(),
+        s3_endpoint: store.s3_endpoint.clone(),
+        s3_prefix: store.s3_prefix.clone(),
+        s3_access_key_env: store.s3_access_key_env.clone(),
+        s3_secret_key_env: store.s3_secret_key_env.clone(),
+        s3_session_token_env: store.s3_session_token_env.clone(),
+        s3_virtual_hosted_style: store.s3_virtual_hosted_style,
+      }
+    }),
+  }
+}
+
+pub(crate) fn profile_config(
+  value: &config::UploadProfileConfig,
+) -> oxibelt_upload_storage::config::UploadProfileConfig {
+  oxibelt_upload_storage::config::UploadProfileConfig {
+    name: value.name.clone(),
+    store: value.store.clone(),
+    public_base_url: value.public_base_url.clone(),
+    staging_dir: value.staging_dir.clone(),
+    max_staging_bytes: value.max_staging_bytes,
+    control_path_prefix: value.control_path_prefix.clone(),
+    object_path_prefix: value.object_path_prefix.clone(),
+    destination: match &value.destination {
+      config::UploadDestinationConfig::Object => {
+        oxibelt_upload_storage::config::UploadDestinationConfig::Object
+      }
+      config::UploadDestinationConfig::Upstream { upstream } => {
+        oxibelt_upload_storage::config::UploadDestinationConfig::Upstream {
+          upstream: upstream.clone(),
+        }
+      }
+    },
+    identity: oxibelt_upload_storage::config::UploadIdentityConfig {
+      kind: identity_kind(value.identity.kind),
+      source: value.identity.source.clone(),
+      subject_field: value.identity.subject_field.clone(),
+    },
+    max_upload_bytes: value.max_upload_bytes,
+    max_part_bytes: value.max_part_bytes,
+    max_storage_bytes: value.max_storage_bytes,
+    max_sessions: value.max_sessions,
+    max_parts: value.max_parts,
+    inspection_bytes: value.inspection_bytes,
+    ttl_seconds: value.ttl_seconds,
+    object_ttl_seconds: value.object_ttl_seconds,
+    max_concurrent_uploads: value.max_concurrent_uploads,
+    max_concurrent_parts: value.max_concurrent_parts,
+    compression_dictionary: value.compression_dictionary.as_ref().map(|dictionary| {
+      oxibelt_upload_storage::config::ManagedUploadDictionaryConfig {
+        profile: dictionary.profile.clone(),
+        dictionary: dictionary.dictionary.clone(),
+      }
+    }),
+  }
+}
+
+pub(crate) fn identity_kind(
+  value: config::UploadIdentityKind,
+) -> oxibelt_upload_storage::config::UploadIdentityKind {
+  match value {
+    config::UploadIdentityKind::Ipm => oxibelt_upload_storage::config::UploadIdentityKind::Ipm,
+    config::UploadIdentityKind::ExternalAuth => {
+      oxibelt_upload_storage::config::UploadIdentityKind::ExternalAuth
+    }
+    config::UploadIdentityKind::Mtls => oxibelt_upload_storage::config::UploadIdentityKind::Mtls,
+  }
+}
+
+pub(crate) fn upload_dictionary_coding(value: DictionaryCoding) -> UploadDictionaryCoding {
+  match value {
+    DictionaryCoding::Dcb => UploadDictionaryCoding::Dcb,
+    DictionaryCoding::Dcz => UploadDictionaryCoding::Dcz,
+  }
+}
+
+pub(crate) fn dictionary_coding(value: UploadDictionaryCoding) -> DictionaryCoding {
+  match value {
+    UploadDictionaryCoding::Dcb => DictionaryCoding::Dcb,
+    UploadDictionaryCoding::Dcz => DictionaryCoding::Dcz,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Arc;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn host_upload_config_preserves_storage_reuse_and_fencing() {
+    let root = tempfile::tempdir().expect("temp root");
+    let store = config::UploadStoreConfig {
+      name: "local".to_string(),
+      kind: config::UploadStoreKind::Local,
+      local: Some(config::LocalUploadStoreConfig {
+        root: root.path().join("store"),
+      }),
+      postgres_s3: None,
     };
-    Ok(Arc::new(store))
+    let profile: config::UploadProfileConfig = toml::from_str(
+      r#"
+name = "profile"
+store = "local"
+public_base_url = "https://uploads.example.test"
+staging_dir = "/tmp"
+max_staging_bytes = 64
+control_path_prefix = "/uploads"
+object_path_prefix = "/objects"
+destination = {kind = "object"}
+identity = {kind = "ipm", source = "test"}
+max_upload_bytes = 64
+max_part_bytes = 32
+max_storage_bytes = 128
+max_sessions = 8
+max_parts = 8
+inspection_bytes = 32
+ttl_seconds = 60
+object_ttl_seconds = 60
+max_concurrent_uploads = 4
+max_concurrent_parts = 4
+"#,
+    )
+    .expect("host profile");
+    let converted_store = store_config(&store);
+    let converted_profile = profile_config(&profile);
+    assert_eq!(
+      serde_json::to_value(&store).expect("host store"),
+      serde_json::to_value(&converted_store).expect("storage store")
+    );
+    assert_eq!(
+      serde_json::to_value(&profile).expect("host profile"),
+      serde_json::to_value(&converted_profile).expect("storage profile")
+    );
+    let options = UploadOptions {
+      upload_stores: vec![converted_store],
+      upload_profiles: vec![converted_profile],
+    };
+    let first = UploadRuntime::new(&options, None)
+      .await
+      .expect("first snapshot");
+    let same = UploadRuntime::new(&options, Some(&first))
+      .await
+      .expect("unchanged snapshot");
+    assert!(Arc::ptr_eq(
+      first.profile("profile").expect("first profile").store(),
+      same.profile("profile").expect("same profile").store(),
+    ));
+    let mut changed = options.clone();
+    changed.upload_stores[0].name = "renamed".to_string();
+    changed.upload_profiles[0].store = "renamed".to_string();
+    assert!(UploadRuntime::new(&changed, Some(&first)).await.is_err());
   }
 
-  pub async fn create(&self, request: UploadCreate) -> anyhow::Result<UploadStatus> {
-    match self {
-      Self::Local(store) => store.create(request).await,
-      Self::PostgresS3(store) => store.create(request).await,
-    }
+  #[test]
+  fn dictionary_hash_retains_journal_byte_array_shape() {
+    let bytes = [7_u8; 32];
+    let old =
+      crate::compression_dictionary::fields::DictionaryHash::from_slice(&bytes).expect("host hash");
+    let new = UploadDictionaryHash::from(bytes);
+    assert_eq!(
+      serde_json::to_value(old).expect("host hash JSON"),
+      serde_json::to_value(new).expect("storage hash JSON"),
+    );
+    let encoded = serde_json::to_string(&new).expect("stored hash JSON");
+    assert_eq!(
+      serde_json::from_str::<UploadDictionaryHash>(&encoded)
+        .expect("reloaded storage hash")
+        .as_bytes(),
+      &bytes,
+    );
   }
-
-  pub async fn lookup(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-  ) -> anyhow::Result<UploadStatus> {
-    match self {
-      Self::Local(store) => store.lookup(id, owner, binding).await,
-      Self::PostgresS3(store) => store.lookup(id, owner, binding).await,
-    }
-  }
-
-  pub async fn declare_length(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-    total: u64,
-  ) -> anyhow::Result<UploadStatus> {
-    match self {
-      Self::Local(store) => store.declare_length(id, owner, binding, total).await,
-      Self::PostgresS3(store) => store.declare_length(id, owner, binding, total).await,
-    }
-  }
-
-  pub async fn begin_append(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-    expected_offset: u64,
-    length: u64,
-  ) -> anyhow::Result<AppendReservation> {
-    if length == 0 {
-      bail!("managed upload part length must be nonzero");
-    }
-    match self {
-      Self::Local(store) => {
-        store
-          .begin_append(id, owner, binding, expected_offset, length)
-          .await
-      }
-      Self::PostgresS3(store) => {
-        store
-          .begin_append(id, owner, binding, expected_offset, length)
-          .await
-      }
-    }
-  }
-
-  pub async fn commit_fully_inspected_part(
-    &self,
-    reservation: &AppendReservation,
-    inspected: &InspectedPart,
-    body: UploadByteStream,
-  ) -> anyhow::Result<UploadStatus> {
-    if inspected.bytes > reservation.length || !is_sha256_hex(&inspected.sha256) {
-      bail!("managed upload inspection evidence does not match reserved part");
-    }
-    match self {
-      Self::Local(store) => {
-        store
-          .commit_fully_inspected_part(reservation, inspected, body)
-          .await
-      }
-      Self::PostgresS3(store) => {
-        store
-          .commit_fully_inspected_part(reservation, inspected, body)
-          .await
-      }
-    }
-  }
-
-  /// Commits an RFC 9842 encoded part.  Its bytes are deliberately not
-  /// represented as WAF evidence: the complete decoded representation is
-  /// inspected under the validation fence at completion time.
-  pub async fn commit_encoded_part(
-    &self,
-    reservation: &AppendReservation,
-    bytes: u64,
-    sha256: String,
-    body: UploadByteStream,
-  ) -> anyhow::Result<UploadStatus> {
-    if bytes == 0 || bytes > reservation.length || !is_sha256_hex(&sha256) {
-      bail!("managed upload encoded part does not match reserved part");
-    }
-    // Backends still independently hash the stream and compare this durable
-    // staging evidence; it is not a WAF acceptance proof.
-    let staged = InspectedPart { bytes, sha256 };
-    match self {
-      Self::Local(store) => {
-        store
-          .commit_fully_inspected_part(reservation, &staged, body)
-          .await
-      }
-      Self::PostgresS3(store) => {
-        store
-          .commit_fully_inspected_part(reservation, &staged, body)
-          .await
-      }
-    }
-  }
-
-  pub async fn abort_append(&self, reservation: &AppendReservation) -> anyhow::Result<()> {
-    match self {
-      Self::Local(store) => store.abort_append(reservation).await,
-      Self::PostgresS3(store) => store.abort_append(reservation).await,
-    }
-  }
-
-  pub async fn request_metadata(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-  ) -> anyhow::Result<UploadRequestMetadata> {
-    match self {
-      Self::Local(store) => store.request_metadata(id, owner, binding).await,
-      Self::PostgresS3(store) => store.request_metadata(id, owner, binding).await,
-    }
-  }
-
-  pub async fn read_object(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-  ) -> anyhow::Result<UploadByteStream> {
-    match self {
-      Self::Local(store) => store.read_object(id, owner, binding).await,
-      Self::PostgresS3(store) => store.read_object(id, owner, binding).await,
-    }
-  }
-
-  pub async fn read_assembled(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-  ) -> anyhow::Result<UploadByteStream> {
-    match self {
-      Self::Local(store) => store.read_assembled(id, owner, binding).await,
-      Self::PostgresS3(store) => store.read_assembled(id, owner, binding).await,
-    }
-  }
-
-  pub async fn claim_complete(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-    expected_offset: u64,
-  ) -> anyhow::Result<UploadStatus> {
-    match self {
-      Self::Local(store) => {
-        store
-          .claim_complete(id, owner, binding, expected_offset)
-          .await
-      }
-      Self::PostgresS3(store) => {
-        store
-          .claim_complete(id, owner, binding, expected_offset)
-          .await
-      }
-    }
-  }
-
-  pub async fn publish_object(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-  ) -> anyhow::Result<UploadStatus> {
-    match self {
-      Self::Local(store) => store.publish_object(id, owner, binding).await,
-      Self::PostgresS3(store) => store.publish_object(id, owner, binding).await,
-    }
-  }
-
-  /// Publishes the already-decoded, fully inspected representation retained by
-  /// a `Validating` RFC 9842 session. The encoded chunks stay immutable for
-  /// audit/recovery; delivery always uses this distinct identity object.
-  pub async fn publish_decoded_object(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-    bytes: u64,
-    sha256: &str,
-    body: UploadByteStream,
-  ) -> anyhow::Result<UploadStatus> {
-    if !is_sha256_hex(sha256) {
-      bail!("managed upload decoded object digest is invalid");
-    }
-    match self {
-      Self::Local(store) => {
-        store
-          .publish_decoded_object(id, owner, binding, bytes, sha256, body)
-          .await
-      }
-      Self::PostgresS3(store) => {
-        store
-          .publish_decoded_object(id, owner, binding, bytes, sha256, body)
-          .await
-      }
-    }
-  }
-
-  /// Makes a compressed session terminal after its pinned dictionary cannot be
-  /// recovered, its prelude does not match, decoding exceeds a budget, or the
-  /// assembled decoded representation fails inspection.  It intentionally
-  /// never resets the offset or reopens delivery.
-  pub async fn fail_validation(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-  ) -> anyhow::Result<UploadStatus> {
-    match self {
-      Self::Local(store) => store.fail_validation(id, owner, binding).await,
-      Self::PostgresS3(store) => store.fail_validation(id, owner, binding).await,
-    }
-  }
-
-  pub async fn begin_dispatch(
-    &self,
-    id: &str,
-    owner: &UploadOwner,
-    binding: &Value,
-  ) -> anyhow::Result<DispatchClaim> {
-    match self {
-      Self::Local(store) => store.begin_dispatch(id, owner, binding).await,
-      Self::PostgresS3(store) => store.begin_dispatch(id, owner, binding).await,
-    }
-  }
-
-  pub async fn finish_dispatch(
-    &self,
-    claim: &DispatchClaim,
-    terminal: DispatchTerminal,
-  ) -> anyhow::Result<UploadStatus> {
-    match self {
-      Self::Local(store) => store.finish_dispatch(claim, terminal).await,
-      Self::PostgresS3(store) => store.finish_dispatch(claim, terminal).await,
-    }
-  }
-
-  pub async fn delete(&self, id: &str, owner: &UploadOwner, binding: &Value) -> anyhow::Result<()> {
-    match self {
-      Self::Local(store) => store.delete(id, owner, binding).await,
-      Self::PostgresS3(store) => store.delete(id, owner, binding).await,
-    }
-  }
-
-  pub async fn collect_garbage(&self, now_ms: u64, limit: usize) -> anyhow::Result<usize> {
-    match self {
-      Self::Local(store) => store.collect_garbage(now_ms, limit).await,
-      Self::PostgresS3(store) => store.collect_garbage(now_ms, limit).await,
-    }
-  }
-}
-
-pub(crate) fn is_sha256_hex(value: &str) -> bool {
-  value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }

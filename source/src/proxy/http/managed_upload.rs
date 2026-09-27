@@ -105,7 +105,7 @@ fn owner(
     return Err(StatusCode::UNAUTHORIZED);
   }
   Ok(UploadOwner {
-    kind: profile.identity.kind,
+    kind: crate::uploads::identity_kind(profile.identity.kind),
     source: profile.identity.source.clone(),
     subject,
   })
@@ -199,10 +199,10 @@ fn dictionary_pin(
     return Err(StatusCode::SERVICE_UNAVAILABLE);
   }
   Ok(UploadDictionaryPin {
-    coding: coding.into(),
+    coding: crate::uploads::upload_dictionary_coding(coding),
     profile: reference.profile.clone(),
     dictionary: reference.dictionary.clone(),
-    hash: dictionary.hash,
+    hash: crate::uploads::UploadDictionaryHash::from(*dictionary.hash.as_bytes()),
   })
 }
 
@@ -651,7 +651,7 @@ async fn execute(
     let safe_headers = serde_json::json!({"content-type": context.request.headers().get(http::header::CONTENT_TYPE).and_then(|value| value.to_str().ok())});
     match store
       .create(UploadCreate {
-        profile: profile.clone(),
+        profile: crate::uploads::profile_config(profile),
         owner: owner.clone(),
         binding: binding.clone(),
         method: method.clone(),
@@ -1142,7 +1142,7 @@ async fn complete_upload(
       .configured(&pin.dictionary)?;
     (runtime.config.request_decode
       && configured.public
-      && configured.hash == pin.hash
+      && configured.hash.as_bytes() == pin.hash.as_bytes()
       && runtime.config.dictionaries.contains(&pin.dictionary))
     .then_some((runtime, configured))
   });
@@ -1224,7 +1224,7 @@ async fn complete_upload(
       super::dictionary_body::CodecBodyOptions {
         metrics: Some(context.state.metrics.clone()),
         coding: match metadata.dictionary.as_ref() {
-          Some(pin) => pin.coding.into(),
+          Some(pin) => crate::uploads::dictionary_coding(pin.coding),
           None => {
             let _ = store.fail_validation(&upload.id, &owner, &binding).await;
             reject!(StatusCode::SERVICE_UNAVAILABLE);

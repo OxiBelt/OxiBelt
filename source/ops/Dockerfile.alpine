@@ -106,6 +106,7 @@ COPY source/crates/oxibelt-crypto-primitives ./source/crates/oxibelt-crypto-prim
 COPY source/crates/oxibelt-ct ./source/crates/oxibelt-ct
 COPY source/crates/oxibelt-deployment-diagnostics ./source/crates/oxibelt-deployment-diagnostics
 COPY source/crates/oxibelt-tls-cert-compression ./source/crates/oxibelt-tls-cert-compression
+COPY source/crates/oxibelt-upload-storage ./source/crates/oxibelt-upload-storage
 COPY fuzz ./fuzz
 COPY tests/unsafe_harness ./tests/unsafe_harness
 

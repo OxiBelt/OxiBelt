@@ -16,6 +16,7 @@ members = [
   "source/crates/oxibelt-ct",
   "source/crates/oxibelt-deployment-diagnostics",
   "source/crates/oxibelt-tls-cert-compression",
+  "source/crates/oxibelt-upload-storage",
   "fuzz",
   "tests/unsafe_harness",
 ]
@@ -34,6 +35,7 @@ default-members = [
   "source/crates/oxibelt-ct",
   "source/crates/oxibelt-deployment-diagnostics",
   "source/crates/oxibelt-tls-cert-compression",
+  "source/crates/oxibelt-upload-storage",
 ]
 exclude = ["source/third_party/hyper", "source/third_party/h2", "source/third_party/rustls", "source/third_party/quinn", "source/third_party/quinn-proto", "source/third_party/h3", "source/third_party/web-transport-quinn", "source/third_party/web-transport-proto"]
 resolver = "3"
@@ -77,6 +79,7 @@ oxibelt-crypto-primitives = { path = "source/crates/oxibelt-crypto-primitives" }
 oxibelt-ct = { path = "source/crates/oxibelt-ct" }
 oxibelt-deployment-diagnostics = { path = "source/crates/oxibelt-deployment-diagnostics" }
 oxibelt-tls-cert-compression = { path = "source/crates/oxibelt-tls-cert-compression" }
+oxibelt-upload-storage = { path = "source/crates/oxibelt-upload-storage" }
 openssl-sys = { version = "0.9.117", features = ["vendored"] }
 openssl-probe = "0.2.1"
 object_store = { version = "=0.14.2", default-features = false, features = ["aws", "fs"] }

@@ -477,6 +477,24 @@ test('requires documentation for Admin mutation core changes alone', () => {
   }
 })
 
+test('requires documentation for upload storage crate changes alone', () => {
+  const Fixture = CreateChangedWorkspace([
+    'source/crates/oxibelt-upload-storage/src/local.rs'
+  ])
+  try {
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Fixture.root,
+        changeBase: Fixture.base,
+        changeHead: Fixture.head
+      }),
+      /compatibility surfaces changed \(Storage and state\) without updating a changelog ledger or docs\/Upgrading\.md/
+    )
+  } finally {
+    RemoveWorkspace(Fixture.root)
+  }
+})
+
 test('rejects deleted compatibility surfaces without a release-contract document update', () => {
   const Root = CreateContractWorkspace()
   try {

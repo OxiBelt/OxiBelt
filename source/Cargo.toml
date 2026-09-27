@@ -107,6 +107,7 @@ oxibelt-admin-mutation-core = { workspace = true, optional = true }
 oxibelt-control-protocol.workspace = true
 oxibelt-crypto-primitives.workspace = true
 oxibelt-ct.workspace = true
+oxibelt-upload-storage.workspace = true
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_pointer_width = "64", any(target_env = "gnu", target_env = "musl")))'.dependencies]
 oxibelt-allocator = { workspace = true, optional = true, features = ["native-mimalloc"] }

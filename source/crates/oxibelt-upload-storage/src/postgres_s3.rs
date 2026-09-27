@@ -1573,7 +1573,7 @@ fn multipart_chunk_bytes(total_bytes: u64) -> anyhow::Result<usize> {
 }
 fn random_id() -> anyhow::Result<String> {
   let mut bytes = [0_u8; 32];
-  crate::crypto::random_fill(&mut bytes)
+  oxibelt_crypto_primitives::random_fill(&mut bytes)
     .map_err(|_| anyhow::anyhow!("managed upload identifier generation failed"))?;
   Ok(hex_digest(bytes))
 }
@@ -2068,11 +2068,11 @@ mod tests {
     for publication_claimed in [false, true] {
       let mut request = create();
       request.declared_total = Some(0);
-      request.dictionary = Some(crate::uploads::UploadDictionaryPin {
-        coding: crate::uploads::UploadDictionaryCoding::Dcz,
+      request.dictionary = Some(crate::UploadDictionaryPin {
+        coding: crate::UploadDictionaryCoding::Dcz,
         profile: "decode".into(),
         dictionary: "public".into(),
-        hash: crate::compression_dictionary::fields::DictionaryHash::from_slice(&[7; 32]).unwrap(),
+        hash: crate::UploadDictionaryHash::from_slice(&[7; 32]).unwrap(),
       });
       let pinned = store.create(request).await.unwrap();
       store

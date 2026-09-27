@@ -1,13 +1,13 @@
 use super::DictionaryValidationGuard;
-use crate::config::{
-  LocalUploadStoreConfig, UploadDestinationConfig, UploadProfileConfig, UploadStoreConfig,
-  UploadStoreKind,
-};
 use crate::uploads::{
   InspectedPart, UploadByteStream, UploadCreate, UploadDictionaryCoding, UploadDictionaryPin,
   UploadOwner, UploadState, UploadStore,
 };
 use bytes::Bytes;
+use oxibelt_upload_storage::config::{
+  LocalUploadStoreConfig, UploadDestinationConfig, UploadProfileConfig, UploadStoreConfig,
+  UploadStoreKind,
+};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -63,7 +63,7 @@ max_concurrent_parts = 4
   .unwrap();
   profile.destination = destination;
   let owner = UploadOwner {
-    kind: crate::config::UploadIdentityKind::Ipm,
+    kind: oxibelt_upload_storage::config::UploadIdentityKind::Ipm,
     source: "test".into(),
     subject: "alice".into(),
   };
@@ -81,7 +81,7 @@ max_concurrent_parts = 4
         coding: UploadDictionaryCoding::Dcz,
         profile: "decode".into(),
         dictionary: "public".into(),
-        hash: crate::compression_dictionary::fields::DictionaryHash::from_slice(&[7; 32]).unwrap(),
+        hash: crate::uploads::UploadDictionaryHash::from_slice(&[7; 32]).unwrap(),
       }),
     })
     .await

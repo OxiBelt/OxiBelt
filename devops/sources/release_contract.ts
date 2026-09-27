@@ -236,6 +236,8 @@ const CompatibilitySurfaceSections: CompatibilitySurface[] = [
       /(?:^|\/)store_schema\.rs$/,
       /^source\/src\/(?:admin_(?:audit|mutation)|server\/admin_operations)\/.*store/,
       /^source\/crates\/oxibelt-admin-mutation-core\/src\/admin_mutation\/.*store/,
+      /^source\/src\/uploads(?:\.rs|\/)/,
+      /^source\/crates\/oxibelt-upload-storage\//,
       /^source\/src\/shared_state(?:\.rs|\/)/
     ]
   }

@@ -106,6 +106,11 @@ same configured process-wide provider. The integrated crate enables this
 dependency only with `admin-runtime`; strict data-plane and helper roles do
 not compile the Admin core.
 
+`oxibelt-upload-storage` owns managed-upload session persistence and storage
+adapters. The integrated crate supplies validated configuration and dictionary
+policy through its private `uploads` facade, keeping request orchestration and
+configuration ownership in `oxibelt`.
+
 ## Role feature matrix
 
 The workspace dependency on `oxibelt` disables default features. Every role

@@ -527,9 +527,12 @@ impl AppSnapshot {
       shared_state.clone(),
     )
     .context("failed to build compression dictionary runtime")?;
-    let uploads = UploadRuntime::new(&config, previous.map(|snapshot| &snapshot.uploads))
-      .await
-      .context("failed to build managed upload runtime")?;
+    let uploads = UploadRuntime::new(
+      &crate::uploads::options(&config),
+      previous.map(|snapshot| &snapshot.uploads),
+    )
+    .await
+    .context("failed to build managed upload runtime")?;
     let runtime_introspection = previous
       .map(|snapshot| snapshot.runtime_introspection.clone())
       .unwrap_or_default();
@@ -970,7 +973,7 @@ impl AppSnapshot {
       previous.shared_state.clone(),
     )
     .context("failed to build compression dictionary runtime")?;
-    let uploads = UploadRuntime::new(&config, Some(&previous.uploads))
+    let uploads = UploadRuntime::new(&crate::uploads::options(&config), Some(&previous.uploads))
       .await
       .context("failed to build managed upload runtime")?;
     let ipm = IpmRuntime::new(&config)

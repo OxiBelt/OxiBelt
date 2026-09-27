@@ -12,6 +12,7 @@ const EXTRACTED_RUNTIME_CRATES: &[(&str, &str)] = &[
   ("oxibelt-admin-mutation-core", "admin_mutation"),
   ("oxibelt-crypto-primitives", "crypto"),
   ("oxibelt-ct", "ct"),
+  ("oxibelt-upload-storage", "uploads"),
 ];
 const FIXTURE_ROOT: &str = concat!(
   env!("CARGO_MANIFEST_DIR"),
@@ -588,6 +589,9 @@ fn extracted_runtime_sources_keep_their_logical_module_paths() {
   assert_eq!(relative(&crate_root.join("nested.rs")), "ct/nested.rs");
   let crypto_root = Path::new(CRATES_ROOT).join("oxibelt-crypto-primitives/src");
   assert_eq!(relative(&crypto_root.join("lib.rs")), "crypto/mod.rs");
+  let upload_root = Path::new(CRATES_ROOT).join("oxibelt-upload-storage/src");
+  assert_eq!(relative(&upload_root.join("lib.rs")), "uploads/mod.rs");
+  assert_eq!(relative(&upload_root.join("local.rs")), "uploads/local.rs");
 }
 
 #[test]

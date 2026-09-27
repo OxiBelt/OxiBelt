@@ -71,6 +71,7 @@ RUNTIME_WORKSPACE_PACKAGES = frozenset(
         "oxibelt-crypto-primitives",
         "oxibelt-ct",
         "oxibelt-tls-cert-compression",
+        "oxibelt-upload-storage",
     }
 )
 ADMIN_RUNTIME_WORKSPACE_PACKAGES = RUNTIME_WORKSPACE_PACKAGES | {
