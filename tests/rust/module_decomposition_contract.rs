@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use syn::visit::{self, Visit};
 
 const SOURCE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+const CRATES_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/crates");
+// An extracted runtime crate keeps the boundary policy of its former module.
+const EXTRACTED_RUNTIME_CRATES: &[(&str, &str)] = &[("oxibelt-ct", "ct")];
 const FIXTURE_ROOT: &str = concat!(
   env!("CARGO_MANIFEST_DIR"),
   "/../tests/fixtures/rust-dependency-boundaries"
@@ -164,12 +167,85 @@ fn rust_sources(root: &Path) -> Vec<PathBuf> {
   sources
 }
 
+fn first_party_sources() -> Vec<PathBuf> {
+  let crates_root = Path::new(CRATES_ROOT);
+  let mut roots = vec![PathBuf::from(SOURCE_ROOT)];
+  let mut crates = fs::read_dir(crates_root)
+    .unwrap_or_else(|error| panic!("failed to read {}: {error}", crates_root.display()))
+    .map(|entry| {
+      entry
+        .expect("crate directory entry should be readable")
+        .path()
+    })
+    .filter(|path| path.is_dir())
+    .collect::<Vec<_>>();
+  crates.sort();
+  for crate_dir in crates {
+    let source_root = crate_dir.join("src");
+    if source_root.is_dir() {
+      roots.push(source_root);
+    }
+  }
+  for (crate_name, _) in EXTRACTED_RUNTIME_CRATES {
+    let source_root = crates_root.join(crate_name).join("src");
+    assert!(
+      roots.contains(&source_root),
+      "extracted runtime crate source root {} must exist",
+      source_root.display()
+    );
+  }
+  roots
+    .iter()
+    .flat_map(|root| {
+      let sources = rust_sources(root);
+      if EXTRACTED_RUNTIME_CRATES
+        .iter()
+        .any(|(crate_name, _)| root == &crates_root.join(crate_name).join("src"))
+      {
+        assert!(
+          !sources.is_empty(),
+          "extracted runtime crate source root {} must contain Rust modules",
+          root.display()
+        );
+      }
+      sources
+    })
+    .collect()
+}
+
 fn relative(path: &Path) -> String {
-  path
-    .strip_prefix(SOURCE_ROOT)
-    .expect("Rust source should be below source/src")
-    .to_string_lossy()
-    .replace('\\', "/")
+  if let Ok(runtime_path) = path.strip_prefix(SOURCE_ROOT) {
+    return runtime_path.to_string_lossy().replace('\\', "/");
+  }
+  let crate_path = path
+    .strip_prefix(CRATES_ROOT)
+    .expect("Rust source should be below source/src or source/crates");
+  let mut components = crate_path.components();
+  let crate_name = components
+    .next()
+    .expect("crate source should have a package name")
+    .as_os_str()
+    .to_string_lossy();
+  assert!(
+    components
+      .next()
+      .is_some_and(|component| component.as_os_str() == "src"),
+    "crate source should be below its src directory"
+  );
+  let crate_relative = components.as_path().to_string_lossy().replace('\\', "/");
+  if let Some((_, logical_root)) = EXTRACTED_RUNTIME_CRATES
+    .iter()
+    .find(|(name, _)| *name == crate_name)
+  {
+    let module_path = if crate_relative == "lib.rs" {
+      "mod.rs"
+    } else {
+      &crate_relative
+    };
+    format!("{logical_root}/{module_path}")
+  } else {
+    format!("crates/{crate_name}/src/{crate_relative}")
+  }
 }
 
 fn is_test_source(path: &str) -> bool {
@@ -475,8 +551,8 @@ fn public_module_names(source: &str) -> Result<BTreeSet<String>, syn::Error> {
 }
 
 #[test]
-fn every_runtime_source_is_valid_rust_syntax() {
-  let sources = rust_sources(Path::new(SOURCE_ROOT));
+fn every_first_party_source_is_valid_rust_syntax() {
+  let sources = first_party_sources();
   assert!(
     !sources.is_empty(),
     "source/src should contain Rust modules"
@@ -484,6 +560,13 @@ fn every_runtime_source_is_valid_rust_syntax() {
   for source in sources {
     let _ = facts(&source);
   }
+}
+
+#[test]
+fn extracted_runtime_sources_keep_their_logical_module_paths() {
+  let crate_root = Path::new(CRATES_ROOT).join("oxibelt-ct/src");
+  assert_eq!(relative(&crate_root.join("lib.rs")), "ct/mod.rs");
+  assert_eq!(relative(&crate_root.join("nested.rs")), "ct/nested.rs");
 }
 
 #[test]
@@ -514,9 +597,9 @@ fn configured_boundary_targets_exist() {
 }
 
 #[test]
-fn dependency_boundaries_hold_for_all_runtime_sources() {
+fn dependency_boundaries_hold_for_all_first_party_sources() {
   let mut violations = Vec::new();
-  for source in rust_sources(Path::new(SOURCE_ROOT)) {
+  for source in first_party_sources() {
     let relative = relative(&source);
     violations.extend(dependency_violations(&relative, &facts(&source)));
   }
@@ -750,7 +833,7 @@ fn wildcard_public_reexports_stay_in_reviewed_facades() {
   .into_iter()
   .map(str::to_string)
   .collect::<BTreeSet<_>>();
-  let actual = rust_sources(Path::new(SOURCE_ROOT))
+  let actual = first_party_sources()
     .into_iter()
     .filter_map(|source| {
       let relative = relative(&source);

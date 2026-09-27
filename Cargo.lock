@@ -3208,6 +3208,7 @@ dependencies = [
  "oxibelt-allocator",
  "oxibelt-build-identity",
  "oxibelt-control-protocol",
+ "oxibelt-ct",
  "oxibelt-tls-cert-compression",
  "precis-profiles",
  "pretty_assertions",
@@ -3286,6 +3287,15 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "http",
+]
+
+[[package]]
+name = "oxibelt-ct"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "serde",
+ "sha2 0.11.0",
 ]
 
 [[package]]

@@ -103,6 +103,7 @@ memchr = "2.8.3"
 online-dsl-forge = "0.3.3"
 oxibelt-build-identity.workspace = true
 oxibelt-control-protocol.workspace = true
+oxibelt-ct.workspace = true
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_pointer_width = "64", any(target_env = "gnu", target_env = "musl")))'.dependencies]
 oxibelt-allocator = { workspace = true, optional = true, features = ["native-mimalloc"] }

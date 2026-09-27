@@ -67,6 +67,7 @@ RUNTIME_WORKSPACE_PACKAGES = frozenset(
         "oxibelt",
         "oxibelt-build-identity",
         "oxibelt-control-protocol",
+        "oxibelt-ct",
         "oxibelt-tls-cert-compression",
     }
 )

@@ -81,6 +81,12 @@ does not own configuration parsing, persistence, deployment control, or
 cross-process coordination, and no role package acquires a new dependency or
 feature through this bridge.
 
+`oxibelt-ct` owns the Certificate Transparency wire codecs and Merkle proof
+primitives formerly compiled inside `oxibelt`. It has no runtime, network,
+storage, or private-key dependency. The integrated crate retains the
+`oxibelt::ct` module as an explicit compatibility facade, so callers keep the
+same Rust paths and type identities.
+
 ## Role feature matrix
 
 The workspace dependency on `oxibelt` disables default features. Every role
@@ -132,8 +138,10 @@ configuration without embedding Admin APIs or routes.
 
 ## Enforcement
 
-`tests/rust/module_decomposition_contract.rs` parses Rust syntax and enforces
-module dependency and public-surface policy. Its negative fixtures under
+`tests/rust/module_decomposition_contract.rs` parses Rust syntax in the
+integrated runtime and first-party crates and enforces module dependency and
+public-surface policy. Extracted runtime crates retain their logical module
+paths in that check rather than falling outside its boundary rules. Its negative fixtures under
 `tests/fixtures/rust-dependency-boundaries/` demonstrate rejected edges and
 accidental public modules.
 

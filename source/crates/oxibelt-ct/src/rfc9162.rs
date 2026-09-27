@@ -670,7 +670,7 @@ fn decode_base64(value: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::ct::rfc6962::{
+  use crate::rfc6962::{
     DigitallySigned, HASH_ALGORITHM_SHA256, SIGNATURE_ALGORITHM_ECDSA, SignedCertificateTimestampV1,
   };
 
