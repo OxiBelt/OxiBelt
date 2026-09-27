@@ -36,10 +36,24 @@ fn h1_handshake_accept_matches_rfc_6455_sample() {
     .unwrap();
   assert_eq!(
     validate_downstream(&request, false),
-    Ok(Some(HeaderValue::from_static(
-      "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-    )))
+    Ok(Some("dGhlIHNhbXBsZSBub25jZQ==".to_owned()))
   );
+  assert_eq!(
+    accept_key("dGhlIHNhbXBsZSBub25jZQ==").unwrap(),
+    HeaderValue::from_static("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+  );
+}
+
+#[test]
+fn invalid_h1_key_header_does_not_modify_outbound_headers() {
+  let mut headers = HeaderMap::new();
+  headers.insert("x-stays", HeaderValue::from_static("original"));
+  let original = headers.clone();
+  assert!(matches!(
+    prepare_h1_headers(&mut headers, None, "invalid\nkey"),
+    Err(H1HeaderError::Key)
+  ));
+  assert_eq!(headers, original);
 }
 
 #[test]

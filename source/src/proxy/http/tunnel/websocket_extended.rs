@@ -29,13 +29,18 @@ enum UpstreamSession {
   ),
   H3(
     DuplexStream,
-    crate::proxy::http3::UpstreamH3WebSocketConnectionGuard,
+    Box<crate::proxy::http3::UpstreamH3WebSocketConnectionGuard>,
   ),
 }
 
 struct UpstreamGuard {
   _h2: Option<crate::proxy::http::websocket_h2::H2WebSocketConnectionGuard>,
-  _h3: Option<crate::proxy::http3::UpstreamH3WebSocketConnectionGuard>,
+  _h3: Option<Box<crate::proxy::http3::UpstreamH3WebSocketConnectionGuard>>,
+}
+
+enum H1HeaderError {
+  Key,
+  Host,
 }
 
 impl UpstreamGuard {
@@ -133,9 +138,21 @@ pub(in crate::proxy::http) async fn handle(
   }
   let downstream_version = request.version();
   let extended = is_extended_websocket_request(&request);
-  let downstream_accept = match validate_downstream(&request, extended) {
-    Ok(accept) => accept,
+  let downstream_key = match validate_downstream(&request, extended) {
+    Ok(key) => key,
     Err(message) => return route_security.text(StatusCode::BAD_REQUEST, message),
+  };
+  let downstream_accept = match downstream_key {
+    Some(key) => match accept_key(&key) {
+      Ok(accept) => Some(accept),
+      Err(_) => {
+        return route_security.text(
+          StatusCode::SERVICE_UNAVAILABLE,
+          "WebSocket accept generation failed",
+        );
+      }
+    },
+    None => None,
   };
   let offered_protocol = request.headers().get("sec-websocket-protocol").cloned();
   let offered_extensions = request.headers().get("sec-websocket-extensions").cloned();
@@ -202,16 +219,14 @@ pub(in crate::proxy::http) async fn handle(
     .get::<crate::proxy_protocol_egress::tls::PreparedTlsHeader>()
     .cloned();
   let verified_early_data = early_data::is_verified(&request);
-  let mut outbound = Request::builder()
-    .method(if upstream_version == HttpVersion::H1 {
-      Method::GET
-    } else {
-      Method::CONNECT
-    })
-    .uri(target_uri.clone())
-    .version(version::upstream_request_version(upstream_version))
-    .body(body::materialized_known_small_body(Bytes::new(), None))
-    .expect("validated WebSocket upstream request");
+  let mut outbound = Request::new(body::materialized_known_small_body(Bytes::new(), None));
+  *outbound.method_mut() = if upstream_version == HttpVersion::H1 {
+    Method::GET
+  } else {
+    Method::CONNECT
+  };
+  *outbound.uri_mut() = target_uri.clone();
+  *outbound.version_mut() = version::upstream_request_version(upstream_version);
   *outbound.headers_mut() = request.headers().clone();
   if upstream.preserve_host {
     set_effective_host_header(outbound.headers_mut(), downstream_host);
@@ -273,7 +288,27 @@ pub(in crate::proxy::http) async fn handle(
           );
         }
       };
-      prepare_h1_headers(&mut headers, target_uri.authority(), &key);
+      let expected_accept = match accept_key(&key) {
+        Ok(accept) => accept,
+        Err(_) => {
+          return route_security.text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "WebSocket accept generation failed",
+          );
+        }
+      };
+      if let Err(error) = prepare_h1_headers(&mut headers, target_uri.authority(), &key) {
+        return match error {
+          H1HeaderError::Key => route_security.text(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "WebSocket key header generation failed",
+          ),
+          H1HeaderError::Host => route_security.text(
+            StatusCode::BAD_GATEWAY,
+            "invalid upstream WebSocket authority",
+          ),
+        };
+      }
       *outbound.headers_mut() = headers;
       let upstream_request = async {
         if upstream.proxy_protocol_tls.is_some() {
@@ -311,7 +346,7 @@ pub(in crate::proxy::http) async fn handle(
       if response.status() != StatusCode::SWITCHING_PROTOCOLS
         || !upgrade_protocol::is_websocket_selection(response.headers())
         || !header_has_token(response.headers(), http::header::CONNECTION, "upgrade")
-        || response.headers().get("sec-websocket-accept") != Some(&accept_key(&key))
+        || response.headers().get("sec-websocket-accept") != Some(&expected_accept)
       {
         return route_security.text(
           StatusCode::BAD_GATEWAY,
@@ -357,7 +392,11 @@ pub(in crate::proxy::http) async fn handle(
         Ok(connected) => connected,
         Err(error) => return upstream_error(&route_security, state, upstream, access_log, error),
       };
-      (headers, UpstreamSession::H3(stream, guard), certificate)
+      (
+        headers,
+        UpstreamSession::H3(stream, Box::new(guard)),
+        certificate,
+      )
     }
   };
   if !valid_upstream_negotiation(
@@ -503,7 +542,7 @@ fn translated_response_headers(mut headers: HeaderMap) -> HeaderMap {
 fn validate_downstream<B>(
   request: &Request<B>,
   extended: bool,
-) -> Result<Option<HeaderValue>, &'static str> {
+) -> Result<Option<String>, &'static str> {
   let versions = request.headers().get_all("sec-websocket-version");
   if versions.iter().count() != 1 || versions.iter().next() != Some(&HeaderValue::from_static("13"))
   {
@@ -541,17 +580,16 @@ fn validate_downstream<B>(
     if decoded.len() != 16 {
       return Err("invalid WebSocket key");
     }
-    Ok(Some(accept_key(key)))
+    Ok(Some(key.to_owned()))
   }
 }
 
-fn accept_key(key: &str) -> HeaderValue {
+fn accept_key(key: &str) -> Result<HeaderValue, http::header::InvalidHeaderValue> {
   let mut input = Vec::with_capacity(key.len() + WEBSOCKET_GUID.len());
   input.extend_from_slice(key.as_bytes());
   input.extend_from_slice(WEBSOCKET_GUID);
   let digest = crate::crypto::sha1(&input);
   HeaderValue::from_str(&base64::engine::general_purpose::STANDARD.encode(digest))
-    .expect("base64 accept value")
 }
 
 fn new_key() -> Result<String, getrandom::Error> {
@@ -564,7 +602,11 @@ fn prepare_h1_headers(
   headers: &mut HeaderMap,
   authority: Option<&http::uri::Authority>,
   key: &str,
-) {
+) -> Result<(), H1HeaderError> {
+  let key = HeaderValue::from_str(key).map_err(|_| H1HeaderError::Key)?;
+  let host = authority
+    .map(|authority| HeaderValue::from_str(authority.as_str()).map_err(|_| H1HeaderError::Host))
+    .transpose()?;
   strip_hop_by_hop_headers(headers);
   headers.remove("sec-websocket-accept");
   headers.insert(
@@ -572,17 +614,12 @@ fn prepare_h1_headers(
     HeaderValue::from_static("Upgrade"),
   );
   headers.insert(http::header::UPGRADE, HeaderValue::from_static("websocket"));
-  headers.insert(
-    "sec-websocket-key",
-    HeaderValue::from_str(key).expect("base64 key"),
-  );
+  headers.insert("sec-websocket-key", key);
   headers.insert("sec-websocket-version", HeaderValue::from_static("13"));
-  if let Some(authority) = authority {
-    headers.insert(
-      http::header::HOST,
-      HeaderValue::from_str(authority.as_str()).expect("URI authority"),
-    );
+  if let Some(host) = host {
+    headers.insert(http::header::HOST, host);
   }
+  Ok(())
 }
 
 fn header_has_token(headers: &HeaderMap, name: http::HeaderName, token: &str) -> bool {
@@ -692,11 +729,11 @@ fn h3_downstream_bridge(mut request_body: ProxyBody) -> (DuplexStream, ProxyBody
         upload_failed.store(true, Ordering::Release);
         break;
       };
-      if let Ok(data) = frame.into_data() {
-        if pump_writer.write_all(&data).await.is_err() {
-          upload_failed.store(true, Ordering::Release);
-          break;
-        }
+      if let Ok(data) = frame.into_data()
+        && pump_writer.write_all(&data).await.is_err()
+      {
+        upload_failed.store(true, Ordering::Release);
+        break;
       }
     }
     let _ = pump_writer.shutdown().await;
