@@ -863,7 +863,7 @@ fn browser_webdriver_firefox_turn_diagnostics_are_bounded_and_failure_only() {
   );
   assert_eq!(
     diagnostics.matches("copy_redacted_artifact").count(),
-    4,
+    5,
     "every ordinary Firefox TURN diagnostic should pass through credential redaction"
   );
   assert_eq!(
