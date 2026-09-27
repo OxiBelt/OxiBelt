@@ -1,92 +1,51 @@
-mod artifact;
-mod artifact_store;
-mod cluster_command;
-mod envelope;
-mod error;
-mod ledger;
-mod membership;
-mod membership_crypto;
-mod membership_store;
+//! Integrated Admin mutation adapter and compatibility facade.
+
 #[cfg(test)]
 pub(crate) mod postgres_test_support;
-mod response;
-mod rollout;
-mod rollout_store;
-mod runtime;
-mod store;
-mod store_anchor;
-mod verifier;
 
-pub(crate) use cluster_command::{
-  ClusterAuthorizationCheck, ClusterCommandAuthorization, ClusterExecutionModel,
-  ClusterMutationCommand,
+mod runtime;
+
+pub(crate) use oxibelt_admin_mutation_core::admin_mutation::{
+  BreakGlassMutationCheckpoint, ClusterAuthorizationCheck, ClusterCommandAuthorization,
+  ClusterExecutionModel, ClusterMutationCommand, CoordinatorFence, FencedCoordinatorTransaction,
+  FencedTargetTransition, MemberFence, MemberWork, MembershipActivationRequest,
+  MembershipArtifactCiphers, MembershipCancelRequest, MembershipMember,
+  MembershipMutationCheckpoint, MembershipReadinessReceipt, MembershipTransition,
+  MembershipTransitionRequest, MutationRecord, MutationState, ResourceHeadUpdate, RolloutDirective,
+  RolloutTarget, RolloutTransitionPlan, SharedPublicationClaim, SharedPublicationOutcome,
+  SharedPublicationState, TargetPlan, TargetState, apply_membership_proposal_tx,
+  authorize_membership_activation_tx, begin_coordinator_transaction,
+  cancel_membership_transition_tx, capture_break_glass_checkpoint_tx, claim_shared_publication,
+  consume_shared_winner_response, create_break_glass_activation_tx, finish_shared_publication,
+  load_shared_publication, publish_checkpoint_in_coordinator_transaction,
+  restore_break_glass_checkpoint_tx, restore_membership_mutation_tx,
+  revoke_break_glass_activation_tx,
 };
-pub use envelope::{
-  MutationEnvelope, MutationSignature, MutationTarget, SignatureSuite, TranscriptContext,
-  UnsignedMutationEnvelope, encode_mutation_header, mutation_transcript, parse_mutation_header,
-};
-pub use error::{MutationProtocolError, MutationProtocolErrorKind};
 #[cfg(test)]
-pub(crate) use ledger::{ClaimOutcome, MutationClaim};
-pub(crate) use ledger::{MutationRecord, MutationState};
-pub(crate) use membership::{
-  MembershipActivationRequest, MembershipCancelRequest, MembershipMember,
-  MembershipReadinessReceipt, MembershipTransitionRequest,
+pub(crate) use oxibelt_admin_mutation_core::admin_mutation::{
+  ClaimOutcome, MutationClaim, MutationStore, StoreRolloutMode, claim_tx_with_mode,
+  init_mutation_postgres, load_recoverable_mutations,
 };
-pub(crate) use membership_store::{
-  MembershipArtifactCiphers, MembershipMutationCheckpoint, MembershipTransition,
-  apply_membership_proposal_tx, authorize_membership_activation_tx,
-  cancel_membership_transition_tx, restore_membership_mutation_tx,
+pub use oxibelt_admin_mutation_core::admin_mutation::{
+  IDEMPOTENT_REPLAY_HEADER, MUTATION_HEADER, MUTATION_REQUEST_ID_HEADER, MUTATION_REVISION_HEADER,
+  MutationEnvelope, MutationProtocolError, MutationProtocolErrorKind, MutationResponseMetadata,
+  MutationSignature, MutationTarget, SignatureSuite, SignerBinding, SignerRegistry,
+  TranscriptContext, UnsignedMutationEnvelope, VerifiedMutation, attach_mutation_response_headers,
+  encode_mutation_header, mutation_transcript, parse_mutation_header,
 };
-pub use response::{
-  IDEMPOTENT_REPLAY_HEADER, MUTATION_REQUEST_ID_HEADER, MUTATION_REVISION_HEADER,
-  MutationResponseMetadata, attach_mutation_response_headers,
-};
-pub(crate) use rollout::RolloutDirective;
-#[cfg(test)]
-pub(crate) use rollout_store::load_recoverable_mutations;
-pub(crate) use rollout_store::{
-  CoordinatorFence, FencedCoordinatorTransaction, FencedTargetTransition, MemberFence, MemberWork,
-  ResourceHeadUpdate, RolloutTarget, RolloutTransitionPlan, SharedPublicationClaim,
-  SharedPublicationOutcome, SharedPublicationState, TargetPlan, TargetState,
-  begin_coordinator_transaction, claim_shared_publication, consume_shared_winner_response,
-  finish_shared_publication, load_shared_publication,
-  publish_checkpoint_in_coordinator_transaction,
+pub(crate) use oxibelt_admin_mutation_core::admin_mutation::{
+  artifact, artifact_store, cluster_command, envelope, ledger, membership, membership_store,
+  rollout, rollout_store, store,
 };
 pub(crate) use runtime::{
   AdminMutationRuntime, ClusterHeartbeatBootstrap, ClusterHeartbeatTask, LocalMembershipHead,
   MutationAdmission, MutationAdmissionError, MutationConflict, configured_target,
 };
-pub(crate) use store::{
-  BreakGlassMutationCheckpoint, capture_break_glass_checkpoint_tx,
-  create_break_glass_activation_tx, restore_break_glass_checkpoint_tx,
-  revoke_break_glass_activation_tx,
-};
-#[cfg(test)]
-pub(crate) use store::{
-  MutationStore, StoreRolloutMode, claim_tx_with_mode, init_postgres as init_mutation_postgres,
-};
-pub use verifier::{SignerBinding, SignerRegistry, VerifiedMutation};
-
-pub const MUTATION_HEADER: &str = "x-oxibelt-mutation";
 
 #[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_cluster_rollout(data: &[u8]) {
-  const MAX_FRAME_BYTES: usize = 32 * 1024;
-  let data = &data[..data.len().min(MAX_FRAME_BYTES)];
-  cluster_command::fuzz_decode_frame(data);
-  rollout::fuzz_classify_rollout(data);
+  oxibelt_admin_mutation_core::admin_mutation::fuzz_cluster_rollout(data)
 }
 
 #[cfg(test)]
-mod artifact_postgres_tests;
-#[cfg(test)]
-mod rollout_store_fault_tests;
-#[cfg(test)]
-mod rollout_store_postgres_tests;
-#[cfg(test)]
-mod rollout_store_shared_postgres_tests;
-#[cfg(test)]
 mod store_postgres_tests;
-#[cfg(test)]
-mod tests;

@@ -8,10 +8,10 @@ use zeroize::Zeroizing;
 use super::{MutationStore, validate_identifier};
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct BreakGlassActivation {
+pub struct BreakGlassActivation {
   pub(crate) activation_id: String,
   pub(crate) principal: String,
-  pub(crate) scopes: Vec<String>,
+  pub scopes: Vec<String>,
   pub(crate) mutation_request_id: String,
   pub(crate) expires_at: String,
   pub(crate) revoked_at: Option<String>,
@@ -19,7 +19,7 @@ pub(crate) struct BreakGlassActivation {
 }
 
 #[derive(Clone)]
-pub(crate) struct BreakGlassMutationCheckpoint {
+pub struct BreakGlassMutationCheckpoint {
   activation_id: String,
   prior_row: Option<Zeroizing<Vec<u8>>>,
 }
@@ -42,7 +42,7 @@ struct BreakGlassMutationCheckpointWire {
 }
 
 impl BreakGlassMutationCheckpoint {
-  pub(crate) fn encode_plaintext(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+  pub fn encode_plaintext(&self) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     let prior_row = self
       .prior_row
       .as_ref()
@@ -57,7 +57,7 @@ impl BreakGlassMutationCheckpoint {
     )?))
   }
 
-  pub(crate) fn decode_plaintext(encoded: &[u8]) -> anyhow::Result<Self> {
+  pub fn decode_plaintext(encoded: &[u8]) -> anyhow::Result<Self> {
     let wire: BreakGlassMutationCheckpointWire = serde_json::from_slice(encoded)?;
     ensure!(
       wire.format == "oxibelt-break-glass-checkpoint-v1",
@@ -74,7 +74,7 @@ impl BreakGlassMutationCheckpoint {
   }
 }
 
-pub(crate) async fn capture_break_glass_checkpoint_tx(
+pub async fn capture_break_glass_checkpoint_tx(
   tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   activation_id: &str,
@@ -95,7 +95,7 @@ pub(crate) async fn capture_break_glass_checkpoint_tx(
   })
 }
 
-pub(crate) async fn restore_break_glass_checkpoint_tx(
+pub async fn restore_break_glass_checkpoint_tx(
   tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   checkpoint: &BreakGlassMutationCheckpoint,
@@ -133,7 +133,7 @@ pub(crate) async fn restore_break_glass_checkpoint_tx(
   Ok(())
 }
 
-pub(crate) async fn create_break_glass_activation_tx(
+pub async fn create_break_glass_activation_tx(
   tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   activation_id: &str,
@@ -189,7 +189,7 @@ pub(crate) async fn create_break_glass_activation_tx(
   from_row(&row)
 }
 
-pub(crate) async fn revoke_break_glass_activation_tx(
+pub async fn revoke_break_glass_activation_tx(
   tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   activation_id: &str,
@@ -208,7 +208,7 @@ pub(crate) async fn revoke_break_glass_activation_tx(
   Ok(result.rows_affected() == 1)
 }
 
-pub(crate) async fn load_active_break_glass_for_principal(
+pub async fn load_active_break_glass_for_principal(
   store: &MutationStore,
   principal: &str,
 ) -> anyhow::Result<Option<BreakGlassActivation>> {

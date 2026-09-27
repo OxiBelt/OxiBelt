@@ -33,28 +33,28 @@ mod shared;
 mod target;
 #[cfg(test)]
 pub(crate) use fencing::ExactMembership;
-pub(crate) use fencing::{
+pub use fencing::{
   CoordinatorFence, FencedTargetTransition, MemberFence, RolloutTransitionPlan, TargetPlan,
   acquire_coordinator_fence, apply_transition_plan, heartbeat_fenced, prove_exact_live_membership,
 };
-pub(crate) use heads::{
+pub use heads::{
   ResourceHeadUpdate, load_resource_heads, prove_exact_resource_membership, publish_resource_head,
 };
-pub(crate) use payload::{
+pub use payload::{
   SealedCheckpoint, cluster_admit_tx, fetch_checkpoint, fetch_committed_artifact,
   is_admission_origin, publish_checkpoint, publish_checkpoint_in_coordinator_transaction,
 };
-pub(crate) use recovery::{
+pub use recovery::{
   MemberWork, RecoveryMutation, guarded_cluster_finish_tx, load_member_work,
   load_recoverable_mutations, release_member_fence,
 };
-pub(crate) use shared::{
+pub use shared::{
   FencedCoordinatorTransaction, SharedPublicationClaim, SharedPublicationOutcome,
   SharedPublicationState, begin_coordinator_transaction, claim_shared_publication,
   consume_shared_winner_response, finish_shared_publication, load_applied_shared_publication_tx,
   load_shared_publication,
 };
-pub(crate) use target::transition_target_fenced;
+pub use target::transition_target_fenced;
 
 #[cfg(test)]
 const ACQUIRE_COORDINATOR_LEASE_SQL: &str = "UPDATE oxibelt_admin_mutations AS mutation
@@ -93,7 +93,7 @@ const ACQUIRE_COORDINATOR_LEASE_SQL: &str = "UPDATE oxibelt_admin_mutations AS m
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TargetState {
+pub enum TargetState {
   Pending,
   Validating,
   Validated,
@@ -141,7 +141,7 @@ impl TargetState {
     })
   }
 
-  pub(crate) const fn may_transition_to(self, next: Self) -> bool {
+  pub const fn may_transition_to(self, next: Self) -> bool {
     match self {
       Self::Pending => matches!(next, Self::Validating | Self::Nacked),
       Self::Validating => matches!(next, Self::Validated | Self::Applying | Self::Nacked),
@@ -161,22 +161,22 @@ impl TargetState {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct RolloutTarget {
-  pub(crate) instance_id: String,
-  pub(crate) state: TargetState,
-  pub(crate) state_version: i64,
-  pub(crate) assignment_epoch: i64,
-  pub(crate) boot_id: Option<String>,
-  pub(crate) instance_epoch: Option<i64>,
-  pub(crate) effect_started_at: Option<String>,
-  pub(crate) validation_revision: Option<String>,
-  pub(crate) validation_digest: Option<String>,
-  pub(crate) applied_revision: Option<String>,
-  pub(crate) applied_digest: Option<String>,
-  pub(crate) restored_revision: Option<String>,
-  pub(crate) restored_digest: Option<String>,
-  pub(crate) error_code: Option<String>,
-  pub(crate) updated_at: String,
+pub struct RolloutTarget {
+  pub instance_id: String,
+  pub state: TargetState,
+  pub state_version: i64,
+  pub assignment_epoch: i64,
+  pub boot_id: Option<String>,
+  pub instance_epoch: Option<i64>,
+  pub effect_started_at: Option<String>,
+  pub validation_revision: Option<String>,
+  pub validation_digest: Option<String>,
+  pub applied_revision: Option<String>,
+  pub applied_digest: Option<String>,
+  pub restored_revision: Option<String>,
+  pub restored_digest: Option<String>,
+  pub error_code: Option<String>,
+  pub updated_at: String,
 }
 
 #[cfg(test)]
@@ -190,19 +190,19 @@ pub(crate) struct TargetTransition {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct HeartbeatUpdate {
-  pub(crate) cluster_id: String,
-  pub(crate) instance_id: String,
-  pub(crate) boot_id: String,
-  pub(crate) build_version: String,
-  pub(crate) capability_version: String,
-  pub(crate) artifact_key_fingerprint: String,
-  pub(crate) membership_revision: String,
-  pub(crate) assigned_revision: Option<String>,
-  pub(crate) applied_revision: String,
-  pub(crate) applied_digest: String,
-  pub(crate) ready: bool,
-  pub(crate) lease_seconds: i32,
+pub struct HeartbeatUpdate {
+  pub cluster_id: String,
+  pub instance_id: String,
+  pub boot_id: String,
+  pub build_version: String,
+  pub capability_version: String,
+  pub artifact_key_fingerprint: String,
+  pub membership_revision: String,
+  pub assigned_revision: Option<String>,
+  pub applied_revision: String,
+  pub applied_digest: String,
+  pub ready: bool,
+  pub lease_seconds: i32,
 }
 
 impl HeartbeatUpdate {
@@ -253,21 +253,21 @@ impl HeartbeatUpdate {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct InstanceHeartbeat {
-  pub(crate) cluster_id: String,
-  pub(crate) instance_id: String,
-  pub(crate) boot_id: String,
-  pub(crate) instance_epoch: i64,
-  pub(crate) build_version: String,
-  pub(crate) capability_version: String,
-  pub(crate) artifact_key_fingerprint: String,
-  pub(crate) membership_revision: String,
-  pub(crate) assigned_revision: Option<String>,
-  pub(crate) applied_revision: String,
-  pub(crate) applied_digest: String,
-  pub(crate) ready: bool,
-  pub(crate) lease_expires_at: String,
-  pub(crate) updated_at: String,
+pub struct InstanceHeartbeat {
+  pub cluster_id: String,
+  pub instance_id: String,
+  pub boot_id: String,
+  pub instance_epoch: i64,
+  pub build_version: String,
+  pub capability_version: String,
+  pub artifact_key_fingerprint: String,
+  pub membership_revision: String,
+  pub assigned_revision: Option<String>,
+  pub applied_revision: String,
+  pub applied_digest: String,
+  pub ready: bool,
+  pub lease_expires_at: String,
+  pub updated_at: String,
 }
 
 #[cfg(test)]
@@ -439,7 +439,7 @@ pub(crate) async fn transition_target(
   target_from_row(&row)
 }
 
-pub(crate) async fn load_targets(
+pub async fn load_targets(
   store: &MutationStore,
   request_id: &str,
 ) -> anyhow::Result<Vec<RolloutTarget>> {
@@ -467,7 +467,7 @@ pub(crate) async fn heartbeat(
   Ok(())
 }
 
-pub(crate) async fn load_live_members_bounded(
+pub async fn load_live_members_bounded(
   store: &MutationStore,
   cluster_id: &str,
   limit: i64,

@@ -196,6 +196,7 @@ const CompatibilitySurfaceSections: CompatibilitySurface[] = [
     patterns: [
       /^source\/assets\/admin-openapi\.json$/,
       /^source\/src\/admin(?:[_.].*|\/)/,
+      /^source\/crates\/oxibelt-admin-mutation-core\//,
       /^source\/src\/server\/admin(?:[_.].*|\/)/,
       /^source\/src\/ipm\/admin(?:[_.].*|\/)/,
       /^source\/crates\/oxibelt-control-(?:http|protocol)\//
@@ -234,6 +235,7 @@ const CompatibilitySurfaceSections: CompatibilitySurface[] = [
       /^deploy\/postgres\//,
       /(?:^|\/)store_schema\.rs$/,
       /^source\/src\/(?:admin_(?:audit|mutation)|server\/admin_operations)\/.*store/,
+      /^source\/crates\/oxibelt-admin-mutation-core\/src\/admin_mutation\/.*store/,
       /^source\/src\/shared_state(?:\.rs|\/)/
     ]
   }

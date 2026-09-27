@@ -7,8 +7,12 @@ use syn::visit::{self, Visit};
 const SOURCE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
 const CRATES_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/crates");
 // An extracted runtime crate keeps the boundary policy of its former module.
-const EXTRACTED_RUNTIME_CRATES: &[(&str, &str)] =
-  &[("oxibelt-admission-policy", "config"), ("oxibelt-ct", "ct")];
+const EXTRACTED_RUNTIME_CRATES: &[(&str, &str)] = &[
+  ("oxibelt-admission-policy", "config"),
+  ("oxibelt-admin-mutation-core", "admin_mutation"),
+  ("oxibelt-crypto-primitives", "crypto"),
+  ("oxibelt-ct", "ct"),
+];
 const FIXTURE_ROOT: &str = concat!(
   env!("CARGO_MANIFEST_DIR"),
   "/../tests/fixtures/rust-dependency-boundaries"
@@ -234,6 +238,9 @@ fn relative(path: &Path) -> String {
     "crate source should be below its src directory"
   );
   let crate_relative = components.as_path().to_string_lossy().replace('\\', "/");
+  if crate_name == "oxibelt-admin-mutation-core" && crate_relative.starts_with("admin_mutation/") {
+    return crate_relative;
+  }
   if let Some((_, logical_root)) = EXTRACTED_RUNTIME_CRATES
     .iter()
     .find(|(name, _)| *name == crate_name)
@@ -565,6 +572,11 @@ fn every_first_party_source_is_valid_rust_syntax() {
 
 #[test]
 fn extracted_runtime_sources_keep_their_logical_module_paths() {
+  let admin_root = Path::new(CRATES_ROOT).join("oxibelt-admin-mutation-core/src");
+  assert_eq!(
+    relative(&admin_root.join("admin_mutation/envelope.rs")),
+    "admin_mutation/envelope.rs"
+  );
   let admission_root = Path::new(CRATES_ROOT).join("oxibelt-admission-policy/src");
   assert_eq!(relative(&admission_root.join("lib.rs")), "config/mod.rs");
   assert_eq!(
@@ -574,6 +586,8 @@ fn extracted_runtime_sources_keep_their_logical_module_paths() {
   let crate_root = Path::new(CRATES_ROOT).join("oxibelt-ct/src");
   assert_eq!(relative(&crate_root.join("lib.rs")), "ct/mod.rs");
   assert_eq!(relative(&crate_root.join("nested.rs")), "ct/nested.rs");
+  let crypto_root = Path::new(CRATES_ROOT).join("oxibelt-crypto-primitives/src");
+  assert_eq!(relative(&crypto_root.join("lib.rs")), "crypto/mod.rs");
 }
 
 #[test]

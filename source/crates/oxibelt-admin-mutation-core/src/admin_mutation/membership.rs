@@ -13,17 +13,17 @@ use sha2::{Digest, Sha256};
 
 use super::ledger::validate_identifier;
 
-pub(crate) const MEMBERSHIP_DOCUMENT_VERSION: u32 = 2;
+pub const MEMBERSHIP_DOCUMENT_VERSION: u32 = 2;
 pub(crate) const LEGACY_MEMBERSHIP_DOCUMENT_VERSION: u32 = 1;
 pub(crate) const MAX_MEMBERSHIP_MEMBERS: usize = 1_024;
-pub(crate) const MEMBERSHIP_CAPABILITY_VERSION: &str = "admin-membership-epoch-v2";
+pub const MEMBERSHIP_CAPABILITY_VERSION: &str = "admin-membership-epoch-v2";
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipMember {
-  pub(crate) id: String,
-  pub(crate) readiness_ed25519_public_key: String,
-  pub(crate) catchup_x25519_public_key: String,
+pub struct MembershipMember {
+  pub id: String,
+  pub readiness_ed25519_public_key: String,
+  pub catchup_x25519_public_key: String,
 }
 
 impl MembershipMember {
@@ -47,20 +47,20 @@ impl MembershipMember {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipEpoch {
-  pub(crate) version: u32,
+pub struct MembershipEpoch {
+  pub version: u32,
   pub(crate) cluster_id: String,
-  pub(crate) sequence: u64,
-  pub(crate) predecessor: Option<String>,
+  pub sequence: u64,
+  pub predecessor: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub(crate) artifact_key_fingerprint: Option<String>,
-  pub(crate) members: Vec<MembershipMember>,
-  pub(crate) authorized_by_request_id: String,
+  pub artifact_key_fingerprint: Option<String>,
+  pub members: Vec<MembershipMember>,
+  pub authorized_by_request_id: String,
 }
 
 impl MembershipEpoch {
   #[cfg(test)]
-  pub(crate) fn new(
+  pub fn new(
     cluster_id: String,
     sequence: u64,
     predecessor: Option<String>,
@@ -80,7 +80,7 @@ impl MembershipEpoch {
     Ok(value)
   }
 
-  pub(crate) fn new_v2(
+  pub fn new_v2(
     cluster_id: String,
     sequence: u64,
     predecessor: Option<String>,
@@ -176,7 +176,7 @@ impl MembershipEpoch {
     members
   }
 
-  pub(crate) fn digest(&self) -> anyhow::Result<String> {
+  pub fn digest(&self) -> anyhow::Result<String> {
     self.validate()?;
     let mut hasher = Sha256::new();
     hasher.update(if self.version == LEGACY_MEMBERSHIP_DOCUMENT_VERSION {
@@ -290,40 +290,40 @@ impl MembershipTransitionState {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipTransitionRequest {
+pub struct MembershipTransitionRequest {
   pub(crate) version: u32,
   pub(crate) kind: MembershipTransitionKind,
-  pub(crate) expected_active_epoch: Option<String>,
+  pub expected_active_epoch: Option<String>,
   pub(crate) member: Option<MembershipMember>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipReadinessReceipt {
-  pub(crate) version: u32,
-  pub(crate) transition_id: String,
-  pub(crate) target_epoch: String,
-  pub(crate) member_id: String,
-  pub(crate) catchup_cursor: u32,
-  pub(crate) catchup_digest: String,
+pub struct MembershipReadinessReceipt {
+  pub version: u32,
+  pub transition_id: String,
+  pub target_epoch: String,
+  pub member_id: String,
+  pub catchup_cursor: u32,
+  pub catchup_digest: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub(crate) source_epoch: Option<String>,
+  pub source_epoch: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub(crate) artifact_key_fingerprint: Option<String>,
+  pub artifact_key_fingerprint: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub(crate) checkpoint_digest: Option<String>,
+  pub checkpoint_digest: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub(crate) journal_tail_digest: Option<String>,
+  pub journal_tail_digest: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub(crate) verified_position: Option<u64>,
-  pub(crate) build_version: String,
-  pub(crate) capability_version: String,
-  pub(crate) issued_at_unix_seconds: i64,
-  pub(crate) signature: String,
+  pub verified_position: Option<u64>,
+  pub build_version: String,
+  pub capability_version: String,
+  pub issued_at_unix_seconds: i64,
+  pub signature: String,
 }
 
 impl MembershipReadinessReceipt {
-  pub(crate) fn validate(&self) -> anyhow::Result<()> {
+  pub fn validate(&self) -> anyhow::Result<()> {
     ensure!(
       matches!(self.version, 1 | 2),
       "unsupported membership readiness receipt version"
@@ -391,7 +391,7 @@ impl MembershipReadinessReceipt {
     validate_base64_len("membership readiness signature", &self.signature, 64)
   }
 
-  pub(crate) fn transcript(&self, cluster_id: &str) -> anyhow::Result<Vec<u8>> {
+  pub fn transcript(&self, cluster_id: &str) -> anyhow::Result<Vec<u8>> {
     self.validate()?;
     validate_identifier("membership cluster ID", cluster_id, 253)?;
     let mut transcript = if self.version == 1 {
@@ -452,20 +452,20 @@ impl MembershipReadinessReceipt {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipKeyProof {
-  pub(crate) version: u32,
-  pub(crate) transition_id: String,
-  pub(crate) target_epoch: String,
-  pub(crate) member_id: String,
-  pub(crate) artifact_key_fingerprint: String,
-  pub(crate) build_version: String,
-  pub(crate) capability_version: String,
-  pub(crate) issued_at_unix_seconds: i64,
-  pub(crate) signature: String,
+pub struct MembershipKeyProof {
+  pub version: u32,
+  pub transition_id: String,
+  pub target_epoch: String,
+  pub member_id: String,
+  pub artifact_key_fingerprint: String,
+  pub build_version: String,
+  pub capability_version: String,
+  pub issued_at_unix_seconds: i64,
+  pub signature: String,
 }
 
 impl MembershipKeyProof {
-  pub(crate) fn validate(&self) -> anyhow::Result<()> {
+  pub fn validate(&self) -> anyhow::Result<()> {
     ensure!(
       self.version == 2,
       "unsupported membership key-proof version"
@@ -488,7 +488,7 @@ impl MembershipKeyProof {
     validate_base64_len("membership key-proof signature", &self.signature, 64)
   }
 
-  pub(crate) fn transcript(&self, cluster_id: &str) -> anyhow::Result<Vec<u8>> {
+  pub fn transcript(&self, cluster_id: &str) -> anyhow::Result<Vec<u8>> {
     self.validate()?;
     validate_identifier("membership cluster ID", cluster_id, 253)?;
     let mut transcript = b"OXIBELT-ADMIN-MEMBERSHIP-KEY-PROOF-V2\0".to_vec();
@@ -511,14 +511,14 @@ impl MembershipKeyProof {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipActivationRequest {
+pub struct MembershipActivationRequest {
   pub(crate) version: u32,
-  pub(crate) transition_id: String,
+  pub transition_id: String,
   pub(crate) expected_target_epoch: String,
 }
 
 impl MembershipActivationRequest {
-  pub(crate) fn validate(&self) -> anyhow::Result<()> {
+  pub fn validate(&self) -> anyhow::Result<()> {
     ensure!(
       self.version == 1,
       "unsupported membership activation request version"
@@ -534,14 +534,14 @@ impl MembershipActivationRequest {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipCancelRequest {
+pub struct MembershipCancelRequest {
   pub(crate) version: u32,
-  pub(crate) transition_id: String,
+  pub transition_id: String,
   pub(crate) expected_target_epoch: String,
 }
 
 impl MembershipCancelRequest {
-  pub(crate) fn validate(&self) -> anyhow::Result<()> {
+  pub fn validate(&self) -> anyhow::Result<()> {
     ensure!(
       self.version == 1,
       "unsupported membership cancellation request version"
@@ -556,7 +556,7 @@ impl MembershipCancelRequest {
 }
 
 impl MembershipTransitionRequest {
-  pub(crate) fn validate(&self) -> anyhow::Result<()> {
+  pub fn validate(&self) -> anyhow::Result<()> {
     ensure!(
       self.version == 1,
       "unsupported membership transition request version"

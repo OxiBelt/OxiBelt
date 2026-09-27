@@ -5,7 +5,7 @@ use aws_lc_rs::agreement::{self, PrivateKey, UnparsedPublicKey, X25519};
 use base64::Engine as _;
 use zeroize::Zeroizing;
 
-use crate::crypto::{Aes256GcmKey, hkdf_sha256, random_fill};
+use oxibelt_crypto_primitives::{Aes256GcmKey, hkdf_sha256, random_fill};
 
 use super::artifact::sha256_digest;
 

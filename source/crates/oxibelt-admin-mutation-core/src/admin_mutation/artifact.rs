@@ -7,7 +7,7 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::crypto::{Aes256GcmKey, random_fill};
+use oxibelt_crypto_primitives::{Aes256GcmKey, random_fill};
 
 use super::ledger::{MutationClaim, MutationRecord, validate_identifier};
 
@@ -17,7 +17,7 @@ pub(super) const ARTIFACT_TAG_BYTES: usize = 16;
 const ARTIFACT_AAD_DOMAIN: &[u8] = b"OXIBELT-ADMIN-MUTATION-ARTIFACT-V1\0";
 const CHECKPOINT_AAD_DOMAIN: &[u8] = b"OXIBELT-ADMIN-MUTATION-CHECKPOINT-V1\0";
 
-pub(crate) struct MutationArtifactPlaintext {
+pub struct MutationArtifactPlaintext {
   bytes: Zeroizing<Vec<u8>>,
   signed_content_digest: String,
 }
@@ -62,30 +62,30 @@ impl fmt::Debug for MutationArtifactPlaintext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MutationArtifactReceipt {
+pub struct MutationArtifactReceipt {
   pub(crate) published: bool,
   pub(crate) ciphertext_digest: String,
   pub(crate) plaintext_len: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ArtifactBinding {
+pub struct ArtifactBinding {
   pub(super) namespace: String,
-  pub(super) request_id: String,
+  pub request_id: String,
   pub(super) fingerprint: String,
   pub(super) principal: String,
   pub(super) signer_id: String,
   pub(super) action: String,
   pub(super) resource: String,
   pub(super) cluster_id: String,
-  pub(super) membership_revision: String,
+  pub membership_revision: String,
   pub(super) new_revision: String,
   pub(super) expected_previous_revision: String,
   pub(super) content_digest: String,
 }
 
 impl ArtifactBinding {
-  pub(super) fn from_claim(namespace: &str, claim: &MutationClaim) -> anyhow::Result<Self> {
+  pub fn from_claim(namespace: &str, claim: &MutationClaim) -> anyhow::Result<Self> {
     let cluster_id = claim
       .cluster_id
       .clone()
@@ -112,7 +112,7 @@ impl ArtifactBinding {
     Ok(binding)
   }
 
-  pub(super) fn from_record(namespace: &str, record: &MutationRecord) -> anyhow::Result<Self> {
+  pub fn from_record(namespace: &str, record: &MutationRecord) -> anyhow::Result<Self> {
     let cluster_id = record
       .cluster_id
       .clone()
@@ -201,12 +201,12 @@ impl ArtifactBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CheckpointArtifactBinding {
-  pub(super) artifact: ArtifactBinding,
-  pub(super) instance_id: String,
-  pub(super) assignment_epoch: i64,
-  pub(super) prior_revision: String,
-  pub(super) prior_digest: String,
+pub struct CheckpointArtifactBinding {
+  pub artifact: ArtifactBinding,
+  pub instance_id: String,
+  pub assignment_epoch: i64,
+  pub prior_revision: String,
+  pub prior_digest: String,
 }
 
 impl CheckpointArtifactBinding {
@@ -248,36 +248,36 @@ impl CheckpointArtifactBinding {
   }
 }
 
-pub(super) struct SealedArtifact {
+pub struct SealedArtifact {
   pub(super) nonce: [u8; ARTIFACT_NONCE_BYTES],
   pub(super) ciphertext: Zeroizing<Vec<u8>>,
   pub(super) ciphertext_digest: String,
   pub(super) plaintext_len: usize,
 }
 
-pub(super) struct SealedCheckpointArtifact {
-  pub(super) nonce: [u8; ARTIFACT_NONCE_BYTES],
-  pub(super) ciphertext: Zeroizing<Vec<u8>>,
-  pub(super) ciphertext_digest: String,
-  pub(super) plaintext_len: usize,
+pub struct SealedCheckpointArtifact {
+  pub nonce: [u8; ARTIFACT_NONCE_BYTES],
+  pub ciphertext: Zeroizing<Vec<u8>>,
+  pub ciphertext_digest: String,
+  pub plaintext_len: usize,
 }
 
-pub(crate) struct StoredArtifact {
-  pub(super) binding: ArtifactBinding,
+pub struct StoredArtifact {
+  pub binding: ArtifactBinding,
   pub(super) nonce: Vec<u8>,
   pub(super) ciphertext: Vec<u8>,
   pub(super) ciphertext_digest: String,
   pub(super) plaintext_len: usize,
 }
 
-pub(crate) struct MutationArtifactCipher {
+pub struct MutationArtifactCipher {
   key: Aes256GcmKey,
   key_fingerprint: String,
   maximum_plaintext_bytes: usize,
 }
 
 impl MutationArtifactCipher {
-  pub(super) fn from_environment(
+  pub fn from_environment(
     environment_name: &str,
     maximum_plaintext_bytes: usize,
   ) -> anyhow::Result<Self> {
@@ -295,7 +295,7 @@ impl MutationArtifactCipher {
     Self::new(&key, maximum_plaintext_bytes)
   }
 
-  pub(super) fn new(key: &[u8], maximum_plaintext_bytes: usize) -> anyhow::Result<Self> {
+  pub fn new(key: &[u8], maximum_plaintext_bytes: usize) -> anyhow::Result<Self> {
     validate_limit(maximum_plaintext_bytes)?;
     ensure!(
       key.len() == 32,
@@ -308,15 +308,15 @@ impl MutationArtifactCipher {
     })
   }
 
-  pub(super) fn maximum_plaintext_bytes(&self) -> usize {
+  pub fn maximum_plaintext_bytes(&self) -> usize {
     self.maximum_plaintext_bytes
   }
 
-  pub(super) fn key_fingerprint(&self) -> &str {
+  pub fn key_fingerprint(&self) -> &str {
     &self.key_fingerprint
   }
 
-  pub(super) fn seal(
+  pub fn seal(
     &self,
     binding: &ArtifactBinding,
     plaintext: MutationArtifactPlaintext,
@@ -364,7 +364,7 @@ impl MutationArtifactCipher {
     })
   }
 
-  pub(super) fn open(
+  pub fn open(
     &self,
     expected_binding: &ArtifactBinding,
     stored: StoredArtifact,
@@ -413,7 +413,7 @@ impl MutationArtifactCipher {
     })
   }
 
-  pub(super) fn seal_checkpoint(
+  pub fn seal_checkpoint(
     &self,
     binding: &CheckpointArtifactBinding,
     plaintext: &[u8],
@@ -441,7 +441,7 @@ impl MutationArtifactCipher {
   }
 
   #[allow(clippy::too_many_arguments)]
-  pub(super) fn open_checkpoint(
+  pub fn open_checkpoint(
     &self,
     binding: &CheckpointArtifactBinding,
     nonce: Vec<u8>,
@@ -488,7 +488,7 @@ pub(crate) fn artifact_key_fingerprint(key: &[u8]) -> String {
   encoded
 }
 
-pub(super) fn sha256_digest(bytes: &[u8]) -> String {
+pub fn sha256_digest(bytes: &[u8]) -> String {
   let digest = Sha256::digest(bytes);
   let mut encoded = String::with_capacity(71);
   encoded.push_str("sha256:");
@@ -507,7 +507,7 @@ fn validate_limit(maximum_plaintext_bytes: usize) -> anyhow::Result<()> {
   Ok(())
 }
 
-pub(super) fn is_sha256_digest(value: &str) -> bool {
+pub fn is_sha256_digest(value: &str) -> bool {
   value.len() == 71
     && value.starts_with("sha256:")
     && value.as_bytes()[7..]

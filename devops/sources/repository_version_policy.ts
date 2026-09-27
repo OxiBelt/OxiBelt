@@ -60,6 +60,13 @@ const CargoPackages: CargoPackagePolicy[] = [
     versionSource: 'workspace'
   },
   {
+    name: 'oxibelt-admin-mutation-core',
+    manifestPath: 'source/crates/oxibelt-admin-mutation-core/Cargo.toml',
+    lockfilePath: 'Cargo.lock',
+    releaseRewrite: true,
+    versionSource: 'workspace'
+  },
+  {
     name: 'oxibelt-allocator',
     manifestPath: 'source/crates/oxibelt-allocator/Cargo.toml',
     lockfilePath: 'Cargo.lock',
@@ -83,6 +90,13 @@ const CargoPackages: CargoPackagePolicy[] = [
   {
     name: 'oxibelt-control-protocol',
     manifestPath: 'source/crates/oxibelt-control-protocol/Cargo.toml',
+    lockfilePath: 'Cargo.lock',
+    releaseRewrite: true,
+    versionSource: 'workspace'
+  },
+  {
+    name: 'oxibelt-crypto-primitives',
+    manifestPath: 'source/crates/oxibelt-crypto-primitives/Cargo.toml',
     lockfilePath: 'Cargo.lock',
     releaseRewrite: true,
     versionSource: 'workspace'

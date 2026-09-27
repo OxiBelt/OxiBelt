@@ -8,7 +8,7 @@ use super::{RolloutTarget, TargetState, target_from_row};
 use crate::admin_mutation::ledger::validate_identifier;
 use crate::admin_mutation::store::MutationStore;
 
-pub(crate) async fn transition_target_fenced(
+pub async fn transition_target_fenced(
   store: &MutationStore,
   member: &MemberFence,
   request_id: &str,

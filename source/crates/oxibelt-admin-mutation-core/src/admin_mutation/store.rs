@@ -11,27 +11,27 @@ use super::ledger::{
 
 /// Maximum encrypted command plaintext: a 16 MiB request body, a bounded
 /// 16 KiB metadata frame, a 34-byte domain, and a 4-byte length prefix.
-pub(crate) const MAX_STORED_ARTIFACT_BYTES: usize = 16 * 1024 * 1024 + 16 * 1024 + 34 + 4;
+pub const MAX_STORED_ARTIFACT_BYTES: usize = 16 * 1024 * 1024 + 16 * 1024 + 34 + 4;
 
 #[path = "store_break_glass.rs"]
 mod break_glass;
 #[path = "store_schema.rs"]
 mod schema;
-pub(crate) use break_glass::{
+pub use break_glass::{
   BreakGlassActivation, BreakGlassMutationCheckpoint, capture_break_glass_checkpoint_tx,
   create_break_glass_activation_tx, load_active_break_glass_for_principal,
   restore_break_glass_checkpoint_tx, revoke_break_glass_activation_tx,
 };
 
 #[derive(Clone)]
-pub(crate) struct MutationStore {
+pub struct MutationStore {
   pool: Pool<Postgres>,
   namespace: String,
   rollout_mode: StoreRolloutMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StoreRolloutMode {
+pub enum StoreRolloutMode {
   SingleInstance,
   AdminCluster,
 }
@@ -46,11 +46,11 @@ impl StoreRolloutMode {
 }
 
 impl MutationStore {
-  pub(crate) fn new(pool: Pool<Postgres>, namespace: String) -> anyhow::Result<Self> {
+  pub fn new(pool: Pool<Postgres>, namespace: String) -> anyhow::Result<Self> {
     Self::new_with_mode(pool, namespace, StoreRolloutMode::SingleInstance)
   }
 
-  pub(crate) fn new_cluster(pool: Pool<Postgres>, namespace: String) -> anyhow::Result<Self> {
+  pub fn new_cluster(pool: Pool<Postgres>, namespace: String) -> anyhow::Result<Self> {
     Self::new_with_mode(pool, namespace, StoreRolloutMode::AdminCluster)
   }
 
@@ -67,11 +67,11 @@ impl MutationStore {
     })
   }
 
-  pub(crate) fn pool(&self) -> &Pool<Postgres> {
+  pub fn pool(&self) -> &Pool<Postgres> {
     &self.pool
   }
 
-  pub(crate) fn namespace(&self) -> &str {
+  pub fn namespace(&self) -> &str {
     &self.namespace
   }
 
@@ -79,7 +79,7 @@ impl MutationStore {
     self.rollout_mode
   }
 
-  pub(crate) async fn initialize_revision(
+  pub async fn initialize_revision(
     &self,
     resource: &str,
     revision: &str,
@@ -150,10 +150,7 @@ impl MutationStore {
     Ok(())
   }
 
-  pub(crate) async fn load_revision(
-    &self,
-    resource: &str,
-  ) -> anyhow::Result<Option<LogicalRevision>> {
+  pub async fn load_revision(&self, resource: &str) -> anyhow::Result<Option<LogicalRevision>> {
     validate_identifier("resource", resource, 256)?;
     let row = sqlx::query(
       "SELECT resource, committed_revision, content_digest, cluster_id, membership_revision,
@@ -168,7 +165,7 @@ impl MutationStore {
     row.as_ref().map(logical_revision_from_row).transpose()
   }
 
-  pub(crate) async fn claim(&self, claim: &MutationClaim) -> anyhow::Result<ClaimOutcome> {
+  pub async fn claim(&self, claim: &MutationClaim) -> anyhow::Result<ClaimOutcome> {
     claim.validate()?;
     let mut tx = self.pool.begin().await?;
     let result =
@@ -190,7 +187,7 @@ impl MutationStore {
   }
 
   #[cfg(test)]
-  pub(crate) async fn finish(
+  pub async fn finish(
     &self,
     request_id: &str,
     terminal: &TerminalMutation,
@@ -202,16 +199,13 @@ impl MutationStore {
     Ok(record)
   }
 
-  pub(crate) async fn load_mutation(
-    &self,
-    request_id: &str,
-  ) -> anyhow::Result<Option<MutationRecord>> {
+  pub async fn load_mutation(&self, request_id: &str) -> anyhow::Result<Option<MutationRecord>> {
     validate_identifier("request_id", request_id, 256)?;
     let row = select_mutation(&self.pool, &self.namespace, request_id, false).await?;
     row.as_ref().map(mutation_from_row).transpose()
   }
 
-  pub(crate) async fn delete_expired_terminal_records(&self, limit: i64) -> anyhow::Result<u64> {
+  pub async fn delete_expired_terminal_records(&self, limit: i64) -> anyhow::Result<u64> {
     ensure!(
       (1..=10_000).contains(&limit),
       "cleanup limit must be between 1 and 10000"
@@ -251,18 +245,18 @@ impl MutationStore {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct LogicalRevision {
+pub struct LogicalRevision {
   pub(crate) resource: String,
-  pub(crate) committed_revision: String,
-  pub(crate) content_digest: String,
-  pub(crate) cluster_id: Option<String>,
-  pub(crate) membership_revision: Option<String>,
-  pub(crate) pending_request_id: Option<String>,
+  pub committed_revision: String,
+  pub content_digest: String,
+  pub cluster_id: Option<String>,
+  pub membership_revision: Option<String>,
+  pub pending_request_id: Option<String>,
   pub(crate) pending_revision: Option<String>,
   pub(crate) updated_at: String,
 }
 
-pub(crate) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
+pub async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
   let mut tx = pool.begin().await?;
   // Acquire the legacy v2 key first so rolling upgrades serialize with older
   // binaries, then the version-independent key used by current migrations.
@@ -293,7 +287,7 @@ pub(crate) async fn init_postgres(pool: &Pool<Postgres>) -> anyhow::Result<()> {
   Ok(())
 }
 
-pub(crate) async fn claim_tx_with_mode(
+pub async fn claim_tx_with_mode(
   tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   rollout_mode: StoreRolloutMode,
@@ -471,7 +465,7 @@ pub(crate) async fn transition_tx(
   mutation_from_row(&row)
 }
 
-pub(crate) async fn finish_tx(
+pub async fn finish_tx(
   tx: &mut Transaction<'_, Postgres>,
   namespace: &str,
   request_id: &str,

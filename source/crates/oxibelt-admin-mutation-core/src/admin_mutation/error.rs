@@ -24,7 +24,7 @@ pub struct MutationProtocolError {
 }
 
 impl MutationProtocolError {
-  pub(crate) const fn new(kind: MutationProtocolErrorKind, detail: &'static str) -> Self {
+  pub const fn new(kind: MutationProtocolErrorKind, detail: &'static str) -> Self {
     Self { kind, detail }
   }
 

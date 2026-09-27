@@ -63,6 +63,22 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                 WORKSPACE_PACKAGES,
             )
 
+    def test_strict_data_plane_rejects_admin_mutation_core(self) -> None:
+        graph = (
+            fixture("allowed-strict.txt")
+            + "oxibelt-admin-mutation-core v0.0.0 "
+            "(/workspace/source/crates/oxibelt-admin-mutation-core)|\n"
+        )
+        with self.assertRaisesRegex(
+            CHECKER.BoundaryError,
+            "unexpected workspace packages: oxibelt-admin-mutation-core",
+        ):
+            CHECKER.validate_profile_graph(
+                CHECKER.POLICY_BY_LABEL["strict data plane"],
+                graph,
+                WORKSPACE_PACKAGES,
+            )
+
     def test_rejects_an_unknown_local_path_package(self) -> None:
         with self.assertRaisesRegex(
             CHECKER.BoundaryError,
@@ -379,7 +395,7 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                 policy = CHECKER.POLICY_BY_LABEL[label]
                 self.assertEqual(
                     policy.allowed_workspace_packages,
-                    CHECKER.RUNTIME_WORKSPACE_PACKAGES | {"oxibelt-allocator"},
+                    CHECKER.ADMIN_RUNTIME_WORKSPACE_PACKAGES | {"oxibelt-allocator"},
                 )
                 self.assertEqual(dict(policy.expected_features)["oxibelt"], features)
                 graph = (

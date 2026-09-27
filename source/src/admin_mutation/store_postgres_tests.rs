@@ -15,6 +15,17 @@ use super::store::{
 };
 use crate::admin_audit::{AdminAuditHandle, AdminAuditRuntime};
 
+async fn finish_test_mutation(
+  store: &MutationStore,
+  request_id: &str,
+  terminal: &TerminalMutation,
+) -> anyhow::Result<super::ledger::MutationRecord> {
+  let mut tx = store.pool().begin().await?;
+  let record = finish_tx(&mut tx, store.namespace(), request_id, terminal).await?;
+  tx.commit().await?;
+  Ok(record)
+}
+
 #[tokio::test]
 async fn postgres_claim_is_atomic_and_terminal_replay_is_retained() {
   Box::pin(postgres_atomicity_test_body()).await;
@@ -350,20 +361,20 @@ async fn committed_parent_is_required_before_break_glass_is_active(store: &Mutat
     "a claimed parent mutation must not authorize the activation"
   );
 
-  store
-    .finish(
-      &claim.request_id,
-      &TerminalMutation {
-        state: MutationState::Committed,
-        http_status: 201,
-        safe_response: Some(json!({ "ok": true, "token_recoverable": false })),
-        error_code: None,
-        terminal_audit_record_id: 202,
-        audit_anchor_required: false,
-      },
-    )
-    .await
-    .expect("break-glass terminal commit");
+  finish_test_mutation(
+    store,
+    &claim.request_id,
+    &TerminalMutation {
+      state: MutationState::Committed,
+      http_status: 201,
+      safe_response: Some(json!({ "ok": true, "token_recoverable": false })),
+      error_code: None,
+      terminal_audit_record_id: 202,
+      audit_anchor_required: false,
+    },
+  )
+  .await
+  .expect("break-glass terminal commit");
   assert!(
     load_active_break_glass_for_principal(store, "controller")
       .await
@@ -388,20 +399,20 @@ async fn indeterminate_result_keeps_the_resource_reserved(store: &MutationStore)
     store.claim(&claim).await.expect("IPM claim"),
     ClaimOutcome::Claimed(_)
   ));
-  store
-    .finish(
-      &claim.request_id,
-      &TerminalMutation {
-        state: MutationState::Indeterminate,
-        http_status: 503,
-        safe_response: None,
-        error_code: Some("mutation_indeterminate".to_string()),
-        terminal_audit_record_id: 302,
-        audit_anchor_required: false,
-      },
-    )
-    .await
-    .expect("indeterminate terminal result");
+  finish_test_mutation(
+    store,
+    &claim.request_id,
+    &TerminalMutation {
+      state: MutationState::Indeterminate,
+      http_status: 503,
+      safe_response: None,
+      error_code: Some("mutation_indeterminate".to_string()),
+      terminal_audit_record_id: 302,
+      audit_anchor_required: false,
+    },
+  )
+  .await
+  .expect("indeterminate terminal result");
 
   let mut next = claim.clone();
   next.request_id = "018f47a2-7b2c-7b25-8f31-d13db7b4c126".to_string();

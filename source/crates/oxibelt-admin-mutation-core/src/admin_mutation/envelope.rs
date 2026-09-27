@@ -494,7 +494,7 @@ fn hex_nibble(byte: u8) -> u8 {
   }
 }
 
-pub(super) fn parse_timestamp(value: &str) -> Result<i64, MutationProtocolError> {
+pub fn parse_timestamp(value: &str) -> Result<i64, MutationProtocolError> {
   let bytes = value.as_bytes();
   if bytes.len() != 20
     || bytes.get(4) != Some(&b'-')
@@ -577,7 +577,7 @@ fn append_field(output: &mut Vec<u8>, value: &[u8]) -> Result<(), MutationProtoc
   Ok(())
 }
 
-pub(crate) fn sha256_labelled(domain: &[u8], value: &[u8]) -> String {
+pub fn sha256_labelled(domain: &[u8], value: &[u8]) -> String {
   let mut hasher = Sha256::new();
   hasher.update(domain);
   hasher.update(value);

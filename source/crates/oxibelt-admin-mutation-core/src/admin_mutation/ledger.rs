@@ -13,23 +13,23 @@ pub(crate) const MAX_SAFE_RESPONSE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_ERROR_CODE_BYTES: usize = 128;
 
 #[derive(Debug, Clone)]
-pub(crate) struct MutationClaim {
-  pub(crate) request_id: String,
-  pub(crate) fingerprint: String,
-  pub(crate) principal: String,
-  pub(crate) signer_id: String,
-  pub(crate) action: String,
-  pub(crate) resource: String,
-  pub(crate) expected_previous_revision: String,
-  pub(crate) new_revision: String,
-  pub(crate) content_digest: String,
-  pub(crate) cluster_id: Option<String>,
-  pub(crate) membership_revision: Option<String>,
-  pub(crate) issued_at: String,
-  pub(crate) expires_at: String,
-  pub(crate) allowed_clock_skew_seconds: i64,
-  pub(crate) retention_seconds: i64,
-  pub(crate) audit_record_id: i64,
+pub struct MutationClaim {
+  pub request_id: String,
+  pub fingerprint: String,
+  pub principal: String,
+  pub signer_id: String,
+  pub action: String,
+  pub resource: String,
+  pub expected_previous_revision: String,
+  pub new_revision: String,
+  pub content_digest: String,
+  pub cluster_id: Option<String>,
+  pub membership_revision: Option<String>,
+  pub issued_at: String,
+  pub expires_at: String,
+  pub allowed_clock_skew_seconds: i64,
+  pub retention_seconds: i64,
+  pub audit_record_id: i64,
 }
 
 impl MutationClaim {
@@ -83,7 +83,7 @@ impl MutationClaim {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MutationState {
+pub enum MutationState {
   Claimed,
   Validating,
   Applying,
@@ -100,7 +100,7 @@ pub(crate) enum MutationState {
 }
 
 impl MutationState {
-  pub(crate) const fn as_str(self) -> &'static str {
+  pub const fn as_str(self) -> &'static str {
     match self {
       Self::Claimed => "claimed",
       Self::Validating => "validating",
@@ -204,41 +204,41 @@ impl MutationState {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct MutationRecord {
-  pub(crate) request_id: String,
-  pub(crate) fingerprint: String,
-  pub(crate) principal: String,
-  pub(crate) signer_id: String,
-  pub(crate) action: String,
-  pub(crate) resource: String,
-  pub(crate) expected_previous_revision: String,
-  pub(crate) new_revision: String,
-  pub(crate) content_digest: String,
-  pub(crate) cluster_id: Option<String>,
-  pub(crate) membership_revision: Option<String>,
-  pub(crate) state: MutationState,
-  pub(crate) http_status: Option<i32>,
-  pub(crate) safe_response: Option<Value>,
-  pub(crate) error_code: Option<String>,
+pub struct MutationRecord {
+  pub request_id: String,
+  pub fingerprint: String,
+  pub principal: String,
+  pub signer_id: String,
+  pub action: String,
+  pub resource: String,
+  pub expected_previous_revision: String,
+  pub new_revision: String,
+  pub content_digest: String,
+  pub cluster_id: Option<String>,
+  pub membership_revision: Option<String>,
+  pub state: MutationState,
+  pub http_status: Option<i32>,
+  pub safe_response: Option<Value>,
+  pub error_code: Option<String>,
   pub(crate) audit_record_id: i64,
-  pub(crate) terminal_audit_record_id: Option<i64>,
+  pub terminal_audit_record_id: Option<i64>,
   pub(crate) terminal_audit_confirmed: bool,
-  pub(crate) issued_at: String,
-  pub(crate) expires_at: String,
-  pub(crate) created_at: String,
-  pub(crate) updated_at: String,
+  pub issued_at: String,
+  pub expires_at: String,
+  pub created_at: String,
+  pub updated_at: String,
 }
 
 impl MutationRecord {
-  pub(crate) const fn terminal_response_ready(&self) -> bool {
+  pub const fn terminal_response_ready(&self) -> bool {
     self.state.is_terminal() && self.terminal_audit_confirmed
   }
 
-  pub(crate) const fn terminal_anchor_pending(&self) -> bool {
+  pub const fn terminal_anchor_pending(&self) -> bool {
     self.state.is_terminal() && !self.terminal_audit_confirmed
   }
 
-  pub(crate) fn classify_existing_claim(self, claim: &MutationClaim) -> ClaimOutcome {
+  pub fn classify_existing_claim(self, claim: &MutationClaim) -> ClaimOutcome {
     if self.fingerprint != claim.fingerprint || self.principal != claim.principal {
       ClaimOutcome::RequestConflict
     } else if self.terminal_response_ready() {
@@ -250,7 +250,7 @@ impl MutationRecord {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum ClaimOutcome {
+pub enum ClaimOutcome {
   Claimed(MutationRecord),
   Replay(MutationRecord),
   InProgress(MutationRecord),
@@ -262,15 +262,15 @@ pub(crate) enum ClaimOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct TerminalMutation {
-  pub(crate) state: MutationState,
-  pub(crate) http_status: u16,
-  pub(crate) safe_response: Option<Value>,
-  pub(crate) error_code: Option<String>,
-  pub(crate) terminal_audit_record_id: i64,
+pub struct TerminalMutation {
+  pub state: MutationState,
+  pub http_status: u16,
+  pub safe_response: Option<Value>,
+  pub error_code: Option<String>,
+  pub terminal_audit_record_id: i64,
   /// Required anchoring leaves the terminal receipt hidden until the external
   /// checkpoint receipt is durable and the confirmation marker is promoted.
-  pub(crate) audit_anchor_required: bool,
+  pub audit_anchor_required: bool,
 }
 
 impl TerminalMutation {
@@ -294,11 +294,7 @@ impl TerminalMutation {
   }
 }
 
-pub(crate) fn validate_identifier(
-  name: &str,
-  value: &str,
-  maximum_bytes: usize,
-) -> anyhow::Result<()> {
+pub fn validate_identifier(name: &str, value: &str, maximum_bytes: usize) -> anyhow::Result<()> {
   ensure!(!value.is_empty(), "{name} must not be empty");
   ensure!(
     value.len() <= maximum_bytes,

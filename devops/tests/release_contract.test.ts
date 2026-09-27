@@ -458,6 +458,25 @@ test('requires documentation for admission-policy crate changes alone', () => {
   }
 })
 
+test('requires documentation for Admin mutation core changes alone', () => {
+  const Fixture = CreateChangedWorkspace([
+    'source/crates/oxibelt-admin-mutation-core/src/admin_mutation/envelope.rs',
+    'source/crates/oxibelt-admin-mutation-core/src/admin_mutation/store.rs'
+  ])
+  try {
+    Assert.throws(
+      () => ValidateRepositoryReleaseContract({
+        workspacePath: Fixture.root,
+        changeBase: Fixture.base,
+        changeHead: Fixture.head
+      }),
+      /compatibility surfaces changed \(Admin API, Storage and state\) without updating a changelog ledger or docs\/Upgrading\.md/
+    )
+  } finally {
+    RemoveWorkspace(Fixture.root)
+  }
+})
+
 test('rejects deleted compatibility surfaces without a release-contract document update', () => {
   const Root = CreateContractWorkspace()
   try {

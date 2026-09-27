@@ -1,0 +1,21 @@
+[package]
+name = "oxibelt-crypto-primitives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
+anyhow.workspace = true
+aws-lc-rs = { workspace = true, features = ["non-fips"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
+getrandom.workspace = true
+hkdf = "0.13.0"
+hmac = "0.13.0"
+sha1 = { version = "0.11.0", features = ["oid"] }
+sha2.workspace = true
+
+[lints]
+workspace = true

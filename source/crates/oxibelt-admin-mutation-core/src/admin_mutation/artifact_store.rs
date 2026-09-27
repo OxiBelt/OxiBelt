@@ -118,7 +118,7 @@ pub(super) async fn publish(
   })
 }
 
-pub(super) async fn fetch_for_member(
+pub async fn fetch_for_member(
   store: &MutationStore,
   instance_id: &str,
   boot_id: &str,

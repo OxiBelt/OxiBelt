@@ -97,10 +97,12 @@ COPY source/apps/oxibelt-keysigner ./source/apps/oxibelt-keysigner
 COPY source/apps/oxibelt-netport-switcher ./source/apps/oxibelt-netport-switcher
 COPY source/apps/oxibeltctl ./source/apps/oxibeltctl
 COPY source/crates/oxibelt-admission-policy ./source/crates/oxibelt-admission-policy
+COPY source/crates/oxibelt-admin-mutation-core ./source/crates/oxibelt-admin-mutation-core
 COPY source/crates/oxibelt-allocator ./source/crates/oxibelt-allocator
 COPY source/crates/oxibelt-build-identity ./source/crates/oxibelt-build-identity
 COPY source/crates/oxibelt-control-http ./source/crates/oxibelt-control-http
 COPY source/crates/oxibelt-control-protocol ./source/crates/oxibelt-control-protocol
+COPY source/crates/oxibelt-crypto-primitives ./source/crates/oxibelt-crypto-primitives
 COPY source/crates/oxibelt-ct ./source/crates/oxibelt-ct
 COPY source/crates/oxibelt-deployment-diagnostics ./source/crates/oxibelt-deployment-diagnostics
 COPY source/crates/oxibelt-tls-cert-compression ./source/crates/oxibelt-tls-cert-compression

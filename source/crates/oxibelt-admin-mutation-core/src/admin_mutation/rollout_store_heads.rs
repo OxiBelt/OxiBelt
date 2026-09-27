@@ -10,20 +10,20 @@ use crate::admin_mutation::ledger::validate_identifier;
 use crate::admin_mutation::store::MutationStore;
 
 #[derive(Debug, Clone)]
-pub(crate) struct ResourceHeadUpdate {
-  pub(crate) resource: String,
-  pub(crate) assigned_revision: Option<String>,
-  pub(crate) applied_revision: String,
-  pub(crate) applied_digest: String,
-  pub(crate) ready: bool,
+pub struct ResourceHeadUpdate {
+  pub resource: String,
+  pub assigned_revision: Option<String>,
+  pub applied_revision: String,
+  pub applied_digest: String,
+  pub ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct InstanceResourceHead {
-  pub(crate) instance_id: String,
+pub struct InstanceResourceHead {
+  pub instance_id: String,
   pub(crate) resource: String,
-  pub(crate) boot_id: String,
-  pub(crate) instance_epoch: i64,
+  pub boot_id: String,
+  pub instance_epoch: i64,
   pub(crate) assigned_revision: Option<String>,
   pub(crate) applied_revision: String,
   pub(crate) applied_digest: String,
@@ -51,7 +51,7 @@ impl ResourceHeadUpdate {
   }
 }
 
-pub(crate) async fn publish_resource_head(
+pub async fn publish_resource_head(
   store: &MutationStore,
   member: &MemberFence,
   update: &ResourceHeadUpdate,
@@ -117,7 +117,7 @@ async fn require_current_member_boot(
   Ok(())
 }
 
-pub(crate) async fn load_resource_heads(
+pub async fn load_resource_heads(
   store: &MutationStore,
   cluster_id: &str,
   resource: &str,
@@ -137,7 +137,7 @@ pub(crate) async fn load_resource_heads(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn prove_exact_resource_membership(
+pub async fn prove_exact_resource_membership(
   store: &MutationStore,
   cluster_id: &str,
   membership_revision: &str,

@@ -33,20 +33,20 @@ pub(crate) fn fuzz_classify_rollout(data: &[u8]) {
 const CAPABILITY_VERSION: &str = "admin-mutation-rollout-v1";
 
 #[derive(Debug, Clone)]
-pub(crate) struct RolloutSettings {
-  pub(crate) cluster_id: String,
-  pub(crate) membership_revision: String,
-  pub(crate) members: Vec<String>,
-  pub(crate) instance_id: String,
-  pub(crate) allow_learner: bool,
-  pub(crate) boot_id: String,
-  pub(crate) build_version: String,
-  pub(crate) artifact_key_fingerprint: String,
-  pub(crate) heartbeat_interval: Duration,
-  pub(crate) stale_after: Duration,
-  pub(crate) phase_timeout: Duration,
-  pub(crate) rollback_timeout: Duration,
-  pub(crate) canary_observation: Duration,
+pub struct RolloutSettings {
+  pub cluster_id: String,
+  pub membership_revision: String,
+  pub members: Vec<String>,
+  pub instance_id: String,
+  pub allow_learner: bool,
+  pub boot_id: String,
+  pub build_version: String,
+  pub artifact_key_fingerprint: String,
+  pub heartbeat_interval: Duration,
+  pub stale_after: Duration,
+  pub phase_timeout: Duration,
+  pub rollback_timeout: Duration,
+  pub canary_observation: Duration,
 }
 
 impl RolloutSettings {
@@ -101,11 +101,11 @@ impl RolloutSettings {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct LocalRolloutStatus {
-  pub(crate) assigned_revision: Option<String>,
-  pub(crate) applied_revision: String,
-  pub(crate) applied_digest: String,
-  pub(crate) ready: bool,
+pub struct LocalRolloutStatus {
+  pub assigned_revision: Option<String>,
+  pub applied_revision: String,
+  pub applied_digest: String,
+  pub ready: bool,
 }
 
 impl LocalRolloutStatus {
@@ -128,7 +128,7 @@ impl LocalRolloutStatus {
 }
 
 #[derive(Clone)]
-pub(crate) struct AdminClusterRolloutController {
+pub struct AdminClusterRolloutController {
   store: MutationStore,
   settings: Arc<RolloutSettings>,
   membership: Arc<StdRwLock<ControllerMembership>>,
@@ -146,7 +146,7 @@ struct ControllerMembership {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RolloutDirective {
+pub enum RolloutDirective {
   AwaitMembership,
   Validate(Vec<String>),
   AwaitValidation,
@@ -163,7 +163,7 @@ pub(crate) enum RolloutDirective {
 }
 
 impl AdminClusterRolloutController {
-  pub(crate) fn new(
+  pub fn new(
     store: MutationStore,
     mut settings: RolloutSettings,
     initial_status: LocalRolloutStatus,
@@ -191,23 +191,23 @@ impl AdminClusterRolloutController {
     })
   }
 
-  pub(crate) fn ready(&self) -> bool {
+  pub fn ready(&self) -> bool {
     self.ready.load(Ordering::Acquire)
   }
 
-  pub(crate) fn instance_id(&self) -> &str {
+  pub fn instance_id(&self) -> &str {
     &self.settings.instance_id
   }
 
-  pub(crate) fn boot_id(&self) -> &str {
+  pub fn boot_id(&self) -> &str {
     &self.settings.boot_id
   }
 
-  pub(crate) fn cluster_id(&self) -> &str {
+  pub fn cluster_id(&self) -> &str {
     &self.settings.cluster_id
   }
 
-  pub(crate) fn membership_revision(&self) -> String {
+  pub fn membership_revision(&self) -> String {
     self.membership().revision
   }
 
@@ -219,7 +219,7 @@ impl AdminClusterRolloutController {
       .clone()
   }
 
-  pub(crate) async fn activate_membership(
+  pub async fn activate_membership(
     &self,
     revision: String,
     members: Vec<String>,
@@ -280,7 +280,7 @@ impl AdminClusterRolloutController {
     Ok(participating)
   }
 
-  pub(crate) async fn member_fence(&self) -> anyhow::Result<MemberFence> {
+  pub async fn member_fence(&self) -> anyhow::Result<MemberFence> {
     self
       .member_fence
       .read()
@@ -289,36 +289,36 @@ impl AdminClusterRolloutController {
       .context("Admin cluster member authority is unavailable")
   }
 
-  pub(crate) fn coordinator_lease_seconds(&self) -> anyhow::Result<i32> {
+  pub fn coordinator_lease_seconds(&self) -> anyhow::Result<i32> {
     seconds_i32(self.settings.stale_after, "coordinator lease")
   }
 
-  pub(crate) fn heartbeat_interval(&self) -> Duration {
+  pub fn heartbeat_interval(&self) -> Duration {
     self.settings.heartbeat_interval
   }
 
-  pub(crate) async fn heartbeat_and_refresh_readiness(&self) -> anyhow::Result<()> {
+  pub async fn heartbeat_and_refresh_readiness(&self) -> anyhow::Result<()> {
     self.heartbeat_once().await?;
     let durable_ready = self.durable_readiness().await.unwrap_or(false);
     self.ready.store(durable_ready, Ordering::Release);
     Ok(())
   }
 
-  pub(crate) async fn update_local_status(&self, status: LocalRolloutStatus) -> anyhow::Result<()> {
+  pub async fn update_local_status(&self, status: LocalRolloutStatus) -> anyhow::Result<()> {
     status.validate()?;
     *self.local_status.write().await = status;
     Ok(())
   }
 
-  pub(crate) async fn local_status(&self) -> LocalRolloutStatus {
+  pub async fn local_status(&self) -> LocalRolloutStatus {
     self.local_status.read().await.clone()
   }
 
-  pub(crate) fn participating(&self) -> bool {
+  pub fn participating(&self) -> bool {
     self.participating.load(Ordering::Acquire)
   }
 
-  pub(crate) async fn release(&self) -> anyhow::Result<()> {
+  pub async fn release(&self) -> anyhow::Result<()> {
     self.ready.store(false, Ordering::Release);
     let fence = self.member_fence.write().await.take();
     if let Some(fence) = fence {
@@ -330,7 +330,7 @@ impl AdminClusterRolloutController {
     Ok(())
   }
 
-  pub(crate) async fn heartbeat_once(&self) -> anyhow::Result<()> {
+  pub async fn heartbeat_once(&self) -> anyhow::Result<()> {
     if !self.participating.load(Ordering::Acquire) {
       self.ready.store(false, Ordering::Release);
       return Ok(());
@@ -394,7 +394,7 @@ impl AdminClusterRolloutController {
     })
   }
 
-  pub(crate) async fn classify_durable(
+  pub async fn classify_durable(
     &self,
     record: &MutationRecord,
     targets: &[RolloutTarget],

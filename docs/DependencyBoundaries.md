@@ -93,6 +93,19 @@ not import request runtime, proxy state, or storage; the integrated config
 facade retains existing `oxibelt::config` names. Runtime admission still owns
 the process-local queues, leases, and request classification.
 
+`oxibelt-crypto-primitives` owns the single process-wide primitive-provider
+claim and fixed algorithm helpers. The integrated crypto adapter maps validated
+configuration to a provider selection, retaining existing internal call paths
+without a second provider state.
+
+`oxibelt-admin-mutation-core` owns Admin mutation transcripts, membership
+policy, rollout state, and persistence operations. The integrated crate keeps
+the Admin runtime adapters and the existing `oxibelt::admin_mutation` facade.
+The core uses `oxibelt-crypto-primitives` so its encrypted artifacts share the
+same configured process-wide provider. The integrated crate enables this
+dependency only with `admin-runtime`; strict data-plane and helper roles do
+not compile the Admin core.
+
 ## Role feature matrix
 
 The workspace dependency on `oxibelt` disables default features. Every role

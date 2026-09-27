@@ -10,71 +10,71 @@ use crate::admin_mutation::ledger::{MutationState, validate_identifier};
 use crate::admin_mutation::store::{MutationStore, StoreRolloutMode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct MemberFence {
+pub struct MemberFence {
   pub(crate) cluster_id: String,
   pub(crate) membership_revision: String,
-  pub(crate) instance_id: String,
+  pub instance_id: String,
   pub(crate) boot_id: String,
   pub(crate) instance_epoch: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExactMembership {
-  pub(crate) cluster_id: String,
-  pub(crate) membership_revision: String,
+pub struct ExactMembership {
+  pub cluster_id: String,
+  pub membership_revision: String,
   pub(crate) build_version: String,
   pub(crate) capability_version: String,
   pub(crate) artifact_key_fingerprint: String,
-  pub(crate) resource: String,
-  pub(crate) baseline_revision: String,
-  pub(crate) baseline_digest: String,
-  pub(crate) members: Vec<MemberFence>,
+  pub resource: String,
+  pub baseline_revision: String,
+  pub baseline_digest: String,
+  pub members: Vec<MemberFence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CoordinatorFence {
-  pub(crate) request_id: String,
+pub struct CoordinatorFence {
+  pub request_id: String,
   pub(crate) member: MemberFence,
-  pub(crate) exact_membership: ExactMembership,
-  pub(crate) coordinator_epoch: i64,
+  pub exact_membership: ExactMembership,
+  pub coordinator_epoch: i64,
   pub(crate) mutation_state_version: i64,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct TargetPlan {
-  pub(crate) instance_id: String,
-  pub(crate) expected_state: TargetState,
-  pub(crate) expected_state_version: i64,
-  pub(crate) next_state: TargetState,
+pub struct TargetPlan {
+  pub instance_id: String,
+  pub expected_state: TargetState,
+  pub expected_state_version: i64,
+  pub next_state: TargetState,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RolloutTransitionPlan {
-  pub(crate) expected_state: MutationState,
-  pub(crate) next_state: Option<MutationState>,
-  pub(crate) canary_instance_id: Option<String>,
-  pub(crate) phase_timeout_seconds: i32,
-  pub(crate) rollback_timeout_seconds: i32,
-  pub(crate) targets: Vec<TargetPlan>,
+pub struct RolloutTransitionPlan {
+  pub expected_state: MutationState,
+  pub next_state: Option<MutationState>,
+  pub canary_instance_id: Option<String>,
+  pub phase_timeout_seconds: i32,
+  pub rollback_timeout_seconds: i32,
+  pub targets: Vec<TargetPlan>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct FencedTargetTransition {
-  pub(crate) expected_state: TargetState,
-  pub(crate) expected_state_version: i64,
-  pub(crate) assignment_epoch: i64,
-  pub(crate) next_state: TargetState,
-  pub(crate) effect_started: bool,
-  pub(crate) validation_revision: Option<String>,
-  pub(crate) validation_digest: Option<String>,
-  pub(crate) applied_revision: Option<String>,
-  pub(crate) applied_digest: Option<String>,
-  pub(crate) restored_revision: Option<String>,
-  pub(crate) restored_digest: Option<String>,
-  pub(crate) error_code: Option<String>,
+pub struct FencedTargetTransition {
+  pub expected_state: TargetState,
+  pub expected_state_version: i64,
+  pub assignment_epoch: i64,
+  pub next_state: TargetState,
+  pub effect_started: bool,
+  pub validation_revision: Option<String>,
+  pub validation_digest: Option<String>,
+  pub applied_revision: Option<String>,
+  pub applied_digest: Option<String>,
+  pub restored_revision: Option<String>,
+  pub restored_digest: Option<String>,
+  pub error_code: Option<String>,
 }
 
-pub(crate) async fn heartbeat_fenced(
+pub async fn heartbeat_fenced(
   store: &MutationStore,
   update: &HeartbeatUpdate,
 ) -> anyhow::Result<MemberFence> {
@@ -288,7 +288,7 @@ async fn retire_boot(
   Ok(())
 }
 
-pub(crate) async fn prove_exact_live_membership(
+pub async fn prove_exact_live_membership(
   store: &MutationStore,
   cluster_id: &str,
   membership_revision: &str,
@@ -391,7 +391,7 @@ fn validate_expected_members(members: &[String]) -> anyhow::Result<()> {
   Ok(())
 }
 
-pub(crate) async fn acquire_coordinator_fence(
+pub async fn acquire_coordinator_fence(
   store: &MutationStore,
   request_id: &str,
   member: &MemberFence,
@@ -537,7 +537,7 @@ pub(super) async fn lock_exact_membership(
   Ok(())
 }
 
-pub(crate) async fn apply_transition_plan(
+pub async fn apply_transition_plan(
   store: &MutationStore,
   fence: &CoordinatorFence,
   plan: &RolloutTransitionPlan,

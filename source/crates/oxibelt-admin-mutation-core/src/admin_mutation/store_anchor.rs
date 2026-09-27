@@ -6,7 +6,7 @@ use super::ledger::validate_identifier;
 use super::store::MutationStore;
 
 impl MutationStore {
-  pub(crate) async fn confirm_terminal_audit(
+  pub async fn confirm_terminal_audit(
     &self,
     request_id: &str,
     terminal_audit_record_id: i64,
@@ -37,7 +37,7 @@ impl MutationStore {
     Ok(())
   }
 
-  pub(crate) async fn confirm_admission_audit(
+  pub async fn confirm_admission_audit(
     &self,
     request_id: &str,
     audit_record_id: i64,

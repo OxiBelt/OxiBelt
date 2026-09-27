@@ -32,7 +32,7 @@ const MAX_CATCHUP_ARTIFACTS: usize = 64;
 const MAX_MEMBERSHIP_EPOCH_KEYS: usize = 64;
 const MEMBERSHIP_EVIDENCE_FRESHNESS_SECONDS: u64 = 300;
 
-pub(crate) type MembershipArtifactCiphers = HashMap<String, Arc<MutationArtifactCipher>>;
+pub type MembershipArtifactCiphers = HashMap<String, Arc<MutationArtifactCipher>>;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct MembershipHead {
@@ -44,22 +44,22 @@ pub(crate) struct MembershipHead {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct MembershipTransition {
-  pub(crate) transition_id: String,
+pub struct MembershipTransition {
+  pub transition_id: String,
   pub(crate) kind: String,
-  pub(crate) state: String,
+  pub state: String,
   pub(crate) state_version: i64,
-  pub(crate) source_epoch_digest: Option<String>,
-  pub(crate) target_epoch_digest: String,
-  pub(crate) member_id: Option<String>,
+  pub source_epoch_digest: Option<String>,
+  pub target_epoch_digest: String,
+  pub member_id: Option<String>,
   pub(crate) proposal_request_id: String,
   pub(crate) activation_request_id: Option<String>,
   pub(crate) blocking_reason: Option<String>,
-  pub(crate) catchup_cursor: i64,
-  pub(crate) catchup_digest: Option<String>,
-  pub(crate) checkpoint_digest: Option<String>,
-  pub(crate) journal_tail_digest: Option<String>,
-  pub(crate) verified_position: Option<i64>,
+  pub catchup_cursor: i64,
+  pub catchup_digest: Option<String>,
+  pub checkpoint_digest: Option<String>,
+  pub journal_tail_digest: Option<String>,
+  pub verified_position: Option<i64>,
   pub(crate) capability_result: String,
   pub(crate) key_proof_count: i32,
   pub(crate) key_proof_required: i32,
@@ -70,18 +70,18 @@ pub(crate) struct MembershipTransition {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct MembershipStatus {
+pub struct MembershipStatus {
   pub(crate) mode: &'static str,
   pub(crate) head: Option<MembershipHead>,
   pub(crate) active_epoch: Option<MembershipEpoch>,
-  pub(crate) required_members: Vec<String>,
-  pub(crate) pending_transition: Option<MembershipTransition>,
+  pub required_members: Vec<String>,
+  pub pending_transition: Option<MembershipTransition>,
   pub(crate) recent_transitions: Vec<MembershipTransition>,
-  pub(crate) fenced_members: Vec<String>,
+  pub fenced_members: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct MembershipCatchupChunk {
+pub struct MembershipCatchupChunk {
   pub(crate) chunk_index: i32,
   pub(crate) algorithm: String,
   pub(crate) ephemeral_public_key: String,
@@ -92,26 +92,26 @@ pub(crate) struct MembershipCatchupChunk {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ActiveMembershipAuthority {
-  pub(crate) epoch_digest: String,
-  pub(crate) members: Vec<String>,
-  pub(crate) epoch_version: u32,
-  pub(crate) artifact_key_fingerprint: Option<String>,
-  pub(crate) epoch: MembershipEpoch,
+pub struct ActiveMembershipAuthority {
+  pub epoch_digest: String,
+  pub members: Vec<String>,
+  pub epoch_version: u32,
+  pub artifact_key_fingerprint: Option<String>,
+  pub epoch: MembershipEpoch,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PendingMembershipReconciliation {
-  pub(crate) transition: MembershipTransition,
-  pub(crate) epoch: MembershipEpoch,
+pub struct PendingMembershipReconciliation {
+  pub transition: MembershipTransition,
+  pub epoch: MembershipEpoch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipCatchupLogicalHead {
-  pub(crate) resource: String,
-  pub(crate) committed_revision: String,
-  pub(crate) content_digest: String,
+pub struct MembershipCatchupLogicalHead {
+  pub resource: String,
+  pub committed_revision: String,
+  pub content_digest: String,
   pub(crate) membership_revision: Option<String>,
 }
 
@@ -134,7 +134,7 @@ pub(crate) struct MembershipCatchupJournalEntry {
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipCatchupArtifact {
+pub struct MembershipCatchupArtifact {
   pub(crate) namespace: String,
   pub(crate) request_id: String,
   pub(crate) fingerprint: String,
@@ -157,7 +157,7 @@ impl Drop for MembershipCatchupArtifact {
 }
 
 impl MembershipCatchupArtifact {
-  pub(crate) fn binding(&self) -> anyhow::Result<ArtifactBinding> {
+  pub fn binding(&self) -> anyhow::Result<ArtifactBinding> {
     let binding = ArtifactBinding {
       namespace: self.namespace.clone(),
       request_id: self.request_id.clone(),
@@ -176,7 +176,7 @@ impl MembershipCatchupArtifact {
     Ok(binding)
   }
 
-  pub(crate) fn plaintext(&self) -> anyhow::Result<MutationArtifactPlaintext> {
+  pub fn plaintext(&self) -> anyhow::Result<MutationArtifactPlaintext> {
     let bytes = base64::engine::general_purpose::STANDARD
       .decode(&self.encoded_plaintext)
       .context("membership checkpoint artifact is not base64")?;
@@ -197,7 +197,7 @@ impl MembershipCatchupArtifact {
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MembershipCatchupManifestV2 {
+pub struct MembershipCatchupManifestV2 {
   pub(crate) format: String,
   pub(crate) cluster_id: String,
   pub(crate) transition_id: String,
@@ -208,8 +208,8 @@ pub(crate) struct MembershipCatchupManifestV2 {
   pub(crate) key_wrap_digest: String,
   pub(crate) build_version: String,
   pub(crate) capability_version: String,
-  pub(crate) logical_heads: Vec<MembershipCatchupLogicalHead>,
-  pub(crate) checkpoint_artifacts: Vec<MembershipCatchupArtifact>,
+  pub logical_heads: Vec<MembershipCatchupLogicalHead>,
+  pub checkpoint_artifacts: Vec<MembershipCatchupArtifact>,
   pub(crate) journal_tail: Vec<MembershipCatchupJournalEntry>,
   pub(crate) checkpoint_digest: String,
   pub(crate) journal_tail_digest: String,
@@ -218,7 +218,7 @@ pub(crate) struct MembershipCatchupManifestV2 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum MembershipMutationCheckpoint {
+pub enum MembershipMutationCheckpoint {
   Proposal {
     cluster_id: String,
     transition_id: String,
@@ -244,16 +244,16 @@ pub(crate) enum MembershipMutationCheckpoint {
 }
 
 impl MembershipMutationCheckpoint {
-  pub(crate) fn encode_plaintext(&self) -> anyhow::Result<Vec<u8>> {
+  pub fn encode_plaintext(&self) -> anyhow::Result<Vec<u8>> {
     Ok(serde_json::to_vec(self)?)
   }
 
-  pub(crate) fn decode_plaintext(value: &[u8]) -> anyhow::Result<Self> {
+  pub fn decode_plaintext(value: &[u8]) -> anyhow::Result<Self> {
     Ok(serde_json::from_slice(value)?)
   }
 }
 
-pub(crate) async fn load_membership_status(
+pub async fn load_membership_status(
   store: &MutationStore,
   cluster_id: &str,
   bootstrap_members: &[MembershipMember],
@@ -409,9 +409,7 @@ pub(crate) async fn load_membership_status(
   })
 }
 
-pub(crate) async fn durable_membership_cluster_ids(
-  store: &MutationStore,
-) -> anyhow::Result<Vec<String>> {
+pub async fn durable_membership_cluster_ids(store: &MutationStore) -> anyhow::Result<Vec<String>> {
   let cluster_ids: Vec<String> = sqlx::query_scalar(
     "SELECT cluster_id
        FROM (
@@ -432,7 +430,7 @@ pub(crate) async fn durable_membership_cluster_ids(
   Ok(cluster_ids)
 }
 
-pub(crate) async fn durable_membership_cluster_ids_if_present(
+pub async fn durable_membership_cluster_ids_if_present(
   pool: &sqlx::PgPool,
   namespace: &str,
 ) -> anyhow::Result<Vec<String>> {
@@ -485,10 +483,7 @@ pub(crate) async fn durable_membership_cluster_ids_if_present(
   Ok(cluster_ids)
 }
 
-pub(crate) async fn ensure_membership_head(
-  store: &MutationStore,
-  cluster_id: &str,
-) -> anyhow::Result<()> {
+pub async fn ensure_membership_head(store: &MutationStore, cluster_id: &str) -> anyhow::Result<()> {
   super::ledger::validate_identifier("cluster_id", cluster_id, 253)?;
   sqlx::query(
     "INSERT INTO oxibelt_admin_membership_heads(namespace,cluster_id)
@@ -501,7 +496,7 @@ pub(crate) async fn ensure_membership_head(
   Ok(())
 }
 
-pub(crate) async fn load_membership_catchup(
+pub async fn load_membership_catchup(
   store: &MutationStore,
   cluster_id: &str,
   transition_id: &str,
@@ -544,7 +539,7 @@ pub(crate) async fn load_membership_catchup(
     .map_err(Into::into)
 }
 
-pub(crate) async fn submit_membership_readiness(
+pub async fn submit_membership_readiness(
   store: &MutationStore,
   cluster_id: &str,
   receipt: &MembershipReadinessReceipt,
@@ -750,7 +745,7 @@ pub(crate) async fn submit_membership_readiness(
   Ok(updated)
 }
 
-pub(crate) async fn submit_membership_key_proof(
+pub async fn submit_membership_key_proof(
   store: &MutationStore,
   cluster_id: &str,
   proof: &MembershipKeyProof,
@@ -902,7 +897,7 @@ pub(crate) async fn submit_membership_key_proof(
   Ok(updated)
 }
 
-pub(crate) async fn has_membership_key_proof(
+pub async fn has_membership_key_proof(
   store: &MutationStore,
   cluster_id: &str,
   transition_id: &str,
@@ -940,7 +935,7 @@ pub(crate) async fn has_membership_key_proof(
   )
 }
 
-pub(crate) async fn set_membership_blocking_reason(
+pub async fn set_membership_blocking_reason(
   store: &MutationStore,
   cluster_id: &str,
   transition_id: &str,
@@ -1232,7 +1227,7 @@ async fn validate_activation_evidence(
   Ok(target_members)
 }
 
-pub(crate) async fn load_active_membership_authority(
+pub async fn load_active_membership_authority(
   store: &MutationStore,
   cluster_id: &str,
 ) -> anyhow::Result<Option<ActiveMembershipAuthority>> {
@@ -1290,7 +1285,7 @@ pub(crate) async fn load_active_membership_authority(
   }))
 }
 
-pub(crate) async fn load_pending_membership_reconciliation(
+pub async fn load_pending_membership_reconciliation(
   store: &MutationStore,
   cluster_id: &str,
   member_id: &str,
@@ -1340,7 +1335,7 @@ pub(crate) async fn load_pending_membership_reconciliation(
   Ok(Some(PendingMembershipReconciliation { transition, epoch }))
 }
 
-pub(crate) async fn load_epoch_artifact_cipher_for_member(
+pub async fn load_epoch_artifact_cipher_for_member(
   store: &MutationStore,
   cluster_id: &str,
   epoch_digest: &str,
@@ -1407,7 +1402,7 @@ pub(crate) async fn load_epoch_artifact_cipher_for_member(
   Ok(Arc::new(cipher))
 }
 
-pub(crate) async fn load_member_legacy_epoch_digests(
+pub async fn load_member_legacy_epoch_digests(
   store: &MutationStore,
   cluster_id: &str,
   member_id: &str,
@@ -1450,7 +1445,7 @@ pub(crate) async fn load_member_legacy_epoch_digests(
     .collect()
 }
 
-pub(crate) async fn load_and_open_membership_catchup(
+pub async fn load_and_open_membership_catchup(
   store: &MutationStore,
   cluster_id: &str,
   member_id: &str,
@@ -1634,7 +1629,7 @@ async fn ensure_no_concurrent_protected_mutation(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn apply_membership_proposal_tx(
+pub async fn apply_membership_proposal_tx(
   connection: &mut sqlx::PgConnection,
   namespace: &str,
   cluster_id: &str,
@@ -1758,7 +1753,7 @@ pub(crate) async fn apply_membership_proposal_tx(
   }
   let sequence = active_sequence.map_or(0, |value| value + 1);
   let mut epoch_artifact_key = zeroize::Zeroizing::new([0_u8; 32]);
-  crate::crypto::random_fill(epoch_artifact_key.as_mut())
+  oxibelt_crypto_primitives::random_fill(epoch_artifact_key.as_mut())
     .context("failed to generate membership epoch artifact key")?;
   let epoch_artifact_key_fingerprint = artifact_key_fingerprint(epoch_artifact_key.as_ref());
   let epoch = MembershipEpoch::new_v2(
@@ -2479,7 +2474,7 @@ fn validate_catchup_manifest(manifest: &MembershipCatchupManifestV2) -> anyhow::
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn authorize_membership_activation_tx(
+pub async fn authorize_membership_activation_tx(
   connection: &mut sqlx::PgConnection,
   namespace: &str,
   cluster_id: &str,
@@ -2609,7 +2604,7 @@ pub(crate) async fn authorize_membership_activation_tx(
   ))
 }
 
-pub(crate) async fn cancel_membership_transition_tx(
+pub async fn cancel_membership_transition_tx(
   connection: &mut sqlx::PgConnection,
   namespace: &str,
   cluster_id: &str,
@@ -2757,7 +2752,7 @@ async fn insert_membership_receipt(
   Ok(())
 }
 
-pub(crate) async fn restore_membership_mutation_tx(
+pub async fn restore_membership_mutation_tx(
   connection: &mut sqlx::PgConnection,
   namespace: &str,
   checkpoint: &MembershipMutationCheckpoint,
@@ -2998,7 +2993,7 @@ async fn restore_membership_proposal_checkpoint_tx(
   Ok(())
 }
 
-pub(crate) async fn finalize_committed_membership_activation(
+pub async fn finalize_committed_membership_activation(
   store: &MutationStore,
   cluster_id: &str,
 ) -> anyhow::Result<Option<ActiveMembershipAuthority>> {

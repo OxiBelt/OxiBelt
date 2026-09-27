@@ -48,7 +48,10 @@ impl AdminMutationRuntime {
       );
     }
     let authenticated_actor = ClusterAuthenticatedActor::new(
-      authenticated_actor,
+      &authenticated_actor.name,
+      &authenticated_actor.principal,
+      &authenticated_actor.subject,
+      &authenticated_actor.groups,
       credential_kind,
       authenticated_with_break_glass,
     )?;

@@ -8,8 +8,6 @@ use http::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::ipm::IpmActor;
-
 use super::artifact::{ArtifactBinding, MutationArtifactPlaintext, sha256_digest};
 use super::envelope::{TranscriptContext, parse_mutation_header, parse_timestamp};
 use super::{MUTATION_HEADER, SignerRegistry};
@@ -20,60 +18,54 @@ pub(super) const MAX_COMMAND_METADATA_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ClusterExecutionModel {
+pub enum ClusterExecutionModel {
   PerMember,
   SharedStaged,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ClusterCommandAuthorization {
-  pub(crate) admin_update_config: bool,
-  pub(crate) ipm_update_config: bool,
+pub struct ClusterCommandAuthorization {
+  pub admin_update_config: bool,
+  pub ipm_update_config: bool,
   pub(crate) checks_digest: String,
   pub(crate) check_count: u16,
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub(crate) struct ClusterAuthorizationCheck {
-  pub(crate) action: String,
-  pub(crate) resource: String,
+pub struct ClusterAuthorizationCheck {
+  pub action: String,
+  pub resource: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ClusterAuthenticatedActor {
-  pub(crate) name: String,
-  pub(crate) principal: String,
-  pub(crate) subject: String,
-  pub(crate) groups: Vec<String>,
-  pub(crate) credential_kind: String,
-  pub(crate) authenticated_with_break_glass: bool,
+pub struct ClusterAuthenticatedActor {
+  pub name: String,
+  pub principal: String,
+  pub subject: String,
+  pub groups: Vec<String>,
+  pub credential_kind: String,
+  pub authenticated_with_break_glass: bool,
 }
 
 impl ClusterAuthenticatedActor {
-  pub(crate) fn new(
-    actor: &IpmActor,
+  pub fn new(
+    name: &str,
+    principal: &str,
+    subject: &str,
+    groups: &[String],
     credential_kind: &str,
     authenticated_with_break_glass: bool,
   ) -> anyhow::Result<Self> {
     let value = Self {
-      name: actor.name.clone(),
-      principal: actor.principal.clone(),
-      subject: actor.subject.clone(),
-      groups: actor.groups.clone(),
+      name: name.to_string(),
+      principal: principal.to_string(),
+      subject: subject.to_string(),
+      groups: groups.to_vec(),
       credential_kind: credential_kind.to_string(),
       authenticated_with_break_glass,
     };
     value.validate()?;
     Ok(value)
-  }
-
-  pub(crate) fn ipm_actor(&self) -> IpmActor {
-    IpmActor {
-      name: self.name.clone(),
-      principal: self.principal.clone(),
-      subject: self.subject.clone(),
-      groups: self.groups.clone(),
-    }
   }
 
   fn validate(&self) -> anyhow::Result<()> {
@@ -110,7 +102,7 @@ impl ClusterAuthenticatedActor {
 }
 
 impl ClusterCommandAuthorization {
-  pub(crate) fn from_checks(
+  pub fn from_checks(
     admin_update_config: bool,
     ipm_update_config: bool,
     checks: &[ClusterAuthorizationCheck],
@@ -124,7 +116,7 @@ impl ClusterCommandAuthorization {
     })
   }
 
-  pub(crate) fn matches_checks(&self, checks: &[ClusterAuthorizationCheck]) -> bool {
+  pub fn matches_checks(&self, checks: &[ClusterAuthorizationCheck]) -> bool {
     canonical_authorization_checks(checks).is_ok_and(|checks| {
       usize::from(self.check_count) == checks.len()
         && self.checks_digest == authorization_checks_digest(&checks)
@@ -132,19 +124,19 @@ impl ClusterCommandAuthorization {
   }
 }
 
-pub(crate) struct ClusterMutationCommand {
-  pub(crate) method: Method,
-  pub(crate) path_and_query: String,
-  pub(crate) precondition_revision: String,
-  pub(crate) principal: String,
-  pub(crate) actor: ClusterAuthenticatedActor,
+pub struct ClusterMutationCommand {
+  pub method: Method,
+  pub path_and_query: String,
+  pub precondition_revision: String,
+  pub principal: String,
+  pub actor: ClusterAuthenticatedActor,
   pub(crate) signer_id: String,
   pub(crate) action: String,
   pub(crate) resource: String,
-  pub(crate) expected_previous_revision: String,
-  pub(crate) new_revision: String,
-  pub(crate) execution_model: ClusterExecutionModel,
-  pub(crate) authorization: ClusterCommandAuthorization,
+  pub expected_previous_revision: String,
+  pub new_revision: String,
+  pub execution_model: ClusterExecutionModel,
+  pub authorization: ClusterCommandAuthorization,
   mutation_header: Zeroizing<String>,
   body: Zeroizing<Vec<u8>>,
 }
@@ -164,7 +156,7 @@ impl fmt::Debug for ClusterMutationCommand {
 
 impl ClusterMutationCommand {
   #[allow(clippy::too_many_arguments)]
-  pub(crate) fn new(
+  pub fn new(
     method: &Method,
     path_and_query: &str,
     precondition_revision: &str,
@@ -200,15 +192,15 @@ impl ClusterMutationCommand {
     Ok(command)
   }
 
-  pub(crate) fn body(&self) -> &[u8] {
+  pub fn body(&self) -> &[u8] {
     &self.body
   }
 
-  pub(crate) fn signed_content_digest(&self) -> String {
+  pub fn signed_content_digest(&self) -> String {
     sha256_digest(&self.body)
   }
 
-  pub(crate) fn mutation_identity(&self) -> anyhow::Result<(String, String, String)> {
+  pub fn mutation_identity(&self) -> anyhow::Result<(String, String, String)> {
     let mut headers = HeaderMap::new();
     headers.insert(
       MUTATION_HEADER,
@@ -223,7 +215,7 @@ impl ClusterMutationCommand {
     ))
   }
 
-  pub(crate) fn into_plaintext(self) -> anyhow::Result<MutationArtifactPlaintext> {
+  pub fn into_plaintext(self) -> anyhow::Result<MutationArtifactPlaintext> {
     let signed_content_digest = self.signed_content_digest();
     let wire = ClusterMutationCommandWire {
       format: FORMAT,
@@ -266,7 +258,7 @@ impl ClusterMutationCommand {
     ))
   }
 
-  pub(super) fn from_plaintext(
+  pub fn from_plaintext(
     plaintext: &MutationArtifactPlaintext,
     binding: &ArtifactBinding,
   ) -> anyhow::Result<Self> {
@@ -293,7 +285,7 @@ impl ClusterMutationCommand {
     Ok(command)
   }
 
-  pub(super) fn validate_against(&self, binding: &ArtifactBinding) -> anyhow::Result<()> {
+  pub fn validate_against(&self, binding: &ArtifactBinding) -> anyhow::Result<()> {
     self.validate()?;
     ensure!(
       self.principal == binding.principal
@@ -325,7 +317,7 @@ impl ClusterMutationCommand {
     Ok(())
   }
 
-  pub(super) fn reverify(
+  pub fn reverify(
     &self,
     registry: &SignerRegistry,
     ipm_namespace: &str,

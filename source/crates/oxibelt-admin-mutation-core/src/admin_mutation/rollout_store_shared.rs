@@ -12,18 +12,18 @@ use crate::admin_mutation::ledger::{validate_identifier, validate_safe_response}
 use crate::admin_mutation::store::MutationStore;
 
 #[derive(Debug, Clone)]
-pub(crate) struct SharedPublicationClaim {
-  pub(crate) operation_kind: String,
-  pub(crate) operation_fingerprint: String,
-  pub(crate) candidate_revision: String,
-  pub(crate) candidate_digest: String,
-  pub(crate) checkpoint_reference: String,
-  pub(crate) token_producing: bool,
+pub struct SharedPublicationClaim {
+  pub operation_kind: String,
+  pub operation_fingerprint: String,
+  pub candidate_revision: String,
+  pub candidate_digest: String,
+  pub checkpoint_reference: String,
+  pub token_producing: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SharedPublicationState {
+pub enum SharedPublicationState {
   Applying,
   Applied,
   Restored,
@@ -52,34 +52,34 @@ impl SharedPublicationState {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct SharedPublicationRecord {
-  pub(crate) state: SharedPublicationState,
-  pub(crate) candidate_revision: String,
-  pub(crate) candidate_digest: String,
+pub struct SharedPublicationRecord {
+  pub state: SharedPublicationState,
+  pub candidate_revision: String,
+  pub candidate_digest: String,
   pub(crate) checkpoint_reference: String,
   pub(crate) token_producing: bool,
-  pub(crate) safe_response: Option<Value>,
+  pub safe_response: Option<Value>,
   pub(crate) winner_response_consumed: bool,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum SharedPublicationOutcome {
+pub enum SharedPublicationOutcome {
   FirstPublisher,
   Replay(SharedPublicationRecord),
 }
 
-pub(crate) struct FencedCoordinatorTransaction<'a> {
+pub struct FencedCoordinatorTransaction<'a> {
   tx: Transaction<'a, Postgres>,
   store: &'a MutationStore,
   fence: CoordinatorFence,
 }
 
 impl<'a> FencedCoordinatorTransaction<'a> {
-  pub(crate) fn transaction(&mut self) -> &mut Transaction<'a, Postgres> {
+  pub fn transaction(&mut self) -> &mut Transaction<'a, Postgres> {
     &mut self.tx
   }
 
-  pub(crate) const fn store(&self) -> &MutationStore {
+  pub const fn store(&self) -> &MutationStore {
     self.store
   }
 
@@ -89,7 +89,7 @@ impl<'a> FencedCoordinatorTransaction<'a> {
 
   /// Rechecks database-time lease and exact live identity immediately before
   /// commit. Callers cannot commit the inner transaction directly.
-  pub(crate) async fn commit(mut self) -> anyhow::Result<()> {
+  pub async fn commit(mut self) -> anyhow::Result<()> {
     lock_coordinator(&mut self.tx, self.store, &self.fence, None, true)
       .await
       .context("shared mutation authority expired before commit")?;
@@ -98,7 +98,7 @@ impl<'a> FencedCoordinatorTransaction<'a> {
   }
 }
 
-pub(crate) async fn begin_coordinator_transaction<'a>(
+pub async fn begin_coordinator_transaction<'a>(
   store: &'a MutationStore,
   fence: &CoordinatorFence,
 ) -> anyhow::Result<FencedCoordinatorTransaction<'a>> {
@@ -113,7 +113,7 @@ pub(crate) async fn begin_coordinator_transaction<'a>(
   })
 }
 
-pub(crate) async fn claim_shared_publication(
+pub async fn claim_shared_publication(
   transaction: &mut FencedCoordinatorTransaction<'_>,
   claim: &SharedPublicationClaim,
 ) -> anyhow::Result<SharedPublicationOutcome> {
@@ -177,7 +177,7 @@ pub(crate) async fn claim_shared_publication(
   Ok(SharedPublicationOutcome::Replay(row))
 }
 
-pub(crate) async fn finish_shared_publication(
+pub async fn finish_shared_publication(
   transaction: &mut FencedCoordinatorTransaction<'_>,
   next: SharedPublicationState,
   safe_response: Option<Value>,
@@ -234,7 +234,7 @@ pub(crate) async fn finish_shared_publication(
 /// Atomically marks the winner-only response slot as consumed. Callers may
 /// return any non-replayable credential only when this returns `true`; every
 /// retry receives `false` and must use the persisted safe response instead.
-pub(crate) async fn consume_shared_winner_response(
+pub async fn consume_shared_winner_response(
   transaction: &mut FencedCoordinatorTransaction<'_>,
 ) -> anyhow::Result<bool> {
   let namespace = transaction.store.namespace().to_string();
@@ -294,7 +294,7 @@ async fn load_publication(
   })
 }
 
-pub(crate) async fn load_shared_publication(
+pub async fn load_shared_publication(
   store: &MutationStore,
   request_id: &str,
 ) -> anyhow::Result<Option<SharedPublicationRecord>> {
@@ -326,7 +326,7 @@ pub(crate) async fn load_shared_publication(
     .transpose()
 }
 
-pub(crate) async fn load_applied_shared_publication_tx(
+pub async fn load_applied_shared_publication_tx(
   tx: &mut Transaction<'_, Postgres>,
   store: &MutationStore,
   fence: &CoordinatorFence,

@@ -3205,10 +3205,12 @@ dependencies = [
  "object_store",
  "online-dsl-forge",
  "openssl-probe",
+ "oxibelt-admin-mutation-core",
  "oxibelt-admission-policy",
  "oxibelt-allocator",
  "oxibelt-build-identity",
  "oxibelt-control-protocol",
+ "oxibelt-crypto-primitives",
  "oxibelt-ct",
  "oxibelt-tls-cert-compression",
  "precis-profiles",
@@ -3250,6 +3252,25 @@ dependencies = [
  "x509-ocsp",
  "zeroize",
  "zstd",
+]
+
+[[package]]
+name = "oxibelt-admin-mutation-core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "http",
+ "oxibelt-build-identity",
+ "oxibelt-crypto-primitives",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "subtle",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -3297,6 +3318,21 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "http",
+]
+
+[[package]]
+name = "oxibelt-crypto-primitives"
+version = "0.0.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "aws-lc-rs",
+ "chacha20poly1305",
+ "getrandom 0.4.3",
+ "hkdf",
+ "hmac",
+ "sha1",
+ "sha2 0.11.0",
 ]
 
 [[package]]

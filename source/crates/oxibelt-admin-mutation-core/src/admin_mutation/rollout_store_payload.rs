@@ -15,27 +15,27 @@ use crate::admin_mutation::store::{
   MAX_STORED_ARTIFACT_BYTES, MutationStore, StoreRolloutMode, claim_tx_with_mode,
 };
 
-pub(crate) struct ClusterAdmission {
-  pub(crate) outcome: ClaimOutcome,
-  pub(crate) artifact: Option<MutationArtifactReceipt>,
+pub struct ClusterAdmission {
+  pub outcome: ClaimOutcome,
+  pub artifact: Option<MutationArtifactReceipt>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SealedCheckpoint {
-  pub(crate) assignment_epoch: i64,
-  pub(crate) candidate_revision: String,
-  pub(crate) candidate_digest: String,
-  pub(crate) prior_revision: String,
-  pub(crate) prior_digest: String,
-  pub(crate) nonce: Vec<u8>,
-  pub(crate) ciphertext: Vec<u8>,
-  pub(crate) ciphertext_digest: String,
-  pub(crate) plaintext_len: usize,
+pub struct SealedCheckpoint {
+  pub assignment_epoch: i64,
+  pub candidate_revision: String,
+  pub candidate_digest: String,
+  pub prior_revision: String,
+  pub prior_digest: String,
+  pub nonce: Vec<u8>,
+  pub ciphertext: Vec<u8>,
+  pub ciphertext_digest: String,
+  pub plaintext_len: usize,
 }
 
 pub(crate) type StoredCheckpoint = SealedCheckpoint;
 
-pub(crate) async fn is_admission_origin(
+pub async fn is_admission_origin(
   store: &MutationStore,
   request_id: &str,
   member: &MemberFence,
@@ -60,7 +60,7 @@ pub(crate) async fn is_admission_origin(
   )
 }
 
-pub(crate) async fn cluster_admit_tx(
+pub async fn cluster_admit_tx(
   tx: &mut Transaction<'_, Postgres>,
   store: &MutationStore,
   claim: &MutationClaim,
@@ -290,7 +290,7 @@ async fn lock_membership_claim_barrier(
   Ok(())
 }
 
-pub(crate) async fn publish_checkpoint(
+pub async fn publish_checkpoint(
   store: &MutationStore,
   member: &MemberFence,
   request_id: &str,
@@ -316,7 +316,7 @@ pub(crate) async fn publish_checkpoint(
 /// coordinator transaction. The owner is an exact rollout target (normally the
 /// deterministic canary), making the publication marker's checkpoint reference
 /// stable across coordinator takeover.
-pub(crate) async fn publish_checkpoint_in_coordinator_transaction(
+pub async fn publish_checkpoint_in_coordinator_transaction(
   transaction: &mut FencedCoordinatorTransaction<'_>,
   owner: &MemberFence,
   checkpoint: &SealedCheckpoint,
@@ -406,7 +406,7 @@ async fn insert_checkpoint_tx(
   Ok(false)
 }
 
-pub(crate) async fn fetch_checkpoint(
+pub async fn fetch_checkpoint(
   store: &MutationStore,
   member: &MemberFence,
   request_id: &str,
@@ -442,7 +442,7 @@ pub(crate) async fn fetch_checkpoint(
   Ok(checkpoint)
 }
 
-pub(crate) async fn fetch_committed_artifact(
+pub async fn fetch_committed_artifact(
   store: &MutationStore,
   member: &MemberFence,
   resource: &str,

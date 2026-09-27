@@ -89,7 +89,12 @@ impl AdminClusterExecutor {
       .map_err(|error| rejected(error.to_string()))?;
     Ok(ValidatedOperation {
       kind,
-      actor: command.actor.ipm_actor(),
+      actor: crate::ipm::IpmActor {
+        name: command.actor.name.clone(),
+        principal: command.actor.principal.clone(),
+        subject: command.actor.subject.clone(),
+        groups: command.actor.groups.clone(),
+      },
       previous_revision: command.expected_previous_revision.clone(),
       operational_precondition_revision: command.precondition_revision.clone(),
       candidate_revision: command.new_revision.clone(),

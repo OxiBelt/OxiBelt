@@ -35,6 +35,20 @@ fn active_members() -> Vec<MembershipMember> {
   vec![member("edge-a", 1, 2), member("edge-b", 3, 4)]
 }
 
+fn legacy_epoch(members: Vec<MembershipMember>) -> MembershipEpoch {
+  let epoch: MembershipEpoch = serde_json::from_value(serde_json::json!({
+    "version": 1,
+    "cluster_id": CLUSTER_ID,
+    "sequence": 0,
+    "predecessor": null,
+    "members": members,
+    "authorized_by_request_id": "activate-v1",
+  }))
+  .expect("valid legacy membership fixture");
+  epoch.digest().expect("validated legacy membership fixture");
+  epoch
+}
+
 fn namespace(label: &str) -> String {
   format!(
     "cluster-heartbeat-{label}-{}-{}",
@@ -204,14 +218,7 @@ async fn keyless_legacy_learner_refreshes_without_participating() {
     return;
   };
   let members = active_members();
-  let epoch = MembershipEpoch::new(
-    CLUSTER_ID.to_string(),
-    0,
-    None,
-    members.clone(),
-    "activate-v1".to_string(),
-  )
-  .expect("legacy epoch");
+  let epoch = legacy_epoch(members.clone());
   let epoch_digest = install_active_epoch(&pool, &store, &epoch).await;
   let runtime = runtime(
     store.clone(),
@@ -248,14 +255,7 @@ async fn active_legacy_member_without_cipher_still_fails_closed() {
     return;
   };
   let members = active_members();
-  let epoch = MembershipEpoch::new(
-    CLUSTER_ID.to_string(),
-    0,
-    None,
-    members.clone(),
-    "activate-v1".to_string(),
-  )
-  .expect("legacy epoch");
+  let epoch = legacy_epoch(members.clone());
   let epoch_digest = install_active_epoch(&pool, &store, &epoch).await;
   let previous_members = vec![members[1].clone(), member("edge-c", 5, 6)];
   let runtime = runtime(
@@ -295,14 +295,7 @@ async fn keyed_active_legacy_member_refreshes_and_heartbeats() {
     return;
   };
   let members = active_members();
-  let epoch = MembershipEpoch::new(
-    CLUSTER_ID.to_string(),
-    0,
-    None,
-    members.clone(),
-    "activate-v1".to_string(),
-  )
-  .expect("legacy epoch");
+  let epoch = legacy_epoch(members.clone());
   let epoch_digest = install_active_epoch(&pool, &store, &epoch).await;
   let cipher = Arc::new(
     MutationArtifactCipher::new(&[42_u8; 32], MAX_STORED_ARTIFACT_BYTES).expect("legacy cipher"),

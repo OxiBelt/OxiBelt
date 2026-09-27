@@ -10,8 +10,8 @@ use crate::admin_mutation::ledger::{MutationRecord, MutationState, TerminalMutat
 use crate::admin_mutation::store::{MutationStore, finish_cluster_tx_authorized};
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct RecoveryMutation {
-  pub(crate) request_id: String,
+pub struct RecoveryMutation {
+  pub request_id: String,
   pub(crate) state: MutationState,
   pub(crate) state_version: i64,
   pub(crate) coordinator_epoch: i64,
@@ -19,15 +19,15 @@ pub(crate) struct RecoveryMutation {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct MemberWork {
-  pub(crate) request_id: String,
+pub struct MemberWork {
+  pub request_id: String,
   pub(crate) resource: String,
   pub(crate) new_revision: String,
   pub(crate) content_digest: String,
-  pub(crate) target: RolloutTarget,
+  pub target: RolloutTarget,
 }
 
-pub(crate) async fn release_member_fence(
+pub async fn release_member_fence(
   store: &MutationStore,
   fence: &MemberFence,
 ) -> anyhow::Result<bool> {
@@ -48,7 +48,7 @@ pub(crate) async fn release_member_fence(
   Ok(result.rows_affected() == 1)
 }
 
-pub(crate) async fn load_recoverable_mutations(
+pub async fn load_recoverable_mutations(
   store: &MutationStore,
   limit: i64,
 ) -> anyhow::Result<Vec<RecoveryMutation>> {
@@ -79,7 +79,7 @@ pub(crate) async fn load_recoverable_mutations(
     .collect()
 }
 
-pub(crate) async fn load_member_work(
+pub async fn load_member_work(
   store: &MutationStore,
   member: &MemberFence,
   limit: i64,
@@ -123,7 +123,7 @@ pub(crate) async fn load_member_work(
     .collect()
 }
 
-pub(crate) async fn guarded_cluster_finish_tx(
+pub async fn guarded_cluster_finish_tx(
   tx: &mut Transaction<'_, Postgres>,
   store: &MutationStore,
   fence: &CoordinatorFence,
