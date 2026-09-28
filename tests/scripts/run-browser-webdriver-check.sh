@@ -639,6 +639,20 @@ fi
 generate_test_ca
 generate_server_certificate
 
+if [[ "${websocket_h3_scenario}" == "true" ]]; then
+  chrome_cert_spki="$(
+    openssl x509 -in "${cert_dir}/fullchain.pem" -noout -pubkey \
+      | openssl pkey -pubin -outform der \
+      | openssl dgst -sha256 -binary \
+      | base64 -w 0
+  )"
+  capabilities="$(
+    jq --arg spki "${chrome_cert_spki}" \
+      '.capabilities.alwaysMatch["goog:chromeOptions"].args += ["--ignore-certificate-errors-spki-list=" + $spki]' \
+      <<<"${capabilities}"
+  )"
+fi
+
 if [[ "${browser}" == "firefox" ]]; then
   firefox_profile=""
   if [[ "${scenario}" == "webrtc-turn" ]]; then
@@ -878,6 +892,10 @@ http1 = true
 http2 = true
 http3 = ${websocket_h3_scenario}
 
+[quic.socket]
+workers = 1
+reuse_port = false
+
 [tls]
 cert_chain = "${cert_chain}"
 private_key = "${private_key}"
@@ -1089,6 +1107,7 @@ fi
 
 if [[ "${isolated_firefox_turn}" != "true" ]]; then
   LISTEN_PORT="${upstream_port}" \
+    CONTROL_PORT=0 \
     UPSTREAM_NAME="browser-upstream" \
     python3 "${repo_root}/tests/docker/mock_upstream/server.py" >"${upstream_log}" 2>&1 &
   upstream_pid="$!"
@@ -1305,9 +1324,34 @@ case "${scenario}" in
     )"
     if ! jq -e --arg protocol "${expected_next_hop}" \
       '.ok == true and (.protocol | startswith($protocol))' <<<"${warm_result}" >/dev/null; then
-      echo "Expected ${browser} same-origin warmup over ${expected_next_hop}: ${warm_result}" >&2
-      show_diagnostics
-      exit 1
+      # Chromium can omit nextHopProtocol even for a completed HTTP/3 fetch.
+      # Keep the gate tied to the proxy's authenticated per-request access log.
+      warmup_access_log=false
+      if jq -e '.ok == false and (.observed | length == 20) and all(.observed[]; . == "")' \
+        <<<"${warm_result}" >/dev/null; then
+        for _ in {1..30}; do
+          refresh_proxy_log
+          if jq -R -s -e --arg version "${expected_http_version}" --arg browser "${browser}" '
+            [split("\n")[] | fromjson?]
+            | any(.[];
+              .event.dataset == "oxibelt.access.system"
+              and .http.request.method == "GET"
+              and .http.version == $version
+              and .url.path == "/app/webdriver"
+              and (.url.query | startswith("browser=" + $browser + "&ws_warm="))
+              and .http.response.status_code == 200)
+          ' <"${proxy_log}" >/dev/null; then
+            warmup_access_log=true
+            break
+          fi
+          sleep 1
+        done
+      fi
+      if [[ "${warmup_access_log}" != "true" ]]; then
+        echo "Expected ${browser} same-origin warmup over ${expected_next_hop}: ${warm_result}" >&2
+        show_diagnostics
+        exit 1
+      fi
     fi
     websocket_payload="browser-ws-${browser}-${scenario}"
     websocket_result="$(
