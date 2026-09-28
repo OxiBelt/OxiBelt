@@ -112,7 +112,18 @@ esac
   write_executable(&bin_dir.join("sleep"), "#!/usr/bin/env bash\nexit 0\n");
   write_executable(
     &bin_dir.join("managed-upload-test"),
-    "#!/usr/bin/env bash\nexit 0\n",
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+test_name='postgres_s3::tests::postgres_s3_lifecycle_fences_discovery_and_enforces_session_quota'
+if [[ "$#" -eq 1 && "$1" == "--list" ]]; then
+  printf '%s: test\n' "$test_name"
+elif [[ "$#" -eq 3 && "$1" == "--exact" && "$2" == "$test_name" && "$3" == "--nocapture" ]]; then
+  exit 0
+else
+  printf 'unexpected managed upload test arguments: %s\n' "$*" >&2
+  exit 96
+fi
+"#,
   );
 }
 

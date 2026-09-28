@@ -242,7 +242,7 @@ invariants = ["duplicate or noncanonical headers fail closed", "body and context
 unsupported_states = ["private signing keys", "cryptographic signature verification", "Admin handlers"]
 seed_dir = "fuzz/seeds/admin_mutation_envelope"
 dictionary = "fuzz/dictionaries/admin_envelope.dict"
-coverage_landmarks = ["source/src/admin_mutation/envelope.rs:parse_mutation_header", "source/src/admin_mutation/envelope.rs:mutation_transcript"]
+coverage_landmarks = ["source/crates/oxibelt-admin-mutation-core/src/admin_mutation/envelope.rs:parse_mutation_header", "source/crates/oxibelt-admin-mutation-core/src/admin_mutation/envelope.rs:mutation_transcript"]
 regression_path = "tests/fixtures/fuzz-regressions/admin_mutation_envelope"
 leak_policy = "enabled"
 
@@ -255,7 +255,7 @@ invariants = ["frame lengths and metadata limits fail closed", "rollout classifi
 unsupported_states = ["PostgreSQL storage", "runtime snapshot replacement", "remote member communication"]
 seed_dir = "fuzz/seeds/cluster_rollout_state"
 dictionary = "fuzz/dictionaries/admin_json.dict"
-coverage_landmarks = ["source/src/admin_mutation/cluster_command.rs:decode_frame", "source/src/admin_mutation/rollout_state.rs:classify"]
+coverage_landmarks = ["source/crates/oxibelt-admin-mutation-core/src/admin_mutation/cluster_command.rs:decode_frame", "source/crates/oxibelt-admin-mutation-core/src/admin_mutation/rollout_state.rs:classify"]
 regression_path = "tests/fixtures/fuzz-regressions/cluster_rollout_state"
 leak_policy = "enabled"
 

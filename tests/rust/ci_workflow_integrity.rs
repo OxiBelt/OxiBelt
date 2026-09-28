@@ -3196,7 +3196,7 @@ fn admin_mutation_postgres_ci_is_mandatory_bounded_and_rootless() {
     "OXIBELT_TEST_MUTATION_POSTGRES_URL=",
     "NetworkSettings.Networks",
     "timeout --signal=TERM 35m",
-    "cargo test --all-features --locked -p oxibelt --lib",
+    "cargo test --all-features --locked -p oxibelt -p oxibelt-admin-mutation-core --lib",
     "'admin_mutation' -- --test-threads=1",
     "container_created=1",
     "if ((container_created == 1)); then",
