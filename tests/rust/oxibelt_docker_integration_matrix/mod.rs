@@ -232,6 +232,7 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("proxy-upstream-tls", "untrusted-https-upstream-fails"),
   ("proxy-upstream-tls", "health-check-tls-policy"),
   ("waf-request", "reject-path"),
+  ("waf-request", "escaped-traversal-h3"),
   ("waf-request", "body-size-chunked"),
   ("waf-request", "monitor-mode-allows"),
   ("waf-request", "rule-mode-hit-counters"),
