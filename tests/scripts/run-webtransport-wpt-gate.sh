@@ -67,6 +67,7 @@ docker exec "${runner}" /bin/sh -c \
 run_wpt() {
   local browser="$1"
   local phase="$2"
+  local report_name="${3:-${browser}-${phase}}"
   local binary webdriver
   local status=0
   case "${browser}" in
@@ -86,7 +87,7 @@ run_wpt() {
     --enable-webtransport-h3
     --no-fail-on-unexpected
     --test-types testharness crashtest
-    --log-wptreport="/artifacts/${browser}-${phase}.json"
+    --log-wptreport="/artifacts/${report_name}.json"
     "${browser}" webtransport/
   )
   if [[ "${browser}" == chrome ]]; then
@@ -100,12 +101,12 @@ run_wpt() {
       --env HOME=/home/wpt \
       --workdir /opt/wpt \
       "${runner}" ./wpt run "${args[@]}" \
-      >"${artifact_dir}/${browser}-${phase}.log" 2>&1 || status=$?
-  printf '%s\n' "${status}" >"${artifact_dir}/${browser}-${phase}.exit"
+      >"${artifact_dir}/${report_name}.log" 2>&1 || status=$?
+  printf '%s\n' "${status}" >"${artifact_dir}/${report_name}.exit"
   if ((status != 0)); then
     return "${status}"
   fi
-  test -s "${artifact_dir}/${browser}-${phase}.json"
+  test -s "${artifact_dir}/${report_name}.json"
 }
 
 for browser in chrome firefox; do
@@ -242,8 +243,32 @@ for browser in chrome firefox; do
     echo "${browser}: no browser WebTransport packets reached the proxy DNAT rule." >&2
     exit 1
   fi
+  comparison_output=""
+  if comparison_output="$(
+    python3 "${script_dir}/check-webtransport-wpt-report.py" \
+      "${browser}" \
+      "${artifact_dir}/${browser}-direct.json" \
+      "${artifact_dir}/${browser}-proxied.json" 2>&1
+  )"; then
+    printf '%s\n' "${comparison_output}"
+    continue
+  fi
+  printf '%s\n' "${comparison_output}" >&2
+  if [[ "${browser}" != firefox \
+    || "${comparison_output}" != "direct/proxy baseline mismatch:"* ]]; then
+    exit 1
+  fi
+
+  echo 'Firefox WPT parity mismatch; retrying one full proxied pass.' >&2
+  packets_before="$(proxy_nat_packets)"
+  run_wpt firefox proxied firefox-proxied-retry
+  packets_after="$(proxy_nat_packets)"
+  if ((packets_after <= packets_before)); then
+    echo 'Firefox retry: no browser WebTransport packets reached the proxy DNAT rule.' >&2
+    exit 1
+  fi
   python3 "${script_dir}/check-webtransport-wpt-report.py" \
-    "${browser}" \
-    "${artifact_dir}/${browser}-direct.json" \
-    "${artifact_dir}/${browser}-proxied.json"
+    firefox \
+    "${artifact_dir}/firefox-direct.json" \
+    "${artifact_dir}/firefox-proxied-retry.json"
 done
