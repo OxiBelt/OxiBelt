@@ -356,7 +356,16 @@ fn aws_lc_stable_signature_evidence_matches_first_party_features() {
       &core["features"]["mutation-pqc"],
       "source mutation-pqc feature",
     ),
-    ["admin-runtime"]
+    ["admin-runtime", "oxibelt-admin-mutation-core/mutation-pqc"]
+  );
+  let mutation_core = toml_document("source/crates/oxibelt-admin-mutation-core/Cargo.toml");
+  assert!(
+    string_array(
+      &mutation_core["features"]["mutation-pqc"],
+      "mutation core mutation-pqc feature",
+    )
+    .is_empty(),
+    "mutation-pqc must not enable an unstable AWS-LC feature"
   );
 
   let quic_parser = &core["dependencies"]["quic-parser"];
@@ -394,7 +403,7 @@ fn aws_lc_stable_signature_evidence_matches_first_party_features() {
 
   for path in [
     "source/apps/oxibeltctl/src/mutation_signer.rs",
-    "source/src/admin_mutation/verifier.rs",
+    "source/crates/oxibelt-admin-mutation-core/src/admin_mutation/verifier.rs",
   ] {
     assert!(
       !read(path).contains("aws_lc_rs::unstable"),
