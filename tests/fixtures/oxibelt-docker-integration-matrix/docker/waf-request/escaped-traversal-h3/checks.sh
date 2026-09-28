@@ -5,8 +5,9 @@ run_case_checks() {
   assert_response_jq "${response}" '.negotiated_protocol == "h3"'
   assert_body_jq "${response}" '.path == "/origin/locales/en/messages.json"'
 
-  response="$(protocol_probe_client h3 "example.test" "/safe/../x" 401)"
-  assert_response_jq "${response}" '.negotiated_protocol == "h3" and .body == "Unauthorized"'
+  # The HTTP/3 path validator rejects dot segments before WAF evaluation.
+  response="$(protocol_probe_client h3 "example.test" "/safe/../x" 400)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h3" and .body == "invalid request path"'
 
   logs="$(docker logs "${proxy_container}" 2>&1 || true)"
   baseline_failures="$(grep -F -c 'hot reload failed; keeping previous active state' <<<"${logs}" || true)"
@@ -35,6 +36,6 @@ run_case_checks() {
   assert_response_jq "${response}" '.negotiated_protocol == "h3"'
   assert_body_jq "${response}" '.path == "/origin/locales/en/messages.json"'
 
-  response="$(protocol_probe_client h3 "example.test" "/safe/../x" 401)"
-  assert_response_jq "${response}" '.negotiated_protocol == "h3" and .body == "Unauthorized"'
+  response="$(protocol_probe_client h3 "example.test" "/safe/../x" 400)"
+  assert_response_jq "${response}" '.negotiated_protocol == "h3" and .body == "invalid request path"'
 }
