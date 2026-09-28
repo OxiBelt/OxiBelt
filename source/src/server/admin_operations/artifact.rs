@@ -250,7 +250,7 @@ impl OperationArtifactCipher {
     self
       .key
       .seal_in_place_append_tag(nonce, &aad, &mut ciphertext)
-      .map_err(|()| anyhow::anyhow!("failed to encrypt Admin operation artifact"))?;
+      .map_err(|_| anyhow::anyhow!("failed to encrypt Admin operation artifact"))?;
     let ciphertext_digest = sha256_digest(&ciphertext);
     Ok(SealedOperationArtifact {
       binding,
@@ -293,7 +293,7 @@ impl OperationArtifactCipher {
     let opened = self
       .key
       .open_in_place(nonce, &aad, &mut plaintext)
-      .map_err(|()| anyhow::anyhow!("failed to authenticate Admin operation artifact"))?;
+      .map_err(|_| anyhow::anyhow!("failed to authenticate Admin operation artifact"))?;
     let length = opened.len();
     plaintext.truncate(length);
     Ok(OperationArtifactPlaintext(plaintext))

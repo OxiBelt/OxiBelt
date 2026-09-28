@@ -222,6 +222,19 @@ pub enum Aes256GcmKey {
   AwsLcRs(AwsLessSafeKey),
 }
 
+/// Opaque failure from an authenticated encryption or decryption operation.
+/// Callers should not expose backend-specific authentication details.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct AeadOperationError;
+
+impl std::fmt::Display for AeadOperationError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("authenticated encryption operation failed")
+  }
+}
+
+impl std::error::Error for AeadOperationError {}
+
 impl Aes256GcmKey {
   pub fn new_from_slice(key: &[u8]) -> anyhow::Result<Self> {
     match active_provider(AES_GCM_SHIFT) {
@@ -241,13 +254,14 @@ impl Aes256GcmKey {
     nonce: [u8; 12],
     additional_data: &[u8],
     data: &mut Vec<u8>,
-  ) -> Result<(), ()> {
+  ) -> Result<(), AeadOperationError> {
     match self {
       Self::RustCrypto(key) => {
-        let nonce = RustCryptoNonce::<RustCryptoAes256Gcm>::try_from(&nonce[..]).map_err(|_| ())?;
+        let nonce = RustCryptoNonce::<RustCryptoAes256Gcm>::try_from(&nonce[..])
+          .map_err(|_| AeadOperationError)?;
         key
           .encrypt_in_place(&nonce, additional_data, data)
-          .map_err(|_| ())
+          .map_err(|_| AeadOperationError)
       }
       Self::AwsLcRs(key) => key
         .seal_in_place_append_tag(
@@ -255,7 +269,7 @@ impl Aes256GcmKey {
           AwsAad::from(additional_data),
           data,
         )
-        .map_err(|_| ()),
+        .map_err(|_| AeadOperationError),
     }
   }
 
@@ -264,19 +278,21 @@ impl Aes256GcmKey {
     nonce: [u8; 12],
     additional_data: &[u8],
     data: &'a mut [u8],
-  ) -> Result<&'a mut [u8], ()> {
+  ) -> Result<&'a mut [u8], AeadOperationError> {
     match self {
       Self::RustCrypto(key) => {
         if data.len() < 16 {
-          return Err(());
+          return Err(AeadOperationError);
         }
         let tag_start = data.len() - 16;
         let (ciphertext, tag) = data.split_at_mut(tag_start);
-        let nonce = RustCryptoNonce::<RustCryptoAes256Gcm>::try_from(&nonce[..]).map_err(|_| ())?;
-        let tag = RustCryptoTag::<RustCryptoAes256Gcm>::try_from(&*tag).map_err(|_| ())?;
+        let nonce = RustCryptoNonce::<RustCryptoAes256Gcm>::try_from(&nonce[..])
+          .map_err(|_| AeadOperationError)?;
+        let tag =
+          RustCryptoTag::<RustCryptoAes256Gcm>::try_from(&*tag).map_err(|_| AeadOperationError)?;
         key
           .decrypt_inout_detached(&nonce, additional_data, ciphertext.into(), &tag)
-          .map_err(|_| ())?;
+          .map_err(|_| AeadOperationError)?;
         Ok(ciphertext)
       }
       Self::AwsLcRs(key) => key
@@ -285,7 +301,7 @@ impl Aes256GcmKey {
           AwsAad::from(additional_data),
           data,
         )
-        .map_err(|_| ()),
+        .map_err(|_| AeadOperationError),
     }
   }
 }
@@ -319,14 +335,14 @@ impl ChaCha20Poly1305Key {
     nonce: [u8; 12],
     additional_data: &[u8],
     data: &mut Vec<u8>,
-  ) -> Result<(), ()> {
+  ) -> Result<(), AeadOperationError> {
     match self {
       Self::RustCrypto(key) => {
-        let nonce =
-          RustCryptoNonce::<RustCryptoChaCha20Poly1305>::try_from(&nonce[..]).map_err(|_| ())?;
+        let nonce = RustCryptoNonce::<RustCryptoChaCha20Poly1305>::try_from(&nonce[..])
+          .map_err(|_| AeadOperationError)?;
         key
           .encrypt_in_place(&nonce, additional_data, data)
-          .map_err(|_| ())
+          .map_err(|_| AeadOperationError)
       }
       Self::AwsLcRs(key) => key
         .seal_in_place_append_tag(
@@ -334,7 +350,7 @@ impl ChaCha20Poly1305Key {
           AwsAad::from(additional_data),
           data,
         )
-        .map_err(|_| ()),
+        .map_err(|_| AeadOperationError),
     }
   }
 
@@ -343,20 +359,21 @@ impl ChaCha20Poly1305Key {
     nonce: [u8; 12],
     additional_data: &[u8],
     data: &'a mut [u8],
-  ) -> Result<&'a mut [u8], ()> {
+  ) -> Result<&'a mut [u8], AeadOperationError> {
     match self {
       Self::RustCrypto(key) => {
         if data.len() < 16 {
-          return Err(());
+          return Err(AeadOperationError);
         }
         let tag_start = data.len() - 16;
         let (ciphertext, tag) = data.split_at_mut(tag_start);
-        let nonce =
-          RustCryptoNonce::<RustCryptoChaCha20Poly1305>::try_from(&nonce[..]).map_err(|_| ())?;
-        let tag = RustCryptoTag::<RustCryptoChaCha20Poly1305>::try_from(&*tag).map_err(|_| ())?;
+        let nonce = RustCryptoNonce::<RustCryptoChaCha20Poly1305>::try_from(&nonce[..])
+          .map_err(|_| AeadOperationError)?;
+        let tag = RustCryptoTag::<RustCryptoChaCha20Poly1305>::try_from(&*tag)
+          .map_err(|_| AeadOperationError)?;
         key
           .decrypt_inout_detached(&nonce, additional_data, ciphertext.into(), &tag)
-          .map_err(|_| ())?;
+          .map_err(|_| AeadOperationError)?;
         Ok(ciphertext)
       }
       Self::AwsLcRs(key) => key
@@ -365,7 +382,7 @@ impl ChaCha20Poly1305Key {
           AwsAad::from(additional_data),
           data,
         )
-        .map_err(|_| ()),
+        .map_err(|_| AeadOperationError),
     }
   }
 }

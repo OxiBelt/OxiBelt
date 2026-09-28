@@ -354,7 +354,7 @@ impl MutationArtifactCipher {
     self
       .key
       .seal_in_place_append_tag(nonce, &aad, &mut ciphertext)
-      .map_err(|()| anyhow::anyhow!("failed to encrypt mutation artifact"))?;
+      .map_err(|_| anyhow::anyhow!("failed to encrypt mutation artifact"))?;
     let ciphertext_digest = sha256_digest(&ciphertext);
     Ok(SealedArtifact {
       nonce,
@@ -391,7 +391,7 @@ impl MutationArtifactCipher {
     let opened_len = self
       .key
       .open_in_place(nonce, &aad, &mut plaintext)
-      .map_err(|()| anyhow::anyhow!("mutation artifact authentication failed"))?
+      .map_err(|_| anyhow::anyhow!("mutation artifact authentication failed"))?
       .len();
     ensure!(
       opened_len == stored.plaintext_len,
@@ -430,7 +430,7 @@ impl MutationArtifactCipher {
     self
       .key
       .seal_in_place_append_tag(nonce, &aad, &mut ciphertext)
-      .map_err(|()| anyhow::anyhow!("failed to encrypt mutation checkpoint"))?;
+      .map_err(|_| anyhow::anyhow!("failed to encrypt mutation checkpoint"))?;
     let ciphertext_digest = sha256_digest(&ciphertext);
     Ok(SealedCheckpointArtifact {
       nonce,
@@ -463,7 +463,7 @@ impl MutationArtifactCipher {
     let opened_len = self
       .key
       .open_in_place(nonce, &aad, &mut plaintext)
-      .map_err(|()| anyhow::anyhow!("mutation checkpoint authentication failed"))?
+      .map_err(|_| anyhow::anyhow!("mutation checkpoint authentication failed"))?
       .len();
     ensure!(
       opened_len == plaintext_len,

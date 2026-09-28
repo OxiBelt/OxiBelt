@@ -117,7 +117,7 @@ pub(crate) fn seal_catchup_chunk(
   let mut ciphertext = plaintext;
   cipher
     .seal_in_place_append_tag(nonce, &aad, &mut ciphertext)
-    .map_err(|()| anyhow::anyhow!("failed to encrypt membership catch-up chunk"))?;
+    .map_err(|_| anyhow::anyhow!("failed to encrypt membership catch-up chunk"))?;
   let ciphertext_digest = sha256_digest(&ciphertext);
   Ok(SealedCatchupChunk {
     ephemeral_public_key,
@@ -266,7 +266,7 @@ fn seal_x25519(
   let mut ciphertext = plaintext;
   cipher
     .seal_in_place_append_tag(nonce, aad, &mut ciphertext)
-    .map_err(|()| anyhow::anyhow!("failed to encrypt {label}"))?;
+    .map_err(|_| anyhow::anyhow!("failed to encrypt {label}"))?;
   Ok(SealedX25519 {
     ephemeral_public_key,
     nonce,
@@ -311,7 +311,7 @@ fn open_x25519(
   let mut plaintext = Zeroizing::new(ciphertext);
   let opened_len = cipher
     .open_in_place(nonce, aad, &mut plaintext)
-    .map_err(|()| anyhow::anyhow!("{label} authentication failed"))?
+    .map_err(|_| anyhow::anyhow!("{label} authentication failed"))?
     .len();
   plaintext.truncate(opened_len);
   Ok(plaintext)
