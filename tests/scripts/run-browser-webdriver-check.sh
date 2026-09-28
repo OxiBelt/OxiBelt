@@ -568,6 +568,7 @@ case "${browser}" in
     driver_binary="$(find_first_command "${DRIVER_COMMAND:-chromedriver}" chromedriver)"
     driver_port="${DRIVER_PORT:-9515}"
     driver_log="${work_dir}/chromedriver.log"
+    # The H3 fixture binds or publishes UDP only on IPv4 loopback.
     capabilities="$(
       jq -n \
         --arg binary "${browser_binary}" \
@@ -592,7 +593,12 @@ case "${browser}" in
                 else
                   []
                 end + if $websocket_h3_scenario then
-                  ["--enable-quic", "--enable-features=EnableWebsocketsOverHttp3", ("--origin-to-force-quic-on=localhost:" + $proxy_port)]
+                  [
+                    "--enable-quic",
+                    "--enable-features=EnableWebsocketsOverHttp3",
+                    ("--origin-to-force-quic-on=localhost:" + $proxy_port),
+                    "--host-resolver-rules=MAP localhost 127.0.0.1"
+                  ]
                 else
                   if $websocket_scenario then ["--disable-quic"] else [] end
                 end)
