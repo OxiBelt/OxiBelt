@@ -1189,6 +1189,12 @@ criteria = "safe-to-deploy"
 delta = "0.3.2 -> 0.3.3"
 notes = "Reviewed the complete checksum-matched 0.3.2-to-0.3.3 source delta. Float literal tokenization now accepts only finite parsed values, routing overflow and non-finite results through the existing diagnostic path before AST construction or evaluation. Recursion and token limits are unchanged, and the crate contains no unsafe code, build script, proc macro, filesystem, network, or process capability."
 
+[[audits.online-dsl-forge]]
+who = "OpenAI Codex <codex@openai.com>"
+criteria = "safe-to-deploy"
+delta = "0.3.3 -> 0.3.5"
+notes = "Reviewed the checksum-matched packaged source delta across parser, semantic analysis, rulepack rendering, runtime, and value conversion; all 53 packaged 0.3.5 source files match signed tag 0.3.5. Unsupported string escapes now fail validation, aggregate parser/function/regex admission is bounded, and rulepack placeholder checks advance linearly through string spans. The library has no unsafe code or built-in filesystem, network, or process execution; the packaged CLI reads local input files. OxiBelt uses the parser and analyzer; changed admission limits can reject oversized custom rules, and serde_json arbitrary_precision unifies into the host, so WAF and persisted audit-number compatibility are separately tested."
+
 [[audits.password-hash]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"

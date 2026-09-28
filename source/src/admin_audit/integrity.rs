@@ -537,6 +537,34 @@ mod tests {
   }
 
   #[test]
+  fn pre_upgrade_numeric_audit_payload_keeps_its_hash_after_json_readback() {
+    // Before arbitrary_precision, serde_json serialized an integer above u64::MAX
+    // as this finite float. Persisted audit payloads contain that serialized form.
+    let stored = r#"{"timestamp_unix_ms":1728000000000,"request_summary":{"safe_fields":{"id":1.8446744073709552e+19,"policy":1.5,"source":18446744073709551615}},"operation":"post.config.load"}"#;
+    let canonical = br#"{"operation":"post.config.load","request_summary":{"safe_fields":{"id":1.8446744073709552e+19,"policy":1.5,"source":18446744073709551615}},"timestamp_unix_ms":1728000000000}"#;
+    let payload: Value = serde_json::from_str(stored).unwrap();
+    assert_eq!(canonical_json_bytes(&payload).unwrap(), canonical);
+
+    let envelope = IntegrityEnvelope {
+      algorithm: IntegrityAlgorithm::Sha256,
+      chain_id: CHAIN_ID.to_string(),
+      sequence: 0,
+      previous_hash: ZERO_HASH.to_string(),
+      event_hash: "850c20015455a17a8d3422df1ea4ac2ed4426514be4712e62fb84b1630a184ec".to_string(),
+      key_id: None,
+      tag: None,
+    };
+    let mut verifier = IntegrityVerifier::new(CHAIN_ID.to_string(), None).unwrap();
+    verifier.verify_and_advance(&payload, &envelope).unwrap();
+
+    let encoded = serde_json::to_vec(&payload).unwrap();
+    let readback: Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(canonical_json_bytes(&readback).unwrap(), canonical);
+    let mut verifier = IntegrityVerifier::new(CHAIN_ID.to_string(), None).unwrap();
+    verifier.verify_and_advance(&readback, &envelope).unwrap();
+  }
+
+  #[test]
   fn verifier_rejects_reordered_or_missing_events_without_advancing() {
     let mut chain = hash_chain();
     let first_payload = json!({"event": 1});

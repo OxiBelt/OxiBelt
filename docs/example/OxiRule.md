@@ -7,6 +7,11 @@ This cookbook gives practical OxiRule examples grouped by intent. The formal rul
 
 Examples shown with `[[waf.rules]]` are global rules. The same rule shape may be used under `[[routes.waf.rules]]` when the policy should apply only after a route is matched.
 
+Regex backslashes in a TOML basic string pass through both TOML and the OxiRule
+string parser. For example, write `\\\\.` in triple-quoted TOML to pass `\.`
+to the regex matcher. Pattern-set `patterns` values pass directly from TOML to
+the regex matcher and need only TOML escaping.
+
 ## Baseline Request Controls
 
 ### Block Public Admin Paths
@@ -58,8 +63,8 @@ tags = ["path-policy"]
 phase = "request"
 priority = 110
 when = """
-Request.Http.Path.matches('(^|/)\\.[^/]+') ||
-Request.Http.Path.matches('(?i)(\\.bak|\\.old|~)$')
+Request.Http.Path.matches('(^|/)\\\\.[^/]+') ||
+Request.Http.Path.matches('(?i)(\\\\.bak|\\\\.old|~)$')
 """
 
 [[waf.rules.actions]]
@@ -77,7 +82,7 @@ tags = ["path-policy", "attack-signature"]
 phase = "request"
 priority = 120
 when = """
-Request.Http.Uri.matches('(?i)(\\.\\.|%2e%2e|%252e%252e)') ||
+Request.Http.Uri.matches('(?i)(\\\\.\\\\.|%2e%2e|%252e%252e)') ||
 Request.Http.Uri.matches('(?i)(%2f|%5c|%252f|%255c)')
 """
 
@@ -154,7 +159,7 @@ name = "block-sqli-query"
 tags = ["query", "attack-signature"]
 phase = "request"
 priority = 180
-when = "Request.QueryParams.anyValueMatches('(?i)(union\\s+select|information_schema|sleep\\s*\\()')"
+when = "Request.QueryParams.anyValueMatches('(?i)(union\\\\s+select|information_schema|sleep\\\\s*\\\\()')"
 
 [[waf.rules.actions]]
 type = "reject"
@@ -896,7 +901,7 @@ body = "Blocked by WAF"
 name = "scanner-signals"
 when = """
 Request.Headers.anyValueMatches('(?i)(sqlmap|nikto)') ||
-Request.QueryParams.anyValueMatches('(?i)(union\\s+select|sleep\\s*\\()')
+Request.QueryParams.anyValueMatches('(?i)(union\\\\s+select|sleep\\\\s*\\\\()')
 """
 ```
 

@@ -5,6 +5,23 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## OxiRule string escapes
+
+OxiRule now rejects unsupported string escapes while loading configuration
+instead of silently dropping their backslashes. Review regex literals in rule,
+group, and function expressions before upgrading. In a TOML basic string,
+escape the backslash once for TOML and once for OxiRule: write `\\\\.` to pass
+the literal-dot pattern `\.` to the regex matcher. A rule containing `\\.`
+in TOML previously became the wildcard pattern `.` and now fails validation.
+The [examples](example/OxiRule.md) use the corrected form.
+
+The updated DSL dependency also bounds aggregate parser input, expression
+functions, and regex admission during configuration loading. Validate custom
+rules and rulepacks with the new binary before replacing a running instance.
+An invalid hot-reload candidate keeps the previous active configuration.
+Explicit rule `mode = "enforcing"` continues to override global WAF monitor
+mode; set individual rules to `monitor` when their actions must be suppressed.
+
 ## Internal Rust crate layout
 
 Certificate Transparency protocol primitives, admission-policy configuration,

@@ -545,6 +545,81 @@ body = "blocked"
 }
 
 #[test]
+fn escaped_traversal_regex_does_not_reject_locale_path() {
+  let engine = compile_waf_fragment(
+    "waf-escaped-traversal-regex",
+    r#"
+[waf]
+enabled = true
+mode = "monitor"
+
+[[waf.rules]]
+name = "block-traversal"
+mode = "enforcing"
+phase = "request"
+priority = 10
+when = """Request.Http.Path.matches('(^|/)\\\\.\\\\.(/|$)')"""
+
+[[waf.rules.actions]]
+type = "reject"
+status = 401
+body = "Unauthorized"
+"#,
+  );
+
+  assert!(
+    evaluate_simple_request(&engine, "/locales/en/messages.json?cache=5dwehg")
+      .terminal
+      .is_none()
+  );
+  assert!(
+    evaluate_simple_request(&engine, "/safe/en/x")
+      .terminal
+      .is_none()
+  );
+  assert_eq!(
+    evaluate_simple_request(&engine, "/safe/../x")
+      .terminal
+      .as_ref()
+      .map(|terminal| terminal.status),
+    Some(StatusCode::UNAUTHORIZED)
+  );
+}
+
+#[test]
+fn unsupported_oxirule_regex_escape_fails_configuration_validation() {
+  let temp_dir = common::TempDir::new("waf-unsupported-regex-escape");
+  let (cert_path, key_path) =
+    common::create_self_signed_cert(temp_dir.path(), "waf-unsupported-regex-escape");
+  let raw = format!(
+    "{}\n{}",
+    common::minimal_config_toml(&cert_path, &key_path),
+    r#"
+[waf]
+enabled = true
+
+[[waf.rules]]
+name = "block-traversal"
+phase = "request"
+priority = 10
+when = """Request.Http.Path.matches('(^|/)\\.\\.(/|$)')"""
+
+[[waf.rules.actions]]
+type = "reject"
+status = 401
+"#
+  );
+  let config: Config = toml::from_str(&raw).expect("TOML should parse");
+  let error = config
+    .validate()
+    .expect_err("unsupported DSL escape must fail validation");
+  assert!(
+    format!("{error:#}").contains("unsupported string escape"),
+    "unexpected validation error: {error:#}"
+  );
+}
+
+#[test]
 fn request_phase_silent_close_sets_no_response_terminal() {
   let engine = compile_waf_fragment(
     "waf-request-silent-close",

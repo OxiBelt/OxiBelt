@@ -15,6 +15,17 @@ pub(super) fn docker_cases() -> Vec<DockerCase> {
     ),
     docker_case(
       "waf-request",
+      "escaped-traversal-h3",
+      "escaped traversal regex allows locale HTTP/3 requests and rejects traversal",
+      ExpectStart::Success,
+      Needs {
+        http_upstream: true,
+        ..Needs::default()
+      },
+      None,
+    ),
+    docker_case(
+      "waf-request",
       "body-size-chunked",
       "request Body.Size rules reject chunked bodies without Content-Length",
       ExpectStart::Success,
