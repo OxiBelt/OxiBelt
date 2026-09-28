@@ -1825,10 +1825,16 @@ protocol_probe_websocket_client() {
   local payload="$4"
   local protocol="${5:-h1}"
   local probe_unsupported_connect="${6:-false}"
+  shift "$(( $# < 6 ? $# : 6 ))"
   local probe_args=()
   if [[ "${probe_unsupported_connect}" == "true" ]]; then
     probe_args=(--probe-unsupported-connect true)
   fi
+  local header_args=()
+  local header
+  for header in "$@"; do
+    header_args+=(--header "${header}")
+  done
   local output=""
   local status=0
   local client_container=""
@@ -1843,6 +1849,7 @@ protocol_probe_websocket_client() {
       websocket-client \
       --protocol "${protocol}" \
       "${probe_args[@]}" \
+      "${header_args[@]}" \
       --host proxy \
       --port 8443 \
       --server-name proxy \

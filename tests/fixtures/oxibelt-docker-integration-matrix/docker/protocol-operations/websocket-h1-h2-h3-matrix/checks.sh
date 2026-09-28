@@ -31,4 +31,13 @@ run_case_checks() {
 
   response="$(protocol_probe_websocket_client "ws-h1.example.test" "/ws/echo" 200 "h3-sibling" h3 true)"
   assert_response_jq "${response}" '.protocol == "h3" and .unsupported_connect_status == 501 and .ping_pong == true and .closed == true'
+
+  # The CONNECT body stays open while the probe waits for response headers.
+  # A framing header must be rejected before the proxy awaits body completion.
+  for downstream in h2 h3; do
+    response="$(PROTOCOL_PROBE_ATTEMPTS=1 protocol_probe_websocket_client \
+      "ws-h1.example.test" "/ws/echo" 400 "invalid-framing" "${downstream}" false \
+      'Content-Length: 0')"
+    assert_response_jq "${response}" ".protocol == \"${downstream}\" and .status == 400 and .upgraded == false"
+  done
 }

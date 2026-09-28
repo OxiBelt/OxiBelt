@@ -545,6 +545,18 @@ where
       request.extensions_mut().insert(managed_upload::VerifiedIpmActor(actor));
     }
 
+    // Extended WebSocket streams use their session idle timeout after the
+    // handshake. Reject prohibited request framing before that exemption can
+    // let the Content-Length: 0 guard wait on an unfinished stream.
+    if extended_websocket
+      && !matches!(
+        request_body_framing(request.headers()),
+        RequestBodyFraming::NoBodyHeaders
+      )
+    {
+      return route_security.text(StatusCode::BAD_REQUEST, "invalid extended WebSocket CONNECT headers");
+    }
+
     let client_body_timeout = EffectiveTimeouts::route_body_only(&state.config, resolved.route);
     let (request_parts, request_body) = request.into_parts();
     let request_body = if extended_websocket {
@@ -687,6 +699,8 @@ mod early_data_rate_limit_tests;
 mod rate_limit_header_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod websocket_handshake_tests;
 #[cfg(test)]
 mod webtransport_tests;
 
