@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "01dae0f85be69f9bdcbf5efd893b12d669ece1337ff755edc8bd8a952ba721eb",
+      "lockfileSha256": "e41d1e88b69ae2e6fdb6b2e8b1fe340a0eed5f0ebb677272d95de23293100269",
       "exemptionInventorySha256": "bd21e1575dce0d01e19bb0741a9e09da3f666de87814c5740a645fe920d5ee5a",
       "exemptedPackageVersions": 456
     },
@@ -402,7 +402,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:01dae0f85be69f9bdcbf5efd893b12d669ece1337ff755edc8bd8a952ba721eb",
+      "subject": "Cargo.lock@sha256:e41d1e88b69ae2e6fdb6b2e8b1fe340a0eed5f0ebb677272d95de23293100269",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. The development-only proptest graph adds exact rand 0.9, rand_chacha 0.9, and rand_core 0.9 lines tracked by https://github.com/OxiBelt/OxiBelt/issues/172; any further line fails the static admission test.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
@@ -414,7 +414,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:01dae0f85be69f9bdcbf5efd893b12d669ece1337ff755edc8bd8a952ba721eb",
+      "subject": "Cargo.lock@sha256:e41d1e88b69ae2e6fdb6b2e8b1fe340a0eed5f0ebb677272d95de23293100269",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "OxiBelt maintainers",
       "bootstrap": true,
