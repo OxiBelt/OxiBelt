@@ -7,6 +7,7 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 run_id="wt-wpt-$(date +%s)-$$"
 runner="${run_id}-runner"
 proxy="${run_id}-proxy"
+direct_retry_runner="${run_id}-direct-retry"
 wpt_image="${OXIBELT_WEBTRANSPORT_WPT_IMAGE:-oxibelt/webtransport-wpt:ece2d7fdc436-git-prefs156}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-}"
 firefox_image="${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1}"
@@ -26,7 +27,7 @@ cleanup() {
   if docker container inspect "${proxy}" >/dev/null 2>&1; then
     docker logs "${proxy}" >"${artifact_dir}/proxy.log" 2>&1 || true
   fi
-  docker rm -fv "${proxy}" "${runner}" >/dev/null 2>&1 || true
+  docker rm -fv "${proxy}" "${runner}" "${direct_retry_runner}" >/dev/null 2>&1 || true
   if [[ "${created_wpt_image}" == true ]]; then
     docker image rm "${wpt_image}" >/dev/null 2>&1 || true
   fi
@@ -68,6 +69,7 @@ run_wpt() {
   local browser="$1"
   local phase="$2"
   local report_name="${3:-${browser}-${phase}}"
+  local runner_name="${4:-${runner}}"
   local binary webdriver
   local status=0
   case "${browser}" in
@@ -100,7 +102,7 @@ run_wpt() {
     docker exec --user 10002:10002 \
       --env HOME=/home/wpt \
       --workdir /opt/wpt \
-      "${runner}" ./wpt run "${args[@]}" \
+      "${runner_name}" ./wpt run "${args[@]}" \
       >"${artifact_dir}/${report_name}.log" 2>&1 || status=$?
   printf '%s\n' "${status}" >"${artifact_dir}/${report_name}.exit"
   if ((status != 0)); then
@@ -244,16 +246,45 @@ for browser in chrome firefox; do
     exit 1
   fi
   comparison_output=""
+  comparison_status=0
+  comparison_args=()
+  if [[ "${browser}" == chrome ]]; then
+    comparison_args+=(--classify-chrome-direct-retry)
+  fi
   if comparison_output="$(
     python3 "${script_dir}/check-webtransport-wpt-report.py" \
+      "${comparison_args[@]}" \
       "${browser}" \
       "${artifact_dir}/${browser}-direct.json" \
       "${artifact_dir}/${browser}-proxied.json" 2>&1
   )"; then
     printf '%s\n' "${comparison_output}"
     continue
+  else
+    comparison_status=$?
   fi
   printf '%s\n' "${comparison_output}" >&2
+  if [[ "${browser}" == chrome && "${comparison_status}" == 3 ]]; then
+    echo 'Chrome direct close/abort mismatch; retrying one full direct pass.' >&2
+    # Use a fresh network namespace: the proxied runner's conntrack state may
+    # retain DNAT mappings even after an OUTPUT rule is removed.
+    docker create \
+      --name "${direct_retry_runner}" \
+      --label "oxibelt.test.run=${run_id}" \
+      --cap-add NET_ADMIN \
+      --security-opt no-new-privileges \
+      --shm-size 1g \
+      --mount "type=bind,src=${artifact_dir},dst=/artifacts" \
+      "${wpt_image}" >/dev/null
+    docker start "${direct_retry_runner}" >/dev/null
+    run_wpt chrome direct chrome-direct-retry "${direct_retry_runner}"
+    docker rm -fv "${direct_retry_runner}" >/dev/null
+    python3 "${script_dir}/check-webtransport-wpt-report.py" \
+      chrome \
+      "${artifact_dir}/chrome-direct-retry.json" \
+      "${artifact_dir}/chrome-proxied.json"
+    continue
+  fi
   if [[ "${browser}" != firefox \
     || "${comparison_output}" != "direct/proxy baseline mismatch:"* ]]; then
     exit 1

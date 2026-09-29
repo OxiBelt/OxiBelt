@@ -1922,6 +1922,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
+      - name: Validate WebTransport WPT parity classifier
+        run: python3 -m unittest tests/scripts/test-check-webtransport-wpt-report.py
+
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto

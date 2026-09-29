@@ -959,6 +959,7 @@ fn webtransport_wpt_gate_is_pinned_complete_and_required() {
   let job_text = workflow_job_text(&workflow, "webtransport-wpt");
   for expected in [
     "run: tests/scripts/run-webtransport-wpt-gate.sh",
+    "python3 -m unittest tests/scripts/test-check-webtransport-wpt-report.py",
     "name: oxibelt-firefox-webdriver-helper-image",
     "name: oxibelt-webtransport-wpt-diagnostics",
   ] {
@@ -1034,6 +1035,10 @@ fn webtransport_wpt_gate_is_pinned_complete_and_required() {
     "trusted_ca_sha256 = [\"${ca_sha256}\"]",
     "allow_origins = [\"https://web-platform.test:8443\"]",
     "check-webtransport-wpt-report.py",
+    "--classify-chrome-direct-retry",
+    "chrome-direct-retry.json",
+    "direct_retry_runner=\"${run_id}-direct-retry\"",
+    "run_wpt chrome direct chrome-direct-retry \"${direct_retry_runner}\"",
   ] {
     assert!(
       script.contains(expected),

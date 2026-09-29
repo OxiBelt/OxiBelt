@@ -25,7 +25,13 @@ OxiBelt with the same browser
 URL and WPT certificate. Each browser must pass session, bidirectional stream,
 unidirectional stream, datagram, and close controls on both paths. The gate
 rejects missing tests or subtests and any difference in direct and proxied
-test or subtest status. It retains JSON reports and run logs under
+test or subtest status. If the first Chrome comparison differs only because the
+direct worker or shared worker `Close and abort unidirectional stream` subtest
+reports the pinned `FIN` timing failure while the proxy passes, the gate runs
+one complete direct Chrome replay and requires strict parity against the saved
+proxy report. Other Chrome mismatches fail immediately; the existing Firefox
+path permits one complete proxied replay after a parity mismatch. It retains
+both initial and replay JSON reports and run logs under
 `OXIBELT_TEST_ARTIFACT_DIR`;
 on failure it also retains the proxy log. The runner needs Docker support for
 `NET_ADMIN` in its isolated test container to redirect browser WebTransport

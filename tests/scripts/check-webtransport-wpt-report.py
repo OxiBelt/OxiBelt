@@ -20,6 +20,18 @@ CONTROLS = (
 # an accidentally narrowed selection that happens to keep the same count.
 EXPECTED_CASE_COUNT = 103
 EXPECTED_CASE_IDS_SHA256 = "ba9e567c8331d61352899f0463df184820b280dab2fe24a79a255a8b371f58c7"
+CHROME_DIRECT_RETRY_CASES = frozenset(
+    (
+        f"/webtransport/streams-close.https.any.{context}.html",
+        "Close and abort unidirectional stream",
+    )
+    for context in ("worker", "sharedworker")
+)
+CHROME_DIRECT_RETRY_MESSAGE = 'assert_equals: reset_stream expected "reset" but got "FIN"'
+
+
+class RetryableDirectBaselineMismatch(ValueError):
+    """The pinned Chrome direct run hit the observed close/abort timing case."""
 
 
 def load(path):
@@ -57,49 +69,76 @@ def passed_controls(results, label):
             raise ValueError(f"{label}: missing passing control: {basename}: {control}")
 
 
-def compare(direct, proxied):
+def compare(direct, proxied, classify_chrome_direct_retry=False):
     if set(direct) != set(proxied):
         only_direct = sorted(set(direct) - set(proxied))
         only_proxy = sorted(set(proxied) - set(direct))
         raise ValueError(f"test selection differs: direct-only={only_direct}, proxy-only={only_proxy}")
     regressions = []
+    retryable = True
     for test in sorted(direct):
         before = direct[test]
         after = proxied[test]
         if before.get("status") != after.get("status"):
             regressions.append(f"{test}: harness {before.get('status')} -> {after.get('status')}")
+            retryable = False
         before_entries = before.get("subtests", [])
         after_entries = after.get("subtests", [])
         before_subtests = {entry["name"]: entry["status"] for entry in before_entries}
         after_subtests = {entry["name"]: entry["status"] for entry in after_entries}
         if len(before_subtests) != len(before_entries) or len(after_subtests) != len(after_entries):
             regressions.append(f"{test}: duplicate subtest name")
+            retryable = False
             continue
         if set(before_subtests) != set(after_subtests):
             regressions.append(f"{test}: subtest selection differs")
+            retryable = False
             continue
+        before_messages = {entry["name"]: entry.get("message") for entry in before_entries}
         for name, status in before_subtests.items():
             if status != after_subtests[name]:
                 regressions.append(f"{test}: {name}: {status} -> {after_subtests[name]}")
+                if (
+                    (test, name) not in CHROME_DIRECT_RETRY_CASES
+                    or status != "FAIL"
+                    or after_subtests[name] != "PASS"
+                    or before_messages[name] != CHROME_DIRECT_RETRY_MESSAGE
+                ):
+                    retryable = False
     if regressions:
-        raise ValueError("direct/proxy baseline mismatch:\n" + "\n".join(regressions))
+        mismatch = "direct/proxy baseline mismatch:\n" + "\n".join(regressions)
+        if classify_chrome_direct_retry and retryable:
+            raise RetryableDirectBaselineMismatch(mismatch)
+        raise ValueError(mismatch)
     print(f"WPT WebTransport parity: {len(direct)} cases; no proxy regressions from direct baseline")
 
 
 def main():
-    if len(sys.argv) != 4:
-        raise ValueError("usage: check-webtransport-wpt-report.py <browser> <direct.json> <proxied.json>")
-    browser, direct_path, proxy_path = sys.argv[1:]
+    args = sys.argv[1:]
+    classify_chrome_direct_retry = bool(args and args[0] == "--classify-chrome-direct-retry")
+    if classify_chrome_direct_retry:
+        args = args[1:]
+    if len(args) != 3:
+        raise ValueError(
+            "usage: check-webtransport-wpt-report.py "
+            "[--classify-chrome-direct-retry] <browser> <direct.json> <proxied.json>"
+        )
+    browser, direct_path, proxy_path = args
+    if classify_chrome_direct_retry and browser != "chrome":
+        raise ValueError("Chrome direct retry classification requires the chrome browser")
     direct = load(direct_path)
     proxied = load(proxy_path)
     passed_controls(direct, f"{browser} direct")
     passed_controls(proxied, f"{browser} proxied")
-    compare(direct, proxied)
+    compare(direct, proxied, classify_chrome_direct_retry)
 
 
 if __name__ == "__main__":
     try:
         main()
+    except RetryableDirectBaselineMismatch as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(3)
     except (KeyError, ValueError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
         sys.exit(1)
