@@ -819,7 +819,7 @@ fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
 }
 
 #[test]
-fn browser_webdriver_firefox_turn_diagnostics_are_bounded_and_failure_only() {
+fn browser_webdriver_diagnostics_are_bounded_and_failure_only() {
   let script = browser_webdriver_script_text();
 
   for expected in [
@@ -841,6 +841,10 @@ fn browser_webdriver_firefox_turn_diagnostics_are_bounded_and_failure_only() {
     "copy_redacted_artifact",
     "docker logs --tail 20000 \"${container}\"",
     "tail -c \"${diagnostic_log_limit_bytes}\"",
+    "if [[ \"${scenario}\" == \"hot-reload\" ]]; then",
+    "chromium_startup_log=\"${work_dir}/chromium-startup.log\"",
+    "CHROME_LOG_FILE=\"${chrome_log}\"",
+    "\"${driver_binary}\" --verbose --port=\"${driver_port}\"",
   ] {
     assert!(
       script.contains(expected),
@@ -859,13 +863,25 @@ fn browser_webdriver_firefox_turn_diagnostics_are_bounded_and_failure_only() {
 
   assert!(
     diagnostics.contains("${OXIBELT_TEST_ARTIFACT_DIR}"),
-    "Firefox TURN logs should only be copied by the failure diagnostics helper"
+    "browser logs should only be copied by the failure diagnostics helper"
   );
   assert_eq!(
     diagnostics.matches("copy_redacted_artifact").count(),
-    5,
-    "every ordinary Firefox TURN diagnostic should pass through credential redaction"
+    7,
+    "browser diagnostics should pass through bounded credential redaction"
   );
+  for expected in [
+    "ps -o pid=,ppid=,stat=,etime=,rss=,comm= -p \"${driver_pid}\"",
+    "awk '/^(MemAvailable|SwapFree):/ { print }' /proc/meminfo",
+    "show_log \"Chrome stderr\" \"${chrome_log}\"",
+    "${OXIBELT_TEST_ARTIFACT_DIR}/chromium-startup.log",
+    "${OXIBELT_TEST_ARTIFACT_DIR}/chrome-stderr.log",
+  ] {
+    assert!(
+      diagnostics.contains(expected),
+      "Chromium startup diagnostics should preserve {expected}"
+    );
+  }
   assert_eq!(
     diagnostics
       .matches("${OXIBELT_TEST_ARTIFACT_DIR}/firefox-turn.moz_log")

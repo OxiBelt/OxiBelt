@@ -77,6 +77,8 @@ proxy_internal_ipv6=""
 driver_container=""
 profile_container=""
 driver_pid=""
+chrome_log=""
+chromium_startup_log=""
 
 if [[ -n "${CHROMEWEBDRIVER:-}" ]]; then
   export PATH="${CHROMEWEBDRIVER}:${PATH}"
@@ -208,6 +210,28 @@ show_diagnostics() {
   show_log "Mock WebSocket upstream log" "${websocket_upstream_log}"
   show_log "OxiBelt log" "${proxy_log}"
   show_log "Driver log" "${driver_log:-}"
+  if [[ -n "${chromium_startup_log}" ]]; then
+    {
+      printf '\nChromeDriver process at failure:\n'
+      if [[ -n "${driver_pid}" ]]; then
+        ps -o pid=,ppid=,stat=,etime=,rss=,comm= -p "${driver_pid}" || true
+        if ! kill -0 "${driver_pid}" 2>/dev/null; then
+          driver_exit_status=0
+          wait "${driver_pid}" || driver_exit_status=$?
+          printf 'ChromeDriver exit status: %s\n' "${driver_exit_status}"
+          driver_pid=""
+        fi
+      fi
+      printf '\nAvailable memory and cgroup events:\n'
+      awk '/^(MemAvailable|SwapFree):/ { print }' /proc/meminfo || true
+      if [[ -r /sys/fs/cgroup/memory.events ]]; then
+        cat /sys/fs/cgroup/memory.events || true
+      fi
+      df -h /tmp /dev/shm || true
+    } >>"${chromium_startup_log}" 2>&1
+    show_log "Chromium startup" "${chromium_startup_log}"
+    show_log "Chrome stderr" "${chrome_log}"
+  fi
 
   if [[ -n "${OXIBELT_TEST_ARTIFACT_DIR:-}" ]]; then
     mkdir -p "${OXIBELT_TEST_ARTIFACT_DIR}"
@@ -223,6 +247,14 @@ show_diagnostics() {
     copy_redacted_artifact \
       "${driver_log:-}" \
       "${OXIBELT_TEST_ARTIFACT_DIR}/webdriver.log"
+    if [[ -n "${chromium_startup_log}" ]]; then
+      copy_redacted_artifact \
+        "${chromium_startup_log}" \
+        "${OXIBELT_TEST_ARTIFACT_DIR}/chromium-startup.log"
+      copy_redacted_artifact \
+        "${chrome_log}" \
+        "${OXIBELT_TEST_ARTIFACT_DIR}/chrome-stderr.log"
+    fi
     copy_redacted_artifact \
       "${config_dir}/oxibelt.toml" \
       "${OXIBELT_TEST_ARTIFACT_DIR}/oxibelt.toml"
@@ -568,6 +600,10 @@ case "${browser}" in
     driver_binary="$(find_first_command "${DRIVER_COMMAND:-chromedriver}" chromedriver)"
     driver_port="${DRIVER_PORT:-9515}"
     driver_log="${work_dir}/chromedriver.log"
+    if [[ "${scenario}" == "hot-reload" ]]; then
+      chrome_log="${work_dir}/chrome.log"
+      chromium_startup_log="${work_dir}/chromium-startup.log"
+    fi
     # The H3 fixture binds or publishes UDP only on IPv4 loopback.
     capabilities="$(
       jq -n \
@@ -638,8 +674,15 @@ fi
 mkdir -p "${config_dir}" "${cert_dir}" "${firefox_turn_log_dir}"
 
 if [[ "${isolated_firefox_turn}" != "true" ]]; then
-  "${browser_binary}" --version
-  "${driver_binary}" --version
+  if [[ -n "${chromium_startup_log}" ]]; then
+    {
+      "${browser_binary}" --version
+      "${driver_binary}" --version
+    } | tee "${chromium_startup_log}"
+  else
+    "${browser_binary}" --version
+    "${driver_binary}" --version
+  fi
 fi
 
 generate_test_ca
@@ -1212,7 +1255,12 @@ fi
 
 case "${browser}" in
   chromium)
-    "${driver_binary}" --port="${driver_port}" >"${driver_log}" 2>&1 &
+    if [[ -n "${chromium_startup_log}" ]]; then
+      CHROME_LOG_FILE="${chrome_log}" \
+        "${driver_binary}" --verbose --port="${driver_port}" >"${driver_log}" 2>&1 &
+    else
+      "${driver_binary}" --port="${driver_port}" >"${driver_log}" 2>&1 &
+    fi
     ;;
   firefox)
     if [[ "${isolated_firefox_turn}" == "true" ]]; then
