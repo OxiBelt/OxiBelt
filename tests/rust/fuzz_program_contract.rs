@@ -927,6 +927,83 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
 
 #[cfg(unix)]
 #[test]
+fn asan_smoke_uses_faster_build_settings_without_losing_sanitizer_coverage() {
+  use std::os::unix::fs::PermissionsExt as _;
+
+  let target_dir = repo_root().join("target");
+  fs::create_dir_all(&target_dir).expect("Cargo target directory should be creatable");
+  let temp_dir = tempfile::Builder::new()
+    .prefix("oxibelt-fuzz-asan-smoke-contract-")
+    .tempdir_in(target_dir)
+    .expect("ASan smoke contract temp directory should be creatable");
+  let runner_temp = temp_dir.path().join("runner");
+  let bin_dir = temp_dir.path().join("bin");
+  let called_marker = temp_dir.path().join("asan-smoke-called");
+  fs::create_dir_all(&runner_temp).expect("runner temp directory should be creatable");
+  fs::create_dir_all(&bin_dir).expect("fake Cargo directory should be creatable");
+
+  let cargo = bin_dir.join("cargo");
+  fs::write(
+    &cargo,
+    r#"#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "$#" -ge 11 ]]
+[[ "$1" == "+nightly-2026-09-20" ]]
+[[ "$2" == "fuzz" ]]
+[[ "$3" == "run" ]]
+[[ "$4" == "--sanitizer" ]]
+[[ "$5" == "address" ]]
+[[ "$6" == "--codegen-units" ]]
+[[ "$7" == "16" ]]
+[[ "$8" == "native_config" ]]
+[[ -d "${9}" && ! -L "${9}" ]]
+[[ "${10}" == "--" ]]
+[[ "${CARGO_PROFILE_RELEASE_LTO:-}" == "off" ]]
+[[ "$ASAN_OPTIONS" == *"detect_leaks=0:halt_on_error=1:abort_on_error=1"* ]]
+[[ "$LSAN_OPTIONS" == "detect_leaks=0" ]]
+found_runs=0
+for argument in "$@"; do
+  if [[ "$argument" == "-runs=256" ]]; then
+    found_runs=1
+  fi
+done
+(( found_runs == 1 ))
+printf 'ASan smoke invoked\n' >"$FAKE_FUZZ_CALLED"
+"#,
+  )
+  .expect("fake Cargo should be writable");
+  let mut permissions = fs::metadata(&cargo)
+    .expect("fake Cargo should have metadata")
+    .permissions();
+  permissions.set_mode(0o755);
+  fs::set_permissions(&cargo, permissions).expect("fake Cargo should be executable");
+
+  let original_path = std::env::var_os("PATH").unwrap_or_default();
+  let path = format!("{}:{}", bin_dir.display(), original_path.to_string_lossy());
+  let output = std::process::Command::new("bash")
+    .arg(repo_root().join("tests/scripts/run-fuzz-target.sh"))
+    .args(["smoke", "native_config"])
+    .current_dir(repo_root())
+    .env("OXIBELT_FUZZ_PROFILE", "asan")
+    .env("RUNNER_TEMP", &runner_temp)
+    .env("FAKE_FUZZ_CALLED", &called_marker)
+    .env("PATH", path)
+    .output()
+    .expect("ASan smoke contract runner should execute");
+
+  assert!(
+    output.status.success(),
+    "ASan smoke should keep sanitizer coverage with faster build settings: {}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+  assert!(
+    called_marker.is_file(),
+    "ASan smoke must invoke cargo with the pinned nightly profile"
+  );
+}
+
+#[cfg(unix)]
+#[test]
 fn stable_smoke_uses_stable_without_sanitizer_environment() {
   use std::os::unix::fs::PermissionsExt as _;
 

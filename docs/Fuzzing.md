@@ -184,6 +184,11 @@ leak detection for every target. The stable profile is accepted only for
 nightly sanitizer profile. A sanitizer exception requires an owner, a written
 rationale, an expiry, and a tracking issue in `fuzz/targets.toml`.
 
+AddressSanitizer smoke builds disable release LTO and use 16 codegen units to
+reduce cold CI compilation time. This changes only the 256-iteration smoke
+build; sustained campaigns retain the release profile's LTO and codegen
+settings.
+
 The runner enforces those AddressSanitizer and LeakSanitizer settings itself,
 so local invocations retain the selected tier's leak policy even when the
 caller has not preconfigured sanitizer environment variables.

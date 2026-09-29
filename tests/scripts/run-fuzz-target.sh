@@ -266,8 +266,11 @@ cd -- "$repo_root"
 
 case "$mode" in
   smoke)
+    smoke_build_args=()
     if [[ "$fuzz_profile" == "asan" ]]; then
       configure_sanitizer_environment 0
+      export CARGO_PROFILE_RELEASE_LTO=off
+      smoke_build_args=(--codegen-units 16)
     else
       unset ASAN_OPTIONS LSAN_OPTIONS
     fi
@@ -284,7 +287,7 @@ case "$mode" in
     }
     trap cleanup_temporary_corpus EXIT
     copy_reviewed_seeds "$temporary_corpus"
-    cargo "+$fuzz_toolchain" fuzz run --sanitizer "$fuzz_sanitizer" "$target" "$temporary_corpus" -- \
+    cargo "+$fuzz_toolchain" fuzz run --sanitizer "$fuzz_sanitizer" "${smoke_build_args[@]}" "$target" "$temporary_corpus" -- \
       -runs=256 \
       -detect_leaks=0 \
       "${common_fuzzer_arguments[@]}" \
