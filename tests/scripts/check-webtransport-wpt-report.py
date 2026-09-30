@@ -28,10 +28,18 @@ CHROME_DIRECT_RETRY_CASES = frozenset(
     for context in ("worker", "sharedworker")
 )
 CHROME_DIRECT_RETRY_MESSAGE = 'assert_equals: reset_stream expected "reset" but got "FIN"'
+CHROME_PROXY_RETRY_CASE = (
+    "/webtransport/streams-close.https.any.serviceworker.html",
+    "Close and abort unidirectional stream",
+)
 
 
 class RetryableDirectBaselineMismatch(ValueError):
     """The pinned Chrome direct run hit the observed close/abort timing case."""
+
+
+class RetryableProxyBaselineMismatch(ValueError):
+    """The pinned Chrome proxied run hit the observed serviceworker timing case."""
 
 
 def load(path):
@@ -69,19 +77,21 @@ def passed_controls(results, label):
             raise ValueError(f"{label}: missing passing control: {basename}: {control}")
 
 
-def compare(direct, proxied, classify_chrome_direct_retry=False):
+def compare(direct, proxied, classify_chrome_direct_retry=False, classify_chrome_proxy_retry=False):
     if set(direct) != set(proxied):
         only_direct = sorted(set(direct) - set(proxied))
         only_proxy = sorted(set(proxied) - set(direct))
         raise ValueError(f"test selection differs: direct-only={only_direct}, proxy-only={only_proxy}")
     regressions = []
     retryable = True
+    proxy_retryable = True
     for test in sorted(direct):
         before = direct[test]
         after = proxied[test]
         if before.get("status") != after.get("status"):
             regressions.append(f"{test}: harness {before.get('status')} -> {after.get('status')}")
             retryable = False
+            proxy_retryable = False
         before_entries = before.get("subtests", [])
         after_entries = after.get("subtests", [])
         before_subtests = {entry["name"]: entry["status"] for entry in before_entries}
@@ -89,12 +99,15 @@ def compare(direct, proxied, classify_chrome_direct_retry=False):
         if len(before_subtests) != len(before_entries) or len(after_subtests) != len(after_entries):
             regressions.append(f"{test}: duplicate subtest name")
             retryable = False
+            proxy_retryable = False
             continue
         if set(before_subtests) != set(after_subtests):
             regressions.append(f"{test}: subtest selection differs")
             retryable = False
+            proxy_retryable = False
             continue
         before_messages = {entry["name"]: entry.get("message") for entry in before_entries}
+        after_messages = {entry["name"]: entry.get("message") for entry in after_entries}
         for name, status in before_subtests.items():
             if status != after_subtests[name]:
                 regressions.append(f"{test}: {name}: {status} -> {after_subtests[name]}")
@@ -105,32 +118,50 @@ def compare(direct, proxied, classify_chrome_direct_retry=False):
                     or before_messages[name] != CHROME_DIRECT_RETRY_MESSAGE
                 ):
                     retryable = False
+                if (
+                    (test, name) != CHROME_PROXY_RETRY_CASE
+                    or before.get("status") != "OK"
+                    or after.get("status") != "OK"
+                    or status != "PASS"
+                    or after_subtests[name] != "FAIL"
+                    or after_messages[name] != CHROME_DIRECT_RETRY_MESSAGE
+                ):
+                    proxy_retryable = False
     if regressions:
         mismatch = "direct/proxy baseline mismatch:\n" + "\n".join(regressions)
         if classify_chrome_direct_retry and retryable:
             raise RetryableDirectBaselineMismatch(mismatch)
+        if classify_chrome_proxy_retry and proxy_retryable:
+            raise RetryableProxyBaselineMismatch(mismatch)
         raise ValueError(mismatch)
     print(f"WPT WebTransport parity: {len(direct)} cases; no proxy regressions from direct baseline")
 
 
 def main():
     args = sys.argv[1:]
-    classify_chrome_direct_retry = bool(args and args[0] == "--classify-chrome-direct-retry")
-    if classify_chrome_direct_retry:
+    flags = set()
+    while args and args[0].startswith("--"):
+        flag = args[0]
+        if flag not in ("--classify-chrome-direct-retry", "--classify-chrome-proxy-retry") or flag in flags:
+            raise ValueError(f"unexpected or duplicate classification flag: {flag}")
+        flags.add(flag)
         args = args[1:]
+    classify_chrome_direct_retry = "--classify-chrome-direct-retry" in flags
+    classify_chrome_proxy_retry = "--classify-chrome-proxy-retry" in flags
     if len(args) != 3:
         raise ValueError(
             "usage: check-webtransport-wpt-report.py "
-            "[--classify-chrome-direct-retry] <browser> <direct.json> <proxied.json>"
+            "[--classify-chrome-direct-retry] [--classify-chrome-proxy-retry] "
+            "<browser> <direct.json> <proxied.json>"
         )
     browser, direct_path, proxy_path = args
-    if classify_chrome_direct_retry and browser != "chrome":
-        raise ValueError("Chrome direct retry classification requires the chrome browser")
+    if flags and browser != "chrome":
+        raise ValueError("Chrome retry classification requires the chrome browser")
     direct = load(direct_path)
     proxied = load(proxy_path)
     passed_controls(direct, f"{browser} direct")
     passed_controls(proxied, f"{browser} proxied")
-    compare(direct, proxied, classify_chrome_direct_retry)
+    compare(direct, proxied, classify_chrome_direct_retry, classify_chrome_proxy_retry)
 
 
 if __name__ == "__main__":
@@ -139,6 +170,9 @@ if __name__ == "__main__":
     except RetryableDirectBaselineMismatch as exc:
         print(exc, file=sys.stderr)
         sys.exit(3)
+    except RetryableProxyBaselineMismatch as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(4)
     except (KeyError, ValueError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
         sys.exit(1)

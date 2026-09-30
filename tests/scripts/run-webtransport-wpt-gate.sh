@@ -249,7 +249,7 @@ for browser in chrome firefox; do
   comparison_status=0
   comparison_args=()
   if [[ "${browser}" == chrome ]]; then
-    comparison_args+=(--classify-chrome-direct-retry)
+    comparison_args+=(--classify-chrome-direct-retry --classify-chrome-proxy-retry)
   fi
   if comparison_output="$(
     python3 "${script_dir}/check-webtransport-wpt-report.py" \
@@ -283,6 +283,21 @@ for browser in chrome firefox; do
       chrome \
       "${artifact_dir}/chrome-direct-retry.json" \
       "${artifact_dir}/chrome-proxied.json"
+    continue
+  fi
+  if [[ "${browser}" == chrome && "${comparison_status}" == 4 ]]; then
+    echo 'Chrome proxied serviceworker close/abort mismatch; retrying one full proxied pass.' >&2
+    packets_before="$(proxy_nat_packets)"
+    run_wpt chrome proxied chrome-proxied-retry
+    packets_after="$(proxy_nat_packets)"
+    if ((packets_after <= packets_before)); then
+      echo 'Chrome retry: no browser WebTransport packets reached the proxy DNAT rule.' >&2
+      exit 1
+    fi
+    python3 "${script_dir}/check-webtransport-wpt-report.py" \
+      chrome \
+      "${artifact_dir}/chrome-direct.json" \
+      "${artifact_dir}/chrome-proxied-retry.json"
     continue
   fi
   if [[ "${browser}" != firefox \

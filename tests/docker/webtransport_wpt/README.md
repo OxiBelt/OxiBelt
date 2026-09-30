@@ -29,8 +29,14 @@ test or subtest status. If the first Chrome comparison differs only because the
 direct worker or shared worker `Close and abort unidirectional stream` subtest
 reports the pinned `FIN` timing failure while the proxy passes, the gate runs
 one complete direct Chrome replay and requires strict parity against the saved
-proxy report. Other Chrome mismatches fail immediately; the existing Firefox
-path permits one complete proxied replay after a parity mismatch. It retains
+proxy report. If the first Chrome comparison differs only because the
+serviceworker variant of that subtest passes directly and fails through the
+proxy with the same exact `FIN` assertion, with both harness results `OK`, the
+gate runs one complete proxied Chrome replay and requires strict parity against
+the original direct report. The replay must also prove browser packet traversal
+through the proxy. Other Chrome mismatches fail immediately, and a replay cannot
+trigger another replay. The existing Firefox path permits one complete proxied
+replay after a parity mismatch. It retains
 both initial and replay JSON reports and run logs under
 `OXIBELT_TEST_ARTIFACT_DIR`;
 on failure it also retains the proxy log. The runner needs Docker support for
