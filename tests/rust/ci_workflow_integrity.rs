@@ -1616,9 +1616,10 @@ fn alpine_runtime_rootfs_is_assembled_without_target_execution() {
     "/etc/apk/repositories",
     "/etc/apk/keys",
     "/lib/apk/db/installed",
-    "amd64) apk_arch=x86_64",
-    "arm64) apk_arch=aarch64",
-    "riscv64) apk_arch=riscv64",
+    "amd64) apk_arch=x86_64; openssl_package_version=\"3.5.9-r0\" ;;",
+    "arm64) apk_arch=aarch64; openssl_package_version=\"3.5.9-r0\" ;;",
+    "riscv64) apk_arch=riscv64; openssl_package_version=\"3.5.9-r0\" ;;",
+    "*) fail \"unsupported target architecture ${target_arch}\" ;;",
     "--root",
     "--arch",
     "--no-scripts",
@@ -1628,7 +1629,6 @@ fn alpine_runtime_rootfs_is_assembled_without_target_execution() {
     "libgcc",
     "libcrypto3",
     "libssl3",
-    "openssl_package_version=\"3.5.8-r0\"",
     "\"libcrypto3=${openssl_package_version}\"",
     "\"libssl3=${openssl_package_version}\"",
     "\"${package}=${openssl_package_version}\"",
@@ -1639,6 +1639,18 @@ fn alpine_runtime_rootfs_is_assembled_without_target_execution() {
       "rootfs preparation should validate and preserve the signed Alpine contract: {expected}"
     );
   }
+
+  assert_eq!(
+    rootfs_script.matches("openssl_package_version=").count(),
+    3,
+    "each supported architecture should select one exact OpenSSL version without an override"
+  );
+  assert!(
+    rootfs_script.contains(
+      "apk --root \"${rootfs}\" --arch \"${apk_arch}\" info --installed \\\n    \"${package}=${openssl_package_version}\" >/dev/null || \\\n    fail \"required target package version is missing: ${package}=${openssl_package_version}\""
+    ),
+    "rootfs preparation should reject either OpenSSL package unless its exact selected version is installed"
+  );
 
   let package_validation = rootfs_script
     .find("CA certificate bundle is missing")

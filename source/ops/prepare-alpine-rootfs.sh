@@ -4,7 +4,6 @@ set -eu
 rootfs="${1:-}"
 target_arch="${2:-}"
 config_source="${3:-}"
-openssl_package_version="3.5.8-r0"
 
 fail() {
   echo "prepare-alpine-rootfs: $*" >&2
@@ -19,10 +18,12 @@ fi
 [ "${rootfs}" = "/opt/oxibelt-rootfs" ] || fail "refusing unexpected rootfs ${rootfs}"
 [ -f "${config_source}" ] || fail "configuration source is missing"
 
+# Keep exact pins per architecture because signed package publication can lag
+# between architectures.
 case "${target_arch}" in
-  amd64) apk_arch=x86_64 ;;
-  arm64) apk_arch=aarch64 ;;
-  riscv64) apk_arch=riscv64 ;;
+  amd64) apk_arch=x86_64; openssl_package_version="3.5.9-r0" ;;
+  arm64) apk_arch=aarch64; openssl_package_version="3.5.9-r0" ;;
+  riscv64) apk_arch=riscv64; openssl_package_version="3.5.9-r0" ;;
   *) fail "unsupported target architecture ${target_arch}" ;;
 esac
 
