@@ -1819,6 +1819,12 @@ criteria = "safe-to-deploy"
 delta = "0.8.2 -> 0.8.3"
 notes = "Reviewed the checksum-verified Syn 3 adaptation. Removing a generic default now uses Syn's combined default field, and existing generated lifetime/ownership transformations remain unchanged. The added visitor feature is parser-only; no new build script or external capability."
 
+[[audits.yoke-derive]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.8.3 -> 0.8.4"
+notes = "Reviewed the complete checksum-matched 0.8.3-to-0.8.4 source delta. The only production change replaces an ASCII underscore byte vector and UTF-8 conversion with str::repeat; generated lifetime and ownership transformations are unchanged. Dependencies and features are unchanged, the declared Rust 1.82 minimum is below OxiBelt's toolchain, and no build script or external capability is added."
+
 [[audits.zerocopy]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
