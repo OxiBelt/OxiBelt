@@ -99,7 +99,7 @@ version = "0.3"
 version = "1"
 
 [dependencies.kio]
-version = "0.5.4"
+version = "0.6.1"
 
 [dependencies.quinn]
 version = "0.11"
