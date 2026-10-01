@@ -143,7 +143,7 @@ version = "2"
 version = "0.6"
 
 [dependencies.web-transport-trait]
-version = "0.4"
+version = "0.5"
 
 [dev-dependencies.anyhow]
 version = "1"
