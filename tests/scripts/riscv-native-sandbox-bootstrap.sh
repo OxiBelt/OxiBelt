@@ -76,6 +76,18 @@ with open(sys.argv[2], 'w') as out:
     json.dump({'locked': installed, 'inventory': subprocess.check_output(['dpkg-query', '-W', '-f=${Package}=${Version}\n'], text=True).splitlines()}, out, sort_keys=True)
 PY
 useradd --uid 1001 --create-home --shell /bin/bash runner
+# RootlessKit prepares its private TAP via ip tuntap before slirp4netns opens
+# this node. Create it only in this sandbox's private /dev, with the matching
+# outer device-cgroup rule; no provider device is mounted into the sandbox.
+[[ ! -L /dev/net ]]
+mkdir -p /dev/net
+chmod 755 /dev/net
+if [[ ! -e /dev/net/tun && ! -L /dev/net/tun ]]; then
+  mknod -m 600 /dev/net/tun c 10 200
+fi
+[[ ! -L /dev/net/tun && -c /dev/net/tun && $(stat -c '%t:%T' /dev/net/tun) == a:c8 ]]
+chown runner:runner /dev/net/tun
+chmod 600 /dev/net/tun
 printf 'runner:100000:65536\n' >/etc/subuid
 printf 'runner:100000:65536\n' >/etc/subgid
 chown -R runner:runner "${home}"

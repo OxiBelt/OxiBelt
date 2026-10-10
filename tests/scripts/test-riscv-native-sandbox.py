@@ -18,6 +18,17 @@ MANIFEST_CODE = re.search(r'python3 - "\$\{lock\}" "\$\{tools\}/bin"[^\n]*<<\'PY
 
 
 class NativeToolReceiptTests(unittest.TestCase):
+    def test_network_device_stays_inside_the_guarded_sandbox(self):
+        bootstrap = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()
+        guard = bootstrap.index('[[ $$ == 1 && $(id -u) == 0 && $(uname -m) == riscv64 ]]')
+        node = bootstrap.index('mknod -m 600 /dev/net/tun c 10 200')
+        systemd = bootstrap.index('exec /lib/systemd/systemd')
+        self.assertLess(guard, node)
+        self.assertLess(node, systemd)
+        self.assertIn('chown runner:runner /dev/net/tun', bootstrap)
+        self.assertIn('chmod 600 /dev/net/tun', bootstrap)
+        self.assertIn("$(stat -c '%t:%T' /dev/net/tun) == a:c8", bootstrap)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

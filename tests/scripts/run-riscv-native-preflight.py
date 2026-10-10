@@ -121,6 +121,7 @@ def sandbox_arguments(parent: str, image: str, name: str, labels: dict[str, str]
     argv = ["create", "--name", name, "--platform", "linux/riscv64",
             "--cgroup-parent", parent, "--cgroupns=private", "--network=bridge",
             "--cpus=2", "--memory=4g", "--memory-swap=4g", "--pids-limit=1024",
+            "--device-cgroup-rule=c 10:200 rwm",
             "--cap-add=SYS_ADMIN", "--cap-drop=AUDIT_WRITE",
             "--security-opt=seccomp=unconfined", "--security-opt=apparmor=unconfined",
             "--security-opt=writable-cgroups=true", "--stop-signal=SIGRTMIN+3",
@@ -191,6 +192,7 @@ class Preflight:
             or host.get("PidMode") not in ("", "private") or host.get("Binds") or host.get("Mounts")
             or host.get("NanoCpus") != 2000000000 or host.get("Memory") != 4294967296
             or host.get("MemorySwap") != 4294967296 or host.get("PidsLimit") != 1024
+            or host.get("DeviceCgroupRules") != ["c 10:200 rwm"]
             or self.base_image_id is not None and state.get("Image") != self.base_image_id):
             raise Failure("sandbox-runtime-boundary-mismatch")
         return state

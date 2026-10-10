@@ -37,7 +37,8 @@ class LifecycleTests(unittest.TestCase):
                 "HostConfig": {"Privileged": False, "CgroupParent": p.parent,
                                "CgroupnsMode": "private", "NetworkMode": "bridge", "PidMode": "",
                                "NanoCpus": 2000000000, "Memory": 4294967296,
-                               "MemorySwap": 4294967296, "PidsLimit": 1024},
+                               "MemorySwap": 4294967296, "PidsLimit": 1024,
+                               "DeviceCgroupRules": ["c 10:200 rwm"]},
                 "State": {"Running": True, "Pid": 321}}
 
     def test_explicit_provider_socket_and_no_credentials(self):
@@ -112,6 +113,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("--cgroupns=private", args)
         self.assertIn("--security-opt=writable-cgroups=true", args)
         self.assertIn("--cap-add=SYS_ADMIN", args)
+        self.assertIn("--device-cgroup-rule=c 10:200 rwm", args)
         for flag in ("--cpus=2", "--memory=4g", "--memory-swap=4g", "--pids-limit=1024"):
             self.assertIn(flag, args)
         self.assertNotIn("--privileged", args)
@@ -131,7 +133,8 @@ class LifecycleTests(unittest.TestCase):
     def test_privileged_or_host_bound_envelopes_are_rejected(self):
         self.preflight.container = CID
         for key, value in (("Privileged", True), ("PidMode", "host"), ("Binds", ["/:/host"]),
-                           ("CgroupnsMode", "host"), ("CgroupParent", "/docker")):
+                           ("CgroupnsMode", "host"), ("CgroupParent", "/docker"),
+                           ("DeviceCgroupRules", ["a *:* rwm"])):
             state = self.state()
             state["HostConfig"][key] = value
             with self.subTest(key=key), mock.patch.object(self.preflight, "command", return_value=json.dumps([state]).encode()):
