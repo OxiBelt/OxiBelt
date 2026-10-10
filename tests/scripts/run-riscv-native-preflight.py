@@ -26,6 +26,7 @@ SOCKET = "unix:///var/run/docker.sock"
 MAX_BYTES = 128 * 1024
 SOURCE_LABEL = "org.oxibelt.preflight.source"
 RUN_LABEL = "org.oxibelt.preflight.run"
+VERSION_TOKEN = r"v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][A-Za-z0-9][A-Za-z0-9.+~:-]{0,63})?"
 FILES = (
     "riscv-native-sandbox-bootstrap.sh", "riscv-native-sandbox-build-tools.sh",
     "riscv-native-tools.lock.json", "check-riscv-native-runner.py",
@@ -41,6 +42,21 @@ def mapping(value, diagnostic: str) -> dict:
     if not isinstance(value, dict):
         raise Failure(diagnostic)
     return value
+
+
+def runtime_version(value, name: str) -> str | None:
+    """Extract only a bounded version token, never copy arbitrary diagnostics."""
+    if not isinstance(value, str) or len(value) > 512:
+        return None
+    prefix = {"containerd": r"(?:containerd(?: github\.com/containerd/containerd(?:/v2)?)? )?",
+              "runc": r"(?:runc version )?"}.get(name, "")
+    normalized = " ".join(value.split())
+    matched = re.match(r"^" + prefix + "(" + VERSION_TOKEN + r")(?=\s|$)", normalized)
+    return matched.group(1).removeprefix("v") if matched else None
+
+
+def runtime_commit(value) -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{7,64}", value) else None
 
 
 def load_probe():
@@ -299,6 +315,81 @@ class Preflight:
             time.sleep(5)
         raise Failure("sandbox-bootstrap-timeout")
 
+    def record_runtime_versions(self, version) -> None:
+        """Version observations supplement the mandatory native daemon boundary."""
+        provider = self.receipt["provider_daemon"]
+        components = {}
+        observations = {"components_field": "invalid", "entries_inspected": 0,
+                        "unknown_entries": 0, "malformed_entries": 0, "unrecognized_versions": []}
+        provider["runtime_components"] = components
+        provider["runtime_version_observations"] = observations
+        entries = version.get("Components") if isinstance(version, dict) else None
+        if isinstance(entries, list):
+            observations["components_field"] = "list"
+            observations["entries_inspected"] = min(len(entries), 32)
+            observations["entries_truncated"] = len(entries) > 32
+            for component in entries[:32]:
+                if not isinstance(component, dict):
+                    observations["malformed_entries"] += 1
+                    continue
+                name = component.get("Name")
+                if not isinstance(name, str) or name not in ("Engine", "containerd", "runc", "docker-init"):
+                    observations["unknown_entries"] += 1
+                    continue
+                parsed = runtime_version(component.get("Version"), name)
+                if parsed is None:
+                    if name not in observations["unrecognized_versions"]:
+                        observations["unrecognized_versions"].append(name)
+                    continue
+                item = {"version": parsed, "source": "daemon-components"}
+                details = component.get("Details")
+                commit = runtime_commit(details.get("GitCommit")) if isinstance(details, dict) else None
+                if commit:
+                    item["commit"] = commit
+                components[name] = item
+        elif isinstance(version, dict) and "Components" not in version:
+            observations["components_field"] = "missing"
+        fallbacks = {}
+        provider["runtime_version_fallbacks"] = fallbacks
+        for name in ("containerd", "runc"):
+            if name in components:
+                continue
+            fallback = {"status": "unavailable", "source": "runner-binary"}
+            fallbacks[name] = fallback
+            try:
+                code, output = execute([name, "--version"], self.env, timeout=15)
+            except (Failure, OSError):
+                continue
+            if code:
+                fallback["status"] = "command-failed"
+                continue
+            if len(output) > 4096:
+                fallback["status"] = "unrecognized"
+                continue
+            try:
+                lines = output.decode("ascii").splitlines()
+            except UnicodeDecodeError:
+                fallback["status"] = "unrecognized"
+                continue
+            parsed = runtime_version(lines[0], name) if lines else None
+            if parsed is None:
+                fallback["status"] = "unrecognized"
+                continue
+            item = {"version": parsed, "source": "runner-binary"}
+            if name == "containerd":
+                commit = runtime_commit(lines[0].split()[-1])
+            else:
+                commit = None
+                for line in lines[1:8]:
+                    matched = re.fullmatch(r"commit:?[ \t]+(?:v[0-9][A-Za-z0-9.+-]{0,63}-g)?([0-9a-f]{7,64})", line)
+                    if matched:
+                        commit = runtime_commit(matched.group(1))
+                        break
+            if commit:
+                item["commit"] = commit
+            components[name] = item
+            fallback["status"] = "observed"
+
     def provision(self):
         outer = self.probe.Probe().run(dict(os.environ), phase="runner")
         self.probe.write_evidence(self.output / "runner.json", outer)
@@ -316,19 +407,11 @@ class Preflight:
             raise Failure("unsupported-provider-daemon")
         self.receipt["provider_daemon"] = {key: info[key] for key in (
             "Architecture", "CgroupVersion", "CgroupDriver", "ServerVersion")}
-        version = mapping(json.loads(self.command(["version", "--format", "{{json .Server}}"] )), "invalid-provider-runtime-evidence")
-        components = {}
-        version_components = version.get("Components")
-        if not isinstance(version_components, list):
-            raise Failure("invalid-provider-runtime-components")
-        for component in version_components:
-            component = mapping(component, "invalid-provider-runtime-component")
-            name, value = component.get("Name"), component.get("Version")
-            if isinstance(name, str) and name in {"Engine", "containerd", "runc", "docker-init"} and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9+._/-]{1,128}", value):
-                components[name] = value
-        if not {"containerd", "runc"} <= components.keys():
-            raise Failure("provider-runtime-versions-unavailable")
-        self.receipt["provider_daemon"]["runtime_components"] = components
+        try:
+            version = json.loads(self.command(["version", "--format", "{{json .Server}}"] ))
+        except (Failure, OSError, ValueError):
+            version = None
+        self.record_runtime_versions(version)
         lock = mapping(json.loads((HERE / "riscv-native-tools.lock.json").read_text()), "invalid-sandbox-tool-lock")
         image = self.prepare_image(lock)
         self.check_ancestors()

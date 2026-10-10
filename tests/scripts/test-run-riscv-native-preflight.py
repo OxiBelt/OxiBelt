@@ -48,6 +48,64 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", env)
         self.assertNotIn("GITHUB_TOKEN", env)
 
+    def test_daemon_distro_versions_are_normalized_and_extra_fields_are_omitted(self):
+        self.preflight.receipt["provider_daemon"] = {}
+        versions = {"Components": [
+            {"Name": "containerd", "Version": " v1.7.27 (ubuntu build) ", "Details": {"GitCommit": "a" * 40, "secret": "SECRET"}},
+            {"Name": "runc", "Version": " \t1.3.3-0ubuntu2~24.04.3 \n", "Details": {"GitCommit": "b" * 40}},
+            {"Name": "private SECRET", "Version": "SECRET"}, None]}
+        with mock.patch.object(MODULE, "execute") as call:
+            self.preflight.record_runtime_versions(versions)
+        call.assert_not_called()
+        provider = self.preflight.receipt["provider_daemon"]
+        self.assertEqual(provider["runtime_components"]["runc"]["version"], "1.3.3-0ubuntu2~24.04.3")
+        self.assertEqual(provider["runtime_components"]["containerd"]["version"], "1.7.27")
+        self.assertEqual(provider["runtime_version_observations"]["malformed_entries"], 1)
+        self.assertEqual(provider["runtime_version_observations"]["unknown_entries"], 1)
+        self.assertNotIn("SECRET", json.dumps(provider))
+
+    def test_missing_and_unrecognized_daemon_versions_use_sanitized_read_only_fallbacks(self):
+        self.preflight.receipt["provider_daemon"] = {}
+        versions = {"Components": [{"Name": "containerd", "Version": "private credential=SECRET"}]}
+        outputs = [(0, b"containerd github.com/containerd/containerd v1.7.27 " + b"c" * 40 + b"\n"),
+                   (0, b"runc version 1.3.3-0ubuntu2~24.04.3\ncommit: " + b"d" * 40 + b"\nSECRET=value\n")]
+        with mock.patch.object(MODULE, "execute", side_effect=outputs) as call:
+            self.preflight.record_runtime_versions(versions)
+        self.assertEqual([args.args[0] for args in call.call_args_list], [["containerd", "--version"], ["runc", "--version"]])
+        for args in call.call_args_list:
+            self.assertEqual(args.args[1], self.preflight.env)
+            self.assertEqual(args.kwargs["timeout"], 15)
+            self.assertNotIn("GH_TOKEN", args.args[1])
+        provider = self.preflight.receipt["provider_daemon"]
+        self.assertEqual(provider["runtime_components"]["runc"]["source"], "runner-binary")
+        self.assertEqual(provider["runtime_components"]["containerd"]["commit"], "c" * 40)
+        self.assertEqual(provider["runtime_components"]["runc"]["commit"], "d" * 40)
+        self.assertNotIn("SECRET", json.dumps(provider))
+
+    def test_unavailable_version_metadata_is_recorded_without_becoming_boundary_failure(self):
+        for version in (None, {"Components": None}, {"Components": []}):
+            self.preflight.receipt["provider_daemon"] = {}
+            with self.subTest(version=version), mock.patch.object(MODULE, "execute", side_effect=OSError("SECRET")):
+                self.preflight.record_runtime_versions(version)
+            provider = self.preflight.receipt["provider_daemon"]
+            self.assertFalse(provider["runtime_components"])
+            self.assertEqual(provider["runtime_version_fallbacks"]["runc"]["status"], "unavailable")
+            self.assertNotIn("SECRET", json.dumps(provider))
+
+    def test_runtime_observations_survive_a_later_failed_gate(self):
+        def provision():
+            self.preflight.receipt["provider_daemon"] = {"ServerVersion": "28.0.4"}
+            self.preflight.record_runtime_versions({"Components": [{"Name": "runc", "Version": "SECRET"}]})
+            raise MODULE.Failure("sandbox-base-must-be-pinned")
+        with mock.patch.object(self.preflight, "provision", side_effect=provision), \
+             mock.patch.object(MODULE, "execute", return_value=(0, b"unrecognized SECRET\n")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.preflight.run(), 1)
+        receipt = json.loads((self.root / "preflight.json").read_text())
+        self.assertEqual(receipt["provider_daemon"]["runtime_version_observations"]["unrecognized_versions"], ["runc"])
+        self.assertEqual(receipt["diagnostic"], "sandbox-base-must-be-pinned")
+        self.assertNotIn("SECRET", json.dumps(receipt))
+
     def test_envelope_uses_private_namespaces_without_blanket_privilege(self):
         args = MODULE.sandbox_arguments(self.preflight.parent, "base@sha256:" + "d" * 64,
                                         self.preflight.name, self.preflight.labels)
