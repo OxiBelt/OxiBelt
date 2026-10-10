@@ -61,11 +61,41 @@ class NativeRunnerTest(unittest.TestCase):
         path.write_bytes(content)
 
     def run_probe(self, **kwargs: object) -> dict:
+        phase = kwargs.pop("phase", "sandbox")
         return PROBE.Probe(
             root=self.root, uid=kwargs.pop("uid", 1000), username="runner",
             system=kwargs.pop("system", "Linux"), machine=kwargs.pop("machine", "riscv64"),
             command_reader=self.reader, **kwargs,
-        ).run({"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123"})
+        ).run({"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123"}, phase=phase)
+
+    def pod_fixture(self, *, systemd: bool = False, qos: str = "burstable") -> tuple[Path, Path]:
+        uuid = "12345678-1234-1234-1234-123456789abc"
+        container = "a" * 64
+        if systemd:
+            prefix = f"kubepods-{qos}-" if qos else "kubepods-"
+            qos_directory = f"kubepods-{qos}.slice/" if qos else ""
+            path = f"/kubepods.slice/{qos_directory}{prefix}pod{uuid.replace('-', '_')}.slice/cri-containerd-{container}.scope"
+        else:
+            qos_directory = f"{qos}/" if qos else ""
+            path = f"/kubepods/{qos_directory}pod{uuid}/{container}"
+        self.write("proc/self/cgroup", f"0::{path}\n".encode())
+        leaf = self.root / "sys/fs/cgroup" / path.lstrip("/")
+        leaf.mkdir(parents=True)
+        pod = leaf.parent
+        root_controllers = "cpu memory pids io cpuset hugetlb\n"
+        directory = leaf
+        base = self.root / "sys/fs/cgroup"
+        while True:
+            (directory / "cgroup.controllers").write_text(root_controllers)
+            (directory / "cgroup.subtree_control").write_text(root_controllers)
+            (directory / "cgroup.procs").write_text(str(os.getpid()) + "\n" if directory == leaf else "")
+            if directory == base:
+                break
+            directory = directory.parent
+        # Within the dedicated empty pod, runc may enable optional controllers.
+        # Outside it, every root-available controller must already be enabled.
+        (pod / "cgroup.subtree_control").write_text("cpu memory pids\n")
+        return pod, leaf
 
     def failed_check(self, receipt: dict, name: str) -> dict:
         self.assertFalse(receipt["supported"])
@@ -78,6 +108,93 @@ class NativeRunnerTest(unittest.TestCase):
         self.assertEqual(delegation["control_group"], self.group)
         self.assertEqual(delegation["delegated_controllers"], ["cpu", "memory", "pids"])
         self.reader.assert_called_once_with()
+        self.assertEqual(receipt["schema_version"], 2)
+        self.assertEqual(receipt["phase"], "sandbox")
+        self.assertNotIn("sandbox_cgroup_parent", receipt)
+
+    def test_runner_proves_pod_parent_without_requiring_or_querying_systemd(self) -> None:
+        for systemd, qos in ((False, "burstable"), (False, ""), (True, "burstable"), (True, "besteffort"), (True, "")):
+            with self.subTest(systemd=systemd, qos=qos):
+                pod, _ = self.pod_fixture(systemd=systemd, qos=qos)
+                self.reader.return_value = ("missing-systemctl", "")
+                before = {path: path.read_bytes() for path in (self.root / "sys/fs/cgroup").rglob("*") if path.is_file()}
+                receipt = self.run_probe(phase="runner")
+                self.assertTrue(receipt["supported"], receipt)
+                self.assertEqual(receipt["phase"], "runner")
+                self.assertEqual(receipt["sandbox_cgroup_parent"], "/" + str(pod.relative_to(self.root / "sys/fs/cgroup")))
+                self.assertEqual(before, {path: path.read_bytes() for path in (self.root / "sys/fs/cgroup").rglob("*") if path.is_file()})
+        self.reader.assert_not_called()
+
+    def test_runner_rejects_missing_or_unrecognized_parent_and_namespace_root(self) -> None:
+        for path in (
+            "/", "/docker/" + "a" * 64,
+            "/shared/pod12345678-1234-1234-1234-123456789abc/" + "a" * 64,
+            "/kubepods/burstable/pod12345678-1234-1234-1234-123456789abc",
+            "/../../kubepods/pod12345678-1234-1234-1234-123456789abc/" + "a" * 64,
+        ):
+            with self.subTest(path=path):
+                self.write("proc/self/cgroup", f"0::{path}\n".encode())
+                receipt = self.run_probe(phase="runner")
+                self.failed_check(receipt, "sandbox_cgroup_confinement")
+                self.assertNotIn("sandbox_cgroup_parent", receipt)
+        pod, leaf = self.pod_fixture()
+        for path in leaf.iterdir():
+            path.unlink()
+        leaf.rmdir()
+        receipt = self.run_probe(phase="runner")
+        self.assertEqual(self.failed_check(receipt, "sandbox_cgroup_confinement")["diagnostic"], "sandbox-cgroup-unavailable")
+        self.assertNotIn("sandbox_cgroup_parent", receipt)
+
+    def test_runner_rejects_processes_directly_in_the_proposed_pod_parent(self) -> None:
+        pod, _ = self.pod_fixture()
+        (pod / "cgroup.procs").write_text("42\n")
+        receipt = self.run_probe(phase="runner")
+        self.assertEqual(self.failed_check(receipt, "sandbox_cgroup_confinement")["diagnostic"], "pod-parent-has-direct-processes")
+        self.assertNotIn("sandbox_cgroup_parent", receipt)
+
+    def test_runner_requires_all_available_controllers_already_enabled_outside_pod(self) -> None:
+        pod, _ = self.pod_fixture()
+        base = self.root / "sys/fs/cgroup"
+        for ancestor in (base, base / "kubepods", pod.parent):
+            with self.subTest(ancestor=ancestor):
+                original = (ancestor / "cgroup.subtree_control").read_text()
+                (ancestor / "cgroup.subtree_control").write_text("cpu memory pids\n")
+                receipt = self.run_probe(phase="runner")
+                self.assertEqual(self.failed_check(receipt, "sandbox_cgroup_confinement")["diagnostic"], "shared-ancestor-controller-propagation-incomplete")
+                self.assertNotIn("sandbox_cgroup_parent", receipt)
+                (ancestor / "cgroup.subtree_control").write_text(original)
+        (pod.parent / "cgroup.controllers").write_text("cpu memory pids\n")
+        self.failed_check(self.run_probe(phase="runner"), "sandbox_cgroup_confinement")
+
+    def test_runner_requires_enabled_pod_limits_and_actual_leaf_process_membership(self) -> None:
+        pod, leaf = self.pod_fixture()
+        (pod / "cgroup.subtree_control").write_text("memory pids\n")
+        self.assertEqual(self.failed_check(self.run_probe(phase="runner"), "sandbox_cgroup_confinement")["diagnostic"], "pod-missing-enabled-cpu-memory-pids-controllers")
+        (pod / "cgroup.subtree_control").write_text("cpu memory pids\n")
+        (leaf / "cgroup.procs").write_text("42\n")
+        self.assertEqual(self.failed_check(self.run_probe(phase="runner"), "sandbox_cgroup_confinement")["diagnostic"], "current-process-not-confined-to-container-leaf")
+        (leaf / "cgroup.procs").write_text(str(os.getpid()) + "\n")
+        (leaf / "child").mkdir()
+        self.assertEqual(self.failed_check(self.run_probe(phase="runner"), "sandbox_cgroup_confinement")["diagnostic"], "current-container-cgroup-not-leaf")
+
+    def test_runner_never_returns_pod_parent_when_another_prerequisite_fails(self) -> None:
+        self.pod_fixture()
+        receipt = self.run_probe(phase="runner", machine="x86_64")
+        self.failed_check(receipt, "native_linux_riscv64")
+        self.assertTrue(next(check for check in receipt["checks"] if check["name"] == "sandbox_cgroup_confinement")["passed"])
+        self.assertNotIn("sandbox_cgroup_parent", receipt)
+
+    def test_runner_rejects_inconsistent_qos_or_symlinked_cgroup(self) -> None:
+        _, leaf = self.pod_fixture(systemd=True)
+        current = (self.root / "proc/self/cgroup").read_text().replace("kubepods-burstable-pod", "kubepods-besteffort-pod")
+        self.write("proc/self/cgroup", current.encode())
+        self.assertEqual(self.failed_check(self.run_probe(phase="runner"), "sandbox_cgroup_confinement")["diagnostic"], "inconsistent-kubernetes-qos-ancestry")
+        _, leaf = self.pod_fixture()
+        for child in leaf.iterdir():
+            child.unlink()
+        leaf.rmdir()
+        leaf.symlink_to(self.manager, target_is_directory=True)
+        self.assertEqual(self.failed_check(self.run_probe(phase="runner"), "sandbox_cgroup_confinement")["diagnostic"], "sandbox-cgroup-path-escape")
 
     def test_global_controllers_do_not_substitute_for_enabled_user_subtree(self) -> None:
         (self.manager / "cgroup.subtree_control").write_text("memory pids\n")
@@ -236,6 +353,20 @@ class NativeRunnerTest(unittest.TestCase):
             self.assertEqual(PROBE.main(["--output", str(output)]), 1)
             self.assertEqual(PROBE.main(["--output", str(output)]), 2)
         self.assertFalse(json.loads(output.read_text())["supported"])
+        self.assertEqual(probe.run.call_args.kwargs["phase"], "sandbox")
+
+    def test_cli_runner_phase_persists_supported_parent_receipt(self) -> None:
+        self.pod_fixture()
+        receipt = self.run_probe(phase="runner")
+        probe = mock.Mock()
+        probe.run.return_value = receipt
+        output = self.root / "runner.json"
+        with mock.patch.object(PROBE, "Probe", return_value=probe), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(PROBE.main(["--phase", "runner", "--output", str(output)]), 0)
+        self.assertEqual(probe.run.call_args.kwargs["phase"], "runner")
+        persisted = json.loads(output.read_text())
+        self.assertEqual(persisted["sandbox_cgroup_parent"], receipt["sandbox_cgroup_parent"])
+        self.assertEqual(persisted["schema_version"], 2)
 
     def test_subprocess_errors_timeout_and_large_output_are_bounded_and_safe(self) -> None:
         executable = self.root / "fake-systemctl"

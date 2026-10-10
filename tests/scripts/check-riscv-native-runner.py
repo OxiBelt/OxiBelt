@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only prerequisites for a native, cgroup-bounded rootless RISC-V lane.
+"""Read-only runner and sandbox prerequisites for the native RISC-V lane.
 
 This does not install Docker, start services, create namespaces, enable
 controllers, or qualify a running daemon. A supported receipt permits only the
@@ -36,6 +36,18 @@ PROVIDER_PREREQUISITE = (
     "node sysctls, security policy, or cgroups, or fall back to rootful Docker "
     "or QEMU."
 )
+RUNNER_PREREQUISITE = (
+    "The provider must supply a native Linux riscv64 nonroot runner confined "
+    "to a dedicated Kubernetes container leaf under a recognized pod cgroup, "
+    "with full-root writable cgroup v2 visibility, all root-available controllers "
+    "already enabled outside the pod boundary, no processes directly in the "
+    "pod cgroup, and cpu/memory/pids available and enabled in the pod. Existing "
+    "uidmap helpers, subordinate UID/GID ranges, and namespace sysctls must "
+    "permit the inner rootless setup. Do not modify shared node cgroups, sysctls "
+    "or security policy, or use QEMU."
+)
+POD_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+SYSTEMD_POD_UUID = r"[0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{12}"
 IDENTITY_PATTERNS = {
     "GITHUB_REPOSITORY": r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
     "GITHUB_SHA": r"[0-9a-f]{40}",
@@ -145,6 +157,7 @@ class Probe:
         self.command_reader = command_reader
         self.checks: list[dict[str, object]] = []
         self.cgroup_mount_verified = False
+        self.sandbox_cgroup_parent: str | None = None
 
     def path(self, absolute: str) -> Path:
         return self.root / absolute.lstrip("/")
@@ -261,6 +274,96 @@ class Probe:
             "writable": True,
         }
 
+    def cgroup_directory(self, group: PurePosixPath) -> Path:
+        base = self.path("/sys/fs/cgroup")
+        directory = base / str(group).lstrip("/")
+        try:
+            resolved = directory.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ProbeError("sandbox-cgroup-unavailable") from error
+        if not resolved.is_relative_to(base) or resolved != directory:
+            raise ProbeError("sandbox-cgroup-path-escape")
+        return directory
+
+    def controller_set(self, directory: Path, name: str) -> set[str]:
+        tokens = self.read(directory / name).split()
+        if len(tokens) > 64 or any(not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", token) for token in tokens):
+            raise ProbeError("invalid-cgroup-controller-list")
+        return set(tokens)
+
+    def sandbox_confinement(self) -> dict[str, object]:
+        """Prove runc can create a pod sibling without enabling node controllers."""
+        if not self.cgroup_mount_verified:
+            raise ProbeError("requires-verified-cgroup-v2-mount")
+        entries = self.read(self.path("/proc/self/cgroup")).splitlines()
+        unified = [line[3:] for line in entries if line.startswith("0::")]
+        if len(unified) != 1:
+            raise ProbeError("requires-one-current-unified-cgroup")
+        value = unified[0]
+        current = PurePosixPath(value)
+        if (
+            len(value) > 1024 or not value.startswith("/") or str(current) != value
+            or ".." in current.parts or len(current.parts) > 32
+            or not re.fullmatch(r"/[a-z0-9_.:/-]+", value)
+        ):
+            raise ProbeError("invalid-current-cgroup-path")
+        # Exact hierarchy shapes prevent a coincidentally named/shared ancestor
+        # from being accepted as a Kubernetes pod boundary.
+        cgroupfs = re.fullmatch(
+            rf"/kubepods/(?:burstable/|besteffort/)?pod{POD_UUID}/[0-9a-f]{{64}}", value
+        )
+        systemd = re.fullmatch(
+            rf"/kubepods\.slice/(?:kubepods-(burstable|besteffort)\.slice/)?"
+            rf"kubepods-(?:(burstable|besteffort)-)?pod{SYSTEMD_POD_UUID}\.slice/"
+            r"(?:cri-containerd|containerd|crio|docker|runc)-[0-9a-f]{64}\.scope", value
+        )
+        if not cgroupfs and not systemd:
+            raise ProbeError("requires-recognized-kubernetes-pod-container-leaf")
+        if systemd and systemd.group(1) != systemd.group(2):
+            raise ProbeError("inconsistent-kubernetes-qos-ancestry")
+        pod = current.parent
+        leaf_directory = self.cgroup_directory(current)
+        pod_directory = self.cgroup_directory(pod)
+        leaf_pids = self.read(leaf_directory / "cgroup.procs").split()
+        if any(not re.fullmatch(r"[0-9]{1,12}", pid) for pid in leaf_pids) or str(os.getpid()) not in leaf_pids:
+            raise ProbeError("current-process-not-confined-to-container-leaf")
+        try:
+            with os.scandir(leaf_directory) as children:
+                for index, child in enumerate(children):
+                    if index >= 256 or child.is_dir(follow_symlinks=False) or child.is_symlink():
+                        raise ProbeError("current-container-cgroup-not-leaf")
+        except OSError as error:
+            raise ProbeError("current-container-leaf-unavailable") from error
+        if self.read(pod_directory / "cgroup.procs").strip():
+            raise ProbeError("pod-parent-has-direct-processes")
+        root_directory = self.cgroup_directory(PurePosixPath("/"))
+        root_controllers = self.controller_set(root_directory, "cgroup.controllers")
+        if not REQUIRED_CONTROLLERS <= root_controllers:
+            raise ProbeError("root-missing-cpu-memory-pids-controllers")
+        ancestors = list(reversed(pod.parents))
+        for ancestor in ancestors:
+            directory = self.cgroup_directory(ancestor)
+            available = self.controller_set(directory, "cgroup.controllers")
+            enabled = self.controller_set(directory, "cgroup.subtree_control")
+            # The pinned runtime may enable every controller available at root,
+            # including io/cpuset/hugetlb. Requiring all to be enabled here rules
+            # out any runtime write to an ancestor outside this dedicated pod.
+            if not root_controllers <= available or not root_controllers <= enabled:
+                raise ProbeError("shared-ancestor-controller-propagation-incomplete")
+        available = self.controller_set(pod_directory, "cgroup.controllers")
+        enabled = self.controller_set(pod_directory, "cgroup.subtree_control")
+        if not REQUIRED_CONTROLLERS <= available or not REQUIRED_CONTROLLERS <= enabled:
+            raise ProbeError("pod-missing-enabled-cpu-memory-pids-controllers")
+        self.sandbox_cgroup_parent = str(pod)
+        return {
+            "recognized_pod_boundary": True,
+            "current_process_in_container_leaf": True,
+            "pod_direct_processes_empty": True,
+            "shared_ancestor_controllers_already_enabled": sorted(root_controllers),
+            "checked_shared_ancestor_count": len(ancestors),
+            "pod_enabled_required_controllers": sorted(REQUIRED_CONTROLLERS),
+        }
+
     def uidmap(self) -> dict[str, object]:
         missing = [name for name in ("newuidmap", "newgidmap") if shutil.which(name) is None]
         if missing:
@@ -296,12 +399,15 @@ class Probe:
             raise ProbeError("unprivileged-user-namespaces-disabled")
         return {"kernel_user_namespace_sysctls_allow": True}
 
-    def run(self, env: dict[str, str]) -> dict[str, object]:
+    def run(self, env: dict[str, str], *, phase: str = "sandbox") -> dict[str, object]:
+        if phase not in {"runner", "sandbox"}:
+            raise ProbeError("invalid-probe-phase")
         for name, callback in (
             ("native_linux_riscv64", self.native),
             ("nonroot_current_user", self.nonroot),
             ("cgroup_v2", self.cgroup_v2),
-            ("systemd_user_manager_delegation", self.delegation),
+            (("sandbox_cgroup_confinement", self.sandbox_confinement) if phase == "runner"
+             else ("systemd_user_manager_delegation", self.delegation)),
             ("uidmap_helpers", self.uidmap),
             ("subuid_mapping", lambda: self.mapping("subuid")),
             ("subgid_mapping", lambda: self.mapping("subgid")),
@@ -309,15 +415,20 @@ class Probe:
         ):
             self.check(name, callback)
         failed = [check["name"] for check in self.checks if not check["passed"]]
-        return {
-            "schema_version": 1,
+        evidence = {
+            "schema_version": 2,
+            "phase": phase,
             "supported": not failed,
-            "scope": "read-only-prerequisites-before-rootless-docker-setup",
+            "scope": ("read-only-prerequisites-before-privileged-sandbox-setup" if phase == "runner"
+                      else "read-only-prerequisites-before-rootless-docker-setup"),
             "identity": github_identity(env),
             "failed_prerequisites": failed,
             "checks": self.checks,
-            "provider_prerequisite": PROVIDER_PREREQUISITE,
+            "provider_prerequisite": RUNNER_PREREQUISITE if phase == "runner" else PROVIDER_PREREQUISITE,
         }
+        if phase == "runner" and not failed and self.sandbox_cgroup_parent is not None:
+            evidence["sandbox_cgroup_parent"] = self.sandbox_cgroup_parent
+        return evidence
 
 
 def write_evidence(output: Path, evidence: dict[str, object]) -> None:
@@ -342,18 +453,21 @@ def write_evidence(output: Path, evidence: dict[str, object]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path, help="new .json file in an existing directory")
+    parser.add_argument("--phase", choices=("runner", "sandbox"), default="sandbox")
     args = parser.parse_args(argv)
     try:
-        evidence = Probe().run({name: os.environ[name] for name in IDENTITY_PATTERNS if name in os.environ})
+        evidence = Probe().run(
+            {name: os.environ[name] for name in IDENTITY_PATTERNS if name in os.environ}, phase=args.phase
+        )
         write_evidence(args.output, evidence)
     except ProbeError as error:
         print(f"RISC-V prerequisite evidence failed: {error}", file=sys.stderr)
         return 2
     if not evidence["supported"]:
         print("Unsupported runner: " + ", ".join(evidence["failed_prerequisites"]), file=sys.stderr)
-        print(PROVIDER_PREREQUISITE, file=sys.stderr)
+        print(evidence["provider_prerequisite"], file=sys.stderr)
         return 1
-    print("Native RISC-V rootless Docker prerequisites passed; runtime enforcement remains unverified.")
+    print(f"Native RISC-V {args.phase} prerequisites passed; runtime enforcement remains unverified.")
     return 0
 
 

@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "architecture": "riscv64",
+  "probeSourceSha256": "029d8f0ea1fd940ced4ca865bc9467eaa6e42411784f3c4703200230f5e1c24a",
+  "baseImage": {
+    "indexDigest": "sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5",
+    "nativeDigest": "sha256:44b44cf865f20150089a7db350187a9e8312853942087edbb4b05f9a31bb8c5c"
+  },
+  "debian": {
+    "snapshot": "20261005T000000Z",
+    "suite": "trixie",
+    "packages": {
+      "ca-certificates": "20250419",
+      "curl": "8.14.1-2+deb13u5",
+      "dbus": "1.16.2-2",
+      "dbus-user-session": "1.16.2-2",
+      "gcc": "4:14.2.0-1",
+      "git": "1:2.47.3-0+deb13u1",
+      "iptables": "1.8.11-2",
+      "libc6-dev": "2.41-12+deb13u4",
+      "libseccomp-dev": "2.6.0-2",
+      "make": "4.4.1-2",
+      "pkg-config": "1.8.1-4",
+      "python3": "3.13.5-1",
+      "slirp4netns": "1.2.1-1.1",
+      "systemd": "257.13-1~deb13u1",
+      "systemd-sysv": "257.13-1~deb13u1",
+      "uidmap": "1:4.17.4-2",
+      "util-linux": "2.41.5-0+deb13u1"
+    }
+  },
+  "go": {
+    "version": "1.26.8",
+    "url": "https://go.dev/dl/go1.26.8.linux-riscv64.tar.gz",
+    "sha256": "75d368eef1dc44ff9de0c8cac4b37c519e541e6d46c4291c1ff959644a71af32"
+  },
+  "rootlesskit": {
+    "version": "3.2.0",
+    "url": "https://github.com/rootless-containers/rootlesskit/releases/download/v3.2.0/rootlesskit-riscv64.tar.gz",
+    "sha256": "2d0e395987fc7c7a07838badfcd750a56ea684248cf7ead2ca9a1a4fad1780d4"
+  },
+  "sources": {
+    "engine": {
+      "commit": "3ce5872b7950c63ba2ffbc5123101019ff3e6682",
+      "url": "https://codeload.github.com/moby/moby/tar.gz/3ce5872b7950c63ba2ffbc5123101019ff3e6682",
+      "sha256": "115b7bb0ee00e9eb443cc7c16eb16cebafaa7bbb2b87deaadd775766eb61237a",
+      "version": "29.8.0"
+    },
+    "cli": {
+      "commit": "88096ef00576baf72a9cb45caa45c0544c40e0a7",
+      "url": "https://codeload.github.com/docker/cli/tar.gz/88096ef00576baf72a9cb45caa45c0544c40e0a7",
+      "sha256": "13e970fe3c22cc02d566a3ac366f7e65c61622bd71d95e9db82000447544870c",
+      "version": "29.8.0"
+    },
+    "containerd": {
+      "commit": "db8809540e1a7a9da5d518876894933ff55692ab",
+      "url": "https://codeload.github.com/containerd/containerd/tar.gz/db8809540e1a7a9da5d518876894933ff55692ab",
+      "sha256": "526be66366940040f53be20ad539fc897df4a8faa46a8981b9dd389b8c78f2a0",
+      "version": "2.3.4"
+    },
+    "runc": {
+      "commit": "8f2685a471d3347a686ad3909783d8aafc6bb208",
+      "url": "https://codeload.github.com/opencontainers/runc/tar.gz/8f2685a471d3347a686ad3909783d8aafc6bb208",
+      "sha256": "d05b6dfe90f33a382c9dcb1940ca6f1bcb782c752c4d798731324d38b13e621c",
+      "version": "1.5.1"
+    }
+  },
+  "build": {
+    "runcBuildTags": "-libpathrs",
+    "goToolchain": "local",
+    "goFlags": "-mod=vendor -trimpath -buildvcs=false -p=2",
+    "goMaxProcs": 2,
+    "timeoutSeconds": 5400
+  }
+}
