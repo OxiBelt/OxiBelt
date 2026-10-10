@@ -1,0 +1,67 @@
+name: RISC-V native runner preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Full lowercase main-branch commit containing this preflight
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: riscv-native-preflight-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  capabilities:
+    name: Native rootless smoke prerequisites
+    if: github.repository == 'OxiBelt/OxiBelt'
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Require exact main workflow revision
+        env:
+          EXPECTED_REVISION: ${{ inputs.source_revision }}
+          WORKFLOW_REVISION: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_REVISION}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" == "${EXPECTED_REVISION}" ]]
+          [[ "${WORKFLOW_REVISION}" == "${EXPECTED_REVISION}" ]]
+          [[ "${WORKFLOW_REF}" == "OxiBelt/OxiBelt/.github/workflows/riscv-native-preflight.yml@refs/heads/main" ]]
+
+      - name: Checkout immutable preflight source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Inspect native rootless smoke prerequisites
+        env:
+          EXPECTED_REVISION: ${{ inputs.source_revision }}
+          EVIDENCE_DIR: ${{ runner.temp }}/riscv-native-preflight
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "${EXPECTED_REVISION}" ]]
+          install -d -m 700 "${EVIDENCE_DIR}"
+          python3 tests/scripts/check-riscv-native-runner.py \
+            --output "${EVIDENCE_DIR}/capabilities.json"
+
+      - name: Preserve prerequisite evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        with:
+          name: riscv-native-preflight-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/riscv-native-preflight/capabilities.json
+          if-no-files-found: error
+          retention-days: 7

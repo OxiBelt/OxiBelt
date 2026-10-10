@@ -46,6 +46,7 @@ jobs:
         run: |
           python3 -m unittest tests/scripts/test-compare-release-image-artifacts.py
           python3 -m unittest tests/scripts/test-run-riscv64-release-image-smoke.py
+          python3 -m unittest tests/scripts/test-check-riscv-native-runner.py
 
       - name: Test mock upstream client
         env:

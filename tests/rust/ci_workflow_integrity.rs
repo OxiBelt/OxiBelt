@@ -13,6 +13,8 @@ mod managed_upload;
 mod minio_download;
 #[path = "ci_workflow_integrity/retry_storm.rs"]
 mod retry_storm;
+#[path = "ci_workflow_integrity/riscv_native.rs"]
+mod riscv_native;
 
 #[derive(Clone, Debug)]
 struct Job {
@@ -2112,7 +2114,8 @@ fn release_image_rebuild_comparator_regressions_are_ci_gated() {
     .as_array()
     .expect("source-structure should define steps");
   let command = "python3 -m unittest tests/scripts/test-compare-release-image-artifacts.py\n\
-python3 -m unittest tests/scripts/test-run-riscv64-release-image-smoke.py\n";
+python3 -m unittest tests/scripts/test-run-riscv64-release-image-smoke.py\n\
+python3 -m unittest tests/scripts/test-check-riscv-native-runner.py\n";
   let matching_steps = steps
     .iter()
     .enumerate()
