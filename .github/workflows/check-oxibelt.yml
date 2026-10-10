@@ -48,6 +48,14 @@ jobs:
           python3 -m unittest tests/scripts/test-run-riscv64-release-image-smoke.py
           python3 -m unittest tests/scripts/test-check-riscv-native-runner.py
 
+      - name: Test native rootless sandbox lifecycle
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -m unittest tests/scripts/test-riscv-native-sandbox.py
+          python3 -m unittest tests/scripts/test-run-riscv-native-preflight.py
+          python3 -m unittest tests/scripts/test-check-riscv-rootless-enforcement.py
+
       - name: Test mock upstream client
         env:
           PYTHONDONTWRITEBYTECODE: "1"

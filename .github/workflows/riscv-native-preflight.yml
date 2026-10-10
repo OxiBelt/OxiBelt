@@ -16,10 +16,10 @@ concurrency:
 
 jobs:
   capabilities:
-    name: Native rootless smoke prerequisites
+    name: Native rootless sandbox enforcement
     if: github.repository == 'OxiBelt/OxiBelt'
     runs-on: ubuntu-24.04-riscv
-    timeout-minutes: 10
+    timeout-minutes: 120
     permissions:
       contents: read
 
@@ -45,23 +45,38 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Inspect native rootless smoke prerequisites
+      - name: Provision and qualify native rootless sandbox
         env:
           EXPECTED_REVISION: ${{ inputs.source_revision }}
           EVIDENCE_DIR: ${{ runner.temp }}/riscv-native-preflight
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
+          umask 077
           [[ "$(git rev-parse HEAD)" == "${EXPECTED_REVISION}" ]]
           install -d -m 700 "${EVIDENCE_DIR}"
-          python3 tests/scripts/check-riscv-native-runner.py \
-            --output "${EVIDENCE_DIR}/capabilities.json"
+          python3 tests/scripts/run-riscv-native-preflight.py \
+            --output-dir "${EVIDENCE_DIR}"
+
+      - name: Ensure exact sandbox cleanup
+        if: always()
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/riscv-native-preflight
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          if [[ -d "${EVIDENCE_DIR}" ]]; then
+            python3 tests/scripts/run-riscv-native-preflight.py \
+              --output-dir "${EVIDENCE_DIR}" --cleanup
+          fi
 
       - name: Preserve prerequisite evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
           name: riscv-native-preflight-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/riscv-native-preflight/capabilities.json
+          path: |
+            ${{ runner.temp }}/riscv-native-preflight/*.json
+            ${{ runner.temp }}/riscv-native-preflight/*.log
           if-no-files-found: error
           retention-days: 7
