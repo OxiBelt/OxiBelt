@@ -157,6 +157,7 @@ class Preflight:
         self.baseline: dict[str, list[str]] | None = None
         self.base_image_id: str | None = None
         self.receipt = {"schema_version": 1, "identity": self.identity, "supported": False,
+                        "stage": "runner-prerequisites",
                         "scope": "native-rootless-sandbox-resource-enforcement", "cleanup_confirmed": False}
 
     def command(self, args: list[str], timeout: int = 30, allow_failure: bool = False) -> bytes:
