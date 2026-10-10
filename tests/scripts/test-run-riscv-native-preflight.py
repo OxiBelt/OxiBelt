@@ -285,6 +285,7 @@ class LifecycleTests(unittest.TestCase):
         receipt = json.loads((self.root / "preflight.json").read_text())
         self.assertFalse(receipt["supported"])
         self.assertEqual(receipt["diagnostic"], "runner-prerequisites-failed")
+        self.assertEqual(receipt["stage"], "runner-prerequisites")
         self.assertTrue(receipt["cleanup_confirmed"])
         self.assertEqual(receipt["identity"], IDENTITY)
 

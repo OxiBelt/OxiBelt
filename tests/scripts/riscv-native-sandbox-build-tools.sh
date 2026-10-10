@@ -10,7 +10,8 @@ home=/home/runner
 evidence=${home}/evidence
 tools=${home}/native-tools
 lock=${root}/riscv-native-tools.lock.json
-mkdir -p "${tools}/bin" "${tools}/src" "${tools}/downloads" "${home}/.config/systemd/user" "${home}/.config/docker"
+mkdir -p "${tools}/bin" "${tools}/src" "${tools}/downloads" "${tools}/build-tmp" "${home}/.config/systemd/user" "${home}/.config/docker"
+export GOTMPDIR="${tools}/build-tmp" TMPDIR="${tools}/build-tmp"
 trap 'printf "native tools build failed\n" >"/home/runner/preflight-failed"' ERR
 
 field() {

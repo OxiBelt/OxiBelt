@@ -255,6 +255,7 @@ class Preflight:
         return data
 
     def prepare_image(self, lock: dict) -> str:
+        self.receipt["stage"] = "native-image"
         base = mapping(lock.get("baseImage"), "invalid-sandbox-image-lock")
         index, native = base.get("indexDigest"), base.get("nativeDigest")
         if any(not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value)
@@ -391,12 +392,14 @@ class Preflight:
             fallback["status"] = "observed"
 
     def provision(self):
+        self.receipt["stage"] = "runner-prerequisites"
         outer = self.probe.Probe().run(dict(os.environ), phase="runner")
         self.probe.write_evidence(self.output / "runner.json", outer)
         if not outer["supported"]:
             raise Failure("runner-prerequisites-failed")
         self.parent = outer["sandbox_cgroup_parent"]
         self.baseline = controls(self.parent)
+        self.receipt["stage"] = "provider-daemon"
         info = mapping(json.loads(self.command(["info", "--format", "{{json .}}" ])), "invalid-provider-daemon-evidence")
         security = info.get("SecurityOptions")
         server_version = info.get("ServerVersion")
@@ -422,6 +425,7 @@ class Preflight:
             "name": self.name, "labels": self.labels, "parent": self.parent, "ancestors": self.baseline,
         })
         self.creation_attempted = True
+        self.receipt["stage"] = "sandbox-create"
         raw = self.command(sandbox_arguments(self.parent, image, self.name, self.labels), timeout=300).decode().strip()
         if not re.fullmatch(r"[0-9a-f]{64}", raw):
             raise Failure("invalid-sandbox-container-id")
@@ -431,6 +435,7 @@ class Preflight:
             "parent": self.parent, "ancestors": self.baseline,
         })
         self.container_state()
+        self.receipt["stage"] = "sandbox-staging"
         with tempfile.TemporaryDirectory(prefix="oxibelt-native-bootstrap-") as temporary:
             staging = Path(temporary) / "oxibelt-preflight"
             staging.mkdir(mode=0o755)
@@ -439,19 +444,25 @@ class Preflight:
                 shutil.copyfile(HERE / filename, staging / filename, follow_symlinks=False)
                 (staging / filename).chmod(0o644)
             self.command(["cp", str(staging), f"{raw}:/opt/"])
+        self.receipt["stage"] = "sandbox-start"
         self.command(["start", raw])
         self.check_ancestors()
+        self.receipt["stage"] = "sandbox-boundary"
         self.verify_running_boundary()
+        self.receipt["stage"] = "sandbox-bootstrap"
         self.wait_ready()
         self.check_ancestors()
         self.receipt["tools"] = self.copy_json("native-tools.json")
+        self.receipt["stage"] = "sandbox-prerequisites"
         self.inner(["python3", "/opt/oxibelt-preflight/check-riscv-native-runner.py", "--phase", "sandbox",
                     "--output", "/home/runner/evidence/sandbox.json"], allow_failure=True)
         self.copy_json("sandbox.json")
+        self.receipt["stage"] = "rootless-enforcement"
         self.inner(["python3", "/opt/oxibelt-preflight/check-riscv-rootless-enforcement.py",
                     "--output", "/home/runner/evidence/enforcement.json"], timeout=600, allow_failure=True)
         self.receipt["enforcement"] = self.copy_json("enforcement.json")
         self.check_ancestors()
+        self.receipt["stage"] = "qualified"
 
     def cleanup(self):
         if not self.container and self.creation_attempted:
@@ -461,7 +472,8 @@ class Preflight:
             return
         self.owned_container()
         for filename in ("apt-update.log", "apt-bootstrap.log", "apt-install.log", "build-engine.log",
-                         "build-cli.log", "build-containerd.log", "build-runc.log", "docker-start.log"):
+                         "build-cli.log", "build-containerd.log", "build-runc.log", "docker-start.log",
+                         "systemd-build-failure.log", "systemd-docker-failure.log"):
             try:
                 data = self.command(["exec", self.container, "tail", "-c", "65536", "--",
                                      f"/home/runner/evidence/{filename}"], allow_failure=True)

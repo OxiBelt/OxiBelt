@@ -16,6 +16,16 @@ fi
 if [[ ${1:-} == --record-failure ]]; then
   [[ $(cat /proc/1/comm) == systemd ]]
   if [[ ${SERVICE_RESULT:-unknown} != success ]]; then
+    # Copy only named unit diagnostics, without environment or unrestricted
+    # journal output. User Docker messages identify uid 1001 and its unit.
+    mkdir -p "${evidence}"
+    journalctl --no-pager --lines=500 --output=short-iso \
+      --unit=oxibelt-native-prepare.service --unit=oxibelt-native-build.service \
+      2>&1 | tail -c 1048576 >"${evidence}/systemd-build-failure.log" || true
+    journalctl --no-pager --lines=500 --output=short-iso \
+      _UID=1001 _SYSTEMD_USER_UNIT=docker.service \
+      2>&1 | tail -c 1048576 >"${evidence}/systemd-docker-failure.log" || true
+    chown runner:runner "${evidence}/systemd-build-failure.log" "${evidence}/systemd-docker-failure.log"
     printf '%s\n' "native tool preparation failed: ${SERVICE_RESULT:-unknown}" >"${home}/preflight-failed"
     chown runner:runner "${home}/preflight-failed"
   fi

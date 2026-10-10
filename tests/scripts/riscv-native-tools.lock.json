@@ -70,6 +70,7 @@
     "goToolchain": "local",
     "goFlags": "-mod=vendor -trimpath -buildvcs=false -p=2",
     "goMaxProcs": 2,
+    "temporaryDirectory": "/home/runner/native-tools/build-tmp",
     "timeoutSeconds": 5400
   }
 }
