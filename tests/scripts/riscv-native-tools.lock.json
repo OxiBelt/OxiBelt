@@ -16,6 +16,7 @@
       "dbus-user-session": "1.16.2-2",
       "gcc": "4:14.2.0-1",
       "git": "1:2.47.3-0+deb13u1",
+      "iproute2": "6.15.0-1",
       "iptables": "1.8.11-2",
       "libc6-dev": "2.41-12+deb13u4",
       "libseccomp-dev": "2.6.0-2",

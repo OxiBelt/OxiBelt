@@ -62,7 +62,7 @@ for name, version in lock['debian']['packages'].items():
     print(f'{name}={version}')
 PY
 )
-[[ ${#packages[@]} == 17 ]]
+[[ ${#packages[@]} == 18 ]]
 timeout 1200 apt-get install -y --no-install-recommends --allow-downgrades "${packages[@]}" 2>&1 | tail -c 4194304 >"${evidence}/apt-install.log"
 python3 - "${root}/riscv-native-tools.lock.json" "${evidence}/packages.json" <<'PY'
 import json, subprocess, sys

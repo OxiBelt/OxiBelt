@@ -36,7 +36,10 @@ build_logged() {
 }
 download go "$(field go.url)" "$(field go.sha256)"
 tar --extract --gzip --no-same-owner --file "${tools}/downloads/go.tar.gz" --directory "${tools}"
-export PATH="${tools}/go/bin:${tools}/bin:/usr/bin:/bin"
+export PATH="${tools}/go/bin:${tools}/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+for command in ip iptables ip6tables newuidmap newgidmap slirp4netns mount mountpoint nsenter systemctl; do
+  command -v "${command}" >/dev/null
+done
 export GOTOOLCHAIN=local GOFLAGS='-mod=vendor -trimpath -buildvcs=false -p=2' GOMAXPROCS=2 GOPROXY=off GOSUMDB=off
 [[ $(go version) == 'go version go1.26.8 linux/riscv64' ]]
 [[ $(go env GOHOSTARCH) == riscv64 && $(go env GOARCH) == riscv64 ]]
@@ -133,7 +136,7 @@ cat >"${home}/.config/systemd/user/docker.service" <<'EOF'
 Description=Isolated native rootless Docker
 [Service]
 Type=simple
-Environment=PATH=/home/runner/native-tools/bin:/usr/bin:/bin DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
+Environment=PATH=/home/runner/native-tools/bin:/usr/sbin:/usr/bin:/sbin:/bin DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
 ExecStart=/home/runner/native-tools/bin/dockerd-rootless.sh --host=unix:///run/user/1001/docker.sock --config-file=/home/runner/.config/docker/daemon.json
 Delegate=yes
 KillMode=mixed
