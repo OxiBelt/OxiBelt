@@ -206,6 +206,11 @@ class LifecycleTests(unittest.TestCase):
         self.preflight.container = CID
         expected = "0::" + self.preflight.parent + "/" + CID
         mounts = "1 0 0:1 / /sys ro - sysfs sysfs ro\n2 0 0:2 / /proc/sys ro - proc proc ro\n3 0 0:3 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
+        real_stat = MODULE.os.stat
+        def stat(path, *args, **kwargs):
+            if str(path).startswith("/proc/self/ns/"):
+                return SimpleNamespace(st_dev=1, st_ino=2)
+            return real_stat(path, *args, **kwargs)
         for fault, diagnostic in ((None, None), ("cgroup", "sandbox-process-outside-owned-cgroup"),
                                   ("namespace", "sandbox-namespace-not-private"),
                                   ("sys", "sandbox-kernel-mount-boundary-mismatch")):
@@ -219,7 +224,7 @@ class LifecycleTests(unittest.TestCase):
                 return (mounts.replace("/sys ro", "/sys rw") if fault == "sys" else mounts).encode()
             with self.subTest(fault=fault), mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
                  mock.patch.object(self.preflight.probe, "Probe", return_value=SimpleNamespace(read=read)), \
-                 mock.patch.object(MODULE.os, "stat", return_value=SimpleNamespace(st_dev=1, st_ino=2)), \
+                 mock.patch.object(MODULE.os, "stat", side_effect=stat), \
                  mock.patch.object(self.preflight, "command", side_effect=command):
                 if diagnostic:
                     with self.assertRaisesRegex(MODULE.Failure, diagnostic):
@@ -247,6 +252,39 @@ class LifecycleTests(unittest.TestCase):
              self.assertRaisesRegex(MODULE.Failure, "sandbox-tool-bootstrap-failed"):
             self.preflight.wait_ready()
 
+    def test_early_network_receipt_is_qualified_once_before_tool_readiness(self):
+        self.preflight.container = CID
+        def qualify():
+            self.preflight.receipt["network"] = {"supported": True}
+        def command(args, **_kwargs):
+            return b"ready" if "network-preflight-ready" in args[-1] else b""
+        output = io.StringIO()
+        with mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
+             mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(self.preflight, "qualify_network", side_effect=qualify) as check, \
+             mock.patch.object(MODULE, "execute", side_effect=[(1, b""), (0, b"")]), \
+             mock.patch.object(MODULE.time, "sleep"), contextlib.redirect_stdout(output):
+            self.preflight.wait_ready()
+        check.assert_called_once_with()
+        self.assertEqual(output.getvalue().count("Native detached network forwarding verified"), 1)
+
+    def test_network_receipt_requires_the_actual_sandbox_namespace(self):
+        self.preflight.container = CID
+        receipt = {"supported": True, "sandbox_netns": 123}
+        for actual in (b"123\n", b"456\n", b"invalid"):
+            with self.subTest(actual=actual), \
+                 mock.patch.object(self.preflight, "verify_running_boundary") as boundary, \
+                 mock.patch.object(self.preflight, "copy_json", return_value=receipt), \
+                 mock.patch.object(self.preflight, "command", return_value=actual):
+                self.preflight.receipt.pop("network", None)
+                if actual == b"123\n":
+                    self.preflight.qualify_network()
+                    self.assertEqual(self.preflight.receipt["network"], receipt)
+                else:
+                    with self.assertRaisesRegex(MODULE.Failure, "network-evidence-sandbox-namespace-mismatch"):
+                        self.preflight.qualify_network()
+                    self.assertNotIn("network", self.preflight.receipt)
+                boundary.assert_called_once_with(require_network=True)
     def test_log_and_graceful_stop_failures_still_force_exact_removal(self):
         self.preflight.container = CID
         calls = []
@@ -268,6 +306,34 @@ class LifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.Failure, "creation-outcome-unconfirmed"):
                 self.preflight.cleanup()
         self.assertFalse(self.preflight.receipt["cleanup_confirmed"])
+
+    def test_network_failure_evidence_survives_exact_container_cleanup(self):
+        self.preflight.container = CID
+        evidence = {"schema_version": 1, "supported": False,
+                    "diagnostic": "sysctl-write-failed", "cleanup_confirmed": True}
+        calls = []
+        def command(args, **_kwargs):
+            calls.append(args)
+            if args[0] == "inspect":
+                return json.dumps([self.state()]).encode()
+            if args[0] == "exec" and "cat /home/runner/evidence/network-sysctl.json" in args[-1]:
+                return json.dumps(evidence).encode()
+            return b""
+        with mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(self.preflight, "check_ancestors"):
+            self.preflight.cleanup()
+        self.assertEqual(json.loads((self.root / "network-sysctl.json").read_text()), evidence)
+        self.assertIn(["rm", "--force", CID], calls)
+        self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
+    def test_failed_network_receipt_cannot_qualify_the_sandbox(self):
+        self.preflight.container = CID
+        def copy(_args, **_kwargs):
+            (self.root / "network-sysctl.json").write_text(json.dumps({"supported": False}))
+            return b""
+        with mock.patch.object(self.preflight, "command", side_effect=copy):
+            with self.assertRaisesRegex(MODULE.Failure, "inner-network-qualification-failed"):
+                self.preflight.copy_json("network-sysctl.json")
 
     def test_timed_out_creation_recovers_only_matching_identity(self):
         self.preflight.creation_attempted = True

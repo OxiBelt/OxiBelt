@@ -34,12 +34,19 @@ build_logged() {
   shift
   "$@" 2>&1 | tail -c 4194304 >"${evidence}/build-${name}.log"
 }
-download go "$(field go.url)" "$(field go.sha256)"
-tar --extract --gzip --no-same-owner --file "${tools}/downloads/go.tar.gz" --directory "${tools}"
 export PATH="${tools}/go/bin:${tools}/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 for command in ip iptables ip6tables newuidmap newgidmap slirp4netns mount mountpoint nsenter systemctl sysctl; do
   command -v "${command}" >/dev/null
 done
+download rootlesskit "$(field rootlesskit.url)" "$(field rootlesskit.sha256)"
+tar --extract --gzip --no-same-owner --file "${tools}/downloads/rootlesskit.tar.gz" --directory "${tools}/bin" rootlesskit
+printf 'Checking isolated RootlessKit network forwarding before compilation\n'
+python3 "${root}/check-riscv-network-sysctl.py" \
+  --output "${evidence}/network-sysctl.json"
+printf 'native network forwarding ready\n' >"${home}/network-preflight-ready"
+printf 'Isolated network forwarding verified; starting native compilation\n'
+download go "$(field go.url)" "$(field go.sha256)"
+tar --extract --gzip --no-same-owner --file "${tools}/downloads/go.tar.gz" --directory "${tools}"
 export GOTOOLCHAIN=local GOFLAGS='-mod=vendor -trimpath -buildvcs=false -p=2' GOMAXPROCS=2 GOPROXY=off GOSUMDB=off
 [[ $(go version) == 'go version go1.26.8 linux/riscv64' ]]
 [[ $(go env GOHOSTARCH) == riscv64 && $(go env GOARCH) == riscv64 ]]
@@ -88,8 +95,6 @@ done
   build_logged runc make RUNC_BUILDTAGS="$(field build.runcBuildTags)" COMMIT="$(field sources.runc.commit)" GIT_BRANCH=locked-source runc
   install -m 755 runc "${tools}/bin/"
 )
-download rootlesskit "$(field rootlesskit.url)" "$(field rootlesskit.sha256)"
-tar --extract --gzip --no-same-owner --file "${tools}/downloads/rootlesskit.tar.gz" --directory "${tools}/bin" rootlesskit
 printf '%s  %s\n' "$(field probeSourceSha256)" "${root}/riscv-rootless-limit-probe.c" | sha256sum --check --status
 gcc -O2 -static -Wall -Wextra -Werror -o "${home}/limit-probe" "${root}/riscv-rootless-limit-probe.c"
 

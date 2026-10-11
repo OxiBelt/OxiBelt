@@ -31,6 +31,7 @@ FILES = (
     "riscv-native-sandbox-bootstrap.sh", "riscv-native-sandbox-build-tools.sh",
     "riscv-native-tools.lock.json", "check-riscv-native-runner.py",
     "check-riscv-rootless-enforcement.py", "riscv-rootless-limit-probe.c",
+    "check-riscv-network-sysctl.py",
 )
 
 
@@ -61,6 +62,14 @@ def runtime_commit(value) -> str | None:
 
 def load_probe():
     spec = importlib.util.spec_from_file_location("native_prerequisites", HERE / "check-riscv-native-runner.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_network_probe():
+    spec = importlib.util.spec_from_file_location("network_prerequisites", HERE / "check-riscv-network-sysctl.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -197,7 +206,7 @@ class Preflight:
             raise Failure("sandbox-runtime-boundary-mismatch")
         return state
 
-    def verify_running_boundary(self):
+    def verify_running_boundary(self, *, require_network: bool = False):
         state = self.container_state()
         pid = state["State"].get("Pid")
         if type(pid) is not int or pid <= 1 or not self.parent:
@@ -216,14 +225,12 @@ class Preflight:
                                   "--format=%d:%i", f"/proc/1/ns/{namespace}"]).decode().strip()
             if not re.fullmatch(r"[0-9]+:[0-9]+", child) or child == f"{outer.st_dev}:{outer.st_ino}":
                 raise Failure("sandbox-namespace-not-private")
-        mounts = {}
-        for line in self.command(["exec", str(self.container), "cat", "/proc/1/mountinfo"]).decode().splitlines():
-            fields = line.split()
-            if len(fields) >= 6:
-                mounts[fields[4]] = set(fields[5].split(","))
-        if ("ro" not in mounts.get("/sys", set()) or "ro" not in mounts.get("/proc/sys", set())
-            or "rw" not in mounts.get("/sys/fs/cgroup", set())):
-            raise Failure("sandbox-kernel-mount-boundary-mismatch")
+        mounts = self.command(["exec", str(self.container), "cat", "/proc/1/mountinfo"]).decode()
+        network = load_network_probe()
+        try:
+            network.validate_mounts(mounts, require_network=require_network)
+        except ValueError as error:
+            raise Failure("sandbox-kernel-mount-boundary-mismatch") from error
 
     def check_ancestors(self):
         if self.parent and self.baseline is not None and controls(self.parent) != self.baseline:
@@ -255,7 +262,22 @@ class Preflight:
                 raise Failure("inner-evidence-identity-mismatch")
             if data.get("supported") is not True:
                 raise Failure("inner-qualification-failed")
+        if filename == "network-sysctl.json":
+            try:
+                load_network_probe().validate_receipt(data)
+            except ValueError as error:
+                raise Failure("inner-network-qualification-failed") from error
         return data
+
+    def qualify_network(self):
+        self.verify_running_boundary(require_network=True)
+        network = self.copy_json("network-sysctl.json")
+        actual_netns = self.command(["exec", self.container, "stat", "--dereference",
+                                    "--format=%i", "/proc/1/ns/net"]).decode().strip()
+        if (not re.fullmatch(r"[0-9]+", actual_netns)
+            or network["sandbox_netns"] != int(actual_netns)):
+            raise Failure("network-evidence-sandbox-namespace-mismatch")
+        self.receipt["network"] = network
 
     def prepare_image(self, lock: dict) -> str:
         self.receipt["stage"] = "native-image"
@@ -310,6 +332,12 @@ class Preflight:
             state = self.container_state()
             if state["State"].get("Running") is not True:
                 raise Failure("sandbox-bootstrap-exited")
+            if "network" not in self.receipt and self.command([
+                "exec", self.container, "/bin/sh", "-c",
+                "if test -f /home/runner/network-preflight-ready; then printf ready; fi",
+            ]).strip() == b"ready":
+                self.qualify_network()
+                print("Native detached network forwarding verified; tool compilation pending.", flush=True)
             code, _ = execute(["docker", "--host", SOCKET, "exec", self.container, "/bin/sh", "-c",
                                "test ! -f /home/runner/preflight-failed && test -f /home/runner/preflight-ready"], self.env)
             if code == 0:
@@ -454,7 +482,10 @@ class Preflight:
         self.verify_running_boundary()
         self.receipt["stage"] = "sandbox-bootstrap"
         self.wait_ready()
+        self.verify_running_boundary(require_network=True)
         self.check_ancestors()
+        if "network" not in self.receipt:
+            self.qualify_network()
         self.receipt["tools"] = self.copy_json("native-tools.json")
         self.receipt["stage"] = "sandbox-prerequisites"
         self.inner(["python3", "/opt/oxibelt-preflight/check-riscv-native-runner.py", "--phase", "sandbox",
@@ -476,7 +507,8 @@ class Preflight:
         self.owned_container()
         for filename in ("apt-update.log", "apt-bootstrap.log", "apt-install.log", "build-engine.log",
                          "build-cli.log", "build-containerd.log", "build-runc.log", "docker-start.log",
-                         "systemd-build-failure.log", "systemd-docker-failure.log"):
+                         "systemd-build-failure.log", "systemd-docker-failure.log",
+                         "network-mount.log", "network-sysctl.log"):
             try:
                 data = self.command(["exec", self.container, "tail", "-c", "65536", "--",
                                      f"/home/runner/evidence/{filename}"], allow_failure=True)
@@ -484,6 +516,19 @@ class Preflight:
                     os.fchmod(stream.fileno(), 0o600)
                     stream.write(data)
             except (Failure, OSError):
+                pass
+        destination = self.output / "network-sysctl.json"
+        if not destination.exists() and not destination.is_symlink():
+            try:
+                data = self.command(["exec", self.container, "/bin/sh", "-c",
+                                     "if test -f /home/runner/evidence/network-sysctl.json; then "
+                                     "cat /home/runner/evidence/network-sysctl.json; fi"])
+                if data:
+                    if len(data) > 65536:
+                        raise Failure("network-evidence-too-large")
+                    value = mapping(json.loads(data), "invalid-network-evidence")
+                    self.probe.write_evidence(destination, value)
+            except (Failure, OSError, ValueError):
                 pass
         try:
             logs = self.command(["logs", "--tail=150", self.container], allow_failure=True)

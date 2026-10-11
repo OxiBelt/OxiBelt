@@ -47,6 +47,47 @@ class NativeToolReceiptTests(unittest.TestCase):
         self.assertIn('chmod 600 /dev/net/tun', bootstrap)
         self.assertIn("$(stat -c '%t:%T' /dev/net/tun) == a:c8", bootstrap)
 
+    def test_network_mount_is_prepared_before_any_user_namespace(self):
+        bootstrap = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()
+        guard = bootstrap.index('[[ $$ == 1 && $(id -u) == 0 && $(uname -m) == riscv64 ]]')
+        private = bootstrap.index('mount --make-rprivate /')
+        bind = bootstrap.index('mount --bind /proc/sys/net /proc/sys/net')
+        remount = bootstrap.index('mount -o remount,bind,rw,nosuid,nodev,noexec /proc/sys/net')
+        check = bootstrap.index('check-riscv-network-sysctl.py')
+        self.assertLess(guard, private)
+        self.assertLess(private, bind)
+        self.assertLess(bind, remount)
+        self.assertLess(remount, check)
+        self.assertLess(check, bootstrap.index('useradd --uid 1001'))
+
+    def test_failed_network_probe_prevents_go_download_and_compilation(self):
+        start = SCRIPT.index('download rootlesskit ')
+        end = SCRIPT.index('export GOTOOLCHAIN=')
+        preparation = SCRIPT[start:end]
+        for status in ('0', '1'):
+            with self.subTest(status=status):
+                shell = '''set -e
+download() { printf 'download:%s\\n' "$1"; }
+field() { :; }
+tar() { :; }
+python3() { return "${NETWORK_STATUS}"; }
+''' + preparation + '\nprintf compiled'
+                result = subprocess.run(['bash', '-c', shell],
+                                        env={'NETWORK_STATUS': status, 'tools': '/tools',
+                                             'root': '/root', 'evidence': '/evidence',
+                                             'home': str(self.root)},
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, int(status))
+                self.assertIn('download:rootlesskit', result.stdout)
+                if status == '1':
+                    self.assertNotIn('download:go', result.stdout)
+                    self.assertNotIn('compiled', result.stdout)
+                    self.assertFalse((self.root / 'network-preflight-ready').exists())
+                else:
+                    self.assertIn('download:go', result.stdout)
+                    self.assertTrue(result.stdout.endswith('compiled'))
+                    (self.root / 'network-preflight-ready').unlink()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

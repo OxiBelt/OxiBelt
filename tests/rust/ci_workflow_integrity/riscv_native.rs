@@ -88,6 +88,7 @@ fn native_sandbox_lifecycle_regressions_are_ci_gated() {
     "test-riscv-native-sandbox.py",
     "test-run-riscv-native-preflight.py",
     "test-check-riscv-rootless-enforcement.py",
+    "test-check-riscv-network-sysctl.py",
   ] {
     assert!(command.contains(&format!("python3 -m unittest tests/scripts/{script}")));
   }

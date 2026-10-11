@@ -55,6 +55,7 @@ jobs:
           python3 -m unittest tests/scripts/test-riscv-native-sandbox.py
           python3 -m unittest tests/scripts/test-run-riscv-native-preflight.py
           python3 -m unittest tests/scripts/test-check-riscv-rootless-enforcement.py
+          python3 -m unittest tests/scripts/test-check-riscv-network-sysctl.py
 
       - name: Test mock upstream client
         env:

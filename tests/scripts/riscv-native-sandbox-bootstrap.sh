@@ -35,6 +35,8 @@ fi
 [[ -f ${root}/riscv-native-tools.lock.json && -f /usr/share/keyrings/debian-archive-keyring.gpg ]]
 mkdir -p "${evidence}"
 trap 'printf "sandbox bootstrap failed\n" >"${home}/preflight-failed"' ERR
+# Detach propagation before adding any sandbox-local mount exception.
+mount --make-rprivate /
 
 # Freeze all dependency resolution while retaining Debian archive authentication.
 rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*
@@ -75,6 +77,14 @@ for name, version in lock['debian']['packages'].items():
 with open(sys.argv[2], 'w') as out:
     json.dump({'locked': installed, 'inventory': subprocess.check_output(['dpkg-query', '-W', '-f=${Package}=${Version}\n'], text=True).splitlines()}, out, sort_keys=True)
 PY
+# RootlessKit inherits these mounts when it creates its user namespace. Only
+# network sysctls may be writable; their lookups use the caller's network
+# namespace. Keep the enclosing /proc/sys and all Docker masks intact.
+[[ ! -L /proc/sys/net && -d /proc/sys/net ]]
+mount --bind /proc/sys/net /proc/sys/net
+mount -o remount,bind,rw,nosuid,nodev,noexec /proc/sys/net
+python3 "${root}/check-riscv-network-sysctl.py" --check-mounts \
+  >"${evidence}/network-mount.log" 2>&1
 useradd --uid 1001 --create-home --shell /bin/bash runner
 # RootlessKit prepares its private TAP via ip tuntap before slirp4netns opens
 # this node. Create it only in this sandbox's private /dev, with the matching
