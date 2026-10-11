@@ -38,6 +38,53 @@ def receipt():
 
 
 class MountTests(unittest.TestCase):
+    def protect(self, before, after=None, failure=None, wrong_namespace=False, no_remount=False):
+        after = before if after is None else after
+        def read(path, *args):
+            return b"systemd\n" if str(path) == "/proc/1/comm" else next(reads).encode()
+        reads = iter((before, after))
+        def path_stat(path, *args, **kwargs):
+            return mock.Mock(st_ino=2 if wrong_namespace and str(path) == "/proc/self/ns/mnt" else 1)
+        with mock.patch.object(PROBE.os, "getuid", return_value=0), \
+             mock.patch.object(PROBE.os, "geteuid", return_value=0), \
+             mock.patch.object(PROBE.platform, "machine", return_value="riscv64"), \
+             mock.patch.object(PROBE.Path, "is_file", return_value=True), \
+             mock.patch.object(PROBE.Path, "stat", path_stat), \
+             mock.patch.object(PROBE.Path, "resolve", lambda path, **kw: path), \
+             mock.patch.object(PROBE, "read_file", side_effect=read), \
+             mock.patch.object(PROBE.subprocess, "run", side_effect=failure) as run, \
+             mock.patch("builtins.print"):
+            try:
+                PROBE.protect_systemd_mounts()
+            finally:
+                if no_remount:
+                    run.assert_not_called()
+            return run.call_args_list
+
+    def test_restores_only_known_systemd_fusectl_mount(self):
+        fuse = "7 2 0:7 / /sys/fs/fuse/connections rw,nosuid,nodev,noexec - fusectl fusectl rw\n"
+        calls = self.protect(mounts() + fuse, mounts() + fuse.replace("connections rw,", "connections ro,"))
+        self.assertEqual(calls[0].args[0], ["/usr/bin/mount", "-o", "remount,bind,ro,nosuid,nodev,noexec",
+                                          "/sys/fs/fuse/connections"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.protect(mounts()), [])
+
+    def test_systemd_protection_rejects_unknown_or_unrepaired_mounts(self):
+        fuse = "7 2 0:7 / /sys/fs/fuse/connections rw,nosuid,nodev,noexec - fusectl fusectl rw\n"
+        for before in (mounts() + fuse.replace("fusectl", "tmpfs"),
+                       mounts() + fuse.replace("/sys/fs/fuse/connections", "/sys/kernel/debug"),
+                       mounts() + fuse + fuse,
+                       mounts() + fuse + "8 5 0:4 /sys/kernel /proc/sys/kernel rw - proc proc rw\n"):
+            with self.subTest(before=before):
+                with self.assertRaises(PROBE.ProbeError):
+                    self.protect(before, no_remount=True)
+        with self.assertRaisesRegex(PROBE.ProbeError, "writable-noncgroup-sys-mount"):
+            self.protect(mounts() + fuse)
+        with self.assertRaisesRegex(PROBE.ProbeError, "requires-sandbox-systemd"):
+            self.protect(mounts(), wrong_namespace=True, no_remount=True)
+        with self.assertRaises(PROBE.subprocess.CalledProcessError):
+            self.protect(mounts() + fuse, failure=PROBE.subprocess.CalledProcessError(1, "mount"))
+
     def test_strict_positive_and_initial_optional_network(self):
         self.assertTrue(PROBE.validate_mounts(mounts())["network_sysctl_writable"])
         for network in (None, "ro,nosuid,nodev,noexec", "rw,nosuid,nodev,noexec"):

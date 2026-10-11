@@ -48,8 +48,8 @@ def read_file(path: Path, maximum: int = 262144) -> bytes:
         raise ProbeError("input-unavailable") from error
 
 
-def validate_mounts(text: str, require_network: bool = True) -> dict:
-    """Check effective mount options, including hidden writable sysctl submounts."""
+def mount_rows(text: str) -> list:
+    """Parse bounded mount metadata without recording devices or mount sources."""
     if len(text.encode()) > 262144:
         raise ProbeError("mountinfo-too-large")
     mounts = []
@@ -65,6 +65,49 @@ def validate_mounts(text: str, require_network: bool = True) -> dict:
             mounts.append((point, options, details[0]))
         except (ValueError, IndexError) as error:
             raise ProbeError("invalid-mountinfo") from error
+
+    return mounts
+
+
+def protect_systemd_mounts() -> None:
+    """Restore the known systemd fusectl mount's VFS flags before user startup."""
+    if (os.getuid() != 0 or os.geteuid() != 0 or platform.machine() != "riscv64"
+        or not Path("/.dockerenv").is_file()
+        or read_file(Path("/proc/1/comm"), 32).strip() != b"systemd"
+        or Path("/proc/self/ns/mnt").stat().st_ino != Path("/proc/1/ns/mnt").stat().st_ino):
+        raise ProbeError("requires-sandbox-systemd-mount-namespace")
+    text = read_file(Path("/proc/self/mountinfo")).decode()
+    rows = mount_rows(text)
+    targets = []
+    for point, options, filesystem in rows:
+        if point.startswith("/sys/") and "rw" in options and not (
+            point == "/sys/fs/cgroup" or point.startswith("/sys/fs/cgroup/")):
+            print(json.dumps({"mountpoint": point, "options": sorted(options), "filesystem": filesystem}))
+            if (point != "/sys/fs/fuse/connections" or filesystem != "fusectl"
+                or sum(row[0] == point for row in rows) != 1
+                or Path(point).resolve(strict=True) != Path(point)):
+                raise ProbeError("unexpected-writable-systemd-mount")
+            targets.append(point)
+    # Validate every other boundary before any mount mutation. Only this exact
+    # systemd-created fusectl entry can be repaired; unknown mounts fail closed.
+    sanitized = []
+    for line in text.splitlines():
+        fields = line.split()
+        if fields[4] in targets:
+            fields[5] = ",".join("ro" if option == "rw" else option for option in fields[5].split(","))
+            line = " ".join(fields)
+        sanitized.append(line)
+    validate_mounts("\n".join(sanitized))
+    for point in targets:
+        subprocess.run(["/usr/bin/mount", "-o", "remount,bind,ro,nosuid,nodev,noexec", point],
+                       check=True, timeout=10, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    validate_mounts(read_file(Path("/proc/self/mountinfo")).decode())
+
+
+def validate_mounts(text: str, require_network: bool = True) -> dict:
+    """Check effective mount options, including hidden writable sysctl submounts."""
+    mounts = mount_rows(text)
 
     def effective(path):
         candidates = [(len(point), index, row) for index, row in enumerate(mounts)
@@ -447,15 +490,19 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("/home/runner/evidence/network-sysctl.json"))
     parser.add_argument("--check-mounts", action="store_true")
+    parser.add_argument("--protect-systemd-mounts", action="store_true")
     parser.add_argument("--child", type=Path)
     parser.add_argument("--parent-netns", type=int)
     parser.add_argument("--state-device", type=int)
     parser.add_argument("--state-inode", type=int)
     args = parser.parse_args(argv)
-    if args.check_mounts:
+    if args.check_mounts or args.protect_systemd_mounts:
         try:
-            validate_mounts(read_file(Path("/proc/self/mountinfo")).decode())
-        except (ProbeError, UnicodeDecodeError) as error:
+            if args.protect_systemd_mounts:
+                protect_systemd_mounts()
+            else:
+                validate_mounts(read_file(Path("/proc/self/mountinfo")).decode())
+        except (ProbeError, OSError, UnicodeDecodeError, subprocess.SubprocessError) as error:
             print("Network mount guard failed: " + str(error), file=sys.stderr)
             return 1
         return 0

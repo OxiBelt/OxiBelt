@@ -53,12 +53,21 @@ class NativeToolReceiptTests(unittest.TestCase):
         private = bootstrap.index('mount --make-rprivate /')
         bind = bootstrap.index('mount --bind /proc/sys/net /proc/sys/net')
         remount = bootstrap.index('mount -o remount,bind,rw,nosuid,nodev,noexec /proc/sys/net')
-        check = bootstrap.index('check-riscv-network-sysctl.py')
+        check = bootstrap.index('--check-mounts')
         self.assertLess(guard, private)
         self.assertLess(private, bind)
         self.assertLess(bind, remount)
         self.assertLess(remount, check)
         self.assertLess(check, bootstrap.index('useradd --uid 1001'))
+
+    def test_systemd_mount_protection_precedes_runner_startup(self):
+        bootstrap = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()
+        preparation = bootstrap[bootstrap.index('if [[ ${1:-} == --prepare-user'):
+                                bootstrap.index('if [[ ${1:-} == --record-failure')]
+        self.assertLess(preparation.index('--protect-systemd-mounts'),
+                        preparation.index('loginctl enable-linger runner'))
+        self.assertLess(preparation.index('--protect-systemd-mounts'),
+                        preparation.index('systemctl start user@1001.service'))
 
     def test_failed_network_probe_prevents_go_download_and_compilation(self):
         start = SCRIPT.index('download rootlesskit ')

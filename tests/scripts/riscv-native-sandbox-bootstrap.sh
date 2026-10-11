@@ -9,6 +9,10 @@ evidence=${home}/evidence
 
 if [[ ${1:-} == --prepare-user ]]; then
   [[ $(cat /proc/1/comm) == systemd ]]
+  # systemd may add its fusectl API mount after the PID 1 bootstrap guard.
+  # Protect its existing VFS mount before the runner can create user namespaces.
+  python3 "${root}/check-riscv-network-sysctl.py" --protect-systemd-mounts \
+    >>"${evidence}/network-mount.log" 2>&1
   loginctl enable-linger runner
   systemctl start user@1001.service
   exit 0
