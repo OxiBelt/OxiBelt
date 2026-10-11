@@ -212,13 +212,27 @@ class LifecycleTests(unittest.TestCase):
                 return SimpleNamespace(st_dev=1, st_ino=2)
             return real_stat(path, *args, **kwargs)
         for fault, diagnostic in ((None, None), ("cgroup", "sandbox-process-outside-owned-cgroup"),
+                                  ("init", None), ("init-non-systemd", "sandbox-process-outside-owned-cgroup"),
+                                  ("init-child", "sandbox-process-outside-owned-cgroup"),
+                                  ("prefix-sibling", "sandbox-process-outside-owned-cgroup"),
+                                  ("traversal", "sandbox-process-outside-owned-cgroup"),
+                                  ("multiline", "sandbox-process-outside-owned-cgroup"),
+                                  ("other-scope", "sandbox-process-outside-owned-cgroup"),
                                   ("namespace", "sandbox-namespace-not-private"),
                                   ("sys", "sandbox-kernel-mount-boundary-mismatch")):
             def read(path):
                 if str(path) == "/proc/321/cgroup":
-                    return "0::/foreign" if fault == "cgroup" else expected
+                    return {"cgroup": "0::/foreign", "init": expected + "/init.scope",
+                            "init-non-systemd": expected + "/init.scope",
+                            "init-child": expected + "/init.scope/child",
+                            "prefix-sibling": expected + "bad/init.scope",
+                            "traversal": expected + "/../init.scope",
+                            "multiline": expected + "/init.scope\n0::/foreign",
+                            "other-scope": expected + "/other.scope"}.get(fault, expected)
                 return "0::/outer"
             def command(args, **_kwargs):
+                if args[-1] == "/proc/1/comm":
+                    return b"bash" if fault == "init-non-systemd" else b"systemd"
                 if args[2] == "stat":
                     return b"1:2" if fault == "namespace" else b"1:3"
                 return (mounts.replace("/sys ro", "/sys rw") if fault == "sys" else mounts).encode()
@@ -231,6 +245,9 @@ class LifecycleTests(unittest.TestCase):
                         self.preflight.verify_running_boundary()
                 else:
                     self.preflight.verify_running_boundary()
+                    self.assertEqual(self.preflight.receipt["pid1_cgroup"], {
+                        "owned_root": expected[3:],
+                        "path": expected[3:] + ("/init.scope" if fault == "init" else "")})
 
     def test_ready_poll_reports_only_bounded_progress_and_checks_failure(self):
         self.preflight.container = CID

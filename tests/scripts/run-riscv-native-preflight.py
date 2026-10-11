@@ -215,8 +215,18 @@ class Preflight:
         process = Path("/proc") / str(pid)
         group = probe.read(process / "cgroup").strip()
         expected = "0::" + self.parent + "/" + str(self.container)
-        if group != expected or group == probe.read(Path("/proc/self/cgroup")).strip():
+        # Retain only a bounded canonical unified path, without raw proc data.
+        if (len(group) <= 4096 and re.fullmatch(r"0::/[A-Za-z0-9_./-]*", group)
+            and not any(part in (".", "..") for part in group[3:].split("/"))):
+            self.receipt["pid1_cgroup"] = {"owned_root": expected[3:], "path": group[3:]}
+        # Pinned systemd moves PID 1 into its init.scope below the owned root.
+        # Accept only that exact lifecycle transition, never arbitrary children.
+        if group not in (expected, expected + "/init.scope") or group == probe.read(Path("/proc/self/cgroup")).strip():
             raise Failure("sandbox-process-outside-owned-cgroup")
+        if group.endswith("/init.scope"):
+            manager = self.command(["exec", str(self.container), "cat", "/proc/1/comm"]).strip()
+            if manager != b"systemd":
+                raise Failure("sandbox-process-outside-owned-cgroup")
         for namespace in ("pid", "net", "mnt", "cgroup"):
             outer = os.stat(Path("/proc/self/ns") / namespace)
             # /proc/<root-pid>/ns is ptrace-protected from the outer nonroot
