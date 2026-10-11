@@ -243,12 +243,12 @@ def validate_info(info: dict) -> dict:
         security = info["SecurityOptions"]
         if (info["ServerVersion"] != "29.8.0" or info["OSType"] != "linux"
             or info["Architecture"] != "riscv64" or info["CgroupVersion"] != "2"
-            or info["CgroupDriver"] != "systemd" or not isinstance(security, list)
+            or info["CgroupDriver"] != "systemd" or info["Driver"] != "vfs" or not isinstance(security, list)
             or not {"name=rootless", "name=cgroupns", "name=seccomp,profile=builtin"} <= set(security)):
             raise ProbeError("daemon-boundary-mismatch")
     except (KeyError, TypeError) as error:
         raise ProbeError("invalid-daemon-evidence") from error
-    return {**{key: info[key] for key in ("ServerVersion", "OSType", "Architecture", "CgroupVersion", "CgroupDriver")},
+    return {**{key: info[key] for key in ("ServerVersion", "OSType", "Architecture", "CgroupVersion", "CgroupDriver", "Driver")},
             "SecurityOptions": ["name=rootless", "name=cgroupns", "name=seccomp,profile=builtin"]}
 
 

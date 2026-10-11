@@ -133,8 +133,10 @@ with open(sys.argv[3], 'w') as output:
     json.dump(manifest, output, indent=2, sort_keys=True)
     output.write('\n')
 PY
+# The tiny disposable probe uses directory copies instead of nested overlay
+# mounts. Select the classic store explicitly on fresh Docker 29 installations.
 cat >"${home}/.config/docker/daemon.json" <<'EOF'
-{"exec-opts":["native.cgroupdriver=systemd"],"data-root":"/home/runner/.local/share/docker","log-driver":"local","log-opts":{"max-size":"10m","max-file":"2"}}
+{"storage-driver":"vfs","features":{"containerd-snapshotter":false},"exec-opts":["native.cgroupdriver=systemd"],"data-root":"/home/runner/.local/share/docker","log-driver":"local","log-opts":{"max-size":"10m","max-file":"2"}}
 EOF
 cat >"${home}/.config/systemd/user/docker.service" <<'EOF'
 [Unit]
@@ -164,6 +166,7 @@ import json, sys
 info = json.load(open(sys.argv[1]))
 assert info['Architecture'] == 'riscv64'
 assert info['ServerVersion'] == '29.8.0'
+assert info['Driver'] == 'vfs'
 assert info['CgroupVersion'] == '2' and info['CgroupDriver'] == 'systemd'
 assert {'name=rootless', 'name=cgroupns', 'name=seccomp,profile=builtin'}.issubset(info['SecurityOptions'])
 PY

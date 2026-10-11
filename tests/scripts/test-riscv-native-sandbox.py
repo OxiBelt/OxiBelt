@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise native tool receipt failures without a daemon or privileged host work."""
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -18,6 +19,51 @@ MANIFEST_CODE = re.search(r'python3 - "\$\{lock\}" "\$\{tools\}/bin"[^\n]*<<\'PY
 
 
 class NativeToolReceiptTests(unittest.TestCase):
+    def test_daemon_configuration_selects_vfs_and_disables_containerd_snapshotter(self):
+        config = re.search(r'cat >"\$\{home\}/\.config/docker/daemon\.json" <<\'EOF\'\n(.*?)\nEOF',
+                           SCRIPT, re.S)
+        self.assertIsNotNone(config)
+        daemon = json.loads(config.group(1))
+        self.assertEqual(daemon['storage-driver'], 'vfs')
+        self.assertIs(daemon['features']['containerd-snapshotter'], False)
+        self.assertEqual(daemon['exec-opts'], ['native.cgroupdriver=systemd'])
+        self.assertEqual(daemon['data-root'], '/home/runner/.local/share/docker')
+
+    def test_daemon_readiness_requires_vfs_and_preserves_boundary_checks(self):
+        start = SCRIPT.index('python3 - "${evidence}/docker-info.json"')
+        publication = SCRIPT.index('>"${home}/preflight-ready"', start)
+        validator = SCRIPT[start:SCRIPT.index('\n', publication)]
+        info = {'Architecture': 'riscv64', 'ServerVersion': '29.8.0', 'Driver': 'vfs',
+                'CgroupVersion': '2', 'CgroupDriver': 'systemd',
+                'SecurityOptions': ['name=rootless', 'name=cgroupns', 'name=seccomp,profile=builtin']}
+        variants = [('valid', info)]
+        for field, value in [('Driver', None), ('Driver', 'overlayfs'), ('Driver', 'native'),
+                             ('Architecture', 'x86_64'), ('ServerVersion', '28.0.4'),
+                             ('CgroupVersion', '1'), ('CgroupDriver', 'none')]:
+            invalid = copy.deepcopy(info)
+            if value is None:
+                del invalid[field]
+            else:
+                invalid[field] = value
+            variants.append((f'{field}-{value}', invalid))
+        for missing in info['SecurityOptions']:
+            invalid = copy.deepcopy(info)
+            invalid['SecurityOptions'].remove(missing)
+            variants.append((missing, invalid))
+        for index, (name, fixture) in enumerate(variants):
+            with self.subTest(name=name):
+                evidence = self.root / str(index)
+                evidence.mkdir()
+                (evidence / 'docker-info.json').write_text(json.dumps(fixture))
+                result = subprocess.run(['bash', '-c', 'set -e\n' + validator],
+                                        env={'evidence': str(evidence), 'home': str(evidence)},
+                                        capture_output=True, text=True)
+                ready = evidence / 'preflight-ready'
+                self.assertEqual(result.returncode == 0, name == 'valid')
+                self.assertEqual(ready.exists(), name == 'valid')
+                if name == 'valid':
+                    self.assertEqual(ready.read_text(), 'native rootless tools ready\n')
+
     def test_locks_sysctl_provider_and_installs_the_full_package_set(self):
         self.assertEqual(LOCK['debian']['packages']['procps'], '2:4.0.4-9')
         bootstrap = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()

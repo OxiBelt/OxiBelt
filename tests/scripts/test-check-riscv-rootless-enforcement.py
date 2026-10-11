@@ -23,7 +23,8 @@ PROBE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROBE)
 TOKEN = "a" * 32
 INFO = {"ServerVersion": "29.8.0", "OSType": "linux", "Architecture": "riscv64", "CgroupVersion": "2",
-        "CgroupDriver": "systemd", "SecurityOptions": ["name=rootless", "name=cgroupns", "name=seccomp,profile=builtin"]}
+        "CgroupDriver": "systemd", "Driver": "vfs",
+        "SecurityOptions": ["name=rootless", "name=cgroupns", "name=seccomp,profile=builtin"]}
 
 
 def native_static_elf():
@@ -64,6 +65,7 @@ class FakeDocker:
         self.import_overrides = {}
         self.partial_import_failure = False
         self.archive_bytes = None
+        self.info = copy.deepcopy(INFO)
 
     def begin_cleanup(self):
         pass
@@ -79,7 +81,7 @@ class FakeDocker:
     def _call(self, args):
         self.calls.append(args)
         if args[0] == "info":
-            return 0, json.dumps(INFO)
+            return 0, json.dumps(self.info)
         if args[:2] in (["image", "inspect"], ["container", "inspect"]):
             collection = self.images if args[0] == "image" else self.containers
             value = collection.get(args[2])
@@ -215,6 +217,7 @@ class EnforcementTest(unittest.TestCase):
         enforcement = PROBE.Enforcement(docker, TOKEN)
         receipt = self.receipt()
         enforcement.run(receipt)
+        self.assertEqual(receipt["daemon"]["Driver"], "vfs")
         self.assertEqual([row["mode"] for row in receipt["checks"]], ["cpu", "memory", "pids"])
         self.assertEqual(enforcement.cleanup(), [])
         self.assertFalse(docker.containers)
@@ -312,10 +315,35 @@ class EnforcementTest(unittest.TestCase):
 
     def test_rootful_wrong_version_architecture_driver_or_seccomp_are_rejected(self):
         for field, value in (("ServerVersion", "28.0.4"), ("Architecture", "x86_64"),
-                             ("CgroupVersion", "1"), ("CgroupDriver", "none"), ("SecurityOptions", ["name=rootless"])):
+                             ("CgroupVersion", "1"), ("CgroupDriver", "none"),
+                             ("Driver", "overlayfs"), ("Driver", "native"),
+                             ("SecurityOptions", ["name=rootless"]),
+                             ("SecurityOptions", ["name=cgroupns", "name=seccomp,profile=builtin"])):
             with self.subTest(field=field), self.assertRaises(PROBE.ProbeError):
                 PROBE.validate_info({**INFO, field: value})
+        with self.assertRaises(PROBE.ProbeError):
+            PROBE.validate_info({key: value for key, value in INFO.items() if key != "Driver"})
+        self.assertEqual(PROBE.validate_info(INFO)["Driver"], "vfs")
         self.assertNotIn("private=secret", str(PROBE.validate_info({**INFO, "SecurityOptions": INFO["SecurityOptions"] + ["private=secret"]})))
+
+    def test_unqualified_storage_driver_fails_before_image_import(self):
+        variants = [(None, True), ("overlayfs", True), ("native", True), ("overlay2", True),
+                    ("vfs", False), ("overlayfs", False)]
+        for driver, rootless in variants:
+            with self.subTest(driver=driver, rootless=rootless):
+                docker = FakeDocker()
+                if driver is None:
+                    del docker.info["Driver"]
+                else:
+                    docker.info["Driver"] = driver
+                if not rootless:
+                    docker.info["SecurityOptions"].remove("name=rootless")
+                enforcement = PROBE.Enforcement(docker, TOKEN)
+                with self.assertRaises(PROBE.ProbeError):
+                    enforcement.run(self.receipt())
+                self.assertEqual(docker.calls, [["info", "--format", "{{json .}}"]])
+                self.assertEqual(enforcement.cleanup(), [])
+                self.assertFalse(docker.images or docker.containers)
 
     def test_cgroup_effective_values_oom_state_and_positive_counters_are_required(self):
         state = {"Status": "exited", "ExitCode": 0, "OOMKilled": False}
