@@ -3,6 +3,7 @@
 import importlib.util
 import contextlib
 import io
+import hashlib
 import json
 import os
 import tempfile
@@ -119,6 +120,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertNotIn("--privileged", args)
         self.assertNotIn("--pid=host", args)
         self.assertNotIn("--network=host", args)
+        self.assertNotIn("--security-opt=systempaths=unconfined", args)
         self.assertNotIn("--volume", args)
 
     def test_foreign_container_labels_block_cleanup(self):
@@ -205,7 +207,7 @@ class LifecycleTests(unittest.TestCase):
     def test_running_boundary_rejects_foreign_leaf_shared_namespace_and_writable_sys(self):
         self.preflight.container = CID
         expected = "0::" + self.preflight.parent + "/" + CID
-        mounts = "1 0 0:1 / /sys ro - sysfs sysfs ro\n2 0 0:2 / /proc/sys ro - proc proc ro\n3 0 0:3 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
+        mounts = "1 0 0:1 / /sys ro - sysfs sysfs ro\n2 0 0:2 /sys /proc/sys ro - proc proc ro\n3 0 0:3 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
         real_stat = MODULE.os.stat
         def stat(path, *args, **kwargs):
             if str(path).startswith("/proc/self/ns/"):
@@ -302,6 +304,71 @@ class LifecycleTests(unittest.TestCase):
                         self.preflight.qualify_network()
                     self.assertNotIn("network", self.preflight.receipt)
                 boundary.assert_called_once_with(require_network=True)
+
+    def test_early_proc_receipt_is_qualified_once_before_tool_readiness(self):
+        self.preflight.container = CID
+        def qualify():
+            self.preflight.receipt["proc_mount"] = {"supported": True}
+        def command(args, **_kwargs):
+            return b"ready" if "proc-preflight-ready" in args[-1] else b""
+        output = io.StringIO()
+        with mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
+             mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(self.preflight, "qualify_proc", side_effect=qualify) as check, \
+             mock.patch.object(MODULE, "execute", side_effect=[(1, b""), (0, b"")]), \
+             mock.patch.object(MODULE.time, "sleep"), contextlib.redirect_stdout(output):
+            self.preflight.wait_ready()
+        check.assert_called_once_with()
+        self.assertEqual(output.getvalue().count("Native isolated procfs mounting verified"), 1)
+
+    def test_proc_receipt_requires_actual_namespaces_and_staged_sources(self):
+        self.preflight.container = CID
+        native = {"lock_sha256": hashlib.sha256((MODULE.HERE / "riscv-native-tools.lock.json").read_bytes()).hexdigest(),
+                  "probe_sha256": hashlib.sha256((MODULE.HERE / "check-riscv-proc-mount.py").read_bytes()).hexdigest()}
+        for actual, hashes, diagnostic in ((b"123\n", native, None), (b"456\n", native, "namespace-mismatch"),
+                                           (b"invalid", native, "namespace-mismatch"),
+                                           (b"123\n", {**native, "probe_sha256": "0" * 64}, "source-mismatch")):
+            receipt = {"sandbox_pidns": 123, "sandbox_mntns": 123, "native": hashes}
+            self.preflight.receipt.pop("proc_mount", None)
+            with self.subTest(actual=actual, diagnostic=diagnostic), \
+                 mock.patch.object(self.preflight, "verify_running_boundary"), \
+                 mock.patch.object(self.preflight, "copy_json", return_value=receipt), \
+                 mock.patch.object(self.preflight, "command", return_value=actual):
+                if diagnostic:
+                    with self.assertRaisesRegex(MODULE.Failure, diagnostic):
+                        self.preflight.qualify_proc()
+                    self.assertNotIn("proc_mount", self.preflight.receipt)
+                else:
+                    self.preflight.qualify_proc()
+                    self.assertEqual(self.preflight.receipt["proc_mount"], receipt)
+
+    def test_failed_proc_receipt_cannot_qualify_the_sandbox(self):
+        self.preflight.container = CID
+        def copy(_args, **_kwargs):
+            (self.root / "proc-mount.json").write_text(json.dumps({"supported": False}))
+            return b""
+        with mock.patch.object(self.preflight, "command", side_effect=copy):
+            with self.assertRaisesRegex(MODULE.Failure, "inner-proc-mount-qualification-failed"):
+                self.preflight.copy_json("proc-mount.json")
+
+    def test_proc_failure_evidence_is_preserved_before_owned_cleanup(self):
+        self.preflight.container = CID
+        failure = {"supported": False, "diagnostic": "private-proc-mount-denied"}
+        def command(args, **_kwargs):
+            if args[0] == "inspect":
+                return json.dumps([self.state()]).encode()
+            if args[-1] == "/home/runner/evidence/proc-mount.log":
+                return b'{"operation":"mount-proc","errno":1}\n'
+            if args[-1].startswith("if test -f /home/runner/evidence/proc-mount.json"):
+                return json.dumps(failure).encode()
+            return b""
+        with mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(self.preflight, "check_ancestors"):
+            self.preflight.cleanup()
+        self.assertEqual(json.loads((self.root / "proc-mount.json").read_text()), failure)
+        self.assertIn(b'"errno":1', (self.root / "proc-mount.log").read_bytes())
+        self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
     def test_log_and_graceful_stop_failures_still_force_exact_removal(self):
         self.preflight.container = CID
         calls = []

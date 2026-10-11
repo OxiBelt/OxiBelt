@@ -115,6 +115,30 @@ class NativeToolReceiptTests(unittest.TestCase):
         self.assertLess(preparation.index('--protect-systemd-mounts'),
                         preparation.index('systemctl start user@1001.service'))
 
+    def test_proc_helper_is_prepared_before_any_user_namespace(self):
+        bootstrap = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()
+        helper = bootstrap.index('--prepare-proc-mount')
+        self.assertLess(bootstrap.index('mount --make-rprivate /'), helper)
+        self.assertLess(helper, bootstrap.index('useradd --uid 1001'))
+
+    def test_failed_proc_probe_prevents_network_probe_and_compilation(self):
+        start = SCRIPT.index('download rootlesskit ')
+        end = SCRIPT.index('export GOTOOLCHAIN=')
+        shell = '''set -e
+download() { printf 'download:%s\\n' "$1"; }
+field() { :; }
+tar() { :; }
+python3() { printf '%s\\n' "$1"; return 1; }
+''' + SCRIPT[start:end] + '\nprintf compiled'
+        result = subprocess.run(['bash', '-c', shell], env={'tools': '/tools', 'root': '/root',
+                                'evidence': '/evidence', 'home': str(self.root)}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('/root/check-riscv-proc-mount.py', result.stdout)
+        self.assertNotIn('/root/check-riscv-network-sysctl.py', result.stdout)
+        self.assertNotIn('download:go', result.stdout)
+        self.assertNotIn('compiled', result.stdout)
+        self.assertFalse((self.root / 'proc-preflight-ready').exists())
+
     def test_failed_network_probe_prevents_go_download_and_compilation(self):
         start = SCRIPT.index('download rootlesskit ')
         end = SCRIPT.index('export GOTOOLCHAIN=')
@@ -142,6 +166,7 @@ python3() { return "${NETWORK_STATUS}"; }
                     self.assertIn('download:go', result.stdout)
                     self.assertTrue(result.stdout.endswith('compiled'))
                     (self.root / 'network-preflight-ready').unlink()
+                    (self.root / 'proc-preflight-ready').unlink()
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

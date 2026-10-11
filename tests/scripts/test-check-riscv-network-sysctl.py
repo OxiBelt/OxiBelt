@@ -38,6 +38,69 @@ def receipt():
 
 
 class MountTests(unittest.TestCase):
+    def test_full_proc_helper_is_exact_and_does_not_relax_original_mounts(self):
+        helper = ("7 1 0:7 / /opt/oxibelt-preflight/private-proc/proc "
+                  "rw,nosuid,nodev,noexec - proc proc rw\n")
+        self.assertEqual(PROBE.validate_proc_helper(mounts()), None)
+        self.assertEqual(PROBE.validate_proc_helper(mounts() + helper, required=True)["root"], "/")
+        PROBE.validate_mounts(mounts() + helper, require_helper=True)
+        variants = [mounts(), mounts() + helper + helper,
+                    mounts() + helper.replace("7 1 0:7 / ", "7 1 0:7 /sys "),
+                    mounts() + helper.replace("rw,nosuid,nodev,noexec", "rw,nosuid,nodev"),
+                    mounts() + helper.replace("rw,nosuid,nodev,noexec", "ro,nosuid,nodev,noexec"),
+                    mounts() + helper.replace(" - proc proc rw", " - tmpfs tmpfs rw"),
+                    mounts() + helper.replace(" - proc proc rw", " - proc proc ro"),
+                    mounts() + helper.replace(" - proc proc rw", " - proc proc rw,subset=pid"),
+                    mounts() + helper.replace(" - proc proc rw", " - proc proc rw,hidepid=2"),
+                    mounts() + helper.replace(" - proc", " shared:7 - proc"),
+                    mounts() + helper + "8 7 0:8 / /opt/oxibelt-preflight/private-proc/proc/sys ro - tmpfs tmpfs ro\n",
+                    mounts() + helper + "8 1 0:8 / /tmp/alias ro,nosuid,nodev,noexec - proc proc ro\n",
+                    mounts() + helper + "8 4 0:8 / /proc/extra rw,nosuid,nodev,noexec - proc proc rw\n",
+                    mounts().replace("/proc/sys ro,", "/proc/sys rw,") + helper]
+        for text in variants:
+            with self.subTest(text=text), self.assertRaises(PROBE.ProbeError):
+                PROBE.validate_mounts(text, require_helper=True)
+
+    def test_proc_helper_directory_rejects_modes_owners_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "opt" / "oxibelt-preflight"
+            helper = base / "private-proc" / "proc"
+            helper.mkdir(parents=True)
+            base.chmod(0o755)
+            base.parent.chmod(0o755)
+            helper.chmod(0o700)
+            helper.parent.chmod(0o700)
+            real_lstat = Path.lstat
+            def root_stat(path):
+                info = real_lstat(path)
+                return mock.Mock(st_mode=info.st_mode, st_uid=0, st_gid=0)
+            with mock.patch.object(PROBE, "PROC_PARENT", helper.parent), \
+                 mock.patch.object(PROBE, "PROC_HELPER", helper), \
+                 mock.patch.object(PROBE.Path, "lstat", root_stat):
+                PROBE.validate_proc_directories()
+                for mode in (0o755, 0o770, 0o777):
+                    helper.parent.chmod(mode)
+                    with self.subTest(mode=mode), self.assertRaises(PROBE.ProbeError):
+                        PROBE.validate_proc_directories()
+                helper.parent.chmod(0o700)
+                helper.rmdir()
+                helper.symlink_to(base)
+                with self.assertRaises(PROBE.ProbeError):
+                    PROBE.validate_proc_directories()
+            with mock.patch.object(PROBE.Path, "lstat", return_value=mock.Mock(st_mode=stat.S_IFDIR | 0o700, st_uid=1001, st_gid=0)):
+                with self.assertRaises(PROBE.ProbeError):
+                    PROBE.validate_proc_directories()
+
+    def test_proc_mount_creation_rejects_host_and_non_pid_one_before_mutation(self):
+        for uid, pid in ((1001, 1), (0, 42)):
+            with mock.patch.object(PROBE.os, "getuid", return_value=uid), \
+                 mock.patch.object(PROBE.os, "geteuid", return_value=uid), \
+                 mock.patch.object(PROBE.os, "getppid", return_value=pid), \
+                 mock.patch.object(PROBE.subprocess, "run") as run:
+                with self.assertRaisesRegex(PROBE.ProbeError, "requires-sandbox-pid-one"):
+                    PROBE.prepare_proc_mount()
+                run.assert_not_called()
+
     def protect(self, before, after=None, failure=None, wrong_namespace=False, no_remount=False):
         after = before if after is None else after
         def read(path, *args):

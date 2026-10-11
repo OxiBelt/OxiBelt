@@ -21,6 +21,8 @@ from pathlib import Path
 ROOTLESSKIT = "/home/runner/native-tools/bin/rootlesskit"
 LOCK = Path("/opt/oxibelt-preflight/riscv-native-tools.lock.json")
 RUNTIME = Path("/run/user/1001")
+PROC_PARENT = Path("/opt/oxibelt-preflight/private-proc")
+PROC_HELPER = PROC_PARENT / "proc"
 IPV4 = Path("/proc/sys/net/ipv4/ip_forward")
 IPV6 = Path("/proc/sys/net/ipv6/conf/all/forwarding")
 MAX_OUTPUT = 65536
@@ -48,7 +50,7 @@ def read_file(path: Path, maximum: int = 262144) -> bytes:
         raise ProbeError("input-unavailable") from error
 
 
-def mount_rows(text: str) -> list:
+def mount_metadata(text: str) -> list[dict]:
     """Parse bounded mount metadata without recording devices or mount sources."""
     if len(text.encode()) > 262144:
         raise ProbeError("mountinfo-too-large")
@@ -58,15 +60,90 @@ def mount_rows(text: str) -> list:
             left, right = line.split(" - ", 1)
             fields, details = left.split(), right.split()
             point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])
+            root = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[3])
             options = set(fields[5].split(","))
             if (not point.startswith("/") or ".." in Path(point).parts
+                or not root.startswith("/") or ".." in Path(root).parts
                 or len({"rw", "ro"}.intersection(options)) != 1 or len(details) < 3):
                 raise ValueError
-            mounts.append((point, options, details[0]))
+            mounts.append({"point": point, "root": root, "options": options,
+                           "filesystem": details[0], "super_options": set(details[2].split(",")),
+                           "propagation": fields[6:]})
         except (ValueError, IndexError) as error:
             raise ProbeError("invalid-mountinfo") from error
 
     return mounts
+
+
+def mount_rows(text: str) -> list:
+    return [(row["point"], row["options"], row["filesystem"]) for row in mount_metadata(text)]
+
+
+def validate_proc_helper(text: str, *, required: bool = False) -> dict | None:
+    """Allow exactly one full procfs visibility grant outside the protected /proc."""
+    mounts = mount_metadata(text)
+    matches = [row for row in mounts if row["point"] == str(PROC_HELPER)]
+    for row in mounts:
+        point = row["point"]
+        if (point == str(PROC_PARENT) or point.startswith(str(PROC_PARENT) + "/")) and point != str(PROC_HELPER):
+            raise ProbeError("unexpected-proc-helper-submount")
+        if (row["filesystem"] == "proc" and point != "/proc"
+            and (row["root"] == "/" or not point.startswith("/proc/")) and point != str(PROC_HELPER)):
+            raise ProbeError("unexpected-procfs-alias")
+    if not matches and not required:
+        return None
+    if len(matches) != 1:
+        raise ProbeError("proc-helper-missing-or-duplicate")
+    row = matches[0]
+    if (row["root"] != "/" or row["filesystem"] != "proc"
+        or not {"rw", "nosuid", "nodev", "noexec"} <= row["options"]
+        or "rw" not in row["super_options"]
+        or any(option.startswith(("subset=", "hidepid=")) for option in row["super_options"])
+        or any(option.startswith("shared:") for option in row["propagation"])):
+        raise ProbeError("proc-helper-mount-mismatch")
+    return {"mountpoint": str(PROC_HELPER), "root": "/", "filesystem": "proc",
+            "options": sorted(row["options"])}
+
+
+def validate_proc_directories() -> None:
+    for path in (PROC_PARENT.parent, PROC_PARENT.parent.parent, PROC_PARENT, PROC_HELPER):
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or info.st_mode & 0o022 or path.resolve(strict=True) != path):
+            raise ProbeError("unsafe-proc-helper-directory")
+        if path == PROC_PARENT and stat.S_IMODE(info.st_mode) != 0o700:
+            raise ProbeError("unsafe-proc-helper-permissions")
+
+
+def prepare_proc_mount() -> None:
+    """The PID 1 Bash bootstrap creates a sandbox-local visibility grant."""
+    if (os.getuid() != 0 or os.geteuid() != 0 or os.getppid() != 1
+        or platform.machine() != "riscv64" or not Path("/.dockerenv").is_file()
+        or read_file(Path("/proc/1/cmdline"), 256) != b"/bin/bash\0/opt/oxibelt-preflight/riscv-native-sandbox-bootstrap.sh\0"
+        or Path("/proc/self/ns/mnt").stat().st_ino != Path("/proc/1/ns/mnt").stat().st_ino):
+        raise ProbeError("requires-sandbox-pid-one-bootstrap-mount-namespace")
+    before = read_file(Path("/proc/self/mountinfo")).decode()
+    validate_mounts(before)
+    if validate_proc_helper(before) is not None:
+        raise ProbeError("proc-helper-already-mounted")
+    root_rows = [row for row in mount_metadata(before) if row["point"] == "/"]
+    if len(root_rows) != 1 or root_rows[0]["propagation"]:
+        raise ProbeError("requires-private-sandbox-mount-propagation")
+    for parent in (PROC_PARENT.parent.parent, PROC_PARENT.parent):
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or info.st_mode & 0o022 or parent.resolve(strict=True) != parent):
+            raise ProbeError("unsafe-proc-helper-directory")
+    PROC_PARENT.mkdir(mode=0o700)
+    PROC_HELPER.mkdir(mode=0o700)
+    validate_proc_directories()
+    subprocess.run(["/usr/bin/mount", "-t", "proc", "-o", "rw,nosuid,nodev,noexec", "proc", str(PROC_HELPER)],
+                   check=True, timeout=10, stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    after = read_file(Path("/proc/self/mountinfo")).decode()
+    validate_mounts(after, require_helper=True)
+    validate_proc_directories()
+    print(json.dumps(validate_proc_helper(after, required=True), sort_keys=True))
 
 
 def protect_systemd_mounts() -> None:
@@ -105,9 +182,10 @@ def protect_systemd_mounts() -> None:
     validate_mounts(read_file(Path("/proc/self/mountinfo")).decode())
 
 
-def validate_mounts(text: str, require_network: bool = True) -> dict:
+def validate_mounts(text: str, require_network: bool = True, *, require_helper: bool = False) -> dict:
     """Check effective mount options, including hidden writable sysctl submounts."""
     mounts = mount_rows(text)
+    validate_proc_helper(text, required=require_helper)
 
     def effective(path):
         candidates = [(len(point), index, row) for index, row in enumerate(mounts)
@@ -515,14 +593,17 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path, default=Path("/home/runner/evidence/network-sysctl.json"))
     parser.add_argument("--check-mounts", action="store_true")
     parser.add_argument("--protect-systemd-mounts", action="store_true")
+    parser.add_argument("--prepare-proc-mount", action="store_true")
     parser.add_argument("--child", type=Path)
     parser.add_argument("--parent-netns", type=int)
     parser.add_argument("--state-device", type=int)
     parser.add_argument("--state-inode", type=int)
     args = parser.parse_args(argv)
-    if args.check_mounts or args.protect_systemd_mounts:
+    if args.check_mounts or args.protect_systemd_mounts or args.prepare_proc_mount:
         try:
-            if args.protect_systemd_mounts:
+            if args.prepare_proc_mount:
+                prepare_proc_mount()
+            elif args.protect_systemd_mounts:
                 protect_systemd_mounts()
             else:
                 validate_mounts(read_file(Path("/proc/self/mountinfo")).decode())

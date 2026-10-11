@@ -35,11 +35,15 @@ build_logged() {
   "$@" 2>&1 | tail -c 4194304 >"${evidence}/build-${name}.log"
 }
 export PATH="${tools}/go/bin:${tools}/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-for command in ip iptables ip6tables newuidmap newgidmap slirp4netns mount mountpoint nsenter systemctl sysctl; do
+for command in ip iptables ip6tables newuidmap newgidmap slirp4netns mount mountpoint nsenter unshare systemctl sysctl; do
   command -v "${command}" >/dev/null
 done
 download rootlesskit "$(field rootlesskit.url)" "$(field rootlesskit.sha256)"
 tar --extract --gzip --no-same-owner --file "${tools}/downloads/rootlesskit.tar.gz" --directory "${tools}/bin" rootlesskit
+printf 'Checking isolated RootlessKit procfs mounting before compilation\n'
+python3 "${root}/check-riscv-proc-mount.py" \
+  --output "${evidence}/proc-mount.json"
+printf 'native procfs mounting ready\n' >"${home}/proc-preflight-ready"
 printf 'Checking isolated RootlessKit network forwarding before compilation\n'
 python3 "${root}/check-riscv-network-sysctl.py" \
   --output "${evidence}/network-sysctl.json"

@@ -89,6 +89,10 @@ mount --bind /proc/sys/net /proc/sys/net
 mount -o remount,bind,rw,nosuid,nodev,noexec /proc/sys/net
 python3 "${root}/check-riscv-network-sysctl.py" --check-mounts \
   >"${evidence}/network-mount.log" 2>&1
+# A root-only full procfs grant lets nested runc mount its own PID namespace.
+# Keep the original /proc masks and readonly sysctls; no provider mount changes.
+python3 "${root}/check-riscv-network-sysctl.py" --prepare-proc-mount \
+  >>"${evidence}/network-mount.log" 2>&1
 useradd --uid 1001 --create-home --shell /bin/bash runner
 # RootlessKit prepares its private TAP via ip tuntap before slirp4netns opens
 # this node. Create it only in this sandbox's private /dev, with the matching
