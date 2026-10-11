@@ -18,6 +18,24 @@ MANIFEST_CODE = re.search(r'python3 - "\$\{lock\}" "\$\{tools\}/bin"[^\n]*<<\'PY
 
 
 class NativeToolReceiptTests(unittest.TestCase):
+    def test_locks_sysctl_provider_and_installs_the_full_package_set(self):
+        self.assertEqual(LOCK['debian']['packages']['procps'], '2:4.0.4-9')
+        bootstrap = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()
+        count = re.search(r'\[\[ \$\{#packages\[@\]\} == (\d+) \]\]', bootstrap)
+        self.assertEqual(int(count.group(1)), len(LOCK['debian']['packages']))
+
+    def test_missing_sysctl_fails_before_compilation(self):
+        prerequisites = re.search(r'for command in .*?\ndone', SCRIPT, re.S).group(0)
+        self.assertLess(SCRIPT.index(prerequisites), SCRIPT.index('build_logged engine'))
+        for missing, expected in [('', 0), ('sysctl', 1)]:
+            with self.subTest(missing=missing):
+                result = subprocess.run(
+                    ['bash', '-c', 'set -e; command() { [[ "$2" != "${MISSING}" ]]; };\n'
+                     + prerequisites + '\nprintf compiled'],
+                    env={'MISSING': missing}, capture_output=True, text=True)
+                self.assertEqual(result.returncode, expected)
+                self.assertEqual(result.stdout, 'compiled' if expected == 0 else '')
+
     def test_network_device_stays_inside_the_guarded_sandbox(self):
         bootstrap = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()
         guard = bootstrap.index('[[ $$ == 1 && $(id -u) == 0 && $(uname -m) == riscv64 ]]')

@@ -37,7 +37,7 @@ build_logged() {
 download go "$(field go.url)" "$(field go.sha256)"
 tar --extract --gzip --no-same-owner --file "${tools}/downloads/go.tar.gz" --directory "${tools}"
 export PATH="${tools}/go/bin:${tools}/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-for command in ip iptables ip6tables newuidmap newgidmap slirp4netns mount mountpoint nsenter systemctl; do
+for command in ip iptables ip6tables newuidmap newgidmap slirp4netns mount mountpoint nsenter systemctl sysctl; do
   command -v "${command}" >/dev/null
 done
 export GOTOOLCHAIN=local GOFLAGS='-mod=vendor -trimpath -buildvcs=false -p=2' GOMAXPROCS=2 GOPROXY=off GOSUMDB=off

@@ -22,6 +22,7 @@
       "libseccomp-dev": "2.6.0-2",
       "make": "4.4.1-2",
       "pkg-config": "1.8.1-4",
+      "procps": "2:4.0.4-9",
       "python3": "3.13.5-1",
       "slirp4netns": "1.2.1-1.1",
       "systemd": "257.13-1~deb13u1",
