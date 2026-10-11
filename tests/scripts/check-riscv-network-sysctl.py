@@ -193,7 +193,10 @@ def write_forwarding(path: Path, value: int) -> None:
     try:
         fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "wb", buffering=0) as stream:
-            if stream.write(str(value).encode() + b"\n") != 2:
+            # Some IPv6 forwarding handlers return 1 after applying a value.
+            # A single numeric byte avoids treating that as a short write;
+            # toggle still requires readback and verified restoration.
+            if stream.write(str(value).encode()) != 1:
                 raise ProbeError("short-sysctl-write")
     except OSError as error:
         raise ProbeError("sysctl-write-failed") from error
@@ -216,8 +219,10 @@ def toggle(path: Path, evidence: dict, *, optional: bool = False) -> None:
         evidence["readback"] = forwarding(path)
         if evidence["readback"] != 1 - before:
             raise ProbeError("forwarding-readback-mismatch")
-    except ProbeError:
+    except ProbeError as error:
         evidence["status"] = "write-or-readback-failed"
+        if optional:
+            log_sysctl_error("optional-write", error)
         if not optional:
             raise
     else:
@@ -227,19 +232,28 @@ def toggle(path: Path, evidence: dict, *, optional: bool = False) -> None:
         if optional and not wrote:
             try:
                 unchanged = forwarding(path) == before
-            except ProbeError:
-                pass
+            except ProbeError as error:
+                log_sysctl_error("optional-unchanged-read", error)
         if unchanged:
             evidence["status"] = "unavailable"
+            evidence["restored"] = True
             # The optional IPv6 sysctl was never successfully written.
         else:
             try:
                 write_forwarding(path, before)
                 evidence["restored"] = forwarding(path) == before
-            except ProbeError:
+            except ProbeError as error:
+                log_sysctl_error("restore", error)
                 evidence["restored"] = False
             if not evidence["restored"]:
                 raise ProbeError("forwarding-restore-failed")
+
+
+def log_sysctl_error(stage: str, error: ProbeError) -> None:
+    # Fixed diagnostic labels and errno only; never emit input data or paths.
+    cause = error.__cause__
+    print(json.dumps({"sysctl_stage": stage, "diagnostic": str(error),
+                      "errno": cause.errno if isinstance(cause, OSError) else None}), file=sys.stderr)
 
 
 def guarded_state(state: Path, *, child: bool = False, identity: tuple[int, int] | None = None) -> None:
@@ -409,10 +423,20 @@ def parent_probe(receipt: dict, commands: Commands) -> None:
             receipt["cleanup_confirmed"] = commands.cleanup_confirmed
             if state is not None and commands.cleanup_confirmed:
                 receipt["cleanup_confirmed"] = False
-                guarded_state(state)
                 try:
-                    shutil.rmtree(state)
-                    receipt["cleanup_confirmed"] = not state.exists()
+                    # RootlessKit v3.2.0 itself removes its explicit state dir.
+                    # Confirm absence only after the entire group is reaped.
+                    try:
+                        state.lstat()
+                    except FileNotFoundError:
+                        receipt["cleanup_confirmed"] = True
+                    else:
+                        guarded_state(state)
+                        shutil.rmtree(state)
+                        try:
+                            state.lstat()
+                        except FileNotFoundError:
+                            receipt["cleanup_confirmed"] = True
                 except OSError as error:
                     raise ProbeError("state-cleanup-failed") from error
         finally:

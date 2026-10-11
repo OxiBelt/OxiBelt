@@ -150,6 +150,37 @@ class PrerequisiteTests(unittest.TestCase):
 
 
 class ToggleTests(unittest.TestCase):
+    def test_single_digit_write_accepts_ipv6_handlers_returning_one(self):
+        stream = mock.MagicMock()
+        stream.__enter__.return_value = stream
+        stream.fileno.return_value = 10
+        stream.write.side_effect = lambda raw: 1
+        with mock.patch.object(PROBE.os, "open", return_value=10), \
+             mock.patch.object(PROBE.os, "fdopen", return_value=stream):
+            for value in (0, 1):
+                PROBE.write_forwarding(PROBE.IPV6, value)
+        self.assertEqual([call.args[0] for call in stream.write.call_args_list], [b"0", b"1"])
+        state = [0]
+        def apply(raw):
+            state[0] = int(raw)
+            return 1
+        stream.write.reset_mock()
+        stream.write.side_effect = apply
+        evidence = {}
+        with mock.patch.object(PROBE.os, "open", return_value=10), \
+             mock.patch.object(PROBE.os, "fdopen", return_value=stream), \
+             mock.patch.object(PROBE, "forwarding", side_effect=lambda path: state[0]):
+            PROBE.toggle(PROBE.IPV6, evidence, optional=True)
+        self.assertEqual([call.args[0] for call in stream.write.call_args_list], [b"1", b"0"])
+        self.assertEqual(evidence, {"before": 0, "readback": 1, "restored": True, "status": "passed"})
+        self.assertEqual(state[0], 0)
+        stream.write.return_value = 0
+        stream.write.side_effect = None
+        with mock.patch.object(PROBE.os, "open", return_value=10), \
+             mock.patch.object(PROBE.os, "fdopen", return_value=stream):
+            with self.assertRaisesRegex(PROBE.ProbeError, "short-sysctl-write"):
+                PROBE.write_forwarding(PROBE.IPV6, 1)
+
     def test_toggles_opposite_and_restores_for_either_initial_value(self):
         for before in (0, 1):
             evidence = {}
@@ -184,6 +215,10 @@ class ToggleTests(unittest.TestCase):
             PROBE.toggle(PROBE.IPV6, evidence, optional=True)
         self.assertEqual(write.call_count, 1)
         self.assertEqual(evidence["status"], "unavailable")
+        self.assertTrue(evidence["restored"])
+        value = receipt()
+        value["ipv6"] = evidence
+        PROBE.validate_receipt(value)
         evidence = {}
         with mock.patch.object(PROBE, "forwarding", side_effect=[1, 0, 1]), \
              mock.patch.object(PROBE, "write_forwarding") as write:
@@ -259,6 +294,36 @@ class ChildTests(unittest.TestCase):
 
 
 class ProcessTests(unittest.TestCase):
+    def test_rootlesskit_removed_state_is_confirmed_only_after_process_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            commands = mock.Mock(cleanup_confirmed=True)
+            child = {key: value for key, value in receipt().items()
+                     if key not in ("native", "parent_before", "parent_after", "cleanup_confirmed")}
+            def call(arguments):
+                if arguments[1] == "--version":
+                    return 0, "rootlesskit version 3.2.0\n"
+                state = Path(arguments[1].split("=", 1)[1])
+                state.rmdir()
+                return 0, json.dumps(child)
+            commands.call.side_effect = call
+            original_lstat = PROBE.Path.lstat
+            def lstat(path, *args, **kwargs):
+                result = original_lstat(path, *args, **kwargs)
+                return mock.Mock(st_mode=result.st_mode, st_uid=1001,
+                                 st_dev=result.st_dev, st_ino=result.st_ino)
+            value = receipt()
+            with mock.patch.object(PROBE, "RUNTIME", runtime), \
+                 mock.patch.object(PROBE, "prerequisites", return_value=value["native"]), \
+                 mock.patch.object(PROBE, "namespace_id", return_value=101), \
+                 mock.patch.object(PROBE, "forwarding", return_value=0), \
+                 mock.patch.object(PROBE.Path, "lstat", lstat), \
+                 mock.patch.object(PROBE.shutil, "rmtree") as remove:
+                PROBE.parent_probe(value, commands)
+                remove.assert_not_called()
+            PROBE.validate_receipt(value)
+            self.assertEqual(list(runtime.iterdir()), [])
+
     def test_timeout_and_output_limit_kill_and_reap_entire_tree(self):
         scripts = [("command-timeout", "import os,time; print(os.fork(),flush=True); time.sleep(20)", .15),
                    ("command-output-too-large", "import os,time; os.fork(); print('x'*70000,flush=True); time.sleep(20)", 3)]
