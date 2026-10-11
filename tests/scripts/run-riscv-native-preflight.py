@@ -518,7 +518,7 @@ class Preflight:
         for filename in ("apt-update.log", "apt-bootstrap.log", "apt-install.log", "build-engine.log",
                          "build-cli.log", "build-containerd.log", "build-runc.log", "docker-start.log",
                          "systemd-build-failure.log", "systemd-docker-failure.log",
-                         "network-mount.log", "network-sysctl.log"):
+                         "network-mount.log", "network-sysctl.log", "enforcement-docker.log"):
             try:
                 data = self.command(["exec", self.container, "tail", "-c", "65536", "--",
                                      f"/home/runner/evidence/{filename}"], allow_failure=True)

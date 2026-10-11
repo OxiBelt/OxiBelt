@@ -343,6 +343,29 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn(["rm", "--force", CID], calls)
         self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
 
+    def test_enforcement_diagnostics_survive_exact_container_cleanup(self):
+        self.preflight.container = CID
+        diagnostic = b'{"command":"image-import","exit_code":1}\nstderr:\nimport failed\n'
+        calls = []
+        def command(args, **_kwargs):
+            calls.append(args)
+            if args[0] == "inspect":
+                return json.dumps([self.state()]).encode()
+            if args[0] == "exec" and args[-1] == "/home/runner/evidence/enforcement-docker.log":
+                self.assertEqual(args[2:6], ["tail", "-c", "65536", "--"])
+                return diagnostic
+            return b""
+        with mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(self.preflight, "check_ancestors"):
+            self.preflight.cleanup()
+        log = self.root / "enforcement-docker.log"
+        self.assertEqual(log.read_bytes(), diagnostic)
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        capture = next(index for index, args in enumerate(calls)
+                       if args[-1] == "/home/runner/evidence/enforcement-docker.log")
+        self.assertLess(capture, calls.index(["rm", "--force", CID]))
+        self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
     def test_failed_network_receipt_cannot_qualify_the_sandbox(self):
         self.preflight.container = CID
         def copy(_args, **_kwargs):

@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import platform
 import re
 import secrets
 import selectors
-import shutil
 import signal
 import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from pathlib import Path
@@ -127,6 +128,12 @@ def prerequisites() -> dict:
 class Docker:
     def __init__(self, config: Path):
         self.deadline = time.monotonic() + 420
+        self.operation = "initialization"
+        self.first_failure = None
+        self.failure_log = b""
+        self.last_result = None
+        self.stdout = bytearray()
+        self.stderr = bytearray()
         self.env = {"HOME": "/home/runner", "USER": "runner", "LOGNAME": "runner",
                     "PATH": "/home/runner/native-tools/bin:/usr/bin:/bin", "LC_ALL": "C",
                     "XDG_RUNTIME_DIR": "/run/user/1001", "DOCKER_CONFIG": str(config)}
@@ -135,14 +142,21 @@ class Docker:
         self.deadline = time.monotonic() + 60
 
     def call(self, arguments: list[str]) -> tuple[int, str]:
+        command = "-".join(arguments[:2]) if arguments[0] in {"image", "container"} else arguments[0]
+        if command not in {"info", "image-import", "image-inspect", "image-ls", "image-rm",
+                           "container-inspect", "container-ls", "create", "start", "wait", "logs", "rm"}:
+            raise ProbeError("unsupported-docker-command")
+        self.stdout, self.stderr = bytearray(), bytearray()
+        self.last_result = {"operation": self.operation, "command": command, "exit_code": None}
         if time.monotonic() >= self.deadline:
+            self.remember_failure("docker-phase-timeout")
             raise ProbeError("docker-phase-timeout")
         try:
             process = subprocess.Popen([DOCKER, "--host", SOCKET, *arguments], env=self.env,
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         except OSError as error:
+            self.remember_failure("docker-command-unavailable")
             raise ProbeError("docker-command-unavailable") from error
-        stdout = bytearray()
         total = 0
         deadline = min(time.monotonic() + COMMAND_TIMEOUT, self.deadline)
         try:
@@ -159,19 +173,23 @@ class Docker:
                         if not raw:
                             selector.unregister(key.fileobj)
                             continue
+                        target = self.stdout if key.data else self.stderr
+                        target.extend(raw[:MAX_OUTPUT - total])
                         total += len(raw)
                         if total > MAX_OUTPUT:
                             raise ProbeError("docker-command-output-too-large")
-                        if key.data:
-                            stdout.extend(raw)
             try:
                 code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
             except subprocess.TimeoutExpired as error:
                 raise ProbeError("docker-command-timeout") from error
             try:
-                return code, stdout.decode("utf-8")
+                self.last_result["exit_code"] = code
+                return code, self.stdout.decode("utf-8")
             except UnicodeDecodeError as error:
                 raise ProbeError("invalid-docker-output") from error
+        except ProbeError as error:
+            self.remember_failure(str(error))
+            raise
         finally:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -186,8 +204,38 @@ class Docker:
     def checked(self, arguments: list[str]) -> str:
         code, output = self.call(arguments)
         if code:
+            self.remember_failure("docker-command-failed")
             raise ProbeError("docker-command-failed")
         return output
+
+    def remember_failure(self, diagnostic: str) -> None:
+        if self.first_failure is None:
+            self.first_failure = {**self.last_result, "diagnostic": diagnostic}
+            header = (json.dumps(self.first_failure, sort_keys=True) + "\nstderr:\n").encode()
+            self.failure_log = (header + self.stderr + b"\nstdout:\n" + self.stdout)[:MAX_OUTPUT]
+
+
+def create_probe_archive(output: Path, expected_digest: str) -> str:
+    """Package only a freshly verified static native executable, without a builder."""
+    raw = read_file(PROBE_BINARY, 64 * 1024 * 1024)
+    native_elf(raw, static=True)
+    if (not isinstance(expected_digest, str) or not DIGEST.fullmatch(expected_digest)
+        or hashlib.sha256(raw).hexdigest() != expected_digest):
+        raise ProbeError("probe-archive-binary-digest-mismatch")
+    try:
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            with tarfile.open(fileobj=stream, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+                member = tarfile.TarInfo("limit-probe")
+                member.type = tarfile.REGTYPE
+                member.size = len(raw)
+                member.mode = 0o755
+                member.uid = member.gid = member.mtime = 0
+                member.uname = member.gname = ""
+                archive.addfile(member, io.BytesIO(raw))
+        return hashlib.sha256(read_file(output, 64 * 1024 * 1024 + 10240)).hexdigest()
+    except (OSError, tarfile.TarError) as error:
+        raise ProbeError("probe-archive-creation-failed") from error
 
 
 def validate_info(info: dict) -> dict:
@@ -269,26 +317,48 @@ class Enforcement:
             raise ProbeError("resource-ownership-mismatch")
         return value
 
+    def stage(self, receipt: dict, name: str) -> None:
+        receipt["stage"] = name
+        self.docker.operation = name
+
     def run(self, receipt: dict) -> None:
+        self.stage(receipt, "daemon-info")
         receipt["daemon"] = validate_info(parse_json(self.docker.checked(["info", "--format", "{{json .}}"])))
         # Random tag must be absent before setting ownership; never overwrite.
+        self.stage(receipt, "image-precheck")
         if self.owned(self.image, image=True) is not None:
             raise ProbeError("probe-image-already-exists")
-        self.image_created = True
+        self.stage(receipt, "image-archive")
+        try:
+            expected_digest = receipt["bootstrap"]["binaries"]["limit-probe"]
+        except (KeyError, TypeError) as error:
+            raise ProbeError("invalid-bootstrap-evidence") from error
         with tempfile.TemporaryDirectory(prefix="oxibelt-limit-image-") as directory:
-            root = Path(directory)
-            shutil.copyfile(PROBE_BINARY, root / "limit-probe")
-            (root / "limit-probe").chmod(0o755)
-            (root / "Dockerfile").write_text('FROM scratch\nCOPY limit-probe /limit-probe\nUSER 1001:1001\nENTRYPOINT ["/limit-probe"]\n')
-            self.docker.checked(["build", "--network=none", "--no-cache", "--label", LABEL + "=" + self.token,
-                                 "--tag", self.image, str(root)])
+            archive = Path(directory) / "probe-rootfs.tar"
+            receipt["rootfs_sha256"] = create_probe_archive(archive, expected_digest)
+            self.stage(receipt, "image-import")
+            self.image_created = True
+            imported = self.docker.checked([
+                "image", "import", "--platform=linux/riscv64", "--change", "LABEL " + LABEL + "=" + self.token,
+                "--change", "USER 1001:1001", "--change", 'ENTRYPOINT ["/limit-probe"]',
+                str(archive), self.image]).strip()
+            if not IMAGE_ID.fullmatch(imported):
+                raise ProbeError("invalid-imported-image-id")
+        self.stage(receipt, "image-verify")
         image = self.owned(self.image, image=True)
         if image is None:
             raise ProbeError("probe-image-missing")
+        if image["Id"] != imported:
+            raise ProbeError("imported-image-identity-mismatch")
+        if (image.get("Os") != "linux" or image.get("Architecture") != "riscv64"
+            or image["Config"].get("User") != "1001:1001"
+            or image["Config"].get("Entrypoint") != ["/limit-probe"]):
+            raise ProbeError("probe-image-configuration-mismatch")
         receipt["image_id"] = image["Id"]
         for mode in ("cpu", "memory", "pids"):
             name = "oxibelt-limit-" + mode + "-" + self.token
             self.names.append(name)
+            self.stage(receipt, mode + "-create")
             identifier = self.docker.checked([
                 "create", "--name", name, "--label", LABEL + "=" + self.token, "--pull=never",
                 "--platform=linux/riscv64", "--cgroupns=private", "--network=none", "--read-only",
@@ -296,20 +366,29 @@ class Enforcement:
                 "--memory=64m", "--memory-swap=64m", "--pids-limit=32", image["Id"], mode]).strip()
             if not CONTAINER_ID.fullmatch(identifier):
                 raise ProbeError("invalid-created-container-id")
+            self.stage(receipt, mode + "-inspect")
             owned = self.owned(name)
             if owned is None or owned["Id"] != identifier:
                 raise ProbeError("created-container-identity-mismatch")
+            self.stage(receipt, mode + "-start")
             self.docker.checked(["start", identifier])
+            self.stage(receipt, mode + "-wait")
             self.docker.checked(["wait", identifier])
+            self.stage(receipt, mode + "-inspect")
             owned = self.owned(name)
             if owned is None or owned["Id"] != identifier:
                 raise ProbeError("finished-container-identity-mismatch")
-            evidence = validate_mode(mode, self.docker.checked(["logs", identifier]), owned.get("State", {}))
+            self.stage(receipt, mode + "-logs")
+            logs = self.docker.checked(["logs", identifier])
+            self.stage(receipt, mode + "-verify")
+            evidence = validate_mode(mode, logs, owned.get("State", {}))
             receipt["checks"].append({"mode": mode, "container_id": identifier, "passed": True, **evidence})
+        self.stage(receipt, "enforcement-complete")
 
     def cleanup(self) -> list[str]:
         self.docker.begin_cleanup()
         failures = []
+        self.docker.operation = "cleanup-container"
         for name in reversed(self.names):
             try:
                 owned = self.owned(name)
@@ -320,6 +399,7 @@ class Enforcement:
             except ProbeError:
                 failures.append("container-cleanup-failed")
         if self.image_created:
+            self.docker.operation = "cleanup-image"
             try:
                 owned = self.owned(self.image, image=True)
                 if owned is not None:
@@ -348,6 +428,20 @@ def write_evidence(output: Path, receipt: dict) -> None:
         raise ProbeError("cannot-create-new-evidence-file") from error
 
 
+def write_diagnostics(output: Path, raw: bytes) -> None:
+    absolute = output.absolute()
+    try:
+        if ".." in absolute.parts or absolute.parent.resolve(strict=True) != absolute.parent:
+            raise ProbeError("output-parent-must-not-contain-symlinks")
+        if len(raw) > MAX_OUTPUT:
+            raise ProbeError("diagnostics-too-large")
+        fd = os.open(absolute, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+    except OSError as error:
+        raise ProbeError("cannot-create-new-diagnostics-file") from error
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
@@ -357,12 +451,20 @@ def main(argv=None) -> int:
                "identity": {key: value for key, pattern in IDENTITY.items()
                             if (value := os.environ.get(key, "")) and len(value) <= 256 and re.fullmatch(pattern, value)}}
     enforcement = None
+    docker = None
     try:
         receipt["bootstrap"] = prerequisites()
         with tempfile.TemporaryDirectory(prefix="oxibelt-limit-docker-config-") as config:
-            enforcement = Enforcement(Docker(Path(config)))
+            docker = Docker(Path(config))
+            enforcement = Enforcement(docker)
             try:
                 enforcement.run(receipt)
+            except ProbeError as error:
+                # Preserve successful CLI output rejected by semantic checks,
+                # before cleanup replaces the last command's buffers.
+                if docker.last_result is not None and receipt.get("stage") != "image-archive":
+                    docker.remember_failure(str(error))
+                raise
             finally:
                 failures = enforcement.cleanup()
                 receipt["cleanup_confirmed"] = not failures
@@ -371,8 +473,11 @@ def main(argv=None) -> int:
             receipt["supported"] = receipt["cleanup_confirmed"] and len(receipt["checks"]) == 3
     except ProbeError as error:
         receipt["failure"] = str(error)
+    if docker is not None and docker.first_failure is not None:
+        receipt["docker_failure"] = docker.first_failure
     try:
         write_evidence(args.output, receipt)
+        write_diagnostics(args.output.parent / "enforcement-docker.log", docker.failure_log if docker is not None else b"")
     except ProbeError as error:
         print("Cannot preserve enforcement receipt: " + str(error), file=sys.stderr)
         return 2
