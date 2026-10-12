@@ -1,0 +1,191 @@
+{
+  "errors": {},
+  "ip": {
+    "address": [
+      {
+        "addr_info": [],
+        "address": "00:00:00:00:00:00",
+        "broadcast": "00:00:00:00:00:00",
+        "flags": [
+          "LOOPBACK"
+        ],
+        "group": "default",
+        "ifindex": 1,
+        "ifname": "lo",
+        "link_type": "loopback",
+        "mtu": 65536,
+        "operstate": "DOWN",
+        "qdisc": "noop",
+        "txqlen": 1000
+      },
+      {
+        "addr_info": [],
+        "address": "0.0.0.0",
+        "broadcast": "0.0.0.0",
+        "flags": [
+          "NOARP"
+        ],
+        "group": "default",
+        "ifindex": 2,
+        "ifname": "ip_vti0",
+        "link": null,
+        "link_type": "ipip",
+        "mtu": 1480,
+        "operstate": "DOWN",
+        "qdisc": "noop",
+        "txqlen": 1000
+      },
+      {
+        "addr_info": [],
+        "address": "0.0.0.0",
+        "broadcast": "0.0.0.0",
+        "flags": [
+          "NOARP"
+        ],
+        "group": "default",
+        "ifindex": 3,
+        "ifname": "sit0",
+        "link": null,
+        "link_type": "sit",
+        "mtu": 1480,
+        "operstate": "DOWN",
+        "qdisc": "noop",
+        "txqlen": 1000
+      }
+    ],
+    "link": [
+      {
+        "address": "00:00:00:00:00:00",
+        "broadcast": "00:00:00:00:00:00",
+        "flags": [
+          "LOOPBACK"
+        ],
+        "group": "default",
+        "gso_max_segs": 65535,
+        "gso_max_size": 65536,
+        "ifindex": 1,
+        "ifname": "lo",
+        "link_type": "loopback",
+        "linkmode": "DEFAULT",
+        "max_mtu": 0,
+        "min_mtu": 0,
+        "mtu": 65536,
+        "num_rx_queues": 1,
+        "num_tx_queues": 1,
+        "operstate": "DOWN",
+        "promiscuity": 0,
+        "qdisc": "noop",
+        "txqlen": 1000
+      },
+      {
+        "address": "0.0.0.0",
+        "broadcast": "0.0.0.0",
+        "flags": [
+          "NOARP"
+        ],
+        "group": "default",
+        "gso_max_segs": 65535,
+        "gso_max_size": 65536,
+        "ifindex": 2,
+        "ifname": "ip_vti0",
+        "link": null,
+        "link_type": "ipip",
+        "linkinfo": {
+          "info_data": {
+            "local": "any",
+            "remote": "any"
+          },
+          "info_kind": "vti"
+        },
+        "linkmode": "DEFAULT",
+        "max_mtu": 0,
+        "min_mtu": 0,
+        "mtu": 1480,
+        "num_rx_queues": 1,
+        "num_tx_queues": 1,
+        "operstate": "DOWN",
+        "promiscuity": 0,
+        "qdisc": "noop",
+        "txqlen": 1000
+      },
+      {
+        "address": "0.0.0.0",
+        "broadcast": "0.0.0.0",
+        "flags": [
+          "NOARP"
+        ],
+        "group": "default",
+        "gso_max_segs": 65535,
+        "gso_max_size": 65536,
+        "ifindex": 3,
+        "ifname": "sit0",
+        "link": null,
+        "link_type": "sit",
+        "linkinfo": {
+          "info_data": {
+            "local": "any",
+            "pmtudisc": false,
+            "proto": "ip6ip",
+            "remote": "any",
+            "ttl": 64
+          },
+          "info_kind": "sit"
+        },
+        "linkmode": "DEFAULT",
+        "max_mtu": 65555,
+        "min_mtu": 1280,
+        "mtu": 1480,
+        "num_rx_queues": 1,
+        "num_tx_queues": 1,
+        "operstate": "DOWN",
+        "promiscuity": 0,
+        "qdisc": "noop",
+        "txqlen": 1000
+      }
+    ],
+    "route4": [],
+    "route6": []
+  },
+  "schema_version": 1,
+  "socket_interfaces": [
+    {
+      "index": 1,
+      "name": "lo"
+    },
+    {
+      "index": 2,
+      "name": "ip_vti0"
+    },
+    {
+      "index": 3,
+      "name": "sit0"
+    }
+  ],
+  "sys_interfaces": {
+    "interfaces": [
+      {
+        "flags": 128,
+        "index": 2,
+        "name": "ip_vti0",
+        "type": 768
+      },
+      {
+        "flags": 8,
+        "index": 1,
+        "name": "lo",
+        "type": 772
+      },
+      {
+        "flags": 128,
+        "index": 3,
+        "name": "sit0",
+        "type": 776
+      }
+    ],
+    "names": [
+      "ip_vti0",
+      "lo",
+      "sit0"
+    ]
+  }
+}

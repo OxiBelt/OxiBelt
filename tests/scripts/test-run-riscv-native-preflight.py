@@ -539,25 +539,26 @@ class LifecycleTests(unittest.TestCase):
                     self.preflight.qualify_sys()
                     self.assertEqual(self.preflight.receipt["sys_mount"], receipt)
 
-    def test_v2_sys_receipt_requires_staged_network_observer_hash(self):
+    def test_v2_and_v3_sys_receipts_require_staged_network_observer_hash(self):
         self.preflight.container = CID
         native = {"lock_sha256": hashlib.sha256((MODULE.HERE / "riscv-native-tools.lock.json").read_bytes()).hexdigest(),
                   "probe_sha256": hashlib.sha256((MODULE.HERE / "check-riscv-sys-mount.py").read_bytes()).hexdigest(),
                   "observer_sha256": hashlib.sha256((MODULE.HERE / "riscv-network-observation.py").read_bytes()).hexdigest()}
-        for digest in (native["observer_sha256"], "0" * 64):
-            receipt = {"schema_version": 2, "sandbox_pidns": 123, "sandbox_mntns": 123, "sandbox_netns": 123,
-                       "native": {**native, "observer_sha256": digest}}
-            self.preflight.receipt.pop("sys_mount", None)
-            with self.subTest(digest=digest), mock.patch.object(self.preflight, "verify_running_boundary"), \
-                 mock.patch.object(self.preflight, "copy_json", return_value=receipt), \
-                 mock.patch.object(self.preflight, "command", return_value=b"123\n"):
-                if digest == "0" * 64:
-                    with self.assertRaisesRegex(MODULE.Failure, "sys-evidence-source-mismatch"):
+        for version in (2, 3):
+            for digest in (native["observer_sha256"], "0" * 64):
+                receipt = {"schema_version": version, "sandbox_pidns": 123, "sandbox_mntns": 123, "sandbox_netns": 123,
+                           "native": {**native, "observer_sha256": digest}}
+                self.preflight.receipt.pop("sys_mount", None)
+                with self.subTest(version=version, digest=digest), mock.patch.object(self.preflight, "verify_running_boundary"), \
+                     mock.patch.object(self.preflight, "copy_json", return_value=receipt), \
+                     mock.patch.object(self.preflight, "command", return_value=b"123\n"):
+                    if digest == "0" * 64:
+                        with self.assertRaisesRegex(MODULE.Failure, "sys-evidence-source-mismatch"):
+                            self.preflight.qualify_sys()
+                        self.assertNotIn("sys_mount", self.preflight.receipt)
+                    else:
                         self.preflight.qualify_sys()
-                    self.assertNotIn("sys_mount", self.preflight.receipt)
-                else:
-                    self.preflight.qualify_sys()
-                    self.assertEqual(self.preflight.receipt["sys_mount"], receipt)
+                        self.assertEqual(self.preflight.receipt["sys_mount"], receipt)
 
     def test_failed_sys_receipt_cannot_qualify_the_sandbox(self):
         self.preflight.container = CID

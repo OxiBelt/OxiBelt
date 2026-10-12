@@ -22,6 +22,7 @@ IDENTITY = {"GITHUB_REPOSITORY": "example/OxiBelt", "GITHUB_SHA": "a" * 40,
 PARENTS, ENTERED = (101, 202, 303), (101, 404, 505)
 BASE = "1 0 0:1 / / rw - overlay overlay rw\n"
 PIN = "3 1 0:3 net:[505] /run/user/1001/oxibelt-network-test/netns rw - nsfs nsfs rw\n"
+NATIVE_OBSERVATION = json.loads(Path(__file__).with_name("fixtures").joinpath("riscv-network-defaults-rv5.10.json").read_text())
 
 
 def mountinfo(target, root="/", flags="ro,nosuid,nodev,noexec", fs="sysfs", propagation="", super_flags="rw"):
@@ -30,6 +31,14 @@ def mountinfo(target, root="/", flags="ro,nosuid,nodev,noexec", fs="sysfs", prop
 
 
 def observation(names=((1, "lo"),)):
+    if names == ((1, "lo"),):
+        value = json.loads(json.dumps(NATIVE_OBSERVATION))
+        value["socket_interfaces"] = [{"index": 1, "name": "lo"}]
+        value["sys_interfaces"]["names"] = ["lo"]
+        value["sys_interfaces"]["interfaces"] = [item for item in value["sys_interfaces"]["interfaces"] if item["name"] == "lo"]
+        for view in ("link", "address"):
+            value["ip"][view] = [item for item in value["ip"][view] if item["ifname"] == "lo"]
+        return value
     return {"schema_version": 1,
             "socket_interfaces": [{"index": index, "name": name} for index, name in names],
             "sys_interfaces": {"names": sorted(name for _, name in names),
@@ -41,32 +50,35 @@ def observation(names=((1, "lo"),)):
                    "route4": [], "route6": []}, "errors": {}}
 
 
-def child():
+def child(version=3):
     value = PROBE.child_receipt()
     value.update(supported=True, diagnostic="passed", pidns=606, mntns=707, netns=808,
                  entered_pidns=ENTERED[0], entered_mntns=ENTERED[1], detached_netns=ENTERED[2],
                  mount_id=2, readonly_errno=30, interfaces=[{"index": 1, "name": "lo"}],
                  network_observation=observation(),
                  **{key: True for key in PROBE.BOOLEAN_FIELDS})
+    value["schema_version"] = version
+    if version == 1:
+        del value["network_observation"]
     return value
 
 
-def receipt():
+def receipt(version=3):
     value = PROBE.parent_receipt()
     value.update(supported=True, diagnostic="passed", identity=dict(IDENTITY),
                  native={**PROBE.NATIVE_FIELDS, **{key: "b" * 64 for key in PROBE.HASH_FIELDS}},
                  kernel_release="6.12.42-provider", sandbox_pidns=101, sandbox_mntns=202, sandbox_netns=303,
-                 child=child(), parent_mounts_sha256="c" * 64, parent_mounts_unchanged=True,
+                 child=child(version), parent_mounts_sha256="c" * 64, parent_mounts_unchanged=True,
                  helper_inaccessible=True, cleanup_confirmed=True)
+    value["schema_version"] = version
+    if version == 1:
+        del value["native"]["observer_sha256"]
     return value
 
 
 class ReceiptTests(unittest.TestCase):
     def test_legacy_v1_keeps_exact_fields_hashes_and_loopback_contract(self):
-        value = receipt()
-        value["schema_version"] = value["child"]["schema_version"] = 1
-        del value["child"]["network_observation"]
-        del value["native"]["observer_sha256"]
+        value = receipt(1)
         hashes = {key: value["native"][key] for key in PROBE.V1_HASH_FIELDS}
         self.assertIs(PROBE.validate_receipt(value, IDENTITY, hashes), value)
         for mutate in (lambda v: v["native"].update(observer_sha256="b" * 64),
@@ -81,16 +93,14 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNot(PROBE.V1_HASH_FIELDS, PROBE.PROC.HASH_FIELDS)
 
     def test_parent_and_child_schema_versions_cannot_mix(self):
-        for version in (1, 2):
-            value = receipt()
-            if version == 1:
-                value["schema_version"] = 1
-                del value["native"]["observer_sha256"]
-            else:
-                value["child"]["schema_version"] = 1
-                del value["child"]["network_observation"]
-            with self.assertRaises(PROBE.ProbeError):
-                PROBE.validate_receipt(value)
+        for parent_version in (1, 2, 3):
+            for child_version in (1, 2, 3):
+                if parent_version == child_version:
+                    continue
+                value = receipt(parent_version)
+                value["child"] = child(child_version)
+                with self.subTest(parent=parent_version, child=child_version), self.assertRaises(PROBE.ProbeError):
+                    PROBE.validate_receipt(value)
 
     def test_v2_network_observation_must_be_complete_and_match_to_pass(self):
         for change in (lambda v: v.update(network_observation=PROBE.OBSERVER.empty()),
@@ -99,10 +109,65 @@ class ReceiptTests(unittest.TestCase):
                        lambda v: v["network_observation"].update(errors={"route6": "network-observation-timeout"}),
                        lambda v: v["network_observation"]["ip"]["link"][0].update(ifindex=2),
                        lambda v: v.update(network_observation=observation(((1, "lo"), (2, "gre0"))))):
-            value = receipt()
+            value = receipt(2)
             change(value["child"])
             with self.assertRaises(PROBE.ProbeError):
                 PROBE.validate_receipt(value)
+
+    def test_legacy_schemas_reject_the_observed_additional_defaults(self):
+        interfaces = [{"index": 1, "name": "lo"}, {"index": 2, "name": "ip_vti0"}, {"index": 3, "name": "sit0"}]
+        for version in (1, 2):
+            value = receipt(version)
+            value["child"]["interfaces"] = interfaces
+            if version == 2:
+                value["child"]["network_observation"] = json.loads(json.dumps(NATIVE_OBSERVATION))
+            with self.subTest(version=version), self.assertRaisesRegex(PROBE.ProbeError, "success-evidence"):
+                PROBE.validate_receipt(value)
+
+    def native_receipt(self):
+        value = receipt()
+        value["child"]["network_observation"] = json.loads(json.dumps(NATIVE_OBSERVATION))
+        value["child"]["interfaces"] = [{"index": 1, "name": "lo"}, {"index": 2, "name": "ip_vti0"},
+                                         {"index": 3, "name": "sit0"}]
+        return value
+
+    def test_v3_reclassifies_complete_native_observation_before_success(self):
+        value = self.native_receipt()
+        hashes = {key: value["native"][key] for key in PROBE.HASH_FIELDS}
+        with mock.patch.object(PROBE.OBSERVER, "network_none_interfaces",
+                               wraps=PROBE.OBSERVER.network_none_interfaces) as classified:
+            self.assertIs(PROBE.validate_receipt(value, IDENTITY, hashes), value)
+        classified.assert_called_once_with(value["child"]["network_observation"])
+        self.assertEqual(value["schema_version"], 3)
+        self.assertEqual(PROBE.child_receipt()["schema_version"], 3)
+
+    def test_v3_does_not_trust_supported_or_interface_facts(self):
+        mutations = [lambda v: v.update(interfaces=[{"index": 1, "name": "lo"}]),
+                     lambda v: v["network_observation"]["ip"].update(route4=[{"dev": "ip_vti0", "dst": "default"}]),
+                     lambda v: v["network_observation"]["ip"].update(route6=[{"dev": "sit0", "dst": "default"}]),
+                     lambda v: v["network_observation"]["ip"]["link"][1]["linkinfo"]["info_data"].update(remote="192.0.2.1"),
+                     lambda v: v["network_observation"]["ip"]["link"][2]["linkinfo"]["info_data"].update(ttl=63),
+                     lambda v: v["network_observation"]["ip"]["link"][1]["linkinfo"]["info_data"].update(fwmark="0x1"),
+                     lambda v: v["network_observation"]["ip"]["link"][1].update(master="bridge0"),
+                     lambda v: v["network_observation"]["ip"]["link"][2].update(flags=["NOARP", "UP"]),
+                     lambda v: v["network_observation"]["ip"]["address"][1].update(addr_info=[{"family": "inet", "local": "192.0.2.1"}]),
+                     lambda v: v["network_observation"]["sys_interfaces"]["interfaces"][0].update(flags=129),
+                     lambda v: v["network_observation"]["ip"].update(route6=None),
+                     lambda v: v["network_observation"].update(errors={"route6": "network-observation-timeout"})]
+        for number, change in enumerate(mutations):
+            value = self.native_receipt()
+            change(value["child"])
+            with self.subTest(mutation=number), self.assertRaises(PROBE.ProbeError):
+                PROBE.validate_receipt(value)
+
+    def test_v3_observer_hash_is_required_and_bound_to_expected_source(self):
+        for change in (lambda v: v["native"].pop("observer_sha256"),
+                       lambda v: v["native"].update(observer_sha256="d" * 64)):
+            value = self.native_receipt()
+            hashes = {key: value["native"][key] for key in PROBE.HASH_FIELDS}
+            change(value)
+            with self.assertRaisesRegex(PROBE.ProbeError, "invalid-sys-mount-receipt"):
+                PROBE.validate_receipt(value, IDENTITY, hashes)
 
     def test_success_binds_identity_and_hashes(self):
         value = receipt()
@@ -112,6 +177,22 @@ class ReceiptTests(unittest.TestCase):
                                    (IDENTITY, {**hashes, "probe_sha256": "d"*64})):
             with self.subTest(identity=identity), self.assertRaises(PROBE.ProbeError):
                 PROBE.validate_receipt(value, identity, expected)
+
+    def test_legacy_v2_retains_exact_observation_and_hash_contract(self):
+        value = receipt(2)
+        hashes = {key: value["native"][key] for key in PROBE.HASH_FIELDS}
+        self.assertIs(PROBE.validate_receipt(value, IDENTITY, hashes), value)
+        legacy = json.loads(json.dumps(value))
+        legacy["child"]["network_observation"]["ip"]["link"] = [{"ifindex": 1, "ifname": "lo", "flags": ["LOOPBACK"]}]
+        legacy["child"]["network_observation"]["ip"]["address"] = [{"ifindex": 1, "ifname": "lo", "addr_info": []}]
+        self.assertIs(PROBE.validate_receipt(legacy, IDENTITY, hashes), legacy)
+        for change in (lambda v: v["native"].pop("observer_sha256"),
+                       lambda v: v["child"].pop("network_observation"),
+                       lambda v: v["child"].update(extra=True)):
+            changed = json.loads(json.dumps(value))
+            change(changed)
+            with self.assertRaises(PROBE.ProbeError):
+                PROBE.validate_receipt(changed, IDENTITY, hashes)
 
     def test_receipt_requires_strict_types_and_all_parent_evidence(self):
         for key, bad in (("schema_version", True), ("supported", 1), ("diagnostic", "failed"),
@@ -292,7 +373,7 @@ class NamespaceAndNetworkTests(unittest.TestCase):
                     PROBE.launch(Path("/run/user/1001/oxibelt-network-test"), PARENTS, (1, 2))
                 execute.assert_not_called()
 
-    def test_network_view_collects_before_strict_loopback_gate(self):
+    def test_network_view_collects_before_observed_default_classifier(self):
         for names in (((1, "lo"),), ((1, "lo"), (2, "gre0"), (3, "gretap0"))):
             output = PROBE.OBSERVER.empty()
             def collect(_target, value, _read):
@@ -305,6 +386,15 @@ class NamespaceAndNetworkTests(unittest.TestCase):
                         PROBE.network_view(Path("/fresh/sys"), output)
                 collected.assert_called_once()
                 self.assertEqual(output, observation(names))
+
+    def test_network_view_accepts_full_actual_inactive_defaults(self):
+        output = PROBE.OBSERVER.empty()
+        def collect(_target, value, _read):
+            value.update(json.loads(json.dumps(NATIVE_OBSERVATION)))
+        with mock.patch.object(PROBE.OBSERVER, "collect", side_effect=collect):
+            self.assertEqual(PROBE.network_view(Path("/fresh/sys"), output),
+                             [{"index": 1, "name": "lo"}, {"index": 2, "name": "ip_vti0"}, {"index": 3, "name": "sit0"}])
+        self.assertEqual(output, NATIVE_OBSERVATION)
 
     def test_wrong_network_view_fails_after_complete_capture(self):
         output = observation()
@@ -324,7 +414,8 @@ class NamespaceAndNetworkTests(unittest.TestCase):
 
 class ChildTests(unittest.TestCase):
     def run_child(self, *, namespaces=(606, 707, 808), pid=1, mount_error=None, proof_error=None,
-                  network_error=None, unmount_error=None, remains=False, bad_mount=False, symlink=False):
+                  network_error=None, unmount_error=None, remains=False, bad_mount=False, symlink=False,
+                  network_observation=None):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
             if symlink:
@@ -349,12 +440,11 @@ class ChildTests(unittest.TestCase):
                 mount = stack.enter_context(mock.patch.object(PROBE, "mount_sys", side_effect=mount_error))
                 unmount = stack.enter_context(mock.patch.object(PROBE, "unmount_sys", side_effect=unmount_error))
                 proof_mock = stack.enter_context(mock.patch.object(PROBE, "readonly_proof", side_effect=proof))
-                def network(_target, output):
-                    output.update(observation())
+                def collect(_target, output, _read):
+                    output.update(json.loads(json.dumps(network_observation)) if network_observation is not None else observation())
                     if network_error:
                         raise network_error
-                    return [{"index": 1, "name": "lo"}]
-                stack.enter_context(mock.patch.object(PROBE, "network_view", side_effect=network))
+                stack.enter_context(mock.patch.object(PROBE.OBSERVER, "collect", side_effect=collect))
                 try:
                     PROBE.child_probe(state, PARENTS, ENTERED, (1, 2), value)
                 except PROBE.ProbeError as error:
@@ -368,6 +458,19 @@ class ChildTests(unittest.TestCase):
         value, error, target, mount, unmount, proof, exists = self.run_child()
         self.assertIsNone(error)
         PROBE.validate_child(value, *PARENTS)
+        mount.assert_called_once_with(target)
+        unmount.assert_called_once_with(target)
+        proof.assert_called_once_with(target, 2, value)
+        self.assertFalse(exists)
+
+    def test_fresh_child_accepts_and_records_actual_default_interface_pairs(self):
+        value, error, target, mount, unmount, proof, exists = self.run_child(network_observation=NATIVE_OBSERVATION)
+        self.assertIsNone(error)
+        PROBE.validate_child(value, *PARENTS)
+        self.assertEqual(value["interfaces"],
+                         [{"index": 1, "name": "lo"}, {"index": 2, "name": "ip_vti0"}, {"index": 3, "name": "sit0"}])
+        self.assertEqual(value["network_observation"], NATIVE_OBSERVATION)
+        self.assertTrue(all(value[key] for key in PROBE.BOOLEAN_FIELDS))
         mount.assert_called_once_with(target)
         unmount.assert_called_once_with(target)
         proof.assert_called_once_with(target, 2, value)

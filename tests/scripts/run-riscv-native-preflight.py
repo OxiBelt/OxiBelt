@@ -472,7 +472,7 @@ class Preflight:
         if (native["lock_sha256"] != hashlib.sha256((HERE / "riscv-native-tools.lock.json").read_bytes()).hexdigest()
             or native["probe_sha256"] != hashlib.sha256((HERE / "check-riscv-sys-mount.py").read_bytes()).hexdigest()):
             raise Failure("sys-evidence-source-mismatch")
-        if (sys_mount.get("schema_version") == 2
+        if (sys_mount.get("schema_version") in (2, 3)
             and native["observer_sha256"] != hashlib.sha256((HERE / "riscv-network-observation.py").read_bytes()).hexdigest()):
             raise Failure("sys-evidence-source-mismatch")
         self.receipt["sys_mount"] = sys_mount

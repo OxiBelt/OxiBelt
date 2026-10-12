@@ -40,14 +40,14 @@ CHILD_FIELDS = V1_CHILD_FIELDS | {"network_observation"}
 
 
 def child_receipt() -> dict:
-    return {"schema_version": 2, "supported": False, "diagnostic": "probe-not-completed",
+    return {"schema_version": 3, "supported": False, "diagnostic": "probe-not-completed",
             "readonly_errno": None, "mount_id": None, "interfaces": [],
             "network_observation": OBSERVER.empty(),
             **{key: False for key in BOOLEAN_FIELDS}, **{key: None for key in NAMESPACE_FIELDS}}
 
 
 def parent_receipt() -> dict:
-    return {"schema_version": 2, "supported": False, "diagnostic": "probe-not-completed", "identity": {},
+    return {"schema_version": 3, "supported": False, "diagnostic": "probe-not-completed", "identity": {},
             "native": None, "kernel_release": None, "sandbox_pidns": None, "sandbox_mntns": None,
             "sandbox_netns": None, "child": None, "parent_mounts_sha256": None,
             "parent_mounts_unchanged": False, "helper_inaccessible": False, "cleanup_confirmed": False}
@@ -154,12 +154,9 @@ def readonly_proof(target: Path, mount_id: int, receipt: dict) -> None:
 def network_view(target: Path, observation: dict) -> list[dict]:
     try:
         OBSERVER.collect(target, observation, NETWORK.read_file)
-        interfaces = OBSERVER.matching_interfaces(observation)
+        interfaces = OBSERVER.network_none_interfaces(observation)
     except OBSERVER.ObservationError as error:
         raise ProbeError(str(error)) from error
-    # Diagnostic observations never admit additional kernel-created interfaces.
-    if interfaces != [{"index": 1, "name": "lo"}]:
-        raise ProbeError("private-network-is-not-network-none")
     return interfaces
 
 
@@ -217,7 +214,7 @@ def child_probe(state: Path, parents: tuple[int, int, int], entered: tuple[int, 
 def validate_child(value: dict, parent_pidns: int, parent_mntns: int, parent_netns: int) -> None:
     version = value.get("schema_version") if isinstance(value, dict) else None
     if (not isinstance(value, dict) or set(value) != (V1_CHILD_FIELDS if version == 1 else CHILD_FIELDS)
-        or type(version) is not int or version not in (1, 2)
+        or type(version) is not int or version not in (1, 2, 3)
         or type(value["supported"]) is not bool or not isinstance(value["diagnostic"], str)
         or not re.fullmatch(r"[a-z0-9-]{1,96}", value["diagnostic"])
         or any(type(value[key]) is not bool for key in BOOLEAN_FIELDS)
@@ -228,11 +225,13 @@ def validate_child(value: dict, parent_pidns: int, parent_mntns: int, parent_net
                or not valid_id(item["index"]) or not isinstance(item["name"], str)
                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", item["name"]) for item in value["interfaces"])):
         raise ProbeError("invalid-sys-child-evidence")
-    if version == 2:
+    if version in (2, 3):
         try:
             OBSERVER.validate(value["network_observation"], complete=value["supported"])
-            if value["supported"] and OBSERVER.matching_interfaces(value["network_observation"]) != value["interfaces"]:
-                raise OBSERVER.ObservationError("sys-network-view-mismatch")
+            if value["supported"]:
+                classify = OBSERVER.network_none_interfaces if version == 3 else OBSERVER.matching_interfaces
+                if classify(value["network_observation"]) != value["interfaces"]:
+                    raise OBSERVER.ObservationError("sys-network-view-mismatch")
         except OBSERVER.ObservationError as error:
             raise ProbeError("invalid-sys-child-network-evidence") from error
     if value["supported"] and (value["diagnostic"] != "passed"
@@ -242,7 +241,8 @@ def validate_child(value: dict, parent_pidns: int, parent_mntns: int, parent_net
         or value["mntns"] in (parent_mntns, value["entered_mntns"])
         or value["netns"] in (parent_netns, value["detached_netns"])
         or value["detached_netns"] == parent_netns
-        or value["readonly_errno"] != errno.EROFS or value["interfaces"] != [{"index": 1, "name": "lo"}]):
+        or value["readonly_errno"] != errno.EROFS
+        or (version != 3 and value["interfaces"] != [{"index": 1, "name": "lo"}])):
         raise ProbeError("invalid-sys-child-success-evidence")
 
 
@@ -251,7 +251,7 @@ def validate_receipt(value: dict, expected_identity: dict | None = None,
     version = value.get("schema_version") if isinstance(value, dict) else None
     hash_fields = V1_HASH_FIELDS if version == 1 else HASH_FIELDS
     if (not isinstance(value, dict) or set(value) != set(parent_receipt())
-        or type(version) is not int or version not in (1, 2)
+        or type(version) is not int or version not in (1, 2, 3)
         or value["supported"] is not True or value["diagnostic"] != "passed"
         or any(value[key] is not True for key in ("parent_mounts_unchanged", "helper_inaccessible", "cleanup_confirmed"))
         or any(not valid_id(value[key]) for key in ("sandbox_pidns", "sandbox_mntns", "sandbox_netns"))

@@ -269,3 +269,72 @@ def matching_interfaces(value: dict) -> list[dict]:
         or ip_shape("address", value["ip"]["address"]) != mapping):
         raise ObservationError("sys-network-view-mismatch")
     return value["socket_interfaces"]
+
+
+# Only these two defaults were observed in the authenticated fresh RV5.10 NET
+# namespace. Kernel per-net initialization and the pinned iproute2 printers:
+# https://github.com/torvalds/linux/blob/v5.10/net/ipv4/ip_vti.c
+# https://github.com/torvalds/linux/blob/v5.10/net/ipv6/sit.c
+# https://github.com/iproute2/iproute2/blob/v6.15.0/ip/link_vti.c
+# https://github.com/iproute2/iproute2/blob/v6.15.0/ip/link_iptnl.c
+INACTIVE_DEFAULTS = {
+    "ip_vti0": {"type": 768, "link_type": "ipip", "kind": "vti", "min_mtu": 0, "max_mtu": 0,
+                "info_data": {"local": "any", "remote": "any"}},
+    "sit0": {"type": 776, "link_type": "sit", "kind": "sit", "min_mtu": 1280, "max_mtu": 65555,
+             "info_data": {"local": "any", "remote": "any", "proto": "ip6ip", "ttl": 64, "pmtudisc": False}},
+}
+
+
+def typed_equal(value, expected) -> bool:
+    """Exact metadata comparison, including JSON booleans versus integers."""
+    if type(value) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(value) == set(expected) and all(typed_equal(value[key], item) for key, item in expected.items())
+    if isinstance(expected, list):
+        return len(value) == len(expected) and all(typed_equal(item, other) for item, other in zip(value, expected))
+    return value == expected
+
+
+def inactive_profile(name: str, index: int) -> tuple[dict, dict]:
+    """Exact fresh, inactive link/address signatures; unknown metadata fails."""
+    loopback = name == "lo"
+    default = None if loopback else INACTIVE_DEFAULTS[name]
+    address = {"ifindex": index, "ifname": name, "flags": ["LOOPBACK"] if loopback else ["NOARP"],
+               "mtu": 65536 if loopback else 1480, "qdisc": "noop", "operstate": "DOWN",
+               "group": "default", "txqlen": 1000,
+               "link_type": "loopback" if loopback else default["link_type"],
+               "address": "00:00:00:00:00:00" if loopback else "0.0.0.0",
+               "broadcast": "00:00:00:00:00:00" if loopback else "0.0.0.0"}
+    link = {**address, "promiscuity": 0, "min_mtu": 0 if loopback else default["min_mtu"],
+            "max_mtu": 0 if loopback else default["max_mtu"], "num_tx_queues": 1, "num_rx_queues": 1,
+            "gso_max_size": 65536, "gso_max_segs": 65535, "linkmode": "DEFAULT"}
+    if not loopback:
+        link["linkinfo"] = {"info_kind": default["kind"], "info_data": dict(default["info_data"])}
+    address["addr_info"] = []
+    return link, address
+
+
+def network_none_interfaces(value: dict) -> list[dict]:
+    """Admit lo and only the two observed, entirely inactive kernel defaults."""
+    interfaces = matching_interfaces(value)
+    mapping = pairs(interfaces)
+    if (mapping.get("lo") != 1 or not set(mapping) <= {"lo", *INACTIVE_DEFAULTS}
+        or value["ip"]["route4"] or value["ip"]["route6"]):
+        raise ObservationError("private-network-is-not-network-none")
+    sysfs = {item["name"]: item for item in value["sys_interfaces"]["interfaces"]}
+    links = {item["ifname"]: item for item in value["ip"]["link"]}
+    addresses = {item["ifname"]: item for item in value["ip"]["address"]}
+    for name, index in mapping.items():
+        expected_type = 772 if name == "lo" else INACTIVE_DEFAULTS[name]["type"]
+        expected_flags = 8 if name == "lo" else 128
+        if sysfs[name]["type"] != expected_type or sysfs[name]["flags"] != expected_flags:
+            raise ObservationError("private-network-is-not-network-none")
+        link_profile, address_profile = inactive_profile(name, index)
+        for actual, profile in ((links[name], link_profile), (addresses[name], address_profile)):
+            # iproute2 emits null for the absent lower link on these defaults.
+            # Every non-null link, and every master/peer/parent field, fails.
+            without_link = dict(actual)
+            if without_link.pop("link", None) is not None or not typed_equal(without_link, profile):
+                raise ObservationError("private-network-is-not-network-none")
+    return sorted(interfaces, key=lambda item: (item["index"], item["name"]))

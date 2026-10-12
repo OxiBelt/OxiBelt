@@ -14,6 +14,30 @@ assert SPEC and SPEC.loader
 OBSERVER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(OBSERVER)
 INTERFACES = [(1, "lo"), (2, "gre0"), (3, "gretap0")]
+# Native source: https://github.com/OxiBelt/OxiBelt/actions/runs/38279621761/job/114913439439
+# Source revision: 7bdc28ac87946d9ac3ea7b2e1f12184cb354fdd2
+# Uploaded ZIP artifact 11769875214 SHA256:
+# 11ec6f89090dbe874a0c929e2a7fbf57b904532e69355107dc2a6101c37fb9a8
+# Extracted sys-mount.json member SHA256:
+# 9751fffddf82d5301e882f72c60823546054aa4e160fc55f8093f944c0820d24
+# Fixture content is exactly child.network_observation, without identity fields.
+NATIVE_FIXTURE = Path(__file__).with_name("fixtures") / "riscv-network-defaults-rv5.10.json"
+
+
+def native_observation(names=("lo", "ip_vti0", "sit0")):
+    value = json.loads(NATIVE_FIXTURE.read_text())
+    value["socket_interfaces"] = [item for item in value["socket_interfaces"] if item["name"] in names]
+    value["sys_interfaces"]["names"] = [name for name in value["sys_interfaces"]["names"] if name in names]
+    value["sys_interfaces"]["interfaces"] = [item for item in value["sys_interfaces"]["interfaces"] if item["name"] in names]
+    for view in ("link", "address"):
+        value["ip"][view] = [item for item in value["ip"][view] if item["ifname"] in names]
+    return value
+
+
+def native_interface(value, view, name):
+    if view == "sys":
+        return next(item for item in value["sys_interfaces"]["interfaces"] if item["name"] == name)
+    return next(item for item in value["ip"][view] if item["ifname"] == name)
 
 
 def snapshots(interfaces=INTERFACES):
@@ -236,6 +260,187 @@ class ShapeTests(unittest.TestCase):
         OBSERVER.validate(OBSERVER.empty())
         with self.assertRaises(OBSERVER.ObservationError):
             OBSERVER.validate(OBSERVER.empty(), complete=True)
+
+
+class NetworkNoneTests(unittest.TestCase):
+    def assert_rejected(self, value):
+        with self.assertRaises(OBSERVER.ObservationError):
+            OBSERVER.network_none_interfaces(value)
+
+    def test_sanitized_verified_native_fixture_and_only_observed_subsets_pass(self):
+        self.assertEqual(OBSERVER.network_none_interfaces(native_observation()),
+                         [{"index": 1, "name": "lo"}, {"index": 2, "name": "ip_vti0"}, {"index": 3, "name": "sit0"}])
+        for names, expected in ((("lo",), [{"index": 1, "name": "lo"}]),
+                                (("lo", "ip_vti0"), [{"index": 1, "name": "lo"}, {"index": 2, "name": "ip_vti0"}]),
+                                (("lo", "sit0"), [{"index": 1, "name": "lo"}, {"index": 3, "name": "sit0"}])):
+            with self.subTest(names=names):
+                self.assertEqual(OBSERVER.network_none_interfaces(native_observation(names)), expected)
+        self.assertEqual(set(json.loads(NATIVE_FIXTURE.read_text())), set(OBSERVER.empty()))
+        self.assertEqual(set(OBSERVER.INACTIVE_DEFAULTS), {"ip_vti0", "sit0"})
+
+    def test_profile_builders_do_not_alias_the_fixed_default_policy(self):
+        profile, _address = OBSERVER.inactive_profile("sit0", 3)
+        profile["linkinfo"]["info_data"]["ttl"] = 1
+        self.assertEqual(OBSERVER.INACTIVE_DEFAULTS["sit0"]["info_data"]["ttl"], 64)
+        self.assertEqual(len(OBSERVER.network_none_interfaces(native_observation())), 3)
+
+    def test_orders_do_not_affect_classification_or_canonical_receipt(self):
+        value = native_observation()
+        expected = [{"index": 1, "name": "lo"}, {"index": 2, "name": "ip_vti0"}, {"index": 3, "name": "sit0"}]
+        value["socket_interfaces"].reverse()
+        value["sys_interfaces"]["names"].reverse()
+        value["sys_interfaces"]["interfaces"].reverse()
+        value["ip"]["link"].reverse()
+        value["ip"]["address"].reverse()
+        self.assertEqual(OBSERVER.network_none_interfaces(value), expected)
+
+    def test_lower_link_absent_or_null_is_the_only_optional_field(self):
+        for view in ("link", "address"):
+            for name in ("lo", "ip_vti0", "sit0"):
+                value = native_observation()
+                native_interface(value, view, name).pop("link", None)
+                self.assertEqual(len(OBSERVER.network_none_interfaces(value)), 3)
+                native_interface(value, view, name)["link"] = None
+                self.assertEqual(len(OBSERVER.network_none_interfaces(value)), 3)
+
+    def test_only_lo_index_is_fixed_but_all_maps_must_agree(self):
+        value = native_observation(("lo", "sit0"))
+        for item in value["socket_interfaces"]:
+            if item["name"] == "sit0":
+                item["index"] = 2
+        native_interface(value, "sys", "sit0")["index"] = 2
+        for view in ("link", "address"):
+            native_interface(value, view, "sit0")["ifindex"] = 2
+        self.assertEqual(OBSERVER.network_none_interfaces(value), [{"index": 1, "name": "lo"}, {"index": 2, "name": "sit0"}])
+        self.assert_rejected(native_observation(("sit0", "ip_vti0")))
+        value = native_observation()
+        value["socket_interfaces"][0]["index"] = 9
+        native_interface(value, "sys", "lo")["index"] = 9
+        for view in ("link", "address"):
+            native_interface(value, view, "lo")["ifindex"] = 9
+        self.assert_rejected(value)
+
+    def test_unknown_names_are_not_admitted_by_matching_safe_metadata(self):
+        for name in ("eth0", "veth0", "tunl0", "gre0", "ip6tnl0", "ip6_vti0", "sit1", "ip_vti1"):
+            value = native_observation()
+            for item in value["socket_interfaces"] + value["sys_interfaces"]["interfaces"]:
+                if item["name"] == "ip_vti0":
+                    item["name"] = name
+            value["sys_interfaces"]["names"] = [name if old == "ip_vti0" else old for old in value["sys_interfaces"]["names"]]
+            for view in ("link", "address"):
+                native_interface(value, view, "ip_vti0")["ifname"] = name
+            OBSERVER.matching_interfaces(value)
+            with self.subTest(name=name):
+                self.assert_rejected(value)
+
+    def test_wrong_names_types_kinds_and_any_active_flag_are_rejected(self):
+        for name in ("lo", "ip_vti0", "sit0"):
+            for field, bad_values in (("type", (1, 772, 768, 776, True)),
+                                      ("flags", (0, 1, 8, 128, 129, 256, 65664, True))):
+                original = native_interface(native_observation(), "sys", name)[field]
+                for bad in bad_values:
+                    if type(bad) is int and bad == original:
+                        continue
+                    value = native_observation()
+                    native_interface(value, "sys", name)[field] = bad
+                    with self.subTest(name=name, field=field, bad=bad):
+                        self.assert_rejected(value)
+            for view in ("link", "address"):
+                for field, bad in (("flags", []), ("flags", ["NOARP", "UP"]),
+                                   ("flags", ["NOARP", "LOWER_UP"]), ("flags", ["POINTOPOINT"]),
+                                   ("flags", ["NOARP", "RUNNING"]), ("operstate", "UP"),
+                                   ("link_type", "ether"), ("mtu", True)):
+                    value = native_observation()
+                    native_interface(value, view, name)[field] = bad
+                    with self.subTest(name=name, view=view, field=field, bad=bad):
+                        self.assert_rejected(value)
+        for name, kind in (("ip_vti0", "sit"), ("sit0", "vti"), ("sit0", "gre")):
+            value = native_observation()
+            native_interface(value, "link", name)["linkinfo"]["info_kind"] = kind
+            self.assert_rejected(value)
+
+    def test_addresses_and_routes_in_any_table_reject_every_device(self):
+        for name in ("lo", "ip_vti0", "sit0"):
+            value = native_observation()
+            native_interface(value, "address", name)["addr_info"] = [{"family": "inet", "local": "127.0.0.1", "prefixlen": 8}]
+            self.assert_rejected(value)
+        for view, route in (("route4", {"dst": "default", "dev": "ip_vti0"}),
+                            ("route4", {"dst": "127.0.0.1", "dev": "lo", "table": "local"}),
+                            ("route6", {"dst": "::1", "dev": "lo", "table": 999}),
+                            ("route6", {"dst": "default", "type": "unreachable", "table": "default"})):
+            value = native_observation()
+            value["ip"][view] = [route]
+            self.assert_rejected(value)
+
+    def test_parent_master_peer_and_link_fields_fail_even_when_null(self):
+        for name in ("lo", "ip_vti0", "sit0"):
+            for view in ("link", "address"):
+                for field in ("master", "parent", "peer", "link_index", "link_netnsid", "link_netns", "ifalias"):
+                    for bad in (None, 0, "lo", {"ifindex": 9}):
+                        value = native_observation()
+                        native_interface(value, view, name)[field] = bad
+                        with self.subTest(name=name, view=view, field=field, bad=bad):
+                            self.assert_rejected(value)
+                for bad in (0, False, "lo", 1):
+                    value = native_observation()
+                    native_interface(value, view, name)["link"] = bad
+                    self.assert_rejected(value)
+
+    def test_tunnel_keys_marks_metadata_encapsulation_and_endpoints_fail(self):
+        for name in ("ip_vti0", "sit0"):
+            for field in ("ikey", "okey", "fwmark", "collect_metadata", "metadata", "encap", "encap_type", "dev",
+                          "6rd_prefix", "6rd_relay_prefix", "isatap", "tos"):
+                for bad in (0, False, "0", {"type": "fou"}):
+                    value = native_observation()
+                    native_interface(value, "link", name)["linkinfo"]["info_data"][field] = bad
+                    with self.subTest(name=name, field=field, bad=bad):
+                        self.assert_rejected(value)
+            for field in ("local", "remote"):
+                for bad in ("0.0.0.0", "192.0.2.1", "::", None):
+                    value = native_observation()
+                    native_interface(value, "link", name)["linkinfo"]["info_data"][field] = bad
+                    self.assert_rejected(value)
+        for field, bad in (("proto", "ipip"), ("proto", 41), ("ttl", 0), ("ttl", 63), ("ttl", True),
+                           ("pmtudisc", 0), ("pmtudisc", True), ("pmtudisc", "false")):
+            value = native_observation()
+            native_interface(value, "link", "sit0")["linkinfo"]["info_data"][field] = bad
+            with self.subTest(field=field, bad=bad):
+                self.assert_rejected(value)
+
+    def test_missing_or_unknown_metadata_and_incomplete_views_fail(self):
+        for name in ("lo", "ip_vti0", "sit0"):
+            for view in ("link", "address"):
+                record = native_interface(native_observation(), view, name)
+                for field in set(record) - {"link"}:
+                    value = native_observation()
+                    del native_interface(value, view, name)[field]
+                    with self.subTest(name=name, view=view, missing=field):
+                        self.assert_rejected(value)
+                value = native_observation()
+                native_interface(value, view, name)["unknown_metadata"] = False
+                self.assert_rejected(value)
+            if name != "lo":
+                for field in native_interface(native_observation(), "link", name)["linkinfo"]["info_data"]:
+                    value = native_observation()
+                    del native_interface(value, "link", name)["linkinfo"]["info_data"][field]
+                    self.assert_rejected(value)
+                for field in ("info_kind", "info_data"):
+                    value = native_observation()
+                    del native_interface(value, "link", name)["linkinfo"][field]
+                    self.assert_rejected(value)
+                value = native_observation()
+                native_interface(value, "link", name)["linkinfo"]["info_slave_kind"] = "bridge"
+                self.assert_rejected(value)
+        for view in OBSERVER.VIEWS:
+            value = native_observation()
+            value["ip"][view] = None
+            self.assert_rejected(value)
+        value = native_observation()
+        value["errors"]["route4"] = "network-observation-timeout"
+        self.assert_rejected(value)
+        value = native_observation()
+        native_interface(value, "address", "ip_vti0")["ifindex"] = 9
+        self.assert_rejected(value)
 
 
 if __name__ == "__main__":
