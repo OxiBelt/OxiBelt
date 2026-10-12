@@ -27,6 +27,11 @@ def mounts(network="rw,nosuid,nodev,noexec"):
     return text
 
 
+def namespace_mount(root="net:[4026532455]", *, filesystem="nsfs",
+                    point="/run/user/1001/oxibelt-network-test/netns", options="rw"):
+    return f"8 1 0:8 {root} {point} {options} - {filesystem} nsfs rw\n"
+
+
 def receipt():
     return {"schema_version": 1, "supported": True, "diagnostic": "passed",
             "sandbox_netns": 101, "detached_netns": 202,
@@ -38,6 +43,56 @@ def receipt():
 
 
 class MountTests(unittest.TestCase):
+    def test_nsfs_network_inode_roots_preserve_metadata_and_protected_mounts(self):
+        helper = ("7 1 0:7 / /opt/oxibelt-preflight/private-proc/proc "
+                  "rw,nosuid,nodev,noexec - proc proc rw\n")
+        for root in ("net:[1]", "net:[4026532455]", "net:[18446744073709551615]"):
+            text = mounts() + helper + namespace_mount(root)
+            with self.subTest(root=root):
+                row = PROBE.mount_metadata(text)[-1]
+                self.assertEqual(row["root"], root)
+                self.assertEqual(row["filesystem"], "nsfs")
+                self.assertEqual(PROBE.mount_rows(text)[-1], (row["point"], {"rw"}, "nsfs"))
+                self.assertEqual(PROBE.validate_proc_helper(text, required=True)["root"], "/")
+                self.assertTrue(PROBE.validate_mounts(text, require_helper=True)["network_sysctl_writable"])
+        for root in ("/", "/ordinary/root", "/ordinary\\040root"):
+            with self.subTest(root=root):
+                self.assertEqual(PROBE.mount_metadata(namespace_mount(root, filesystem="tmpfs"))[0]["root"],
+                                 root.replace("\\040", " "))
+
+    def test_nsfs_inode_root_grammar_and_filesystem_fail_closed(self):
+        roots = ("net:[]", "net:[0]", "net:[00]", "net:[01]", "net:[-1]", "net:[+1]",
+                 "net:[18446744073709551616]", "net:[100000000000000000000]",
+                 "net:[١]", "net:[１]", "net:[1.0]", "net:[ 1]", "net:[1 ]",
+                 "net:[1]/", "net:[1]suffix", "prefixnet:[1]", "net:[1", "net:1]",
+                 "NET:[1]", "mnt:[1]", "net:[1]\\040", "relative", "/root/../other")
+        variants = [namespace_mount(root) for root in roots]
+        variants += [namespace_mount(filesystem=filesystem) for filesystem in ("proc", "tmpfs", "NSFS")]
+        variants += [namespace_mount(point=point) for point in ("relative", "/run/../netns")]
+        variants += [namespace_mount(options=options) for options in ("rw,ro", "nosuid")]
+        variants += ["8 1 0:8 net:[1] /run/netns rw - " + details + "\n"
+                     for details in ("", "nsfs", "nsfs nsfs")]
+        variants += ["8 1 0:8 net:[1] /run/netns - nsfs nsfs rw\n"]
+        for text in variants:
+            with self.subTest(text=text), self.assertRaisesRegex(PROBE.ProbeError, "^invalid-mountinfo$"):
+                PROBE.mount_metadata(text)
+
+    def test_accepted_nsfs_rows_cannot_hide_invalid_protected_mounts(self):
+        hidden_kernel = ("9 5 0:4 /sys/kernel /proc/sys/kernel rw,nosuid,nodev,noexec - proc proc rw\n"
+                         "10 5 0:4 /sys/kernel /proc/sys/kernel ro,nosuid,nodev,noexec - proc proc rw\n")
+        variants = [mounts().replace("/proc/sys ro,", "/proc/sys rw,"),
+                    mounts().replace("/sys ro,", "/sys rw,"),
+                    mounts().replace("/sys/fs/cgroup rw,", "/sys/fs/cgroup ro,"),
+                    mounts("rw"), mounts(None), mounts() + hidden_kernel,
+                    mounts() + "9 1 0:4 / /tmp/proc-alias rw,nosuid,nodev,noexec - proc proc rw\n",
+                    mounts() + namespace_mount(point="/sys/kernel"),
+                    mounts() + namespace_mount(point="/sys/fs/cgroup"),
+                    mounts() + namespace_mount(point="/proc/sys/net/ipv4"),
+                    mounts() + namespace_mount(point="/proc/sys/kernel", options="ro")]
+        for text in variants:
+            with self.subTest(text=text), self.assertRaises(PROBE.ProbeError):
+                PROBE.validate_mounts(namespace_mount() + text)
+
     def test_full_proc_helper_is_exact_and_does_not_relax_original_mounts(self):
         helper = ("7 1 0:7 / /opt/oxibelt-preflight/private-proc/proc "
                   "rw,nosuid,nodev,noexec - proc proc rw\n")
@@ -57,7 +112,7 @@ class MountTests(unittest.TestCase):
                     mounts() + helper + "8 1 0:8 / /tmp/alias ro,nosuid,nodev,noexec - proc proc ro\n",
                     mounts() + helper + "8 4 0:8 / /proc/extra rw,nosuid,nodev,noexec - proc proc rw\n",
                     mounts().replace("/proc/sys ro,", "/proc/sys rw,") + helper]
-        for text in variants:
+        for text in variants + [namespace_mount() + text for text in variants]:
             with self.subTest(text=text), self.assertRaises(PROBE.ProbeError):
                 PROBE.validate_mounts(text, require_helper=True)
 

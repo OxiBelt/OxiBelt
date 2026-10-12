@@ -59,12 +59,18 @@ def mount_metadata(text: str) -> list[dict]:
         try:
             left, right = line.split(" - ", 1)
             fields, details = left.split(), right.split()
+            if len(fields) < 6 or len(details) < 3:
+                raise ValueError
             point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])
             root = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[3])
             options = set(fields[5].split(","))
+            # nsfs names a pinned network namespace by inode instead of a path.
+            namespace = re.fullmatch(r"net:\[([1-9][0-9]{0,19})\]", root)
+            valid_root = (root.startswith("/") and ".." not in Path(root).parts) or (
+                details[0] == "nsfs" and namespace is not None
+                and int(namespace[1]) <= 2**64 - 1)
             if (not point.startswith("/") or ".." in Path(point).parts
-                or not root.startswith("/") or ".." in Path(root).parts
-                or len({"rw", "ro"}.intersection(options)) != 1 or len(details) < 3):
+                or not valid_root or len({"rw", "ro"}.intersection(options)) != 1):
                 raise ValueError
             mounts.append({"point": point, "root": root, "options": options,
                            "filesystem": details[0], "super_options": set(details[2].split(",")),

@@ -20,6 +20,8 @@ PROBE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROBE)
 IDENTITY = {"GITHUB_REPOSITORY": "example/OxiBelt", "GITHUB_SHA": "a" * 40,
             "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "push"}
+NAMESPACE_MOUNT = ("3 1 0:3 net:[4026532455] /run/user/1001/oxibelt-network-test/netns "
+                   "rw - nsfs nsfs rw\n")
 
 
 def child():
@@ -82,11 +84,12 @@ class ReceiptTests(unittest.TestCase):
     def test_private_proc_requires_full_root_flags_and_no_child_mounts(self):
         target = Path("/run/user/1001/oxibelt-network-test/proc")
         PROBE.validate_proc_mount(mountinfo(target), target)
+        PROBE.validate_proc_mount(mountinfo(target) + NAMESPACE_MOUNT, target)
         variants = [mountinfo(target, root="/sys"), mountinfo(target, flags="rw,nosuid,nodev"),
                     mountinfo(target, flags="ro,nosuid,nodev,noexec"), mountinfo(target, filesystem="tmpfs"),
                     mountinfo(target) + f"3 2 0:3 / {target}/sys rw - proc proc rw\n",
                     mountinfo(target) + mountinfo(target), "malformed", "x" * 262145]
-        for text in variants:
+        for text in variants + [text + NAMESPACE_MOUNT for text in variants]:
             with self.subTest(text=text[:100]), self.assertRaises(PROBE.ProbeError):
                 PROBE.validate_proc_mount(text, target)
 
@@ -99,16 +102,25 @@ class ChildTests(unittest.TestCase):
 
     def run_child(self, *, uid_map=b"0 1001 1\n1 100000 65536\n", namespaces=(303, 404), pid=1,
                   mount_failure=None, status=b"Name:\tpython3\nPid:\t1\n", unmount_failure=None,
-                  bad_mount=False):
+                  bad_mount=False, flags="rw,nosuid,nodev,noexec", remains_mounted=False):
         value = PROBE.child_receipt()
         target = self.state / "proc"
-        texts = iter((mountinfo(target, root="/sys" if bad_mount else "/").encode(),
-                      b"1 0 0:1 / / rw - overlay overlay rw\n"))
+        mounted_text = mountinfo(target, root="/sys" if bad_mount else "/", flags=flags) + NAMESPACE_MOUNT
+        unmounted_text = (mounted_text if remains_mounted else
+                          "1 0 0:1 / / rw - overlay overlay rw\n" + NAMESPACE_MOUNT)
+        texts = iter((mounted_text.encode(), unmounted_text.encode()))
+        self.mountinfo_reads = []
+        self.status_reads = []
         def read(path, *args):
             if str(path) == "/proc/self/uid_map":
                 return uid_map
             if path == PROBE.MOUNTINFO:
-                return next(texts)
+                text = next(texts)
+                self.mountinfo_reads.append(text.decode())
+                return text
+            self.assertEqual(path, target.resolve() / "self/status")
+            self.assertEqual(args, (16384,))
+            self.status_reads.append(path)
             return status
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(PROBE.NETWORK, "guarded_state"))
@@ -125,12 +137,21 @@ class ChildTests(unittest.TestCase):
                 return value, mount, unmount, error
         return value, mount, unmount, None
 
-    def test_success_verifies_pid_one_mount_and_unmount(self):
-        value, mount, unmount, error = self.run_child()
+    def test_success_verifies_pid_one_mount_and_unmount_with_persistent_nsfs(self):
+        with mock.patch.object(PROBE, "validate_proc_mount", wraps=PROBE.validate_proc_mount) as validate:
+            value, mount, unmount, error = self.run_child()
         self.assertIsNone(error)
         PROBE.validate_child(value, 101, 202)
         mount.assert_called_once_with(self.state / "proc")
         unmount.assert_called_once_with(self.state / "proc")
+        self.assertEqual(len(self.mountinfo_reads), 2)
+        self.assertTrue(all(NAMESPACE_MOUNT in text for text in self.mountinfo_reads))
+        validate.assert_called_once_with(self.mountinfo_reads[0], self.state / "proc")
+        self.assertEqual(self.status_reads, [self.state / "proc/self/status"])
+        self.assertFalse(any(row["point"] == str(self.state / "proc")
+                             for row in PROBE.NETWORK.mount_metadata(self.mountinfo_reads[1])))
+        self.assertTrue(all(value[key] for key in
+                            ("pid_one", "proc_root_and_flags", "proc_self_pid_one", "unmounted", "supported")))
         self.assertFalse((self.state / "proc").exists())
 
     def test_copyup_symlink_ancestor_uses_resolved_mountpoint(self):
@@ -169,16 +190,32 @@ class ChildTests(unittest.TestCase):
         self.assertFalse((self.state / "proc").exists())
 
     def test_readback_failure_still_unmounts_and_unmount_failure_is_not_waived(self):
-        for kwargs in ({"status": b"Pid:\t42\n"}, {"bad_mount": True}):
+        for kwargs in ({"status": b"Pid:\t42\n"}, {"bad_mount": True},
+                       {"flags": "rw,nosuid,nodev"}):
             with self.subTest(kwargs=kwargs):
-                value, _mount, unmount, error = self.run_child(**kwargs)
+                value, mount, unmount, error = self.run_child(**kwargs)
                 self.assertIsInstance(error, PROBE.ProbeError)
+                mount.assert_called_once()
                 unmount.assert_called_once()
                 self.assertTrue(value["unmounted"])
                 self.assertFalse(value["supported"])
-        value, _mount, unmount, error = self.run_child(unmount_failure=PROBE.ProbeError("private-proc-unmount-failed"))
+                self.assertEqual(len(self.mountinfo_reads), 2)
+                self.assertFalse((self.state / "proc").exists())
+        value, mount, unmount, error = self.run_child(unmount_failure=PROBE.ProbeError("private-proc-unmount-failed"))
         self.assertEqual(str(error), "private-proc-unmount-failed")
+        mount.assert_called_once()
+        unmount.assert_called_once()
         self.assertFalse(value["supported"] or value["unmounted"])
+
+    def test_persistent_nsfs_does_not_hide_proc_mount_remaining_after_unmount(self):
+        value, mount, unmount, error = self.run_child(remains_mounted=True)
+        self.assertEqual(str(error), "private-proc-remains-mounted")
+        mount.assert_called_once_with(self.state / "proc")
+        unmount.assert_called_once_with(self.state / "proc")
+        self.assertEqual(len(self.mountinfo_reads), 2)
+        self.assertTrue(all(NAMESPACE_MOUNT in text for text in self.mountinfo_reads))
+        self.assertFalse(value["supported"] or value["unmounted"])
+        self.assertTrue((self.state / "proc").exists())
 
     def test_mount_syscall_has_exact_safe_flags_and_reports_errno(self):
         library = mock.Mock()
