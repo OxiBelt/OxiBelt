@@ -5,6 +5,34 @@ umask 077
 root=/opt/oxibelt-preflight
 home=/home/runner
 evidence=${home}/evidence
+bootstrap_stage=guard
+bootstrap_receipt_enabled=0
+bootstrap_failure() {
+  local exit_code=$1 failure_line=$2
+  # Diagnostic failures must neither recurse nor replace the bootstrap status.
+  trap - ERR
+  set +e
+  printf 'sandbox bootstrap failed: stage=%s line=%s exit_code=%s\n' \
+    "${bootstrap_stage}" "${failure_line}" "${exit_code}" >&3
+  if [[ ${bootstrap_receipt_enabled} == 1 ]]; then
+    mkdir -p "${evidence}" 2>/dev/null
+    # noclobber retains the first receipt; omit commands and environment data.
+    (
+      umask 077
+      set -o noclobber
+      [[ ! -e ${evidence}/bootstrap-failure.json && ! -L ${evidence}/bootstrap-failure.json ]] || exit 0
+      printf '{"schema_version":1,"stage":"%s","line":%s,"exit_code":%s}\n' \
+        "${bootstrap_stage}" "${failure_line}" "${exit_code}" >"${evidence}/bootstrap-failure.json"
+    ) 2>/dev/null
+    printf 'sandbox bootstrap failed\n' >"${home}/preflight-failed" 2>/dev/null
+  fi
+  exit "${exit_code}"
+}
+if [[ ${1:-} != --prepare-user && ${1:-} != --record-failure ]]; then
+  # Keep the original stderr even when a failing command redirects its output.
+  exec 3>&2
+  trap 'bootstrap_failure "$?" "$LINENO"' ERR
+fi
 [[ $(id -u) == 0 && $(uname -m) == riscv64 && -f /.dockerenv ]]
 
 if [[ ${1:-} == --prepare-user ]]; then
@@ -36,13 +64,15 @@ if [[ ${1:-} == --record-failure ]]; then
   exit 0
 fi
 [[ $$ == 1 && $(id -u) == 0 && $(uname -m) == riscv64 ]]
+bootstrap_receipt_enabled=1
 [[ -f ${root}/riscv-native-tools.lock.json && -f /usr/share/keyrings/debian-archive-keyring.gpg ]]
 mkdir -p "${evidence}"
-trap 'printf "sandbox bootstrap failed\n" >"${home}/preflight-failed"' ERR
 # Detach propagation before adding any sandbox-local mount exception.
+bootstrap_stage=propagation
 mount --make-rprivate /
 
 # Freeze all dependency resolution while retaining Debian archive authentication.
+bootstrap_stage=apt-sources
 rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*
 cat >/etc/apt/sources.list.d/oxibelt.sources <<'EOF'
 Types: deb
@@ -54,11 +84,14 @@ Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 Check-Valid-Until: no
 EOF
 export DEBIAN_FRONTEND=noninteractive
+bootstrap_stage=apt-update
 timeout 600 apt-get update 2>&1 | tail -c 4194304 >"${evidence}/apt-update.log"
 # Python is the sole bootstrap parser, at its exact locked version.
+bootstrap_stage=python-install
 python_version=$(sed -n 's/^      "python3": "\([^"]*\)",\?$/\1/p' "${root}/riscv-native-tools.lock.json")
 [[ ${python_version} == 3.13.5-1 ]]
 timeout 1200 apt-get install -y --no-install-recommends --allow-downgrades "python3=${python_version}" 2>&1 | tail -c 4194304 >"${evidence}/apt-bootstrap.log"
+bootstrap_stage=package-install
 mapfile -t packages < <(python3 - "${root}/riscv-native-tools.lock.json" <<'PY'
 import json, sys
 lock = json.load(open(sys.argv[1]))
@@ -70,6 +103,7 @@ PY
 )
 [[ ${#packages[@]} == 19 ]]
 timeout 1200 apt-get install -y --no-install-recommends --allow-downgrades "${packages[@]}" 2>&1 | tail -c 4194304 >"${evidence}/apt-install.log"
+bootstrap_stage=package-verify
 python3 - "${root}/riscv-native-tools.lock.json" "${evidence}/packages.json" <<'PY'
 import json, subprocess, sys
 lock = json.load(open(sys.argv[1]))
@@ -84,6 +118,7 @@ PY
 # RootlessKit inherits these mounts when it creates its user namespace. Only
 # network sysctls may be writable; their lookups use the caller's network
 # namespace. Keep the enclosing /proc/sys and all Docker masks intact.
+bootstrap_stage=network-mount
 [[ ! -L /proc/sys/net && -d /proc/sys/net ]]
 mount --bind /proc/sys/net /proc/sys/net
 mount -o remount,bind,rw,nosuid,nodev,noexec /proc/sys/net
@@ -91,12 +126,15 @@ python3 "${root}/check-riscv-network-sysctl.py" --check-mounts \
   >"${evidence}/network-mount.log" 2>&1
 # A root-only full procfs grant lets nested runc mount its own PID namespace.
 # Keep the original /proc masks and readonly sysctls; no provider mount changes.
+bootstrap_stage=proc-helper
 python3 "${root}/check-riscv-network-sysctl.py" --prepare-proc-mount \
   >>"${evidence}/network-mount.log" 2>&1
+bootstrap_stage=runner-user
 useradd --uid 1001 --create-home --shell /bin/bash runner
 # RootlessKit prepares its private TAP via ip tuntap before slirp4netns opens
 # this node. Create it only in this sandbox's private /dev, with the matching
 # outer device-cgroup rule; no provider device is mounted into the sandbox.
+bootstrap_stage=tun
 [[ ! -L /dev/net ]]
 mkdir -p /dev/net
 chmod 755 /dev/net
@@ -106,10 +144,12 @@ fi
 [[ ! -L /dev/net/tun && -c /dev/net/tun && $(stat -c '%t:%T' /dev/net/tun) == a:c8 ]]
 chown runner:runner /dev/net/tun
 chmod 600 /dev/net/tun
+bootstrap_stage=runner-user
 printf 'runner:100000:65536\n' >/etc/subuid
 printf 'runner:100000:65536\n' >/etc/subgid
 chown -R runner:runner "${home}"
 chmod 700 "${home}" "${evidence}"
+bootstrap_stage=systemd-setup
 mkdir -p /etc/systemd/system/user@.service.d /etc/systemd/journald.conf.d
 cat >/etc/systemd/system/user@.service.d/delegate.conf <<'EOF'
 [Service]
@@ -155,5 +195,11 @@ After=oxibelt-native-build.service
 EOF
 systemctl mask systemd-firstboot.service systemd-udevd.service
 # Propagation changes are confined to this container's private mount namespace.
+bootstrap_stage=propagation
 mount --make-rshared /
-exec /lib/systemd/systemd --show-status=false --unit=oxibelt-native.target
+bootstrap_stage=systemd-exec
+# Bash otherwise exits on a failed exec without running its ERR trap.
+shopt -s execfail
+set +e
+exec /lib/systemd/systemd --show-status=false --unit=oxibelt-native.target 3>&- \
+  || bootstrap_failure "$?" "$LINENO"

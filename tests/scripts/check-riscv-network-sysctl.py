@@ -137,9 +137,15 @@ def prepare_proc_mount() -> None:
     PROC_PARENT.mkdir(mode=0o700)
     PROC_HELPER.mkdir(mode=0o700)
     validate_proc_directories()
-    subprocess.run(["/usr/bin/mount", "-t", "proc", "-o", "rw,nosuid,nodev,noexec", "proc", str(PROC_HELPER)],
-                   check=True, timeout=10, stdin=subprocess.DEVNULL,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    commands = Commands(timeout=10)
+    try:
+        code, _output = commands.call(["/usr/bin/mount", "-t", "proc", "-o", "rw,nosuid,nodev,noexec", "proc", str(PROC_HELPER)])
+        if code:
+            raise ProbeError(f"failed-exit-{code}")
+    except ProbeError as error:
+        if commands.log:
+            print("Proc helper mount output:\n" + commands.log.decode(errors="replace"), file=sys.stderr)
+        raise ProbeError("proc-helper-mount-" + str(error)) from error
     after = read_file(Path("/proc/self/mountinfo")).decode()
     validate_mounts(after, require_helper=True)
     validate_proc_directories()
@@ -411,8 +417,8 @@ def stop_group(process: subprocess.Popen) -> None:
 
 
 class Commands:
-    def __init__(self):
-        self.deadline = time.monotonic() + TIMEOUT
+    def __init__(self, timeout: float = TIMEOUT):
+        self.deadline = time.monotonic() + timeout
         self.log = bytearray()
         self.cleanup_confirmed = True
         # Reap orphaned grandchildren after killing the entire process group.

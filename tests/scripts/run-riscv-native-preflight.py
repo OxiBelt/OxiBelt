@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,16 @@ from pathlib import Path, PurePosixPath
 HERE = Path(__file__).resolve().parent
 SOCKET = "unix:///var/run/docker.sock"
 MAX_BYTES = 128 * 1024
+MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
+MAX_EVIDENCE_FILE_BYTES = 4 * 1024 * 1024
+MAX_EVIDENCE_BYTES = 64 * 1024
+EVIDENCE_LOGS = (
+    "apt-update.log", "apt-bootstrap.log", "apt-install.log", "build-engine.log",
+    "build-cli.log", "build-containerd.log", "build-runc.log", "docker-start.log",
+    "systemd-build-failure.log", "systemd-docker-failure.log", "network-mount.log",
+    "network-sysctl.log", "proc-mount.log", "enforcement-docker.log",
+)
+EVIDENCE_JSON = ("network-sysctl.json", "proc-mount.json", "bootstrap-failure.json")
 SOURCE_LABEL = "org.oxibelt.preflight.source"
 RUN_LABEL = "org.oxibelt.preflight.run"
 VERSION_TOKEN = r"v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][A-Za-z0-9][A-Za-z0-9.+~:-]{0,63})?"
@@ -86,7 +97,8 @@ def load_proc_probe():
     return module
 
 
-def execute(argv: list[str], env: dict[str, str], timeout: int = 30) -> tuple[int, bytes]:
+def execute(argv: list[str], env: dict[str, str], timeout: int = 30,
+            *, maximum: int = MAX_BYTES) -> tuple[int, bytes]:
     """Bound command time and combined output, including failed CLI commands."""
     process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, env=env, start_new_session=True)
@@ -104,7 +116,7 @@ def execute(argv: list[str], env: dict[str, str], timeout: int = 30) -> tuple[in
                 if not chunk:
                     break
                 output.extend(chunk)
-                if len(output) > MAX_BYTES:
+                if len(output) > maximum:
                     raise Failure("command-output-too-large")
         return process.wait(timeout=max(0.001, deadline - time.monotonic())), bytes(output)
     except subprocess.TimeoutExpired as error:
@@ -118,6 +130,73 @@ def execute(argv: list[str], env: dict[str, str], timeout: int = 30) -> tuple[in
         process.wait()
         if process.stdout:
             process.stdout.close()
+
+
+def archive_evidence(raw: bytes, filename: str) -> bytes:
+    """Read one named regular file from an uncompressed Docker archive."""
+    if filename not in EVIDENCE_LOGS + EVIDENCE_JSON:
+        raise Failure("unknown-evidence-file")
+    if len(raw) > MAX_ARCHIVE_BYTES:
+        raise Failure("evidence-archive-too-large")
+    try:
+        # Parse a single physical header directly. Recursive PAX/GNU metadata
+        # parsing is unnecessary for these short fixed names and can exhaust
+        # the call stack even in a bounded archive.
+        member = tarfile.TarInfo.frombuf(raw[:512], encoding="utf-8", errors="strict")
+        if (member.name not in (filename, "./" + filename)
+            or member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE)
+            or member.size < 0 or member.size > MAX_EVIDENCE_FILE_BYTES):
+            raise Failure("invalid-evidence-archive-member")
+        if filename.endswith(".json") and member.size > MAX_EVIDENCE_BYTES:
+            raise Failure("evidence-json-too-large")
+        end = 512 + ((member.size + 511) // 512) * 512
+        if len(raw) < end + 1024 or any(raw[512 + member.size:]):
+            raise Failure("invalid-evidence-archive-trailer")
+        data = raw[512:512 + member.size]
+    except (tarfile.TarError, OSError, ValueError) as error:
+        raise Failure("invalid-evidence-archive") from error
+    return data if filename.endswith(".json") else data[-MAX_EVIDENCE_BYTES:]
+
+
+def validate_collected_json(data: bytes) -> None:
+    """Bound nesting before decoding; retain validated bytes without expansion."""
+    text = data.decode("utf-8")
+    depth, quoted, escaped = 0, False, False
+    for char in map(ord, text):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == 92:
+                escaped = True
+            elif char == 34:
+                quoted = False
+        elif char == 34:
+            quoted = True
+        elif char in (91, 123):
+            depth += 1
+            if depth > 64:
+                raise Failure("evidence-json-too-deep")
+        elif char in (93, 125):
+            depth -= 1
+    mapping(json.loads(text), "invalid-collected-json")
+
+
+def sanitized_exit_state(value: dict) -> dict:
+    """Allowlist process outcome fields without copying runtime error text."""
+    state = mapping(value.get("State"), "invalid-sandbox-exit-state")
+    timestamp = r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z"
+    if (not isinstance(state.get("Status"), str)
+        or state["Status"] not in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}
+        or type(state.get("Running")) is not bool or type(state.get("OOMKilled")) is not bool
+        or type(state.get("ExitCode")) is not int or not 0 <= state["ExitCode"] <= 255
+        or not isinstance(state.get("Error"), str)
+        or any(not isinstance(state.get(key), str) or not re.fullmatch(timestamp, state[key])
+               for key in ("StartedAt", "FinishedAt"))):
+        raise Failure("invalid-sandbox-exit-state")
+    return {"status": state["Status"], "running": state["Running"],
+            "exit_code": state["ExitCode"], "oom_killed": state["OOMKilled"],
+            "started_at": state["StartedAt"], "finished_at": state["FinishedAt"],
+            "runtime_error_present": bool(state["Error"])}
 
 
 def controls(parent: str, root: Path = Path("/sys/fs/cgroup")) -> dict[str, list[str]]:
@@ -566,53 +645,75 @@ class Preflight:
         if not self.container:
             self.receipt["cleanup_confirmed"] = True
             return
-        self.owned_container()
-        for filename in ("apt-update.log", "apt-bootstrap.log", "apt-install.log", "build-engine.log",
-                         "build-cli.log", "build-containerd.log", "build-runc.log", "docker-start.log",
-                         "systemd-build-failure.log", "systemd-docker-failure.log",
-                         "network-mount.log", "network-sysctl.log", "proc-mount.log", "enforcement-docker.log"):
-            try:
-                data = self.command(["exec", self.container, "tail", "-c", "65536", "--",
-                                     f"/home/runner/evidence/{filename}"], allow_failure=True)
-                with (self.output / filename).open("xb") as stream:
-                    os.fchmod(stream.fileno(), 0o600)
-                    stream.write(data)
-            except (Failure, OSError):
-                pass
-        destination = self.output / "network-sysctl.json"
-        if not destination.exists() and not destination.is_symlink():
-            try:
-                data = self.command(["exec", self.container, "/bin/sh", "-c",
-                                     "if test -f /home/runner/evidence/network-sysctl.json; then "
-                                     "cat /home/runner/evidence/network-sysctl.json; fi"])
-                if data:
-                    if len(data) > 65536:
-                        raise Failure("network-evidence-too-large")
-                    value = mapping(json.loads(data), "invalid-network-evidence")
-                    self.probe.write_evidence(destination, value)
-            except (Failure, OSError, ValueError):
-                pass
-        destination = self.output / "proc-mount.json"
-        if not destination.exists() and not destination.is_symlink():
-            try:
-                data = self.command(["exec", self.container, "/bin/sh", "-c",
-                                     "if test -f /home/runner/evidence/proc-mount.json; then "
-                                     "cat /home/runner/evidence/proc-mount.json; fi"])
-                if data:
-                    if len(data) > 65536:
-                        raise Failure("proc-evidence-too-large")
-                    value = mapping(json.loads(data), "invalid-proc-evidence")
-                    self.probe.write_evidence(destination, value)
-            except (Failure, OSError, ValueError):
-                pass
+        state = self.owned_container()
         try:
-            logs = self.command(["logs", "--tail=150", self.container], allow_failure=True)
-            with (self.output / "bootstrap.log").open("xb") as stream:
+            self.collect_diagnostics(state)
+        finally:
+            self.remove_container()
+
+    def collect_diagnostics(self, state: dict):
+        collection = []
+
+        def collect(filename, action):
+            destination = self.output / filename
+            if destination.is_symlink():
+                collection.append({"filename": filename, "status": "unavailable",
+                                   "diagnostic": "evidence-output-symlink"})
+                return
+            if destination.exists():
+                collection.append({"filename": filename, "status": "existing"})
+                return
+            try:
+                action(destination)
+                collection.append({"filename": filename, "status": "collected"})
+            except (Failure, OSError, ValueError) as error:
+                diagnostic = str(error) if isinstance(error, Failure) else "evidence-collection-failed"
+                collection.append({"filename": filename, "status": "unavailable", "diagnostic": diagnostic})
+
+        def write_exit(destination):
+            self.probe.write_evidence(destination, {
+                "schema_version": 1, "identity": self.identity, "container": self.container,
+                "state": sanitized_exit_state(state),
+            })
+
+        collect("sandbox-exit.json", write_exit)
+
+        def copy_file(filename, destination):
+            code, raw = execute(["docker", "--host", SOCKET, "cp",
+                                 f"{self.container}:/home/runner/evidence/{filename}", "-"],
+                                self.env, timeout=30, maximum=MAX_ARCHIVE_BYTES)
+            if code:
+                raise Failure("evidence-copy-failed")
+            data = archive_evidence(raw, filename)
+            if filename.endswith(".json"):
+                validate_collected_json(data)
+            with destination.open("xb") as stream:
                 os.fchmod(stream.fileno(), 0o600)
-                stream.write(logs)
-        except (Failure, OSError):
-            # A diagnostics failure must never bypass exact-container cleanup.
+                stream.write(data)
+
+        for filename in EVIDENCE_LOGS + EVIDENCE_JSON:
+            collect(filename, lambda destination, filename=filename: copy_file(filename, destination))
+
+        def write_bootstrap_log(destination):
+            code, logs = execute(["docker", "--host", SOCKET, "logs", "--tail=150", self.container],
+                                 self.env, timeout=30)
+            if code:
+                raise Failure("bootstrap-log-command-failed")
+            with destination.open("xb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(logs[-MAX_EVIDENCE_BYTES:])
+
+        collect("bootstrap.log", write_bootstrap_log)
+        try:
+            destination = self.output / "evidence-collection.json"
+            if not destination.exists() and not destination.is_symlink():
+                self.probe.write_evidence(destination, {"schema_version": 1, "identity": self.identity,
+                                                       "container": self.container, "files": collection})
+        except OSError:
+            # Diagnostic write failures must not bypass exact-container removal.
             pass
+
+    def remove_container(self):
         try:
             self.command(["stop", "--time=15", self.container], timeout=30, allow_failure=True)
         except (Failure, OSError):

@@ -92,14 +92,77 @@ class MountTests(unittest.TestCase):
                     PROBE.validate_proc_directories()
 
     def test_proc_mount_creation_rejects_host_and_non_pid_one_before_mutation(self):
-        for uid, pid in ((1001, 1), (0, 42)):
-            with mock.patch.object(PROBE.os, "getuid", return_value=uid), \
-                 mock.patch.object(PROBE.os, "geteuid", return_value=uid), \
-                 mock.patch.object(PROBE.os, "getppid", return_value=pid), \
-                 mock.patch.object(PROBE.subprocess, "run") as run:
+        for change in ({"uid": 1001}, {"euid": 1001}, {"pid": 42}, {"machine": "x86_64"},
+                       {"container": False}, {"cmdline": b"unexpected\0"}, {"namespace": 2}):
+            with self.subTest(change=change), \
+                 mock.patch.object(PROBE.os, "getuid", return_value=change.get("uid", 0)), \
+                 mock.patch.object(PROBE.os, "geteuid", return_value=change.get("euid", 0)), \
+                 mock.patch.object(PROBE.os, "getppid", return_value=change.get("pid", 1)), \
+                 mock.patch.object(PROBE.platform, "machine", return_value=change.get("machine", "riscv64")), \
+                 mock.patch.object(PROBE.Path, "is_file", return_value=change.get("container", True)), \
+                 mock.patch.object(PROBE, "read_file", return_value=change.get("cmdline", b"/bin/bash\0/opt/oxibelt-preflight/riscv-native-sandbox-bootstrap.sh\0")), \
+                 mock.patch.object(PROBE.Path, "stat", side_effect=[mock.Mock(st_ino=1), mock.Mock(st_ino=change.get("namespace", 1))]), \
+                 mock.patch.object(PROBE.Path, "mkdir") as mkdir, \
+                 mock.patch.object(PROBE, "Commands") as commands:
                 with self.assertRaisesRegex(PROBE.ProbeError, "requires-sandbox-pid-one"):
                     PROBE.prepare_proc_mount()
-                run.assert_not_called()
+                commands.assert_not_called()
+                mkdir.assert_not_called()
+
+    def prepare(self, commands, output, after=None):
+        helper = ("7 1 0:7 / /opt/oxibelt-preflight/private-proc/proc "
+                  "rw,nosuid,nodev,noexec - proc proc rw\n")
+        reads = iter((mounts(), mounts() + helper if after is None else after))
+        def read(path, *args):
+            if str(path) == "/proc/1/cmdline":
+                return b"/bin/bash\0/opt/oxibelt-preflight/riscv-native-sandbox-bootstrap.sh\0"
+            return next(reads).encode()
+        with mock.patch.object(PROBE.os, "getuid", return_value=0), \
+             mock.patch.object(PROBE.os, "geteuid", return_value=0), \
+             mock.patch.object(PROBE.os, "getppid", return_value=1), \
+             mock.patch.object(PROBE.platform, "machine", return_value="riscv64"), \
+             mock.patch.object(PROBE.Path, "is_file", return_value=True), \
+             mock.patch.object(PROBE.Path, "stat", return_value=mock.Mock(st_ino=1)), \
+             mock.patch.object(PROBE.Path, "lstat", return_value=mock.Mock(st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0)), \
+             mock.patch.object(PROBE.Path, "resolve", lambda path, **kw: path), \
+             mock.patch.object(PROBE.Path, "mkdir"), \
+             mock.patch.object(PROBE, "read_file", side_effect=read), \
+             mock.patch.object(PROBE, "Commands", return_value=commands) as runner, \
+             mock.patch("builtins.print", output):
+            try:
+                PROBE.prepare_proc_mount()
+            finally:
+                runner.assert_called_once_with(timeout=10)
+                commands.call.assert_called_once_with(["/usr/bin/mount", "-t", "proc", "-o",
+                    "rw,nosuid,nodev,noexec", "proc", str(PROBE.PROC_HELPER)])
+
+    def test_proc_mount_failure_retains_denial_and_exit_status(self):
+        commands = mock.Mock(log=bytearray(b"mount: permission denied\n"))
+        commands.call.return_value = (32, "")
+        output = mock.Mock()
+        with self.assertRaisesRegex(PROBE.ProbeError, "^proc-helper-mount-failed-exit-32$"):
+            self.prepare(commands, output)
+        output.assert_called_once_with("Proc helper mount output:\nmount: permission denied\n", file=PROBE.sys.stderr)
+
+    def test_proc_mount_runner_failures_preserve_specific_bounded_diagnostics(self):
+        for diagnostic in ("command-timeout", "command-output-too-large", "process-group-cleanup-failed"):
+            commands = mock.Mock(log=bytearray(b"x" * PROBE.MAX_OUTPUT))
+            commands.call.side_effect = PROBE.ProbeError(diagnostic)
+            output = mock.Mock()
+            with self.subTest(diagnostic=diagnostic), \
+                 self.assertRaisesRegex(PROBE.ProbeError, "^proc-helper-mount-" + diagnostic + "$"):
+                self.prepare(commands, output)
+            output.assert_called_once_with("Proc helper mount output:\n" + "x" * PROBE.MAX_OUTPUT, file=PROBE.sys.stderr)
+
+    def test_proc_mount_success_requires_post_mount_validation(self):
+        commands = mock.Mock(log=bytearray(b"successful mount output\n"))
+        commands.call.return_value = (0, "")
+        output = mock.Mock()
+        self.prepare(commands, output)
+        self.assertEqual(json.loads(output.call_args.args[0])["filesystem"], "proc")
+        commands.call.reset_mock()
+        with self.assertRaisesRegex(PROBE.ProbeError, "proc-helper-missing-or-duplicate"):
+            self.prepare(commands, mock.Mock(), after=mounts())
 
     def protect(self, before, after=None, failure=None, wrong_namespace=False, no_remount=False):
         after = before if after is None else after
@@ -357,6 +420,18 @@ class ChildTests(unittest.TestCase):
 
 
 class ProcessTests(unittest.TestCase):
+    def test_nonzero_command_retains_stderr_and_execution_identity(self):
+        commands = PROBE.Commands(timeout=10)
+        script = ("import os,sys; print(f'uid={os.getuid()},euid={os.geteuid()}'); "
+                  "print('mount: permission denied',file=sys.stderr); sys.exit(32)")
+        code, output = commands.call([sys.executable, "-c", script])
+        self.assertEqual(code, 32)
+        self.assertEqual(output, f"uid={os.getuid()},euid={os.geteuid()}\n")
+        self.assertIn(b"mount: permission denied\n", commands.log)
+        self.assertIn(output.encode(), commands.log)
+        self.assertLessEqual(len(commands.log), PROBE.MAX_OUTPUT)
+        self.assertTrue(commands.cleanup_confirmed)
+
     def test_rootlesskit_removed_state_is_confirmed_only_after_process_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
@@ -391,8 +466,7 @@ class ProcessTests(unittest.TestCase):
         scripts = [("command-timeout", "import os,time; print(os.fork(),flush=True); time.sleep(20)", .15),
                    ("command-output-too-large", "import os,time; os.fork(); print('x'*70000,flush=True); time.sleep(20)", 3)]
         for diagnostic, script, bound in scripts:
-            commands = PROBE.Commands()
-            commands.deadline = PROBE.time.monotonic() + bound
+            commands = PROBE.Commands(timeout=bound)
             with mock.patch.object(PROBE, "group_members", wraps=PROBE.group_members) as members:
                 with self.assertRaisesRegex(PROBE.ProbeError, diagnostic):
                     commands.call([sys.executable, "-c", script])
@@ -400,6 +474,16 @@ class ProcessTests(unittest.TestCase):
             self.assertLessEqual(len(commands.log), PROBE.MAX_OUTPUT)
             group = members.call_args.args[0]
             self.assertEqual(PROBE.group_members(group), [])
+
+    def test_output_limit_combines_stdout_and_stderr(self):
+        commands = PROBE.Commands(timeout=3)
+        script = "import os,time; os.write(2,b'e'*40000); os.write(1,b'o'*30000); time.sleep(20)"
+        with self.assertRaisesRegex(PROBE.ProbeError, "command-output-too-large"):
+            commands.call([sys.executable, "-c", script])
+        self.assertEqual(len(commands.log), PROBE.MAX_OUTPUT)
+        self.assertIn(b"e", commands.log)
+        self.assertIn(b"o", commands.log)
+        self.assertTrue(commands.cleanup_confirmed)
 
     def test_nonzero_exit_also_removes_surviving_descendant(self):
         commands = PROBE.Commands()

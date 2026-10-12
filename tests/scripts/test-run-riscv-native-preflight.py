@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import tempfile
+import tarfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,9 +16,24 @@ from unittest import mock
 SPEC = importlib.util.spec_from_file_location("native_preflight", Path(__file__).with_name("run-riscv-native-preflight.py"))
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+REAL_EXECUTE = MODULE.execute
 IDENTITY = {"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
             "GITHUB_REPOSITORY": "OxiBelt/OxiBelt", "GITHUB_EVENT_NAME": "workflow_dispatch"}
 CID = "b" * 64
+
+
+def archive_bytes(filename, data, *, kind=tarfile.REGTYPE, extra=None):
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        member = tarfile.TarInfo(filename)
+        member.type = kind
+        member.linkname = "target" if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE) else ""
+        member.size = len(data) if kind == tarfile.REGTYPE else 0
+        archive.addfile(member, io.BytesIO(data) if kind == tarfile.REGTYPE else None)
+        if extra:
+            other = tarfile.TarInfo(extra)
+            archive.addfile(other, io.BytesIO())
+    return output.getvalue()
 
 
 class LifecycleTests(unittest.TestCase):
@@ -31,6 +47,9 @@ class LifecycleTests(unittest.TestCase):
         self.preflight = MODULE.Preflight(self.root)
         self.preflight.parent = "/kubepods/pod" + "c" * 36
         self.preflight.baseline = {"/": ["cpu", "memory", "pids"]}
+        executor = mock.patch.object(MODULE, "execute", return_value=(1, b"unavailable"))
+        executor.start()
+        self.addCleanup(executor.stop)
 
     def state(self):
         p = self.preflight
@@ -40,7 +59,9 @@ class LifecycleTests(unittest.TestCase):
                                "NanoCpus": 2000000000, "Memory": 4294967296,
                                "MemorySwap": 4294967296, "PidsLimit": 1024,
                                "DeviceCgroupRules": ["c 10:200 rwm"]},
-                "State": {"Running": True, "Pid": 321}}
+                "State": {"Status": "running", "Running": True, "Pid": 321, "ExitCode": 0,
+                          "OOMKilled": False, "Error": "", "StartedAt": "2026-10-12T00:00:00Z",
+                          "FinishedAt": "0001-01-01T00:00:00Z"}}
 
     def test_explicit_provider_socket_and_no_credentials(self):
         with mock.patch.object(MODULE, "execute", return_value=(0, b"ok")) as call:
@@ -354,20 +375,28 @@ class LifecycleTests(unittest.TestCase):
     def test_proc_failure_evidence_is_preserved_before_owned_cleanup(self):
         self.preflight.container = CID
         failure = {"supported": False, "diagnostic": "private-proc-mount-denied"}
+        calls = []
         def command(args, **_kwargs):
-            if args[0] == "inspect":
-                return json.dumps([self.state()]).encode()
-            if args[-1] == "/home/runner/evidence/proc-mount.log":
-                return b'{"operation":"mount-proc","errno":1}\n'
-            if args[-1].startswith("if test -f /home/runner/evidence/proc-mount.json"):
-                return json.dumps(failure).encode()
-            return b""
+            calls.append(args)
+            return json.dumps([self.state()]).encode() if args[0] == "inspect" else b""
+        def execute(args, _env, **_kwargs):
+            calls.append(args[3:])
+            if args[3] == "cp":
+                filename = args[4].rsplit("/", 1)[-1]
+                data = {"proc-mount.json": json.dumps(failure).encode(),
+                        "proc-mount.log": b'{"operation":"mount-proc","errno":1}\n'}.get(filename)
+                return (0, archive_bytes(filename, data)) if data else (1, b"missing")
+            return 0, b""
         with mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(MODULE, "execute", side_effect=execute), \
              mock.patch.object(self.preflight, "check_ancestors"):
             self.preflight.cleanup()
         self.assertEqual(json.loads((self.root / "proc-mount.json").read_text()), failure)
         self.assertIn(b'"errno":1', (self.root / "proc-mount.log").read_bytes())
+        self.assertLess(next(i for i, call in enumerate(calls) if call[0] == "cp"),
+                        calls.index(["rm", "--force", CID]))
         self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
 
     def test_log_and_graceful_stop_failures_still_force_exact_removal(self):
         self.preflight.container = CID
@@ -398,17 +427,19 @@ class LifecycleTests(unittest.TestCase):
         calls = []
         def command(args, **_kwargs):
             calls.append(args)
-            if args[0] == "inspect":
-                return json.dumps([self.state()]).encode()
-            if args[0] == "exec" and "cat /home/runner/evidence/network-sysctl.json" in args[-1]:
-                return json.dumps(evidence).encode()
-            return b""
+            return json.dumps([self.state()]).encode() if args[0] == "inspect" else b""
+        def execute(args, _env, **_kwargs):
+            if args[3] == "cp" and args[4].endswith("/network-sysctl.json"):
+                return 0, archive_bytes("network-sysctl.json", json.dumps(evidence).encode())
+            return 1, b"missing"
         with mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(MODULE, "execute", side_effect=execute), \
              mock.patch.object(self.preflight, "check_ancestors"):
             self.preflight.cleanup()
         self.assertEqual(json.loads((self.root / "network-sysctl.json").read_text()), evidence)
         self.assertIn(["rm", "--force", CID], calls)
         self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
 
     def test_enforcement_diagnostics_survive_exact_container_cleanup(self):
         self.preflight.container = CID
@@ -416,22 +447,25 @@ class LifecycleTests(unittest.TestCase):
         calls = []
         def command(args, **_kwargs):
             calls.append(args)
-            if args[0] == "inspect":
-                return json.dumps([self.state()]).encode()
-            if args[0] == "exec" and args[-1] == "/home/runner/evidence/enforcement-docker.log":
-                self.assertEqual(args[2:6], ["tail", "-c", "65536", "--"])
-                return diagnostic
-            return b""
+            return json.dumps([self.state()]).encode() if args[0] == "inspect" else b""
+        def execute(args, _env, **kwargs):
+            calls.append(args[3:])
+            if args[3] == "cp" and args[4].endswith("/enforcement-docker.log"):
+                self.assertEqual(kwargs, {"timeout": 30, "maximum": MODULE.MAX_ARCHIVE_BYTES})
+                return 0, archive_bytes("enforcement-docker.log", diagnostic)
+            return 1, b"missing"
         with mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(MODULE, "execute", side_effect=execute), \
              mock.patch.object(self.preflight, "check_ancestors"):
             self.preflight.cleanup()
         log = self.root / "enforcement-docker.log"
         self.assertEqual(log.read_bytes(), diagnostic)
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
         capture = next(index for index, args in enumerate(calls)
-                       if args[-1] == "/home/runner/evidence/enforcement-docker.log")
+                       if args[0] == "cp" and args[1].endswith("/enforcement-docker.log"))
         self.assertLess(capture, calls.index(["rm", "--force", CID]))
         self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
 
     def test_failed_network_receipt_cannot_qualify_the_sandbox(self):
         self.preflight.container = CID
@@ -465,6 +499,169 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(receipt["cleanup_confirmed"])
         self.assertEqual(receipt["identity"], IDENTITY)
 
+    def test_stopped_container_retains_real_files_and_sanitized_oom_state(self):
+        self.preflight.container = CID
+        state = self.state()
+        state["State"].update(Status="exited", Running=False, Pid=0, ExitCode=137, OOMKilled=True,
+                              Error="runtime SECRET", FinishedAt="2026-10-12T00:01:00.123Z")
+        failure = {"schema_version": 1, "stage": "proc-helper", "line": 99, "exit_code": 1}
+        sources = {"bootstrap-failure.json": json.dumps(failure).encode(),
+                   "apt-update.log": b"discarded prefix\n" + b"z" * MODULE.MAX_EVIDENCE_BYTES}
+        calls = []
+        def command(args, **_kwargs):
+            calls.append(args)
+            return json.dumps([state]).encode() if args[0] == "inspect" else b""
+        def execute(args, env, **kwargs):
+            self.assertEqual(env, self.preflight.env)
+            calls.append(args[3:])
+            if args[3] == "logs":
+                return 0, b"sandbox bootstrap failed: proc-helper\n"
+            self.assertEqual(args[3], "cp")
+            self.assertEqual(args[-1], "-")
+            self.assertEqual(kwargs, {"timeout": 30, "maximum": MODULE.MAX_ARCHIVE_BYTES})
+            filename = args[4].rsplit("/", 1)[-1]
+            if filename in sources:
+                return 0, archive_bytes(filename, sources[filename])
+            return 1, b"Error: container SECRET is not running"
+        with mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(MODULE, "execute", side_effect=execute), \
+             mock.patch.object(self.preflight, "check_ancestors"):
+            self.preflight.cleanup()
+        self.assertEqual((self.root / "apt-update.log").read_bytes(), b"z" * MODULE.MAX_EVIDENCE_BYTES)
+        self.assertEqual(json.loads((self.root / "bootstrap-failure.json").read_text()), failure)
+        outcome = json.loads((self.root / "sandbox-exit.json").read_text())
+        self.assertEqual(outcome["identity"], IDENTITY)
+        self.assertEqual(outcome["container"], CID)
+        self.assertEqual(outcome["state"]["exit_code"], 137)
+        self.assertTrue(outcome["state"]["oom_killed"])
+        self.assertTrue(outcome["state"]["runtime_error_present"])
+        self.assertNotIn("SECRET", (self.root / "sandbox-exit.json").read_text())
+        report = (self.root / "evidence-collection.json").read_text()
+        self.assertNotIn("SECRET", report)
+        self.assertFalse((self.root / "proc-mount.log").exists())
+        self.assertFalse(any(call[0] == "exec" for call in calls))
+        removal = calls.index(["rm", "--force", CID])
+        self.assertLess(max(i for i, call in enumerate(calls) if call[0] == "cp"), removal)
+        for filename in ("apt-update.log", "bootstrap-failure.json", "sandbox-exit.json", "bootstrap.log"):
+            self.assertEqual((self.root / filename).stat().st_mode & 0o777, 0o600)
+        self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
+    def test_malformed_exit_state_and_copy_timeout_never_bypass_removal(self):
+        self.preflight.container = CID
+        state = self.state()
+        state["State"]["Status"] = ["SECRET"]
+        calls = []
+        def command(args, **_kwargs):
+            calls.append(args)
+            return json.dumps([state]).encode() if args[0] == "inspect" else b""
+        with mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(MODULE, "execute", side_effect=MODULE.Failure("command-timeout")), \
+             mock.patch.object(self.preflight, "check_ancestors"):
+            self.preflight.cleanup()
+        self.assertIn(["rm", "--force", CID], calls)
+        self.assertFalse((self.root / "sandbox-exit.json").exists())
+        report = json.loads((self.root / "evidence-collection.json").read_text())
+        self.assertEqual(report["files"][0]["diagnostic"], "invalid-sandbox-exit-state")
+        self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
+    def test_existing_evidence_and_output_symlinks_are_never_overwritten(self):
+        self.preflight.container = CID
+        existing = self.root / "proc-mount.json"
+        existing.write_text('{"original":true}')
+        target = self.root / "outside"
+        target.write_text("private")
+        (self.root / "network-sysctl.json").symlink_to(target)
+        with mock.patch.object(self.preflight, "command", side_effect=lambda args, **kwargs:
+                               json.dumps([self.state()]).encode() if args[0] == "inspect" else b""), \
+             mock.patch.object(self.preflight, "check_ancestors"):
+            self.preflight.cleanup()
+        self.assertEqual(existing.read_text(), '{"original":true}')
+        self.assertEqual(target.read_text(), "private")
+        self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
+    def test_archive_reader_rejects_unsafe_members_truncation_and_extra_data(self):
+        valid = archive_bytes("apt-update.log", b"real log")
+        self.assertEqual(MODULE.archive_evidence(valid, "apt-update.log"), b"real log")
+        variants = [b"invalid", valid[:1024], valid + b"daemon error", valid[:1536],
+                    archive_bytes("../apt-update.log", b"escaped"),
+                    archive_bytes("/apt-update.log", b"absolute"),
+                    archive_bytes("apt-update.log", b"", extra="unexpected"),
+                    archive_bytes("apt-update.log", b"", extra="apt-update.log")]
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.DIRTYPE, tarfile.CHRTYPE, tarfile.FIFOTYPE):
+            variants.append(archive_bytes("apt-update.log", b"", kind=kind))
+        for raw in variants:
+            with self.subTest(size=len(raw)), self.assertRaises(MODULE.Failure):
+                MODULE.archive_evidence(raw, "apt-update.log")
+        with self.assertRaisesRegex(MODULE.Failure, "unknown-evidence-file"):
+            MODULE.archive_evidence(valid, "../apt-update.log")
+
+    def test_archive_and_json_limits_keep_bounded_log_tails(self):
+        data = b"x" * MODULE.MAX_EVIDENCE_FILE_BYTES
+        self.assertEqual(MODULE.archive_evidence(archive_bytes("apt-install.log", data), "apt-install.log"),
+                         b"x" * MODULE.MAX_EVIDENCE_BYTES)
+        for filename, raw, diagnostic in (
+            ("apt-install.log", b"x" * (MODULE.MAX_ARCHIVE_BYTES + 1), "evidence-archive-too-large"),
+            ("apt-install.log", archive_bytes("apt-install.log", data + b"x"), "invalid-evidence-archive-member"),
+            ("proc-mount.json", archive_bytes("proc-mount.json", b"x" * (MODULE.MAX_EVIDENCE_BYTES + 1)),
+             "evidence-json-too-large"),
+        ):
+            with self.subTest(filename=filename), self.assertRaisesRegex(MODULE.Failure, diagnostic):
+                MODULE.archive_evidence(raw, filename)
+
+    def test_pax_metadata_chains_are_rejected_before_recursive_parsing(self):
+        record = b"13 comment=x\n"
+        header = tarfile.TarInfo("metadata")
+        header.type, header.size = tarfile.XHDTYPE, len(record)
+        metadata = header.tobuf(format=tarfile.USTAR_FORMAT) + record + b"\0" * (512 - len(record))
+        for count in (1, 1100):
+            raw = metadata * count + archive_bytes("apt-update.log", b"real log")
+            with self.subTest(count=count), self.assertRaisesRegex(MODULE.Failure, "invalid-evidence-archive-member"):
+                MODULE.archive_evidence(raw, "apt-update.log")
+
+    def test_json_depth_bound_matches_utf8_decoder_and_preserves_strings(self):
+        value = {"message": 'quote " and slash \\ plus []{} and \u2200', "nested": [[1]]}
+        MODULE.validate_collected_json(json.dumps(value, ensure_ascii=False).encode())
+        deep = '{"x":"\u2200","y":' + '[' * 1000 + '0' + ']' * 1000 + '}'
+        with self.assertRaisesRegex(MODULE.Failure, "evidence-json-too-deep"):
+            MODULE.validate_collected_json(deep.encode())
+        for encoding in ("utf-16", "utf-32", "utf-16-le", "utf-32-be"):
+            with self.subTest(encoding=encoding), self.assertRaises(ValueError):
+                MODULE.validate_collected_json(deep.encode(encoding))
+
+    def test_unexpected_collector_exception_still_removes_exact_container(self):
+        self.preflight.container = CID
+        calls = []
+        def command(args, **kwargs):
+            calls.append(args)
+            return json.dumps([self.state()]).encode() if args[0] == "inspect" else b""
+        with mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(self.preflight, "collect_diagnostics", side_effect=RecursionError()), \
+             mock.patch.object(self.preflight, "check_ancestors"):
+            with self.assertRaises(RecursionError):
+                self.preflight.cleanup()
+        self.assertIn(["rm", "--force", CID], calls)
+        self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+
+    def test_malformed_archives_and_json_are_reported_without_qualifying(self):
+        self.preflight.container = CID
+        def execute(args, env, **kwargs):
+            if args[3] == "cp":
+                filename = args[4].rsplit("/", 1)[-1]
+                if filename == "proc-mount.json":
+                    return 0, archive_bytes(filename, b"[]")
+                return 0, b"malformed archive"
+            return 1, b"daemon SECRET"
+        with mock.patch.object(self.preflight, "command", side_effect=lambda args, **kwargs:
+                               json.dumps([self.state()]).encode() if args[0] == "inspect" else b""), \
+             mock.patch.object(MODULE, "execute", side_effect=execute), \
+             mock.patch.object(self.preflight, "check_ancestors"):
+            self.preflight.cleanup()
+        self.assertFalse((self.root / "proc-mount.json").exists())
+        self.assertFalse((self.root / "bootstrap.log").exists())
+        self.assertTrue(self.preflight.receipt["cleanup_confirmed"])
+        self.assertNotIn("SECRET", (self.root / "evidence-collection.json").read_text())
+        self.assertFalse(self.preflight.receipt["supported"])
+
     def test_ancestor_state_change_blocks_success(self):
         with mock.patch.object(MODULE, "controls", return_value={"/": ["cpu", "io", "memory", "pids"]}):
             with self.assertRaisesRegex(MODULE.Failure, "external-cgroup-controller-state-changed"):
@@ -488,9 +685,9 @@ class LifecycleTests(unittest.TestCase):
     def test_subprocess_timeout_and_output_cap_are_bounded(self):
         env = {"PATH": "/usr/bin:/bin"}
         with self.assertRaisesRegex(MODULE.Failure, "command-timeout"):
-            MODULE.execute(["python3", "-c", "import time; time.sleep(5)"], env, timeout=0.05)
+            REAL_EXECUTE(["python3", "-c", "import time; time.sleep(5)"], env, timeout=0.05)
         with self.assertRaisesRegex(MODULE.Failure, "command-output-too-large"):
-            MODULE.execute(["python3", "-c", "print('x'*150000)"], env)
+            REAL_EXECUTE(["python3", "-c", "print('x'*150000)"], env)
 
     def test_process_exit_race_does_not_mask_timeout(self):
         killpg = MODULE.os.killpg
@@ -498,7 +695,7 @@ class LifecycleTests(unittest.TestCase):
             killpg(pid, sig)
             raise ProcessLookupError()
         with mock.patch.object(MODULE.os, "killpg", side_effect=race), self.assertRaisesRegex(MODULE.Failure, "command-timeout"):
-            MODULE.execute(["python3", "-c", "import time; time.sleep(5)"], {"PATH": "/usr/bin:/bin"}, timeout=0.05)
+            REAL_EXECUTE(["python3", "-c", "import time; time.sleep(5)"], {"PATH": "/usr/bin:/bin"}, timeout=0.05)
 
 
 if __name__ == "__main__":

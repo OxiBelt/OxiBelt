@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import struct
@@ -15,7 +16,161 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent
 LOCK = json.loads((ROOT / 'riscv-native-tools.lock.json').read_text())
 SCRIPT = (ROOT / 'riscv-native-sandbox-build-tools.sh').read_text()
+BOOTSTRAP = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()
+BOOTSTRAP_FAILURE_SETUP = BOOTSTRAP[BOOTSTRAP.index('bootstrap_stage=guard\n'):
+                                    BOOTSTRAP.index('[[ $(id -u) == 0')]
 MANIFEST_CODE = re.search(r'python3 - "\$\{lock\}" "\$\{tools\}/bin"[^\n]*<<\'PY\'\n(.*?)\nPY', SCRIPT, re.S).group(1)
+
+
+class BootstrapFailureReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = Path(self.temporary.name)
+        self.evidence = self.home / 'evidence'
+        self.evidence.mkdir()
+        self.receipt = self.evidence / 'bootstrap-failure.json'
+        self.canary = 'private-command-and-environment-canary'
+
+    def run_bootstrap(self, commands, *, enable_receipt=True):
+        shell = 'set -euo pipefail\numask 077\n' + BOOTSTRAP_FAILURE_SETUP
+        if enable_receipt:
+            shell += 'bootstrap_receipt_enabled=1\n'
+        shell += commands + '\nprintf unexpected-continuation\n'
+        result = subprocess.run(['bash', '-c', shell],
+                                env={'home': str(self.home), 'evidence': str(self.evidence),
+                                     'SECRET_ENVIRONMENT': self.canary},
+                                capture_output=True, text=True, timeout=10)
+        return shell, result
+
+    def assert_failure(self, shell, result, *, stage, status, command):
+        line = shell[:shell.index(command)].count('\n') + 1
+        expected = {'schema_version': 1, 'stage': stage, 'line': line, 'exit_code': status}
+        self.assertEqual(result.returncode, status)
+        self.assertEqual(json.loads(self.receipt.read_text()), expected)
+        self.assertEqual(self.receipt.stat().st_mode & 0o777, 0o600)
+        self.assertLessEqual(self.receipt.stat().st_size, 256)
+        self.assertEqual(result.stdout, '')
+        self.assertEqual(result.stderr,
+                         f'sandbox bootstrap failed: stage={stage} line={line} exit_code={status}\n')
+        self.assertNotIn(self.canary, self.receipt.read_text() + result.stderr)
+        self.assertNotIn(command, self.receipt.read_text() + result.stderr)
+        self.assertEqual((self.home / 'preflight-failed').read_text(), 'sandbox bootstrap failed\n')
+
+    def test_silent_locked_python_assertion_records_production_stage(self):
+        stage = re.search(r'^bootstrap_stage=python-install$', BOOTSTRAP, re.M).group(0)
+        assertion = re.search(r'^\[\[ \$\{python_version\} == 3\.13\.5-1 \]\]$',
+                              BOOTSTRAP, re.M).group(0)
+        shell, result = self.run_bootstrap(stage + '\npython_version=unlocked\n' + assertion)
+        self.assert_failure(shell, result, stage='python-install', status=1, command=assertion)
+
+    def test_redirected_update_pipeline_preserves_original_status_and_stderr(self):
+        pipeline = re.search(r'^bootstrap_stage=apt-update\ntimeout[^\n]+', BOOTSTRAP, re.M).group(0)
+        shell, result = self.run_bootstrap(
+            'timeout() { printf "%s\\n" "$SECRET_ENVIRONMENT"; return 23; }\n' + pipeline)
+        self.assert_failure(shell, result, stage='apt-update', status=23, command='timeout 600 apt-get update')
+        self.assertEqual((self.evidence / 'apt-update.log').read_text(), self.canary + '\n')
+
+    def test_redirected_proc_helper_preserves_original_stderr(self):
+        helper = re.search(r'^bootstrap_stage=proc-helper\npython3[^\n]+\\\n[^\n]+',
+                           BOOTSTRAP, re.M).group(0)
+        shell, result = self.run_bootstrap(
+            'root=/fixture\npython3() { printf "%s\\n" "$SECRET_ENVIRONMENT"; return 37; }\n' + helper)
+        self.assert_failure(shell, result, stage='proc-helper', status=37,
+                            command='python3 "${root}/check-riscv-network-sysctl.py" --prepare-proc-mount')
+        self.assertEqual((self.evidence / 'network-mount.log').read_text(), self.canary + '\n')
+
+    def test_preserves_first_receipt_and_refuses_existing_symlink_or_fifo(self):
+        for kind in ('receipt', 'symlink', 'fifo'):
+            with self.subTest(kind=kind):
+                target = self.home / 'existing'
+                target.write_text('first failure\n')
+                if kind == 'receipt':
+                    self.receipt.write_text('first failure\n')
+                elif kind == 'symlink':
+                    self.receipt.symlink_to(target)
+                else:
+                    os.mkfifo(self.receipt)
+                _, result = self.run_bootstrap('false')
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr.count('sandbox bootstrap failed:'), 1)
+                if kind == 'receipt':
+                    self.assertEqual(self.receipt.read_text(), 'first failure\n')
+                else:
+                    self.assertEqual(target.read_text(), 'first failure\n')
+                self.receipt.unlink()
+
+    def test_unwritable_evidence_does_not_recurse_or_replace_failure_status(self):
+        self.evidence.rmdir()
+        self.evidence.write_text('not a directory\n')
+        _, result = self.run_bootstrap('(exit 43)')
+        self.assertEqual(result.returncode, 43)
+        self.assertEqual(result.stdout, '')
+        self.assertEqual(result.stderr.count('sandbox bootstrap failed:'), 1)
+        self.assertIn('exit_code=43\n', result.stderr)
+
+    def test_unsafe_guard_emits_marker_without_creating_receipt(self):
+        _, result = self.run_bootstrap('false', enable_receipt=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('stage=guard', result.stderr)
+        self.assertFalse(self.receipt.exists())
+        self.assertFalse((self.home / 'preflight-failed').exists())
+
+    def test_systemd_exec_failure_uses_production_handler(self):
+        handoff = BOOTSTRAP[BOOTSTRAP.index('bootstrap_stage=systemd-exec\n'):]
+        shell, result = self.run_bootstrap(
+            'exec() { builtin exec "${home}/missing-systemd"; }\n' + handoff)
+        self.assertEqual(result.returncode, 127)
+        receipt = json.loads(self.receipt.read_text())
+        self.assertEqual(receipt['stage'], 'systemd-exec')
+        self.assertEqual(receipt['exit_code'], 127)
+        line = shell[:shell.index('  || bootstrap_failure')].count('\n') + 1
+        self.assertEqual(receipt['line'], line)
+        self.assertIn(f'stage=systemd-exec line={line} exit_code=127\n', result.stderr)
+        self.assertNotIn(self.canary, result.stderr + self.receipt.read_text())
+
+    def test_successful_systemd_handoff_closes_diagnostic_descriptor(self):
+        handoff = BOOTSTRAP[BOOTSTRAP.index('bootstrap_stage=systemd-exec\n'):]
+        _, result = self.run_bootstrap(
+            '''exec() {
+  builtin exec python3 -c 'import os
+try:
+    os.fstat(3)
+except OSError:
+    print("descriptor closed")
+else:
+    raise AssertionError("diagnostic descriptor leaked")'
+}
+''' + handoff)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, 'descriptor closed\n')
+        self.assertEqual(result.stderr, '')
+        self.assertFalse(self.receipt.exists())
+
+    def test_unit_modes_do_not_install_bootstrap_failure_trap(self):
+        shell = 'set -euo pipefail\n' + BOOTSTRAP_FAILURE_SETUP + 'false\n'
+        for mode in ('--prepare-user', '--record-failure'):
+            with self.subTest(mode=mode):
+                result = subprocess.run(['bash', '-c', shell, 'bootstrap-fixture', mode],
+                                        env={'home': str(self.home), 'evidence': str(self.evidence)},
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr, '')
+                self.assertFalse(self.receipt.exists())
+
+    def test_handler_is_installed_before_guard_and_writes_only_after_pid1_guard(self):
+        first_guard = BOOTSTRAP.index('[[ $(id -u) == 0')
+        pid1_guard = BOOTSTRAP.index('[[ $$ == 1 && $(id -u) == 0 && $(uname -m) == riscv64 ]]')
+        enabled = BOOTSTRAP.index('\nbootstrap_receipt_enabled=1\n')
+        lock_guard = BOOTSTRAP.index('[[ -f ${root}/riscv-native-tools.lock.json')
+        self.assertLess(BOOTSTRAP.index("trap 'bootstrap_failure"), first_guard)
+        self.assertLess(pid1_guard, enabled)
+        self.assertLess(enabled, lock_guard)
+        stages = set(re.findall(r'^bootstrap_stage=([a-z-]+)$', BOOTSTRAP, re.M))
+        self.assertEqual(stages, {'guard', 'propagation', 'apt-sources', 'apt-update',
+                                 'python-install', 'package-install', 'package-verify',
+                                 'network-mount', 'proc-helper', 'runner-user', 'tun',
+                                 'systemd-setup', 'systemd-exec'})
 
 
 class NativeToolReceiptTests(unittest.TestCase):
