@@ -67,6 +67,25 @@ fi
 bootstrap_receipt_enabled=1
 [[ -f ${root}/riscv-native-tools.lock.json && -f /usr/share/keyrings/debian-archive-keyring.gpg ]]
 mkdir -p "${evidence}"
+# docker cp preserves the provider user's ownership. Admit only flat regular
+# staging files before normalizing ownership for the root-only proc helper.
+bootstrap_stage=staging-ownership
+[[ ! -L ${root%/*} && -d ${root%/*} && ! -L ${root} && -d ${root} ]]
+shopt -s dotglob nullglob
+staged_files=("${root}"/*)
+shopt -u dotglob nullglob
+for staged_file in "${staged_files[@]}"; do
+  [[ ! -L ${staged_file} && -f ${staged_file} ]]
+  case ${staged_file##*/} in
+    riscv-native-sandbox-bootstrap.sh|riscv-native-sandbox-build-tools.sh|riscv-native-tools.lock.json|\
+    check-riscv-native-runner.py|check-riscv-rootless-enforcement.py|riscv-rootless-limit-probe.c|\
+    check-riscv-network-sysctl.py|check-riscv-proc-mount.py|workflow-identity.json) ;;
+    *) false ;;
+  esac
+done
+chown --no-dereference 0:0 -- "${root}" "${staged_files[@]}"
+chmod 755 -- "${root}"
+chmod 644 -- "${staged_files[@]}"
 # Detach propagation before adding any sandbox-local mount exception.
 bootstrap_stage=propagation
 mount --make-rprivate /
@@ -197,6 +216,12 @@ systemctl mask systemd-firstboot.service systemd-udevd.service
 # Propagation changes are confined to this container's private mount namespace.
 bootstrap_stage=propagation
 mount --make-rshared /
+# Keep the full procfs grant private while systemd's root remains shared.
+bootstrap_stage=proc-helper
+mount --make-private "${root}/private-proc/proc"
+bootstrap_stage=network-mount
+python3 "${root}/check-riscv-network-sysctl.py" --check-mounts \
+  2>&1 | tail -c 4194304 >>"${evidence}/network-mount.log"
 bootstrap_stage=systemd-exec
 # Bash otherwise exits on a failed exec without running its ERR trap.
 shopt -s execfail

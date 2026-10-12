@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise native tool receipt failures without a daemon or privileged host work."""
+import ast
 import copy
 import hashlib
 import json
@@ -19,6 +20,8 @@ SCRIPT = (ROOT / 'riscv-native-sandbox-build-tools.sh').read_text()
 BOOTSTRAP = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()
 BOOTSTRAP_FAILURE_SETUP = BOOTSTRAP[BOOTSTRAP.index('bootstrap_stage=guard\n'):
                                     BOOTSTRAP.index('[[ $(id -u) == 0')]
+STAGED_NAMES = ast.literal_eval(re.search(
+    r'^FILES = (\(.*?\n\))', (ROOT / 'run-riscv-native-preflight.py').read_text(), re.M | re.S).group(1)) + ('workflow-identity.json',)
 MANIFEST_CODE = re.search(r'python3 - "\$\{lock\}" "\$\{tools\}/bin"[^\n]*<<\'PY\'\n(.*?)\nPY', SCRIPT, re.S).group(1)
 
 
@@ -158,6 +161,140 @@ else:
                 self.assertEqual(result.stderr, '')
                 self.assertFalse(self.receipt.exists())
 
+    def staging_block(self):
+        return BOOTSTRAP[BOOTSTRAP.index('bootstrap_stage=staging-ownership\n'):
+                         BOOTSTRAP.index('# Detach propagation')]
+
+    def make_staging(self, parent):
+        staging = parent / 'preflight'
+        staging.mkdir(parents=True)
+        staging.chmod(0o777)
+        for name in STAGED_NAMES:
+            (staging / name).write_text('fixture; never execute\n')
+            (staging / name).chmod(0o600)
+        return staging
+
+    def staging_commands(self, relative_root):
+        return ('root="${home}/' + relative_root + '"\n'
+                'chown() { printf "%s\\0" "$@" >"${home}/chown-arguments"; }\n'
+                + self.staging_block())
+
+    def test_staged_sources_have_root_ownership_arguments_and_safe_modes(self):
+        staging = self.make_staging(self.home / 'stage-parent')
+        _, result = self.run_bootstrap(self.staging_commands('stage-parent/preflight'))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, '')
+        arguments = (self.home / 'chown-arguments').read_bytes().decode().split('\0')[:-1]
+        self.assertEqual(arguments[:4], ['--no-dereference', '0:0', '--', str(staging)])
+        self.assertEqual(set(arguments[4:]), {str(staging / name) for name in STAGED_NAMES})
+        self.assertEqual(len(arguments[4:]), len(STAGED_NAMES))
+        self.assertEqual(staging.stat().st_mode & 0o777, 0o755)
+        for name in STAGED_NAMES:
+            self.assertEqual((staging / name).stat().st_mode & 0o777, 0o644)
+        self.assertFalse(self.receipt.exists())
+
+    def test_staging_rejects_symlinks_and_unexpected_entries_before_chown(self):
+        cases = ('parent-symlink', 'root-symlink', 'child-symlink', 'dangling-symlink',
+                 'directory', 'fifo', 'unexpected-file', 'hidden-file')
+        for index, kind in enumerate(cases):
+            with self.subTest(kind=kind):
+                case = self.home / str(index)
+                staging = self.make_staging(case / 'stage-parent')
+                staged_root = case / 'stage-parent' / 'preflight'
+                if kind == 'parent-symlink':
+                    staging.parent.rename(case / 'real-parent')
+                    staged_root.parent.symlink_to(case / 'real-parent')
+                    staging = case / 'real-parent' / 'preflight'
+                elif kind == 'root-symlink':
+                    staging.rename(case / 'stage-parent' / 'real-staging')
+                    staged_root.symlink_to(staged_root.parent / 'real-staging')
+                    staging = staged_root.parent / 'real-staging'
+                elif kind in ('child-symlink', 'dangling-symlink', 'directory', 'fifo'):
+                    entry = staging / 'check-riscv-proc-mount.py'
+                    entry.unlink()
+                    if kind == 'child-symlink':
+                        entry.symlink_to(staging / 'check-riscv-network-sysctl.py')
+                    elif kind == 'dangling-symlink':
+                        entry.symlink_to(staging / 'absent')
+                    elif kind == 'directory':
+                        entry.mkdir()
+                    else:
+                        os.mkfifo(entry)
+                else:
+                    name = '.unexpected' if kind == 'hidden-file' else 'unexpected.py'
+                    (staging / name).write_text('unexpected\n')
+                _, result = self.run_bootstrap(self.staging_commands(f'{index}/stage-parent/preflight'))
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, '')
+                self.assertEqual(json.loads(self.receipt.read_text())['stage'], 'staging-ownership')
+                self.assertIn('stage=staging-ownership', result.stderr)
+                self.assertFalse((self.home / 'chown-arguments').exists())
+                self.assertEqual(staging.stat().st_mode & 0o777, 0o777)
+                self.receipt.unlink()
+
+    def test_staging_normalization_precedes_package_work_and_runner_startup(self):
+        ownership = BOOTSTRAP.index('bootstrap_stage=staging-ownership\n')
+        self.assertLess(BOOTSTRAP.index('\nbootstrap_receipt_enabled=1\n'), ownership)
+        self.assertLess(ownership, BOOTSTRAP.index('bootstrap_stage=apt-sources\n'))
+        self.assertLess(ownership, BOOTSTRAP.index('useradd --uid 1001'))
+        self.assertLess(BOOTSTRAP.index('chmod 644 -- "${staged_files[@]}"'),
+                        BOOTSTRAP.index('bootstrap_stage=proc-helper\n'))
+
+    def test_handoff_restores_exact_private_proc_mount_and_checks_before_systemd(self):
+        handoff = BOOTSTRAP[BOOTSTRAP.rindex('bootstrap_stage=propagation\n'):]
+        shared = handoff.index('mount --make-rshared /')
+        private = handoff.index('mount --make-private "${root}/private-proc/proc"')
+        check = handoff.index('--check-mounts')
+        systemd = handoff.index('exec /lib/systemd/systemd')
+        self.assertLess(shared, private)
+        self.assertLess(private, check)
+        self.assertLess(check, systemd)
+        self.assertIn('tail -c 4194304 >>"${evidence}/network-mount.log"', handoff)
+        for failure, status, stage in [('none', 0, None), ('shared', 41, 'propagation'),
+                                       ('private', 43, 'proc-helper'), ('check', 47, 'network-mount')]:
+            with self.subTest(failure=failure):
+                commands = '''root=/fixture
+mount() {
+  printf '%s %s\\n' "$1" "$2" >>"${home}/mount-calls"
+  if [[ $1 == --make-rshared && $failure == shared ]]; then return 41; fi
+  if [[ $1 == --make-private && $failure == private ]]; then return 43; fi
+}
+python3() {
+  printf '%s %s\\n' "$1" "$2" >"${home}/mount-check"
+  printf '%s\\n' "$SECRET_ENVIRONMENT"
+  if [[ $failure == check ]]; then return 47; fi
+}
+exec() { printf started >"${home}/systemd-started"; builtin exec /usr/bin/true; }
+''' + f'failure={failure}\n' + handoff
+                (self.evidence / 'network-mount.log').write_text('before\n')
+                _, result = self.run_bootstrap(commands)
+                self.assertEqual(result.returncode, status)
+                self.assertEqual(result.stdout, '')
+                calls = (self.home / 'mount-calls').read_text().splitlines()
+                expected = ['--make-rshared /']
+                if failure != 'shared':
+                    expected.append('--make-private /fixture/private-proc/proc')
+                self.assertEqual(calls, expected)
+                self.assertEqual((self.home / 'mount-check').exists(), failure in ('none', 'check'))
+                self.assertEqual((self.home / 'systemd-started').exists(), failure == 'none')
+                if status:
+                    receipt = json.loads(self.receipt.read_text())
+                    self.assertEqual(receipt['stage'], stage)
+                    self.assertEqual(receipt['exit_code'], status)
+                    self.assertIn(f'stage={stage}', result.stderr)
+                    self.assertNotIn(self.canary, result.stderr + self.receipt.read_text())
+                    self.receipt.unlink()
+                else:
+                    self.assertEqual(result.stderr, '')
+                    self.assertFalse(self.receipt.exists())
+                if failure in ('none', 'check'):
+                    self.assertEqual((self.home / 'mount-check').read_text(),
+                                     '/fixture/check-riscv-network-sysctl.py --check-mounts\n')
+                    self.assertEqual((self.evidence / 'network-mount.log').read_text(),
+                                     'before\n' + self.canary + '\n')
+                for name in ('mount-calls', 'mount-check', 'systemd-started'):
+                    (self.home / name).unlink(missing_ok=True)
+
     def test_handler_is_installed_before_guard_and_writes_only_after_pid1_guard(self):
         first_guard = BOOTSTRAP.index('[[ $(id -u) == 0')
         pid1_guard = BOOTSTRAP.index('[[ $$ == 1 && $(id -u) == 0 && $(uname -m) == riscv64 ]]')
@@ -167,7 +304,7 @@ else:
         self.assertLess(pid1_guard, enabled)
         self.assertLess(enabled, lock_guard)
         stages = set(re.findall(r'^bootstrap_stage=([a-z-]+)$', BOOTSTRAP, re.M))
-        self.assertEqual(stages, {'guard', 'propagation', 'apt-sources', 'apt-update',
+        self.assertEqual(stages, {'guard', 'staging-ownership', 'propagation', 'apt-sources', 'apt-update',
                                  'python-install', 'package-install', 'package-verify',
                                  'network-mount', 'proc-helper', 'runner-user', 'tun',
                                  'systemd-setup', 'systemd-exec'})
