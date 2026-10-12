@@ -42,6 +42,11 @@ both initial and replay JSON reports and run logs under
 on failure it also retains the proxy log. The runner needs Docker support for
 `NET_ADMIN` in its isolated test container to redirect browser WebTransport
 UDP traffic while the WPT server stays on loopback.
+The Chrome `Abort client-created bidirectional stream` timeout followed by
+`NOTRUN` subtests remains an immediate failure, including when retry
+classification is enabled. Diagnose it with paired direct and proxied runs of
+all four `streams-close` contexts using the pinned browser and image before
+changing proxy behavior; a successful replay alone does not explain the timeout.
 The proxy fixture disables H1/H2 and enables
 `proxy.http3.webtransport_only_connections` on its isolated H3 endpoint so
 session close events can close that QUIC connection;

@@ -86,6 +86,35 @@ def set_subtest(report, test, status, message=None):
     subtest.update(status=status, message=message)
 
 
+def serviceworker_timeout_reports():
+    """Reproduce the Chrome serviceworker sequence from hosted run 38205816664."""
+    direct = pinned_report()
+    target = next(entry for entry in direct["results"] if entry["test"] == SERVICE_WORKER)
+    target["subtests"] = [
+        {"name": name, "status": "PASS", "message": None, "known_intermittent": []}
+        for name in (
+            "Close outgoing stream / bidi-1",
+            "Close outgoing stream / bidi-2",
+            "Close outgoing stream / uni",
+            "Abort client-created bidirectional stream",
+            "Abort server-initiated bidirectional stream",
+            "Abort unidirectional stream with WebTransportError",
+            SUBTEST,
+            "Abort unidirectional stream with default error code",
+            "STOP_SENDING coming from server",
+            "RESET_STREAM coming from server",
+        )
+    ]
+    proxied = copy.deepcopy(direct)
+    target = next(entry for entry in proxied["results"] if entry["test"] == SERVICE_WORKER)
+    target["status"] = "TIMEOUT"
+    for index, subtest in enumerate(target["subtests"][3:]):
+        subtest.update(status="TIMEOUT" if index == 0 else "NOTRUN", expected="PASS")
+        if index == 0:
+            subtest["message"] = "Test timed out"
+    return direct, proxied
+
+
 class ChromeDirectRetryTests(unittest.TestCase):
     def setUp(self):
         self.direct = {
@@ -228,6 +257,21 @@ class ChromeProxyRetryTests(unittest.TestCase):
         self.proxied[WORKER] = result("PASS")
         self.assert_not_retryable()
 
+    def test_hosted_serviceworker_timeout_cannot_select_either_replay(self):
+        direct, proxied = serviceworker_timeout_reports()
+        with self.assertRaises(ValueError) as caught:
+            checker.compare(
+                {entry["test"]: entry for entry in direct["results"]},
+                {entry["test"]: entry for entry in proxied["results"]},
+                True, True,
+            )
+        self.assertIs(type(caught.exception), ValueError)
+        message = str(caught.exception)
+        self.assertIn(f"{SERVICE_WORKER}: harness OK -> TIMEOUT", message)
+        self.assertIn("Abort client-created bidirectional stream: PASS -> TIMEOUT", message)
+        self.assertEqual(message.count(": PASS -> NOTRUN"), 6)
+        self.assertNotIn("Retryable", message)
+
 
 class ClassifierCliTests(unittest.TestCase):
     def run_checker(self, direct, proxied, *flags, browser="chrome"):
@@ -266,6 +310,18 @@ class ClassifierCliTests(unittest.TestCase):
         ):
             with self.subTest(flags=flags, browser=browser):
                 self.assertEqual(self.run_checker(report, report, *flags, browser=browser).returncode, 1)
+
+    def test_hosted_serviceworker_timeout_exits_one_with_both_classification_flags(self):
+        direct, proxied = serviceworker_timeout_reports()
+        completed = self.run_checker(
+            direct, proxied, "--classify-chrome-direct-retry", "--classify-chrome-proxy-retry",
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn(f"{SERVICE_WORKER}: harness OK -> TIMEOUT", completed.stderr)
+        self.assertIn("Abort client-created bidirectional stream: PASS -> TIMEOUT", completed.stderr)
+        self.assertEqual(completed.stderr.count(": PASS -> NOTRUN"), 6)
+        self.assertNotIn("Retryable", completed.stderr)
+        self.assertEqual(completed.stdout, "")
 
     def test_report_and_control_errors_cannot_request_replay(self):
         original = pinned_report()
@@ -320,7 +376,9 @@ if args[0] == "exec" and "./wpt" in args:
     if report_name == "chrome-direct" and scenario == "mixed":
         entry = next(entry for entry in report["results"] if entry["test"] == "/webtransport/streams-close.https.any.worker.html")
         entry["subtests"][0].update(status="FAIL", message='assert_equals: reset_stream expected "reset" but got "FIN"')
-    failure = report_name == "chrome-proxied" or (retry and scenario == "persistent")
+    if report_name == "chrome-proxied" and scenario == "serviceworker-timeout":
+        report = json.loads((root / "timeout.json").read_text())
+    failure = (report_name == "chrome-proxied" and scenario != "serviceworker-timeout") or (retry and scenario == "persistent")
     if failure or (retry and scenario == "migrating"):
         context = "worker" if retry and scenario == "migrating" else "serviceworker"
         target = f"/webtransport/streams-close.https.any.{context}.html"
@@ -354,7 +412,11 @@ class ProxyReplayShellTests(unittest.TestCase):
         root = Path(temporary.name)
         (root / "artifacts").mkdir()
         (root / "bin").mkdir()
-        (root / "passing.json").write_text(json.dumps(pinned_report()))
+        passing = pinned_report()
+        if scenario == "serviceworker-timeout":
+            passing, timeout_report = serviceworker_timeout_reports()
+            (root / "timeout.json").write_text(json.dumps(timeout_report))
+        (root / "passing.json").write_text(json.dumps(passing))
         (root / "state.json").write_text(json.dumps({"runs": [], "packets": 0}))
         docker = root / "bin" / "docker"
         docker.write_text(f"#!{sys.executable}\n" + textwrap.dedent(FAKE_DOCKER))
@@ -380,7 +442,10 @@ class ProxyReplayShellTests(unittest.TestCase):
                 self.assertTrue((root / "artifacts" / f"{name}.{suffix}").is_file(), completed.stderr)
         original = json.loads((root / "artifacts" / "chrome-proxied.json").read_text())
         target = next(entry for entry in original["results"] if entry["test"] == SERVICE_WORKER)
-        self.assertEqual(target["subtests"][0]["status"], "FAIL")
+        if scenario == "serviceworker-timeout":
+            self.assertEqual(original, timeout_report)
+        else:
+            self.assertEqual(target["subtests"][0]["status"], "FAIL")
         return completed, state, root
 
     def test_one_complete_proxy_replay_passes_and_preserves_reports(self):
@@ -419,6 +484,23 @@ class ProxyReplayShellTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 1, completed.stderr)
                 self.assertEqual(state["runs"], ["chrome-direct", "firefox-direct", "chrome-proxied"])
                 self.assertFalse((root / "artifacts" / "chrome-proxied-retry.json").exists())
+
+    def test_hosted_serviceworker_timeout_preserves_initial_failure_without_replay(self):
+        completed, state, root = self.run_gate("serviceworker-timeout", expected_retries=0)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertEqual(state["runs"], ["chrome-direct", "firefox-direct", "chrome-proxied"])
+        self.assertEqual(state["packets"], 1)
+        direct, proxied = serviceworker_timeout_reports()
+        for name, expected in (("chrome-direct", direct), ("chrome-proxied", proxied)):
+            self.assertEqual(json.loads((root / "artifacts" / f"{name}.json").read_text()), expected)
+            self.assertEqual((root / "artifacts" / f"{name}.exit").read_text().strip(), "0")
+            self.assertIn(f"synthetic WPT {name}", (root / "artifacts" / f"{name}.log").read_text())
+        self.assertIn(f"{SERVICE_WORKER}: harness OK -> TIMEOUT", completed.stderr)
+        self.assertIn("Abort client-created bidirectional stream: PASS -> TIMEOUT", completed.stderr)
+        self.assertEqual(completed.stderr.count(": PASS -> NOTRUN"), 6)
+        self.assertNotIn("Retryable", completed.stderr)
+        self.assertNotIn("retrying", completed.stderr)
+        self.assertFalse(list((root / "artifacts").glob("*retry*")))
 
 
 if __name__ == "__main__":
