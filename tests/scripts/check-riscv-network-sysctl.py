@@ -23,6 +23,8 @@ LOCK = Path("/opt/oxibelt-preflight/riscv-native-tools.lock.json")
 RUNTIME = Path("/run/user/1001")
 PROC_PARENT = Path("/opt/oxibelt-preflight/private-proc")
 PROC_HELPER = PROC_PARENT / "proc"
+SYS_PARENT = Path("/opt/oxibelt-preflight/private-sys")
+SYS_HELPER = SYS_PARENT / "sys"
 IPV4 = Path("/proc/sys/net/ipv4/ip_forward")
 IPV6 = Path("/proc/sys/net/ipv6/conf/all/forwarding")
 MAX_OUTPUT = 65536
@@ -121,6 +123,87 @@ def validate_proc_directories() -> None:
             raise ProbeError("unsafe-proc-helper-permissions")
 
 
+def validate_sys_helper(text: str, *, required: bool = False) -> dict | None:
+    """Admit one private full sysfs grant without changing Docker's /sys masks."""
+    mounts = mount_metadata(text)
+    matches = [row for row in mounts if row["point"] == str(SYS_HELPER)]
+    for row in mounts:
+        point = row["point"]
+        if (point == str(SYS_PARENT) or point.startswith(str(SYS_PARENT) + "/")) and point != str(SYS_HELPER):
+            raise ProbeError("unexpected-sys-helper-submount")
+        if row["filesystem"] == "sysfs":
+            if "rw" in row["options"]:
+                raise ProbeError("writable-sysfs-alias")
+            if (point != str(Path(point)) or row["root"] != str(Path(row["root"]))
+                or (point != "/sys" and not point.startswith("/sys/") and point != str(SYS_HELPER))):
+                raise ProbeError("unexpected-sysfs-alias")
+    if not matches and not required:
+        return None
+    if len(matches) != 1:
+        raise ProbeError("sys-helper-missing-or-duplicate")
+    row = matches[0]
+    if (row["root"] != "/" or row["filesystem"] != "sysfs"
+        or not {"ro", "nosuid", "nodev", "noexec"} <= row["options"]
+        or "rw" in row["options"]
+        or len({"ro", "rw"}.intersection(row["super_options"])) != 1
+        or row["propagation"]):
+        raise ProbeError("sys-helper-mount-mismatch")
+    return {"mountpoint": str(SYS_HELPER), "root": "/", "filesystem": "sysfs",
+            "options": sorted(row["options"])}
+
+
+def validate_sys_directories() -> None:
+    for path in (Path("/"), SYS_PARENT.parent.parent, SYS_PARENT.parent, SYS_PARENT, SYS_HELPER):
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or info.st_mode & 0o022 or path.resolve(strict=True) != path):
+            raise ProbeError("unsafe-sys-helper-directory")
+        if path == SYS_PARENT and stat.S_IMODE(info.st_mode) != 0o700:
+            raise ProbeError("unsafe-sys-helper-permissions")
+
+
+def prepare_sys_mount() -> None:
+    """Create a fresh readonly sysfs mount only in the PID 1 bootstrap namespace."""
+    if (os.getuid() != 0 or os.geteuid() != 0 or os.getppid() != 1
+        or platform.machine() != "riscv64" or not Path("/.dockerenv").is_file()
+        or read_file(Path("/proc/1/cmdline"), 256) != b"/bin/bash\0/opt/oxibelt-preflight/riscv-native-sandbox-bootstrap.sh\0"
+        or Path("/proc/self/ns/mnt").stat().st_ino != Path("/proc/1/ns/mnt").stat().st_ino):
+        raise ProbeError("requires-sandbox-pid-one-bootstrap-mount-namespace")
+    before = read_file(Path("/proc/self/mountinfo")).decode()
+    validate_mounts(before, require_helper=True)
+    if validate_sys_helper(before) is not None:
+        raise ProbeError("sys-helper-already-mounted")
+    root_rows = [row for row in mount_metadata(before) if row["point"] == "/"]
+    if len(root_rows) != 1 or root_rows[0]["propagation"]:
+        raise ProbeError("requires-private-sandbox-mount-propagation")
+    for parent in (Path("/"), SYS_PARENT.parent.parent, SYS_PARENT.parent):
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or info.st_mode & 0o022 or parent.resolve(strict=True) != parent):
+            raise ProbeError("unsafe-sys-helper-directory")
+    SYS_PARENT.mkdir(mode=0o700)
+    SYS_HELPER.mkdir(mode=0o700)
+    validate_sys_directories()
+    commands = Commands(timeout=10)
+    try:
+        code, _output = commands.call(["/usr/bin/mount", "-t", "sysfs", "-o", "ro,nosuid,nodev,noexec", "sysfs", str(SYS_HELPER)])
+        if code:
+            raise ProbeError(f"failed-exit-{code}")
+    except ProbeError as error:
+        if commands.log:
+            print("Sys helper mount output:\n" + commands.log.decode(errors="replace"), file=sys.stderr)
+        raise ProbeError("sys-helper-mount-" + str(error)) from error
+    after = read_file(Path("/proc/self/mountinfo")).decode()
+    def original_sys_rows(text):
+        return [line for line in text.splitlines()
+                if (point := mount_metadata(line)[0]["point"]) == "/sys" or point.startswith("/sys/")]
+    if original_sys_rows(before) != original_sys_rows(after):
+        raise ProbeError("original-sys-mounts-changed")
+    validate_mounts(after, require_helper=True, require_sys_helper=True)
+    validate_sys_directories()
+    print(json.dumps(validate_sys_helper(after, required=True), sort_keys=True))
+
+
 def prepare_proc_mount() -> None:
     """The PID 1 Bash bootstrap creates a sandbox-local visibility grant."""
     if (os.getuid() != 0 or os.geteuid() != 0 or os.getppid() != 1
@@ -186,18 +269,24 @@ def protect_systemd_mounts() -> None:
             fields[5] = ",".join("ro" if option == "rw" else option for option in fields[5].split(","))
             line = " ".join(fields)
         sanitized.append(line)
-    validate_mounts("\n".join(sanitized))
+    validate_mounts("\n".join(sanitized), require_helper=True, require_sys_helper=True)
+    validate_proc_directories()
+    validate_sys_directories()
     for point in targets:
         subprocess.run(["/usr/bin/mount", "-o", "remount,bind,ro,nosuid,nodev,noexec", point],
                        check=True, timeout=10, stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    validate_mounts(read_file(Path("/proc/self/mountinfo")).decode())
+    validate_mounts(read_file(Path("/proc/self/mountinfo")).decode(), require_helper=True, require_sys_helper=True)
+    validate_proc_directories()
+    validate_sys_directories()
 
 
-def validate_mounts(text: str, require_network: bool = True, *, require_helper: bool = False) -> dict:
+def validate_mounts(text: str, require_network: bool = True, *, require_helper: bool = False,
+                    require_sys_helper: bool = False) -> dict:
     """Check effective mount options, including hidden writable sysctl submounts."""
     mounts = mount_rows(text)
     validate_proc_helper(text, required=require_helper)
+    validate_sys_helper(text, required=require_sys_helper)
 
     def effective(path):
         candidates = [(len(point), index, row) for index, row in enumerate(mounts)
@@ -603,22 +692,33 @@ def write_new(path: Path, raw: bytes) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("/home/runner/evidence/network-sysctl.json"))
-    parser.add_argument("--check-mounts", action="store_true")
-    parser.add_argument("--protect-systemd-mounts", action="store_true")
-    parser.add_argument("--prepare-proc-mount", action="store_true")
-    parser.add_argument("--child", type=Path)
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--check-mounts", action="store_true")
+    actions.add_argument("--protect-systemd-mounts", action="store_true")
+    actions.add_argument("--prepare-proc-mount", action="store_true")
+    actions.add_argument("--prepare-sys-mount", action="store_true")
+    parser.add_argument("--require-sys-helper", action="store_true")
+    actions.add_argument("--child", type=Path)
     parser.add_argument("--parent-netns", type=int)
     parser.add_argument("--state-device", type=int)
     parser.add_argument("--state-inode", type=int)
     args = parser.parse_args(argv)
-    if args.check_mounts or args.protect_systemd_mounts or args.prepare_proc_mount:
+    if args.require_sys_helper and not args.check_mounts:
+        parser.error("--require-sys-helper requires --check-mounts")
+    if args.check_mounts or args.protect_systemd_mounts or args.prepare_proc_mount or args.prepare_sys_mount:
         try:
-            if args.prepare_proc_mount:
+            if args.prepare_sys_mount:
+                prepare_sys_mount()
+            elif args.prepare_proc_mount:
                 prepare_proc_mount()
             elif args.protect_systemd_mounts:
                 protect_systemd_mounts()
             else:
-                validate_mounts(read_file(Path("/proc/self/mountinfo")).decode())
+                validate_mounts(read_file(Path("/proc/self/mountinfo")).decode(),
+                                require_helper=args.require_sys_helper, require_sys_helper=args.require_sys_helper)
+                if args.require_sys_helper:
+                    validate_proc_directories()
+                    validate_sys_directories()
         except (ProbeError, OSError, UnicodeDecodeError, subprocess.SubprocessError) as error:
             print("Network mount guard failed: " + str(error), file=sys.stderr)
             return 1

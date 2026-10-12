@@ -83,6 +83,15 @@ class BootstrapFailureReceiptTests(unittest.TestCase):
                             command='python3 "${root}/check-riscv-network-sysctl.py" --prepare-proc-mount')
         self.assertEqual((self.evidence / 'network-mount.log').read_text(), self.canary + '\n')
 
+    def test_redirected_sys_helper_preserves_original_stderr_and_receipt(self):
+        helper = re.search(r'^bootstrap_stage=sys-helper\npython3[^\n]+\\\n[^\n]+',
+                           BOOTSTRAP, re.M).group(0)
+        shell, result = self.run_bootstrap(
+            'root=/fixture\npython3() { printf "%s\\n" "$SECRET_ENVIRONMENT"; return 39; }\n' + helper)
+        self.assert_failure(shell, result, stage='sys-helper', status=39,
+                            command='python3 "${root}/check-riscv-network-sysctl.py" --prepare-sys-mount')
+        self.assertEqual((self.evidence / 'network-mount.log').read_text(), self.canary + '\n')
+
     def test_preserves_first_receipt_and_refuses_existing_symlink_or_fifo(self):
         for kind in ('receipt', 'symlink', 'fifo'):
             with self.subTest(kind=kind):
@@ -240,27 +249,32 @@ else:
         self.assertLess(BOOTSTRAP.index('chmod 644 -- "${staged_files[@]}"'),
                         BOOTSTRAP.index('bootstrap_stage=proc-helper\n'))
 
-    def test_handoff_restores_exact_private_proc_mount_and_checks_before_systemd(self):
+    def test_handoff_restores_both_private_helpers_and_checks_before_systemd(self):
         handoff = BOOTSTRAP[BOOTSTRAP.rindex('bootstrap_stage=propagation\n'):]
         shared = handoff.index('mount --make-rshared /')
         private = handoff.index('mount --make-private "${root}/private-proc/proc"')
+        sys_private = handoff.index('mount --make-private "${root}/private-sys/sys"')
         check = handoff.index('--check-mounts')
         systemd = handoff.index('exec /lib/systemd/systemd')
         self.assertLess(shared, private)
-        self.assertLess(private, check)
+        self.assertLess(private, sys_private)
+        self.assertLess(sys_private, check)
+        self.assertIn('--check-mounts --require-sys-helper', handoff)
         self.assertLess(check, systemd)
         self.assertIn('tail -c 4194304 >>"${evidence}/network-mount.log"', handoff)
         for failure, status, stage in [('none', 0, None), ('shared', 41, 'propagation'),
-                                       ('private', 43, 'proc-helper'), ('check', 47, 'network-mount')]:
+                                       ('private', 43, 'proc-helper'), ('sys-private', 45, 'sys-helper'),
+                                       ('check', 47, 'network-mount')]:
             with self.subTest(failure=failure):
                 commands = '''root=/fixture
 mount() {
   printf '%s %s\\n' "$1" "$2" >>"${home}/mount-calls"
   if [[ $1 == --make-rshared && $failure == shared ]]; then return 41; fi
   if [[ $1 == --make-private && $failure == private ]]; then return 43; fi
+  if [[ $2 == /fixture/private-sys/sys && $failure == sys-private ]]; then return 45; fi
 }
 python3() {
-  printf '%s %s\\n' "$1" "$2" >"${home}/mount-check"
+  printf '%s\\n' "$*" >"${home}/mount-check"
   printf '%s\\n' "$SECRET_ENVIRONMENT"
   if [[ $failure == check ]]; then return 47; fi
 }
@@ -274,6 +288,8 @@ exec() { printf started >"${home}/systemd-started"; builtin exec /usr/bin/true; 
                 expected = ['--make-rshared /']
                 if failure != 'shared':
                     expected.append('--make-private /fixture/private-proc/proc')
+                if failure not in ('shared', 'private'):
+                    expected.append('--make-private /fixture/private-sys/sys')
                 self.assertEqual(calls, expected)
                 self.assertEqual((self.home / 'mount-check').exists(), failure in ('none', 'check'))
                 self.assertEqual((self.home / 'systemd-started').exists(), failure == 'none')
@@ -289,7 +305,7 @@ exec() { printf started >"${home}/systemd-started"; builtin exec /usr/bin/true; 
                     self.assertFalse(self.receipt.exists())
                 if failure in ('none', 'check'):
                     self.assertEqual((self.home / 'mount-check').read_text(),
-                                     '/fixture/check-riscv-network-sysctl.py --check-mounts\n')
+                                     '/fixture/check-riscv-network-sysctl.py --check-mounts --require-sys-helper\n')
                     self.assertEqual((self.evidence / 'network-mount.log').read_text(),
                                      'before\n' + self.canary + '\n')
                 for name in ('mount-calls', 'mount-check', 'systemd-started'):
@@ -306,7 +322,7 @@ exec() { printf started >"${home}/systemd-started"; builtin exec /usr/bin/true; 
         stages = set(re.findall(r'^bootstrap_stage=([a-z-]+)$', BOOTSTRAP, re.M))
         self.assertEqual(stages, {'guard', 'staging-ownership', 'propagation', 'apt-sources', 'apt-update',
                                  'python-install', 'package-install', 'package-verify',
-                                 'network-mount', 'proc-helper', 'runner-user', 'tun',
+                                 'network-mount', 'proc-helper', 'sys-helper', 'runner-user', 'tun',
                                  'systemd-setup', 'systemd-exec'})
 
 
@@ -413,6 +429,13 @@ class NativeToolReceiptTests(unittest.TestCase):
         self.assertLess(bootstrap.index('mount --make-rprivate /'), helper)
         self.assertLess(helper, bootstrap.index('useradd --uid 1001'))
 
+    def test_sys_helper_is_prepared_after_proc_before_any_user_namespace(self):
+        helper = BOOTSTRAP.index('--prepare-sys-mount')
+        self.assertLess(BOOTSTRAP.index('mount --make-rprivate /'), helper)
+        self.assertLess(BOOTSTRAP.index('--prepare-proc-mount'), helper)
+        self.assertLess(helper, BOOTSTRAP.index('useradd --uid 1001'))
+        self.assertIn('check-riscv-sys-mount.py|workflow-identity.json', BOOTSTRAP)
+
     def test_failed_proc_probe_prevents_network_probe_and_compilation(self):
         start = SCRIPT.index('download rootlesskit ')
         end = SCRIPT.index('export GOTOOLCHAIN=')
@@ -430,6 +453,34 @@ python3() { printf '%s\\n' "$1"; return 1; }
         self.assertNotIn('download:go', result.stdout)
         self.assertNotIn('compiled', result.stdout)
         self.assertFalse((self.root / 'proc-preflight-ready').exists())
+
+    def test_failed_sys_probe_prevents_go_download_and_compilation(self):
+        start = SCRIPT.index('download rootlesskit ')
+        end = SCRIPT.index('export GOTOOLCHAIN=')
+        for status in ('1', '0'):
+            home = self.root / ('sys-' + status)
+            home.mkdir()
+            shell = '''set -e
+download() { printf 'download:%s\\n' "$1"; }
+field() { :; }
+tar() { :; }
+python3() {
+  printf 'probe:%s\\n' "$1"
+  if [[ "$1" == */check-riscv-sys-mount.py ]]; then return "${SYS_STATUS}"; fi
+}
+''' + SCRIPT[start:end] + '\nprintf compiled'
+            with self.subTest(status=status):
+                result = subprocess.run(['bash', '-c', shell],
+                                        env={'SYS_STATUS': status, 'tools': '/tools', 'root': '/root',
+                                             'evidence': '/evidence', 'home': str(home)},
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, int(status))
+                self.assertIn('probe:/root/check-riscv-sys-mount.py', result.stdout)
+                self.assertTrue((home / 'proc-preflight-ready').exists())
+                self.assertTrue((home / 'network-preflight-ready').exists())
+                self.assertEqual((home / 'sys-preflight-ready').exists(), status == '0')
+                self.assertEqual('download:go' in result.stdout, status == '0')
+                self.assertEqual('compiled' in result.stdout, status == '0')
 
     def test_failed_network_probe_prevents_go_download_and_compilation(self):
         start = SCRIPT.index('download rootlesskit ')

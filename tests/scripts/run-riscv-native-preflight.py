@@ -33,9 +33,9 @@ EVIDENCE_LOGS = (
     "apt-update.log", "apt-bootstrap.log", "apt-install.log", "build-engine.log",
     "build-cli.log", "build-containerd.log", "build-runc.log", "docker-start.log",
     "systemd-build-failure.log", "systemd-docker-failure.log", "network-mount.log",
-    "network-sysctl.log", "proc-mount.log", "enforcement-docker.log",
+    "network-sysctl.log", "proc-mount.log", "sys-mount.log", "enforcement-docker.log",
 )
-EVIDENCE_JSON = ("network-sysctl.json", "proc-mount.json", "bootstrap-failure.json")
+EVIDENCE_JSON = ("network-sysctl.json", "proc-mount.json", "sys-mount.json", "bootstrap-failure.json")
 SOURCE_LABEL = "org.oxibelt.preflight.source"
 RUN_LABEL = "org.oxibelt.preflight.run"
 VERSION_TOKEN = r"v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][A-Za-z0-9][A-Za-z0-9.+~:-]{0,63})?"
@@ -45,6 +45,7 @@ FILES = (
     "check-riscv-rootless-enforcement.py", "riscv-rootless-limit-probe.c",
     "check-riscv-network-sysctl.py",
     "check-riscv-proc-mount.py",
+    "check-riscv-sys-mount.py",
 )
 
 
@@ -91,6 +92,14 @@ def load_network_probe():
 
 def load_proc_probe():
     spec = importlib.util.spec_from_file_location("proc_prerequisites", HERE / "check-riscv-proc-mount.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_sys_probe():
+    spec = importlib.util.spec_from_file_location("sys_prerequisites", HERE / "check-riscv-sys-mount.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -327,12 +336,14 @@ class Preflight:
         mounts = self.command(["exec", str(self.container), "cat", "/proc/1/mountinfo"]).decode()
         network = load_network_probe()
         try:
-            network.validate_mounts(mounts, require_network=require_network, require_helper=require_network)
+            network.validate_mounts(mounts, require_network=require_network, require_helper=require_network,
+                                    require_sys_helper=require_network)
             if require_network:
-                metadata = self.command(["exec", str(self.container), "stat", "--format=%u:%g:%a:%F",
-                                         str(network.PROC_PARENT)]).decode().strip()
-                if metadata != "0:0:700:directory":
-                    raise Failure("sandbox-proc-helper-directory-mismatch")
+                for kind, parent in (("proc", network.PROC_PARENT), ("sys", network.SYS_PARENT)):
+                    metadata = self.command(["exec", str(self.container), "stat", "--format=%u:%g:%a:%F",
+                                             str(parent)]).decode().strip()
+                    if metadata != "0:0:700:directory":
+                        raise Failure("sandbox-" + kind + "-helper-directory-mismatch")
         except ValueError as error:
             raise Failure("sandbox-kernel-mount-boundary-mismatch") from error
 
@@ -376,6 +387,11 @@ class Preflight:
                 load_proc_probe().validate_receipt(data, expected_identity=self.identity)
             except ValueError as error:
                 raise Failure("inner-proc-mount-qualification-failed") from error
+        if filename == "sys-mount.json":
+            try:
+                load_sys_probe().validate_receipt(data, expected_identity=self.identity)
+            except ValueError as error:
+                raise Failure("inner-sys-mount-qualification-failed") from error
         return data
 
 
@@ -403,6 +419,27 @@ class Preflight:
             or network["sandbox_netns"] != int(actual_netns)):
             raise Failure("network-evidence-sandbox-namespace-mismatch")
         self.receipt["network"] = network
+
+    def qualify_sys(self):
+        self.verify_running_boundary(require_network=True)
+        sys_mount = self.copy_json("sys-mount.json")
+        for key, namespace in (("sandbox_pidns", "pid"), ("sandbox_mntns", "mnt"), ("sandbox_netns", "net")):
+            actual = self.command(["exec", self.container, "stat", "--dereference",
+                                   "--format=%i", f"/proc/1/ns/{namespace}"]).decode().strip()
+            if not re.fullmatch(r"[0-9]+", actual) or sys_mount[key] != int(actual):
+                raise Failure("sys-evidence-sandbox-namespace-mismatch")
+        native = sys_mount["native"]
+        if (native["lock_sha256"] != hashlib.sha256((HERE / "riscv-native-tools.lock.json").read_bytes()).hexdigest()
+            or native["probe_sha256"] != hashlib.sha256((HERE / "check-riscv-sys-mount.py").read_bytes()).hexdigest()):
+            raise Failure("sys-evidence-source-mismatch")
+        self.receipt["sys_mount"] = sys_mount
+
+    def qualify_tools(self):
+        self.receipt["tools"] = self.copy_json("native-tools.json")
+        for kind in ("proc", "sys"):
+            if (self.receipt[kind + "_mount"]["native"]["rootlesskit_sha256"]
+                != self.receipt["tools"]["binaries"]["rootlesskit"]["sha256"]):
+                raise Failure(kind + "-evidence-rootlesskit-mismatch")
 
     def prepare_image(self, lock: dict) -> str:
         self.receipt["stage"] = "native-image"
@@ -470,6 +507,13 @@ class Preflight:
             ]).strip() == b"ready":
                 self.qualify_network()
                 print("Native detached network forwarding verified; tool compilation pending.", flush=True)
+            if "sys_mount" not in self.receipt and self.command([
+                "exec", self.container, "/bin/sh", "-c",
+                "if test -f /home/runner/sys-preflight-ready; then printf ready; fi",
+            ]).strip() == b"ready":
+                self.receipt["stage"] = "sys-mount"
+                self.qualify_sys()
+                print("Native isolated readonly sysfs mounting verified; tool compilation pending.", flush=True)
             code, _ = execute(["docker", "--host", SOCKET, "exec", self.container, "/bin/sh", "-c",
                                "test ! -f /home/runner/preflight-failed && test -f /home/runner/preflight-ready"], self.env)
             if code == 0:
@@ -624,10 +668,10 @@ class Preflight:
         if "proc_mount" not in self.receipt:
             self.receipt["stage"] = "proc-mount"
             self.qualify_proc()
-        self.receipt["tools"] = self.copy_json("native-tools.json")
-        if (self.receipt["proc_mount"]["native"]["rootlesskit_sha256"]
-            != self.receipt["tools"]["binaries"]["rootlesskit"]["sha256"]):
-            raise Failure("proc-evidence-rootlesskit-mismatch")
+        if "sys_mount" not in self.receipt:
+            self.receipt["stage"] = "sys-mount"
+            self.qualify_sys()
+        self.qualify_tools()
         self.receipt["stage"] = "sandbox-prerequisites"
         self.inner(["python3", "/opt/oxibelt-preflight/check-riscv-native-runner.py", "--phase", "sandbox",
                     "--output", "/home/runner/evidence/sandbox.json"], allow_failure=True)

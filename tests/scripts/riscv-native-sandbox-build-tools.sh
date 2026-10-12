@@ -48,7 +48,11 @@ printf 'Checking isolated RootlessKit network forwarding before compilation\n'
 python3 "${root}/check-riscv-network-sysctl.py" \
   --output "${evidence}/network-sysctl.json"
 printf 'native network forwarding ready\n' >"${home}/network-preflight-ready"
-printf 'Isolated network forwarding verified; starting native compilation\n'
+printf 'Checking isolated RootlessKit readonly sysfs mounting before compilation\n'
+python3 "${root}/check-riscv-sys-mount.py" \
+  --output "${evidence}/sys-mount.json"
+printf 'native readonly sysfs mounting ready\n' >"${home}/sys-preflight-ready"
+printf 'Isolated procfs, network forwarding, and readonly sysfs verified; starting native compilation\n'
 download go "$(field go.url)" "$(field go.sha256)"
 tar --extract --gzip --no-same-owner --file "${tools}/downloads/go.tar.gz" --directory "${tools}"
 export GOTOOLCHAIN=local GOFLAGS='-mod=vendor -trimpath -buildvcs=false -p=2' GOMAXPROCS=2 GOPROXY=off GOSUMDB=off

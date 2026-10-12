@@ -32,6 +32,16 @@ def namespace_mount(root="net:[4026532455]", *, filesystem="nsfs",
     return f"8 1 0:8 {root} {point} {options} - {filesystem} nsfs rw\n"
 
 
+def proc_helper():
+    return ("70 1 0:70 / /opt/oxibelt-preflight/private-proc/proc "
+            "rw,nosuid,nodev,noexec - proc proc rw\n")
+
+
+def sys_helper(super_options="rw", options="ro,nosuid,nodev,noexec"):
+    return ("71 1 0:71 / /opt/oxibelt-preflight/private-sys/sys "
+            f"{options} - sysfs sysfs {super_options}\n")
+
+
 def receipt():
     return {"schema_version": 1, "supported": True, "diagnostic": "passed",
             "sandbox_netns": 101, "detached_netns": 202,
@@ -219,8 +229,12 @@ class MountTests(unittest.TestCase):
         with self.assertRaisesRegex(PROBE.ProbeError, "proc-helper-missing-or-duplicate"):
             self.prepare(commands, mock.Mock(), after=mounts())
 
-    def protect(self, before, after=None, failure=None, wrong_namespace=False, no_remount=False):
+    def protect(self, before, after=None, failure=None, wrong_namespace=False, no_remount=False,
+                include_helpers=True, directory_failure=None):
         after = before if after is None else after
+        if include_helpers:
+            before += proc_helper() + sys_helper()
+            after += proc_helper() + sys_helper()
         def read(path, *args):
             return b"systemd\n" if str(path) == "/proc/1/comm" else next(reads).encode()
         reads = iter((before, after))
@@ -232,6 +246,8 @@ class MountTests(unittest.TestCase):
              mock.patch.object(PROBE.Path, "is_file", return_value=True), \
              mock.patch.object(PROBE.Path, "stat", path_stat), \
              mock.patch.object(PROBE.Path, "resolve", lambda path, **kw: path), \
+             mock.patch.object(PROBE, "validate_proc_directories"), \
+             mock.patch.object(PROBE, "validate_sys_directories", side_effect=directory_failure), \
              mock.patch.object(PROBE, "read_file", side_effect=read), \
              mock.patch.object(PROBE.subprocess, "run", side_effect=failure) as run, \
              mock.patch("builtins.print"):
@@ -266,6 +282,15 @@ class MountTests(unittest.TestCase):
         with self.assertRaises(PROBE.subprocess.CalledProcessError):
             self.protect(mounts() + fuse, failure=PROBE.subprocess.CalledProcessError(1, "mount"))
 
+    def test_systemd_requires_both_helpers_and_safe_directories_before_remount(self):
+        fuse = "7 2 0:7 / /sys/fs/fuse/connections rw,nosuid,nodev,noexec - fusectl fusectl rw\n"
+        for text in (mounts() + fuse, mounts() + fuse + proc_helper(), mounts() + fuse + sys_helper()):
+            with self.subTest(text=text), self.assertRaises(PROBE.ProbeError):
+                self.protect(text, include_helpers=False, no_remount=True)
+        with self.assertRaisesRegex(PROBE.ProbeError, "unsafe-sys-helper-directory"):
+            self.protect(mounts() + fuse, directory_failure=PROBE.ProbeError("unsafe-sys-helper-directory"),
+                         no_remount=True)
+
     def test_strict_positive_and_initial_optional_network(self):
         self.assertTrue(PROBE.validate_mounts(mounts())["network_sysctl_writable"])
         for network in (None, "ro,nosuid,nodev,noexec", "rw,nosuid,nodev,noexec"):
@@ -290,6 +315,186 @@ class MountTests(unittest.TestCase):
                 PROBE.validate_mounts(text)
         with self.assertRaises(PROBE.ProbeError):
             PROBE.validate_mounts(mounts("rw"), require_network=False)
+
+
+class SysHelperTests(unittest.TestCase):
+    def test_full_readonly_sys_helper_accepts_vfs_ro_with_super_rw_or_ro(self):
+        self.assertIsNone(PROBE.validate_sys_helper(mounts()))
+        for super_options in ("rw", "ro", "rw,seclabel", "ro,seclabel"):
+            with self.subTest(super_options=super_options):
+                text = mounts() + proc_helper() + sys_helper(super_options)
+                self.assertEqual(PROBE.validate_sys_helper(text, required=True)["root"], "/")
+                self.assertEqual(PROBE.validate_mounts(text, require_helper=True, require_sys_helper=True),
+                                 PROBE.validate_mounts(mounts()))
+
+    def test_realistic_kernel_atime_flags_preserve_readonly_sys_helper(self):
+        for atime in ("relatime", "noatime", "strictatime"):
+            options = "ro,nosuid,nodev,noexec," + atime
+            text = mounts() + proc_helper() + sys_helper("rw", options)
+            with self.subTest(atime=atime):
+                self.assertEqual(PROBE.validate_sys_helper(text, required=True)["options"],
+                                 sorted(options.split(",")))
+                PROBE.validate_mounts(text, require_helper=True, require_sys_helper=True)
+
+    def test_optional_present_helper_is_always_checked_and_bad_aliases_rejected(self):
+        helper = sys_helper()
+        variants = [helper + helper,
+                    helper.replace("71 1 0:71 / ", "71 1 0:71 /kernel "),
+                    helper.replace("ro,nosuid,nodev,noexec", "rw,nosuid,nodev,noexec"),
+                    helper.replace("ro,nosuid,nodev,noexec", "ro,nosuid,nodev"),
+                    helper.replace(" - sysfs sysfs rw", " - tmpfs tmpfs ro"),
+                    helper.replace(" - sysfs sysfs rw", " - sysfs sysfs nosuid"),
+                    helper.replace(" - sysfs sysfs rw", " - sysfs sysfs rw,ro"),
+                    helper.replace(" - sysfs", " shared:7 - sysfs"),
+                    helper.replace(" - sysfs", " master:7 - sysfs"),
+                    helper.replace(" - sysfs", " master:7 propagate_from:8 - sysfs"),
+                    helper + "72 71 0:72 / /opt/oxibelt-preflight/private-sys/sys/kernel ro - tmpfs tmpfs ro\n",
+                    helper + "72 1 0:72 / /opt/oxibelt-preflight/private-sys ro - tmpfs tmpfs ro\n",
+                    helper + "72 1 0:72 / /tmp/sys-alias ro - sysfs sysfs rw\n",
+                    helper + "72 1 0:72 /kernel /tmp/sys-alias ro - sysfs sysfs rw\n",
+                    helper + "72 2 0:72 /kernel /sys/kernel rw - sysfs sysfs rw\n",
+                    helper + "72 2 0:72 / /sys/fs/cgroup/sys-alias rw - sysfs sysfs rw\n",
+                    helper + "72 1 0:72 / /tmp/sys-alias rw - sysfs sysfs rw\n",
+                    helper.replace("/private-sys/sys ", "/private-sys//sys ")]
+        for extra in variants:
+            with self.subTest(extra=extra), self.assertRaises(PROBE.ProbeError):
+                PROBE.validate_mounts(mounts() + extra)
+        with self.assertRaisesRegex(PROBE.ProbeError, "sys-helper-missing-or-duplicate"):
+            PROBE.validate_mounts(mounts(), require_sys_helper=True)
+
+    def test_sys_helper_preserves_original_mask_and_cgroup_boundaries(self):
+        for text in (mounts().replace("/sys ro,", "/sys rw,"),
+                     mounts().replace("/sys/fs/cgroup rw,", "/sys/fs/cgroup ro,"),
+                     mounts() + "72 2 0:72 / /sys/kernel/debug rw - tmpfs tmpfs rw\n",
+                     mounts() + "72 3 0:72 / /sys/fs/cgroup/unsafe rw - tmpfs tmpfs rw\n"):
+            with self.subTest(text=text), self.assertRaises(PROBE.ProbeError):
+                PROBE.validate_mounts(text + sys_helper(), require_sys_helper=True)
+        masked = mounts() + "72 2 0:72 / /sys/firmware ro - tmpfs tmpfs ro\n"
+        PROBE.validate_mounts(masked + sys_helper(), require_sys_helper=True)
+
+    def test_sys_directories_reject_unsafe_modes_owners_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "opt" / "oxibelt-preflight"
+            helper = base / "private-sys" / "sys"
+            helper.mkdir(parents=True)
+            base.chmod(0o755)
+            base.parent.chmod(0o755)
+            helper.chmod(0o700)
+            helper.parent.chmod(0o700)
+            real_lstat = Path.lstat
+            def root_stat(path):
+                info = real_lstat(path)
+                return mock.Mock(st_mode=info.st_mode, st_uid=0, st_gid=0)
+            with mock.patch.object(PROBE, "SYS_PARENT", helper.parent), \
+                 mock.patch.object(PROBE, "SYS_HELPER", helper), \
+                 mock.patch.object(PROBE.Path, "lstat", root_stat):
+                PROBE.validate_sys_directories()
+                for path, mode in ((helper.parent, 0o755), (helper.parent, 0o770),
+                                   (helper, 0o777), (base, 0o775), (base.parent, 0o777)):
+                    original = path.stat().st_mode & 0o777
+                    path.chmod(mode)
+                    with self.subTest(path=path, mode=mode), self.assertRaises(PROBE.ProbeError):
+                        PROBE.validate_sys_directories()
+                    path.chmod(original)
+                helper.rmdir()
+                helper.symlink_to(base)
+                with self.assertRaises(PROBE.ProbeError):
+                    PROBE.validate_sys_directories()
+            for uid, gid in ((1001, 0), (0, 1001)):
+                with mock.patch.object(PROBE.Path, "lstat", return_value=mock.Mock(
+                        st_mode=stat.S_IFDIR | 0o700, st_uid=uid, st_gid=gid)):
+                    with self.assertRaises(PROBE.ProbeError):
+                        PROBE.validate_sys_directories()
+
+    def prepare(self, *, before=None, after=None, change=None, code=0, mkdir_failure=None):
+        change = change or {}
+        before = mounts() + proc_helper() if before is None else before
+        after = before + sys_helper() if after is None else after
+        reads = iter((before, after))
+        def read(path, *args):
+            if str(path) == "/proc/1/cmdline":
+                return change.get("cmdline", b"/bin/bash\0/opt/oxibelt-preflight/riscv-native-sandbox-bootstrap.sh\0")
+            return next(reads).encode()
+        commands = mock.Mock(log=bytearray(b"mount: permission denied\n" if code else b""))
+        commands.call.return_value = (code, "")
+        with mock.patch.object(PROBE.os, "getuid", return_value=change.get("uid", 0)), \
+             mock.patch.object(PROBE.os, "geteuid", return_value=change.get("euid", 0)), \
+             mock.patch.object(PROBE.os, "getppid", return_value=change.get("pid", 1)), \
+             mock.patch.object(PROBE.platform, "machine", return_value=change.get("machine", "riscv64")), \
+             mock.patch.object(PROBE.Path, "is_file", return_value=change.get("container", True)), \
+             mock.patch.object(PROBE.Path, "stat", side_effect=[mock.Mock(st_ino=1), mock.Mock(st_ino=change.get("namespace", 1))]), \
+             mock.patch.object(PROBE.Path, "lstat", return_value=mock.Mock(st_mode=stat.S_IFDIR | 0o700, st_uid=change.get("owner", 0), st_gid=0)), \
+             mock.patch.object(PROBE.Path, "resolve", lambda path, **kw: path), \
+             mock.patch.object(PROBE.Path, "mkdir", side_effect=mkdir_failure) as mkdir, \
+             mock.patch.object(PROBE, "read_file", side_effect=read), \
+             mock.patch.object(PROBE, "Commands", return_value=commands) as runner, \
+             mock.patch("builtins.print") as output:
+            try:
+                PROBE.prepare_sys_mount()
+            finally:
+                self.mount_calls = commands.call.call_args_list
+                self.runner_calls = runner.call_args_list
+                self.mkdir_calls = mkdir.call_args_list
+                self.output = output.call_args_list
+        return output
+
+    def test_sys_creation_rejects_host_non_pid_one_and_unsafe_owner_before_mutation(self):
+        for change in ({"uid": 1001}, {"euid": 1001}, {"pid": 42}, {"machine": "x86_64"},
+                       {"container": False}, {"cmdline": b"unexpected\0"}, {"namespace": 2}, {"owner": 1001}):
+            with self.subTest(change=change), self.assertRaises(PROBE.ProbeError):
+                self.prepare(change=change)
+            self.assertEqual(self.mount_calls, [])
+            self.assertEqual(self.mkdir_calls, [])
+
+    def test_sys_creation_requires_private_root_and_new_exclusive_directories(self):
+        for before in (mounts() + proc_helper() + sys_helper(),
+                       mounts().replace("/ rw -", "/ rw shared:1 -") + proc_helper(),
+                       mounts().replace("/ rw -", "/ rw master:1 -") + proc_helper(),
+                       mounts()):
+            with self.subTest(before=before), self.assertRaises(PROBE.ProbeError):
+                self.prepare(before=before)
+            self.assertEqual(self.mount_calls, [])
+            self.assertEqual(self.mkdir_calls, [])
+        with self.assertRaises(FileExistsError):
+            self.prepare(mkdir_failure=FileExistsError())
+        self.assertEqual(self.mount_calls, [])
+
+    def test_sys_creation_uses_fresh_mount_and_retains_denial_diagnostic(self):
+        output = self.prepare(after=mounts() + proc_helper() +
+                              sys_helper("rw", "ro,nosuid,nodev,noexec,relatime"))
+        self.assertEqual(self.mount_calls, [mock.call(["/usr/bin/mount", "-t", "sysfs", "-o",
+                         "ro,nosuid,nodev,noexec", "sysfs", str(PROBE.SYS_HELPER)])])
+        self.assertEqual(self.runner_calls, [mock.call(timeout=10)])
+        self.assertEqual(self.mkdir_calls, [mock.call(mode=0o700), mock.call(mode=0o700)])
+        self.assertEqual(json.loads(output.call_args.args[0])["filesystem"], "sysfs")
+        self.assertIn("relatime", json.loads(output.call_args.args[0])["options"])
+        with self.assertRaisesRegex(PROBE.ProbeError, "^sys-helper-mount-failed-exit-32$"):
+            self.prepare(code=32)
+        self.assertEqual(self.output[0].args[0], "Sys helper mount output:\nmount: permission denied\n")
+
+    def test_sys_creation_checks_original_sys_rows_and_post_mount_helper(self):
+        masked = mounts() + proc_helper() + "72 2 0:72 / /sys/firmware ro - tmpfs tmpfs ro\n"
+        self.prepare(before=masked)
+        for after in (masked.replace("0:72", "0:73") + sys_helper(),
+                      masked.replace("/sys/firmware ro", "/sys/firmware rw") + sys_helper(),
+                      masked.replace("cgroup2 cgroup rw", "cgroup2 cgroup rw,nsdelegate") + sys_helper()):
+            with self.subTest(after=after), self.assertRaisesRegex(PROBE.ProbeError, "original-sys-mounts-changed"):
+                self.prepare(before=masked, after=after)
+        with self.assertRaisesRegex(PROBE.ProbeError, "sys-helper-missing-or-duplicate"):
+            self.prepare(after=mounts() + proc_helper())
+
+    def test_sys_prepare_cli_is_exclusive_and_check_can_require_helper(self):
+        with mock.patch.object(PROBE, "prepare_sys_mount") as prepare:
+            self.assertEqual(PROBE.main(["--prepare-sys-mount"]), 0)
+            prepare.assert_called_once_with()
+        for arguments in (["--prepare-sys-mount", "--prepare-proc-mount"],
+                          ["--prepare-sys-mount", "--check-mounts"],
+                          ["--prepare-sys-mount", "--child", "/tmp/state"], ["--require-sys-helper"]):
+            with self.subTest(arguments=arguments), mock.patch("sys.stderr"), self.assertRaises(SystemExit) as error:
+                PROBE.main(arguments)
+            self.assertEqual(error.exception.code, 2)
+        with mock.patch.object(PROBE, "read_file", return_value=mounts().encode()), mock.patch("sys.stderr"):
+            self.assertEqual(PROBE.main(["--check-mounts", "--require-sys-helper"]), 1)
 
 
 class PrerequisiteTests(unittest.TestCase):

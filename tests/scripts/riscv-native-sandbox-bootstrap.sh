@@ -68,7 +68,7 @@ bootstrap_receipt_enabled=1
 [[ -f ${root}/riscv-native-tools.lock.json && -f /usr/share/keyrings/debian-archive-keyring.gpg ]]
 mkdir -p "${evidence}"
 # docker cp preserves the provider user's ownership. Admit only flat regular
-# staging files before normalizing ownership for the root-only proc helper.
+# staging files before normalizing ownership for the root-only helpers.
 bootstrap_stage=staging-ownership
 [[ ! -L ${root%/*} && -d ${root%/*} && ! -L ${root} && -d ${root} ]]
 shopt -s dotglob nullglob
@@ -79,7 +79,7 @@ for staged_file in "${staged_files[@]}"; do
   case ${staged_file##*/} in
     riscv-native-sandbox-bootstrap.sh|riscv-native-sandbox-build-tools.sh|riscv-native-tools.lock.json|\
     check-riscv-native-runner.py|check-riscv-rootless-enforcement.py|riscv-rootless-limit-probe.c|\
-    check-riscv-network-sysctl.py|check-riscv-proc-mount.py|workflow-identity.json) ;;
+    check-riscv-network-sysctl.py|check-riscv-proc-mount.py|check-riscv-sys-mount.py|workflow-identity.json) ;;
     *) false ;;
   esac
 done
@@ -147,6 +147,12 @@ python3 "${root}/check-riscv-network-sysctl.py" --check-mounts \
 # Keep the original /proc masks and readonly sysctls; no provider mount changes.
 bootstrap_stage=proc-helper
 python3 "${root}/check-riscv-network-sysctl.py" --prepare-proc-mount \
+  >>"${evidence}/network-mount.log" 2>&1
+# Fresh full sysfs visibility lets nested runc create its own readonly sysfs.
+# The root-only parent keeps this grant inaccessible to runner uid 1001.
+# Docker's original /sys masks and delegated cgroup mount remain unchanged.
+bootstrap_stage=sys-helper
+python3 "${root}/check-riscv-network-sysctl.py" --prepare-sys-mount \
   >>"${evidence}/network-mount.log" 2>&1
 bootstrap_stage=runner-user
 useradd --uid 1001 --create-home --shell /bin/bash runner
@@ -216,11 +222,13 @@ systemctl mask systemd-firstboot.service systemd-udevd.service
 # Propagation changes are confined to this container's private mount namespace.
 bootstrap_stage=propagation
 mount --make-rshared /
-# Keep the full procfs grant private while systemd's root remains shared.
+# Keep both full filesystem grants private while systemd's root remains shared.
 bootstrap_stage=proc-helper
 mount --make-private "${root}/private-proc/proc"
+bootstrap_stage=sys-helper
+mount --make-private "${root}/private-sys/sys"
 bootstrap_stage=network-mount
-python3 "${root}/check-riscv-network-sysctl.py" --check-mounts \
+python3 "${root}/check-riscv-network-sysctl.py" --check-mounts --require-sys-helper \
   2>&1 | tail -c 4194304 >>"${evidence}/network-mount.log"
 bootstrap_stage=systemd-exec
 # Bash otherwise exits on a failed exec without running its ERR trap.
