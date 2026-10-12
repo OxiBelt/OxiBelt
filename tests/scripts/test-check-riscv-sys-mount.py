@@ -29,11 +29,24 @@ def mountinfo(target, root="/", flags="ro,nosuid,nodev,noexec", fs="sysfs", prop
     return BASE + f"2 1 0:2 {root} {target} {flags}{extra} - {fs} sysfs {super_flags}\n" + PIN
 
 
+def observation(names=((1, "lo"),)):
+    return {"schema_version": 1,
+            "socket_interfaces": [{"index": index, "name": name} for index, name in names],
+            "sys_interfaces": {"names": sorted(name for _, name in names),
+                               "interfaces": [{"index": index, "name": name, "type": 772 if name == "lo" else 1,
+                                               "flags": 8 if name == "lo" else 0} for index, name in names]},
+            "ip": {"link": [{"ifindex": index, "ifname": name, "flags": ["LOOPBACK"] if name == "lo" else []}
+                            for index, name in names],
+                   "address": [{"ifindex": index, "ifname": name, "addr_info": []} for index, name in names],
+                   "route4": [], "route6": []}, "errors": {}}
+
+
 def child():
     value = PROBE.child_receipt()
     value.update(supported=True, diagnostic="passed", pidns=606, mntns=707, netns=808,
                  entered_pidns=ENTERED[0], entered_mntns=ENTERED[1], detached_netns=ENTERED[2],
                  mount_id=2, readonly_errno=30, interfaces=[{"index": 1, "name": "lo"}],
+                 network_observation=observation(),
                  **{key: True for key in PROBE.BOOLEAN_FIELDS})
     return value
 
@@ -49,6 +62,48 @@ def receipt():
 
 
 class ReceiptTests(unittest.TestCase):
+    def test_legacy_v1_keeps_exact_fields_hashes_and_loopback_contract(self):
+        value = receipt()
+        value["schema_version"] = value["child"]["schema_version"] = 1
+        del value["child"]["network_observation"]
+        del value["native"]["observer_sha256"]
+        hashes = {key: value["native"][key] for key in PROBE.V1_HASH_FIELDS}
+        self.assertIs(PROBE.validate_receipt(value, IDENTITY, hashes), value)
+        for mutate in (lambda v: v["native"].update(observer_sha256="b" * 64),
+                       lambda v: v["child"].update(network_observation=observation()),
+                       lambda v: v["child"].update(interfaces=[{"index": 1, "name": "lo"}, {"index": 2, "name": "gre0"}]),
+                       lambda v: v["child"].update(readonly_errno=errno.EPERM)):
+            changed = json.loads(json.dumps(value))
+            mutate(changed)
+            with self.assertRaises(PROBE.ProbeError):
+                PROBE.validate_receipt(changed)
+        self.assertEqual(PROBE.V1_HASH_FIELDS, {"rootlesskit_sha256", "probe_sha256", "lock_sha256"})
+        self.assertIsNot(PROBE.V1_HASH_FIELDS, PROBE.PROC.HASH_FIELDS)
+
+    def test_parent_and_child_schema_versions_cannot_mix(self):
+        for version in (1, 2):
+            value = receipt()
+            if version == 1:
+                value["schema_version"] = 1
+                del value["native"]["observer_sha256"]
+            else:
+                value["child"]["schema_version"] = 1
+                del value["child"]["network_observation"]
+            with self.assertRaises(PROBE.ProbeError):
+                PROBE.validate_receipt(value)
+
+    def test_v2_network_observation_must_be_complete_and_match_to_pass(self):
+        for change in (lambda v: v.update(network_observation=PROBE.OBSERVER.empty()),
+                       lambda v: v.update(network_observation=None),
+                       lambda v: v["network_observation"]["ip"].update(route4=None),
+                       lambda v: v["network_observation"].update(errors={"route6": "network-observation-timeout"}),
+                       lambda v: v["network_observation"]["ip"]["link"][0].update(ifindex=2),
+                       lambda v: v.update(network_observation=observation(((1, "lo"), (2, "gre0"))))):
+            value = receipt()
+            change(value["child"])
+            with self.assertRaises(PROBE.ProbeError):
+                PROBE.validate_receipt(value)
+
     def test_success_binds_identity_and_hashes(self):
         value = receipt()
         hashes = {key: value["native"][key] for key in PROBE.HASH_FIELDS}
@@ -237,22 +292,27 @@ class NamespaceAndNetworkTests(unittest.TestCase):
                     PROBE.launch(Path("/run/user/1001/oxibelt-network-test"), PARENTS, (1, 2))
                 execute.assert_not_called()
 
-    def test_network_view_matches_socket_indices_and_names(self):
-        target = Path("/fresh/sys")
-        with mock.patch.object(PROBE.socket, "if_nameindex", return_value=[(1, "lo")]), \
-             mock.patch.object(PROBE.os, "listdir", return_value=["lo"]), \
-             mock.patch.object(PROBE.NETWORK, "read_file", return_value=b"1\n") as read:
-            self.assertEqual(PROBE.network_view(target), [{"index": 1, "name": "lo"}])
-            read.assert_called_once_with(target / "class/net/lo/ifindex", 32)
+    def test_network_view_collects_before_strict_loopback_gate(self):
+        for names in (((1, "lo"),), ((1, "lo"), (2, "gre0"), (3, "gretap0"))):
+            output = PROBE.OBSERVER.empty()
+            def collect(_target, value, _read):
+                value.update(observation(names))
+            with mock.patch.object(PROBE.OBSERVER, "collect", side_effect=collect) as collected:
+                if len(names) == 1:
+                    self.assertEqual(PROBE.network_view(Path("/fresh/sys"), output), [{"index": 1, "name": "lo"}])
+                else:
+                    with self.assertRaisesRegex(PROBE.ProbeError, "private-network-is-not-network-none"):
+                        PROBE.network_view(Path("/fresh/sys"), output)
+                collected.assert_called_once()
+                self.assertEqual(output, observation(names))
 
-    def test_wrong_network_view_or_nonisolated_network_fails(self):
-        for names, indices, raw in ((["lo", "eth0"], [(1, "lo")], b"1"),
-                                    (["lo"], [(1, "lo"), (2, "eth0")], b"1"),
-                                    (["lo"], [(1, "lo")], b"2")):
-            with mock.patch.object(PROBE.socket, "if_nameindex", return_value=indices), \
-                 mock.patch.object(PROBE.os, "listdir", return_value=names), \
-                 mock.patch.object(PROBE.NETWORK, "read_file", return_value=raw), self.assertRaises(PROBE.ProbeError):
-                PROBE.network_view(Path("/fresh/sys"))
+    def test_wrong_network_view_fails_after_complete_capture(self):
+        output = observation()
+        output["sys_interfaces"]["interfaces"][0]["index"] = 2
+        with mock.patch.object(PROBE.OBSERVER, "collect"), self.assertRaisesRegex(PROBE.ProbeError, "sys-network-view-mismatch"):
+            PROBE.network_view(Path("/fresh/sys"), output)
+        self.assertEqual(output["socket_interfaces"], [{"index": 1, "name": "lo"}])
+        self.assertEqual(output["ip"]["link"][0]["ifname"], "lo")
 
     def test_mapped_root_rejects_host_root_and_bad_map(self):
         for mapping in (b"0 0 4294967295\n", b"invalid\n", b""):
@@ -289,7 +349,12 @@ class ChildTests(unittest.TestCase):
                 mount = stack.enter_context(mock.patch.object(PROBE, "mount_sys", side_effect=mount_error))
                 unmount = stack.enter_context(mock.patch.object(PROBE, "unmount_sys", side_effect=unmount_error))
                 proof_mock = stack.enter_context(mock.patch.object(PROBE, "readonly_proof", side_effect=proof))
-                stack.enter_context(mock.patch.object(PROBE, "network_view", side_effect=network_error, return_value=[{"index": 1, "name": "lo"}]))
+                def network(_target, output):
+                    output.update(observation())
+                    if network_error:
+                        raise network_error
+                    return [{"index": 1, "name": "lo"}]
+                stack.enter_context(mock.patch.object(PROBE, "network_view", side_effect=network))
                 try:
                     PROBE.child_probe(state, PARENTS, ENTERED, (1, 2), value)
                 except PROBE.ProbeError as error:
@@ -480,6 +545,28 @@ class ParentTests(unittest.TestCase):
             self.assertEqual(str(error), "private-sys-mount-denied")
             self.assertEqual(value["child"], failed)
             self.assertTrue(value["cleanup_confirmed"] and value["parent_mounts_unchanged"])
+
+    def test_non_loopback_and_partial_network_failures_preserve_all_actual_observations(self):
+        for partial in (False, True):
+            with self.subTest(partial=partial), tempfile.TemporaryDirectory() as directory:
+                runtime = Path(directory)
+                runtime.chmod(0o700)
+                failed = child()
+                failed.update(supported=False, interfaces=[], network_view_matches=False,
+                              diagnostic="private-network-is-not-network-none",
+                              network_observation=observation(((1, "lo"), (2, "gre0"), (3, "gretap0"))))
+                if partial:
+                    failed["diagnostic"] = "network-observation-timeout"
+                    failed["network_observation"]["ip"]["route6"] = None
+                    failed["network_observation"]["errors"]["route6"] = "network-observation-timeout"
+                commands = mock.Mock(cleanup_confirmed=True)
+                commands.call.side_effect = [(0, "rootlesskit version 3.2.0\n"), (1, json.dumps(failed))]
+                value, error = self.parent(runtime, commands)
+                self.assertEqual(str(error), failed["diagnostic"])
+                self.assertEqual(value["child"], failed)
+                self.assertFalse(value["supported"])
+                self.assertTrue(value["cleanup_confirmed"] and value["parent_mounts_unchanged"])
+                self.assertEqual(len(value["child"]["network_observation"]["socket_interfaces"]), 3)
 
     def test_only_eacces_proves_direct_helper_traversal_denied(self):
         with mock.patch.object(PROBE.os, "open", side_effect=PermissionError(errno.EACCES, "denied")):

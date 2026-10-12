@@ -17,6 +17,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent
 LOCK = json.loads((ROOT / 'riscv-native-tools.lock.json').read_text())
 SCRIPT = (ROOT / 'riscv-native-sandbox-build-tools.sh').read_text()
+PHASE_FUNCTION = SCRIPT[SCRIPT.index('record_phase() {\n'):SCRIPT.index('\nexport PATH=')] + '\n'
 BOOTSTRAP = (ROOT / 'riscv-native-sandbox-bootstrap.sh').read_text()
 BOOTSTRAP_FAILURE_SETUP = BOOTSTRAP[BOOTSTRAP.index('bootstrap_stage=guard\n'):
                                     BOOTSTRAP.index('[[ $(id -u) == 0')]
@@ -204,7 +205,8 @@ else:
 
     def test_staging_rejects_symlinks_and_unexpected_entries_before_chown(self):
         cases = ('parent-symlink', 'root-symlink', 'child-symlink', 'dangling-symlink',
-                 'directory', 'fifo', 'unexpected-file', 'hidden-file')
+                 'directory', 'fifo', 'unexpected-file', 'hidden-file',
+                 'observer-symlink', 'observer-directory', 'observer-fifo')
         for index, kind in enumerate(cases):
             with self.subTest(kind=kind):
                 case = self.home / str(index)
@@ -218,14 +220,16 @@ else:
                     staging.rename(case / 'stage-parent' / 'real-staging')
                     staged_root.symlink_to(staged_root.parent / 'real-staging')
                     staging = staged_root.parent / 'real-staging'
-                elif kind in ('child-symlink', 'dangling-symlink', 'directory', 'fifo'):
-                    entry = staging / 'check-riscv-proc-mount.py'
+                elif kind in ('child-symlink', 'dangling-symlink', 'directory', 'fifo',
+                              'observer-symlink', 'observer-directory', 'observer-fifo'):
+                    entry = staging / ('riscv-network-observation.py' if kind.startswith('observer-')
+                                       else 'check-riscv-proc-mount.py')
                     entry.unlink()
-                    if kind == 'child-symlink':
+                    if kind in ('child-symlink', 'observer-symlink'):
                         entry.symlink_to(staging / 'check-riscv-network-sysctl.py')
                     elif kind == 'dangling-symlink':
                         entry.symlink_to(staging / 'absent')
-                    elif kind == 'directory':
+                    elif kind in ('directory', 'observer-directory'):
                         entry.mkdir()
                     else:
                         os.mkfifo(entry)
@@ -434,7 +438,8 @@ class NativeToolReceiptTests(unittest.TestCase):
         self.assertLess(BOOTSTRAP.index('mount --make-rprivate /'), helper)
         self.assertLess(BOOTSTRAP.index('--prepare-proc-mount'), helper)
         self.assertLess(helper, BOOTSTRAP.index('useradd --uid 1001'))
-        self.assertIn('check-riscv-sys-mount.py|workflow-identity.json', BOOTSTRAP)
+        self.assertIn('check-riscv-sys-mount.py|', BOOTSTRAP)
+        self.assertIn('riscv-network-observation.py|workflow-identity.json', BOOTSTRAP)
 
     def test_failed_proc_probe_prevents_network_probe_and_compilation(self):
         start = SCRIPT.index('download rootlesskit ')
@@ -444,22 +449,28 @@ download() { printf 'download:%s\\n' "$1"; }
 field() { :; }
 tar() { :; }
 python3() { printf '%s\\n' "$1"; return 1; }
-''' + SCRIPT[start:end] + '\nprintf compiled'
+''' + PHASE_FUNCTION + SCRIPT[start:end] + '\nprintf compiled'
+        evidence = self.root / 'evidence'
+        evidence.mkdir(mode=0o700)
         result = subprocess.run(['bash', '-c', shell], env={'tools': '/tools', 'root': '/root',
-                                'evidence': '/evidence', 'home': str(self.root)}, capture_output=True, text=True)
+                                'evidence': str(evidence), 'home': str(self.root)}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
         self.assertIn('/root/check-riscv-proc-mount.py', result.stdout)
         self.assertNotIn('/root/check-riscv-network-sysctl.py', result.stdout)
         self.assertNotIn('download:go', result.stdout)
         self.assertNotIn('compiled', result.stdout)
         self.assertFalse((self.root / 'proc-preflight-ready').exists())
+        self.assertEqual(json.loads((evidence / 'bootstrap-phase.json').read_text()),
+                         {'schema_version': 1, 'phase': 'proc-mount'})
 
     def test_failed_sys_probe_prevents_go_download_and_compilation(self):
         start = SCRIPT.index('download rootlesskit ')
         end = SCRIPT.index('export GOTOOLCHAIN=')
         for status in ('1', '0'):
             home = self.root / ('sys-' + status)
-            home.mkdir()
+            home.mkdir(mode=0o700)
+            evidence = home / 'evidence'
+            evidence.mkdir(mode=0o700)
             shell = '''set -e
 download() { printf 'download:%s\\n' "$1"; }
 field() { :; }
@@ -468,11 +479,11 @@ python3() {
   printf 'probe:%s\\n' "$1"
   if [[ "$1" == */check-riscv-sys-mount.py ]]; then return "${SYS_STATUS}"; fi
 }
-''' + SCRIPT[start:end] + '\nprintf compiled'
+''' + PHASE_FUNCTION + SCRIPT[start:end] + '\nprintf compiled'
             with self.subTest(status=status):
                 result = subprocess.run(['bash', '-c', shell],
                                         env={'SYS_STATUS': status, 'tools': '/tools', 'root': '/root',
-                                             'evidence': '/evidence', 'home': str(home)},
+                                             'evidence': str(evidence), 'home': str(home)},
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, int(status))
                 self.assertIn('probe:/root/check-riscv-sys-mount.py', result.stdout)
@@ -481,6 +492,8 @@ python3() {
                 self.assertEqual((home / 'sys-preflight-ready').exists(), status == '0')
                 self.assertEqual('download:go' in result.stdout, status == '0')
                 self.assertEqual('compiled' in result.stdout, status == '0')
+                self.assertEqual(json.loads((evidence / 'bootstrap-phase.json').read_text())['phase'],
+                                 'native-tools' if status == '0' else 'sys-mount')
 
     def test_failed_network_probe_prevents_go_download_and_compilation(self):
         start = SCRIPT.index('download rootlesskit ')
@@ -488,28 +501,59 @@ python3() {
         preparation = SCRIPT[start:end]
         for status in ('0', '1'):
             with self.subTest(status=status):
+                home = self.root / ('network-' + status)
+                home.mkdir(mode=0o700)
+                evidence = home / 'evidence'
+                evidence.mkdir(mode=0o700)
                 shell = '''set -e
 download() { printf 'download:%s\\n' "$1"; }
 field() { :; }
 tar() { :; }
-python3() { return "${NETWORK_STATUS}"; }
-''' + preparation + '\nprintf compiled'
+python3() {
+  if [[ "$1" == */check-riscv-network-sysctl.py ]]; then return "${NETWORK_STATUS}"; fi
+}
+''' + PHASE_FUNCTION + preparation + '\nprintf compiled'
                 result = subprocess.run(['bash', '-c', shell],
                                         env={'NETWORK_STATUS': status, 'tools': '/tools',
-                                             'root': '/root', 'evidence': '/evidence',
-                                             'home': str(self.root)},
+                                             'root': '/root', 'evidence': str(evidence),
+                                             'home': str(home)},
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, int(status))
                 self.assertIn('download:rootlesskit', result.stdout)
                 if status == '1':
                     self.assertNotIn('download:go', result.stdout)
                     self.assertNotIn('compiled', result.stdout)
-                    self.assertFalse((self.root / 'network-preflight-ready').exists())
+                    self.assertFalse((home / 'network-preflight-ready').exists())
                 else:
                     self.assertIn('download:go', result.stdout)
                     self.assertTrue(result.stdout.endswith('compiled'))
-                    (self.root / 'network-preflight-ready').unlink()
-                    (self.root / 'proc-preflight-ready').unlink()
+                    self.assertTrue((home / 'network-preflight-ready').exists())
+                self.assertEqual(json.loads((evidence / 'bootstrap-phase.json').read_text())['phase'],
+                                 'network' if status == '1' else 'native-tools')
+
+    def test_phase_writer_replaces_owned_file_without_exposing_environment(self):
+        evidence = self.root / 'evidence'
+        evidence.mkdir(mode=0o700)
+        shell = 'set -euo pipefail\n' + PHASE_FUNCTION
+        shell += 'record_phase proc-mount\nrecord_phase sys-mount\n'
+        result = subprocess.run(['bash', '-c', shell], capture_output=True, text=True,
+                                env={'home': str(self.root), 'evidence': str(evidence),
+                                     'SECRET_ENVIRONMENT': 'canary'})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout + result.stderr, '')
+        marker = evidence / 'bootstrap-phase.json'
+        self.assertEqual(json.loads(marker.read_text()), {'schema_version': 1, 'phase': 'sys-mount'})
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(evidence.iterdir()), [marker])
+        marker.unlink()
+        target = self.root / 'canary'
+        target.write_text('unchanged')
+        marker.symlink_to(target)
+        result = subprocess.run(['bash', '-c', shell], capture_output=True, text=True,
+                                env={'home': str(self.root), 'evidence': str(evidence)})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(target.read_text(), 'unchanged')
+        self.assertTrue(marker.is_symlink())
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

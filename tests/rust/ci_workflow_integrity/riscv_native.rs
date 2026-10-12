@@ -91,6 +91,7 @@ fn native_sandbox_lifecycle_regressions_are_ci_gated() {
     "test-check-riscv-network-sysctl.py",
     "test-check-riscv-proc-mount.py",
     "test-check-riscv-sys-mount.py",
+    "test-riscv-network-observation.py",
   ] {
     assert!(command.contains(&format!("python3 -m unittest tests/scripts/{script}")));
   }

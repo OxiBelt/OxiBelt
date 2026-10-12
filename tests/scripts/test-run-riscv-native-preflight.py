@@ -6,6 +6,7 @@ import io
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import tarfile
 import unittest
@@ -281,12 +282,14 @@ class LifecycleTests(unittest.TestCase):
         with mock.patch.object(MODULE.time, "monotonic", side_effect=lambda: now[0]), \
              mock.patch.object(MODULE.time, "sleep", side_effect=sleep), \
              mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
+             mock.patch.object(self.preflight, "observe_bootstrap_phase"), \
              mock.patch.object(MODULE, "execute", side_effect=[(1, b"SECRET"), (1, b"SECRET"), (1, b"SECRET"), (0, b"")]), \
              mock.patch.object(self.preflight, "command", return_value=b""), contextlib.redirect_stdout(output):
             self.preflight.wait_ready()
         self.assertEqual(len(output.getvalue().splitlines()), 2)
         self.assertNotIn("SECRET", output.getvalue())
         with mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
+             mock.patch.object(self.preflight, "observe_bootstrap_phase"), \
              mock.patch.object(MODULE, "execute", return_value=(1, b"")), \
              mock.patch.object(self.preflight, "command", return_value=b"failed"), contextlib.redirect_stdout(io.StringIO()), \
              self.assertRaisesRegex(MODULE.Failure, "sandbox-tool-bootstrap-failed"):
@@ -300,6 +303,7 @@ class LifecycleTests(unittest.TestCase):
             return b"ready" if "network-preflight-ready" in args[-1] else b""
         output = io.StringIO()
         with mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
+             mock.patch.object(self.preflight, "observe_bootstrap_phase"), \
              mock.patch.object(self.preflight, "command", side_effect=command), \
              mock.patch.object(self.preflight, "qualify_network", side_effect=qualify) as check, \
              mock.patch.object(MODULE, "execute", side_effect=[(1, b""), (0, b"")]), \
@@ -307,6 +311,129 @@ class LifecycleTests(unittest.TestCase):
             self.preflight.wait_ready()
         check.assert_called_once_with()
         self.assertEqual(output.getvalue().count("Native detached network forwarding verified"), 1)
+
+    def test_phase_hint_requires_owned_container_and_fixed_read_only_command(self):
+        self.preflight.container = CID
+        for value, expected in ((b"sys-mount\n", "sys-mount"), (b"native-tools\n", "native-tools"),
+                                (b"qualified", "sandbox-bootstrap"), (b"SECRET", "sandbox-bootstrap"),
+                                (b"sys-mount\nSECRET", "sandbox-bootstrap")):
+            self.preflight.receipt["stage"] = "sandbox-bootstrap"
+            with self.subTest(value=value), mock.patch.object(self.preflight, "owned_container") as owned, \
+                 mock.patch.object(self.preflight, "inner", return_value=value) as inner:
+                self.preflight.observe_bootstrap_phase()
+                owned.assert_called_once_with()
+                inner.assert_called_once_with(["python3", "-I", "-c", MODULE.PHASE_READER], allow_failure=True)
+                self.assertEqual(self.preflight.receipt["stage"], expected)
+                self.assertFalse(self.preflight.receipt["supported"])
+        with mock.patch.object(self.preflight, "owned_container", side_effect=MODULE.Failure("sandbox-label-mismatch")), \
+             mock.patch.object(self.preflight, "inner") as inner, \
+             self.assertRaisesRegex(MODULE.Failure, "sandbox-label-mismatch"):
+            self.preflight.observe_bootstrap_phase()
+        inner.assert_not_called()
+
+    def test_failed_sys_phase_does_not_replace_proc_network_or_sys_qualification(self):
+        self.preflight.container = CID
+        def command(args, **_kwargs):
+            if "proc-preflight-ready" in args[-1] or "network-preflight-ready" in args[-1]:
+                return b"ready"
+            return b"failed" if "preflight-failed" in args[-1] else b""
+        def proc():
+            self.preflight.receipt["proc_mount"] = {"supported": True}
+        def network():
+            self.preflight.receipt["network"] = {"supported": True}
+        with mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
+             mock.patch.object(self.preflight, "owned_container"), \
+             mock.patch.object(self.preflight, "inner", return_value=b"sys-mount\n"), \
+             mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(self.preflight, "qualify_proc", side_effect=proc) as proc_check, \
+             mock.patch.object(self.preflight, "qualify_network", side_effect=network) as network_check, \
+             mock.patch.object(self.preflight, "qualify_sys") as sys_check, \
+             mock.patch.object(self.preflight, "qualify_tools") as tools_check, \
+             mock.patch.object(MODULE, "execute", return_value=(1, b"")), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             self.assertRaisesRegex(MODULE.Failure, "sandbox-tool-bootstrap-failed"):
+            self.preflight.wait_ready()
+        self.assertEqual(self.preflight.receipt["stage"], "sys-mount")
+        self.assertFalse(self.preflight.receipt["supported"])
+        self.assertNotIn("sys_mount", self.preflight.receipt)
+        proc_check.assert_called_once_with()
+        network_check.assert_called_once_with()
+        sys_check.assert_not_called()
+        tools_check.assert_not_called()
+
+    def test_phase_hint_does_not_hide_source_qualification_failure(self):
+        self.preflight.container = CID
+        def command(args, **_kwargs):
+            return b"ready" if "sys-preflight-ready" in args[-1] else b""
+        with mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
+             mock.patch.object(self.preflight, "owned_container"), \
+             mock.patch.object(self.preflight, "inner", return_value=b"native-tools\n"), \
+             mock.patch.object(self.preflight, "command", side_effect=command), \
+             mock.patch.object(self.preflight, "qualify_sys", side_effect=MODULE.Failure("sys-evidence-source-mismatch")) as check, \
+             contextlib.redirect_stdout(io.StringIO()), \
+             self.assertRaisesRegex(MODULE.Failure, "sys-evidence-source-mismatch"):
+            self.preflight.wait_ready()
+        check.assert_called_once_with()
+        self.assertEqual(self.preflight.receipt["stage"], "sys-mount")
+        self.assertFalse(self.preflight.receipt["supported"])
+
+    def test_phase_reader_is_bounded_typed_and_does_not_follow_links(self):
+        base = self.root / "phase-home"
+        base.mkdir()
+        home = base / "runner"
+        home.mkdir(mode=0o700)
+        evidence = home / "evidence"
+        evidence.mkdir(mode=0o700)
+        marker = evidence / "bootstrap-phase.json"
+        # Substitute only the fixture root and ownership; execute the production
+        # parser and descriptor-based no-follow reads unchanged.
+        code = MODULE.PHASE_READER.replace("'/home'", repr(str(base)))
+        code = code.replace("(1001, 1001, 0o700)", f"({os.getuid()}, {os.getgid()}, 0o700)")
+        code = code.replace("metadata.st_uid == 1001 and metadata.st_gid == 1001",
+                            f"metadata.st_uid == {os.getuid()} and metadata.st_gid == {os.getgid()}")
+        def read():
+            result = subprocess.run(["python3", "-I", "-c", code], capture_output=True,
+                                    env={"PYTHONOPTIMIZE": "1", "SECRET": "canary"})
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, b"")
+            return result.stdout
+        valid = b'{"schema_version":1,"phase":"sys-mount"}'
+        cases = [(valid, b"sys-mount\n"), (b"{}", b""),
+                 (b'{"schema_version":true,"phase":"sys-mount"}', b""),
+                 (b'{"schema_version":1,"phase":"qualified"}', b""),
+                 (b'{"schema_version":1,"phase":["sys-mount"]}', b""),
+                 (b'{"schema_version":1,"phase":"sys-mount","secret":"canary"}', b""),
+                 (valid + b" " * 513, b""), (b"invalid canary", b"")]
+        for data, expected in cases:
+            with self.subTest(data=data[:100]):
+                marker.write_bytes(data)
+                marker.chmod(0o600)
+                self.assertEqual(read(), expected)
+                if expected:
+                    MODULE.validate_bootstrap_phase(data)
+                else:
+                    with self.assertRaises((MODULE.Failure, ValueError)):
+                        MODULE.validate_bootstrap_phase(data)
+        marker.write_bytes(valid)
+        for path in (home, evidence, marker):
+            with self.subTest(mode_path=path.name):
+                original = path.stat().st_mode & 0o777
+                path.chmod(0o777)
+                self.assertEqual(read(), b"")
+                path.chmod(original)
+        for path in (base, home, evidence, marker):
+            with self.subTest(link_path=path.name):
+                target = path.with_name(path.name + "-real")
+                path.rename(target)
+                path.symlink_to(target)
+                self.assertEqual(read(), b"")
+                path.unlink()
+                target.rename(path)
+        marker.unlink()
+        os.mkfifo(marker, mode=0o600)
+        self.assertEqual(read(), b"")
+        marker.unlink()
+        self.assertEqual(read(), b"")
 
     def test_network_receipt_requires_the_actual_sandbox_namespace(self):
         self.preflight.container = CID
@@ -334,6 +461,7 @@ class LifecycleTests(unittest.TestCase):
             return b"ready" if "proc-preflight-ready" in args[-1] else b""
         output = io.StringIO()
         with mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
+             mock.patch.object(self.preflight, "observe_bootstrap_phase"), \
              mock.patch.object(self.preflight, "command", side_effect=command), \
              mock.patch.object(self.preflight, "qualify_proc", side_effect=qualify) as check, \
              mock.patch.object(MODULE, "execute", side_effect=[(1, b""), (0, b"")]), \
@@ -371,6 +499,7 @@ class LifecycleTests(unittest.TestCase):
             return b"ready" if "sys-preflight-ready" in args[-1] else b""
         output = io.StringIO()
         with mock.patch.object(self.preflight, "container_state", return_value=self.state()), \
+             mock.patch.object(self.preflight, "observe_bootstrap_phase"), \
              mock.patch.object(self.preflight, "command", side_effect=command), \
              mock.patch.object(self.preflight, "qualify_sys", side_effect=qualify) as check, \
              mock.patch.object(MODULE, "execute", side_effect=[(1, b""), (0, b"")]), \
@@ -404,6 +533,26 @@ class LifecycleTests(unittest.TestCase):
                  mock.patch.object(self.preflight, "command", return_value=b"123\n"):
                 if diagnostic:
                     with self.assertRaisesRegex(MODULE.Failure, diagnostic):
+                        self.preflight.qualify_sys()
+                    self.assertNotIn("sys_mount", self.preflight.receipt)
+                else:
+                    self.preflight.qualify_sys()
+                    self.assertEqual(self.preflight.receipt["sys_mount"], receipt)
+
+    def test_v2_sys_receipt_requires_staged_network_observer_hash(self):
+        self.preflight.container = CID
+        native = {"lock_sha256": hashlib.sha256((MODULE.HERE / "riscv-native-tools.lock.json").read_bytes()).hexdigest(),
+                  "probe_sha256": hashlib.sha256((MODULE.HERE / "check-riscv-sys-mount.py").read_bytes()).hexdigest(),
+                  "observer_sha256": hashlib.sha256((MODULE.HERE / "riscv-network-observation.py").read_bytes()).hexdigest()}
+        for digest in (native["observer_sha256"], "0" * 64):
+            receipt = {"schema_version": 2, "sandbox_pidns": 123, "sandbox_mntns": 123, "sandbox_netns": 123,
+                       "native": {**native, "observer_sha256": digest}}
+            self.preflight.receipt.pop("sys_mount", None)
+            with self.subTest(digest=digest), mock.patch.object(self.preflight, "verify_running_boundary"), \
+                 mock.patch.object(self.preflight, "copy_json", return_value=receipt), \
+                 mock.patch.object(self.preflight, "command", return_value=b"123\n"):
+                if digest == "0" * 64:
+                    with self.assertRaisesRegex(MODULE.Failure, "sys-evidence-source-mismatch"):
                         self.preflight.qualify_sys()
                     self.assertNotIn("sys_mount", self.preflight.receipt)
                 else:

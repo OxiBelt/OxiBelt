@@ -12,7 +12,6 @@ import platform
 import re
 import secrets
 import shutil
-import socket
 import stat
 import sys
 import tempfile
@@ -24,26 +23,31 @@ _spec = importlib.util.spec_from_file_location("riscv_proc_mount", Path(__file__
 assert _spec and _spec.loader
 PROC = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(PROC)
+OBSERVER = PROC.sibling("riscv-network-observation")
 NETWORK = PROC.NETWORK
 ProbeError, Commands = NETWORK.ProbeError, NETWORK.Commands
 RUNTIME, IDENTITY_FILE, MOUNTINFO = PROC.RUNTIME, PROC.IDENTITY_FILE, PROC.MOUNTINFO
-NATIVE_FIELDS, HASH_FIELDS = PROC.NATIVE_FIELDS, PROC.HASH_FIELDS
+NATIVE_FIELDS = dict(PROC.NATIVE_FIELDS)
+V1_HASH_FIELDS = set(PROC.HASH_FIELDS)
+HASH_FIELDS = V1_HASH_FIELDS | {"observer_sha256"}
 valid_id, valid_identity, namespace_id = PROC.valid_id, PROC.valid_identity, PROC.namespace_id
 MS_SYS_FLAGS = 1 | 2 | 4 | 8  # MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC
 BOOLEAN_FIELDS = {"pid_one", "mapped_runner_root", "detached_network_entered", "sys_root_and_flags",
                   "rootfd_authenticated", "readonly_token_absent", "network_view_matches", "unmounted"}
 NAMESPACE_FIELDS = {"pidns", "mntns", "netns", "entered_pidns", "entered_mntns", "detached_netns"}
-CHILD_FIELDS = {"schema_version", "supported", "diagnostic", "readonly_errno", "mount_id", "interfaces"} | BOOLEAN_FIELDS | NAMESPACE_FIELDS
+V1_CHILD_FIELDS = {"schema_version", "supported", "diagnostic", "readonly_errno", "mount_id", "interfaces"} | BOOLEAN_FIELDS | NAMESPACE_FIELDS
+CHILD_FIELDS = V1_CHILD_FIELDS | {"network_observation"}
 
 
 def child_receipt() -> dict:
-    return {"schema_version": 1, "supported": False, "diagnostic": "probe-not-completed",
+    return {"schema_version": 2, "supported": False, "diagnostic": "probe-not-completed",
             "readonly_errno": None, "mount_id": None, "interfaces": [],
+            "network_observation": OBSERVER.empty(),
             **{key: False for key in BOOLEAN_FIELDS}, **{key: None for key in NAMESPACE_FIELDS}}
 
 
 def parent_receipt() -> dict:
-    return {"schema_version": 1, "supported": False, "diagnostic": "probe-not-completed", "identity": {},
+    return {"schema_version": 2, "supported": False, "diagnostic": "probe-not-completed", "identity": {},
             "native": None, "kernel_release": None, "sandbox_pidns": None, "sandbox_mntns": None,
             "sandbox_netns": None, "child": None, "parent_mounts_sha256": None,
             "parent_mounts_unchanged": False, "helper_inaccessible": False, "cleanup_confirmed": False}
@@ -147,17 +151,16 @@ def readonly_proof(target: Path, mount_id: int, receipt: dict) -> None:
         os.close(fd)
 
 
-def network_view(target: Path) -> list[dict]:
-    interfaces = socket.if_nameindex()
-    if interfaces != [(1, "lo")]:
+def network_view(target: Path, observation: dict) -> list[dict]:
+    try:
+        OBSERVER.collect(target, observation, NETWORK.read_file)
+        interfaces = OBSERVER.matching_interfaces(observation)
+    except OBSERVER.ObservationError as error:
+        raise ProbeError(str(error)) from error
+    # Diagnostic observations never admit additional kernel-created interfaces.
+    if interfaces != [{"index": 1, "name": "lo"}]:
         raise ProbeError("private-network-is-not-network-none")
-    if sorted(os.listdir(target / "class/net")) != [name for _index, name in interfaces]:
-        raise ProbeError("sys-network-view-mismatch")
-    for index, name in interfaces:
-        raw = NETWORK.read_file(target / "class/net" / name / "ifindex", 32).strip()
-        if raw != str(index).encode():
-            raise ProbeError("sys-network-index-mismatch")
-    return [{"index": index, "name": name} for index, name in interfaces]
+    return interfaces
 
 
 def launch(state: Path, parents: tuple[int, int, int], identity: tuple[int, int]) -> None:
@@ -198,7 +201,7 @@ def child_probe(state: Path, parents: tuple[int, int, int], entered: tuple[int, 
         receipt["mount_id"] = validate_sys_mount(NETWORK.read_file(MOUNTINFO).decode(), target)
         receipt["sys_root_and_flags"] = True
         readonly_proof(target, receipt["mount_id"], receipt)
-        receipt["interfaces"] = network_view(target)
+        receipt["interfaces"] = network_view(target, receipt["network_observation"])
         receipt["network_view_matches"] = True
     finally:
         if mounted:
@@ -212,8 +215,9 @@ def child_probe(state: Path, parents: tuple[int, int, int], entered: tuple[int, 
 
 
 def validate_child(value: dict, parent_pidns: int, parent_mntns: int, parent_netns: int) -> None:
-    if (not isinstance(value, dict) or set(value) != CHILD_FIELDS
-        or type(value["schema_version"]) is not int or value["schema_version"] != 1
+    version = value.get("schema_version") if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or set(value) != (V1_CHILD_FIELDS if version == 1 else CHILD_FIELDS)
+        or type(version) is not int or version not in (1, 2)
         or type(value["supported"]) is not bool or not isinstance(value["diagnostic"], str)
         or not re.fullmatch(r"[a-z0-9-]{1,96}", value["diagnostic"])
         or any(type(value[key]) is not bool for key in BOOLEAN_FIELDS)
@@ -224,6 +228,13 @@ def validate_child(value: dict, parent_pidns: int, parent_mntns: int, parent_net
                or not valid_id(item["index"]) or not isinstance(item["name"], str)
                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", item["name"]) for item in value["interfaces"])):
         raise ProbeError("invalid-sys-child-evidence")
+    if version == 2:
+        try:
+            OBSERVER.validate(value["network_observation"], complete=value["supported"])
+            if value["supported"] and OBSERVER.matching_interfaces(value["network_observation"]) != value["interfaces"]:
+                raise OBSERVER.ObservationError("sys-network-view-mismatch")
+        except OBSERVER.ObservationError as error:
+            raise ProbeError("invalid-sys-child-network-evidence") from error
     if value["supported"] and (value["diagnostic"] != "passed"
         or not all(value[key] is True for key in BOOLEAN_FIELDS)
         or not all(valid_id(value[key]) for key in NAMESPACE_FIELDS | {"mount_id"})
@@ -237,24 +248,26 @@ def validate_child(value: dict, parent_pidns: int, parent_mntns: int, parent_net
 
 def validate_receipt(value: dict, expected_identity: dict | None = None,
                      expected_hashes: dict | None = None) -> dict:
+    version = value.get("schema_version") if isinstance(value, dict) else None
+    hash_fields = V1_HASH_FIELDS if version == 1 else HASH_FIELDS
     if (not isinstance(value, dict) or set(value) != set(parent_receipt())
-        or type(value["schema_version"]) is not int or value["schema_version"] != 1
+        or type(version) is not int or version not in (1, 2)
         or value["supported"] is not True or value["diagnostic"] != "passed"
         or any(value[key] is not True for key in ("parent_mounts_unchanged", "helper_inaccessible", "cleanup_confirmed"))
         or any(not valid_id(value[key]) for key in ("sandbox_pidns", "sandbox_mntns", "sandbox_netns"))
         or not valid_identity(value["identity"])
         or (expected_identity is not None and value["identity"] != expected_identity)
-        or not isinstance(value["native"], dict) or set(value["native"]) != set(NATIVE_FIELDS) | HASH_FIELDS
+        or not isinstance(value["native"], dict) or set(value["native"]) != set(NATIVE_FIELDS) | hash_fields
         or any(type(value["native"].get(key)) is not type(expected) or value["native"].get(key) != expected
                for key, expected in NATIVE_FIELDS.items())
         or any(not isinstance(value["native"].get(key), str)
-               or not re.fullmatch(r"[0-9a-f]{64}", value["native"][key]) for key in HASH_FIELDS)
-        or (expected_hashes is not None and {key: value["native"][key] for key in HASH_FIELDS} != expected_hashes)
+               or not re.fullmatch(r"[0-9a-f]{64}", value["native"][key]) for key in hash_fields)
+        or (expected_hashes is not None and {key: value["native"][key] for key in hash_fields} != expected_hashes)
         or not isinstance(value["kernel_release"], str) or not re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", value["kernel_release"])
         or not isinstance(value["parent_mounts_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["parent_mounts_sha256"])):
         raise ProbeError("invalid-sys-mount-receipt")
     validate_child(value["child"], value["sandbox_pidns"], value["sandbox_mntns"], value["sandbox_netns"])
-    if value["child"]["supported"] is not True:
+    if value["child"]["supported"] is not True or value["child"]["schema_version"] != version:
         raise ProbeError("invalid-sys-mount-receipt")
     return value
 
@@ -262,7 +275,8 @@ def validate_receipt(value: dict, expected_identity: dict | None = None,
 def parent_probe(receipt: dict, commands: Commands) -> None:
     receipt["native"] = dict(NETWORK.prerequisites())
     for key, path in (("rootlesskit_sha256", Path(NETWORK.ROOTLESSKIT)),
-                      ("probe_sha256", Path(__file__).resolve()), ("lock_sha256", NETWORK.LOCK)):
+                      ("probe_sha256", Path(__file__).resolve()), ("lock_sha256", NETWORK.LOCK),
+                      ("observer_sha256", Path(OBSERVER.__file__).resolve())):
         receipt["native"][key] = hashlib.sha256(NETWORK.read_file(path, 64 * 1024 * 1024)).hexdigest()
     try:
         receipt["identity"] = json.loads(NETWORK.read_file(IDENTITY_FILE, 16384))
@@ -303,6 +317,8 @@ def parent_probe(receipt: dict, commands: Commands) -> None:
             raise ProbeError("invalid-sys-child-output") from error
         validate_child(child, *parents)
         receipt["child"] = child
+        if child["schema_version"] != receipt["schema_version"]:
+            raise ProbeError("sys-child-schema-mismatch")
         if code or not child["supported"]:
             raise ProbeError(child["diagnostic"] if child["diagnostic"] != "passed" else "rootlesskit-command-failed")
     finally:
@@ -363,8 +379,8 @@ def main(argv=None) -> int:
         print(json.dumps(receipt, sort_keys=True))
     else:
         try:
-            raw = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode()
-            if len(raw) > 16384:
+            raw = (json.dumps(receipt, sort_keys=True) + "\n").encode()
+            if len(raw) > 65536:
                 raise ProbeError("evidence-too-large")
             NETWORK.write_new(args.output, raw)
             NETWORK.write_new(args.output.parent / "sys-mount.log", bytes(commands.log) if commands else b"")

@@ -34,25 +34,42 @@ build_logged() {
   shift
   "$@" 2>&1 | tail -c 4194304 >"${evidence}/build-${name}.log"
 }
+# This bounded phase hint is diagnostic only; successful probe receipts remain
+# mandatory. Replace an owned temporary file instead of following a marker link.
+record_phase() {
+  local phase=$1 temporary expected
+  case ${phase} in proc-mount|network|sys-mount|native-tools) ;; *) return 1 ;; esac
+  expected="$(id -u):$(id -g):700:directory"
+  [[ ! -L ${home} && ! -L ${evidence} && ! -L ${evidence}/bootstrap-phase.json ]]
+  [[ $(stat --format='%u:%g:%a:%F' -- "${home}") == "${expected}" ]]
+  [[ $(stat --format='%u:%g:%a:%F' -- "${evidence}") == "${expected}" ]]
+  temporary=$(mktemp "${evidence}/.bootstrap-phase.XXXXXX")
+  printf '{"schema_version":1,"phase":"%s"}\n' "${phase}" >"${temporary}"
+  mv --force --no-target-directory -- "${temporary}" "${evidence}/bootstrap-phase.json"
+}
 export PATH="${tools}/go/bin:${tools}/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 for command in ip iptables ip6tables newuidmap newgidmap slirp4netns mount mountpoint nsenter unshare systemctl sysctl; do
   command -v "${command}" >/dev/null
 done
 download rootlesskit "$(field rootlesskit.url)" "$(field rootlesskit.sha256)"
 tar --extract --gzip --no-same-owner --file "${tools}/downloads/rootlesskit.tar.gz" --directory "${tools}/bin" rootlesskit
+record_phase proc-mount
 printf 'Checking isolated RootlessKit procfs mounting before compilation\n'
 python3 "${root}/check-riscv-proc-mount.py" \
   --output "${evidence}/proc-mount.json"
 printf 'native procfs mounting ready\n' >"${home}/proc-preflight-ready"
+record_phase network
 printf 'Checking isolated RootlessKit network forwarding before compilation\n'
 python3 "${root}/check-riscv-network-sysctl.py" \
   --output "${evidence}/network-sysctl.json"
 printf 'native network forwarding ready\n' >"${home}/network-preflight-ready"
+record_phase sys-mount
 printf 'Checking isolated RootlessKit readonly sysfs mounting before compilation\n'
 python3 "${root}/check-riscv-sys-mount.py" \
   --output "${evidence}/sys-mount.json"
 printf 'native readonly sysfs mounting ready\n' >"${home}/sys-preflight-ready"
 printf 'Isolated procfs, network forwarding, and readonly sysfs verified; starting native compilation\n'
+record_phase native-tools
 download go "$(field go.url)" "$(field go.sha256)"
 tar --extract --gzip --no-same-owner --file "${tools}/downloads/go.tar.gz" --directory "${tools}"
 export GOTOOLCHAIN=local GOFLAGS='-mod=vendor -trimpath -buildvcs=false -p=2' GOMAXPROCS=2 GOPROXY=off GOSUMDB=off

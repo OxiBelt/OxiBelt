@@ -58,6 +58,7 @@ jobs:
           python3 -m unittest tests/scripts/test-check-riscv-network-sysctl.py
           python3 -m unittest tests/scripts/test-check-riscv-proc-mount.py
           python3 -m unittest tests/scripts/test-check-riscv-sys-mount.py
+          python3 -m unittest tests/scripts/test-riscv-network-observation.py
 
       - name: Test mock upstream client
         env:

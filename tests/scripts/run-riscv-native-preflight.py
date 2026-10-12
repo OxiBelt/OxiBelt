@@ -35,7 +35,8 @@ EVIDENCE_LOGS = (
     "systemd-build-failure.log", "systemd-docker-failure.log", "network-mount.log",
     "network-sysctl.log", "proc-mount.log", "sys-mount.log", "enforcement-docker.log",
 )
-EVIDENCE_JSON = ("network-sysctl.json", "proc-mount.json", "sys-mount.json", "bootstrap-failure.json")
+EVIDENCE_JSON = ("network-sysctl.json", "proc-mount.json", "sys-mount.json", "bootstrap-failure.json",
+                 "bootstrap-phase.json")
 SOURCE_LABEL = "org.oxibelt.preflight.source"
 RUN_LABEL = "org.oxibelt.preflight.run"
 VERSION_TOKEN = r"v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][A-Za-z0-9][A-Za-z0-9.+~:-]{0,63})?"
@@ -46,7 +47,34 @@ FILES = (
     "check-riscv-network-sysctl.py",
     "check-riscv-proc-mount.py",
     "check-riscv-sys-mount.py",
+    "riscv-network-observation.py",
 )
+
+# Fixed read-only code: hints can describe a failure, never qualify a probe.
+PHASE_READER = """import json, os, stat
+try:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with_root = os.open('/home', flags)
+    home = os.open('runner', flags, dir_fd=with_root)
+    evidence = os.open('evidence', flags, dir_fd=home)
+    for directory in (home, evidence):
+        metadata = os.fstat(directory)
+        assert (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode)) == (1001, 1001, 0o700)
+    descriptor = os.open('bootstrap-phase.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=evidence)
+    with os.fdopen(descriptor, 'rb') as stream:
+        metadata = os.fstat(stream.fileno())
+        assert stat.S_ISREG(metadata.st_mode) and metadata.st_uid == 1001 and metadata.st_gid == 1001
+        assert stat.S_IMODE(metadata.st_mode) == 0o600 and metadata.st_size <= 512
+        raw = stream.read(513)
+    assert len(raw) <= 512
+    value = json.loads(raw)
+    assert isinstance(value, dict) and set(value) == {'schema_version', 'phase'}
+    assert type(value['schema_version']) is int and value['schema_version'] == 1
+    assert isinstance(value['phase'], str) and value['phase'] in ('proc-mount', 'network', 'sys-mount', 'native-tools')
+    print(value['phase'])
+except (OSError, ValueError, AssertionError, KeyError, TypeError):
+    pass
+"""
 
 
 class Failure(RuntimeError):
@@ -57,6 +85,18 @@ def mapping(value, diagnostic: str) -> dict:
     if not isinstance(value, dict):
         raise Failure(diagnostic)
     return value
+
+
+def validate_bootstrap_phase(raw: bytes):
+    """Bound diagnostic artifacts to the same small phase-only schema."""
+    if len(raw) > 512:
+        raise Failure("invalid-bootstrap-phase-evidence")
+    value = mapping(json.loads(raw), "invalid-bootstrap-phase-evidence")
+    if (set(value) != {"schema_version", "phase"}
+        or type(value.get("schema_version")) is not int or value["schema_version"] != 1
+        or not isinstance(value.get("phase"), str)
+        or value["phase"] not in ("proc-mount", "network", "sys-mount", "native-tools")):
+        raise Failure("invalid-bootstrap-phase-evidence")
 
 
 def runtime_version(value, name: str) -> str | None:
@@ -432,6 +472,9 @@ class Preflight:
         if (native["lock_sha256"] != hashlib.sha256((HERE / "riscv-native-tools.lock.json").read_bytes()).hexdigest()
             or native["probe_sha256"] != hashlib.sha256((HERE / "check-riscv-sys-mount.py").read_bytes()).hexdigest()):
             raise Failure("sys-evidence-source-mismatch")
+        if (sys_mount.get("schema_version") == 2
+            and native["observer_sha256"] != hashlib.sha256((HERE / "riscv-network-observation.py").read_bytes()).hexdigest()):
+            raise Failure("sys-evidence-source-mismatch")
         self.receipt["sys_mount"] = sys_mount
 
     def qualify_tools(self):
@@ -482,6 +525,16 @@ class Preflight:
                                      "architecture": "riscv64", "os": "linux"}
         return native_ref
 
+    def observe_bootstrap_phase(self):
+        """Apply only a bounded diagnostic hint from the exact owned container."""
+        self.owned_container()
+        try:
+            phase = self.inner(["python3", "-I", "-c", PHASE_READER], allow_failure=True).strip()
+        except (Failure, OSError):
+            return
+        if phase in (b"proc-mount", b"network", b"sys-mount", b"native-tools"):
+            self.receipt["stage"] = phase.decode("ascii")
+
     def wait_ready(self):
         assert self.container
         started = time.monotonic()
@@ -494,6 +547,7 @@ class Preflight:
             state = self.container_state()
             if state["State"].get("Running") is not True:
                 raise Failure("sandbox-bootstrap-exited")
+            self.observe_bootstrap_phase()
             if "proc_mount" not in self.receipt and self.command([
                 "exec", self.container, "/bin/sh", "-c",
                 "if test -f /home/runner/proc-preflight-ready; then printf ready; fi",
@@ -505,6 +559,7 @@ class Preflight:
                 "exec", self.container, "/bin/sh", "-c",
                 "if test -f /home/runner/network-preflight-ready; then printf ready; fi",
             ]).strip() == b"ready":
+                self.receipt["stage"] = "network"
                 self.qualify_network()
                 print("Native detached network forwarding verified; tool compilation pending.", flush=True)
             if "sys_mount" not in self.receipt and self.command([
@@ -519,6 +574,8 @@ class Preflight:
             if code == 0:
                 return
             if self.command(["exec", self.container, "/bin/sh", "-c", "if test -f /home/runner/preflight-failed; then printf failed; fi"]).strip() == b"failed":
+                # Earlier successful qualifications can have changed stage.
+                self.observe_bootstrap_phase()
                 raise Failure("sandbox-tool-bootstrap-failed")
             time.sleep(5)
         raise Failure("sandbox-bootstrap-timeout")
@@ -731,6 +788,8 @@ class Preflight:
             data = archive_evidence(raw, filename)
             if filename.endswith(".json"):
                 validate_collected_json(data)
+                if filename == "bootstrap-phase.json":
+                    validate_bootstrap_phase(data)
             with destination.open("xb") as stream:
                 os.fchmod(stream.fileno(), 0o600)
                 stream.write(data)

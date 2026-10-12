@@ -79,7 +79,8 @@ for staged_file in "${staged_files[@]}"; do
   case ${staged_file##*/} in
     riscv-native-sandbox-bootstrap.sh|riscv-native-sandbox-build-tools.sh|riscv-native-tools.lock.json|\
     check-riscv-native-runner.py|check-riscv-rootless-enforcement.py|riscv-rootless-limit-probe.c|\
-    check-riscv-network-sysctl.py|check-riscv-proc-mount.py|check-riscv-sys-mount.py|workflow-identity.json) ;;
+    check-riscv-network-sysctl.py|check-riscv-proc-mount.py|check-riscv-sys-mount.py|\
+    riscv-network-observation.py|workflow-identity.json) ;;
     *) false ;;
   esac
 done
