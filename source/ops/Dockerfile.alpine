@@ -110,7 +110,8 @@ COPY source/crates/oxibelt-upload-storage ./source/crates/oxibelt-upload-storage
 COPY fuzz ./fuzz
 COPY tests/unsafe_harness ./tests/unsafe_harness
 
-ENV OXIBELT_BUILD_VERSION=${OXIBELT_BUILD_VERSION} \
+ENV CARGO_NET_RETRY=10 \
+    OXIBELT_BUILD_VERSION=${OXIBELT_BUILD_VERSION} \
     OXIBELT_BUILD_REVISION=${OXIBELT_BUILD_REVISION} \
     OXIBELT_BUILD_REF=${OXIBELT_BUILD_REF} \
     OXIBELT_BUILD_DIRTY=${OXIBELT_BUILD_DIRTY} \

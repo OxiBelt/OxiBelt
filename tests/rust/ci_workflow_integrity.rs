@@ -1450,6 +1450,92 @@ fn simulate_source_structure_failure(jobs: &BTreeMap<String, Job>, job_id: &str)
 }
 
 #[test]
+fn alpine_rust_builds_inherit_workflow_cargo_retry_policy() {
+  let workflow: serde_json::Value =
+    serde_saphyr::from_str(&workflow_text()).expect("check workflow should parse as YAML");
+  let workflow_retry = workflow["env"]["CARGO_NET_RETRY"]
+    .as_str()
+    .expect("workflow should configure Cargo retries as an environment string")
+    .parse::<u32>()
+    .expect("workflow Cargo retry budget should be numeric");
+  let dockerfile = dockerfile_text();
+  let builder = dockerfile_stage(&dockerfile, "builder");
+  let builder_retry = builder
+    .lines()
+    .find_map(|line| line.strip_prefix("ENV CARGO_NET_RETRY="))
+    .expect("shared builder should configure Cargo network retries")
+    .split_whitespace()
+    .next()
+    .expect("shared builder Cargo retry budget should have a value")
+    .trim_matches('"')
+    .parse::<u32>()
+    .expect("shared builder Cargo retry budget should be numeric");
+  assert_eq!(
+    builder_retry, workflow_retry,
+    "Docker Rust builds should use the same retry budget as host CI builds"
+  );
+  assert_eq!(
+    dockerfile.matches("CARGO_NET_RETRY").count(),
+    1,
+    "Cargo retry policy should be set only in the shared builder, without stage or command overrides"
+  );
+
+  let stages: BTreeMap<&str, &str> = dockerfile
+    .lines()
+    .filter_map(|line| line.strip_prefix("FROM "))
+    .map(|line| {
+      let (base, name) = line
+        .split_once(" AS ")
+        .expect("Docker stages should have explicit names");
+      (name, base.split_whitespace().last().unwrap())
+    })
+    .collect();
+  let rust_stages: BTreeSet<&str> = stages
+    .keys()
+    .copied()
+    .filter(|name| {
+      let body = dockerfile_stage(&dockerfile, name);
+      body.contains("cargo build ") || body.contains("cargo check ")
+    })
+    .collect();
+  assert_eq!(
+    rust_stages,
+    BTreeSet::from([
+      "riscv64-musl-check",
+      "controller-builder",
+      "keysigner-builder",
+      "netport-builder",
+      "tools-builder",
+      "runtime-builder",
+      "strict-dataplane-builder",
+    ]),
+    "all Rust build and check stages should be covered by the retry inheritance contract"
+  );
+  for name in rust_stages {
+    assert_eq!(
+      stages[name], "builder",
+      "Rust stage {name} should inherit the shared builder retry environment"
+    );
+  }
+
+  for &(role, _) in OXIBELT_IMAGE_ROLES {
+    let mut stage = role;
+    let mut visited = BTreeSet::new();
+    while let Some(base) = stages.get(stage) {
+      assert!(
+        visited.insert(stage),
+        "Docker stage ancestry should be acyclic"
+      );
+      assert_ne!(
+        stage, "builder",
+        "final {role} image should not inherit the Cargo builder environment"
+      );
+      stage = base;
+    }
+  }
+}
+
+#[test]
 fn alpine_dockerfile_builder_copies_workspace_members() {
   let dockerfile = dockerfile_text();
 

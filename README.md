@@ -242,6 +242,10 @@ docker build --pull --target dataplane-strict -t oxibelt-dataplane-strict -f sou
 docker build --pull --target controller -t oxibelt-gateway-controller -f source/ops/Dockerfile.alpine .
 ```
 
+Rust image builds use a ten-retry budget for transient Cargo download failures,
+matching the CI policy. Persistent download failures and compiler errors still
+stop the build.
+
 The standard compatibility `oxibelt` and `dataplane` image targets inherit the
 package's default Cargo features. On `x86_64` Linux GNU and musl builds, the
 integrated `oxibelt` executable uses secure mimalloc by default. Supported
