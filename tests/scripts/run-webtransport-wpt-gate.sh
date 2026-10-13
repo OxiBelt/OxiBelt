@@ -72,6 +72,7 @@ run_wpt() {
   local runner_name="${4:-${runner}}"
   local binary webdriver
   local status=0
+  local docker_env=(--env HOME=/home/wpt)
   case "${browser}" in
     chrome)
       binary=/opt/chrome/chrome
@@ -90,17 +91,22 @@ run_wpt() {
     --no-fail-on-unexpected
     --test-types testharness crashtest
     --log-wptreport="/artifacts/${report_name}.json"
+    --log-raw="/artifacts/${report_name}.events.jsonl"
     "${browser}" webtransport/
   )
   if [[ "${browser}" == chrome ]]; then
     args=(--binary-arg=--no-sandbox "${args[@]}")
   else
     args=(--channel stable --prefs-root=/opt/wpt/firefox-profiles "${args[@]}")
+    docker_env+=(
+      --env 'MOZ_LOG=timestamp,rotate:32,nsHttp:5,neqo_http3::*:5,neqo_transport::*:5'
+      --env "MOZ_LOG_FILE=/artifacts/${report_name}-moz.log"
+    )
   fi
   echo "Running pinned WPT WebTransport: ${browser} ${phase}"
   timeout --signal=TERM 20m \
     docker exec --user 10002:10002 \
-      --env HOME=/home/wpt \
+      "${docker_env[@]}" \
       --workdir /opt/wpt \
       "${runner_name}" ./wpt run "${args[@]}" \
       >"${artifact_dir}/${report_name}.log" 2>&1 || status=$?
@@ -121,6 +127,8 @@ docker cp "${runner}:/opt/wpt/tools/certs/web-platform.test.key" "${work_dir}/se
 ca_sha256="$(sha256sum "${work_dir}/cacert.pem")"
 ca_sha256="${ca_sha256%% *}"
 cat >"${work_dir}/oxibelt.toml" <<EOF
+[logging]
+level = "info,oxibelt::proxy::http3::webtransport_connect=debug"
 [runtime]
 linux_only = true
 read_only_rootfs_compatible = true

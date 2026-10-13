@@ -20,7 +20,7 @@ use tracing::debug;
 use super::{
   H3BidiStream, H3DownstreamRequestContext, H3RequestStream, H3ServerConnection,
   WebTransportWireDraft, handle_h3_request, is_webtransport_request, request_tasks,
-  respond_to_h3_request,
+  respond_to_h3_request, trace_webtransport_connect,
 };
 use crate::lifecycle::ConnectionDrain;
 use crate::limits::ConnectionLimitContext;
@@ -421,6 +421,15 @@ async fn handle_downstream_request(
       text_response(StatusCode::SERVICE_UNAVAILABLE, "draining"),
       &state.config.proxy.status_headers,
     );
+    if is_webtransport_request(&request) {
+      trace_webtransport_connect(
+        &udp_connection_id,
+        peer_addr,
+        stream.id(),
+        Some(response.status()),
+        "listener_draining",
+      );
+    }
     respond_to_h3_request(stream, response).await?;
     return Ok(());
   }
@@ -441,6 +450,15 @@ async fn handle_downstream_request(
     is_webtransport,
     session_index,
   ) {
+    if is_webtransport {
+      trace_webtransport_connect(
+        &udp_connection_id,
+        peer_addr,
+        stream.id(),
+        Some(status),
+        "dedicated_connection_reused",
+      );
+    }
     respond_to_h3_request(
       stream,
       text_response(status, "WebTransport-only connection"),
@@ -453,6 +471,13 @@ async fn handle_downstream_request(
     if !super::webtransport_request_matches_draft(&request, downstream.wire_draft())
       || http_early_data::is_verified(&request)
     {
+      trace_webtransport_connect(
+        &udp_connection_id,
+        peer_addr,
+        stream.id(),
+        Some(StatusCode::BAD_REQUEST),
+        "downstream_dialect_or_early_data",
+      );
       respond_to_h3_request(
         stream,
         text_response(StatusCode::BAD_REQUEST, "WebTransport H3 dialect mismatch"),

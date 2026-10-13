@@ -1417,6 +1417,14 @@ then rechecks serving endpoints. The deployment, admission policy, and native
 configuration schema are unchanged; no operator or persisted-state migration
 is required.
 
+HTTP/3 WebTransport now includes debug-only CONNECT admission diagnostics.
+The WPT fixture enables their dedicated tracing target and retains raw WPT
+events plus bounded Firefox HTTP/3 logs for each direct, proxied, and replay
+pass. Admission decisions, protocol responses, configuration defaults, and
+dedicated-connection limits retain their existing behavior. This diagnostic
+change requires no configuration or persisted-state migration; rollback uses
+the previous complete immutable image.
+
 The Gateway API graduation target advances from `v1.6.1` to `v1.6.2`, standard
 channel, with required resources still served as `v1`. Before rolling out a
 controller built from this development revision, verify the standard CRD

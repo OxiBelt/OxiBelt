@@ -48,6 +48,137 @@ enum WebTransportWireDraft {
   Draft16,
 }
 
+// Rejections report an admission decision before the response attempt, not delivery.
+// Keep the fields limited to transport identifiers, a numeric status, and static reasons.
+fn trace_webtransport_connect(
+  connection_id: &str,
+  peer_addr: SocketAddr,
+  stream_id: h3::quic::StreamId,
+  status: Option<StatusCode>,
+  reason: &'static str,
+) {
+  tracing::debug!(
+    target: "oxibelt::proxy::http3::webtransport_connect",
+    connection_id,
+    peer = %peer_addr,
+    stream_id = stream_id.into_inner(),
+    status = status.map(|status| status.as_u16()),
+    reason,
+    "WebTransport CONNECT admission"
+  );
+}
+
+#[cfg(test)]
+mod webtransport_connect_trace_tests {
+  use std::collections::BTreeMap;
+  use std::sync::{Arc, Mutex};
+
+  use serde_json::Value;
+  use tracing::field::{Field, Visit};
+  use tracing_subscriber::{EnvFilter, Layer, layer::Context, prelude::*};
+
+  use super::trace_webtransport_connect;
+
+  #[derive(Default)]
+  struct Fields(BTreeMap<String, Value>);
+
+  impl Visit for Fields {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+      self
+        .0
+        .insert(field.name().into(), format!("{value:?}").into());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+      self.0.insert(field.name().into(), value.into());
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+      self.0.insert(field.name().into(), value.into());
+    }
+  }
+
+  #[derive(Clone, Default)]
+  struct Capture(Arc<Mutex<Vec<Fields>>>);
+
+  impl<S: tracing::Subscriber> Layer<S> for Capture {
+    fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+      assert_eq!(*event.metadata().level(), tracing::Level::DEBUG);
+      assert_eq!(
+        event.metadata().target(),
+        "oxibelt::proxy::http3::webtransport_connect"
+      );
+      let mut fields = Fields::default();
+      event.record(&mut fields);
+      self.0.lock().unwrap().push(fields);
+    }
+  }
+
+  #[test]
+  fn webtransport_connect_trace_is_target_scoped_and_contains_only_safe_fields() {
+    let capture = Capture::default();
+    let emit = || {
+      let peer = "127.0.0.1:443".parse().unwrap();
+      let stream_id = h3::quic::StreamId::try_from(12).unwrap();
+      trace_webtransport_connect(
+        "quinn-stable:7",
+        peer,
+        stream_id,
+        Some(http::StatusCode::BAD_REQUEST),
+        "dialect_or_capability_mismatch",
+      );
+      trace_webtransport_connect(
+        "quinn-stable:7",
+        peer,
+        stream_id,
+        None,
+        "request_policy_silent_close",
+      );
+      tracing::debug!(target: "oxibelt::proxy::http3", uri = "/private?token=secret", authorization = "Bearer secret", error = "private upstream", "unrelated event");
+    };
+    let subscriber = tracing_subscriber::registry()
+      .with(EnvFilter::new("info"))
+      .with(capture.clone());
+    tracing::subscriber::with_default(subscriber, emit);
+    assert!(capture.0.lock().unwrap().is_empty());
+
+    let subscriber = tracing_subscriber::registry()
+      .with(EnvFilter::new(
+        "info,oxibelt::proxy::http3::webtransport_connect=debug",
+      ))
+      .with(capture.clone());
+    tracing::subscriber::with_default(subscriber, emit);
+    let events = capture.0.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+      events[0].0.keys().map(String::as_str).collect::<Vec<_>>(),
+      [
+        "connection_id",
+        "message",
+        "peer",
+        "reason",
+        "status",
+        "stream_id"
+      ]
+    );
+    assert_eq!(events[0].0["connection_id"], "quinn-stable:7");
+    assert_eq!(events[0].0["peer"], "127.0.0.1:443");
+    assert_eq!(events[0].0["stream_id"], 12);
+    assert_eq!(events[0].0["status"], 400);
+    assert_eq!(events[0].0["reason"], "dialect_or_capability_mismatch");
+    assert_eq!(events[0].0["message"], "WebTransport CONNECT admission");
+    assert_eq!(
+      events[1].0.keys().map(String::as_str).collect::<Vec<_>>(),
+      ["connection_id", "message", "peer", "reason", "stream_id"]
+    );
+    assert_eq!(events[1].0["reason"], "request_policy_silent_close");
+    for event in events.iter() {
+      assert!(!serde_json::to_string(&event.0).unwrap().contains("secret"));
+      assert!(!serde_json::to_string(&event.0).unwrap().contains("private"));
+    }
+  }
+}
+
 mod fast_response;
 mod request_body;
 mod request_tasks;
@@ -314,6 +445,13 @@ pub(crate) async fn handle_downstream_connection(
         &request,
         snapshot.config.proxy.http3.webtransport_draft16,
       ) else {
+        trace_webtransport_connect(
+          &udp_connection_id,
+          peer_addr,
+          stream.id(),
+          Some(StatusCode::BAD_REQUEST),
+          "dialect_or_capability_mismatch",
+        );
         respond_to_h3_request(
           stream,
           text_response(
@@ -337,6 +475,13 @@ pub(crate) async fn handle_downstream_connection(
           }
           let response =
             http_proxy::status_headers::finalize(response, &snapshot.config.proxy.status_headers);
+          trace_webtransport_connect(
+            &udp_connection_id,
+            peer_addr,
+            stream.id(),
+            Some(response.status()),
+            "overloaded",
+          );
           respond_to_h3_request(stream, response).await?;
           continue;
         }

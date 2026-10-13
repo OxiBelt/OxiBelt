@@ -51,3 +51,14 @@ The proxy fixture disables H1/H2 and enables
 `proxy.http3.webtransport_only_connections` on its isolated H3 endpoint so
 session close events can close that QUIC connection;
 the default shared H3 setting remains disabled in normal configurations.
+
+Each pass also retains timestamped raw WPT events in
+`<report-name>.events.jsonl`. Firefox HTTP/3 logs use the separate
+`<report-name>-moz.log` prefix, including child-process and rotated files;
+each process uses a 32 MiB rotation budget. These logs cover only the isolated
+WPT browser. The proxy fixture enables the existing debug tracing target
+`oxibelt::proxy::http3::webtransport_connect`, which records CONNECT decisions
+with connection and stream IDs, response status, and fixed reasons, without
+logging request URIs or headers. A decision trace precedes the response send;
+successful response sending and session registration have separate events.
+Normal proxy logging defaults and the parity/replay policy are unchanged.

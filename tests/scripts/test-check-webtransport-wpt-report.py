@@ -367,9 +367,27 @@ if args[0] == "exec" and "./wpt" in args:
     assert args[args.index("--test-types") + 1:args.index("--test-types") + 3] == ["testharness", "crashtest"]
     report_name = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--log-wptreport="))
     report_name = Path(report_name).stem
+    raw_path = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--log-raw="))
+    assert raw_path == f"/artifacts/{report_name}.events.jsonl"
+    environment = dict(args[index + 1].split("=", 1) for index, arg in enumerate(args) if arg == "--env")
+    assert environment["HOME"] == "/home/wpt"
+    if report_name.startswith("firefox-"):
+        assert environment["MOZ_LOG"] == "timestamp,rotate:32,nsHttp:5,neqo_http3::*:5,neqo_transport::*:5"
+        assert environment["MOZ_LOG_FILE"] == f"/artifacts/{report_name}-moz.log"
+        for suffix in ("", ".child-42", ".child-42.0"):
+            with (root / "artifacts" / f"{report_name}-moz.log{suffix}").open("x") as log:
+                log.write(f"synthetic Firefox network log {report_name}{suffix}\n")
+    else:
+        assert "MOZ_LOG" not in environment and "MOZ_LOG_FILE" not in environment
+    with (root / "artifacts" / Path(raw_path).name).open("x") as raw:
+        raw.write(json.dumps({"action": "suite_start", "time": 1234, "report": report_name}) + "\n")
     state["runs"].append(report_name)
+    state.setdefault("invocations", []).append({"report": report_name, "raw": raw_path, "environment": environment})
     retry = report_name == "chrome-proxied-retry"
-    if "proxied" in report_name and not (retry and scenario == "missing-packets"):
+    firefox_retry = report_name == "firefox-proxied-retry"
+    if "proxied" in report_name and not (
+        (retry and scenario == "missing-packets") or (firefox_retry and scenario == "firefox-missing-packets")
+    ):
         state["packets"] += 1
     (root / "state.json").write_text(json.dumps(state))
     report = json.loads((root / "passing.json").read_text())
@@ -378,7 +396,7 @@ if args[0] == "exec" and "./wpt" in args:
         entry["subtests"][0].update(status="FAIL", message='assert_equals: reset_stream expected "reset" but got "FIN"')
     if report_name == "chrome-proxied" and scenario == "serviceworker-timeout":
         report = json.loads((root / "timeout.json").read_text())
-    failure = (report_name == "chrome-proxied" and scenario != "serviceworker-timeout") or (retry and scenario == "persistent")
+    failure = (report_name == "chrome-proxied" and scenario != "serviceworker-timeout" and not scenario.startswith("firefox-")) or (retry and scenario == "persistent")
     if failure or (retry and scenario == "migrating"):
         context = "worker" if retry and scenario == "migrating" else "serviceworker"
         target = f"/webtransport/streams-close.https.any.{context}.html"
@@ -386,9 +404,23 @@ if args[0] == "exec" and "./wpt" in args:
         entry["subtests"][0].update(status="FAIL", message='assert_equals: reset_stream expected "reset" but got "FIN"')
         if report_name == "chrome-proxied" and scenario == "wrong-message":
             entry["subtests"][0]["message"] = "different failure"
+    if scenario.startswith("firefox-"):
+        initial_failure = report_name == "firefox-proxied" and scenario != "firefox-normal"
+        repeated_failure = firefox_retry and scenario in ("firefox-persistent", "firefox-migrating")
+        if initial_failure or repeated_failure:
+            if firefox_retry and scenario == "firefox-migrating":
+                target = "/webtransport/streams-close.https.any.worker.html"
+                name = "Close outgoing stream / bidi-2"
+            else:
+                target = "/webtransport/streams-echo.https.any.html"
+                name = "WebTransport client should be able to create, accept, and handle a unidirectional stream"
+            entry = next(entry for entry in report["results"] if entry["test"] == target)
+            entry.update(status="ERROR", message="Unhandled rejection: WebTransport connection rejected")
+            subtest = next(subtest for subtest in entry["subtests"] if subtest["name"] == name)
+            subtest.update(status="FAIL", message='promise_test: Unhandled rejection with value: object "WebTransportError: WebTransport connection rejected"')
     (root / "artifacts" / f"{report_name}.json").write_text(json.dumps(report))
     print(f"synthetic WPT {report_name}")
-    sys.exit(7 if retry and scenario == "run-fails" else 0)
+    sys.exit(7 if (retry and scenario == "run-fails") or (firefox_retry and scenario == "firefox-run-fails") else 0)
 elif args[0] == "exec" and "--version" in args:
     print("Google Chrome for Testing 154.0.8037.57" if "/opt/chrome/chrome" in args else "Mozilla Firefox 156.0")
 elif args[0] == "exec" and "-L" in args:
@@ -398,6 +430,10 @@ elif args[0] == "cp":
         sys.stdin.buffer.read()
     elif ":" not in args[-1]:
         Path(args[-1]).write_text("synthetic certificate fixture\n")
+    elif args[-1].endswith("/oxibelt.toml"):
+        config = Path(args[-2]).read_text()
+        assert '[logging]\nlevel = "info,oxibelt::proxy::http3::webtransport_connect=debug"' in config
+        assert "webtransport_only_connections = true" in config
 elif args[0] == "inspect":
     print("true")
 elif args[0] == "logs":
@@ -413,6 +449,14 @@ class ProxyReplayShellTests(unittest.TestCase):
         (root / "artifacts").mkdir()
         (root / "bin").mkdir()
         passing = pinned_report()
+        if scenario.startswith("firefox-"):
+            indexed = {entry["test"]: entry for entry in passing["results"]}
+            indexed["/webtransport/streams-echo.https.any.worker.html"]["subtests"].extend(
+                copy.deepcopy(indexed["/webtransport/streams-echo.https.any.html"]["subtests"])
+            )
+            indexed[WORKER]["subtests"].append(
+                {"name": "Close outgoing stream / bidi-2", "status": "PASS", "message": None}
+            )
         if scenario == "serviceworker-timeout":
             passing, timeout_report = serviceworker_timeout_reports()
             (root / "timeout.json").write_text(json.dumps(timeout_report))
@@ -434,17 +478,22 @@ class ProxyReplayShellTests(unittest.TestCase):
         state = json.loads((root / "state.json").read_text())
         self.assertEqual(state["runs"].count("chrome-proxied-retry"), expected_retries, completed.stderr)
         self.assertFalse(any("direct-retry" in name for name in state["runs"]), completed.stderr)
-        reports = ["chrome-direct", "chrome-proxied"]
-        if expected_retries:
-            reports.append("chrome-proxied-retry")
-        for name in reports:
-            for suffix in ("json", "log", "exit"):
+        for name in state["runs"]:
+            for suffix in ("json", "log", "exit", "events.jsonl"):
                 self.assertTrue((root / "artifacts" / f"{name}.{suffix}").is_file(), completed.stderr)
+            raw = (root / "artifacts" / f"{name}.events.jsonl").read_text()
+            self.assertEqual(json.loads(raw)["report"], name)
+            if name.startswith("firefox-"):
+                for suffix in ("", ".child-42", ".child-42.0"):
+                    network_log = root / "artifacts" / f"{name}-moz.log{suffix}"
+                    self.assertIn(name, network_log.read_text(), completed.stderr)
+            else:
+                self.assertFalse(list((root / "artifacts").glob(f"{name}-moz.log*")))
         original = json.loads((root / "artifacts" / "chrome-proxied.json").read_text())
         target = next(entry for entry in original["results"] if entry["test"] == SERVICE_WORKER)
         if scenario == "serviceworker-timeout":
             self.assertEqual(original, timeout_report)
-        else:
+        elif not scenario.startswith("firefox-"):
             self.assertEqual(target["subtests"][0]["status"], "FAIL")
         return completed, state, root
 
@@ -501,6 +550,57 @@ class ProxyReplayShellTests(unittest.TestCase):
         self.assertNotIn("Retryable", completed.stderr)
         self.assertNotIn("retrying", completed.stderr)
         self.assertFalse(list((root / "artifacts").glob("*retry*")))
+
+    def test_firefox_normal_pass_retains_separate_diagnostics_without_replay(self):
+        completed, state, _ = self.run_gate("firefox-normal", expected_retries=0)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(state["runs"], ["chrome-direct", "firefox-direct", "chrome-proxied", "firefox-proxied"])
+        self.assertEqual(state["packets"], 2)
+
+    def test_firefox_one_complete_proxy_replay_preserves_original_rejection(self):
+        completed, state, root = self.run_gate("firefox-passes", expected_retries=0)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(state["runs"], ["chrome-direct", "firefox-direct", "chrome-proxied", "firefox-proxied", "firefox-proxied-retry"])
+        self.assertEqual(state["packets"], 3)
+        self.assertEqual(completed.stderr.count("Firefox WPT parity mismatch; retrying one full proxied pass."), 1)
+        target = "/webtransport/streams-echo.https.any.html"
+        original = json.loads((root / "artifacts" / "firefox-proxied.json").read_text())
+        self.assertEqual(next(entry for entry in original["results"] if entry["test"] == target)["status"], "ERROR")
+        direct = json.loads((root / "artifacts" / "firefox-direct.json").read_text())
+        replay = json.loads((root / "artifacts" / "firefox-proxied-retry.json").read_text())
+        self.assertEqual(replay, direct)
+
+    def test_firefox_persistent_and_hosted_migrating_rejections_are_terminal(self):
+        for scenario in ("firefox-persistent", "firefox-migrating"):
+            with self.subTest(scenario=scenario):
+                completed, state, root = self.run_gate(scenario, expected_retries=0)
+                self.assertEqual(completed.returncode, 1, completed.stderr)
+                self.assertEqual(state["runs"], ["chrome-direct", "firefox-direct", "chrome-proxied", "firefox-proxied", "firefox-proxied-retry"])
+                self.assertEqual(completed.stderr.count("Firefox WPT parity mismatch; retrying one full proxied pass."), 1)
+                self.assertEqual(state["runs"].count("firefox-proxied-retry"), 1)
+                original = json.loads((root / "artifacts" / "firefox-proxied.json").read_text())
+                replay = json.loads((root / "artifacts" / "firefox-proxied-retry.json").read_text())
+                echo = "/webtransport/streams-echo.https.any.html"
+                self.assertEqual(next(entry for entry in original["results"] if entry["test"] == echo)["status"], "ERROR")
+                target = WORKER if scenario == "firefox-migrating" else echo
+                self.assertEqual(next(entry for entry in replay["results"] if entry["test"] == target)["status"], "ERROR")
+                self.assertIn(f"{target}: harness OK -> ERROR", completed.stderr)
+                if scenario == "firefox-migrating":
+                    self.assertEqual(next(entry for entry in replay["results"] if entry["test"] == echo)["status"], "OK")
+                    self.assertIn("Close outgoing stream / bidi-2: PASS -> FAIL", completed.stderr)
+
+    def test_firefox_missing_retry_packets_is_terminal_with_diagnostics_retained(self):
+        completed, state, _ = self.run_gate("firefox-missing-packets", expected_retries=0)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertEqual(state["runs"].count("firefox-proxied-retry"), 1)
+        self.assertEqual(state["packets"], 2)
+        self.assertIn("Firefox retry: no browser WebTransport packets reached the proxy DNAT rule.", completed.stderr)
+
+    def test_firefox_failed_replay_preserves_exit_status_and_diagnostics(self):
+        completed, state, root = self.run_gate("firefox-run-fails", expected_retries=0)
+        self.assertEqual(completed.returncode, 7, completed.stderr)
+        self.assertEqual(state["runs"].count("firefox-proxied-retry"), 1)
+        self.assertEqual((root / "artifacts" / "firefox-proxied-retry.exit").read_text().strip(), "7")
 
 
 if __name__ == "__main__":

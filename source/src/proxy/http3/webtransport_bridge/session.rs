@@ -16,7 +16,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use super::super::{H3RequestStream, connect_upstream_webtransport, respond_to_h3_request};
+use super::super::{
+  H3RequestStream, connect_upstream_webtransport, respond_to_h3_request, trace_webtransport_connect,
+};
 use super::connection::DownstreamWebTransportConnection;
 use super::upstream_adapter::{UpstreamWebTransportRecvStream, UpstreamWebTransportSendStream};
 use super::{
@@ -184,10 +186,24 @@ pub(super) async fn accept_webtransport_session(
     Ok(prepared) => prepared,
     Err(response) => {
       if is_silent_close_response(&response) {
+        trace_webtransport_connect(
+          &udp_connection_id,
+          peer_addr,
+          connect_stream_id,
+          None,
+          "request_policy_silent_close",
+        );
         return Ok(());
       }
       let response =
         http_proxy::shape_webtransport_response(*response, None, snapshot.metrics.clone());
+      trace_webtransport_connect(
+        &udp_connection_id,
+        peer_addr,
+        connect_stream_id,
+        Some(response.status()),
+        "request_policy_rejected",
+      );
       respond_to_h3_request(stream, response).await?;
       return Ok(());
     }
@@ -222,6 +238,13 @@ pub(super) async fn accept_webtransport_session(
       )
     );
     if !matching {
+      trace_webtransport_connect(
+        &udp_connection_id,
+        peer_addr,
+        connect_stream_id,
+        Some(StatusCode::BAD_REQUEST),
+        "upstream_dialect_mismatch",
+      );
       respond_to_h3_request(
         stream,
         shape_prepared_response(text_response(
@@ -243,6 +266,13 @@ pub(super) async fn accept_webtransport_session(
   };
   #[cfg(feature = "admin-runtime")]
   if snapshot.webtransport_admin.is_draining(&registration) {
+    trace_webtransport_connect(
+      &udp_connection_id,
+      peer_addr,
+      connect_stream_id,
+      Some(StatusCode::SERVICE_UNAVAILABLE),
+      "admin_draining",
+    );
     respond_to_h3_request(
       stream,
       shape_prepared_response(text_response(
@@ -260,6 +290,13 @@ pub(super) async fn accept_webtransport_session(
       .limits
       .max_webtransport_sessions_per_connection
   {
+    trace_webtransport_connect(
+      &udp_connection_id,
+      peer_addr,
+      connect_stream_id,
+      Some(StatusCode::SERVICE_UNAVAILABLE),
+      "session_limit",
+    );
     respond_to_h3_request(
       stream,
       shape_prepared_response(text_response(
@@ -280,6 +317,13 @@ pub(super) async fn accept_webtransport_session(
   {
     Ok(permits) => permits,
     Err(status) => {
+      trace_webtransport_connect(
+        &udp_connection_id,
+        peer_addr,
+        connect_stream_id,
+        Some(status),
+        "connection_limit",
+      );
       respond_to_h3_request(
         stream,
         shape_prepared_response(text_response(status, "connection limit exceeded")),
@@ -293,6 +337,13 @@ pub(super) async fn accept_webtransport_session(
     if downstream.wire_draft() == super::super::WebTransportWireDraft::Draft16 {
       let limits = &snapshot.config.proxy.http2.webtransport;
       let Some(bytes) = limits.session_reservation_bytes() else {
+        trace_webtransport_connect(
+          &udp_connection_id,
+          peer_addr,
+          connect_stream_id,
+          Some(StatusCode::SERVICE_UNAVAILABLE),
+          "buffer_capacity_unavailable",
+        );
         respond_to_h3_request(
           stream,
           shape_prepared_response(text_response(
@@ -309,6 +360,13 @@ pub(super) async fn accept_webtransport_session(
       {
         Ok(reservation) => Some(reservation),
         Err(_) => {
+          trace_webtransport_connect(
+            &udp_connection_id,
+            peer_addr,
+            connect_stream_id,
+            Some(StatusCode::SERVICE_UNAVAILABLE),
+            "buffer_capacity_exhausted",
+          );
           respond_to_h3_request(
             stream,
             shape_prepared_response(text_response(
@@ -325,6 +383,13 @@ pub(super) async fn accept_webtransport_session(
     };
 
   if sessions.contains_key(&session_id) {
+    trace_webtransport_connect(
+      &udp_connection_id,
+      peer_addr,
+      connect_stream_id,
+      Some(StatusCode::CONFLICT),
+      "duplicate_session",
+    );
     respond_to_h3_request(
       stream,
       shape_prepared_response(text_response(
@@ -344,6 +409,13 @@ pub(super) async fn accept_webtransport_session(
           ?session_id,
           error = ?error,
           "failed to connect upstream WebTransport session"
+        );
+        trace_webtransport_connect(
+          &udp_connection_id,
+          peer_addr,
+          connect_stream_id,
+          Some(StatusCode::BAD_GATEWAY),
+          "upstream_connect_failed",
         );
         respond_to_h3_request(
           stream,
@@ -381,6 +453,13 @@ pub(super) async fn accept_webtransport_session(
     .send_response(response)
     .await
     .context("failed to send downstream WebTransport response")?;
+  trace_webtransport_connect(
+    &udp_connection_id,
+    peer_addr,
+    connect_stream_id,
+    Some(StatusCode::OK),
+    "response_sent",
+  );
 
   let flow = if downstream.wire_draft() == super::super::WebTransportWireDraft::Draft16 {
     let peer_initial = downstream.peer_initial_credit();
@@ -507,6 +586,13 @@ pub(super) async fn accept_webtransport_session(
       unassociated_uni_resets: 0,
       tasks,
     },
+  );
+  trace_webtransport_connect(
+    &udp_connection_id,
+    peer_addr,
+    connect_stream_id,
+    None,
+    "session_registered",
   );
   Ok(())
 }
