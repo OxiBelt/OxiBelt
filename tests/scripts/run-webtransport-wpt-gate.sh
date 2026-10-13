@@ -100,7 +100,7 @@ run_wpt() {
     args=(--channel stable --prefs-root=/opt/wpt/firefox-profiles "${args[@]}")
     docker_env+=(
       --env 'MOZ_LOG=timestamp,rotate:32,nsHttp:5,neqo_http3::*:5,neqo_transport::*:5'
-      --env "MOZ_LOG_FILE=/artifacts/${report_name}-moz.log"
+      --env "MOZ_LOG_FILE=/artifacts/${report_name}-moz%PID.log"
     )
   fi
   echo "Running pinned WPT WebTransport: ${browser} ${phase}"

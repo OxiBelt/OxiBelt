@@ -1420,7 +1420,8 @@ is required.
 HTTP/3 WebTransport now includes debug-only CONNECT admission diagnostics.
 The WPT fixture enables their dedicated tracing target and retains raw WPT
 events plus bounded Firefox HTTP/3 logs for each direct, proxied, and replay
-pass. Admission decisions, protocol responses, configuration defaults, and
+pass. Process-specific log filenames retain evidence across WPT browser
+restarts. Admission decisions, protocol responses, configuration defaults, and
 dedicated-connection limits retain their existing behavior. This diagnostic
 change requires no configuration or persisted-state migration; rollback uses
 the previous complete immutable image.

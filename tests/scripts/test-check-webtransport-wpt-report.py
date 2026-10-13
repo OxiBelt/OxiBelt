@@ -373,10 +373,19 @@ if args[0] == "exec" and "./wpt" in args:
     assert environment["HOME"] == "/home/wpt"
     if report_name.startswith("firefox-"):
         assert environment["MOZ_LOG"] == "timestamp,rotate:32,nsHttp:5,neqo_http3::*:5,neqo_transport::*:5"
-        assert environment["MOZ_LOG_FILE"] == f"/artifacts/{report_name}-moz.log"
-        for suffix in ("", ".child-42", ".child-42.0"):
-            with (root / "artifacts" / f"{report_name}-moz.log{suffix}").open("x") as log:
-                log.write(f"synthetic Firefox network log {report_name}{suffix}\n")
+        log_template = f"/artifacts/{report_name}-moz%PID.log"
+        assert environment["MOZ_LOG_FILE"] == log_template
+        for parent_pid in (4200, 4201):
+            for process, pid in (("main", parent_pid), ("child", parent_pid + 100)):
+                expanded_path = Path(log_template.replace("%PID", f"-{process}.{pid}"))
+                if not str(expanded_path).endswith(".moz_log"):
+                    expanded_path = Path(f"{expanded_path}.moz_log")
+                log_path = root / "artifacts" / expanded_path.name
+                for rotation in range(4):
+                    Path(f"{log_path}.{rotation}").unlink(missing_ok=True)
+                log_path.unlink(missing_ok=True)
+                log_path.write_text(f"synthetic Firefox {process} network log {report_name} {pid}\n")
+                Path(f"{log_path}.0").write_text(f"synthetic Firefox {process} rotated log {report_name} {pid}\n")
     else:
         assert "MOZ_LOG" not in environment and "MOZ_LOG_FILE" not in environment
     with (root / "artifacts" / Path(raw_path).name).open("x") as raw:
@@ -484,11 +493,17 @@ class ProxyReplayShellTests(unittest.TestCase):
             raw = (root / "artifacts" / f"{name}.events.jsonl").read_text()
             self.assertEqual(json.loads(raw)["report"], name)
             if name.startswith("firefox-"):
-                for suffix in ("", ".child-42", ".child-42.0"):
-                    network_log = root / "artifacts" / f"{name}-moz.log{suffix}"
+                artifacts = root / "artifacts"
+                parent_logs = sorted(artifacts.glob(f"{name}-moz-main.*.log.moz_log"))
+                child_logs = sorted(artifacts.glob(f"{name}-moz-child.*.log.moz_log"))
+                self.assertEqual(len(parent_logs), 2, completed.stderr)
+                self.assertEqual(len({path.name for path in parent_logs}), 2, completed.stderr)
+                self.assertEqual(len(child_logs), 2, completed.stderr)
+                for network_log in parent_logs + child_logs:
                     self.assertIn(name, network_log.read_text(), completed.stderr)
+                    self.assertIn(name, Path(f"{network_log}.0").read_text(), completed.stderr)
             else:
-                self.assertFalse(list((root / "artifacts").glob(f"{name}-moz.log*")))
+                self.assertFalse(list((root / "artifacts").glob(f"{name}-moz*")))
         original = json.loads((root / "artifacts" / "chrome-proxied.json").read_text())
         target = next(entry for entry in original["results"] if entry["test"] == SERVICE_WORKER)
         if scenario == "serviceworker-timeout":

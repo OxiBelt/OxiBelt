@@ -54,8 +54,10 @@ the default shared H3 setting remains disabled in normal configurations.
 
 Each pass also retains timestamped raw WPT events in
 `<report-name>.events.jsonl`. Firefox HTTP/3 logs use the separate
-`<report-name>-moz.log` prefix, including child-process and rotated files;
-each process uses a 32 MiB rotation budget. These logs cover only the isolated
+`<report-name>-moz%PID.log` template, including child-process and rotated files.
+Firefox expands `%PID` to the process type and ID before opening its logs, so
+later WPT browser restarts cannot overwrite earlier process logs. Each process
+uses a 32 MiB rotation budget. These logs cover only the isolated
 WPT browser. The proxy fixture enables the existing debug tracing target
 `oxibelt::proxy::http3::webtransport_connect`, which records CONNECT decisions
 with connection and stream IDs, response status, and fixed reasons, without
