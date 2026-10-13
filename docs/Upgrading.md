@@ -1404,6 +1404,12 @@ revision, lockfiles, and pinned image inputs, and retain the previous complete
 immutable artifacts for rollback. These development changes do not amend the
 historical `0.9.2` release entry or establish a new supported release target.
 
+Rust Docker image builds now use `CARGO_NET_RETRY=10`, matching the host CI
+budget for transient Cargo download failures. Persistent download failures and
+compiler errors still stop the build. This build-only change requires no
+configuration or persisted-state migration and keeps runtime image environments
+unchanged.
+
 The Gateway API graduation target advances from `v1.6.1` to `v1.6.2`, standard
 channel, with required resources still served as `v1`. Before rolling out a
 controller built from this development revision, verify the standard CRD
