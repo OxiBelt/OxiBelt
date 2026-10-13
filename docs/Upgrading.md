@@ -1410,6 +1410,13 @@ compiler errors still stop the build. This build-only change requires no
 configuration or persisted-state migration and keeps runtime image environments
 unchanged.
 
+Kubernetes admission TLS-rotation qualification now waits for old TLS Pods,
+including terminating Pods, to retire before removing the old CA. It retains
+overlapping trust and continuous admission probing during that bounded wait,
+then rechecks serving endpoints. The deployment, admission policy, and native
+configuration schema are unchanged; no operator or persisted-state migration
+is required.
+
 The Gateway API graduation target advances from `v1.6.1` to `v1.6.2`, standard
 channel, with required resources still served as `v1`. Before rolling out a
 controller built from this development revision, verify the standard CRD

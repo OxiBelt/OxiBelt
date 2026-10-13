@@ -5186,6 +5186,133 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
 }
 
 #[test]
+fn kubernetes_supply_chain_admission_tls_retirement_rejects_live_old_pods() {
+  let script = kubernetes_supply_chain_admission_script_text();
+  let helper_start = script
+    .find("tls_rotation_pods_retired() {")
+    .expect("TLS rotation should define its retirement predicate");
+  let helper = &script[helper_start..];
+  let helper_end = helper
+    .find("\n}\n")
+    .expect("retirement predicate should have a bounded function body")
+    + "\n}".len();
+  let harness = format!(
+    r#"set -euo pipefail
+namespace=admission-test
+release_name=release-test
+kube() {{
+  if [[ "$*" == '-n admission-test get deployment oxibelt-admission-revision-a -o json' ]]; then
+    [[ "${{FAIL_READ}}" != deployment ]] || return 1
+    printf '%s\n' "${{DEPLOYMENT}}"
+  elif [[ "$*" == '-n admission-test get pods -l app.kubernetes.io/name=oxibelt-admission,app.kubernetes.io/instance=release-test,oxibelt.dev/supply-chain-bundle=revision-a -o json' ]]; then
+    [[ "${{FAIL_READ}}" != pods ]] || return 1
+    printf '%s\n' "${{PODS}}"
+  else
+    printf 'unexpected Kubernetes query: %s\n' "$*" >&2
+    return 70
+  fi
+}}
+{}
+tls_rotation_pods_retired revision-a tls-b
+"#,
+    &helper[..helper_end]
+  );
+  let pod = |secret: &str| {
+    serde_json::json!({
+      "metadata": {
+        "namespace": "admission-test",
+        "labels": {
+          "app.kubernetes.io/name": "oxibelt-admission",
+          "app.kubernetes.io/instance": "release-test",
+          "oxibelt.dev/supply-chain-bundle": "revision-a"
+        }
+      },
+      "spec": {"volumes": [{"name": "tls", "secret": {"secretName": secret}}]}
+    })
+  };
+  let ready = serde_json::json!({"items": [pod("tls-b"), pod("tls-b")]});
+  let run_case = |deployment: &str, pods: &str, fail_read: &str| {
+    Command::new("bash")
+      .arg("-c")
+      .arg(&harness)
+      .env("DEPLOYMENT", deployment)
+      .env("PODS", pods)
+      .env("FAIL_READ", fail_read)
+      .output()
+      .expect("Bash should execute the TLS retirement predicate")
+  };
+  let deployment = r#"{"spec":{"replicas":2}}"#;
+  assert!(
+    run_case(deployment, &ready.to_string(), "")
+      .status
+      .success()
+  );
+
+  let mut old_terminating = pod("tls-a");
+  old_terminating["metadata"]["deletionTimestamp"] = serde_json::json!("2026-10-13T14:39:31Z");
+  let mut missing_volume = pod("tls-b");
+  missing_volume["spec"]["volumes"] = serde_json::json!([]);
+  let mut duplicate_volume = pod("tls-b");
+  duplicate_volume["spec"]["volumes"] = serde_json::json!([
+    {"name": "tls", "secret": {"secretName": "tls-b"}},
+    {"name": "tls", "secret": {"secretName": "tls-b"}}
+  ]);
+  let mut wrong_release = pod("tls-b");
+  wrong_release["metadata"]["labels"]["app.kubernetes.io/instance"] =
+    serde_json::json!("other-release");
+  for (label, pods) in [
+    (
+      "a terminating old TLS Pod despite two new endpoints",
+      serde_json::json!({"items": [pod("tls-b"), pod("tls-b"), old_terminating]}),
+    ),
+    ("no Pods", serde_json::json!({"items": []})),
+    ("too few Pods", serde_json::json!({"items": [pod("tls-b")]})),
+    ("a missing Pod list", serde_json::json!({})),
+    (
+      "a missing TLS volume",
+      serde_json::json!({"items": [pod("tls-b"), missing_volume]}),
+    ),
+    (
+      "duplicate TLS volumes",
+      serde_json::json!({"items": [pod("tls-b"), duplicate_volume]}),
+    ),
+    (
+      "a Pod outside the exact release",
+      serde_json::json!({"items": [pod("tls-b"), wrong_release]}),
+    ),
+  ] {
+    assert!(
+      !run_case(deployment, &pods.to_string(), "").status.success(),
+      "TLS retirement must reject {label}"
+    );
+  }
+  for invalid_deployment in [
+    r#"{"spec":{"replicas":0}}"#,
+    r#"{"spec":{"replicas":-1}}"#,
+    r#"{"spec":{"replicas":1.5}}"#,
+    r#"{"spec":{"replicas":"2"}}"#,
+    r#"{"spec":{}}"#,
+    "{invalid",
+  ] {
+    assert!(
+      !run_case(invalid_deployment, &ready.to_string(), "")
+        .status
+        .success(),
+      "TLS retirement must reject invalid desired replicas"
+    );
+  }
+  assert!(!run_case(deployment, "{invalid", "").status.success());
+  for fail_read in ["deployment", "pods"] {
+    assert!(
+      !run_case(deployment, &ready.to_string(), fail_read)
+        .status
+        .success(),
+      "TLS retirement must reject failed {fail_read} reads"
+    );
+  }
+}
+
+#[test]
 fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
   let script = kubernetes_supply_chain_admission_script_text();
   let expect_admitted = script
@@ -5216,6 +5343,9 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
     ".webhooks[1].timeoutSeconds == .webhooks[0].timeoutSeconds",
     "SupplyChainAdmissionDenied",
     "bundle_digest_mismatch",
+    "mv -- \"${work_dir}/rotation-phase.next\" \"${work_dir}/rotation-phase\"",
+    "phase_start=[%s] phase_end=[%s]",
+    "TLS rotation Pod summary (first 20 Pods):",
   ] {
     assert!(
       script.contains(expected),
@@ -5285,8 +5415,8 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
     rotation
       .matches("service_targets_revision_and_tls_secret")
       .count(),
-    4,
-    "the barrier, TLS rotation, bundle switch, and rollback should prove endpoint TLS identity"
+    5,
+    "the barrier, TLS rotation, retirement recheck, bundle switch, and rollback should prove endpoint TLS identity"
   );
 
   for expected in [
@@ -5373,6 +5503,12 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
   let overlap_admission = rotation
     .find("wait_for \"admission with overlapping CA trust\"")
     .expect("TLS rotation should prove admission before removing CA A");
+  let retirement = rotation
+    .find("wait_for \"old TLS admission Pod retirement\"")
+    .expect("TLS rotation should retire all old TLS Pods before contracting trust");
+  let retirement_recheck = rotation
+    .find("wait_for \"TLS Secret B admission endpoints after retirement\"")
+    .expect("TLS rotation should recheck endpoint convergence after retirement");
   let ca_b_patch = rotation
     .find("--patch-file \"${work_dir}/admission-ca-b-remove-barrier-patch.json\"")
     .expect("TLS rotation should atomically contract trust and remove the barrier");
@@ -5412,7 +5548,9 @@ fn kubernetes_supply_chain_admission_rotation_is_namespaced_and_convergent() {
       && tls_apply < deployment_readback
       && deployment_readback < rollout
       && rollout < endpoint_convergence
-      && endpoint_convergence < overlap_admission
+      && endpoint_convergence < retirement
+      && retirement < retirement_recheck
+      && retirement_recheck < overlap_admission
       && overlap_admission < ca_b_patch
       && ca_b_patch < ca_b_readback
       && ca_b_readback < barrier_removal

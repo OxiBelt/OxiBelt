@@ -374,6 +374,9 @@ cleanup() {
   stop_port_forward
 
   if ((status != 0)); then
+    if [[ -f "${work_dir}/rotation-phase" && -n "${revision_a:-}" ]]; then
+      rotation_pod_summary "${revision_a}"
+    fi
     diagnose
   fi
   if ((tools_extract_container_created == 1)) && [[ -n "${tools_extract_container}" ]]; then
@@ -1582,6 +1585,57 @@ select_admission_documents() {
   [[ -s "${output}" ]] || die "admission ${selection} manifest is empty"
 }
 
+tls_rotation_pods_retired() {
+  local expected_revision="$1"
+  local expected_tls_secret="$2"
+  local deployment_json pods_json desired_replicas
+  deployment_json="$(kube -n "${namespace}" get deployment \
+    "oxibelt-admission-${expected_revision}" -o json)" || return 1
+  desired_replicas="$(jq -er '.spec.replicas
+    | select(type == "number" and . > 0 and floor == .)' \
+    <<<"${deployment_json}")" || return 1
+  [[ "${desired_replicas}" =~ ^[1-9][0-9]*$ ]] || return 1
+  pods_json="$(kube -n "${namespace}" get pods \
+    -l "app.kubernetes.io/name=oxibelt-admission,app.kubernetes.io/instance=${release_name},oxibelt.dev/supply-chain-bundle=${expected_revision}" \
+    -o json)" || return 1
+  # Include terminating Pods: removed Endpoints do not prove the old TLS
+  # processes have stopped serving through already-started connections.
+  jq -e --arg namespace "${namespace}" --arg release "${release_name}" \
+    --arg revision "${expected_revision}" --arg secret "${expected_tls_secret}" \
+    --argjson replicas "${desired_replicas}" '
+      (.items | type) == "array"
+        and (.items | length) >= $replicas
+        and all(.items[];
+          .metadata.namespace == $namespace
+          and .metadata.labels["app.kubernetes.io/name"] == "oxibelt-admission"
+          and .metadata.labels["app.kubernetes.io/instance"] == $release
+          and .metadata.labels["oxibelt.dev/supply-chain-bundle"] == $revision
+          and ([.spec.volumes[]? | select(.name == "tls")] | length) == 1
+          and ([.spec.volumes[]?
+            | select(.name == "tls" and .secret.secretName == $secret)] | length) == 1)
+    ' >/dev/null <<<"${pods_json}"
+}
+
+rotation_phase() {
+  local phase="$1"
+  printf '%s %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%S.%NZ')" "${phase}" \
+    >"${work_dir}/rotation-phase.next"
+  mv -- "${work_dir}/rotation-phase.next" "${work_dir}/rotation-phase"
+  cat "${work_dir}/rotation-phase" >&2
+}
+
+rotation_pod_summary() {
+  local revision="$1"
+  echo "TLS rotation Pod summary (first 20 Pods):" >&2
+  kube -n "${namespace}" get pods \
+    -l "app.kubernetes.io/name=oxibelt-admission,app.kubernetes.io/instance=${release_name},oxibelt.dev/supply-chain-bundle=${revision}" \
+    -o json | jq -c '.items[:20][] | {
+      name: .metadata.name, uid: .metadata.uid, ip: .status.podIP,
+      deleting: .metadata.deletionTimestamp,
+      tlsSecrets: [.spec.volumes[]? | select(.name == "tls") | .secret.secretName]
+    }' >&2
+}
+
 deployment_targets_tls_secret() {
   local expected_revision="$1"
   local expected_tls_secret="$2"
@@ -1818,6 +1872,7 @@ kube get validatingwebhookconfiguration "${webhook_name}" -o json \
               }])}
         ]
     ' >"${work_dir}/admission-overlap-barrier-patch.json"
+rotation_phase overlap-install-start
 kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
   --patch-file "${work_dir}/admission-overlap-barrier-patch.json" >/dev/null
 webhook_trusts_overlap_and_barrier "${ca_overlap}" "${rotation_barrier_webhook}" \
@@ -1826,14 +1881,22 @@ wait_for "semantic CA B trust barrier" rotation_barrier_denied
 if ! expect_admitted "${work_dir}/pod-exact.json"; then
   die "canonical admission did not adopt overlapping CA trust before TLS rotation"
 fi
+rotation_phase overlap-adopted
 
 touch "${work_dir}/rotation-probe.running"
 : >"${work_dir}/rotation-probe.failures"
 (
   while [[ -f "${work_dir}/rotation-probe.running" ]]; do
+    probe_started="$(date -u +'%Y-%m-%dT%H:%M:%S.%NZ')"
+    probe_phase_start="$(cat "${work_dir}/rotation-phase")"
     if ! kube -n "${namespace}" create --dry-run=server -f "${work_dir}/pod-exact.json" \
-      >/dev/null 2>>"${work_dir}/rotation-probe.failures"; then
-      printf 'probe failed\n' >>"${work_dir}/rotation-probe.failures"
+      >/dev/null 2>"${work_dir}/rotation-probe.request.log"; then
+      {
+        printf 'probe failed: start=%s end=%s phase_start=[%s] phase_end=[%s]\n' \
+          "${probe_started}" "$(date -u +'%Y-%m-%dT%H:%M:%S.%NZ')" \
+          "${probe_phase_start}" "$(cat "${work_dir}/rotation-phase")"
+        cat "${work_dir}/rotation-probe.request.log"
+      } >>"${work_dir}/rotation-probe.failures"
     fi
     sleep 1
   done
@@ -1843,6 +1906,7 @@ render_admission "${fixture_a}" "${admission_tls_secret_b}" "${ca_overlap}" \
   "${work_dir}/admission-tls-b.yaml"
 select_admission_documents "${work_dir}/admission-tls-b.yaml" \
   "${work_dir}/admission-tls-b-stage.yaml" stage
+rotation_phase tls-rollout-start
 kube -n "${namespace}" apply -f "${work_dir}/admission-tls-b-stage.yaml" >/dev/null
 deployment_targets_tls_secret "${revision_a}" "${admission_tls_secret_b}" \
   || die "admission deployment did not target TLS Secret B"
@@ -1850,8 +1914,16 @@ kube -n "${namespace}" rollout status "deployment/oxibelt-admission-${revision_a
   --timeout="${timeout_seconds}s"
 wait_for "TLS Secret B admission endpoints" \
   service_targets_revision_and_tls_secret "${revision_a}" "${admission_tls_secret_b}"
+rotation_phase endpoints-converged
+wait_for "old TLS admission Pod retirement" \
+  tls_rotation_pods_retired "${revision_a}" "${admission_tls_secret_b}"
+rotation_phase old-tls-pods-retired
+rotation_pod_summary "${revision_a}"
+wait_for "TLS Secret B admission endpoints after retirement" \
+  service_targets_revision_and_tls_secret "${revision_a}" "${admission_tls_secret_b}"
 wait_for "admission with overlapping CA trust" \
   expect_admitted "${work_dir}/pod-exact.json"
+rotation_phase overlap-admission-confirmed
 kube get validatingwebhookconfiguration "${webhook_name}" -o json \
   | jq -ce \
     --arg ca_b "${public_ca_b}" \
@@ -1864,13 +1936,16 @@ kube get validatingwebhookconfiguration "${webhook_name}" -o json \
           {op: "remove", path: "/webhooks/1"}
         ]
     ' >"${work_dir}/admission-ca-b-remove-barrier-patch.json"
+rotation_phase ca-contraction-start
 kube patch validatingwebhookconfiguration "${webhook_name}" --type json \
   --patch-file "${work_dir}/admission-ca-b-remove-barrier-patch.json" >/dev/null
 webhook_trusts_exact_ca_bundle "${public_ca_b}" \
   || die "admission webhook did not retain CA B after rotation"
+rotation_phase ca-b-readback
 wait_for "rotation barrier webhook removal" \
   expect_admitted "${work_dir}/pod-rotation-barrier.json"
 wait_for "admission after old CA removal" expect_admitted "${work_dir}/pod-exact.json"
+rotation_phase ca-b-adopted
 kube -n "${namespace}" delete service "${rotation_barrier_service}" --wait=true >/dev/null
 stop_rotation_probe
 if [[ -s "${work_dir}/rotation-probe.failures" ]]; then

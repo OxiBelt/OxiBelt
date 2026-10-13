@@ -119,6 +119,13 @@ not store mutable pass/fail state. Promotion requires a complete detached
 receipt for every assigned gate and both intended platforms. Rendering or
 API-server dry-run alone still does not establish live admission.
 
+The TLS-rotation harness retains overlapping CA trust until every Pod in the
+canonical admission revision uses the new TLS Secret, including terminating
+Pods. It then rechecks the serving endpoints before removing the old CA. The
+continuous admission probe remains active throughout this bounded retirement
+wait and rejects any failed request. Timestamped rotation phases and bounded
+Pod/TLS summaries help distinguish retirement from trust-contraction failures.
+
 <!-- BEGIN KUBERNETES GRADUATION GENERATED -->
 
 > Generated from `devops/config/kubernetes-feature-graduation.json` by
