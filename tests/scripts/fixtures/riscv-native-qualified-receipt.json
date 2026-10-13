@@ -1,0 +1,525 @@
+{
+  "cleanup_confirmed": true,
+  "enforcement": {
+    "bootstrap": {
+      "architecture": "riscv64",
+      "binaries": {
+        "docker": "f49ec7778c6b9d219c86f2f56f3e095a6f51616e828f843a204f4c1593ea367c",
+        "limit-probe": "6249039034b8810198b346e1c3ad5a0c2efb379e6ed011e1a549e859732561f7"
+      },
+      "bootstrap_manifest_sha256": "2fedd96e2346c184bcba9a9e532649a6e5922505f373ab20bbfb467cc5f66659",
+      "executing_elf": "riscv64",
+      "lock_sha256": "6d58dbb6990005550f3fcdbea0e4a628c8d5f5c186dc43f44868d8c67cd70eaf",
+      "nonroot": true
+    },
+    "checks": [
+      {
+        "container_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "effective_controls": {
+          "architecture": "riscv64",
+          "cpu_max": "50000 100000",
+          "executable_machine": "riscv64",
+          "membership": "0::/",
+          "memory_max": 67108864,
+          "memory_swap_max": 0,
+          "nonroot": true,
+          "pids_max": 32,
+          "schema_version": 1
+        },
+        "mode": "cpu",
+        "passed": true,
+        "result": {
+          "mode": "cpu",
+          "nr_throttled_after": 20,
+          "nr_throttled_before": 0
+        }
+      },
+      {
+        "container_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "effective_controls": {
+          "architecture": "riscv64",
+          "cpu_max": "50000 100000",
+          "executable_machine": "riscv64",
+          "membership": "0::/",
+          "memory_max": 67108864,
+          "memory_swap_max": 0,
+          "nonroot": true,
+          "pids_max": 32,
+          "schema_version": 1
+        },
+        "mode": "memory",
+        "passed": true,
+        "result": {
+          "exit_code": 137,
+          "mode": "memory",
+          "oom_killed": true
+        }
+      },
+      {
+        "container_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "effective_controls": {
+          "architecture": "riscv64",
+          "cpu_max": "50000 100000",
+          "executable_machine": "riscv64",
+          "membership": "0::/",
+          "memory_max": 67108864,
+          "memory_swap_max": 0,
+          "nonroot": true,
+          "pids_max": 32,
+          "schema_version": 1
+        },
+        "mode": "pids",
+        "passed": true,
+        "result": {
+          "children": 31,
+          "children_reaped": true,
+          "fork_blocked": true,
+          "mode": "pids",
+          "pids_max_after": 1,
+          "pids_max_before": 0
+        }
+      }
+    ],
+    "cleanup_confirmed": true,
+    "daemon": {
+      "Architecture": "riscv64",
+      "CgroupDriver": "systemd",
+      "CgroupVersion": "2",
+      "Driver": "vfs",
+      "OSType": "linux",
+      "SecurityOptions": [
+        "name=rootless",
+        "name=cgroupns",
+        "name=seccomp,profile=builtin"
+      ],
+      "ServerVersion": "29.8.0"
+    },
+    "identity": {
+      "GITHUB_EVENT_NAME": "workflow_dispatch",
+      "GITHUB_JOB": "capabilities",
+      "GITHUB_REF": "refs/heads/main",
+      "GITHUB_REPOSITORY": "OxiBelt/OxiBelt",
+      "GITHUB_RUN_ATTEMPT": "1",
+      "GITHUB_RUN_ID": "123",
+      "GITHUB_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "GITHUB_WORKFLOW_REF": "OxiBelt/OxiBelt/.github/workflows/riscv-native-preflight.yml@refs/heads/main",
+      "GITHUB_WORKFLOW_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "image_id": "sha256:1b6154c61a69f852262e9bc9c6e5ec0b9dd5c4f60b124db82e69f501aa75d2fb",
+    "rootfs_sha256": "9fb1b24019d23a807a338afc59cd2b3a6672699aafd5e0139b9bb5da3bb1ba5f",
+    "schema_version": 1,
+    "scope": "native-rootless-cpu-memory-pid-enforcement",
+    "stage": "enforcement-complete",
+    "supported": true
+  },
+  "identity": {
+    "GITHUB_EVENT_NAME": "workflow_dispatch",
+    "GITHUB_JOB": "capabilities",
+    "GITHUB_REF": "refs/heads/main",
+    "GITHUB_REPOSITORY": "OxiBelt/OxiBelt",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_RUN_ID": "123",
+    "GITHUB_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "GITHUB_WORKFLOW_REF": "OxiBelt/OxiBelt/.github/workflows/riscv-native-preflight.yml@refs/heads/main",
+    "GITHUB_WORKFLOW_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "network": {
+    "cleanup_confirmed": true,
+    "detached_netns": 1000000001,
+    "diagnostic": "passed",
+    "ipv4": {
+      "before": 1,
+      "readback": 0,
+      "restored": true,
+      "status": "passed"
+    },
+    "ipv6": {
+      "before": 0,
+      "readback": 1,
+      "restored": true,
+      "status": "passed"
+    },
+    "native": {
+      "architecture": "riscv64",
+      "engine_source_version": "29.8.0",
+      "executing_elf_machine": 243,
+      "rootlesskit_version": "3.2.0",
+      "uid": 1001
+    },
+    "parent_after": 1,
+    "parent_before": 1,
+    "sandbox_netns": 1000000002,
+    "schema_version": 1,
+    "supported": true
+  },
+  "proc_mount": {
+    "child": {
+      "diagnostic": "passed",
+      "mapped_runner_root": true,
+      "mntns": 1000000003,
+      "pid_one": true,
+      "pidns": 1000000004,
+      "proc_root_and_flags": true,
+      "proc_self_pid_one": true,
+      "schema_version": 1,
+      "supported": true,
+      "unmounted": true
+    },
+    "cleanup_confirmed": true,
+    "diagnostic": "passed",
+    "helper_inaccessible": true,
+    "identity": {
+      "GITHUB_EVENT_NAME": "workflow_dispatch",
+      "GITHUB_JOB": "capabilities",
+      "GITHUB_REF": "refs/heads/main",
+      "GITHUB_REPOSITORY": "OxiBelt/OxiBelt",
+      "GITHUB_RUN_ATTEMPT": "1",
+      "GITHUB_RUN_ID": "123",
+      "GITHUB_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "GITHUB_WORKFLOW_REF": "OxiBelt/OxiBelt/.github/workflows/riscv-native-preflight.yml@refs/heads/main",
+      "GITHUB_WORKFLOW_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "kernel_release": "5.10.113-scw1",
+    "native": {
+      "architecture": "riscv64",
+      "engine_source_version": "29.8.0",
+      "executing_elf_machine": 243,
+      "lock_sha256": "6d58dbb6990005550f3fcdbea0e4a628c8d5f5c186dc43f44868d8c67cd70eaf",
+      "probe_sha256": "cf68c0735598523a8b6dd59d2e8c0a17b55802708083efdbd2c2af54755e6835",
+      "rootlesskit_sha256": "da975d0754c3a112f92cc7b86daa09c16678a309bf69bc2860def20b0e83517a",
+      "rootlesskit_version": "3.2.0",
+      "uid": 1001
+    },
+    "parent_mounts_sha256": "71cdf26b9bedd20d4a3c1ccaf8bbe93fa30b2128dfcc30251241e835cc37647f",
+    "parent_mounts_unchanged": true,
+    "sandbox_mntns": 1000000005,
+    "sandbox_pidns": 1000000006,
+    "schema_version": 1,
+    "supported": true
+  },
+  "schema_version": 1,
+  "scope": "native-rootless-sandbox-resource-enforcement",
+  "stage": "qualified",
+  "supported": true,
+  "sys_mount": {
+    "child": {
+      "detached_netns": 1000000001,
+      "detached_network_entered": true,
+      "diagnostic": "passed",
+      "entered_mntns": 1000000007,
+      "entered_pidns": 1000000006,
+      "interfaces": [
+        {
+          "index": 1,
+          "name": "lo"
+        },
+        {
+          "index": 2,
+          "name": "ip_vti0"
+        },
+        {
+          "index": 3,
+          "name": "sit0"
+        }
+      ],
+      "mapped_runner_root": true,
+      "mntns": 1000000003,
+      "mount_id": 123,
+      "netns": 1000000008,
+      "network_observation": {
+        "errors": {},
+        "ip": {
+          "address": [
+            {
+              "addr_info": [],
+              "address": "00:00:00:00:00:00",
+              "broadcast": "00:00:00:00:00:00",
+              "flags": [
+                "LOOPBACK"
+              ],
+              "group": "default",
+              "ifindex": 1,
+              "ifname": "lo",
+              "link_type": "loopback",
+              "mtu": 65536,
+              "operstate": "DOWN",
+              "qdisc": "noop",
+              "txqlen": 1000
+            },
+            {
+              "addr_info": [],
+              "address": "0.0.0.0",
+              "broadcast": "0.0.0.0",
+              "flags": [
+                "NOARP"
+              ],
+              "group": "default",
+              "ifindex": 2,
+              "ifname": "ip_vti0",
+              "link": null,
+              "link_type": "ipip",
+              "mtu": 1480,
+              "operstate": "DOWN",
+              "qdisc": "noop",
+              "txqlen": 1000
+            },
+            {
+              "addr_info": [],
+              "address": "0.0.0.0",
+              "broadcast": "0.0.0.0",
+              "flags": [
+                "NOARP"
+              ],
+              "group": "default",
+              "ifindex": 3,
+              "ifname": "sit0",
+              "link": null,
+              "link_type": "sit",
+              "mtu": 1480,
+              "operstate": "DOWN",
+              "qdisc": "noop",
+              "txqlen": 1000
+            }
+          ],
+          "link": [
+            {
+              "address": "00:00:00:00:00:00",
+              "broadcast": "00:00:00:00:00:00",
+              "flags": [
+                "LOOPBACK"
+              ],
+              "group": "default",
+              "gso_max_segs": 65535,
+              "gso_max_size": 65536,
+              "ifindex": 1,
+              "ifname": "lo",
+              "link_type": "loopback",
+              "linkmode": "DEFAULT",
+              "max_mtu": 0,
+              "min_mtu": 0,
+              "mtu": 65536,
+              "num_rx_queues": 1,
+              "num_tx_queues": 1,
+              "operstate": "DOWN",
+              "promiscuity": 0,
+              "qdisc": "noop",
+              "txqlen": 1000
+            },
+            {
+              "address": "0.0.0.0",
+              "broadcast": "0.0.0.0",
+              "flags": [
+                "NOARP"
+              ],
+              "group": "default",
+              "gso_max_segs": 65535,
+              "gso_max_size": 65536,
+              "ifindex": 2,
+              "ifname": "ip_vti0",
+              "link": null,
+              "link_type": "ipip",
+              "linkinfo": {
+                "info_data": {
+                  "local": "any",
+                  "remote": "any"
+                },
+                "info_kind": "vti"
+              },
+              "linkmode": "DEFAULT",
+              "max_mtu": 0,
+              "min_mtu": 0,
+              "mtu": 1480,
+              "num_rx_queues": 1,
+              "num_tx_queues": 1,
+              "operstate": "DOWN",
+              "promiscuity": 0,
+              "qdisc": "noop",
+              "txqlen": 1000
+            },
+            {
+              "address": "0.0.0.0",
+              "broadcast": "0.0.0.0",
+              "flags": [
+                "NOARP"
+              ],
+              "group": "default",
+              "gso_max_segs": 65535,
+              "gso_max_size": 65536,
+              "ifindex": 3,
+              "ifname": "sit0",
+              "link": null,
+              "link_type": "sit",
+              "linkinfo": {
+                "info_data": {
+                  "local": "any",
+                  "pmtudisc": false,
+                  "proto": "ip6ip",
+                  "remote": "any",
+                  "ttl": 64
+                },
+                "info_kind": "sit"
+              },
+              "linkmode": "DEFAULT",
+              "max_mtu": 65555,
+              "min_mtu": 1280,
+              "mtu": 1480,
+              "num_rx_queues": 1,
+              "num_tx_queues": 1,
+              "operstate": "DOWN",
+              "promiscuity": 0,
+              "qdisc": "noop",
+              "txqlen": 1000
+            }
+          ],
+          "route4": [],
+          "route6": []
+        },
+        "schema_version": 1,
+        "socket_interfaces": [
+          {
+            "index": 1,
+            "name": "lo"
+          },
+          {
+            "index": 2,
+            "name": "ip_vti0"
+          },
+          {
+            "index": 3,
+            "name": "sit0"
+          }
+        ],
+        "sys_interfaces": {
+          "interfaces": [
+            {
+              "flags": 128,
+              "index": 2,
+              "name": "ip_vti0",
+              "type": 768
+            },
+            {
+              "flags": 8,
+              "index": 1,
+              "name": "lo",
+              "type": 772
+            },
+            {
+              "flags": 128,
+              "index": 3,
+              "name": "sit0",
+              "type": 776
+            }
+          ],
+          "names": [
+            "ip_vti0",
+            "lo",
+            "sit0"
+          ]
+        }
+      },
+      "network_view_matches": true,
+      "pid_one": true,
+      "pidns": 1000000004,
+      "readonly_errno": 30,
+      "readonly_token_absent": true,
+      "rootfd_authenticated": true,
+      "schema_version": 3,
+      "supported": true,
+      "sys_root_and_flags": true,
+      "unmounted": true
+    },
+    "cleanup_confirmed": true,
+    "diagnostic": "passed",
+    "helper_inaccessible": true,
+    "identity": {
+      "GITHUB_EVENT_NAME": "workflow_dispatch",
+      "GITHUB_JOB": "capabilities",
+      "GITHUB_REF": "refs/heads/main",
+      "GITHUB_REPOSITORY": "OxiBelt/OxiBelt",
+      "GITHUB_RUN_ATTEMPT": "1",
+      "GITHUB_RUN_ID": "123",
+      "GITHUB_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "GITHUB_WORKFLOW_REF": "OxiBelt/OxiBelt/.github/workflows/riscv-native-preflight.yml@refs/heads/main",
+      "GITHUB_WORKFLOW_SHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "kernel_release": "5.10.113-scw1",
+    "native": {
+      "architecture": "riscv64",
+      "engine_source_version": "29.8.0",
+      "executing_elf_machine": 243,
+      "lock_sha256": "6d58dbb6990005550f3fcdbea0e4a628c8d5f5c186dc43f44868d8c67cd70eaf",
+      "observer_sha256": "bdb34598e714486aff84a7e05babe729de6f6c7a8c003ff7a1d0ae39d02753cb",
+      "probe_sha256": "0b8fd3dfecb8d078d1b2d72c4b5fca1f4c076f9fe8805e8ff313c267a0152880",
+      "rootlesskit_sha256": "da975d0754c3a112f92cc7b86daa09c16678a309bf69bc2860def20b0e83517a",
+      "rootlesskit_version": "3.2.0",
+      "uid": 1001
+    },
+    "parent_mounts_sha256": "71cdf26b9bedd20d4a3c1ccaf8bbe93fa30b2128dfcc30251241e835cc37647f",
+    "parent_mounts_unchanged": true,
+    "sandbox_mntns": 1000000005,
+    "sandbox_netns": 1000000002,
+    "sandbox_pidns": 1000000006,
+    "schema_version": 3,
+    "supported": true
+  },
+  "tools": {
+    "architecture": "riscv64",
+    "binaries": {
+      "containerd": {
+        "elfMachine": 243,
+        "sha256": "a095d5f09b2e201becf045f715eb789648c7b06330a33a69cc2895c29046826f",
+        "version": "containerd github.com/containerd/containerd/v2 v2.3.4 db8809540e1a7a9da5d518876894933ff55692ab"
+      },
+      "containerd-shim-runc-v2": {
+        "elfMachine": 243,
+        "sha256": "ee40a31eccd192a81153c2f1c32163a97ba1b629a802bd3d684669ba2ccf59d4",
+        "version": "containerd-shim-runc-v2:\n  Version:  v2.3.4\n  Revision: db8809540e1a7a9da5d518876894933ff55692ab\n  Go version: go1.26.8"
+      },
+      "ctr": {
+        "elfMachine": 243,
+        "sha256": "9526954fb3131f9b4d522c014fe2116e957d8424b4b16bb4eb99d2ed9d3c2cee",
+        "version": "ctr github.com/containerd/containerd/v2 v2.3.4"
+      },
+      "docker": {
+        "elfMachine": 243,
+        "sha256": "f49ec7778c6b9d219c86f2f56f3e095a6f51616e828f843a204f4c1593ea367c",
+        "version": "Docker version 29.8.0, build 88096ef00576baf72a9cb45caa45c0544c40e0a7"
+      },
+      "docker-proxy": {
+        "elfMachine": 243,
+        "sha256": "5d02d89741b81fb339f43f1a7c91956b7b0ad2bf4aa2ffe6c1f4a25f74b763cd",
+        "version": "docker-proxy (commit 3ce5872b7950c63ba2ffbc5123101019ff3e6682) version 29.8.0"
+      },
+      "dockerd": {
+        "elfMachine": 243,
+        "sha256": "28afd4bef28395775291945cb0436147ddcd31785c5d81378bfec66f88051185",
+        "version": "Docker version 29.8.0, build 3ce5872b7950c63ba2ffbc5123101019ff3e6682"
+      },
+      "limit-probe": {
+        "elfMachine": 243,
+        "sha256": "6249039034b8810198b346e1c3ad5a0c2efb379e6ed011e1a549e859732561f7",
+        "version": "native-cgroup-enforcement-v1"
+      },
+      "rootlesskit": {
+        "elfMachine": 243,
+        "sha256": "da975d0754c3a112f92cc7b86daa09c16678a309bf69bc2860def20b0e83517a",
+        "version": "rootlesskit version 3.2.0"
+      },
+      "runc": {
+        "elfMachine": 243,
+        "sha256": "9a23d9191528eaec9a3615fea43af23800940b449e58510d6f6cae2f3e879f92",
+        "version": "runc version 1.5.1\ncommit: 8f2685a471d3347a686ad3909783d8aafc6bb208\nspec: 1.3.0\ngo: go1.26.8\nlibseccomp: 2.6.0"
+      }
+    },
+    "lockSha256": "6d58dbb6990005550f3fcdbea0e4a628c8d5f5c186dc43f44868d8c67cd70eaf",
+    "schemaVersion": 1,
+    "scripts": {
+      "dockerd-rootless-setuptool.sh": {
+        "sha256": "1c9f0dc93ebb3d75255254ec760d26a912affba7f329ab8abffe8e25eb0b3f94"
+      },
+      "dockerd-rootless.sh": {
+        "sha256": "200203633806081a401e60aefdf68a8fa73fc7dc80aa854c52a69d47710a3488"
+      }
+    }
+  }
+}

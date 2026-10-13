@@ -344,6 +344,61 @@ class NativeRunnerTest(unittest.TestCase):
         with self.assertRaises(PROBE.ProbeError):
             PROBE.write_evidence(parent_link / "via-link.json", receipt)
 
+    def test_enlarged_evidence_retains_private_file_and_path_protections(self) -> None:
+        receipt = {"proof": "x" * 16384}
+        output = self.root / "aggregate.json"
+        PROBE.write_evidence(output, receipt, maximum_bytes=PROBE.MAX_READ_BYTES)
+        self.assertEqual(json.loads(PROBE.Probe().read(output)), receipt)
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+        with self.assertRaises(PROBE.ProbeError):
+            PROBE.write_evidence(output, receipt, maximum_bytes=PROBE.MAX_READ_BYTES)
+        target = self.root / "aggregate-target"
+        target.write_text("untouched")
+        link = self.root / "aggregate-link.json"
+        link.symlink_to(target)
+        parent = self.root / "aggregate-parent"
+        parent.symlink_to(self.root, target_is_directory=True)
+        directory = self.root / "aggregate-directory.json"
+        directory.mkdir()
+        fifo = self.root / "aggregate-pipe.json"
+        os.mkfifo(fifo)
+        for path in (link, parent / "child.json", directory, fifo,
+                     self.root / "aggregate-no-extension", self.root / "x/../aggregate-escaped.json"):
+            with self.subTest(path=path), self.assertRaises(PROBE.ProbeError):
+                PROBE.write_evidence(path, receipt, maximum_bytes=PROBE.MAX_READ_BYTES)
+        self.assertEqual(target.read_text(), "untouched")
+        self.assertEqual(json.loads(output.read_text()), receipt)
+
+    def test_evidence_limits_apply_to_exact_encoded_bytes(self) -> None:
+        for maximum in (16384, PROBE.MAX_READ_BYTES):
+            with self.subTest(maximum=maximum):
+                overhead = len((json.dumps({"proof": ""}, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+                receipt = {"proof": "x" * (maximum - overhead)}
+                output = self.root / f"boundary-{maximum}.json"
+                PROBE.write_evidence(output, receipt, maximum_bytes=maximum)
+                self.assertEqual(output.stat().st_size, maximum)
+                self.assertEqual(json.loads(PROBE.Probe().read(output)), receipt)
+                overflow = self.root / f"overflow-{maximum}.json"
+                receipt["proof"] += "x"
+                with self.assertRaisesRegex(PROBE.ProbeError, "^evidence-too-large$"):
+                    PROBE.write_evidence(overflow, receipt, maximum_bytes=maximum)
+                self.assertFalse(overflow.exists())
+        receipt = {"proof": "\u00e9"}
+        raw = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        with self.assertRaisesRegex(PROBE.ProbeError, "^evidence-too-large$"):
+            PROBE.write_evidence(self.root / "escaped-unicode.json", receipt, maximum_bytes=len(raw) - 1)
+        self.assertFalse((self.root / "escaped-unicode.json").exists())
+
+    def test_evidence_default_limit_and_invalid_overrides_create_no_file(self) -> None:
+        output = self.root / "default-limit.json"
+        with self.assertRaisesRegex(PROBE.ProbeError, "^evidence-too-large$"):
+            PROBE.write_evidence(output, {"proof": "x" * 16384})
+        self.assertFalse(output.exists())
+        for maximum in (False, True, 0, -1, 16384.0, "16384", None, PROBE.MAX_READ_BYTES + 1):
+            with self.subTest(maximum=maximum), self.assertRaisesRegex(PROBE.ProbeError, "^invalid-evidence-byte-limit$"):
+                PROBE.write_evidence(output, {}, maximum_bytes=maximum)
+            self.assertFalse(output.exists())
+
     def test_cli_exit_status_preserves_unsupported_receipt(self) -> None:
         probe = mock.Mock()
         receipt = self.run_probe(machine="x86_64")

@@ -29,6 +29,9 @@ MAX_BYTES = 128 * 1024
 MAX_ARCHIVE_BYTES = 5 * 1024 * 1024
 MAX_EVIDENCE_FILE_BYTES = 4 * 1024 * 1024
 MAX_EVIDENCE_BYTES = 64 * 1024
+# The complete aggregate contains several bounded probe receipts and must fit
+# the prerequisite reader's 256 KiB limit; individual writers retain 16 KiB.
+MAX_PREFLIGHT_RECEIPT_BYTES = 256 * 1024
 EVIDENCE_LOGS = (
     "apt-update.log", "apt-bootstrap.log", "apt-install.log", "build-engine.log",
     "build-cli.log", "build-containerd.log", "build-runc.log", "docker-start.log",
@@ -840,6 +843,7 @@ class Preflight:
 
     def run(self) -> int:
         diagnostic = None
+        persistence_diagnostic = None
         try:
             self.provision()
         except (Failure, OSError, ValueError, KeyError) as error:
@@ -852,7 +856,19 @@ class Preflight:
             self.receipt["supported"] = diagnostic is None and self.receipt["cleanup_confirmed"]
             if diagnostic:
                 self.receipt["diagnostic"] = diagnostic
-            self.probe.write_evidence(self.output / "preflight.json", self.receipt)
+            try:
+                self.probe.write_evidence(self.output / "preflight.json", self.receipt,
+                                          maximum_bytes=MAX_PREFLIGHT_RECEIPT_BYTES)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                persistence_diagnostic = (
+                    "preflight-receipt-too-large"
+                    if isinstance(error, self.probe.ProbeError) and str(error) == "evidence-too-large"
+                    else "preflight-receipt-write-failed"
+                )
+        if persistence_diagnostic:
+            print("Native rootless preflight could not preserve valid qualification evidence: "
+                  + persistence_diagnostic, file=sys.stderr)
+            return 2
         print("Native rootless preflight passed." if not diagnostic else f"Native rootless preflight failed: {diagnostic}")
         return int(diagnostic is not None)
 

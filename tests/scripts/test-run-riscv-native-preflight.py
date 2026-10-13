@@ -19,8 +19,20 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 REAL_EXECUTE = MODULE.execute
 IDENTITY = {"GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
-            "GITHUB_REPOSITORY": "OxiBelt/OxiBelt", "GITHUB_EVENT_NAME": "workflow_dispatch"}
+            "GITHUB_REPOSITORY": "OxiBelt/OxiBelt", "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_JOB": "capabilities", "GITHUB_REF": "refs/heads/main",
+            "GITHUB_WORKFLOW_REF": "OxiBelt/OxiBelt/.github/workflows/riscv-native-preflight.yml@refs/heads/main",
+            "GITHUB_WORKFLOW_SHA": "a" * 40}
 CID = "b" * 64
+
+# Qualified proof fields come from the public native capability run:
+# https://github.com/OxiBelt/OxiBelt/actions/runs/38299055993
+# Source: b1b7381372ff29819411a3833065aa59a4206b82; artifact: 11772849929.
+# Original artifact ZIP SHA-256 (before fixture sanitization):
+# 3e9148b5373ae876bb850a114a59aa427017d3d1bf3dc67d771ad92c46bb5d61
+# Workflow identity, namespace/container IDs, and mount ID use test values;
+# proof shape, v3 network views, hashes, pins, and resource outcomes are retained.
+QUALIFIED_RECEIPT = Path(__file__).with_name("fixtures") / "riscv-native-qualified-receipt.json"
 
 
 def archive_bytes(filename, data, *, kind=tarfile.REGTYPE, extra=None):
@@ -63,6 +75,133 @@ class LifecycleTests(unittest.TestCase):
                 "State": {"Status": "running", "Running": True, "Pid": 321, "ExitCode": 0,
                           "OOMKilled": False, "Error": "", "StartedAt": "2026-10-12T00:00:00Z",
                           "FinishedAt": "0001-01-01T00:00:00Z"}}
+
+    @contextlib.contextmanager
+    def qualified_lifecycle(self, *, provision_error=None, cleanup_error=None, writer=None):
+        """Exercise actual owned cleanup and persistence with qualified native proof."""
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            preflight = MODULE.Preflight(Path(directory))
+            preflight.parent, preflight.baseline = self.preflight.parent, self.preflight.baseline
+            preflight.container = CID
+            preflight.receipt = json.loads(QUALIFIED_RECEIPT.read_text())
+            preflight.receipt["cleanup_confirmed"] = False
+            events = []
+            stdout, stderr = io.StringIO(), io.StringIO()
+            real_writer = preflight.probe.write_evidence
+
+            def provision():
+                if provision_error:
+                    preflight.receipt["stage"] = "rootless-enforcement"
+                    raise provision_error
+
+            def command(args, **_kwargs):
+                events.append(args[0])
+                if args[0] == "inspect":
+                    return json.dumps([self.state()]).encode()
+                if args[0] == "rm" and cleanup_error:
+                    raise cleanup_error
+                return b""
+
+            def persist(path, receipt, **kwargs):
+                events.append("persist")
+                return (writer or real_writer)(path, receipt, **kwargs)
+
+            with mock.patch.object(preflight, "provision", side_effect=provision), \
+                 mock.patch.object(preflight, "command", side_effect=command), \
+                 mock.patch.object(preflight, "collect_diagnostics"), \
+                 mock.patch.object(preflight, "check_ancestors"), \
+                 mock.patch.object(preflight.probe, "write_evidence", side_effect=persist), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                yield SimpleNamespace(preflight=preflight, events=events, stdout=stdout, stderr=stderr,
+                                      write_evidence=real_writer)
+
+    def assert_persistence_failed(self, lifecycle, status, diagnostic):
+        self.assertEqual(status, 2)
+        self.assertLess(lifecycle.events.index("rm"), lifecycle.events.index("persist"))
+        output = lifecycle.stdout.getvalue() + lifecycle.stderr.getvalue()
+        self.assertIn(diagnostic, lifecycle.stderr.getvalue())
+        self.assertNotIn("SECRET", output)
+        self.assertNotIn("preflight passed", output)
+
+    def test_complete_native_receipt_exceeds_leaf_limit_and_roundtrips_after_cleanup(self):
+        expected = json.loads(QUALIFIED_RECEIPT.read_text())
+        self.assertEqual(expected["identity"], IDENTITY)
+        with self.qualified_lifecycle() as lifecycle:
+            self.assertEqual(lifecycle.preflight.run(), 0)
+            path = lifecycle.preflight.output / "preflight.json"
+            self.assertGreater(path.stat().st_size, 16 * 1024)
+            self.assertLessEqual(path.stat().st_size, lifecycle.preflight.probe.MAX_READ_BYTES)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(lifecycle.preflight.probe.Probe().read(path)), expected)
+            self.assertLess(lifecycle.events.index("rm"), lifecycle.events.index("persist"))
+            self.assertIn("preflight passed", lifecycle.stdout.getvalue())
+            leaf = lifecycle.preflight.output / "leaf.json"
+            # The identical complete proof remains too large for an ordinary leaf.
+            with self.assertRaisesRegex(lifecycle.preflight.probe.ProbeError, "evidence-too-large"):
+                lifecycle.write_evidence(leaf, expected)
+            self.assertFalse(leaf.exists())
+
+    def test_large_unsupported_receipts_preserve_proof_and_cleanup_outcome(self):
+        expected = json.loads(QUALIFIED_RECEIPT.read_text())
+        for failure in ("provision", "cleanup"):
+            with self.subTest(failure=failure), self.qualified_lifecycle(
+                provision_error=MODULE.Failure("native-enforcement-failed") if failure == "provision" else None,
+                cleanup_error=MODULE.Failure("sandbox-cleanup-incomplete") if failure == "cleanup" else None,
+            ) as lifecycle:
+                self.assertEqual(lifecycle.preflight.run(), 1)
+                path = lifecycle.preflight.output / "preflight.json"
+                receipt = json.loads(lifecycle.preflight.probe.Probe().read(path))
+                self.assertGreater(path.stat().st_size, 16 * 1024)
+                self.assertFalse(receipt["supported"])
+                self.assertEqual(receipt["cleanup_confirmed"], failure == "provision")
+                self.assertEqual(receipt["diagnostic"], "native-enforcement-failed" if failure == "provision"
+                                 else "sandbox-cleanup-or-ancestor-verification-failed")
+                for key in ("identity", "network", "proc_mount", "sys_mount", "tools", "enforcement"):
+                    self.assertEqual(receipt[key], expected[key])
+                self.assertLess(lifecycle.events.index("rm"), lifecycle.events.index("persist"))
+                self.assertNotIn("preflight passed", lifecycle.stdout.getvalue())
+
+    def test_final_receipt_file_or_symlink_conflict_still_cleans_up_and_returns_two(self):
+        for kind in ("file", "symlink"):
+            with self.subTest(kind=kind), self.qualified_lifecycle() as lifecycle:
+                path = lifecycle.preflight.output / "preflight.json"
+                stale = b"SECRET stale evidence\n"
+                if kind == "file":
+                    path.write_bytes(stale)
+                else:
+                    target = lifecycle.preflight.output / "untouched.json"
+                    target.write_bytes(stale)
+                    path.symlink_to(target)
+                self.assert_persistence_failed(lifecycle, lifecycle.preflight.run(), "preflight-receipt-write-failed")
+                self.assertTrue(lifecycle.preflight.receipt["cleanup_confirmed"])
+                self.assertEqual(path.read_bytes(), stale)
+                self.assertEqual(path.is_symlink(), kind == "symlink")
+
+    def test_final_write_errors_are_sanitized_even_when_a_partial_file_exists(self):
+        cases = [("evidence-too-large", False, "preflight-receipt-too-large"),
+                 ("SECRET private path", False, "preflight-receipt-write-failed")]
+        cases += [(error("SECRET private path"), False, "preflight-receipt-write-failed")
+                  for error in (OSError, ValueError, KeyError, TypeError)]
+        cases.append((OSError("SECRET partial write"), True, "preflight-receipt-write-failed"))
+        for error, partial, diagnostic in cases:
+            def writer(path, _receipt, **_kwargs):
+                if partial:
+                    path.write_bytes(b'{"partial":')
+                if isinstance(error, str):
+                    raise lifecycle.preflight.probe.ProbeError(error)
+                raise error
+            with self.subTest(error=type(error).__name__, partial=partial), \
+                 self.qualified_lifecycle(writer=writer) as lifecycle:
+                self.assert_persistence_failed(lifecycle, lifecycle.preflight.run(), diagnostic)
+                self.assertTrue(lifecycle.preflight.receipt["cleanup_confirmed"])
+                self.assertEqual((lifecycle.preflight.output / "preflight.json").exists(), partial)
+
+    def test_aggregate_above_reader_limit_fails_after_cleanup_without_a_receipt(self):
+        with self.qualified_lifecycle() as lifecycle:
+            lifecycle.preflight.receipt["tools"]["oversized_observation"] = "x" * (256 * 1024)
+            self.assert_persistence_failed(lifecycle, lifecycle.preflight.run(), "preflight-receipt-too-large")
+            self.assertTrue(lifecycle.preflight.receipt["cleanup_confirmed"])
+            self.assertFalse((lifecycle.preflight.output / "preflight.json").exists())
 
     def test_explicit_provider_socket_and_no_credentials(self):
         with mock.patch.object(MODULE, "execute", return_value=(0, b"ok")) as call:

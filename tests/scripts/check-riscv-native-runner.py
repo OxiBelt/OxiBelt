@@ -25,6 +25,7 @@ from typing import Callable
 
 
 MAX_READ_BYTES = 256 * 1024
+MAX_WRITE_BYTES = 16 * 1024
 MAX_COMMAND_BYTES = 4096
 COMMAND_TIMEOUT_SECONDS = 5
 REQUIRED_CONTROLLERS = {"cpu", "memory", "pids"}
@@ -431,8 +432,15 @@ class Probe:
         return evidence
 
 
-def write_evidence(output: Path, evidence: dict[str, object]) -> None:
-    """Create a private new regular file; never follow links or overwrite input."""
+def write_evidence(output: Path, evidence: dict[str, object],
+                   *, maximum_bytes: int = MAX_WRITE_BYTES) -> None:
+    """Create private new regular JSON without following links or overwriting.
+
+    Individual receipts retain a 16 KiB bound. An explicit aggregate bound
+    cannot exceed the reader's limit.
+    """
+    if type(maximum_bytes) is not int or not 0 < maximum_bytes <= MAX_READ_BYTES:
+        raise ProbeError("invalid-evidence-byte-limit")
     absolute = output.absolute()
     if ".." in absolute.parts or absolute.suffix != ".json":
         raise ProbeError("output-requires-new-regular-json-file")
@@ -441,7 +449,7 @@ def write_evidence(output: Path, evidence: dict[str, object]) -> None:
         if parent != absolute.parent:
             raise ProbeError("output-parent-must-not-contain-symlinks")
         raw = (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        if len(raw) > 16384:
+        if len(raw) > maximum_bytes:
             raise ProbeError("evidence-too-large")
         fd = os.open(absolute, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as stream:
