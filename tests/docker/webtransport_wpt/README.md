@@ -26,10 +26,11 @@ URL and WPT certificate. Each browser must pass session, bidirectional stream,
 unidirectional stream, datagram, and close controls on both paths. The gate
 rejects missing tests or subtests and any difference in direct and proxied
 test or subtest status. If the first Chrome comparison differs only because the
-direct worker or shared worker `Close and abort unidirectional stream` subtest
-reports the pinned `FIN` timing failure while the proxy passes, the gate runs
-one complete direct Chrome replay and requires strict parity against the saved
-proxy report. If the first Chrome comparison differs only because the
+direct worker, shared worker, or serviceworker `Close and abort unidirectional
+stream` subtest reports the pinned `FIN` timing failure while the proxy passes,
+with both harness results `OK`, the gate runs one complete direct Chrome replay
+in a fresh container and requires strict parity against the saved proxy report.
+If the first Chrome comparison differs only because the
 serviceworker variant of that subtest passes directly and fails through the
 proxy with the same exact `FIN` assertion, with both harness results `OK`, the
 gate runs one complete proxied Chrome replay and requires strict parity against

@@ -25,7 +25,7 @@ CHROME_DIRECT_RETRY_CASES = frozenset(
         f"/webtransport/streams-close.https.any.{context}.html",
         "Close and abort unidirectional stream",
     )
-    for context in ("worker", "sharedworker")
+    for context in ("worker", "sharedworker", "serviceworker")
 )
 CHROME_DIRECT_RETRY_MESSAGE = 'assert_equals: reset_stream expected "reset" but got "FIN"'
 CHROME_PROXY_RETRY_CASE = (
@@ -113,6 +113,8 @@ def compare(direct, proxied, classify_chrome_direct_retry=False, classify_chrome
                 regressions.append(f"{test}: {name}: {status} -> {after_subtests[name]}")
                 if (
                     (test, name) not in CHROME_DIRECT_RETRY_CASES
+                    or before.get("status") != "OK"
+                    or after.get("status") != "OK"
                     or status != "FAIL"
                     or after_subtests[name] != "PASS"
                     or before_messages[name] != CHROME_DIRECT_RETRY_MESSAGE
