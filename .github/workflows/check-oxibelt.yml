@@ -328,7 +328,7 @@ jobs:
           jq -e '.bomFormat == "CycloneDX" and (.components | type) == "array"' "${snapshot}" >/dev/null
 
       - name: Upload local pnpm dependency snapshot
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: pnpm-dependency-snapshot
           path: ${{ runner.temp }}/pnpm-dependency-snapshot
@@ -842,7 +842,7 @@ jobs:
 
       - name: Upload fuzz artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-${{ matrix.fuzz_profile.name }}-${{ matrix.fuzz_target }}-fuzz-artifacts
           path: ${{ runner.temp }}/oxibelt-fuzz-artifacts/${{ matrix.fuzz_target }}
@@ -879,7 +879,7 @@ jobs:
 
       - name: Upload mutation evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-mutation-testing-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/oxibelt-mutation-testing
@@ -1162,7 +1162,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image"
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.artifact_name }}
           path: |
@@ -1229,7 +1229,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-amd64.tar"
 
       - name: Upload role-specific Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.role.artifact_prefix }}-alpine-musl-amd64-image
           path: |
@@ -1282,7 +1282,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image"
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-alpine-musl-${{ matrix.arch }}-image
           path: |
@@ -1328,7 +1328,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image"
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-alpine-musl-riscv64-image
           path: |
@@ -1408,7 +1408,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}.tar"
 
       - name: Upload role-specific Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}-image
           path: |
@@ -1600,7 +1600,7 @@ jobs:
             --html-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Upload Trivy vulnerability report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: trivy-oxibelt-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}-json
           path: trivy-results-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}.json
@@ -1608,7 +1608,7 @@ jobs:
           retention-days: 0
 
       - name: Upload local dependency snapshot
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: dependency-snapshot-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}
           path: ${{ runner.temp }}/dependency-snapshot/${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}
@@ -1816,7 +1816,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-integration-helper-images"
 
       - name: Upload Docker integration helper image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar
@@ -1858,7 +1858,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-firefox-webdriver"
 
       - name: Upload Firefox WebDriver helper image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-firefox-webdriver-helper-image
           path: ${{ runner.temp }}/oxibelt-firefox-webdriver/oxibelt-firefox-webdriver-image.tar
@@ -1971,7 +1971,7 @@ jobs:
 
       - name: Upload WebTransport WPT diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-webtransport-wpt-diagnostics
           path: ${{ runner.temp }}/oxibelt-webtransport-wpt
@@ -2162,7 +2162,7 @@ jobs:
           --receipt-output "${RUNNER_TEMP}/ct-object-store-minio-receipt.json"
 
       - name: Upload CT object-store MinIO evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ct-object-store-minio-evidence
           path: ${{ runner.temp }}/ct-object-store-minio-receipt.json
@@ -2377,7 +2377,7 @@ jobs:
           tests/scripts/run-kubernetes-supply-chain-admission.sh --provider kind
 
       - name: Upload Kubernetes supply-chain admission evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: kubernetes-supply-chain-admission-evidence
           path: ${{ runner.temp }}/oxibelt-admission-evidence/receipt.json
@@ -2663,7 +2663,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2738,7 +2738,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2813,7 +2813,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2888,7 +2888,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2964,7 +2964,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -3039,7 +3039,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -3114,7 +3114,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -3189,7 +3189,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -3259,7 +3259,7 @@ jobs:
 
       - name: Upload Docker security fuzz failure evidence
         if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-security-fuzz-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/oxibelt-docker-security-fuzz/${{ matrix.target }}
@@ -3345,7 +3345,7 @@ jobs:
 
       - name: Upload browser WebDriver diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-browser-${{ matrix.browser }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-browser-logs/${{ matrix.browser }}-${{ matrix.case }}
@@ -3414,7 +3414,7 @@ jobs:
 
       - name: Upload isolated Firefox WebDriver diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-browser-firefox-webrtc-turn-isolated-diagnostics
           path: ${{ runner.temp }}/oxibelt-browser-logs/firefox-webrtc-turn-isolated
@@ -3503,7 +3503,7 @@ jobs:
 
       - name: Upload non-benchmark validation summary
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: non-benchmark-summary-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

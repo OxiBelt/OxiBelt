@@ -278,7 +278,7 @@ jobs:
 
       - name: Upload independently derived image plan
         if: steps.plan.outputs.automatic == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: independent-image-plan-${{ steps.plan.outputs.revision }}
           path: ${{ runner.temp }}/independent-image-plan.json
@@ -415,7 +415,7 @@ jobs:
             "${producer_arguments[@]}"
 
       - name: Upload independent rebuild receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: rebuild-receipt-${{ matrix.role }}-${{ matrix.artifact_arch }}
           path: ${{ runner.temp }}/rebuild-receipt-${{ matrix.role }}-${{ matrix.artifact_arch }}.json
@@ -549,7 +549,7 @@ jobs:
             >"${RUNNER_TEMP}/helm-rebuild-receipt-${CHART}.json"
 
       - name: Upload independent chart rebuild receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: helm-rebuild-receipt-${{ matrix.chart }}
           path: ${{ runner.temp }}/helm-rebuild-receipt-${{ matrix.chart }}.json
@@ -1106,7 +1106,7 @@ jobs:
           fi
 
       - name: Upload sealed release qualification
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: release-qualification-${{ needs.resolve.outputs.revision }}
           path: ${{ runner.temp }}/release-qualification.json

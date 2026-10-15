@@ -287,7 +287,7 @@ jobs:
           fi
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
           path: |
@@ -855,7 +855,7 @@ jobs:
 
       - name: Upload digest-bound Trivy vulnerability evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: trivy-release-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.OXIBELT_ARTIFACT_PREFIX }}-${{ env.OXIBELT_ARTIFACT_ARCH }}
           path: |
@@ -865,7 +865,7 @@ jobs:
           retention-days: 7
 
       - name: Upload platform SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}
           path: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
@@ -873,7 +873,7 @@ jobs:
           retention-days: 1
 
       - name: Upload platform rebuild recipe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-rebuild-${{ env.OXIBELT_ARTIFACT_ARCH }}
           path: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
@@ -956,7 +956,7 @@ jobs:
 
       - name: Upload RISC-V runtime smoke evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: riscv64-runtime-smoke-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.OXIBELT_ARTIFACT_PREFIX }}
           path: ${{ runner.temp }}/oxibelt-riscv64-runtime-smoke

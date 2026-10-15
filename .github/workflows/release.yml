@@ -416,7 +416,7 @@ jobs:
             --expected-body "${OXIBELT_BODY}"
 
       - name: Upload verified release contract
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: release-contract-${{ needs.resolve-release-source.outputs.revision }}
           path: |
@@ -735,7 +735,7 @@ jobs:
             "${metadata_root}/helper/riscv64-release-image-smoke/controller-empty-list.json"
 
       - name: Upload release metadata
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
@@ -794,7 +794,7 @@ jobs:
             --output-directory "${output}"
 
       - name: Upload immutable chart packages and plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: helm-chart-release-${{ needs.prepare-release.outputs.revision }}
           path: ${{ runner.temp }}/oxibelt-helm-chart-release
@@ -903,7 +903,7 @@ jobs:
             --output "${evidence}/helm-chart-publish-receipt.json"
 
       - name: Upload bounded chart publication evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: helm-chart-oci-evidence-${{ needs.prepare-release.outputs.revision }}
           path: ${{ runner.temp }}/oxibelt-helm-oci-evidence
@@ -1298,7 +1298,7 @@ jobs:
 
       - name: Upload controlled vulnerability gate decision
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ steps.decision-identity.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-vulnerability-decision
@@ -1770,7 +1770,7 @@ jobs:
             >"${RUNNER_TEMP}/oxibelt-index-metadata/index-metadata.json"
 
       - name: Upload immutable index metadata
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-metadata
           path: ${{ runner.temp }}/oxibelt-index-metadata/index-metadata.json
@@ -1881,7 +1881,7 @@ jobs:
             --output "${INDEX_REBUILD}"
 
       - name: Upload index SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-sbom
           path: ${{ runner.temp }}/oxibelt-index-sbom/${{ matrix.artifact_prefix }}-release-index.cdx.json
@@ -1889,7 +1889,7 @@ jobs:
           retention-days: 1
 
       - name: Upload index rebuild recipe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-rebuild
           path: ${{ runner.temp }}/oxibelt-index-rebuild/${{ matrix.artifact_prefix }}-release-index.rebuild.json

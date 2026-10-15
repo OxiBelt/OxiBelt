@@ -154,7 +154,7 @@ jobs:
 
       - name: Upload exact platform gate evidence
         if: success()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: feature-graduation-raw-${{ matrix.artifact_platform }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/feature-graduation-raw
@@ -428,7 +428,7 @@ jobs:
             "${OXIBELT_SEALED_ROOT}/"
 
       - name: Upload sealed graduation evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: feature-graduation-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: qualification-evidence
