@@ -223,7 +223,7 @@ jobs:
           done
 
       - name: Download AMD64 gate evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           artifact-ids: ${{ steps.raw-artifacts.outputs.amd64_id }}
           digest-mismatch: error
@@ -231,7 +231,7 @@ jobs:
           path: ${{ runner.temp }}/feature-graduation-raw/amd64
 
       - name: Download ARM64 gate evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           artifact-ids: ${{ steps.raw-artifacts.outputs.arm64_id }}
           digest-mismatch: error
@@ -488,7 +488,7 @@ jobs:
           printf 'artifact_digest=%s\n' "${artifact_digest}" >>"${GITHUB_OUTPUT}"
 
       - name: Download sealed graduation evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           artifact-ids: ${{ steps.sealed-artifact.outputs.artifact_id }}
           digest-mismatch: error
@@ -689,7 +689,7 @@ jobs:
           printf 'artifact_digest=%s\n' "${artifact_digest}" >>"${GITHUB_OUTPUT}"
 
       - name: Download sealed graduation evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           artifact-ids: ${{ steps.sealed-artifact.outputs.artifact_id }}
           digest-mismatch: error
