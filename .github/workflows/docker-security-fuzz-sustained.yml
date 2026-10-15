@@ -105,7 +105,7 @@ jobs:
           rustup default 1.98.1
 
       - name: Download sustained Docker security fuzz images
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: sustained-docker-security-fuzz-images-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/oxibelt-security-fuzz-images
