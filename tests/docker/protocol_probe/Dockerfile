@@ -15,7 +15,7 @@ COPY source/third_party/web-transport-proto /src/source/third_party/web-transpor
 COPY source/third_party/web-transport-quinn /src/source/third_party/web-transport-quinn
 RUN cargo build --release --locked
 
-FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
