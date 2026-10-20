@@ -22,7 +22,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
-  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
 jobs:
   # Keep this job independent. If test jobs need it, a PR can intentionally
@@ -74,8 +74,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Test Rust boundary tooling
         env:
@@ -151,7 +151,7 @@ jobs:
       fail-fast: false
       matrix:
         rust_version:
-          - 1.98.1
+          - 1.99.1
         runner:
           - ubuntu-26.04
           - ubuntu-26.04-arm
@@ -231,8 +231,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Install pinned Rust dependency tools
         run: |
@@ -328,7 +328,7 @@ jobs:
           jq -e '.bomFormat == "CycloneDX" and (.components | type) == "array"' "${snapshot}" >/dev/null
 
       - name: Upload local pnpm dependency snapshot
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: pnpm-dependency-snapshot
           path: ${{ runner.temp }}/pnpm-dependency-snapshot
@@ -367,7 +367,7 @@ jobs:
       - name: Setup canonical Helm packager
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.3.0
+          version: v4.3.1
 
       - name: Test DevOps tooling
         run: pnpm run test
@@ -577,7 +577,7 @@ jobs:
 
       - name: Download exact manual graduation evidence
         if: github.event_name != 'pull_request' && steps.policy.outputs.requires_evidence == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           artifact-ids: ${{ steps.evidence.outputs.artifact_id }}
           digest-mismatch: error
@@ -791,7 +791,7 @@ jobs:
           - name: stable
             toolchain: stable
           - name: asan
-            toolchain: nightly-2026-09-20
+            toolchain: nightly-2026-10-20
         fuzz_target:
           - turn_protocol
           - tls_client_hello
@@ -842,7 +842,7 @@ jobs:
 
       - name: Upload fuzz artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-${{ matrix.fuzz_profile.name }}-${{ matrix.fuzz_target }}-fuzz-artifacts
           path: ${{ runner.temp }}/oxibelt-fuzz-artifacts/${{ matrix.fuzz_target }}
@@ -866,12 +866,12 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Install pinned mewt
         run: |
-          cargo +1.98.1 install mewt --version 4.0.0 --locked
+          cargo +1.99.1 install mewt --version 4.0.0 --locked
           test "$(mewt --version)" = "mewt 4.0.0"
 
       - name: Run mutation campaign
@@ -879,7 +879,7 @@ jobs:
 
       - name: Upload mutation evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-mutation-testing-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/oxibelt-mutation-testing
@@ -915,7 +915,7 @@ jobs:
       fail-fast: false
       matrix:
         rust_version:
-          - 1.98.1
+          - 1.99.1
         target:
           - riscv64gc-unknown-linux-gnu
           - riscv64gc-unknown-linux-musl
@@ -969,7 +969,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         if: matrix.target == 'riscv64gc-unknown-linux-musl'
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Cargo check for RISC-V musl target
@@ -1016,8 +1016,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Generate matrices
         id: matrices
@@ -1097,8 +1097,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Install native build dependencies
         run: |
@@ -1151,7 +1151,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1162,7 +1162,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image"
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.artifact_name }}
           path: |
@@ -1211,7 +1211,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
@@ -1229,7 +1229,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-amd64.tar"
 
       - name: Upload role-specific Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.role.artifact_prefix }}-alpine-musl-amd64-image
           path: |
@@ -1271,7 +1271,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1282,7 +1282,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image"
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-alpine-musl-${{ matrix.arch }}-image
           path: |
@@ -1317,7 +1317,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -1328,7 +1328,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image"
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-alpine-musl-riscv64-image
           path: |
@@ -1390,7 +1390,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build role-specific Docker image artifact
@@ -1408,7 +1408,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-image/${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}.tar"
 
       - name: Upload role-specific Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}-image
           path: |
@@ -1465,7 +1465,7 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Download OxiBelt Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ matrix.role.artifact_prefix }}-alpine-musl-${{ matrix.target.artifact_arch }}-image
           path: ${{ runner.temp }}/oxibelt-image/${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}
@@ -1493,8 +1493,8 @@ jobs:
             --expected-source-dirty "clean" \
             --expected-build-kind "git_development" \
             --expected-created "$(jq -r '.created' "${contract}")" \
-            --rust-builder-image "rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546" \
-            --node-builder-image "node:24-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1" \
+            --rust-builder-image "rust:1.99.1-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a" \
+            --node-builder-image "node:24-alpine3.24@sha256:44fce696f38ba8c987c4db89954051000bbd05ffd8d8659ba15ed4a8602e937f" \
             --runtime-image "alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6" \
             --repo-root "${GITHUB_WORKSPACE}"
 
@@ -1520,7 +1520,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.74.0
+          version: v0.76.0
           scan-type: image
           image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}
           format: json
@@ -1574,7 +1574,7 @@ jobs:
       - name: Generate local Trivy dependency snapshot
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.74.0
+          version: v0.76.0
           scan-type: image
           image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}
           format: github
@@ -1600,7 +1600,7 @@ jobs:
             --html-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Upload Trivy vulnerability report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: trivy-oxibelt-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}-json
           path: trivy-results-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}.json
@@ -1608,7 +1608,7 @@ jobs:
           retention-days: 0
 
       - name: Upload local dependency snapshot
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: dependency-snapshot-${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}
           path: ${{ runner.temp }}/dependency-snapshot/${{ matrix.role.name }}-${{ matrix.target.artifact_arch }}
@@ -1636,7 +1636,7 @@ jobs:
 
     steps:
       - name: Download local dependency snapshots
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           pattern: dependency-snapshot-*
           path: ${{ runner.temp }}/dependency-snapshots
@@ -1806,7 +1806,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker integration helper image artifact
@@ -1816,7 +1816,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-integration-helper-images"
 
       - name: Upload Docker integration helper image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar
@@ -1848,7 +1848,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Firefox WebDriver helper image artifact
@@ -1858,7 +1858,7 @@ jobs:
             "${RUNNER_TEMP}/oxibelt-firefox-webdriver"
 
       - name: Upload Firefox WebDriver helper image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-firefox-webdriver-helper-image
           path: ${{ runner.temp }}/oxibelt-firefox-webdriver/oxibelt-firefox-webdriver-image.tar
@@ -1887,7 +1887,7 @@ jobs:
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -1898,7 +1898,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -1943,7 +1943,7 @@ jobs:
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -1954,7 +1954,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Firefox WebDriver helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-firefox-webdriver-helper-image
           path: ${{ runner.temp }}/oxibelt-firefox-webdriver
@@ -1965,13 +1965,13 @@ jobs:
       - name: Run full pinned WebTransport WPT direct and proxy comparison
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
-          OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1
+          OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:158.0.1-geckodriver-0.37.1
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-webtransport-wpt
         run: tests/scripts/run-webtransport-wpt-gate.sh
 
       - name: Upload WebTransport WPT diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-webtransport-wpt-diagnostics
           path: ${{ runner.temp }}/oxibelt-webtransport-wpt
@@ -2000,7 +2000,7 @@ jobs:
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -2011,7 +2011,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2043,11 +2043,11 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2079,11 +2079,11 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2115,11 +2115,11 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2151,8 +2151,8 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Run CT object-store TLS MinIO admission
         env:
@@ -2162,7 +2162,7 @@ jobs:
           --receipt-output "${RUNNER_TEMP}/ct-object-store-minio-receipt.json"
 
       - name: Upload CT object-store MinIO evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ct-object-store-minio-evidence
           path: ${{ runner.temp }}/ct-object-store-minio-receipt.json
@@ -2210,7 +2210,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.22.0
+          version: v3.22.1
 
       - name: Validate Helm Admin configuration
         run: tests/scripts/check-helm-admin-config.sh
@@ -2239,13 +2239,13 @@ jobs:
         run: tests/scripts/install-ci-kind-kubectl.sh "${KUBECTL_VERSION}" "${RUNNER_TEMP}/oxibelt-ci-tools"
 
       - name: Download AMD64 data-plane Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-dataplane-alpine-musl-amd64-image
           path: ${{ runner.temp }}/oxibelt-dataplane-image
 
       - name: Download AMD64 Gateway Controller Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-gateway-controller-alpine-musl-amd64-image
           path: ${{ runner.temp }}/oxibelt-gateway-controller-image
@@ -2256,7 +2256,7 @@ jobs:
           docker load --input "${RUNNER_TEMP}/oxibelt-gateway-controller-image/oxibelt-gateway-controller-alpine-musl-amd64.tar"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2293,7 +2293,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.22.0
+          version: v3.22.1
 
       - name: Validate strict hardening templates
         run: |
@@ -2306,7 +2306,7 @@ jobs:
         run: tests/scripts/install-ci-kind-kubectl.sh "${KUBECTL_VERSION}" "${RUNNER_TEMP}/oxibelt-ci-tools"
 
       - name: Download AMD64 strict data-plane Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-dataplane-strict-alpine-musl-amd64-image
           path: ${{ runner.temp }}/oxibelt-dataplane-strict-image
@@ -2339,13 +2339,13 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.22.0
+          version: v3.22.1
 
       - name: Install verified Kind and kubectl
         env:
@@ -2353,13 +2353,13 @@ jobs:
         run: tests/scripts/install-ci-kind-kubectl.sh "${KUBECTL_VERSION}" "${RUNNER_TEMP}/oxibelt-ci-tools"
 
       - name: Download AMD64 strict data-plane Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-dataplane-strict-alpine-musl-amd64-image
           path: ${{ runner.temp }}/oxibelt-admission-strict-image
 
       - name: Download AMD64 tools Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-tools-alpine-musl-amd64-image
           path: ${{ runner.temp }}/oxibelt-admission-tools-image
@@ -2377,7 +2377,7 @@ jobs:
           tests/scripts/run-kubernetes-supply-chain-admission.sh --provider kind
 
       - name: Upload Kubernetes supply-chain admission evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: kubernetes-supply-chain-admission-evidence
           path: ${{ runner.temp }}/oxibelt-admission-evidence/receipt.json
@@ -2403,7 +2403,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.22.0
+          version: v3.22.1
 
       - name: Validate Helm Pod distribution and lifecycle
         run: tests/scripts/check-helm-pod-lifecycle.sh
@@ -2421,7 +2421,7 @@ jobs:
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -2465,7 +2465,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.22.0
+          version: v3.22.1
 
       - name: Validate Helm NetworkPolicy configuration
         run: tests/scripts/check-helm-network-policy.sh
@@ -2495,7 +2495,7 @@ jobs:
         run: tests/scripts/run-kubernetes-network-policy.sh --cni "${{ matrix.cni }}"
 
   kubernetes-current-compatibility:
-    name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.3.0 compatibility
+    name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.3.1 compatibility
     runs-on: ubuntu-26.04
     needs:
       - test
@@ -2534,7 +2534,7 @@ jobs:
       - name: Set up current Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.3.0
+          version: v4.3.1
 
       - name: Validate Helm 4 configuration
         run: |
@@ -2618,15 +2618,15 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -2637,7 +2637,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2663,7 +2663,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2693,15 +2693,15 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -2712,7 +2712,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2738,7 +2738,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2768,15 +2768,15 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -2787,7 +2787,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2813,7 +2813,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2843,15 +2843,15 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -2862,7 +2862,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2888,7 +2888,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2918,15 +2918,15 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -2937,7 +2937,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -2964,7 +2964,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -2994,15 +2994,15 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -3013,7 +3013,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -3039,7 +3039,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -3069,15 +3069,15 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -3088,7 +3088,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -3114,7 +3114,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -3144,15 +3144,15 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -3163,7 +3163,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -3189,7 +3189,7 @@ jobs:
 
       - name: Upload Docker integration diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-${{ matrix.category }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-docker-logs/${{ matrix.category }}-${{ matrix.case }}
@@ -3220,15 +3220,15 @@ jobs:
 
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       - name: Select AMD64 Docker image artifact
         id: select-amd64-image
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -3239,7 +3239,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -3259,7 +3259,7 @@ jobs:
 
       - name: Upload Docker security fuzz failure evidence
         if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-docker-security-fuzz-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/oxibelt-docker-security-fuzz/${{ matrix.target }}
@@ -3287,7 +3287,7 @@ jobs:
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -3327,7 +3327,7 @@ jobs:
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -3345,7 +3345,7 @@ jobs:
 
       - name: Upload browser WebDriver diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-browser-${{ matrix.browser }}-${{ matrix.case }}-diagnostics
           path: ${{ runner.temp }}/oxibelt-browser-logs/${{ matrix.browser }}-${{ matrix.case }}
@@ -3376,7 +3376,7 @@ jobs:
         run: tests/scripts/select-amd64-docker-image-artifact.sh auto
 
       - name: Download AMD64 Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ steps.select-amd64-image.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -3387,7 +3387,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-image/${OXIBELT_IMAGE_TAR}"
 
       - name: Download Docker integration helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-docker-integration-helper-images
           path: ${{ runner.temp }}/oxibelt-integration-helper-images
@@ -3396,7 +3396,7 @@ jobs:
         run: docker load --input "${RUNNER_TEMP}/oxibelt-integration-helper-images/oxibelt-docker-integration-helper-images.tar"
 
       - name: Download Firefox WebDriver helper image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-firefox-webdriver-helper-image
           path: ${{ runner.temp }}/oxibelt-firefox-webdriver
@@ -3408,13 +3408,13 @@ jobs:
         env:
           OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}
           OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci
-          OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1
+          OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:158.0.1-geckodriver-0.37.1
           OXIBELT_TEST_ARTIFACT_DIR: ${{ runner.temp }}/oxibelt-browser-logs/firefox-webrtc-turn-isolated
         run: tests/scripts/run-browser-webdriver-check.sh firefox webrtc-turn isolated
 
       - name: Upload isolated Firefox WebDriver diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-browser-firefox-webrtc-turn-isolated-diagnostics
           path: ${{ runner.temp }}/oxibelt-browser-logs/firefox-webrtc-turn-isolated
@@ -3503,7 +3503,7 @@ jobs:
 
       - name: Upload non-benchmark validation summary
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: non-benchmark-summary-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

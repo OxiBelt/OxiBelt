@@ -564,7 +564,7 @@ export function ValidateKubernetesGraduationEvidenceObject(
   if (!IsObject(SchemaValue)) {
     throw new Error('Kubernetes graduation evidence schema must be an object')
   }
-  ValidateSchemaValue(Value, SchemaValue as JsonSchema, Label)
+  ValidateSchemaValue(Value, SchemaValue, Label)
   const Receipt = Value as KubernetesGraduationEvidenceReceipt
   const ExpectedRevision = ValidateSourceRevision(
     ExpectedSourceRevision,
@@ -803,8 +803,11 @@ export type KubernetesGraduationPolicyValidationOptions = {
   AllowPreviousHelmCompatibility?: boolean
 }
 
-const CurrentHelmCompatibilityVersions = ['3.22.0', '4.3.0'] as const
-const PreviousHelmCompatibilityVersions = ['3.21.4', '4.2.4'] as const
+const CurrentHelmCompatibilityVersions = ['3.22.1', '4.3.1'] as const
+const PreviousHelmCompatibilityVersions = [
+  ['3.22.0', '4.3.0'],
+  ['3.21.4', '4.2.4']
+] as const
 
 function ValidatePolicySemantics(
   Policy: KubernetesGraduationPolicy,
@@ -828,7 +831,7 @@ function ValidatePolicySemantics(
   const HelmCompatibilityVersions = [...Policy.supportContract.helm.versions].sort()
   const AcceptedHelmCompatibilityVersions = [
     CurrentHelmCompatibilityVersions,
-    ...(Options.AllowPreviousHelmCompatibility ? [PreviousHelmCompatibilityVersions] : [])
+    ...(Options.AllowPreviousHelmCompatibility ? PreviousHelmCompatibilityVersions : [])
   ]
   if (!AcceptedHelmCompatibilityVersions.some(Versions =>
     ValuesEqual(HelmCompatibilityVersions, [...Versions].sort())
@@ -948,7 +951,7 @@ export function ValidateKubernetesGraduationPolicyObject(
   if (!IsObject(SchemaValue)) {
     throw new Error('Kubernetes graduation schema must be an object')
   }
-  ValidateSchemaValue(PolicyValue, SchemaValue as JsonSchema, 'policy')
+  ValidateSchemaValue(PolicyValue, SchemaValue, 'policy')
   const Policy = PolicyValue as KubernetesGraduationPolicy
   ValidatePolicySemantics(Policy, Options)
   return Policy

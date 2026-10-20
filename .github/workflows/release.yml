@@ -16,7 +16,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
-  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
   OXIBELT_GHCR_IMAGE: ghcr.io/oxibelt/oxibelt
   OXIBELT_SOURCE_URL: https://github.com/OxiBelt/OxiBelt
 
@@ -416,7 +416,7 @@ jobs:
             --expected-body "${OXIBELT_BODY}"
 
       - name: Upload verified release contract
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: release-contract-${{ needs.resolve-release-source.outputs.revision }}
           path: |
@@ -457,7 +457,7 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Download verified release contract
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: release-contract-${{ needs.resolve-release-source.outputs.revision }}
           path: ${{ runner.temp }}/release-contract
@@ -735,7 +735,7 @@ jobs:
             "${metadata_root}/helper/riscv64-release-image-smoke/controller-empty-list.json"
 
       - name: Upload release metadata
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
@@ -763,7 +763,7 @@ jobs:
       - name: Setup canonical Helm packager
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.3.0
+          version: v4.3.1
 
       - name: Enable hash-pinned pnpm
         run: |
@@ -794,7 +794,7 @@ jobs:
             --output-directory "${output}"
 
       - name: Upload immutable chart packages and plan
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: helm-chart-release-${{ needs.prepare-release.outputs.revision }}
           path: ${{ runner.temp }}/oxibelt-helm-chart-release
@@ -839,7 +839,7 @@ jobs:
       - name: Setup canonical Helm publisher
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.3.0
+          version: v4.3.1
 
       - name: Install pinned ORAS acquisition client
         env:
@@ -851,7 +851,7 @@ jobs:
           "${GOBIN}/oras" version | grep -E '(^|[[:space:]])1\.3\.4($|[[:space:]])'
 
       - name: Download immutable chart packages and plan
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: helm-chart-release-${{ needs.prepare-release.outputs.revision }}
           path: ${{ runner.temp }}/oxibelt-helm-chart-release
@@ -903,7 +903,7 @@ jobs:
             --output "${evidence}/helm-chart-publish-receipt.json"
 
       - name: Upload bounded chart publication evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: helm-chart-oci-evidence-${{ needs.prepare-release.outputs.revision }}
           path: ${{ runner.temp }}/oxibelt-helm-oci-evidence
@@ -939,7 +939,7 @@ jobs:
       - name: Setup canonical Helm rebuild packager
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.3.0
+          version: v4.3.1
 
       - name: Enable hash-pinned pnpm and install dependencies
         run: |
@@ -949,7 +949,7 @@ jobs:
           pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Download chart publication inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           pattern: helm-chart-*-${{ needs.prepare-release.outputs.revision }}
           path: ${{ runner.temp }}/oxibelt-chart-inputs
@@ -1143,7 +1143,7 @@ jobs:
           printf 'run_attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
 
       - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
@@ -1250,7 +1250,7 @@ jobs:
       - name: Download selected digest-bound vulnerability scan evidence
         if: steps.scan-artifacts.outcome == 'success'
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           artifact-ids: ${{ steps.scan-artifacts.outputs.artifact_ids }}
           digest-mismatch: error
@@ -1298,7 +1298,7 @@ jobs:
 
       - name: Upload controlled vulnerability gate decision
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ steps.decision-identity.outputs.artifact_name }}
           path: ${{ runner.temp }}/oxibelt-vulnerability-decision
@@ -1463,7 +1463,7 @@ jobs:
 
     steps:
       - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
@@ -1488,7 +1488,7 @@ jobs:
           fi
 
       - name: Download controlled vulnerability gate decision
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ env.OXIBELT_VULNERABILITY_DECISION_ARTIFACT_NAME }}
           path: ${{ runner.temp }}/oxibelt-vulnerability-decision
@@ -1499,7 +1499,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Validate manifest release plan
@@ -1770,7 +1770,7 @@ jobs:
             >"${RUNNER_TEMP}/oxibelt-index-metadata/index-metadata.json"
 
       - name: Upload immutable index metadata
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-metadata
           path: ${{ runner.temp }}/oxibelt-index-metadata/index-metadata.json
@@ -1815,26 +1815,26 @@ jobs:
 
     steps:
       - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
 
       - name: Download immutable index metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-metadata
           path: ${{ runner.temp }}/oxibelt-index-metadata
 
       - name: Download platform SBOMs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           pattern: ${{ matrix.artifact_prefix }}-release-sbom-*
           path: ${{ runner.temp }}/oxibelt-platform-sboms
           merge-multiple: true
 
       - name: Download platform rebuild recipes
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           pattern: ${{ matrix.artifact_prefix }}-release-rebuild-*
           path: ${{ runner.temp }}/oxibelt-platform-rebuild
@@ -1881,7 +1881,7 @@ jobs:
             --output "${INDEX_REBUILD}"
 
       - name: Upload index SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-sbom
           path: ${{ runner.temp }}/oxibelt-index-sbom/${{ matrix.artifact_prefix }}-release-index.cdx.json
@@ -1889,7 +1889,7 @@ jobs:
           retention-days: 1
 
       - name: Upload index rebuild recipe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-rebuild
           path: ${{ runner.temp }}/oxibelt-index-rebuild/${{ matrix.artifact_prefix }}-release-index.rebuild.json
@@ -1938,25 +1938,25 @@ jobs:
 
     steps:
       - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
 
       - name: Download immutable index metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-metadata
           path: ${{ runner.temp }}/oxibelt-index-metadata
 
       - name: Download index SBOM
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-sbom
           path: ${{ runner.temp }}/oxibelt-index-sbom
 
       - name: Download index rebuild recipe
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-rebuild
           path: ${{ runner.temp }}/oxibelt-index-rebuild
@@ -1967,7 +1967,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Validate immutable index attestation subject
@@ -2142,25 +2142,25 @@ jobs:
 
     steps:
       - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
 
       - name: Download immutable index metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-metadata
           path: ${{ runner.temp }}/oxibelt-index-metadata
 
       - name: Download index SBOM
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-sbom
           path: ${{ runner.temp }}/oxibelt-index-sbom
 
       - name: Download index rebuild recipe
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ matrix.artifact_prefix }}-release-index-rebuild
           path: ${{ runner.temp }}/oxibelt-index-rebuild
@@ -2171,7 +2171,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Verify GitHub API index attestations

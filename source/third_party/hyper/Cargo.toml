@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.63"
 name = "hyper"
-version = "1.11.1"
+version = "1.12.0"
 authors = ["Sean McArthur <sean@seanmonstar.com>"]
 build = false
 include = [
@@ -135,7 +135,7 @@ optional = true
 default-features = false
 
 [dependencies.h2]
-version = "0.4.19"
+version = "0.4.20"
 path = "../h2"
 optional = true
 
@@ -184,7 +184,7 @@ optional = true
 default-features = false
 
 [dependencies.want]
-version = "0.3"
+version = "0.3.2"
 optional = true
 
 [dev-dependencies.form_urlencoded]

@@ -45,7 +45,10 @@ impl ResetState {
     }
 
     fn take(&self) -> Option<Reason> {
-        self.reason.lock().ok().and_then(|mut pending| pending.take())
+        self.reason
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
     }
 
     fn register(&self, cx: &Context<'_>) {
@@ -79,6 +82,7 @@ pub(super) fn pair<B>(
             rx,
             close_notify,
             reset,
+            buffered: None,
             error_tx: Some(error_tx),
         },
     )
@@ -107,6 +111,7 @@ pub(super) fn webtransport_pair<B>(
             rx,
             close_notify: Arc::new(UpgradedCloseNotify::new()),
             reset,
+            buffered: None,
             error_tx: Some(error_tx),
         },
     )
@@ -173,6 +178,7 @@ pin_project! {
         rx: mpsc::Receiver<SendCommand>,
         close_notify: Arc<UpgradedCloseNotify>,
         reset: Arc<ResetState>,
+        buffered: Option<Cursor<Box<[u8]>>>,
         error_tx: Option<oneshot::Sender<crate::Error>>,
     }
 }
@@ -200,35 +206,6 @@ where
                 me.h2_tx.send_reset(reason);
                 return Poll::Ready(Ok(()));
             }
-            // we don't have the next chunk of data yet, so just reserve 1 byte to make
-            // sure there's some capacity available. h2 will handle the capacity management
-            // for the actual body chunk.
-            me.h2_tx.reserve_capacity(1);
-
-            let h2_has_capacity = if me.h2_tx.capacity() == 0 {
-                // poll_capacity oddly needs a loop
-                loop {
-                    match me.h2_tx.poll_capacity(cx) {
-                        Poll::Ready(Some(Ok(0))) => {}
-                        Poll::Ready(Some(Ok(_))) => break true,
-                        Poll::Ready(Some(Err(e))) => {
-                            return Poll::Ready(Err(crate::Error::new_body_write(e)))
-                        }
-                        Poll::Ready(None) => {
-                            // None means the stream is no longer in a
-                            // streaming state, we either finished it
-                            // somehow, or the remote reset us.
-                            return Poll::Ready(Err(crate::Error::new_body_write(
-                                "send stream capacity unexpectedly closed",
-                            )));
-                        }
-                        Poll::Pending => break false,
-                    }
-                }
-            } else {
-                true
-            };
-
             match me.h2_tx.poll_reset(cx) {
                 Poll::Ready(Ok(reason)) => {
                     trace!("stream received RST_STREAM: {:?}", reason);
@@ -242,33 +219,35 @@ where
                 Poll::Pending => (),
             }
 
-            // If h2 has no capacity, don't pull another item from the mpsc
-            // receiver. That would free a channel slot and let the writer
-            // enqueue more data without h2 backpressure.
-            //
-            // Still allow the task to finish once the upgraded write side is
-            // gone and the mpsc queue is empty.
-            if !h2_has_capacity {
-                // `size_hint` reads the queued message count without popping,
-                // so an accepted write stays queued until h2 capacity returns.
-                if me.rx.size_hint().0 == 0 && me.close_notify.poll_closed(cx).is_ready() {
-                    me.h2_tx
-                        .send_data(SendBuf::None, true)
-                        .map_err(crate::Error::new_body_write)?;
-                    return Poll::Ready(Ok(()));
+            // An accepted payload waits here for h2 credit; no further channel
+            // item is taken while it is buffered. ResetState remains independently
+            // wakeable, even when both this slot and the payload channel are full.
+            if me.buffered.is_some() {
+                let _ = me.close_notify.poll_closed(cx);
+                while me.h2_tx.capacity() == 0 {
+                    match ready!(me.h2_tx.poll_capacity(cx)) {
+                        Some(Ok(0)) => {}
+                        Some(Ok(_)) => break,
+                        Some(Err(e)) => return Poll::Ready(Err(crate::Error::new_body_write(e))),
+                        None => {
+                            return Poll::Ready(Err(crate::Error::new_body_write(
+                                "send stream capacity unexpectedly closed",
+                            )))
+                        }
+                    }
                 }
-
-                return Poll::Pending;
+                let cursor = me.buffered.take().expect("checked is_some above");
+                me.h2_tx
+                    .send_data(SendBuf::Cursor(cursor), false)
+                    .map_err(crate::Error::new_body_write)?;
+                continue;
             }
 
             match me.rx.as_mut().poll_next(cx) {
                 Poll::Ready(Some(SendCommand::Data(data))) => {
-                    me.h2_tx
-                        .send_data(
-                            SendBuf::Cursor(Cursor::new(data.to_vec().into_boxed_slice())),
-                            false,
-                        )
-                        .map_err(crate::Error::new_body_write)?;
+                    // Do not pin connection-level send credit while idle.
+                    me.h2_tx.reserve_capacity(1);
+                    *me.buffered = Some(Cursor::new(data.to_vec().into_boxed_slice()));
                 }
                 Poll::Ready(Some(SendCommand::Finish)) => {
                     me.h2_tx
@@ -312,6 +291,170 @@ mod tests {
         let reset = ResetState::new();
         reset.request(Reason::FLOW_CONTROL_ERROR);
         assert_eq!(reset.take(), Some(Reason::FLOW_CONTROL_ERROR));
+    }
+    async fn task_pair(
+        window: u32,
+    ) -> (
+        H2Upgraded,
+        UpgradedSendStreamTask<Bytes>,
+        RecvStream,
+        [tokio::task::JoinHandle<()>; 2],
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let client_builder = h2::client::Builder::new();
+        let mut server_builder = h2::server::Builder::new();
+        server_builder.initial_window_size(window);
+        let (client, server) = tokio::join!(
+            client_builder.handshake::<_, SendBuf<Bytes>>(client_io),
+            server_builder.handshake::<_, Bytes>(server_io),
+        );
+        let (sender, connection) = client.unwrap();
+        let client_driver = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let mut server = server.unwrap();
+        let (peer_tx, peer_rx) = oneshot::channel();
+        let server_driver = tokio::spawn(async move {
+            let mut accepted = Vec::new();
+            let mut peer_tx = Some(peer_tx);
+            while let Some(Ok((request, mut respond))) = server.accept().await {
+                let send = respond
+                    .send_response(http::Response::new(()), false)
+                    .unwrap();
+                let body = request.into_body();
+                if let Some(tx) = peer_tx.take() {
+                    let _ = tx.send(body);
+                    accepted.push(send);
+                }
+            }
+        });
+        let mut sender = sender.ready().await.unwrap();
+        let request = http::Request::builder()
+            .uri("https://example.test/")
+            .body(())
+            .unwrap();
+        let (response, send) = sender.send_request(request, false).unwrap();
+        let recv = response.await.unwrap().into_body();
+        let (upgraded, task) = pair(send, recv, super::super::ping::disabled());
+        (
+            upgraded,
+            task,
+            peer_rx.await.unwrap(),
+            [client_driver, server_driver],
+        )
+    }
+
+    #[tokio::test]
+    async fn idle_upgrade_does_not_reserve_send_credit() {
+        let (_upgraded, mut task, _peer, drivers) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), task_pair(65_535))
+                .await
+                .unwrap();
+        assert_eq!(task.h2_tx.capacity(), 0);
+        futures_util::future::poll_fn(|cx| {
+            assert!(Pin::new(&mut task).tick(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(
+            task.h2_tx.capacity(),
+            0,
+            "idle upgraded streams must not pin connection credit"
+        );
+        for driver in drivers {
+            driver.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_preempts_buffered_payload_without_peer_credit() {
+        let (mut upgraded, mut task, _peer, drivers) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), task_pair(0))
+                .await
+                .unwrap();
+        upgraded
+            .send_stream
+            .tx
+            .try_send(SendCommand::Data(Bytes::from_static(b"blocked")))
+            .unwrap();
+        futures_util::future::poll_fn(|cx| {
+            assert!(Pin::new(&mut task).tick(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert!(task.buffered.is_some());
+        let mut full = false;
+        for _ in 0..8 {
+            if upgraded
+                .send_stream
+                .tx
+                .try_send(SendCommand::Data(Bytes::from_static(b"queued")))
+                .is_err()
+            {
+                full = true;
+                break;
+            }
+        }
+        assert!(full, "the accepted payload queue remains bounded");
+        task.reset.request(Reason::CANCEL);
+        futures_util::future::poll_fn(|cx| {
+            assert!(matches!(Pin::new(&mut task).tick(cx), Poll::Ready(Ok(()))));
+            Poll::Ready(())
+        })
+        .await;
+        for driver in drivers {
+            driver.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn finish_without_payload_does_not_wait_for_peer_credit() {
+        let (mut upgraded, mut task, _peer, drivers) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), task_pair(0))
+                .await
+                .unwrap();
+        upgraded
+            .send_stream
+            .tx
+            .try_send(SendCommand::Finish)
+            .unwrap();
+        futures_util::future::poll_fn(|cx| {
+            assert!(matches!(Pin::new(&mut task).tick(cx), Poll::Ready(Ok(()))));
+            Poll::Ready(())
+        })
+        .await;
+        for driver in drivers {
+            driver.abort();
+        }
+    }
+    #[tokio::test]
+    async fn accepted_payload_precedes_fin_on_the_wire() {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let (mut upgraded, mut task, mut peer, drivers) = task_pair(65_535).await;
+            upgraded
+                .send_stream
+                .tx
+                .try_send(SendCommand::Data(Bytes::from_static(b"payload")))
+                .unwrap();
+            upgraded
+                .send_stream
+                .tx
+                .try_send(SendCommand::Finish)
+                .unwrap();
+            futures_util::future::poll_fn(|cx| Pin::new(&mut task).tick(cx))
+                .await
+                .unwrap();
+            let mut received = Vec::new();
+            while let Some(chunk) = peer.data().await {
+                received.extend_from_slice(&chunk.unwrap());
+            }
+            assert_eq!(received, b"payload");
+            for driver in drivers {
+                driver.abort();
+            }
+        })
+        .await
+        .expect("accepted payload and FIN must make progress in order");
     }
 }
 

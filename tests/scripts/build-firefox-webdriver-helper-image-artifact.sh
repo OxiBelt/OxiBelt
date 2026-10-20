@@ -17,11 +17,11 @@ fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
-firefox_version="156.0"
-firefox_sha256="1d44cd02351c307c3e19061ea2a4d18a30f236e6be862b94f2282564afdb0167"
+firefox_version="158.0.1"
+firefox_sha256="dce45470139242cf294eb6ada3d192a9bb334696842b02b71ade448a139eb41a"
 geckodriver_version="0.37.1"
 geckodriver_sha256="e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e"
-base_image="docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a"
+base_image="docker.io/library/debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f"
 firefox_image="oxibelt/firefox-webdriver:${firefox_version}-geckodriver-${geckodriver_version}"
 image_tar="${output_dir%/}/oxibelt-firefox-webdriver-image.tar"
 
@@ -68,7 +68,7 @@ docker run --rm \
   --entrypoint /bin/sh \
   "${firefox_image}" -ceu '
   test "$(id -u)" = "10001"
-  test "$(/opt/firefox/firefox --version)" = "Mozilla Firefox 156.0"
+  test "$(/opt/firefox/firefox --version)" = "Mozilla Firefox 158.0.1"
   /usr/local/bin/geckodriver --version | grep --fixed-strings -- "geckodriver 0.37.1 "
   command -v certutil
   command -v zip

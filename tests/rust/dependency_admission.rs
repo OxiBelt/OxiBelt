@@ -674,22 +674,22 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
         let version = version.as_str().expect("version must be a string");
         assert!(
           locked_registry_packages.contains(&(name.clone(), version.to_owned()))
-            || (name == "hyper" && version == "1.11.1" && {
+            || (name == "hyper" && version == "1.12.0" && {
               assert_hyper_vendor_admission();
               true
             })
-            || (name == "h2" && version == "0.4.19" && {
+            || (name == "h2" && version == "0.4.20" && {
               assert_h2_vendor_admission();
               true
             })
-            || (name == "rustls" && version == "0.23.45" && {
+            || (name == "rustls" && version == "0.23.46" && {
               assert_rustls_vendor_admission();
               true
             })
             || matches!(
               (name.as_str(), version),
               ("quinn", "0.11.12")
-                | ("quinn-proto", "0.11.18")
+                | ("quinn-proto", "0.11.19")
                 | ("h3", "0.0.8")
                 | ("web-transport-quinn", "0.12.1")
                 | ("web-transport-proto", "0.6.2")
@@ -1015,7 +1015,7 @@ fn assert_hyper_vendor_admission() {
   );
   let manifest = toml_document(&format!("{VENDOR}/Cargo.toml"));
   assert_eq!(manifest["package"]["name"].as_str(), Some("hyper"));
-  assert_eq!(manifest["package"]["version"].as_str(), Some("1.11.1"));
+  assert_eq!(manifest["package"]["version"].as_str(), Some("1.12.0"));
   assert_eq!(manifest["package"]["license"].as_str(), Some("MIT"));
   assert_eq!(manifest["package"]["build"].as_bool(), Some(false));
   let lock = toml_document("Cargo.lock");
@@ -1026,7 +1026,7 @@ fn assert_hyper_vendor_admission() {
     .filter(|package| package["name"].as_str() == Some("hyper"))
     .collect::<Vec<_>>();
   assert_eq!(hyper.len(), 1);
-  assert_eq!(hyper[0]["version"].as_str(), Some("1.11.1"));
+  assert_eq!(hyper[0]["version"].as_str(), Some("1.12.0"));
   assert!(hyper[0].get("source").is_none());
   assert!(hyper[0].get("checksum").is_none());
   let policy = json_policy();
@@ -1039,7 +1039,7 @@ fn assert_hyper_vendor_admission() {
     .find(|source| source["name"] == "hyper")
     .expect("Hyper source inventory");
   assert_eq!(source["name"], "hyper");
-  assert_eq!(source["version"], "1.11.1");
+  assert_eq!(source["version"], "1.12.0");
   assert_eq!(source["path"], VENDOR);
   assert_eq!(source["license"], "MIT");
   assert_eq!(source["owner"], "@piquark6046");
@@ -1049,7 +1049,7 @@ fn assert_hyper_vendor_admission() {
   );
   assert_eq!(
     source["upstreamArchiveSha256"],
-    "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
+    "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
   );
   assert_eq!(source["manifestPath"], "supply-chain/hyper-source.sha256");
   assert_eq!(
@@ -1082,7 +1082,7 @@ fn assert_rustls_vendor_admission() {
   assert_eq!(patches["rustls"].as_table().expect("patch").len(), 1);
   let manifest = toml_document(&format!("{VENDOR}/Cargo.toml"));
   assert_eq!(manifest["package"]["name"].as_str(), Some("rustls"));
-  assert_eq!(manifest["package"]["version"].as_str(), Some("0.23.45"));
+  assert_eq!(manifest["package"]["version"].as_str(), Some("0.23.46"));
   assert_eq!(
     manifest["package"]["license"].as_str(),
     Some("Apache-2.0 OR ISC OR MIT")
@@ -1097,7 +1097,7 @@ fn assert_rustls_vendor_admission() {
     .filter(|package| package["name"].as_str() == Some("rustls"))
     .collect::<Vec<_>>();
   assert_eq!(rustls.len(), 1);
-  assert_eq!(rustls[0]["version"].as_str(), Some("0.23.45"));
+  assert_eq!(rustls[0]["version"].as_str(), Some("0.23.46"));
   assert!(rustls[0].get("source").is_none());
   assert!(rustls[0].get("checksum").is_none());
 
@@ -1110,7 +1110,7 @@ fn assert_rustls_vendor_admission() {
     .iter()
     .find(|source| source["name"] == "rustls")
     .expect("rustls source inventory");
-  assert_eq!(source["version"], "0.23.45");
+  assert_eq!(source["version"], "0.23.46");
   assert_eq!(source["path"], VENDOR);
   assert_eq!(source["license"], "Apache-2.0 OR ISC OR MIT");
   assert_eq!(source["owner"], "@piquark6046");
@@ -1124,12 +1124,12 @@ fn assert_rustls_vendor_admission() {
   );
   assert_eq!(
     source["upstreamArchiveSha256"],
-    "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+    "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
   );
   assert_eq!(source["manifestPath"], "supply-chain/rustls-source.sha256");
   assert_eq!(
     source["manifestSha256"],
-    "3e32be07eb6fc6716dad12a819ac77d9986718b0011f1d0ebcd1dec7cce41265"
+    "1bc3cc7c1656f5882b958c3f67d81c218cc6740292e2608b7da3388a3ccf11b1"
   );
   assert_eq!(
     sha256_hex(read("supply-chain/rustls-source.sha256").as_bytes()),
@@ -1156,7 +1156,7 @@ fn assert_h2_vendor_admission() {
     .iter()
     .find(|source| source["name"] == "h2")
     .expect("h2 source inventory");
-  assert_eq!(source["version"], "0.4.19");
+  assert_eq!(source["version"], "0.4.20");
   assert_eq!(source["path"], VENDOR);
   assert_eq!(source["license"], "MIT");
   assert_eq!(source["owner"], "@piquark6046");
@@ -1166,7 +1166,7 @@ fn assert_h2_vendor_admission() {
   );
   assert_eq!(
     source["upstreamArchiveSha256"],
-    "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
+    "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
   );
   assert_eq!(source["manifestPath"], "supply-chain/h2-source.sha256");
   assert_eq!(
@@ -1182,7 +1182,7 @@ fn assert_h2_vendor_admission() {
   );
   let manifest = toml_document(&format!("{VENDOR}/Cargo.toml"));
   assert_eq!(manifest["package"]["name"].as_str(), Some("h2"));
-  assert_eq!(manifest["package"]["version"].as_str(), Some("0.4.19"));
+  assert_eq!(manifest["package"]["version"].as_str(), Some("0.4.20"));
   assert_eq!(manifest["package"]["license"].as_str(), Some("MIT"));
   assert_eq!(manifest["package"]["build"].as_bool(), Some(false));
   let lock = toml_document("Cargo.lock");
@@ -1193,7 +1193,7 @@ fn assert_h2_vendor_admission() {
     .filter(|package| package["name"].as_str() == Some("h2"))
     .collect::<Vec<_>>();
   assert_eq!(packages.len(), 1);
-  assert_eq!(packages[0]["version"].as_str(), Some("0.4.19"));
+  assert_eq!(packages[0]["version"].as_str(), Some("0.4.20"));
   assert!(packages[0].get("source").is_none());
   assert!(packages[0].get("checksum").is_none());
 }
@@ -1218,7 +1218,7 @@ fn webtransport_h3_transport_sources_are_byte_locked_and_governed() {
   assert_eq!(sources.len(), 8);
   for (name, version) in [
     ("quinn", "0.11.12"),
-    ("quinn-proto", "0.11.18"),
+    ("quinn-proto", "0.11.19"),
     ("h3", "0.0.8"),
     ("web-transport-quinn", "0.12.1"),
     ("web-transport-proto", "0.6.2"),

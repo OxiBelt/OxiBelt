@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
 jobs:
   validate:
@@ -67,7 +67,7 @@ jobs:
             core.setOutput('revision', revision)
 
       - name: Download sealed release qualification from verifier run
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: release-qualification-${{ steps.identity.outputs.revision }}
           path: ${{ runner.temp }}/release-qualification
@@ -355,7 +355,7 @@ jobs:
 
       - name: Download beta aggregate bound by the stable qualification
         if: ${{ steps.eligibility.outputs.eligible == 'true' && steps.reauthenticate.outputs.beta_mode == 'qualification' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: release-qualification-${{ steps.reauthenticate.outputs.beta_revision }}
           path: ${{ runner.temp }}/beta-release-qualification
@@ -495,7 +495,7 @@ jobs:
         if: steps.eligibility.outputs.eligible == 'true'
         uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
         with:
-          version: v29.8.0
+          version: v29.9.2
           rootless: true
           set-host: true
           daemon-config: |
@@ -505,7 +505,7 @@ jobs:
         if: steps.eligibility.outputs.eligible == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Install pinned ORAS acquisition client
@@ -599,7 +599,7 @@ jobs:
 
       - name: Upload validated promotion plan
         if: steps.eligibility.outputs.eligible == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: stable-alias-promotion-plan-${{ steps.identity.outputs.revision }}
           path: ${{ runner.temp }}/stable-alias-promotion-plan.json
@@ -618,7 +618,7 @@ jobs:
 
     steps:
       - name: Download validated promotion plan
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: stable-alias-promotion-plan-${{ needs.validate.outputs.revision }}
           path: ${{ runner.temp }}/stable-alias-promotion-plan
@@ -626,7 +626,7 @@ jobs:
       - name: Setup pinned Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Reauthenticate latest stable release immediately before mutation

@@ -709,7 +709,7 @@ fn proxy_udp_session_admitted(active: usize, limit: usize) -> bool {
 
 fn next_turn_stream_id() -> Option<u64> {
   NEXT_TURN_STREAM_ID
-    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+    .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
     .ok()
 }
 

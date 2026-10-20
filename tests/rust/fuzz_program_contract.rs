@@ -781,7 +781,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
       "permissions:\n      contents: read",
       "timeout-minutes: 60",
       "name: Fuzz smoke (${{ matrix.fuzz_profile.name }}, ${{ matrix.fuzz_target }})",
-      "fuzz_profile:\n          - name: stable\n            toolchain: stable\n          - name: asan\n            toolchain: nightly-2026-09-20",
+      "fuzz_profile:\n          - name: stable\n            toolchain: stable\n          - name: asan\n            toolchain: nightly-2026-10-20",
       "rustup toolchain install \"${{ matrix.fuzz_profile.toolchain }}\" --profile minimal",
       "cargo-fuzz --version 0.13.2",
       "OXIBELT_FUZZ_PROFILE: ${{ matrix.fuzz_profile.name }}",
@@ -817,7 +817,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     &[
       "permissions:\n      contents: read",
       "timeout-minutes: 180",
-      "nightly-2026-09-20",
+      "nightly-2026-10-20",
       "cargo-fuzz --version 0.13.2",
       "tests/scripts/run-fuzz-target.sh campaign",
       "LSAN_OPTIONS: detect_leaks=1",
@@ -861,7 +861,7 @@ fn workflows_enforce_bounded_least_privilege_profiles() {
     &[
       "set -Eeuo pipefail",
       "umask 077",
-      "readonly FUZZ_ASAN_NIGHTLY=\"nightly-2026-09-20\"",
+      "readonly FUZZ_ASAN_NIGHTLY=\"nightly-2026-10-20\"",
       "readonly fuzz_profile=\"${OXIBELT_FUZZ_PROFILE:-asan}\"",
       "stable fuzz profile only supports smoke mode",
       "OXIBELT_FUZZ_PROFILE must be one of: asan, stable",
@@ -948,7 +948,7 @@ fn asan_smoke_uses_faster_build_settings_without_losing_sanitizer_coverage() {
     r#"#!/usr/bin/env bash
 set -Eeuo pipefail
 [[ "$#" -ge 11 ]]
-[[ "$1" == "+nightly-2026-09-20" ]]
+[[ "$1" == "+nightly-2026-10-20" ]]
 [[ "$2" == "fuzz" ]]
 [[ "$3" == "run" ]]
 [[ "$4" == "--sanitizer" ]]
@@ -1178,7 +1178,7 @@ impl CoverageHarness {
       &cargo,
       r#"#!/usr/bin/env bash
 set -Eeuo pipefail
-[[ "$1" == "+nightly-2026-09-20" ]]
+[[ "$1" == "+nightly-2026-10-20" ]]
 [[ "$2" == "fuzz" ]]
 [[ "$3" == "coverage" ]]
 shift 3
@@ -1418,7 +1418,7 @@ impl CminHarness {
       r#"#!/usr/bin/env bash
 set -Eeuo pipefail
 [[ "$#" -ge 7 ]]
-[[ "$1" == "+nightly-2026-09-20" ]]
+[[ "$1" == "+nightly-2026-10-20" ]]
 [[ "$2" == "fuzz" ]]
 [[ "$3" == "cmin" ]]
 [[ "$6" == "native_config" ]]
@@ -1680,7 +1680,7 @@ fn fuzzing_documentation_covers_the_operational_lifecycle() {
       "## Coverage evidence",
       "## Crash triage and regressions",
       "moving `stable`",
-      "`nightly-2026-09-20`",
+      "`nightly-2026-10-20`",
       "OXIBELT_FUZZ_PROFILE=stable",
       "Stable smoke runs use `--sanitizer none`",
       "stable lane supplements rather than replaces",

@@ -54,7 +54,7 @@ impl GlobalConnectionBudget {
   ) -> Option<GlobalConnectionPermit> {
     if self
       .open
-      .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+      .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         if current >= self.limit {
           None
         } else {
@@ -77,7 +77,7 @@ impl GlobalConnectionBudget {
       let origin_counts = Arc::clone(origins.entry(origin.clone()).or_default());
       if origin_counts
         .open
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
           if current >= max_connections_per_origin {
             None
           } else {
@@ -103,7 +103,7 @@ impl GlobalConnectionBudget {
   }
 
   fn decrement(count: &AtomicUsize, invariant: &'static str) -> usize {
-    match count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+    match count.try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
       current.checked_sub(1)
     }) {
       Ok(previous) => previous - 1,
@@ -167,7 +167,7 @@ impl GlobalConnectionBudget {
     }
     origin_counts
       .idle
-      .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+      .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         if current >= max_idle {
           None
         } else {

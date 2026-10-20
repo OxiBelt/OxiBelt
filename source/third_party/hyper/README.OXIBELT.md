@@ -1,8 +1,8 @@
 # OxiBelt Hyper transport patch
 
-This directory vendors the production sources of `hyper` 1.11.1 from the
+This directory vendors the production sources of `hyper` 1.12.0 from the
 crates.io artifact with SHA-256
-`27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43`.
+`2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c`.
 
 OxiBelt carries a deliberately narrow patch, owned by `piquark6046` and
 tracked in [issue #194](https://github.com/OxiBelt/OxiBelt/issues/194):
@@ -72,3 +72,18 @@ The HTTP/2 request sender exposes the peer's acknowledged
 lets a dedicated extended CONNECT client enforce its request deadline before
 dispatch. The wait uses the paired `h2` SETTINGS handle and does not require
 WebTransport SETTINGS. Existing CONNECT upgrade ownership stays in Hyper.
+
+## 1.12.0 rebase
+
+The upstream body channel and readiness changes retain bounded accepted data,
+error ordering, and trailers-after-body delivery. The HTTP/2 upgrade writer
+now reserves send credit only after receiving payload and holds at most one
+additional payload while waiting for that credit. The bounded command channel,
+independent reset wakeup, FIFO DATA/FIN ordering, and close notification remain
+owned by the existing OxiBelt transport patch. Empty FIN does not wait for peer
+DATA credit.
+
+The local WebTransport API also enables the existing channel-closed error for
+server-only HTTP/2 feature builds. The rebase retains both informational and
+WebTransport SETTINGS boundary APIs; source review and upgrade maintenance are
+tracked in [issue #304](https://github.com/OxiBelt/OxiBelt/issues/304).

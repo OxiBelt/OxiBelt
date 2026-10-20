@@ -1,12 +1,12 @@
-ARG FIREFOX_IMAGE=oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1
+ARG FIREFOX_IMAGE=oxibelt/firefox-webdriver:158.0.1-geckodriver-0.37.1
 FROM ${FIREFOX_IMAGE}
 
 USER root
 
 ARG WPT_REVISION=ece2d7fdc436d4b9a3856877163b07ec15c05354
-ARG CHROME_VERSION=154.0.8037.57
-ARG CHROME_SHA256=ceee2972074d441ea7c4ba8bcc0eaab77e7e87680f6653d73d3065851fe10302
-ARG CHROMEDRIVER_SHA256=48edfc7f6e02ed85c45357110f18a54a82d8993b908cc9bfff9517b12abc96d9
+ARG CHROME_VERSION=155.0.8059.84
+ARG CHROME_SHA256=cf0f049892dea22e6a6db26d47ed0d7776b7158edcbec4634086633df8bafcbc
+ARG CHROMEDRIVER_SHA256=4fe2433044363e5233d642e70fa50278b471bda08032d922402c8bd7c6d743fd
 
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends \
@@ -45,7 +45,7 @@ RUN set -eux; \
   rm /tmp/chrome.zip /tmp/chromedriver.zip; \
   /opt/chrome/chrome --version | grep --fixed-strings -- "Google Chrome for Testing ${CHROME_VERSION}"; \
   /opt/chromedriver/chromedriver --version | grep --fixed-strings -- "ChromeDriver ${CHROME_VERSION} "; \
-  test "$(/opt/firefox/firefox --version)" = "Mozilla Firefox 156.0"
+  test "$(/opt/firefox/firefox --version)" = "Mozilla Firefox 158.0.1"
 
 WORKDIR /opt/wpt
 

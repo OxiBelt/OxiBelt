@@ -48,7 +48,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
-  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
   OXIBELT_GHCR_IMAGE: ${{ inputs.image }}
   OXIBELT_IMAGE_ROLE: ${{ inputs.image_role }}
   OXIBELT_ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
@@ -91,7 +91,7 @@ jobs:
           fi
 
       - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
@@ -104,7 +104,7 @@ jobs:
       - name: Start isolated rootless Docker
         uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
         with:
-          version: v29.8.0
+          version: v29.9.2
           rootless: true
           set-host: true
           # Hosted runners do not delegate systemd cgroup scopes to rootless Docker.
@@ -134,7 +134,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -287,7 +287,7 @@ jobs:
           fi
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
           path: |
@@ -313,13 +313,13 @@ jobs:
 
     steps:
       - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
 
       - name: Download Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -620,7 +620,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.74.0
+          version: v0.76.0
           scan-type: image
           image-ref: ${{ steps.trivy-image.outputs.image_id }}
           format: json
@@ -632,7 +632,7 @@ jobs:
       - name: Generate CycloneDX platform SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.74.0
+          version: v0.76.0
           scan-type: image
           image-ref: ${{ steps.trivy-image.outputs.image_id }}
           format: cyclonedx
@@ -806,13 +806,13 @@ jobs:
             cc_identity="Alpine 3.24 build-base musl toolchain"
           fi
           jq -n \
-            --arg rustc "rustc 1.98.1 via ${rust_builder}" \
+            --arg rustc "rustc 1.99.1 via ${rust_builder}" \
             --arg cargo "cargo from ${rust_builder}" \
             --arg node "${node_builder}" \
             --arg pnpm "pnpm ${pnpm_version}" \
             --arg buildx "${buildx_version}" \
             --arg buildkit "${OXIBELT_BUILDKIT_IMAGE}" \
-            --arg trivy "trivy v0.74.0" \
+            --arg trivy "trivy v0.76.0" \
             --arg cc "${cc_identity}" \
             --arg ld "Rust target linker ${rust_target}" \
             --arg feature_graph_sha256 "sha256:${feature_graph_sha256}" \
@@ -855,7 +855,7 @@ jobs:
 
       - name: Upload digest-bound Trivy vulnerability evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: trivy-release-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.OXIBELT_ARTIFACT_PREFIX }}-${{ env.OXIBELT_ARTIFACT_ARCH }}
           path: |
@@ -865,7 +865,7 @@ jobs:
           retention-days: 7
 
       - name: Upload platform SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-sbom-${{ env.OXIBELT_ARTIFACT_ARCH }}
           path: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.cdx.json
@@ -873,7 +873,7 @@ jobs:
           retention-days: 1
 
       - name: Upload platform rebuild recipe
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: ${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-rebuild-${{ env.OXIBELT_ARTIFACT_ARCH }}
           path: ${{ runner.temp }}/${{ env.OXIBELT_ARTIFACT_PREFIX }}-release-${{ env.OXIBELT_ARTIFACT_ARCH }}.rebuild.json
@@ -896,13 +896,13 @@ jobs:
 
     steps:
       - name: Download release metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: oxibelt-release-metadata
           path: ${{ runner.temp }}/oxibelt-release-metadata
 
       - name: Download Docker image artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: ${{ env.OXIBELT_TRANSPORT_ARTIFACT_NAME }}
           path: ${{ runner.temp }}/oxibelt-image
@@ -956,7 +956,7 @@ jobs:
 
       - name: Upload RISC-V runtime smoke evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: riscv64-runtime-smoke-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.OXIBELT_ARTIFACT_PREFIX }}
           path: ${{ runner.temp }}/oxibelt-riscv64-runtime-smoke

@@ -2,7 +2,7 @@
 
 The required CI job runs the complete WebTransport tree from web-platform-tests
 revision `ece2d7fdc436d4b9a3856877163b07ec15c05354` in Chrome for Testing
-`154.0.8037.57` and Firefox `156.0`. The helper image checks out and verifies
+`155.0.8059.84` and Firefox `158.0.1`. The helper image checks out and verifies
 the exact WPT Git commit and verifies Chrome downloads against pinned SHA-256
 digests. The Firefox helper image
 uses its existing pinned Firefox and geckodriver downloads.

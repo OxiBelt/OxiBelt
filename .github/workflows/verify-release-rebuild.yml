@@ -47,7 +47,7 @@ permissions:
   packages: read
 
 env:
-  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
 
 jobs:
   resolve:
@@ -278,7 +278,7 @@ jobs:
 
       - name: Upload independently derived image plan
         if: steps.plan.outputs.automatic == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: independent-image-plan-${{ steps.plan.outputs.revision }}
           path: ${{ runner.temp }}/independent-image-plan.json
@@ -317,7 +317,7 @@ jobs:
       - name: Start isolated rootless Docker
         uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
         with:
-          version: v29.8.0
+          version: v29.9.2
           rootless: true
           set-host: true
           # Hosted runners do not delegate systemd cgroup scopes to rootless Docker.
@@ -348,13 +348,13 @@ jobs:
       - name: Setup pinned Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Setup pinned Trivy
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
-          version: v0.74.0
+          version: v0.76.0
           cache: false
 
       - name: Enable hash-pinned pnpm
@@ -415,7 +415,7 @@ jobs:
             "${producer_arguments[@]}"
 
       - name: Upload independent rebuild receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: rebuild-receipt-${{ matrix.role }}-${{ matrix.artifact_arch }}
           path: ${{ runner.temp }}/rebuild-receipt-${{ matrix.role }}-${{ matrix.artifact_arch }}.json
@@ -457,7 +457,7 @@ jobs:
       - name: Setup canonical Helm rebuild packager
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v4.3.0
+          version: v4.3.1
 
       - name: Enable hash-pinned pnpm and install verifier dependencies
         run: |
@@ -522,7 +522,8 @@ jobs:
             and .predicateType == "https://oxibelt.dev/attestations/helm-chart-rebuild/v3"
             and .receipt.source == {ref: $ref, revision: $revision, commitEpoch: .receipt.source.commitEpoch, releaseVersion: $version}
             and .comparison.exactPackageBytes == true
-            and .comparison.deterministicPackager == "v4.3.0"
+            and ((.comparison.deterministicPackager == "v4.3.0" and .comparison.consumptionHelmVersions == ["v3.22.0", "v4.3.0"])
+              or (.comparison.deterministicPackager == "v4.3.1" and .comparison.consumptionHelmVersions == ["v3.22.1", "v4.3.1"]))
           ' "${predicate}" >/dev/null
           ORAS_BIN="${ORAS_BIN}" HELM_CHART_RELEASE_HELPER="$(pwd)/devops/sources/helm_chart_release.ts" \
             tests/scripts/verify-release-helm-chart.sh \
@@ -549,7 +550,7 @@ jobs:
             >"${RUNNER_TEMP}/helm-rebuild-receipt-${CHART}.json"
 
       - name: Upload independent chart rebuild receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: helm-rebuild-receipt-${{ matrix.chart }}
           path: ${{ runner.temp }}/helm-rebuild-receipt-${{ matrix.chart }}.json
@@ -571,14 +572,14 @@ jobs:
 
     steps:
       - name: Download independently derived image plan
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: independent-image-plan-${{ needs.resolve.outputs.revision }}
           path: ${{ runner.temp }}/independent-release-metadata
 
       - name: Download exact producer release contract for stable qualification
         if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: release-contract-${{ needs.resolve.outputs.revision }}
           path: ${{ runner.temp }}/producer-release-contract
@@ -729,7 +730,7 @@ jobs:
 
       - name: Download exact beta qualification aggregate for stable soak binding
         if: ${{ !contains(needs.resolve.outputs.release_version, '-beta.') && steps.identity.outputs.beta_mode == 'qualification' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           name: release-qualification-${{ steps.identity.outputs.beta_revision }}
           path: ${{ runner.temp }}/beta-release-qualification
@@ -762,14 +763,14 @@ jobs:
           mv "${IDENTITY}.next" "${IDENTITY}"
 
       - name: Download exactly 30 image receipts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           pattern: rebuild-receipt-*
           path: ${{ runner.temp }}/image-receipts
           merge-multiple: true
 
       - name: Download exactly two chart receipts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2
         with:
           pattern: helm-rebuild-receipt-*
           path: ${{ runner.temp }}/chart-receipts
@@ -778,7 +779,7 @@ jobs:
       - name: Start isolated rootless Docker for registry readback
         uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
         with:
-          version: v29.8.0
+          version: v29.9.2
           rootless: true
           set-host: true
           daemon-config: |
@@ -787,7 +788,7 @@ jobs:
       - name: Setup pinned Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.37.1
+          version: v0.38.0
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Validate receipt inventory and snapshot immutable subjects
@@ -1106,7 +1107,7 @@ jobs:
           fi
 
       - name: Upload sealed release qualification
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: release-qualification-${{ needs.resolve.outputs.revision }}
           path: ${{ runner.temp }}/release-qualification.json

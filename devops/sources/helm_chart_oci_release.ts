@@ -150,7 +150,7 @@ function ExactCanonical(Value: unknown, Expected: unknown, Label: string): void 
   if (Canonical(Value) !== Canonical(Expected)) throw new Error(`${Label} does not match the exact canonical release-plan contract`)
 }
 
-export function HelmChartOciSha256(Value: Buffer | string | unknown): string {
+export function HelmChartOciSha256(Value: unknown): string {
   const Content = Buffer.isBuffer(Value) ? Value : typeof Value === 'string' ? Buffer.from(Value, 'utf8') : Buffer.from(Canonical(Value), 'utf8')
   return Crypto.createHash('sha256').update(Content).digest('hex')
 }
@@ -476,7 +476,7 @@ export function BuildHelmChartRebuildPredicate(Options: BuildHelmChartRebuildPre
   }
   const Predicate: JsonObject = {
     schemaVersion: HelmChartRebuildPredicateSchemaVersion, predicateType: HelmChartRebuildPredicateType, kind: 'helm-chart', receipt: Receipt,
-    comparison: { schemaVersion: 1, exactPackageBytes: true, deterministicPackager: 'v4.3.0', consumptionHelmVersions: ['v3.22.0', 'v4.3.0'] }
+    comparison: { schemaVersion: 1, exactPackageBytes: true, deterministicPackager: 'v4.3.1', consumptionHelmVersions: ['v3.22.1', 'v4.3.1'] }
   }
   return ValidateHelmChartRebuildPredicate(Predicate)
 }
@@ -488,7 +488,13 @@ export function ValidateHelmChartRebuildPredicate(Value: unknown): JsonObject {
   ValidateHelmChartPublishReceipt(Predicate.receipt)
   const Comparison = ObjectValue(Predicate.comparison, 'Helm chart rebuild predicate comparison')
   ExactKeys(Comparison, ['schemaVersion', 'exactPackageBytes', 'deterministicPackager', 'consumptionHelmVersions'], 'Helm chart rebuild predicate comparison')
-  if (Comparison.schemaVersion !== 1 || Comparison.exactPackageBytes !== true || Comparison.deterministicPackager !== 'v4.3.0' || Canonical(Comparison.consumptionHelmVersions) !== Canonical(['v3.22.0', 'v4.3.0'])) throw new Error('Helm chart rebuild predicate comparison contract is invalid')
+  // Historical signed predicates keep their exact original tool pair. Never
+  // accept a combination assembled from different qualification generations.
+  const SupportedComparison = [
+    { packager: 'v4.3.0', consumers: ['v3.22.0', 'v4.3.0'] },
+    { packager: 'v4.3.1', consumers: ['v3.22.1', 'v4.3.1'] }
+  ].some(Contract => Comparison.deterministicPackager === Contract.packager && Canonical(Comparison.consumptionHelmVersions) === Canonical(Contract.consumers))
+  if (Comparison.schemaVersion !== 1 || Comparison.exactPackageBytes !== true || !SupportedComparison) throw new Error('Helm chart rebuild predicate comparison contract is invalid')
   AssertEnvelopeSize(Predicate, 'Helm chart rebuild predicate')
   return Predicate
 }

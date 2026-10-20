@@ -784,7 +784,7 @@ fn browser_webdriver_turn_tls_uses_a_temporary_firefox_trust_profile() {
     "/CN=OxiBelt WebDriver Test CA",
     "subjectAltName=DNS:localhost,DNS:proxy.oxibelt.test,DNS:turn-v4.oxibelt.test,DNS:turn-v6.oxibelt.test,IP:127.0.0.1,IP:::1",
     "extendedKeyUsage=serverAuth",
-    "firefox_webdriver_image=\"${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1}\"",
+    "firefox_webdriver_image=\"${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:158.0.1-geckodriver-0.37.1}\"",
     "certutil -N --empty-password -d sql:/tmp/firefox-profile",
     "certutil -A",
     "-t \"C,,\"",
@@ -911,9 +911,9 @@ fn firefox_webdriver_helper_image_is_pinned_nonroot_and_nss_ready() {
 
   for expected in [
     "FROM ${DEBIAN_IMAGE} AS fetch",
-    "docker.io/library/debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a",
-    "ARG FIREFOX_VERSION=156.0",
-    "ARG FIREFOX_SHA256=1d44cd02351c307c3e19061ea2a4d18a30f236e6be862b94f2282564afdb0167",
+    "docker.io/library/debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+    "ARG FIREFOX_VERSION=158.0.1",
+    "ARG FIREFOX_SHA256=dce45470139242cf294eb6ada3d192a9bb334696842b02b71ade448a139eb41a",
     "ARG GECKODRIVER_VERSION=0.37.1",
     "ARG GECKODRIVER_SHA256=e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e",
     "https://archive.mozilla.org/pub/firefox/releases/${FIREFOX_VERSION}/linux-x86_64/en-US/firefox-${FIREFOX_VERSION}.tar.xz",
@@ -938,8 +938,8 @@ fn firefox_webdriver_helper_image_is_pinned_nonroot_and_nss_ready() {
     "Firefox and geckodriver archives must each be checksum verified"
   );
   for expected in [
-    "firefox_version=\"156.0\"",
-    "firefox_sha256=\"1d44cd02351c307c3e19061ea2a4d18a30f236e6be862b94f2282564afdb0167\"",
+    "firefox_version=\"158.0.1\"",
+    "firefox_sha256=\"dce45470139242cf294eb6ada3d192a9bb334696842b02b71ade448a139eb41a\"",
     "geckodriver_version=\"0.37.1\"",
     "geckodriver_sha256=\"e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e\"",
     "retry_command 3 docker pull --platform \"${platform}\" \"${base_image}\"",
@@ -992,8 +992,8 @@ fn webtransport_wpt_gate_is_pinned_complete_and_required() {
     "ece2d7fdc436d4b9a3856877163b07ec15c05354",
     "git -C /opt/wpt rev-parse HEAD",
     "git -C /opt/wpt status --porcelain",
-    "154.0.8037.57",
-    "156.0",
+    "155.0.8059.84",
+    "158.0.1",
     "sha256sum --check --strict",
     "python3 -m venv /opt/wpt/_venv3",
     "requirements_firefox.txt",
@@ -1025,7 +1025,7 @@ fn webtransport_wpt_gate_is_pinned_complete_and_required() {
     .expect("WPT gate script should be readable");
   for expected in [
     "webtransport/",
-    "oxibelt/webtransport-wpt:ece2d7fdc436-git-prefs156",
+    "oxibelt/webtransport-wpt:ece2d7fdc436-chrome155-firefox158-prefs156",
     "test \"$(cat /opt/wpt/.source-revision)\" = \"ece2d7fdc436d4b9a3856877163b07ec15c05354\"",
     "--enable-webtransport-h3",
     "--test-types testharness crashtest",
@@ -1146,7 +1146,7 @@ fn firefox_webdriver_turn_jobs_are_required_and_use_exact_artifacts() {
     "docker load --input \"${RUNNER_TEMP}/oxibelt-firefox-webdriver/oxibelt-firefox-webdriver-image.tar\"",
     "OXIBELT_DOCKER_IMAGE: ${{ steps.select-amd64-image.outputs.image_tag }}",
     "OXIBELT_MOCK_UPSTREAM_IMAGE: oxibelt/mock-upstream:ci",
-    "OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1",
+    "OXIBELT_FIREFOX_WEBDRIVER_IMAGE: oxibelt/firefox-webdriver:158.0.1-geckodriver-0.37.1",
     "run: tests/scripts/run-browser-webdriver-check.sh firefox webrtc-turn isolated",
     "if: failure()",
     "name: oxibelt-browser-firefox-webrtc-turn-isolated-diagnostics",
@@ -1559,7 +1559,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
     .expect("oxibeltctl Cargo.toml should be readable");
 
   for expected in [
-    "ARG RUST_BUILDER_IMAGE=rust:1.98.1-trixie",
+    "ARG RUST_BUILDER_IMAGE=rust:1.99.1-trixie",
     "ARG OXIBELT_RUNTIME_IMAGE=alpine:3.24",
     "ARG OXIBELT_RUST_BUILDER_STAGE=builder-native",
     "ARG OXIBELT_RISCV64_TOOLCHAIN_PLATFORM=linux/amd64",
@@ -1592,7 +1592,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   }
 
   for expected in [
-    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546\"",
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a\"",
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",
@@ -1820,7 +1820,7 @@ fn python_docker_helpers_track_the_supported_alpine_base() {
     let contents = fs::read_to_string(repo_root().join(dockerfile))
       .unwrap_or_else(|error| panic!("{dockerfile} should be readable: {error}"));
     assert!(
-      contents.starts_with("FROM python:3.14-alpine3.24@sha256:9e9fde4d32eedce0b661d9ab91e826b62dddf28e928c230ec55f1866cac66b01\n"),
+      contents.starts_with("FROM python:3.14-alpine3.24@sha256:f6a589d43c42b9e7f7dc67a12d37132491f362859a5d750607710cc56da3bc72\n"),
       "{dockerfile} should use the supported Python 3.14 and Alpine 3.24 base"
     );
   }
@@ -2116,7 +2116,7 @@ fn source_structure_job_stays_independent() {
 
   let rust_install = exact_step(
     "Install Rust toolchain",
-    "rustup toolchain install 1.98.1 --profile minimal\nrustup default 1.98.1\n",
+    "rustup toolchain install 1.99.1 --profile minimal\nrustup default 1.99.1\n",
   );
   let boundary_unit_tests = exact_step(
     "Test Rust boundary tooling",
@@ -3886,8 +3886,8 @@ fn rust_advisory_checks_run_as_independent_primary_gate() {
     "runs-on: ubuntu-26.04",
     "contents: read",
     "name: Install Rust toolchain",
-    "rustup toolchain install 1.98.1 --profile minimal",
-    "rustup default 1.98.1",
+    "rustup toolchain install 1.99.1 --profile minimal",
+    "rustup default 1.99.1",
     "name: Install pinned Rust dependency tools",
     "cargo install cargo-audit --version 0.22.2 --locked",
     "cargo install cargo-deny --version 0.20.2 --locked",
@@ -4177,7 +4177,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "pnpm run typecheck",
     "name: Setup canonical Helm packager",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v4.3.0",
+    "version: v4.3.1",
     "pnpm run test",
     "name: Verify hosted release-tag ruleset core policy",
     "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'OxiBelt/OxiBelt'",
@@ -4236,7 +4236,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
   );
   for expected in [
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v4.3.0",
+    "version: v4.3.1",
   ] {
     assert!(
       helm_step.contains(expected),
@@ -4258,7 +4258,7 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     .collect::<Vec<_>>();
   assert_eq!(
     helm_inputs,
-    ["version: v4.3.0"],
+    ["version: v4.3.1"],
     "canonical Helm setup should receive only the exact version and no GitHub token"
   );
   let kubernetes_graduation = job_text
@@ -4289,9 +4289,9 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     "TypeScript release tooling should install the canonical Helm packager exactly once"
   );
   assert_eq!(
-    job_text.matches("version: v4.3.0").count(),
+    job_text.matches("version: v4.3.1").count(),
     1,
-    "TypeScript release tooling should declare Helm 4.3.0 exactly once"
+    "TypeScript release tooling should declare Helm 4.3.1 exactly once"
   );
   for forbidden in [
     "contents: write",
@@ -4487,7 +4487,7 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
     "kubernetes: v1.37.0",
     "kubectl: v1.37.0",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v3.22.0",
+    "version: v3.22.1",
     "name: Validate Helm Admin configuration",
     "tests/scripts/check-helm-admin-config.sh",
     "name: Validate Helm base configuration",
@@ -4953,8 +4953,8 @@ fn kubernetes_supply_chain_admission_ci_is_exact_bounded_and_fail_closed() {
     "name: Kubernetes supply-chain admission",
     "actions: read",
     "contents: read",
-    "rustup toolchain install 1.98.1 --profile minimal",
-    "version: v3.22.0",
+    "rustup toolchain install 1.99.1 --profile minimal",
+    "version: v3.22.1",
     "name: Install verified Kind and kubectl",
     "KUBECTL_VERSION: v1.34.11",
     KIND_KUBECTL_INSTALL_COMMAND,
@@ -6470,7 +6470,7 @@ fn kubernetes_pod_lifecycle_ci_exercises_distribution_drain_and_worker_loss() {
     "contents: read",
     "timeout-minutes: 35",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v3.22.0",
+    "version: v3.22.1",
     "name: Validate Helm Pod distribution and lifecycle",
     "tests/scripts/check-helm-pod-lifecycle.sh",
     "name: Validate Helm autoscaling configuration",
@@ -6622,7 +6622,7 @@ fn kubernetes_network_policy_ci_uses_enforcing_cnis_and_hardened_fixtures() {
     "timeout-minutes: 35",
     "cni: [calico, cilium]",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v3.22.0",
+    "version: v3.22.1",
     "name: Validate Helm NetworkPolicy configuration",
     "tests/scripts/check-helm-network-policy.sh",
     "name: Install verified Kind and kubectl",
@@ -6787,7 +6787,7 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
     "current Kubernetes compatibility should wait for all primary dependency gates"
   );
   for expected in [
-    "name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.3.0 compatibility",
+    "name: Kubernetes ${{ matrix.kubernetes }} and Helm v4.3.1 compatibility",
     "runs-on: ubuntu-26.04",
     "contents: read",
     "timeout-minutes: 15",
@@ -6805,7 +6805,7 @@ fn current_kubernetes_and_helm_compatibility_is_pinned_and_isolated() {
     "kube_version: 1.37.0",
     "kubectl: v1.37.0",
     "azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1",
-    "version: v4.3.0",
+    "version: v4.3.1",
     "tests/scripts/check-helm-admin-config.sh",
     "tests/scripts/check-helm-base-config.sh",
     "tests/scripts/check-helm-edge-secure-medium-profile.sh",
@@ -7914,7 +7914,7 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
     "RELEASE.2025-10-15T17-29-55Z",
     "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a",
     "45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841",
-    "golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414",
+    "golang:1.27.3-alpine3.24@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd",
     "alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
   ] {
     assert!(
@@ -9045,7 +9045,7 @@ fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
     "actions: read",
     "contents: read",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1",
-    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
+    "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2",
     "tests/scripts/validate-ci-image-artifact.py validate",
     "-build-metadata.json",
     "-artifact-contract.json",
@@ -9054,7 +9054,7 @@ fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
     "tests/scripts/validate-strict-dataplane-image.py",
     "if: matrix.role.name == 'dataplane-strict'",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
-    "version: v0.74.0",
+    "version: v0.76.0",
     "scan-type: image",
     "image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}",
     "format: json",
@@ -9132,7 +9132,7 @@ fn docker_image_dependency_snapshot_submits_only_on_write_events() {
   for expected in [
     "actions: read",
     "contents: write",
-    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
+    "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2",
     "pattern: dependency-snapshot-*",
     "roles=(standalone dataplane dataplane-strict controller tools keysigner)",
     "architectures=(amd64v2 amd64 amd64v4 arm64 riscv64)",
@@ -9499,9 +9499,9 @@ fn mutation_testing_is_pinned_bounded_and_fail_closed() {
     "timeout-minutes: 120",
     "permissions:\n      contents: read",
     "persist-credentials: false",
-    "rustup toolchain install 1.98.1 --profile minimal",
-    "rustup default 1.98.1",
-    "cargo +1.98.1 install mewt --version 4.0.0 --locked",
+    "rustup toolchain install 1.99.1 --profile minimal",
+    "rustup default 1.99.1",
+    "cargo +1.99.1 install mewt --version 4.0.0 --locked",
     "tests/scripts/run-mutation-testing.sh",
     "if-no-files-found: warn",
   ] {
@@ -10409,7 +10409,7 @@ fn stable_and_beta_tags_prepare_conflict_safe_drafts_without_publishing() {
 
   let draft = workflow_job_text(&workflow, "prepare-draft");
   for expected in [
-    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 8.0.1",
+    "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # 8.0.2",
     "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0",
     "github.rest.repos.getReleaseByTag",
     "github.rest.git.getRef",
@@ -10786,7 +10786,7 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
     "Checkout release revision",
     "Validate immutable release checkout",
     "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0",
-    "version: v29.8.0",
+    "version: v29.9.2",
     "rootless: true",
     "daemon-config: |",
     "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",
@@ -11944,7 +11944,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "runs-on: ${{ matrix.runner }}",
     "persist-credentials: false",
     "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0",
-    "version: v29.8.0",
+    "version: v29.9.2",
     "rootless: true",
     "daemon-config: |",
     "\"exec-opts\": [\"native.cgroupdriver=cgroupfs\"]",
@@ -11953,7 +11953,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "index(\"name=seccomp,profile=builtin\") != null",
     "docker info --format '{{.CgroupDriver}}'",
     "rootless verifier must use no host cgroup resource controller",
-    "moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8",
+    "moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea",
     "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1",
     "aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1",
     "pnpm install --frozen-lockfile --ignore-scripts",
@@ -13315,7 +13315,7 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1";
   let prepull_step_name = "name: Pre-pull Docker BuildKit image";
   let prepull_command = "tests/scripts/retry-docker-pull.sh \"${OXIBELT_BUILDKIT_IMAGE}\"";
-  let pinned_image = "OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8";
+  let pinned_image = "OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea";
   let pinned_driver = "driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
   let setup_count = workflow.matches(setup_marker).count();
 
@@ -13368,7 +13368,7 @@ fn release_buildx_setups_precede_with_pinned_buildkit_retry_pull() {
   let prepull_name = "Pre-pull Docker BuildKit image";
   let prepull_command = "bash \"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh\" \"${OXIBELT_BUILDKIT_IMAGE}\"";
   let driver_opts = "image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
-  let pinned_image = "moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8";
+  let pinned_image = "moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea";
   let retry_script = docker_pull_retry_script_text();
   assert!(
     retry_script.contains("retry_command 3 docker pull \"${image}\""),
@@ -13569,11 +13569,11 @@ fn local_amd64_comparator_images_preserve_cpu_targets_and_hardening() {
     "comparator build script should produce deterministic tags and tar names"
   );
   assert!(
-    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.6")
+    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.7")
       && nginx_dockerfile.contains(
-        "ARG NGINX_SHA256=974ed5298a5e398e008704ed5db284e655fc270c596493dbccada452448fc9f1"
+        "ARG NGINX_SHA256=89ea8a3dc171511f7325043b50e4c036248d9fad5feb7ec809c0b82d5df42c65"
       )
-      && script.contains("--build-arg \"NGINX_VERSION=1.31.6\"")
+      && script.contains("--build-arg \"NGINX_VERSION=1.31.7\"")
       && nginx_dockerfile.contains("ARG NGINX_RUNTIME_IMAGE=alpine:3.24")
       && nginx_dockerfile.contains("FROM alpine:3.24 AS builder")
       && nginx_dockerfile.contains("sha256sum -c -")
@@ -13610,7 +13610,7 @@ fn local_amd64_comparator_images_preserve_cpu_targets_and_hardening() {
     );
   }
   assert!(
-    caddy_dockerfile.contains("ARG CADDY_VERSION=2.11.4")
+    caddy_dockerfile.contains("ARG CADDY_VERSION=2.11.7")
       && caddy_dockerfile.contains("FROM caddy:${CADDY_VERSION}-builder-alpine AS builder")
       && caddy_dockerfile.contains("export GOAMD64=v2")
       && caddy_dockerfile.contains("export GOAMD64=v3"),

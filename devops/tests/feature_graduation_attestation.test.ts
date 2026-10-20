@@ -114,7 +114,7 @@ function KubernetesReceipt(Policy: KubernetesGraduationPolicy, Reports: Array<{ 
     repository: Policy.repository, sourceRef: 'refs/heads/main', sourceRevision: Revision,
     generatedAt: '2026-08-08T12:00:00Z', qualifiedPlatforms: Feature.qualifiedPlatforms,
     workflow: { repository: Policy.repository, path: '.github/workflows/feature-graduation.yml', ref: Revision, runId: 7, runAttempt: 1, jobs: Feature.qualifiedPlatforms.map((Platform, Index) => ({ id: 201 + Index, name: `kubernetes-${Platform}`, conclusion: 'success' })) },
-    toolVersions: [{ name: 'helm', version: '3.22.0' }],
+    toolVersions: [{ name: 'helm', version: '3.22.1' }],
     artifactSubjects: Feature.requiredArtifacts.map((Requirement, Index) => {
       const digest = `sha256:${String(Index + 2).repeat(64)}`
       return { name: Requirement.name, kind: Requirement.kind, reference: `${Requirement.repository}@${digest}`, digest }
@@ -161,14 +161,14 @@ function Attestation(Sealed: SealedFeatureGraduation): unknown {
   } } }]
 }
 
-test('inspects canonical policies with an explicit zero-supported outcome', () => {
+void test('inspects canonical policies with an explicit zero-supported outcome', () => {
   const Expectations = InspectFeatureGraduationPolicies(RepoRoot)
   Assert.equal(Expectations.result, 'zero_supported')
   Assert.equal(Expectations.features.length, 0)
   Assert.deepEqual(Expectations.policies.map(Policy => Policy.scope), ['features', 'kubernetes'])
 })
 
-test('writes expectations to a bounded absolute temporary output path', () => {
+void test('writes expectations to a bounded absolute temporary output path', () => {
   const TemporaryDirectory = Fs.mkdtempSync(Path.join('/tmp', 'feature-attestation-output-'))
   const Output = Path.join(TemporaryDirectory, 'expectations.json')
   try {
@@ -180,7 +180,7 @@ test('writes expectations to a bounded absolute temporary output path', () => {
   }
 })
 
-test('seals exact receipt, report, log, and authenticated producer-job inventory', () => {
+void test('seals exact receipt, report, log, and authenticated producer-job inventory', () => {
   const { root, sealed } = BuildSealedWorkspace()
   try {
     Assert.equal(sealed.predicate.expectations.result, 'supported')
@@ -204,7 +204,7 @@ test('seals exact receipt, report, log, and authenticated producer-job inventory
   }
 })
 
-test('rejects unsafe or incomplete private evidence trees', () => {
+void test('rejects unsafe or incomplete private evidence trees', () => {
   const { root } = BuildSealedWorkspace()
   try {
     Fs.writeFileSync(Path.join(root, 'evidence/reports/extra.txt'), 'extra')
@@ -227,7 +227,7 @@ test('rejects unsafe or incomplete private evidence trees', () => {
   }
 })
 
-test('requires every platform producer job and exact report artifact', () => {
+void test('requires every platform producer job and exact report artifact', () => {
   const MissingJob = BuildSealedWorkspace()
   try {
     const Metadata = Jobs()
@@ -252,7 +252,7 @@ test('requires every platform producer job and exact report artifact', () => {
   }
 })
 
-test('rejects unused authenticated producer jobs and cross-receipt producer-job conflicts', () => {
+void test('rejects unused authenticated producer jobs and cross-receipt producer-job conflicts', () => {
   const ExtraJob = BuildSealedWorkspace()
   try {
     const Metadata = Jobs()
@@ -290,7 +290,7 @@ test('rejects unused authenticated producer jobs and cross-receipt producer-job 
   }
 })
 
-test('permits one identical authenticated producer job shared across receipt scopes', () => {
+void test('permits one identical authenticated producer job shared across receipt scopes', () => {
   const SharedJob = BuildSealedWorkspace()
   try {
     const ReceiptPath = Path.join(SharedJob.root, 'evidence/receipts/kubernetes/supply.json')
@@ -318,7 +318,7 @@ test('permits one identical authenticated producer job shared across receipt sco
   }
 })
 
-test('verifies exact attestation readback and rejects signer, subject, predicate, and source drift', () => {
+void test('verifies exact attestation readback and rejects signer, subject, predicate, and source drift', () => {
   const { root, sealed } = BuildSealedWorkspace()
   try {
     const Options = {

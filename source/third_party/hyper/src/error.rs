@@ -52,7 +52,7 @@ pub(super) enum Kind {
     /// Indicates a channel (client or body sender) is closed.
     #[cfg(any(
         all(feature = "http1", any(feature = "client", feature = "server")),
-        all(feature = "http2", feature = "client")
+        all(feature = "http2", any(feature = "client", feature = "server"))
     ))]
     ChannelClosed,
     /// An `io::Error` that occurred while trying to read or write to a network stream.
@@ -240,13 +240,13 @@ impl Error {
     pub fn is_closed(&self) -> bool {
         #[cfg(not(any(
             all(feature = "http1", any(feature = "client", feature = "server")),
-            all(feature = "http2", feature = "client")
+            all(feature = "http2", any(feature = "client", feature = "server"))
         )))]
         return false;
 
         #[cfg(any(
             all(feature = "http1", any(feature = "client", feature = "server")),
-            all(feature = "http2", feature = "client")
+            all(feature = "http2", any(feature = "client", feature = "server"))
         ))]
         matches!(self.inner.kind, Kind::ChannelClosed)
     }
@@ -392,7 +392,7 @@ impl Error {
 
     #[cfg(any(
         all(feature = "http1", any(feature = "client", feature = "server")),
-        all(feature = "http2", feature = "client")
+        all(feature = "http2", any(feature = "client", feature = "server"))
     ))]
     pub(super) fn new_closed() -> Error {
         Error::new(Kind::ChannelClosed)
@@ -534,7 +534,7 @@ impl Error {
             Kind::UnexpectedMessage => "received unexpected message from connection",
             #[cfg(any(
                 all(feature = "http1", any(feature = "client", feature = "server")),
-                all(feature = "http2", feature = "client")
+                all(feature = "http2", any(feature = "client", feature = "server"))
             ))]
             Kind::ChannelClosed => "channel closed",
             Kind::Canceled => "operation was canceled",
@@ -719,6 +719,8 @@ mod tests {
     #[test]
     fn h2_reason_unknown() {
         let closed = Error::new_closed();
+        assert!(closed.is_closed());
+        assert_eq!(closed.to_string(), "channel closed");
         assert_eq!(closed.h2_reason(), h2::Reason::INTERNAL_ERROR);
     }
 

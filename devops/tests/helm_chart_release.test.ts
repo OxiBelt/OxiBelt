@@ -102,16 +102,17 @@ function CloneWithOrigin(Origin: string): string {
   return Directory
 }
 
-test('accepts only Helm 4.3.0 as the canonical chart packager', () => {
-  Assert.equal(CanonicalHelmPackagerVersion, 'v4.3.0')
-  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.0'), true)
-  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.0+g0123456'), true)
-  Assert.equal(IsSupportedHelmPackagerVersion('v3.22.0'), false)
+void test('accepts only Helm 4.3.1 as the canonical chart packager', () => {
+  Assert.equal(CanonicalHelmPackagerVersion, 'v4.3.1')
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.1'), true)
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.1+g0123456'), true)
+  Assert.equal(IsSupportedHelmPackagerVersion('v3.22.1'), false)
   Assert.equal(IsSupportedHelmPackagerVersion('v4.2.4'), false)
-  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.1'), false)
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.0'), false)
+  Assert.equal(IsSupportedHelmPackagerVersion('v4.3.2'), false)
 })
 
-test('prepares an exact-ref, canonical plan and deterministic transformed archives without touching chart sources', () => {
+void test('prepares an exact-ref, canonical plan and deterministic transformed archives without touching chart sources', () => {
   const First = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-first-'))
   const Second = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-second-'))
   const WorktreeValues = Fs.readFileSync(Path.join(RepoRoot, 'deploy/helm/oxibelt/values.yaml'))
@@ -154,7 +155,7 @@ test('prepares an exact-ref, canonical plan and deterministic transformed archiv
   }
 })
 
-test('recomputes the entire canonical plan and rejects every tampered field group or extra key', () => {
+void test('recomputes the entire canonical plan and rejects every tampered field group or extra key', () => {
   const Directory = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-plan-tamper-'))
   try {
     PrepareHelmChartRelease(Options(Directory))
@@ -185,7 +186,7 @@ test('recomputes the entire canonical plan and rejects every tampered field grou
   }
 })
 
-test('rejects tree traversal and any symlink or special Git tree entry', () => {
+void test('rejects tree traversal and any symlink or special Git tree entry', () => {
   const Directory = FixtureRepository()
   try {
     const Revision = Git(Directory, 'rev-parse', 'HEAD')
@@ -211,7 +212,7 @@ test('rejects tree traversal and any symlink or special Git tree entry', () => {
   }
 })
 
-test('rejects traversal, special, unexpected, and partial archive members', () => {
+void test('rejects traversal, special, unexpected, and partial archive members', () => {
   const Epoch = 1785332178
   const Expected = new Map([['oxibelt/values.yaml', Buffer.from('image:\n')]])
   Assert.throws(() => InspectHelmChartArchive(Archive([TarMember('../escape', Buffer.alloc(0), Epoch)])), /unsafe/)
@@ -249,7 +250,7 @@ test('rejects traversal, special, unexpected, and partial archive members', () =
   ), /normalized mode/)
 })
 
-test('uses origin only as a structural guard, not repository provenance authentication', () => {
+void test('uses origin only as a structural guard, not repository provenance authentication', () => {
   const NonRepository = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-not-git-'))
   const GitRepository = FixtureRepository()
   const Output = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-origin-output-'))
@@ -270,7 +271,7 @@ test('uses origin only as a structural guard, not repository provenance authenti
   }
 })
 
-test('normalizes accepted HTTPS and SSH origin spellings out of the plan bytes', () => {
+void test('normalizes accepted HTTPS and SSH origin spellings out of the plan bytes', () => {
   const Origins = [
     'https://github.com/OxiBelt/OxiBelt',
     'https://github.com/OxiBelt/OxiBelt.git',
@@ -296,7 +297,7 @@ test('normalizes accepted HTTPS and SSH origin spellings out of the plan bytes',
   }
 })
 
-test('requires an empty or exact complete regular output inventory and preserves prior outputs on failure', () => {
+void test('requires an empty or exact complete regular output inventory and preserves prior outputs on failure', () => {
   const Directory = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-inventory-'))
   try {
     Fs.writeFileSync(Path.join(Directory, 'unexpected'), 'x')
@@ -343,7 +344,7 @@ test('requires an empty or exact complete regular output inventory and preserves
   }
 })
 
-test('rejects an oversized plan before parsing it', () => {
+void test('rejects an oversized plan before parsing it', () => {
   const Directory = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-plan-size-'))
   try {
     PrepareHelmChartRelease(Options(Directory))
@@ -354,7 +355,7 @@ test('rejects an oversized plan before parsing it', () => {
   }
 })
 
-test('independent verification detects missing and mutated release outputs', () => {
+void test('independent verification detects missing and mutated release outputs', () => {
   const Directory = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-verify-'))
   try {
     const Plan = PrepareHelmChartRelease(Options(Directory))

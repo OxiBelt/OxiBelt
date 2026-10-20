@@ -120,7 +120,7 @@ default). Native upstreams and discovery sources use
 
 The required CI gate runs every WebTransport test from pinned web-platform-tests
 revision `ece2d7fdc436d4b9a3856877163b07ec15c05354` in Chrome for Testing
-`154.0.8037.57` and Firefox `156.0`. It compares direct WPT-server results
+`155.0.8059.84` and Firefox `158.0.1`. It compares direct WPT-server results
 with OxiBelt-proxied results using the same browser URL and certificate. Each
 path must pass session, bidirectional stream, unidirectional stream, datagram,
 and close controls. The gate fails if any test or subtest is missing, or if a

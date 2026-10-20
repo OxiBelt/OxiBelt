@@ -11,7 +11,7 @@ label="oxibelt.test.run=${run_id}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-oxibelt/proxy:${run_id}}"
 upstream_image="${OXIBELT_MOCK_UPSTREAM_IMAGE:-oxibelt/mock-upstream:${run_id}}"
 fuzzer_image="oxibelt/tlsfuzzer:${run_id}"
-openssl_image="rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546"
+openssl_image="rust:1.99.1-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a"
 proxy_container="${run_id}-proxy"
 
 cleanup() {

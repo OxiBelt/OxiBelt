@@ -1392,15 +1392,27 @@ mixing dependency generations.
 
 ### Current development dependency refresh
 
-Development after the `0.9.2` source cut refreshes the locked Rust and pnpm
-dependency graphs, including `oxibeltctl`'s `der` dependency from `0.8.1` to
-`0.8.2`, the hash-pinned pnpm toolchain to `12.14.0`, and oxlint to `1.89.0`.
-The digest-pinned Rust `1.98.1` builder, Node `24` on Alpine `3.24`, and Alpine
-`3.24` runtime inputs also advance without changing their selected versions or
-image roles. This refresh preserves executable names, command-line contracts,
-image roles, and the native configuration schema; it requires no configuration
-or persisted-state migration. Build each target from its complete source
-revision, lockfiles, and pinned image inputs, and retain the previous complete
+The October 2026 dependency refresh advances the integrity-pinned pnpm
+toolchain to `12.14.0`, Oxlint to `1.89.0`, and Rust builders to `1.99.1`.
+The minimum supported Rust version remains `1.98`; Node `24` remains the
+supported LTS line, with matching Node 24 types. Refreshed Rust graphs retain
+the local HTTP, TLS, and WebTransport patches when updating their upstream
+sources. Build from the complete revision, lockfiles, source checksum
+manifests, and pinned image inputs.
+
+Node `24` on Alpine `3.24`, Alpine `3.24`, Debian Trixie, and Python test inputs
+receive refreshed image digests; Go test builders advance to `1.27.3`.
+Image tooling selects Docker `29.9.2`, Buildx `0.38.0`, and Trivy `0.76.0`,
+retaining the existing image roles and vulnerability policy. Current Helm
+qualification uses `3.22.1` and `4.3.1`; deterministic chart packaging requires
+`4.3.1`. Historical chart verification retains its original coherent tool
+pair and source-matched packager, rather than combining qualification
+versions from different revisions.
+
+Executable names, command-line contracts, image roles, and the native
+configuration schema are preserved. No configuration or persisted-state
+migration is required. Validate upstream connectivity with the refreshed
+certificate trust inputs before rollout, and retain the previous complete
 immutable artifacts for rollback. These development changes do not amend the
 historical `0.9.2` release entry or establish a new supported release target.
 
@@ -1436,10 +1448,10 @@ remain operator-owned. Upgrade the controller before its selected data plane;
 roll back the data plane before the controller, and never downgrade or delete
 the CRDs as an implicit Helm rollback. The integration remains `experimental`,
 with the same Kubernetes `1.34`–`1.37` graduation range and the current Helm
-`3.22.0`/`4.3.0` targets described in [KubernetesSupport.md](KubernetesSupport.md).
+`3.22.1`/`4.3.1` targets described in [KubernetesSupport.md](KubernetesSupport.md).
 
-The NGINX `1.31.6` and OpenResty `1.31.1.1-3-alpine` updates apply only to
-benchmark comparator images. Firefox `156.0` and the refreshed sanitizer,
+The NGINX `1.31.7` and OpenResty `1.31.1.1-3-alpine` updates apply only to
+benchmark comparator images. Chrome `155.0.8059.84`, Firefox `158.0.1` and the refreshed sanitizer,
 database, object-store, and test-helper images remain validation inputs. These
 updates do not change an OxiBelt release-image role or require an operator
 migration.

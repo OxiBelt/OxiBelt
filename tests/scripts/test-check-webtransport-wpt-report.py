@@ -562,7 +562,7 @@ elif args[0] == "exec" and "./wpt" in args:
     print(f"synthetic WPT {report_name}")
     sys.exit(7 if (retry and scenario == "run-fails") or (direct_retry and scenario == "direct-run-fails") or (firefox_retry and scenario == "firefox-run-fails") else 0)
 elif args[0] == "exec" and "--version" in args:
-    print("Google Chrome for Testing 154.0.8037.57" if "/opt/chrome/chrome" in args else "Mozilla Firefox 156.0")
+    print("Google Chrome for Testing 155.0.8059.84" if "/opt/chrome/chrome" in args else "Mozilla Firefox 158.0.1")
 elif args[0] == "exec" and "/usr/sbin/iptables" in args:
     state.setdefault("nat_containers", []).append(args[args.index("/usr/sbin/iptables") - 1])
     (root / "state.json").write_text(json.dumps(state))

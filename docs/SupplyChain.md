@@ -190,13 +190,23 @@ substituted registry evidence.
 
 The release workflow uses this helper to publish exactly the two versioned
 chart tags, build the bounded receipt, reproduce both packages with Helm
-v4.3.0, and attest the schema-v3 predicate through GitHub's attestation API.
+v4.3.1, and attest the schema-v3 predicate through GitHub's attestation API.
 The `github-workflow-authentication-required` receipt value remains a policy
 marker rather than proof by itself. Consumers must verify the exact GitHub
 repository, signer workflow, source ref and revision, subject digest,
 predicate type, and trusted timestamp through the GitHub attestation API.
 Charts remain experimental and never receive a mutable `latest` or major
 alias.
+
+Current chart builds use Helm `4.3.1`; current consumption qualification uses
+Helm `3.22.1` and `4.3.1`. Verification also accepts the historical coherent
+predicate pair `4.3.0` with consumers `3.22.0` and `4.3.0`, preserving existing
+signed evidence. Mixed historical/current pairs are rejected. Historical
+consumption can use any of those four exact clients. Reproducing historical
+package bytes requires the approved source-matched helper and its exact Helm
+packager; accepting a historical predicate does not establish that another
+packager produces identical bytes.
+
 
 ## Verify GitHub attestations
 

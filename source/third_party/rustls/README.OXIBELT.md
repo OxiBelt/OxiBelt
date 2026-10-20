@@ -1,7 +1,7 @@
 # OxiBelt rustls patch
 
-This directory starts from the crates.io `rustls` 0.23.45 source archive
-(`0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634`).
+This directory starts from the crates.io `rustls` 0.23.46 source archive
+(`48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf`).
 It remains licensed under Apache-2.0 OR ISC OR MIT.
 
 The local changes address RFC 9846 requirements that cannot be expressed
@@ -19,3 +19,9 @@ through the released rustls API:
 The root `Cargo.toml` patches crates.io rustls to this source so all workspace
 dependents use the same implementation. Keep this patch narrow and compare it
 with each future upstream rustls release before updating the archive.
+
+The 0.23.46 rebase retains the post-`close_notify` application-write guard
+when adopting the upstream record-limit and key-refresh loop. All local
+RFC 9846 epoch, outstanding-request, ticket, alert, and downgrade-sentinel
+changes remain in place. The shipped upstream `Cargo.lock` is copied unchanged
+from the checksum-verified 0.23.46 archive; the root lock owns production.

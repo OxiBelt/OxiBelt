@@ -89,7 +89,7 @@ function ForgedManifestReceipt(FixtureValue: ReturnType<typeof Fixture>, Index: 
   return ForgedReceipt
 }
 
-test('builds canonical exact two-chart OCI receipt and predicate', () => {
+void test('builds canonical exact two-chart OCI receipt and predicate', () => {
   const FixtureValue = Fixture()
   try {
     const { Receipt } = FixtureValue
@@ -109,19 +109,28 @@ test('builds canonical exact two-chart OCI receipt and predicate', () => {
     Assert.equal(Predicate.schemaVersion, 3)
     Assert.equal(HelmChartRebuildPredicateType, 'https://oxibelt.dev/attestations/helm-chart-rebuild/v3')
     Assert.equal(Predicate.predicateType, HelmChartRebuildPredicateType)
-    Assert.deepEqual((Predicate.comparison as Record<string, unknown>).consumptionHelmVersions, ['v3.22.0', 'v4.3.0'])
+    Assert.deepEqual((Predicate.comparison as Record<string, unknown>).consumptionHelmVersions, ['v3.22.1', 'v4.3.1'])
     Assert.doesNotThrow(() => ValidateHelmChartPublishReceipt(structuredClone(Receipt)))
     Assert.doesNotThrow(() => ValidateHelmChartRebuildPredicate(structuredClone(Predicate)))
+    const HistoricalComparison = { schemaVersion: 1, exactPackageBytes: true, deterministicPackager: 'v4.3.0', consumptionHelmVersions: ['v3.22.0', 'v4.3.0'] }
+    Assert.doesNotThrow(() => ValidateHelmChartRebuildPredicate({ ...Predicate, comparison: HistoricalComparison }))
+    for (const MixedComparison of [
+      { ...HistoricalComparison, deterministicPackager: 'v4.3.1' },
+      { ...(Predicate.comparison as Record<string, unknown>), deterministicPackager: 'v4.3.0' },
+      { ...HistoricalComparison, consumptionHelmVersions: ['v3.22.1', 'v4.3.0'] },
+      { ...HistoricalComparison, consumptionHelmVersions: ['v3.22.0', 'v4.3.1'] }
+    ]) Assert.throws(() => ValidateHelmChartRebuildPredicate({ ...Predicate, comparison: MixedComparison }), /comparison contract/)
+
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
-test('accepts only exact Helm 4 OCI manifest annotations', () => {
+void test('accepts only exact Helm 4 OCI manifest annotations', () => {
   const FixtureValue = Fixture()
   try {
-    const HelmAnnotations = (name: string, description: string) => ({
+    const HelmAnnotations = (Name: string, Description: string) => ({
       'org.opencontainers.image.created': '2026-08-18T11:25:22Z',
-      'org.opencontainers.image.description': description,
-      'org.opencontainers.image.title': name,
+      'org.opencontainers.image.description': Description,
+      'org.opencontainers.image.title': Name,
       'org.opencontainers.image.version': '1.2.3-beta.1',
       'oxibelt.dev/feature-status': 'experimental',
       'oxibelt.dev/kubernetes-support-policy': '1'
@@ -154,7 +163,7 @@ test('accepts only exact Helm 4 OCI manifest annotations', () => {
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
-test('rejects plan/archive/manifest binding drift and receipt or predicate extras', () => {
+void test('rejects plan/archive/manifest binding drift and receipt or predicate extras', () => {
   const FixtureValue = Fixture()
   try {
     const { Receipt, Archives } = FixtureValue
@@ -174,12 +183,12 @@ test('rejects plan/archive/manifest binding drift and receipt or predicate extra
     ]
     for (const [Value, Expected] of Cases) Assert.throws(() => ValidateHelmChartPublishReceipt(Value), Expected)
     const Predicate = BuildHelmChartRebuildPredicate({ receipt: Receipt, rebuiltPlanBytes: FixtureValue.PlanBytes, publishedArchives: FixtureValue.Archives, rebuiltArchives: FixtureValue.Archives })
-    Assert.throws(() => ValidateHelmChartRebuildPredicate({ ...Predicate, comparison: { ...(Predicate.comparison as Record<string, unknown>), deterministicPackager: 'v3.22.0' } }), /comparison contract/)
+    Assert.throws(() => ValidateHelmChartRebuildPredicate({ ...Predicate, comparison: { ...(Predicate.comparison as Record<string, unknown>), deterministicPackager: 'v3.22.1' } }), /comparison contract/)
     Assert.throws(() => ValidateHelmChartRebuildPredicate({ ...Predicate, unexpected: true }), /missing, unexpected/)
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
-test('bounded canonical file reads reject symlinks, whitespace, and duplicate-key encodings', () => {
+void test('bounded canonical file reads reject symlinks, whitespace, and duplicate-key encodings', () => {
   const Directory = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-oci-json-'))
   try {
     const File = Path.join(Directory, 'input.json')
@@ -198,7 +207,7 @@ test('bounded canonical file reads reject symlinks, whitespace, and duplicate-ke
   } finally { Fs.rmSync(Directory, { recursive: true, force: true }) }
 })
 
-test('rejects substituted plan semantics, unsupported tags, and oversized evidence', () => {
+void test('rejects substituted plan semantics, unsupported tags, and oversized evidence', () => {
   const FixtureValue = Fixture()
   try {
     const Build = (Plan: unknown, Archives = FixtureValue.Archives) => BuildHelmChartPublishReceipt({
@@ -233,7 +242,7 @@ test('rejects substituted plan semantics, unsupported tags, and oversized eviden
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
-test('rebuild predicates require exact independently rebuilt plan and package bytes', () => {
+void test('rebuild predicates require exact independently rebuilt plan and package bytes', () => {
   const FixtureValue = Fixture()
   try {
     const Options = { receipt: FixtureValue.Receipt, rebuiltPlanBytes: FixtureValue.PlanBytes, publishedArchives: FixtureValue.Archives, rebuiltArchives: FixtureValue.Archives }
@@ -251,7 +260,7 @@ test('rebuild predicates require exact independently rebuilt plan and package by
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
-test('rejects forged OCI manifest identities that do not contain the recorded package layer', () => {
+void test('rejects forged OCI manifest identities that do not contain the recorded package layer', () => {
   const FixtureValue = Fixture()
   try {
     for (const Index of [0, 1]) {
@@ -284,7 +293,7 @@ test('rejects forged OCI manifest identities that do not contain the recorded pa
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
-test('rejects substituted raw OCI evidence and all v2 receipt or predicate inputs', () => {
+void test('rejects substituted raw OCI evidence and all v2 receipt or predicate inputs', () => {
   const FixtureValue = Fixture()
   try {
     const NoncanonicalBase64 = structuredClone(FixtureValue.Receipt)
@@ -319,7 +328,7 @@ test('rejects substituted raw OCI evidence and all v2 receipt or predicate input
   } finally { Fs.rmSync(FixtureValue.Directory, { recursive: true, force: true }) }
 })
 
-test('CLI accepts only exact option sets and writes newline-canonical predicates', () => {
+void test('CLI accepts only exact option sets and writes newline-canonical predicates', () => {
   const FixtureValue = Fixture()
   try {
     const ReceiptPath = Path.join(FixtureValue.Directory, 'receipt.json')

@@ -51,9 +51,6 @@ pub(super) struct Recv {
     /// Holds frames that are waiting to be read
     buffer: Buffer<Event>,
 
-    /// Refused StreamId, this represents a frame that must be sent out.
-    refused: Option<StreamId>,
-
     /// If push promises are allowed to be received.
     is_push_enabled: bool,
 
@@ -76,8 +73,8 @@ pub(super) struct DataEvent {
 }
 
 #[derive(Debug)]
-pub(super) enum RecvHeaderBlockError<T> {
-    Oversize(T),
+pub(super) enum RecvHeaderBlockError {
+    Oversize,
     State(Error),
 }
 
@@ -111,7 +108,6 @@ impl Recv {
             pending_reset_expired: store::Queue::new(),
             reset_duration: config.local_reset_duration,
             buffer: Buffer::new(),
-            refused: None,
             is_push_enabled: config.local_push_enabled,
             is_extended_connect_protocol_enabled: config.extended_connect_protocol_enabled,
         }
@@ -136,8 +132,6 @@ impl Recv {
         mode: Open,
         counts: &mut Counts,
     ) -> Result<Option<StreamId>, Error> {
-        assert!(self.refused.is_none());
-
         counts.peer().ensure_can_open(id, mode)?;
 
         let next_id = self.next_stream_id()?;
@@ -149,7 +143,6 @@ impl Recv {
         self.next_stream_id = id.next_id();
 
         if !counts.can_inc_num_recv_streams() {
-            self.refused = Some(id);
             return Ok(None);
         }
 
@@ -165,28 +158,30 @@ impl Recv {
         stream: &mut store::Ptr,
         counts: &mut Counts,
         settings: crate::webtransport::ReceivedSettingsSnapshot,
-    ) -> Result<(), RecvHeaderBlockError<Option<frame::Headers>>> {
+    ) -> Result<(), RecvHeaderBlockError> {
         tracing::trace!("opening stream; init_window={}", self.init_window_sz);
         let is_initial = stream.state.recv_open(&frame)?;
 
         // Informational responses do not transition a remotely reserved stream
         // out of `ReservedRemote`. As a result, `recv_open` reports each of them
         // as initial. Only account for the stream once.
-        if is_initial && !stream.is_counted {
-            // TODO: be smarter about this logic
+        if is_initial {
             if frame.stream_id() > self.last_processed_id {
                 self.last_processed_id = frame.stream_id();
             }
 
-            // Increment the number of concurrent streams
-            counts.inc_num_recv_streams(stream);
+            if !stream.is_counted {
+                // Increment the number of concurrent streams
+                counts.inc_num_recv_streams(stream);
+            }
         }
 
-        if !stream.content_length.is_head() {
+        {
             use super::stream::ContentLength;
             use http::header;
 
-            if let Some(content_length) = frame.fields().get(header::CONTENT_LENGTH) {
+            let mut first_content_length = None;
+            for content_length in frame.fields().get_all(header::CONTENT_LENGTH) {
                 let content_length = match frame::parse_u64(content_length.as_bytes()) {
                     Ok(v) => v,
                     Err(_) => {
@@ -195,6 +190,19 @@ impl Recv {
                     }
                 };
 
+                if let Some(first) = first_content_length {
+                    if content_length != first {
+                        proto_err!(stream: "conflicting content-length headers; stream={:?}", stream.id);
+                        return Err(Error::library_reset(stream.id, Reason::PROTOCOL_ERROR).into());
+                    }
+                } else {
+                    first_content_length = Some(content_length);
+                }
+            }
+
+            if let Some(content_length) =
+                first_content_length.filter(|_| !stream.content_length.is_head())
+            {
                 stream.content_length = ContentLength::Remaining(content_length);
                 // END_STREAM on headers frame with non-zero content-length is malformed.
                 // https://datatracker.ietf.org/doc/html/rfc9113#section-8.1.1
@@ -228,17 +236,7 @@ impl Recv {
                  recv_headers: frame is over size; stream={:?}",
                 stream.id
             );
-            return if counts.peer().is_server() && is_initial {
-                let mut res = frame::Headers::new(
-                    stream.id,
-                    frame::Pseudo::response(::http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE),
-                    HeaderMap::new(),
-                );
-                res.set_end_stream();
-                Err(RecvHeaderBlockError::Oversize(Some(res)))
-            } else {
-                Err(RecvHeaderBlockError::Oversize(None))
-            };
+            return Err(RecvHeaderBlockError::Oversize);
         }
 
         let stream_id = frame.stream_id();
@@ -1049,32 +1047,6 @@ impl Recv {
         }
     }
 
-    /// Send any pending refusals.
-    pub fn send_pending_refusal<T, B>(
-        &mut self,
-        dst: &mut Codec<T, Prioritized<B>>,
-    ) -> io::Result<BufferStatus>
-    where
-        T: AsyncWrite + Unpin,
-        B: Buf,
-    {
-        if let Some(stream_id) = self.refused {
-            if !dst.has_send_capacity() {
-                return Ok(BufferStatus::CodecFull);
-            }
-
-            // Create the RST_STREAM frame
-            let frame = frame::Reset::new(stream_id, Reason::REFUSED_STREAM);
-
-            // Buffer the frame
-            dst.buffer(frame.into()).expect("invalid RST_STREAM frame");
-        }
-
-        self.refused = None;
-
-        Ok(BufferStatus::Complete)
-    }
-
     pub fn clear_expired_reset_streams(&mut self, store: &mut Store, counts: &mut Counts) {
         if !self.pending_reset_expired.is_empty() {
             let now = Instant::now();
@@ -1304,12 +1276,8 @@ impl Recv {
 mod tests {
     use super::*;
 
-    #[test]
-    fn clear_recv_buffer_caps_capacity_before_overflow() {
-        const FRAME_LEN: usize = 1 << 20;
-        const FRAME_COUNT: usize = (u32::MAX as usize / FRAME_LEN) + 1;
-
-        let config = Config {
+    fn config() -> Config {
+        Config {
             initial_max_send_streams: 0,
             local_max_buffer_size: 0,
             local_next_stream_id: 2.into(),
@@ -1321,8 +1289,65 @@ mod tests {
             remote_init_window_sz: DEFAULT_INITIAL_WINDOW_SIZE,
             remote_max_initiated: None,
             local_max_error_reset_streams: None,
-            data_frame_budget: DEFAULT_DATA_FRAME_BUDGET,
-        };
+            data_frame_budget: DataFrameBudget::Configured(DEFAULT_DATA_FRAME_BUDGET),
+        }
+    }
+
+    #[test]
+    fn duplicate_content_lengths_agree_even_for_head() {
+        for is_head in [false, true] {
+            for second in ["0", "1"] {
+                let config = config();
+                let mut recv = Recv::new(peer::Dyn::Server, &config);
+                let mut store = Store::new();
+                let id = StreamId::from(1);
+                let mut stream = store.insert(id, Stream::new(id, 0, DEFAULT_INITIAL_WINDOW_SIZE));
+                if is_head {
+                    stream.content_length = super::super::stream::ContentLength::Head;
+                }
+                let mut fields = HeaderMap::new();
+                fields.append(http::header::CONTENT_LENGTH, "0".parse().unwrap());
+                fields.append(http::header::CONTENT_LENGTH, second.parse().unwrap());
+                let pseudo = frame::Pseudo::request(
+                    http::Method::GET,
+                    "https://example.test/".parse().unwrap(),
+                    None,
+                );
+                let mut frame = frame::Headers::new(id, pseudo, fields);
+                frame.set_end_stream();
+                let mut counts = Counts::new(peer::Dyn::Server, &config);
+                let result = recv.recv_headers(
+                    frame,
+                    &mut stream,
+                    &mut counts,
+                    crate::webtransport::ReceivedSettingsSnapshot::new(None),
+                );
+                drop(recv.pending_accept.pop(stream.store_mut()));
+                recv.clear_recv_buffer(&mut stream, &mut None, &mut counts);
+                stream.set_reset(Reason::CANCEL, proto::Initiator::Library);
+                counts.transition_after(stream, false);
+                if second == "0" {
+                    assert!(result.is_ok(), "equal content lengths are valid");
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(RecvHeaderBlockError::State(Error::Reset(
+                            _,
+                            Reason::PROTOCOL_ERROR,
+                            _
+                        )))
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clear_recv_buffer_caps_capacity_before_overflow() {
+        const FRAME_LEN: usize = 1 << 20;
+        const FRAME_COUNT: usize = (u32::MAX as usize / FRAME_LEN) + 1;
+
+        let config = config();
         let mut recv = Recv::new(peer::Dyn::Server, &config);
         let mut store = Store::new();
         let mut stream = store.insert(
@@ -1349,6 +1374,8 @@ mod tests {
         assert!(stream.pending_recv.is_empty());
         assert_eq!(stream.in_flight_recv_data, 0);
         assert_eq!(recv.in_flight_data, 0);
+        stream.unlink();
+        stream.remove();
     }
 }
 
@@ -1362,7 +1389,7 @@ impl Open {
 
 // ===== impl RecvHeaderBlockError =====
 
-impl<T> From<Error> for RecvHeaderBlockError<T> {
+impl From<Error> for RecvHeaderBlockError {
     fn from(err: Error) -> Self {
         RecvHeaderBlockError::State(err)
     }

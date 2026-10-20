@@ -1,8 +1,8 @@
 # OxiBelt HTTP/2 WebTransport patch
 
-This directory carries the production sources of `h2` 0.4.19 from the
+This directory carries the production sources of `h2` 0.4.20 from the
 crates.io archive with SHA-256
-`ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16`.
+`7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118`.
 The upstream MIT license is retained. The owner is `piquark6046`; maintenance
 and removal are tracked in [issue #195](https://github.com/OxiBelt/OxiBelt/issues/195).
 
@@ -35,3 +35,10 @@ The shared SETTINGS handle also exposes a per-caller, close-aware wait for the
 peer's `SETTINGS_ENABLE_CONNECT_PROTOCOL` value. It reuses the existing waiter
 registry and does not require WebTransport SETTINGS. Callers supply a request
 deadline; a pending wait is removed on cancellation.
+
+The 0.4.20 rebase retains inbound HEADERS-time and outbound wire-order
+SETTINGS snapshots while adopting deferred receive-side send-buffer locking,
+connection-owned pending refusals, and runtime automatic DATA budget updates.
+The local per-waiter close/cancellation behavior and queued CONNECT withdrawal
+handling remain unchanged. The HPACK codec and generated Huffman tables are
+from the checksum-verified upstream release.

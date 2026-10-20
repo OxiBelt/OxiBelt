@@ -40,7 +40,17 @@ impl GoAway {
         &self.debug_data
     }
 
-    pub fn load(payload: &[u8]) -> Result<GoAway, Error> {
+    pub fn load(head: Head, payload: &[u8]) -> Result<GoAway, Error> {
+        debug_assert_eq!(head.kind(), crate::frame::Kind::GoAway);
+
+        // The GOAWAY frame applies to the connection, not a specific stream.
+        // An endpoint MUST treat a GOAWAY frame with a stream identifier
+        // other than 0x00 as a connection error (Section 5.4.1) of type
+        // PROTOCOL_ERROR.
+        if !head.stream_id().is_zero() {
+            return Err(Error::InvalidStreamId);
+        }
+
         if payload.len() < 8 {
             return Err(Error::BadFrameSize);
         }
@@ -83,5 +93,21 @@ impl fmt::Debug for GoAway {
         }
 
         builder.finish()
+    }
+}
+
+#[cfg(test)]
+mod oxibelt_tests {
+    use super::*;
+
+    #[test]
+    fn goaway_rejects_nonzero_stream_id() {
+        let head = Head::new(Kind::GoAway, 0, StreamId::from(1));
+        assert!(matches!(
+            GoAway::load(head, &[0; 8]),
+            Err(Error::InvalidStreamId)
+        ));
+        let head = Head::new(Kind::GoAway, 0, StreamId::zero());
+        assert!(GoAway::load(head, &[0; 8]).is_ok());
     }
 }

@@ -26,7 +26,7 @@ impl CompioDirectH1OverlapBudget {
   fn try_reserve(self: &Arc<Self>) -> anyhow::Result<Arc<CompioDirectH1FleetReservation>> {
     self
       .fleets
-      .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+      .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         (current < MAX_OVERLAPPING_FLEETS).then_some(current + 1)
       })
       .map_err(|current| {
@@ -59,13 +59,12 @@ impl CompioDirectH1FleetReservation {
     if self.released.swap(true, Ordering::AcqRel) {
       return;
     }
-    let released =
-      self
-        .budget
-        .fleets
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-          current.checked_sub(1)
-        });
+    let released = self
+      .budget
+      .fleets
+      .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        current.checked_sub(1)
+      });
     debug_assert!(
       released.is_ok(),
       "Compio direct-H1 fleet reservation accounting must not underflow"

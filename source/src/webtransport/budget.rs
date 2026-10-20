@@ -20,7 +20,7 @@ impl Budget {
   pub(crate) fn reserve(self: &Arc<Self>, bytes: usize, ceiling: usize) -> io::Result<Reservation> {
     self
       .used
-      .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+      .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
         used.checked_add(bytes).filter(|next| *next <= ceiling)
       })
       .map_err(|_| io::Error::other("WebTransport buffer capacity exhausted"))?;

@@ -22,7 +22,7 @@ function RunScript(Arguments: string[], Environment: NodeJS.ProcessEnv): void {
   }
 }
 
-test('read-only Helm OCI verifier accepts injected consumption tools and rejects mutable input', () => {
+void test('read-only Helm OCI verifier accepts injected consumption tools and rejects mutable input', () => {
   const Directory = Fs.mkdtempSync(Path.join(Os.tmpdir(), 'oxibelt-helm-oci-script-'))
   try {
     const Bin = Path.join(Directory, 'bin'); const Work = Path.join(Directory, 'work'); const RebuildWork = Path.join(Directory, 'rebuild-work'); const Archive = Path.join(Directory, 'oxibelt-1.2.3.tgz'); const RegistryArchive = Path.join(Directory, 'registry-oxibelt-1.2.3.tgz'); const CommandLog = Path.join(Directory, 'commands.log')
@@ -38,10 +38,10 @@ test('read-only Helm OCI verifier accepts injected consumption tools and rejects
     const Helm4ManifestText = `{\n  "schemaVersion": 2,\n  "config": {"digest":"sha256:${ConfigDigest}","mediaType":"application/vnd.cncf.helm.config.v1+json","size":${Buffer.byteLength(ConfigText)}},\n  "layers": [{"digest":"sha256:${ArchiveSha}","mediaType":"application/vnd.cncf.helm.chart.content.v1.tar+gzip","size":5}],\n  "annotations": {"org.opencontainers.image.created":"2026-08-18T11:25:22Z","org.opencontainers.image.description":"OxiBelt reverse proxy and WAF data plane","org.opencontainers.image.title":"oxibelt","org.opencontainers.image.version":"1.2.3","oxibelt.dev/feature-status":"experimental","oxibelt.dev/kubernetes-support-policy":"1"}\n}\n`
     Fs.writeFileSync(Helm4Manifest, Helm4ManifestText)
     const Helm4Digest = `sha256:${Crypto.createHash('sha256').update(Helm4ManifestText).digest('hex')}`
-    const WriteManifestVariant = (name: string, text: string) => {
-      const PathValue = Path.join(Directory, `${name}-manifest.json`)
-      Fs.writeFileSync(PathValue, text)
-      return { path: PathValue, digest: `sha256:${Crypto.createHash('sha256').update(text).digest('hex')}` }
+    const WriteManifestVariant = (Name: string, Text: string) => {
+      const PathValue = Path.join(Directory, `${Name}-manifest.json`)
+      Fs.writeFileSync(PathValue, Text)
+      return { path: PathValue, digest: `sha256:${Crypto.createHash('sha256').update(Text).digest('hex')}` }
     }
     const PartialAnnotations = WriteManifestVariant('partial-annotations', Helm4ManifestText.replace('"org.opencontainers.image.created":"2026-08-18T11:25:22Z",', ''))
     const ExtraAnnotations = WriteManifestVariant('extra-annotations', Helm4ManifestText.replace('"oxibelt.dev/kubernetes-support-policy":"1"', '"oxibelt.dev/kubernetes-support-policy":"1","unexpected":"value"'))
@@ -49,9 +49,10 @@ test('read-only Helm OCI verifier accepts injected consumption tools and rejects
     const InvalidCreated = WriteManifestVariant('invalid-created', Helm4ManifestText.replace('2026-08-18T11:25:22Z', '2026-02-31T11:25:22Z'))
     const WrongVersion = WriteManifestVariant('wrong-version', Helm4ManifestText.replace('"org.opencontainers.image.version":"1.2.3"', '"org.opencontainers.image.version":"1.2.4"'))
     const WrongPolicy = WriteManifestVariant('wrong-policy', Helm4ManifestText.replace('"oxibelt.dev/feature-status":"experimental"', '"oxibelt.dev/feature-status":"stable"'))
+    const ConsumptionHelmVersion = 'v3.22.1'
     WriteExecutable(Path.join(Bin, 'helm'), `
 [[ -z "\${COMMAND_LOG:-}" ]] || printf 'helm:%s\\n' "$*" >>"\${COMMAND_LOG}"
-if [[ "$1 $2" == "version --short" ]]; then echo v3.22.0; exit 0; fi
+if [[ "$1 $2" == "version --short" ]]; then echo "\${HELM_VERSION:-${ConsumptionHelmVersion}}"; exit 0; fi
 case "$1" in
   show) [[ "$2" == chart && "$3" == */oxibelt-1.2.3.tgz ]] || exit 8; if [[ "\${APP_VERSION_QUOTED:-}" == 1 ]]; then app_version='"1.2.3"'; else app_version='1.2.3'; fi; printf 'apiVersion: v2\\nname: oxibelt\\nversion: 1.2.3\\nappVersion: %s\\nannotations:\\n  oxibelt.dev/feature-status: experimental\\n  oxibelt.dev/kubernetes-support-policy: "1"\\n' "$app_version" ;;
   lint|template) : ;;
@@ -117,6 +118,14 @@ fi`)
       const VariantWork = Path.join(Directory, `${Variant}-work`); Fs.mkdirSync(VariantWork)
       Assert.throws(() => RunScript(Arguments(VariantWork, '1.2.3', VariantDigest), { ...Environment, MANIFEST_VARIANT: Variant }), Expected)
     }
+    for (const HelmVersion of ['v3.22.0', 'v3.22.1', 'v4.3.0', 'v4.3.1']) {
+      const CompatibleWork = Path.join(Directory, `compatible-${HelmVersion}`); Fs.mkdirSync(CompatibleWork)
+      RunScript(Arguments(CompatibleWork), { ...Environment, HELM_VERSION: HelmVersion })
+    }
+    for (const HelmVersion of ['v3.22.2', 'v4.3.2', 'v4.3.1-rc.1']) {
+      const UnsupportedWork = Path.join(Directory, `unsupported-${HelmVersion}`); Fs.mkdirSync(UnsupportedWork)
+      Assert.throws(() => RunScript(Arguments(UnsupportedWork), { ...Environment, HELM_VERSION: HelmVersion }), /consumption verification requires Helm/)
+    }
     const Commands = Fs.readFileSync(CommandLog, 'utf8')
     Assert.match(Commands, /oras:manifest fetch --descriptor ghcr\.io\/oxibelt\/charts\/oxibelt:1\.2\.3/)
     Assert.match(Commands, new RegExp(`oras:manifest fetch --descriptor ghcr\\.io/oxibelt/charts/oxibelt@${Digest}`))
@@ -126,7 +135,7 @@ fi`)
     Assert.match(Commands, /helm:install .*--dry-run=client/)
     Assert.doesNotMatch(Commands, /helm:pull/)
     Assert.throws(() => RunScript(Arguments(Directory), Environment), /work directory must be empty/)
-    Assert.throws(() => RunScript(['--mode', 'rebuild', ...Arguments(RebuildWork).slice(2), '--workspace-path', Directory, '--release-ref', 'refs/tags/1.2.3', '--revision', 'a'.repeat(40)], Environment), /byte rebuild requires Helm v4\.3\.0/)
+    Assert.throws(() => RunScript(['--mode', 'rebuild', ...Arguments(RebuildWork).slice(2), '--workspace-path', Directory, '--release-ref', 'refs/tags/1.2.3', '--revision', 'a'.repeat(40)], Environment), /byte rebuild requires source-matched Helm v4\.3\.0 or v4\.3\.1/)
     for (const [Name, Expected] of [['extra', /unexpected JSON keys/], ['duplicate', /duplicate JSON key/], ['size', /exact raw manifest bytes/], ['digest', /exact raw manifest bytes/]] as const) {
       const BadDescriptorWork = Path.join(Directory, `bad-descriptor-${Name}-work`); Fs.mkdirSync(BadDescriptorWork)
       Assert.throws(() => RunScript(Arguments(BadDescriptorWork), { ...Environment, BAD_DESCRIPTOR: Name }), Expected)

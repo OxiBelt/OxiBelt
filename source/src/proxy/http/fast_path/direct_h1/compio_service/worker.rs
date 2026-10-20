@@ -245,7 +245,7 @@ struct ActiveOperationGuard {
 impl ActiveOperationGuard {
   fn acquire(active_operations: Arc<AtomicUsize>) -> Option<Self> {
     active_operations
-      .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+      .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         current.checked_add(1)
       })
       .ok()?;
@@ -258,7 +258,7 @@ impl Drop for ActiveOperationGuard {
     let decremented =
       self
         .active_operations
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
           current.checked_sub(1)
         });
     debug_assert!(
@@ -497,7 +497,7 @@ fn reject_queued(
 
 fn decrement_queue(metrics: &Metrics, queue_occupancy: &AtomicUsize) -> bool {
   if queue_occupancy
-    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+    .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
       current.checked_sub(1)
     })
     .is_err()

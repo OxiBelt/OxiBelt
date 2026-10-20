@@ -112,7 +112,7 @@ function Receipt(
     },
     toolVersions: [
       { name: 'kubectl', version: 'v1.34.11' },
-      { name: 'helm', version: '3.22.0' }
+      { name: 'helm', version: '3.22.1' }
     ],
     artifactSubjects: Feature.requiredArtifacts.map((Requirement, Index) => {
       const Digest = `sha256:${((Index + 2) % 10).toString().repeat(64)}`
@@ -139,7 +139,7 @@ function Receipt(
   }
 }
 
-test('accepts the exact experimental registry, support document, and lifecycle matrix', () => {
+void test('accepts the exact experimental registry, support document, and lifecycle matrix', () => {
   const Loaded = ValidateKubernetesGraduationWorkspace(RepoRoot, GitHead())
   Assert.equal(Loaded.schemaVersion, 2)
   Assert.equal(Loaded.policyVersion, 4)
@@ -158,7 +158,7 @@ test('accepts the exact experimental registry, support document, and lifecycle m
   )
 })
 
-test('preserves support inputs and rejects invalid promotion or platform scope', () => {
+void test('preserves support inputs and rejects invalid promotion or platform scope', () => {
   const Schema = ReadJson('devops/config/kubernetes-feature-graduation.schema.json')
   const Unknown = Policy()
   Object.assign(Unknown as unknown as Record<string, unknown>, { ignored: true })
@@ -245,7 +245,7 @@ test('preserves support inputs and rejects invalid promotion or platform scope',
   )
 })
 
-test('admits the immediate previous Helm contract only when explicitly requested', () => {
+void test('admits the immediate previous Helm contract only when explicitly requested', () => {
   const PreviousPolicy = Policy()
   PreviousPolicy.supportContract.helm.versions = ['3.21.4', '4.2.4']
   const PreviousSchema = ReadJson(
@@ -262,7 +262,7 @@ test('admits the immediate previous Helm contract only when explicitly requested
 
   Assert.throws(
     () => ValidateKubernetesGraduationPolicyObject(PreviousPolicy, PreviousSchema),
-    /Helm compatibility versions must be exactly \[3\.22\.0, 4\.3\.0\], found \[3\.21\.4, 4\.2\.4\]/
+    /Helm compatibility versions must be exactly \[3\.22\.1, 4\.3\.1\], found \[3\.21\.4, 4\.2\.4\]/
   )
   const Validated = ValidateKubernetesGraduationPolicyObject(
     PreviousPolicy,
@@ -270,9 +270,18 @@ test('admits the immediate previous Helm contract only when explicitly requested
     { AllowPreviousHelmCompatibility: true }
   )
   Assert.deepEqual(Validated.supportContract.helm.versions, ['3.21.4', '4.2.4'])
+  PreviousPolicy.supportContract.helm.versions = ['3.22.0', '4.3.0']
+  Items.enum = ['3.22.0', '4.3.0']
+  Assert.throws(() => ValidateKubernetesGraduationPolicyObject(PreviousPolicy, PreviousSchema), /Helm compatibility versions must be exactly/)
+  const PriorPatch = ValidateKubernetesGraduationPolicyObject(PreviousPolicy, PreviousSchema, { AllowPreviousHelmCompatibility: true })
+  Assert.deepEqual(PriorPatch.supportContract.helm.versions, ['3.22.0', '4.3.0'])
+  PreviousPolicy.supportContract.helm.versions = ['3.22.0', '4.3.1']
+  Items.enum = ['3.22.0', '4.3.1']
+  Assert.throws(() => ValidateKubernetesGraduationPolicyObject(PreviousPolicy, PreviousSchema, { AllowPreviousHelmCompatibility: true }), /Helm compatibility versions must be exactly/)
+
 })
 
-test('renders detached gate descriptors and qualification platforms deterministically', () => {
+void test('renders detached gate descriptors and qualification platforms deterministically', () => {
   const First = RenderKubernetesGraduationTables(Policy())
   const Second = RenderKubernetesGraduationTables(structuredClone(Policy()))
   Assert.equal(First, Second)
@@ -284,7 +293,7 @@ test('renders detached gate descriptors and qualification platforms deterministi
   Assert.doesNotMatch(First, /\| State \| Applies to \|/)
 })
 
-test('binds candidate and official beta phases to exact release refs', () => {
+void test('binds candidate and official beta phases to exact release refs', () => {
   ValidateKubernetesGraduationPhaseRef('candidate', 'refs/heads/main')
   ValidateKubernetesGraduationPhaseRef('official_beta', 'refs/tags/0.8.1-beta.1')
   Assert.throws(
@@ -304,7 +313,7 @@ test('binds candidate and official beta phases to exact release refs', () => {
   )
 })
 
-test('requires a supported exact feature-scoped receipt with complete provenance', () => {
+void test('requires a supported exact feature-scoped receipt with complete provenance', () => {
   const BaselinePolicy = Policy()
   const PolicyValue = SupportedPolicy(['supply-chain-admission-bundle'])
   const Schema = ReadJson('devops/config/kubernetes-feature-graduation-evidence.schema.json')
@@ -478,7 +487,7 @@ test('requires a supported exact feature-scoped receipt with complete provenance
   )
 })
 
-test('requires the exact supported receipt set and rejects experimental extras', () => {
+void test('requires the exact supported receipt set and rejects experimental extras', () => {
   const BaselinePolicy = Policy()
   Assert.throws(
     () => ValidateKubernetesGraduationEvidenceSet(BaselinePolicy, []),
@@ -496,7 +505,7 @@ test('requires the exact supported receipt set and rejects experimental extras',
   )
 })
 
-test('loads only canonical regular evidence files below a non-symlink directory', () => {
+void test('loads only canonical regular evidence files below a non-symlink directory', () => {
   const TemporaryRoot = Fs.mkdtempSync(Path.join(RepoRoot, '.kubernetes-graduation-test-'))
   const Directory = Path.join(TemporaryRoot, 'receipts')
   Fs.mkdirSync(Directory)
@@ -543,7 +552,7 @@ test('loads only canonical regular evidence files below a non-symlink directory'
   }
 })
 
-test('keeps domain-independent receipt fields aligned with non-Kubernetes evidence', () => {
+void test('keeps domain-independent receipt fields aligned with non-Kubernetes evidence', () => {
   type SchemaNode = {
     const?: unknown
     required?: string[]

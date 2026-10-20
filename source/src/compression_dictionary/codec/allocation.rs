@@ -77,7 +77,7 @@ impl<T: Clone + Default> Allocator<T> for BoundedAlloc {
     if self
       .0
       .live
-      .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+      .try_update(Ordering::AcqRel, Ordering::Acquire, |live| {
         live
           .checked_add(bytes)
           .filter(|next| *next <= self.0.maximum)

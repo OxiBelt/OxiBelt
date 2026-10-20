@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-09-20",
+  "reviewedOn": "2026-10-20",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,9 +17,9 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "c0cadc5407a697fdca6af5f6b5d5d6a6b6101f18cd40589b90bcf2c4163fc872",
-      "exemptionInventorySha256": "bd21e1575dce0d01e19bb0741a9e09da3f666de87814c5740a645fe920d5ee5a",
-      "exemptedPackageVersions": 456
+      "lockfileSha256": "ebddca96b957c50c43e702e382d1cd617340e84ccd40f31aae4311a4fed6be93",
+      "exemptionInventorySha256": "6b4585c43b5ab022db21374af8c54e1870724ca0893b711bc5d6a760890067a8",
+      "exemptedPackageVersions": 452
     },
     "reviewTriggers": [
       "new direct dependency",
@@ -30,94 +30,209 @@
       "new or extended dependency-policy exception"
     ],
     "duplicateCompatibilityBaseline": {
-      "aes": ["0.8", "0.9"],
-      "alloc-no-stdlib": ["2", "3"],
-      "alloc-stdlib": ["0.2", "0.3"],
-      "annotate-snippets": ["0.11", "0.12"],
-      "argon2": ["0.5", "0.6"],
-      "base64": ["0.22", "0.23"],
-      "bit-set": ["0.8", "0.9"],
-      "bit-vec": ["0.8", "0.9"],
-      "bitflags": ["1", "2"],
-      "blake2": ["0.10", "0.11"],
-      "block-buffer": ["0.10", "0.12"],
-      "brotli": ["8", "9"],
-      "brotli-decompressor": ["5", "6"],
-      "cipher": ["0.4", "0.5"],
-      "const-oid": ["0.10", "0.9"],
-      "cpufeatures": ["0.2", "0.3"],
-      "crypto-common": ["0.1", "0.2"],
-      "der": ["0.7", "0.8"],
-      "der_derive": ["0.7", "0.8"],
-      "digest": ["0.10", "0.11"],
-      "foldhash": ["0.1", "0.2"],
-      "generic-array": ["0.14", "1"],
-      "getrandom": ["0.2", "0.3", "0.4"],
-      "granit-parser": ["0.0.7", "1"],
-      "hashbrown": ["0.15", "0.16", "0.17"],
-      "inout": ["0.1", "0.2"],
-      "itertools": ["0.13", "0.14", "0.15"],
-      "password-hash": ["0.5", "0.6"],
-      "pem-rfc7468": ["0.7", "1"],
-      "r-efi": ["5", "6"],
-      "rand": ["0.10", "0.8", "0.9"],
-      "rand_chacha": ["0.3", "0.9"],
-      "rand_core": ["0.10", "0.6", "0.9"],
-      "serde-saphyr": ["0.0.29", "1"],
-      "sha2": ["0.10", "0.11"],
-      "shlex": ["1", "2"],
-      "spin": ["0.9", "0.10"],
-      "spki": ["0.7", "0.8"],
-      "syn": ["2", "3"],
-      "thiserror": ["1", "2"],
-      "thiserror-impl": ["1", "2"],
-      "untrusted": ["0.7", "0.9"],
-      "windows-sys": ["0.52", "0.61"],
-      "x509-cert": ["0.2", "0.3"]
+      "aes": [
+        "0.8",
+        "0.9"
+      ],
+      "annotate-snippets": [
+        "0.11",
+        "0.12"
+      ],
+      "argon2": [
+        "0.5",
+        "0.6"
+      ],
+      "base64": [
+        "0.22",
+        "0.23"
+      ],
+      "bit-set": [
+        "0.8",
+        "0.9"
+      ],
+      "bit-vec": [
+        "0.8",
+        "0.9"
+      ],
+      "bitflags": [
+        "1",
+        "2"
+      ],
+      "blake2": [
+        "0.10",
+        "0.11"
+      ],
+      "block-buffer": [
+        "0.10",
+        "0.12"
+      ],
+      "cipher": [
+        "0.4",
+        "0.5"
+      ],
+      "const-oid": [
+        "0.10",
+        "0.9"
+      ],
+      "cpufeatures": [
+        "0.2",
+        "0.3"
+      ],
+      "crypto-common": [
+        "0.1",
+        "0.2"
+      ],
+      "der": [
+        "0.7",
+        "0.8"
+      ],
+      "der_derive": [
+        "0.7",
+        "0.8"
+      ],
+      "digest": [
+        "0.10",
+        "0.11"
+      ],
+      "foldhash": [
+        "0.1",
+        "0.2"
+      ],
+      "generic-array": [
+        "0.14",
+        "1"
+      ],
+      "getrandom": [
+        "0.2",
+        "0.3",
+        "0.4"
+      ],
+      "granit-parser": [
+        "0.0.7",
+        "1"
+      ],
+      "hashbrown": [
+        "0.15",
+        "0.16",
+        "0.17"
+      ],
+      "inout": [
+        "0.1",
+        "0.2"
+      ],
+      "itertools": [
+        "0.13",
+        "0.14",
+        "0.15"
+      ],
+      "password-hash": [
+        "0.5",
+        "0.6"
+      ],
+      "pem-rfc7468": [
+        "0.7",
+        "1"
+      ],
+      "r-efi": [
+        "5",
+        "6"
+      ],
+      "rand": [
+        "0.10",
+        "0.8"
+      ],
+      "rand_core": [
+        "0.10",
+        "0.6"
+      ],
+      "serde-saphyr": [
+        "0.0.29",
+        "1"
+      ],
+      "sha2": [
+        "0.10",
+        "0.11"
+      ],
+      "shlex": [
+        "1",
+        "2"
+      ],
+      "spin": [
+        "0.10",
+        "0.9"
+      ],
+      "spki": [
+        "0.7",
+        "0.8"
+      ],
+      "syn": [
+        "2",
+        "3"
+      ],
+      "thiserror": [
+        "1",
+        "2"
+      ],
+      "thiserror-impl": [
+        "1",
+        "2"
+      ],
+      "untrusted": [
+        "0.7",
+        "0.9"
+      ],
+      "windows-sys": [
+        "0.52",
+        "0.61"
+      ],
+      "x509-cert": [
+        "0.2",
+        "0.3"
+      ]
     },
     "vendoredRustSources": [
       {
         "name": "h2",
-        "version": "0.4.19",
+        "version": "0.4.20",
         "path": "source/third_party/h2",
         "upstreamRepository": "https://github.com/hyperium/h2",
-        "upstreamArchiveSha256": "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16",
+        "upstreamArchiveSha256": "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118",
         "manifestPath": "supply-chain/h2-source.sha256",
-        "manifestSha256": "2d6120617a0d4be36fd45e97a9bacc8f79c62d850febab48a5254afa1bd396f5",
+        "manifestSha256": "b982663fa581db3228576cb3c8e736969b2c27f8d0c34a4c724a61cdb7265063",
         "license": "MIT",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/195",
-        "reviewedOn": "2026-09-18",
+        "reviewedOn": "2026-10-20",
         "maintenanceReviewIntervalDays": 30,
         "removalCriteria": "Replace this patch when upstream acknowledged WebTransport SETTINGS snapshots satisfy the draft-15 transport and isolation matrix and a close-aware RFC 8441 peer extended CONNECT capability wait is available. Review every h2 update and retain HTTP/2 stream and unsafe invariants."
       },
       {
         "name": "hyper",
-        "version": "1.11.1",
+        "version": "1.12.0",
         "path": "source/third_party/hyper",
         "upstreamRepository": "https://github.com/hyperium/hyper",
-        "upstreamArchiveSha256": "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43",
+        "upstreamArchiveSha256": "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c",
         "manifestPath": "supply-chain/hyper-source.sha256",
-        "manifestSha256": "3a98231bef51abd5211319bbc9047d8a4e43f1f675abd74ff2cf56587ffd506e",
+        "manifestSha256": "990dca3e441da68109357b210960e076b6f209a88d8ce4e54dac03ea919e9b68",
         "license": "MIT",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/194",
-        "reviewedOn": "2026-09-18",
+        "reviewedOn": "2026-10-20",
         "maintenanceReviewIntervalDays": 30,
         "removalCriteria": "Replace this exact patch with an upstream release once bounded HTTP/1 and HTTP/2 server informational sending and HTTP/2 client callbacks pass the OxiBelt cross-protocol matrix. Also require equivalent typed WebTransport CONNECT handoff, acknowledged settings snapshots, bounded independently driven send/reset semantics tracked in issue #195, and an HTTP/2 client wait for the peer extended CONNECT setting. Review every Hyper update and preserve upstream framing, ownership, and unsafe invariants."
       },
       {
         "name": "rustls",
-        "version": "0.23.45",
+        "version": "0.23.46",
         "path": "source/third_party/rustls",
         "upstreamRepository": "https://github.com/rustls/rustls",
-        "upstreamArchiveSha256": "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634",
+        "upstreamArchiveSha256": "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf",
         "manifestPath": "supply-chain/rustls-source.sha256",
-        "manifestSha256": "3e32be07eb6fc6716dad12a819ac77d9986718b0011f1d0ebcd1dec7cce41265",
+        "manifestSha256": "1bc3cc7c1656f5882b958c3f67d81c218cc6740292e2608b7da3388a3ccf11b1",
         "license": "Apache-2.0 OR ISC OR MIT",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/209",
-        "reviewedOn": "2026-09-24",
+        "reviewedOn": "2026-10-20",
         "maintenanceReviewIntervalDays": 30,
         "removalCriteria": "Replace the local RFC 9846 patch when an upstream rustls release provides equivalent bounded key-update epochs, post-close write rejection, disabled-resumption ticket handling, general_error support, and an explicit TLS 1.2 downgrade sentinel setting. Review each rustls update and rerun the TLS and dependency admission suites."
       },
@@ -153,16 +268,16 @@
       },
       {
         "name": "quinn-proto",
-        "version": "0.11.18",
+        "version": "0.11.19",
         "path": "source/third_party/quinn-proto",
         "upstreamRepository": "https://github.com/quinn-rs/quinn",
-        "upstreamArchiveSha256": "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc",
+        "upstreamArchiveSha256": "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe",
         "manifestPath": "supply-chain/quinn-proto-source.sha256",
-        "manifestSha256": "a3d43ca13b2b96cb6f362f0cac8595cae44c84f9b0ceacb472a73b5aa250accd",
+        "manifestSha256": "6e07bb4a9bb7597ea34ccba62b61f132b0b73b572044258c73c3de94f0e91c54",
         "license": "MIT OR Apache-2.0",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/220",
-        "reviewedOn": "2026-09-25",
+        "reviewedOn": "2026-10-20",
         "maintenanceReviewIntervalDays": 30,
         "removalCriteria": "Replace this patch when upstream quinn-proto implements draft-ietf-quic-reliable-stream-reset-09 transport parameters, frames, reliable prefix retransmission, final-size accounting, and 0-RTT compatibility. Review every update and rerun protocol tests."
       },
@@ -173,11 +288,11 @@
         "upstreamRepository": "https://github.com/moq-dev/web-transport",
         "upstreamArchiveSha256": "1a81bcc79bf48ad0b819bfa51ec28524ee7c356056d43c316727d6b505dcc71e",
         "manifestPath": "supply-chain/web-transport-proto-source.sha256",
-        "manifestSha256": "8571191a05b5628312f9ebbf8676b340eebb5f4bca583a818e8e865780eda216",
+        "manifestSha256": "8474621936650fbbd738dee73ada626f7079a6aaa62e9ffc31782147c6e661fb",
         "license": "MIT OR Apache-2.0",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/220",
-        "reviewedOn": "2026-09-25",
+        "reviewedOn": "2026-10-20",
         "maintenanceReviewIntervalDays": 30,
         "removalCriteria": "Replace this patch when upstream web-transport-proto supports draft 16 negotiation, capsules, and stream identifiers alongside draft 02. Review every update and rerun WebTransport and dependency admission suites."
       },
@@ -258,109 +373,235 @@
       {
         "category": "memory-allocation",
         "packages": {},
-        "nativeSources": ["mimalloc"],
+        "nativeSources": [
+          "mimalloc"
+        ],
         "reviewBoundary": "Native allocation contracts, build provenance, secure-mode selection, FFI ownership, cross-thread free and allocator lifecycle"
       },
       {
         "category": "cryptography",
         "packages": {
-          "aes-gcm": ["0.11.1"],
-          "argon2": ["0.6.0"],
-          "aws-lc-fips-sys": ["0.14.2"],
-          "aws-lc-rs": ["1.18.1"],
-          "aws-lc-sys": ["0.45.0"],
-          "chacha20poly1305": ["0.11.0"],
-          "hkdf": ["0.13.0"],
-          "hmac": ["0.13.0"],
-          "openssl-sys": ["0.9.117"],
-          "ring": ["0.17.14"],
-          "sequoia-openpgp": ["2.4.1"],
-          "sha2": ["0.10.9", "0.11.0"],
-          "zeroize": ["1.9.0"]
+          "aes-gcm": [
+            "0.11.1"
+          ],
+          "argon2": [
+            "0.6.0"
+          ],
+          "aws-lc-fips-sys": [
+            "0.14.2"
+          ],
+          "aws-lc-rs": [
+            "1.18.1"
+          ],
+          "aws-lc-sys": [
+            "0.45.0"
+          ],
+          "chacha20poly1305": [
+            "0.11.0"
+          ],
+          "hkdf": [
+            "0.13.0"
+          ],
+          "hmac": [
+            "0.13.0"
+          ],
+          "openssl-sys": [
+            "0.9.117"
+          ],
+          "ring": [
+            "0.17.14"
+          ],
+          "sequoia-openpgp": [
+            "2.4.1"
+          ],
+          "sha2": [
+            "0.10.9",
+            "0.11.0"
+          ],
+          "zeroize": [
+            "1.9.1"
+          ]
         },
         "reviewBoundary": "primitive choice, key handling, FFI, unsafe code, enabled algorithms, and release provenance"
       },
       {
         "category": "tls-quic-http",
         "packages": {
-          "fastwebsockets": ["0.10.0"],
-          "h2": ["0.4.19"],
-          "h3": ["0.0.8"],
-          "h3-quinn": ["0.0.10"],
-          "h3-webtransport": ["0.1.2"],
-          "http": ["1.5.0"],
-          "httparse": ["1.10.1"],
-          "hyper": ["1.11.1"],
-          "hyper-rustls": ["0.27.10"],
-          "hyper-util": ["0.1.20"],
-          "kio": ["0.5.9"],
-          "quinn": ["0.11.12"],
-          "quinn-proto": ["0.11.18"],
-          "quinn-udp": ["0.5.15"],
-          "rustls": ["0.23.45"],
-          "rustls-pki-types": ["1.15.1"],
-          "rustls-webpki": ["0.103.15"],
-          "web-transport-proto": ["0.6.2"],
-          "web-transport-quinn": ["0.12.1"],
-          "web-transport-trait": ["0.4.0"]
+          "fastwebsockets": [
+            "0.10.0"
+          ],
+          "h2": [
+            "0.4.20"
+          ],
+          "h3": [
+            "0.0.8"
+          ],
+          "h3-quinn": [
+            "0.0.10"
+          ],
+          "h3-webtransport": [
+            "0.1.2"
+          ],
+          "http": [
+            "1.5.0"
+          ],
+          "httparse": [
+            "1.10.1"
+          ],
+          "hyper": [
+            "1.12.0"
+          ],
+          "hyper-rustls": [
+            "0.27.10"
+          ],
+          "hyper-util": [
+            "0.1.20"
+          ],
+          "kio": [
+            "0.5.9"
+          ],
+          "quinn": [
+            "0.11.12"
+          ],
+          "quinn-proto": [
+            "0.11.19"
+          ],
+          "quinn-udp": [
+            "0.5.15"
+          ],
+          "rustls": [
+            "0.23.46"
+          ],
+          "rustls-pki-types": [
+            "1.15.1"
+          ],
+          "rustls-webpki": [
+            "0.103.16"
+          ],
+          "web-transport-proto": [
+            "0.6.2"
+          ],
+          "web-transport-quinn": [
+            "0.12.1"
+          ],
+          "web-transport-trait": [
+            "0.4.0"
+          ]
         },
         "reviewBoundary": "message framing, certificate verification, protocol state machines, parser limits, and unsafe or platform code"
       },
       {
         "category": "parsing-serialization",
         "packages": {
-          "jsonschema": ["0.56.0"],
-          "online-dsl-forge": ["0.3.5"],
-          "serde": ["1.0.229"],
-          "serde-saphyr": ["0.0.29", "1.3.0"],
-          "serde_json": ["1.0.151"],
-          "toml": ["1.1.6+spec-1.1.0"],
-          "toml_edit": ["0.25.15+spec-1.1.0"],
-          "urlpattern": ["0.6.0"]
+          "jsonschema": [
+            "0.56.0"
+          ],
+          "online-dsl-forge": [
+            "0.3.5"
+          ],
+          "serde": [
+            "1.0.229"
+          ],
+          "serde-saphyr": [
+            "0.0.29",
+            "1.3.0"
+          ],
+          "serde_json": [
+            "1.0.154"
+          ],
+          "toml": [
+            "1.1.8+spec-1.1.0"
+          ],
+          "toml_edit": [
+            "0.25.17+spec-1.1.0"
+          ],
+          "urlpattern": [
+            "0.6.0"
+          ]
         },
         "reviewBoundary": "untrusted-input handling, recursion and allocation bounds, ambiguity, format compatibility, and URL pattern canonicalization and matching"
       },
       {
         "category": "credential-internationalization",
         "packages": {
-          "precis-core": ["0.2.0"],
-          "precis-profiles": ["0.2.0"],
-          "precis-tools": ["0.1.10"],
-          "regex-lite": ["0.1.9"],
-          "ucd-parse": ["0.1.13"]
+          "precis-core": [
+            "0.2.0"
+          ],
+          "precis-profiles": [
+            "0.2.0"
+          ],
+          "precis-tools": [
+            "0.1.10"
+          ],
+          "regex-lite": [
+            "0.1.9"
+          ],
+          "ucd-parse": [
+            "0.1.13"
+          ]
         },
         "reviewBoundary": "RFC 8264 and RFC 8265 conformance, bundled Unicode table generation, disallowed-code-point handling, normalization ambiguity, and build-time network isolation"
       },
       {
         "category": "compression",
         "packages": {
-          "async-compression": ["0.4.48"],
-          "brotli": ["8.0.4", "9.0.0"],
-          "flate2": ["1.1.10"],
-          "miniz_oxide": ["0.9.1"],
-          "zlib-rs": ["0.6.8"],
-          "zstd": ["0.14.0"]
+          "async-compression": [
+            "0.4.51"
+          ],
+          "brotli": [
+            "9.0.0"
+          ],
+          "flate2": [
+            "1.1.10"
+          ],
+          "miniz_oxide": [
+            "0.9.1"
+          ],
+          "zlib-rs": [
+            "0.6.8"
+          ],
+          "zstd": [
+            "0.14.3"
+          ]
         },
         "reviewBoundary": "decompression limits, native-code boundaries, memory use, and malformed-stream behavior"
       },
       {
         "category": "database",
         "packages": {
-          "object_store": ["0.14.2"],
-          "sqlx": ["0.9.0"],
-          "sqlx-core": ["0.9.0"],
-          "sqlx-postgres": ["0.9.0"]
+          "object_store": [
+            "0.14.2"
+          ],
+          "sqlx": [
+            "0.9.0"
+          ],
+          "sqlx-core": [
+            "0.9.0"
+          ],
+          "sqlx-postgres": [
+            "0.9.0"
+          ]
         },
         "reviewBoundary": "query binding, object-key and conditional-write semantics, TLS, cloud credential handling, protocol parsing, and migration compatibility"
       },
       {
         "category": "kubernetes",
         "packages": {
-          "k8s-openapi": ["0.28.0"],
-          "kube": ["4.2.0"],
-          "kube-client": ["4.2.0"],
-          "kube-core": ["4.2.0"],
-          "kube-runtime": ["4.2.0"]
+          "k8s-openapi": [
+            "0.28.0"
+          ],
+          "kube": [
+            "4.2.0"
+          ],
+          "kube-client": [
+            "4.2.0"
+          ],
+          "kube-core": [
+            "4.2.0"
+          ],
+          "kube-runtime": [
+            "4.2.0"
+          ]
         },
         "reviewBoundary": "API version selection, authentication, TLS, watch-stream parsing, and controller retry behavior"
       }
@@ -402,25 +643,27 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:c0cadc5407a697fdca6af5f6b5d5d6a6b6101f18cd40589b90bcf2c4163fc872",
-      "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. The development-only proptest graph adds exact rand 0.9, rand_chacha 0.9, and rand_core 0.9 lines tracked by https://github.com/OxiBelt/OxiBelt/issues/172; any further line fails the static admission test.",
-      "owner": "OxiBelt maintainers",
+      "subject": "Cargo.lock@sha256:ebddca96b957c50c43e702e382d1cd617340e84ccd40f31aae4311a4fed6be93",
+      "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. Reviewed proptest and compression updates removed obsolete RNG, Brotli and allocator compatibility lines; any further line fails the static admission test.",
+      "owner": "@piquark6046",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-09-10",
-      "expiresOn": "2026-10-19"
+      "reviewedOn": "2026-10-20",
+      "expiresOn": "2026-11-03",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304"
     },
     {
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:c0cadc5407a697fdca6af5f6b5d5d6a6b6101f18cd40589b90bcf2c4163fc872",
+      "subject": "Cargo.lock@sha256:ebddca96b957c50c43e702e382d1cd617340e84ccd40f31aae4311a4fed6be93",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
-      "owner": "OxiBelt maintainers",
+      "owner": "@piquark6046",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-09-10",
-      "expiresOn": "2026-10-19"
+      "reviewedOn": "2026-10-20",
+      "expiresOn": "2026-11-03",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304"
     },
     {
       "id": "rust-cargo-vet-proptest-1.11.0",
@@ -428,50 +671,6 @@
       "control": "cargo-vet",
       "subject": "proptest@1.11.0:safe-to-run",
       "rationale": "OxiBelt uses proptest only for bounded TURN protocol and authentication property tests with default features disabled. Retain this exact development-only exemption while imported or local audit coverage is established.",
-      "owner": "@piquark6046",
-      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
-      "reviewedOn": "2026-09-01",
-      "expiresOn": "2026-11-29"
-    },
-    {
-      "id": "rust-cargo-vet-rand-0.9.5",
-      "ecosystem": "rust",
-      "control": "cargo-vet",
-      "subject": "rand@0.9.5:safe-to-run",
-      "rationale": "This exact rand release is reachable only through the development-only proptest graph. Retain the safe-to-run exemption while issue 172 tracks replacement by imported or local audit coverage.",
-      "owner": "@piquark6046",
-      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
-      "reviewedOn": "2026-09-01",
-      "expiresOn": "2026-11-29"
-    },
-    {
-      "id": "rust-cargo-vet-rand-chacha-0.9.0",
-      "ecosystem": "rust",
-      "control": "cargo-vet",
-      "subject": "rand_chacha@0.9.0:safe-to-run",
-      "rationale": "This exact rand_chacha release is reachable only through the development-only proptest graph. Retain the safe-to-run exemption while issue 172 tracks replacement by imported or local audit coverage.",
-      "owner": "@piquark6046",
-      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
-      "reviewedOn": "2026-09-01",
-      "expiresOn": "2026-11-29"
-    },
-    {
-      "id": "rust-cargo-vet-rand-core-0.9.5",
-      "ecosystem": "rust",
-      "control": "cargo-vet",
-      "subject": "rand_core@0.9.5:safe-to-run",
-      "rationale": "This exact rand_core release is reachable only through the development-only proptest graph. Retain the safe-to-run exemption while issue 172 tracks replacement by imported or local audit coverage.",
-      "owner": "@piquark6046",
-      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
-      "reviewedOn": "2026-09-01",
-      "expiresOn": "2026-11-29"
-    },
-    {
-      "id": "rust-cargo-vet-rand-xorshift-0.4.0",
-      "ecosystem": "rust",
-      "control": "cargo-vet",
-      "subject": "rand_xorshift@0.4.0:safe-to-run",
-      "rationale": "This exact rand_xorshift release is reachable only through the development-only proptest graph. Retain the safe-to-run exemption while issue 172 tracks replacement by imported or local audit coverage.",
       "owner": "@piquark6046",
       "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/172",
       "reviewedOn": "2026-09-01",
@@ -561,9 +760,9 @@
       "subject": "web-transport-trait@0.4.0:safe-to-deploy",
       "rationale": "Whole-crate certification remains withheld because the generic async RecvStream::read_buf default transmutes BufMut spare capacity to a mutable byte slice and advances it without enforcing that a safe implementation returned a size within initialized storage. Version 0.4.0 adds poll::RecvStream::poll_read_buf and poll_read_chunk with the same unchecked pattern. OxiBelt confines WebTransport to a private adapter that uses web-transport-quinn's Tokio AsyncRead path into initialized storage and rejects direct generic, raw, or poll receive APIs outside that boundary; retain this exact-version exception pending an upstream redesign or dependency removal.",
       "owner": "@piquark6046",
-      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/121",
-      "reviewedOn": "2026-08-09",
-      "expiresOn": "2026-10-19"
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304",
+      "reviewedOn": "2026-10-20",
+      "expiresOn": "2026-11-03"
     },
     {
       "id": "rust-license-buffered-reader-1.4.1",
@@ -571,11 +770,12 @@
       "control": "license",
       "subject": "buffered-reader@1.4.1:LGPL-2.0-or-later",
       "rationale": "Sequoia uses this streaming parser internally; keep the copyleft license scoped to the exact reviewed crate version.",
-      "owner": "OxiBelt maintainers",
+      "owner": "@piquark6046",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-21",
-      "expiresOn": "2026-10-19"
+      "reviewedOn": "2026-10-20",
+      "expiresOn": "2026-11-03",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304"
     },
     {
       "id": "rust-license-clubcard-0.3.4",
@@ -583,11 +783,12 @@
       "control": "license",
       "subject": "clubcard@0.3.4:MPL-2.0",
       "rationale": "CRLite uses this exact package for probabilistic certificate-revocation data; keep MPL approval package-local.",
-      "owner": "OxiBelt maintainers",
+      "owner": "@piquark6046",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-01",
-      "expiresOn": "2026-10-19"
+      "reviewedOn": "2026-10-20",
+      "expiresOn": "2026-11-03",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304"
     },
     {
       "id": "rust-license-clubcard-crlite-0.6.2",
@@ -595,11 +796,12 @@
       "control": "license",
       "subject": "clubcard-crlite@0.6.2:MPL-2.0",
       "rationale": "OxiBelt's CRLite integration directly relies on this exact MPL-licensed implementation.",
-      "owner": "OxiBelt maintainers",
+      "owner": "@piquark6046",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-08-04",
-      "expiresOn": "2026-10-19"
+      "reviewedOn": "2026-10-20",
+      "expiresOn": "2026-11-03",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304"
     },
     {
       "id": "rust-license-sequoia-openpgp-2.4.1",
@@ -607,11 +809,12 @@
       "control": "license",
       "subject": "sequoia-openpgp@2.4.1:LGPL-2.0-or-later",
       "rationale": "The CLI signing and verification boundary requires Sequoia; approval remains limited to the exact reviewed release.",
-      "owner": "OxiBelt maintainers",
+      "owner": "@piquark6046",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-07-21",
-      "expiresOn": "2026-10-19"
+      "reviewedOn": "2026-10-20",
+      "expiresOn": "2026-11-03",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304"
     }
   ]
 }

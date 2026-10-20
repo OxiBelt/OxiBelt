@@ -136,7 +136,8 @@ impl<B> SendRequest<B> {
     /// Returns whether the peer has acknowledged
     /// `SETTINGS_ENABLE_CONNECT_PROTOCOL` on this connection.
     pub fn is_extended_connect_protocol_enabled(&self) -> bool {
-        self.webtransport_settings.peer_extended_connect_protocol_enabled()
+        self.webtransport_settings
+            .peer_extended_connect_protocol_enabled()
     }
 
     /// Waits until the peer acknowledges `SETTINGS_ENABLE_CONNECT_PROTOCOL`.
@@ -231,7 +232,7 @@ where
                     Ok(Ok(resp)) => Ok(resp),
                     Ok(Err(err)) => Err(err),
                     // this is definite bug if it happens, but it shouldn't happen!
-                    Err(_canceled) => panic!("dispatch dropped without returning error"),
+                    Err(_canceled) => unreachable!("dispatch dropped without returning error"),
                 },
                 Err(_req) => {
                     debug!("connection was not ready");
@@ -262,7 +263,7 @@ where
                     Ok(Ok(res)) => Ok(res),
                     Ok(Err(err)) => Err(err),
                     // this is definite bug if it happens, but it shouldn't happen!
-                    Err(_) => panic!("dispatch dropped without returning error"),
+                    Err(_) => unreachable!("dispatch dropped without returning error"),
                 },
                 Err(req) => {
                     debug!("connection was not ready");
@@ -616,7 +617,10 @@ where
     }
 
     /// Sends these WebTransport SETTINGS in the HTTP/2 connection preface.
-    pub fn webtransport_settings(&mut self, settings: crate::ext::WebTransportSettings) -> &mut Self {
+    pub fn webtransport_settings(
+        &mut self,
+        settings: crate::ext::WebTransportSettings,
+    ) -> &mut Self {
         self.h2_builder.webtransport_settings = Some(settings.into());
         self
     }
@@ -694,15 +698,20 @@ mod tests {
             let _ = connection.accept().await;
         });
         let (client, connection) = Builder::new(TokioExecutor)
-            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(client_io))
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(
+                client_io,
+            ))
             .await
             .expect("Hyper HTTP/2 client handshake");
         let client_driver = tokio::spawn(async move { connection.await });
 
-        tokio::time::timeout(Duration::from_secs(1), client.wait_for_extended_connect_protocol())
-            .await
-            .expect("peer SETTINGS deadline")
-            .expect("extended CONNECT should be enabled");
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            client.wait_for_extended_connect_protocol(),
+        )
+        .await
+        .expect("peer SETTINGS deadline")
+        .expect("extended CONNECT should be enabled");
         assert!(client.is_extended_connect_protocol_enabled());
 
         client_driver.abort();
@@ -737,15 +746,20 @@ mod tests {
             drop(connection);
         });
         let (client, connection) = Builder::new(TokioExecutor)
-            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(client_io))
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(
+                client_io,
+            ))
             .await
             .expect("Hyper HTTP/2 client handshake");
         let client_driver = tokio::spawn(async move { connection.await });
 
-        let error = tokio::time::timeout(Duration::from_secs(1), client.wait_for_extended_connect_protocol())
-            .await
-            .expect("closed peer should resolve SETTINGS wait")
-            .expect_err("closed peer cannot enable extended CONNECT");
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.wait_for_extended_connect_protocol(),
+        )
+        .await
+        .expect("closed peer should resolve SETTINGS wait")
+        .expect_err("closed peer cannot enable extended CONNECT");
         assert!(error.is_closed());
         assert!(!client.is_extended_connect_protocol_enabled());
 
@@ -1008,7 +1022,9 @@ mod tests {
             ..Default::default()
         });
         let (mut client, connection) = builder
-            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(client_io))
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(
+                client_io,
+            ))
             .await
             .expect("Hyper HTTP/2 client handshake");
         let client_driver = tokio::spawn(async move { connection.await });
@@ -1062,7 +1078,9 @@ mod tests {
         });
 
         let (mut client, connection) = Builder::new(TokioExecutor)
-            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(client_io))
+            .handshake::<_, http_body_util::Empty<bytes::Bytes>>(crate::common::io::Compat::new(
+                client_io,
+            ))
             .await
             .expect("Hyper HTTP/2 client handshake");
         let client_driver = tokio::spawn(async move { connection.await });

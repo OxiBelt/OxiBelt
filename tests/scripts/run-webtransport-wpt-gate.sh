@@ -8,9 +8,9 @@ run_id="wt-wpt-$(date +%s)-$$"
 runner="${run_id}-runner"
 proxy="${run_id}-proxy"
 direct_retry_runner="${run_id}-direct-retry"
-wpt_image="${OXIBELT_WEBTRANSPORT_WPT_IMAGE:-oxibelt/webtransport-wpt:ece2d7fdc436-git-prefs156}"
+wpt_image="${OXIBELT_WEBTRANSPORT_WPT_IMAGE:-oxibelt/webtransport-wpt:ece2d7fdc436-chrome155-firefox158-prefs156}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-}"
-firefox_image="${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:156.0-geckodriver-0.37.1}"
+firefox_image="${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:158.0.1-geckodriver-0.37.1}"
 artifact_dir="${OXIBELT_TEST_ARTIFACT_DIR:-$(mktemp -d /tmp/oxibelt-webtransport-wpt-artifacts.XXXXXX)}"
 work_dir="$(mktemp -d /tmp/oxibelt-webtransport-wpt.XXXXXX)"
 created_wpt_image=false
@@ -59,9 +59,9 @@ docker start "${runner}" >/dev/null
 docker exec "${runner}" /bin/sh -c \
   'test "$(cat /opt/wpt/.source-revision)" = "ece2d7fdc436d4b9a3856877163b07ec15c05354"'
 docker exec "${runner}" /opt/chrome/chrome --version \
-  | grep --fixed-strings -- 'Google Chrome for Testing 154.0.8037.57'
+  | grep --fixed-strings -- 'Google Chrome for Testing 155.0.8059.84'
 docker exec "${runner}" /opt/firefox/firefox --version \
-  | grep --fixed-strings -- 'Mozilla Firefox 156.0'
+  | grep --fixed-strings -- 'Mozilla Firefox 158.0.1'
 docker exec "${runner}" /bin/sh -c \
   'cd /opt/wpt/firefox-profiles && sha256sum --check --strict /opt/wpt/firefox-profiles.sha256'
 

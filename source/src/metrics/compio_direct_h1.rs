@@ -422,7 +422,7 @@ fn duration_ns(duration: Duration) -> u64 {
 }
 
 fn adjust_gauge(gauge: &AtomicU64, delta: isize) {
-  let _ = gauge.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+  let _ = gauge.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
     Some(if delta >= 0 {
       current.saturating_add(delta as u64)
     } else {
