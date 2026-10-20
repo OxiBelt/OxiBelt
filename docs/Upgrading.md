@@ -1394,7 +1394,7 @@ mixing dependency generations.
 
 Development after the `0.9.2` source cut refreshes the locked Rust and pnpm
 dependency graphs, including `oxibeltctl`'s `der` dependency from `0.8.1` to
-`0.8.2`, the hash-pinned pnpm toolchain to `12.5.1`, and oxlint to `1.83.0`.
+`0.8.2`, the hash-pinned pnpm toolchain to `12.14.0`, and oxlint to `1.89.0`.
 The digest-pinned Rust `1.98.1` builder, Node `24` on Alpine `3.24`, and Alpine
 `3.24` runtime inputs also advance without changing their selected versions or
 image roles. This refresh preserves executable names, command-line contracts,
