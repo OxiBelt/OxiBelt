@@ -50,6 +50,8 @@ class LocalPerformanceCampaignTests(unittest.TestCase):
         self.runtime.mkdir(mode=0o700)
         self.inputs = self.root / "images.json"
         self.aggregate = self.bin / "aggregate"
+        self.cargo = self.bin / "cargo"
+        self.cargo_record = self.root / "cargo-record.jsonl"
         self.docker = self.bin / "docker"
         self.timeout = self.bin / "timeout"
         self.runner_record = self.root / "runner-record.jsonl"
@@ -142,6 +144,7 @@ sys.exit(int(os.environ.get("FAKE_RUNNER_EXIT", "0")))
 ''',
         )
 
+        (self.source / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(self.source)], check=True)
         subprocess.run(
             ["git", "-C", str(self.source), "config", "user.email", "fixture@example.invalid"],
@@ -163,12 +166,36 @@ sys.exit(int(os.environ.get("FAKE_RUNNER_EXIT", "0")))
         ).strip()
 
         write_executable(self.docker, self._docker_fixture())
+        write_executable(self.cargo, self._cargo_fixture())
         write_executable(self.aggregate, self._aggregate_fixture())
         write_executable(self.timeout, self._timeout_fixture())
         self.inputs.write_text(json.dumps(self._input_manifest(), indent=2), encoding="utf-8")
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    @staticmethod
+    def _cargo_fixture() -> str:
+        return r'''#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+source = pathlib.Path(os.environ["FAKE_CARGO_SOURCE_ROOT"])
+with pathlib.Path(os.environ["FAKE_CARGO_RECORD"]).open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps({"args": sys.argv[1:], "cwd": str(pathlib.Path.cwd())}) + "\n")
+expected = ["metadata", "--locked", "--offline", "--no-deps", "--format-version", "1",
+            "--manifest-path", str(source / "Cargo.toml")]
+if sys.argv[1:] != expected or pathlib.Path.cwd() != source or not (source / "Cargo.toml").is_file():
+    raise SystemExit("fixture Cargo requires offline metadata from the selected source root")
+if os.environ.get("FAKE_CARGO_EXIT"):
+    raise SystemExit(int(os.environ["FAKE_CARGO_EXIT"]))
+if "FAKE_CARGO_METADATA_OUTPUT" in os.environ:
+    print(os.environ["FAKE_CARGO_METADATA_OUTPUT"])
+else:
+    print(json.dumps({"target_directory": os.environ["FAKE_CARGO_TARGET_DIRECTORY"]}))
+'''
 
     def _docker_fixture(self) -> str:
         return f'''#!/usr/bin/env python3
@@ -532,8 +559,10 @@ os.execv("/usr/bin/timeout", ["timeout", *args])
         *extra: str,
         env: dict[str, str] | None = None,
         caller_umask: int | None = None,
+        aggregate_override: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         command_env = os.environ.copy()
+        command_env.pop("OXIBELT_PERF_AGGREGATE_COMMAND", None)
         command_env.update(
             {
                 "OXIBELT_DOCKER_COMMAND": str(self.docker),
@@ -541,6 +570,8 @@ os.execv("/usr/bin/timeout", ["timeout", *args])
                 "FAKE_AGGREGATE_RECORD": str(self.aggregate_record),
                 "FAKE_TIMEOUT_RECORD": str(self.timeout_record),
                 "FAKE_SOURCE_REVISION": self.revision,
+                "FAKE_CARGO_RECORD": str(self.cargo_record),
+                "FAKE_CARGO_SOURCE_ROOT": str(self.source),
                 "XDG_RUNTIME_DIR": str(self.runtime),
                 "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
             }
@@ -557,10 +588,10 @@ os.execv("/usr/bin/timeout", ["timeout", *args])
             str(self.source),
             "--campaign-dir",
             str(campaign),
-            "--aggregate-bin",
-            str(self.aggregate),
-            *extra,
         ]
+        if aggregate_override:
+            command.extend(["--aggregate-bin", str(self.aggregate)])
+        command.extend(extra)
         return subprocess.run(
             command,
             cwd=self.root,
@@ -698,6 +729,98 @@ os.execv("/usr/bin/timeout", ["timeout", *args])
                 "accepted_regression": {"status": "inactive"},
             },
         }
+
+    def test_default_aggregate_uses_cargo_target_directory_from_selected_source_root(self) -> None:
+        target_directory = self.root / "nonstandard Cargo target"
+        binary = target_directory / "release" / "oxibelt-performance-aggregate"
+        binary.parent.mkdir(parents=True)
+        shutil.copy2(self.aggregate, binary)
+        self.aggregate = binary
+        campaign = self.seed_full_benchmark()
+        result = self.invoke(
+            "aggregate", campaign, aggregate_override=False,
+            env={"FAKE_CARGO_TARGET_DIRECTORY": str(target_directory)},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = [json.loads(line) for line in self.cargo_record.read_text().splitlines()]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["cwd"], str(self.source))
+        self.assertEqual(records[0]["args"], [
+            "metadata", "--locked", "--offline", "--no-deps", "--format-version", "1",
+            "--manifest-path", str(self.source / "Cargo.toml"),
+        ])
+        self.assertTrue(self.aggregate_record.is_file())
+
+    def test_explicit_argument_and_environment_aggregate_bypass_cargo(self) -> None:
+        for mode in ("argument", "environment"):
+            with self.subTest(mode=mode):
+                campaign = self.seed_full_benchmark(campaign=self.root / mode)
+                env = {"FAKE_CARGO_EXIT": "86"}
+                if mode == "environment":
+                    env["OXIBELT_PERF_AGGREGATE_COMMAND"] = str(self.aggregate)
+                result = self.invoke(
+                    "aggregate", campaign, aggregate_override=mode == "argument", env=env,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(self.cargo_record.exists())
+
+    def test_empty_explicit_aggregate_fails_without_cargo_lookup(self) -> None:
+        for mode in ("argument", "environment"):
+            with self.subTest(mode=mode):
+                extra = ("--aggregate-bin", "") if mode == "argument" else ()
+                env = {"FAKE_CARGO_EXIT": "86"}
+                if mode == "environment":
+                    env["OXIBELT_PERF_AGGREGATE_COMMAND"] = ""
+                result = self.invoke(
+                    "benchmark", self.root / mode, *extra,
+                    aggregate_override=False, env=env,
+                )
+                self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+                self.assertIn("--aggregate-bin", result.stderr)
+                self.assertFalse(self.cargo_record.exists())
+                self.assertFalse(self.runner_record.exists())
+
+    def test_smoke_needs_neither_aggregate_binary_nor_cargo(self) -> None:
+        result = self.invoke(
+            "smoke", self.root / "smoke-no-aggregate", "--target-cpu", "x86-64-v2",
+            "--group", "reverse-proxy", aggregate_override=False,
+            env={"FAKE_CARGO_EXIT": "86"},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.cargo_record.exists())
+        self.assertFalse(self.aggregate_record.exists())
+        self.assertTrue(self.runner_record.is_file())
+
+    def test_invalid_cargo_metadata_fails_closed_before_load(self) -> None:
+        for index, output in enumerate((
+            '', "not-json", "{}", "[]", '{"target_directory":"/one"} {"target_directory":"/two"}', '{"target_directory":null}',
+            '{"target_directory":123}', '{"target_directory":"relative/target"}',
+            '{"target_directory":"/bad\\npath"}',
+            '{"target_directory":"/bad\\u0000path"}',
+        )):
+            with self.subTest(output=output):
+                result = self.invoke(
+                    "benchmark", self.root / f"invalid-metadata-{index}",
+                    aggregate_override=False, env={"FAKE_CARGO_METADATA_OUTPUT": output},
+                )
+                self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+                self.assertIn("--aggregate-bin", result.stderr)
+                self.assertFalse(self.runner_record.exists())
+                self.assertFalse(self.aggregate_record.exists())
+
+    def test_cargo_failure_and_missing_prebuilt_binary_fail_before_load(self) -> None:
+        for mode, env in (
+            ("cargo-failed", {"FAKE_CARGO_EXIT": "86"}),
+            ("binary-missing", {"FAKE_CARGO_TARGET_DIRECTORY": str(self.root / "empty-target")}),
+        ):
+            with self.subTest(mode=mode):
+                result = self.invoke(
+                    "benchmark", self.root / mode, aggregate_override=False, env=env,
+                )
+                self.assertEqual(result.returncode, 66, result.stdout + result.stderr)
+                self.assertIn("--aggregate-bin", result.stderr)
+                self.assertFalse(self.runner_record.exists())
+                self.assertFalse(self.aggregate_record.exists())
 
     def test_missing_and_malformed_reports_fail_closed(self) -> None:
         for mode in ("no-report", "malformed-report"):

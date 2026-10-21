@@ -25,7 +25,7 @@ Options:
   --aggregate-bin PATH              Prebuilt `oxibelt-performance-aggregate`
                                       executable. Defaults to
                                       `$OXIBELT_PERF_AGGREGATE_COMMAND` or the
-                                      source-root release binary.
+                                      Cargo target-directory release binary.
   -h, --help                        Show this help.
 
 The inputs file is JSON with this shape:
@@ -56,6 +56,7 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 source_root="${repo_root}"
 runner=""
 aggregate_bin="${OXIBELT_PERF_AGGREGATE_COMMAND:-}"
+aggregate_bin_supplied="${OXIBELT_PERF_AGGREGATE_COMMAND+x}"
 docker_command="${OXIBELT_DOCKER_COMMAND:-docker}"
 
 # These ceilings bound orchestration failures without shortening any measured
@@ -109,6 +110,7 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --aggregate-bin)
       aggregate_bin="${2:-}"
+      aggregate_bin_supplied=1
       shift 2
       ;;
     -h|--help)
@@ -148,13 +150,6 @@ if [[ "${phase}" != "aggregate" && ! -x "${runner}" ]]; then
   echo "source-root does not provide an executable performance runner: ${runner}" >&2
   exit 66
 fi
-if [[ -z "${aggregate_bin}" ]]; then
-  aggregate_bin="${source_root}/source/target/release/oxibelt-performance-aggregate"
-fi
-if [[ "${phase}" == "benchmark" || "${phase}" == "aggregate" || "${phase}" == "all" ]] && [[ ! -x "${aggregate_bin}" ]]; then
-  echo "aggregate executable is unavailable; build it before measuring and pass --aggregate-bin" >&2
-  exit 66
-fi
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -166,6 +161,38 @@ require_command() {
 for required_command in git jq flock sha256sum stat awk find timeout "${docker_command}"; do
   require_command "${required_command}"
 done
+
+# Smoke collection does not aggregate. Explicit paths also need no Cargo lookup.
+if [[ "${phase}" != "smoke" ]]; then
+  if [[ -z "${aggregate_bin_supplied}" ]]; then
+    if ! command -v cargo >/dev/null 2>&1; then
+      echo "cannot resolve the aggregate executable without Cargo; pass --aggregate-bin with a prebuilt executable" >&2
+      exit 66
+    fi
+    cargo_metadata="$(
+      cd -- "${source_root}" &&
+        cargo metadata --locked --offline --no-deps --format-version 1 \
+          --manifest-path "${source_root}/Cargo.toml"
+    )" || {
+      echo "cannot resolve the Cargo target directory; pass --aggregate-bin with a prebuilt executable" >&2
+      exit 66
+    }
+    cargo_target_directory="$(
+      jq -ser 'select(length == 1) | .[0] |
+        select(type == "object") | .target_directory |
+        select(type == "string" and startswith("/") and
+          all(explode[]; . >= 32 and . != 127))' <<<"${cargo_metadata}" 2>/dev/null
+    )" || {
+      echo "Cargo metadata has no valid absolute target_directory; pass --aggregate-bin with a prebuilt executable" >&2
+      exit 66
+    }
+    aggregate_bin="${cargo_target_directory}/release/oxibelt-performance-aggregate"
+  fi
+  if [[ ! -f "${aggregate_bin}" || ! -x "${aggregate_bin}" ]]; then
+    echo "aggregate executable is unavailable; build it before measuring and pass --aggregate-bin" >&2
+    exit 66
+  fi
+fi
 
 # Collection policy is fixed here.  Letting inherited tuning or fixture knobs
 # reach the runner would make a manifest look comparable when it is not.
