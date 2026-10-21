@@ -740,3 +740,63 @@ mod tests {
     );
   }
 }
+
+/// Real QUIC fixtures share the selected dependency boundary without exposing
+/// raw sessions or generic receive streams to the test caller.
+#[cfg(test)]
+pub(super) mod datagram_fixture {
+  use bytes::Bytes;
+
+  #[derive(Debug)]
+  pub struct Session {
+    inner: web_transport_quinn::Session,
+  }
+
+  impl Session {
+    pub async fn accept(connection: h3_quinn::quinn::Connection) -> anyhow::Result<Self> {
+      let request = web_transport_quinn::Request::accept(connection).await?;
+      Ok(Self {
+        inner: request.ok().await?,
+      })
+    }
+
+    pub async fn connect(
+      connection: h3_quinn::quinn::Connection,
+      url: url::Url,
+    ) -> anyhow::Result<Self> {
+      Ok(Self {
+        inner: web_transport_quinn::Session::connect(connection, url).await?,
+      })
+    }
+
+    pub fn max_datagram_size(&self) -> usize {
+      self.inner.max_datagram_size()
+    }
+
+    pub fn send_datagram(&self, payload: Bytes) -> anyhow::Result<()> {
+      self.inner.send_datagram(payload)?;
+      Ok(())
+    }
+
+    pub async fn read_datagram(&self) -> anyhow::Result<Bytes> {
+      Ok(self.inner.read_datagram().await?)
+    }
+
+    pub async fn closed(&self) {
+      self.inner.closed().await;
+    }
+  }
+
+  pub fn is_bad_gateway(error: &anyhow::Error) -> bool {
+    matches!(
+      error.downcast_ref::<web_transport_quinn::ClientError>(),
+      Some(web_transport_quinn::ClientError::HttpError(
+        web_transport_quinn::ConnectError::ProtoError(
+          web_transport_quinn::proto::ConnectError::WrongStatus(Some(
+            http::StatusCode::BAD_GATEWAY
+          ))
+        )
+      ))
+    )
+  }
+}

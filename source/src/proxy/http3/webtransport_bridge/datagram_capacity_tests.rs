@@ -12,6 +12,8 @@ use crate::config::{Config, UpstreamEchConfig};
 use crate::lifecycle::ConnectionDrain;
 use crate::state::AppSnapshot;
 
+use super::upstream_adapter::datagram_fixture;
+
 mod common {
   include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -75,9 +77,8 @@ async fn h3_datagram_capacity_is_checked_before_accept_and_failed_sessions_relea
         );
         return;
       }
-      let request = web_transport_quinn::Request::accept(conn).await
+      let session = datagram_fixture::Session::accept(conn).await
         .unwrap_or_else(|error| panic!("upstream SETTINGS peer_cap={peer_cap:?} send_queue={send_queue} stale_snapshot={stale_snapshot} h2={h2_ingress}: {error:?}"));
-      let session = request.ok().await.unwrap();
       if succeeds {
         let bytes = session.read_datagram().await.unwrap();
         session.send_datagram(bytes).unwrap();
@@ -164,7 +165,7 @@ async fn h3_datagram_capacity_is_checked_before_accept_and_failed_sessions_relea
     );
     let result = tokio::time::timeout(
       TIMEOUT,
-      web_transport_quinn::Session::connect(
+      datagram_fixture::Session::connect(
         conn,
         url::Url::parse("https://example.com/session").unwrap(),
       ),
@@ -190,13 +191,7 @@ async fn h3_datagram_capacity_is_checked_before_accept_and_failed_sessions_relea
       assert!(
         matches!(
           result,
-          Err(web_transport_quinn::ClientError::HttpError(
-            web_transport_quinn::ConnectError::ProtoError(
-              web_transport_quinn::proto::ConnectError::WrongStatus(Some(
-                http::StatusCode::BAD_GATEWAY
-              ))
-            )
-          ))
+          Err(ref error) if datagram_fixture::is_bad_gateway(error)
         ),
         "an incompatible upstream must produce 502 before 200: peer_cap={peer_cap:?} send_queue={send_queue} stale_snapshot={stale_snapshot}: {result:?}"
       );
